@@ -49,11 +49,35 @@ def _scan_entries(repo_root: Path, settings) -> Iterator[ScanEntry]:
     )
 
 
+def _build_indexes(repo_root: Path, entries: list[ScanEntry]) -> dict:
+    """Run each parser's optional ``build_index`` once (main process). Maps
+    parser-name → index; threaded into ParseContext.resolution_index."""
+    parsers: dict[str, object] = {}
+    files: dict[str, list[Path]] = {}
+    for entry in entries:
+        parser = parser_for(entry.path)
+        if parser is None:
+            continue
+        parsers[parser.name] = parser
+        files.setdefault(parser.name, []).append(repo_root / entry.path)
+    indexes: dict[str, object] = {}
+    for name, parser in parsers.items():
+        build = getattr(parser, "build_index", None)
+        if build is None:
+            continue
+        index = build(repo_root, files[name])
+        if index is not None:
+            indexes[name] = index
+    return indexes
+
+
 def iter_records(repo_root: str | Path, settings) -> Iterator[tuple[ScanEntry, FileRecord]]:
     """Sequential, in-process scan + parse (streaming)."""
     repo_root = Path(repo_root)
+    entries = list(_scan_entries(repo_root, settings))
     options = executor._options(settings)
-    for entry in _scan_entries(repo_root, settings):
+    options["indexes"] = _build_indexes(repo_root, entries)
+    for entry in entries:
         record = executor._parse_entry(entry.path, str(repo_root), options)
         if record is not None:
             yield entry, record
@@ -63,12 +87,13 @@ def run(repo_root: str | Path, settings, sink) -> ProjectMetaData:
     """Full analysis to a sink (parallel) → assembled projectMetaData."""
     repo_root = Path(repo_root)
     entries = list(_scan_entries(repo_root, settings))
+    indexes = _build_indexes(repo_root, entries)
 
     total_files = total_functions = total_classes = total_loc = config_files = 0
     languages: set[str] = set()
     by_type: dict[str, int] = {}
 
-    for language, record in executor.parse_entries(entries, repo_root, settings):
+    for language, record in executor.parse_entries(entries, repo_root, settings, indexes):
         sink.write(record)
         total_files += 1
         total_functions += len(record.functions)

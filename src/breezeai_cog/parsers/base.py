@@ -72,7 +72,7 @@ class BaseParser:
     #: Default () = compose with every other matching parser.
     overrides: tuple[str, ...] = ()
 
-    def build_index(self, files: Sequence[Path]) -> Any | None:  # optional pre-pass
+    def build_index(self, repo_root: Path, files: Sequence[Path]) -> Any | None:  # optional pre-pass
         return None
 
     def ignore_patterns(self) -> list[str]:

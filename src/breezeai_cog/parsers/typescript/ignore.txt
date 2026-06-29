@@ -1,0 +1,7 @@
+# TypeScript/JavaScript per-language ignore defaults (layer 2, §9).
+*.min.js
+*.min.css
+*.js.map
+*.d.ts
+coverage/
+.angular/

@@ -58,6 +58,7 @@ def _parse_entry(path: str, repo_root: str, options: dict) -> FileRecord | None:
             capture_statements=options["capture_statements"],
             text_truncation_limit=options["text_truncation_limit"],
             parse_timeout_micros=options["parse_timeout_micros"],
+            resolution_index=options.get("indexes", {}).get(parser.name),
         )
         return parser.parse_file(ctx)
     except Exception as exc:  # per-file isolation (incl. parse timeout)
@@ -110,11 +111,15 @@ def _stop_listener(state: tuple) -> None:
     manager.shutdown()
 
 
-def parse_entries(entries: list[ScanEntry], repo_root: str | Path, settings) -> Iterator[tuple[str, FileRecord]]:
+def parse_entries(
+    entries: list[ScanEntry], repo_root: str | Path, settings, indexes: dict | None = None
+) -> Iterator[tuple[str, FileRecord]]:
     """Yield ``(language, FileRecord)`` — parallel across processes, sequential when
-    ``jobs == 1`` or there's nothing to parallelize."""
+    ``jobs == 1`` or there's nothing to parallelize. ``indexes`` maps parser-name →
+    repo-level ``build_index`` result (threaded into each ParseContext)."""
     repo_root = str(Path(repo_root))
     options = _options(settings)
+    options["indexes"] = indexes or {}
     jobs = settings.jobs if settings.jobs and settings.jobs > 0 else (os.cpu_count() or 1)
 
     if jobs <= 1 or len(entries) <= 1:

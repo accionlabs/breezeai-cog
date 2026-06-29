@@ -1,10 +1,5 @@
-"""Flat statement capture (gated by --capture-statements).
-
-Emits one Statement per matching node at every depth *within the same scope*. A
-statement that contains a call is run through the shared detectors
-(``parsers/detection``) to set ``semanticType`` (api_call / db_method_call) +
-``method`` / ``endpoint`` / ``dataAccessHint`` on the same span.
-"""
+"""Flat statement capture for TypeScript/JavaScript (gated by --capture-statements),
+with shared API/DB call detection (``parsers/detection``)."""
 
 from __future__ import annotations
 
@@ -19,18 +14,23 @@ from .mappings import CONTROL_FLOW, EMIT_TYPES, NESTED_SCOPES
 
 
 def _name_of(node: Node, source: bytes) -> str | None:
-    if node.type in ("assignment", "augmented_assignment"):
-        lhs = node.named_children[0] if node.named_children else None
-        if lhs is not None and lhs.type == "identifier":
-            return node_text(lhs, source)
+    if node.type == "lexical_declaration":
+        decl = next((c for c in node.named_children if c.type == "variable_declarator"), None)
+        if decl is not None:
+            name = decl.child_by_field_name("name")
+            if name is not None and name.type == "identifier":
+                return node_text(name, source)
     return None
 
 
 def _find_call(node: Node) -> Node | None:
-    if node.type == "call":
+    if node.type == "call_expression":
         return node
     for child in node.named_children:
-        if child.type in ("function_definition", "class_definition", "lambda"):
+        if child.type in (
+            "function_declaration", "function_expression", "arrow_function",
+            "method_definition", "class_declaration",
+        ):
             continue
         found = _find_call(child)
         if found is not None:
@@ -49,8 +49,8 @@ def _call_info(node: Node, source: bytes) -> tuple[str, str, str | None] | None:
     if args is not None:
         for arg in args.named_children:
             if arg.type == "string":
-                content = next((c for c in arg.named_children if c.type == "string_content"), None)
-                first_str = node_text(content, source) if content is not None else None
+                frag = next((c for c in arg.named_children if c.type == "string_fragment"), None)
+                first_str = node_text(frag, source) if frag is not None else None
                 break
     return callee, callee.rsplit(".", 1)[-1], first_str
 

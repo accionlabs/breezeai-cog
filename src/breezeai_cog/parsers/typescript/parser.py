@@ -1,0 +1,140 @@
+"""TypeScriptParser — extracts one .ts/.tsx/.js/.jsx file into a FileRecord.
+
+Picks the ``tsx`` grammar for JSX files and ``typescript`` otherwise; labels the
+record language ``typescript`` or ``javascript`` by extension. Top-level
+declarations may be wrapped in ``export_statement`` and preceded by ``decorator``
+nodes, both of which are unwrapped here.
+"""
+
+from __future__ import annotations
+
+from pathlib import Path
+from typing import Sequence
+
+from tree_sitter import Node
+
+from ...emit import file_id
+from ...schemas import SCHEMA_VERSION, FileRecord, Function, Statement
+from ...utils import count_loc
+from ..base import BaseParser, ParseContext
+from ..treesitter import node_text, parse_source
+from .classes import build_class
+from .functions import build_function, extract_decorators
+from .imports import TsAliasIndex, build_alias_index, extract_imports
+from .mappings import FRAMEWORKS, STATEMENT_TYPES
+from .statements import extract_statements
+
+_DECLS = (
+    "class_declaration", "abstract_class_declaration", "interface_declaration",
+    "enum_declaration", "function_declaration", "lexical_declaration", "variable_declaration",
+)
+_CLASSES = ("class_declaration", "abstract_class_declaration", "interface_declaration", "enum_declaration")
+_TSX_EXT = (".tsx", ".jsx")
+_JS_EXT = (".js", ".jsx", ".mjs", ".cjs")
+
+
+def _unwrap_export(node: Node) -> tuple[Node | None, list[Node]]:
+    if node.type == "export_statement":
+        decs = [c for c in node.named_children if c.type == "decorator"]
+        decl = next((c for c in node.named_children if c.type in _DECLS), None)
+        return decl, decs
+    if node.type in _DECLS:
+        return node, []
+    return None, []
+
+
+class TypeScriptParser(BaseParser):
+    name = "typescript"
+    extensions = (".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs")
+    schema_version = SCHEMA_VERSION
+    statement_types = STATEMENT_TYPES
+    frameworks = FRAMEWORKS
+
+    def build_index(self, repo_root: Path, files: Sequence[Path]) -> TsAliasIndex | None:
+        """Repo-level pre-pass: load tsconfig path aliases for import resolution."""
+        return build_alias_index(Path(repo_root))
+
+    def parse_file(self, ctx: ParseContext) -> FileRecord:
+        grammar = "tsx" if ctx.path.endswith(_TSX_EXT) else "typescript"
+        root = parse_source(grammar, ctx.source, ctx.parse_timeout_micros).root_node
+        return self.extract(root, ctx)
+
+    def extract(self, root: Node, ctx: ParseContext) -> FileRecord:
+        source, path = ctx.source, ctx.path
+        fid = file_id(path)
+        seen_ids: set[str] = set()
+        capture, limit = ctx.capture_statements, ctx.text_truncation_limit
+
+        internal, external, exports = extract_imports(
+            root, source, path, ctx.repo_root, ctx.resolution_index
+        )
+        functions: list[Function] = []
+        classes = []
+        statements: list[Statement] = []
+
+        pending: list[Node] = []
+        for child in root.named_children:
+            if child.type == "decorator":
+                pending.append(child)
+                continue
+            decl, exp_decs = _unwrap_export(child)
+            decorators = pending + exp_decs
+            pending = []
+            if decl is None:
+                continue
+            self._handle(decl, decorators, source, path, fid, seen_ids, capture, limit,
+                         functions, classes, statements)
+
+        statements.extend(
+            extract_statements(root, source, path, parent_id=fid, capture=capture, limit=limit, seen_ids=seen_ids)
+        )
+
+        return FileRecord(
+            id=fid,
+            path=path,
+            type="code",
+            language="javascript" if path.endswith(_JS_EXT) else "typescript",
+            loc=count_loc(source.decode("utf-8", "replace")),
+            importFiles=internal,
+            externalImports=external,
+            exports=exports,
+            functions=functions,
+            classes=classes,
+            statements=statements,
+        )
+
+    def _handle(self, decl, decorators, source, path, fid, seen_ids, capture, limit,
+                functions, classes, statements) -> None:
+        if decl.type in _CLASSES:
+            cls, methods, cls_stmts = build_class(
+                decl, decorators, source, path,
+                parent_id=fid, seen_ids=seen_ids, capture=capture, limit=limit,
+            )
+            classes.append(cls)
+            functions.extend(methods)
+            statements.extend(cls_stmts)
+        elif decl.type == "function_declaration":
+            name_node = decl.child_by_field_name("name")
+            fn, fn_stmts = build_function(
+                decl, name=node_text(name_node, source) if name_node else "",
+                kind="function", decorators=extract_decorators(decorators, source),
+                source=source, path=path, parent_id=fid, class_name=None,
+                seen_ids=seen_ids, capture=capture, limit=limit,
+            )
+            functions.append(fn)
+            statements.extend(fn_stmts)
+        elif decl.type in ("lexical_declaration", "variable_declaration"):
+            for vd in decl.named_children:
+                if vd.type != "variable_declarator":
+                    continue
+                value = vd.child_by_field_name("value")
+                if value is not None and value.type in ("arrow_function", "function_expression"):
+                    name_node = vd.child_by_field_name("name")
+                    fn, fn_stmts = build_function(
+                        value, name=node_text(name_node, source) if name_node else "",
+                        kind=value.type, decorators=[], source=source, path=path,
+                        parent_id=fid, class_name=None, seen_ids=seen_ids,
+                        capture=capture, limit=limit,
+                    )
+                    functions.append(fn)
+                    statements.extend(fn_stmts)
