@@ -1,0 +1,10 @@
+# Python per-language ignore defaults (layer 2, §9).
+*.pyc
+*.pyo
+*.pyd
+*.so
+__pycache__/
+*.egg-info/
+.eggs/
+.mypy_cache/
+.pytest_cache/
