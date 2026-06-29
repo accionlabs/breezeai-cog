@@ -28,7 +28,10 @@ app = typer.Typer(
 @app.command("repo-to-json-tree")
 def repo_to_json_tree(
     repo: Path = typer.Option(..., "--repo", exists=True, file_okay=False, help="Repository directory."),
-    out: Optional[Path] = typer.Option(None, "--out", help="Output .ndjson.gz path."),
+    out: Optional[Path] = typer.Option(
+        None, "--out", file_okay=False,
+        help="Output directory (default: the repo's parent). File: <repo>-project-analysis.ndjson.gz.",
+    ),
     language: Optional[list[str]] = typer.Option(None, "--language", help="Restrict to languages (repeatable)."),
     capture_statements: bool = typer.Option(False, "--capture-statements", help="Capture in-body statements."),
     jobs: Optional[int] = typer.Option(None, "--jobs", help="Worker processes (default: CPU count)."),

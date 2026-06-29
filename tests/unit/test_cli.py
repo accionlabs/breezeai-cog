@@ -37,12 +37,13 @@ def test_repo_to_json_tree(tmp_path) -> None:
     repo.mkdir()
     (repo / "a.py").write_text("def f():\n    return 1\n")
     (repo / "b.py").write_text("class B:\n    pass\n")
-    out = tmp_path / "out.ndjson.gz"
+    out_dir = tmp_path / "results"  # --out is a directory; filename is derived
 
     result = runner.invoke(
-        app, ["repo-to-json-tree", "--repo", str(repo), "--out", str(out), "--jobs", "1"]
+        app, ["repo-to-json-tree", "--repo", str(repo), "--out", str(out_dir), "--jobs", "1"]
     )
     assert result.exit_code == 0, result.output
+    out = out_dir / "repo-project-analysis.ndjson.gz"
     assert out.exists()
     records = [json.loads(line) for line in gzip.open(out, "rt", encoding="utf-8").read().splitlines()]
     assert records[0]["__type"] == "projectMetaData"

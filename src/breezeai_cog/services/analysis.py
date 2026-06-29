@@ -25,9 +25,11 @@ class AnalysisService:
         self.settings = settings
 
     def _default_out(self, repo: Path) -> Path:
-        if self.settings.out is not None:
-            return Path(self.settings.out)
-        return repo.resolve().parent / f"{repo.resolve().name}-project-analysis.ndjson.gz"
+        """Resolve the output file inside the output **directory** (`--out`, default the
+        repo's parent): `<out_dir>/<repo-name>-project-analysis.ndjson.gz`."""
+        repo = repo.resolve()
+        out_dir = Path(self.settings.out) if self.settings.out is not None else repo.parent
+        return out_dir / f"{repo.name}-project-analysis.ndjson.gz"
 
     def analyze_repo(self, repo: str | Path, *, sink: Sink | None = None) -> AnalysisResult:
         repo = Path(repo)

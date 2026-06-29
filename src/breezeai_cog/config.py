@@ -47,7 +47,7 @@ class Settings(BaseSettings):
 
     # ── Analysis ──────────────────────────────────────────────────────────
     repo: Path | None = None  # --repo
-    out: Path | None = None  # --out
+    out: Path | None = None  # --out; output DIRECTORY (filename is derived)
     languages: list[str] | None = Field(  # --language; None = auto-detect all
         default=None,
         validation_alias=AliasChoices("BREEZEAI_COG_LANGUAGE", "BREEZEAI_COG_LANGUAGES"),

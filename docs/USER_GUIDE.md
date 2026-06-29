@@ -31,14 +31,16 @@ pip install -e "/path/to/breezeai-cog[all]"
 
 ```bash
 cd /path/to/your/project
-breezeai-cog repo-to-json-tree --repo . --out analysis.ndjson.gz
+breezeai-cog repo-to-json-tree --repo . --out ./out
+# writes ./out/<repo-name>-project-analysis.ndjson.gz
 ```
 
 Inspect the result:
 
 ```bash
-zcat analysis.ndjson.gz | head -1 | jq        # projectMetaData (first line)
-zcat analysis.ndjson.gz | sed -n 2p | jq      # first file record
+f=$(ls ./out/*-project-analysis.ndjson.gz)
+zcat "$f" | head -1 | jq        # projectMetaData (first line)
+zcat "$f" | sed -n 2p | jq      # first file record
 ```
 
 ---
@@ -57,7 +59,7 @@ zcat analysis.ndjson.gz | sed -n 2p | jq      # first file record
 | Option | Default | Description |
 |---|---|---|
 | `--repo <dir>` | *(required)* | Directory to analyze |
-| `--out <file>` | `<repo>-project-analysis.ndjson.gz` | Output path |
+| `--out <dir>` | the repo's parent | Output **directory**; file is `<repo>-project-analysis.ndjson.gz` |
 | `--language <name>` | all (auto-detect) | Restrict to a language; repeatable |
 | `--capture-statements` | off | Also emit in-body statements (routes/API/DB detection) |
 | `--jobs <n>` | CPU count | Worker processes |
@@ -65,7 +67,7 @@ zcat analysis.ndjson.gz | sed -n 2p | jq      # first file record
 
 ```bash
 breezeai-cog repo-to-json-tree --repo . --language python --language java \
-    --capture-statements --jobs 8 --out out.ndjson.gz
+    --capture-statements --jobs 8 --out ./out
 ```
 
 > The CLI only parses **local** directories. Cloning/diffing a remote git repo is
