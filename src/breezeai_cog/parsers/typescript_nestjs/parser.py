@@ -1,11 +1,8 @@
-"""NestJSParser — a TypeScript framework parser that overrides the base
-TypeScriptParser for the files it matches (single parse, reuses
-``TypeScriptParser.extract`` on the shared tree, then adds NestJS routes).
-
-Mirrors the FastAPI parser. ``overrides = ("typescript",)`` makes the registry skip
-the base TS parser. (Only one override-framework parser can own a language; a second
-TS framework that must coexist would compose instead — see ARCHITECTURE.md §4.)
-"""
+"""NestJSParser — a TypeScript framework parser. Selected over the base
+TypeScriptParser (single parser per file) when ``claims`` finds a NestJS signature;
+reuses ``TypeScriptParser.extract`` on the shared tree, then adds NestJS routes. It
+coexists with other TS framework parsers (Angular) because selection is per-file by
+``claims`` (ARCHITECTURE.md §4)."""
 
 from __future__ import annotations
 
@@ -18,8 +15,11 @@ from .routes import detect_nest_routes
 
 class NestJSParser(TypeScriptParser):
     name = "typescript-nestjs"
-    overrides = ("typescript",)
+    priority = 10
     frameworks = ["nestjs"]
+
+    def claims(self, path: str, source: bytes) -> bool:
+        return b"@nestjs/" in source
 
     def parse_file(self, ctx: ParseContext) -> FileRecord:
         grammar = "tsx" if ctx.path.endswith((".tsx", ".jsx")) else "typescript"

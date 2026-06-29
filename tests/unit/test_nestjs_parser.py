@@ -59,11 +59,12 @@ def test_output_validates(tmp_path) -> None:
     assert not errors, errors
 
 
-def test_override_makes_nest_own_ts_files() -> None:
+def test_claims_selects_nestjs() -> None:
     registry.clear()
     from breezeai_cog.parsers.typescript.parser import TypeScriptParser
 
     registry.register(TypeScriptParser())
     registry.register(NestJSParser())
-    assert isinstance(registry.parser_for("x.ts"), NestJSParser)  # base TS skipped
+    assert registry.select("x.ts", b"import { Controller } from '@nestjs/common';").name == "typescript-nestjs"
+    assert registry.select("x.ts", b"const x = 1;").name == "typescript"  # plain TS -> base
     registry.clear()

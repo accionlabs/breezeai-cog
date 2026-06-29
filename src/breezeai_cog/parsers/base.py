@@ -68,9 +68,15 @@ class BaseParser:
     schema_version: str = SCHEMA_VERSION
     statement_types: list[str] = []
     frameworks: list[str] = []
-    #: Names of parsers this one supersedes for a matched file (skip composition).
-    #: Default () = compose with every other matching parser.
-    overrides: tuple[str, ...] = ()
+    #: Selection priority. A file is parsed by exactly ONE parser — the highest-priority
+    #: one whose ``claims`` is True (framework parsers > base; base = 0, the fallback).
+    priority: int = 0
+
+    def claims(self, path: str, source: bytes) -> bool:
+        """Whether this parser should handle ``path``. The base language parser claims
+        everything of its extension (fallback); framework parsers override this to sniff
+        their framework's signature in ``source`` (e.g. ``b"@nestjs/" in source``)."""
+        return True
 
     def build_index(self, repo_root: Path, files: Sequence[Path]) -> Any | None:  # optional pre-pass
         return None

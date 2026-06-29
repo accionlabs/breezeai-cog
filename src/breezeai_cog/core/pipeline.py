@@ -17,7 +17,7 @@ from ..logging import get_logger
 from ..schemas import FileRecord, ProjectMetaData
 from . import executor
 from .ignore import IgnoreEngine
-from .registry import discover_builtin, parser_for, registered
+from .registry import base_parser_for, discover_builtin, registered
 from .scanner import ScanEntry, scan
 
 log = get_logger("breezeai_cog.pipeline")
@@ -25,12 +25,12 @@ log = get_logger("breezeai_cog.pipeline")
 
 def _classifier(languages: set[str] | None) -> Callable[[str], str | None]:
     def classify(path: str) -> str | None:
-        parser = parser_for(path)
-        if parser is None:
+        base = base_parser_for(path)  # the language parser (extension allow-list + label)
+        if base is None:
             return None
-        if languages and parser.name not in languages:
+        if languages and base.name not in languages:
             return None
-        return parser.name
+        return base.name
 
     return classify
 
@@ -52,20 +52,17 @@ def _scan_entries(repo_root: Path, settings) -> Iterator[ScanEntry]:
 def _build_indexes(repo_root: Path, entries: list[ScanEntry]) -> dict:
     """Run each parser's optional ``build_index`` once (main process). Maps
     parser-name → index; threaded into ParseContext.resolution_index."""
-    parsers: dict[str, object] = {}
+    bases: dict[str, object] = {}
     files: dict[str, list[Path]] = {}
     for entry in entries:
-        parser = parser_for(entry.path)
-        if parser is None:
+        base = base_parser_for(entry.path)  # index is per base language, keyed by its name
+        if base is None:
             continue
-        parsers[parser.name] = parser
-        files.setdefault(parser.name, []).append(repo_root / entry.path)
+        bases[base.name] = base
+        files.setdefault(base.name, []).append(repo_root / entry.path)
     indexes: dict[str, object] = {}
-    for name, parser in parsers.items():
-        build = getattr(parser, "build_index", None)
-        if build is None:
-            continue
-        index = build(repo_root, files[name])
+    for name, base in bases.items():
+        index = base.build_index(repo_root, files[name])
         if index is not None:
             indexes[name] = index
     return indexes

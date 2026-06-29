@@ -41,15 +41,21 @@ def _options(settings) -> dict:
 
 def _parse_entry(path: str, repo_root: str, options: dict) -> FileRecord | None:
     from ..parsers.base import ParseContext
-    from .registry import parser_for
+    from .registry import base_parser_for, select
 
-    parser = parser_for(path)
-    if parser is None:  # pragma: no cover - classify already filtered
-        return None
     abs_path = os.path.join(repo_root, path)
     try:
         with open(abs_path, "rb") as fh:
             source = fh.read()
+    except OSError:
+        return None
+
+    parser = select(path, source)  # exactly one parser per file (claims + priority)
+    if parser is None:  # pragma: no cover - classify already filtered
+        return None
+    base = base_parser_for(path)
+    index = options.get("indexes", {}).get(base.name if base is not None else "")
+    try:
         ctx = ParseContext(
             path=path,
             abs_path=Path(abs_path),
@@ -58,12 +64,12 @@ def _parse_entry(path: str, repo_root: str, options: dict) -> FileRecord | None:
             capture_statements=options["capture_statements"],
             text_truncation_limit=options["text_truncation_limit"],
             parse_timeout_micros=options["parse_timeout_micros"],
-            resolution_index=options.get("indexes", {}).get(parser.name),
+            resolution_index=index,
         )
         return parser.parse_file(ctx)
     except Exception as exc:  # per-file isolation (incl. parse timeout)
         get_logger("breezeai_cog.worker").warning(
-            "parse.file.failed", path=path, parser=getattr(parser, "name", None), error=str(exc)
+            "parse.file.failed", path=path, parser=parser.name, error=str(exc)
         )
         return None
 

@@ -1,5 +1,6 @@
-"""SpringBootParser — a Java framework parser that overrides JavaParser. Single parse,
-reuses ``JavaParser.extract``, then detects Spring MVC routes from the captured
+"""SpringBootParser — a Java framework parser. Selected (one parser per file) over
+JavaParser when ``claims`` finds an ``org.springframework`` import; reuses
+``JavaParser.extract`` (single parse), then detects Spring MVC routes from the captured
 annotations. Covers Spring Boot v2 and v3 (identical web annotations)."""
 
 from __future__ import annotations
@@ -13,8 +14,11 @@ from .routes import detect_spring_routes
 
 class SpringBootParser(JavaParser):
     name = "java-springboot"
-    overrides = ("java",)
+    priority = 10
     frameworks = ["spring", "springboot"]
+
+    def claims(self, path: str, source: bytes) -> bool:
+        return b"org.springframework" in source
 
     def parse_file(self, ctx: ParseContext) -> FileRecord:
         root = parse_source("java", ctx.source, ctx.parse_timeout_micros).root_node

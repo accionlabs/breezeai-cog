@@ -73,11 +73,12 @@ def test_output_validates(tmp_path) -> None:
     assert not errors, errors
 
 
-def test_override_makes_fastapi_own_py_files() -> None:
+def test_claims_selects_fastapi() -> None:
     registry.clear()
     from breezeai_cog.parsers.python.parser import PythonParser
 
     registry.register(PythonParser())
     registry.register(FastAPIParser())
-    assert isinstance(registry.parser_for("x.py"), FastAPIParser)  # base skipped
+    assert registry.select("x.py", b"from fastapi import FastAPI").name == "python-fastapi"
+    assert registry.select("x.py", b"print(1)").name == "python"  # plain python -> base
     registry.clear()

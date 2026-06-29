@@ -85,11 +85,13 @@ def test_output_validates(tmp_path) -> None:
     assert not errors, errors
 
 
-def test_override_registered() -> None:
+def test_claims_selects_spring() -> None:
     registry.clear()
     from breezeai_cog.parsers.java.parser import JavaParser
 
     registry.register(JavaParser())
     registry.register(SpringBootParser())
-    assert isinstance(registry.parser_for("X.java"), SpringBootParser)  # base Java skipped
+    spring = b"import org.springframework.web.bind.annotation.RestController;"
+    assert registry.select("X.java", spring).name == "java-springboot"
+    assert registry.select("X.java", b"package x;").name == "java"  # plain Java -> base
     registry.clear()
