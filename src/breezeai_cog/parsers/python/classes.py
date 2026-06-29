@@ -6,9 +6,9 @@ from __future__ import annotations
 from tree_sitter import Node
 
 from ...emit import class_id, disambiguate
-from ...schemas import Class, ConstructorParam, Function
+from ...schemas import Class, ConstructorParam, Function, Statement
 from ..treesitter import line_span, node_text
-from .functions import build_function, extract_decorators, extract_params
+from .functions import build_function, extract_decorators
 from .statements import extract_statements
 
 
@@ -31,7 +31,10 @@ def build_class(
     seen_ids: set[str],
     capture: bool,
     limit: int,
-) -> tuple[Class, list[Function]]:
+) -> tuple[Class, list[Function], list[Statement]]:
+    """Return (Class, methods, statements). Methods and statements are flat — the
+    caller collects them onto ``FileRecord.functions``/``.statements`` (linked by
+    parentId), not nested on the Class."""
     name = node_text(cnode.child_by_field_name("name"), source)
     start, end = line_span(cnode)
     cid = disambiguate(class_id(path, name), seen_ids)
@@ -40,18 +43,24 @@ def build_class(
     bases = [node_text(b, source) for b in supers.named_children] if supers is not None else []
 
     methods: list[Function] = []
+    statements: list[Statement] = []
     ctor_params: list[ConstructorParam] = []
     body = cnode.child_by_field_name("body")
     if body is not None:
+        # class-level statements (e.g. class variables), parented to the class
+        statements.extend(
+            extract_statements(body, source, path, parent_id=cid, capture=capture, limit=limit, seen_ids=seen_ids)
+        )
         for child in body.named_children:
             defn, decs = _unwrap(child)
             if defn.type == "function_definition":
-                fn = build_function(
+                fn, fn_statements = build_function(
                     defn, extract_decorators(decs, source), source, path,
                     parent_id=cid, class_name=name, seen_ids=seen_ids,
                     capture=capture, limit=limit,
                 )
                 methods.append(fn)
+                statements.extend(fn_statements)
                 if fn.name == "__init__":
                     ctor_params = [
                         ConstructorParam(name=p.name, type=p.type)
@@ -70,8 +79,5 @@ def build_class(
         decorators=extract_decorators(decorator_nodes, source),
         startLine=start,
         endLine=end,
-        statements=extract_statements(
-            body, source, path, parent_id=cid, capture=capture, limit=limit, seen_ids=seen_ids
-        ),
     )
-    return cls, methods
+    return cls, methods, statements

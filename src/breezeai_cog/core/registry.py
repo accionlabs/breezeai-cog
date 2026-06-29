@@ -49,8 +49,12 @@ def _file_matches(parser: LanguageParser, path: str | Path) -> bool:
 
 
 def parsers_for(path: str | Path) -> list[LanguageParser]:
-    """All registered parsers that claim this file."""
-    return [p for p in _REGISTRY if _file_matches(p, path)]
+    """Parsers that claim this file. A matching parser's ``overrides`` supersede
+    (skip) the named parsers — so a framework parser can replace the base instead
+    of composing with it. Default (no ``overrides``) = compose with everything."""
+    matches = [p for p in _REGISTRY if _file_matches(p, path)]
+    superseded = {name for p in matches for name in getattr(p, "overrides", ())}
+    return [p for p in matches if p.name not in superseded]
 
 
 def parser_for(path: str | Path) -> LanguageParser | None:
@@ -76,14 +80,22 @@ def capabilities() -> dict[str, Any]:
 
 
 def discover_builtin() -> None:
-    """Import every ``parsers/<lang>`` subpackage so it self-registers."""
+    """Register every built-in parser. Each ``parsers/<lang>`` subpackage exposes a
+    ``PARSERS`` list; registration is idempotent (by name) so this is safe to call
+    repeatedly and **repopulates after** :func:`clear` (import side-effects fire only
+    once, so we read ``PARSERS`` from the imported module instead)."""
     from .. import parsers as pkg
 
     skip = {"base", "treesitter", "detection"}
+    existing = {p.name for p in _REGISTRY}
     for mod in pkgutil.iter_modules(pkg.__path__):
         if mod.name in skip:
             continue
-        importlib.import_module(f"{pkg.__name__}.{mod.name}")
+        module = importlib.import_module(f"{pkg.__name__}.{mod.name}")
+        for parser in getattr(module, "PARSERS", []):
+            if parser.name not in existing:
+                register(parser)
+                existing.add(parser.name)
 
 
 def _union(*lists: list[str]) -> list[str]:

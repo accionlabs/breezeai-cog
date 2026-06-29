@@ -1,9 +1,9 @@
 """Analysis pipeline (ARCHITECTURE.md §5/§6).
 
-M2 runs single-process: scan → parse → assemble projectMetaData → sink. The
-ProcessPoolExecutor fan-out and pool-initializer grammar loading arrive in M3; the
-shape here (an ``iter_records`` generator + a ``run`` that drives a sink) is what
-the parallel executor will slot into.
+``run`` drives the full analysis to a sink using the parallel executor and assembles
+``projectMetaData``. ``iter_records`` streams ``(ScanEntry, FileRecord)`` sequentially
+in-process for the library's ``iter_file_records``. The ``projectMetaData``-first
+temp strategy lives in ``FileSink`` (§6).
 """
 
 from __future__ import annotations
@@ -14,8 +14,8 @@ from typing import Callable, Iterator
 
 from .._version import __version__
 from ..logging import get_logger
-from ..parsers.base import ParseContext
 from ..schemas import FileRecord, ProjectMetaData
+from . import executor
 from .ignore import IgnoreEngine
 from .registry import discover_builtin, parser_for, registered
 from .scanner import ScanEntry, scan
@@ -35,56 +35,47 @@ def _classifier(languages: set[str] | None) -> Callable[[str], str | None]:
     return classify
 
 
-def iter_records(repo_root: str | Path, settings) -> Iterator[tuple[ScanEntry, FileRecord]]:
-    """Scan + parse, yielding ``(ScanEntry, FileRecord)``. A file that fails to parse
-    is logged and skipped (the repo always terminates)."""
+def _scan_entries(repo_root: Path, settings) -> Iterator[ScanEntry]:
     discover_builtin()
-    repo_root = Path(repo_root)
     engine = IgnoreEngine.build(registered())
     languages = set(settings.languages) if settings.languages else None
 
     def on_skip(path: str, reason: str) -> None:
         log.debug("scan.file.skipped", path=path, reason=reason)
 
-    for entry in scan(
+    yield from scan(
         repo_root, _classifier(languages),
         engine=engine, max_file_size=settings.max_file_size, on_skip=on_skip,
-    ):
-        parser = parser_for(entry.path)
-        if parser is None:  # pragma: no cover - classify already filtered
-            continue
-        abs_path = repo_root / entry.path
-        try:
-            ctx = ParseContext(
-                path=entry.path,
-                abs_path=abs_path,
-                source=abs_path.read_bytes(),
-                repo_root=repo_root,
-                capture_statements=settings.capture_statements,
-                text_truncation_limit=settings.text_truncation_limit,
-            )
-            record = parser.parse_file(ctx)
-        except Exception as exc:  # per-file isolation (§5)
-            log.warning("parse.file.failed", path=entry.path, parser=parser.name, error=str(exc))
-            continue
-        yield entry, record
+    )
+
+
+def iter_records(repo_root: str | Path, settings) -> Iterator[tuple[ScanEntry, FileRecord]]:
+    """Sequential, in-process scan + parse (streaming)."""
+    repo_root = Path(repo_root)
+    options = executor._options(settings)
+    for entry in _scan_entries(repo_root, settings):
+        record = executor._parse_entry(entry.path, str(repo_root), options)
+        if record is not None:
+            yield entry, record
 
 
 def run(repo_root: str | Path, settings, sink) -> ProjectMetaData:
-    """Drive the full analysis to a sink and return the assembled projectMetaData."""
+    """Full analysis to a sink (parallel) → assembled projectMetaData."""
     repo_root = Path(repo_root)
+    entries = list(_scan_entries(repo_root, settings))
+
     total_files = total_functions = total_classes = total_loc = config_files = 0
     languages: set[str] = set()
     by_type: dict[str, int] = {}
 
-    for entry, record in iter_records(repo_root, settings):
+    for language, record in executor.parse_entries(entries, repo_root, settings):
         sink.write(record)
         total_files += 1
         total_functions += len(record.functions)
         total_classes += len(record.classes)
         total_loc += record.loc
-        languages.add(entry.language)
-        by_type[entry.language] = by_type.get(entry.language, 0) + 1
+        languages.add(language)
+        by_type[language] = by_type.get(language, 0) + 1
         if record.type == "config":
             config_files += 1
 
@@ -103,7 +94,7 @@ def run(repo_root: str | Path, settings, sink) -> ProjectMetaData:
     sink.finalize(meta)
     log.info(
         "analysis.complete",
-        files=total_files, functions=total_functions, classes=total_classes, loc=total_loc,
-        languages=sorted(languages),
+        files=total_files, functions=total_functions, classes=total_classes,
+        loc=total_loc, languages=sorted(languages),
     )
     return meta

@@ -83,7 +83,6 @@ def file_record() -> FileRecord:
         params=[Parameter(name="id", type="string", decorators=[Decorator(name="Param", args=["id"])])],
         calls=[Call(name="findById", path="src/order.repo.ts")],
         returnType="Promise<Order>",
-        statements=[route],
     )
     cls = Class(
         id="src/order.controller.ts#OrderController",
@@ -109,6 +108,7 @@ def file_record() -> FileRecord:
         exports=["OrderController"],
         functions=[fn],
         classes=[cls],
+        statements=[route],  # flat on the file; route.parentId points to the function
     )
 
 

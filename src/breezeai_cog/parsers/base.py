@@ -38,6 +38,7 @@ class ParseContext:
     repo_root: Path
     capture_statements: bool = False
     text_truncation_limit: int = 1000
+    parse_timeout_micros: int = 0  # cross-platform tree-sitter timeout (0 = none)
     resolution_index: Any | None = None  # result of the language's build_index, or None
 
 
@@ -67,6 +68,9 @@ class BaseParser:
     schema_version: str = SCHEMA_VERSION
     statement_types: list[str] = []
     frameworks: list[str] = []
+    #: Names of parsers this one supersedes for a matched file (skip composition).
+    #: Default () = compose with every other matching parser.
+    overrides: tuple[str, ...] = ()
 
     def build_index(self, files: Sequence[Path]) -> Any | None:  # optional pre-pass
         return None

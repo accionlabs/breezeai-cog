@@ -5,7 +5,7 @@ from __future__ import annotations
 from tree_sitter import Node
 
 from ...emit import disambiguate, function_id
-from ...schemas import Call, Decorator, Function, Parameter
+from ...schemas import Call, Decorator, Function, Parameter, Statement
 from ..treesitter import line_span, node_text
 from .statements import extract_statements
 
@@ -94,13 +94,15 @@ def build_function(
     seen_ids: set[str],
     capture: bool = False,
     limit: int = 1000,
-) -> Function:
+) -> tuple[Function, list[Statement]]:
+    """Return the Function and its (flat) statements — the caller collects statements
+    onto ``FileRecord.statements`` (statements are not nested on the Function)."""
     name = node_text(fnode.child_by_field_name("name"), source)
     start, end = line_span(fnode)
     fid = disambiguate(function_id(path, name, start, class_name=class_name), seen_ids)
     ret = fnode.child_by_field_name("return_type")
     body = fnode.child_by_field_name("body")
-    return Function(
+    fn = Function(
         id=fid,
         parentId=parent_id,
         path=path,
@@ -114,7 +116,8 @@ def build_function(
         startLine=start,
         endLine=end,
         calls=_extract_calls(body, source),
-        statements=extract_statements(
-            body, source, path, parent_id=fid, capture=capture, limit=limit, seen_ids=seen_ids
-        ),
     )
+    statements = extract_statements(
+        body, source, path, parent_id=fid, capture=capture, limit=limit, seen_ids=seen_ids
+    )
+    return fn, statements

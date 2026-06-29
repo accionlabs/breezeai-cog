@@ -56,6 +56,7 @@ class Settings(BaseSettings):
     jobs: int | None = None  # --jobs; None = CPU count (resolved in the executor)
     text_truncation_limit: int = 1000  # max captured statement `text` length (utils/text.py)
     max_file_size: int = 2_000_000  # bytes; scanner skips larger files (core/scanner.py)
+    parse_timeout: float = 10.0  # seconds; per-file tree-sitter native timeout (0 disables)
 
     # ── Logging (see §11) ─────────────────────────────────────────────────
     log_level: str = "INFO"

@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+from tree_sitter import Node
+
 from ...emit import file_id
-from ...schemas import SCHEMA_VERSION, FileRecord
+from ...schemas import SCHEMA_VERSION, FileRecord, Function, Statement
 from ...utils import count_loc
 from ..base import BaseParser, ParseContext
-from ..treesitter import get_parser
+from ..treesitter import parse_source
 from .classes import _unwrap, build_class
 from .functions import build_function, extract_decorators
 from .imports import extract_imports
@@ -22,8 +24,14 @@ class PythonParser(BaseParser):
     frameworks = FRAMEWORKS
 
     def parse_file(self, ctx: ParseContext) -> FileRecord:
+        """Parse the source into an AST, then extract. Split so subclasses /
+        framework add-ons can reuse the same tree (no second parse) — see ``extract``."""
+        root = parse_source("python", ctx.source, ctx.parse_timeout_micros).root_node
+        return self.extract(root, ctx)
+
+    def extract(self, root: Node, ctx: ParseContext) -> FileRecord:
+        """Build a FileRecord from an already-parsed AST ``root``."""
         source = ctx.source
-        root = get_parser("python").parse(source).root_node
         path = ctx.path
         fid = file_id(path)
         seen_ids: set[str] = set()
@@ -31,28 +39,31 @@ class PythonParser(BaseParser):
 
         internal, external, exports = extract_imports(root, source, path, ctx.repo_root)
 
-        functions = []
+        functions: list[Function] = []
         classes = []
+        statements: list[Statement] = []
         for child in root.named_children:
             defn, decs = _unwrap(child)
             if defn.type == "class_definition":
-                cls, methods = build_class(
+                cls, methods, cls_statements = build_class(
                     defn, decs, source, path,
                     parent_id=fid, seen_ids=seen_ids, capture=capture, limit=limit,
                 )
                 classes.append(cls)
                 functions.extend(methods)
+                statements.extend(cls_statements)
             elif defn.type == "function_definition":
-                functions.append(
-                    build_function(
-                        defn, extract_decorators(decs, source), source, path,
-                        parent_id=fid, class_name=None, seen_ids=seen_ids,
-                        capture=capture, limit=limit,
-                    )
+                fn, fn_statements = build_function(
+                    defn, extract_decorators(decs, source), source, path,
+                    parent_id=fid, class_name=None, seen_ids=seen_ids,
+                    capture=capture, limit=limit,
                 )
+                functions.append(fn)
+                statements.extend(fn_statements)
 
-        file_statements = extract_statements(
-            root, source, path, parent_id=fid, capture=capture, limit=limit, seen_ids=seen_ids
+        # file-scope statements (parented to the file)
+        statements.extend(
+            extract_statements(root, source, path, parent_id=fid, capture=capture, limit=limit, seen_ids=seen_ids)
         )
 
         return FileRecord(
@@ -66,5 +77,5 @@ class PythonParser(BaseParser):
             exports=exports,
             functions=functions,
             classes=classes,
-            statements=file_statements,
+            statements=statements,  # flat: file + class + function-scoped, linked by parentId
         )

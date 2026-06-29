@@ -246,13 +246,6 @@
               ],
               "default": null,
               "title": "Metadata"
-            },
-            "statements": {
-              "items": {
-                "$ref": "#/$defs/Statement"
-              },
-              "title": "Statements",
-              "type": "array"
             }
           },
           "required": [
@@ -424,13 +417,6 @@
                 "$ref": "#/$defs/Call"
               },
               "title": "Calls",
-              "type": "array"
-            },
-            "statements": {
-              "items": {
-                "$ref": "#/$defs/Statement"
-              },
-              "title": "Statements",
               "type": "array"
             }
           },

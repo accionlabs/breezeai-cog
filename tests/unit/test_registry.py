@@ -100,6 +100,33 @@ def test_schema_version_gate() -> None:
         registry.register(Stale())
 
 
+class FrameworkFk(BaseParser):
+    name = "fake-fw"
+    extensions = (".fk",)
+    overrides = ("fake",)  # supersede FakeA
+
+    def parse_file(self, ctx: ParseContext) -> FileRecord:
+        return FileRecord(id=ctx.path, path=ctx.path, type="code", language="fake-fw", loc=1)
+
+
+def test_override_skips_base_no_composite() -> None:
+    registry.register(FakeA())  # name "fake"
+    registry.register(FrameworkFk())  # overrides ("fake",)
+    p = registry.parser_for("a.fk")
+    assert isinstance(p, FrameworkFk)  # not a CompositeParser; base skipped
+    assert registry.parsers_for("a.fk") == [registry.registered()[1]]
+
+
+def test_override_only_applies_when_overrider_matches() -> None:
+    class OtherExt(FrameworkFk):
+        extensions = (".other",)  # does NOT claim .fk
+
+    registry.register(FakeA())
+    registry.register(OtherExt())
+    # OtherExt doesn't match .fk, so its override of "fake" has no effect here
+    assert isinstance(registry.parser_for("a.fk"), FakeA)
+
+
 def test_config_filename_matching() -> None:
     registry.register(ConfigParser())
     assert registry.parser_for("Dockerfile") is not None

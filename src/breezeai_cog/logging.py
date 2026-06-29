@@ -201,7 +201,11 @@ def setup_logging(settings: "Settings") -> None:
         file_handler.setFormatter(formatter)
         logger.addHandler(file_handler)
 
-    renderer: Any = _render_json if settings.log_format == "json" else _render_plaintext
+    _configure_structlog(settings.log_format)
+
+
+def _configure_structlog(log_format: str) -> None:
+    renderer: Any = _render_json if log_format == "json" else _render_plaintext
     structlog.configure(
         processors=[
             structlog.contextvars.merge_contextvars,
@@ -215,6 +219,17 @@ def setup_logging(settings: "Settings") -> None:
         logger_factory=LoggerFactory(),
         cache_logger_on_first_use=True,
     )
+
+
+def setup_worker_logging(queue: object, log_format: str, log_level: str) -> None:
+    """Configure a process-pool worker (M3): route the app logger to a ``QueueHandler``
+    so records flow to the main process's ``QueueListener`` (§11)."""
+    logger = logging.getLogger(APP_LOGGER)
+    logger.handlers.clear()
+    logger.setLevel(log_level)
+    logger.propagate = False
+    logger.addHandler(logging.handlers.QueueHandler(queue))  # type: ignore[arg-type]
+    _configure_structlog(log_format)
 
 
 def get_logger(name: str | None = None) -> structlog.stdlib.BoundLogger:

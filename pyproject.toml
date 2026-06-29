@@ -24,15 +24,18 @@ dependencies = [
 [project.optional-dependencies]
 upload = ["httpx>=0.27", "boto3>=1.34"]
 server = ["fastapi>=0.110", "uvicorn>=0.29", "httpx>=0.27", "gitpython>=3.1"]
-dev = ["pytest>=8", "jsonschema>=4.21", "ruff>=0.5", "mypy>=1.10"]
 all = [
   "httpx>=0.27", "boto3>=1.34",
   "fastapi>=0.110", "uvicorn>=0.29", "gitpython>=3.1",
 ]
 
-# Console script (CLI) is wired in M3 alongside cli.py.
-# [project.scripts]
-# breezeai-cog = "breezeai_cog.cli:main"
+# Dev tooling (PEP 735). Installed by `uv sync` (the `dev` group is on by default),
+# unlike optional-dependencies extras which require `uv sync --extra <name>`.
+[dependency-groups]
+dev = ["pytest>=8", "jsonschema>=4.21", "ruff>=0.5", "mypy>=1.10"]
+
+[project.scripts]
+breezeai-cog = "breezeai_cog.cli:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/breezeai_cog"]

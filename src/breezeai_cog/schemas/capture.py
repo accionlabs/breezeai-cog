@@ -109,7 +109,8 @@ class Function(BaseModel):
     returnType: str | None = None
     metadata: dict[str, Any] | None = None
     calls: list[Call] = Field(default_factory=list)
-    statements: list[Statement] = Field(default_factory=list)  # gated by --capture-statements
+    # Statements are NOT nested here — they live flat on FileRecord.statements and
+    # link back via parentId (like methods link to their class). See FileRecord.
 
 
 class Class(BaseModel):
@@ -132,7 +133,7 @@ class Class(BaseModel):
     constructorParams: list[ConstructorParam] = Field(default_factory=list)
     decorators: list[Decorator] = Field(default_factory=list)
     metadata: dict[str, Any] | None = None
-    statements: list[Statement] = Field(default_factory=list)
+    # Statements are NOT nested here — see FileRecord.statements (flat, linked via parentId).
 
 
 class FileRecord(BaseModel):
@@ -151,9 +152,11 @@ class FileRecord(BaseModel):
     importFiles: list[str] = Field(default_factory=list)  # in-repo paths → builds IMPORTS
     externalImports: list[str] = Field(default_factory=list)
     exports: list[str] = Field(default_factory=list)
-    functions: list[Function] = Field(default_factory=list)  # code files only
+    functions: list[Function] = Field(default_factory=list)  # code files only; methods link via parentId
     classes: list[Class] = Field(default_factory=list)  # code files only
-    statements: list[Statement] = Field(default_factory=list)  # file-scope, code files only
+    # ALL statements (file / class / function-scoped), flat — each links to its owning
+    # file/class/function via parentId (HAS_STATEMENT). Not nested inside Function/Class.
+    statements: list[Statement] = Field(default_factory=list)
     metadata: dict[str, Any] | None = None  # parsed config metadata (config files only)
 
 

@@ -87,12 +87,38 @@ def test_top_level_function(tmp_path) -> None:
     assert top.id.endswith("@21") or "@" in top.id  # position-suffixed id
 
 
-def test_statements_gated(tmp_path) -> None:
-    assert _parse(tmp_path, capture=False).functions[0].statements == []
+def test_statements_are_flat_and_gated(tmp_path) -> None:
+    # off by default -> no statements anywhere
+    assert _parse(tmp_path, capture=False).statements == []
+
     rec = _parse(tmp_path, capture=True)
     top = next(f for f in rec.functions if f.name == "top")
-    node_types = {s.nodeType for s in top.statements}
+    # statements live FLAT on the file, linked to their owner via parentId
+    top_stmts = [s for s in rec.statements if s.parentId == top.id]
+    node_types = {s.nodeType for s in top_stmts}
     assert "if_statement" in node_types and "return_statement" in node_types
+    # class-var statement is parented to the class, not nested on it
+    order = next(c for c in rec.classes if c.name == "Order")
+    assert any(s.parentId == order.id for s in rec.statements)
+
+
+def test_extract_reuses_a_prebuilt_tree(tmp_path) -> None:
+    from breezeai_cog.parsers.treesitter import parse_source
+
+    abs_path = tmp_path / "pkg" / "order.py"
+    abs_path.parent.mkdir(parents=True, exist_ok=True)
+    (tmp_path / "pkg" / "utils.py").write_text("def helper(x): return x\n")
+    abs_path.write_text(SRC.decode())
+    ctx = ParseContext(path="pkg/order.py", abs_path=abs_path, source=SRC, repo_root=tmp_path,
+                       capture_statements=True, text_truncation_limit=1000)
+    parser = PythonParser()
+
+    root = parse_source("python", SRC, 0).root_node  # parse once, externally
+    via_extract = parser.extract(root, ctx)          # share the tree
+    via_parse_file = parser.parse_file(ctx)          # parse + extract
+
+    assert via_extract.model_dump_json() == via_parse_file.model_dump_json()
+    assert via_extract.functions  # sanity
 
 
 def test_output_validates_against_schema(tmp_path) -> None:
