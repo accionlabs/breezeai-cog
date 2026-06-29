@@ -1,0 +1,53 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "breezeai-cog"
+version = "0.0.0"
+description = "Python code-ontology generator — parses source repositories into the capture NDJSON contract (Part C)."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "Proprietary" }
+authors = [{ name = "Breeze AI" }]
+dependencies = [
+  "pydantic>=2.7",
+  "pydantic-settings>=2.2",
+  "typer>=0.12",
+  "structlog>=24.1",
+  "pathspec>=0.12",
+  "rich>=13.7",
+  "tree-sitter>=0.21",
+  "tree-sitter-language-pack>=0.2",
+]
+
+[project.optional-dependencies]
+upload = ["httpx>=0.27", "boto3>=1.34"]
+server = ["fastapi>=0.110", "uvicorn>=0.29", "httpx>=0.27", "gitpython>=3.1"]
+dev = ["pytest>=8", "jsonschema>=4.21", "ruff>=0.5", "mypy>=1.10"]
+all = [
+  "httpx>=0.27", "boto3>=1.34",
+  "fastapi>=0.110", "uvicorn>=0.29", "gitpython>=3.1",
+]
+
+# Console script (CLI) is wired in M3 alongside cli.py.
+# [project.scripts]
+# breezeai-cog = "breezeai_cog.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/breezeai_cog"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+src = ["src", "tests"]
+
+[tool.mypy]
+python_version = "3.11"
+packages = ["breezeai_cog"]
+mypy_path = "src"
+strict = true
