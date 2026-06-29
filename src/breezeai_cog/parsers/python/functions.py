@@ -76,7 +76,7 @@ def _extract_calls(body: Node | None, source: bytes) -> list[Call]:
                     name = node_text(fn, source).rsplit(".", 1)[-1]
                     if name and name not in seen:
                         seen.add(name)
-                        calls.append(Call(name=name))  # path resolved later (M4+)
+                        calls.append(Call(name=name))  # callee path resolved later
             visit(child)
 
     visit(body)

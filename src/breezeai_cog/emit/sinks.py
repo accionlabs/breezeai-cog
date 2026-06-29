@@ -1,4 +1,5 @@
-"""Output sinks. M1 ships the file sink (S3 / HTTP / in-memory arrive in M6).
+"""Output sinks: the gzipped-NDJSON file sink and the in-memory sink. (The streaming
+S3 upload lives in ``emit/s3.py``.)
 
 The file sink implements the ``projectMetaData``-first strategy (ARCHITECTURE.md
 §6): body ``FileRecord`` lines stream to a temp NDJSON while totals accumulate;

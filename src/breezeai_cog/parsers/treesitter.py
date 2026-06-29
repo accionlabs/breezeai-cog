@@ -2,7 +2,7 @@
 
 Note: ``tree_sitter_language_pack.get_parser`` is broken under tree-sitter 0.25
 (``parse`` rejects bytes), so we build ``Parser(get_language(name))`` ourselves.
-Parsers are cached per language per process (warmed in the pool initializer, M3).
+Parsers are cached per language per process (warmed in the pool initializer).
 """
 
 from __future__ import annotations

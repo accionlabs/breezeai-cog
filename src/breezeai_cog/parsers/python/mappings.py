@@ -1,7 +1,7 @@
 """Python AST node-type → statement classification + capability metadata.
 
 ``STATEMENT_TYPES`` is the source of the parser's capability-discovery list.
-Semantic detection (route / db / api / event) is added in M4 via ``parsers/detection``.
+Semantic detection (route / db / api / event) is wired via ``parsers/detection``.
 """
 
 from __future__ import annotations

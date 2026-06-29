@@ -1,7 +1,7 @@
 """Command-line interface (Typer). A thin client over the services layer (§7).
 
 Commands: ``repo-to-json-tree`` (analyze a local repo), ``capabilities``, ``version``,
-``serve`` (the FastAPI service, §10). ``upload-docs`` arrives later in M6.
+``serve`` (the FastAPI service, §10).
 """
 
 from __future__ import annotations

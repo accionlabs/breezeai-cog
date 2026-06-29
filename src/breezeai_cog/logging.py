@@ -8,7 +8,7 @@ stdlib levels — no custom TRACE.
 Differences from the sibling (a single async web process): ``setup_logging`` takes
 an injected :class:`~breezeai_cog.config.Settings` (no module-level singleton), and
 there is no JWT-identity / HTTP-body handling. Cross-process worker log funneling
-(``QueueHandler`` → ``QueueListener``) is wired by the executor in M3, not here.
+(``QueueHandler`` → ``QueueListener``) is wired by the executor, not here.
 """
 
 from __future__ import annotations
@@ -222,7 +222,7 @@ def _configure_structlog(log_format: str) -> None:
 
 
 def setup_worker_logging(queue: object, log_format: str, log_level: str) -> None:
-    """Configure a process-pool worker (M3): route the app logger to a ``QueueHandler``
+    """Configure a process-pool worker: route the app logger to a ``QueueHandler``
     so records flow to the main process's ``QueueListener`` (§11)."""
     logger = logging.getLogger(APP_LOGGER)
     logger.handlers.clear()
