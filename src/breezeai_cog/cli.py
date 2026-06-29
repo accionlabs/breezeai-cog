@@ -1,7 +1,7 @@
 """Command-line interface (Typer). A thin client over the services layer (§7).
 
-Commands: ``repo-to-json-tree`` (analyze a local repo), ``capabilities``, ``version``.
-``upload-docs`` and ``serve`` arrive in M6.
+Commands: ``repo-to-json-tree`` (analyze a local repo), ``capabilities``, ``version``,
+``serve`` (the FastAPI service, §10). ``upload-docs`` arrives later in M6.
 """
 
 from __future__ import annotations
@@ -60,6 +60,24 @@ def capabilities() -> None:
 
     discover_builtin()
     typer.echo(json.dumps(_caps(), indent=2))
+
+
+@app.command()
+def serve(
+    port: Optional[int] = typer.Option(None, "--port", help="Port (default: 3000 / $PORT / settings)."),
+    host: str = typer.Option("0.0.0.0", "--host", help="Bind host."),
+) -> None:
+    """Start the FastAPI service (/health, /api/analyze[-diff|-sql|-es])."""
+    import os
+
+    import uvicorn
+
+    from .server.app import create_app
+
+    settings = Settings(port=port) if port is not None else Settings()
+    setup_logging(settings)
+    bind_port = port or int(os.environ.get("PORT", settings.port))
+    uvicorn.run(create_app(settings), host=host, port=bind_port)
 
 
 @app.command()

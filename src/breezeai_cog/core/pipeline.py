@@ -80,17 +80,13 @@ def iter_records(repo_root: str | Path, settings) -> Iterator[tuple[ScanEntry, F
             yield entry, record
 
 
-def run(repo_root: str | Path, settings, sink) -> ProjectMetaData:
-    """Full analysis to a sink (parallel) → assembled projectMetaData."""
-    repo_root = Path(repo_root)
-    entries = list(_scan_entries(repo_root, settings))
-    indexes = _build_indexes(repo_root, entries)
-
+def _assemble(repo_root: Path, records: Iterator[tuple[str, FileRecord]], sink) -> ProjectMetaData:
+    """Stream (language, record) pairs to the sink and accumulate projectMetaData."""
     total_files = total_functions = total_classes = total_loc = config_files = 0
     languages: set[str] = set()
     by_type: dict[str, int] = {}
 
-    for language, record in executor.parse_entries(entries, repo_root, settings, indexes):
+    for language, record in records:
         sink.write(record)
         total_files += 1
         total_functions += len(record.functions)
@@ -120,3 +116,20 @@ def run(repo_root: str | Path, settings, sink) -> ProjectMetaData:
         loc=total_loc, languages=sorted(languages),
     )
     return meta
+
+
+def run(repo_root: str | Path, settings, sink) -> ProjectMetaData:
+    """Full analysis to a sink (parallel) → assembled projectMetaData."""
+    repo_root = Path(repo_root)
+    entries = list(_scan_entries(repo_root, settings))
+    indexes = _build_indexes(repo_root, entries)
+    return _assemble(repo_root, executor.parse_entries(entries, repo_root, settings, indexes), sink)
+
+
+def run_inprocess(repo_root: str | Path, settings, sink) -> ProjectMetaData:
+    """Full analysis to a sink, **sequential and in-process** (no spawn pool) — the
+    server `/api/analyze` path (§10), where file lists are small and per-request pool
+    startup would dominate."""
+    repo_root = Path(repo_root)
+    records = ((record.language, record) for _entry, record in iter_records(repo_root, settings))
+    return _assemble(repo_root, records, sink)

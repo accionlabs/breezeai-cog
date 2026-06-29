@@ -25,6 +25,21 @@ class Sink(Protocol):
     def finalize(self, project_meta: ProjectMetaData) -> None: ...
 
 
+class MemorySink:
+    """Collects records + meta in memory. Used by the server `/api/analyze` path,
+    which returns a plain JSON `{ projectMetaData, files }` (no gzip, §10)."""
+
+    def __init__(self) -> None:
+        self.records: list[FileRecord] = []
+        self.project_meta: ProjectMetaData | None = None
+
+    def write(self, record: FileRecord) -> None:
+        self.records.append(record)
+
+    def finalize(self, project_meta: ProjectMetaData) -> None:
+        self.project_meta = project_meta
+
+
 class FileSink:
     """Writes ``<out>.ndjson.gz`` with ``projectMetaData`` as the first line."""
 
