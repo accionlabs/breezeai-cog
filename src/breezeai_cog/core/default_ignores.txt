@@ -1,0 +1,69 @@
+# Built-in default ignore patterns (ARCHITECTURE.md §9, layer 1). gitignore syntax.
+# Re-include anything here via a repo .repoinclude (or per-language include.txt).
+
+# VCS
+.git/
+.svn/
+.hg/
+
+# Dependencies
+node_modules/
+vendor/
+bower_components/
+jspm_packages/
+
+# Python envs / caches
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+env/
+.tox/
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+*.egg-info/
+
+# Build output
+dist/
+build/
+out/
+target/
+bin/
+obj/
+.next/
+.nuxt/
+.svelte-kit/
+*.min.js
+*.min.css
+
+# Caches / IDE
+.cache/
+.parcel-cache/
+.gradle/
+.idea/
+.vscode/
+
+# Secrets
+.env
+.env.*
+*.pem
+*.key
+id_rsa*
+
+# Logs / temp
+*.log
+logs/
+tmp/
+temp/
+
+# Tests (excluded by default; re-include via .repoinclude)
+test/
+tests/
+__tests__/
+*.test.*
+*.spec.*
+test_*.py
+*_test.py
+*_test.go

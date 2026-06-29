@@ -10,10 +10,22 @@ cross-file context simply omit it; the pipeline calls it via ``getattr``.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from importlib import resources
 from pathlib import Path
 from typing import Any, Protocol, Sequence, runtime_checkable
 
 from ..schemas import SCHEMA_VERSION, FileRecord
+
+
+def _read_sibling_lines(obj: object, filename: str) -> list[str]:
+    """Read a text file (e.g. ``ignore.txt``) shipped in the parser's subpackage."""
+    package = type(obj).__module__.rpartition(".")[0]
+    if not package:
+        return []
+    try:
+        return resources.files(package).joinpath(filename).read_text("utf-8").splitlines()
+    except (FileNotFoundError, ModuleNotFoundError, OSError, NotADirectoryError):
+        return []
 
 
 @dataclass(frozen=True, slots=True)
@@ -58,6 +70,14 @@ class BaseParser:
 
     def build_index(self, files: Sequence[Path]) -> Any | None:  # optional pre-pass
         return None
+
+    def ignore_patterns(self) -> list[str]:
+        """Per-language ignore defaults (layer 2, §9) — from sibling ``ignore.txt``."""
+        return _read_sibling_lines(self, "ignore.txt")
+
+    def include_patterns(self) -> list[str]:
+        """Per-language force-include overrides (§9) — from sibling ``include.txt``."""
+        return _read_sibling_lines(self, "include.txt")
 
     def parse_file(self, ctx: ParseContext) -> FileRecord:  # pragma: no cover - abstract
         raise NotImplementedError
