@@ -39,4 +39,4 @@ NESTED_SCOPES = {
 
 STATEMENT_TYPES = sorted(EMIT_TYPES)
 
-FRAMEWORKS = ["angular", "nestjs", "express", "react", "vue"]
+FRAMEWORKS = ["angular", "nestjs", "loopback", "express", "react", "vue"]
