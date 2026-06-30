@@ -1,9 +1,9 @@
 """Schema version + JSON-Schema generation for the capture contract.
 
-The Pydantic models in ``capture.py`` are the SOURCE OF TRUTH. The JSON Schema
-produced here is a *generated* artifact for cross-language consumers (e.g. the
-Node backend) and external validation — regenerate and drift-check it in CI;
-never hand-edit it.
+The Pydantic models in ``capture.py`` are the SOURCE OF TRUTH. The JSON Schema is
+*generated on demand* from them (``export_json_schema`` / the ``schema`` CLI command)
+for cross-language consumers (e.g. the Node backend) and external validation. It is
+not committed — generate it when a consumer needs it.
 """
 
 from __future__ import annotations
@@ -37,7 +37,7 @@ def export_json_schema() -> dict[str, Any]:
 
 
 def write_json_schema(path: str) -> None:
-    """Write the generated JSON Schema to ``path`` (used by CI / publish steps)."""
+    """Write the generated JSON Schema to ``path`` (for publishing to a consumer)."""
     with open(path, "w", encoding="utf-8") as fh:
         json.dump(export_json_schema(), fh, indent=2)
         fh.write("\n")

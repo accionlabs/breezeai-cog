@@ -51,6 +51,7 @@ zcat "$f" | sed -n 2p | jq      # first file record
 |---|---|
 | `repo-to-json-tree` | Analyze a **local** directory → gzipped NDJSON |
 | `capabilities` | Print supported languages / frameworks / statement types (JSON) |
+| `schema` | Generate the capture JSON Schema (stdout, or `--out <file>`) |
 | `serve` | Start the FastAPI service (needs the `[server]` extra) |
 | `version` | Print the tool version |
 

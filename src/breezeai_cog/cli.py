@@ -84,6 +84,20 @@ def serve(
 
 
 @app.command()
+def schema(
+    out: Optional[Path] = typer.Option(None, "--out", help="Write to this file instead of stdout."),
+) -> None:
+    """Generate the capture JSON Schema from the Pydantic models (the source of truth)."""
+    from .schemas import export_json_schema, write_json_schema
+
+    if out is not None:
+        write_json_schema(str(out))
+        typer.echo(f"wrote {out}")
+    else:
+        typer.echo(json.dumps(export_json_schema(), indent=2))
+
+
+@app.command()
 def version() -> None:
     """Print the tool version."""
     typer.echo(__version__)

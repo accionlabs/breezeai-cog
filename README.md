@@ -18,8 +18,8 @@ Parses Python, TypeScript/JavaScript, and Java — with FastAPI, NestJS, Angular
 framework detection — into the Part C capture contract, and serves the analysis API.
 
 - `src/breezeai_cog/schemas/` — the Part C capture contract as Pydantic v2 models
-  (**source of truth**). `export_json_schema()` generates the language-agnostic JSON Schema for
-  cross-language consumers; `SCHEMA_VERSION = 2.0`.
+  (**source of truth**). The language-agnostic JSON Schema is generated on demand for
+  cross-language consumers via `breezeai-cog schema` (`export_json_schema()`); `SCHEMA_VERSION = 2.0`.
 - `core/`, `parsers/`, `emit/`, `services/`, `server/` — the scanner, parser registry, multiprocess
   pipeline, NDJSON/S3 sinks, and the FastAPI service (`/api/analyze[-diff|-sql|-es]`).
 

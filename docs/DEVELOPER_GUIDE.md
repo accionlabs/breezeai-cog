@@ -27,7 +27,7 @@ deps live in the `server` and `all` optional-dependency extras.
 
 ```
 src/breezeai_cog/
-  schemas/        # Pydantic v2 capture contract — the SOURCE OF TRUTH (+ JSON Schema export)
+  schemas/        # Pydantic v2 capture contract — the SOURCE OF TRUTH (JSON Schema generated on demand)
   config.py       # Settings: CLI flags ↔ env vars (BREEZEAI_COG_*)
   logging.py      # structlog setup
   core/           # registry · scanner · ignore · pipeline · executor (multiprocess)
@@ -89,10 +89,10 @@ In short:
 
 ## The capture contract
 
-`src/breezeai_cog/schemas/` (Pydantic v2) **is the source of truth**. The committed JSON Schema is
-*generated* from it via `export_json_schema()`, and a drift test fails the build if they diverge.
-`SCHEMA_VERSION` gates parser registration. Changing the contract means editing the models, then
-regenerating + reviewing the schema artifact.
+`src/breezeai_cog/schemas/` (Pydantic v2) **is the source of truth**. The language-agnostic JSON
+Schema is *generated on demand* from the models — `breezeai-cog schema` (or `export_json_schema()`) —
+for cross-language consumers; it is not committed. `SCHEMA_VERSION` gates parser registration.
+Changing the contract means editing the models; consumers regenerate the schema when they need it.
 
 ---
 
