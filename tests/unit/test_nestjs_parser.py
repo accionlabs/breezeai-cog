@@ -27,11 +27,19 @@ export class OrderController {
 '''
 
 
-def _parse(tmp_path) -> FileRecord:
+def _parse(tmp_path, *, capture=True) -> FileRecord:
     p = tmp_path / "order.controller.ts"
     p.write_text(SRC.decode())
-    ctx = ParseContext(path="order.controller.ts", abs_path=p, source=SRC, repo_root=tmp_path)
+    ctx = ParseContext(path="order.controller.ts", abs_path=p, source=SRC, repo_root=tmp_path,
+                       capture_statements=capture)
     return NestJSParser().parse_file(ctx)
+
+
+def test_routes_require_capture_statements(tmp_path) -> None:
+    # Routes are statements — only emitted with --capture-statements (spec A4).
+    rec = _parse(tmp_path, capture=False)
+    assert [s for s in rec.statements if s.semanticType == "route"] == []
+    assert rec.framework is None
 
 
 def test_routes_detected_and_linked(tmp_path) -> None:

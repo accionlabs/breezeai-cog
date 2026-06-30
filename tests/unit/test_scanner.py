@@ -48,6 +48,8 @@ def test_scan_filter_chain(tmp_path) -> None:
     assert "node_modules/x.py" not in found  # dir pruned
     assert "sub/d.py" not in found  # hierarchical .repoignore
     assert "big.py" not in found  # size filter
-    assert ("big.py", "max_file_size") in skips
+    reasons = {(p, r) for p, r in skips}
+    assert ("big.py", "oversized") in reasons
+    assert ("sub/d.py", "ignored") in reasons  # dropped by hierarchical .repoignore
     # symlinked dir never recursed (no duplicate / link-prefixed paths)
     assert not any(p.startswith("link/") for p in found)

@@ -47,12 +47,92 @@ def repo_to_json_tree(
         log_level="DEBUG" if verbose else "INFO",
     )
     setup_logging(settings)
-    result = AnalysisService(settings).analyze_repo(repo)
+    service = AnalysisService(settings)
+
+    # A live bar + final table for humans on an interactive terminal (not under --verbose,
+    # where per-file logs already show progress). Piped/CI output keeps the structured
+    # `analysis.complete` log line + a plain one-liner. Server/library paths are untouched.
+    import sys
+
+    show_bar = not verbose and sys.stderr.isatty()
+    render_table = not verbose and sys.stdout.isatty()
+    stats: dict = {}
+
+    def analyze(progress: object) -> object:
+        return service.analyze_repo(
+            repo, progress=progress, summary_out=stats, log_summary=not render_table,
+        )
+
+    if show_bar:
+        from rich.console import Console
+        from rich.progress import (
+            BarColumn, MofNCompleteColumn, Progress, TextColumn, TimeElapsedColumn,
+        )
+
+        with Progress(
+            TextColumn("[progress.description]{task.description}"),
+            BarColumn(),
+            MofNCompleteColumn(),
+            TimeElapsedColumn(),
+            console=Console(stderr=True),
+            transient=True,            # clear the bar when done; the summary remains
+            refresh_per_second=10,     # throttled redraw — cheap regardless of file count
+        ) as prog:
+            task = prog.add_task("Analyzing", total=None)
+
+            def _on_progress(done: int, total: int) -> None:
+                prog.update(task, completed=done, total=total)
+                # Tear the bar down as soon as parsing finishes — before the pipeline
+                # logs its summary line — so that log starts on a clean line.
+                if total and done >= total:
+                    prog.stop()
+
+            result = analyze(_on_progress)
+    else:
+        result = analyze(None)
+
     m = result.project_meta
-    typer.echo(
-        f"{m.totalFiles} files, {m.totalFunctions} functions, {m.totalClasses} classes "
-        f"({', '.join(m.analyzedLanguages) or 'none'}) -> {result.out_path}"
-    )
+    if render_table:
+        _print_summary_table(m, stats, result.out_path)
+    else:
+        typer.echo(
+            f"{m.totalFiles} files, {m.totalFunctions} functions, {m.totalClasses} classes "
+            f"({', '.join(m.analyzedLanguages) or 'none'}) -> {result.out_path}"
+        )
+
+
+def _print_summary_table(meta: object, stats: dict, out_path: object) -> None:
+    """Render the run summary as a readable table (interactive terminal)."""
+    from rich import box
+    from rich.console import Console
+    from rich.table import Table
+
+    skips = stats.get("skips") or {}
+    skipped = stats.get("skipped", 0)
+    skip_detail = ", ".join(f"{k} {v:,}" for k, v in sorted(skips.items()))
+
+    table = Table(title="Analysis summary", title_style="bold cyan", title_justify="left",
+                  show_header=False, box=box.ROUNDED)
+    table.add_column(style="cyan", justify="right", no_wrap=True)
+    table.add_column(style="white")
+
+    # scanned = parsed + failed + skipped (these reconcile)
+    table.add_row("Files scanned", f"{stats.get('scanned', meta.totalFiles):,}")
+    table.add_row("  parsed", f"{stats.get('parsed', meta.totalFiles):,}")
+    if stats.get("failed"):
+        table.add_row("  failed", f"[red]{stats['failed']:,}[/red]")
+    if skipped:
+        table.add_row("  skipped", f"{skipped:,}" + (f"  ([dim]{skip_detail}[/dim])" if skip_detail else ""))
+    table.add_section()
+    table.add_row("Functions", f"{meta.totalFunctions:,}")
+    table.add_row("Classes", f"{meta.totalClasses:,}")
+    table.add_row("Statements", f"{stats.get('statements', 0):,}")
+    table.add_row("Lines of code", f"{meta.totalLinesOfCode:,}")
+    table.add_section()
+    table.add_row("Languages", ", ".join(meta.analyzedLanguages) or "none")
+    table.add_row("Output", str(out_path))
+
+    Console().print(table)
 
 
 @app.command()

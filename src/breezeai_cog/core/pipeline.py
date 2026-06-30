@@ -8,6 +8,7 @@ temp strategy lives in ``FileSink`` (§6).
 
 from __future__ import annotations
 
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Iterator
@@ -35,13 +36,19 @@ def _classifier(languages: set[str] | None) -> Callable[[str], str | None]:
     return classify
 
 
-def _scan_entries(repo_root: Path, settings) -> Iterator[ScanEntry]:
+def _scan_entries(
+    repo_root: Path, settings, skips: dict[str, int] | None = None
+) -> Iterator[ScanEntry]:
     discover_builtin()
     engine = IgnoreEngine.build(registered())
     languages = set(settings.languages) if settings.languages else None
+    debug_on = settings.log_level == "DEBUG"
 
     def on_skip(path: str, reason: str) -> None:
-        log.debug("scan.file.skipped", path=path, reason=reason)
+        if skips is not None:  # cheap tally for the run summary (ignored/unsupported/oversized)
+            skips[reason] = skips.get(reason, 0) + 1
+        if debug_on:  # gated so structlog never renders below DEBUG
+            log.debug("scan.file.skipped", path=path, reason=reason)
 
     yield from scan(
         repo_root, _classifier(languages),
@@ -49,7 +56,9 @@ def _scan_entries(repo_root: Path, settings) -> Iterator[ScanEntry]:
     )
 
 
-def _build_indexes(repo_root: Path, entries: list[ScanEntry]) -> dict:
+def _build_indexes(
+    repo_root: Path, entries: list[ScanEntry], *, debug_on: bool = False
+) -> dict:
     """Run each parser's optional ``build_index`` once (main process). Maps
     parser-name → index; threaded into ParseContext.resolution_index."""
     bases: dict[str, object] = {}
@@ -62,7 +71,13 @@ def _build_indexes(repo_root: Path, entries: list[ScanEntry]) -> dict:
         files.setdefault(base.name, []).append(repo_root / entry.path)
     indexes: dict[str, object] = {}
     for name, base in bases.items():
+        start = time.perf_counter()
         index = base.build_index(repo_root, files[name])
+        if debug_on:
+            log.debug(
+                "build_index.done", parser=name, files=len(files[name]),
+                ms=round((time.perf_counter() - start) * 1000, 1), built=index is not None,
+            )
         if index is not None:
             indexes[name] = index
     return indexes
@@ -73,29 +88,62 @@ def iter_records(repo_root: str | Path, settings) -> Iterator[tuple[ScanEntry, F
     repo_root = Path(repo_root)
     entries = list(_scan_entries(repo_root, settings))
     options = executor._options(settings)
-    options["indexes"] = _build_indexes(repo_root, entries)
+    options["indexes"] = _build_indexes(
+        repo_root, entries, debug_on=settings.log_level == "DEBUG"
+    )
     for entry in entries:
         record = executor._parse_entry(entry.path, str(repo_root), options)
         if record is not None:
             yield entry, record
 
 
-def _assemble(repo_root: Path, records: Iterator[tuple[str, FileRecord]], sink) -> ProjectMetaData:
-    """Stream (language, record) pairs to the sink and accumulate projectMetaData."""
+def _assemble(
+    repo_root: Path,
+    records: Iterator[tuple[str, FileRecord]],
+    sink,
+    *,
+    candidates: int | None = None,
+    skips: dict[str, int] | None = None,
+    debug_on: bool = False,
+    progress: Callable[[int, int], None] | None = None,
+    summary_out: dict | None = None,
+    log_summary: bool = True,
+) -> ProjectMetaData:
+    """Stream (language, record) pairs to the sink and accumulate projectMetaData.
+
+    Logs an ``analysis.complete`` summary (candidate files, parsed, failed, skipped +
+    cumulative totals) at INFO, or DEBUG when ``log_summary`` is False (the caller will
+    present it itself, e.g. as a table). If ``summary_out`` is given it's filled with the
+    same numbers. ``progress(done, total)`` — if given — is called as records arrive.
+    Under ``--verbose`` a per-file ``parse.file.done`` is also logged.
+    """
     total_files = total_functions = total_classes = total_loc = config_files = 0
+    total_statements = 0
     languages: set[str] = set()
     by_type: dict[str, int] = {}
+
+    if progress is not None and candidates is not None:
+        progress(0, candidates)  # establish the total up front
 
     for language, record in records:
         sink.write(record)
         total_files += 1
         total_functions += len(record.functions)
         total_classes += len(record.classes)
+        total_statements += len(record.statements)
         total_loc += record.loc
         languages.add(language)
         by_type[language] = by_type.get(language, 0) + 1
         if record.type == "config":
             config_files += 1
+        if progress is not None and candidates is not None:
+            progress(total_files, candidates)
+        if debug_on:  # gated: no structlog cost unless --verbose
+            log.debug(
+                "parse.file.done", path=record.path, language=language,
+                functions=len(record.functions), classes=len(record.classes),
+                statements=len(record.statements),
+            )
 
     meta = ProjectMetaData(
         repositoryPath=str(repo_root.resolve()),
@@ -110,20 +158,56 @@ def _assemble(repo_root: Path, records: Iterator[tuple[str, FileRecord]], sink) 
         toolVersion=__version__,
     )
     sink.finalize(meta)
-    log.info(
+
+    skips = skips or {}
+    parsed = total_files
+    candidate_n = candidates if candidates is not None else parsed  # source files to parse
+    failed = max(0, candidate_n - parsed)                            # candidates that errored
+    skipped_total = sum(skips.values())                             # non-candidates dropped in scan
+    scanned = candidate_n + skipped_total                           # = parsed + failed + skipped
+    if summary_out is not None:
+        summary_out.update(
+            scanned=scanned, parsed=parsed, failed=failed,
+            skipped=skipped_total, skips=dict(skips), statements=total_statements,
+        )
+    emit = log.info if log_summary else log.debug
+    emit(
         "analysis.complete",
-        files=total_files, functions=total_functions, classes=total_classes,
-        loc=total_loc, languages=sorted(languages),
+        scanned=scanned,                   # files walked = parsed + failed + skipped
+        parsed=parsed,                     # records produced
+        failed=failed,                     # candidates that errored out
+        skipped=skipped_total or None,     # ignored + unsupported + oversized
+        skips=skips or None,
+        functions=total_functions, classes=total_classes,
+        statements=total_statements, loc=total_loc,
+        languages=sorted(languages),
     )
     return meta
 
 
-def run(repo_root: str | Path, settings, sink) -> ProjectMetaData:
-    """Full analysis to a sink (parallel) → assembled projectMetaData."""
+def run(
+    repo_root: str | Path, settings, sink,
+    *,
+    progress: Callable[[int, int], None] | None = None,
+    summary_out: dict | None = None,
+    log_summary: bool = True,
+) -> ProjectMetaData:
+    """Full analysis to a sink (parallel) → assembled projectMetaData.
+
+    ``progress(done, total)`` — if given — receives live counts as files complete.
+    ``summary_out`` / ``log_summary`` — see :func:`_assemble`.
+    """
     repo_root = Path(repo_root)
-    entries = list(_scan_entries(repo_root, settings))
-    indexes = _build_indexes(repo_root, entries)
-    return _assemble(repo_root, executor.parse_entries(entries, repo_root, settings, indexes), sink)
+    debug_on = settings.log_level == "DEBUG"
+    skips: dict[str, int] = {}
+    entries = list(_scan_entries(repo_root, settings, skips))
+    indexes = _build_indexes(repo_root, entries, debug_on=debug_on)
+    records = executor.parse_entries(entries, repo_root, settings, indexes)
+    return _assemble(
+        repo_root, records, sink, candidates=len(entries), skips=skips,
+        debug_on=debug_on, progress=progress,
+        summary_out=summary_out, log_summary=log_summary,
+    )
 
 
 def run_inprocess(repo_root: str | Path, settings, sink) -> ProjectMetaData:
@@ -131,5 +215,18 @@ def run_inprocess(repo_root: str | Path, settings, sink) -> ProjectMetaData:
     server `/api/analyze` path (§10), where file lists are small and per-request pool
     startup would dominate."""
     repo_root = Path(repo_root)
-    records = ((record.language, record) for _entry, record in iter_records(repo_root, settings))
-    return _assemble(repo_root, records, sink)
+    debug_on = settings.log_level == "DEBUG"
+    skips: dict[str, int] = {}
+    entries = list(_scan_entries(repo_root, settings, skips))
+    options = executor._options(settings)
+    options["indexes"] = _build_indexes(repo_root, entries, debug_on=debug_on)
+
+    def gen() -> Iterator[tuple[str, FileRecord]]:
+        for entry in entries:
+            record = executor._parse_entry(entry.path, str(repo_root), options)
+            if record is not None:
+                yield record.language, record
+
+    return _assemble(
+        repo_root, gen(), sink, candidates=len(entries), skips=skips, debug_on=debug_on
+    )

@@ -44,11 +44,19 @@ public class PingController {
 '''
 
 
-def _parse(tmp_path, src: bytes, name: str) -> FileRecord:
+def _parse(tmp_path, src: bytes, name: str, *, capture: bool = True) -> FileRecord:
     p = tmp_path / name
     p.write_text(src.decode())
-    ctx = ParseContext(path=name, abs_path=p, source=src, repo_root=tmp_path)
+    ctx = ParseContext(path=name, abs_path=p, source=src, repo_root=tmp_path,
+                       capture_statements=capture)
     return SpringBootParser().parse_file(ctx)
+
+
+def test_routes_require_capture_statements(tmp_path) -> None:
+    # Routes are statements — only emitted with --capture-statements (spec A4).
+    rec = _parse(tmp_path, SRC_V3, "OrderController.java", capture=False)
+    assert [s for s in rec.statements if s.semanticType == "route"] == []
+    assert rec.framework is None
 
 
 def test_v3_routes(tmp_path) -> None:

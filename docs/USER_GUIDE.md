@@ -67,8 +67,10 @@ breezeai-cog repo-to-json-tree --repo . --out ./out
 - `--out ./out` — the **output directory**. The tool creates a file inside it named
   `<repo-name>-project-analysis.ndjson.gz`.
 
-When it finishes, it prints a one-line summary (files / functions / classes found) and the path to
-the output file.
+While it runs in an interactive terminal, a live progress bar shows files parsed out of the total,
+with elapsed time. (The bar is automatically suppressed when output is piped or redirected, and when
+`--verbose` is on.) When it finishes, it prints a one-line summary (files / functions / classes
+found) and the path to the output file.
 
 ---
 
@@ -93,7 +95,24 @@ the output file.
 | `--language <name>` | all (auto-detected) | Only analyze this language. Repeat the flag for several (e.g. `--language python --language java`). |
 | `--capture-statements` | off | Also record statements *inside* functions — needed to detect API calls, DB queries, and routes. Off by default because it produces more data. |
 | `--jobs <n>` | number of CPU cores | How many files to parse in parallel. |
-| `--verbose` | off | Print detailed (debug) logs. |
+| `--verbose` | off | Print detailed (debug) logs: per-file parse results, each skipped file with its reason (`ignored` / `unsupported` / `oversized`), and index-build timing. |
+
+Every run — even without `--verbose` — ends with a one-line summary showing files **found** vs
+**parsed**, how many **failed** or were **skipped** (and why), plus cumulative totals:
+
+```
+analysis.complete scanned=182 parsed=118 failed=0 skipped=64 \
+  skips={"unsupported":51,"ignored":12,"oversized":1} \
+  functions=940 classes=210 statements=0 loc=18324 languages=["python","typescript"]
+```
+
+- **scanned** — total files the scanner walked; equals **parsed** + **failed** + **skipped**.
+- **parsed** — records produced. **failed** — candidate source files that errored during parsing.
+- **skipped** — files dropped during scanning, by reason: `ignored` (by `.gitignore`/`.repoignore`),
+  `unsupported` (no parser for that type), `oversized` (over the size limit).
+- **statements** — captured in-body statements **plus** detected framework routes. With
+  `--capture-statements` off (the default) this is **routes only**, so it's normally far smaller
+  than the function count; turn the flag on to capture all in-body statements.
 
 Example — analyze only Python and Java, with statement detail, using 8 parallel workers:
 

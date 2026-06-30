@@ -23,10 +23,11 @@ class AngularParser(TypeScriptParser):
         grammar = "tsx" if ctx.path.endswith((".tsx", ".jsx")) else "typescript"
         root = parse_source(grammar, ctx.source, ctx.parse_timeout_micros).root_node
         record = self.extract(root, ctx)  # full TS extraction (one parse)
-        routes = detect_angular_routes(
-            root, ctx.source, ctx.path, seen_ids={s.id for s in record.statements}
-        )
-        if routes:
-            record.statements.extend(routes)
-            record.framework = "angular"
+        if ctx.capture_statements:  # routes are statements — gated by --capture-statements (spec A4)
+            routes = detect_angular_routes(
+                root, ctx.source, ctx.path, seen_ids={s.id for s in record.statements}
+            )
+            if routes:
+                record.statements.extend(routes)
+                record.framework = "angular"
         return record

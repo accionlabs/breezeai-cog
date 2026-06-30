@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterator
+from typing import Callable, Iterator
 
 from ..config import Settings
 from ..core import pipeline
@@ -31,12 +31,23 @@ class AnalysisService:
         out_dir = Path(self.settings.out) if self.settings.out is not None else repo.parent
         return out_dir / f"{repo.name}-project-analysis.ndjson.gz"
 
-    def analyze_repo(self, repo: str | Path, *, sink: Sink | None = None) -> AnalysisResult:
+    def analyze_repo(
+        self,
+        repo: str | Path,
+        *,
+        sink: Sink | None = None,
+        progress: Callable[[int, int], None] | None = None,
+        summary_out: dict | None = None,
+        log_summary: bool = True,
+    ) -> AnalysisResult:
         repo = Path(repo)
         owns_sink = sink is None
         out_path = self._default_out(repo) if owns_sink else None
         sink = sink or FileSink(out_path)  # type: ignore[arg-type]
-        meta = pipeline.run(repo, self.settings, sink)
+        meta = pipeline.run(
+            repo, self.settings, sink,
+            progress=progress, summary_out=summary_out, log_summary=log_summary,
+        )
         return AnalysisResult(project_meta=meta, out_path=out_path)
 
     def iter_file_records(self, repo: str | Path) -> Iterator[FileRecord]:

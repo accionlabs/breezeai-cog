@@ -33,12 +33,19 @@ def helper(x):
 '''
 
 
-def _parse(tmp_path, *, capture=False) -> FileRecord:
+def _parse(tmp_path, *, capture=True) -> FileRecord:
     p = tmp_path / "main.py"
     p.write_text(SRC.decode())
     ctx = ParseContext(path="main.py", abs_path=p, source=SRC, repo_root=tmp_path,
                        capture_statements=capture, text_truncation_limit=1000)
     return FastAPIParser().parse_file(ctx)
+
+
+def test_routes_require_capture_statements(tmp_path) -> None:
+    # Routes are statements — only emitted with --capture-statements (spec A4).
+    rec = _parse(tmp_path, capture=False)
+    assert [s for s in rec.statements if s.semanticType == "route"] == []
+    assert rec.framework is None
 
 
 def test_routes_detected_and_linked(tmp_path) -> None:

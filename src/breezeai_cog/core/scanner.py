@@ -91,17 +91,21 @@ def scan(
                 yield from walk(Path(entry.path), rel, ig, inc)
             elif entry.is_file(follow_symlinks=True):
                 if not keep(rel, False, ig, inc):
+                    if on_skip is not None:
+                        on_skip(rel, "ignored")
                     continue
                 language = classify(rel)
                 if language is None:
-                    continue  # extension allow-list
+                    if on_skip is not None:
+                        on_skip(rel, "unsupported")  # no parser for this extension
+                    continue
                 try:
                     size = entry.stat(follow_symlinks=True).st_size
                 except OSError:
                     continue
                 if max_file_size and size > max_file_size:
                     if on_skip is not None:
-                        on_skip(rel, "max_file_size")
+                        on_skip(rel, "oversized")
                     continue
                 yield ScanEntry(path=rel, language=language)
 

@@ -54,3 +54,23 @@ def test_capabilities() -> None:
     assert "python" in caps["languages"]
     assert ".py" in caps["extensions"]
     assert caps["schemaVersion"] == "2.0"
+
+
+def test_run_reports_progress(tmp_path) -> None:
+    """pipeline.run forwards live (done, total) progress as files complete."""
+    from breezeai_cog.config import Settings
+    from breezeai_cog.core import pipeline
+    from breezeai_cog.emit.sinks import MemorySink
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    for i in range(5):
+        (repo / f"m{i}.py").write_text(f"def f{i}():\n    return {i}\n")
+
+    seen: list[tuple[int, int]] = []
+    pipeline.run(repo, Settings(jobs=1), MemorySink(), progress=lambda d, t: seen.append((d, t)))
+
+    assert seen[0] == (0, 5)                       # total set up front
+    assert seen[-1] == (5, 5)                       # ends at total
+    assert [d for d, _ in seen] == sorted(d for d, _ in seen)  # monotonic
+    assert all(t == 5 for _, t in seen)             # total stable
