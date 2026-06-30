@@ -75,11 +75,7 @@ sequentially in-process for the server's small payloads.
 
 A new **language** or **framework** parser is a self-contained subpackage. The full recipe —
 structure, the tools to reuse, the `claims`/`priority` selection model, and testing standards — is
-the **`add-parser` skill**:
-
-```
-.claude/skills/add-parser/SKILL.md
-```
+in **[Adding a Parser](ADDING_A_PARSER.md)**.
 
 In short:
 

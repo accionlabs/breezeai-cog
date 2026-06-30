@@ -8,7 +8,8 @@ Python reimplementation of `breezeai-code-ontology-generator`.
 ## Documentation
 
 - **[User Guide](docs/USER_GUIDE.md)** — install, CLI usage, output format, configuration, and the HTTP service.
-- **[Developer Guide](docs/DEVELOPER_GUIDE.md)** — setup, project layout, how it works, and adding a parser.
+- **[Developer Guide](docs/DEVELOPER_GUIDE.md)** — setup, project layout, and how it works.
+- **[Adding a Parser](docs/ADDING_A_PARSER.md)** — add a new language or framework parser.
 - **[Architecture](../../breeze-cog/docs/ARCHITECTURE.md)** — the full design and rationale.
 
 ## Status
