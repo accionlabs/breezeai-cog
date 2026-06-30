@@ -92,7 +92,15 @@ full schema is the Pydantic model in `src/breezeai_cog/schemas/` (the source of 
 ## Configuration
 
 Every CLI flag has an environment-variable equivalent (prefix `BREEZEAI_COG_`), readable from the
-process environment or a `.env` file. Flags win over env vars.
+process environment or a `.env` file. Flags win over env vars. Copy
+[`.env.example`](../.env.example) to `.env` for the full list of variables with defaults:
+
+```bash
+cp .env.example .env
+```
+
+A few server/backend vars also accept their conventional unprefixed names (e.g. `BREEZE_API_URL`,
+`API_KEY`, `AWS_*`), shown below.
 
 | Setting | Env var | Default |
 |---|---|---|
