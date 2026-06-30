@@ -1,5 +1,7 @@
 name: CI
 
+# DISABLED: GitHub ignores this file because of the `.disabled` extension.
+# To re-enable CI, rename it back to `ci.yml`.
 on:
   push:
     branches: [main]
@@ -23,5 +25,5 @@ jobs:
         run: ruff check .
       - name: Type-check
         run: mypy
-      - name: Test (includes schema-drift gate)
+      - name: Test
         run: pytest -q
