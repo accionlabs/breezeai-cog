@@ -27,9 +27,40 @@ def test_classify_db() -> None:
     assert classify_call("Order.findOne", "findOne") == ("db_method_call", "findOne", "orm")
 
 
+def test_classify_db_recall() -> None:
+    # DBs/ORMs added for recall parity with the legacy DB_METHOD_MAP.
+    assert classify_call("client.hset", "hset") == ("db_method_call", "hset", "redis")
+    assert classify_call("ddb.putItem", "putItem") == ("db_method_call", "putItem", "dynamodb")
+    assert classify_call("session.writeTransaction", "writeTransaction") == \
+        ("db_method_call", "writeTransaction", "neo4j")
+    assert classify_call("db.getDoc", "getDoc") == ("db_method_call", "getDoc", "firebase")
+    assert classify_call("ctx.Users.ToListAsync", "ToListAsync") == \
+        ("db_method_call", "ToListAsync", "entity_framework")
+    assert classify_call("qs.select_related", "select_related") == \
+        ("db_method_call", "select_related", "django")
+    assert classify_call("es.msearch", "msearch") == ("db_method_call", "msearch", "elasticsearch")
+    assert classify_call("Model.findAndCountAll", "findAndCountAll") == \
+        ("db_method_call", "findAndCountAll", "sequelize")
+    assert classify_call("coll.bulkWrite", "bulkWrite") == ("db_method_call", "bulkWrite", "mongodb")
+
+
+def test_classify_api_recall() -> None:
+    # HTTP clients added for recall parity with the legacy API_CLIENT_NAMES.
+    assert classify_call("restTemplate.getForObject", "getForObject") is None  # not an HTTP verb
+    assert classify_call("this.httpService.post", "post") == ("api_call", "POST", None)
+    assert classify_call("webClient.get", "get") == ("api_call", "GET", None)
+    assert classify_call("axios.request", "request") == ("api_call", "REQUEST", None)
+    assert classify_call("$fetch", "$fetch") == ("api_call", "GET", None)
+    assert classify_call("useFetch", "useFetch") == ("api_call", "GET", None)
+    # bare .request() without a client hint is NOT an API call (precision)
+    assert classify_call("emitter.request", "request") is None
+
+
 def test_classify_none() -> None:
     assert classify_call("logger.info", "info") is None
     assert classify_call("foo.bar", "bar") is None
+    # generic .get() on a non-queryset receiver stays unclassified (get needs objects/queryset)
+    assert classify_call("map.get", "get") is None
 
 
 def _ctx(path, src, repo):
