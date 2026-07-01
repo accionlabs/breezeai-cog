@@ -8,7 +8,7 @@ from tree_sitter import Node
 from ...emit import class_id, disambiguate
 from ...schemas import Class, ConstructorParam, Function, Statement
 from ..treesitter import line_span, node_text
-from .functions import build_function, extract_decorators
+from .functions import _visibility, build_function, extract_decorators
 from .statements import extract_statements
 
 
@@ -41,6 +41,11 @@ def build_class(
 
     supers = cnode.child_by_field_name("superclasses")
     bases = [node_text(b, source) for b in supers.named_children] if supers is not None else []
+    # Python has no access modifiers; use the leading-underscore convention (as for functions).
+    # Abstract = inherits ABC/ABCMeta (the common marker). PEP 695 `class C[T]` → generics.
+    is_abstract = any("ABC" in b for b in bases)
+    tp = cnode.child_by_field_name("type_parameters")
+    generics = node_text(tp, source) if tp is not None else None
 
     methods: list[Function] = []
     statements: list[Statement] = []
@@ -73,6 +78,9 @@ def build_class(
         path=path,
         name=name,
         type="class",
+        visibility=_visibility(name),
+        isAbstract=is_abstract,
+        generics=generics,
         extends=bases[0] if bases else None,
         implements=bases[1:],
         constructorParams=ctor_params,

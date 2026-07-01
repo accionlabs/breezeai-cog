@@ -110,6 +110,8 @@ def build_function(
         type="method" if class_name else "function",
         visibility=_visibility(name),
         isStatic=any(d.name == "staticmethod" for d in decorators),
+        generics=node_text(fnode.child_by_field_name("type_parameters"), source)
+        if fnode.child_by_field_name("type_parameters") is not None else None,
         params=extract_params(fnode.child_by_field_name("parameters"), source),
         decorators=[d for d in decorators if d.name not in ("staticmethod", "classmethod")],
         returnType=node_text(ret, source) if ret is not None else None,

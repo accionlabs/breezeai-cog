@@ -60,6 +60,13 @@ def build_class(
     cid = disambiguate(class_id(path, name), seen_ids)
     extends, implements = _heritage(cnode, source)
 
+    # TS has no class-level access modifier — classes are public (module-scoped via export).
+    is_abstract = cnode.type == "abstract_class_declaration" or any(
+        c.type == "abstract" for c in cnode.children
+    )
+    tp = cnode.child_by_field_name("type_parameters")
+    generics = node_text(tp, source) if tp is not None else None
+
     methods: list[Function] = []
     statements: list[Statement] = []
     ctor_params: list[ConstructorParam] = []
@@ -97,6 +104,9 @@ def build_class(
         path=path,
         name=name,
         type=_TYPE.get(cnode.type, "class"),
+        visibility="public",
+        isAbstract=is_abstract,
+        generics=generics,
         extends=extends,
         implements=implements,
         constructorParams=ctor_params,

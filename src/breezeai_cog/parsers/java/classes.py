@@ -48,6 +48,17 @@ def build_class(
     cid = disambiguate(class_id(path, name), seen_ids)
     extends, implements = _heritage(node, source)
 
+    modifiers = modifiers_node(node)
+    visibility, is_abstract = "package", node.type == "interface_declaration"  # interfaces are abstract
+    if modifiers is not None:
+        for c in modifiers.children:
+            if c.type in ("public", "private", "protected"):
+                visibility = c.type
+            elif c.type == "abstract":
+                is_abstract = True
+    tp = node.child_by_field_name("type_parameters")
+    generics = node_text(tp, source) if tp is not None else None
+
     methods: list[Function] = []
     statements: list[Statement] = []
     ctor_params: list[ConstructorParam] = []
@@ -77,10 +88,13 @@ def build_class(
         path=path,
         name=name,
         type=_TYPE.get(node.type, "class"),
+        visibility=visibility,
+        isAbstract=is_abstract,
+        generics=generics,
         extends=extends,
         implements=implements,
         constructorParams=ctor_params,
-        decorators=extract_annotations(modifiers_node(node), source),
+        decorators=extract_annotations(modifiers, source),
         startLine=start,
         endLine=end,
     )

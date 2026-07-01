@@ -68,6 +68,9 @@ def test_types(tmp_path) -> None:
     assert ctrl.extends == "Base" and ctrl.implements == ["IController"]
     assert {d.name for d in ctrl.decorators} == {"RestController", "RequestMapping"}
     assert ctrl.constructorParams == [ConstructorParam(name="repo", type="OrderRepo")]
+    # B1.2 required fields
+    assert ctrl.visibility == "public" and ctrl.isAbstract is False
+    assert by_name["IController"].isAbstract is True  # interfaces are abstract
 
 
 def test_methods(tmp_path) -> None:

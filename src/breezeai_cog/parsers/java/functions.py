@@ -105,6 +105,7 @@ def build_method(
     visibility, is_static = _flags(modifiers)
     ret = node.child_by_field_name("type")
     body = node.child_by_field_name("body")
+    tp = node.child_by_field_name("type_parameters")
     fn = Function(
         id=fid,
         parentId=parent_id,
@@ -113,6 +114,7 @@ def build_method(
         type="constructor" if node.type == "constructor_declaration" else "method",
         visibility=visibility,
         isStatic=is_static,
+        generics=node_text(tp, source) if tp is not None else None,
         params=extract_params(node.child_by_field_name("parameters"), source),
         decorators=extract_annotations(modifiers, source),
         returnType=node_text(ret, source) if ret is not None else None,

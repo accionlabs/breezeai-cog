@@ -110,6 +110,7 @@ def build_function(
         type=kind,
         visibility=_visibility(node, source),
         isStatic=any(c.type == "static" for c in node.children),
+        generics=_type_text(node.child_by_field_name("type_parameters"), source) or None,
         params=extract_params(node.child_by_field_name("parameters"), source),
         decorators=decorators,
         returnType=_type_text(node.child_by_field_name("return_type"), source),
