@@ -7,24 +7,30 @@ from __future__ import annotations
 
 from .api_calls import match_api
 from .db_queries import match_db
+from .queries import is_query, text_has_query
 
 
-def classify_call(callee: str, method: str) -> tuple[str, str, str | None] | None:
+def classify_call(callee: str, method: str, arg: str | None = None) -> tuple[str, str, str | None] | None:
     """Classify a normalized call into ``(semanticType, method, dataAccessHint)``.
 
-    * HTTP client call -> ``("api_call", "<VERB>", None)``
-    * ORM/DB call      -> ``("db_method_call", "<method>", "<hint>")``
-    * otherwise        -> ``None``
+    * HTTP client call    -> ``("api_call", "<VERB>", None)``
+    * raw SQL/JPQL query  -> ``("query_statement", "<method>", None)``
+    * ORM/DB method call  -> ``("db_method_call", "<method>", "<hint>")``
+    * otherwise           -> ``None``
 
-    API is tried first (so ``objects.get`` is a Django query, not an HTTP GET).
+    ``arg`` = the call's first string literal (for SQL sniffing). API is tried first (so
+    ``objects.get`` is a Django query, not an HTTP GET); raw queries before ORM (so
+    ``createNativeQuery("SELECT …")`` is a ``query_statement``, not an ORM call).
     """
     verb = match_api(callee, method)
     if verb is not None:
         return "api_call", verb, None
+    if is_query(method, arg):
+        return "query_statement", method, None
     hint = match_db(callee, method)
     if hint is not None:
         return "db_method_call", method, hint
     return None
 
 
-__all__ = ["classify_call", "match_api", "match_db"]
+__all__ = ["classify_call", "match_api", "match_db", "is_query", "text_has_query"]

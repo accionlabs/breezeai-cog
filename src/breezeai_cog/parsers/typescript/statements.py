@@ -8,7 +8,7 @@ from tree_sitter import Node
 from ...emit import disambiguate, statement_id
 from ...schemas import Statement
 from ...utils import truncate
-from ..detection import classify_call
+from ..detection import classify_call, text_has_query
 from ..treesitter import first_line, node_text
 from .mappings import CONTROL_FLOW, EMIT_TYPES, NESTED_SCOPES
 
@@ -86,11 +86,13 @@ def extract_statements(
         semantic = method_value = endpoint = hint = None
         info = _call_info(node, source)
         if info is not None:
-            classified = classify_call(info[0], info[1])
+            classified = classify_call(info[0], info[1], info[2])
             if classified is not None:
                 semantic, method_value, hint = classified
                 if semantic == "api_call":
                     endpoint = info[2]
+        if semantic is None and text_has_query(text):  # raw SQL string literal
+            semantic = "query_statement"
 
         out.append(
             Statement(

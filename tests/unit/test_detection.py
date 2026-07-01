@@ -63,3 +63,19 @@ def test_typescript_statement_detection(tmp_path) -> None:
     by_sem = {s.semanticType: s for s in rec.statements if s.semanticType}
     assert by_sem["api_call"].method == "GET" and by_sem["api_call"].endpoint == "/api/x"
     assert by_sem["db_method_call"].dataAccessHint == "typeorm"
+
+
+def test_query_statement_detection() -> None:
+    from breezeai_cog.parsers.detection import classify_call, text_has_query
+
+    # raw SQL / strong query builders → query_statement (before ORM db_method_call)
+    assert classify_call("db.query", "query", "SELECT id FROM users")[0] == "query_statement"
+    assert classify_call("em.createNativeQuery", "createNativeQuery", None)[0] == "query_statement"
+    assert classify_call("p.$queryRaw", "$queryRaw", None)[0] == "query_statement"
+    # ORM method (no SQL) stays db_method_call
+    assert classify_call("this.repo.findById", "findById", None)[0] == "db_method_call"
+    # SQL string literal embedded in a statement's source
+    assert text_has_query('String sql = "SELECT u FROM User u WHERE u.id = :id";')
+    # false positives guarded: UI text / leading keyword without structure
+    assert classify_call("res.send", "send", "Create account") is None
+    assert not text_has_query('const label = "Update your profile";')
