@@ -6,8 +6,68 @@ from tree_sitter import Node
 
 from ...emit import disambiguate, function_id
 from ...schemas import Call, Decorator, Function, Parameter, Statement
+from ..callresolve import CallResolver, noop_resolver
 from ..treesitter import line_span, node_text
 from .statements import extract_statements
+
+_DEF_TYPES = {
+    "function_declaration", "generator_function_declaration", "method_definition",
+    "class_declaration", "abstract_class_declaration", "interface_declaration", "enum_declaration",
+}
+
+
+def defined_names(root: Node, source: bytes) -> set[str]:
+    """Function/method/class/interface names + arrow/fn consts defined in the file."""
+    names: set[str] = set()
+
+    def walk(n: Node) -> None:
+        for c in n.named_children:
+            if c.type in _DEF_TYPES:
+                nm = c.child_by_field_name("name")
+                if nm is not None:
+                    names.add(node_text(nm, source))
+            elif c.type in ("lexical_declaration", "variable_declaration"):
+                for d in c.named_children:
+                    if d.type == "variable_declarator":
+                        val = d.child_by_field_name("value")
+                        if val is not None and val.type in ("arrow_function", "function_expression", "function"):
+                            nm = d.child_by_field_name("name")
+                            if nm is not None:
+                                names.add(node_text(nm, source))
+            walk(c)
+
+    walk(root)
+    return names
+
+
+def type_map(root: Node, source: bytes) -> dict[str, str]:
+    """Variable name → declared type, for receiver-type call resolution (Phase 2):
+    class fields, constructor parameter-properties, params, and typed locals."""
+    types: dict[str, str] = {}
+
+    def add(name_node: Node | None, type_node: Node | None, *, override: bool) -> None:
+        if name_node is None or type_node is None:
+            return
+        t = _type_text(type_node, source)
+        if not t:
+            return
+        name = node_text(name_node, source)
+        if override or name not in types:
+            types[name] = t
+
+    def walk(n: Node) -> None:
+        for c in n.named_children:
+            if c.type == "public_field_definition":
+                add(c.child_by_field_name("name"), c.child_by_field_name("type"), override=True)
+            elif c.type in ("required_parameter", "optional_parameter"):
+                add(c.child_by_field_name("pattern"), c.child_by_field_name("type"), override=False)
+            elif c.type == "variable_declarator":
+                add(c.child_by_field_name("name"), c.child_by_field_name("type"), override=False)
+            walk(c)
+
+    walk(root)
+    return types
+
 
 _SKIP_SCOPES = {
     "function_declaration", "function_expression", "arrow_function",
@@ -66,7 +126,7 @@ def extract_params(params_node: Node | None, source: bytes) -> list[Parameter]:
     return out
 
 
-def _calls(body: Node | None, source: bytes) -> list[Call]:
+def _calls(body: Node | None, source: bytes, resolve: CallResolver = noop_resolver) -> list[Call]:
     if body is None:
         return []
     calls: list[Call] = []
@@ -79,10 +139,12 @@ def _calls(body: Node | None, source: bytes) -> list[Call]:
             if child.type == "call_expression":
                 fn = child.child_by_field_name("function")
                 if fn is not None:
-                    name = node_text(fn, source).rsplit(".", 1)[-1]
+                    callee = node_text(fn, source)
+                    name = callee.rsplit(".", 1)[-1]
+                    receiver = callee.rsplit(".", 1)[0] if "." in callee else None
                     if name.isidentifier() and name not in seen:
                         seen.add(name)
-                        calls.append(Call(name=name))
+                        calls.append(Call(name=name, path=resolve(name, receiver)))
             visit(child)
 
     visit(body)
@@ -102,6 +164,7 @@ def build_function(
     seen_ids: set[str],
     capture: bool,
     limit: int,
+    resolve: CallResolver = noop_resolver,
 ) -> tuple[Function, list[Statement]]:
     start, end = line_span(node)
     fid = disambiguate(function_id(path, name, start, class_name=class_name), seen_ids)
@@ -120,7 +183,7 @@ def build_function(
         returnType=_type_text(node.child_by_field_name("return_type"), source),
         startLine=start,
         endLine=end,
-        calls=_calls(body, source),
+        calls=_calls(body, source, resolve),
     )
     statements = extract_statements(
         body, source, path, parent_id=fid, capture=capture, limit=limit, seen_ids=seen_ids

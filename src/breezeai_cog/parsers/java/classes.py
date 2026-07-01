@@ -7,6 +7,7 @@ from tree_sitter import Node
 from ...emit import class_id, disambiguate
 from ...schemas import Class, ConstructorParam, Function, Statement
 from ..treesitter import line_span, node_text
+from ..callresolve import CallResolver, noop_resolver
 from .functions import build_method, extract_annotations, extract_params, modifiers_node
 from .statements import extract_statements
 
@@ -42,6 +43,7 @@ def build_class(
     seen_ids: set[str],
     capture: bool,
     limit: int,
+    resolve: CallResolver = noop_resolver,
 ) -> tuple[Class, list[Function], list[Statement]]:
     name = node_text(node.child_by_field_name("name"), source)
     start, end = line_span(node)
@@ -73,6 +75,7 @@ def build_class(
                 fn, fn_statements = build_method(
                     member, source, path,
                     parent_id=cid, class_name=name, seen_ids=seen_ids, capture=capture, limit=limit,
+                    resolve=resolve,
                 )
                 methods.append(fn)
                 statements.extend(fn_statements)

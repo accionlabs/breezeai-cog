@@ -44,20 +44,26 @@ def _iter(node: Node):
 
 def extract_imports(
     root: Node, source: bytes, file_path: str, repo_root: str | Path
-) -> tuple[list[str], list[str], list[str]]:
+) -> tuple[list[str], list[str], list[str], dict[str, str]]:
     repo_root = Path(repo_root)
     internal: dict[str, None] = {}
     external: dict[str, None] = {}
     exports: list[str] = []
+    bindings: dict[str, str] = {}  # local symbol/module name → in-repo file (calls[].path)
 
     for node in _iter(root):
         if node.type == "import_statement":
             for child in node.named_children:
-                target = child.named_children[0] if child.type == "aliased_import" else child
-                if target.type == "dotted_name":
-                    module = _dotted(target, source)
-                    resolved = _resolve(module, 0, file_path, repo_root)
-                    (internal if resolved else external).setdefault(resolved or module, None)
+                aliased = child.type == "aliased_import"
+                target = child.named_children[0] if aliased else child
+                if target.type != "dotted_name":
+                    continue
+                module = _dotted(target, source)
+                resolved = _resolve(module, 0, file_path, repo_root)
+                (internal if resolved else external).setdefault(resolved or module, None)
+                if resolved:  # `import m` → receiver "m"; `import m as mm` → receiver "mm"
+                    alias = child.child_by_field_name("alias") if aliased else None
+                    bindings[node_text(alias, source) if alias is not None else module] = resolved
 
         elif node.type == "import_from_statement":
             module_node = node.child_by_field_name("module_name") or (
@@ -76,6 +82,16 @@ def extract_imports(
                 module = _dotted(module_node, source)
             resolved = _resolve(module, level, file_path, repo_root)
             (internal if resolved else external).setdefault(resolved or module or ".", None)
+            if resolved:  # `from m import a, b as c` → a, c → m's file
+                for item in node.named_children:
+                    if item is module_node:
+                        continue
+                    if item.type == "dotted_name":
+                        bindings[node_text(item, source).split(".")[-1]] = resolved
+                    elif item.type == "aliased_import":
+                        al = item.child_by_field_name("alias")
+                        if al is not None:
+                            bindings[node_text(al, source)] = resolved
 
         elif node.type == "assignment":
             target = node.named_children[0] if node.named_children else None
@@ -84,4 +100,4 @@ def extract_imports(
                     if s.type == "string_content":
                         exports.append(node_text(s, source))
 
-    return list(internal), list(external), exports
+    return list(internal), list(external), exports, bindings

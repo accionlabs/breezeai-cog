@@ -50,9 +50,10 @@ def _resolve(fqcn: str, is_static: bool, index: FqcnIndex | None) -> str | None:
 
 def extract_imports(
     root: Node, source: bytes, file_path: str, repo_root: str | Path, index: FqcnIndex | None = None
-) -> tuple[list[str], list[str], list[str]]:
+) -> tuple[list[str], list[str], list[str], dict[str, str]]:
     internal: dict[str, None] = {}
     external: dict[str, None] = {}
+    bindings: dict[str, str] = {}  # simple class/member name → in-repo file (calls[].path)
 
     for node in root.named_children:
         if node.type != "import_declaration":
@@ -68,5 +69,7 @@ def extract_imports(
             continue
         resolved = _resolve(fqcn, is_static, index)
         (internal if resolved else external).setdefault(resolved or fqcn, None)
+        if resolved:  # `import a.b.Foo` → receiver "Foo"; `import static a.b.U.f` → "f"
+            bindings[fqcn.rsplit(".", 1)[-1]] = resolved
 
-    return list(internal), list(external), []  # Java has no explicit exports
+    return list(internal), list(external), [], bindings  # Java has no explicit exports

@@ -6,8 +6,25 @@ from tree_sitter import Node
 
 from ...emit import disambiguate, function_id
 from ...schemas import Call, Decorator, Function, Parameter, Statement
+from ..callresolve import CallResolver, noop_resolver
 from ..treesitter import line_span, node_text
 from .statements import extract_statements
+
+
+def defined_names(root: Node, source: bytes) -> set[str]:
+    """All function/method/class names defined in the file (for same-file call resolution)."""
+    names: set[str] = set()
+
+    def walk(n: Node) -> None:
+        for c in n.named_children:
+            if c.type in ("function_definition", "class_definition"):
+                nm = c.child_by_field_name("name")
+                if nm is not None:
+                    names.add(node_text(nm, source))
+            walk(c)
+
+    walk(root)
+    return names
 
 
 def _visibility(name: str) -> str:
@@ -60,7 +77,7 @@ def extract_params(params_node: Node | None, source: bytes) -> list[Parameter]:
     return out
 
 
-def _extract_calls(body: Node | None, source: bytes) -> list[Call]:
+def _extract_calls(body: Node | None, source: bytes, resolve: CallResolver = noop_resolver) -> list[Call]:
     if body is None:
         return []
     calls: list[Call] = []
@@ -73,10 +90,12 @@ def _extract_calls(body: Node | None, source: bytes) -> list[Call]:
             if child.type == "call":
                 fn = child.child_by_field_name("function")
                 if fn is not None:
-                    name = node_text(fn, source).rsplit(".", 1)[-1]
+                    callee = node_text(fn, source)
+                    name = callee.rsplit(".", 1)[-1]
+                    receiver = callee.rsplit(".", 1)[0] if "." in callee else None
                     if name and name not in seen:
                         seen.add(name)
-                        calls.append(Call(name=name))  # callee path resolved later
+                        calls.append(Call(name=name, path=resolve(name, receiver)))
             visit(child)
 
     visit(body)
@@ -94,6 +113,7 @@ def build_function(
     seen_ids: set[str],
     capture: bool = False,
     limit: int = 1000,
+    resolve: CallResolver = noop_resolver,
 ) -> tuple[Function, list[Statement]]:
     """Return the Function and its (flat) statements — the caller collects statements
     onto ``FileRecord.statements`` (statements are not nested on the Function)."""
@@ -117,7 +137,7 @@ def build_function(
         returnType=node_text(ret, source) if ret is not None else None,
         startLine=start,
         endLine=end,
-        calls=_extract_calls(body, source),
+        calls=_extract_calls(body, source, resolve),
     )
     statements = extract_statements(
         body, source, path, parent_id=fid, capture=capture, limit=limit, seen_ids=seen_ids

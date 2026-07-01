@@ -19,7 +19,8 @@ from ...utils import count_loc
 from ..base import BaseParser, ParseContext
 from ..treesitter import node_text, parse_source
 from .classes import build_class
-from .functions import build_function, extract_decorators
+from ..callresolve import make_resolver
+from .functions import build_function, defined_names, extract_decorators, type_map
 from .imports import TsAliasIndex, build_alias_index, extract_imports
 from .mappings import FRAMEWORKS, STATEMENT_TYPES
 from .statements import extract_statements
@@ -65,8 +66,11 @@ class TypeScriptParser(BaseParser):
         seen_ids: set[str] = set()
         capture, limit = ctx.capture_statements, ctx.text_truncation_limit
 
-        internal, external, exports = extract_imports(
+        internal, external, exports, bindings = extract_imports(
             root, source, path, ctx.repo_root, ctx.resolution_index
+        )
+        resolve = make_resolver(  # calls[].path (Tiers 1+2 + receiver-type Phase 2)
+            bindings, defined_names(root, source), path, type_map(root, source)
         )
         functions: list[Function] = []
         classes = []
@@ -83,7 +87,7 @@ class TypeScriptParser(BaseParser):
             if decl is None:
                 continue
             self._handle(decl, decorators, source, path, fid, seen_ids, capture, limit,
-                         functions, classes, statements)
+                         functions, classes, statements, resolve)
 
         statements.extend(
             extract_statements(root, source, path, parent_id=fid, capture=capture, limit=limit, seen_ids=seen_ids)
@@ -104,11 +108,11 @@ class TypeScriptParser(BaseParser):
         )
 
     def _handle(self, decl, decorators, source, path, fid, seen_ids, capture, limit,
-                functions, classes, statements) -> None:
+                functions, classes, statements, resolve) -> None:
         if decl.type in _CLASSES:
             cls, methods, cls_stmts = build_class(
                 decl, decorators, source, path,
-                parent_id=fid, seen_ids=seen_ids, capture=capture, limit=limit,
+                parent_id=fid, seen_ids=seen_ids, capture=capture, limit=limit, resolve=resolve,
             )
             classes.append(cls)
             functions.extend(methods)
@@ -119,7 +123,7 @@ class TypeScriptParser(BaseParser):
                 decl, name=node_text(name_node, source) if name_node else "",
                 kind="function", decorators=extract_decorators(decorators, source),
                 source=source, path=path, parent_id=fid, class_name=None,
-                seen_ids=seen_ids, capture=capture, limit=limit,
+                seen_ids=seen_ids, capture=capture, limit=limit, resolve=resolve,
             )
             functions.append(fn)
             statements.extend(fn_stmts)
@@ -134,7 +138,7 @@ class TypeScriptParser(BaseParser):
                         value, name=node_text(name_node, source) if name_node else "",
                         kind=value.type, decorators=[], source=source, path=path,
                         parent_id=fid, class_name=None, seen_ids=seen_ids,
-                        capture=capture, limit=limit,
+                        capture=capture, limit=limit, resolve=resolve,
                     )
                     functions.append(fn)
                     statements.extend(fn_stmts)

@@ -8,6 +8,7 @@ from tree_sitter import Node
 from ...emit import class_id, disambiguate
 from ...schemas import Class, ConstructorParam, Function, Statement
 from ..treesitter import line_span, node_text
+from ..callresolve import CallResolver, noop_resolver
 from .functions import _visibility, build_function, extract_decorators
 from .statements import extract_statements
 
@@ -31,6 +32,7 @@ def build_class(
     seen_ids: set[str],
     capture: bool,
     limit: int,
+    resolve: CallResolver = noop_resolver,
 ) -> tuple[Class, list[Function], list[Statement]]:
     """Return (Class, methods, statements). Methods and statements are flat — the
     caller collects them onto ``FileRecord.functions``/``.statements`` (linked by
@@ -62,7 +64,7 @@ def build_class(
                 fn, fn_statements = build_function(
                     defn, extract_decorators(decs, source), source, path,
                     parent_id=cid, class_name=name, seen_ids=seen_ids,
-                    capture=capture, limit=limit,
+                    capture=capture, limit=limit, resolve=resolve,
                 )
                 methods.append(fn)
                 statements.extend(fn_statements)

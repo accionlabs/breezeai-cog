@@ -127,13 +127,36 @@ def _export_names(node: Node, source: bytes) -> list[str]:
     return names
 
 
+def _imported_names(node: Node, source: bytes) -> list[str]:
+    """Local names a TS import binds: default, ``* as ns``, and ``{a, b as c}`` (→ c)."""
+    clause = next((c for c in node.named_children if c.type == "import_clause"), None)
+    if clause is None:
+        return []
+    names: list[str] = []
+    for c in clause.named_children:
+        if c.type == "identifier":  # default import
+            names.append(node_text(c, source))
+        elif c.type == "namespace_import":  # * as ns
+            ident = next((x for x in c.named_children if x.type == "identifier"), None)
+            if ident is not None:
+                names.append(node_text(ident, source))
+        elif c.type == "named_imports":
+            for spec in c.named_children:
+                if spec.type == "import_specifier":
+                    idents = [x for x in spec.named_children if x.type == "identifier"]
+                    if idents:  # last identifier = alias if present, else the name
+                        names.append(node_text(idents[-1], source))
+    return names
+
+
 def extract_imports(
     root: Node, source: bytes, file_path: str, repo_root: str | Path, index: TsAliasIndex | None = None
-) -> tuple[list[str], list[str], list[str]]:
+) -> tuple[list[str], list[str], list[str], dict[str, str]]:
     repo_root = Path(repo_root)
     internal: dict[str, None] = {}
     external: dict[str, None] = {}
     exports: list[str] = []
+    bindings: dict[str, str] = {}  # imported name → in-repo file (calls[].path)
 
     for node in root.named_children:
         if node.type == "import_statement":
@@ -142,7 +165,10 @@ def extract_imports(
                 continue
             resolved = _resolve(module, file_path, repo_root, index)
             (internal if resolved else external).setdefault(resolved or module, None)
+            if resolved:
+                for nm in _imported_names(node, source):
+                    bindings[nm] = resolved
         elif node.type == "export_statement":
             exports.extend(_export_names(node, source))
 
-    return list(internal), list(external), exports
+    return list(internal), list(external), exports, bindings

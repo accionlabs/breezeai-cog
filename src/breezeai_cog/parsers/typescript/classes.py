@@ -8,6 +8,7 @@ from tree_sitter import Node
 from ...emit import class_id, disambiguate
 from ...schemas import Class, ConstructorParam, Function, Statement
 from ..treesitter import line_span, node_text
+from ..callresolve import CallResolver, noop_resolver
 from .functions import build_function, extract_decorators, extract_params
 from .statements import extract_statements
 
@@ -53,6 +54,7 @@ def build_class(
     seen_ids: set[str],
     capture: bool,
     limit: int,
+    resolve: CallResolver = noop_resolver,
 ) -> tuple[Class, list[Function], list[Statement]]:
     name_node = cnode.child_by_field_name("name")
     name = node_text(name_node, source) if name_node is not None else ""
@@ -88,6 +90,7 @@ def build_class(
                     child, name=mname, kind="constructor" if mname == "constructor" else "method",
                     decorators=extract_decorators(pending, source), source=source, path=path,
                     parent_id=cid, class_name=name, seen_ids=seen_ids, capture=capture, limit=limit,
+                    resolve=resolve,
                 )
                 methods.append(fn)
                 statements.extend(fn_statements)
