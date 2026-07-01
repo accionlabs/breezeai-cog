@@ -67,6 +67,42 @@ def test_param_decorators_captured(tmp_path) -> None:
     assert [d.name for d in getone.params[0].decorators] == ["Param"]
 
 
+_ATTRS_SRC = b'''import { Controller, Post, Body, UseGuards } from '@nestjs/common';
+import { ApiResponse } from '@nestjs/swagger';
+
+@Controller('orders')
+@UseGuards(JwtAuthGuard)
+export class OrderController {
+  @Post()
+  @UseGuards(RolesGuard)
+  @ApiResponse({ status: 201, type: OrderDto })
+  create(@Body() dto: CreateOrderDto) { return dto; }
+
+  @Get()
+  list() { return []; }
+}
+'''
+
+
+def test_route_attributes(tmp_path) -> None:
+    # spec C5 — guards (controller+method merged), authRequired, requestDTO, responseDTO.
+    p = tmp_path / "attrs.controller.ts"
+    p.write_text(_ATTRS_SRC.decode())
+    ctx = ParseContext(path="attrs.controller.ts", abs_path=p, source=_ATTRS_SRC,
+                       repo_root=tmp_path, capture_statements=True)
+    rec = NestJSParser().parse_file(ctx)
+    routes = {s.handler: s for s in rec.statements if s.semanticType == "route"}
+    create = routes["create"]
+    assert create.guards == ["JwtAuthGuard", "RolesGuard"]  # controller + method merged
+    assert create.authRequired is True
+    assert create.requestDTO == "CreateOrderDto"
+    assert create.responseDTO == "OrderDto"
+    assert create.isRegex is False
+    # controller guard still applies to routes with no method-level guard
+    assert routes["list"].guards == ["JwtAuthGuard"] and routes["list"].authRequired is True
+    assert routes["list"].requestDTO is None and routes["list"].responseDTO is None
+
+
 def test_output_validates(tmp_path) -> None:
     rec = _parse(tmp_path)
     errors = list(Draft202012Validator(FileRecord.model_json_schema(by_alias=True))

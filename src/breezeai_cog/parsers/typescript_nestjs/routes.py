@@ -5,21 +5,55 @@ TypeScript parser's function id)."""
 
 from __future__ import annotations
 
+import re
+
 from tree_sitter import Node
 
 from ...emit import disambiguate, function_id, statement_id
 from ...schemas import Statement
-from ...parsers.typescript.functions import decorator
+from ...parsers.typescript.functions import decorator, extract_params
 from ..treesitter import node_text
 
 _METHOD_DECORATORS = {
     "Get": "GET", "Post": "POST", "Put": "PUT", "Patch": "PATCH",
     "Delete": "DELETE", "Options": "OPTIONS", "Head": "HEAD", "All": "ALL",
 }
+_RESPONSE_DECORATORS = {"ApiResponse", "ApiOkResponse", "ApiCreatedResponse"}
+_TYPE_PROP_RE = re.compile(r"\btype\s*:\s*\[?\s*([A-Za-z_$][\w.$]*)")
 
 
 def _unquote(text: str) -> str:
     return text.strip().strip("'\"`")
+
+
+def _guards(decs: list[Node], source: bytes) -> list[str]:
+    """Identifier/member args of every ``@UseGuards(...)`` (spec C5)."""
+    out: list[str] = []
+    for dec in decs:
+        d = decorator(dec, source)
+        if d.name == "UseGuards":
+            out.extend(_unquote(a) for a in d.args)
+    return out
+
+
+def _response_dto(decs: list[Node], source: bytes) -> str | None:
+    """``@ApiResponse({ type: Dto })`` / ApiOkResponse / ApiCreatedResponse → Dto."""
+    for dec in decs:
+        d = decorator(dec, source)
+        if d.name in _RESPONSE_DECORATORS:
+            for arg in d.args:
+                m = _TYPE_PROP_RE.search(arg)
+                if m:
+                    return m.group(1)
+    return None
+
+
+def _request_dto(member: Node, source: bytes) -> str | None:
+    """Declared type of the ``@Body``-decorated parameter → requestDTO."""
+    for p in extract_params(member.child_by_field_name("parameters"), source):
+        if any(d.name == "Body" for d in p.decorators):
+            return p.type or None
+    return None
 
 
 def _join(base: str, sub: str) -> str:
@@ -63,6 +97,7 @@ def detect_nest_routes(root: Node, source: bytes, path: str, *, seen_ids: set[st
         body = cls.child_by_field_name("body")
         if body is None:
             continue
+        ctrl_guards = _guards(decs, source)  # controller-level @UseGuards
         pending: list[Node] = []
         for member in body.named_children:
             if member.type == "decorator":
@@ -71,6 +106,9 @@ def detect_nest_routes(root: Node, source: bytes, path: str, *, seen_ids: set[st
             if member.type == "method_definition":
                 mname = node_text(member.child_by_field_name("name"), source)
                 mline = member.start_point[0] + 1
+                guards = ctrl_guards + _guards(pending, source)  # merge (spec C5)
+                response_dto = _response_dto(pending, source)
+                request_dto = _request_dto(member, source)
                 for dec in pending:
                     d = decorator(dec, source)
                     verb = _METHOD_DECORATORS.get(d.name)
@@ -89,6 +127,11 @@ def detect_nest_routes(root: Node, source: bytes, path: str, *, seen_ids: set[st
                         handler=mname,
                         handlerLine=mline,
                         routeKind="route",
+                        isRegex=False,
+                        authRequired=bool(guards),
+                        guards=guards or None,
+                        requestDTO=request_dto,
+                        responseDTO=response_dto,
                         startLine=sl,
                         endLine=dec.end_point[0] + 1,
                         path=path,

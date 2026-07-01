@@ -79,6 +79,16 @@ def test_v2_routes(tmp_path) -> None:
     assert spring_version(rec) == 2  # javax.* -> Spring Boot 2
 
 
+def test_route_attributes(tmp_path) -> None:
+    # spec C5 — @RequestBody type → requestDTO, return type → responseDTO, isRegex False.
+    rec = _parse(tmp_path, SRC_V3, "OrderController.java")
+    routes = {s.handler: s for s in rec.statements if s.semanticType == "route"}
+    assert routes["create"].requestDTO == "OrderDto"
+    assert routes["create"].responseDTO == "Order"
+    assert routes["create"].isRegex is False
+    assert routes["get"].requestDTO is None  # only @PathVariable, no body
+
+
 def test_non_controller_has_no_routes(tmp_path) -> None:
     src = b"package x;\npublic class Plain { public int add(int a){ return a; } }\n"
     rec = _parse(tmp_path, src, "Plain.java")

@@ -10,7 +10,7 @@ inferred from imports (:func:`spring_version`) when present.
 from __future__ import annotations
 
 from ...emit import disambiguate, statement_id
-from ...schemas import Decorator, FileRecord, Statement
+from ...schemas import Decorator, FileRecord, Function, Statement
 
 _METHOD_MAPPINGS = {
     "GetMapping": "GET", "PostMapping": "POST", "PutMapping": "PUT",
@@ -70,6 +70,14 @@ def _join(base: str, sub: str) -> str:
     return "/" + "/".join(parts) if parts else "/"
 
 
+def _request_dto(fn: Function) -> str | None:
+    """Declared type of the ``@RequestBody`` parameter → requestDTO (spec C5)."""
+    for p in fn.params:
+        if any(d.name == "RequestBody" for d in p.decorators):
+            return p.type or None
+    return None
+
+
 def detect_spring_routes(record: FileRecord) -> list[Statement]:
     controllers: dict[str, str] = {}  # class id -> base path
     for cls in record.classes:
@@ -100,6 +108,9 @@ def detect_spring_routes(record: FileRecord) -> list[Statement]:
                 handler=fn.name,
                 handlerLine=fn.startLine,
                 routeKind="route",
+                isRegex=False,
+                requestDTO=_request_dto(fn),
+                responseDTO=fn.returnType or None,
                 startLine=fn.startLine,
                 endLine=fn.endLine,
                 path=fn.path,
