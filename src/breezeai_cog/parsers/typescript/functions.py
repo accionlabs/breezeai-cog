@@ -53,7 +53,11 @@ def extract_params(params_node: Node | None, source: bytes) -> list[Parameter]:
         if p.type in ("required_parameter", "optional_parameter"):
             pat = p.child_by_field_name("pattern")
             name = node_text(pat, source) if pat is not None else ""
-            out.append(Parameter(name=name, type=_type_text(p.child_by_field_name("type"), source) or ""))
+            decs = extract_decorators([c for c in p.named_children if c.type == "decorator"], source)
+            out.append(Parameter(
+                name=name, type=_type_text(p.child_by_field_name("type"), source) or "",
+                decorators=decs,  # e.g. Nest @Body/@Param/@Query, Angular @Inject (spec C4.1)
+            ))
         elif p.type == "rest_pattern":
             ident = next((c for c in p.named_children if c.type == "identifier"), None)
             out.append(Parameter(name="..." + (node_text(ident, source) if ident else ""), type=""))

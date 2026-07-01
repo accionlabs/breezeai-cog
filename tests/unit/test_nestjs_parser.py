@@ -60,6 +60,13 @@ def test_base_extraction_reused(tmp_path) -> None:
     assert rec.language == "typescript"
 
 
+def test_param_decorators_captured(tmp_path) -> None:
+    # spec C4.1 — TS parameter decorators (@Param/@Body/…) now captured.
+    rec = _parse(tmp_path)
+    getone = next(f for f in rec.functions if f.name == "getOne")
+    assert [d.name for d in getone.params[0].decorators] == ["Param"]
+
+
 def test_output_validates(tmp_path) -> None:
     rec = _parse(tmp_path)
     errors = list(Draft202012Validator(FileRecord.model_json_schema(by_alias=True))
