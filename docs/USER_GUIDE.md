@@ -27,8 +27,13 @@ point at any repository.
   Easy to stream and process line by line. The output is also **gzip-compressed** (`.ndjson.gz`).
 - **Record** — one JSON object (one line) in that output. The first line describes the whole project;
   each remaining line describes one source file.
-- **`uv`** — a fast Python package manager used to install and run the tool. (You can use plain
-  `pip` instead; both are shown below.)
+
+> ℹ️ **`uv`** is the tool you'll use to install and run `breezeai-cog`. Because `breezeai-cog` is a
+> Python program, it needs the right version of Python and a set of supporting libraries to run.
+> `uv` takes care of all of that for you — finding Python, downloading those libraries into a
+> private space that won't touch anything else on your machine, and launching the tool. The commands
+> below each begin with `uv` (as `uv tool`, `uv run`, or `uvx`); these are simply different ways to
+> install or start the same program. Plain `pip` works too — see the note under **Install**.
 
 ---
 
@@ -45,6 +50,9 @@ uv tool install "/path/to/breezeai-cog[server]"
 
 # 2. Run it without installing (from anywhere) — `uv` fetches deps on the fly.
 uv run --project /path/to/breezeai-cog breezeai-cog --help
+
+# 3. No clone, no local copy — run the latest straight from GitHub (needs `uv`).
+uvx --from git+https://github.com/accionlabs/breezeai-cog breezeai-cog --help
 ```
 
 Verify it works:
@@ -54,7 +62,7 @@ breezeai-cog version
 breezeai-cog capabilities      # lists the languages/frameworks it currently understands
 ```
 
-> Don't have `uv`? Install it from <https://docs.astral.sh/uv/>, or use option 3 with `pip`.
+> Don't have `uv`? Install it from <https://docs.astral.sh/uv/>, or `pip install /path/to/breezeai-cog`.
 
 ---
 
@@ -65,6 +73,13 @@ Point the tool at a folder and tell it where to put the output:
 ```bash
 cd /path/to/your/project
 breezeai-cog repo-to-json-tree --repo . --out ./out
+```
+
+Or, without installing or cloning anything — run the latest directly from GitHub with `uvx`:
+
+```bash
+cd /path/to/your/project
+uvx --from git+https://github.com/accionlabs/breezeai-cog breezeai-cog repo-to-json-tree --repo . --out .
 ```
 
 - `--repo .` — the directory to analyze (`.` means "here").

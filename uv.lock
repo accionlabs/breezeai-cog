@@ -184,7 +184,7 @@ requires-dist = [
     { name = "sqlglot", marker = "extra == 'all'", specifier = ">=23" },
     { name = "sqlglot", marker = "extra == 'server'", specifier = ">=23" },
     { name = "structlog", specifier = ">=24.1" },
-    { name = "tree-sitter", specifier = ">=0.21" },
+    { name = "tree-sitter", specifier = ">=0.24,<0.26" },
     { name = "tree-sitter-language-pack", specifier = ">=0.2" },
     { name = "typer", specifier = ">=0.12" },
     { name = "uvicorn", marker = "extra == 'all'", specifier = ">=0.29" },
