@@ -97,6 +97,52 @@ def iter_records(repo_root: str | Path, settings) -> Iterator[tuple[ScanEntry, F
             yield entry, record
 
 
+class _ConfigSummary:
+    """Aggregates config-file ``metadata`` into ``projectMetaData.configs`` — category
+    counts, package managers / build tools, docker info, and dependency totals."""
+
+    def __init__(self) -> None:
+        self.by_type: dict[str, int] = {}
+        self.package_managers: set[str] = set()
+        self.build_tools: set[str] = set()
+        self.services: set[str] = set()
+        self.ports: set[str] = set()
+        self.has_dockerfile = self.has_compose = False
+        self.dep_total = self.dep_prod = self.dep_dev = 0
+
+    def add(self, md: dict) -> None:
+        self.by_type[md.get("category", "other")] = self.by_type.get(md.get("category", "other"), 0) + 1
+        if md.get("packageManager"):
+            self.package_managers.add(md["packageManager"])
+        if md.get("buildTool"):
+            self.build_tools.add(md["buildTool"])
+        self.dep_total += md.get("dependencyCount", 0)
+        if md.get("kind") == "package.json":
+            self.dep_prod += md.get("dependencyCount", 0)
+            self.dep_dev += md.get("devDependencyCount", 0)
+        if md.get("kind") == "dockerfile":
+            self.has_dockerfile = True
+            self.ports.update((md.get("dockerInfo") or {}).get("exposedPorts", []))
+        if (dc := md.get("dockerCompose")):
+            self.has_compose = True
+            self.services.update(dc.get("services", []))
+            self.ports.update(dc.get("exposedPorts", []))
+
+    def result(self, total: int) -> dict:
+        return {
+            "totalConfigFiles": total,
+            "byType": self.by_type,
+            "packageManagers": sorted(self.package_managers),
+            "buildTools": sorted(self.build_tools),
+            "docker": {
+                "hasDockerfile": self.has_dockerfile, "hasCompose": self.has_compose,
+                "services": sorted(self.services), "exposedPorts": sorted(self.ports),
+            },
+            "dependencies": {"total": self.dep_total, "production": self.dep_prod,
+                             "development": self.dep_dev},
+        }
+
+
 def _assemble(
     repo_root: Path,
     records: Iterator[tuple[str, FileRecord]],
@@ -120,7 +166,7 @@ def _assemble(
     total_files = total_functions = total_classes = total_loc = config_files = 0
     total_statements = 0
     languages: set[str] = set()
-    by_type: dict[str, int] = {}
+    cfg = _ConfigSummary()
 
     if progress is not None and candidates is not None:
         progress(0, candidates)  # establish the total up front
@@ -132,10 +178,11 @@ def _assemble(
         total_classes += len(record.classes)
         total_statements += len(record.statements)
         total_loc += record.loc
-        languages.add(language)
-        by_type[language] = by_type.get(language, 0) + 1
         if record.type == "config":
             config_files += 1
+            cfg.add(record.metadata or {})
+        else:
+            languages.add(language)  # config is not a programming language
         if progress is not None and candidates is not None:
             progress(total_files, candidates)
         if debug_on:  # gated: no structlog cost unless --verbose
@@ -153,7 +200,7 @@ def _assemble(
         totalFunctions=total_functions,
         totalClasses=total_classes,
         totalLinesOfCode=total_loc,
-        configs={"totalConfigFiles": config_files, "byType": by_type, "packageManagers": []},
+        configs=cfg.result(config_files),
         generatedAt=datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         toolVersion=__version__,
     )

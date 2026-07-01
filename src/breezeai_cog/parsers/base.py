@@ -72,6 +72,13 @@ class BaseParser:
     #: one whose ``claims`` is True (framework parsers > base; base = 0, the fallback).
     priority: int = 0
 
+    def matches(self, path: str | Path) -> bool:
+        """Whether this parser handles ``path`` by name/extension (the candidacy gate,
+        before ``claims``). Default: suffix or exact filename in ``extensions``. Override
+        for filename patterns (e.g. the config parser's ``Dockerfile.*`` / ``.env.*``)."""
+        p = Path(path)
+        return p.suffix in self.extensions or p.name in self.extensions
+
     def claims(self, path: str, source: bytes) -> bool:
         """Whether this parser should handle ``path``. The base language parser claims
         everything of its extension (fallback); framework parsers override this to sniff

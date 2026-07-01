@@ -39,14 +39,9 @@ def registered() -> list[LanguageParser]:
     return list(_REGISTRY)
 
 
-def _file_matches(parser: LanguageParser, path: str | Path) -> bool:
-    p = Path(path)
-    return p.suffix in parser.extensions or p.name in parser.extensions
-
-
 def parsers_for(path: str | Path) -> list[LanguageParser]:
     """All registered parsers that claim this file by extension/filename."""
-    return [p for p in _REGISTRY if _file_matches(p, path)]
+    return [p for p in _REGISTRY if p.matches(path)]
 
 
 def base_parser_for(path: str | Path) -> LanguageParser | None:

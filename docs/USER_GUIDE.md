@@ -14,6 +14,10 @@ tools query it. This guide only covers the generator — the part you run agains
 - **Frameworks** (route detection on top of those languages): FastAPI (Python), NestJS & Angular
   (TypeScript), Spring Boot (Java).
 - **Database/search schemas:** SQL DDL files and Elasticsearch mappings (via the HTTP service).
+- **Config files:** `package.json`, `tsconfig.json`, `Dockerfile`, `docker-compose.yml`, `pom.xml`,
+  `build.gradle`, `pyproject.toml`, `requirements.txt`, `Pipfile`, `.ini`/`.toml`/`.xml`/`.yaml`, and
+  more — parsed into structured `metadata` (dependencies, scripts, images/ports, …) and summarized in
+  `projectMetaData.configs`.
 
 It does **not** run or execute your code — it only reads and parses the source text, so it's safe to
 point at any repository.
