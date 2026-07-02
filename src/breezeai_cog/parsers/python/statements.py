@@ -16,6 +16,12 @@ from ..treesitter import node_text
 from .mappings import CONTROL_FLOW, EMIT_TYPES, NESTED_SCOPES
 
 _CALL_TYPE = "call"
+# Bare expression-statements: this grammar puts a statement-position call/await
+# directly under a block (no ``expression_statement`` wrapper), so they'd otherwise
+# be dropped. ``_CONTAINERS`` are the nodes that hold statements directly, used to
+# tell a statement-position call from a call nested inside an expression.
+_STMT_EXPR = ("call", "await")
+_CONTAINERS = ("block", "module")
 
 
 def _name_of(node: Node, source: bytes) -> str | None:
@@ -48,7 +54,7 @@ def _iter_in_scope(node: Node, descend_all: bool = False):
     for child in node.named_children:
         if not descend_all and child.type in NESTED_SCOPES:
             continue
-        if child.type in EMIT_TYPES:
+        if child.type in EMIT_TYPES or (child.type in _STMT_EXPR and node.type in _CONTAINERS):
             yield child
         yield from _iter_in_scope(child, descend_all)
 
@@ -73,6 +79,7 @@ def extract_statements(
                 node, source, path, parent_id=parent_id, limit=limit, seen_ids=seen_ids,
                 emit_types=EMIT_TYPES, control_flow=CONTROL_FLOW, call_type=_CALL_TYPE,
                 name_of=_name_of, call_details=_call_details,
+                stmt_expr=_STMT_EXPR, container_types=_CONTAINERS,
             )
         )
     return out

@@ -145,3 +145,37 @@ def test_output_validates_against_schema(tmp_path) -> None:
     instance = json.loads(to_line(rec))
     errors = sorted(Draft202012Validator(schema).iter_errors(instance), key=str)
     assert not errors, "\n".join(f"{list(e.absolute_path)}: {e.message}" for e in errors)
+
+
+def test_bare_call_statements_captured(tmp_path) -> None:
+    # Regression (limitation B): a bare call-statement (no expression_statement wrapper
+    # in this grammar) must be emitted as a `call` statement and classified.
+    src = (
+        "def process(order, session):\n"
+        "    repo.save(order)\n"          # bare db call
+        "    mailer.send(order.email)\n"  # bare plain call -> structural statement
+    ).encode()
+    p = tmp_path / "p.py"
+    p.write_text(src.decode())
+    ctx = ParseContext(path="p.py", abs_path=p, source=src, repo_root=tmp_path,
+                       capture_statements=True)
+    rec = PythonParser().parse_file(ctx)
+    fn = next(f for f in rec.functions if f.name == "process")
+    calls = [s for s in rec.statements if s.nodeType == "call" and s.parentId == fn.id]
+    texts = {s.text for s in calls}
+    assert any("repo.save(order)" in t for t in texts)      # bare db call now a statement
+    assert any("mailer.send" in t for t in texts)           # bare plain call now a statement
+    assert any(s.semanticType == "db_method_call" and "repo.save" in s.text for s in calls)
+
+
+def test_bare_call_in_control_body_not_mislabeled(tmp_path) -> None:
+    # The enclosing if/for must not inherit a bare call's semanticType.
+    src = "def h(o):\n    if o:\n        repo.save(o)\n".encode()
+    p = tmp_path / "q.py"
+    p.write_text(src.decode())
+    ctx = ParseContext(path="q.py", abs_path=p, source=src, repo_root=tmp_path,
+                       capture_statements=True)
+    rec = PythonParser().parse_file(ctx)
+    ifs = [s for s in rec.statements if s.nodeType == "if_statement"]
+    assert ifs and all(s.semanticType is None for s in ifs)
+    assert any(s.nodeType == "call" and s.semanticType == "db_method_call" for s in rec.statements)

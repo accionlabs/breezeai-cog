@@ -35,13 +35,35 @@ CallDetails = Callable[[Node, bytes], "tuple[str, str, str | None] | None"]
 NameOf = Callable[[Node, bytes], "str | None"]
 
 
-def _iter_calls(node: Node, emit_types: Collection[str], call_type: str) -> Iterator[Node]:
+def _iter_calls(
+    node: Node,
+    emit_types: Collection[str],
+    call_type: str,
+    stmt_expr: Collection[str],
+    containers: Collection[str],
+) -> Iterator[Node]:
     for child in node.named_children:
         if child.type in emit_types:
             continue  # a nested statement — classified on its own
+        if child.type in stmt_expr and node.type in containers:
+            continue  # a bare statement-position expression (its own statement — Python)
         if child.type == call_type:
             yield child
-        yield from _iter_calls(child, emit_types, call_type)
+        yield from _iter_calls(child, emit_types, call_type, stmt_expr, containers)
+
+
+def _calls_in_statement(
+    node: Node,
+    emit_types: Collection[str],
+    call_type: str,
+    stmt_expr: Collection[str],
+    containers: Collection[str],
+) -> Iterator[Node]:
+    # The statement node may itself be a call — a bare Python call-statement
+    # (``session.add(x)``) has no expression-statement wrapper.
+    if node.type == call_type:
+        yield node
+    yield from _iter_calls(node, emit_types, call_type, stmt_expr, containers)
 
 
 def classify_statement(
@@ -57,6 +79,8 @@ def classify_statement(
     call_type: str,
     name_of: NameOf,
     call_details: CallDetails,
+    stmt_expr: Collection[str] = (),
+    container_types: Collection[str] = (),
 ) -> list[Statement]:
     text = node_text(node, source)
     if node.type in control_flow:
@@ -67,7 +91,7 @@ def classify_statement(
     # All api/db/query hits in this statement's own expression, deduped by (kind, method).
     hits: list[tuple[str, str, str | None, str | None, Node]] = []
     seen_hit: set[tuple[str, str]] = set()
-    for call in _iter_calls(node, emit_types, call_type):
+    for call in _calls_in_statement(node, emit_types, call_type, stmt_expr, container_types):
         det = call_details(call, source)
         if det is None:
             continue
