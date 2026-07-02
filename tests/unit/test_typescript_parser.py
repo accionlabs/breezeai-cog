@@ -190,3 +190,37 @@ def test_control_statement_not_mislabeled(tmp_path) -> None:
     control = [s for s in rec.statements if s.nodeType in ("if_statement", "for_in_statement", "for_statement")]
     assert control and all(s.semanticType is None for s in control)
     assert any(s.semanticType == "db_method_call" for s in rec.statements)
+
+
+def _api(tmp_path, body):
+    p = tmp_path / "u.ts"
+    p.write_text(body)
+    ctx = ParseContext(path="u.ts", abs_path=p, source=p.read_bytes(),
+                       repo_root=tmp_path, capture_statements=True)
+    rec = TypeScriptParser().parse_file(ctx)
+    return [(s.method, s.endpoint) for s in rec.statements if s.semanticType == "api_call"]
+
+
+def test_endpoint_template_string(tmp_path) -> None:
+    # #3: template literal -> path with {param}; leading base/host var dropped.
+    assert _api(tmp_path, "function f(baseURL,id){ axios.get(`${baseURL}/users/${id}`); }") \
+        == [("GET", "/users/{id}")]
+    assert _api(tmp_path, "function f(id){ axios.get(`/api/${id}`); }") == [("GET", "/api/{id}")]
+
+
+def test_endpoint_concatenation(tmp_path) -> None:
+    # #3: string concatenation -> path with {param}.
+    assert _api(tmp_path, "function f(id){ axios.get('/a/' + id + '/b'); }") == [("GET", "/a/{id}/b")]
+
+
+def test_endpoint_config_object(tmp_path) -> None:
+    # #3: axios({ url, method }) — both were missed before.
+    assert _api(tmp_path, "function f(){ axios({ url: '/orders', method: 'get' }); }") \
+        == [("GET", "/orders")]
+
+
+def test_endpoint_verb_first_arg(tmp_path) -> None:
+    # #3: request('GET', url) — verb is the method, URL is the 2nd arg (not the verb).
+    assert _api(tmp_path, "function f(){ http.request('GET', '/orders'); }") == [("GET", "/orders")]
+    # unresolvable URL (an identifier) yields no endpoint rather than the verb string
+    assert _api(tmp_path, "function f(u){ http.request('GET', u); }") == [("GET", None)]
