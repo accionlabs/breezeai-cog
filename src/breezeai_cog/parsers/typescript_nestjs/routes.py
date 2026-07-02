@@ -20,6 +20,9 @@ _METHOD_DECORATORS = {
 }
 _RESPONSE_DECORATORS = {"ApiResponse", "ApiOkResponse", "ApiCreatedResponse"}
 _TYPE_PROP_RE = re.compile(r"\btype\s*:\s*\[?\s*([A-Za-z_$][\w.$]*)")
+# `@Controller({ path: 'orders', host: '...' })` — pull the string `path` out of the
+# object form (the string form `@Controller('orders')` is handled directly).
+_PATH_PROP_RE = re.compile(r"""\bpath\s*:\s*['"`]([^'"`]*)['"`]""")
 
 
 def _unquote(text: str) -> str:
@@ -65,7 +68,22 @@ def _controller_base(decorators: list[Node], source: bytes) -> str | None:
     for dec in decorators:
         d = decorator(dec, source)
         if d.name == "Controller":
-            return _unquote(d.args[0]) if d.args else ""
+            if not d.args:
+                return ""
+            arg = d.args[0].strip()
+            if arg.startswith("{"):  # object form: @Controller({ path: 'x', host: ... })
+                m = _PATH_PROP_RE.search(arg)
+                return m.group(1) if m else ""
+            return _unquote(arg)
+    return None
+
+
+def _version(decorators: list[Node], source: bytes) -> str | None:
+    """``@Version('2')`` (URI versioning) on a method or the controller → version tag."""
+    for dec in decorators:
+        d = decorator(dec, source)
+        if d.name == "Version" and d.args:
+            return _unquote(d.args[0])
     return None
 
 
@@ -98,6 +116,7 @@ def detect_nest_routes(root: Node, source: bytes, path: str, *, seen_ids: set[st
         if body is None:
             continue
         ctrl_guards = _guards(decs, source)  # controller-level @UseGuards
+        ctrl_version = _version(decs, source)  # controller-level @Version (method overrides)
         pending: list[Node] = []
         for member in body.named_children:
             if member.type == "decorator":
@@ -107,6 +126,7 @@ def detect_nest_routes(root: Node, source: bytes, path: str, *, seen_ids: set[st
                 mname = node_text(member.child_by_field_name("name"), source)
                 mline = member.start_point[0] + 1
                 guards = ctrl_guards + _guards(pending, source)  # merge (spec C5)
+                version = _version(pending, source) or ctrl_version
                 response_dto = _response_dto(pending, source)
                 request_dto = _request_dto(member, source)
                 for dec in pending:
@@ -128,6 +148,7 @@ def detect_nest_routes(root: Node, source: bytes, path: str, *, seen_ids: set[st
                         handlerLine=mline,
                         routeKind="route",
                         isRegex=False,
+                        version=version,
                         authRequired=bool(guards),
                         guards=guards or None,
                         requestDTO=request_dto,

@@ -119,3 +119,33 @@ def test_claims_selects_nestjs() -> None:
     assert registry.select("x.ts", b"import { Controller } from '@nestjs/common';").name == "typescript-nestjs"
     assert registry.select("x.ts", b"const x = 1;").name == "typescript"  # plain TS -> base
     registry.clear()
+
+
+_OBJ_SRC = b'''import { Controller, Get, Version } from '@nestjs/common';
+import type { Request } from 'express';
+
+@Controller({ path: 'orders', host: ':tenant.api.example.com' })
+export class OrdersController {
+  @Get(':id')
+  findById() {}
+
+  @Version('2')
+  @Get()
+  findV2() {}
+}
+'''
+
+
+def test_object_form_controller_prefix_and_version(tmp_path) -> None:
+    # #3: @Controller({ path, host }) object form -> base prefix from `path` (not the
+    # whole object literal); @Version('2') captured on the route.
+    p = tmp_path / "obj.controller.ts"
+    p.write_text(_OBJ_SRC.decode())
+    ctx = ParseContext(path="obj.controller.ts", abs_path=p, source=_OBJ_SRC,
+                       repo_root=tmp_path, capture_statements=True)
+    rec = NestJSParser().parse_file(ctx)
+    routes = {s.handler: s for s in rec.statements if s.semanticType == "route"}
+    assert routes["findById"].endpoint == "/orders/:id"   # not /{ path: ... }/:id
+    assert routes["findV2"].endpoint == "/orders"
+    assert routes["findV2"].version == "2"
+    assert routes["findById"].version is None
