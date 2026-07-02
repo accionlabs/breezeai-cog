@@ -81,14 +81,18 @@ def _find_string(node: Node) -> Node | None:
     return None
 
 
-def _iter_in_scope(node: Node):
+def _iter_in_scope(node: Node, descend_all: bool = False):
+    """Yield EMIT_TYPES statement nodes. ``descend_all=True`` (a function body) walks
+    into inline lambdas, attributing their statements to this function; ``False``
+    (file-root / class-body) keeps nested scopes as barriers since they are extracted
+    as their own Function/Class."""
     for child in node.named_children:
         real = _unwrap(child)
-        if real.type in NESTED_SCOPES:
+        if not descend_all and real.type in NESTED_SCOPES:
             continue
         if real.type in EMIT_TYPES:
             yield real
-        yield from _iter_in_scope(real)
+        yield from _iter_in_scope(real, descend_all)
 
 
 def extract_statements(
@@ -100,11 +104,12 @@ def extract_statements(
     capture: bool,
     limit: int,
     seen_ids: set[str],
+    descend_all: bool = False,
 ) -> list[Statement]:
     if not capture or body is None:
         return []
     out: list[Statement] = []
-    for node in _iter_in_scope(body):
+    for node in _iter_in_scope(body, descend_all):
         text = node_text(node, source)
         if node.type in CONTROL_FLOW:
             text = first_line(text)

@@ -53,13 +53,17 @@ def _call_info(node: Node, source: bytes) -> tuple[str, str, str | None] | None:
     return callee, method, first_str
 
 
-def _iter_in_scope(node: Node):
+def _iter_in_scope(node: Node, descend_all: bool = False):
+    """Yield EMIT_TYPES statement nodes. ``descend_all=True`` (a function body) walks
+    into inline lambdas, attributing their statements to this function; ``False``
+    (file-root / class-body) keeps nested scopes as barriers since they are extracted
+    as their own Function/Class."""
     for child in node.named_children:
-        if child.type in NESTED_SCOPES:
+        if not descend_all and child.type in NESTED_SCOPES:
             continue
         if child.type in EMIT_TYPES:
             yield child
-        yield from _iter_in_scope(child)
+        yield from _iter_in_scope(child, descend_all)
 
 
 def extract_statements(
@@ -71,11 +75,12 @@ def extract_statements(
     capture: bool,
     limit: int,
     seen_ids: set[str],
+    descend_all: bool = False,
 ) -> list[Statement]:
     if not capture or body is None:
         return []
     out: list[Statement] = []
-    for node in _iter_in_scope(body):
+    for node in _iter_in_scope(body, descend_all):
         text = node_text(node, source)
         if node.type in CONTROL_FLOW:
             text = first_line(text)

@@ -98,3 +98,27 @@ def test_output_validates(tmp_path) -> None:
     errors = list(Draft202012Validator(FileRecord.model_json_schema(by_alias=True))
                   .iter_errors(json.loads(to_line(rec))))
     assert not errors, errors
+
+
+def test_inline_lambda_body_captured(tmp_path) -> None:
+    # Regression (#1): statements & calls inside a lambda are attributed to the
+    # nearest named enclosing method, not dropped.
+    src = (
+        "class C {\n"
+        "  void m(java.util.List<Order> orders) {\n"
+        "    orders.forEach(o -> {\n"
+        "      repo.save(o);\n"
+        "      logger.info(o);\n"
+        "    });\n"
+        "  }\n"
+        "}\n"
+    ).encode()
+    p = tmp_path / "C.java"
+    p.write_text(src.decode())
+    ctx = ParseContext(path="C.java", abs_path=p, source=src, repo_root=tmp_path,
+                       capture_statements=True)
+    rec = JavaParser().parse_file(ctx)
+    m = next(f for f in rec.functions if f.name == "m")
+    assert {"save", "info"} <= {c.name for c in m.calls}
+    db = [s for s in rec.statements if s.semanticType == "db_method_call"]
+    assert any("repo.save" in s.text for s in db)

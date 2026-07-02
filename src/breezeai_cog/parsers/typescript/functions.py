@@ -69,12 +69,6 @@ def type_map(root: Node, source: bytes) -> dict[str, str]:
     return types
 
 
-_SKIP_SCOPES = {
-    "function_declaration", "function_expression", "arrow_function",
-    "method_definition", "class_declaration", "class",
-}
-
-
 def _type_text(annotation: Node | None, source: bytes) -> str | None:
     if annotation is None:
         return None
@@ -133,9 +127,10 @@ def _calls(body: Node | None, source: bytes, resolve: CallResolver = noop_resolv
     seen: set[str] = set()
 
     def visit(node: Node) -> None:
+        # Descend into every scope, including inline callbacks/lambdas and nested
+        # functions — their calls belong to the nearest named enclosing function
+        # (this body never contains a separately-extracted scope). See build_function.
         for child in node.named_children:
-            if child.type in _SKIP_SCOPES:
-                continue
             if child.type == "call_expression":
                 fn = child.child_by_field_name("function")
                 if fn is not None:
@@ -186,6 +181,7 @@ def build_function(
         calls=_calls(body, source, resolve),
     )
     statements = extract_statements(
-        body, source, path, parent_id=fid, capture=capture, limit=limit, seen_ids=seen_ids
+        body, source, path, parent_id=fid, capture=capture, limit=limit, seen_ids=seen_ids,
+        descend_all=True,  # walk inline callbacks/lambdas — attribute their statements here
     )
     return fn, statements

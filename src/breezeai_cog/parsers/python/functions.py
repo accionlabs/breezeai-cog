@@ -87,9 +87,9 @@ def _extract_calls(body: Node | None, source: bytes, resolve: CallResolver = noo
     seen: set[str] = set()
 
     def visit(node: Node) -> None:
+        # Descend into every scope, including lambdas and nested defs — their calls
+        # belong to the nearest named enclosing function (see build_function).
         for child in node.named_children:
-            if child.type in ("function_definition", "class_definition"):
-                continue  # nested scope's own calls
             if child.type == "call":
                 fn = child.child_by_field_name("function")
                 if fn is not None:
@@ -143,6 +143,7 @@ def build_function(
         calls=_extract_calls(body, source, resolve),
     )
     statements = extract_statements(
-        body, source, path, parent_id=fid, capture=capture, limit=limit, seen_ids=seen_ids
+        body, source, path, parent_id=fid, capture=capture, limit=limit, seen_ids=seen_ids,
+        descend_all=True,  # walk inline lambdas/nested defs — attribute their statements here
     )
     return fn, statements

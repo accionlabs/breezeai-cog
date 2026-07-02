@@ -93,10 +93,9 @@ def _calls(body: Node | None, source: bytes, resolve: CallResolver = noop_resolv
     seen: set[str] = set()
 
     def visit(node: Node) -> None:
+        # Descend into every scope, including inline lambdas/anonymous methods — their
+        # calls belong to the nearest named enclosing function (see build_function).
         for child in node.named_children:
-            if child.type in ("class_declaration", "method_declaration", "local_function_statement",
-                              "lambda_expression", "anonymous_method_expression"):
-                continue
             if child.type == "invocation_expression":
                 func = child.child_by_field_name("function")
                 if func is not None:
@@ -208,6 +207,7 @@ def build_method(
         calls=_calls(body, source, resolve),
     )
     statements = extract_statements(
-        body, source, path, parent_id=fid, capture=capture, limit=limit, seen_ids=seen_ids
+        body, source, path, parent_id=fid, capture=capture, limit=limit, seen_ids=seen_ids,
+        descend_all=True,  # walk inline lambdas/anonymous methods — attribute their statements here
     )
     return fn, statements

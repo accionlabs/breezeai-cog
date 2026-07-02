@@ -119,3 +119,39 @@ def test_module_extensions_matched() -> None:
     parser = TypeScriptParser()
     for ext in (".ts", ".tsx", ".mts", ".cts", ".js", ".jsx", ".mjs", ".cjs"):
         assert parser.matches("mod" + ext), ext
+
+
+def test_inline_callback_body_captured(tmp_path) -> None:
+    # Regression (#1): statements & calls inside an anonymous callback must be
+    # attributed to the nearest named enclosing function, not dropped.
+    p = tmp_path / "cb.ts"
+    p.write_text(
+        "function processOrder(id) {\n"
+        "  orderRepo.findOne(id).then(order => {\n"
+        "    order.status = 'PAID';\n"
+        "    auditRepo.save(order);\n"
+        "    mailer.send(order.email);\n"
+        "  });\n"
+        "}\n"
+    )
+    ctx = ParseContext(path="cb.ts", abs_path=p, source=p.read_bytes(),
+                       repo_root=tmp_path, capture_statements=True)
+    rec = TypeScriptParser().parse_file(ctx)
+    fn = next(f for f in rec.functions if f.name == "processOrder")
+    # calls inside the callback now land on the enclosing function
+    assert {"save", "send"} <= {c.name for c in fn.calls}
+    # the db write inside the callback is detected and parented to processOrder
+    db = [s for s in rec.statements if s.semanticType == "db_method_call" and s.parentId == fn.id]
+    assert any("auditRepo.save" in s.text for s in db)
+
+
+def test_top_level_arrow_not_double_emitted(tmp_path) -> None:
+    # The wider walk must not re-emit a top-level `const x = () => {}` body (it is
+    # already extracted as its own Function).
+    p = tmp_path / "d.ts"
+    p.write_text("const topFn = (x) => { return doTop(x); };\n")
+    ctx = ParseContext(path="d.ts", abs_path=p, source=p.read_bytes(),
+                       repo_root=tmp_path, capture_statements=True)
+    rec = TypeScriptParser().parse_file(ctx)
+    returns = [s for s in rec.statements if s.nodeType == "return_statement" and "doTop" in s.text]
+    assert len(returns) == 1
