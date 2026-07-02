@@ -7,11 +7,38 @@ to the file (Angular routes are config, not handler methods)."""
 
 from __future__ import annotations
 
+import re
+
 from tree_sitter import Node
 
 from ...emit import disambiguate, file_id, statement_id
 from ...schemas import Statement
 from ..treesitter import node_text
+
+# Lazy-load target extraction (Tier 1): capture what a route loads so the mount is a
+# traversable edge, not a dead end. Covers every Angular version's syntax:
+#   () => import('./x').then(m => m.XModule)   NgModule / routes-const / component
+#   () => import('./x.routes')                 default-export routes (fallback: the path)
+#   'app/x/x.module#XModule'                   legacy string form (Angular <9)
+_LAZY_STRING_RE = re.compile(r"""^\s*['"][^'"#]+#([A-Za-z_$][\w$]*)['"]\s*$""")
+_LAZY_MEMBER_RE = re.compile(r"=>\s*[\w$]+\.([A-Za-z_$][\w$]*)")
+_LAZY_IMPORT_RE = re.compile(r"""import\(\s*['"]([^'"]+)['"]""")
+
+
+def _lazy_target(node: Node | None, source: bytes) -> str | None:
+    """The module/routes/component a ``loadChildren`` / ``loadComponent`` resolves to —
+    the class/const name when available (a resolvable graph edge), else the import path."""
+    if node is None:
+        return None
+    text = node_text(node, source)
+    m = _LAZY_STRING_RE.search(text)  # legacy 'path#Module' — most specific
+    if m:
+        return m.group(1)
+    m = _LAZY_MEMBER_RE.search(text)  # .then(m => m.X) — module / routes const / component
+    if m:
+        return m.group(1)
+    m = _LAZY_IMPORT_RE.search(text)  # default-export import — fall back to the path
+    return m.group(1) if m else None
 
 
 def _all(node: Node, typ: str) -> list[Node]:
@@ -80,8 +107,17 @@ def _process(arr: Node, prefix: str, source: bytes, path: str, seen: set[str], r
         if "path" not in pairs:
             continue
         full = _join(prefix, _string_val(pairs["path"], source))
-        load = pairs.get("loadChildren")
+        load = pairs.get("loadChildren")  # lazy route group -> mount
         component = pairs.get("component")
+        load_component = pairs.get("loadComponent")  # lazy standalone component -> page
+        if load is not None:  # mount: handler = the loaded module/routes (a traversable link)
+            handler = _lazy_target(load, source)
+        elif component is not None:
+            handler = node_text(component, source)
+        elif load_component is not None:
+            handler = _lazy_target(load_component, source)
+        else:
+            handler = None
         sl, sc = elem.start_point[0] + 1, elem.start_point[1]
         routes.append(Statement(
             id=disambiguate(statement_id(path, sl, sc), seen),
@@ -92,7 +128,7 @@ def _process(arr: Node, prefix: str, source: bytes, path: str, seen: set[str], r
             endpoint=full,
             framework="angular",
             routeKind="mount" if load is not None else "page",
-            handler=node_text(component, source) if component is not None else None,
+            handler=handler,
             guards=_guards(pairs.get("canActivate"), source) or None,
             startLine=sl,
             endLine=elem.end_point[0] + 1,

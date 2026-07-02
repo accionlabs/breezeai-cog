@@ -76,3 +76,37 @@ def test_claims_selects_angular() -> None:
     assert registry.select("x.ts", b"import { Component } from '@angular/core';").name == "typescript-angular"
     assert registry.select("x.ts", b"const x = 1;").name == "typescript"  # plain TS -> base
     registry.clear()
+
+
+def test_mount_captures_lazy_module_link(tmp_path) -> None:
+    # Tier 1: a loadChildren mount must record what it loads, so it's a traversable
+    # edge in the code graph rather than a dead-end path segment.
+    rec = _parse(tmp_path)
+    mount = next(s for s in rec.statements
+                 if s.semanticType == "route" and s.endpoint == "/admin")
+    assert mount.routeKind == "mount"
+    assert mount.handler == "AdminModule"
+
+
+_STANDALONE_SRC = b'''import { Routes } from '@angular/router';
+
+export const routes: Routes = [
+  { path: 'catalog', loadChildren: () => import('./catalog.routes').then(m => m.CATALOG_ROUTES) },
+  { path: 'user/:id', loadComponent: () => import('./user.component').then(m => m.UserComponent) },
+  { path: 'legacy', loadChildren: 'app/legacy/legacy.module#LegacyModule' },
+];
+'''
+
+
+def test_lazy_forms_across_angular_versions(tmp_path) -> None:
+    # Standalone routes-const mount, lazy standalone component (a page), and the legacy
+    # string form — one detector, no cross-version conflict.
+    p = tmp_path / "app.routes.ts"
+    p.write_text(_STANDALONE_SRC.decode())
+    ctx = ParseContext(path="app.routes.ts", abs_path=p, source=_STANDALONE_SRC,
+                       repo_root=tmp_path, capture_statements=True)
+    rec = AngularParser().parse_file(ctx)
+    by_ep = {s.endpoint: s for s in rec.statements if s.semanticType == "route"}
+    assert by_ep["/catalog"].routeKind == "mount" and by_ep["/catalog"].handler == "CATALOG_ROUTES"
+    assert by_ep["/user/:id"].routeKind == "page" and by_ep["/user/:id"].handler == "UserComponent"
+    assert by_ep["/legacy"].routeKind == "mount" and by_ep["/legacy"].handler == "LegacyModule"
