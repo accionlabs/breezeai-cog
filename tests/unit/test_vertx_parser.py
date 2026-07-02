@@ -94,3 +94,41 @@ def test_output_validates(tmp_path) -> None:
     errors = list(Draft202012Validator(FileRecord.model_json_schema(by_alias=True))
                   .iter_errors(json.loads(to_line(rec))))
     assert not errors, errors
+
+
+_ADDR_SRC = b'''package com.acme;
+
+import io.vertx.core.AbstractVerticle;
+
+public class AddrVerticle extends AbstractVerticle {
+    static final String TOPIC = "orders.audit";
+
+    public void start() {
+        var bus = vertx.eventBus();
+        bus.request("orders.ask", req, reply -> handle(reply));   // modern send-with-reply
+        bus.send(TOPIC, auditMsg);                                // constant address
+        bus.consumer(TOPIC).handler(m -> process(m));             // constant address consumer
+    }
+}
+'''
+
+
+def test_eventbus_request_and_constant_addresses(tmp_path) -> None:
+    # Regression: eventBus.request(...) → eventbus_send, and constant/variable addresses
+    # (not just string literals) are captured, with the symbol name as endpoint.
+    p = tmp_path / "AddrVerticle.java"
+    p.write_text(_ADDR_SRC.decode())
+    ctx = ParseContext(path="AddrVerticle.java", abs_path=p, source=_ADDR_SRC,
+                       repo_root=tmp_path, capture_statements=True)
+    rec = VertxParser().parse_file(ctx)
+    by_sem: dict[str, list] = {}
+    for s in rec.statements:
+        if s.semanticType:
+            by_sem.setdefault(s.semanticType, []).append(s)
+
+    sends = {s.endpoint for s in by_sem.get("eventbus_send", [])}
+    consumers = {s.endpoint for s in by_sem.get("eventbus_consumer", [])}
+    assert "orders.ask" in sends   # request(...) mapped to eventbus_send
+    assert "TOPIC" in sends        # constant-address send captured (endpoint = symbol)
+    assert "TOPIC" in consumers    # constant-address consumer captured
+    assert all(s.framework == "vertx" for s in by_sem.get("eventbus_send", []))

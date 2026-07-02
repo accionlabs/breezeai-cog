@@ -22,6 +22,7 @@ from ..treesitter import first_line, node_text
 
 _EVENTBUS = {
     "send": "eventbus_send",
+    "request": "eventbus_send",  # modern send-with-reply (point-to-point) → same as send
     "publish": "eventbus_publish",
     "consumer": "eventbus_consumer",
     "localConsumer": "eventbus_consumer",
@@ -64,8 +65,11 @@ def _classify(call: Node, source: bytes) -> tuple[str, str | None, str | None, s
     method, first_str, first_arg, obj = _parts(call, source)
     obj_l = obj.lower()
 
-    if method in _EVENTBUS and first_str is not None and ("bus" in obj_l or obj_l == "eb"):
-        return _EVENTBUS[method], None, first_str, None
+    if method in _EVENTBUS and ("bus" in obj_l or obj_l == "eb"):
+        # Address may be a string literal OR a constant/variable (common in real code:
+        # `eventBus.send(ADDRESS, msg)`) — fall back to the first-arg text so the flow
+        # is still captured (endpoint = the symbol name; None only if there is no arg).
+        return _EVENTBUS[method], None, first_str or first_arg, None
     if method in _TIMERS:
         return "timer", None, None, None
     if method == "deployVerticle":
