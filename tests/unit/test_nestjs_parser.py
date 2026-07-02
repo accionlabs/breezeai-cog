@@ -149,3 +149,86 @@ def test_object_form_controller_prefix_and_version(tmp_path) -> None:
     assert routes["findV2"].endpoint == "/orders"
     assert routes["findV2"].version == "2"
     assert routes["findById"].version is None
+
+
+_COMMENT_SRC = b'''import { Controller, Get } from '@nestjs/common';
+
+@Controller('pipeline')
+export class PipelineController {
+  @Get('has-comment')
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  getA(): never { throw new Error('x'); }
+
+  @Get('no-comment')
+  getB() { return 1; }
+}
+'''
+
+
+def test_route_survives_comment_between_decorator_and_handler(tmp_path) -> None:
+    # Regression: a comment line between @Get(...) and the method must NOT drop the route.
+    p = tmp_path / "pipeline.controller.ts"
+    p.write_text(_COMMENT_SRC.decode())
+    ctx = ParseContext(path="pipeline.controller.ts", abs_path=p, source=_COMMENT_SRC,
+                       repo_root=tmp_path, capture_statements=True)
+    rec = NestJSParser().parse_file(ctx)
+    endpoints = {s.endpoint for s in rec.statements if s.semanticType == "route"}
+    assert endpoints == {"/pipeline/has-comment", "/pipeline/no-comment"}
+
+
+_MSG_SRC = b'''import { Controller } from '@nestjs/common';
+import { EventPattern, MessagePattern } from '@nestjs/microservices';
+
+@Controller()
+export class HubspotController {
+  @EventPattern('hubspot.contact')
+  onContact() {}
+
+  @MessagePattern({ cmd: 'sum' })
+  sum() {}
+}
+'''
+
+
+def test_event_and_message_patterns_detected(tmp_path) -> None:
+    # spec B1.4 — @EventPattern/@MessagePattern → eventbus_consumer with the topic as endpoint.
+    p = tmp_path / "hubspot.controller.ts"
+    p.write_text(_MSG_SRC.decode())
+    ctx = ParseContext(path="hubspot.controller.ts", abs_path=p, source=_MSG_SRC,
+                       repo_root=tmp_path, capture_statements=True)
+    rec = NestJSParser().parse_file(ctx)
+    consumers = {s.handler: s for s in rec.statements if s.semanticType == "eventbus_consumer"}
+    assert set(consumers) == {"onContact", "sum"}
+    assert consumers["onContact"].endpoint == "hubspot.contact"
+    assert consumers["onContact"].method == "EVENT"
+    assert consumers["onContact"].routeKind == "message" and consumers["onContact"].framework == "nestjs"
+    assert consumers["sum"].method == "MESSAGE"
+
+
+_RETTYPE_SRC = b'''import { Controller, Get } from '@nestjs/common';
+
+@Controller('orders')
+export class OrderController {
+  @Get()
+  list(): Promise<OrderDto[]> { return null as any; }
+
+  @Get('one')
+  one(): UserDto { return null as any; }
+
+  @Get('count')
+  count(): Promise<number> { return null as any; }
+}
+'''
+
+
+def test_response_dto_from_return_type(tmp_path) -> None:
+    # responseDTO falls back to the handler return type (Promise<T>/T), skipping primitives.
+    p = tmp_path / "ret.controller.ts"
+    p.write_text(_RETTYPE_SRC.decode())
+    ctx = ParseContext(path="ret.controller.ts", abs_path=p, source=_RETTYPE_SRC,
+                       repo_root=tmp_path, capture_statements=True)
+    rec = NestJSParser().parse_file(ctx)
+    dto = {s.handler: s.responseDTO for s in rec.statements if s.semanticType == "route"}
+    assert dto["list"] == "OrderDto"          # Promise<OrderDto[]> → OrderDto
+    assert dto["one"] == "UserDto"            # UserDto
+    assert dto["count"] is None               # Promise<number> → primitive → None

@@ -81,6 +81,8 @@ class TypeScriptParser(BaseParser):
             if child.type == "decorator":
                 pending.append(child)
                 continue
+            if child.type == "comment":
+                continue  # keep pending decorators across a comment before the declaration
             decl, exp_decs = _unwrap_export(child)
             decorators = pending + exp_decs
             pending = []

@@ -11,15 +11,40 @@ from tree_sitter import Node
 
 from ...emit import disambiguate, function_id, statement_id
 from ...schemas import Statement
-from ...parsers.typescript.functions import decorator, extract_params
+from ...parsers.typescript.functions import _type_text, decorator, extract_params
 from ..treesitter import node_text
 
 _METHOD_DECORATORS = {
     "Get": "GET", "Post": "POST", "Put": "PUT", "Patch": "PATCH",
     "Delete": "DELETE", "Options": "OPTIONS", "Head": "HEAD", "All": "ALL",
 }
+# @nestjs/microservices message consumers → eventbus_consumer (spec B1.4 semanticType).
+_MESSAGING_DECORATORS = {"EventPattern": "EVENT", "MessagePattern": "MESSAGE"}
 _RESPONSE_DECORATORS = {"ApiResponse", "ApiOkResponse", "ApiCreatedResponse"}
 _TYPE_PROP_RE = re.compile(r"\btype\s*:\s*\[?\s*([A-Za-z_$][\w.$]*)")
+# return-type → responseDTO: skip generic wrappers and primitives, take the first
+# PascalCase type name (``Promise<OrderDto[]>`` → ``OrderDto``, ``void`` → None).
+_ID_RE = re.compile(r"[A-Za-z_$][\w$]*")
+_NON_DTO_TYPES = {
+    "Promise", "Observable", "Array", "Map", "Set", "Record", "Partial", "Readonly",
+    "void", "any", "unknown", "never", "null", "undefined", "string", "number",
+    "boolean", "object", "bigint", "symbol", "this", "true", "false",
+}
+
+
+def _dto_from_type(t: str | None) -> str | None:
+    if not t:
+        return None
+    for tok in _ID_RE.findall(t):
+        if tok in _NON_DTO_TYPES or not tok[0].isupper():
+            continue
+        return tok
+    return None
+
+
+def _return_dto(member: Node, source: bytes) -> str | None:
+    """Handler return type → responseDTO (fallback when no ``@ApiResponse``)."""
+    return _dto_from_type(_type_text(member.child_by_field_name("return_type"), source))
 # `@Controller({ path: 'orders', host: '...' })` — pull the string `path` out of the
 # object form (the string form `@Controller('orders')` is handled directly).
 _PATH_PROP_RE = re.compile(r"""\bpath\s*:\s*['"`]([^'"`]*)['"`]""")
@@ -27,6 +52,14 @@ _PATH_PROP_RE = re.compile(r"""\bpath\s*:\s*['"`]([^'"`]*)['"`]""")
 
 def _unquote(text: str) -> str:
     return text.strip().strip("'\"`")
+
+
+def _pattern(d) -> str | None:
+    """Address/topic of ``@EventPattern('x')`` / ``@MessagePattern({cmd:'y'})``."""
+    if not d.args:
+        return None
+    raw = d.args[0].strip()
+    return _unquote(raw) if raw[:1] in "'\"`" else (raw or None)
 
 
 def _guards(decs: list[Node], source: bytes) -> list[str]:
@@ -108,54 +141,66 @@ def _class_with_decorators(root: Node):
 def detect_nest_routes(root: Node, source: bytes, path: str, *, seen_ids: set[str]) -> list[Statement]:
     routes: list[Statement] = []
     for cls, decs in _class_with_decorators(root):
-        base = _controller_base(decs, source)
-        if base is None:
-            continue  # not a @Controller
+        base = _controller_base(decs, source)  # None when the class is not a @Controller
+        is_controller = base is not None
         class_name = node_text(cls.child_by_field_name("name"), source)
         body = cls.child_by_field_name("body")
         if body is None:
             continue
-        ctrl_guards = _guards(decs, source)  # controller-level @UseGuards
-        ctrl_version = _version(decs, source)  # controller-level @Version (method overrides)
+        ctrl_guards = _guards(decs, source) if is_controller else []
+        ctrl_version = _version(decs, source) if is_controller else None
         pending: list[Node] = []
         for member in body.named_children:
             if member.type == "decorator":
                 pending.append(member)
                 continue
+            if member.type == "comment":
+                continue  # a comment between a route decorator and its handler must not drop it
             if member.type == "method_definition":
                 mname = node_text(member.child_by_field_name("name"), source)
                 mline = member.start_point[0] + 1
-                guards = ctrl_guards + _guards(pending, source)  # merge (spec C5)
-                version = _version(pending, source) or ctrl_version
-                response_dto = _response_dto(pending, source)
-                request_dto = _request_dto(member, source)
+                parent = function_id(path, mname, mline, class_name=class_name)
+                guards = ctrl_guards + _guards(pending, source)  # merge controller + method (spec C5)
                 for dec in pending:
                     d = decorator(dec, source)
-                    verb = _METHOD_DECORATORS.get(d.name)
-                    if verb is None:
+                    verb = _METHOD_DECORATORS.get(d.name) if is_controller else None
+                    msg = _MESSAGING_DECORATORS.get(d.name)
+                    if verb is None and msg is None:
                         continue
                     sl, sc = dec.start_point[0] + 1, dec.start_point[1]
-                    routes.append(Statement(
+                    common = dict(
                         id=disambiguate(statement_id(path, sl, sc), seen_ids),
-                        parentId=function_id(path, mname, mline, class_name=class_name),
+                        parentId=parent,
                         nodeType="decorator",
-                        semanticType="route",
                         text=node_text(dec, source).split("\n", 1)[0],
-                        method=verb,
-                        endpoint=_join(base, _unquote(d.args[0]) if d.args else ""),
                         framework="nestjs",
                         handler=mname,
                         handlerLine=mline,
-                        routeKind="route",
                         isRegex=False,
-                        version=version,
                         authRequired=bool(guards),
                         guards=guards or None,
-                        requestDTO=request_dto,
-                        responseDTO=response_dto,
                         startLine=sl,
                         endLine=dec.end_point[0] + 1,
                         path=path,
-                    ))
+                    )
+                    if verb is not None:  # HTTP route
+                        routes.append(Statement(
+                            semanticType="route",
+                            method=verb,
+                            endpoint=_join(base, _unquote(d.args[0]) if d.args else ""),
+                            routeKind="route",
+                            version=_version(pending, source) or ctrl_version,
+                            requestDTO=_request_dto(member, source),
+                            responseDTO=_response_dto(pending, source) or _return_dto(member, source),
+                            **common,
+                        ))
+                    else:  # @EventPattern / @MessagePattern microservice consumer
+                        routes.append(Statement(
+                            semanticType="eventbus_consumer",
+                            method=msg,
+                            endpoint=_pattern(d),
+                            routeKind="message",
+                            **common,
+                        ))
             pending = []
     return routes

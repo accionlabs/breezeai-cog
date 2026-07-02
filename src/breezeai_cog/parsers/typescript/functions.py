@@ -134,7 +134,9 @@ def _calls(body: Node | None, source: bytes, resolve: CallResolver = noop_resolv
             if child.type == "call_expression":
                 fn = child.child_by_field_name("function")
                 if fn is not None:
-                    callee = node_text(fn, source)
+                    # Normalize optional chaining so `this.svc?.m()` resolves like `this.svc.m()`
+                    # (otherwise the receiver becomes `this.svc?` and never matches a type).
+                    callee = node_text(fn, source).replace("?.", ".")
                     name = callee.rsplit(".", 1)[-1]
                     receiver = callee.rsplit(".", 1)[0] if "." in callee else None
                     if name.isidentifier() and name not in seen:

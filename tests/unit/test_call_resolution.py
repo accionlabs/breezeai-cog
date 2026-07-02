@@ -90,3 +90,23 @@ def test_typescript_receiver_type(tmp_path) -> None:
                  "  run(id: string) { return this.repo.find(id); }\n}\n")
     rec = TypeScriptParser().parse_file(ParseContext(path="svc.ts", abs_path=p, source=p.read_bytes(), repo_root=tmp_path))
     assert _calls_of(rec, "run")["find"] == "repo.ts"
+
+
+def test_typescript_optional_chaining_receiver(tmp_path) -> None:
+    # `this.svc?.m()` must resolve like `this.svc.m()` — optional chaining is normalized
+    # so the receiver type (DI constructor param-property) still matches (spec C4.2).
+    (tmp_path / "foo.service.ts").write_text("export class FooService { save() {} findAll() {} }\n")
+    p = tmp_path / "d.ts"
+    p.write_text(
+        "import { FooService } from './foo.service';\n"
+        "export class D {\n"
+        "  constructor(private readonly fooService: FooService) {}\n"
+        "  run() { return this.fooService?.save(); }\n"
+        "  list() { return this.fooService.findAll(); }\n"
+        "}\n"
+    )
+    rec = TypeScriptParser().parse_file(
+        ParseContext(path="d.ts", abs_path=p, source=p.read_bytes(), repo_root=tmp_path)
+    )
+    assert _calls_of(rec, "run")["save"] == "foo.service.ts"      # optional-chained DI call
+    assert _calls_of(rec, "list")["findAll"] == "foo.service.ts"  # plain DI call

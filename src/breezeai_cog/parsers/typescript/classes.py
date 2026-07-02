@@ -83,6 +83,8 @@ def build_class(
             if child.type == "decorator":
                 pending.append(child)
                 continue
+            if child.type == "comment":
+                continue  # a comment between a decorator and its method must not drop decorators
             if child.type == "method_definition":
                 mname_node = child.child_by_field_name("name")
                 mname = node_text(mname_node, source) if mname_node is not None else ""
