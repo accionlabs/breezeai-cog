@@ -24,6 +24,12 @@ _CLIENT_HINTS = (
 # Bare (receiver-less) function calls that are HTTP requests → default GET.
 _BARE_FUNCTIONS = {"fetch", "$fetch", "usefetch", "apifetch", "authfetch", "customfetch"}
 
+# ORM query-builder markers that make a chain a DB query, not an HTTP call — the
+# ``session`` client hint collides with SQLAlchemy's DB session, so a chain like
+# ``session.query(User).filter(...).delete()`` ends in an HTTP verb but is data access.
+# These appear in the *callee* (the method chain), never in call arguments.
+_DB_CHAIN_MARKERS = ("query(", ".filter", ".where", "query.")
+
 
 def match_api(callee: str, method: str) -> str | None:
     """Return the HTTP verb (uppercased) if ``callee.method(...)`` is an HTTP call."""
@@ -37,5 +43,7 @@ def match_api(callee: str, method: str) -> str | None:
     if m.endswith("async") and len(m) > len("async"):
         m = m[: -len("async")]
     if m in HTTP_VERBS and any(hint in low for hint in _CLIENT_HINTS):
+        if any(mk in low for mk in _DB_CHAIN_MARKERS):
+            return None  # an ORM query chain (e.g. session.query(...).filter(...).delete())
         return m.upper()  # ``request`` -> "REQUEST" (verb lives in the config arg; matches legacy)
     return None

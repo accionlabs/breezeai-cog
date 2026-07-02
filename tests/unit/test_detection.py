@@ -18,6 +18,17 @@ def test_classify_api() -> None:
     assert classify_call("session.delete", "delete") == ("api_call", "DELETE", None)
 
 
+def test_session_query_chain_is_db_not_http() -> None:
+    # `session` is both an HTTP client hint (requests.Session) and a SQLAlchemy DB
+    # session. A chain carrying an ORM query-builder marker is data access, not HTTP,
+    # even though it rides on `session` and ends in an HTTP verb.
+    assert classify_call("session.query(User).filter(x).delete", "delete") == \
+        ("db_method_call", "delete", "sqlalchemy")
+    assert classify_call("session.query(User).filter(x).delete", "delete")[0] != "api_call"
+    # a bare session.delete (requests.Session) stays an HTTP call
+    assert classify_call("session.delete", "delete") == ("api_call", "DELETE", None)
+
+
 def test_classify_db() -> None:
     assert classify_call("user.findMany", "findMany") == ("db_method_call", "findMany", "prisma")
     assert classify_call("Model.findAll", "findAll") == ("db_method_call", "findAll", "sequelize")
