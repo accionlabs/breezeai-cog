@@ -31,6 +31,11 @@ def match_api(callee: str, method: str) -> str | None:
     low = callee.lower()
     if m in _BARE_FUNCTIONS or low in _BARE_FUNCTIONS or low.endswith(".fetch"):
         return "GET"
+    # .NET (C#/VB) HttpClient uses async-suffixed verbs (``GetAsync``/``PostAsync``…);
+    # strip a trailing ``async`` so they match the same verbs (precision preserved — a
+    # client-hint substring is still required, so a bare ``FooAsync()`` never matches).
+    if m.endswith("async") and len(m) > len("async"):
+        m = m[: -len("async")]
     if m in HTTP_VERBS and any(hint in low for hint in _CLIENT_HINTS):
         return m.upper()  # ``request`` -> "REQUEST" (verb lives in the config arg; matches legacy)
     return None

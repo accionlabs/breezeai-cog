@@ -1,0 +1,8 @@
+# C# / .NET per-language ignore defaults (layer 2, §9).
+bin/
+obj/
+packages/
+*.dll
+*.exe
+*.pdb
+*.nupkg
