@@ -25,8 +25,11 @@ Rules of thumb:
 - *Cross-cutting call recognition* (is this an HTTP call? a DB query?) is **already shared** in `parsers/detection/` — don't reimplement it; feed it.
 
 Worked examples already in the tree:
-- Language: `parsers/python/`, `parsers/typescript/`, `parsers/java/`
-- Framework: `parsers/python_fastapi/` (FastAPI on Python), `parsers/typescript_nestjs/` (NestJS), `parsers/typescript_angular/` (Angular), `parsers/java_springboot/` (Spring Boot)
+- Language: `parsers/python/`, `parsers/typescript/`, `parsers/java/`, `parsers/csharp/`, `parsers/vb/`
+- Framework (AST-walk detection): `parsers/python_fastapi/` (FastAPI), `parsers/typescript_nestjs/` (NestJS), `parsers/typescript_angular/` (Angular), `parsers/typescript_express/` (Express), `parsers/typescript_loopback/` (Loopback), `parsers/typescript_react/` (React), `parsers/java_vertx/` (Vert.x)
+- Framework (**off-the-record** detection — reads annotations the base parser already captured, no AST re-walk): `parsers/java_springboot/` (Spring Boot), `parsers/java_jaxrs/` (JAX-RS)
+- Framework (**hybrid** — off-the-record controllers + an AST walk for call-based routes): `parsers/csharp_aspnet/` and `parsers/vb_aspnet/` (ASP.NET — `[ApiController]`/`[HttpGet]` off the record, minimal-API `app.MapGet(…)` via AST walk; the controller detector is language-agnostic and shared between the C# and VB parsers)
+- Config: `parsers/config/` (a `priority`-0 parser with a custom `matches()` for glob-ish names like `Dockerfile.*` / `.env.*`)
 
 ---
 
@@ -38,7 +41,7 @@ Worked examples already in the tree:
 | Node text / line span / first line | `node_text(node, src)`, `line_span(node)`, `first_line(text)` | `parsers/treesitter.py` |
 | `id`/`parentId` convention | `file_id`, `class_id`, `function_id`, `statement_id`, `disambiguate` | `emit` |
 | Record models | `FileRecord, Class, Function, Statement, Parameter, ConstructorParam, Decorator, Call` | `schemas` |
-| API/DB call classification | `classify_call(callee, method)` → `(semanticType, method, hint)` | `parsers.detection` |
+| API/DB/query call classification | `classify_call(callee, method, arg=None)` → `(semanticType, method, hint)` (api_call / query_statement / db_method_call); `text_has_query(text)` for embedded raw SQL | `parsers.detection` |
 | LOC / truncation / snippet / repo-relative path | `count_loc`, `truncate`, `snippet`, `repo_relative` | `utils` |
 | Capability-metadata defaults, optional `build_index`, ignore/include loading | subclass `BaseParser` | `parsers/base.py` |
 | Registration / single-parser selection | `register`, `PARSERS` list, `select` / `claims` / `priority` | `core/registry.py` |
@@ -124,17 +127,26 @@ parser parse once and reuse the base extraction. Always provide it.
 
 ### Step 5 — Wire shared detection into statements
 In `statements.py`, find a call inside the statement, extract `(callee, method,
-first_string_arg)`, then:
+first_string_arg)`, then pass the **string arg** too so raw-SQL builders are caught:
 ```python
-from ..detection import classify_call
-classified = classify_call(callee, method)
+from ..detection import classify_call, text_has_query
+classified = classify_call(callee, method, first_string_arg)   # arg enables query_statement
 if classified:
-    semantic, method_value, hint = classified
+    semantic, method_value, hint = classified   # api_call | query_statement | db_method_call
     endpoint = first_string_arg if semantic == "api_call" else None
-Statement(..., semanticType=semantic, method=method_value, endpoint=endpoint, dataAccessHint=hint, ...)
+    Statement(..., semanticType=semantic, method=method_value, endpoint=endpoint, dataAccessHint=hint, ...)
+elif text_has_query(statement_text):             # fallback: a raw SQL string literal in the stmt
+    Statement(..., semanticType="query_statement", ...)
 ```
 (See `parsers/python/statements.py` / `parsers/typescript/statements.py`.) Statement
-capture is gated by `--capture-statements`.
+capture is gated by `--capture-statements` (spec A4) — see Step 5b.
+
+### Step 5b — Gate route/db/event/query statements behind `--capture-statements`
+Structural statements (control flow, declarations) always emit, but **semantic
+statements — routes, api_call/db_method_call/query_statement, events — must only be
+emitted when `ctx.capture_statements` is True** (spec A4). The base extractors already
+thread `capture = ctx.capture_statements` into `extract_statements`; **framework parsers
+must gate their own detection the same way** (see the framework example in §4).
 
 ### Step 6 — `build_index` (only if cross-file resolution is needed)
 If imports/symbols need repo-wide info (tsconfig aliases, Java FQCN, route mounts):
@@ -203,18 +215,48 @@ class NestJSParser(TypeScriptParser):
         return b"@nestjs/" in source
 
     def parse_file(self, ctx):
-        root = parse_source("typescript", ctx.source, ctx.parse_timeout_micros).root_node
+        grammar = "tsx" if ctx.path.endswith((".tsx", ".jsx")) else "typescript"
+        root = parse_source(grammar, ctx.source, ctx.parse_timeout_micros).root_node
         record = self.extract(root, ctx)                 # inherited base extraction, ONE parse
-        routes = detect_nest_routes(root, ctx.source, ctx.path,
-                                    seen_ids={s.id for s in record.statements})
-        if routes:
-            record.statements.extend(routes)
-            record.framework = "nestjs"
+        if ctx.capture_statements:                       # routes are statements — gated (spec A4)
+            routes = detect_nest_routes(root, ctx.source, ctx.path,
+                                        seen_ids={s.id for s in record.statements})
+            if routes:
+                record.statements.extend(routes)
+                record.framework = "nestjs"
         return record
 ```
 Framework detection emits route/db/event `Statement`s whose `parentId` is computed
 with the **same** `emit.function_id(...)` the base parser used (so they attach to the
-right handler) — this is why deterministic ids matter.
+right handler) — this is why deterministic ids matter. **Route/event/query detection
+MUST be gated behind `ctx.capture_statements`** (spec A4) — never emit them
+unconditionally.
+
+### Two detection idioms
+
+- **AST-walk** (FastAPI, NestJS, Express, Angular, React, Vert.x): the detector walks
+  `root` to find call/decorator patterns. Use when the signal isn't already on the
+  extracted record (call-based routing, event bus, JSX) — pass `root`, `source`, `path`,
+  and the current `seen_ids`.
+- **Off-the-record** (Spring Boot, JAX-RS): the base Java parser already captured
+  annotations onto `Class.decorators` / `Function.decorators` / `Parameter.decorators`,
+  so the detector reads the **`FileRecord`** directly — **no second AST walk**. Prefer
+  this for annotation-driven frameworks; it's simpler and can't drift from the base
+  extraction. Example:
+  ```python
+  def parse_file(self, ctx):
+      root = parse_source("java", ctx.source, ctx.parse_timeout_micros).root_node
+      record = self.extract(root, ctx)
+      if ctx.capture_statements:
+          routes = detect_spring_routes(record)   # reads record.classes / record.functions
+          if routes:
+              record.statements.extend(routes)
+              record.framework = "spring"
+      return record
+  ```
+  Route attributes (`guards`/`requestDTO`/`responseDTO`/`isRegex`/`authRequired`, spec C5)
+  are populated here from the captured decorators/params/`returnType` — see
+  `java_springboot/routes.py`, `java_jaxrs/routes.py`, `typescript_nestjs/routes.py`.
 
 ### Selection: one parser per file
 A file is parsed by **exactly one** parser. `registry.select(path, source)` picks the
@@ -236,12 +278,15 @@ highest-`priority` parser whose `claims(path, source)` is True; the base languag
       `statement_types` (from `mappings.py`), `frameworks`.
 - [ ] All ids via `emit.*` + `disambiguate`; one `seen_ids` per file.
 - [ ] Statements **flat** on `FileRecord.statements`, linked by `parentId`.
+- [ ] Route/event/query/api/db (semantic) statements gated behind `ctx.capture_statements` (spec A4).
 - [ ] Imports resolved to repo-relative paths where possible (drives `IMPORTS`).
-- [ ] Shared `classify_call` wired for api/db (don't reimplement).
+- [ ] Shared `classify_call(callee, method, arg)` wired for api/db/query (don't reimplement); pass the string arg.
 - [ ] `FileRecord.language` = base language string.
 - [ ] `PARSERS` exported from `__init__.py`.
 - [ ] `ignore.txt` / `include.txt` for a language parser.
 - [ ] `build_index` only if cross-file resolution is needed (return a **picklable** index).
 - [ ] Framework parser subclasses the base, sets `priority` + `claims` (cheap content
       sniff), does full extraction + detection in a single parse — no duplicated code.
+      Annotation-driven frameworks detect **off the record** (read `record.classes` /
+      `record.functions`), not by re-walking the AST.
 - [ ] Unit tests + schema validation + real-repo dogfood; `uv run pytest` green.
