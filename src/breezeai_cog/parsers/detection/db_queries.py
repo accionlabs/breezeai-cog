@@ -78,6 +78,17 @@ _RECEIVER_HINTS = (
     ("session", "sqlalchemy"), ("queryset", "django"), ("objects", "django"),
 )
 
+# Receiver terminal-segment suffixes that are clearly NOT a database: a generic ORM verb
+# (``save``/``delete``/``create``…) on one of these is app logic, not data access, so we
+# drop the weak ``"orm"`` fallback for them. Matched on the receiver's final segment by
+# suffix (``formState`` -> ``state``, ``userCache`` -> ``cache``) — deliberately narrow to
+# avoid suppressing real ORM saves (``user.save``, ``userStore.save`` are NOT listed). A
+# distinctive method or a positive receiver hint (checked first) always overrides this.
+_NON_DB_RECEIVERS = (
+    "cache", "logger", "emitter", "eventbus", "eventemitter", "state",
+    "buffer", "console", "clipboard", "factory", "list", "items", "queue", "stack",
+)
+
 # Django queryset verbs (ambiguous alone -> require a queryset-ish receiver).
 _DJANGO_VERBS = {"filter", "get", "all", "exclude", "annotate", "values"}
 
@@ -92,9 +103,12 @@ def match_db(callee: str, method: str) -> str | None:
     if m in _DISTINCTIVE:
         return _DISTINCTIVE[m]
     if m in _GENERIC:
-        for needle, hint in _RECEIVER_HINTS:
+        for needle, hint in _RECEIVER_HINTS:  # positive vendor hint wins
             if needle in low:
                 return hint
+        receiver = low.rsplit(".", 1)[0].rsplit(".", 1)[-1] if "." in low else ""
+        if receiver and any(receiver.endswith(s) for s in _NON_DB_RECEIVERS):
+            return None  # a cache/collection/UI-state/etc. receiver — not data access
         return "orm"
     if m in _DJANGO_VERBS and ("objects" in low or "queryset" in low):
         return "django"

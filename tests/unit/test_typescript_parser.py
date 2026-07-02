@@ -172,7 +172,7 @@ def test_multi_hit_emits_synthetic(tmp_path) -> None:
     # #4: one statement with an api call AND a db call yields both (base + synthetic),
     # each single-valued, at the same span.
     p = tmp_path / "multi.ts"
-    p.write_text("function f(){ const d = http.get('/a').then(r => cache.save(r)); }")
+    p.write_text("function f(){ const d = http.get('/a').then(r => auditRepo.save(r)); }")
     ctx = ParseContext(path="multi.ts", abs_path=p, source=p.read_bytes(),
                        repo_root=tmp_path, capture_statements=True)
     rec = TypeScriptParser().parse_file(ctx)

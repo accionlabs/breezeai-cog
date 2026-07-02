@@ -134,3 +134,19 @@ def test_query_statement_detection() -> None:
     assert text_has_query("const q = 'CREATE VECTOR INDEX idx FOR (n:Doc) ON n.embedding';")
     # still not fooled by natural language beginning with CREATE
     assert classify_call("res.send", "send", "Create a new vector for me") is None
+
+
+def test_generic_verb_non_db_receiver_guarded() -> None:
+    # #8: a generic ORM verb (save/delete/create/remove) on a clearly non-DB receiver
+    # (cache/collection/UI-state/emitter/factory) is NOT data access.
+    for callee, method in [
+        ("formState.save", "save"), ("cache.delete", "delete"),
+        ("emitter.remove", "remove"), ("figureFactory.create", "create"),
+        ("cartItems.remove", "remove"), ("this.userCache.delete", "delete"),
+    ]:
+        assert classify_call(callee, method) is None, callee
+    # true positives preserved: explicit repo/session, plain document saves, distinctive methods
+    assert classify_call("orderRepo.save", "save") == ("db_method_call", "save", "typeorm")
+    assert classify_call("user.save", "save") == ("db_method_call", "save", "orm")
+    assert classify_call("userStore.save", "save") == ("db_method_call", "save", "orm")
+    assert classify_call("redisCache.hget", "hget") == ("db_method_call", "hget", "redis")
