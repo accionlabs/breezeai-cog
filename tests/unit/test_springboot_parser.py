@@ -113,3 +113,76 @@ def test_claims_selects_spring() -> None:
     assert registry.select("X.java", spring).name == "java-springboot"
     assert registry.select("X.java", b"package x;").name == "java"  # plain Java -> base
     registry.clear()
+
+
+_FN_SRC = b'''package com.example;
+import org.springframework.web.servlet.function.RouterFunction;
+import org.springframework.web.servlet.function.ServerResponse;
+import static org.springframework.web.servlet.function.RequestPredicates.GET;
+import static org.springframework.web.servlet.function.RequestPredicates.POST;
+import static org.springframework.web.servlet.function.RequestPredicates.contentType;
+import static org.springframework.web.servlet.function.RequestPredicates.accept;
+import static org.springframework.web.servlet.function.RouterFunctions.route;
+
+public class RouterConfig {
+    public RouterFunction<ServerResponse> productRoutes(ProductHandler h) {
+        return route(GET("/api/products"), h::list)
+                .andRoute(POST("/api/products").and(contentType(JSON)), h::create)
+                .andRoute(GET("/api/products/{id}"), h::getById);
+    }
+    public RouterFunction<ServerResponse> catalogRoutes(ProductHandler h) {
+        return route()
+                .nest(accept(JSON), b -> b
+                        .GET("/api/v2/catalog", h::list)
+                        .POST("/api/v2/catalog", h::create))
+                .build();
+    }
+}
+'''
+
+
+def test_functional_router_routes(tmp_path) -> None:
+    # #2: WebMvc.fn functional routing — static route()/andRoute() + nested builder DSL.
+    rec = _parse(tmp_path, _FN_SRC, "RouterConfig.java")
+    got = {(s.method, s.endpoint, s.handler) for s in rec.statements if s.semanticType == "route"}
+    assert ("GET", "/api/products", "list") in got
+    assert ("POST", "/api/products", "create") in got          # composed .and(contentType)
+    assert ("GET", "/api/products/{id}", "getById") in got
+    assert ("GET", "/api/v2/catalog", "list") in got           # nested builder form
+    assert ("POST", "/api/v2/catalog", "create") in got
+    assert all(s.framework == "spring" for s in rec.statements if s.semanticType == "route")
+
+
+def test_functional_routing_gated(tmp_path) -> None:
+    # A Spring file without RouterFunction must not trigger the functional walk.
+    src = b"package x; import org.springframework.stereotype.Service;\n@Service class S { void GET(String p){} }"
+    rec = _parse(tmp_path, src, "S.java")
+    assert [s for s in rec.statements if s.semanticType == "route"] == []
+
+
+_ARRAY_SRC = b'''package com.example;
+import org.springframework.web.bind.annotation.RestController;
+import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.GetMapping;
+
+@RestController
+@RequestMapping("/orders")
+public class ReportController {
+    @GetMapping({"/report.*", "/report/{fmt}"})
+    public String report() { return "r"; }
+
+    @GetMapping("/x/{id:[0-9]{1,3}}")
+    public String ranged() { return "x"; }
+}
+'''
+
+
+def test_array_path_mapping_splits(tmp_path) -> None:
+    # #4: @GetMapping({"/a", "/b"}) -> one route per path; a single regex path with a
+    # comma ({1,3} quantifier) is NOT split.
+    rec = _parse(tmp_path, _ARRAY_SRC, "ReportController.java")
+    eps = {(s.method, s.endpoint) for s in rec.statements if s.semanticType == "route"}
+    assert ("GET", "/orders/report.*") in eps
+    assert ("GET", "/orders/report/{fmt}") in eps
+    assert ("GET", "/orders/x/{id:[0-9]{1,3}}") in eps   # single path, comma preserved
+    assert not any('{"' in ep or ", " in ep for _, ep in eps)  # no raw array literal leaked

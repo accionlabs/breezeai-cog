@@ -30,14 +30,25 @@ def spring_version(record: FileRecord) -> int | None:
     return None
 
 
-def _path_arg(args: list[str]) -> str:
+def _split_paths(raw_value: str) -> list[str]:
+    """A mapping's path value → the path(s). Handles the brace-array form
+    ``{"/a", "/b"}`` (multiple paths) vs a single quoted path (never comma-split — a
+    regex path variable like ``{id:\\d{1,3}}`` legitimately contains a comma)."""
+    s = raw_value.strip()
+    if s.startswith("{"):  # array literal: {"/a", "/b"}
+        parts = [p.strip().strip('"').strip() for p in s.strip("{}").split(",")]
+        return [p for p in parts if p] or [""]
+    return [s.strip('"')]
+
+
+def _paths_arg(args: list[str]) -> list[str]:
     for raw in args:
         s = raw.strip()
         if "=" in s and (s.startswith("value") or s.startswith("path")):
-            return s.split("=", 1)[1].strip().strip("{}").strip().strip('"')
+            return _split_paths(s.split("=", 1)[1])
         if "=" not in s:
-            return s.strip('"')
-    return ""
+            return _split_paths(s)
+    return [""]
 
 
 def _request_method(args: list[str]) -> str | None:
@@ -53,16 +64,18 @@ def _request_method(args: list[str]) -> str | None:
 def _mapping_path(decorators: list[Decorator]) -> str:
     for d in decorators:
         if d.name == "RequestMapping":
-            return _path_arg(d.args)
+            return _paths_arg(d.args)[0]  # class-level base — a single prefix
     return ""
 
 
-def _route_of(dec: Decorator) -> tuple[str | None, str]:
+def _routes_of(dec: Decorator) -> tuple[str | None, list[str]]:
+    """(HTTP verb, path(s)) for a mapping annotation — a mapping may declare several
+    paths via the array form ``@GetMapping({"/a", "/b"})``, each its own route."""
     if dec.name in _METHOD_MAPPINGS:
-        return _METHOD_MAPPINGS[dec.name], _path_arg(dec.args)
+        return _METHOD_MAPPINGS[dec.name], _paths_arg(dec.args)
     if dec.name == "RequestMapping":
-        return (_request_method(dec.args) or "GET"), _path_arg(dec.args)
-    return None, ""
+        return (_request_method(dec.args) or "GET"), _paths_arg(dec.args)
+    return None, []
 
 
 def _join(base: str, sub: str) -> str:
@@ -93,26 +106,27 @@ def detect_spring_routes(record: FileRecord) -> list[Statement]:
         if base is None:
             continue
         for dec in fn.decorators:
-            verb, sub = _route_of(dec)
+            verb, subs = _routes_of(dec)
             if verb is None:
                 continue
-            routes.append(Statement(
-                id=disambiguate(statement_id(fn.path, fn.startLine, 0), seen),
-                parentId=fn.id,
-                nodeType="annotation",
-                semanticType="route",
-                text=f"@{dec.name}",
-                method=verb,
-                endpoint=_join(base, sub),
-                framework="spring",
-                handler=fn.name,
-                handlerLine=fn.startLine,
-                routeKind="route",
-                isRegex=False,
-                requestDTO=_request_dto(fn),
-                responseDTO=fn.returnType or None,
-                startLine=fn.startLine,
-                endLine=fn.endLine,
-                path=fn.path,
-            ))
+            for sub in subs:  # the array form @GetMapping({"/a","/b"}) yields one route each
+                routes.append(Statement(
+                    id=disambiguate(statement_id(fn.path, fn.startLine, 0), seen),
+                    parentId=fn.id,
+                    nodeType="annotation",
+                    semanticType="route",
+                    text=f"@{dec.name}",
+                    method=verb,
+                    endpoint=_join(base, sub),
+                    framework="spring",
+                    handler=fn.name,
+                    handlerLine=fn.startLine,
+                    routeKind="route",
+                    isRegex=False,
+                    requestDTO=_request_dto(fn),
+                    responseDTO=fn.returnType or None,
+                    startLine=fn.startLine,
+                    endLine=fn.endLine,
+                    path=fn.path,
+                ))
     return routes
