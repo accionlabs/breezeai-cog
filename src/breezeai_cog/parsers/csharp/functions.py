@@ -12,7 +12,7 @@ from ...emit import disambiguate, function_id
 from ...schemas import Call, Decorator, Function, Parameter, Statement
 from ..callresolve import CallResolver, noop_resolver
 from ..treesitter import line_span, node_text
-from .statements import extract_statements
+from .statements import extract_statements, method_name
 
 _VISIBILITY = {"public", "private", "protected", "internal", "file"}
 _METHOD_TYPES = ("method_declaration", "constructor_declaration", "destructor_declaration",
@@ -81,9 +81,9 @@ def _callee(func: Node, source: bytes) -> tuple[str, str | None]:
     if func.type == "member_access_expression":
         name_node = func.child_by_field_name("name")
         obj = func.child_by_field_name("expression")
-        name = node_text(name_node, source) if name_node is not None else ""
+        name = method_name(name_node, source)
         return name, (node_text(obj, source) if obj is not None else None)
-    return node_text(func, source), None
+    return method_name(func, source), None
 
 
 def _calls(body: Node | None, source: bytes, resolve: CallResolver = noop_resolver) -> list[Call]:

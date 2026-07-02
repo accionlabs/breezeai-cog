@@ -26,6 +26,19 @@ def _name_of(node: Node, source: bytes) -> str | None:
     return None
 
 
+def method_name(name_node: Node | None, source: bytes) -> str:
+    """Method name from an invocation's ``function``/``name`` node, dropping generic
+    type arguments (``GetById<Order>`` -> ``GetById``) so db/api classification and
+    call-path matching key on the bare name."""
+    if name_node is None:
+        return ""
+    if name_node.type == "generic_name":
+        ident = next((c for c in name_node.named_children if c.type == "identifier"), None)
+        if ident is not None:
+            return node_text(ident, source)
+    return node_text(name_node, source)
+
+
 def _find_invocation(node: Node) -> Node | None:
     if node.type == "invocation_expression":
         return node
@@ -48,10 +61,10 @@ def _call_info(node: Node, source: bytes) -> tuple[str, str, str | None] | None:
     if func.type == "member_access_expression":
         name_node = func.child_by_field_name("name")
         obj = func.child_by_field_name("expression")
-        method = node_text(name_node, source) if name_node is not None else ""
+        method = method_name(name_node, source)
         callee = f"{node_text(obj, source)}.{method}" if obj is not None else method
     else:
-        method = node_text(func, source)
+        method = method_name(func, source)
         callee = method
     first_str = None
     args = call.child_by_field_name("arguments")

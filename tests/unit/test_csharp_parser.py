@@ -99,6 +99,39 @@ def test_statements_and_detection(tmp_path) -> None:
     assert all(s.parentId in fn_ids | cls_ids for s in rec.statements)
 
 
+GENERIC_SRC = b'''
+namespace Acme
+{
+    public class Repo
+    {
+        public Order Load(long id)
+        {
+            var a = _ctx.GetById<Order>(id);
+            var b = Build<Widget>();
+            return a;
+        }
+    }
+}
+'''
+
+
+def test_generic_method_call_strips_type_args(tmp_path) -> None:
+    # Regression: `Foo<T>()` must resolve to the bare name `Foo` (not `Foo<T>`) on
+    # both CALLS edges and captured statements, else db/api classification and
+    # call-path matching miss every generic invocation.
+    p = tmp_path / REL
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(GENERIC_SRC.decode())
+    ctx = ParseContext(path=REL, abs_path=p, source=GENERIC_SRC, repo_root=tmp_path,
+                       capture_statements=True)
+    rec = CSharpParser().parse_file(ctx)
+
+    load = next(f for f in rec.functions if f.name == "Load")
+    call_names = [c.name for c in load.calls]
+    assert "GetById" in call_names and "Build" in call_names
+    assert not any("<" in n for n in call_names)
+
+
 def test_output_validates(tmp_path) -> None:
     rec = _parse(tmp_path, capture=True)
     errors = list(Draft202012Validator(FileRecord.model_json_schema(by_alias=True))
