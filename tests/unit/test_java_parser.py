@@ -122,3 +122,15 @@ def test_inline_lambda_body_captured(tmp_path) -> None:
     assert {"save", "info"} <= {c.name for c in m.calls}
     db = [s for s in rec.statements if s.semanticType == "db_method_call"]
     assert any("repo.save" in s.text for s in db)
+
+
+def test_control_statement_not_mislabeled(tmp_path) -> None:
+    # #4/smear: a db call nested in an if/for body must not tag the enclosing control statements.
+    src = ("class C { void m(java.util.List<Order> o){ if(o.size()>0){ for(Order x: o){ repo.save(x); } } } }").encode()
+    p = tmp_path / "C.java"
+    p.write_text(src.decode())
+    ctx = ParseContext(path="C.java", abs_path=p, source=src, repo_root=tmp_path, capture_statements=True)
+    rec = JavaParser().parse_file(ctx)
+    control = [s for s in rec.statements if s.nodeType in ("if_statement", "enhanced_for_statement", "for_statement")]
+    assert control and all(s.semanticType is None for s in control)
+    assert any(s.semanticType == "db_method_call" and s.method == "save" for s in rec.statements)

@@ -155,3 +155,38 @@ def test_top_level_arrow_not_double_emitted(tmp_path) -> None:
     rec = TypeScriptParser().parse_file(ctx)
     returns = [s for s in rec.statements if s.nodeType == "return_statement" and "doTop" in s.text]
     assert len(returns) == 1
+
+
+def test_chain_inner_call_classified(tmp_path) -> None:
+    # #4: a db method that is NOT the outermost call in a chain must still be detected.
+    p = tmp_path / "chain.ts"
+    p.write_text("function f(repo){ const rows = repo.createQueryBuilder('o').where('x').getMany(); }")
+    ctx = ParseContext(path="chain.ts", abs_path=p, source=p.read_bytes(),
+                       repo_root=tmp_path, capture_statements=True)
+    rec = TypeScriptParser().parse_file(ctx)
+    db = [s for s in rec.statements if s.semanticType == "db_method_call"]
+    assert any(s.method == "createQueryBuilder" and s.dataAccessHint == "typeorm" for s in db)
+
+
+def test_multi_hit_emits_synthetic(tmp_path) -> None:
+    # #4: one statement with an api call AND a db call yields both (base + synthetic),
+    # each single-valued, at the same span.
+    p = tmp_path / "multi.ts"
+    p.write_text("function f(){ const d = http.get('/a').then(r => cache.save(r)); }")
+    ctx = ParseContext(path="multi.ts", abs_path=p, source=p.read_bytes(),
+                       repo_root=tmp_path, capture_statements=True)
+    rec = TypeScriptParser().parse_file(ctx)
+    kinds = {s.semanticType for s in rec.statements if s.semanticType}
+    assert {"api_call", "db_method_call"} <= kinds
+
+
+def test_control_statement_not_mislabeled(tmp_path) -> None:
+    # #4/smear: a db call nested in an if/for body must not tag the if/for themselves.
+    p = tmp_path / "smear.ts"
+    p.write_text("function h(o){ if(o.length>0){ for(const x of o){ repo.save(x); } } }")
+    ctx = ParseContext(path="smear.ts", abs_path=p, source=p.read_bytes(),
+                       repo_root=tmp_path, capture_statements=True)
+    rec = TypeScriptParser().parse_file(ctx)
+    control = [s for s in rec.statements if s.nodeType in ("if_statement", "for_in_statement", "for_statement")]
+    assert control and all(s.semanticType is None for s in control)
+    assert any(s.semanticType == "db_method_call" for s in rec.statements)

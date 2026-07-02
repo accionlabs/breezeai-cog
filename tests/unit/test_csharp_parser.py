@@ -159,3 +159,17 @@ def test_output_validates(tmp_path) -> None:
     errors = list(Draft202012Validator(FileRecord.model_json_schema(by_alias=True))
                   .iter_errors(json.loads(to_line(rec))))
     assert not errors, errors
+
+
+def test_chain_multi_hit(tmp_path) -> None:
+    # #4: chained db calls each classified — base carries the first hit, a synthetic
+    # same-span record carries the second.
+    src = "class C { void M(Repo repo){ var r = repo.CreateQueryBuilder().Where(x).ToListAsync(); } }"
+    p = tmp_path / REL
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(src)
+    ctx = ParseContext(path=REL, abs_path=p, source=src.encode(), repo_root=tmp_path,
+                       capture_statements=True)
+    rec = CSharpParser().parse_file(ctx)
+    methods = {s.method for s in rec.statements if s.semanticType == "db_method_call"}
+    assert {"CreateQueryBuilder", "ToListAsync"} <= methods
