@@ -15,7 +15,9 @@ from .routes import detect_loopback_routes
 
 class LoopBackParser(TypeScriptParser):
     name = "typescript-loopback"
-    priority = 10
+    # Above ExpressParser (priority 10): LoopBack is built on Express and may import it;
+    # a ``@loopback/`` signature is decisive, so this must win the selection.
+    priority = 20
     frameworks = ["loopback"]
 
     def claims(self, path: str, source: bytes) -> bool:

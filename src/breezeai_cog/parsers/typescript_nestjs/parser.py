@@ -15,7 +15,10 @@ from .routes import detect_nest_routes
 
 class NestJSParser(TypeScriptParser):
     name = "typescript-nestjs"
-    priority = 10
+    # Above ExpressParser (priority 10): NestJS is built on Express and its controllers
+    # routinely ``import { Request } from 'express'``, which the Express parser also
+    # claims. A ``@nestjs/`` signature is decisive, so this must win the selection.
+    priority = 20
     frameworks = ["nestjs"]
 
     def claims(self, path: str, source: bytes) -> bool:

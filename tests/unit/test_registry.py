@@ -90,3 +90,15 @@ def test_config_filename_matching() -> None:
     assert registry.select("config/app.json", b"") is not None
     assert registry.select("svc/.env", b"") is not None
     assert registry.select("main.go", b"") is None
+
+
+def test_specific_framework_outranks_express() -> None:
+    # A NestJS/LoopBack controller that also imports express must be parsed by the
+    # specific framework, not the base Express parser (both claim; priority breaks the tie).
+    registry.discover_builtin()
+    nest = b"import { Controller, Get } from '@nestjs/common';\nimport { Request } from 'express';\n"
+    assert registry.select("orders.controller.ts", nest).name == "typescript-nestjs"
+    lb = b"import { get } from '@loopback/rest';\nimport { Request } from 'express';\n"
+    assert registry.select("order.controller.ts", lb).name == "typescript-loopback"
+    # a pure express file still selects the express parser
+    assert registry.select("app.ts", b"import express from 'express';\n").name == "typescript-express"
