@@ -83,8 +83,26 @@ def test_top_level_function(tmp_path) -> None:
     top = next(f for f in rec.functions if f.name == "top")
     assert top.type == "function" and top.returnType == "str"
     assert [p.name for p in top.params] == ["a", "b", "*args", "**kw"]
+    by_name = {p.name: p for p in top.params}
+    assert by_name["b"].default == '"x"'  # default-value expr captured
+    assert by_name["a"].default is None  # no default -> None (dropped by exclude_none)
     assert "helper" in [c.name for c in top.calls]
     assert top.id.endswith("@21") or "@" in top.id  # position-suffixed id
+
+
+def test_param_default_captures_depends(tmp_path) -> None:
+    src = (b"from fastapi import Depends\n"
+           b"def get_db(): ...\n"
+           b"def h(db=Depends(get_db), q: int = 0): return db\n")
+    abs_path = tmp_path / "h.py"
+    abs_path.write_bytes(src)
+    ctx = ParseContext(path="h.py", abs_path=abs_path, source=src, repo_root=tmp_path,
+                       capture_statements=True)
+    rec = PythonParser().parse_file(ctx)
+    h = next(f for f in rec.functions if f.name == "h")
+    by_name = {p.name: p for p in h.params}
+    assert by_name["db"].default == "Depends(get_db)"
+    assert by_name["q"].type == "int" and by_name["q"].default == "0"
 
 
 def test_statements_are_flat_and_gated(tmp_path) -> None:

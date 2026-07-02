@@ -73,6 +73,33 @@ def test_base_extraction_reused(tmp_path) -> None:
     assert rec.language == "python"  # framework parser keeps the base language
 
 
+API_ROUTE_SRC = b'''from fastapi import APIRouter
+
+router = APIRouter()
+
+
+@router.api_route("/items", methods=["GET", "POST"])
+def items():
+    return []
+
+
+@router.api_route("/health")
+def health():
+    return "ok"
+'''
+
+
+def test_api_route_emits_one_route_per_method(tmp_path) -> None:
+    p = tmp_path / "main.py"
+    p.write_text(API_ROUTE_SRC.decode())
+    ctx = ParseContext(path="main.py", abs_path=p, source=API_ROUTE_SRC, repo_root=tmp_path,
+                       capture_statements=True, text_truncation_limit=1000)
+    rec = FastAPIParser().parse_file(ctx)
+    routes = {(r.method, r.endpoint) for r in rec.statements if r.semanticType == "route"}
+    # methods=[...] -> one route per verb; bare api_route defaults to GET
+    assert routes == {("GET", "/items"), ("POST", "/items"), ("GET", "/health")}
+
+
 def test_output_validates(tmp_path) -> None:
     rec = _parse(tmp_path, capture=True)
     schema = FileRecord.model_json_schema(by_alias=True)

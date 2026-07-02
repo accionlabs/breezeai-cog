@@ -30,6 +30,7 @@ JUMP = {
 DECLARATIONS = {
     "local_declaration_statement",
     "field_declaration",
+    "property_declaration",  # `public int Count { get; set; }`
     "expression_statement",
     "local_function_statement",
 }

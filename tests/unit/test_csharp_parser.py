@@ -132,6 +132,28 @@ def test_generic_method_call_strips_type_args(tmp_path) -> None:
     assert not any("<" in n for n in call_names)
 
 
+PROPERTY_SRC = b'''
+public class Model
+{
+    public int Count { get; set; }
+    public string Name => _n;
+    private string _n;
+    public void M() { var x = 1; }
+}
+'''
+
+
+def test_property_declaration_captured(tmp_path) -> None:
+    p = tmp_path / REL
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(PROPERTY_SRC.decode())
+    ctx = ParseContext(path=REL, abs_path=p, source=PROPERTY_SRC, repo_root=tmp_path,
+                       capture_statements=True)
+    rec = CSharpParser().parse_file(ctx)
+    props = [s.name for s in rec.statements if s.nodeType == "property_declaration"]
+    assert props == ["Count", "Name"]
+
+
 def test_output_validates(tmp_path) -> None:
     rec = _parse(tmp_path, capture=True)
     errors = list(Draft202012Validator(FileRecord.model_json_schema(by_alias=True))

@@ -74,6 +74,45 @@ def test_config_routes_detected_with_lazy_mount(tmp_path) -> None:
     assert rec.framework == "react"
 
 
+INDEX_JSX_SRC = b'''import { Routes, Route } from 'react-router-dom';
+
+export function App() {
+  return (
+    <Routes>
+      <Route path="/" element={<Layout/>}>
+        <Route index element={<Home/>} />
+        <Route path="about" element={<About/>} />
+      </Route>
+    </Routes>
+  );
+}
+'''
+
+INDEX_CONFIG_SRC = b'''import { createHashRouter } from 'react-router-dom';
+
+export const router = createHashRouter([
+  { path: '/', element: <Layout/>, children: [
+    { index: true, element: <Home/> },
+    { path: 'about', element: <About/> },
+  ]},
+]);
+'''
+
+
+def test_jsx_index_route_captured(tmp_path) -> None:
+    rec = _parse(tmp_path, INDEX_JSX_SRC, "App.tsx")
+    routes = [(s.endpoint, s.handler) for s in rec.statements if s.semanticType == "route"]
+    # index route renders at the parent path ("/") alongside the layout route
+    assert ("/", "Home") in routes and ("/", "Layout") in routes and ("/about", "About") in routes
+
+
+def test_config_index_route_captured(tmp_path) -> None:
+    # createHashRouter is handled like createBrowserRouter (config-object walker)
+    rec = _parse(tmp_path, INDEX_CONFIG_SRC, "router.tsx")
+    routes = [(s.endpoint, s.handler) for s in rec.statements if s.semanticType == "route"]
+    assert ("/", "Home") in routes and ("/", "Layout") in routes and ("/about", "About") in routes
+
+
 def test_base_extraction_reused(tmp_path) -> None:
     rec = _parse(tmp_path, JSX_SRC, "App.tsx")
     assert "App" in {f.name for f in rec.functions}

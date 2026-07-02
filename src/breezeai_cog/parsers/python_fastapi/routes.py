@@ -32,40 +32,75 @@ def _endpoint(call: Node, source: bytes) -> str | None:
     return None
 
 
-def _route(dec: Node, fdef: Node, source: bytes, path: str, class_name: str | None,
-           seen_ids: set[str]) -> Statement | None:
+def _methods_kwarg(call: Node, source: bytes) -> list[str]:
+    """HTTP verbs from an ``api_route(..., methods=["GET", "POST"])`` keyword arg."""
+    args = call.child_by_field_name("arguments")
+    if args is None:
+        return []
+    for arg in args.named_children:
+        if arg.type != "keyword_argument":
+            continue
+        key = arg.child_by_field_name("name")
+        if key is None or node_text(key, source) != "methods":
+            continue
+        val = arg.child_by_field_name("value")
+        if val is None or val.type not in ("list", "tuple", "set"):
+            return []
+        out = []
+        for el in val.named_children:
+            if el.type == "string":
+                content = next((c for c in el.named_children if c.type == "string_content"), None)
+                if content is not None:
+                    out.append(node_text(content, source).upper())
+        return out
+    return []
+
+
+def _routes(dec: Node, fdef: Node, source: bytes, path: str, class_name: str | None,
+            seen_ids: set[str]) -> list[Statement]:
     call = dec.named_children[0] if dec.named_children else None
     if call is None or call.type != "call":
-        return None
+        return []
     func = call.child_by_field_name("function")
     if func is None or func.type != "attribute":  # need X.verb(...)
-        return None
+        return []
     verb_node = func.named_children[-1] if func.named_children else None
     if verb_node is None:
-        return None
+        return []
     verb = node_text(verb_node, source).lower()
-    if verb not in _VERBS:
-        return None
+    if verb in _VERBS:
+        methods = [verb.upper()]
+    elif verb == "api_route":
+        # generic `@router.api_route("/x", methods=[...])` -> one route per verb (GET default)
+        methods = _methods_kwarg(call, source) or ["GET"]
+    else:
+        return []
 
     name = _name(fdef, source)
     handler_line = fdef.start_point[0] + 1
     start_line, start_col = dec.start_point[0] + 1, dec.start_point[1]
-    return Statement(
-        id=disambiguate(statement_id(path, start_line, start_col), seen_ids),
-        parentId=function_id(path, name, handler_line, class_name=class_name),
-        nodeType="decorator",
-        semanticType="route",
-        text=node_text(dec, source).split("\n", 1)[0],
-        method=verb.upper(),
-        endpoint=_endpoint(call, source),
-        framework="fastapi",
-        handler=name,
-        handlerLine=handler_line,
-        routeKind="ws" if verb == "websocket" else "route",
-        startLine=start_line,
-        endLine=dec.end_point[0] + 1,
-        path=path,
-    )
+    endpoint = _endpoint(call, source)
+    text = node_text(dec, source).split("\n", 1)[0]
+    parent = function_id(path, name, handler_line, class_name=class_name)
+    return [
+        Statement(
+            id=disambiguate(statement_id(path, start_line, start_col), seen_ids),
+            parentId=parent,
+            nodeType="decorator",
+            semanticType="route",
+            text=text,
+            method=m,
+            endpoint=endpoint,
+            framework="fastapi",
+            handler=name,
+            handlerLine=handler_line,
+            routeKind="ws" if m == "WEBSOCKET" else "route",
+            startLine=start_line,
+            endLine=dec.end_point[0] + 1,
+            path=path,
+        )
+        for m in methods
+    ]
 
 
 def detect_routes(root: Node, source: bytes, path: str, *, seen_ids: set[str]) -> list[Statement]:
@@ -87,9 +122,7 @@ def detect_routes(root: Node, source: bytes, path: str, *, seen_ids: set[str]) -
                         walk(body, _name(cdef, source))
                 elif fdef is not None:
                     for dec in (c for c in child.named_children if c.type == "decorator"):
-                        route = _route(dec, fdef, source, path, class_name, seen_ids)
-                        if route is not None:
-                            routes.append(route)
+                        routes.extend(_routes(dec, fdef, source, path, class_name, seen_ids))
                     body = fdef.child_by_field_name("body")
                     if body is not None:
                         walk(body, class_name)

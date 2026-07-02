@@ -20,6 +20,11 @@ def _name_of(node: Node, source: bytes) -> str | None:
             name = decl.child_by_field_name("name")
             if name is not None and name.type == "identifier":
                 return node_text(name, source)
+    elif node.type in ("type_alias_declaration", "public_field_definition", "field_definition"):
+        # `type X = …` -> X ;  class field `count = 0` -> count
+        name = node.child_by_field_name("name")
+        if name is not None:
+            return node_text(name, source)
     return None
 
 

@@ -75,10 +75,11 @@ def _jsx_attrs(el: Node, source: bytes) -> dict[str, Node]:
 
 def _process_jsx(el: Node, prefix: str, source: bytes, path: str, seen: set[str], routes: list[Statement]) -> None:
     attrs = _jsx_attrs(el, source)
-    sub = _string_val(attrs.get("path"), source) if "path" in attrs else ""
-    full = _join(prefix, sub)
     has_path = "path" in attrs
-    if has_path:
+    is_index = "index" in attrs and not has_path  # <Route index .../> -> parent's path
+    sub = _string_val(attrs.get("path"), source) if has_path else ""
+    full = _join(prefix, sub)
+    if has_path or is_index:
         sl, sc = el.start_point[0] + 1, el.start_point[1]
         lazy = "lazy" in attrs
         routes.append(Statement(
@@ -134,9 +135,10 @@ def _process_config(arr: Node, prefix: str, source: bytes, path: str, seen: set[
         if elem.type != "object":
             continue
         pairs = _pairs(elem, source)
-        if "path" not in pairs:
+        is_index = "index" in pairs and "path" not in pairs  # index route -> parent's path
+        if "path" not in pairs and not is_index:
             continue
-        full = _join(prefix, _string_val(pairs["path"], source))
+        full = _join(prefix, "" if is_index else _string_val(pairs["path"], source))
         lazy = "lazy" in pairs
         element = pairs.get("element") or pairs.get("Component") or pairs.get("component")
         sl, sc = elem.start_point[0] + 1, elem.start_point[1]

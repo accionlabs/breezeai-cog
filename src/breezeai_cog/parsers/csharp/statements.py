@@ -23,6 +23,10 @@ def _name_of(node: Node, source: bytes) -> str | None:
                     decl.named_children[0] if decl.named_children else None)
                 if nm is not None:
                     return node_text(nm, source)
+    elif node.type == "property_declaration":  # `public int Count { get; set; }` -> Count
+        nm = node.child_by_field_name("name")
+        if nm is not None:
+            return node_text(nm, source)
     return None
 
 

@@ -23,6 +23,9 @@ DECLARATIONS = {
     "lexical_declaration",
     "variable_declaration",
     "expression_statement",
+    "type_alias_declaration",  # TS `type X = …` (absent in JS grammar, so JS-safe)
+    "public_field_definition",  # TS class field  `count: number = 0`
+    "field_definition",  # JS class field  `count = 0`
 }
 
 EMIT_TYPES = CONTROL_FLOW | JUMP | DECLARATIONS

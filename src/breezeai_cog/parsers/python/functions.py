@@ -69,7 +69,10 @@ def extract_params(params_node: Node | None, source: bytes) -> list[Parameter]:
         elif child.type in ("typed_parameter", "default_parameter", "typed_default_parameter"):
             ident = next((c for c in child.named_children if c.type == "identifier"), None)
             name = node_text(ident, source) if ident is not None else node_text(child, source)
-            out.append(Parameter(name=name, type=type_str))
+            # default-value expr (e.g. FastAPI `Depends(get_db)`); None when no default
+            value_node = child.child_by_field_name("value")
+            default = node_text(value_node, source) if value_node is not None else None
+            out.append(Parameter(name=name, type=type_str, default=default))
         elif child.type in ("list_splat_pattern", "dictionary_splat_pattern"):
             ident = next((c for c in child.named_children if c.type == "identifier"), None)
             prefix = "*" if child.type == "list_splat_pattern" else "**"

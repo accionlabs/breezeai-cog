@@ -92,3 +92,30 @@ def test_output_validates(tmp_path) -> None:
     schema = FileRecord.model_json_schema(by_alias=True)
     errors = list(Draft202012Validator(schema).iter_errors(json.loads(to_line(rec))))
     assert not errors, errors
+
+
+def test_type_alias_captured(tmp_path) -> None:
+    p = tmp_path / "t.ts"
+    p.write_text("type UserId = string;\ntype Point = { x: number };\nconst z = 1;\n")
+    ctx = ParseContext(path="t.ts", abs_path=p, source=p.read_bytes(),
+                       repo_root=tmp_path, capture_statements=True)
+    rec = TypeScriptParser().parse_file(ctx)
+    aliases = [s.name for s in rec.statements if s.nodeType == "type_alias_declaration"]
+    assert aliases == ["UserId", "Point"]
+
+
+def test_class_fields_captured(tmp_path) -> None:
+    p = tmp_path / "c.ts"
+    p.write_text("class C { count: number = 0; private label = 'x';\n  greet(): number { return this.count; } }\n")
+    ctx = ParseContext(path="c.ts", abs_path=p, source=p.read_bytes(),
+                       repo_root=tmp_path, capture_statements=True)
+    rec = TypeScriptParser().parse_file(ctx)
+    fields = [s.name for s in rec.statements if s.nodeType in ("public_field_definition", "field_definition")]
+    assert fields == ["count", "label"]
+
+
+def test_module_extensions_matched() -> None:
+    # .mts/.cts (TS) and .mjs/.cjs (JS) module files must be claimed by the parser.
+    parser = TypeScriptParser()
+    for ext in (".ts", ".tsx", ".mts", ".cts", ".js", ".jsx", ".mjs", ".cjs"):
+        assert parser.matches("mod" + ext), ext

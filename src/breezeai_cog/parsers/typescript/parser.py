@@ -46,7 +46,7 @@ def _unwrap_export(node: Node) -> tuple[Node | None, list[Node]]:
 
 class TypeScriptParser(BaseParser):
     name = "typescript"
-    extensions = (".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs")
+    extensions = (".ts", ".tsx", ".mts", ".cts", ".js", ".jsx", ".mjs", ".cjs")
     schema_version = SCHEMA_VERSION
     statement_types = STATEMENT_TYPES
     frameworks = FRAMEWORKS

@@ -42,6 +42,13 @@ def test_classify_db_recall() -> None:
     assert classify_call("Model.findAndCountAll", "findAndCountAll") == \
         ("db_method_call", "findAndCountAll", "sequelize")
     assert classify_call("coll.bulkWrite", "bulkWrite") == ("db_method_call", "bulkWrite", "mongodb")
+    # Neo4j executes Cypher via session.run(...) / tx.run(...) — 'run' needs a driver-ish receiver.
+    assert classify_call("session.run", "run") == ("db_method_call", "run", "neo4j")
+    assert classify_call("tx.run", "run") == ("db_method_call", "run", "neo4j")
+    assert classify_call("this.session.run", "run") == ("db_method_call", "run", "neo4j")
+    # generic .run() on a non-driver receiver stays unclassified (avoids false positives)
+    assert classify_call("context.run", "run") is None
+    assert classify_call("jobRunner.run", "run") is None
 
 
 def test_classify_api_recall() -> None:
@@ -110,3 +117,9 @@ def test_query_statement_detection() -> None:
     # false positives guarded: UI text / leading keyword without structure
     assert classify_call("res.send", "send", "Create account") is None
     assert not text_has_query('const label = "Update your profile";')
+    # Cypher/DDL with an index-type qualifier between CREATE and INDEX (Neo4j, SQL UNIQUE)
+    assert classify_call("session.run", "run", "CREATE VECTOR INDEX idx FOR (n:Doc) ON n.embedding")[0] == "query_statement"
+    assert classify_call("db.exec", "exec", "CREATE UNIQUE INDEX idx ON t (c)")[0] == "query_statement"
+    assert text_has_query("const q = 'CREATE VECTOR INDEX idx FOR (n:Doc) ON n.embedding';")
+    # still not fooled by natural language beginning with CREATE
+    assert classify_call("res.send", "send", "Create a new vector for me") is None

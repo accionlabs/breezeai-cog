@@ -43,6 +43,7 @@ class Parameter(BaseModel):
     name: str
     type: str
     decorators: list[Decorator] = Field(default_factory=list)
+    default: str | None = None  # default-value expr, e.g. FastAPI `Depends(get_db)`
 
 
 class ConstructorParam(BaseModel):

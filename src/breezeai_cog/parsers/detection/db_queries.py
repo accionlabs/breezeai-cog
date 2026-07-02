@@ -81,6 +81,10 @@ _RECEIVER_HINTS = (
 # Django queryset verbs (ambiguous alone -> require a queryset-ish receiver).
 _DJANGO_VERBS = {"filter", "get", "all", "exclude", "annotate", "values"}
 
+# Neo4j runs Cypher via ``session.run(...)`` / ``tx.run(...)``. ``run`` is too generic to
+# list as a distinctive method, so require a driver/session/transaction-ish receiver.
+_NEO4J_RUN_RECEIVERS = ("session", "tx", "transaction", "driver", "neo4j")
+
 
 def match_db(callee: str, method: str) -> str | None:
     m = method.lower()
@@ -94,4 +98,10 @@ def match_db(callee: str, method: str) -> str | None:
         return "orm"
     if m in _DJANGO_VERBS and ("objects" in low or "queryset" in low):
         return "django"
+    if m == "run" and "." in low:
+        # callee includes the method (``session.run``); the receiver is everything before
+        # it, and we match on the receiver's final segment (``this.session`` -> ``session``).
+        receiver_last = low.rsplit(".", 1)[0].rsplit(".", 1)[-1]
+        if any(receiver_last == r or receiver_last.endswith(r) for r in _NEO4J_RUN_RECEIVERS):
+            return "neo4j"
     return None
