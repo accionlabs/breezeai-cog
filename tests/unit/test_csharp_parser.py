@@ -173,3 +173,15 @@ def test_chain_multi_hit(tmp_path) -> None:
     rec = CSharpParser().parse_file(ctx)
     methods = {s.method for s in rec.statements if s.semanticType == "db_method_call"}
     assert {"CreateQueryBuilder", "ToListAsync"} <= methods
+
+
+def test_endpoint_interpolated_string(tmp_path) -> None:
+    # #3: C# interpolated string $"/users/{id}" -> /users/{id}.
+    src = 'class C { void M(int id){ httpClient.GetAsync($"/users/{id}"); } }'
+    p = tmp_path / REL
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(src)
+    ctx = ParseContext(path=REL, abs_path=p, source=src.encode(), repo_root=tmp_path,
+                       capture_statements=True)
+    rec = CSharpParser().parse_file(ctx)
+    assert any(s.semanticType == "api_call" and s.endpoint == "/users/{id}" for s in rec.statements)

@@ -11,7 +11,13 @@ from __future__ import annotations
 from tree_sitter import Node
 
 from ...schemas import Statement
-from ..statements_common import classify_statement
+from ..statements_common import (
+    classify_statement,
+    render_concat,
+    resolve_endpoint,
+    strip_leading_base,
+    url_placeholder,
+)
 from ..treesitter import node_text
 from .mappings import CONTROL_FLOW, EMIT_TYPES, NESTED_SCOPES
 
@@ -32,18 +38,33 @@ def _name_of(node: Node, source: bytes) -> str | None:
     return None
 
 
+def _render_url(node: Node, source: bytes) -> str | None:
+    """Best-effort URL/path from a string, f-string, or ``+`` concatenation. f-string
+    interpolations become ``{name}`` placeholders; a leading interpolated base is dropped."""
+    if node.type == "string":  # plain or f-string (interpolations are child nodes)
+        parts: list[str] = []
+        for c in node.named_children:
+            if c.type == "string_content":
+                parts.append(node_text(c, source))
+            elif c.type == "interpolation":
+                expr = c.named_children[0] if c.named_children else None
+                parts.append(url_placeholder(node_text(expr, source)) if expr is not None else "{param}")
+        return strip_leading_base("".join(parts))
+    if node.type == "binary_operator":  # string concatenation: '/a/' + str(id)
+        return render_concat(node, source, _render_url)
+    return None
+
+
 def _call_details(call: Node, source: bytes) -> tuple[str, str, str | None] | None:
     fn = call.child_by_field_name("function")
     callee = node_text(fn, source) if fn is not None else ""
+    method = callee.rsplit(".", 1)[-1]
     args = call.child_by_field_name("arguments")
-    first_str = None
-    if args is not None:
-        for arg in args.named_children:
-            if arg.type == "string":
-                content = next((c for c in arg.named_children if c.type == "string_content"), None)
-                first_str = node_text(content, source) if content is not None else None
-                break
-    return callee, callee.rsplit(".", 1)[-1], first_str
+    named = list(args.named_children) if args is not None else []
+    endpoint, override = resolve_endpoint(named, source, _render_url)
+    if override is not None:
+        method = override
+    return callee, method, endpoint
 
 
 def _iter_in_scope(node: Node, descend_all: bool = False):

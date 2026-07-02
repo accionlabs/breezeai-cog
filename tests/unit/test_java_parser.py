@@ -134,3 +134,14 @@ def test_control_statement_not_mislabeled(tmp_path) -> None:
     control = [s for s in rec.statements if s.nodeType in ("if_statement", "enhanced_for_statement", "for_statement")]
     assert control and all(s.semanticType is None for s in control)
     assert any(s.semanticType == "db_method_call" and s.method == "save" for s in rec.statements)
+
+
+def test_endpoint_concatenation(tmp_path) -> None:
+    # #3: Java string concatenation "/users/" + id -> /users/{id}.
+    src = 'class C { void m(String id){ httpClient.get("/users/" + id); } }'.encode()
+    p = tmp_path / "C.java"
+    p.write_text(src.decode())
+    ctx = ParseContext(path="C.java", abs_path=p, source=src, repo_root=tmp_path,
+                       capture_statements=True)
+    rec = JavaParser().parse_file(ctx)
+    assert any(s.semanticType == "api_call" and s.endpoint == "/users/{id}" for s in rec.statements)

@@ -6,7 +6,13 @@ from __future__ import annotations
 from tree_sitter import Node
 
 from ...schemas import Statement
-from ..statements_common import classify_statement
+from ..statements_common import (
+    classify_statement,
+    render_concat,
+    resolve_endpoint,
+    strip_leading_base,
+    url_placeholder,
+)
 from ..treesitter import node_text
 from .mappings import CONTROL_FLOW, EMIT_TYPES, NESTED_SCOPES
 
@@ -28,16 +34,6 @@ def _name_of(node: Node, source: bytes) -> str | None:
     return None
 
 
-# HTTP verbs that may appear as the *first argument* (``http.request('GET', url)``).
-_HTTP_VERB_ARGS = {"get", "post", "put", "patch", "delete", "head", "options"}
-
-
-def _placeholder(node: Node, source: bytes) -> str:
-    """A non-string expression inside a URL -> ``{name}`` (or ``{param}``)."""
-    simple = node_text(node, source).rsplit(".", 1)[-1]
-    return "{" + simple + "}" if simple.replace("_", "").isalnum() else "{param}"
-
-
 def _render_url(node: Node, source: bytes) -> str | None:
     """Best-effort URL/path from a string, template literal, or ``+`` concatenation.
     Interpolations become ``{name}`` placeholders; a leading interpolated base/host
@@ -52,37 +48,25 @@ def _render_url(node: Node, source: bytes) -> str | None:
                 parts.append(node_text(c, source))
             elif c.type == "template_substitution":
                 expr = c.named_children[0] if c.named_children else None
-                parts.append(_placeholder(expr, source) if expr is not None else "{param}")
-        url = "".join(parts)
-        if url.startswith("{"):  # leading interpolated base/host -> keep the path only
-            slash = url.find("/")
-            if slash != -1:
-                url = url[slash:]
-        return url
+                parts.append(url_placeholder(node_text(expr, source)) if expr is not None else "{param}")
+        return strip_leading_base("".join(parts))
     if node.type == "binary_expression":  # string concatenation: '/a/' + id + '/b'
-        rendered = [_render_url(c, source) for c in node.named_children]
-        if any(r is not None for r in rendered):
-            return "".join(
-                r if r is not None else _placeholder(c, source)
-                for r, c in zip(rendered, node.named_children)
-            )
+        return render_concat(node, source, _render_url)
     return None
 
 
 def _resolve_args(args: Node | None, source: bytes) -> tuple[str | None, str | None]:
-    """(endpoint, override_method) from a call's arguments.
-
-    Handles the config-object form (``axios({ url, method })``) and the verb-first
-    form (``http.request('GET', url)``); otherwise resolves the first argument."""
+    """(endpoint, override_method) from a call's arguments. Handles the config-object
+    form (``axios({ url, method })``) — JS-specific — then falls back to the shared
+    positional resolver (first-arg / verb-first)."""
     if args is None:
         return None, None
-    named = args.named_children
+    named = list(args.named_children)
     if not named:
         return None, None
-    first = named[0]
-    if first.type == "object":  # axios({ url: '/x', method: 'get' })
+    if named[0].type == "object":  # axios({ url: '/x', method: 'get' })
         url = override = None
-        for pair in first.named_children:
+        for pair in named[0].named_children:
             if pair.type != "pair":
                 continue
             key = pair.child_by_field_name("key")
@@ -94,11 +78,7 @@ def _resolve_args(args: Node | None, source: bytes) -> tuple[str | None, str | N
                 mv = _render_url(val, source)
                 override = mv.lower() if mv else None
         return url, override
-    if first.type == "string" and len(named) >= 2:  # request('GET', url)
-        verb = _render_url(first, source)
-        if verb and verb.lower() in _HTTP_VERB_ARGS:
-            return _render_url(named[1], source), verb.lower()
-    return _render_url(first, source), None
+    return resolve_endpoint(named, source, _render_url)
 
 
 def _call_details(call: Node, source: bytes) -> tuple[str, str, str | None] | None:

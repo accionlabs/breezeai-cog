@@ -6,7 +6,7 @@ from __future__ import annotations
 from tree_sitter import Node
 
 from ...schemas import Statement
-from ..statements_common import classify_statement
+from ..statements_common import classify_statement, render_concat, resolve_endpoint
 from ..treesitter import node_text
 from .mappings import CONTROL_FLOW, EMIT_TYPES, NESTED_SCOPES
 
@@ -23,19 +23,28 @@ def _name_of(node: Node, source: bytes) -> str | None:
     return None
 
 
+def _render_url(node: Node, source: bytes) -> str | None:
+    """Best-effort URL/path from a string literal or ``+`` concatenation (Java has no
+    string interpolation); non-string parts of a concatenation become ``{name}``."""
+    if node.type == "string_literal":
+        frag = next((c for c in node.named_children if c.type == "string_fragment"), None)
+        return node_text(frag, source) if frag is not None else node_text(node, source).strip('"')
+    if node.type == "binary_expression":  # "/users/" + id
+        return render_concat(node, source, _render_url)
+    return None
+
+
 def _call_details(call: Node, source: bytes) -> tuple[str, str, str | None] | None:
     obj = call.child_by_field_name("object")
     name_node = call.child_by_field_name("name")
     method = node_text(name_node, source) if name_node is not None else ""
     callee = f"{node_text(obj, source)}.{method}" if obj is not None else method
-    first_str = None
     args = call.child_by_field_name("arguments")
-    if args is not None:
-        for arg in args.named_children:
-            if arg.type == "string_literal":
-                first_str = node_text(arg, source).strip('"')
-                break
-    return callee, method, first_str
+    named = list(args.named_children) if args is not None else []
+    endpoint, override = resolve_endpoint(named, source, _render_url)
+    if override is not None:
+        method = override
+    return callee, method, endpoint
 
 
 def _iter_in_scope(node: Node, descend_all: bool = False):

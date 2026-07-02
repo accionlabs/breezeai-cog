@@ -34,6 +34,54 @@ from .treesitter import first_line, node_text
 CallDetails = Callable[[Node, bytes], "tuple[str, str, str | None] | None"]
 NameOf = Callable[[Node, bytes], "str | None"]
 
+# --- Endpoint resolution (spec item #3), shared across languages -------------------
+# HTTP verbs that may appear as the *first argument* (``request('GET', url)``).
+HTTP_VERB_ARGS = frozenset({"get", "post", "put", "patch", "delete", "head", "options"})
+UrlRenderer = Callable[[Node, bytes], "str | None"]
+
+
+def url_placeholder(expr_text: str) -> str:
+    """A non-string URL sub-expression -> ``{name}`` (simple name) or ``{param}``."""
+    simple = expr_text.rsplit(".", 1)[-1].strip()
+    return "{" + simple + "}" if simple and simple.replace("_", "").isalnum() else "{param}"
+
+
+def strip_leading_base(url: str) -> str:
+    """Drop a leading interpolated base/host segment so the path matches inbound routes:
+    ``{base}/users/{id}`` -> ``/users/{id}`` (a leading ``{...}`` with no ``/`` is kept)."""
+    if url.startswith("{"):
+        slash = url.find("/")
+        if slash != -1:
+            return url[slash:]
+    return url
+
+
+def render_concat(node: Node, source: bytes, render: UrlRenderer) -> str | None:
+    """Render a binary string-concatenation node to a path (non-string parts -> ``{name}``)."""
+    rendered = [render(c, source) for c in node.named_children]
+    if not any(r is not None for r in rendered):
+        return None
+    return "".join(
+        r if r is not None else url_placeholder(node_text(c, source))
+        for r, c in zip(rendered, node.named_children)
+    )
+
+
+def resolve_endpoint(
+    arg_nodes: list[Node], source: bytes, render: UrlRenderer
+) -> tuple[str | None, str | None]:
+    """(endpoint, override_method) for positional call args, given a language ``render``.
+    Handles the verb-first form ``request('GET', url)`` — the verb is the method, the URL
+    is the next argument; otherwise resolves the first argument."""
+    if not arg_nodes:
+        return None, None
+    first = arg_nodes[0]
+    if len(arg_nodes) >= 2:
+        verb = render(first, source)
+        if verb and verb.lower() in HTTP_VERB_ARGS:
+            return render(arg_nodes[1], source), verb.lower()
+    return render(first, source), None
+
 
 def _iter_calls(
     node: Node,

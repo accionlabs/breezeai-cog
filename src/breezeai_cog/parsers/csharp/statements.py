@@ -6,7 +6,13 @@ from __future__ import annotations
 from tree_sitter import Node
 
 from ...schemas import Statement
-from ..statements_common import classify_statement
+from ..statements_common import (
+    classify_statement,
+    render_concat,
+    resolve_endpoint,
+    strip_leading_base,
+    url_placeholder,
+)
 from ..treesitter import node_text
 from .mappings import CONTROL_FLOW, EMIT_TYPES, NESTED_SCOPES
 
@@ -43,6 +49,29 @@ def method_name(name_node: Node | None, source: bytes) -> str:
     return node_text(name_node, source)
 
 
+def _render_url(node: Node, source: bytes) -> str | None:
+    """Best-effort URL/path from a string, interpolated string (``$"…{x}…"``), or ``+``
+    concatenation. Interpolations become ``{name}``; a leading interpolated base is dropped."""
+    if node.type == "argument":  # C# wraps each positional arg in an `argument` node
+        inner = node.named_children[0] if node.named_children else None
+        return _render_url(inner, source) if inner is not None else None
+    if node.type == "string_literal":
+        content = next((c for c in node.named_children if c.type == "string_literal_content"), None)
+        return node_text(content, source) if content is not None else node_text(node, source).strip('"')
+    if node.type == "interpolated_string_expression":
+        parts: list[str] = []
+        for c in node.named_children:
+            if c.type == "string_content":
+                parts.append(node_text(c, source))
+            elif c.type == "interpolation":
+                expr = next((x for x in c.named_children if x.type != "interpolation_brace"), None)
+                parts.append(url_placeholder(node_text(expr, source)) if expr is not None else "{param}")
+        return strip_leading_base("".join(parts))
+    if node.type == "binary_expression":  # "/a/" + id
+        return render_concat(node, source, _render_url)
+    return None
+
+
 def _call_details(call: Node, source: bytes) -> tuple[str, str, str | None] | None:
     func = call.child_by_field_name("function")
     if func is None:
@@ -55,16 +84,12 @@ def _call_details(call: Node, source: bytes) -> tuple[str, str, str | None] | No
     else:
         method = method_name(func, source)
         callee = method
-    first_str = None
     args = call.child_by_field_name("arguments")
-    if args is not None:
-        for arg in args.named_children:
-            lit = arg if arg.type == "string_literal" else next(
-                (c for c in arg.named_children if c.type == "string_literal"), None)
-            if lit is not None:
-                first_str = node_text(lit, source).strip('"')
-                break
-    return callee, method, first_str
+    named = list(args.named_children) if args is not None else []
+    endpoint, override = resolve_endpoint(named, source, _render_url)
+    if override is not None:
+        method = override
+    return callee, method, endpoint
 
 
 def _iter_in_scope(node: Node, descend_all: bool = False):

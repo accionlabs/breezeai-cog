@@ -179,3 +179,15 @@ def test_bare_call_in_control_body_not_mislabeled(tmp_path) -> None:
     ifs = [s for s in rec.statements if s.nodeType == "if_statement"]
     assert ifs and all(s.semanticType is None for s in ifs)
     assert any(s.nodeType == "call" and s.semanticType == "db_method_call" for s in rec.statements)
+
+
+def test_endpoint_fstring_and_concat(tmp_path) -> None:
+    # #3: f-string / concatenation endpoints resolve to {param} paths (was the raw first arg).
+    src = "def f(id):\n    requests.get(f'/users/{id}')\n    requests.get('/a/' + str(id))\n".encode()
+    p = tmp_path / "e.py"
+    p.write_text(src.decode())
+    ctx = ParseContext(path="e.py", abs_path=p, source=src, repo_root=tmp_path, capture_statements=True)
+    rec = PythonParser().parse_file(ctx)
+    eps = [s.endpoint for s in rec.statements if s.semanticType == "api_call"]
+    assert "/users/{id}" in eps
+    assert any(e and e.startswith("/a/") for e in eps)
