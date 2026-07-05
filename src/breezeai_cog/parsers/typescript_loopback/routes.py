@@ -100,6 +100,8 @@ def detect_loopback_routes(root: Node, source: bytes, path: str, *, seen_ids: se
             if member.type == "decorator":
                 pending.append(member)
                 continue
+            if member.type == "comment":
+                continue  # a comment between a route decorator and its handler must not drop it
             if member.type == "method_definition":
                 mname = node_text(member.child_by_field_name("name"), source)
                 mline = member.start_point[0] + 1

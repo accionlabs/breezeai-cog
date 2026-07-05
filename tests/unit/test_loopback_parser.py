@@ -88,6 +88,33 @@ def test_output_validates(tmp_path) -> None:
     assert not errors, errors
 
 
+def test_comment_between_decorator_and_handler(tmp_path) -> None:
+    # Regression: a comment (commented-out old signature / eslint-disable) between the
+    # route decorator and its handler method must not drop the route (real LoopBack repos
+    # hit this; the NestJS parser already guarded it).
+    src = (
+        b"import {get, param} from '@loopback/rest';\n"
+        b"export class TimezoneController {\n"
+        b"  @get('/timezones', {responses: {}})\n"
+        b"  // async find(): Promise<object> {\n"
+        b"  async find(@param.filter(Timezone) filter?: Filter<Timezone>): Promise<object> {\n"
+        b"    return this.svc.find(filter);\n"
+        b"  }\n"
+        b"  @get('/timezones/{id}')\n"
+        b"  // eslint-disable-next-line @typescript-eslint/no-explicit-any\n"
+        b"  async findById(): Promise<any> { return {}; }\n"
+        b"}\n"
+    )
+    p = tmp_path / "timezone.controller.ts"
+    p.write_text(src.decode())
+    ctx = ParseContext(path="timezone.controller.ts", abs_path=p, source=src,
+                       repo_root=tmp_path, capture_statements=True)
+    rec = LoopBackParser().parse_file(ctx)
+    routes = {(s.method, s.endpoint): s for s in rec.statements if s.semanticType == "route"}
+    assert routes[("GET", "/timezones")].handler == "find"
+    assert routes[("GET", "/timezones/{id}")].handler == "findById"
+
+
 def test_claims_selects_loopback() -> None:
     registry.clear()
     from breezeai_cog.parsers.typescript.parser import TypeScriptParser
