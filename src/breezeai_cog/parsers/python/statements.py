@@ -100,7 +100,7 @@ def extract_statements(
                 node, source, path, parent_id=parent_id, limit=limit, seen_ids=seen_ids,
                 emit_types=EMIT_TYPES, control_flow=CONTROL_FLOW, call_type=_CALL_TYPE,
                 name_of=_name_of, call_details=_call_details,
-                stmt_expr=_STMT_EXPR, container_types=_CONTAINERS,
+                stmt_expr=_STMT_EXPR, container_types=_CONTAINERS, language="python",
             )
         )
     return out

@@ -1,9 +1,15 @@
-"""ORM / database method-call detection (language-agnostic).
+"""ORM / database method-call detection.
 
 Returns an inferred ``dataAccessHint`` (the DB/ORM) for a normalized call, else
 ``None``. Detection is heuristic (``dataAccessHint`` is documented as inferred):
 distinctive method names map directly; ambiguous ORM verbs (``findOne``/``save``…)
 are refined by receiver hints.
+
+Mostly language-agnostic, with one language-aware gate: an optional ``language`` tag
+suppresses Entity-Framework verbs in known non-.NET files (see ``_DOTNET``) so that,
+e.g., ``.include()`` in TypeScript is not mislabeled as EF. High-collision generic
+verbs (``find``/``create``/…) require a positive DB receiver rather than defaulting to
+``orm`` — this is what keeps ``Array.find`` / ``dict.update`` / ``Cookies.remove`` out.
 
 The distinctive table mirrors the legacy ``DB_METHOD_MAP`` (JS ``utils.js``) — one entry
 per DB/ORM, most-specific DB listed first so it wins a name collision. Raw-SQL builders
@@ -96,17 +102,49 @@ _DJANGO_VERBS = {"filter", "get", "all", "exclude", "annotate", "values"}
 # list as a distinctive method, so require a driver/session/transaction-ish receiver.
 _NEO4J_RUN_RECEIVERS = ("session", "tx", "transaction", "driver", "neo4j")
 
+# Languages whose files may legitimately use Entity Framework verbs. EF method names
+# (``ToListAsync``/``Include``/…) collide with unrelated code in other stacks — most
+# painfully ``.include()``, which is TypeORM/array/RxJS in JS but EF in C#. When we KNOW
+# the file is a non-.NET language we treat the EF match as a collision and fall through;
+# an unknown language (``None``) stays permissive for backward compatibility.
+_DOTNET = frozenset({"csharp", "vb"})
 
-def match_db(callee: str, method: str) -> str | None:
+# Generic verbs that collide heavily with ordinary (non-DB) code: ``find`` is
+# ``Array.prototype.find``, ``update`` is ``dict.update``/``Map.set``-adjacent, ``create``
+# is ``Object.create``/Zustand ``create``, ``remove`` is ``Cookies.remove``, etc. For these
+# we require *positive* evidence of a DB receiver (opt-in) instead of defaulting to ``orm``
+# (opt-out) — mirroring the api-call detector, which only fires on a client hint. Real ORM
+# calls on these verbs still match earlier via ``_RECEIVER_HINTS`` (repository/session/…).
+_HIGH_COLLISION = frozenset({"find", "create", "update", "delete", "remove", "persist", "merge"})
+
+# Terminal receiver-segment suffixes that positively signal a DB/ORM handle (beyond the
+# vendor substrings in _RECEIVER_HINTS). Matched by suffix on the receiver's last segment
+# (``userModel`` -> ``model``, ``orderDao`` -> ``dao``). Kept unambiguous — no short tokens
+# like ``em``/``db`` that would also match ``item``/``webdb``.
+_DB_RECEIVER_SUFFIXES = (
+    "repository", "repo", "model", "models", "dao", "collection",
+    "datasource", "queryrunner", "database", "manager",
+)
+
+
+def match_db(callee: str, method: str, language: str | None = None) -> str | None:
     m = method.lower()
     low = callee.lower()
     if m in _DISTINCTIVE:
-        return _DISTINCTIVE[m]
+        db = _DISTINCTIVE[m]
+        # EF verbs are .NET-only; suppress them in a known non-.NET file (name collision).
+        if not (db == "entity_framework" and language is not None and language not in _DOTNET):
+            return db
     if m in _GENERIC:
         for needle, hint in _RECEIVER_HINTS:  # positive vendor hint wins
             if needle in low:
                 return hint
         receiver = low.rsplit(".", 1)[0].rsplit(".", 1)[-1] if "." in low else ""
+        if m in _HIGH_COLLISION:
+            # Opt-in: data access only on a positive DB receiver, else drop (no bare `orm`).
+            if receiver and any(receiver.endswith(s) for s in _DB_RECEIVER_SUFFIXES):
+                return "orm"
+            return None
         if receiver and any(receiver.endswith(s) for s in _NON_DB_RECEIVERS):
             return None  # a cache/collection/UI-state/etc. receiver — not data access
         return "orm"

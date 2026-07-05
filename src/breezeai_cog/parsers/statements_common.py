@@ -129,6 +129,7 @@ def classify_statement(
     call_details: CallDetails,
     stmt_expr: Collection[str] = (),
     container_types: Collection[str] = (),
+    language: str | None = None,
 ) -> list[Statement]:
     text = node_text(node, source)
     if node.type in control_flow:
@@ -143,7 +144,7 @@ def classify_statement(
         det = call_details(call, source)
         if det is None:
             continue
-        classified = classify_call(det[0], det[1], det[2])
+        classified = classify_call(det[0], det[1], det[2], language)
         if classified is None:
             continue
         sem, meth, dh = classified

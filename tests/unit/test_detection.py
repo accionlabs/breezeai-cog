@@ -150,3 +150,44 @@ def test_generic_verb_non_db_receiver_guarded() -> None:
     assert classify_call("user.save", "save") == ("db_method_call", "save", "orm")
     assert classify_call("userStore.save", "save") == ("db_method_call", "save", "orm")
     assert classify_call("redisCache.hget", "hget") == ("db_method_call", "hget", "redis")
+
+
+def test_high_collision_verbs_require_db_receiver() -> None:
+    # #G3: high-collision generic verbs (find/create/update/delete/remove/…) are data access
+    # ONLY on a positive DB receiver — they otherwise collide with ordinary code and were the
+    # dominant db_method_call false-positive source (Array.find, dict.update, Zustand, cookies).
+    for callee, method in [
+        ("layers.find", "find"),            # Array.prototype.find
+        ("assignedTo.find", "find"),        # Array.prototype.find
+        ("config.update", "update"),        # dict/object update
+        ("Object.create", "create"),        # JS builtin
+        ("useStore.create", "create"),      # Zustand store factory
+        ("Cookies.remove", "remove"),       # js-cookie
+        ("this.list.delete", "delete"),     # collection
+        ("items.remove", "remove"),
+    ]:
+        assert classify_call(callee, method) is None, callee
+    # real ORM on these verbs still matches via a positive DB receiver / vendor hint:
+    assert classify_call("userRepository.find", "find") == ("db_method_call", "find", "typeorm")
+    assert classify_call("this.repo.delete", "delete") == ("db_method_call", "delete", "typeorm")
+    assert classify_call("userModel.create", "create") == ("db_method_call", "create", "orm")
+    assert classify_call("orderDao.update", "update") == ("db_method_call", "update", "orm")
+    assert classify_call("prisma.user.create", "create") == ("db_method_call", "create", "prisma")
+    # em.merge / session.persist (Hibernate) keep matching via receiver hints:
+    assert classify_call("this.entityManager.merge", "merge") == ("db_method_call", "merge", "typeorm")
+
+
+def test_entity_framework_verbs_are_dotnet_gated() -> None:
+    # EF verbs collide with other stacks (esp. `.include()` = TypeORM/RxJS/array in JS).
+    # Suppress them in a KNOWN non-.NET language; keep them for .NET and unknown (None).
+    assert classify_call("qb.include", "include", None, "typescript") is None
+    assert classify_call("query.include", "include", None, "python") is None
+    assert classify_call("ctx.Users.ToListAsync", "ToListAsync", None, "typescript") is None
+    # .NET languages: EF preserved
+    assert classify_call("ctx.Users.ToListAsync", "ToListAsync", None, "csharp") == \
+        ("db_method_call", "ToListAsync", "entity_framework")
+    assert classify_call("ctx.Users.Include", "Include", None, "vb") == \
+        ("db_method_call", "Include", "entity_framework")
+    # unknown language stays permissive (backward compatible)
+    assert classify_call("ctx.Users.ToListAsync", "ToListAsync") == \
+        ("db_method_call", "ToListAsync", "entity_framework")

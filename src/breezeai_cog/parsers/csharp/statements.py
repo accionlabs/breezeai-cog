@@ -124,7 +124,7 @@ def extract_statements(
             classify_statement(
                 node, source, path, parent_id=parent_id, limit=limit, seen_ids=seen_ids,
                 emit_types=EMIT_TYPES, control_flow=CONTROL_FLOW, call_type=_CALL_TYPE,
-                name_of=_name_of, call_details=_call_details,
+                name_of=_name_of, call_details=_call_details, language="csharp",
             )
         )
     return out
