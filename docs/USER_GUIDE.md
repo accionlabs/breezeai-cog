@@ -39,20 +39,36 @@ point at any repository.
 
 ## Install
 
+**Requires Python 3.11 or newer.** With `uv` (recommended below) you don't need to install Python
+yourself — `uv` downloads a suitable version for you. Only if you use the `pip` fallback do you need
+your own Python; check it with `python --version`.
+
 You don't add anything to the project you want to analyze — the tool reads it from the outside. You
-only install the tool itself, once. Pick one of these:
+only install the tool itself, once. **Choose one** of the three approaches below — you don't need
+all of them:
 
 ```bash
 # 1. Recommended — install an isolated `breezeai-cog` command onto your PATH (needs `uv`).
-#    Add "[server]" to also get the HTTP service and S3/SQL support.
 uv tool install /path/to/breezeai-cog
-uv tool install "/path/to/breezeai-cog[server]"
 
 # 2. Run it without installing (from anywhere) — `uv` fetches deps on the fly.
 uv run --project /path/to/breezeai-cog breezeai-cog --help
 
 # 3. No clone, no local copy — run the latest straight from GitHub (needs `uv`).
 uvx --from git+https://github.com/accionlabs/breezeai-cog breezeai-cog --help
+```
+
+**Optional features (extras).** By default you get the CLI. To add more, append the extra's name in
+brackets when installing (approach 1 or 2):
+
+| Extra | Adds |
+|---|---|
+| `[upload]` | Uploading results to a Breeze backend. |
+| `[server]` | The HTTP service, plus S3 and SQL support. |
+| `[all]` | Everything above. |
+
+```bash
+uv tool install "/path/to/breezeai-cog[server]"   # note the quotes — your shell needs them
 ```
 
 Verify it works:
@@ -62,7 +78,19 @@ breezeai-cog version
 breezeai-cog capabilities      # lists the languages/frameworks it currently understands
 ```
 
-> Don't have `uv`? Install it from <https://docs.astral.sh/uv/>, or `pip install /path/to/breezeai-cog`.
+> **`command not found: breezeai-cog`?** The install succeeded but the command isn't on your PATH
+> yet. Run `uv tool update-shell`, then open a new terminal and try again.
+
+> **Don't have `uv`?** Install it from <https://docs.astral.sh/uv/> (recommended), or use plain
+> `pip` inside a virtual environment so it doesn't touch your system Python:
+>
+> ```bash
+> python -m venv .venv && source .venv/bin/activate   # Windows: .venv\Scripts\activate
+> pip install "/path/to/breezeai-cog"
+> ```
+>
+> Re-activate the virtual environment (the `source …` line) in each new terminal before running the
+> command.
 
 ---
 
@@ -74,6 +102,9 @@ Point the tool at a folder and tell it where to put the output:
 cd /path/to/your/project
 breezeai-cog repo-to-json-tree --repo . --out ./out
 ```
+
+This only reads your files — it never modifies your project or runs your code, so it's safe on any
+repository.
 
 Or, without installing or cloning anything — run the latest directly from GitHub with `uvx`:
 
@@ -186,7 +217,9 @@ and CI). The rules:
 - Most variables use the prefix `BREEZEAI_COG_` (e.g. `--jobs` ↔ `BREEZEAI_COG_JOBS`).
 - A few infrastructure variables also accept their conventional names (`BREEZE_API_URL`, `API_KEY`,
   `AWS_*`).
-- Variables can live in your shell environment or in a **`.env`** file in the working directory.
+- Variables can live in your shell environment (set with `export VAR=value` on macOS/Linux, or
+  `$env:VAR="value"` in PowerShell) or in a **`.env`** file in the working directory — one
+  `VAR=value` per line. The `.env` file is the easier option if the settings are new to you.
 - A command-line flag always overrides the matching environment variable.
 
 The repository ships a [`.env.example`](../.env.example) listing every variable with its default —
