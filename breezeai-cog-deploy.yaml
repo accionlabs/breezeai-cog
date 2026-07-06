@@ -17,6 +17,12 @@ spec:
       labels:
         app: ${MICROSERVICE_NAME}
     spec:
+      # Kubernetes injects legacy Docker-link env vars for every Service in the
+      # namespace. For the Service named `breezeai-cog` it generates
+      # BREEZEAI_COG_PORT=tcp://<clusterIP>:3000, which collides with the app's
+      # BREEZEAI_COG_ env prefix (Settings.port reads BREEZEAI_COG_PORT). Disable
+      # service links so that injected var never shadows real config.
+      enableServiceLinks: false
       initContainers:
         - name: fix-logs-perms
           image: busybox:1.36
