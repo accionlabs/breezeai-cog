@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import re
+
 from tree_sitter import Node
 
 from ...emit import disambiguate, function_id
@@ -73,6 +75,32 @@ def _type_text(annotation: Node | None, source: bytes) -> str | None:
     if annotation is None:
         return None
     return node_text(annotation, source).lstrip(":").strip() or None
+
+
+# Type-expression → DTO name: skip generic wrappers/primitives, take the first PascalCase
+# name (``Promise<OrderDto[]>`` → ``OrderDto``, ``void``/``object`` → None). Shared by the
+# route parsers (NestJS keeps a private copy; LoopBack uses this) for responseDTO capture.
+_DTO_ID_RE = re.compile(r"[A-Za-z_$][\w$]*")
+_NON_DTO_TYPES = {
+    "Promise", "Observable", "Array", "Map", "Set", "Record", "Partial", "Readonly",
+    "void", "any", "unknown", "never", "null", "undefined", "string", "number",
+    "boolean", "object", "bigint", "symbol", "this", "true", "false",
+}
+
+
+def dto_from_type(t: str | None) -> str | None:
+    if not t:
+        return None
+    for tok in _DTO_ID_RE.findall(t):
+        if tok in _NON_DTO_TYPES or not tok[0].isupper():
+            continue
+        return tok
+    return None
+
+
+def return_dto(member: Node, source: bytes) -> str | None:
+    """Handler return type → responseDTO (``Promise<TimezoneDto[]>`` → ``TimezoneDto``)."""
+    return dto_from_type(_type_text(member.child_by_field_name("return_type"), source))
 
 
 def _visibility(node: Node, source: bytes) -> str:

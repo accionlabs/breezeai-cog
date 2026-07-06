@@ -145,6 +145,33 @@ def test_computed_path_rendered_wellformed(tmp_path) -> None:
     assert eps["plain"] == "/api/v2/plain/literal"
 
 
+def test_request_and_response_dto(tmp_path) -> None:
+    # R2: capture requestDTO from the @requestBody() param type and responseDTO from the
+    # handler return type.
+    src = (
+        b"import {get, post, requestBody} from '@loopback/rest';\n"
+        b"export class C {\n"
+        b"  @post('/clean')\n"
+        b"  async clean(@requestBody() dto: CleanDataDTO): Promise<object> { return {}; }\n"
+        b"  @get('/timezones')\n"
+        b"  async find(): Promise<ResponseApi<Timezone[]>> { return null as any; }\n"
+        b"  @post('/inline')\n"
+        b"  async inline(@requestBody() body: {a: number; b: string}): Promise<void> {}\n"
+        b"}\n"
+    )
+    p = tmp_path / "c.controller.ts"
+    p.write_text(src.decode())
+    ctx = ParseContext(path="c.controller.ts", abs_path=p, source=src,
+                       repo_root=tmp_path, capture_statements=True)
+    routes = {s.handler: s for s in LoopBackParser().parse_file(ctx).statements
+              if s.semanticType == "route"}
+    assert routes["clean"].requestDTO == "CleanDataDTO"
+    assert routes["clean"].responseDTO is None            # Promise<object> → no DTO
+    assert routes["find"].requestDTO is None
+    assert routes["find"].responseDTO == "ResponseApi"     # first PascalCase non-wrapper
+    assert routes["inline"].requestDTO is None             # anonymous inline object → no name
+
+
 def test_claims_selects_loopback() -> None:
     registry.clear()
     from breezeai_cog.parsers.typescript.parser import TypeScriptParser

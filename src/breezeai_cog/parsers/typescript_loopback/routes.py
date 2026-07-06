@@ -11,7 +11,7 @@ from __future__ import annotations
 from tree_sitter import Node
 
 from ...emit import disambiguate, function_id, statement_id
-from ...parsers.typescript.functions import decorator
+from ...parsers.typescript.functions import decorator, dto_from_type, extract_params, return_dto
 from ...schemas import Statement
 from ..statements_common import render_concat, url_placeholder
 from ..treesitter import node_text
@@ -107,6 +107,16 @@ def _render_path(node: Node, source: bytes) -> str:
     return r if r is not None else url_placeholder(node_text(node, source))
 
 
+def _request_dto(member: Node, source: bytes) -> str | None:
+    """Type name of the ``@requestBody()``-decorated parameter → requestDTO. Normalized to a
+    single DTO name (so a named class links to its ``Class`` node); an anonymous inline
+    object type (``{a: number; b: string}``) has no name and yields ``None``."""
+    for p in extract_params(member.child_by_field_name("parameters"), source):
+        if any(d.name == "requestBody" for d in p.decorators):
+            return dto_from_type(p.type)
+    return None
+
+
 def _class_with_decorators(root: Node):
     """Yield (class_declaration, class_decorator_nodes) for top-level classes."""
     pending: list[Node] = []
@@ -165,6 +175,8 @@ def detect_loopback_routes(root: Node, source: bytes, path: str, *, seen_ids: se
                         handler=mname,
                         handlerLine=mline,
                         routeKind="route",
+                        requestDTO=_request_dto(member, source),
+                        responseDTO=return_dto(member, source),
                         startLine=sl,
                         endLine=dec.end_point[0] + 1,
                         path=path,
