@@ -13,6 +13,7 @@ from tree_sitter import Node
 from ...emit import disambiguate, function_id, statement_id
 from ...parsers.typescript.functions import decorator
 from ...schemas import Statement
+from ..statements_common import render_concat, url_placeholder
 from ..treesitter import node_text
 
 # LoopBack method decorators -> HTTP verb. ``del`` (not ``delete``) is LoopBack's
@@ -57,15 +58,53 @@ def _api_base_path(decorators: list[Node], source: bytes) -> str:
     return ""
 
 
-def _route_for(name: str, args: list[str]) -> tuple[str, str] | None:
-    """Map a method decorator (name, args) -> (verb, path), or None if not a route."""
+def _verb_and_index(name: str, args: list[str]) -> tuple[str, int] | None:
+    """Map a method decorator (name, arg-texts) -> (HTTP verb, index of the path argument),
+    or None if not a route. ``@get('/x')`` -> path is arg 0; ``@operation('patch','/x')``
+    -> verb is arg 0, path is arg 1."""
     verb = _METHOD_DECORATORS.get(name)
     if verb is not None:
-        return verb, _unquote(args[0]) if args else ""
+        return verb, 0
     if name == "operation" and args:
-        path = _unquote(args[1]) if len(args) > 1 else ""
-        return _unquote(args[0]).upper(), path
+        return _unquote(args[0]).upper(), 1
     return None
+
+
+def _decorator_args(dec: Node) -> list[Node]:
+    """The argument nodes of a decorator's call, e.g. the nodes inside ``@get(<here>)``."""
+    inner = dec.named_children[0] if dec.named_children else None
+    if inner is None or inner.type != "call_expression":
+        return []
+    arglist = inner.child_by_field_name("arguments")
+    return list(arglist.named_children) if arglist is not None else []
+
+
+def _render_literal(node: Node, source: bytes) -> str | None:
+    """A path expression -> string, with interpolations/variables as ``{name}`` placeholders;
+    ``None`` if not a renderable literal (caller placeholders it). Handles string literals,
+    template literals, and ``+`` concatenation — so ``appConfig.apiPathV2 + '/x'`` renders as
+    the well-formed ``{apiPathV2}/x`` instead of a malformed ``+``-spliced string. Route
+    prefixes are kept (no leading-base stripping — the api-version segment is meaningful)."""
+    if node.type == "string":
+        frag = next((c for c in node.named_children if c.type == "string_fragment"), None)
+        return node_text(frag, source) if frag is not None else ""
+    if node.type == "template_string":
+        parts: list[str] = []
+        for c in node.named_children:
+            if c.type == "string_fragment":
+                parts.append(node_text(c, source))
+            elif c.type == "template_substitution":
+                expr = c.named_children[0] if c.named_children else None
+                parts.append(url_placeholder(node_text(expr, source)) if expr is not None else "{param}")
+        return "".join(parts)
+    if node.type == "binary_expression":  # string concatenation
+        return render_concat(node, source, _render_literal)
+    return None
+
+
+def _render_path(node: Node, source: bytes) -> str:
+    r = _render_literal(node, source)
+    return r if r is not None else url_placeholder(node_text(node, source))
 
 
 def _class_with_decorators(root: Node):
@@ -107,10 +146,12 @@ def detect_loopback_routes(root: Node, source: bytes, path: str, *, seen_ids: se
                 mline = member.start_point[0] + 1
                 for dec in pending:
                     d = decorator(dec, source)
-                    route = _route_for(d.name, d.args)
-                    if route is None:
+                    vi = _verb_and_index(d.name, d.args)
+                    if vi is None:
                         continue
-                    verb, sub = route
+                    verb, idx = vi
+                    arg_nodes = _decorator_args(dec)
+                    sub = _render_path(arg_nodes[idx], source) if idx < len(arg_nodes) else ""
                     sl, sc = dec.start_point[0] + 1, dec.start_point[1]
                     routes.append(Statement(
                         id=disambiguate(statement_id(path, sl, sc), seen_ids),

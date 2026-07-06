@@ -115,6 +115,36 @@ def test_comment_between_decorator_and_handler(tmp_path) -> None:
     assert routes[("GET", "/timezones/{id}")].handler == "findById"
 
 
+def test_computed_path_rendered_wellformed(tmp_path) -> None:
+    # R1(a): a route path built by concatenation / template literal must render as a
+    # well-formed `{placeholder}` path, not a malformed `+`-spliced string.
+    src = (
+        b"import {get, post} from '@loopback/rest';\n"
+        b"import appConfig from './config';\n"
+        b"export class C {\n"
+        b"  @get(appConfig.apiPathV2 + '/tender-status/count')\n"
+        b"  async count() { return 0; }\n"
+        b"  @post(`${appConfig.apiPathV2}/subscriber-setting`)\n"
+        b"  async setting() {}\n"
+        b"  @get('/api/v2/plain/literal')\n"
+        b"  async plain() {}\n"
+        b"}\n"
+    )
+    p = tmp_path / "c.controller.ts"
+    p.write_text(src.decode())
+    ctx = ParseContext(path="c.controller.ts", abs_path=p, source=src,
+                       repo_root=tmp_path, capture_statements=True)
+    eps = {s.handler: s.endpoint for s in LoopBackParser().parse_file(ctx).statements
+           if s.semanticType == "route"}
+    # concat: no '+' and no dangling quote — a clean placeholder for the config var
+    assert "+" not in eps["count"] and "'" not in eps["count"]
+    assert eps["count"].endswith("/tender-status/count") and "{apiPathV2}" in eps["count"]
+    # template literal: ${...} normalized to {...}
+    assert eps["setting"] == "/{apiPathV2}/subscriber-setting"
+    # plain literal unchanged
+    assert eps["plain"] == "/api/v2/plain/literal"
+
+
 def test_claims_selects_loopback() -> None:
     registry.clear()
     from breezeai_cog.parsers.typescript.parser import TypeScriptParser
