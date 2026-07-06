@@ -1,7 +1,10 @@
-"""NestJS route detection: ``@Controller('base')`` classes whose methods carry
-``@Get(':id')`` / ``@Post()`` etc. Emits ``semanticType="route"`` statements parented
-to their handler method (via the shared id convention, so parentId matches the base
-TypeScript parser's function id)."""
+"""Decorator-declared route detection for TS controllers: ``@Controller('base')`` /
+``@JsonController('base')`` classes whose methods carry ``@Get(':id')`` / ``@Post()`` etc.
+Covers both **NestJS** (``@nestjs/common``) and **routing-controllers** — the decorator
+grammar is identical, so detection keys on decorator *names*, not the import source; the
+caller passes the resolved ``framework`` label. Emits ``semanticType="route"`` statements
+parented to their handler method (via the shared id convention, so parentId matches the
+base TypeScript parser's function id)."""
 
 from __future__ import annotations
 
@@ -63,12 +66,15 @@ def _pattern(d) -> str | None:
 
 
 def _guards(decs: list[Node], source: bytes) -> list[str]:
-    """Identifier/member args of every ``@UseGuards(...)`` (spec C5)."""
+    """Guard/auth names: ``@UseGuards(...)`` args (NestJS) and ``@Authorized`` (routing-
+    controllers). Presence of any drives ``authRequired`` (spec C5)."""
     out: list[str] = []
     for dec in decs:
         d = decorator(dec, source)
         if d.name == "UseGuards":
             out.extend(_unquote(a) for a in d.args)
+        elif d.name == "Authorized":  # routing-controllers auth decorator
+            out.append("Authorized")
     return out
 
 
@@ -97,10 +103,13 @@ def _join(base: str, sub: str) -> str:
     return "/" + "/".join(parts) if parts else "/"
 
 
+_CONTROLLER_DECORATORS = {"Controller", "JsonController"}  # NestJS + routing-controllers
+
+
 def _controller_base(decorators: list[Node], source: bytes) -> str | None:
     for dec in decorators:
         d = decorator(dec, source)
-        if d.name == "Controller":
+        if d.name in _CONTROLLER_DECORATORS:
             if not d.args:
                 return ""
             arg = d.args[0].strip()
@@ -138,7 +147,9 @@ def _class_with_decorators(root: Node):
             yield cls, decs
 
 
-def detect_nest_routes(root: Node, source: bytes, path: str, *, seen_ids: set[str]) -> list[Statement]:
+def detect_nest_routes(
+    root: Node, source: bytes, path: str, *, seen_ids: set[str], framework: str = "nestjs"
+) -> list[Statement]:
     routes: list[Statement] = []
     for cls, decs in _class_with_decorators(root):
         base = _controller_base(decs, source)  # None when the class is not a @Controller
@@ -173,7 +184,7 @@ def detect_nest_routes(root: Node, source: bytes, path: str, *, seen_ids: set[st
                         parentId=parent,
                         nodeType="decorator",
                         text=node_text(dec, source).split("\n", 1)[0],
-                        framework="nestjs",
+                        framework=framework,
                         handler=mname,
                         handlerLine=mline,
                         isRegex=False,
