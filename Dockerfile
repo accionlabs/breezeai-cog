@@ -21,6 +21,12 @@ RUN uv sync --no-dev --no-editable --extra server
 # Stage 2: Production
 FROM python:3.13-slim AS production
 
+# git is required at runtime: the /analyze-diff route shells out to `git clone`
+# (server/git.py). ca-certificates is needed for HTTPS clones.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends git ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
 # Create non-root user for security
 RUN groupadd --gid 1000 breeze \
     && useradd --uid 1000 --gid breeze --shell /bin/false --create-home breezeai
