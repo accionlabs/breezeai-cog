@@ -107,6 +107,21 @@ def _render_path(node: Node, source: bytes) -> str:
     return r if r is not None else url_placeholder(node_text(node, source))
 
 
+def _auth(decs: list[Node], source: bytes) -> tuple[bool, list[str]]:
+    """LoopBack auth via ``@authenticate('jwt')`` (class- or method-level). Returns
+    (any @authenticate present, strategy names). ``@authenticate.skip()`` parses as name
+    ``skip`` and is correctly ignored; the object form ``@authenticate({strategy})`` counts
+    as present but contributes no clean guard name."""
+    present = False
+    names: list[str] = []
+    for dec in decs:
+        d = decorator(dec, source)
+        if d.name == "authenticate":
+            present = True
+            names.extend(_unquote(a) for a in d.args if a.strip() and not a.strip().startswith("{"))
+    return present, names
+
+
 def _request_dto(member: Node, source: bytes) -> str | None:
     """Type name of the ``@requestBody()``-decorated parameter → requestDTO. Normalized to a
     single DTO name (so a named class links to its ``Class`` node); an anonymous inline
@@ -139,6 +154,7 @@ def detect_loopback_routes(root: Node, source: bytes, path: str, *, seen_ids: se
     routes: list[Statement] = []
     for cls, decs in _class_with_decorators(root):
         base = _api_base_path(decs, source)
+        ctrl_auth, ctrl_guards = _auth(decs, source)  # class-level @authenticate applies to all methods
         name_node = cls.child_by_field_name("name")
         class_name = node_text(name_node, source) if name_node is not None else None
         body = cls.child_by_field_name("body")
@@ -154,6 +170,9 @@ def detect_loopback_routes(root: Node, source: bytes, path: str, *, seen_ids: se
             if member.type == "method_definition":
                 mname = node_text(member.child_by_field_name("name"), source)
                 mline = member.start_point[0] + 1
+                m_auth, m_guards = _auth(pending, source)  # method-level @authenticate
+                guards = ctrl_guards + m_guards
+                auth_required = ctrl_auth or m_auth
                 for dec in pending:
                     d = decorator(dec, source)
                     vi = _verb_and_index(d.name, d.args)
@@ -175,6 +194,8 @@ def detect_loopback_routes(root: Node, source: bytes, path: str, *, seen_ids: se
                         handler=mname,
                         handlerLine=mline,
                         routeKind="route",
+                        guards=guards or None,
+                        authRequired=auth_required,
                         requestDTO=_request_dto(member, source),
                         responseDTO=return_dto(member, source),
                         startLine=sl,

@@ -172,6 +172,33 @@ def test_request_and_response_dto(tmp_path) -> None:
     assert routes["inline"].requestDTO is None             # anonymous inline object → no name
 
 
+def test_authenticate_guards(tmp_path) -> None:
+    # R4: @authenticate('jwt') at class or method level → guards + authRequired; a route with
+    # no @authenticate is authRequired=False with no guards.
+    src = (
+        b"import {get} from '@loopback/rest';\n"
+        b"import {authenticate} from '@loopback/authentication';\n"
+        b"@authenticate('jwt')\n"
+        b"export class Secured {\n"
+        b"  @get('/a') async a() {}\n"
+        b"  @authenticate('apiKey')\n"
+        b"  @get('/b') async b() {}\n"
+        b"}\n"
+        b"export class Open {\n"
+        b"  @get('/c') async c() {}\n"
+        b"}\n"
+    )
+    p = tmp_path / "s.controller.ts"
+    p.write_text(src.decode())
+    ctx = ParseContext(path="s.controller.ts", abs_path=p, source=src,
+                       repo_root=tmp_path, capture_statements=True)
+    routes = {s.handler: s for s in LoopBackParser().parse_file(ctx).statements
+              if s.semanticType == "route"}
+    assert routes["a"].guards == ["jwt"] and routes["a"].authRequired is True       # class-level
+    assert routes["b"].guards == ["jwt", "apiKey"] and routes["b"].authRequired is True  # class + method
+    assert routes["c"].guards is None and routes["c"].authRequired is False          # unprotected
+
+
 def test_claims_selects_loopback() -> None:
     registry.clear()
     from breezeai_cog.parsers.typescript.parser import TypeScriptParser
