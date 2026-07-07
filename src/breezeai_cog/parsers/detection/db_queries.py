@@ -126,6 +126,17 @@ _DB_RECEIVER_SUFFIXES = (
     "datasource", "queryrunner", "database", "manager",
 )
 
+# ElasticSearch / OpenSearch client verbs. These collide with ordinary code (``search`` is
+# ``String.prototype.search``; app repos/services expose ``.search()`` too — 270+ in one repo)
+# and with HTTP (``get``/``delete``), so they are gated on an ES-*client* receiver and the
+# high-collision HTTP verbs (get/update/delete/create) are deliberately excluded. ``msearch``
+# stays in _DISTINCTIVE (unambiguous, no receiver needed); ``mget`` is left to Redis.
+_ES_VERBS = frozenset({"search", "bulk", "index", "scroll", "reindex", "count"})
+# Terminal receiver segment that identifies an ES client (``this.client`` / ``esClient`` /
+# ``osClient``). Anything ending in ``client`` plus the explicit ES names — but NOT the DB
+# receivers above, so ``xxxCustomRepository.search`` / ``xService.search`` are excluded.
+_ES_RECEIVERS = frozenset({"client", "esclient", "es", "elastic", "elasticsearch", "opensearch", "osclient"})
+
 
 def match_db(callee: str, method: str, language: str | None = None) -> str | None:
     m = method.lower()
@@ -135,11 +146,13 @@ def match_db(callee: str, method: str, language: str | None = None) -> str | Non
         # EF verbs are .NET-only; suppress them in a known non-.NET file (name collision).
         if not (db == "entity_framework" and language is not None and language not in _DOTNET):
             return db
+    receiver = low.rsplit(".", 1)[0].rsplit(".", 1)[-1] if "." in low else ""
+    if m in _ES_VERBS and receiver and (receiver.endswith("client") or receiver in _ES_RECEIVERS):
+        return "elasticsearch"  # e.g. this.client.search(dsl) / esClient.bulk(...)
     if m in _GENERIC:
         for needle, hint in _RECEIVER_HINTS:  # positive vendor hint wins
             if needle in low:
                 return hint
-        receiver = low.rsplit(".", 1)[0].rsplit(".", 1)[-1] if "." in low else ""
         if m in _HIGH_COLLISION:
             # Opt-in: data access only on a positive DB receiver, else drop (no bare `orm`).
             if receiver and any(receiver.endswith(s) for s in _DB_RECEIVER_SUFFIXES):

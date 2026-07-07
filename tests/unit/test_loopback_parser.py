@@ -88,6 +88,117 @@ def test_output_validates(tmp_path) -> None:
     assert not errors, errors
 
 
+def test_comment_between_decorator_and_handler(tmp_path) -> None:
+    # Regression: a comment (commented-out old signature / eslint-disable) between the
+    # route decorator and its handler method must not drop the route (real LoopBack repos
+    # hit this; the NestJS parser already guarded it).
+    src = (
+        b"import {get, param} from '@loopback/rest';\n"
+        b"export class TimezoneController {\n"
+        b"  @get('/timezones', {responses: {}})\n"
+        b"  // async find(): Promise<object> {\n"
+        b"  async find(@param.filter(Timezone) filter?: Filter<Timezone>): Promise<object> {\n"
+        b"    return this.svc.find(filter);\n"
+        b"  }\n"
+        b"  @get('/timezones/{id}')\n"
+        b"  // eslint-disable-next-line @typescript-eslint/no-explicit-any\n"
+        b"  async findById(): Promise<any> { return {}; }\n"
+        b"}\n"
+    )
+    p = tmp_path / "timezone.controller.ts"
+    p.write_text(src.decode())
+    ctx = ParseContext(path="timezone.controller.ts", abs_path=p, source=src,
+                       repo_root=tmp_path, capture_statements=True)
+    rec = LoopBackParser().parse_file(ctx)
+    routes = {(s.method, s.endpoint): s for s in rec.statements if s.semanticType == "route"}
+    assert routes[("GET", "/timezones")].handler == "find"
+    assert routes[("GET", "/timezones/{id}")].handler == "findById"
+
+
+def test_computed_path_rendered_wellformed(tmp_path) -> None:
+    # R1(a): a route path built by concatenation / template literal must render as a
+    # well-formed `{placeholder}` path, not a malformed `+`-spliced string.
+    src = (
+        b"import {get, post} from '@loopback/rest';\n"
+        b"import appConfig from './config';\n"
+        b"export class C {\n"
+        b"  @get(appConfig.apiPathV2 + '/tender-status/count')\n"
+        b"  async count() { return 0; }\n"
+        b"  @post(`${appConfig.apiPathV2}/subscriber-setting`)\n"
+        b"  async setting() {}\n"
+        b"  @get('/api/v2/plain/literal')\n"
+        b"  async plain() {}\n"
+        b"}\n"
+    )
+    p = tmp_path / "c.controller.ts"
+    p.write_text(src.decode())
+    ctx = ParseContext(path="c.controller.ts", abs_path=p, source=src,
+                       repo_root=tmp_path, capture_statements=True)
+    eps = {s.handler: s.endpoint for s in LoopBackParser().parse_file(ctx).statements
+           if s.semanticType == "route"}
+    # concat: no '+' and no dangling quote — a clean placeholder for the config var
+    assert "+" not in eps["count"] and "'" not in eps["count"]
+    assert eps["count"].endswith("/tender-status/count") and "{apiPathV2}" in eps["count"]
+    # template literal: ${...} normalized to {...}
+    assert eps["setting"] == "/{apiPathV2}/subscriber-setting"
+    # plain literal unchanged
+    assert eps["plain"] == "/api/v2/plain/literal"
+
+
+def test_request_and_response_dto(tmp_path) -> None:
+    # R2: capture requestDTO from the @requestBody() param type and responseDTO from the
+    # handler return type.
+    src = (
+        b"import {get, post, requestBody} from '@loopback/rest';\n"
+        b"export class C {\n"
+        b"  @post('/clean')\n"
+        b"  async clean(@requestBody() dto: CleanDataDTO): Promise<object> { return {}; }\n"
+        b"  @get('/timezones')\n"
+        b"  async find(): Promise<ResponseApi<Timezone[]>> { return null as any; }\n"
+        b"  @post('/inline')\n"
+        b"  async inline(@requestBody() body: {a: number; b: string}): Promise<void> {}\n"
+        b"}\n"
+    )
+    p = tmp_path / "c.controller.ts"
+    p.write_text(src.decode())
+    ctx = ParseContext(path="c.controller.ts", abs_path=p, source=src,
+                       repo_root=tmp_path, capture_statements=True)
+    routes = {s.handler: s for s in LoopBackParser().parse_file(ctx).statements
+              if s.semanticType == "route"}
+    assert routes["clean"].requestDTO == "CleanDataDTO"
+    assert routes["clean"].responseDTO is None            # Promise<object> → no DTO
+    assert routes["find"].requestDTO is None
+    assert routes["find"].responseDTO == "ResponseApi"     # first PascalCase non-wrapper
+    assert routes["inline"].requestDTO is None             # anonymous inline object → no name
+
+
+def test_authenticate_guards(tmp_path) -> None:
+    # R4: @authenticate('jwt') at class or method level → guards + authRequired; a route with
+    # no @authenticate is authRequired=False with no guards.
+    src = (
+        b"import {get} from '@loopback/rest';\n"
+        b"import {authenticate} from '@loopback/authentication';\n"
+        b"@authenticate('jwt')\n"
+        b"export class Secured {\n"
+        b"  @get('/a') async a() {}\n"
+        b"  @authenticate('apiKey')\n"
+        b"  @get('/b') async b() {}\n"
+        b"}\n"
+        b"export class Open {\n"
+        b"  @get('/c') async c() {}\n"
+        b"}\n"
+    )
+    p = tmp_path / "s.controller.ts"
+    p.write_text(src.decode())
+    ctx = ParseContext(path="s.controller.ts", abs_path=p, source=src,
+                       repo_root=tmp_path, capture_statements=True)
+    routes = {s.handler: s for s in LoopBackParser().parse_file(ctx).statements
+              if s.semanticType == "route"}
+    assert routes["a"].guards == ["jwt"] and routes["a"].authRequired is True       # class-level
+    assert routes["b"].guards == ["jwt", "apiKey"] and routes["b"].authRequired is True  # class + method
+    assert routes["c"].guards is None and routes["c"].authRequired is False          # unprotected
+
+
 def test_claims_selects_loopback() -> None:
     registry.clear()
     from breezeai_cog.parsers.typescript.parser import TypeScriptParser

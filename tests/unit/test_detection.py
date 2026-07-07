@@ -177,6 +177,23 @@ def test_high_collision_verbs_require_db_receiver() -> None:
     assert classify_call("this.entityManager.merge", "merge") == ("db_method_call", "merge", "typeorm")
 
 
+def test_elasticsearch_client_verbs_gated() -> None:
+    # G1: ES client verbs (search/bulk/index/scroll/count) are data access ONLY on an
+    # ES-client receiver — so String.search, app repo/service .search(), etc. are excluded.
+    assert classify_call("this.client.search", "search") == ("db_method_call", "search", "elasticsearch")
+    assert classify_call("client.search", "search") == ("db_method_call", "search", "elasticsearch")
+    assert classify_call("esClient.bulk", "bulk") == ("db_method_call", "bulk", "elasticsearch")
+    assert classify_call("this.client.index", "index") == ("db_method_call", "index", "elasticsearch")
+    assert classify_call("osClient.scroll", "scroll") == ("db_method_call", "scroll", "elasticsearch")
+    # collisions rejected — not an ES-client receiver:
+    assert classify_call("this.projectsCustomRepository.search", "search") is None  # app repo method
+    assert classify_call("companyService.search", "search") is None                 # app service method
+    assert classify_call("keyword.search", "search") is None                        # String.prototype.search
+    # high-collision HTTP verbs deliberately excluded from ES (avoid map.get/cache.delete/api):
+    assert classify_call("client.get", "get") is None
+    assert classify_call("client.delete", "delete") is None
+
+
 def test_entity_framework_verbs_are_dotnet_gated() -> None:
     # EF verbs collide with other stacks (esp. `.include()` = TypeORM/RxJS/array in JS).
     # Suppress them in a KNOWN non-.NET language; keep them for .NET and unknown (None).
