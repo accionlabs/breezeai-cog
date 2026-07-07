@@ -115,7 +115,7 @@ def build_function(
     class_name: str | None,
     seen_ids: set[str],
     capture: bool = False,
-    limit: int = 1000,
+    limit: int,
     resolve: CallResolver = noop_resolver,
 ) -> tuple[Function, list[Statement]]:
     """Return the Function and its (flat) statements — the caller collects statements

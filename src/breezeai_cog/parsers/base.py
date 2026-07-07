@@ -37,7 +37,7 @@ class ParseContext:
     source: bytes  # read by the worker (cached per-process); only the path crosses the boundary
     repo_root: Path
     capture_statements: bool = False
-    text_truncation_limit: int = 1000
+    text_truncation_limit: int = 8000
     parse_timeout_micros: int = 0  # cross-platform tree-sitter timeout (0 = none)
     resolution_index: Any | None = None  # result of the language's build_index, or None
 

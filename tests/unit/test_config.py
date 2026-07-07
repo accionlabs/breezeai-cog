@@ -40,7 +40,7 @@ def test_defaults(env) -> None:
     assert s.capture_statements is False and s.upload is False
     assert s.log_level == "INFO" and s.log_format == "plaintext" and s.log_to_file is True
     assert s.port == 3000
-    assert s.text_truncation_limit == 1000 and s.max_file_size == 2_000_000
+    assert s.text_truncation_limit == 8000 and s.max_file_size == 2_000_000
     assert s.aws_region == "us-west-2"
 
 
