@@ -50,10 +50,20 @@ def _scan_entries(
         if debug_on:  # gated so structlog never renders below DEBUG
             log.debug("scan.file.skipped", path=path, reason=reason)
 
-    yield from scan(
+    for entry in scan(
         repo_root, _classifier(languages),
         engine=engine, max_file_size=settings.max_file_size, on_skip=on_skip,
-    )
+    ):
+        # Per-language layer-2 filter (§9), applied post-scan and scoped to the file's
+        # own classified language — so e.g. C#'s NuGet ``packages/`` never prunes a
+        # TypeScript ``packages/`` workspace. Universal built-ins already pruned the walk.
+        if engine.is_lang_ignored(entry.path, entry.language) and not (
+            engine.is_lang_included(entry.path, entry.language)
+            or engine.is_included_global(entry.path)
+        ):
+            on_skip(entry.path, "ignored")
+            continue
+        yield entry
 
 
 def _build_indexes(
