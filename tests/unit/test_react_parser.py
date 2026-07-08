@@ -106,6 +106,62 @@ def test_jsx_index_route_captured(tmp_path) -> None:
     assert ("/", "Home") in routes and ("/", "Layout") in routes and ("/about", "About") in routes
 
 
+# React Router v7 framework-mode config DSL (route/index/layout/prefix helper calls),
+# composed across module-level consts + spreads (as real routes.ts files do).
+V7_SRC = b'''import { index, layout, prefix, route } from '@react-router/dev/routes';
+
+const tenderRoutes = prefix('/tender', [
+  route('/new', 'routes/tender/new.tsx'),
+  route('/:tenderId', 'routes/tender/detail.tsx'),
+]);
+
+const procurementRoutes = prefix('/procurements', [
+  ...prefix('/:itemId', [
+    index('routes/procurement/index.tsx'),
+    ...tenderRoutes,
+  ]),
+]);
+
+export default [
+  index('routes/home.tsx'),
+  layout('routes/layouts/main.tsx', [
+    route('/chat', 'routes/chat.tsx'),
+    ...procurementRoutes,
+    route('*', 'routes/not-found.tsx'),
+  ]),
+] satisfies RouteConfig;
+'''
+
+
+def test_v7_config_dsl_routes_detected(tmp_path) -> None:
+    rec = _parse(tmp_path, V7_SRC, "routes.ts")
+    routes = {s.endpoint: s for s in rec.statements if s.semanticType == "route"}
+    # cross-const + spread composition resolves the full prefix chain.
+    assert "/procurements/:itemId/tender/new" in routes
+    assert "/procurements/:itemId/tender/:tenderId" in routes
+    # index() renders at the enclosing prefix path (no own segment).
+    assert "/procurements/:itemId" in routes
+    assert routes["/procurements/:itemId"].handler == "routes/procurement/index.tsx"
+    # layout() is a pathless wrapper (mount) and its children keep the parent path.
+    assert "/chat" in routes and routes["/chat"].handler == "routes/chat.tsx"
+    main = next(s for s in rec.statements if s.handler == "routes/layouts/main.tsx")
+    assert main.routeKind == "mount"
+    # catch-all is a real route, not filtered.
+    assert "/*" in routes
+    assert routes["/procurements/:itemId/tender/new"].framework == "react"
+    assert rec.framework == "react"
+
+
+def test_v7_detection_is_inert_on_v6_code(tmp_path) -> None:
+    # A v6 file (react-router-dom, JSX/object forms) must not trigger any v7 call
+    # matching, and its own detection must be unchanged. Guarded by the import gate.
+    for src, name, expected in ((JSX_SRC, "App.tsx", {"/", "/users", "/users/:id"}),
+                                (CONFIG_SRC, "router.tsx", {"/", "/team", "/reports"})):
+        rec = _parse(tmp_path, src, name)
+        eps = {s.endpoint for s in rec.statements if s.semanticType == "route"}
+        assert eps == expected, (name, eps)
+
+
 def test_config_index_route_captured(tmp_path) -> None:
     # createHashRouter is handled like createBrowserRouter (config-object walker)
     rec = _parse(tmp_path, INDEX_CONFIG_SRC, "router.tsx")
