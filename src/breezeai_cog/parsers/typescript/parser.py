@@ -37,6 +37,9 @@ _JS_EXT = (".js", ".jsx", ".mjs", ".cjs")
 _TS_FIXTURE_MARKERS = (".stories.", ".cy.", ".e2e.")
 
 
+_FUNC_VALUES = ("arrow_function", "function_expression")
+
+
 def _unwrap_export(node: Node) -> tuple[Node | None, list[Node]]:
     if node.type == "export_statement":
         decs = [c for c in node.named_children if c.type == "decorator"]
@@ -45,6 +48,28 @@ def _unwrap_export(node: Node) -> tuple[Node | None, list[Node]]:
     if node.type in _DECLS:
         return node, []
     return None, []
+
+
+def _bears_function(obj: Node) -> bool:
+    """Whether an object literal *transitively* contains a function-valued property.
+    The guard for descending a sub-object (G2): we recurse into a nested object only if
+    it actually holds functions, so plain data objects are never walked."""
+    for pair in obj.named_children:
+        if pair.type != "pair":
+            continue
+        value = pair.child_by_field_name("value")
+        if value is None:
+            continue
+        if value.type in _FUNC_VALUES:
+            return True
+        if value.type == "object" and _bears_function(value):
+            return True
+    return False
+
+
+def _member_name(key: Node, source: bytes) -> str:
+    text = node_text(key, source)
+    return text.strip("'\"`") if key.type == "string" else text
 
 
 class TypeScriptParser(BaseParser):
@@ -142,13 +167,46 @@ class TypeScriptParser(BaseParser):
                 if vd.type != "variable_declarator":
                     continue
                 value = vd.child_by_field_name("value")
-                if value is not None and value.type in ("arrow_function", "function_expression"):
-                    name_node = vd.child_by_field_name("name")
+                name_node = vd.child_by_field_name("name")
+                decl_name = node_text(name_node, source) if name_node else ""
+                if value is not None and value.type in _FUNC_VALUES:
                     fn, fn_stmts = build_function(
-                        value, name=node_text(name_node, source) if name_node else "",
+                        value, name=decl_name,
                         kind=value.type, decorators=[], source=source, path=path,
                         parent_id=fid, class_name=None, seen_ids=seen_ids,
                         capture=capture, limit=limit, resolve=resolve,
                     )
                     functions.append(fn)
                     statements.extend(fn_stmts)
+                elif value is not None and value.type == "object" and _bears_function(value):
+                    # G2: functions attached as object-literal properties (resolver maps,
+                    # service/hook objects). Descend from this declaration site, recursing
+                    # only through function-bearing sub-objects (Query/Mutation groupings).
+                    self._object_functions(
+                        value, decl_name, source, path, fid, seen_ids, capture, limit,
+                        functions, statements, resolve,
+                    )
+
+    def _object_functions(self, obj, name_prefix, source, path, fid, seen_ids, capture,
+                          limit, functions, statements, resolve) -> None:
+        for pair in obj.named_children:
+            if pair.type != "pair":
+                continue
+            key = pair.child_by_field_name("key")
+            value = pair.child_by_field_name("value")
+            if key is None or value is None:
+                continue
+            name = f"{name_prefix}.{_member_name(key, source)}"
+            if value.type in _FUNC_VALUES:
+                fn, fn_stmts = build_function(
+                    value, name=name, kind=value.type, decorators=[], source=source,
+                    path=path, parent_id=fid, class_name=None, seen_ids=seen_ids,
+                    capture=capture, limit=limit, resolve=resolve,
+                )
+                functions.append(fn)
+                statements.extend(fn_stmts)
+            elif value.type == "object" and _bears_function(value):
+                self._object_functions(
+                    value, name, source, path, fid, seen_ids, capture, limit,
+                    functions, statements, resolve,
+                )
