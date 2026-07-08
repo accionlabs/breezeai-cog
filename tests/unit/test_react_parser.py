@@ -8,7 +8,7 @@ from jsonschema import Draft202012Validator
 
 from breezeai_cog.core import registry
 from breezeai_cog.emit import to_line
-from breezeai_cog.parsers.base import ParseContext
+from breezeai_cog.parsers.base import BaseParser, ParseContext
 from breezeai_cog.parsers.typescript_react.parser import ReactParser
 from breezeai_cog.schemas import FileRecord
 
@@ -125,6 +125,52 @@ def test_output_validates(tmp_path) -> None:
         errors = list(Draft202012Validator(FileRecord.model_json_schema(by_alias=True))
                       .iter_errors(json.loads(to_line(rec))))
         assert not errors, errors
+
+
+# Storybook decorator: a createMemoryRouter config-object router wrapping the component
+# under test — a rendering harness, not application routes (R4).
+STORY_SRC = b'''import type { Meta } from '@storybook/react';
+import { createMemoryRouter, RouterProvider } from 'react-router';
+import { CompanyCard } from '../index';
+
+const meta = {
+  component: CompanyCard,
+  decorators: [
+    (StoryComponent) => {
+      const router = createMemoryRouter(
+        [{ path: '*', element: <StoryComponent /> }],
+        { initialEntries: ['/'] },
+      );
+      return <RouterProvider router={router} />;
+    },
+  ],
+};
+export default meta;
+'''
+
+
+def test_fixture_markers_are_layered() -> None:
+    # Global layer: test/spec infixes on any parser.
+    for p in ["foo.test.ts", "bar.spec.tsx"]:
+        assert BaseParser().is_fixture_file(p), p
+    # `.stories.` is a TS-language addition, NOT global — the base parser must not match it.
+    assert not BaseParser().is_fixture_file("a/company-card.stories.tsx")
+    # TypeScript (and every TS framework parser, which inherits it) adds `.stories.`.
+    react = ReactParser()
+    for p in ["a/company-card.stories.tsx", "x.stories.ts", "e.cy.ts", "foo.test.ts"]:
+        assert react.is_fixture_file(p), p
+    for p in ["routes.ts", "App.tsx", "src/story-list.tsx", "a/notification-feed.tsx"]:
+        assert not react.is_fixture_file(p), p
+
+
+def test_story_file_emits_no_routes_but_keeps_structure(tmp_path) -> None:
+    # R4: route-only exclusion — a *.stories.tsx file is parsed for structure but its
+    # decorator router must NOT produce routes.
+    rec = _parse(tmp_path, STORY_SRC, "company-card.stories.tsx")
+    assert [s for s in rec.statements if s.semanticType == "route"] == []
+    assert rec.framework is None
+    # still parsed for structure (imports captured) — exclusion is route-only.
+    assert rec.language == "typescript"
 
 
 def test_claims_selects_react() -> None:

@@ -32,6 +32,9 @@ _DECLS = (
 _CLASSES = ("class_declaration", "abstract_class_declaration", "interface_declaration", "enum_declaration")
 _TSX_EXT = (".tsx", ".jsx")
 _JS_EXT = (".js", ".jsx", ".mjs", ".cjs")
+#: JS/TS route-only fixture markers, layered on top of the global set (base.py). Storybook
+#: stories (not covered by the universal test-file ignores) + Cypress/Playwright specs.
+_TS_FIXTURE_MARKERS = (".stories.", ".cy.", ".e2e.")
 
 
 def _unwrap_export(node: Node) -> tuple[Node | None, list[Node]]:
@@ -50,6 +53,11 @@ class TypeScriptParser(BaseParser):
     schema_version = SCHEMA_VERSION
     statement_types = STATEMENT_TYPES
     frameworks = FRAMEWORKS
+
+    def fixture_markers(self) -> tuple[str, ...]:
+        # Global set + JS/TS additions (``_TS_FIXTURE_MARKERS``); inherited by every TS
+        # framework parser (React/NestJS/Express/…).
+        return (*super().fixture_markers(), *_TS_FIXTURE_MARKERS)
 
     def build_index(self, repo_root: Path, files: Sequence[Path]) -> TsAliasIndex | None:
         """Repo-level pre-pass: load tsconfig path aliases for import resolution."""
