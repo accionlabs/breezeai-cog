@@ -105,6 +105,50 @@ def test_output_validates(tmp_path) -> None:
     assert not errors, errors
 
 
+# R3: the Apollo GraphQL transport mount — app.use(path, expressMiddleware(server)).
+# The path is a variable (resolved to its default) and the handler is the Apollo adapter.
+APOLLO_SRC = b'''import express from 'express';
+import { expressMiddleware } from '@apollo/server/express4';
+
+export function createServer(graphqlPath = '/graphql') {
+  const app = express();
+  app.get('/health', (_req, res) => { res.end('OK'); });
+  app.use('/api', router);                                  // ordinary sub-router mount
+  app.use(graphqlPath, expressMiddleware(server, { context }));
+  return app;
+}
+'''
+
+
+def test_apollo_graphql_mount_detected(tmp_path) -> None:
+    p = tmp_path / "server.ts"
+    p.write_bytes(APOLLO_SRC)
+    ctx = ParseContext(path="server.ts", abs_path=p, source=APOLLO_SRC,
+                       repo_root=tmp_path, capture_statements=True)
+    rec = ExpressParser().parse_file(ctx)
+    routes = {(s.method, s.endpoint): s for s in rec.statements if s.semanticType == "route"}
+    # /health stays a plain express route; /api stays an express mount.
+    assert ("GET", "/health") in routes and routes[("GET", "/health")].framework == "express"
+    assert (None, "/api") in routes and routes[(None, "/api")].routeKind == "mount"
+    # the expressMiddleware mount is a POST /graphql route tagged graphql (path resolved
+    # from the graphqlPath param default).
+    gql = routes[("POST", "/graphql")]
+    assert gql.framework == "graphql" and gql.routeKind == "route"
+
+
+def test_apollo_mount_path_falls_back_to_convention(tmp_path) -> None:
+    # If the mount path can't be resolved to a literal, default to the /graphql convention.
+    src = b'''import { expressMiddleware } from '@apollo/server/express4';
+app.use(cfg.gqlPath, expressMiddleware(server));
+'''
+    p = tmp_path / "s.ts"
+    p.write_bytes(src)
+    ctx = ParseContext(path="s.ts", abs_path=p, source=src, repo_root=tmp_path, capture_statements=True)
+    rec = ExpressParser().parse_file(ctx)
+    eps = {(s.method, s.endpoint) for s in rec.statements if s.semanticType == "route"}
+    assert ("POST", "/graphql") in eps
+
+
 def test_claims_selects_express() -> None:
     registry.clear()
     from breezeai_cog.parsers.typescript.parser import TypeScriptParser

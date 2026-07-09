@@ -68,8 +68,50 @@ def _handler(arg_nodes: list[Node], source: bytes) -> tuple[str | None, int | No
     return None, None
 
 
-def _classify(call: Node, source: bytes) -> tuple[str | None, str, str | None, int | None] | None:
-    """→ (method, endpoint, handler, handlerLine) or None if not an Express route."""
+# The Apollo → Express adapter (``@apollo/server/express4``). ``app.use(path, expressMiddleware(server))``
+# mounts the GraphQL transport endpoint — a real route, not a generic sub-router mount.
+_APOLLO_MIDDLEWARE = "expressMiddleware"
+
+
+def _has_apollo_middleware(arg_nodes: list[Node], source: bytes) -> bool:
+    for a in arg_nodes:
+        if a.type == "call_expression":
+            callee = a.child_by_field_name("function")
+            if callee is not None and node_text(callee, source).rsplit(".", 1)[-1] == _APOLLO_MIDDLEWARE:
+                return True
+    return False
+
+
+def _resolve_str_identifier(name: str, root: Node, source: bytes) -> str | None:
+    """Best-effort: resolve an identifier used as a mount path to a string literal — a
+    param default (``graphqlPath = '/graphql'``) or a ``const graphqlPath = '/x'``."""
+    found: str | None = None
+
+    def walk(n: Node) -> None:
+        nonlocal found
+        if found is not None:
+            return
+        if n.type in ("required_parameter", "optional_parameter"):
+            pat, val = n.child_by_field_name("pattern"), n.child_by_field_name("value")
+            if pat is not None and node_text(pat, source) == name and val is not None and val.type == "string":
+                found = _string_value(val, source)
+                return
+        if n.type == "variable_declarator":
+            nm, val = n.child_by_field_name("name"), n.child_by_field_name("value")
+            if nm is not None and node_text(nm, source) == name and val is not None and val.type == "string":
+                found = _string_value(val, source)
+                return
+        for c in n.named_children:
+            walk(c)
+
+    walk(root)
+    return found
+
+
+def _classify(
+    call: Node, source: bytes, root: Node
+) -> tuple[str | None, str, str | None, int | None, str, str] | None:
+    """→ (method, endpoint, handler, handlerLine, framework, routeKind), or None if not a route."""
     fn = call.child_by_field_name("function")
     if fn is None or fn.type != "member_expression":
         return None
@@ -92,19 +134,25 @@ def _classify(call: Node, source: bytes) -> tuple[str | None, str, str | None, i
         # A verb call is a route only with a path arg + a handler arg — this rules out
         # the settings getter ``app.get('title')`` (single string arg, no handler).
         if path is not None and len(arg_nodes) >= 2:
-            return method.upper(), path, handler, handler_line
+            return method.upper(), path, handler, handler_line, "express", "route"
         return None
-    if method == "use" and path is not None and path.startswith("/"):
-        # ``app.use('/mount', router)`` mounts a sub-router; bare ``app.use(mw)`` is middleware.
-        return None, path, handler, handler_line  # routeKind handled by caller
+    if method == "use":
+        # ``app.use(path, expressMiddleware(server))`` mounts the GraphQL endpoint (R3):
+        # a POST route. The path is often a variable (``graphqlPath``) — resolve it, else
+        # fall back to the ``/graphql`` convention.
+        if _has_apollo_middleware(arg_nodes, source):
+            arg0 = arg_nodes[0] if arg_nodes else None
+            endpoint = path
+            if endpoint is None and arg0 is not None and arg0.type == "identifier":
+                endpoint = _resolve_str_identifier(node_text(arg0, source), root, source)
+            return "POST", endpoint or "/graphql", None, None, "graphql", "route"
+        if path is not None and path.startswith("/"):
+            # ``app.use('/mount', router)`` mounts a sub-router; bare ``app.use(mw)`` is middleware.
+            return None, path, handler, handler_line, "express", "mount"
+        return None
     if method == "route" and path is not None:
-        return None, path, None, None
+        return None, path, None, None, "express", "route"
     return None
-
-
-def _route_kind(call: Node, source: bytes) -> str:
-    prop = call.child_by_field_name("function").child_by_field_name("property")
-    return "mount" if node_text(prop, source) == "use" else "route"
 
 
 def _enclosing_statement(line: int, statements: list[Statement]) -> Statement | None:
@@ -136,17 +184,16 @@ def detect_express(root: Node, source: bytes, path: str, record: FileRecord) -> 
     seen = {s.id for s in record.statements}
 
     for call in _invocations(root):
-        info = _classify(call, source)
+        info = _classify(call, source, root)
         if info is None:
             continue
-        method, endpoint, handler, handler_line = info
-        route_kind = _route_kind(call, source)
+        method, endpoint, handler, handler_line, framework, route_kind = info
         line = call.start_point[0] + 1
 
         stmt = _enclosing_statement(line, record.statements)
         if stmt is not None:  # detection on the same span → enrich in place
             stmt.semanticType = "route"
-            stmt.framework = "express"
+            stmt.framework = framework
             stmt.routeKind = route_kind
             stmt.endpoint = endpoint
             if method:
@@ -164,7 +211,7 @@ def detect_express(root: Node, source: bytes, path: str, record: FileRecord) -> 
                 text=first_line(node_text(call, source)),
                 method=method,
                 endpoint=endpoint,
-                framework="express",
+                framework=framework,
                 handler=handler,
                 handlerLine=handler_line,
                 routeKind=route_kind,
