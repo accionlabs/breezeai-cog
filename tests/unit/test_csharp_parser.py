@@ -258,3 +258,31 @@ def test_ambiguous_type_does_not_bind(tmp_path) -> None:
     assert rec.importFiles == []                           # ambiguous -> no internal import
     calls = {c.name: c.path for f in rec.functions for c in f.calls}
     assert calls.get("Ping") is None                       # ambiguous -> unresolved call
+
+
+def test_same_project_type_wins(tmp_path) -> None:
+    # Identical FQCN in two projects. C# resolves the consumer's OWN-project copy
+    # (CS0436 "source wins"); a tie purely between two OTHER projects is CS0433 -> refuse.
+    files = {
+        "ProjA/ProjA.csproj": "<Project></Project>",
+        "ProjA/IProvider.cs": "namespace Shared;\npublic interface IProvider { void Do(); }\n",
+        "ProjB/ProjB.csproj": "<Project></Project>",
+        "ProjB/IProvider.cs": "namespace Shared;\npublic interface IProvider { void Do(); }\n",
+        "ProjB/Widget.cs":
+            "using Shared;\nnamespace App;\n"
+            "public class Widget { private readonly IProvider p; public void Run(){ p.Do(); } }\n",
+        "ProjC/ProjC.csproj": "<Project></Project>",
+        "ProjC/Thing.cs":
+            "using Shared;\nnamespace App2;\n"
+            "public class Thing { private readonly IProvider q; public void Go(){ q.Do(); } }\n",
+    }
+    # consumer inside ProjB -> binds ProjB's copy
+    rec = _parse_repo(tmp_path, files, "ProjB/Widget.cs")
+    assert rec.importFiles == ["ProjB/IProvider.cs"]
+    calls = {c.name: c.path for f in rec.functions for c in f.calls}
+    assert calls.get("Do") == "ProjB/IProvider.cs"
+    # consumer in ProjC -> tie between ProjA/ProjB, none local -> refuse (no guess)
+    rec2 = _parse_repo(tmp_path, files, "ProjC/Thing.cs")
+    assert rec2.importFiles == []
+    calls2 = {c.name: c.path for f in rec2.functions for c in f.calls}
+    assert calls2.get("Do") is None

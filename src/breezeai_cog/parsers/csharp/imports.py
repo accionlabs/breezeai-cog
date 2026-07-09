@@ -10,6 +10,13 @@ every ``using``, and any ``global using``). Resolution is **precision-first**: a
 binds to a file only when exactly one in-scope namespace declares it (0 or >1 → skip),
 so a BCL/NuGet type that merely shares a name with an in-repo type is never mis-bound.
 
+**Project scoping:** when a name resolves to >1 in-scope file, we break the tie the way
+the C# compiler does — a type declared in the consumer's **own project (assembly)** wins
+over an identically-named one imported from another project (warning CS0436, "source
+wins"). Projects are the directories containing a ``.csproj``. If exactly one candidate is
+in the consumer's project we bind it; otherwise we still refuse (a tie purely between other
+projects is CS0433, which the compiler itself errors on rather than guessing).
+
 ``using static Ns.Type`` and ``using Alias = Ns.Type`` name a *type* (fully qualified),
 so they resolve by direct lookup. Plain ``using``/``global using`` namespaces are still
 recorded as external (the namespace itself is not a single file)."""
@@ -41,6 +48,16 @@ class CSharpIndex:
     types: dict[str, set[str]] = field(default_factory=dict)
     #: namespaces brought into scope for *every* file via ``global using`` / ImplicitUsings.
     global_usings: set[str] = field(default_factory=set)
+    #: repo-relative dirs containing a ``.csproj`` (an assembly boundary), sorted
+    #: longest-first so the nearest ancestor of a file is its owning project.
+    project_roots: list[str] = field(default_factory=list)
+
+    def project_of(self, path: str) -> str | None:
+        """The owning project (nearest ancestor ``.csproj`` dir) of a repo-relative file."""
+        for root in self.project_roots:  # longest-first → nearest ancestor wins
+            if root == "" or path == root or path.startswith(root + "/"):
+                return root
+        return None
 
 
 def _decl_name(node: Node, source: bytes) -> str | None:
@@ -112,16 +129,44 @@ def _index_file(root: Node, source: bytes, rel: str, index: CSharpIndex) -> None
     walk(root, "")
 
 
+def _discover_project_roots(repo_root: Path, live_dirs: set[str]) -> list[str]:
+    """Repo-relative dirs holding a ``.csproj`` (assembly boundaries), longest-first.
+
+    Only projects that actually own scanned source are kept: a ``.csproj`` counts only
+    when a parsed ``.cs`` file lives at or below its directory. Since ``files`` is already
+    ignore-filtered by the scanner, this transitively honours every ignore layer (global
+    defaults, the language ``ignore.txt``, per-dir ``.gitignore``/``.repoignore``, and
+    include overrides) — so build output (``bin``/``obj``) and vendored ``packages`` drop
+    out on their own, with no separate skip list to keep in sync."""
+    roots: set[str] = set()
+    try:
+        for csproj in repo_root.rglob("*.csproj"):
+            d = repo_relative(csproj.parent, repo_root)
+            if d in live_dirs:  # a scanned .cs file lives under this project dir
+                roots.add(d)
+    except OSError:
+        pass
+    return sorted(roots, key=len, reverse=True)
+
+
 def build_csharp_index(repo_root: Path, files) -> CSharpIndex:
-    """Repo-level pre-pass: parse each ``.cs`` file and map declared types → path."""
-    index = CSharpIndex()
-    for file in files:
+    """Repo-level pre-pass: parse each ``.cs`` file and map declared types → path,
+    and record project (``.csproj``) roots for the same-project tiebreak."""
+    repo_root = Path(repo_root)
+    rels = [repo_relative(f, repo_root) for f in files]
+    live_dirs = {""}  # every ancestor dir of a scanned file (its owning-project candidates)
+    for rel in rels:
+        parts = rel.split("/")[:-1]
+        for i in range(1, len(parts) + 1):
+            live_dirs.add("/".join(parts[:i]))
+    index = CSharpIndex(project_roots=_discover_project_roots(repo_root, live_dirs))
+    for file, rel in zip(files, rels):
         try:
             source = Path(file).read_bytes()
         except OSError:
             continue
         root = parse_source("csharp", source, 0).root_node
-        _index_file(root, source, repo_relative(file, repo_root), index)
+        _index_file(root, source, rel, index)
     return index
 
 
@@ -187,7 +232,7 @@ def _referenced_types(root: Node, source: bytes) -> set[str]:
 
 def _resolve(name: str, scopes: set[str], index: CSharpIndex | None, self_path: str) -> str | None:
     """A fully-qualified or simple type name → its declaring file, or ``None`` when
-    external / unresolved / **ambiguous** (declared in >1 in-repo file)."""
+    external / unresolved / **ambiguous** (a tie no rule can break)."""
     if index is None or not name:
         return None
     if "." in name and name in index.types:  # already fully qualified (static/alias target)
@@ -197,7 +242,18 @@ def _resolve(name: str, scopes: set[str], index: CSharpIndex | None, self_path: 
         for ns in scopes:
             hits |= index.types.get(_join(ns, name), set())
     hits.discard(self_path)  # cross-file edges only
-    return next(iter(hits)) if len(hits) == 1 else None
+    if len(hits) == 1:
+        return next(iter(hits))
+    if len(hits) > 1:
+        # Same-project wins (C# CS0436: a type in the consumer's own assembly
+        # beats an identically-named one imported from another project). A tie purely
+        # between *other* projects is CS0433, which the compiler errors on — so we refuse.
+        proj = index.project_of(self_path)
+        if proj is not None:
+            same = [h for h in hits if index.project_of(h) == proj]
+            if len(same) == 1:
+                return same[0]
+    return None
 
 
 def extract_imports(
