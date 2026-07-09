@@ -28,6 +28,14 @@ def _read_sibling_lines(obj: object, filename: str) -> list[str]:
         return []
 
 
+#: Global route-only fixture markers — filename infixes shared across ecosystems whose
+#: files are parsed for structure but never treated as a route source. Layer 1; a
+#: language/framework parser extends it via ``fixture_markers`` (layer 2). Full test-file
+#: *exclusion* (``*.test.*``/``*.spec.*``/``test_*.py``…) lives in ``default_ignores.txt``;
+#: this list is the narrower route-only guard for files that are still captured.
+_GLOBAL_FIXTURE_MARKERS: tuple[str, ...] = (".test.", ".spec.")
+
+
 @dataclass(frozen=True, slots=True)
 class ParseContext:
     """Everything a parser needs for one file (built per file by the pipeline)."""
@@ -95,6 +103,19 @@ class BaseParser:
     def include_patterns(self) -> list[str]:
         """Per-language force-include overrides (§9) — from sibling ``include.txt``."""
         return _read_sibling_lines(self, "include.txt")
+
+    def fixture_markers(self) -> tuple[str, ...]:
+        """Filename infixes marking a **route-only** fixture — a file that is parsed for
+        structure but must never be treated as a route source (e.g. Storybook stories,
+        which render components in throwaway routers). Layered like ``ignore_patterns``:
+        the global set here, extended per language/framework via ``super()``. Empty of
+        anything language-specific at the base; TypeScript adds ``.stories.`` etc."""
+        return _GLOBAL_FIXTURE_MARKERS
+
+    def is_fixture_file(self, path: str) -> bool:
+        """Whether ``path`` is a route-only fixture for this parser's language/framework."""
+        base = path.rsplit("/", 1)[-1]
+        return any(marker in base for marker in self.fixture_markers())
 
     def parse_file(self, ctx: ParseContext) -> FileRecord:  # pragma: no cover - abstract
         raise NotImplementedError

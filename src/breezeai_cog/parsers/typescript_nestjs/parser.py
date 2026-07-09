@@ -52,7 +52,7 @@ class NestJSParser(TypeScriptParser):
         grammar = "tsx" if ctx.path.endswith((".tsx", ".jsx")) else "typescript"
         root = parse_source(grammar, ctx.source, ctx.parse_timeout_micros).root_node
         record = self.extract(root, ctx)  # inherited base extraction (one parse)
-        if ctx.capture_statements:  # routes are statements — gated by --capture-statements (spec A4)
+        if ctx.capture_statements and not self.is_fixture_file(ctx.path):  # gated (spec A4); skip fixtures (R4)
             framework = self._framework(ctx.source)
             routes = detect_nest_routes(
                 root, ctx.source, ctx.path,

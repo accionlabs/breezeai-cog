@@ -7,7 +7,7 @@ reusable building blocks, the AST-discovery workflow, the parse/extract split,
 registration, and testing.
 
 A parser turns one source file into a `FileRecord` (the Part C contract, see
-[`ARCHITECTURE.md`](../../../breeze-cog/docs/ARCHITECTURE.md)). Parsers self-register and
+[`ARCHITECTURE.md`](../../breeze-cog/docs/ARCHITECTURE.md)). Parsers self-register and
 the pipeline dispatches each file to exactly one parser. This is the standard procedure.
 
 ---
@@ -29,6 +29,7 @@ Worked examples already in the tree:
 - Framework (AST-walk detection): `parsers/python_fastapi/` (FastAPI), `parsers/typescript_nestjs/` (NestJS), `parsers/typescript_angular/` (Angular), `parsers/typescript_express/` (Express), `parsers/typescript_loopback/` (Loopback), `parsers/typescript_react/` (React), `parsers/java_vertx/` (Vert.x)
 - Framework (**off-the-record** detection — reads annotations the base parser already captured, no AST re-walk): `parsers/java_springboot/` (Spring Boot), `parsers/java_jaxrs/` (JAX-RS)
 - Framework (**hybrid** — off-the-record controllers + an AST walk for call-based routes): `parsers/csharp_aspnet/` and `parsers/vb_aspnet/` (ASP.NET — `[ApiController]`/`[HttpGet]` off the record, minimal-API `app.MapGet(…)` via AST walk; the controller detector is language-agnostic and shared between the C# and VB parsers)
+- Framework (**embedded-DSL secondary parse** — routes live in a template literal of a *different* language): `parsers/typescript_graphql/` (GraphQL — resolver maps via AST-walk of the host tree, plus SDL re-parsed with the `graphql` grammar; see §4)
 - Config: `parsers/config/` (a `priority`-0 parser with a custom `matches()` for glob-ish names like `Dockerfile.*` / `.env.*`)
 
 ---
@@ -76,6 +77,15 @@ Grammar names come from `tree_sitter_language_pack`. Use a JSX-aware grammar
 (`tsx`) for files with JSX. Note the exact node types and `child_by_field_name`
 fields you'll rely on (`name`, `parameters`, `body`, `return_type`, etc.).
 
+**Embedded DSLs (two grammars).** If routes/queries live inside a string of another
+language (GraphQL SDL in a `gql\`\`` template, SQL in a string, …), run Step 0 **twice** —
+once for the host grammar, once for the embedded one — and confirm the embedded grammar
+exists in `tree_sitter_language_pack`. The detector then locates the host node
+(e.g. `template_string`) in the primary tree, re-parses its bytes with the embedded
+grammar, and maps line numbers back via the host node's `start_point` (see §4, idiom 4).
+**Any secondary `parse_source` must thread `ctx.parse_timeout_micros`** — the same as the
+primary parse; every `parse_source` call site in the tree does.
+
 ### Step 1 — Scaffold the package (language parser)
 ```
 parsers/<lang>/
@@ -86,9 +96,18 @@ parsers/<lang>/
   functions.py    # build_function(...) -> (Function, list[Statement])
   classes.py      # build_class(...) -> (Class, list[Function], list[Statement])
   statements.py   # extract_statements(...) (flat, gated, + detection wiring)
-  ignore.txt      # per-language ignore defaults (layer 2)
-  include.txt     # per-language force-include overrides
+  ignore.txt      # per-language ignore defaults (layer 2) — scoped, post-scan (see §9 note)
+  include.txt     # per-language force-include overrides — same scoping
 ```
+
+> **ignore.txt / include.txt are language-scoped and applied post-scan (not during the
+> walk).** They are compiled per language (keyed by parser name) and matched against a
+> file only when that file's *own* classified language owns the rule — so one language's
+> pattern can't prune another's tree (e.g. C#/NuGet `packages/` must not prune a pnpm
+> `packages/` workspace). Consequence: a **directory-name** pattern here does **not** prune
+> the walk — it filters that language's files after classification. Truly universal
+> directory prunes (`node_modules/`, `dist/`, `build/`, `bin/`, `obj/`, `target/`, …)
+> belong in `core/default_ignores.txt`, which is the only set matched at walk time.
 
 ### Step 2 — Capability metadata + the parse/extract split (mandatory)
 ```python
@@ -147,6 +166,23 @@ statements — routes, api_call/db_method_call/query_statement, events — must 
 emitted when `ctx.capture_statements` is True** (spec A4). The base extractors already
 thread `capture = ctx.capture_statements` into `extract_statements`; **framework parsers
 must gate their own detection the same way** (see the framework example in §4).
+
+### Step 5c — Skip route-only fixture files (story/test harnesses)
+Story/test files render components in throwaway routers, so their "routes" are fixtures,
+not application routes. A **route-emitting** framework parser must gate detection on
+`self.is_fixture_file(ctx.path)` **as well as** `capture_statements`:
+```python
+if ctx.capture_statements and not self.is_fixture_file(ctx.path):
+    routes = detect_xxx_routes(...)
+```
+This is **route-only** — the file is still parsed for structure (functions/imports); only
+route emission is suppressed. Markers are layered like `ignore_patterns`, via
+`BaseParser.fixture_markers()`: a global constant (`_GLOBAL_FIXTURE_MARKERS = (".test.",
+".spec.")`) extended per language/framework through `super()` — e.g. TypeScript adds
+`_TS_FIXTURE_MARKERS = (".stories.", ".cy.", ".e2e.")`, inherited by every TS framework
+parser. Add your language's fixture infixes there, not to a global list. (Note: full
+`*.test.*` / `*.spec.*` *exclusion* already lives in `default_ignores.txt`; this guard is
+the narrower route-only case for files that are still captured, e.g. Storybook stories.)
 
 ### Step 6 — `build_index` (only if cross-file resolution is needed)
 If imports/symbols need repo-wide info (tsconfig aliases, Java FQCN, route mounts):
@@ -218,7 +254,7 @@ class NestJSParser(TypeScriptParser):
         grammar = "tsx" if ctx.path.endswith((".tsx", ".jsx")) else "typescript"
         root = parse_source(grammar, ctx.source, ctx.parse_timeout_micros).root_node
         record = self.extract(root, ctx)                 # inherited base extraction, ONE parse
-        if ctx.capture_statements:                       # routes are statements — gated (spec A4)
+        if ctx.capture_statements and not self.is_fixture_file(ctx.path):  # gated (A4) + skip fixtures (5c)
             routes = detect_nest_routes(root, ctx.source, ctx.path,
                                         seen_ids={s.id for s in record.statements})
             if routes:
@@ -232,7 +268,7 @@ right handler) — this is why deterministic ids matter. **Route/event/query det
 MUST be gated behind `ctx.capture_statements`** (spec A4) — never emit them
 unconditionally.
 
-### Two detection idioms
+### Detection idioms
 
 - **AST-walk** (FastAPI, NestJS, Express, Angular, React, Vert.x): the detector walks
   `root` to find call/decorator patterns. Use when the signal isn't already on the
@@ -257,6 +293,19 @@ unconditionally.
   Route attributes (`guards`/`requestDTO`/`responseDTO`/`isRegex`/`authRequired`, spec C5)
   are populated here from the captured decorators/params/`returnType` — see
   `java_springboot/routes.py`, `java_jaxrs/routes.py`, `typescript_nestjs/routes.py`.
+- **Hybrid** (ASP.NET): off-the-record controllers + an AST walk for call-based
+  minimal-API routes in one parser — see `csharp_aspnet/`, `vb_aspnet/`.
+- **Embedded-DSL secondary parse** (GraphQL): the routes are in a template literal of a
+  *different* language, opaque to the host grammar. AST-walk the host tree to find the
+  string node (`string_fragment` inside the `gql\`\`` `template_string`), slice its bytes,
+  re-parse with the embedded grammar (`parse_source("graphql", sdl,
+  ctx.parse_timeout_micros)`), walk the sub-tree, and map line numbers back with
+  `row_base + sub_node.start_point[0] + 1`, where `row_base = fragment.start_point[0]`
+  (the fragment's row in the host file). Use when the signal is a nested language, not
+  host-language calls/decorators. See `typescript_graphql/routes.py` — it also mixes
+  idioms: resolver **maps** are plain AST-walk of the host tree, while **SDL** uses this
+  secondary parse. Route fields need not be HTTP: GraphQL emits `framework="graphql"`,
+  `routeKind ∈ {query,mutation,subscription}`, `method` = the upper-cased operation kind.
 
 ### Selection: one parser per file
 A file is parsed by **exactly one** parser. `registry.select(path, source)` picks the
@@ -279,11 +328,13 @@ highest-`priority` parser whose `claims(path, source)` is True; the base languag
 - [ ] All ids via `emit.*` + `disambiguate`; one `seen_ids` per file.
 - [ ] Statements **flat** on `FileRecord.statements`, linked by `parentId`.
 - [ ] Route/event/query/api/db (semantic) statements gated behind `ctx.capture_statements` (spec A4).
+- [ ] Route-emitting parsers also skip fixtures: `and not self.is_fixture_file(ctx.path)` (Step 5c); add language fixture infixes to `fixture_markers()`, not a global list.
+- [ ] Any **secondary** `parse_source` (embedded-DSL idiom) threads `ctx.parse_timeout_micros`.
 - [ ] Imports resolved to repo-relative paths where possible (drives `IMPORTS`).
 - [ ] Shared `classify_call(callee, method, arg)` wired for api/db/query (don't reimplement); pass the string arg.
 - [ ] `FileRecord.language` = base language string.
 - [ ] `PARSERS` exported from `__init__.py`.
-- [ ] `ignore.txt` / `include.txt` for a language parser.
+- [ ] `ignore.txt` / `include.txt` for a language parser — **language-scoped, post-scan** (not walk-time); universal directory prunes go in `core/default_ignores.txt`.
 - [ ] `build_index` only if cross-file resolution is needed (return a **picklable** index).
 - [ ] Framework parser subclasses the base, sets `priority` + `claims` (cheap content
       sniff), does full extraction + detection in a single parse — no duplicated code.

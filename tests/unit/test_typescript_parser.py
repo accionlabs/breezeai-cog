@@ -114,6 +114,61 @@ def test_class_fields_captured(tmp_path) -> None:
     assert fields == ["count", "label"]
 
 
+# G2: arrow functions attached as object-literal properties (resolver maps, service
+# objects) are lifted into the function inventory, named by their key-trail.
+OBJ_FN_SRC = b'''const DENOM = { PI: 3.14 };                 // pure data: NOT descended
+
+export const api = {                          // depth-1 service object
+  getUser: async (id) => { return fetch(id); },
+  saveUser: (u) => { return db.put(u); },
+};
+
+export const resolvers = {
+  DateTime: DateTimeResolver,                 // non-function property: skipped
+  Query: {                                    // depth-2 grouping
+    thing: async (_, { id }, ctx) => { return ctx.get(id); },
+  },
+  Mutation: {
+    makeThing: (_, { input }, ctx) => { return ctx.create(input); },
+  },
+};
+
+function plain() { return 1; }
+'''
+
+
+def test_object_property_functions_captured(tmp_path) -> None:
+    p = tmp_path / "resolvers.ts"
+    p.write_bytes(OBJ_FN_SRC)
+    ctx = ParseContext(path="resolvers.ts", abs_path=p, source=OBJ_FN_SRC,
+                       repo_root=tmp_path, capture_statements=True)
+    rec = TypeScriptParser().parse_file(ctx)
+    names = {f.name for f in rec.functions}
+    # depth-1 service arrows, named by key-trail.
+    assert "api.getUser" in names and "api.saveUser" in names
+    # depth-2 resolver arrows, full trail through the grouping object.
+    assert "resolvers.Query.thing" in names
+    assert "resolvers.Mutation.makeThing" in names
+    # plain function still captured; non-function property is not.
+    assert "plain" in names
+    assert "resolvers.DateTime" not in names
+    # pure-data object is never descended (function-bearing guard).
+    assert not any(n.startswith("DENOM") for n in names)
+    # body is real: params + the service-call edge are captured.
+    thing = next(f for f in rec.functions if f.name == "resolvers.Query.thing")
+    assert len(thing.params) == 3 and any(c.name == "get" for c in thing.calls)
+
+
+def test_object_function_ids_are_unique(tmp_path) -> None:
+    p = tmp_path / "resolvers.ts"
+    p.write_bytes(OBJ_FN_SRC)
+    ctx = ParseContext(path="resolvers.ts", abs_path=p, source=OBJ_FN_SRC,
+                       repo_root=tmp_path, capture_statements=True)
+    rec = TypeScriptParser().parse_file(ctx)
+    ids = [f.id for f in rec.functions]
+    assert len(ids) == len(set(ids))  # deterministic, disambiguated ids
+
+
 def test_module_extensions_matched() -> None:
     # .mts/.cts (TS) and .mjs/.cjs (JS) module files must be claimed by the parser.
     parser = TypeScriptParser()

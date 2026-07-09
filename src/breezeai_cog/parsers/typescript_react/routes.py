@@ -1,9 +1,15 @@
-"""React Router route detection. Routes come in two shapes (React Router v6):
+"""React Router route detection. Routes come in three shapes:
 
-* **Declarative JSX** — ``<Route path="users" element={<Users/>}>`` with nested
+* **Declarative JSX** (v5/v6) — ``<Route path="users" element={<Users/>}>`` with nested
   ``<Route>`` children whose paths join onto the parent.
-* **Data-router config objects** — ``createBrowserRouter([{ path, element, children }])``
+* **Data-router config objects** (v6) — ``createBrowserRouter([{ path, element, children }])``
   / ``useRoutes([...])``, the same ``{ path, ... }`` array shape Angular uses.
+* **Framework-mode config DSL** (v7, ``@react-router/dev/routes``) — routes are built
+  from ``route(path, file)`` / ``index(file)`` / ``layout(file, [children])`` /
+  ``prefix(base, [children])`` **helper calls**, composed via ``const`` groups and
+  ``...spread``. The ``route()/index()/layout()/prefix()`` call helpers exist only in v7,
+  so this detection is gated on the ``@react-router/dev`` import and cannot fire on
+  v5/v6 code (whose APIs are the JSX/object forms above).
 
 Emits ``semanticType="route"`` statements (``routeKind="page"`` for element routes,
 ``"mount"`` for ``lazy`` code-split routes). Routes are parented to the file (React
@@ -179,6 +185,127 @@ def _has_route_ancestor(el: Node, source: bytes) -> bool:
     return False
 
 
+# ---- v7 framework-mode config DSL (route/index/layout/prefix calls) ---------
+
+_V7_HELPERS = frozenset({"route", "index", "layout", "prefix"})
+
+
+def _callee_name(call: Node, source: bytes) -> str | None:
+    """The called helper's bare name, or None if the callee isn't a plain identifier."""
+    fn = call.child_by_field_name("function")
+    return node_text(fn, source) if fn is not None and fn.type == "identifier" else None
+
+
+def _call_args(call: Node) -> list[Node]:
+    args = call.child_by_field_name("arguments")
+    return list(args.named_children) if args is not None else []
+
+
+def _last_array(args: list[Node]) -> Node | None:
+    return args[-1] if args and args[-1].type == "array" else None
+
+
+def _collect_consts(root: Node, source: bytes) -> dict[str, Node]:
+    """Map ``const <name> = <expr>`` → value node, so ``...spread`` of a route group
+    resolves to its definition (v7 composes groups across module-level consts)."""
+    consts: dict[str, Node] = {}
+    decls: list[Node] = []
+    _walk(root, "variable_declarator", decls)
+    for d in decls:
+        name = d.child_by_field_name("name")
+        value = d.child_by_field_name("value")
+        if name is not None and name.type == "identifier" and value is not None:
+            consts[node_text(name, source)] = value
+    return consts
+
+
+def _emit_v7(call: Node, kind: str, endpoint: str, handler_arg: Node | None,
+             source: bytes, path: str, seen: set[str], routes: list[Statement]) -> None:
+    sl, sc = call.start_point[0] + 1, call.start_point[1]
+    routes.append(Statement(
+        id=disambiguate(statement_id(path, sl, sc), seen),
+        parentId=file_id(path),
+        nodeType="call_expression",
+        semanticType="route",
+        text=node_text(call, source).split("\n", 1)[0][:120],
+        endpoint=endpoint,
+        framework="react",
+        routeKind="page" if kind in ("route", "index") else "mount",
+        handler=_string_val(handler_arg, source) or None,
+        startLine=sl,
+        endLine=call.end_point[0] + 1,
+        path=path,
+    ))
+
+
+def _process_v7(node: Node, prefix: str, source: bytes, path: str, seen: set[str],
+                routes: list[Statement], consts: dict[str, Node],
+                guard: frozenset[str]) -> None:
+    """Recursively resolve a v7 route node under the accumulated ``prefix``. Handles the
+    array / spread / const-identifier / helper-call forms; ``guard`` breaks const cycles."""
+    if node.type == "array":
+        for child in node.named_children:
+            _process_v7(child, prefix, source, path, seen, routes, consts, guard)
+        return
+    if node.type == "spread_element":
+        inner = node.named_children[0] if node.named_children else None
+        if inner is not None:
+            _process_v7(inner, prefix, source, path, seen, routes, consts, guard)
+        return
+    if node.type == "identifier":  # ...groupConst -> resolve to its definition (once)
+        name = node_text(node, source)
+        target = consts.get(name)
+        if target is not None and name not in guard:
+            _process_v7(target, prefix, source, path, seen, routes, consts, guard | {name})
+        return
+    if node.type != "call_expression":
+        return
+    kind = _callee_name(node, source)
+    if kind not in _V7_HELPERS:
+        return
+    args = _call_args(node)
+    if kind == "route":  # route(path, file, opts?)
+        seg = _string_val(args[0], source) if args else ""
+        handler = args[1] if len(args) > 1 else None
+        _emit_v7(node, kind, _join(prefix, seg), handler, source, path, seen, routes)
+    elif kind == "index":  # index(file, opts?) -> renders at the parent path
+        _emit_v7(node, kind, _join(prefix, ""), args[0] if args else None, source, path, seen, routes)
+    elif kind == "layout":  # layout(file, [children]) -> no path segment; recurse
+        _emit_v7(node, kind, _join(prefix, ""), args[0] if args else None, source, path, seen, routes)
+        children = _last_array(args)
+        if children is not None:
+            _process_v7(children, prefix, source, path, seen, routes, consts, guard)
+    elif kind == "prefix":  # prefix(base, [children]) -> add base, no node of its own
+        base = _string_val(args[0], source) if args else ""
+        children = _last_array(args)
+        if children is not None:
+            _process_v7(children, _join(prefix, base), source, path, seen, routes, consts, guard)
+
+
+def _v7_entry(root: Node, source: bytes) -> Node | None:
+    """The ``export default [...]`` route array (optionally wrapped in ``satisfies``)."""
+    exports: list[Node] = []
+    _walk(root, "export_statement", exports)
+    for exp in exports:
+        for child in exp.named_children:
+            node = child
+            if node.type == "satisfies_expression":  # [...] satisfies RouteConfig
+                node = next((c for c in node.named_children if c.type == "array"), None)
+            if node is not None and node.type == "array":
+                return node
+    return None
+
+
+def _detect_v7(root: Node, source: bytes, path: str, seen: set[str], routes: list[Statement]) -> None:
+    # Gate: the route/index/layout/prefix call helpers exist only in v7 framework mode.
+    # Keying on the import keeps this inert on v5/v6 (react-router-dom) code.
+    if b"@react-router/dev" not in source:
+        return
+    entry = _v7_entry(root, source)
+    if entry is not None:
+        _process_v7(entry, "", source, path, seen, routes, _collect_consts(root, source), frozenset())
+
+
 def detect_react_routes(root: Node, source: bytes, path: str, *, seen_ids: set[str]) -> list[Statement]:
     routes: list[Statement] = []
     # JSX <Route>: start only at top-level Routes (no <Route> ancestor); recursion handles nesting.
@@ -194,4 +321,6 @@ def detect_react_routes(root: Node, source: bytes, path: str, *, seen_ids: set[s
     for arr in arrays:
         if _is_route_array(arr, source) and not _is_children_value(arr, source):
             _process_config(arr, "", source, path, seen_ids, routes)
+    # v7 framework-mode config DSL (gated on the @react-router/dev import).
+    _detect_v7(root, source, path, seen_ids, routes)
     return routes

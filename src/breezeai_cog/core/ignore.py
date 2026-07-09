@@ -2,21 +2,25 @@
 
 Two pattern sets matched with ``pathspec`` (gitwildmatch):
 
-* **ignore** — additive union, no cross-layer "winning": built-in defaults +
-  per-language ``ignore.txt`` (the *global* part, here) and the repo-tree
-  ``.repoignore`` / ``.gitignore`` files (hierarchical — the scanner accumulates a
-  per-directory stack and matches relative to each file's directory).
-* **include** — overrides the ignore set: per-language ``include.txt`` (global) and
+* **universal ignore** — built-in defaults only (``default_ignores.txt``); matched at
+  walk time to prune directories, plus the repo-tree ``.repoignore`` / ``.gitignore``
+  files (hierarchical — the scanner accumulates a per-directory stack and matches
+  relative to each file's directory).
+* **per-language ignore/include** — each parser's ``ignore.txt`` / ``include.txt``
+  (§9 layer 2), kept **scoped to that language** and applied **post-scan** to a file
+  only when the file's own classified language owns the rule.
+* **include** — overrides the ignore set: per-language ``include.txt`` (scoped) and
   repo-tree ``.repoinclude`` (hierarchical).
 
 A path is kept when ``included or not ignored``.
 
-Simplification vs §9: the *global* part unions built-in + **all** registered
-parsers' ``ignore.txt``/``include.txt`` rather than scoping per detected language.
-Per-language artifact patterns are language-specific names, so the union is
-functionally equivalent except for rare cross-language path collisions (a strict
-per-language scoping is a later refinement). This keeps directory pruning — where
-the language is unknown — simple and correct.
+Per-language scoping (§9): layer-2 patterns are *not* unioned into the global spec —
+that leaks one language's directory-ignore into another's tree (e.g. C#/NuGet
+``packages/`` pruning a pnpm ``packages/`` workspace). Instead they are compiled per
+language and matched against a file only when it is a file of that language, after the
+walk has classified it. Directory pruning during the walk therefore uses only the
+universal built-ins (which already cover ``bin/``/``obj/``/``target/``/``dist/`` etc.),
+so the language-agnostic walk can't over-prune.
 """
 
 from __future__ import annotations
@@ -64,24 +68,46 @@ def read_dir_include_spec(dir_path: str | Path) -> GitIgnoreSpec | None:
 
 
 class IgnoreEngine:
-    """Holds the *global* ignore/include specs; the scanner supplies the per-directory
-    repo-tree stacks at match time."""
+    """Holds the *universal* (built-in) ignore/include specs used for walk-time pruning,
+    plus **per-language** layer-2 specs applied post-scan. The scanner supplies the
+    per-directory repo-tree stacks at match time."""
 
-    def __init__(self, ignore_lines: Iterable[str], include_lines: Iterable[str]) -> None:
+    def __init__(
+        self,
+        ignore_lines: Iterable[str],
+        include_lines: Iterable[str],
+        lang_specs: dict[str, tuple[GitIgnoreSpec, GitIgnoreSpec]] | None = None,
+    ) -> None:
         self._ignore = compile_spec(ignore_lines)
         self._include = compile_spec(include_lines)
+        # language name -> (ignore spec, include spec); scoped, matched post-scan.
+        self._lang: dict[str, tuple[GitIgnoreSpec, GitIgnoreSpec]] = dict(lang_specs or {})
 
     @classmethod
     def build(cls, parsers: Iterable[object] = ()) -> "IgnoreEngine":
-        ignore = builtin_ignore_lines()
-        include: list[str] = []
+        # Universal built-ins prune the walk; each parser's layer-2 ignore/include is
+        # compiled per language (keyed by parser name = the file's classified language)
+        # and applied post-scan, so one language's rule can't prune another's tree.
+        lang: dict[str, tuple[GitIgnoreSpec, GitIgnoreSpec]] = {}
         for parser in parsers:
-            ignore += getattr(parser, "ignore_patterns", list)()
-            include += getattr(parser, "include_patterns", list)()
-        return cls(ignore, include)
+            ig = list(getattr(parser, "ignore_patterns", list)())
+            inc = list(getattr(parser, "include_patterns", list)())
+            if ig or inc:
+                lang[getattr(parser, "name", "")] = (compile_spec(ig), compile_spec(inc))
+        return cls(builtin_ignore_lines(), [], lang)
 
     def is_ignored_global(self, rel: str) -> bool:
         return self._ignore.match_file(rel)
 
     def is_included_global(self, rel: str) -> bool:
         return self._include.match_file(rel)
+
+    def is_lang_ignored(self, rel: str, language: str) -> bool:
+        """Whether ``rel`` matches its own ``language``'s layer-2 ignore patterns."""
+        spec = self._lang.get(language)
+        return spec is not None and spec[0].match_file(rel)
+
+    def is_lang_included(self, rel: str, language: str) -> bool:
+        """Whether ``rel`` is force-included by its own ``language``'s layer-2 patterns."""
+        spec = self._lang.get(language)
+        return spec is not None and spec[1].match_file(rel)

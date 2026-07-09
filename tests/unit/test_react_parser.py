@@ -8,7 +8,7 @@ from jsonschema import Draft202012Validator
 
 from breezeai_cog.core import registry
 from breezeai_cog.emit import to_line
-from breezeai_cog.parsers.base import ParseContext
+from breezeai_cog.parsers.base import BaseParser, ParseContext
 from breezeai_cog.parsers.typescript_react.parser import ReactParser
 from breezeai_cog.schemas import FileRecord
 
@@ -106,6 +106,62 @@ def test_jsx_index_route_captured(tmp_path) -> None:
     assert ("/", "Home") in routes and ("/", "Layout") in routes and ("/about", "About") in routes
 
 
+# React Router v7 framework-mode config DSL (route/index/layout/prefix helper calls),
+# composed across module-level consts + spreads (as real routes.ts files do).
+V7_SRC = b'''import { index, layout, prefix, route } from '@react-router/dev/routes';
+
+const tenderRoutes = prefix('/tender', [
+  route('/new', 'routes/tender/new.tsx'),
+  route('/:tenderId', 'routes/tender/detail.tsx'),
+]);
+
+const procurementRoutes = prefix('/procurements', [
+  ...prefix('/:itemId', [
+    index('routes/procurement/index.tsx'),
+    ...tenderRoutes,
+  ]),
+]);
+
+export default [
+  index('routes/home.tsx'),
+  layout('routes/layouts/main.tsx', [
+    route('/chat', 'routes/chat.tsx'),
+    ...procurementRoutes,
+    route('*', 'routes/not-found.tsx'),
+  ]),
+] satisfies RouteConfig;
+'''
+
+
+def test_v7_config_dsl_routes_detected(tmp_path) -> None:
+    rec = _parse(tmp_path, V7_SRC, "routes.ts")
+    routes = {s.endpoint: s for s in rec.statements if s.semanticType == "route"}
+    # cross-const + spread composition resolves the full prefix chain.
+    assert "/procurements/:itemId/tender/new" in routes
+    assert "/procurements/:itemId/tender/:tenderId" in routes
+    # index() renders at the enclosing prefix path (no own segment).
+    assert "/procurements/:itemId" in routes
+    assert routes["/procurements/:itemId"].handler == "routes/procurement/index.tsx"
+    # layout() is a pathless wrapper (mount) and its children keep the parent path.
+    assert "/chat" in routes and routes["/chat"].handler == "routes/chat.tsx"
+    main = next(s for s in rec.statements if s.handler == "routes/layouts/main.tsx")
+    assert main.routeKind == "mount"
+    # catch-all is a real route, not filtered.
+    assert "/*" in routes
+    assert routes["/procurements/:itemId/tender/new"].framework == "react"
+    assert rec.framework == "react"
+
+
+def test_v7_detection_is_inert_on_v6_code(tmp_path) -> None:
+    # A v6 file (react-router-dom, JSX/object forms) must not trigger any v7 call
+    # matching, and its own detection must be unchanged. Guarded by the import gate.
+    for src, name, expected in ((JSX_SRC, "App.tsx", {"/", "/users", "/users/:id"}),
+                                (CONFIG_SRC, "router.tsx", {"/", "/team", "/reports"})):
+        rec = _parse(tmp_path, src, name)
+        eps = {s.endpoint for s in rec.statements if s.semanticType == "route"}
+        assert eps == expected, (name, eps)
+
+
 def test_config_index_route_captured(tmp_path) -> None:
     # createHashRouter is handled like createBrowserRouter (config-object walker)
     rec = _parse(tmp_path, INDEX_CONFIG_SRC, "router.tsx")
@@ -125,6 +181,52 @@ def test_output_validates(tmp_path) -> None:
         errors = list(Draft202012Validator(FileRecord.model_json_schema(by_alias=True))
                       .iter_errors(json.loads(to_line(rec))))
         assert not errors, errors
+
+
+# Storybook decorator: a createMemoryRouter config-object router wrapping the component
+# under test — a rendering harness, not application routes (R4).
+STORY_SRC = b'''import type { Meta } from '@storybook/react';
+import { createMemoryRouter, RouterProvider } from 'react-router';
+import { CompanyCard } from '../index';
+
+const meta = {
+  component: CompanyCard,
+  decorators: [
+    (StoryComponent) => {
+      const router = createMemoryRouter(
+        [{ path: '*', element: <StoryComponent /> }],
+        { initialEntries: ['/'] },
+      );
+      return <RouterProvider router={router} />;
+    },
+  ],
+};
+export default meta;
+'''
+
+
+def test_fixture_markers_are_layered() -> None:
+    # Global layer: test/spec infixes on any parser.
+    for p in ["foo.test.ts", "bar.spec.tsx"]:
+        assert BaseParser().is_fixture_file(p), p
+    # `.stories.` is a TS-language addition, NOT global — the base parser must not match it.
+    assert not BaseParser().is_fixture_file("a/company-card.stories.tsx")
+    # TypeScript (and every TS framework parser, which inherits it) adds `.stories.`.
+    react = ReactParser()
+    for p in ["a/company-card.stories.tsx", "x.stories.ts", "e.cy.ts", "foo.test.ts"]:
+        assert react.is_fixture_file(p), p
+    for p in ["routes.ts", "App.tsx", "src/story-list.tsx", "a/notification-feed.tsx"]:
+        assert not react.is_fixture_file(p), p
+
+
+def test_story_file_emits_no_routes_but_keeps_structure(tmp_path) -> None:
+    # R4: route-only exclusion — a *.stories.tsx file is parsed for structure but its
+    # decorator router must NOT produce routes.
+    rec = _parse(tmp_path, STORY_SRC, "company-card.stories.tsx")
+    assert [s for s in rec.statements if s.semanticType == "route"] == []
+    assert rec.framework is None
+    # still parsed for structure (imports captured) — exclusion is route-only.
+    assert rec.language == "typescript"
 
 
 def test_claims_selects_react() -> None:

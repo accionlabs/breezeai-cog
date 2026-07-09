@@ -32,6 +32,12 @@ _DECLS = (
 _CLASSES = ("class_declaration", "abstract_class_declaration", "interface_declaration", "enum_declaration")
 _TSX_EXT = (".tsx", ".jsx")
 _JS_EXT = (".js", ".jsx", ".mjs", ".cjs")
+#: JS/TS route-only fixture markers, layered on top of the global set (base.py). Storybook
+#: stories (not covered by the universal test-file ignores) + Cypress/Playwright specs.
+_TS_FIXTURE_MARKERS = (".stories.", ".cy.", ".e2e.")
+
+
+_FUNC_VALUES = ("arrow_function", "function_expression")
 
 
 def _unwrap_export(node: Node) -> tuple[Node | None, list[Node]]:
@@ -44,12 +50,39 @@ def _unwrap_export(node: Node) -> tuple[Node | None, list[Node]]:
     return None, []
 
 
+def _bears_function(obj: Node) -> bool:
+    """Whether an object literal *transitively* contains a function-valued property.
+    The guard for descending a sub-object (G2): we recurse into a nested object only if
+    it actually holds functions, so plain data objects are never walked."""
+    for pair in obj.named_children:
+        if pair.type != "pair":
+            continue
+        value = pair.child_by_field_name("value")
+        if value is None:
+            continue
+        if value.type in _FUNC_VALUES:
+            return True
+        if value.type == "object" and _bears_function(value):
+            return True
+    return False
+
+
+def _member_name(key: Node, source: bytes) -> str:
+    text = node_text(key, source)
+    return text.strip("'\"`") if key.type == "string" else text
+
+
 class TypeScriptParser(BaseParser):
     name = "typescript"
     extensions = (".ts", ".tsx", ".mts", ".cts", ".js", ".jsx", ".mjs", ".cjs")
     schema_version = SCHEMA_VERSION
     statement_types = STATEMENT_TYPES
     frameworks = FRAMEWORKS
+
+    def fixture_markers(self) -> tuple[str, ...]:
+        # Global set + JS/TS additions (``_TS_FIXTURE_MARKERS``); inherited by every TS
+        # framework parser (React/NestJS/Express/…).
+        return (*super().fixture_markers(), *_TS_FIXTURE_MARKERS)
 
     def build_index(self, repo_root: Path, files: Sequence[Path]) -> TsAliasIndex | None:
         """Repo-level pre-pass: load tsconfig path aliases for import resolution."""
@@ -134,13 +167,46 @@ class TypeScriptParser(BaseParser):
                 if vd.type != "variable_declarator":
                     continue
                 value = vd.child_by_field_name("value")
-                if value is not None and value.type in ("arrow_function", "function_expression"):
-                    name_node = vd.child_by_field_name("name")
+                name_node = vd.child_by_field_name("name")
+                decl_name = node_text(name_node, source) if name_node else ""
+                if value is not None and value.type in _FUNC_VALUES:
                     fn, fn_stmts = build_function(
-                        value, name=node_text(name_node, source) if name_node else "",
+                        value, name=decl_name,
                         kind=value.type, decorators=[], source=source, path=path,
                         parent_id=fid, class_name=None, seen_ids=seen_ids,
                         capture=capture, limit=limit, resolve=resolve,
                     )
                     functions.append(fn)
                     statements.extend(fn_stmts)
+                elif value is not None and value.type == "object" and _bears_function(value):
+                    # G2: functions attached as object-literal properties (resolver maps,
+                    # service/hook objects). Descend from this declaration site, recursing
+                    # only through function-bearing sub-objects (Query/Mutation groupings).
+                    self._object_functions(
+                        value, decl_name, source, path, fid, seen_ids, capture, limit,
+                        functions, statements, resolve,
+                    )
+
+    def _object_functions(self, obj, name_prefix, source, path, fid, seen_ids, capture,
+                          limit, functions, statements, resolve) -> None:
+        for pair in obj.named_children:
+            if pair.type != "pair":
+                continue
+            key = pair.child_by_field_name("key")
+            value = pair.child_by_field_name("value")
+            if key is None or value is None:
+                continue
+            name = f"{name_prefix}.{_member_name(key, source)}"
+            if value.type in _FUNC_VALUES:
+                fn, fn_stmts = build_function(
+                    value, name=name, kind=value.type, decorators=[], source=source,
+                    path=path, parent_id=fid, class_name=None, seen_ids=seen_ids,
+                    capture=capture, limit=limit, resolve=resolve,
+                )
+                functions.append(fn)
+                statements.extend(fn_stmts)
+            elif value.type == "object" and _bears_function(value):
+                self._object_functions(
+                    value, name, source, path, fid, seen_ids, capture, limit,
+                    functions, statements, resolve,
+                )
