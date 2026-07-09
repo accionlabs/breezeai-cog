@@ -56,7 +56,7 @@ def test_language_and_imports(tmp_path) -> None:
     assert rec.language == "csharp"
     assert "System" in rec.externalImports
     assert "Microsoft.AspNetCore.Mvc" in rec.externalImports
-    assert rec.importFiles == []  # C# usings don't resolve to files
+    assert rec.importFiles == []  # no repo index here -> nothing resolves to a file
 
 
 def test_types(tmp_path) -> None:
@@ -185,3 +185,76 @@ def test_endpoint_interpolated_string(tmp_path) -> None:
                        capture_statements=True)
     rec = CSharpParser().parse_file(ctx)
     assert any(s.semanticType == "api_call" and s.endpoint == "/users/{id}" for s in rec.statements)
+
+
+# --- cross-file resolution (namespace/type -> file) -----------------------------------
+
+def _parse_repo(tmp_path, files: dict[str, str], target: str) -> FileRecord:
+    """Write a multi-file C# repo, run ``build_index``, parse ``target`` with the index."""
+    for rel, text in files.items():
+        p = tmp_path / rel
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(text)
+    parser = CSharpParser()
+    index = parser.build_index(tmp_path, list(tmp_path.rglob("*.cs")))
+    p = tmp_path / target
+    ctx = ParseContext(path=target, abs_path=p, source=p.read_bytes(),
+                       repo_root=tmp_path, resolution_index=index)
+    return parser.parse_file(ctx)
+
+
+def test_referenced_type_resolves_to_file(tmp_path) -> None:
+    # A `using`d namespace's type referenced as a field resolves to the declaring file,
+    # and a call on that field becomes a cross-file CALLS edge.
+    rec = _parse_repo(tmp_path, {
+        "Repo/OrderRepo.cs":
+            "namespace Acme.Repo;\npublic class OrderRepo { public object FindById(int id){return null;} }\n",
+        "Controllers/OrderController.cs":
+            "using Acme.Repo;\nnamespace Acme.Controllers;\n"
+            "public class OrderController {\n"
+            "    private readonly OrderRepo repo;\n"
+            "    public OrderController(OrderRepo repo){ this.repo = repo; }\n"
+            "    public object Get(int id){ return repo.FindById(id); }\n"
+            "}\n",
+    }, "Controllers/OrderController.cs")
+    assert "Repo/OrderRepo.cs" in rec.importFiles          # IMPORTS edge
+    calls = {c.name: c.path for f in rec.functions for c in f.calls}
+    assert calls.get("FindById") == "Repo/OrderRepo.cs"    # cross-file CALLS edge
+
+
+def test_global_using_alias_and_static_resolve(tmp_path) -> None:
+    rec = _parse_repo(tmp_path, {
+        "GlobalUsings.cs": "global using Acme.Data;\n",
+        "Data/OrderRepo.cs":
+            "namespace Acme.Data;\npublic class OrderRepo { public object FindById(int id){return null;} }\n",
+        "Helpers/MathUtil.cs":
+            "namespace Acme.Helpers;\npublic static class MathUtil { public static int Add(int a,int b){return a+b;} }\n",
+        "App/Consumer.cs":
+            "using static Acme.Helpers.MathUtil;\n"
+            "using Repo = Acme.Data.OrderRepo;\n"
+            "namespace Acme.App;\n"
+            "public class Consumer {\n"
+            "    private readonly OrderRepo direct;   // via global using\n"
+            "    private readonly Repo aliased;       // via alias\n"
+            "    public void Run(int id){ direct.FindById(id); aliased.FindById(id); MathUtil.Add(1,2); }\n"
+            "}\n",
+    }, "App/Consumer.cs")
+    calls = {c.name: c.path for f in rec.functions for c in f.calls}
+    assert calls.get("FindById") == "Data/OrderRepo.cs"    # global-using + alias field types
+    assert calls.get("Add") == "Helpers/MathUtil.cs"       # `using static` type binding
+    assert {"Data/OrderRepo.cs", "Helpers/MathUtil.cs"} <= set(rec.importFiles)
+
+
+def test_ambiguous_type_does_not_bind(tmp_path) -> None:
+    # Precision-first: a type declared in >1 in-repo file must NOT resolve (else a shared
+    # name would create false hub edges and collapse unrelated files into one cluster).
+    rec = _parse_repo(tmp_path, {
+        "A/Dup.cs": "namespace Shared;\npublic class Dup { public void Ping(){} }\n",
+        "B/Dup.cs": "namespace Shared;\npublic class Dup { public void Ping(){} }\n",
+        "App/User.cs":
+            "using Shared;\nnamespace App;\n"
+            "public class User { private readonly Dup d; public void Go(){ d.Ping(); } }\n",
+    }, "App/User.cs")
+    assert rec.importFiles == []                           # ambiguous -> no internal import
+    calls = {c.name: c.path for f in rec.functions for c in f.calls}
+    assert calls.get("Ping") is None                       # ambiguous -> unresolved call

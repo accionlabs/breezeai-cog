@@ -3,11 +3,14 @@ declarations live in classes/structs/etc., which in turn live in namespaces (blo
 file-scoped), so extraction recurses through namespaces to reach the type declarations,
 then emits imports + classes (with their flat methods and statements).
 
-No ``build_index``: C# ``using`` names a namespace (spanning many files/assemblies),
-not a file path — so imports stay external and calls resolve same-file only
-(precision-first, Phase 1)."""
+``build_index`` maps each declared type to its file (``Namespace.TypeName → path``);
+because C# ``using`` names a namespace (not a file), cross-file edges resolve from the
+*referenced type names* rather than the imports themselves (see ``imports.py``)."""
 
 from __future__ import annotations
+
+from pathlib import Path
+from typing import Sequence
 
 from tree_sitter import Node
 
@@ -19,7 +22,7 @@ from ..callresolve import make_resolver
 from ..treesitter import parse_source
 from .classes import build_class
 from .functions import defined_names, type_map
-from .imports import extract_imports
+from .imports import CSharpIndex, build_csharp_index, extract_imports
 from .mappings import FRAMEWORKS, STATEMENT_TYPES
 
 _CLASS_TYPES = (
@@ -46,6 +49,10 @@ class CSharpParser(BaseParser):
     statement_types = STATEMENT_TYPES
     frameworks = FRAMEWORKS
 
+    def build_index(self, repo_root: Path, files: Sequence[Path]) -> CSharpIndex:
+        """Repo-level pre-pass: map each declared type ``Namespace.TypeName`` → repo path."""
+        return build_csharp_index(Path(repo_root), files)
+
     def parse_file(self, ctx: ParseContext) -> FileRecord:
         root = parse_source("csharp", ctx.source, ctx.parse_timeout_micros).root_node
         return self.extract(root, ctx)
@@ -56,7 +63,9 @@ class CSharpParser(BaseParser):
         seen_ids: set[str] = set()
         capture, limit = ctx.capture_statements, ctx.text_truncation_limit
 
-        internal, external, _, bindings = extract_imports(root, source)
+        internal, external, _, bindings = extract_imports(
+            root, source, path, ctx.resolution_index
+        )
         resolve = make_resolver(
             bindings, defined_names(root, source), path, type_map(root, source)
         )
