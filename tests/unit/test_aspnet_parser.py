@@ -216,6 +216,48 @@ def test_csharp_minimal_apis() -> None:
     assert ("POST", "/items") in minimal
 
 
+# The Startup.cs registration block that the benchmark found uncaptured (grounded shape):
+# health check, GraphQL HTTP mount via an identifier field, and default-path dev UIs.
+STARTUP = b'''
+using Microsoft.AspNetCore.Builder;
+namespace Acme {
+  public class Startup {
+    private readonly string _graphQlEndpoint = "/graphql";
+    public void Configure(IApplicationBuilder app) {
+      app.UseEndpoints(endpoints => {
+        endpoints.MapHealthChecks("/health", new HealthCheckOptions());
+        endpoints.MapControllerRoute("default", "{controller=Home}/{action=Index}/{id?}");
+      });
+      app.UseGraphQL<ISchema>(_graphQlEndpoint);
+      app.UseGraphQLPlayground();
+      app.UseGraphQLVoyager();
+    }
+  }
+}
+'''
+
+
+def test_csharp_endpoint_registrations() -> None:
+    rec = _parse(AspNetCoreParser(), STARTUP, "Startup.cs")
+    routes = {(s.method, s.endpoint): s for s in rec.statements if s.semanticType == "route"}
+    assert ("GET", "/health") in routes and routes[("GET", "/health")].framework == "aspnet"
+    # GraphQL HTTP mount: verb POST, path resolved from the _graphQlEndpoint field
+    assert ("POST", "/graphql") in routes and routes[("POST", "/graphql")].framework == "graphql"
+    # dev UIs at their library-default paths
+    assert ("GET", "/ui/playground") in routes
+    assert ("GET", "/ui/voyager") in routes
+    # MapControllerRoute is a conventional-routing pattern, not a concrete endpoint → skipped
+    assert not any("{controller" in (e or "") for _, e in routes)
+
+
+def test_graphql_mount_defaults_when_no_arg() -> None:
+    src = b'''using Microsoft.AspNetCore.Builder;
+namespace A { class S { void C(IApplicationBuilder app){ app.UseGraphQL<ISchema>(); } } }'''
+    rec = _parse(AspNetCoreParser(), src, "S.cs")
+    routes = {(s.method, s.endpoint) for s in rec.statements if s.semanticType == "route"}
+    assert ("POST", "/graphql") in routes  # graphql-dotnet convention default
+
+
 def test_vb_controller_routes() -> None:
     rec = _parse(VbAspNetParser(), VB, "Orders.vb")
     routes = {(s.method, s.endpoint): s for s in rec.statements if s.semanticType == "route"}

@@ -46,6 +46,22 @@ _MAP_METHODS = {
     "MapGet": "GET", "MapPost": "POST", "MapPut": "PUT",
     "MapDelete": "DELETE", "MapPatch": "PATCH",
 }
+# Health-check endpoint: MapHealthChecks("/path", …) → GET at the literal path.
+_HEALTH_METHODS = {"MapHealthChecks"}
+# GraphQL HTTP transport mount: UseGraphQL<TSchema>(path) / MapGraphQL(path) → POST. The
+# path is often an identifier/omitted; graphql-dotnet's convention default is /graphql.
+_GRAPHQL_MOUNTS = {"UseGraphQL", "MapGraphQL"}
+_GRAPHQL_MOUNT_DEFAULT = "/graphql"
+# GraphQL dev-UI middleware, each with a documented default path when called with no path.
+_GRAPHQL_UIS = {
+    "UseGraphQLPlayground": "/ui/playground",
+    "UseGraphQLVoyager": "/ui/voyager",
+    "UseGraphQLGraphiQL": "/ui/graphiql",
+    "UseGraphQLAltair": "/ui/altair",
+}
+# MapControllers()/MapControllerRoute() only *enable* attribute/conventional routing; the
+# concrete controller endpoints come from detect_controller_routes, so they emit nothing
+# here (a conventional-route pattern like "{controller}/{action}" is not a callable path).
 
 
 def simple_attr_name(name: str) -> str:
@@ -242,8 +258,10 @@ def detect_minimal_api_routes(
     invocation_type: str,
     member_type: str,
 ) -> list[Statement]:
-    """AST-walk for ``app.MapGet("/x", handler)`` minimal-API endpoints. Grammar-specific
-    node/field names are supplied by the C#/VB caller."""
+    """AST-walk for endpoint registrations on an ``app``/``endpoints`` object:
+    ``MapGet/MapPost/…`` minimal APIs, ``MapHealthChecks``, and the GraphQL HTTP mount +
+    dev-UI middleware (``UseGraphQL``/``MapGraphQL``/``UseGraphQLPlayground``/…). Grammar-
+    specific node/field names are supplied by the C#/VB caller."""
     routes: list[Statement] = []
     name_field = "name" if member_type == "member_access_expression" else "member"
     fn_field = "function" if invocation_type == "invocation_expression" else "target"
@@ -253,11 +271,10 @@ def detect_minimal_api_routes(
             if child.type == invocation_type:
                 func = child.child_by_field_name(fn_field)
                 if func is not None and func.type == member_type:
-                    name_node = func.child_by_field_name(name_field)
-                    method = node_text(name_node, source) if name_node is not None else ""
-                    verb = _MAP_METHODS.get(method)
-                    if verb is not None:
-                        endpoint = _minimal_path(child, source)
+                    method = _member_method_name(func, source, name_field)
+                    spec = _endpoint_spec(method, child, root, source)
+                    if spec is not None:
+                        verb, framework, endpoint = spec
                         start = child.start_point[0] + 1
                         routes.append(Statement(
                             id=disambiguate(statement_id(path, start, child.start_point[1]), seen_ids),
@@ -266,8 +283,8 @@ def detect_minimal_api_routes(
                             semanticType="route",
                             text=node_text(child, source).split("\n", 1)[0][:200],
                             method=verb,
-                            endpoint=endpoint or "/",
-                            framework="aspnet",
+                            endpoint=endpoint,
+                            framework=framework,
                             routeKind="route",
                             isRegex=False,
                             startLine=start,
@@ -280,6 +297,97 @@ def detect_minimal_api_routes(
     return routes
 
 
+def _member_method_name(func: Node, source: bytes, name_field: str) -> str:
+    """Bare method name of a member call, dropping generic args so ``UseGraphQL<ISchema>``
+    keys as ``UseGraphQL`` (the name node is a ``generic_name`` in that case)."""
+    name_node = func.child_by_field_name(name_field)
+    if name_node is None:
+        return ""
+    if name_node.type == "generic_name":
+        ident = next((c for c in name_node.named_children if c.type == "identifier"), None)
+        return node_text(ident, source) if ident is not None else ""
+    return node_text(name_node, source)
+
+
+def _endpoint_spec(
+    method: str, call: Node, root: Node, source: bytes
+) -> tuple[str, str, str] | None:
+    """``(verb, framework, endpoint)`` for a recognized registration call, or None to skip.
+    Returns None (rather than a guessed path) when the endpoint cannot be determined —
+    absent beats wrong."""
+    if method in _MAP_METHODS:
+        return _MAP_METHODS[method], "aspnet", _minimal_path(call, source) or "/"
+    if method in _HEALTH_METHODS:
+        endpoint = _minimal_path(call, source)
+        return ("GET", "aspnet", endpoint) if endpoint is not None else None
+    if method in _GRAPHQL_MOUNTS:
+        return "POST", "graphql", _graphql_mount_path(call, root, source)
+    if method in _GRAPHQL_UIS:
+        endpoint = _ui_path(call, source, _GRAPHQL_UIS[method])
+        return ("GET", "graphql", endpoint) if endpoint is not None else None
+    return None
+
+
+def _positional_args(call: Node) -> list[Node]:
+    """Inner expression node of each positional ``argument`` in a call (generic type args
+    live on the function, not here)."""
+    args = call.child_by_field_name("arguments")
+    out = []
+    for arg in (args.named_children if args is not None else []):
+        inner = arg.named_children[0] if arg.type == "argument" and arg.named_children else arg
+        if inner is not None:
+            out.append(inner)
+    return out
+
+
+def _graphql_mount_path(call: Node, root: Node, source: bytes) -> str:
+    """Endpoint of a GraphQL HTTP mount: a literal path, an in-file resolved string
+    identifier, else graphql-dotnet's ``/graphql`` convention (also used when no path arg)."""
+    args = _positional_args(call)
+    if not args:
+        return _GRAPHQL_MOUNT_DEFAULT
+    first = args[0]
+    if first.type == "string_literal":
+        return _literal(first, source)
+    if first.type == "identifier":
+        return _resolve_str(node_text(first, source), root, source) or _GRAPHQL_MOUNT_DEFAULT
+    return _GRAPHQL_MOUNT_DEFAULT
+
+
+def _ui_path(call: Node, source: bytes, default: str) -> str | None:
+    """Endpoint of a GraphQL dev-UI middleware: a literal path arg, else the library default
+    when called with no args. An unparseable options object → None (path may be overridden;
+    do not guess)."""
+    args = _positional_args(call)
+    if not args:
+        return default
+    if args[0].type == "string_literal":
+        return _literal(args[0], source)
+    return None
+
+
+def _resolve_str(name: str, root: Node, source: bytes) -> str | None:
+    """In-file value of a string field/local (``private readonly string _x = "…";`` or
+    ``var x = "…";``) — the first ``variable_declarator`` binding ``name`` to a string."""
+    found: str | None = None
+
+    def walk(n: Node) -> None:
+        nonlocal found
+        if found is not None:
+            return
+        if n.type == "variable_declarator":
+            nm = n.child_by_field_name("name") or (n.named_children[0] if n.named_children else None)
+            val = next((c for c in n.named_children if c.type == "string_literal"), None)
+            if nm is not None and val is not None and node_text(nm, source) == name:
+                found = _literal(val, source)
+                return
+        for c in n.named_children:
+            walk(c)
+
+    walk(root)
+    return found
+
+
 def _minimal_path(call: Node, source: bytes) -> str | None:
     args = call.child_by_field_name("arguments")
     if args is None:
@@ -287,8 +395,16 @@ def _minimal_path(call: Node, source: bytes) -> str | None:
     for arg in args.named_children:
         lit = _find_string(arg)
         if lit is not None:
-            return node_text(lit, source).strip('"')
+            return _literal(lit, source)
     return None
+
+
+def _literal(lit: Node, source: bytes) -> str:
+    """The text of a C# string literal, stripping quotes (and a ``@`` verbatim prefix)."""
+    content = next((c for c in lit.named_children if c.type == "string_literal_content"), None)
+    if content is not None:
+        return node_text(content, source)
+    return node_text(lit, source).lstrip("@").strip('"')
 
 
 def _find_string(node: Node) -> Node | None:
