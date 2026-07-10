@@ -146,6 +146,19 @@ def _resolve_chain(cls: Any, index: Any) -> tuple[str | None, list[str], bool]:
     return route, guards, resolved
 
 
+def _is_absolute(sub: str) -> bool:
+    """A method route template is absolute — it overrides the controller prefix rather than
+    combining with it — when it starts with ``/`` (app-root) or ``~/`` (the explicit
+    ignore-controller-route marker)."""
+    return sub.startswith("/") or sub.startswith("~/") or sub == "~"
+
+
+def _absolute_endpoint(sub: str) -> str:
+    """Normalize an absolute method template to a route path, dropping a leading ``~`` and
+    reusing ``_join``'s slash-normalization (``~/metadata`` → ``/metadata``)."""
+    return _join("", sub[1:] if sub.startswith("~") else sub)
+
+
 def _method_templates(http_tmpl: str, method_route: str | None) -> list[str]:
     """The method-level route segment(s). Normally one — the ``[HttpX("…")]`` arg, or a
     sibling ``[Route("…")]`` when the verb attribute carries none (a standard split idiom).
@@ -209,11 +222,7 @@ def detect_controller_routes(record: FileRecord, index: Any = None) -> list[Stat
         if info is None:
             continue
         base, cls_guards, resolved, has_class_route, cls_name = info
-        # honest-null: an inherited base we cannot see may carry the route prefix — without
-        # it, and with no [Route] of our own, the absolute path is unknowable. Emit nothing
-        # rather than a fabricated endpoint (a wrong route is worse than a missing one).
-        if not has_class_route and not resolved:
-            continue
+        prefix_unknown = not has_class_route and not resolved  # inherited base we can't see
         method_route = _route_template(fn.decorators)
         fn_guards = _guards(fn.decorators)
         auth_required = ("Authorize" in cls_guards or "Authorize" in fn_guards) or None
@@ -223,8 +232,18 @@ def detect_controller_routes(record: FileRecord, index: Any = None) -> list[Stat
             if verb is None:  # method template composed from [HttpX] + sibling [Route] below
                 continue
             for sub in _method_templates(_first_arg(dec), method_route):
-                # attribute route when one resolves; else MVC convention /{controller}/{action}
-                endpoint = _join(base, sub) if (base or sub) else _convention_endpoint(cls_name, fn.name)
+                if _is_absolute(sub):
+                    endpoint = _absolute_endpoint(sub)  # overrides the prefix → base-independent
+                elif prefix_unknown:
+                    # honest-null: a relative path needs the (unknowable) inherited prefix.
+                    # Emit nothing rather than a fabricated endpoint — but only for this
+                    # relative sub; an absolute sibling above is still emitted.
+                    continue
+                elif base or sub:
+                    endpoint = _join(base, sub)
+                else:
+                    # no attribute route at all → MVC convention /{controller}/{action}
+                    endpoint = _convention_endpoint(cls_name, fn.name)
                 routes.append(Statement(
                     id=disambiguate(statement_id(fn.path, fn.startLine, 0), seen),
                     parentId=fn.id,

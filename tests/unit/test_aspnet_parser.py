@@ -144,6 +144,60 @@ def test_unresolved_base_emits_no_route(tmp_path) -> None:
     assert [s for s in rec.statements if s.semanticType == "route"] == []
 
 
+# Absolute method templates (~/ and leading /) override the controller [Route] prefix.
+ABSOLUTE = b'''
+using Microsoft.AspNetCore.Mvc;
+namespace Acme {
+  [ApiController]
+  [Route("api/products")]
+  public class ProductsController : ControllerBase {
+    [HttpGet("{id}")]                       // relative - combines with the prefix
+    public IActionResult Get(long id) { return null; }
+    [HttpPost("~/metadata/statusMany")]     // tilde-slash absolute - ignores the prefix
+    public IActionResult Status() { return null; }
+    [HttpGet("/health")]                    // leading slash absolute
+    public IActionResult Health() { return null; }
+    [HttpGet("~/")]                         // absolute root
+    public IActionResult Root() { return null; }
+  }
+}
+'''
+
+# an absolute template on a controller whose base prefix is unknowable
+ABSOLUTE_UNRESOLVED = b'''
+using Microsoft.AspNetCore.Mvc;
+namespace Acme {
+  public class WidgetsController : Acme.Platform.PlatformControllerBase {
+    [HttpGet("{id}")]                       // relative - prefix unknown - suppressed
+    public IActionResult Get(long id) { return null; }
+    [HttpPost("~/widgets/bulk")]            // absolute - base-independent - still emitted
+    public IActionResult Bulk() { return null; }
+  }
+}
+'''
+
+
+def test_absolute_method_templates_override_prefix() -> None:
+    rec = _parse(AspNetCoreParser(), ABSOLUTE, "Products.cs")
+    routes = {(s.method, s.endpoint) for s in rec.statements if s.semanticType == "route"}
+    assert ("GET", "/api/products/{id}") in routes   # relative still joins the prefix
+    assert ("POST", "/metadata/statusMany") in routes  # ~/ absolute, prefix dropped
+    assert ("GET", "/health") in routes               # leading / absolute
+    assert ("GET", "/") in routes                     # ~/ root
+    # the prefix must NOT be prepended to the absolute ones
+    assert not any("api/products/metadata" in e for _, e in routes)
+
+
+def test_absolute_template_emitted_under_unresolved_base(tmp_path) -> None:
+    # over-suppression fix: the relative Get is skipped (prefix unknowable), but the
+    # absolute Bulk route is fully known and must still emit.
+    rec = _parse_with_index(AspNetCoreParser(), {"Widgets.cs": ABSOLUTE_UNRESOLVED},
+                            "Widgets.cs", tmp_path)
+    routes = {(s.method, s.endpoint) for s in rec.statements if s.semanticType == "route"}
+    assert ("POST", "/widgets/bulk") in routes        # absolute survives the unresolved base
+    assert not any(m == "GET" for m, _ in routes)     # relative Get suppressed (honest-null)
+
+
 def test_routes_require_capture(tmp_path) -> None:
     rec = _parse(AspNetCoreParser(), CS, "Orders.cs", capture=False)
     assert [s for s in rec.statements if s.semanticType == "route"] == []
