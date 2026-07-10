@@ -1,34 +1,11 @@
-"""ExpressParser — a TypeScript/JavaScript framework parser. Selected over the base
-TypeScriptParser (single parser per file) when ``claims`` finds an ``express`` import;
-reuses ``TypeScriptParser.extract`` on the shared tree, then detects Express routes.
-It coexists with the other TS framework parsers (NestJS, Angular, LoopBack, React)
-because selection is per-file by ``claims``. Express is call-based,
-so route detection enriches the base statement in place (mirrors ``java_vertx``)."""
+"""Retired: Express is no longer a one-per-file framework parser.
 
-from __future__ import annotations
-
-from ...schemas import FileRecord
-from ..base import ParseContext
-from ..treesitter import parse_source
-from ..typescript.parser import TypeScriptParser
-from .routes import detect_express
-
-
-class ExpressParser(TypeScriptParser):
-    name = "typescript-express"
-    priority = 10
-    frameworks = ["express"]
-
-    def claims(self, path: str, source: bytes) -> bool:
-        # Precise import sniff — ``require('express')`` / ``from 'express'`` (either quote
-        # style). The trailing quote excludes ``'express-session'`` and friends.
-        return b"'express'" in source or b'"express"' in source
-
-    def parse_file(self, ctx: ParseContext) -> FileRecord:
-        grammar = "tsx" if ctx.path.endswith((".tsx", ".jsx")) else "typescript"
-        root = parse_source(grammar, ctx.source, ctx.parse_timeout_micros).root_node
-        record = self.extract(root, ctx)  # inherited base extraction (one parse)
-        if ctx.capture_statements and not self.is_fixture_file(ctx.path):  # gated by --capture-statements; skip fixtures (R4)
-            if detect_express(root, ctx.source, ctx.path, record):
-                record.framework = "express"
-        return record
+It was displacing (or being displaced by) other TS framework parsers on files that are
+legitimately both — e.g. an Angular SSR bootstrap that also runs an ``express()`` server —
+losing one side's routes to the selection tie. Express is a substrate (NestJS is built on
+it; Angular SSR mounts it), so route detection is now **additive**: ``routes.detect_express``
+is invoked from ``TypeScriptParser.extract`` for every TS file, self-guarded on an
+``express`` import, enriching the owning parser's statements in place. See ``routes.py`` and
+``typescript/parser.py``. The ``express`` framework capability is carried by the base TS
+parser's ``FRAMEWORKS`` list.
+"""

@@ -21,6 +21,7 @@ from ..treesitter import node_text, parse_source
 from .classes import build_class
 from ..callresolve import make_resolver
 from .aws_events import detect_aws_events
+from ..typescript_express.routes import detect_express
 from .functions import build_function, defined_names, extract_decorators, type_map
 from .imports import TsAliasIndex, build_alias_index, extract_imports
 from .mappings import FRAMEWORKS, STATEMENT_TYPES
@@ -142,10 +143,14 @@ class TypeScriptParser(BaseParser):
             classes=classes,
             statements=statements,
         )
-        # Additive AWS messaging/Lambda event detection — gated by --capture-statements and
-        # layered on top of base + framework extraction (runs for every TS parser that
-        # inherits extract). A more-specific framework set by a subclass wins.
+        # Additive route/event detection — gated by --capture-statements and layered on top
+        # of base + framework extraction (runs for every TS parser that inherits extract, so
+        # it also fires in files owned by another framework). Each detector self-guards on a
+        # cheap marker. A more-specific framework label set by a subclass afterwards wins.
         if capture:
+            if not self.is_fixture_file(path) and detect_express(root, source, path, record):
+                if record.framework is None:
+                    record.framework = "express"
             aws_fw = detect_aws_events(root, source, path, record)
             if aws_fw and record.framework is None:
                 record.framework = aws_fw

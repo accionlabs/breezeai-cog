@@ -201,8 +201,24 @@ def _owner_function(line: int, functions, fallback: str) -> str:
     return best.id if best is not None else fallback
 
 
+def _has_express(source: bytes) -> bool:
+    """Cheap correctness gate: the file imports ``express`` (either quote style). The
+    ``app``/``router``/``route`` receiver heuristic in ``_is_router_obj`` is only safe on
+    files that actually use Express, so this guard — not selection — bounds it now that
+    detection runs additively for every TS file (see TypeScriptParser.extract)."""
+    return (b"'express'" in source or b'"express"' in source
+            or b"expressMiddleware" in source)  # Apollo → Express adapter mount
+
+
 def detect_express(root: Node, source: bytes, path: str, record: FileRecord) -> bool:
-    """Enrich/add Express route statements on ``record``. Returns True if anything matched."""
+    """Enrich/add Express route statements on ``record``. Returns True if anything matched.
+
+    Additive: invoked from ``TypeScriptParser.extract`` for every TS file (whatever parser
+    owns it), self-guarded by :func:`_has_express`, and enriching the base parser's existing
+    statement in place — so it captures Express routes even in files owned by another
+    framework (Angular SSR, NestJS) without duplicating or displacing that owner."""
+    if not _has_express(source):
+        return False
     matched = False
     fid = file_id(path)
     seen = {s.id for s in record.statements}

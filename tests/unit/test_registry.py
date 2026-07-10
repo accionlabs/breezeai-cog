@@ -100,5 +100,6 @@ def test_specific_framework_outranks_express() -> None:
     assert registry.select("orders.controller.ts", nest).name == "typescript-nestjs"
     lb = b"import { get } from '@loopback/rest';\nimport { Request } from 'express';\n"
     assert registry.select("order.controller.ts", lb).name == "typescript-loopback"
-    # a pure express file still selects the express parser
-    assert registry.select("app.ts", b"import express from 'express';\n").name == "typescript-express"
+    # a pure express file is owned by the base parser now — Express is an additive detector
+    # (its routes are captured in extract), not a selecting parser.
+    assert registry.select("app.ts", b"import express from 'express';\n").name == "typescript"
