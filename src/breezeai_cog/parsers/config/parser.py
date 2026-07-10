@@ -25,7 +25,7 @@ class ConfigParser(BaseParser):
     schema_version = SCHEMA_VERSION
     # suffixes + exact filenames (the registry matches either); patterns via `matches`
     extensions = (
-        ".json", ".yaml", ".yml", ".toml", ".ini", ".xml", ".gradle",
+        ".json", ".yaml", ".yml", ".toml", ".ini", ".xml", ".gradle", ".csproj", ".sln",
         "Dockerfile", "Makefile", "requirements.txt", "Pipfile",
         ".gitignore", ".dockerignore", "LICENSE", "README.md", "README.rst", ".env",
     )

@@ -52,6 +52,49 @@ def test_pom_xml_structured() -> None:
     assert md["mavenInfo"]["dependencies"][0]["groupId"] == "org.springframework"
 
 
+def test_csproj_sdk_style() -> None:
+    md = _meta("Svc.csproj", """<Project Sdk="Microsoft.NET.Sdk">
+      <PropertyGroup><TargetFramework>net8.0</TargetFramework></PropertyGroup>
+      <ItemGroup>
+        <PackageReference Include="Newtonsoft.Json" Version="13.0.3" />
+        <PackageReference Include="Serilog" Version="3.1.1" />
+        <ProjectReference Include="..\\Lib\\Lib.csproj" />
+      </ItemGroup></Project>""")
+    assert md["category"] == "dotnet" and md["packageManager"] == "nuget"
+    assert md["buildTool"] == "dotnet"
+    assert md["dotnetInfo"]["sdk"] == "Microsoft.NET.Sdk"
+    assert md["dotnetInfo"]["targetFrameworks"] == ["net8.0"]
+    assert md["dependencyCount"] == 2
+    assert md["dotnetInfo"]["packageReferences"][0] == {"name": "Newtonsoft.Json", "version": "13.0.3"}
+    assert md["dotnetInfo"]["projectReferences"] == ["../Lib/Lib.csproj"]
+    assert md["dotnetInfo"]["projectReferenceCount"] == 1
+
+
+def test_csproj_legacy_namespaced() -> None:
+    # Legacy (non-SDK) csproj: default xmlns + version as a child element, multiple TFMs.
+    md = _meta("Old.csproj", """<Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+      <PropertyGroup><TargetFrameworks>net48;netstandard2.0</TargetFrameworks></PropertyGroup>
+      <ItemGroup>
+        <PackageReference Include="EntityFramework"><Version>6.4.4</Version></PackageReference>
+      </ItemGroup></Project>""")
+    assert md["dotnetInfo"]["targetFrameworks"] == ["net48", "netstandard2.0"]
+    assert md["dotnetInfo"]["packageReferences"] == [{"name": "EntityFramework", "version": "6.4.4"}]
+    assert md["dependencyCount"] == 1 and md["dotnetInfo"]["sdk"] is None
+
+
+def test_sln_lists_projects_not_folders() -> None:
+    sln = (
+        'Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Svc", "Svc\\Svc.csproj", "{A1}"\n'
+        'EndProject\n'
+        'Project("{2150E333-8FDC-42A3-9474-1A3956D46DE4}") = "SolutionItems", "SolutionItems", "{B2}"\n'
+        'EndProject\n'
+    )
+    md = _meta("App.sln", sln)
+    assert md["category"] == "dotnet" and md["buildTool"] == "dotnet"
+    assert md["solutionInfo"]["projectCount"] == 1  # solution folder excluded
+    assert md["solutionInfo"]["projects"] == [{"name": "Svc", "path": "Svc/Svc.csproj"}]
+
+
 def test_docker_compose_and_dockerfile() -> None:
     dc = _meta("docker-compose.yml",
                "services:\n  db:\n    image: postgres:16\n    ports:\n      - '5432:5432'\n  api:\n    build: .\n")
@@ -94,6 +137,7 @@ def test_matches_patterns() -> None:
     p = ConfigParser()
     assert p.matches("package.json") and p.matches("x/Dockerfile") and p.matches("a.yml")
     assert p.matches("Dockerfile.dev") and p.matches(".env.local")  # glob-style
+    assert p.matches("src/Svc.csproj") and p.matches("App.sln")  # .NET manifests
     assert not p.matches("main.py") and not p.matches("app.ts")
 
 
