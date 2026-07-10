@@ -1,4 +1,4 @@
-"""Ignore / include engine (ARCHITECTURE.md §9).
+"""Ignore / include engine.
 
 Two pattern sets matched with ``pathspec`` (gitwildmatch):
 
@@ -7,14 +7,14 @@ Two pattern sets matched with ``pathspec`` (gitwildmatch):
   files (hierarchical — the scanner accumulates a per-directory stack and matches
   relative to each file's directory).
 * **per-language ignore/include** — each parser's ``ignore.txt`` / ``include.txt``
-  (§9 layer 2), kept **scoped to that language** and applied **post-scan** to a file
+  (layer 2), kept **scoped to that language** and applied **post-scan** to a file
   only when the file's own classified language owns the rule.
 * **include** — overrides the ignore set: per-language ``include.txt`` (scoped) and
   repo-tree ``.repoinclude`` (hierarchical).
 
 A path is kept when ``included or not ignored``.
 
-Per-language scoping (§9): layer-2 patterns are *not* unioned into the global spec —
+Per-language scoping: layer-2 patterns are *not* unioned into the global spec —
 that leaks one language's directory-ignore into another's tree (e.g. C#/NuGet
 ``packages/`` pruning a pnpm ``packages/`` workspace). Instead they are compiled per
 language and matched against a file only when it is a file of that language, after the

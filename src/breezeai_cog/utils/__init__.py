@@ -1,4 +1,4 @@
-"""Pure, stateless helpers — no domain logic (ARCHITECTURE.md §2)."""
+"""Pure, stateless helpers — no domain logic."""
 
 from __future__ import annotations
 

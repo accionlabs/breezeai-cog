@@ -84,7 +84,7 @@ def _join(base: str, sub: str) -> str:
 
 
 def _request_dto(fn: Function) -> str | None:
-    """Declared type of the ``@RequestBody`` parameter → requestDTO (spec C5)."""
+    """Declared type of the ``@RequestBody`` parameter → requestDTO."""
     for p in fn.params:
         if any(d.name == "RequestBody" for d in p.decorators):
             return p.type or None

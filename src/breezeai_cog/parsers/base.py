@@ -1,4 +1,4 @@
-"""The parser plugin contract (ARCHITECTURE.md §4).
+"""The parser plugin contract.
 
 A ``LanguageParser`` declares capability metadata (for discovery + the
 schema-version composition gate) and a ``parse_file`` that turns one file into a
@@ -97,11 +97,11 @@ class BaseParser:
         return None
 
     def ignore_patterns(self) -> list[str]:
-        """Per-language ignore defaults (layer 2, §9) — from sibling ``ignore.txt``."""
+        """Per-language ignore defaults (layer 2) — from sibling ``ignore.txt``."""
         return _read_sibling_lines(self, "ignore.txt")
 
     def include_patterns(self) -> list[str]:
-        """Per-language force-include overrides (§9) — from sibling ``include.txt``."""
+        """Per-language force-include overrides — from sibling ``include.txt``."""
         return _read_sibling_lines(self, "include.txt")
 
     def fixture_markers(self) -> tuple[str, ...]:

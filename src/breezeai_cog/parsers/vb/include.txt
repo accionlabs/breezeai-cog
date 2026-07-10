@@ -1,1 +1,1 @@
-# VB.NET per-language force-include overrides (§9). None by default.
+# VB.NET per-language force-include overrides. None by default.

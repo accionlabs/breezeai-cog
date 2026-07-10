@@ -1,6 +1,6 @@
 """ASP.NET route detection.
 
-Two idioms, both emitted as ``route`` statements (spec A4/C5):
+Two idioms, both emitted as ``route`` statements:
 
 * **Controllers — off the record.** The C#/VB base parser already captured
   ``[ApiController]`` / ``[Route]`` / ``[HttpGet]`` onto ``Class.decorators`` /

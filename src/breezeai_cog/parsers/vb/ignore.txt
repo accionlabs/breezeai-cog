@@ -1,4 +1,4 @@
-# VB.NET / .NET per-language ignore defaults (layer 2, §9).
+# VB.NET / .NET per-language ignore defaults (layer 2).
 bin/
 obj/
 packages/

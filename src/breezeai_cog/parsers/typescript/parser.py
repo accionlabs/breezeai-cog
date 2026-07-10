@@ -142,7 +142,7 @@ class TypeScriptParser(BaseParser):
             classes=classes,
             statements=statements,
         )
-        # Additive AWS messaging/Lambda event detection (spec A4) — gated (spec A4) and
+        # Additive AWS messaging/Lambda event detection — gated by --capture-statements and
         # layered on top of base + framework extraction (runs for every TS parser that
         # inherits extract). A more-specific framework set by a subclass wins.
         if capture:

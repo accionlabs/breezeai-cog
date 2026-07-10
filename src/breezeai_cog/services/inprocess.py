@@ -1,4 +1,4 @@
-"""In-process analysis for the server ``POST /api/analyze`` path (§10).
+"""In-process analysis for the server ``POST /api/analyze`` path.
 
 Writes the in-memory file list to a temp dir, runs the pipeline **sequentially**
 (no spawn pool), and returns a plain ``{ projectMetaData, files }`` dict — byte-faithful

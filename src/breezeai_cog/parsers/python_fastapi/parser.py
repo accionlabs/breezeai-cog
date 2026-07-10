@@ -1,7 +1,7 @@
 """FastAPIParser — a Python framework parser. Selected (one parser per file) over the
 base PythonParser when ``claims`` finds a FastAPI signature; subclasses PythonParser so
 all base extraction is inherited (no duplicated code, single parse), then adds FastAPI
-route statements. Selection is per-file by ``claims`` (ARCHITECTURE.md §4)."""
+route statements. Selection is per-file by ``claims``."""
 
 from __future__ import annotations
 
@@ -23,7 +23,7 @@ class FastAPIParser(PythonParser):
     def parse_file(self, ctx: ParseContext) -> FileRecord:
         root = parse_source("python", ctx.source, ctx.parse_timeout_micros).root_node
         record = self.extract(root, ctx)  # inherited base extraction (one parse)
-        if ctx.capture_statements:  # routes are statements — gated by --capture-statements (spec A4)
+        if ctx.capture_statements:  # routes are statements — gated by --capture-statements
             routes = detect_routes(
                 root, ctx.source, ctx.path, seen_ids={s.id for s in record.statements}
             )

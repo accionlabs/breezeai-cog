@@ -21,7 +21,7 @@ _METHOD_DECORATORS = {
     "Get": "GET", "Post": "POST", "Put": "PUT", "Patch": "PATCH",
     "Delete": "DELETE", "Options": "OPTIONS", "Head": "HEAD", "All": "ALL",
 }
-# @nestjs/microservices message consumers → eventbus_consumer (spec B1.4 semanticType).
+# @nestjs/microservices message consumers → eventbus_consumer semanticType.
 _MESSAGING_DECORATORS = {"EventPattern": "EVENT", "MessagePattern": "MESSAGE"}
 _RESPONSE_DECORATORS = {"ApiResponse", "ApiOkResponse", "ApiCreatedResponse"}
 _TYPE_PROP_RE = re.compile(r"\btype\s*:\s*\[?\s*([A-Za-z_$][\w.$]*)")
@@ -67,7 +67,7 @@ def _pattern(d) -> str | None:
 
 def _guards(decs: list[Node], source: bytes) -> list[str]:
     """Guard/auth names: ``@UseGuards(...)`` args (NestJS) and ``@Authorized`` (routing-
-    controllers). Presence of any drives ``authRequired`` (spec C5)."""
+    controllers). Presence of any drives ``authRequired``."""
     out: list[str] = []
     for dec in decs:
         d = decorator(dec, source)
@@ -171,7 +171,7 @@ def detect_nest_routes(
                 mname = node_text(member.child_by_field_name("name"), source)
                 mline = member.start_point[0] + 1
                 parent = function_id(path, mname, mline, class_name=class_name)
-                guards = ctrl_guards + _guards(pending, source)  # merge controller + method (spec C5)
+                guards = ctrl_guards + _guards(pending, source)  # merge controller + method
                 for dec in pending:
                     d = decorator(dec, source)
                     verb = _METHOD_DECORATORS.get(d.name) if is_controller else None

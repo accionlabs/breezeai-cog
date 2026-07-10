@@ -1,4 +1,4 @@
-"""FastAPI routes — mirror the JS ``server.js`` contract exactly (§10). Body validation
+"""FastAPI routes — mirror the JS ``server.js`` contract exactly. Body validation
 is manual (not pydantic) so error messages match byte-for-byte. CPU-bound work and the
 blocking S3 upload run off the event loop; backend notifications are fire-and-forget
 (BackgroundTasks). ``llmPlatform`` is never read or forwarded (accepted deviation)."""

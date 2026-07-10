@@ -1,4 +1,4 @@
-# Built-in default ignore patterns (ARCHITECTURE.md §9, layer 1). gitignore syntax.
+# Built-in default ignore patterns (layer 1). gitignore syntax.
 # Re-include anything here via a repo .repoinclude (or per-language include.txt).
 
 # VCS

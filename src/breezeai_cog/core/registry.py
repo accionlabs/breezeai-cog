@@ -1,4 +1,4 @@
-"""In-package parser registry + capability discovery (ARCHITECTURE.md §4).
+"""In-package parser registry + capability discovery.
 
 Parsers self-register via ``PARSERS`` lists in each ``parsers/<lang>`` subpackage
 (:func:`discover_builtin`). A file is parsed by **exactly one** parser, chosen by

@@ -1,7 +1,7 @@
 """Configuration — a single ``Settings`` model (the one source of config).
 
 Every CLI flag maps 1:1 to a field here and to an environment variable (and
-``.env``). Precedence (highest first), per ARCHITECTURE.md §8::
+``.env``). Precedence (highest first)::
 
     explicit input (CLI flags │ request query params)  >  env vars  >  .env  >  defaults
 
@@ -58,7 +58,7 @@ class Settings(BaseSettings):
     max_file_size: int = 2_000_000  # bytes; scanner skips larger files (core/scanner.py)
     parse_timeout: float = 10.0  # seconds; per-file tree-sitter native timeout (0 disables)
 
-    # ── Logging (see §11) ─────────────────────────────────────────────────
+    # ── Logging ─────────────────────────────────────────────────
     log_level: str = "INFO"
     log_format: Literal["plaintext", "json"] = "plaintext"
     log_to_file: bool = True
@@ -116,7 +116,7 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def _check_upload_requirements(self) -> "Settings":
-        """`--upload` requires baseurl + uuid + user_api_key (spec A1)."""
+        """`--upload` requires baseurl + uuid + user_api_key."""
         if self.upload:
             missing = [
                 name

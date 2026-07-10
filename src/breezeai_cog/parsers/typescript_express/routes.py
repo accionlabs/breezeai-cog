@@ -1,11 +1,11 @@
-"""Express route detection (spec A4). Express is call-based — routes are registered
+"""Express route detection. Express is call-based — routes are registered
 by calling an HTTP-verb method on an ``app`` / ``Router`` object:
 
   app.get('/users/:id', handler)   router.post('/users', handler)   → route
   app.use('/api', router)                                            → route (mount)
   app.route('/book')  (chained .get()/.post())                       → route (group)
 
-Per the contract (Part C / B1.4), a detection sets ``semanticType`` on the **same span**:
+Per the capture contract, a detection sets ``semanticType`` on the **same span**:
 where the base parser already captured the enclosing statement (a top-level
 ``expression_statement``) we enrich it in place; for calls inside handler/callback
 scopes — which the base skips as a nested scope — we add a statement parented to the

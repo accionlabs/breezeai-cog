@@ -1,4 +1,4 @@
-"""Capture NDJSON contract (Part C). The Pydantic models here are the source of
+"""Capture NDJSON contract. The Pydantic models here are the source of
 truth; ``export_json_schema()`` generates the language-agnostic JSON Schema."""
 
 from __future__ import annotations

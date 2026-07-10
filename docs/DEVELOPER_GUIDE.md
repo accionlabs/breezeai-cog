@@ -2,9 +2,6 @@
 
 How `breezeai-cog` is built, how to work on it, and how to extend it.
 
-For the full design rationale, see [`ARCHITECTURE.md`](../../../breeze-cog/docs/ARCHITECTURE.md)
-(the `§N` references in docstrings point to its sections).
-
 ---
 
 ## Setup

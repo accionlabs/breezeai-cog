@@ -1,9 +1,9 @@
-"""Analysis pipeline (ARCHITECTURE.md §5/§6).
+"""Analysis pipeline.
 
 ``run`` drives the full analysis to a sink using the parallel executor and assembles
 ``projectMetaData``. ``iter_records`` streams ``(ScanEntry, FileRecord)`` sequentially
 in-process for the library's ``iter_file_records``. The ``projectMetaData``-first
-temp strategy lives in ``FileSink`` (§6).
+temp strategy lives in ``FileSink``.
 """
 
 from __future__ import annotations
@@ -54,7 +54,7 @@ def _scan_entries(
         repo_root, _classifier(languages),
         engine=engine, max_file_size=settings.max_file_size, on_skip=on_skip,
     ):
-        # Per-language layer-2 filter (§9), applied post-scan and scoped to the file's
+        # Per-language layer-2 filter, applied post-scan and scoped to the file's
         # own classified language — so e.g. C#'s NuGet ``packages/`` never prunes a
         # TypeScript ``packages/`` workspace. Universal built-ins already pruned the walk.
         if engine.is_lang_ignored(entry.path, entry.language) and not (
@@ -269,7 +269,7 @@ def run(
 
 def run_inprocess(repo_root: str | Path, settings, sink) -> ProjectMetaData:
     """Full analysis to a sink, **sequential and in-process** (no spawn pool) — the
-    server `/api/analyze` path (§10), where file lists are small and per-request pool
+    server `/api/analyze` path, where file lists are small and per-request pool
     startup would dominate."""
     repo_root = Path(repo_root)
     debug_on = settings.log_level == "DEBUG"

@@ -223,7 +223,7 @@ def _configure_structlog(log_format: str) -> None:
 
 def setup_worker_logging(queue: object, log_format: str, log_level: str) -> None:
     """Configure a process-pool worker: route the app logger to a ``QueueHandler``
-    so records flow to the main process's ``QueueListener`` (§11)."""
+    so records flow to the main process's ``QueueListener``."""
     logger = logging.getLogger(APP_LOGGER)
     logger.handlers.clear()
     logger.setLevel(log_level)

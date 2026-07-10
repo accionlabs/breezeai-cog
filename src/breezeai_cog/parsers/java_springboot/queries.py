@@ -1,7 +1,7 @@
 """Spring Data ``@Query`` detection → ``query_statement``. The JPQL/native SQL lives in
 the method's ``@Query`` annotation (on a repository interface method with no body), so it
 never appears as an in-body statement — we emit one from the captured decorator, parented
-to the method (spec B4 Data-access view)."""
+to the method (Data-access view)."""
 
 from __future__ import annotations
 

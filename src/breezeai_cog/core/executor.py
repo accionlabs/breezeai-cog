@@ -1,4 +1,4 @@
-"""Parallel parse fan-out (ARCHITECTURE.md §5).
+"""Parallel parse fan-out.
 
 Spawn-safe (Linux/macOS/Windows): module-level worker functions, a ``Manager().Queue``
 for log funneling, and picklable ``initargs``. Each worker loads grammars lazily

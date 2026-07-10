@@ -1,4 +1,4 @@
-"""AWS messaging / Lambda event detection for TypeScript/JavaScript (spec A4 — the
+"""AWS messaging / Lambda event detection for TypeScript/JavaScript (the
 "event/messaging" family, extended beyond Vert.x to the AWS SDK).
 
 AWS SNS/SQS/EventBridge follow the same producer→address→consumer shape as the Vert.x

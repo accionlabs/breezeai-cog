@@ -9,7 +9,7 @@ module turns one statement node into its ``Statement`` record(s):
     the single-classification model, and
   * one **synthetic** same-span record per *additional* hit (``nodeType`` = the call
     node type, following the annotation-route precedent) so method chains and
-    multi-call expressions don't lose every hit after the first (spec item #4).
+    multi-call expressions don't lose every hit after the first.
 
 Calls are gathered by ``_iter_calls``, which walks the statement's own expression but
 **stops at nested EMIT_TYPES statements** (those are emitted and classified on their
@@ -34,7 +34,7 @@ from .treesitter import first_line, node_text
 CallDetails = Callable[[Node, bytes], "tuple[str, str, str | None] | None"]
 NameOf = Callable[[Node, bytes], "str | None"]
 
-# --- Endpoint resolution (spec item #3), shared across languages -------------------
+# --- Endpoint resolution, shared across languages -------------------
 # HTTP verbs that may appear as the *first argument* (``request('GET', url)``).
 HTTP_VERB_ARGS = frozenset({"get", "post", "put", "patch", "delete", "head", "options"})
 UrlRenderer = Callable[[Node, bytes], "str | None"]

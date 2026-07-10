@@ -1,5 +1,5 @@
 """Server-side error carrying an HTTP status. The app's exception handler renders it
-as ``{"error": "<message>"}`` with that status (the existing contract, §10 — the
+as ``{"error": "<message>"}`` with that status (the existing contract — the
 ``{error}`` shape is the one accepted deviation, kept over RFC 7807)."""
 
 from __future__ import annotations

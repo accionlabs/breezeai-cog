@@ -1,4 +1,4 @@
-# TypeScript/JavaScript per-language ignore defaults (layer 2, §9).
+# TypeScript/JavaScript per-language ignore defaults (layer 2).
 *.min.js
 *.min.css
 *.js.map

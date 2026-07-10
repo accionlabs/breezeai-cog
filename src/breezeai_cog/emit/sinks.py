@@ -1,8 +1,7 @@
 """Output sinks: the gzipped-NDJSON file sink and the in-memory sink. (The streaming
 S3 upload lives in ``emit/s3.py``.)
 
-The file sink implements the ``projectMetaData``-first strategy (ARCHITECTURE.md
-§6): body ``FileRecord`` lines stream to a temp NDJSON while totals accumulate;
+The file sink implements the ``projectMetaData``-first strategy: body ``FileRecord`` lines stream to a temp NDJSON while totals accumulate;
 ``finalize`` writes the ``projectMetaData`` line first, then streams the body in,
 compressed with streaming gzip. Memory stays bounded.
 """
@@ -28,7 +27,7 @@ class Sink(Protocol):
 
 class MemorySink:
     """Collects records + meta in memory. Used by the server `/api/analyze` path,
-    which returns a plain JSON `{ projectMetaData, files }` (no gzip, §10)."""
+    which returns a plain JSON `{ projectMetaData, files }` (no gzip)."""
 
     def __init__(self) -> None:
         self.records: list[FileRecord] = []

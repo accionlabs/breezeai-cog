@@ -1,5 +1,5 @@
 """ConfigParser — turns a config file into a ``type="config"`` FileRecord whose
-``metadata`` holds the parsed config (spec C4). It plugs into the normal registry /
+``metadata`` holds the parsed config. It plugs into the normal registry /
 selection / pipeline like any language parser (no separate ``analyzeConfigRepo`` side
 call as in the JS app), and — because the scanner is hierarchical — it captures config
 files **anywhere in the tree**, not just the repo root.

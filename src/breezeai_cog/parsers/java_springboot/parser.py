@@ -25,7 +25,7 @@ class SpringBootParser(JavaParser):
     def parse_file(self, ctx: ParseContext) -> FileRecord:
         root = parse_source("java", ctx.source, ctx.parse_timeout_micros).root_node
         record = self.extract(root, ctx)  # inherited Java extraction (one parse)
-        if ctx.capture_statements:  # routes/queries are statements — gated (spec A4)
+        if ctx.capture_statements:  # routes/queries are statements — gated by --capture-statements
             routes = detect_spring_routes(record)  # annotated controllers — off the record
             if b"RouterFunction" in ctx.source:  # functional routing needs the AST
                 routes += detect_spring_functional_routes(root, ctx.source, ctx.path, record)
