@@ -42,4 +42,9 @@ NESTED_SCOPES = {
 
 STATEMENT_TYPES = sorted(EMIT_TYPES)
 
-FRAMEWORKS = ["angular", "nestjs", "loopback", "express", "react", "vue"]
+FRAMEWORKS = [
+    "angular", "nestjs", "loopback", "express", "react", "vue",
+    # AWS messaging / Lambda (see aws_events.py) — transport carried on statement.framework.
+    "aws-sns", "aws-sqs", "aws-eventbridge", "aws-lambda", "aws-apigw",
+    "aws-dynamodb", "aws-kinesis", "aws-s3", "aws-ses",
+]

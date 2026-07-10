@@ -20,6 +20,7 @@ from ..base import BaseParser, ParseContext
 from ..treesitter import node_text, parse_source
 from .classes import build_class
 from ..callresolve import make_resolver
+from .aws_events import detect_aws_events
 from .functions import build_function, defined_names, extract_decorators, type_map
 from .imports import TsAliasIndex, build_alias_index, extract_imports
 from .mappings import FRAMEWORKS, STATEMENT_TYPES
@@ -128,7 +129,7 @@ class TypeScriptParser(BaseParser):
             extract_statements(root, source, path, parent_id=fid, capture=capture, limit=limit, seen_ids=seen_ids)
         )
 
-        return FileRecord(
+        record = FileRecord(
             id=fid,
             path=path,
             type="code",
@@ -141,6 +142,14 @@ class TypeScriptParser(BaseParser):
             classes=classes,
             statements=statements,
         )
+        # Additive AWS messaging/Lambda event detection (spec A4) — gated (spec A4) and
+        # layered on top of base + framework extraction (runs for every TS parser that
+        # inherits extract). A more-specific framework set by a subclass wins.
+        if capture:
+            aws_fw = detect_aws_events(root, source, path, record)
+            if aws_fw and record.framework is None:
+                record.framework = aws_fw
+        return record
 
     def _handle(self, decl, decorators, source, path, fid, seen_ids, capture, limit,
                 functions, classes, statements, resolve) -> None:
