@@ -23,7 +23,7 @@ from ..callresolve import make_resolver
 from .aws_events import detect_aws_events
 from ..typescript_express.routes import detect_express
 from .functions import build_function, defined_names, extract_decorators, type_map
-from .imports import TsAliasIndex, build_alias_index, extract_imports
+from .imports import TsAliasIndex, build_ts_index, extract_imports
 from .mappings import FRAMEWORKS, STATEMENT_TYPES
 from .statements import extract_statements
 
@@ -87,8 +87,9 @@ class TypeScriptParser(BaseParser):
         return (*super().fixture_markers(), *_TS_FIXTURE_MARKERS)
 
     def build_index(self, repo_root: Path, files: Sequence[Path]) -> TsAliasIndex | None:
-        """Repo-level pre-pass: load tsconfig path aliases for import resolution."""
-        return build_alias_index(Path(repo_root))
+        """Repo-level pre-pass: tsconfig path aliases + a string-constant value map (for
+        resolving non-literal route paths like Angular's ``path: RouteNames.X``)."""
+        return build_ts_index(Path(repo_root), files)
 
     def parse_file(self, ctx: ParseContext) -> FileRecord:
         grammar = "tsx" if ctx.path.endswith(_TSX_EXT) else "typescript"

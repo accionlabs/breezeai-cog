@@ -79,6 +79,33 @@ def _string_val(node: Node | None, source: bytes) -> str:
     return node_text(node, source)
 
 
+def _resolve_path(node: Node | None, source: bytes, index: object) -> str | None:
+    """The route ``path`` as a literal string, resolving non-literal forms via the repo
+    value index: a string literal verbatim; ``RouteNames.X`` / a bare ``CONST`` resolved to
+    its declared literal (cross-file, globally-unique); anything else (template, call,
+    concatenation, ambiguous) → ``None`` (honest-null — never the raw symbol text)."""
+    if node is None:
+        return None
+    if node.type == "string":
+        return _string_val(node, source)  # literal path (may be "")
+    values = getattr(index, "const_values", None) or {}
+    if node.type == "member_expression":
+        obj, prop = node.child_by_field_name("object"), node.child_by_field_name("property")
+        if obj is not None and prop is not None:
+            return values.get(f"{node_text(obj, source)}.{node_text(prop, source)}")
+    elif node.type == "identifier":
+        return values.get(node_text(node, source))
+    return None
+
+
+def _compose(prefix: str | None, sub: str | None) -> str | None:
+    """Join a parent prefix and a route sub-path; if either is unresolved (None), the full
+    path is unknown → None (a relative segment needs its prefix)."""
+    if prefix is None or sub is None:
+        return None
+    return _join(prefix, sub)
+
+
 def _guards(node: Node | None, source: bytes) -> list[str]:
     if node is None or node.type != "array":
         return []
@@ -99,14 +126,15 @@ def _is_children_value(arr: Node, source: bytes) -> bool:
     return p is not None and p.type == "pair" and _key(p, source) == "children"
 
 
-def _process(arr: Node, prefix: str, source: bytes, path: str, seen: set[str], routes: list[Statement]) -> None:
+def _process(arr: Node, prefix: str | None, source: bytes, path: str, seen: set[str],
+             routes: list[Statement], index: object) -> None:
     for elem in arr.named_children:
         if elem.type != "object":
             continue
         pairs = _pairs(elem, source)
         if "path" not in pairs:
             continue
-        full = _join(prefix, _string_val(pairs["path"], source))
+        full = _compose(prefix, _resolve_path(pairs["path"], source, index))
         load = pairs.get("loadChildren")  # lazy route group -> mount
         component = pairs.get("component")
         load_component = pairs.get("loadComponent")  # lazy standalone component -> page
@@ -136,12 +164,13 @@ def _process(arr: Node, prefix: str, source: bytes, path: str, seen: set[str], r
         ))
         children = pairs.get("children")
         if children is not None and children.type == "array":
-            _process(children, full, source, path, seen, routes)
+            _process(children, full, source, path, seen, routes, index)
 
 
-def detect_angular_routes(root: Node, source: bytes, path: str, *, seen_ids: set[str]) -> list[Statement]:
+def detect_angular_routes(root: Node, source: bytes, path: str, *, seen_ids: set[str],
+                          index: object = None) -> list[Statement]:
     routes: list[Statement] = []
     for arr in _all(root, "array"):
         if _is_route_array(arr, source) and not _is_children_value(arr, source):
-            _process(arr, "", source, path, seen_ids, routes)
+            _process(arr, "", source, path, seen_ids, routes, index)
     return routes

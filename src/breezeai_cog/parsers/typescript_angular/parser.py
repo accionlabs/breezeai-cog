@@ -25,7 +25,8 @@ class AngularParser(TypeScriptParser):
         record = self.extract(root, ctx)  # full TS extraction (one parse)
         if ctx.capture_statements and not self.is_fixture_file(ctx.path):  # gated by --capture-statements; skip fixtures (R4)
             routes = detect_angular_routes(
-                root, ctx.source, ctx.path, seen_ids={s.id for s in record.statements}
+                root, ctx.source, ctx.path, seen_ids={s.id for s in record.statements},
+                index=ctx.resolution_index,
             )
             if routes:
                 record.statements.extend(routes)
