@@ -25,7 +25,8 @@ except Exception:  # pragma: no cover
 _EXT_CATEGORY = {
     ".json": "json", ".yaml": "yaml", ".yml": "yaml", ".toml": "toml",
     ".ini": "ini", ".xml": "xml", ".gradle": "gradle",
-    ".csproj": "dotnet", ".sln": "dotnet",
+    ".csproj": "dotnet", ".vbproj": "dotnet", ".fsproj": "dotnet", ".vcxproj": "dotnet",
+    ".sln": "dotnet",
 }
 _GRADLE_DEP = re.compile(
     r"\b(?:implementation|api|compile|testImplementation|runtimeOnly|annotationProcessor|classpath)\b"
@@ -68,8 +69,8 @@ def _dispatch(name: str, suffix: str, text: str) -> dict[str, Any]:
         return _env(text)
     if name == "pom.xml":
         return _pom(text)
-    if suffix == ".csproj":
-        return _csproj(text)
+    if suffix in (".csproj", ".vbproj", ".fsproj", ".vcxproj"):
+        return _csproj(text, kind=suffix.lstrip("."))
     if suffix == ".sln":
         return _sln(text)
     if name == "requirements.txt":
@@ -269,11 +270,12 @@ def _generic_xml(text: str) -> dict[str, Any]:
     return {"kind": "xml", "category": "xml", "rootElement": _strip(ET.fromstring(text).tag)}
 
 
-def _csproj(text: str) -> dict[str, Any]:
-    """.NET project file — the NuGet analog of package.json/pom.xml. Extracts the SDK,
-    target framework(s), and PackageReference (NuGet) / ProjectReference (inter-project)
-    dependencies. Handles both SDK-style (attribute versions) and legacy csproj (default
-    xmlns + child <Version>); ``_strip`` drops the namespace so both parse the same."""
+def _csproj(text: str, kind: str = "csproj") -> dict[str, Any]:
+    """.NET MSBuild project file (``.csproj``/``.vbproj``/``.fsproj``/``.vcxproj``) — the
+    NuGet analog of package.json/pom.xml. Extracts the SDK, target framework(s), and
+    PackageReference (NuGet) / ProjectReference (inter-project) dependencies. Handles both
+    SDK-style (attribute versions) and legacy (default xmlns + child <Version>); ``_strip``
+    drops the namespace so both parse the same. ``kind`` records the concrete file type."""
     root = ET.fromstring(text)
     packages: list[dict[str, Any]] = []
     projects: list[str] = []
@@ -295,7 +297,7 @@ def _csproj(text: str) -> dict[str, Any]:
         elif tag in ("TargetFramework", "TargetFrameworks") and el.text:
             frameworks.extend(f.strip() for f in el.text.split(";") if f.strip())
     return {
-        "kind": "csproj", "category": "dotnet", "packageManager": "nuget", "buildTool": "dotnet",
+        "kind": kind, "category": "dotnet", "packageManager": "nuget", "buildTool": "dotnet",
         "dotnetInfo": {
             "sdk": root.get("Sdk"), "targetFrameworks": frameworks,
             "packageReferences": packages, "projectReferences": projects,

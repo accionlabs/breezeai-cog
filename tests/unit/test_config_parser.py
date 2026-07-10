@@ -82,6 +82,31 @@ def test_csproj_legacy_namespaced() -> None:
     assert md["dependencyCount"] == 1 and md["dotnetInfo"]["sdk"] is None
 
 
+def test_vbproj_fsproj_same_msbuild_extractor() -> None:
+    # .vbproj/.fsproj are SDK-style MSBuild too → same extractor; kind reflects the type.
+    for name, kind in [("Svc.vbproj", "vbproj"), ("Svc.fsproj", "fsproj")]:
+        md = _meta(name, """<Project Sdk="Microsoft.NET.Sdk">
+          <PropertyGroup><TargetFramework>net8.0</TargetFramework></PropertyGroup>
+          <ItemGroup><PackageReference Include="Serilog" Version="3.1.1" /></ItemGroup></Project>""")
+        assert md["kind"] == kind and md["category"] == "dotnet"
+        assert md["packageManager"] == "nuget" and md["dependencyCount"] == 1
+        assert md["dotnetInfo"]["targetFrameworks"] == ["net8.0"]
+
+
+def test_vcxproj_captured_without_error() -> None:
+    # C++ project: valid MSBuild XML but no TargetFramework/PackageReference → sparse, not wrong.
+    md = _meta("Native.vcxproj", """<Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+      <ItemGroup><ProjectReference Include="..\\Core\\Core.vcxproj" /></ItemGroup></Project>""")
+    assert md["kind"] == "vcxproj" and md["category"] == "dotnet"
+    assert md["dotnetInfo"]["projectReferences"] == ["../Core/Core.vcxproj"]
+    assert md["dependencyCount"] == 0 and md["dotnetInfo"]["targetFrameworks"] == []
+
+
+def test_dotnet_project_files_match() -> None:
+    p = ConfigParser()
+    assert p.matches("src/Svc.vbproj") and p.matches("x/App.fsproj") and p.matches("N.vcxproj")
+
+
 def test_sln_lists_projects_not_folders() -> None:
     sln = (
         'Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Svc", "Svc\\Svc.csproj", "{A1}"\n'
