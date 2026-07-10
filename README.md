@@ -21,7 +21,7 @@ Python reimplementation of `breezeai-code-ontology-generator`.
 | TypeScript / JavaScript | `.ts .tsx .mts .cts .js .jsx .mjs .cjs` | NestJS, Angular, Express, React, LoopBack, GraphQL; AWS SNS/SQS/EventBridge/Lambda (additive) |
 | Python | `.py` | FastAPI |
 | Java | `.java` | Spring Boot, JAX-RS, Vert.x |
-| C# | `.cs` | ASP.NET |
+| C# | `.cs` | ASP.NET, GraphQL (graphql-dotnet) |
 | VB.NET | `.vb` | ASP.NET |
 | Config | `package.json`, `tsconfig`, `Dockerfile`, `docker-compose`, `pom.xml`, `requirements.txt`, `build.gradle`, … | — |
 
