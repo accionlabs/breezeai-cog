@@ -9,12 +9,23 @@ Python reimplementation of `breezeai-code-ontology-generator`.
 
 - **[User Guide](docs/USER_GUIDE.md)** — install, CLI usage, output format, configuration, and the HTTP service.
 - **[Developer Guide](docs/DEVELOPER_GUIDE.md)** — setup, project layout, and how it works.
-- **[Adding a Parser](docs/ADDING_A_PARSER.md)** — add a new language or framework parser.
+- **[Extending Capture](skills/extend-capture/SKILL.md)** — add a new language, framework, or cross-cutting detector (start here); reliability-first discipline.
+- **[Parser Reference](docs/parser-reference.md)** — the mechanical step-by-step for building a parser.
 
-## Status
+## Supported languages & frameworks
 
-Parses Python, TypeScript/JavaScript, and Java — with FastAPI, NestJS, Angular, and Spring Boot
-framework detection — into the capture contract, and serves the analysis API.
+`breezeai-cog capabilities` prints the authoritative, live list. Snapshot:
+
+| Language | Extensions | Framework / detector support |
+|---|---|---|
+| TypeScript / JavaScript | `.ts .tsx .mts .cts .js .jsx .mjs .cjs` | NestJS, Angular, Express, React, LoopBack, GraphQL; AWS SNS/SQS/EventBridge/Lambda (additive) |
+| Python | `.py` | FastAPI |
+| Java | `.java` | Spring Boot, JAX-RS, Vert.x |
+| C# | `.cs` | ASP.NET |
+| VB.NET | `.vb` | ASP.NET |
+| Config | `package.json`, `tsconfig`, `Dockerfile`, `docker-compose`, `pom.xml`, `requirements.txt`, `build.gradle`, … | — |
+
+## Layout
 
 - `src/breezeai_cog/schemas/` — the capture contract as Pydantic v2 models
   (**source of truth**). The language-agnostic JSON Schema is generated on demand for
