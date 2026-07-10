@@ -7,6 +7,14 @@ Two idioms, both emitted as ``route`` statements:
   ``Function.decorators`` / ``Parameter.decorators``, so :func:`detect_controller_routes`
   reads the ``FileRecord`` directly (no AST re-walk). Because it only touches the
   language-agnostic record shape, the VB ASP.NET parser reuses it verbatim.
+
+  The full route template is composed from three places, so all three are resolved:
+  the controller ``[Route]`` prefix (possibly **inherited from a base/abstract
+  controller in another file**, via the repo index), the method ``[HttpGet("…")]`` verb
+  attribute, and a separate method-level ``[Route("…")]``. When a controller inherits
+  from a base we cannot see (an external/ambiguous base) and has no ``[Route]`` of its
+  own, the prefix is unknowable — we drop the route rather than emit a fabricated
+  absolute path (a wrong endpoint is worse than a missing one).
 * **Minimal APIs — AST walk.** ``app.MapGet("/x", …)`` is call-based, so
   :func:`detect_minimal_api_routes` walks the tree for the ``MapGet``/``MapPost``/… calls
   (grammar-specific node names are passed in by the C#/VB caller).
@@ -15,6 +23,7 @@ Two idioms, both emitted as ``route`` statements:
 from __future__ import annotations
 
 import re
+from typing import Any
 
 from tree_sitter import Node
 
@@ -28,6 +37,11 @@ _HTTP_ATTRS = {
 }
 _CONTROLLER_ATTRS = {"ApiController", "Controller"}
 _CONTROLLER_BASES = {"Controller", "ControllerBase"}
+_ROUTE_ATTRS = {"Route", "RoutePrefix"}
+_AUTH_ATTRS = {"Authorize", "AllowAnonymous"}
+#: framework base classes that terminate an inheritance chain cleanly — they carry no
+#: user route prefix, so reaching one means the prefix is fully resolved (empty).
+_FRAMEWORK_BASES = {"Controller", "ControllerBase"}
 _MAP_METHODS = {
     "MapGet": "GET", "MapPost": "POST", "MapPut": "PUT",
     "MapDelete": "DELETE", "MapPatch": "PATCH",
@@ -70,11 +84,63 @@ def _convention_endpoint(class_name: str, action: str) -> str:
     return f"/{ctrl}/{action}"
 
 
-def _class_route(decorators: list[Decorator], class_name: str) -> str:
+def _route_template(decorators: list[Decorator]) -> str | None:
+    """First ``[Route]``/``[RoutePrefix]`` template among ``decorators`` (``None`` when
+    absent — distinct from a present-but-empty ``[Route("")]``)."""
     for d in decorators:
-        if simple_attr_name(d.name) in ("Route", "RoutePrefix"):
-            return _controller_token(_first_arg(d), class_name)
-    return ""
+        if simple_attr_name(d.name) in _ROUTE_ATTRS:
+            return _first_arg(d)
+    return None
+
+
+def _guards(decorators: list[Decorator]) -> list[str]:
+    return [n for d in decorators if (n := simple_attr_name(d.name)) in _AUTH_ATTRS]
+
+
+def _resolve_chain(cls: Any, index: Any) -> tuple[str | None, list[str], bool]:
+    """Walk ``cls``'s inheritance chain through the repo index, composing the
+    controller-level route template (nearest-defined wins) and unioning the auth guards.
+
+    Returns ``(route_template, guards, resolved)``. ``resolved`` is ``False`` when the
+    chain ends at a base we cannot see (declared outside the repo, or an ambiguous name):
+    a prefix declared on that base would be invisible, so the caller treats a missing
+    route as unknown rather than empty (honest-null)."""
+    heritage_map = getattr(index, "class_heritage", None) or {}
+    route = _route_template(cls.decorators)
+    guards = _guards(cls.decorators)
+    base = cls.extends
+    seen = {cls.name}
+    resolved = True
+    while base is not None:
+        short = base.rsplit(".", 1)[-1].split("<", 1)[0]
+        if short in seen:  # inheritance cycle (shouldn't happen in valid C#) — stop
+            break
+        seen.add(short)
+        heritage = heritage_map.get(short, "missing")
+        if heritage == "missing":  # base not declared in the repo
+            resolved = short in _FRAMEWORK_BASES  # framework root = clean; unknown = incomplete
+            break
+        if heritage is None:  # ambiguous name — do not resolve through it
+            resolved = False
+            break
+        if route is None:
+            route = _route_template(heritage.decorators)
+        guards.extend(g for g in _guards(heritage.decorators) if g not in guards)
+        base = heritage.extends
+    return route, guards, resolved
+
+
+def _method_templates(http_tmpl: str, method_route: str | None) -> list[str]:
+    """The method-level route segment(s). Normally one — the ``[HttpX("…")]`` arg, or a
+    sibling ``[Route("…")]`` when the verb attribute carries none (a standard split idiom).
+    When both independently carry a *different* template, ASP.NET registers both routes."""
+    if http_tmpl and method_route is not None and http_tmpl != method_route:
+        return [http_tmpl, method_route]
+    if http_tmpl:
+        return [http_tmpl]
+    if method_route is not None:
+        return [method_route]
+    return [""]
 
 
 def _response_dto(return_type: str | None) -> str | None:
@@ -101,23 +167,22 @@ def _request_dto(fn: Function) -> str | None:
     return None
 
 
-def _auth(decorators: list[Decorator]) -> tuple[bool, list[str]]:
-    guards = [n for d in decorators if (n := simple_attr_name(d.name)) in ("Authorize", "AllowAnonymous")]
-    return ("Authorize" in guards), guards
-
-
-def _is_controller(cls) -> bool:
+def _is_controller(cls: Any) -> bool:
     if {simple_attr_name(d.name) for d in cls.decorators} & _CONTROLLER_ATTRS:
         return True
     ext = (cls.extends or "").rsplit(".", 1)[-1]
     return ext in _CONTROLLER_BASES or ext.endswith(("Controller", "ControllerBase"))
 
 
-def detect_controller_routes(record: FileRecord) -> list[Statement]:
-    controllers: dict[str, tuple[str, list[Decorator], str]] = {}
+def detect_controller_routes(record: FileRecord, index: Any = None) -> list[Statement]:
+    # (controller-route prefix, chain guards, chain-resolved, has-any-[Route], class name) per id
+    controllers: dict[str, tuple[str, list[str], bool, bool, str]] = {}
     for cls in record.classes:
-        if _is_controller(cls):
-            controllers[cls.id] = (_class_route(cls.decorators, cls.name), cls.decorators, cls.name)
+        if not _is_controller(cls):
+            continue
+        route, guards, resolved = _resolve_chain(cls, index)
+        base = _controller_token(route, cls.name) if route is not None else ""
+        controllers[cls.id] = (base, guards, resolved, route is not None, cls.name)
     if not controllers:
         return []
 
@@ -127,40 +192,44 @@ def detect_controller_routes(record: FileRecord) -> list[Statement]:
         info = controllers.get(fn.parentId)
         if info is None:
             continue
-        base, cls_decorators, cls_name = info
-        cls_auth, cls_guards = _auth(cls_decorators)
+        base, cls_guards, resolved, has_class_route, cls_name = info
+        # honest-null: an inherited base we cannot see may carry the route prefix — without
+        # it, and with no [Route] of our own, the absolute path is unknowable. Emit nothing
+        # rather than a fabricated endpoint (a wrong route is worse than a missing one).
+        if not has_class_route and not resolved:
+            continue
+        method_route = _route_template(fn.decorators)
+        fn_guards = _guards(fn.decorators)
+        auth_required = ("Authorize" in cls_guards or "Authorize" in fn_guards) or None
+        all_guards = (cls_guards + fn_guards) or None
         for dec in fn.decorators:
             verb = _HTTP_ATTRS.get(simple_attr_name(dec.name))
-            if verb is None and simple_attr_name(dec.name) in ("Route",) and any(
-                    simple_attr_name(d.name) in _HTTP_ATTRS for d in fn.decorators):
-                continue  # a bare [Route] alongside an [HttpX] — the verb comes from [HttpX]
-            if verb is None:
+            if verb is None:  # method template composed from [HttpX] + sibling [Route] below
                 continue
-            sub = _first_arg(dec)
-            # attribute route when one is present; else the MVC convention /{controller}/{action}
-            endpoint = _join(base, sub) if (base or sub) else _convention_endpoint(cls_name, fn.name)
-            fn_auth, fn_guards = _auth(fn.decorators)
-            routes.append(Statement(
-                id=disambiguate(statement_id(fn.path, fn.startLine, 0), seen),
-                parentId=fn.id,
-                nodeType="synthetic",
-                semanticType="route",
-                text=f"[{dec.name}]",
-                method=verb,
-                endpoint=endpoint,
-                framework="aspnet",
-                handler=fn.name,
-                handlerLine=fn.startLine,
-                routeKind="route",
-                isRegex=False,
-                authRequired=(cls_auth or fn_auth) or None,
-                guards=(cls_guards + fn_guards) or None,
-                requestDTO=_request_dto(fn),
-                responseDTO=_response_dto(fn.returnType),
-                startLine=fn.startLine,
-                endLine=fn.endLine,
-                path=fn.path,
-            ))
+            for sub in _method_templates(_first_arg(dec), method_route):
+                # attribute route when one resolves; else MVC convention /{controller}/{action}
+                endpoint = _join(base, sub) if (base or sub) else _convention_endpoint(cls_name, fn.name)
+                routes.append(Statement(
+                    id=disambiguate(statement_id(fn.path, fn.startLine, 0), seen),
+                    parentId=fn.id,
+                    nodeType="synthetic",
+                    semanticType="route",
+                    text=f"[{dec.name}]",
+                    method=verb,
+                    endpoint=endpoint,
+                    framework="aspnet",
+                    handler=fn.name,
+                    handlerLine=fn.startLine,
+                    routeKind="route",
+                    isRegex=False,
+                    authRequired=auth_required,
+                    guards=all_guards,
+                    requestDTO=_request_dto(fn),
+                    responseDTO=_response_dto(fn.returnType),
+                    startLine=fn.startLine,
+                    endLine=fn.endLine,
+                    path=fn.path,
+                ))
     return routes
 
 
@@ -237,7 +306,7 @@ _CTRL_RE = re.compile(r'controller\s*=\s*"([^"]+)"')
 _ACTION_RE = re.compile(r'action\s*=\s*"([^"]+)"')
 
 
-def _route_template(call: Node, source: bytes) -> str | None:
+def _maproute_url(call: Node, source: bytes) -> str | None:
     """The URL-template arg of a ``MapRoute`` call — the string literal that looks like a
     route template (contains ``{`` or ``/``), skipping the leading route-name arg."""
     args = call.child_by_field_name("arguments")
@@ -277,7 +346,7 @@ def detect_route_registrations(
                 if func is not None and func.type == member_type:
                     name_node = func.child_by_field_name(name_field)
                     method = node_text(name_node, source) if name_node is not None else ""
-                    url = _route_template(child, source) if method in _MAP_ROUTE_METHODS else None
+                    url = _maproute_url(child, source) if method in _MAP_ROUTE_METHODS else None
                     if url:
                         text = node_text(child, source)
                         ctrl, action = _CTRL_RE.search(text), _ACTION_RE.search(text)

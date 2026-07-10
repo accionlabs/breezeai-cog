@@ -28,8 +28,10 @@ from pathlib import Path
 
 from tree_sitter import Node
 
+from ...schemas import Decorator
 from ...utils import repo_relative
 from ..treesitter import node_text, parse_source
+from .functions import extract_attributes
 
 _NAME_NODES = ("qualified_name", "identifier", "alias_qualified_name", "member_access_expression")
 _CLASS_TYPES = (
@@ -37,6 +39,16 @@ _CLASS_TYPES = (
     "struct_declaration", "record_declaration",
 )
 _NAMESPACE_TYPES = ("namespace_declaration", "file_scoped_namespace_declaration")
+
+
+@dataclass
+class ClassHeritage:
+    """Generic C# heritage for one class — its base *class* (simple name) and the raw
+    attributes declared on it. Framework-agnostic (just language facts); ASP.NET route
+    resolution walks this to inherit a base controller's ``[Route]``/``[Authorize]``."""
+
+    extends: str | None
+    decorators: list[Decorator]
 
 
 @dataclass
@@ -51,6 +63,10 @@ class CSharpIndex:
     #: repo-relative dirs containing a ``.csproj`` (an assembly boundary), sorted
     #: longest-first so the nearest ancestor of a file is its owning project.
     project_roots: list[str] = field(default_factory=list)
+    #: simple class name → its heritage (base + decorators), for cross-file base-class
+    #: resolution. Value is ``None`` when the name is declared by >1 class with differing
+    #: bases (ambiguous → callers must not resolve through it: honest-null).
+    class_heritage: dict[str, ClassHeritage | None] = field(default_factory=dict)
 
     def project_of(self, path: str) -> str | None:
         """The owning project (nearest ancestor ``.csproj`` dir) of a repo-relative file."""
@@ -100,6 +116,38 @@ def _classify_using(node: Node, source: bytes) -> tuple[str, str | None, str | N
     return "using", name, None
 
 
+def _base_name(node: Node, source: bytes) -> str | None:
+    """Simple name of the base *class* (not interfaces) in a type's ``base_list``, or
+    None. Mirrors the class builder's (first-entry-unless-interface) heuristic and strips
+    the namespace qualifier + generics so it keys the simple-name heritage map."""
+    base = node.child_by_field_name("base_list") or next(
+        (c for c in node.named_children if c.type == "base_list"), None)
+    if base is None:
+        return None
+    names = [node_text(c, source) for c in base.named_children
+             if c.type in ("identifier", "qualified_name", "generic_name")]
+    if not names:
+        return None
+    short = names[0].rsplit(".", 1)[-1].split("<", 1)[0]
+    if len(short) >= 2 and short[0] == "I" and short[1].isupper():
+        return None  # base_list holds only interfaces
+    return short
+
+
+def _record_heritage(index: CSharpIndex, name: str, node: Node, source: bytes) -> None:
+    """Record a class's heritage under its simple name; collapse to ``None`` (ambiguous)
+    when a differing declaration of the same name already exists (partial classes with an
+    identical base are kept — same fact, not a conflict)."""
+    heritage = ClassHeritage(extends=_base_name(node, source),
+                             decorators=extract_attributes(node, source))
+    if name not in index.class_heritage:
+        index.class_heritage[name] = heritage
+    else:
+        existing = index.class_heritage[name]
+        if existing is None or existing.extends != heritage.extends:
+            index.class_heritage[name] = None  # collision → do not resolve through it
+
+
 def _index_file(root: Node, source: bytes, rel: str, index: CSharpIndex) -> None:
     """Add one file's ``global using`` namespaces + declared types to ``index``."""
     for child in root.named_children:
@@ -122,6 +170,7 @@ def _index_file(root: Node, source: bytes, rel: str, index: CSharpIndex) -> None
                 nm = _decl_name(child, source)
                 if nm:
                     index.types.setdefault(_join(local_ns, nm), set()).add(rel)
+                    _record_heritage(index, nm, child, source)
                 body = child.child_by_field_name("body")
                 if body is not None:
                     walk(body, local_ns)  # nested types share the enclosing namespace

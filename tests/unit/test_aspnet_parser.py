@@ -63,6 +63,87 @@ def _parse(parser, src, name, *, capture=True) -> FileRecord:
     return parser.parse_file(ctx)
 
 
+def _parse_with_index(parser, files: dict, target: str, tmp_path) -> FileRecord:
+    """Write ``files`` to a temp repo, build the C# repo index over them, then parse
+    ``target`` with that index — exercises cross-file base-controller resolution."""
+    from breezeai_cog.parsers.csharp.imports import build_csharp_index
+    for name, src in files.items():
+        (tmp_path / name).write_bytes(src)
+    index = build_csharp_index(tmp_path, [tmp_path / n for n in files])
+    ctx = ParseContext(path=target, abs_path=str(tmp_path / target), source=files[target],
+                       repo_root=str(tmp_path), capture_statements=True, resolution_index=index)
+    return parser.parse_file(ctx)
+
+
+# verb on a bare [HttpGet], template on a SEPARATE [Route] — a standard split idiom
+SPLIT = b'''
+using Microsoft.AspNetCore.Mvc;
+namespace Acme {
+  [ApiController]
+  [Route("api/orders")]
+  public class SplitController : ControllerBase {
+    [HttpGet]
+    [Route("{id}/detail")]
+    public IActionResult GetSplit(long id) { return null; }
+  }
+}
+'''
+
+# controller [Route]/[Authorize] live on an abstract base in another file
+BASE = b'''
+using Microsoft.AspNetCore.Mvc;
+namespace Acme {
+  [ApiController]
+  [Route("api/[controller]")]
+  [Authorize]
+  public abstract class BaseApiController : ControllerBase { }
+}
+'''
+DERIVED = b'''
+using Microsoft.AspNetCore.Mvc;
+namespace Acme {
+  public class ProductsController : BaseApiController {
+    [HttpGet("{id}")]
+    public IActionResult Get(long id) { return null; }
+  }
+}
+'''
+
+# base is out-of-repo (not in the index) and the derived controller has no [Route]
+EXTERNAL_BASE = b'''
+using Microsoft.AspNetCore.Mvc;
+namespace Acme {
+  public class WidgetsController : Acme.Platform.PlatformControllerBase {
+    [HttpGet("{id}")]
+    public IActionResult Get(long id) { return null; }
+  }
+}
+'''
+
+
+def test_split_route_and_verb_compose() -> None:
+    # [HttpGet] + separate [Route("{id}/detail")] must compose the full method template
+    rec = _parse(AspNetCoreParser(), SPLIT, "Split.cs")
+    routes = {(s.method, s.endpoint) for s in rec.statements if s.semanticType == "route"}
+    assert routes == {("GET", "/api/orders/{id}/detail")}
+
+
+def test_base_controller_route_and_auth_inherited(tmp_path) -> None:
+    rec = _parse_with_index(AspNetCoreParser(), {"Base.cs": BASE, "Products.cs": DERIVED},
+                            "Products.cs", tmp_path)
+    routes = {s.handler: s for s in rec.statements if s.semanticType == "route"}
+    assert routes["Get"].endpoint == "/api/Products/{id}"  # base [Route] + [controller]→derived
+    assert routes["Get"].authRequired is True              # [Authorize] inherited from base
+    assert "Authorize" in routes["Get"].guards
+
+
+def test_unresolved_base_emits_no_route(tmp_path) -> None:
+    # base out-of-repo + no own [Route] → prefix unknowable → honest-null (skip, not "/{id}")
+    rec = _parse_with_index(AspNetCoreParser(), {"Widgets.cs": EXTERNAL_BASE},
+                            "Widgets.cs", tmp_path)
+    assert [s for s in rec.statements if s.semanticType == "route"] == []
+
+
 def test_routes_require_capture(tmp_path) -> None:
     rec = _parse(AspNetCoreParser(), CS, "Orders.cs", capture=False)
     assert [s for s in rec.statements if s.semanticType == "route"] == []
