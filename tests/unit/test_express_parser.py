@@ -105,6 +105,32 @@ def test_output_validates(tmp_path) -> None:
     assert not errors, errors
 
 
+# Template-literal route paths (the real cause of missed SSR/sitemap routes). Dynamic
+# segments render to {param} placeholders; a leading interpolated base is stripped.
+TEMPLATE_SRC = b'''const express = require('express');
+const app = express();
+const prefix = 'https://cdn.example.com';
+
+app.get(`/sitemaps/${key}.txt`, sitemapHandler);
+app.get(`/plain`, plainHandler);
+app.get(`${prefix}/assets/${name}`, assetHandler);
+app.use(`/api/${version}`, router);
+'''
+
+
+def test_template_literal_paths(tmp_path) -> None:
+    p = tmp_path / "ssr.js"
+    p.write_text(TEMPLATE_SRC.decode())
+    ctx = ParseContext(path="ssr.js", abs_path=p, source=TEMPLATE_SRC, repo_root=tmp_path,
+                       capture_statements=True)
+    rec = ExpressParser().parse_file(ctx)
+    routes = {(s.method, s.endpoint) for s in rec.statements if s.semanticType == "route"}
+    assert ("GET", "/sitemaps/{key}.txt") in routes   # interpolation → {key} placeholder
+    assert ("GET", "/plain") in routes                # a template with no substitution
+    assert ("GET", "/assets/{name}") in routes        # leading ${prefix} base stripped
+    assert (None, "/api/{version}") in routes         # mount path via template literal
+
+
 # R3: the Apollo GraphQL transport mount — app.use(path, expressMiddleware(server)).
 # The path is a variable (resolved to its default) and the handler is the Apollo adapter.
 APOLLO_SRC = b'''import express from 'express';

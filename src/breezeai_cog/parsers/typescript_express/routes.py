@@ -18,6 +18,7 @@ from tree_sitter import Node
 
 from ...emit import disambiguate, file_id, statement_id
 from ...schemas import FileRecord, Statement
+from ..statements_common import strip_leading_base, url_placeholder
 from ..treesitter import first_line, node_text
 
 # HTTP-verb methods that register a route handler on an app/router.
@@ -54,6 +55,29 @@ def _string_value(node: Node, source: bytes) -> str | None:
         return None
     frag = next((c for c in node.named_children if c.type == "string_fragment"), None)
     return node_text(frag, source) if frag is not None else ""
+
+
+def _template_value(node: Node, source: bytes) -> str:
+    """Render a ``template_string`` path to a route path, turning each ``${expr}`` into a
+    ``{name}`` placeholder (``/sitemaps/${key}.txt`` → ``/sitemaps/{key}.txt``). A leading
+    interpolated base/host segment is dropped so the path matches inbound routes."""
+    parts: list[str] = []
+    for c in node.named_children:
+        if c.type == "string_fragment":
+            parts.append(node_text(c, source))
+        elif c.type == "template_substitution":
+            expr = c.named_children[0] if c.named_children else None
+            parts.append(url_placeholder(node_text(expr, source)) if expr is not None else "{param}")
+    return strip_leading_base("".join(parts))
+
+
+def _path_value(node: Node, source: bytes) -> str | None:
+    """Route-path argument as a string: a plain string literal verbatim, or a template
+    literal rendered with ``{param}`` placeholders. Unlike ``_string_value`` (used for
+    resolving identifier constants), this accepts the dynamic template-literal form."""
+    if node.type == "template_string":
+        return _template_value(node, source)
+    return _string_value(node, source)
 
 
 def _handler(arg_nodes: list[Node], source: bytes) -> tuple[str | None, int | None]:
@@ -126,7 +150,7 @@ def _classify(
 
     args = call.child_by_field_name("arguments")
     arg_nodes = list(args.named_children) if args is not None else []
-    path = _string_value(arg_nodes[0], source) if arg_nodes else None
+    path = _path_value(arg_nodes[0], source) if arg_nodes else None
 
     handler, handler_line = _handler(arg_nodes, source)
 
