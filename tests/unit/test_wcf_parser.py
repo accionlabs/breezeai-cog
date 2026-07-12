@@ -147,6 +147,19 @@ def test_service_name_override_differs_from_interface() -> None:
     assert _routes(rec)["HelloWorld"].endpoint == "AgencyService/HelloWorld"
 
 
+def test_generated_client_proxy_skipped() -> None:
+    # svcutil-generated client proxy: [GeneratedCode] + full-form [ServiceContractAttribute].
+    # It's the client side, not a server entry point — must NOT produce routes.
+    src = (b"using System.ServiceModel;\nnamespace K {\n"
+           b"[System.CodeDom.Compiler.GeneratedCodeAttribute(\"svcutil\", \"6.0\")]\n"
+           b"[ServiceContractAttribute]\n"
+           b"public interface ICatalogServiceProxy {\n"
+           b"[OperationContractAttribute] string FindCatalogItem(int id);\n} }")
+    rec = _parse(WcfParser(), src, "Reference.cs")
+    assert [s for s in rec.statements if s.semanticType == "route"] == []
+    assert rec.framework is None
+
+
 def test_non_service_file_has_no_routes() -> None:
     # Uses System.ServiceModel (a client proxy) but defines no [ServiceContract] → no route.
     src = b"using System.ServiceModel;\nnamespace X { public class Proxy { public void Call(){} } }"

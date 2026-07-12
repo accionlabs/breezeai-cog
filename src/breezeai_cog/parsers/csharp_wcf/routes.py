@@ -25,6 +25,7 @@ _WEB_GET = "WebGet"
 _WEB_INVOKE = "WebInvoke"
 _WEB_SERVICE_ATTR = "WebService"   # ASMX (System.Web.Services)
 _WEB_METHOD_ATTR = "WebMethod"     # ASMX operation
+_GENERATED_ATTR = "GeneratedCode"  # svcutil-generated client proxy — NOT a server entry point
 _HTTP_VERBS = {"GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS"}
 
 
@@ -86,7 +87,7 @@ def detect_wcf_services(record: FileRecord) -> list[Statement]:
     services: dict[str, str] = {
         cls.id: _service_name(cls.decorators, cls.name)
         for cls in record.classes
-        if _has_attr(cls.decorators, _SERVICE_ATTR)
+        if _has_attr(cls.decorators, _SERVICE_ATTR) and not _has_attr(cls.decorators, _GENERATED_ATTR)
     }
     if not services:
         return []
@@ -139,6 +140,8 @@ def detect_asmx_services(record: FileRecord) -> list[Statement]:
         if not _has_attr(fn.decorators, _WEB_METHOD_ATTR):
             continue
         cls = cls_by_id.get(fn.parentId)
+        if cls is not None and _has_attr(cls.decorators, _GENERATED_ATTR):
+            continue  # generated proxy, not a real ASMX service
         svc = (_name_arg(cls.decorators, _WEB_SERVICE_ATTR) or cls.name) if cls is not None else "WebService"
         routes.append(
             Statement(
