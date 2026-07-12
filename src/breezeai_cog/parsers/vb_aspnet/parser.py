@@ -7,7 +7,11 @@ from __future__ import annotations
 
 from ...schemas import FileRecord
 from ..base import ParseContext
-from ..csharp_aspnet.routes import detect_controller_routes, detect_minimal_api_routes
+from ..csharp_aspnet.routes import (
+    detect_controller_routes,
+    detect_minimal_api_routes,
+    detect_route_registrations,
+)
 from ..treesitter import parse_source
 from ..vb.parser import VbParser
 
@@ -29,6 +33,10 @@ class VbAspNetParser(VbParser):
             routes = detect_controller_routes(record)
             seen = {s.id for s in record.statements} | {r.id for r in routes}
             routes += detect_minimal_api_routes(
+                root, ctx.source, ctx.path, seen,
+                invocation_type="invocation", member_type="member_access",
+            )
+            routes += detect_route_registrations(
                 root, ctx.source, ctx.path, seen,
                 invocation_type="invocation", member_type="member_access",
             )

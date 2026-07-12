@@ -86,7 +86,7 @@ def _routes(dec: Node, fdef: Node, source: bytes, path: str, class_name: str | N
         Statement(
             id=disambiguate(statement_id(path, start_line, start_col), seen_ids),
             parentId=parent,
-            nodeType="decorator",
+            nodeType="synthetic",
             semanticType="route",
             text=text,
             method=m,

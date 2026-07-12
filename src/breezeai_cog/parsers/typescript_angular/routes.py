@@ -122,7 +122,7 @@ def _process(arr: Node, prefix: str, source: bytes, path: str, seen: set[str], r
         routes.append(Statement(
             id=disambiguate(statement_id(path, sl, sc), seen),
             parentId=file_id(path),
-            nodeType="object",
+            nodeType="synthetic",
             semanticType="route",
             text=node_text(elem, source).split("\n", 1)[0][:120],
             endpoint=full,

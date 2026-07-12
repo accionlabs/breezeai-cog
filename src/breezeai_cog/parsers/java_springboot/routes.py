@@ -113,7 +113,7 @@ def detect_spring_routes(record: FileRecord) -> list[Statement]:
                 routes.append(Statement(
                     id=disambiguate(statement_id(fn.path, fn.startLine, 0), seen),
                     parentId=fn.id,
-                    nodeType="annotation",
+                    nodeType="synthetic",
                     semanticType="route",
                     text=f"@{dec.name}",
                     method=verb,
