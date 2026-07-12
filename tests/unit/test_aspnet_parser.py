@@ -100,6 +100,33 @@ def test_full_form_attribute_names() -> None:
     assert ("GET", "/api/x/{id}") in routes
 
 
+def test_mvc_convention_route() -> None:
+    # classic MVC 5: no [Route] on class/action → endpoint from convention /{controller}/{action}
+    src = (b"using Microsoft.AspNetCore.Mvc;\nnamespace A {\n"
+           b"public class CatalogController : Controller {\n"
+           b"[HttpPost] public object Create(CatalogItem i) { return null; }\n"
+           b"[HttpGet] public object Index() { return null; }\n} }")
+    rec = _parse(AspNetCoreParser(), src, "CatalogController.cs")
+    routes = {(s.method, s.endpoint) for s in rec.statements if s.semanticType == "route"}
+    assert ("POST", "/Catalog/Create") in routes
+    assert ("GET", "/Catalog/Index") in routes
+
+
+def test_mvc_route_registration() -> None:
+    # Phase 2: RouteConfig.MapRoute — custom named route + the default template
+    src = (b"using System.Web.Mvc;\nnamespace A {\npublic class RouteConfig {\n"
+           b"public static void RegisterRoutes(RouteCollection routes) {\n"
+           b'routes.MapRoute("ProductDetails", "products/{id}", new { controller = "Catalog", action = "Details" });\n'
+           b'routes.MapRoute("Default", "{controller}/{action}/{id}", new { controller = "Home", action = "Index" });\n'
+           b"} } }")
+    rec = _parse(AspNetCoreParser(), src, "App_Start/RouteConfig.cs")
+    routes = {s.endpoint: s for s in rec.statements if s.semanticType == "route"}
+    assert routes["/products/{id}"].method == "ANY"
+    assert routes["/products/{id}"].handler == "Catalog.Details"
+    assert "/{controller}/{action}/{id}" in routes            # default template captured
+    assert routes["/{controller}/{action}/{id}"].handler == "Home.Index"
+
+
 def test_csharp_minimal_apis() -> None:
     rec = _parse(AspNetCoreParser(), CS, "Orders.cs")
     minimal = {(s.method, s.endpoint) for s in rec.statements

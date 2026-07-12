@@ -14,6 +14,8 @@ Two idioms, both emitted as ``route`` statements (spec A4/C5):
 
 from __future__ import annotations
 
+import re
+
 from tree_sitter import Node
 
 from ...emit import disambiguate, statement_id
@@ -57,6 +59,15 @@ def _controller_token(base: str, class_name: str) -> str:
 def _join(base: str, sub: str) -> str:
     parts = [p.strip("/") for p in (base, sub) if p and p.strip("/")]
     return "/" + "/".join(parts) if parts else "/"
+
+
+def _convention_endpoint(class_name: str, action: str) -> str:
+    """ASP.NET MVC **convention** route, used when no attribute resolves the path (classic
+    MVC 5 routing declares ``{controller}/{action}`` in RouteConfig, not per action):
+    ``/{controller}/{action}`` with the ``Controller`` suffix dropped
+    (``CatalogController.Create`` → ``/Catalog/Create``)."""
+    ctrl = class_name[: -len("Controller")] if class_name.endswith("Controller") else class_name
+    return f"/{ctrl}/{action}"
 
 
 def _class_route(decorators: list[Decorator], class_name: str) -> str:
@@ -103,10 +114,10 @@ def _is_controller(cls) -> bool:
 
 
 def detect_controller_routes(record: FileRecord) -> list[Statement]:
-    controllers: dict[str, tuple[str, list[Decorator]]] = {}
+    controllers: dict[str, tuple[str, list[Decorator], str]] = {}
     for cls in record.classes:
         if _is_controller(cls):
-            controllers[cls.id] = (_class_route(cls.decorators, cls.name), cls.decorators)
+            controllers[cls.id] = (_class_route(cls.decorators, cls.name), cls.decorators, cls.name)
     if not controllers:
         return []
 
@@ -116,7 +127,7 @@ def detect_controller_routes(record: FileRecord) -> list[Statement]:
         info = controllers.get(fn.parentId)
         if info is None:
             continue
-        base, cls_decorators = info
+        base, cls_decorators, cls_name = info
         cls_auth, cls_guards = _auth(cls_decorators)
         for dec in fn.decorators:
             verb = _HTTP_ATTRS.get(simple_attr_name(dec.name))
@@ -126,6 +137,8 @@ def detect_controller_routes(record: FileRecord) -> list[Statement]:
             if verb is None:
                 continue
             sub = _first_arg(dec)
+            # attribute route when one is present; else the MVC convention /{controller}/{action}
+            endpoint = _join(base, sub) if (base or sub) else _convention_endpoint(cls_name, fn.name)
             fn_auth, fn_guards = _auth(fn.decorators)
             routes.append(Statement(
                 id=disambiguate(statement_id(fn.path, fn.startLine, 0), seen),
@@ -134,7 +147,7 @@ def detect_controller_routes(record: FileRecord) -> list[Statement]:
                 semanticType="route",
                 text=f"[{dec.name}]",
                 method=verb,
-                endpoint=_join(base, sub),
+                endpoint=endpoint,
                 framework="aspnet",
                 handler=fn.name,
                 handlerLine=fn.startLine,
@@ -217,3 +230,77 @@ def _find_string(node: Node) -> Node | None:
         if found is not None:
             return found
     return None
+
+
+_MAP_ROUTE_METHODS = {"MapRoute", "MapHttpRoute"}
+_CTRL_RE = re.compile(r'controller\s*=\s*"([^"]+)"')
+_ACTION_RE = re.compile(r'action\s*=\s*"([^"]+)"')
+
+
+def _route_template(call: Node, source: bytes) -> str | None:
+    """The URL-template arg of a ``MapRoute`` call — the string literal that looks like a
+    route template (contains ``{`` or ``/``), skipping the leading route-name arg."""
+    args = call.child_by_field_name("arguments")
+    if args is None:
+        return None
+    strings = [node_text(s, source).strip('"') for arg in args.named_children
+               if (s := _find_string(arg)) is not None]
+    for s in strings:
+        if "{" in s or "/" in s:
+            return s
+    return strings[1] if len(strings) >= 2 else None
+
+
+def detect_route_registrations(
+    root: Node,
+    source: bytes,
+    path: str,
+    seen_ids: set[str],
+    *,
+    invocation_type: str,
+    member_type: str,
+) -> list[Statement]:
+    """AST-walk for MVC / Web-API **convention-route registrations** —
+    ``routes.MapRoute(name, url, defaults)`` / ``config.Routes.MapHttpRoute(…)`` declared in
+    ``RouteConfig`` / ``Global.asax`` / an ``AreaRegistration``. Emits the declared URL
+    template as a ``route`` (method ``ANY``, since a convention route matches any verb), with
+    the default ``controller``[.``action``] as the handler. Grammar-specific node/field names
+    are supplied by the C#/VB caller (Phase 2 of the MVC endpoint-resolution work)."""
+    routes: list[Statement] = []
+    name_field = "name" if member_type == "member_access_expression" else "member"
+    fn_field = "function" if invocation_type == "invocation_expression" else "target"
+
+    def visit(node: Node) -> None:
+        for child in node.named_children:
+            if child.type == invocation_type:
+                func = child.child_by_field_name(fn_field)
+                if func is not None and func.type == member_type:
+                    name_node = func.child_by_field_name(name_field)
+                    method = node_text(name_node, source) if name_node is not None else ""
+                    url = _route_template(child, source) if method in _MAP_ROUTE_METHODS else None
+                    if url:
+                        text = node_text(child, source)
+                        ctrl, action = _CTRL_RE.search(text), _ACTION_RE.search(text)
+                        handler = (f"{ctrl.group(1)}.{action.group(1)}" if ctrl and action
+                                   else ctrl.group(1) if ctrl else None)
+                        start = child.start_point[0] + 1
+                        routes.append(Statement(
+                            id=disambiguate(statement_id(path, start, child.start_point[1]), seen_ids),
+                            parentId=path,
+                            nodeType=child.type,
+                            semanticType="route",
+                            text=text.split("\n", 1)[0][:200],
+                            method="ANY",
+                            endpoint="/" + url.strip("/"),
+                            framework="aspnet",
+                            handler=handler,
+                            routeKind="route",
+                            isRegex=False,
+                            startLine=start,
+                            endLine=child.end_point[0] + 1,
+                            path=path,
+                        ))
+            visit(child)
+
+    visit(root)
+    return routes
