@@ -89,6 +89,17 @@ def test_csharp_route_attributes() -> None:
     assert routes["Get"].authRequired is True and "Authorize" in routes["Get"].guards
 
 
+def test_full_form_attribute_names() -> None:
+    # attributes written in full form ([HttpGetAttribute] etc.) must resolve like the short form
+    src = (b"using Microsoft.AspNetCore.Mvc;\nnamespace A {\n"
+           b"[ApiControllerAttribute] [RouteAttribute(\"api/x\")]\n"
+           b"public class XController : ControllerBase {\n"
+           b"[HttpGetAttribute(\"{id}\")] public object Get(long id) { return null; }\n} }")
+    rec = _parse(AspNetCoreParser(), src, "X.cs")
+    routes = {(s.method, s.endpoint) for s in rec.statements if s.semanticType == "route"}
+    assert ("GET", "/api/x/{id}") in routes
+
+
 def test_csharp_minimal_apis() -> None:
     rec = _parse(AspNetCoreParser(), CS, "Orders.cs")
     minimal = {(s.method, s.endpoint) for s in rec.statements

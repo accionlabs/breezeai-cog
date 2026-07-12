@@ -150,7 +150,7 @@ def detect_vertx(root: Node, source: bytes, path: str, record: FileRecord) -> bo
         if any(d.name == "ProxyGen" for d in cls.decorators):
             new_id = disambiguate(statement_id(path, cls.startLine, 0), seen)
             record.statements.append(Statement(
-                id=new_id, parentId=cls.id, nodeType="annotation",
+                id=new_id, parentId=cls.id, nodeType="synthetic",
                 semanticType="service_proxy", text="@ProxyGen", framework="vertx",
                 startLine=cls.startLine, endLine=cls.startLine, path=path,
             ))

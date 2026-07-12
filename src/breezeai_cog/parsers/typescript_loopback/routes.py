@@ -185,7 +185,7 @@ def detect_loopback_routes(root: Node, source: bytes, path: str, *, seen_ids: se
                     routes.append(Statement(
                         id=disambiguate(statement_id(path, sl, sc), seen_ids),
                         parentId=function_id(path, mname, mline, class_name=class_name),
-                        nodeType="decorator",
+                        nodeType="synthetic",
                         semanticType="route",
                         text=node_text(dec, source).split("\n", 1)[0],
                         method=verb,

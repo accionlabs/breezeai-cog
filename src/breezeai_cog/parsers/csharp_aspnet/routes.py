@@ -32,6 +32,13 @@ _MAP_METHODS = {
 }
 
 
+def simple_attr_name(name: str) -> str:
+    """Normalize a C#/VB attribute name to its short form: an attribute may be written
+    ``[HttpGet]`` or ``[HttpGetAttribute]`` (and svcutil emits the full form) — both bind to
+    the same class, so drop a trailing ``Attribute``."""
+    return name[: -len("Attribute")] if name.endswith("Attribute") and name != "Attribute" else name
+
+
 def _first_arg(dec: Decorator) -> str:
     """First positional (non-named) attribute arg — the route template, if any."""
     for raw in dec.args:
@@ -54,7 +61,7 @@ def _join(base: str, sub: str) -> str:
 
 def _class_route(decorators: list[Decorator], class_name: str) -> str:
     for d in decorators:
-        if d.name in ("Route", "RoutePrefix"):
+        if simple_attr_name(d.name) in ("Route", "RoutePrefix"):
             return _controller_token(_first_arg(d), class_name)
     return ""
 
@@ -78,18 +85,18 @@ def _response_dto(return_type: str | None) -> str | None:
 
 def _request_dto(fn: Function) -> str | None:
     for p in fn.params:
-        if any(d.name == "FromBody" for d in p.decorators):
+        if any(simple_attr_name(d.name) == "FromBody" for d in p.decorators):
             return p.type or None
     return None
 
 
 def _auth(decorators: list[Decorator]) -> tuple[bool, list[str]]:
-    guards = [d.name for d in decorators if d.name in ("Authorize", "AllowAnonymous")]
+    guards = [n for d in decorators if (n := simple_attr_name(d.name)) in ("Authorize", "AllowAnonymous")]
     return ("Authorize" in guards), guards
 
 
 def _is_controller(cls) -> bool:
-    if {d.name for d in cls.decorators} & _CONTROLLER_ATTRS:
+    if {simple_attr_name(d.name) for d in cls.decorators} & _CONTROLLER_ATTRS:
         return True
     ext = (cls.extends or "").rsplit(".", 1)[-1]
     return ext in _CONTROLLER_BASES or ext.endswith(("Controller", "ControllerBase"))
@@ -112,9 +119,9 @@ def detect_controller_routes(record: FileRecord) -> list[Statement]:
         base, cls_decorators = info
         cls_auth, cls_guards = _auth(cls_decorators)
         for dec in fn.decorators:
-            verb = _HTTP_ATTRS.get(dec.name)
-            if verb is None and dec.name in ("Route",) and any(
-                    d.name in _HTTP_ATTRS for d in fn.decorators):
+            verb = _HTTP_ATTRS.get(simple_attr_name(dec.name))
+            if verb is None and simple_attr_name(dec.name) in ("Route",) and any(
+                    simple_attr_name(d.name) in _HTTP_ATTRS for d in fn.decorators):
                 continue  # a bare [Route] alongside an [HttpX] — the verb comes from [HttpX]
             if verb is None:
                 continue
@@ -123,7 +130,7 @@ def detect_controller_routes(record: FileRecord) -> list[Statement]:
             routes.append(Statement(
                 id=disambiguate(statement_id(fn.path, fn.startLine, 0), seen),
                 parentId=fn.id,
-                nodeType="attribute",
+                nodeType="synthetic",
                 semanticType="route",
                 text=f"[{dec.name}]",
                 method=verb,

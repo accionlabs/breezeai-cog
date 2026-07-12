@@ -182,7 +182,7 @@ def detect_nest_routes(
                     common = dict(
                         id=disambiguate(statement_id(path, sl, sc), seen_ids),
                         parentId=parent,
-                        nodeType="decorator",
+                        nodeType="synthetic",
                         text=node_text(dec, source).split("\n", 1)[0],
                         framework=framework,
                         handler=mname,

@@ -20,7 +20,7 @@ def detect_spring_queries(record: FileRecord) -> list[Statement]:
         out.append(Statement(
             id=disambiguate(statement_id(fn.path, fn.startLine, 0), seen),
             parentId=fn.id,
-            nodeType="annotation",
+            nodeType="synthetic",
             semanticType="query_statement",
             text=sql or "@Query",
             startLine=fn.startLine,
