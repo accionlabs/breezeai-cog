@@ -8,14 +8,15 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Optional
+from typing import Any, Callable, Optional
 
 import typer
 
 from ._version import __version__
 from .config import Settings
 from .logging import setup_logging
-from .services import AnalysisService
+from .schemas import ProjectMetaData
+from .services import AnalysisResult, AnalysisService
 
 app = typer.Typer(
     name="breezeai-cog",
@@ -35,17 +36,49 @@ def repo_to_json_tree(
     language: Optional[list[str]] = typer.Option(None, "--language", help="Restrict to languages (repeatable)."),
     capture_statements: bool = typer.Option(False, "--capture-statements", help="Capture in-body statements."),
     jobs: Optional[int] = typer.Option(None, "--jobs", help="Worker processes (default: CPU count)."),
+    upload: bool = typer.Option(
+        False, "--upload", help="Upload the result to the Breeze backend (needs --baseurl, --uuid, --user-api-key)."
+    ),
+    baseurl: Optional[str] = typer.Option(
+        None, "--baseurl", help="Breeze backend base URL (with --upload; env: BREEZE_API_URL)."
+    ),
+    uuid: Optional[str] = typer.Option(
+        None, "--uuid", help="Project UUID to upload into (with --upload)."
+    ),
+    user_api_key: Optional[str] = typer.Option(
+        None, "--user-api-key", help="Backend API key, sent as `api-key` (with --upload; env: API_KEY).",
+    ),
     verbose: bool = typer.Option(False, "--verbose", help="Verbose (DEBUG) logging."),
 ) -> None:
-    """Analyze a repository to a gzipped NDJSON ontology."""
-    settings = Settings(
-        repo=repo,
-        out=out,
-        languages=language or None,
-        capture_statements=capture_statements,
-        jobs=jobs,
-        log_level="DEBUG" if verbose else "INFO",
-    )
+    """Analyze a repository to a gzipped NDJSON ontology (optionally uploading it)."""
+    # Only forward upload flags that were actually supplied so env / .env can fill the
+    # rest (init kwargs outrank env in pydantic-settings — passing None would clobber it).
+    overrides: dict[str, Any] = {}
+    if upload:
+        overrides["upload"] = True
+    if baseurl is not None:
+        overrides["baseurl"] = baseurl
+    if uuid is not None:
+        overrides["uuid"] = uuid
+    if user_api_key is not None:
+        overrides["user_api_key"] = user_api_key
+
+    from pydantic import ValidationError
+
+    try:
+        settings = Settings(
+            repo=repo,
+            out=out,
+            languages=language or None,
+            capture_statements=capture_statements,
+            jobs=jobs,
+            log_level="DEBUG" if verbose else "INFO",
+            **overrides,
+        )
+    except ValidationError as exc:
+        for err in exc.errors():
+            typer.secho(f"error: {err['msg']}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(1) from exc
     setup_logging(settings)
     service = AnalysisService(settings)
 
@@ -56,9 +89,9 @@ def repo_to_json_tree(
 
     show_bar = not verbose and sys.stderr.isatty()
     render_table = not verbose and sys.stdout.isatty()
-    stats: dict = {}
+    stats: dict[str, Any] = {}
 
-    def analyze(progress: object) -> object:
+    def analyze(progress: Callable[[int, int], None] | None) -> AnalysisResult:
         return service.analyze_repo(
             repo, progress=progress, summary_out=stats, log_summary=not render_table,
         )
@@ -100,8 +133,21 @@ def repo_to_json_tree(
             f"({', '.join(m.analyzedLanguages) or 'none'}) -> {result.out_path}"
         )
 
+    if settings.upload:
+        from .errors import UploadError
+        from .services import upload_ontology
 
-def _print_summary_table(meta: object, stats: dict, out_path: object) -> None:
+        assert result.out_path is not None  # CLI always owns a FileSink (out_path set)
+        typer.echo(f"Uploading {result.out_path.name} to {settings.baseurl} ...")
+        try:
+            upload_ontology(settings, result.out_path, repository_name=m.repositoryName)
+        except UploadError as exc:
+            typer.secho(f"upload failed: {exc}", fg=typer.colors.RED, err=True)
+            raise typer.Exit(1) from exc
+        typer.secho("Upload complete.", fg=typer.colors.GREEN)
+
+
+def _print_summary_table(meta: ProjectMetaData, stats: dict[str, Any], out_path: Path | None) -> None:
     """Render the run summary as a readable table (interactive terminal)."""
     from rich import box
     from rich.console import Console

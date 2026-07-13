@@ -145,6 +145,10 @@ found) and the path to the output file.
 | `--language <name>` | all (auto-detected) | Only analyze this language. Repeat the flag for several (e.g. `--language python --language java`). |
 | `--capture-statements` | off | Also record statements *inside* functions — needed to detect API calls, DB queries, and routes. Off by default because it produces more data. |
 | `--jobs <n>` | number of CPU cores | How many files to parse in parallel. |
+| `--upload` | off | After analysis, upload the `.ndjson.gz` to the Breeze backend (`POST /code-ontology/generate`). Requires `--baseurl`, `--uuid`, and `--user-api-key` (each also readable from the environment). |
+| `--baseurl <url>` | env `BREEZE_API_URL` | Breeze backend base URL (used with `--upload`). |
+| `--uuid <uuid>` | — | Project UUID to upload into (used with `--upload`). |
+| `--user-api-key <key>` | env `API_KEY` | Backend API key, sent as the `api-key` header (used with `--upload`). |
 | `--verbose` | off | Print detailed (debug) logs: per-file parse results, each skipped file with its reason (`ignored` / `unsupported` / `oversized`), and index-build timing. |
 
 Every run — even without `--verbose` — ends with a one-line summary showing files **found** vs
@@ -170,6 +174,20 @@ Example — analyze only Python and Java, with statement detail, using 8 paralle
 breezeai-cog repo-to-json-tree --repo . --language python --language java \
     --capture-statements --jobs 8 --out ./out
 ```
+
+Example — analyze and upload the result to a Breeze project in one step:
+
+```bash
+breezeai-cog repo-to-json-tree --repo . --capture-statements \
+    --upload --baseurl https://api.breeze.example.com \
+    --uuid 3f2c… --user-api-key "$API_KEY"
+```
+
+With `--upload`, the run analyzes as usual, writes the `.ndjson.gz`, then POSTs it as
+`multipart/form-data` to `POST /code-ontology/generate` (the backend streams it to S3 and
+starts ingestion). Transient network / 5xx failures get a bounded retry; a 4xx or exhausted
+retries exits non-zero. `--baseurl` and `--user-api-key` fall back to the `BREEZE_API_URL`
+and `API_KEY` environment variables (or `.env`), so you can keep secrets out of the command line.
 
 > This command only reads **local** folders. To analyze a remote repository by cloning or diffing
 > commits, use the HTTP service's `/api/analyze-diff` endpoint (below).
