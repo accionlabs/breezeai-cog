@@ -2,9 +2,13 @@
 live inside ``type_declaration`` wrappers under ``namespace_block``s; leading
 attributes detach as sibling ``attribute_block`` nodes, so the walker accumulates them
 and hands them to the following type. Like C#, imports name namespaces (not files), so
-there is no ``build_index`` and calls resolve same-file only."""
+calls resolve same-file only; ``build_index`` indexes only class heritage (base + attrs)
+for cross-file base-controller route/auth resolution (ASP.NET)."""
 
 from __future__ import annotations
+
+from collections.abc import Sequence
+from pathlib import Path
 
 from tree_sitter import Node
 
@@ -16,7 +20,7 @@ from ..callresolve import make_resolver
 from ..treesitter import parse_source
 from .classes import build_class
 from .functions import defined_names, type_map
-from .imports import extract_imports
+from .imports import VbIndex, build_vb_index, extract_imports
 from .mappings import FRAMEWORKS, STATEMENT_TYPES
 
 _CLASS_TYPES = (
@@ -51,6 +55,12 @@ class VbParser(BaseParser):
     schema_version = SCHEMA_VERSION
     statement_types = STATEMENT_TYPES
     frameworks = FRAMEWORKS
+
+    def build_index(self, repo_root: Path, files: Sequence[Path]) -> VbIndex:
+        """Repo-level pre-pass: simple class name → heritage (base + attributes), for
+        cross-file base-controller route/auth resolution (ASP.NET). No namespace→file map
+        (VB imports name namespaces); heritage only."""
+        return build_vb_index(Path(repo_root), files)
 
     def parse_file(self, ctx: ParseContext) -> FileRecord:
         root = parse_source("vb", ctx.source, ctx.parse_timeout_micros).root_node

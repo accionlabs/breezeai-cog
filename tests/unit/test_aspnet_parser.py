@@ -391,6 +391,50 @@ def test_vb_controller_routes() -> None:
     assert rec.framework == "aspnet"
 
 
+# VB controller whose [Route]/[Authorize] live on an abstract base in another file
+VB_BASE = b'''Imports Microsoft.AspNetCore.Mvc
+Namespace Acme
+  <ApiController>
+  <Route("api/[controller]")>
+  <Authorize>
+  Public MustInherit Class BaseApiController
+    Inherits ControllerBase
+  End Class
+End Namespace'''
+VB_DERIVED = b'''Imports Microsoft.AspNetCore.Mvc
+Namespace Acme
+  Public Class ProductsController
+    Inherits BaseApiController
+    <HttpGet("{id}")>
+    Public Function GetItem(id As Long) As Object
+      Return Nothing
+    End Function
+  End Class
+End Namespace'''
+
+
+def _parse_vb_with_index(files: dict, target: str, tmp_path) -> FileRecord:
+    """Write ``files`` to a temp repo, build the VB heritage index over them, then parse
+    ``target`` with that index — exercises VB cross-file base-controller resolution."""
+    from breezeai_cog.parsers.vb.imports import build_vb_index
+    for name, src in files.items():
+        (tmp_path / name).write_bytes(src)
+    index = build_vb_index(tmp_path, [tmp_path / n for n in files])
+    ctx = ParseContext(path=target, abs_path=str(tmp_path / target), source=files[target],
+                       repo_root=str(tmp_path), capture_statements=True, resolution_index=index)
+    return VbAspNetParser().parse_file(ctx)
+
+
+def test_vb_base_controller_route_and_auth_inherited(tmp_path) -> None:
+    # VB parity with the C# cross-file case: base [Route]/[Authorize] resolve through the index
+    rec = _parse_vb_with_index({"Base.vb": VB_BASE, "Products.vb": VB_DERIVED},
+                               "Products.vb", tmp_path)
+    routes = {s.handler: s for s in rec.statements if s.semanticType == "route"}
+    assert routes["GetItem"].endpoint == "/api/Products/{id}"  # base [Route] + [controller]→derived
+    assert routes["GetItem"].authRequired is True              # [Authorize] inherited from base
+    assert "Authorize" in routes["GetItem"].guards
+
+
 def test_non_controller_has_no_routes() -> None:
     src = b"using System;\nnamespace X { public class Plain { public int Add(int a){ return a; } } }"
     rec = _parse(AspNetCoreParser(), src, "Plain.cs")
