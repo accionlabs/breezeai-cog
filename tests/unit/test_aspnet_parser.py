@@ -275,7 +275,7 @@ def test_allow_anonymous_overrides_authorize() -> None:
 
 def test_mvc_convention_route_no_attribute() -> None:
     # classic MVC 5: attribute-FREE public actions default to GET at /{controller}/{action}
-    # (BREEZEAI-255 Phase 1 — the case a verb-attribute-only fixture never exercised)
+    # (the case a verb-attribute-only fixture never exercised)
     src = (b"using Microsoft.AspNetCore.Mvc;\nnamespace A {\n"
            b"public class HomeController : Controller {\n"
            b"  public ActionResult Index() { return null; }\n"          # no attr -> GET convention
@@ -293,7 +293,7 @@ def test_mvc_convention_route_no_attribute() -> None:
 
 
 def test_mvc_convention_action_name_override() -> None:
-    # [ActionName("List")] overrides the method name in the convention path (BREEZEAI-255 / #5)
+    # [ActionName("List")] overrides the method name in the convention path
     src = (b"using Microsoft.AspNetCore.Mvc;\nnamespace A {\n"
            b"public class HomeController : Controller {\n"
            b"  [ActionName(\"List\")] public ActionResult Index() { return null; }\n"

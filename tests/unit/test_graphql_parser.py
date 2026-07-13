@@ -93,6 +93,9 @@ def test_sdl_operations_detected_with_dtos(tmp_path) -> None:
     assert routes["procurementItems"].responseDTO == "ProcurementItemConnection"
     # trailing directive stripped from the return type.
     assert routes["_byIds"].responseDTO == "ProcurementItem"
+    # SDL re-parsed from a gql`` template string has no host-AST node → synthetic
+    # (not the GraphQL grammar's "field_definition", not a fabricated "graphql_field").
+    assert routes["procurementItem"].nodeType == "synthetic"
 
 
 def test_base_extraction_reused(tmp_path) -> None:

@@ -114,7 +114,7 @@ def detect_nbs_graphql_routes(
                     routes.append(Statement(
                         id=disambiguate(statement_id(path, sl, sc), seen_ids),
                         parentId=parent,
-                        nodeType="decorator",
+                        nodeType="synthetic",  # decorator-derived route → no backing AST node
                         semanticType="route",
                         text=node_text(dec, source).split("\n", 1)[0][:200],
                         method=kind.upper(),

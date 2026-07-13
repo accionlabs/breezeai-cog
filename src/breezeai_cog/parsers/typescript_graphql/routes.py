@@ -181,7 +181,9 @@ def _emit_fields(obj: Node, kind: str, sdl: bytes, row_base: int, path: str,
         routes.append(Statement(
             id=disambiguate(statement_id(path, line, name.start_point[1]), seen),
             parentId=file_id(path),
-            nodeType="graphql_field",
+            # SDL re-parsed from a gql`` template string — no node in the host (TS) AST, so
+            # synthetic (not the GraphQL grammar's own node type).
+            nodeType="synthetic",
             semanticType="route",
             text=first_line(node_text(field, sdl))[:120],
             method=kind.upper(),

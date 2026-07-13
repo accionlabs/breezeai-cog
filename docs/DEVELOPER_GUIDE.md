@@ -93,6 +93,21 @@ Schema is *generated on demand* from the models — `breezeai-cog schema` (or `e
 for cross-language consumers; it is not committed. `SCHEMA_VERSION` gates parser registration.
 Changing the contract means editing the models; consumers regenerate the schema when they need it.
 
+### Statement `nodeType` (route detectors)
+
+A statement's `nodeType` is the **raw tree-sitter `node.type`** of the node it was extracted from in
+the **file's primary (host-language) parse tree**. A detection with **no backing node in that host
+tree** — a route decomposed from an annotation / attribute / decorator / config / filename — must use
+the single sentinel **`nodeType="synthetic"`**. Never invent a label (e.g. `graphql_field`,
+`page_directive`).
+
+Watch the host-tree qualifier for **embedded DSLs**: SQL in a string, or GraphQL SDL inside a
+`` gql`…` `` template, is text — there is no host-AST node for the SQL column or the SDL field. Follow
+the established precedent (a SQL string `const q = "SELECT …"` → `lexical_declaration`, the *host* node
+that wraps it) — surface the wrapping host node, or `synthetic` when there's no distinct one per item;
+**never** the embedded grammar's own node type (e.g. `field_definition`). The page / mount / rpc /
+graphql distinction is carried by `routeKind` + `framework`, **not** by `nodeType`, so nothing is lost.
+
 ---
 
 ## Testing & quality

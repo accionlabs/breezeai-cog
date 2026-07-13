@@ -6,7 +6,7 @@ also carries ``[WebGet]``/``[WebInvoke]``). The C# base parser already captured 
 attributes onto ``Class.decorators`` / ``Function.decorators``, so this detector just reads
 the ``FileRecord`` — no AST re-walk, no new grammar.
 
-Emitted as ``route`` statements (spec §4.1 extension rule):
+Emitted as ``route`` statements:
 * ``semanticType=route``, ``framework=wcf``, ``handler`` = the operation method.
 * ``endpoint`` = ``ServiceName/OperationName`` (SOAP/RPC) or the ``UriTemplate`` (REST-over-WCF).
 * ``method`` = ``RPC`` for SOAP operations; the HTTP verb for ``[WebGet]``/``[WebInvoke]``.
