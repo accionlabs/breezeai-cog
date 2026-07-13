@@ -247,6 +247,20 @@ def test_mvc_convention_route() -> None:
     assert ("GET", "/Catalog/Index") in routes
 
 
+def test_allow_anonymous_overrides_authorize() -> None:
+    # [AllowAnonymous] on an action under a [Authorize] controller → route is anonymous
+    src = (b"using Microsoft.AspNetCore.Mvc;\nnamespace A {\n"
+           b"[ApiController] [Route(\"api/account\")] [Authorize]\n"
+           b"public class AccountController : ControllerBase {\n"
+           b"  [AllowAnonymous] [HttpPost(\"login\")] public object Login() { return null; }\n"
+           b"  [HttpGet(\"me\")] public object Me() { return null; }\n"
+           b"} }")
+    rec = _parse(AspNetCoreParser(), src, "Account.cs")
+    by_handler = {s.handler: s for s in rec.statements if s.semanticType == "route"}
+    assert by_handler["Login"].authRequired is None      # AllowAnonymous wins over [Authorize]
+    assert by_handler["Me"].authRequired is True         # inherits the controller [Authorize]
+
+
 def test_mvc_convention_route_no_attribute() -> None:
     # classic MVC 5: attribute-FREE public actions default to GET at /{controller}/{action}
     # (BREEZEAI-255 Phase 1 — the case a verb-attribute-only fixture never exercised)

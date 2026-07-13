@@ -272,7 +272,10 @@ def detect_controller_routes(record: FileRecord, index: Any = None) -> list[Stat
         prefix_unknown = not has_class_route and not resolved  # inherited base we can't see
         method_route = _route_template(fn.decorators)
         fn_guards = _guards(fn.decorators)
-        auth_required = ("Authorize" in cls_guards or "Authorize" in fn_guards) or None
+        # [AllowAnonymous] (on the action or controller/base) always wins over [Authorize]
+        anonymous = "AllowAnonymous" in cls_guards or "AllowAnonymous" in fn_guards
+        auth_required = (not anonymous
+                         and ("Authorize" in cls_guards or "Authorize" in fn_guards)) or None
         all_guards = (cls_guards + fn_guards) or None
         verb_attrs = [d for d in fn.decorators if simple_attr_name(d.name) in _HTTP_ATTRS]
         for dec in verb_attrs:
