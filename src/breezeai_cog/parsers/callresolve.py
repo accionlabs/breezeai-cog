@@ -1,4 +1,4 @@
-"""Shared call-target resolver (``calls[].path``, spec C4.2 / C6 — drives the CALLS edge).
+"""Shared call-target resolver (``calls[].path`` — drives the CALLS edge).
 
 Precision-first: resolve only when unambiguous, else return ``None`` (spec: null for
 external/unresolved; the backend silently skips those edges). Two tiers here (Phase 1):

@@ -1,4 +1,4 @@
-"""Git source acquisition for ``/api/analyze-diff`` (server-only, §1). Port of the
+"""Git source acquisition for ``/api/analyze-diff`` (server-only). Port of the
 ``server.js`` provider/clone/diff helpers: first-time analysis does a full ``git clone``
 (avoids per-file API rate limits); incremental analysis pulls only the changed files via
 the provider REST API (GitHub or Bitbucket). Returns a populated temp dir + the changed-

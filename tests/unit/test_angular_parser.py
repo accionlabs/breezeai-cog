@@ -110,3 +110,78 @@ def test_lazy_forms_across_angular_versions(tmp_path) -> None:
     assert by_ep["/catalog"].routeKind == "mount" and by_ep["/catalog"].handler == "CATALOG_ROUTES"
     assert by_ep["/user/:id"].routeKind == "page" and by_ep["/user/:id"].handler == "UserComponent"
     assert by_ep["/legacy"].routeKind == "mount" and by_ep["/legacy"].handler == "LegacyModule"
+
+
+# ── Non-literal path resolution (Task #9) ──────────────────────────────────────
+from breezeai_cog.parsers.typescript.imports import build_ts_index  # noqa: E402
+
+# defines the constants the routing module references (cross-file)
+_CONSTS_SRC = '''
+export class RouteNames { public static readonly ROOT = ''; static readonly DIAGNOSTICS = 'diagnostics'; }
+export enum BrandTab { Overview = 'overview', Products = 'products' }
+'''
+
+_ROUTING_SRC = b'''import { RouterModule, Routes } from '@angular/router';
+import { RouteNames } from './route-names';
+import { BrandTab } from './brand-tab';
+
+const LOCAL = 'admin';
+
+const routes: Routes = [
+  { path: 'login', component: LoginComponent },
+  { path: LOCAL, component: AdminComponent },
+  { path: RouteNames.DIAGNOSTICS, component: DiagComponent },
+  { path: RouteNames.ROOT, component: HomeComponent },
+  { path: BrandTab.Products, component: ProductsComponent },
+  { path: `dyn/${x}`, component: DynComponent },
+  { path: buildPath(), component: CalcComponent },
+];
+'''
+
+
+def _parse_with_index(files: dict, target: str, tmp_path) -> FileRecord:
+    for name, content in files.items():
+        (tmp_path / name).write_text(content if isinstance(content, str) else content.decode())
+    index = build_ts_index(tmp_path, [tmp_path / n for n in files])
+    src = files[target]
+    src = src if isinstance(src, bytes) else src.encode()
+    ctx = ParseContext(path=target, abs_path=str(tmp_path / target), source=src,
+                       repo_root=str(tmp_path), capture_statements=True, resolution_index=index)
+    return AngularParser().parse_file(ctx)
+
+
+def test_const_and_enum_path_resolution(tmp_path) -> None:
+    rec = _parse_with_index(
+        {"route-names.ts": _CONSTS_SRC, "brand-tab.ts": _CONSTS_SRC, "app-routing.module.ts": _ROUTING_SRC},
+        "app-routing.module.ts", tmp_path)
+    eps = {(s.endpoint, s.handler) for s in rec.statements if s.semanticType == "route"}
+    assert ("/login", "LoginComponent") in eps          # plain literal
+    assert ("/admin", "AdminComponent") in eps          # in-file const LOCAL
+    assert ("/diagnostics", "DiagComponent") in eps     # cross-file static readonly
+    assert ("/", "HomeComponent") in eps                # RouteNames.ROOT = '' → root
+    assert ("/products", "ProductsComponent") in eps    # cross-file string enum
+    # the garbled symbol text must NOT appear as an endpoint
+    assert not any(e and "RouteNames" in e for e, _ in eps)
+
+
+def test_unresolved_paths_are_honest_null(tmp_path) -> None:
+    rec = _parse_with_index(
+        {"route-names.ts": _CONSTS_SRC, "brand-tab.ts": _CONSTS_SRC, "app-routing.module.ts": _ROUTING_SRC},
+        "app-routing.module.ts", tmp_path)
+    by_handler = {s.handler: s for s in rec.statements if s.semanticType == "route"}
+    # template literal and function-call paths can't be resolved → endpoint None (not garbled)
+    assert by_handler["DynComponent"].endpoint is None
+    assert by_handler["CalcComponent"].endpoint is None
+
+
+def test_ambiguous_const_not_resolved(tmp_path) -> None:
+    # same symbol declared with DIFFERENT literals in two files → ambiguous → honest-null
+    a = "export const DUP = 'one';\n"
+    b = "export const DUP = 'two';\n"
+    routing = b'''import { RouterModule, Routes } from '@angular/router';
+const routes: Routes = [ { path: DUP, component: C } ];
+'''
+    rec = _parse_with_index({"a.ts": a, "b.ts": b, "app-routing.module.ts": routing},
+                            "app-routing.module.ts", tmp_path)
+    ep = next(s.endpoint for s in rec.statements if s.semanticType == "route")
+    assert ep is None

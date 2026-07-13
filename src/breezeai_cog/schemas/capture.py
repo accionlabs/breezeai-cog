@@ -1,6 +1,6 @@
-"""Pydantic models for the code-capture NDJSON contract (Part C).
+"""Pydantic models for the code-capture NDJSON contract.
 
-These Pydantic models are the **SOURCE OF TRUTH** for the capture contract (Part C).
+These Pydantic models are the **SOURCE OF TRUTH** for the capture contract.
 A language-agnostic JSON Schema is *generated* from them
 (``breezeai_cog.schemas.export_json_schema``) for cross-language consumers such as
 the Node backend — a build artifact, never hand-edited. ``SCHEMA_VERSION`` tracks

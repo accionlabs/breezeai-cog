@@ -296,4 +296,4 @@ run:
 
 That's the whole pipeline: **scan → parse → extract → emit**. For the internals — the parser
 selection model, the schema, how to add a new language or framework, and the project layout — see
-the **[Developer Guide](DEVELOPER_GUIDE.md)** and **[Adding a Parser](ADDING_A_PARSER.md)**.
+the **[Developer Guide](DEVELOPER_GUIDE.md)** and the **[Extending Capture skill](../skills/extend-capture/SKILL.md)** (with the **[Parser Reference](parser-reference.md)**).

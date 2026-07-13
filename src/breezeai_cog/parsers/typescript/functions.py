@@ -138,7 +138,7 @@ def extract_params(params_node: Node | None, source: bytes) -> list[Parameter]:
             decs = extract_decorators([c for c in p.named_children if c.type == "decorator"], source)
             out.append(Parameter(
                 name=name, type=_type_text(p.child_by_field_name("type"), source) or "",
-                decorators=decs,  # e.g. Nest @Body/@Param/@Query, Angular @Inject (spec C4.1)
+                decorators=decs,  # e.g. Nest @Body/@Param/@Query, Angular @Inject
             ))
         elif p.type == "rest_pattern":
             ident = next((c for c in p.named_children if c.type == "identifier"), None)

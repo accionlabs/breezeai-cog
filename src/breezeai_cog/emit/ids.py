@@ -1,4 +1,4 @@
-"""The capture ``id``/``parentId`` convention (ARCHITECTURE.md §3) — defined once,
+"""The capture ``id``/``parentId`` convention — defined once,
 used by parsers when building records. The position suffix keeps anonymous
 functions, overloads, and same-line statements from colliding.
 

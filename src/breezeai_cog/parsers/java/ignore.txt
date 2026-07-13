@@ -1,4 +1,4 @@
-# Java per-language ignore defaults (layer 2, §9).
+# Java per-language ignore defaults (layer 2).
 *.class
 target/
 build/

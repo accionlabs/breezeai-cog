@@ -2,9 +2,6 @@
 
 How `breezeai-cog` is built, how to work on it, and how to extend it.
 
-For the full design rationale, see [`ARCHITECTURE.md`](../../../breeze-cog/docs/ARCHITECTURE.md)
-(the `§N` references in docstrings point to its sections).
-
 ---
 
 ## Setup
@@ -73,9 +70,11 @@ sequentially in-process for the server's small payloads.
 
 ## Adding a parser
 
-A new **language** or **framework** parser is a self-contained subpackage. The full recipe —
-structure, the tools to reuse, the `claims`/`priority` selection model, and testing standards — is
-in **[Adding a Parser](ADDING_A_PARSER.md)**.
+A new **language** or **framework** parser is a self-contained subpackage. Start with the
+**[Extending Capture skill](../skills/extend-capture/SKILL.md)** (which kind to build + the
+reliability discipline); the full mechanical recipe — structure, the tools to reuse, the
+`claims`/`priority` selection model, and testing standards — is in the
+**[Parser Reference](parser-reference.md)**.
 
 In short:
 

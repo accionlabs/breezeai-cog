@@ -1,9 +1,9 @@
-"""Repository scanner (ARCHITECTURE.md §5).
+"""Repository scanner.
 
 Walks a local directory and yields ``(path, language)`` for each file that survives
 the ordered filter chain — **paths only, no content reads**:
 
-    extension allow-list (classify)  ->  ignore/include (§9)  ->  max_file_size  ->  symlink guard
+    extension allow-list (classify)  ->  ignore/include  ->  max_file_size  ->  symlink guard
 
 Directories are pruned when ignored (so ``node_modules/`` etc. are never descended).
 Symlinked directories are never followed and visited real paths are tracked, so the

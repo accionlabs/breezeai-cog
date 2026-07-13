@@ -1,4 +1,4 @@
-"""FastAPI app factory (§10). Maps both manual ``ApiError`` and pydantic
+"""FastAPI app factory. Maps both manual ``ApiError`` and pydantic
 ``RequestValidationError`` to the existing ``{"error": "<message>"}`` shape — and,
 critically, validation failures return **400** (not FastAPI's default 422)."""
 

@@ -20,8 +20,10 @@ from ..base import BaseParser, ParseContext
 from ..treesitter import node_text, parse_source
 from .classes import build_class
 from ..callresolve import make_resolver
+from .aws_events import detect_aws_events
+from ..typescript_express.routes import detect_express
 from .functions import build_function, defined_names, extract_decorators, type_map
-from .imports import TsAliasIndex, build_alias_index, extract_imports
+from .imports import TsAliasIndex, build_ts_index, extract_imports
 from .mappings import FRAMEWORKS, STATEMENT_TYPES
 from .statements import extract_statements
 
@@ -85,8 +87,9 @@ class TypeScriptParser(BaseParser):
         return (*super().fixture_markers(), *_TS_FIXTURE_MARKERS)
 
     def build_index(self, repo_root: Path, files: Sequence[Path]) -> TsAliasIndex | None:
-        """Repo-level pre-pass: load tsconfig path aliases for import resolution."""
-        return build_alias_index(Path(repo_root))
+        """Repo-level pre-pass: tsconfig path aliases + a string-constant value map (for
+        resolving non-literal route paths like Angular's ``path: RouteNames.X``)."""
+        return build_ts_index(Path(repo_root), files)
 
     def parse_file(self, ctx: ParseContext) -> FileRecord:
         grammar = "tsx" if ctx.path.endswith(_TSX_EXT) else "typescript"
@@ -128,7 +131,7 @@ class TypeScriptParser(BaseParser):
             extract_statements(root, source, path, parent_id=fid, capture=capture, limit=limit, seen_ids=seen_ids)
         )
 
-        return FileRecord(
+        record = FileRecord(
             id=fid,
             path=path,
             type="code",
@@ -141,6 +144,18 @@ class TypeScriptParser(BaseParser):
             classes=classes,
             statements=statements,
         )
+        # Additive route/event detection — gated by --capture-statements and layered on top
+        # of base + framework extraction (runs for every TS parser that inherits extract, so
+        # it also fires in files owned by another framework). Each detector self-guards on a
+        # cheap marker. A more-specific framework label set by a subclass afterwards wins.
+        if capture:
+            if not self.is_fixture_file(path) and detect_express(root, source, path, record):
+                if record.framework is None:
+                    record.framework = "express"
+            aws_fw = detect_aws_events(root, source, path, record)
+            if aws_fw and record.framework is None:
+                record.framework = aws_fw
+        return record
 
     def _handle(self, decl, decorators, source, path, fid, seen_ids, capture, limit,
                 functions, classes, statements, resolve) -> None:

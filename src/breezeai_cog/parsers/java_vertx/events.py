@@ -1,4 +1,4 @@
-"""Vert.x event/route detection (spec A4 'Vert.x family'). Vert.x is call-based, so this
+"""Vert.x event/route detection. Vert.x is call-based, so this
 walks the Java AST for method invocations and maps them to event/messaging semantics:
 
   eventBus.send/publish/consumer → eventbus_send / eventbus_publish / eventbus_consumer
@@ -7,7 +7,7 @@ walks the Java AST for method invocations and maps them to event/messaging seman
   ServiceBinder…setAddress(...)  → service_proxy    (+ @ProxyGen interfaces)
   router.get/post/…("/path")     → route
 
-Per the contract (Part C / B1.4), a detection sets ``semanticType`` on the **same span**:
+Per the capture contract, a detection sets ``semanticType`` on the **same span**:
 so where the base parser already captured the enclosing statement (top level of a method
 body) we enrich it in place; for calls inside lambda handlers — which the base skips as a
 nested scope — we add a statement parented to the enclosing function. Mutates ``record``."""

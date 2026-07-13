@@ -11,7 +11,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
-# Capture contract version (semver). Bump on schema change (see ARCHITECTURE.md §3).
+# Capture contract version (semver). Bump on schema change.
 SCHEMA_VERSION = "2.0"
 
 

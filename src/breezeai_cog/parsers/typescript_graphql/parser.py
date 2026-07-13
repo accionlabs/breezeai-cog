@@ -3,7 +3,7 @@ TypeScriptParser (single parser per file) when ``claims`` finds an Apollo /
 ``graphql-tools`` resolver map or GraphQL SDL; reuses ``TypeScriptParser.extract`` on
 the shared tree, then detects GraphQL routes. It coexists with the other TS framework
 parsers (Express, NestJS, Angular, LoopBack, React) because selection is per-file by
-``claims`` (ARCHITECTURE.md §4). GraphQL operations are object-literal / SDL config, so
+``claims``. GraphQL operations are object-literal / SDL config, so
 route detection adds statements parented to the file (mirrors the React detector)."""
 
 from __future__ import annotations
@@ -39,7 +39,7 @@ class GraphQLParser(TypeScriptParser):
         grammar = "tsx" if ctx.path.endswith((".tsx", ".jsx")) else "typescript"
         root = parse_source(grammar, ctx.source, ctx.parse_timeout_micros).root_node
         record = self.extract(root, ctx)  # inherited base extraction (one parse)
-        if ctx.capture_statements and not self.is_fixture_file(ctx.path):  # gated (spec A4); skip fixtures (R4)
+        if ctx.capture_statements and not self.is_fixture_file(ctx.path):  # gated by --capture-statements; skip fixtures (R4)
             routes = detect_graphql(
                 root, ctx.source, ctx.path,
                 seen_ids={s.id for s in record.statements},

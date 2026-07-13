@@ -111,16 +111,15 @@ def test_output_validates(tmp_path) -> None:
 def test_claims_does_not_steal_plain_or_express_files() -> None:
     registry.clear()
     from breezeai_cog.parsers.typescript.parser import TypeScriptParser
-    from breezeai_cog.parsers.typescript_express.parser import ExpressParser
 
     registry.register(TypeScriptParser())
-    registry.register(ExpressParser())
     registry.register(GraphQLParser())
     assert registry.select("r.resolvers.ts", RESOLVER_SRC).name == "typescript-graphql"
     assert registry.select("schema.ts", SDL_SRC).name == "typescript-graphql"
-    # an Express router file is still claimed by Express, not GraphQL.
+    # an Express router file (no GraphQL) falls to the base parser — GraphQL doesn't claim
+    # it, and Express is now an additive detector, not a selecting parser.
     express_src = b"import express from 'express';\nconst r = express.Router();\nr.get('/x', h);\n"
-    assert registry.select("routes.ts", express_src).name == "typescript-express"
+    assert registry.select("routes.ts", express_src).name == "typescript"
     # plain TS falls back to the base parser.
     assert registry.select("x.ts", b"const x = 1;").name == "typescript"
     registry.clear()

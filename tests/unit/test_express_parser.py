@@ -10,7 +10,7 @@ from jsonschema import Draft202012Validator
 from breezeai_cog.core import registry
 from breezeai_cog.emit import to_line
 from breezeai_cog.parsers.base import ParseContext
-from breezeai_cog.parsers.typescript_express.parser import ExpressParser
+from breezeai_cog.parsers.typescript.parser import TypeScriptParser
 from breezeai_cog.schemas import FileRecord
 
 SRC = b'''const express = require('express');
@@ -43,7 +43,7 @@ def _parse(tmp_path, *, capture=True) -> FileRecord:
     p.write_text(SRC.decode())
     ctx = ParseContext(path="server.js", abs_path=p, source=SRC, repo_root=tmp_path,
                        capture_statements=capture)
-    return ExpressParser().parse_file(ctx)
+    return TypeScriptParser().parse_file(ctx)
 
 
 def test_routes_require_capture_statements(tmp_path) -> None:
@@ -105,6 +105,32 @@ def test_output_validates(tmp_path) -> None:
     assert not errors, errors
 
 
+# Template-literal route paths (the real cause of missed SSR/sitemap routes). Dynamic
+# segments render to {param} placeholders; a leading interpolated base is stripped.
+TEMPLATE_SRC = b'''const express = require('express');
+const app = express();
+const prefix = 'https://cdn.example.com';
+
+app.get(`/sitemaps/${key}.txt`, sitemapHandler);
+app.get(`/plain`, plainHandler);
+app.get(`${prefix}/assets/${name}`, assetHandler);
+app.use(`/api/${version}`, router);
+'''
+
+
+def test_template_literal_paths(tmp_path) -> None:
+    p = tmp_path / "ssr.js"
+    p.write_text(TEMPLATE_SRC.decode())
+    ctx = ParseContext(path="ssr.js", abs_path=p, source=TEMPLATE_SRC, repo_root=tmp_path,
+                       capture_statements=True)
+    rec = TypeScriptParser().parse_file(ctx)
+    routes = {(s.method, s.endpoint) for s in rec.statements if s.semanticType == "route"}
+    assert ("GET", "/sitemaps/{key}.txt") in routes   # interpolation → {key} placeholder
+    assert ("GET", "/plain") in routes                # a template with no substitution
+    assert ("GET", "/assets/{name}") in routes        # leading ${prefix} base stripped
+    assert (None, "/api/{version}") in routes         # mount path via template literal
+
+
 # R3: the Apollo GraphQL transport mount — app.use(path, expressMiddleware(server)).
 # The path is a variable (resolved to its default) and the handler is the Apollo adapter.
 APOLLO_SRC = b'''import express from 'express';
@@ -125,7 +151,7 @@ def test_apollo_graphql_mount_detected(tmp_path) -> None:
     p.write_bytes(APOLLO_SRC)
     ctx = ParseContext(path="server.ts", abs_path=p, source=APOLLO_SRC,
                        repo_root=tmp_path, capture_statements=True)
-    rec = ExpressParser().parse_file(ctx)
+    rec = TypeScriptParser().parse_file(ctx)
     routes = {(s.method, s.endpoint): s for s in rec.statements if s.semanticType == "route"}
     # /health stays a plain express route; /api stays an express mount.
     assert ("GET", "/health") in routes and routes[("GET", "/health")].framework == "express"
@@ -144,19 +170,55 @@ app.use(cfg.gqlPath, expressMiddleware(server));
     p = tmp_path / "s.ts"
     p.write_bytes(src)
     ctx = ParseContext(path="s.ts", abs_path=p, source=src, repo_root=tmp_path, capture_statements=True)
-    rec = ExpressParser().parse_file(ctx)
+    rec = TypeScriptParser().parse_file(ctx)
     eps = {(s.method, s.endpoint) for s in rec.statements if s.semanticType == "route"}
     assert ("POST", "/graphql") in eps
 
 
-def test_claims_selects_express() -> None:
+def test_express_is_additive_not_a_selecting_parser(tmp_path) -> None:
+    # Express is no longer its own parser: a plain express file is owned by the base TS
+    # parser, but express detection runs additively in extract → routes + framework label.
     registry.clear()
-    from breezeai_cog.parsers.typescript.parser import TypeScriptParser
+    registry.discover_builtin()
+    assert registry.select("x.ts", b"import express from 'express';").name == "typescript"
+    assert "typescript-express" not in {p.name for p in registry.registered()}
+    registry.clear()
 
-    registry.register(TypeScriptParser())
-    registry.register(ExpressParser())
-    assert registry.select("x.js", b"const e = require('express');").name == "typescript-express"
-    assert registry.select("x.ts", b"import express from 'express';").name == "typescript-express"
-    assert registry.select("x.ts", b"import s from 'express-session';").name == "typescript"  # not express
-    assert registry.select("x.ts", b"const x = 1;").name == "typescript"  # plain TS -> base
+    src = b"import express from 'express';\nconst app = express();\napp.get('/x', h);\n"
+    p = tmp_path / "srv.ts"
+    p.write_bytes(src)
+    rec = TypeScriptParser().parse_file(
+        ParseContext(path="srv.ts", abs_path=p, source=src, repo_root=tmp_path, capture_statements=True)
+    )
+    routes = [s for s in rec.statements if s.semanticType == "route"]
+    assert ("GET", "/x") in {(s.method, s.endpoint) for s in routes}
+    assert rec.framework == "express"
+
+
+def test_express_routes_captured_in_angular_owned_file(tmp_path) -> None:
+    # The #12 fix: a file legitimately BOTH Angular (imports @angular/ssr) and Express is
+    # owned by the Angular parser, yet its express routes are still captured additively.
+    from breezeai_cog.parsers.typescript_angular.parser import AngularParser
+
+    src = b'''import '@angular/ssr/node';
+import express from 'express';
+const app = express();
+app.get(`/sitemaps/${key}.txt`, sitemapHandler);
+app.get('*.*', staticHandler);
+'''
+    p = tmp_path / "express-setup.service.ts"
+    p.write_bytes(src)
+    ctx = ParseContext(path="express-setup.service.ts", abs_path=p, source=src,
+                       repo_root=tmp_path, capture_statements=True)
+    # Angular wins selection (both claim; tie → angular), and Angular does the extraction —
+    # which now runs express detection additively.
     registry.clear()
+    registry.discover_builtin()
+    assert registry.select("express-setup.service.ts", src).name == "typescript-angular"
+    registry.clear()
+
+    rec = AngularParser().parse_file(ctx)
+    routes = {(s.method, s.endpoint) for s in rec.statements if s.semanticType == "route"}
+    assert ("GET", "/sitemaps/{key}.txt") in routes  # template route, no longer lost
+    assert ("GET", "*.*") in routes                  # wildcard route
+    assert all(s.framework == "express" for s in rec.statements if s.semanticType == "route")

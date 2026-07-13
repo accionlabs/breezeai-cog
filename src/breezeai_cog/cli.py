@@ -1,7 +1,7 @@
-"""Command-line interface (Typer). A thin client over the services layer (§7).
+"""Command-line interface (Typer). A thin client over the services layer.
 
 Commands: ``repo-to-json-tree`` (analyze a local repo), ``capabilities``, ``version``,
-``serve`` (the FastAPI service, §10).
+``serve`` (the FastAPI service).
 """
 
 from __future__ import annotations
@@ -19,7 +19,7 @@ from .services import AnalysisService
 
 app = typer.Typer(
     name="breezeai-cog",
-    help="Parse source repositories into the capture NDJSON contract (Part C).",
+    help="Parse source repositories into the capture NDJSON contract.",
     no_args_is_help=True,
     add_completion=False,
 )

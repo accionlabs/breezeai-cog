@@ -1,4 +1,4 @@
-"""Error taxonomy (see ARCHITECTURE.md §11).
+"""Error taxonomy.
 
 Two broad classes of failure:
 * **fatal** (``ConfigError``, ``RegistryError``) — abort the run, fail fast.
@@ -17,7 +17,7 @@ class BreezeCogError(Exception):
 
 
 class ConfigError(BreezeCogError):
-    """Invalid configuration — fatal, fail fast (§8)."""
+    """Invalid configuration — fatal, fail fast."""
 
 
 class RegistryError(BreezeCogError):
@@ -25,7 +25,7 @@ class RegistryError(BreezeCogError):
 
 
 class ParseError(BreezeCogError):
-    """A single file failed to parse/extract — caught per file, file dropped (§5)."""
+    """A single file failed to parse/extract — caught per file, file dropped."""
 
     def __init__(self, message: str, *, path: str | None = None, parser: str | None = None) -> None:
         super().__init__(message)
@@ -38,4 +38,4 @@ class ParserTimeout(ParseError):
 
 
 class UploadError(BreezeCogError):
-    """Outbound upload / network failure (bounded retry; §10/§11)."""
+    """Outbound upload / network failure (bounded retry)."""

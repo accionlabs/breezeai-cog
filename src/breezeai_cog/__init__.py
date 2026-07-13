@@ -1,7 +1,6 @@
 """breezeai-cog — Python code-ontology generator (capture side).
 
-Parses source repositories into the capture NDJSON contract (Part C). See the
-architecture doc (``breeze-cog/docs/ARCHITECTURE.md``) for the full design.
+Parses source repositories into the capture NDJSON contract.
 
 Public, semver-guaranteed surface (everything else is internal):
 ``analyze_repo``, ``iter_file_records``, ``capabilities``, and the schema models.
@@ -51,7 +50,7 @@ def analyze_repo(
     out: str | Path | None = None,
     jobs: int | None = None,
 ) -> AnalysisResult:
-    """Analyze a local repository to a gzipped NDJSON file (Part C). High-level API."""
+    """Analyze a local repository to a gzipped NDJSON file. High-level API."""
     settings = Settings(
         repo=Path(path),
         languages=languages,

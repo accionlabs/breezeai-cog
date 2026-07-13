@@ -4,7 +4,12 @@ Covers both **NestJS** (``@nestjs/common``) and **routing-controllers** — the 
 grammar is identical, so detection keys on decorator *names*, not the import source; the
 caller passes the resolved ``framework`` label. Emits ``semanticType="route"`` statements
 parented to their handler method (via the shared id convention, so parentId matches the
-base TypeScript parser's function id)."""
+base TypeScript parser's function id).
+
+Also detects **@nestjs/graphql code-first operations** — ``@Query``/``@Mutation``/
+``@Subscription`` methods on an ``@Resolver`` class — emitting them as ``framework="graphql"``
+routes (``routeKind`` = the operation kind), mirroring the TypeScript resolver-map/SDL
+detector so the backend joins them uniformly."""
 
 from __future__ import annotations
 
@@ -13,7 +18,7 @@ import re
 from tree_sitter import Node
 
 from ...emit import disambiguate, function_id, statement_id
-from ...schemas import Statement
+from ...schemas import Decorator, Statement
 from ...parsers.typescript.functions import _type_text, decorator, extract_params
 from ..treesitter import node_text
 
@@ -21,8 +26,35 @@ _METHOD_DECORATORS = {
     "Get": "GET", "Post": "POST", "Put": "PUT", "Patch": "PATCH",
     "Delete": "DELETE", "Options": "OPTIONS", "Head": "HEAD", "All": "ALL",
 }
-# @nestjs/microservices message consumers → eventbus_consumer (spec B1.4 semanticType).
+# @nestjs/microservices message consumers → eventbus_consumer semanticType.
 _MESSAGING_DECORATORS = {"EventPattern": "EVENT", "MessagePattern": "MESSAGE"}
+# @nestjs/graphql code-first operations. Gated on the class being an @Resolver — @Query is
+# also a @nestjs/common *param* decorator, but that lives on a parameter, not in the method's
+# decorator list, so a method-level @Query on a resolver is unambiguously the GraphQL one.
+# @ResolveField/@ResolveProperty are field resolvers, not client-callable operations, so
+# they are NOT emitted as routes (matching the TypeScript resolver-map/SDL detector).
+_RESOLVER_DECORATORS = {"Resolver"}
+_GRAPHQL_OPS = {"Query": "query", "Mutation": "mutation", "Subscription": "subscription"}
+_NAME_OPT_RE = re.compile(r"""\bname\s*:\s*['"`]([^'"`]+)['"`]""")  # @Query(..., { name: 'x' })
+_LEADING_ID_RE = re.compile(r"[A-Za-z_$][\w$]*")
+
+
+def _graphql_op_name(d: Decorator, mname: str) -> str:
+    """Operation name for a code-first GraphQL op. An explicit ``{ name: 'x' }`` option
+    wins; else a string first arg (a plain name or an SDL fragment like
+    ``'products(...): [Product]'``) yields its leading identifier; else the method name —
+    the @nestjs/graphql default."""
+    for a in d.args:
+        m = _NAME_OPT_RE.search(a)
+        if m:
+            return m.group(1)
+    if d.args:
+        first = d.args[0].strip()
+        if first[:1] in "'\"`":
+            m = _LEADING_ID_RE.match(first.strip("'\"`").strip())
+            if m:
+                return m.group(0)
+    return mname
 _RESPONSE_DECORATORS = {"ApiResponse", "ApiOkResponse", "ApiCreatedResponse"}
 _TYPE_PROP_RE = re.compile(r"\btype\s*:\s*\[?\s*([A-Za-z_$][\w.$]*)")
 # return-type → responseDTO: skip generic wrappers and primitives, take the first
@@ -67,7 +99,7 @@ def _pattern(d) -> str | None:
 
 def _guards(decs: list[Node], source: bytes) -> list[str]:
     """Guard/auth names: ``@UseGuards(...)`` args (NestJS) and ``@Authorized`` (routing-
-    controllers). Presence of any drives ``authRequired`` (spec C5)."""
+    controllers). Presence of any drives ``authRequired``."""
     out: list[str] = []
     for dec in decs:
         d = decorator(dec, source)
@@ -154,6 +186,7 @@ def detect_nest_routes(
     for cls, decs in _class_with_decorators(root):
         base = _controller_base(decs, source)  # None when the class is not a @Controller
         is_controller = base is not None
+        is_resolver = any(decorator(dec, source).name in _RESOLVER_DECORATORS for dec in decs)
         class_name = node_text(cls.child_by_field_name("name"), source)
         body = cls.child_by_field_name("body")
         if body is None:
@@ -171,12 +204,13 @@ def detect_nest_routes(
                 mname = node_text(member.child_by_field_name("name"), source)
                 mline = member.start_point[0] + 1
                 parent = function_id(path, mname, mline, class_name=class_name)
-                guards = ctrl_guards + _guards(pending, source)  # merge controller + method (spec C5)
+                guards = ctrl_guards + _guards(pending, source)  # merge controller + method
                 for dec in pending:
                     d = decorator(dec, source)
                     verb = _METHOD_DECORATORS.get(d.name) if is_controller else None
                     msg = _MESSAGING_DECORATORS.get(d.name)
-                    if verb is None and msg is None:
+                    gql = _GRAPHQL_OPS.get(d.name) if is_resolver else None
+                    if verb is None and msg is None and gql is None:
                         continue
                     sl, sc = dec.start_point[0] + 1, dec.start_point[1]
                     common = dict(
@@ -205,13 +239,22 @@ def detect_nest_routes(
                             responseDTO=_response_dto(pending, source) or _return_dto(member, source),
                             **common,
                         ))
-                    else:  # @EventPattern / @MessagePattern microservice consumer
+                    elif msg is not None:  # @EventPattern / @MessagePattern microservice consumer
                         routes.append(Statement(
                             semanticType="eventbus_consumer",
                             method=msg,
                             endpoint=_pattern(d),
                             routeKind="message",
                             **common,
+                        ))
+                    elif gql is not None:  # @Query/@Mutation/@Subscription code-first GraphQL op
+                        routes.append(Statement(
+                            **{**common, "framework": "graphql"},
+                            semanticType="route",
+                            method=gql.upper(),
+                            endpoint=_graphql_op_name(d, mname),
+                            routeKind=gql,
+                            responseDTO=_return_dto(member, source),
                         ))
             pending = []
     return routes

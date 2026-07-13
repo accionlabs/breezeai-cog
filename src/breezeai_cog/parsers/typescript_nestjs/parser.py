@@ -4,7 +4,7 @@ NestJS *or* routing-controllers signature; reuses ``TypeScriptParser.extract`` o
 shared tree, then adds routes. Both frameworks share the same ``@Controller`` + ``@Get``/
 ``@Post`` decorator grammar, so the same detector serves both — only the ``framework``
 label differs. It coexists with other TS framework parsers (Angular) because selection is
-per-file by ``claims`` (ARCHITECTURE.md §4)."""
+per-file by ``claims``."""
 
 from __future__ import annotations
 
@@ -52,7 +52,7 @@ class NestJSParser(TypeScriptParser):
         grammar = "tsx" if ctx.path.endswith((".tsx", ".jsx")) else "typescript"
         root = parse_source(grammar, ctx.source, ctx.parse_timeout_micros).root_node
         record = self.extract(root, ctx)  # inherited base extraction (one parse)
-        if ctx.capture_statements and not self.is_fixture_file(ctx.path):  # gated (spec A4); skip fixtures (R4)
+        if ctx.capture_statements and not self.is_fixture_file(ctx.path):  # gated by --capture-statements; skip fixtures (R4)
             framework = self._framework(ctx.source)
             routes = detect_nest_routes(
                 root, ctx.source, ctx.path,

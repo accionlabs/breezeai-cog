@@ -1,4 +1,4 @@
-# C# / .NET per-language ignore defaults (layer 2, §9).
+# C# / .NET per-language ignore defaults (layer 2).
 bin/
 obj/
 packages/

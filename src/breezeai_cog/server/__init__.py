@@ -1,4 +1,4 @@
-"""FastAPI service (optional extra ``[server]``). Mirrors the JS API (§10)."""
+"""FastAPI service (optional extra ``[server]``). Mirrors the JS API."""
 
 from __future__ import annotations
 

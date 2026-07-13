@@ -1,4 +1,4 @@
-"""Raw-query detection → ``query_statement`` (spec A4 / B4 Data-access view).
+"""Raw-query detection → ``query_statement`` (Data-access view).
 
 Fires when a statement runs a **raw** SQL/JPQL query — either a string literal with real
 SQL *structure* (not just a leading keyword, so UI strings like "Create account" don't

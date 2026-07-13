@@ -1,11 +1,11 @@
-"""Express route detection (spec A4). Express is call-based — routes are registered
+"""Express route detection. Express is call-based — routes are registered
 by calling an HTTP-verb method on an ``app`` / ``Router`` object:
 
   app.get('/users/:id', handler)   router.post('/users', handler)   → route
   app.use('/api', router)                                            → route (mount)
   app.route('/book')  (chained .get()/.post())                       → route (group)
 
-Per the contract (Part C / B1.4), a detection sets ``semanticType`` on the **same span**:
+Per the capture contract, a detection sets ``semanticType`` on the **same span**:
 where the base parser already captured the enclosing statement (a top-level
 ``expression_statement``) we enrich it in place; for calls inside handler/callback
 scopes — which the base skips as a nested scope — we add a statement parented to the
@@ -18,6 +18,7 @@ from tree_sitter import Node
 
 from ...emit import disambiguate, file_id, statement_id
 from ...schemas import FileRecord, Statement
+from ..statements_common import strip_leading_base, url_placeholder
 from ..treesitter import first_line, node_text
 
 # HTTP-verb methods that register a route handler on an app/router.
@@ -54,6 +55,29 @@ def _string_value(node: Node, source: bytes) -> str | None:
         return None
     frag = next((c for c in node.named_children if c.type == "string_fragment"), None)
     return node_text(frag, source) if frag is not None else ""
+
+
+def _template_value(node: Node, source: bytes) -> str:
+    """Render a ``template_string`` path to a route path, turning each ``${expr}`` into a
+    ``{name}`` placeholder (``/sitemaps/${key}.txt`` → ``/sitemaps/{key}.txt``). A leading
+    interpolated base/host segment is dropped so the path matches inbound routes."""
+    parts: list[str] = []
+    for c in node.named_children:
+        if c.type == "string_fragment":
+            parts.append(node_text(c, source))
+        elif c.type == "template_substitution":
+            expr = c.named_children[0] if c.named_children else None
+            parts.append(url_placeholder(node_text(expr, source)) if expr is not None else "{param}")
+    return strip_leading_base("".join(parts))
+
+
+def _path_value(node: Node, source: bytes) -> str | None:
+    """Route-path argument as a string: a plain string literal verbatim, or a template
+    literal rendered with ``{param}`` placeholders. Unlike ``_string_value`` (used for
+    resolving identifier constants), this accepts the dynamic template-literal form."""
+    if node.type == "template_string":
+        return _template_value(node, source)
+    return _string_value(node, source)
 
 
 def _handler(arg_nodes: list[Node], source: bytes) -> tuple[str | None, int | None]:
@@ -126,7 +150,7 @@ def _classify(
 
     args = call.child_by_field_name("arguments")
     arg_nodes = list(args.named_children) if args is not None else []
-    path = _string_value(arg_nodes[0], source) if arg_nodes else None
+    path = _path_value(arg_nodes[0], source) if arg_nodes else None
 
     handler, handler_line = _handler(arg_nodes, source)
 
@@ -177,8 +201,24 @@ def _owner_function(line: int, functions, fallback: str) -> str:
     return best.id if best is not None else fallback
 
 
+def _has_express(source: bytes) -> bool:
+    """Cheap correctness gate: the file imports ``express`` (either quote style). The
+    ``app``/``router``/``route`` receiver heuristic in ``_is_router_obj`` is only safe on
+    files that actually use Express, so this guard — not selection — bounds it now that
+    detection runs additively for every TS file (see TypeScriptParser.extract)."""
+    return (b"'express'" in source or b'"express"' in source
+            or b"expressMiddleware" in source)  # Apollo → Express adapter mount
+
+
 def detect_express(root: Node, source: bytes, path: str, record: FileRecord) -> bool:
-    """Enrich/add Express route statements on ``record``. Returns True if anything matched."""
+    """Enrich/add Express route statements on ``record``. Returns True if anything matched.
+
+    Additive: invoked from ``TypeScriptParser.extract`` for every TS file (whatever parser
+    owns it), self-guarded by :func:`_has_express`, and enriching the base parser's existing
+    statement in place — so it captures Express routes even in files owned by another
+    framework (Angular SSR, NestJS) without duplicating or displacing that owner."""
+    if not _has_express(source):
+        return False
     matched = False
     fid = file_id(path)
     seen = {s.id for s in record.statements}

@@ -25,6 +25,8 @@ except Exception:  # pragma: no cover
 _EXT_CATEGORY = {
     ".json": "json", ".yaml": "yaml", ".yml": "yaml", ".toml": "toml",
     ".ini": "ini", ".xml": "xml", ".gradle": "gradle",
+    ".csproj": "dotnet", ".vbproj": "dotnet", ".fsproj": "dotnet", ".vcxproj": "dotnet",
+    ".sln": "dotnet",
 }
 _GRADLE_DEP = re.compile(
     r"\b(?:implementation|api|compile|testImplementation|runtimeOnly|annotationProcessor|classpath)\b"
@@ -67,6 +69,10 @@ def _dispatch(name: str, suffix: str, text: str) -> dict[str, Any]:
         return _env(text)
     if name == "pom.xml":
         return _pom(text)
+    if suffix in (".csproj", ".vbproj", ".fsproj", ".vcxproj"):
+        return _csproj(text, kind=suffix.lstrip("."))
+    if suffix == ".sln":
+        return _sln(text)
     if name == "requirements.txt":
         return _requirements(text)
     if name == "pyproject.toml":
@@ -262,6 +268,62 @@ def _pom(text: str) -> dict[str, Any]:
 
 def _generic_xml(text: str) -> dict[str, Any]:
     return {"kind": "xml", "category": "xml", "rootElement": _strip(ET.fromstring(text).tag)}
+
+
+def _csproj(text: str, kind: str = "csproj") -> dict[str, Any]:
+    """.NET MSBuild project file (``.csproj``/``.vbproj``/``.fsproj``/``.vcxproj``) — the
+    NuGet analog of package.json/pom.xml. Extracts the SDK, target framework(s), and
+    PackageReference (NuGet) / ProjectReference (inter-project) dependencies. Handles both
+    SDK-style (attribute versions) and legacy (default xmlns + child <Version>); ``_strip``
+    drops the namespace so both parse the same. ``kind`` records the concrete file type."""
+    root = ET.fromstring(text)
+    packages: list[dict[str, Any]] = []
+    projects: list[str] = []
+    frameworks: list[str] = []
+    for el in root.iter():
+        tag = _strip(el.tag)
+        if tag == "PackageReference":
+            pkg = el.get("Include") or el.get("Update")
+            if pkg:
+                ver = el.get("Version")
+                if ver is None:  # legacy style stores version as a child element
+                    child = _child(el, "Version")
+                    ver = child.text if child is not None else None
+                packages.append({"name": pkg, "version": ver})
+        elif tag == "ProjectReference":
+            inc = el.get("Include")
+            if inc:
+                projects.append(inc.replace("\\", "/"))  # normalize Windows separators
+        elif tag in ("TargetFramework", "TargetFrameworks") and el.text:
+            frameworks.extend(f.strip() for f in el.text.split(";") if f.strip())
+    return {
+        "kind": kind, "category": "dotnet", "packageManager": "nuget", "buildTool": "dotnet",
+        "dotnetInfo": {
+            "sdk": root.get("Sdk"), "targetFrameworks": frameworks,
+            "packageReferences": packages, "projectReferences": projects,
+            "projectReferenceCount": len(projects),
+        },
+        "dependencyCount": len(packages),
+    }
+
+
+_SLN_PROJECT = re.compile(r'^Project\("\{[^}]*\}"\)\s*=\s*"([^"]+)",\s*"([^"]+)"', re.M)
+
+
+def _sln(text: str) -> dict[str, Any]:
+    """Visual Studio solution manifest — a custom (non-XML) text format listing member
+    projects, so it needs its own line parser. Solution *folders* also appear as Project
+    entries but point at a bare name rather than a project file, so filter to real project
+    paths (those carrying a path separator or a *proj extension)."""
+    projects = []
+    for name, path in _SLN_PROJECT.findall(text):
+        norm = path.replace("\\", "/")
+        if "/" in norm or norm.endswith((".csproj", ".vbproj", ".fsproj", ".vcxproj")):
+            projects.append({"name": name, "path": norm})
+    return {
+        "kind": "sln", "category": "dotnet", "buildTool": "dotnet",
+        "solutionInfo": {"projectCount": len(projects), "projects": projects},
+    }
 
 
 # ── Python / TOML family ─────────────────────────────────────────────────────

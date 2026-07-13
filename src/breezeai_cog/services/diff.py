@@ -1,4 +1,4 @@
-"""Diff streaming for ``/api/analyze-diff`` (§10): parse the acquired temp dir,
+"""Diff streaming for ``/api/analyze-diff``: parse the acquired temp dir,
 stream FileRecord NDJSON.gz to S3 (filtered to changed files in incremental mode),
 and accumulate ``projectMetaData`` **out-of-band** (it rides the notification, not the
 gz stream). Mirrors ``runAnalysisDiffStream`` in ``server.js``."""

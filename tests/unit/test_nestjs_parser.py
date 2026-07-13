@@ -103,6 +103,62 @@ def test_route_attributes(tmp_path) -> None:
     assert routes["list"].requestDTO is None and routes["list"].responseDTO is None
 
 
+# @nestjs/graphql code-first resolver — grounded on the real decorator shapes:
+# thunk-only (name = method), explicit { name }, SDL-string first arg, @ResolveField
+# (field resolver, not an op), and a @Query PARAM decorator that must not be mistaken.
+_GQL_SRC = b'''import { Resolver, Query, Mutation, Subscription, ResolveField, Args } from '@nestjs/graphql';
+
+@Resolver(() => Conversation)
+export class ConversationResolver {
+  @Query(() => [Conversation])
+  async getConversations(): Promise<Conversation[]> { return []; }
+
+  @Mutation(() => CapAI, { name: 'capAi' })
+  public capAi(): CapAI { return null; }
+
+  @Query('productCollections(params: Params!): ProductCollectionsResponse!')
+  public productCollections() { return null; }
+
+  @Subscription(() => ChatEvent, { name: 'chatEvents' })
+  chatEvents() { return null; }
+
+  @ResolveField(() => String)
+  async title(): Promise<string> { return ''; }
+}
+
+@Resolver()
+export class SearchResolver {
+  // @Query here is the @nestjs/common PARAM decorator, NOT a GraphQL op
+  search(@Query() q: string) { return q; }
+}
+'''
+
+
+def test_graphql_code_first_operations(tmp_path) -> None:
+    p = tmp_path / "conversation.resolver.ts"
+    p.write_text(_GQL_SRC.decode())
+    ctx = ParseContext(path="conversation.resolver.ts", abs_path=p, source=_GQL_SRC,
+                       repo_root=tmp_path, capture_statements=True)
+    rec = NestJSParser().parse_file(ctx)
+    ops = {(s.method, s.endpoint): s for s in rec.statements if s.semanticType == "route"}
+    # name = method (thunk), explicit { name }, SDL-string leading id, subscription name
+    assert ("QUERY", "getConversations") in ops
+    assert ("MUTATION", "capAi") in ops
+    assert ("QUERY", "productCollections") in ops
+    assert ("SUBSCRIPTION", "chatEvents") in ops
+    for s in ops.values():
+        assert s.framework == "graphql"
+    assert ops[("QUERY", "getConversations")].routeKind == "query"
+    assert ops[("SUBSCRIPTION", "chatEvents")].routeKind == "subscription"
+    # @ResolveField is a field resolver, not a client-callable op → not a route
+    assert "title" not in {s.endpoint for s in ops.values()}
+    # the @Query PARAM decorator on SearchResolver.search must NOT produce a route
+    assert "search" not in {s.endpoint for s in ops.values()}
+    # ops parent to their handler methods
+    fn_ids = {f.id for f in rec.functions}
+    assert all(s.parentId in fn_ids for s in ops.values())
+
+
 def test_output_validates(tmp_path) -> None:
     rec = _parse(tmp_path)
     errors = list(Draft202012Validator(FileRecord.model_json_schema(by_alias=True))
