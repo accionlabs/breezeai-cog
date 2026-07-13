@@ -203,15 +203,62 @@ def _is_controller(cls: Any) -> bool:
     return ext in _CONTROLLER_BASES or ext.endswith(("Controller", "ControllerBase"))
 
 
+def _action_name(fn: Function) -> str:
+    """The action segment for a convention route: the ``[ActionName("x")]`` argument when
+    present (it overrides the method name in MVC), else the method name itself."""
+    for d in fn.decorators:
+        if simple_attr_name(d.name) == "ActionName" and (name := _first_arg(d)):
+            return name
+    return fn.name
+
+
+def _is_conventional_action(fn: Function) -> bool:
+    """A public instance method that classic MVC treats as a GET action by convention.
+    Excludes constructors/non-methods, non-public and static members, and ``[NonAction]``."""
+    if fn.type != "method" or fn.isStatic or fn.visibility not in (None, "public"):
+        return False
+    return not any(simple_attr_name(d.name) == "NonAction" for d in fn.decorators)
+
+
+def _route_statement(
+    fn: Function, method: str, endpoint: str, text: str,
+    auth_required: bool | None, guards: list[str] | None, seen: set[str],
+) -> Statement:
+    """Build one controller-route ``Statement`` (``nodeType="synthetic"`` — attribute/convention
+    derived, no backing AST node). Shared by the attribute-route and convention-route paths."""
+    return Statement(
+        id=disambiguate(statement_id(fn.path, fn.startLine, 0), seen),
+        parentId=fn.id,
+        nodeType="synthetic",
+        semanticType="route",
+        text=text,
+        method=method,
+        endpoint=endpoint,
+        framework="aspnet",
+        handler=fn.name,
+        handlerLine=fn.startLine,
+        routeKind="route",
+        isRegex=False,
+        authRequired=auth_required,
+        guards=guards,
+        requestDTO=_request_dto(fn),
+        responseDTO=_response_dto(fn.returnType),
+        startLine=fn.startLine,
+        endLine=fn.endLine,
+        path=fn.path,
+    )
+
+
 def detect_controller_routes(record: FileRecord, index: Any = None) -> list[Statement]:
-    # (controller-route prefix, chain guards, chain-resolved, has-any-[Route], class name) per id
-    controllers: dict[str, tuple[str, list[str], bool, bool, str]] = {}
+    # (prefix, chain guards, chain-resolved, has-any-[Route], class name, is-[ApiController]) per id
+    controllers: dict[str, tuple[str, list[str], bool, bool, str, bool]] = {}
     for cls in record.classes:
         if not _is_controller(cls):
             continue
         route, guards, resolved = _resolve_chain(cls, index)
         base = _controller_token(route, cls.name) if route is not None else ""
-        controllers[cls.id] = (base, guards, resolved, route is not None, cls.name)
+        is_api = "ApiController" in {simple_attr_name(d.name) for d in cls.decorators}
+        controllers[cls.id] = (base, guards, resolved, route is not None, cls.name, is_api)
     if not controllers:
         return []
 
@@ -221,16 +268,15 @@ def detect_controller_routes(record: FileRecord, index: Any = None) -> list[Stat
         info = controllers.get(fn.parentId)
         if info is None:
             continue
-        base, cls_guards, resolved, has_class_route, cls_name = info
+        base, cls_guards, resolved, has_class_route, cls_name, is_api = info
         prefix_unknown = not has_class_route and not resolved  # inherited base we can't see
         method_route = _route_template(fn.decorators)
         fn_guards = _guards(fn.decorators)
         auth_required = ("Authorize" in cls_guards or "Authorize" in fn_guards) or None
         all_guards = (cls_guards + fn_guards) or None
-        for dec in fn.decorators:
-            verb = _HTTP_ATTRS.get(simple_attr_name(dec.name))
-            if verb is None:  # method template composed from [HttpX] + sibling [Route] below
-                continue
+        verb_attrs = [d for d in fn.decorators if simple_attr_name(d.name) in _HTTP_ATTRS]
+        for dec in verb_attrs:
+            verb = _HTTP_ATTRS[simple_attr_name(dec.name)]
             for sub in _method_templates(_first_arg(dec), method_route):
                 if _is_absolute(sub):
                     endpoint = _absolute_endpoint(sub)  # overrides the prefix → base-independent
@@ -242,29 +288,24 @@ def detect_controller_routes(record: FileRecord, index: Any = None) -> list[Stat
                 elif base or sub:
                     endpoint = _join(base, sub)
                 else:
-                    # no attribute route at all → MVC convention /{controller}/{action}
-                    endpoint = _convention_endpoint(cls_name, fn.name)
-                routes.append(Statement(
-                    id=disambiguate(statement_id(fn.path, fn.startLine, 0), seen),
-                    parentId=fn.id,
-                    nodeType="synthetic",
-                    semanticType="route",
-                    text=f"[{dec.name}]",
-                    method=verb,
-                    endpoint=endpoint,
-                    framework="aspnet",
-                    handler=fn.name,
-                    handlerLine=fn.startLine,
-                    routeKind="route",
-                    isRegex=False,
-                    authRequired=auth_required,
-                    guards=all_guards,
-                    requestDTO=_request_dto(fn),
-                    responseDTO=_response_dto(fn.returnType),
-                    startLine=fn.startLine,
-                    endLine=fn.endLine,
-                    path=fn.path,
-                ))
+                    # verb attribute but no route anywhere → MVC convention /{controller}/{action}
+                    endpoint = _convention_endpoint(cls_name, _action_name(fn))
+                routes.append(_route_statement(
+                    fn, verb, endpoint, f"[{dec.name}]", auth_required, all_guards, seen))
+        # Classic MVC convention: a public action with NO [HttpX] attribute defaults to a GET at
+        # /{controller}/{action} (or a bare method-level [Route], if any). Skipped for
+        # [ApiController] (attribute routing is required there) and when the inherited prefix is
+        # unknowable (honest-null).
+        if not verb_attrs and not is_api and not prefix_unknown and _is_conventional_action(fn):
+            sub = method_route or ""
+            if _is_absolute(sub):
+                endpoint = _absolute_endpoint(sub)
+            elif base or sub:
+                endpoint = _join(base, sub)
+            else:
+                endpoint = _convention_endpoint(cls_name, _action_name(fn))
+            routes.append(_route_statement(
+                fn, "GET", endpoint, f"(convention) {fn.name}", auth_required, all_guards, seen))
     return routes
 
 

@@ -247,6 +247,48 @@ def test_mvc_convention_route() -> None:
     assert ("GET", "/Catalog/Index") in routes
 
 
+def test_mvc_convention_route_no_attribute() -> None:
+    # classic MVC 5: attribute-FREE public actions default to GET at /{controller}/{action}
+    # (BREEZEAI-255 Phase 1 — the case a verb-attribute-only fixture never exercised)
+    src = (b"using Microsoft.AspNetCore.Mvc;\nnamespace A {\n"
+           b"public class HomeController : Controller {\n"
+           b"  public ActionResult Index() { return null; }\n"          # no attr -> GET convention
+           b"  public ActionResult About() { return null; }\n"          # no attr -> GET convention
+           b"  [HttpPost] public ActionResult Contact() { return null; }\n"  # verb attr -> POST
+           b"  [NonAction] public ActionResult Helper() { return null; }\n"  # excluded
+           b"  private ActionResult Secret() { return null; }\n"        # non-public -> excluded
+           b"} }")
+    rec = _parse(AspNetCoreParser(), src, "HomeController.cs")
+    routes = {(s.method, s.endpoint) for s in rec.statements if s.semanticType == "route"}
+    assert ("GET", "/Home/Index") in routes
+    assert ("GET", "/Home/About") in routes
+    assert ("POST", "/Home/Contact") in routes
+    assert not any("Helper" in e or "Secret" in e for _, e in routes)  # [NonAction]/private skipped
+
+
+def test_mvc_convention_action_name_override() -> None:
+    # [ActionName("List")] overrides the method name in the convention path (BREEZEAI-255 / #5)
+    src = (b"using Microsoft.AspNetCore.Mvc;\nnamespace A {\n"
+           b"public class HomeController : Controller {\n"
+           b"  [ActionName(\"List\")] public ActionResult Index() { return null; }\n"
+           b"} }")
+    rec = _parse(AspNetCoreParser(), src, "HomeController.cs")
+    routes = {(s.method, s.endpoint) for s in rec.statements if s.semanticType == "route"}
+    assert ("GET", "/Home/List") in routes
+    assert not any(e == "/Home/Index" for _, e in routes)
+
+
+def test_apicontroller_bare_action_emits_no_route() -> None:
+    # [ApiController] mandates attribute routing → an attribute-free action is NOT a convention route
+    src = (b"using Microsoft.AspNetCore.Mvc;\nnamespace A {\n"
+           b"[ApiController] [Route(\"api/x\")]\n"
+           b"public class XController : ControllerBase {\n"
+           b"  public object Bare() { return null; }\n"                  # no [HttpX] -> not routable
+           b"} }")
+    rec = _parse(AspNetCoreParser(), src, "X.cs")
+    assert [s for s in rec.statements if s.semanticType == "route"] == []
+
+
 def test_mvc_route_registration() -> None:
     # Phase 2: RouteConfig.MapRoute — custom named route + the default template
     src = (b"using System.Web.Mvc;\nnamespace A {\npublic class RouteConfig {\n"
