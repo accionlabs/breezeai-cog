@@ -452,14 +452,15 @@ def _resolve_str(name: str, root: Node, source: bytes) -> str | None:
 
 
 def _minimal_path(call: Node, source: bytes) -> str | None:
+    """Route template = the FIRST argument's string literal. The args that follow (the handler
+    delegate/lambda) may hold their own string literals — never mistake those for the path;
+    return None when the first arg isn't a literal (absent beats a fabricated endpoint)."""
     args = call.child_by_field_name("arguments")
-    if args is None:
+    first = args.named_children[0] if args is not None and args.named_children else None
+    if first is None:
         return None
-    for arg in args.named_children:
-        lit = _find_string(arg)
-        if lit is not None:
-            return _literal(lit, source)
-    return None
+    lit = _find_string(first)
+    return _literal(lit, source) if lit is not None else None
 
 
 def _literal(lit: Node, source: bytes) -> str:

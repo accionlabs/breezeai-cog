@@ -247,6 +247,18 @@ def test_mvc_convention_route() -> None:
     assert ("GET", "/Catalog/Index") in routes
 
 
+def test_minimal_api_ignores_handler_string_literal() -> None:
+    # non-literal route pattern: the handler body's string must NOT become the endpoint (#3)
+    src = (b"using Microsoft.AspNetCore.Builder;\nnamespace A { class S { void C(){\n"
+           b"  app.MapGet(RoutePattern, () => \"hello world\");\n"       # var pattern -> no fabrication
+           b"  app.MapPost(\"/items\", () => \"created\");\n"            # literal pattern still works
+           b"} } }")
+    rec = _parse(AspNetCoreParser(), src, "S.cs")
+    routes = {(s.method, s.endpoint) for s in rec.statements if s.semanticType == "route"}
+    assert ("POST", "/items") in routes
+    assert not any(e in ("hello world", "created") for _, e in routes)  # handler strings ignored
+
+
 def test_allow_anonymous_overrides_authorize() -> None:
     # [AllowAnonymous] on an action under a [Authorize] controller → route is anonymous
     src = (b"using Microsoft.AspNetCore.Mvc;\nnamespace A {\n"
