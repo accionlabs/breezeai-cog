@@ -29,6 +29,7 @@ from tree_sitter import Node
 
 from ...emit import disambiguate, statement_id
 from ...schemas import Decorator, FileRecord, Function, Statement
+from ..index_common import walk_heritage
 from ..treesitter import node_text
 
 _HTTP_ATTRS = {
@@ -114,35 +115,27 @@ def _guards(decorators: list[Decorator]) -> list[str]:
 
 
 def _resolve_chain(cls: Any, index: Any) -> tuple[str | None, list[str], bool]:
-    """Walk ``cls``'s inheritance chain through the repo index, composing the
-    controller-level route template (nearest-defined wins) and unioning the auth guards.
+    """Compose the controller-level route template (nearest-defined wins) and union the auth
+    guards across ``cls``'s inheritance chain (walked via :func:`walk_heritage`).
 
-    Returns ``(route_template, guards, resolved)``. ``resolved`` is ``False`` when the
-    chain ends at a base we cannot see (declared outside the repo, or an ambiguous name):
-    a prefix declared on that base would be invisible, so the caller treats a missing
-    route as unknown rather than empty (honest-null)."""
+    Returns ``(route_template, guards, resolved)``. ``resolved`` is ``False`` when the chain
+    ends at a base we cannot see (outside the repo and not a known framework root, or an
+    ambiguous name): a prefix declared there would be invisible, so the caller treats a
+    missing route as unknown rather than empty (honest-null)."""
     heritage_map = getattr(index, "class_heritage", None) or {}
+    chain = walk_heritage(cls.name, cls.extends, heritage_map)
     route = _route_template(cls.decorators)
     guards = _guards(cls.decorators)
-    base = cls.extends
-    seen = {cls.name}
-    resolved = True
-    while base is not None:
-        short = base.rsplit(".", 1)[-1].split("<", 1)[0]
-        if short in seen:  # inheritance cycle (shouldn't happen in valid C#) — stop
-            break
-        seen.add(short)
-        heritage = heritage_map.get(short, "missing")
-        if heritage == "missing":  # base not declared in the repo
-            resolved = short in _FRAMEWORK_BASES  # framework root = clean; unknown = incomplete
-            break
-        if heritage is None:  # ambiguous name — do not resolve through it
-            resolved = False
-            break
+    for heritage in chain.ancestors:
         if route is None:
             route = _route_template(heritage.decorators)
         guards.extend(g for g in _guards(heritage.decorators) if g not in guards)
-        base = heritage.extends
+    if chain.unresolved is None:
+        resolved = True  # chain ended in-repo (or a cycle)
+    elif chain.ambiguous:
+        resolved = False
+    else:  # base outside the repo — clean only if it's a known framework root
+        resolved = chain.unresolved in _FRAMEWORK_BASES
     return route, guards, resolved
 
 

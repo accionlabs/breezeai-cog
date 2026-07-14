@@ -28,8 +28,8 @@ from pathlib import Path
 
 from tree_sitter import Node
 
-from ...schemas import Decorator
 from ...utils import repo_relative
+from ..index_common import ClassHeritage, record_heritage
 from ..treesitter import node_text, parse_source
 from .functions import extract_attributes
 
@@ -39,16 +39,6 @@ _CLASS_TYPES = (
     "struct_declaration", "record_declaration",
 )
 _NAMESPACE_TYPES = ("namespace_declaration", "file_scoped_namespace_declaration")
-
-
-@dataclass
-class ClassHeritage:
-    """Generic C# heritage for one class — its base *class* (simple name) and the raw
-    attributes declared on it. Framework-agnostic (just language facts); ASP.NET route
-    resolution walks this to inherit a base controller's ``[Route]``/``[Authorize]``."""
-
-    extends: str | None
-    decorators: list[Decorator]
 
 
 @dataclass
@@ -135,17 +125,10 @@ def _base_name(node: Node, source: bytes) -> str | None:
 
 
 def _record_heritage(index: CSharpIndex, name: str, node: Node, source: bytes) -> None:
-    """Record a class's heritage under its simple name; collapse to ``None`` (ambiguous)
-    when a differing declaration of the same name already exists (partial classes with an
-    identical base are kept — same fact, not a conflict)."""
-    heritage = ClassHeritage(extends=_base_name(node, source),
-                             decorators=extract_attributes(node, source))
-    if name not in index.class_heritage:
-        index.class_heritage[name] = heritage
-    else:
-        existing = index.class_heritage[name]
-        if existing is None or existing.extends != heritage.extends:
-            index.class_heritage[name] = None  # collision → do not resolve through it
+    """Record a class's heritage under its simple name (collapsing ambiguous duplicates via
+    :func:`record_heritage`)."""
+    record_heritage(index.class_heritage, name,
+                    _base_name(node, source), extract_attributes(node, source))
 
 
 def _index_file(root: Node, source: bytes, rel: str, index: CSharpIndex) -> None:

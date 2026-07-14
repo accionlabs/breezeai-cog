@@ -16,6 +16,7 @@ from typing import Sequence
 from tree_sitter import Node
 
 from ...utils import repo_relative
+from ..index_common import record_distinct
 from ..treesitter import node_text, parse_source
 
 _SUFFIXES = (".ts", ".tsx", ".d.ts", ".js", ".jsx", ".mjs", ".cjs")
@@ -76,13 +77,14 @@ def _string_literal(node: Node | None, source: bytes) -> str | None:
     return node_text(frag, source) if frag is not None else ""
 
 
-def _collect_const_values(root: Node, source: bytes, acc: dict[str, set[str]]) -> None:
-    """Accumulate ``symbol → {literals}`` from one file's top-level string constants:
+def _collect_const_values(root: Node, source: bytes, const_values: dict[str, str | None]) -> None:
+    """Record ``symbol → literal`` from one file's top-level string constants:
     ``const NAME = 'x'``, ``enum E { M = 'x' }`` (→ ``E.M``), and ``static readonly M = 'x'``
-    class fields (→ ``C.M``). Non-string values are skipped."""
+    class fields (→ ``C.M``). Non-string values are skipped; a symbol seen with >1 distinct
+    literal collapses to ``None`` (ambiguous, honest-null) via :func:`record_distinct`."""
     def add(sym: str, val: str | None) -> None:
         if val is not None:
-            acc.setdefault(sym, set()).add(val)
+            record_distinct(const_values, sym, val)
 
     for child in root.named_children:
         node: Node | None = child
@@ -124,7 +126,7 @@ def build_ts_index(repo_root: Path, files: Sequence[Path]) -> TsAliasIndex | Non
     """Repo-level pre-pass: tsconfig aliases + a string-constant value map (parses each TS
     file once). Returns None only when there are neither aliases nor constants."""
     alias = build_alias_index(repo_root)
-    acc: dict[str, set[str]] = {}
+    const_values: dict[str, str | None] = {}
     for f in files:
         try:
             src = Path(f).read_bytes()
@@ -135,11 +137,7 @@ def build_ts_index(repo_root: Path, files: Sequence[Path]) -> TsAliasIndex | Non
             root = parse_source(grammar, src, 0).root_node
         except Exception:
             continue
-        _collect_const_values(root, src, acc)
-    # collapse to a single literal per symbol; >1 distinct value → None (ambiguous)
-    const_values: dict[str, str | None] = {
-        sym: (next(iter(vals)) if len(vals) == 1 else None) for sym, vals in acc.items()
-    }
+        _collect_const_values(root, src, const_values)
     if alias is None and not const_values:
         return None
     return TsAliasIndex(
