@@ -182,3 +182,22 @@ class ProjectMetaData(BaseModel):
     # optional
     repositoryPath: str | None = None
     configs: dict[str, Any] | None = None  # {totalConfigFiles, byType, packageManagers}
+
+    def has_content(self) -> bool:
+        """True if the analysis captured anything worth persisting.
+
+        Source code (any detected language, function, or class) always counts. A
+        config-only result counts only when it carries real signal — dependencies,
+        a package manager / build tool, or docker. A folder whose sole file is a
+        trivial config (e.g. a lone README or empty JSON) yields ``False`` so no
+        empty ontology is written.
+        """
+        if self.analyzedLanguages or self.totalFunctions or self.totalClasses:
+            return True
+        cfg = self.configs or {}
+        if (cfg.get("dependencies") or {}).get("total", 0):
+            return True
+        docker = cfg.get("docker") or {}
+        if docker.get("hasDockerfile") or docker.get("hasCompose"):
+            return True
+        return bool(cfg.get("packageManagers") or cfg.get("buildTools"))
