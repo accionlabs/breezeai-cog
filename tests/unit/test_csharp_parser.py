@@ -376,3 +376,33 @@ def test_partial_class_ambiguous_method_stays_null(tmp_path) -> None:
     }, "Derived.cs")
     calls = {c.name: c.path for f in rec.functions for c in f.calls}
     assert calls.get("Dup") is None
+
+
+def test_partial_class_split_base_clause_resolves(tmp_path) -> None:
+    # WebForms pattern: the base clause is stated in one partial file and omitted in the
+    # .designer partial. The parts must MERGE (not conflict) so `this.M()` on the base resolves.
+    rec = _parse_repo(tmp_path, {
+        "Ctl/SplendidControl.cs":
+            "namespace App;\npublic class SplendidControl { public void AppendGridColumns(){} }\n",
+        "Views/View.ascx.cs":
+            "namespace App;\npublic partial class View : SplendidControl {\n"
+            "    public void Load(){ this.AppendGridColumns(); }\n}\n",
+        "Views/View.ascx.designer.cs":
+            "namespace App;\npublic partial class View { }\n",
+    }, "Views/View.ascx.cs")
+    calls = {c.name: c.path for f in rec.functions for c in f.calls}
+    assert calls.get("AppendGridColumns") == "Ctl/SplendidControl.cs"
+
+
+def test_same_simple_name_distinct_types_do_not_inherit(tmp_path) -> None:
+    # Two distinct `Widget` types (different namespaces): one derives from an in-repo base
+    # with a method, the other is baseless. The FQN projection must collapse the shared simple
+    # name → None so the baseless Widget does NOT mis-inherit the base's method (no false edge).
+    rec = _parse_repo(tmp_path, {
+        "A/Base.cs": "namespace A;\npublic class Base { public void Helper(){} }\n",
+        "A/Widget.cs": "namespace A;\npublic class Widget : Base { }\n",
+        "B/Widget.cs":
+            "namespace B;\npublic class Widget { public void Go(){ this.Helper(); } }\n",
+    }, "B/Widget.cs")
+    calls = {c.name: c.path for f in rec.functions for c in f.calls}
+    assert calls.get("Helper") is None

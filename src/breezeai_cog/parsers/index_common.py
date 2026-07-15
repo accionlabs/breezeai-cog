@@ -79,6 +79,63 @@ def record_heritage(
     )
 
 
+def merge_heritage(
+    heritage: dict[str, ClassHeritage | None],
+    key: str,
+    extends: str | None,
+    decorators: list[Decorator],
+) -> None:
+    """Merge one class *declaration* into ``heritage[key]``, **partial-class aware**.
+
+    A partial declaration that omits the base clause carries ``extends is None`` — that means
+    "this part didn't restate the shared base", so it **yields** to a part that names a
+    concrete base rather than conflicting with it. Two parts naming *different* concrete bases
+    collapse to ``None`` (genuine ambiguity, honest-null). Decorators are unioned across parts.
+
+    ``key`` must be the class's **fully-qualified** name so that only real partials of one
+    type merge; distinct types sharing a simple name are separated by :func:`project_heritage`."""
+    if key not in heritage:
+        heritage[key] = ClassHeritage(extends=extends, decorators=list(decorators))
+        return
+    existing = heritage[key]
+    if existing is None:  # already ambiguous
+        return
+    if existing.extends is None:
+        existing.extends = extends  # adopt the concrete base a later part states
+    elif extends is not None and extends != existing.extends:
+        heritage[key] = None  # two different concrete bases → genuine ambiguity
+        return
+    for d in decorators:
+        if d not in existing.decorators:
+            existing.decorators.append(d)
+
+
+def project_heritage(by_fqn: dict[str, ClassHeritage | None]) -> dict[str, ClassHeritage | None]:
+    """Project a fully-qualified-name heritage map to **simple** class names (what the resolver
+    and :func:`walk_heritage` key on). Distinct types sharing a simple name are *merged*, not
+    blindly dropped: they keep a shared ``extends`` (differing bases → ``None``) and per-method
+    files (a method name declared in >1 file → ``None``). So same-named classes that agree
+    (e.g. many controls extending one base) still resolve through that base, while genuine
+    conflicts stay honest-null. (Real partials of one type are already merged within their FQN
+    by :func:`merge_heritage` before this step.)"""
+    out: dict[str, ClassHeritage | None] = {}
+    for fqn, heritage in by_fqn.items():
+        simple = fqn.rsplit(".", 1)[-1]
+        if simple not in out:
+            out[simple] = heritage
+            continue
+        cur = out[simple]
+        if cur is None or heritage is None or cur.extends != heritage.extends:
+            out[simple] = None  # different base (or already ambiguous) → refuse
+            continue
+        for m, f in heritage.methods.items():  # per-method: agree → keep, conflict → None
+            cur.methods[m] = f if (m not in cur.methods or cur.methods[m] == f) else None
+        for d in heritage.decorators:
+            if d not in cur.decorators:
+                cur.decorators.append(d)
+    return out
+
+
 @dataclass
 class HeritageChain:
     """Result of walking a class's ``extends`` chain through a repo heritage index.

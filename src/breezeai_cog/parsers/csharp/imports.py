@@ -29,7 +29,7 @@ from pathlib import Path
 from tree_sitter import Node
 
 from ...utils import repo_relative
-from ..index_common import ClassHeritage, record_distinct, record_heritage
+from ..index_common import ClassHeritage, merge_heritage, project_heritage, record_distinct
 from ..treesitter import node_text, parse_source
 from .functions import extract_attributes, flags
 
@@ -128,11 +128,12 @@ def _base_name(node: Node, source: bytes) -> str | None:
     return short
 
 
-def _record_heritage(index: CSharpIndex, name: str, node: Node, source: bytes) -> None:
-    """Record a class's heritage under its simple name (collapsing ambiguous duplicates via
-    :func:`record_heritage`)."""
-    record_heritage(index.class_heritage, name,
-                    _base_name(node, source), extract_attributes(node, source))
+def _record_heritage(
+    by_fqn: dict[str, ClassHeritage | None], fqn: str, node: Node, source: bytes,
+) -> None:
+    """Merge a class declaration's heritage into the FQN-keyed map (partial-class aware via
+    :func:`merge_heritage`; projected to simple names after the walk)."""
+    merge_heritage(by_fqn, fqn, _base_name(node, source), extract_attributes(node, source))
 
 
 def _extension_this_type(node: Node, source: bytes) -> str | None:
@@ -152,10 +153,10 @@ def _extension_this_type(node: Node, source: bytes) -> str | None:
 
 
 def _index_members(
-    class_name: str, body: Node, source: bytes, rel: str, index: CSharpIndex,
+    fqn: str, body: Node, source: bytes, rel: str, index: CSharpIndex,
     method_files: dict[tuple[str, str], str | None],
 ) -> None:
-    """Record the class's declared methods (``(class, method) → file``, for inherited-call
+    """Record the class's declared methods (``(fqn, method) → file``, for inherited-call
     resolution) and any extension methods it defines (``(method, this-type) → file``)."""
     for member in body.named_children:
         if member.type != "method_declaration":
@@ -164,7 +165,7 @@ def _index_members(
         if mn is None:
             continue
         mname = node_text(mn, source)
-        record_distinct(method_files, (class_name, mname), rel)
+        record_distinct(method_files, (fqn, mname), rel)
         this_type = _extension_this_type(member, source)
         if this_type:
             record_distinct(index.ext_methods, (mname, this_type), rel)
@@ -172,9 +173,11 @@ def _index_members(
 
 def _index_file(
     root: Node, source: bytes, rel: str, index: CSharpIndex,
+    by_fqn: dict[str, ClassHeritage | None],
     method_files: dict[tuple[str, str], str | None],
 ) -> None:
-    """Add one file's ``global using`` namespaces + declared types + members to ``index``."""
+    """Add one file's ``global using`` namespaces + declared types + members to ``index``.
+    Heritage is accumulated into ``by_fqn`` (fully-qualified names) for later projection."""
     for child in root.named_children:
         if child.type == "using_directive":
             kind, name, _ = _classify_using(child, source)
@@ -195,10 +198,11 @@ def _index_file(
                 nm = _decl_name(child, source)
                 body = child.child_by_field_name("body")
                 if nm:
-                    index.types.setdefault(_join(local_ns, nm), set()).add(rel)
-                    _record_heritage(index, nm, child, source)
+                    fqn = _join(local_ns, nm)
+                    index.types.setdefault(fqn, set()).add(rel)
+                    _record_heritage(by_fqn, fqn, child, source)
                     if body is not None:
-                        _index_members(nm, body, source, rel, index, method_files)
+                        _index_members(fqn, body, source, rel, index, method_files)
                 if body is not None:
                     walk(body, local_ns)  # nested types share the enclosing namespace
 
@@ -236,6 +240,7 @@ def build_csharp_index(repo_root: Path, files) -> CSharpIndex:
         for i in range(1, len(parts) + 1):
             live_dirs.add("/".join(parts[:i]))
     index = CSharpIndex(project_roots=_discover_project_roots(repo_root, live_dirs))
+    by_fqn: dict[str, ClassHeritage | None] = {}   # partials merged per fully-qualified name
     method_files: dict[tuple[str, str], str | None] = {}
     for file, rel in zip(files, rels):
         try:
@@ -243,12 +248,14 @@ def build_csharp_index(repo_root: Path, files) -> CSharpIndex:
         except OSError:
             continue
         root = parse_source("csharp", source, 0).root_node
-        _index_file(root, source, rel, index, method_files)
-    # attach each class's method→file map to its (unambiguous) heritage record
-    for (cname, mname), mfile in method_files.items():
-        heritage = index.class_heritage.get(cname)
+        _index_file(root, source, rel, index, by_fqn, method_files)
+    # attach each class's method→file map to its (unambiguous) heritage record, then project
+    # fully-qualified heritage down to simple names (distinct types sharing a name → None)
+    for (fqn, mname), mfile in method_files.items():
+        heritage = by_fqn.get(fqn)
         if heritage is not None:
             heritage.methods[mname] = mfile
+    index.class_heritage = project_heritage(by_fqn)
     return index
 
 
