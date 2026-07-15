@@ -15,7 +15,7 @@ from pathlib import Path
 
 from tree_sitter import Node
 
-from ..csharp.imports import ClassHeritage
+from ..index_common import ClassHeritage, record_heritage
 from ..treesitter import node_text, parse_source
 
 
@@ -42,15 +42,6 @@ class VbIndex:
     class_heritage: dict[str, ClassHeritage | None] = field(default_factory=dict)
 
 
-def _record_heritage(heritage_map: dict, name: str, heritage: ClassHeritage) -> None:
-    """Record under the simple name; collapse to ``None`` when a differing declaration of
-    the same name already exists (identical partial-class bases are kept — same fact)."""
-    if name not in heritage_map:
-        heritage_map[name] = heritage
-    elif heritage_map[name] is None or heritage_map[name].extends != heritage.extends:
-        heritage_map[name] = None  # collision → do not resolve through it
-
-
 def build_vb_index(repo_root: Path, files) -> VbIndex:
     """Repo-level pre-pass: map each declared VB type's simple name → its heritage (base
     class + attributes). VB ``Imports`` name namespaces (no namespace→file map), so only
@@ -72,9 +63,6 @@ def build_vb_index(repo_root: Path, files) -> VbIndex:
             name = node_text(name_node, source) if name_node is not None else None
             if not name:
                 continue
-            heritage = ClassHeritage(
-                extends=_heritage(block, source)[0],
-                decorators=attributes_from_blocks(attrs, source),
-            )
-            _record_heritage(index.class_heritage, name, heritage)
+            record_heritage(index.class_heritage, name,
+                            _heritage(block, source)[0], attributes_from_blocks(attrs, source))
     return index

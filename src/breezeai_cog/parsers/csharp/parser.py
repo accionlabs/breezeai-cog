@@ -67,7 +67,9 @@ class CSharpParser(BaseParser):
             root, source, path, ctx.resolution_index
         )
         resolve = make_resolver(
-            bindings, defined_names(root, source), path, type_map(root, source)
+            bindings, defined_names(root, source), path, type_map(root, source),
+            ext_index=getattr(ctx.resolution_index, "ext_methods", None),
+            heritage=getattr(ctx.resolution_index, "class_heritage", None),
         )
         functions: list[Function] = []
         classes = []
