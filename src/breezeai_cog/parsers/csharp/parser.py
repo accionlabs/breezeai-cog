@@ -49,9 +49,9 @@ class CSharpParser(BaseParser):
     statement_types = STATEMENT_TYPES
     frameworks = FRAMEWORKS
 
-    def build_index(self, repo_root: Path, files: Sequence[Path]) -> CSharpIndex:
+    def build_index(self, repo_root: Path, files: Sequence[Path], jobs: int = 1) -> CSharpIndex:
         """Repo-level pre-pass: map each declared type ``Namespace.TypeName`` → repo path."""
-        return build_csharp_index(Path(repo_root), files)
+        return build_csharp_index(Path(repo_root), files, jobs)
 
     def parse_file(self, ctx: ParseContext) -> FileRecord:
         root = parse_source("csharp", ctx.source, ctx.parse_timeout_micros).root_node

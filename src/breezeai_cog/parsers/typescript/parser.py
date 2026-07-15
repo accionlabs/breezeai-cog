@@ -86,7 +86,7 @@ class TypeScriptParser(BaseParser):
         # framework parser (React/NestJS/Express/…).
         return (*super().fixture_markers(), *_TS_FIXTURE_MARKERS)
 
-    def build_index(self, repo_root: Path, files: Sequence[Path]) -> TsAliasIndex | None:
+    def build_index(self, repo_root: Path, files: Sequence[Path], jobs: int = 1) -> TsAliasIndex | None:
         """Repo-level pre-pass: tsconfig path aliases + a string-constant value map (for
         resolving non-literal route paths like Angular's ``path: RouteNames.X``)."""
         return build_ts_index(Path(repo_root), files)

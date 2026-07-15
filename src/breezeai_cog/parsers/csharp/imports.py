@@ -29,7 +29,9 @@ from pathlib import Path
 from tree_sitter import Node
 
 from ...utils import repo_relative
-from ..index_common import ClassHeritage, merge_heritage, project_heritage, record_distinct
+from ..index_common import (
+    ClassHeritage, merge_heritage, parallel_map, project_heritage, record_distinct,
+)
 from ..treesitter import node_text, parse_source
 from .functions import extract_attributes, flags
 
@@ -229,9 +231,53 @@ def _discover_project_roots(repo_root: Path, live_dirs: set[str]) -> list[str]:
     return sorted(roots, key=len, reverse=True)
 
 
-def build_csharp_index(repo_root: Path, files) -> CSharpIndex:
-    """Repo-level pre-pass: parse each ``.cs`` file and map declared types → path,
-    and record project (``.csproj``) roots for the same-project tiebreak."""
+_Fragment = tuple[CSharpIndex, dict[str, ClassHeritage | None], dict[tuple[str, str], str | None]]
+
+
+def _index_one(args: tuple[str, str]) -> _Fragment | None:
+    """Parse one file into a **partial** index fragment — pure, no shared state, so it is
+    safe to run in a worker process (module-level + picklable, for :func:`parallel_map`).
+    Returns ``None`` on read error."""
+    file_s, rel = args
+    try:
+        source = Path(file_s).read_bytes()
+    except OSError:
+        return None
+    root = parse_source("csharp", source, 0).root_node
+    frag = CSharpIndex()
+    by_fqn: dict[str, ClassHeritage | None] = {}
+    method_files: dict[tuple[str, str], str | None] = {}
+    _index_file(root, source, rel, frag, by_fqn, method_files)
+    return frag, by_fqn, method_files
+
+
+def _merge_fragment(
+    index: CSharpIndex,
+    by_fqn: dict[str, ClassHeritage | None],
+    method_files: dict[tuple[str, str], str | None],
+    frag: _Fragment,
+) -> None:
+    """Reduce one file fragment into the shared index using the same collapse rules as the
+    serial build (so the result is identical regardless of fragment order)."""
+    fidx, fby, fmf = frag
+    index.global_usings |= fidx.global_usings
+    for tname, tfiles in fidx.types.items():
+        index.types.setdefault(tname, set()).update(tfiles)
+    for ekey, efile in fidx.ext_methods.items():
+        record_distinct(index.ext_methods, ekey, efile)
+    for mkey, mfile in fmf.items():
+        record_distinct(method_files, mkey, mfile)
+    for fqn, ch in fby.items():
+        if ch is None:
+            by_fqn[fqn] = None  # ambiguous within the file → refuse
+        else:
+            merge_heritage(by_fqn, fqn, ch.extends, ch.decorators)
+
+
+def build_csharp_index(repo_root: Path, files, jobs: int = 1) -> CSharpIndex:
+    """Repo-level pre-pass: parse each ``.cs`` file and map declared types → path, and record
+    project (``.csproj``) roots for the same-project tiebreak. Files are parsed into partial
+    fragments across ``jobs`` processes and reduced deterministically (``jobs<=1`` → serial)."""
     repo_root = Path(repo_root)
     rels = [repo_relative(f, repo_root) for f in files]
     live_dirs = {""}  # every ancestor dir of a scanned file (its owning-project candidates)
@@ -242,13 +288,12 @@ def build_csharp_index(repo_root: Path, files) -> CSharpIndex:
     index = CSharpIndex(project_roots=_discover_project_roots(repo_root, live_dirs))
     by_fqn: dict[str, ClassHeritage | None] = {}   # partials merged per fully-qualified name
     method_files: dict[tuple[str, str], str | None] = {}
-    for file, rel in zip(files, rels):
-        try:
-            source = Path(file).read_bytes()
-        except OSError:
-            continue
-        root = parse_source("csharp", source, 0).root_node
-        _index_file(root, source, rel, index, by_fqn, method_files)
+    # MAP: parse each file into a pure partial fragment (parallel over ``jobs`` processes).
+    fragments = parallel_map([(str(f), rel) for f, rel in zip(files, rels)], _index_one, jobs)
+    # REDUCE: fold fragments into the shared index (deterministic, order-independent).
+    for frag in fragments:
+        if frag is not None:
+            _merge_fragment(index, by_fqn, method_files, frag)
     # attach each class's method→file map to its (unambiguous) heritage record, then project
     # fully-qualified heritage down to simple names (distinct types sharing a name → None)
     for (fqn, mname), mfile in method_files.items():

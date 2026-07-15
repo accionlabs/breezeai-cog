@@ -31,7 +31,7 @@ class JavaParser(BaseParser):
     statement_types = STATEMENT_TYPES
     frameworks = FRAMEWORKS
 
-    def build_index(self, repo_root: Path, files: Sequence[Path]) -> FqcnIndex:
+    def build_index(self, repo_root: Path, files: Sequence[Path], jobs: int = 1) -> FqcnIndex:
         """Repo-level pre-pass: map each file's package.ClassName → repo path (FQCN)."""
         return build_fqcn_index(Path(repo_root), files)
 

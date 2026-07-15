@@ -56,7 +56,7 @@ class VbParser(BaseParser):
     statement_types = STATEMENT_TYPES
     frameworks = FRAMEWORKS
 
-    def build_index(self, repo_root: Path, files: Sequence[Path]) -> VbIndex:
+    def build_index(self, repo_root: Path, files: Sequence[Path], jobs: int = 1) -> VbIndex:
         """Repo-level pre-pass: simple class name → heritage (base + attributes), for
         cross-file base-controller route/auth resolution (ASP.NET). No namespace→file map
         (VB imports name namespaces); heritage only."""
