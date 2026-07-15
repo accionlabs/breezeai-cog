@@ -29,9 +29,9 @@ from pathlib import Path
 from tree_sitter import Node
 
 from ...utils import repo_relative
-from ..index_common import ClassHeritage, record_heritage
+from ..index_common import ClassHeritage, record_distinct, record_heritage
 from ..treesitter import node_text, parse_source
-from .functions import extract_attributes
+from .functions import extract_attributes, flags
 
 _NAME_NODES = ("qualified_name", "identifier", "alias_qualified_name", "member_access_expression")
 _CLASS_TYPES = (
@@ -53,10 +53,14 @@ class CSharpIndex:
     #: repo-relative dirs containing a ``.csproj`` (an assembly boundary), sorted
     #: longest-first so the nearest ancestor of a file is its owning project.
     project_roots: list[str] = field(default_factory=list)
-    #: simple class name → its heritage (base + decorators), for cross-file base-class
-    #: resolution. Value is ``None`` when the name is declared by >1 class with differing
-    #: bases (ambiguous → callers must not resolve through it: honest-null).
+    #: simple class name → its heritage (base + decorators + method→file), for cross-file
+    #: base-class resolution. Value is ``None`` when the name is declared by >1 class with
+    #: differing bases (ambiguous → callers must not resolve through it: honest-null).
     class_heritage: dict[str, ClassHeritage | None] = field(default_factory=dict)
+    #: (extension-method name, simple ``this``-param type) → defining file. ``None`` when the
+    #: same (name, type) is defined in >1 file (ambiguous → honest-null). Drives the resolver's
+    #: extension-method tier (``recv.M()`` where ``M`` is ``static M(this T …)``).
+    ext_methods: dict[tuple[str, str], str | None] = field(default_factory=dict)
 
     def project_of(self, path: str) -> str | None:
         """The owning project (nearest ancestor ``.csproj`` dir) of a repo-relative file."""
@@ -131,8 +135,46 @@ def _record_heritage(index: CSharpIndex, name: str, node: Node, source: bytes) -
                     _base_name(node, source), extract_attributes(node, source))
 
 
-def _index_file(root: Node, source: bytes, rel: str, index: CSharpIndex) -> None:
-    """Add one file's ``global using`` namespaces + declared types to ``index``."""
+def _extension_this_type(node: Node, source: bytes) -> str | None:
+    """Simple type of a method's ``this`` (extension) parameter, or ``None`` when ``node`` is
+    not a ``static M(this T …)`` extension method."""
+    _, is_static = flags(node, source)
+    if not is_static:
+        return None
+    params = node.child_by_field_name("parameters")
+    first = next((p for p in params.named_children if p.type == "parameter"), None) if params else None
+    if first is None:
+        return None
+    if not any(c.type == "modifier" and node_text(c, source) == "this" for c in first.children):
+        return None
+    tnode = first.child_by_field_name("type")
+    return _simple(node_text(tnode, source)) if tnode is not None else None
+
+
+def _index_members(
+    class_name: str, body: Node, source: bytes, rel: str, index: CSharpIndex,
+    method_files: dict[tuple[str, str], str | None],
+) -> None:
+    """Record the class's declared methods (``(class, method) → file``, for inherited-call
+    resolution) and any extension methods it defines (``(method, this-type) → file``)."""
+    for member in body.named_children:
+        if member.type != "method_declaration":
+            continue
+        mn = member.child_by_field_name("name")
+        if mn is None:
+            continue
+        mname = node_text(mn, source)
+        record_distinct(method_files, (class_name, mname), rel)
+        this_type = _extension_this_type(member, source)
+        if this_type:
+            record_distinct(index.ext_methods, (mname, this_type), rel)
+
+
+def _index_file(
+    root: Node, source: bytes, rel: str, index: CSharpIndex,
+    method_files: dict[tuple[str, str], str | None],
+) -> None:
+    """Add one file's ``global using`` namespaces + declared types + members to ``index``."""
     for child in root.named_children:
         if child.type == "using_directive":
             kind, name, _ = _classify_using(child, source)
@@ -151,10 +193,12 @@ def _index_file(root: Node, source: bytes, rel: str, index: CSharpIndex) -> None
                     walk(body, _join(local_ns, _decl_name(child, source)))
             elif t in _CLASS_TYPES:
                 nm = _decl_name(child, source)
+                body = child.child_by_field_name("body")
                 if nm:
                     index.types.setdefault(_join(local_ns, nm), set()).add(rel)
                     _record_heritage(index, nm, child, source)
-                body = child.child_by_field_name("body")
+                    if body is not None:
+                        _index_members(nm, body, source, rel, index, method_files)
                 if body is not None:
                     walk(body, local_ns)  # nested types share the enclosing namespace
 
@@ -192,13 +236,19 @@ def build_csharp_index(repo_root: Path, files) -> CSharpIndex:
         for i in range(1, len(parts) + 1):
             live_dirs.add("/".join(parts[:i]))
     index = CSharpIndex(project_roots=_discover_project_roots(repo_root, live_dirs))
+    method_files: dict[tuple[str, str], str | None] = {}
     for file, rel in zip(files, rels):
         try:
             source = Path(file).read_bytes()
         except OSError:
             continue
         root = parse_source("csharp", source, 0).root_node
-        _index_file(root, source, rel, index)
+        _index_file(root, source, rel, index, method_files)
+    # attach each class's method→file map to its (unambiguous) heritage record
+    for (cname, mname), mfile in method_files.items():
+        heritage = index.class_heritage.get(cname)
+        if heritage is not None:
+            heritage.methods[mname] = mfile
     return index
 
 

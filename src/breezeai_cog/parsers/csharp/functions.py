@@ -86,7 +86,10 @@ def _callee(func: Node, source: bytes) -> tuple[str, str | None]:
     return method_name(func, source), None
 
 
-def _calls(body: Node | None, source: bytes, resolve: CallResolver = noop_resolver) -> list[Call]:
+def _calls(
+    body: Node | None, source: bytes, resolve: CallResolver = noop_resolver,
+    owner: str | None = None,
+) -> list[Call]:
     if body is None:
         return []
     calls: list[Call] = []
@@ -102,7 +105,7 @@ def _calls(body: Node | None, source: bytes, resolve: CallResolver = noop_resolv
                     name, receiver = _callee(func, source)
                     if name and name not in seen:
                         seen.add(name)
-                        calls.append(Call(name=name, path=resolve(name, receiver)))
+                        calls.append(Call(name=name, path=resolve(name, receiver, owner)))
             visit(child)
 
     visit(body)
@@ -204,7 +207,7 @@ def build_method(
         returnType=node_text(ret, source) if ret is not None else None,
         startLine=start,
         endLine=end,
-        calls=_calls(body, source, resolve),
+        calls=_calls(body, source, resolve, class_name),
     )
     statements = extract_statements(
         body, source, path, parent_id=fid, capture=capture, limit=limit, seen_ids=seen_ids,

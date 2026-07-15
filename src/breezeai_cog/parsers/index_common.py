@@ -10,7 +10,7 @@ builders (C#/VB class heritage, TS string constants) that each hand-rolled it.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Callable, Hashable, TypeVar
 
 from ..schemas import Decorator
@@ -47,13 +47,20 @@ def record_distinct(
 
 @dataclass
 class ClassHeritage:
-    """One class's heritage for cross-file base-class resolution — its base *class* (simple
-    name) and the raw attributes/decorators declared on it. Language-agnostic (C#, VB.NET);
-    ASP.NET route resolution walks this to inherit a base controller's ``[Route]`` /
-    ``[Authorize]``."""
+    """One class's heritage for cross-file resolution — its base *class* (simple name), the
+    raw attributes/decorators declared on it, and (for call resolution) the methods it
+    declares mapped to their defining file. Language-agnostic (C#, VB.NET): ASP.NET route
+    resolution walks the base chain to inherit a controller's ``[Route]`` / ``[Authorize]``,
+    and the call resolver walks it to resolve inherited-method calls to the declaring file.
+
+    ``methods`` maps method name → declaring file, or ``None`` when the name is declared in
+    >1 file for this class (partial-class split / overload ambiguity → honest-null). It is
+    empty for builders that don't support inherited-call resolution, so the inheritance tier
+    stays inert for them."""
 
     extends: str | None
     decorators: list[Decorator]
+    methods: dict[str, str | None] = field(default_factory=dict)
 
 
 def record_heritage(

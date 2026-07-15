@@ -286,3 +286,93 @@ def test_same_project_type_wins(tmp_path) -> None:
     assert rec2.importFiles == []
     calls2 = {c.name: c.path for f in rec2.functions for c in f.calls}
     assert calls2.get("Do") is None
+
+
+# --- inherited base-class & extension-method call resolution --------------------------
+
+def test_inherited_base_method_resolves(tmp_path) -> None:
+    # `this.M()` where M is declared on a base class in ANOTHER file → the base's file.
+    rec = _parse_repo(tmp_path, {
+        "Svc/BaseService.cs":
+            "namespace App;\npublic class BaseService { protected void LogAudit(string m){} }\n",
+        "Svc/OrderService.cs":
+            "namespace App;\n"
+            "public class OrderService : BaseService {\n"
+            "    public void Place(){ this.LogAudit(\"x\"); }\n"
+            "}\n",
+    }, "Svc/OrderService.cs")
+    calls = {c.name: c.path for f in rec.functions for c in f.calls}
+    assert calls.get("LogAudit") == "Svc/BaseService.cs"
+
+
+def test_extension_method_resolves(tmp_path) -> None:
+    # `recv.M()` where M is `static M(this T…)` and recv's type is the external T → the
+    # extension's defining file (Phase 2 finds no in-repo member, extension tier resolves).
+    rec = _parse_repo(tmp_path, {
+        "Data/DataLayer.cs":
+            "using System.Data;\nnamespace App.Data;\n"
+            "public static class DataLayer {\n"
+            "    public static object GetSqlData(this IDataReader r, string sql){ return null; }\n"
+            "}\n",
+        "Repos/ReservationRepository.cs":
+            "using System.Data;\nusing App.Data;\nnamespace App.Repos;\n"
+            "public class ReservationRepository {\n"
+            "    public void Load(IDataReader reader){ var d = reader.GetSqlData(\"q\"); }\n"
+            "}\n",
+    }, "Repos/ReservationRepository.cs")
+    calls = {c.name: c.path for f in rec.functions for c in f.calls}
+    assert calls.get("GetSqlData") == "Data/DataLayer.cs"
+
+
+def test_external_method_call_stays_null(tmp_path) -> None:
+    # Precision: a call on an external (BCL) receiver with no in-repo extension stays null —
+    # the new tiers must never fabricate an edge.
+    rec = _parse_repo(tmp_path, {
+        "Repos/Repo.cs":
+            "using System.Data;\nnamespace App.Repos;\n"
+            "public class Repo { public void Load(IDataReader reader){ reader.Read(); } }\n",
+    }, "Repos/Repo.cs")
+    calls = {c.name: c.path for f in rec.functions for c in f.calls}
+    assert calls.get("Read") is None
+
+
+def test_ambiguous_extension_stays_null(tmp_path) -> None:
+    # The same extension (method, this-type) defined in >1 file → ambiguous → None.
+    rec = _parse_repo(tmp_path, {
+        "Ext/A.cs":
+            "using System.Data;\nnamespace App.A;\n"
+            "public static class A { public static int M(this IDataReader r){ return 1; } }\n",
+        "Ext/B.cs":
+            "using System.Data;\nnamespace App.B;\n"
+            "public static class B { public static int M(this IDataReader r){ return 2; } }\n",
+        "Use/User.cs":
+            "using System.Data;\nusing App.A;\nusing App.B;\nnamespace App.Use;\n"
+            "public class User { public void Go(IDataReader reader){ reader.M(); } }\n",
+    }, "Use/User.cs")
+    calls = {c.name: c.path for f in rec.functions for c in f.calls}
+    assert calls.get("M") is None
+
+
+def test_partial_class_method_resolves_to_declaring_file(tmp_path) -> None:
+    # A base split across partial files: `this.M()` resolves to the partial file that
+    # actually declares M (not merely the first-seen partial).
+    rec = _parse_repo(tmp_path, {
+        "Base.Part1.cs": "namespace App;\npublic partial class Base { }\n",
+        "Base.Part2.cs": "namespace App;\npublic partial class Base { public void Helper(){} }\n",
+        "Derived.cs":
+            "namespace App;\npublic class Derived : Base { public void F(){ this.Helper(); } }\n",
+    }, "Derived.cs")
+    calls = {c.name: c.path for f in rec.functions for c in f.calls}
+    assert calls.get("Helper") == "Base.Part2.cs"
+
+
+def test_partial_class_ambiguous_method_stays_null(tmp_path) -> None:
+    # A method name declared in BOTH partial files can't be pinned to one file → None.
+    rec = _parse_repo(tmp_path, {
+        "Base.Part1.cs": "namespace App;\npublic partial class Base { public void Dup(){} }\n",
+        "Base.Part2.cs": "namespace App;\npublic partial class Base { public void Dup(int x){} }\n",
+        "Derived.cs":
+            "namespace App;\npublic class Derived : Base { public void F(){ this.Dup(); } }\n",
+    }, "Derived.cs")
+    calls = {c.name: c.path for f in rec.functions for c in f.calls}
+    assert calls.get("Dup") is None
