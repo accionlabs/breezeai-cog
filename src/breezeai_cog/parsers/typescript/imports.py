@@ -16,7 +16,7 @@ from typing import Sequence
 from tree_sitter import Node
 
 from ...utils import repo_relative
-from ..index_common import record_distinct
+from ..index_common import parallel_map, record_distinct
 from ..treesitter import node_text, parse_source
 
 _SUFFIXES = (".ts", ".tsx", ".d.ts", ".js", ".jsx", ".mjs", ".cjs")
@@ -122,22 +122,33 @@ def _collect_const_values(root: Node, source: bytes, const_values: dict[str, str
                             add(f"{node_text(cname, source)}.{node_text(fn, source)}", _string_literal(fv, source))
 
 
-def build_ts_index(repo_root: Path, files: Sequence[Path]) -> TsAliasIndex | None:
-    """Repo-level pre-pass: tsconfig aliases + a string-constant value map (parses each TS
-    file once). Returns None only when there are neither aliases nor constants."""
-    alias = build_alias_index(repo_root)
+def _ts_index_one(file_s: str) -> dict[str, str | None] | None:
+    """Parse one TS/JS file into its partial string-constant map — pure, picklable worker
+    for :func:`parallel_map`. Returns ``None`` on read/parse failure."""
+    try:
+        src = Path(file_s).read_bytes()
+    except OSError:
+        return None
+    grammar = "tsx" if file_s.endswith((".tsx", ".jsx")) else "typescript"
+    try:
+        root = parse_source(grammar, src, 0).root_node
+    except Exception:
+        return None
     const_values: dict[str, str | None] = {}
-    for f in files:
-        try:
-            src = Path(f).read_bytes()
-        except OSError:
-            continue
-        grammar = "tsx" if str(f).endswith((".tsx", ".jsx")) else "typescript"
-        try:
-            root = parse_source(grammar, src, 0).root_node
-        except Exception:
-            continue
-        _collect_const_values(root, src, const_values)
+    _collect_const_values(root, src, const_values)
+    return const_values
+
+
+def build_ts_index(repo_root: Path, files: Sequence[Path], jobs: int = 1) -> TsAliasIndex | None:
+    """Repo-level pre-pass: tsconfig aliases + a string-constant value map (parses each TS
+    file once, across ``jobs`` processes). Returns None only when there are neither aliases
+    nor constants."""
+    alias = build_alias_index(repo_root)  # repo-level (tsconfig) — computed once in main
+    const_values: dict[str, str | None] = {}
+    for frag in parallel_map([str(f) for f in files], _ts_index_one, jobs):
+        if frag:
+            for sym, literal in frag.items():
+                record_distinct(const_values, sym, literal)
     if alias is None and not const_values:
         return None
     return TsAliasIndex(

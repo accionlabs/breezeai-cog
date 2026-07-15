@@ -10,10 +10,32 @@ builders (C#/VB class heritage, TS string constants) that each hand-rolled it.
 
 from __future__ import annotations
 
+import multiprocessing as mp
+from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass, field
-from typing import Callable, Hashable, TypeVar
+from typing import Callable, Hashable, Sequence, TypeVar
 
 from ..schemas import Decorator
+
+try:  # fork lets workers inherit the parent's already-imported modules (no costly re-import).
+    _CTX = mp.get_context("fork")  # POSIX
+except ValueError:  # pragma: no cover - Windows / no fork
+    _CTX = mp.get_context("spawn")
+
+T = TypeVar("T")
+R = TypeVar("R")
+
+
+def parallel_map(items: Sequence[T], fn: Callable[[T], R], jobs: int = 1) -> list[R]:
+    """Map ``fn`` over ``items`` across a process pool, preserving order. Falls back to a
+    plain serial map when ``jobs <= 1`` or there is at most one item (so ``--jobs 1`` stays
+    single-process and deterministic). ``fn`` and every item must be picklable, so pass a
+    module-level function and plain-data items. Runs before the parse pool (never concurrent
+    with it), so reusing the same ``jobs`` count does not oversubscribe."""
+    if jobs <= 1 or len(items) <= 1:
+        return [fn(x) for x in items]
+    with ProcessPoolExecutor(max_workers=jobs, mp_context=_CTX) as pool:
+        return list(pool.map(fn, items))
 
 K = TypeVar("K", bound=Hashable)
 V = TypeVar("V")

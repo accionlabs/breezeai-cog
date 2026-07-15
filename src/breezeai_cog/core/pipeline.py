@@ -8,6 +8,7 @@ temp strategy lives in ``FileSink``.
 
 from __future__ import annotations
 
+import os
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -67,10 +68,12 @@ def _scan_entries(
 
 
 def _build_indexes(
-    repo_root: Path, entries: list[ScanEntry], *, debug_on: bool = False
+    repo_root: Path, entries: list[ScanEntry], jobs: int = 1, *, debug_on: bool = False
 ) -> dict:
     """Run each parser's optional ``build_index`` once (main process). Maps
-    parser-name → index; threaded into ParseContext.resolution_index."""
+    parser-name → index; threaded into ParseContext.resolution_index. ``jobs`` is the same
+    worker count as the parse stage — passed to ``build_index`` so its per-file parse can
+    parallelize (``jobs<=1`` keeps it serial)."""
     bases: dict[str, object] = {}
     files: dict[str, list[Path]] = {}
     for entry in entries:
@@ -82,7 +85,7 @@ def _build_indexes(
     indexes: dict[str, object] = {}
     for name, base in bases.items():
         start = time.perf_counter()
-        index = base.build_index(repo_root, files[name])
+        index = base.build_index(repo_root, files[name], jobs)
         if debug_on:
             log.debug(
                 "build_index.done", parser=name, files=len(files[name]),
@@ -258,7 +261,8 @@ def run(
     debug_on = settings.log_level == "DEBUG"
     skips: dict[str, int] = {}
     entries = list(_scan_entries(repo_root, settings, skips))
-    indexes = _build_indexes(repo_root, entries, debug_on=debug_on)
+    jobs = settings.jobs if settings.jobs and settings.jobs > 0 else (os.cpu_count() or 1)
+    indexes = _build_indexes(repo_root, entries, jobs, debug_on=debug_on)
     records = executor.parse_entries(entries, repo_root, settings, indexes)
     return _assemble(
         repo_root, records, sink, candidates=len(entries), skips=skips,
