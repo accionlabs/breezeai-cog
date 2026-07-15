@@ -148,7 +148,10 @@ def extract_params(params_node: Node | None, source: bytes) -> list[Parameter]:
     return out
 
 
-def _calls(body: Node | None, source: bytes, resolve: CallResolver = noop_resolver) -> list[Call]:
+def _calls(
+    body: Node | None, source: bytes, resolve: CallResolver = noop_resolver,
+    owner: str | None = None,
+) -> list[Call]:
     if body is None:
         return []
     calls: list[Call] = []
@@ -169,7 +172,7 @@ def _calls(body: Node | None, source: bytes, resolve: CallResolver = noop_resolv
                     receiver = callee.rsplit(".", 1)[0] if "." in callee else None
                     if name.isidentifier() and name not in seen:
                         seen.add(name)
-                        calls.append(Call(name=name, path=resolve(name, receiver)))
+                        calls.append(Call(name=name, path=resolve(name, receiver, owner)))
             visit(child)
 
     visit(body)
@@ -208,7 +211,7 @@ def build_function(
         returnType=_type_text(node.child_by_field_name("return_type"), source),
         startLine=start,
         endLine=end,
-        calls=_calls(body, source, resolve),
+        calls=_calls(body, source, resolve, class_name),
     )
     statements = extract_statements(
         body, source, path, parent_id=fid, capture=capture, limit=limit, seen_ids=seen_ids,

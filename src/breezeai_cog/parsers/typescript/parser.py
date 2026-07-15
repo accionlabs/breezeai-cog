@@ -105,8 +105,9 @@ class TypeScriptParser(BaseParser):
         internal, external, exports, bindings = extract_imports(
             root, source, path, ctx.repo_root, ctx.resolution_index
         )
-        resolve = make_resolver(  # calls[].path (Tiers 1+2 + receiver-type Phase 2)
-            bindings, defined_names(root, source), path, type_map(root, source)
+        resolve = make_resolver(  # calls[].path (Tiers 1+2 + Phase 2 + inherited this.M())
+            bindings, defined_names(root, source), path, type_map(root, source),
+            heritage=getattr(ctx.resolution_index, "class_heritage", None),
         )
         functions: list[Function] = []
         classes = []

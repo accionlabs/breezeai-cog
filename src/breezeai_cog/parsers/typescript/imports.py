@@ -16,7 +16,7 @@ from typing import Sequence
 from tree_sitter import Node
 
 from ...utils import repo_relative
-from ..index_common import parallel_map, record_distinct
+from ..index_common import ClassHeritage, parallel_map, record_distinct
 from ..treesitter import node_text, parse_source
 
 _SUFFIXES = (".ts", ".tsx", ".d.ts", ".js", ".jsx", ".mjs", ".cjs")
@@ -37,6 +37,9 @@ class TsAliasIndex:
     base_dir: str  # absolute baseUrl directory
     paths: dict[str, list[str]]  # e.g. {"@app/*": ["src/app/*"]}
     const_values: dict[str, str | None] = field(default_factory=dict)
+    #: simple class name → heritage (base + method→file), for resolving inherited `this.M()`
+    #: calls to the declaring base file. A name declared in >1 file → ``None`` (ambiguous).
+    class_heritage: dict[str, ClassHeritage | None] = field(default_factory=dict)
 
 
 def _load_jsonc(path: Path) -> dict | None:
@@ -122,9 +125,40 @@ def _collect_const_values(root: Node, source: bytes, const_values: dict[str, str
                             add(f"{node_text(cname, source)}.{node_text(fn, source)}", _string_literal(fv, source))
 
 
-def _ts_index_one(file_s: str) -> dict[str, str | None] | None:
-    """Parse one TS/JS file into its partial string-constant map — pure, picklable worker
-    for :func:`parallel_map`. Returns ``None`` on read/parse failure."""
+_CLASS_NODES = ("class_declaration", "class", "abstract_class_declaration")
+
+
+def _collect_heritage(root: Node, source: bytes, rel: str) -> dict[str, ClassHeritage]:
+    """Each class declared in this file → its heritage: base class name + the methods it
+    declares mapped to this file. (A TS class lives in one file, so every method → ``rel``.)"""
+    from .classes import _heritage  # lazy — avoid an import cycle with classes.py
+
+    out: dict[str, ClassHeritage] = {}
+
+    def walk(node: Node) -> None:
+        for child in node.named_children:
+            if child.type in _CLASS_NODES:
+                nm = child.child_by_field_name("name")
+                body = child.child_by_field_name("body")
+                if nm is not None:
+                    extends, _ = _heritage(child, source)
+                    methods: dict[str, str | None] = {}
+                    for m in (body.named_children if body is not None else []):
+                        if m.type == "method_definition":
+                            mn = m.child_by_field_name("name")
+                            if mn is not None:
+                                methods[node_text(mn, source)] = rel
+                    out[node_text(nm, source)] = ClassHeritage(extends=extends, decorators=[], methods=methods)
+            walk(child)
+
+    walk(root)
+    return out
+
+
+def _ts_index_one(args: tuple[str, str]) -> tuple[dict[str, str | None], dict[str, ClassHeritage]] | None:
+    """Parse one TS/JS file into its partial (string-constant map, class-heritage map) — pure,
+    picklable worker for :func:`parallel_map`. Returns ``None`` on read/parse failure."""
+    file_s, rel = args
     try:
         src = Path(file_s).read_bytes()
     except OSError:
@@ -136,25 +170,32 @@ def _ts_index_one(file_s: str) -> dict[str, str | None] | None:
         return None
     const_values: dict[str, str | None] = {}
     _collect_const_values(root, src, const_values)
-    return const_values
+    return const_values, _collect_heritage(root, src, rel)
 
 
 def build_ts_index(repo_root: Path, files: Sequence[Path], jobs: int = 1) -> TsAliasIndex | None:
-    """Repo-level pre-pass: tsconfig aliases + a string-constant value map (parses each TS
-    file once, across ``jobs`` processes). Returns None only when there are neither aliases
-    nor constants."""
+    """Repo-level pre-pass: tsconfig aliases, a string-constant value map, and class heritage
+    (for inherited-call resolution) — parses each file once, across ``jobs`` processes. Returns
+    None only when there is nothing to resolve with."""
     alias = build_alias_index(repo_root)  # repo-level (tsconfig) — computed once in main
     const_values: dict[str, str | None] = {}
-    for frag in parallel_map([str(f) for f in files], _ts_index_one, jobs):
-        if frag:
-            for sym, literal in frag.items():
-                record_distinct(const_values, sym, literal)
-    if alias is None and not const_values:
+    class_heritage: dict[str, ClassHeritage | None] = {}
+    args = [(str(f), repo_relative(f, repo_root)) for f in files]
+    for frag in parallel_map(args, _ts_index_one, jobs):
+        if not frag:
+            continue
+        cv, heritage = frag
+        for sym, literal in cv.items():
+            record_distinct(const_values, sym, literal)
+        for cname, ch in heritage.items():  # same class name in >1 file → None (distinct types)
+            record_distinct(class_heritage, cname, ch, same=lambda a, b: False)
+    if alias is None and not const_values and not class_heritage:
         return None
     return TsAliasIndex(
         base_dir=alias.base_dir if alias else str(repo_root),
         paths=alias.paths if alias else {},
         const_values=const_values,
+        class_heritage=class_heritage,
     )
 
 
