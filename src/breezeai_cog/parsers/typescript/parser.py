@@ -89,7 +89,7 @@ class TypeScriptParser(BaseParser):
     def build_index(self, repo_root: Path, files: Sequence[Path], jobs: int = 1) -> TsAliasIndex | None:
         """Repo-level pre-pass: tsconfig path aliases + a string-constant value map (for
         resolving non-literal route paths like Angular's ``path: RouteNames.X``)."""
-        return build_ts_index(Path(repo_root), files)
+        return build_ts_index(Path(repo_root), files, jobs)
 
     def parse_file(self, ctx: ParseContext) -> FileRecord:
         grammar = "tsx" if ctx.path.endswith(_TSX_EXT) else "typescript"

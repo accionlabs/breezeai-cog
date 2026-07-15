@@ -60,7 +60,7 @@ class VbParser(BaseParser):
         """Repo-level pre-pass: simple class name → heritage (base + attributes), for
         cross-file base-controller route/auth resolution (ASP.NET). No namespace→file map
         (VB imports name namespaces); heritage only."""
-        return build_vb_index(Path(repo_root), files)
+        return build_vb_index(Path(repo_root), files, jobs)
 
     def parse_file(self, ctx: ParseContext) -> FileRecord:
         root = parse_source("vb", ctx.source, ctx.parse_timeout_micros).root_node

@@ -15,7 +15,7 @@ from pathlib import Path
 
 from tree_sitter import Node
 
-from ..index_common import ClassHeritage, record_heritage
+from ..index_common import ClassHeritage, parallel_map, record_heritage
 from ..treesitter import node_text, parse_source
 
 
@@ -42,27 +42,41 @@ class VbIndex:
     class_heritage: dict[str, ClassHeritage | None] = field(default_factory=dict)
 
 
-def build_vb_index(repo_root: Path, files) -> VbIndex:
-    """Repo-level pre-pass: map each declared VB type's simple name → its heritage (base
-    class + attributes). VB ``Imports`` name namespaces (no namespace→file map), so only
-    heritage is indexed — enough for ASP.NET cross-file base-controller resolution."""
+def _vb_index_one(file_s: str) -> dict[str, ClassHeritage | None] | None:
+    """Parse one VB file into its partial ``class_heritage`` map — pure, picklable worker
+    for :func:`parallel_map`. Returns ``None`` on read failure."""
     # Lazy imports: parser.py imports this module, so a top-level import would cycle.
     from .classes import _heritage
     from .functions import attributes_from_blocks
     from .parser import iter_type_declarations
 
-    index = VbIndex()
-    for file in files:
-        try:
-            source = Path(file).read_bytes()
-        except OSError:
+    try:
+        source = Path(file_s).read_bytes()
+    except OSError:
+        return None
+    root = parse_source("vb", source, 0).root_node
+    heritage: dict[str, ClassHeritage | None] = {}
+    for block, attrs in iter_type_declarations(root):
+        name_node = block.child_by_field_name("name")
+        name = node_text(name_node, source) if name_node is not None else None
+        if not name:
             continue
-        root = parse_source("vb", source, 0).root_node
-        for block, attrs in iter_type_declarations(root):
-            name_node = block.child_by_field_name("name")
-            name = node_text(name_node, source) if name_node is not None else None
-            if not name:
-                continue
-            record_heritage(index.class_heritage, name,
-                            _heritage(block, source)[0], attributes_from_blocks(attrs, source))
+        record_heritage(heritage, name, _heritage(block, source)[0], attributes_from_blocks(attrs, source))
+    return heritage
+
+
+def build_vb_index(repo_root: Path, files, jobs: int = 1) -> VbIndex:
+    """Repo-level pre-pass: map each declared VB type's simple name → its heritage (base
+    class + attributes), parsing each file across ``jobs`` processes. VB ``Imports`` name
+    namespaces (no namespace→file map), so only heritage is indexed — enough for ASP.NET
+    cross-file base-controller resolution."""
+    index = VbIndex()
+    for frag in parallel_map([str(f) for f in files], _vb_index_one, jobs):
+        if not frag:
+            continue
+        for name, ch in frag.items():
+            if ch is None:
+                index.class_heritage[name] = None
+            else:
+                record_heritage(index.class_heritage, name, ch.extends, ch.decorators)
     return index
