@@ -150,8 +150,9 @@ their own detection the same way** (see the framework example below).
 
 ### Step 5c — Skip route-only fixture files (story/test harnesses)
 Story/test files render components in throwaway routers, so their "routes" are fixtures, not
-application routes. A **route-emitting** framework parser must gate detection on
-`self.is_fixture_file(ctx.path)` **as well as** `capture_statements`:
+application routes. **Anything that emits routes** — a framework parser or an additive
+`detect_*` pass — must gate detection on `self.is_fixture_file(ctx.path)` **as well as**
+`capture_statements`:
 ```python
 if ctx.capture_statements and not self.is_fixture_file(ctx.path):
     routes = detect_xxx_routes(...)
@@ -167,11 +168,43 @@ to a global list. (Full `*.test.*` / `*.spec.*` *exclusion* already lives in
 If imports/symbols need repo-wide info (path aliases, fully-qualified class names, route
 mounts):
 ```python
-def build_index(self, repo_root, files):
+def build_index(self, repo_root, files, jobs=1):
     return <picklable index>   # threaded into ctx.resolution_index
 ```
-The pipeline runs it once in the main process and passes the (picklable!) result to every
-worker. Use it in `extract`/`imports` via `ctx.resolution_index`.
+The pipeline runs it once in the main process (before the parse pool), passing the **same
+`jobs`** as the parse stage, and hands the (picklable!) result to every worker. Use it in
+`extract`/`imports` via `ctx.resolution_index`.
+
+**Parallelize a full-parse index.** If `build_index` parses every file, don't loop serially —
+split it map/reduce so it scales with `jobs`:
+```python
+def _index_one(args):              # module-level + picklable (runs in a worker process)
+    path, rel = args
+    root = parse_source(LANG, Path(path).read_bytes(), 0).root_node
+    return <partial fragment>      # pure — no shared state
+
+def build_index(self, repo_root, files, jobs=1):
+    index = <empty>
+    for frag in parallel_map([(str(f), rel(f)) for f in files], _index_one, jobs):
+        <merge frag into index>    # deterministic, order-independent
+    return index
+```
+`parallel_map(items, fn, jobs=1)` (import from `..index_common`) owns the worker pool: it runs
+`fn` over `items` across `jobs` processes and **falls back to a plain serial map at `jobs<=1`**
+— so calling it with the default is safe (no pool, no `__main__`/spawn constraint; unit tests
+build indexes at `jobs=1`). `fn` and every item must be picklable. The merge must be
+**order-independent** so the built index is identical regardless of scheduling.
+
+**Reuse `index_common` — don't re-implement these:**
+- `record_distinct(map, key, value)` — the honest-null "conflict ⇒ `None`" collapse (mutates
+  `map` in place, returns `None`). A key seen again with the **same** value stays resolved;
+  only a **differing** value collapses it to `None` — resolving to nothing rather than a guess.
+  Use it for any `name → file` index and as the order-independent fragment-merge step.
+- `ClassHeritage` + `record_heritage` / `walk_heritage` — cross-file base-class heritage and
+  chain walking (base-controller route inheritance, inherited-method call resolution).
+- `merge_heritage` / `project_heritage` — partial-class-aware heritage merge (a declaration
+  that omits the base clause yields to a concrete base) plus fully-qualified → simple-name
+  projection (distinct types sharing a short name collapse to `None`).
 
 ### Step 7 — Register
 ```python
@@ -319,7 +352,8 @@ highest-`priority` parser whose `claims(path, source)` is True; the base languag
 - [ ] `PARSERS` exported from `__init__.py`.
 - [ ] `ignore.txt` / `include.txt` — **language-scoped, post-scan**; universal directory
       prunes go in `core/default_ignores.txt`.
-- [ ] `build_index` only if cross-file resolution is needed (return a **picklable** index).
+- [ ] `build_index` only if cross-file resolution is needed (return a **picklable** index); if
+      it full-parses, structure it as a `parallel_map` worker + deterministic reduce honouring `jobs`.
 - [ ] Framework parser subclasses the base, sets `priority` + `claims`, does full extraction
       + detection in a single parse. Annotation-driven frameworks detect **off the record**.
 - [ ] Unit tests + schema validation + real-repo dogfood; `uv run pytest` green.
