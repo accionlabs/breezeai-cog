@@ -14,7 +14,10 @@ from breezeai_cog.parsers.base import ParseContext
 from breezeai_cog.parsers.csharp.parser import CSharpParser
 from breezeai_cog.parsers.csharp_aspnet.parser import AspNetCoreParser
 from breezeai_cog.parsers.csharp_webforms.parser import WebFormsParser
-from breezeai_cog.parsers.csharp_webforms.routes import detect_webforms_pages
+from breezeai_cog.parsers.csharp_webforms.routes import (
+    detect_master_layout,
+    detect_webforms_pages,
+)
 from breezeai_cog.schemas import FileRecord
 
 PAGE = b'''
@@ -260,6 +263,66 @@ def test_mount_not_friendly_routed() -> None:
                                    "Ctrl.ascx.cs", {"Ctrl.ascx": ["should/not/apply"]})
     assert routes[0].endpoint == "/Ctrl.ascx"
     assert routes[0].routeKind == "mount"
+
+
+MASTER_CB = b"using System.Web.UI;\nnamespace Acme { public partial class Site : MasterPage {} }\n"
+
+
+def test_master_layout_page(tmp_path: Path) -> None:
+    # `<%@ Page MasterPageFile %>` → a routeKind=layout statement alongside the page route.
+    rec = _parse_repo(WebFormsParser(), tmp_path, "CMS/Enrollment.aspx.cs", {
+        "web.config": b"<configuration/>",
+        "CMS/Enrollment.aspx": b'<%@ Page MasterPageFile="~/Site.master" %>\n<html/>',
+        "CMS/Enrollment.aspx.cs": PAGE,
+        "Site.master": b'<%@ Master %>',                     # target must exist on disk
+        "Site.master.cs": MASTER_CB,
+    })
+    layouts = [s for s in rec.statements if s.routeKind == "layout"]
+    assert len(layouts) == 1
+    assert layouts[0].endpoint == "/Site.master"
+    assert layouts[0].semanticType == "route"
+    assert layouts[0].nodeType == "synthetic"
+    assert layouts[0].method is None                        # layout is composition, not a verb
+    # page route still present and distinct
+    assert {s.routeKind for s in rec.statements if s.semanticType == "route"} == {"page", "layout"}
+
+
+def test_master_layout_nesting(tmp_path: Path) -> None:
+    # A .master can itself declare a parent master (`<%@ Master MasterPageFile %>`).
+    rec = _parse_repo(WebFormsParser(), tmp_path, "Site.master.cs", {
+        "web.config": b"<configuration/>",
+        "Site.master": b'<%@ Master MasterPageFile="~/Root.master" %>',
+        "Site.master.cs": MASTER_CB,
+        "Root.master": b'<%@ Master %>',
+        "Root.master.cs": MASTER_CB,
+    })
+    layouts = [s for s in rec.statements if s.routeKind == "layout"]
+    assert len(layouts) == 1 and layouts[0].endpoint == "/Root.master"
+
+
+def test_master_missing_file_skipped(tmp_path: Path) -> None:
+    # Declared master not present in the repo → honest-null, no layout statement.
+    rec = _parse_repo(WebFormsParser(), tmp_path, "P.aspx.cs", {
+        "web.config": b"<configuration/>",
+        "P.aspx": b'<%@ Page MasterPageFile="~/Ghost.master" %>',
+        "P.aspx.cs": PAGE,
+    })
+    assert [s for s in rec.statements if s.routeKind == "layout"] == []
+
+
+def test_master_directive_only_not_comment(tmp_path: Path) -> None:
+    # MasterPageFile in an HTML comment is not a directive → not captured.
+    rec = _parse_repo(WebFormsParser(), tmp_path, "P.aspx.cs", {
+        "web.config": b"<configuration/>",
+        "P.aspx": b'<!-- MasterPageFile="~/Site.master" -->\n<html/>',
+        "P.aspx.cs": PAGE,
+        "Site.master": b'x', "Site.master.cs": MASTER_CB,
+    })
+    assert [s for s in rec.statements if s.routeKind == "layout"] == []
+
+
+def test_master_layout_no_master_no_statement() -> None:
+    assert detect_master_layout(_parse(WebFormsParser(), PAGE, "P.aspx.cs"), "P.aspx.cs", None) == []
 
 
 def test_output_validates() -> None:

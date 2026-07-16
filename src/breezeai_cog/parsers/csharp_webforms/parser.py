@@ -17,8 +17,8 @@ from ...schemas import FileRecord
 from ..base import ParseContext
 from ..csharp.parser import CSharpParser
 from ..treesitter import parse_source
-from .mounts import resolve_mounts
-from .routes import detect_webforms_pages
+from .mounts import read_sibling_markup, resolve_master, resolve_mounts
+from .routes import detect_master_layout, detect_webforms_pages
 
 #: Web Forms code-behind imports System.Web.UI (Page/UserControl) — NOT the MVC/Core
 #: markers that select the sibling AspNetCoreParser, so the two claim disjoint files.
@@ -38,16 +38,24 @@ class WebFormsParser(CSharpParser):
     def parse_file(self, ctx: ParseContext) -> FileRecord:
         root = parse_source("csharp", ctx.source, ctx.parse_timeout_micros).root_node
         record = self.extract(root, ctx)  # inherited C# extraction (one parse)
+        markup = read_sibling_markup(ctx.abs_path)  # read once — shared by mount + master passes
         if ctx.capture_statements:  # routes are statements — gated (spec A4)
             page_routes = getattr(ctx.resolution_index, "page_routes", None)
             routes = detect_webforms_pages(record, ctx.path, page_routes)
             if routes:
                 record.statements.extend(routes)
                 record.framework = "aspnet-webforms"
+            # Master-page composition → routeKind=layout statement (item 3).
+            layout = detect_master_layout(
+                record, ctx.path, resolve_master(markup, ctx.path, ctx.repo_root)
+            )
+            if layout:
+                record.statements.extend(layout)
+                record.framework = "aspnet-webforms"
         # Host→control mounts → importFiles (IMPORTS edge). Not statement-gated: importFiles
         # is a core cross-file field, always emitted. Deduped against existing imports,
         # sorted additions for deterministic output.
-        mounts = resolve_mounts(ctx.abs_path, ctx.path, ctx.source, ctx.repo_root)
+        mounts = resolve_mounts(markup, ctx.path, ctx.source, ctx.repo_root)
         if mounts:
             existing = set(record.importFiles)
             record.importFiles.extend(m for m in mounts if m not in existing)
