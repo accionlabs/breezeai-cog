@@ -19,7 +19,7 @@ markup pass and intentionally out of scope here."""
 from __future__ import annotations
 
 from ...emit import disambiguate, file_id, statement_id
-from ...schemas import FileRecord, Statement
+from ...schemas import Class, FileRecord, Statement
 
 #: code-behind suffix → (routeKind, nodeType). nodeType is the shared ``synthetic`` sentinel
 #: (no backing AST node — the markup isn't parsed); the page/control distinction lives in routeKind.
@@ -35,7 +35,7 @@ def _endpoint(path: str) -> str:
     return "/" + markup.lstrip("/")
 
 
-def _page_class(record: FileRecord, path: str):
+def _page_class(record: FileRecord, path: str) -> Class | None:
     """The code-behind class — normally the markup file stem
     (``CMS/Enrollment.aspx.cs`` → class ``Enrollment``); fall back to the first class."""
     stem = path.rsplit("/", 1)[-1].split(".", 1)[0]  # Enrollment.aspx.cs → Enrollment

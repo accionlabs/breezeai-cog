@@ -4,6 +4,7 @@ file-parented), capture-gating, master/base-class skipping, and parser selection
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 from jsonschema import Draft202012Validator
 
@@ -52,6 +53,21 @@ def _parse(parser, src, name, *, capture=True) -> FileRecord:
     return parser.parse_file(ctx)
 
 
+def _parse_repo(parser, root: Path, target: str, files: dict[str, bytes],
+                *, capture=True) -> FileRecord:
+    """Write ``files`` under ``root`` and parse ``target`` with on-disk context (so the
+    markup pass can read the sibling markup + verify control code-behind targets)."""
+    for rel, content in files.items():
+        p = root / rel
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_bytes(content)
+    ctx = ParseContext(
+        path=target, abs_path=root / target, source=(root / target).read_bytes(),
+        repo_root=root, capture_statements=capture,
+    )
+    return parser.parse_file(ctx)
+
+
 def test_routes_require_capture() -> None:
     rec = _parse(WebFormsParser(), PAGE, "CMS/Enrollment.aspx.cs", capture=False)
     assert [s for s in rec.statements if s.semanticType == "route"] == []
@@ -96,6 +112,70 @@ def test_base_class_file_has_no_route() -> None:
     rec = _parse(WebFormsParser(), src, "CMS/Code/CMSBaseUserControl.cs")
     assert [s for s in rec.statements if s.semanticType == "route"] == []
     assert rec.framework is None
+
+
+CTRL_CB = b"using System.Web.UI;\nnamespace Acme { public partial class Nav : UserControl {} }\n"
+
+
+def test_mount_register_src(tmp_path: Path) -> None:
+    # `<%@ Register Src %>` in the sibling markup → IMPORTS edge to the control's code-behind.
+    rec = _parse_repo(WebFormsParser(), tmp_path, "CMS/Page.aspx.cs", {
+        "web.config": b"<configuration/>",                       # app root = repo root
+        "CMS/Page.aspx": b'<%@ Register TagName="Nav" Src="~/CMS/Controls/Nav.ascx" %>\n<html/>',
+        "CMS/Page.aspx.cs": PAGE,
+        "CMS/Controls/Nav.ascx.cs": CTRL_CB,                     # target exists
+    })
+    assert "CMS/Controls/Nav.ascx.cs" in rec.importFiles
+    assert rec.framework == "aspnet-webforms"
+
+
+def test_mount_loadcontrol_literal(tmp_path: Path) -> None:
+    # `LoadControl("~/…")` in the code-behind resolves the same way.
+    cb = b'using System.Web.UI;\nnamespace Acme { public partial class P : Page {' \
+         b' void L(){ LoadControl("~/Controls/Cart.ascx"); } } }\n'
+    rec = _parse_repo(WebFormsParser(), tmp_path, "Shop/P.aspx.cs", {
+        "web.config": b"<configuration/>",
+        "Shop/P.aspx.cs": cb,
+        "Controls/Cart.ascx.cs": CTRL_CB,
+    })
+    assert "Controls/Cart.ascx.cs" in rec.importFiles
+
+
+def test_mount_dynamic_loadcontrol_unresolved(tmp_path: Path) -> None:
+    # A data-driven control name (no string literal) is honest-null — no edge.
+    cb = b'using System.Web.UI;\nnamespace Acme { public partial class P : Page {' \
+         b' void L(string n){ LoadControl(n); } } }\n'
+    rec = _parse_repo(WebFormsParser(), tmp_path, "P.aspx.cs", {
+        "web.config": b"<configuration/>", "P.aspx.cs": cb,
+    })
+    assert rec.importFiles == []
+
+
+def test_mount_missing_codebehind_skipped(tmp_path: Path) -> None:
+    # Registered control whose .ascx.cs does not exist (inline-code control) → no dangling edge.
+    rec = _parse_repo(WebFormsParser(), tmp_path, "Page.aspx.cs", {
+        "web.config": b"<configuration/>",
+        "Page.aspx": b'<%@ Register Src="~/Controls/Inline.ascx" %>',
+        "Page.aspx.cs": PAGE,   # Controls/Inline.ascx.cs intentionally absent
+    })
+    assert rec.importFiles == []
+
+
+def test_mount_app_root_in_subdir(tmp_path: Path) -> None:
+    # `~/` resolves against the app root (nearest web.config), not the repo root.
+    rec = _parse_repo(WebFormsParser(), tmp_path, "App/CMS/Page.aspx.cs", {
+        "App/web.config": b"<configuration/>",                   # app root = App/
+        "App/CMS/Page.aspx": b'<%@ Register Src="~/Controls/Nav.ascx" %>',
+        "App/CMS/Page.aspx.cs": PAGE,
+        "App/Controls/Nav.ascx.cs": CTRL_CB,                     # ~/ → App/Controls/…
+    })
+    assert "App/Controls/Nav.ascx.cs" in rec.importFiles
+
+
+def test_mount_requires_disk_context() -> None:
+    # In-memory parse (no repo_root/abs_path) must not crash and yields no mounts.
+    rec = _parse(WebFormsParser(), PAGE, "CMS/Page.aspx.cs")
+    assert rec.importFiles == []
 
 
 def test_output_validates() -> None:
