@@ -243,12 +243,20 @@ def _index_one(args: tuple[str, str]) -> _Fragment | None:
         source = Path(file_s).read_bytes()
     except OSError:
         return None
-    root = parse_source("csharp", source, 0).root_node
-    frag = CSharpIndex()
-    by_fqn: dict[str, ClassHeritage | None] = {}
-    method_files: dict[tuple[str, str], str | None] = {}
-    _index_file(root, source, rel, frag, by_fqn, method_files)
-    return frag, by_fqn, method_files
+    try:
+        root = parse_source("csharp", source, 0).root_node
+        frag = CSharpIndex()
+        by_fqn: dict[str, ClassHeritage | None] = {}
+        method_files: dict[tuple[str, str], str | None] = {}
+        _index_file(root, source, rel, frag, by_fqn, method_files)
+        return frag, by_fqn, method_files
+    except Exception as exc:  # parse OR a pathologically deep AST walk (RecursionError) — skip this file
+        from ...logging import get_logger
+        get_logger("breezeai_cog.index").warning(
+            "index.file.skipped", path=file_s, language="csharp",
+            error_type=type(exc).__name__, error=str(exc),
+        )
+        return None
 
 
 def _merge_fragment(

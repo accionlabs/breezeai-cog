@@ -54,15 +54,23 @@ def _vb_index_one(file_s: str) -> dict[str, ClassHeritage | None] | None:
         source = Path(file_s).read_bytes()
     except OSError:
         return None
-    root = parse_source("vb", source, 0).root_node
-    heritage: dict[str, ClassHeritage | None] = {}
-    for block, attrs in iter_type_declarations(root):
-        name_node = block.child_by_field_name("name")
-        name = node_text(name_node, source) if name_node is not None else None
-        if not name:
-            continue
-        record_heritage(heritage, name, _heritage(block, source)[0], attributes_from_blocks(attrs, source))
-    return heritage
+    try:
+        root = parse_source("vb", source, 0).root_node
+        heritage: dict[str, ClassHeritage | None] = {}
+        for block, attrs in iter_type_declarations(root):
+            name_node = block.child_by_field_name("name")
+            name = node_text(name_node, source) if name_node is not None else None
+            if not name:
+                continue
+            record_heritage(heritage, name, _heritage(block, source)[0], attributes_from_blocks(attrs, source))
+        return heritage
+    except Exception as exc:  # parse OR a pathologically deep AST walk (RecursionError) — skip this file
+        from ...logging import get_logger
+        get_logger("breezeai_cog.index").warning(
+            "index.file.skipped", path=file_s, language="vb",
+            error_type=type(exc).__name__, error=str(exc),
+        )
+        return None
 
 
 def build_vb_index(repo_root: Path, files, jobs: int = 1) -> VbIndex:

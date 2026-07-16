@@ -166,11 +166,16 @@ def _ts_index_one(args: tuple[str, str]) -> tuple[dict[str, str | None], dict[st
     grammar = "tsx" if file_s.endswith((".tsx", ".jsx")) else "typescript"
     try:
         root = parse_source(grammar, src, 0).root_node
-    except Exception:
+        const_values: dict[str, str | None] = {}
+        _collect_const_values(root, src, const_values)
+        return const_values, _collect_heritage(root, src, rel)
+    except Exception as exc:  # parse OR a pathologically deep AST walk (RecursionError) — skip this file
+        from ...logging import get_logger
+        get_logger("breezeai_cog.index").warning(
+            "index.file.skipped", path=file_s, language="typescript",
+            error_type=type(exc).__name__, error=str(exc),
+        )
         return None
-    const_values: dict[str, str | None] = {}
-    _collect_const_values(root, src, const_values)
-    return const_values, _collect_heritage(root, src, rel)
 
 
 def build_ts_index(repo_root: Path, files: Sequence[Path], jobs: int = 1) -> TsAliasIndex | None:
