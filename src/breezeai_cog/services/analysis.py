@@ -16,6 +16,7 @@ from ..schemas import FileRecord, ProjectMetaData
 class AnalysisResult:
     project_meta: ProjectMetaData
     out_path: Path | None
+    written: bool = True  # False when the parser produced nothing and no file was emitted
 
 
 class AnalysisService:
@@ -48,7 +49,10 @@ class AnalysisService:
             repo, self.settings, sink,
             progress=progress, summary_out=summary_out, log_summary=log_summary,
         )
-        return AnalysisResult(project_meta=meta, out_path=out_path)
+        # A FileSink skips emitting a file when nothing was parsed; caller-supplied sinks
+        # own their own semantics, so assume they always "wrote".
+        written = sink.wrote if isinstance(sink, FileSink) else True
+        return AnalysisResult(project_meta=meta, out_path=out_path, written=written)
 
     def iter_file_records(self, repo: str | Path) -> Iterator[FileRecord]:
         for _entry, record in pipeline.iter_records(repo, self.settings):

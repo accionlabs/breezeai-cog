@@ -41,7 +41,12 @@ class MemorySink:
 
 
 class FileSink:
-    """Writes ``<out>.ndjson.gz`` with ``projectMetaData`` as the first line."""
+    """Writes ``<out>.ndjson.gz`` with ``projectMetaData`` as the first line.
+
+    If the analysis captured no real content (see :meth:`ProjectMetaData.has_content` —
+    e.g. a folder whose only file is a trivial config), ``finalize`` emits no file at all
+    and leaves :attr:`wrote` ``False`` — an empty ontology is never useful downstream
+    (and would upload as a no-op)."""
 
     def __init__(self, out_path: str | Path, *, gzip_level: int = DEFAULT_LEVEL) -> None:
         self.out_path = Path(out_path)
@@ -50,6 +55,7 @@ class FileSink:
         self.out_path.parent.mkdir(parents=True, exist_ok=True)
         self._body = self._tmp.open("w", encoding="utf-8")
         self._finalized = False
+        self.wrote = False  # True once finalize writes an actual file
 
     def write(self, record: FileRecord) -> None:
         self._body.write(to_line(record))
@@ -58,9 +64,13 @@ class FileSink:
         if self._finalized:
             raise RuntimeError("FileSink already finalized")
         self._body.close()
+        self._finalized = True
+        if not project_meta.has_content():  # nothing worth persisting — write no file
+            self._tmp.unlink(missing_ok=True)
+            return
         with open_gzip_text(self.out_path, self._gzip_level) as out:
             out.write(to_line(project_meta))  # projectMetaData first
             with self._tmp.open("r", encoding="utf-8") as body:
                 shutil.copyfileobj(body, out)
         self._tmp.unlink(missing_ok=True)
-        self._finalized = True
+        self.wrote = True

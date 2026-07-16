@@ -28,10 +28,12 @@ from pathlib import Path
 
 from tree_sitter import Node
 
-from ...schemas import Decorator
 from ...utils import repo_relative
+from ..index_common import (
+    ClassHeritage, merge_heritage, parallel_map, project_heritage, record_distinct,
+)
 from ..treesitter import node_text, parse_source
-from .functions import extract_attributes
+from .functions import extract_attributes, flags
 
 _NAME_NODES = ("qualified_name", "identifier", "alias_qualified_name", "member_access_expression")
 _CLASS_TYPES = (
@@ -39,16 +41,6 @@ _CLASS_TYPES = (
     "struct_declaration", "record_declaration",
 )
 _NAMESPACE_TYPES = ("namespace_declaration", "file_scoped_namespace_declaration")
-
-
-@dataclass
-class ClassHeritage:
-    """Generic C# heritage for one class — its base *class* (simple name) and the raw
-    attributes declared on it. Framework-agnostic (just language facts); ASP.NET route
-    resolution walks this to inherit a base controller's ``[Route]``/``[Authorize]``."""
-
-    extends: str | None
-    decorators: list[Decorator]
 
 
 @dataclass
@@ -63,10 +55,14 @@ class CSharpIndex:
     #: repo-relative dirs containing a ``.csproj`` (an assembly boundary), sorted
     #: longest-first so the nearest ancestor of a file is its owning project.
     project_roots: list[str] = field(default_factory=list)
-    #: simple class name → its heritage (base + decorators), for cross-file base-class
-    #: resolution. Value is ``None`` when the name is declared by >1 class with differing
-    #: bases (ambiguous → callers must not resolve through it: honest-null).
+    #: simple class name → its heritage (base + decorators + method→file), for cross-file
+    #: base-class resolution. Value is ``None`` when the name is declared by >1 class with
+    #: differing bases (ambiguous → callers must not resolve through it: honest-null).
     class_heritage: dict[str, ClassHeritage | None] = field(default_factory=dict)
+    #: (extension-method name, simple ``this``-param type) → defining file. ``None`` when the
+    #: same (name, type) is defined in >1 file (ambiguous → honest-null). Drives the resolver's
+    #: extension-method tier (``recv.M()`` where ``M`` is ``static M(this T …)``).
+    ext_methods: dict[tuple[str, str], str | None] = field(default_factory=dict)
 
     def project_of(self, path: str) -> str | None:
         """The owning project (nearest ancestor ``.csproj`` dir) of a repo-relative file."""
@@ -134,22 +130,56 @@ def _base_name(node: Node, source: bytes) -> str | None:
     return short
 
 
-def _record_heritage(index: CSharpIndex, name: str, node: Node, source: bytes) -> None:
-    """Record a class's heritage under its simple name; collapse to ``None`` (ambiguous)
-    when a differing declaration of the same name already exists (partial classes with an
-    identical base are kept — same fact, not a conflict)."""
-    heritage = ClassHeritage(extends=_base_name(node, source),
-                             decorators=extract_attributes(node, source))
-    if name not in index.class_heritage:
-        index.class_heritage[name] = heritage
-    else:
-        existing = index.class_heritage[name]
-        if existing is None or existing.extends != heritage.extends:
-            index.class_heritage[name] = None  # collision → do not resolve through it
+def _record_heritage(
+    by_fqn: dict[str, ClassHeritage | None], fqn: str, node: Node, source: bytes,
+) -> None:
+    """Merge a class declaration's heritage into the FQN-keyed map (partial-class aware via
+    :func:`merge_heritage`; projected to simple names after the walk)."""
+    merge_heritage(by_fqn, fqn, _base_name(node, source), extract_attributes(node, source))
 
 
-def _index_file(root: Node, source: bytes, rel: str, index: CSharpIndex) -> None:
-    """Add one file's ``global using`` namespaces + declared types to ``index``."""
+def _extension_this_type(node: Node, source: bytes) -> str | None:
+    """Simple type of a method's ``this`` (extension) parameter, or ``None`` when ``node`` is
+    not a ``static M(this T …)`` extension method."""
+    _, is_static = flags(node, source)
+    if not is_static:
+        return None
+    params = node.child_by_field_name("parameters")
+    first = next((p for p in params.named_children if p.type == "parameter"), None) if params else None
+    if first is None:
+        return None
+    if not any(c.type == "modifier" and node_text(c, source) == "this" for c in first.children):
+        return None
+    tnode = first.child_by_field_name("type")
+    return _simple(node_text(tnode, source)) if tnode is not None else None
+
+
+def _index_members(
+    fqn: str, body: Node, source: bytes, rel: str, index: CSharpIndex,
+    method_files: dict[tuple[str, str], str | None],
+) -> None:
+    """Record the class's declared methods (``(fqn, method) → file``, for inherited-call
+    resolution) and any extension methods it defines (``(method, this-type) → file``)."""
+    for member in body.named_children:
+        if member.type != "method_declaration":
+            continue
+        mn = member.child_by_field_name("name")
+        if mn is None:
+            continue
+        mname = node_text(mn, source)
+        record_distinct(method_files, (fqn, mname), rel)
+        this_type = _extension_this_type(member, source)
+        if this_type:
+            record_distinct(index.ext_methods, (mname, this_type), rel)
+
+
+def _index_file(
+    root: Node, source: bytes, rel: str, index: CSharpIndex,
+    by_fqn: dict[str, ClassHeritage | None],
+    method_files: dict[tuple[str, str], str | None],
+) -> None:
+    """Add one file's ``global using`` namespaces + declared types + members to ``index``.
+    Heritage is accumulated into ``by_fqn`` (fully-qualified names) for later projection."""
     for child in root.named_children:
         if child.type == "using_directive":
             kind, name, _ = _classify_using(child, source)
@@ -168,10 +198,13 @@ def _index_file(root: Node, source: bytes, rel: str, index: CSharpIndex) -> None
                     walk(body, _join(local_ns, _decl_name(child, source)))
             elif t in _CLASS_TYPES:
                 nm = _decl_name(child, source)
-                if nm:
-                    index.types.setdefault(_join(local_ns, nm), set()).add(rel)
-                    _record_heritage(index, nm, child, source)
                 body = child.child_by_field_name("body")
+                if nm:
+                    fqn = _join(local_ns, nm)
+                    index.types.setdefault(fqn, set()).add(rel)
+                    _record_heritage(by_fqn, fqn, child, source)
+                    if body is not None:
+                        _index_members(fqn, body, source, rel, index, method_files)
                 if body is not None:
                     walk(body, local_ns)  # nested types share the enclosing namespace
 
@@ -198,9 +231,53 @@ def _discover_project_roots(repo_root: Path, live_dirs: set[str]) -> list[str]:
     return sorted(roots, key=len, reverse=True)
 
 
-def build_csharp_index(repo_root: Path, files) -> CSharpIndex:
-    """Repo-level pre-pass: parse each ``.cs`` file and map declared types → path,
-    and record project (``.csproj``) roots for the same-project tiebreak."""
+_Fragment = tuple[CSharpIndex, dict[str, ClassHeritage | None], dict[tuple[str, str], str | None]]
+
+
+def _index_one(args: tuple[str, str]) -> _Fragment | None:
+    """Parse one file into a **partial** index fragment — pure, no shared state, so it is
+    safe to run in a worker process (module-level + picklable, for :func:`parallel_map`).
+    Returns ``None`` on read error."""
+    file_s, rel = args
+    try:
+        source = Path(file_s).read_bytes()
+    except OSError:
+        return None
+    root = parse_source("csharp", source, 0).root_node
+    frag = CSharpIndex()
+    by_fqn: dict[str, ClassHeritage | None] = {}
+    method_files: dict[tuple[str, str], str | None] = {}
+    _index_file(root, source, rel, frag, by_fqn, method_files)
+    return frag, by_fqn, method_files
+
+
+def _merge_fragment(
+    index: CSharpIndex,
+    by_fqn: dict[str, ClassHeritage | None],
+    method_files: dict[tuple[str, str], str | None],
+    frag: _Fragment,
+) -> None:
+    """Reduce one file fragment into the shared index using the same collapse rules as the
+    serial build (so the result is identical regardless of fragment order)."""
+    fidx, fby, fmf = frag
+    index.global_usings |= fidx.global_usings
+    for tname, tfiles in fidx.types.items():
+        index.types.setdefault(tname, set()).update(tfiles)
+    for ekey, efile in fidx.ext_methods.items():
+        record_distinct(index.ext_methods, ekey, efile)
+    for mkey, mfile in fmf.items():
+        record_distinct(method_files, mkey, mfile)
+    for fqn, ch in fby.items():
+        if ch is None:
+            by_fqn[fqn] = None  # ambiguous within the file → refuse
+        else:
+            merge_heritage(by_fqn, fqn, ch.extends, ch.decorators)
+
+
+def build_csharp_index(repo_root: Path, files, jobs: int = 1) -> CSharpIndex:
+    """Repo-level pre-pass: parse each ``.cs`` file and map declared types → path, and record
+    project (``.csproj``) roots for the same-project tiebreak. Files are parsed into partial
+    fragments across ``jobs`` processes and reduced deterministically (``jobs<=1`` → serial)."""
     repo_root = Path(repo_root)
     rels = [repo_relative(f, repo_root) for f in files]
     live_dirs = {""}  # every ancestor dir of a scanned file (its owning-project candidates)
@@ -209,13 +286,21 @@ def build_csharp_index(repo_root: Path, files) -> CSharpIndex:
         for i in range(1, len(parts) + 1):
             live_dirs.add("/".join(parts[:i]))
     index = CSharpIndex(project_roots=_discover_project_roots(repo_root, live_dirs))
-    for file, rel in zip(files, rels):
-        try:
-            source = Path(file).read_bytes()
-        except OSError:
-            continue
-        root = parse_source("csharp", source, 0).root_node
-        _index_file(root, source, rel, index)
+    by_fqn: dict[str, ClassHeritage | None] = {}   # partials merged per fully-qualified name
+    method_files: dict[tuple[str, str], str | None] = {}
+    # MAP: parse each file into a pure partial fragment (parallel over ``jobs`` processes).
+    fragments = parallel_map([(str(f), rel) for f, rel in zip(files, rels)], _index_one, jobs)
+    # REDUCE: fold fragments into the shared index (deterministic, order-independent).
+    for frag in fragments:
+        if frag is not None:
+            _merge_fragment(index, by_fqn, method_files, frag)
+    # attach each class's method→file map to its (unambiguous) heritage record, then project
+    # fully-qualified heritage down to simple names (distinct types sharing a name → None)
+    for (fqn, mname), mfile in method_files.items():
+        heritage = by_fqn.get(fqn)
+        if heritage is not None:
+            heritage.methods[mname] = mfile
+    index.class_heritage = project_heritage(by_fqn)
     return index
 
 

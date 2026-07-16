@@ -35,6 +35,11 @@ def repo_to_json_tree(
     ),
     language: Optional[list[str]] = typer.Option(None, "--language", help="Restrict to languages (repeatable)."),
     capture_statements: bool = typer.Option(False, "--capture-statements", help="Capture in-body statements."),
+    batch: bool = typer.Option(
+        False, "--batch",
+        help="Treat --repo as a workspace folder: analyze each immediate subdirectory as its own project "
+             "(one .ndjson.gz per subdir). Dot-directories and loose files are skipped.",
+    ),
     jobs: Optional[int] = typer.Option(None, "--jobs", help="Worker processes (default: CPU count)."),
     upload: bool = typer.Option(
         False, "--upload", help="Upload the result to the Breeze backend (needs --baseurl, --uuid, --user-api-key)."
@@ -89,6 +94,31 @@ def repo_to_json_tree(
 
     show_bar = not verbose and sys.stderr.isatty()
     render_table = not verbose and sys.stdout.isatty()
+
+    if batch:
+        # Immediate subdirectories only; skip dot-directories. Loose files are ignored
+        # because we iterate directories, never the workspace itself.
+        repos = sorted(p for p in repo.iterdir() if p.is_dir() and not p.name.startswith("."))
+        if not repos:
+            typer.secho(f"error: no subdirectories to analyze in {repo}", fg=typer.colors.RED, err=True)
+            raise typer.Exit(1)
+        typer.echo(f"Batch: analyzing {len(repos)} project(s) in {repo} ...")
+        for sub in repos:
+            typer.echo(f"\n[{sub.name}]")
+            _analyze_and_report(service, settings, sub, show_bar=show_bar, render_table=render_table)
+    else:
+        _analyze_and_report(service, settings, repo, show_bar=show_bar, render_table=render_table)
+
+
+def _analyze_and_report(
+    service: AnalysisService,
+    settings: Settings,
+    repo: Path,
+    *,
+    show_bar: bool,
+    render_table: bool,
+) -> None:
+    """Analyze one repository, render its summary, and (if configured) upload it."""
     stats: dict[str, Any] = {}
 
     def analyze(progress: Callable[[int, int], None] | None) -> AnalysisResult:
@@ -125,6 +155,13 @@ def repo_to_json_tree(
         result = analyze(None)
 
     m = result.project_meta
+    if not result.written:
+        name = result.out_path.name if result.out_path else "output"
+        typer.secho(
+            f"No parseable source files — skipped {name} (no ndjson written).",
+            fg=typer.colors.YELLOW,
+        )
+        return
     if render_table:
         _print_summary_table(m, stats, result.out_path)
     else:

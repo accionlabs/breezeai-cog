@@ -93,7 +93,7 @@ class BaseParser:
         their framework's signature in ``source`` (e.g. ``b"@nestjs/" in source``)."""
         return True
 
-    def build_index(self, repo_root: Path, files: Sequence[Path]) -> Any | None:  # optional pre-pass
+    def build_index(self, repo_root: Path, files: Sequence[Path], jobs: int = 1) -> Any | None:  # optional pre-pass
         return None
 
     def ignore_patterns(self) -> list[str]:
