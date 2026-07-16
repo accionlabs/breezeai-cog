@@ -85,7 +85,14 @@ def _build_indexes(
     indexes: dict[str, object] = {}
     for name, base in bases.items():
         start = time.perf_counter()
-        index = base.build_index(repo_root, files[name], jobs)
+        try:
+            index = base.build_index(repo_root, files[name], jobs)
+        except Exception as exc:
+            # Per-file workers already isolate their own failures; this is a last-resort
+            # guard so one language's index cannot abort the whole run. Resolution simply
+            # falls back to "no index for this language" (honest-null), never a crash.
+            log.warning("build_index.failed", parser=name, error=str(exc))
+            index = None
         if debug_on:
             log.debug(
                 "build_index.done", parser=name, files=len(files[name]),
