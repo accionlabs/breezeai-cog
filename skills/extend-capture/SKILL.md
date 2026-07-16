@@ -68,8 +68,9 @@ runtime behaviors to build in:
   meant to hold a resolved value. A reader must be able to trust that a set field is real.
 - **Absent beats wrong for relationships.** The parser does not create an edge (a call, an
   import, a producer→consumer link) unless *both* ends resolve to real identities in the
-  graph. A missing edge is a gap the agent knows it lacks; a wrong edge is a fabricated path
-  it will confidently follow.
+  graph — an unresolved edge is dropped entirely, never emitted with a null endpoint. A
+  missing edge is a gap the agent knows it lacks; a wrong edge is a fabricated path it will
+  confidently follow.
 
 (The design-time counterpart — deciding *how* to model something when it's ambiguous — is
 §2. That decision is yours to make with a human before you code it; the runtime behavior
@@ -82,7 +83,9 @@ no single obviously-correct representation. When you hit one, **stop and get a h
 decision** (present the options and your recommendation) before you code it — do not bake an
 assumption into the parser. The modeling is then fixed once, applied uniformly, and the
 parser behaves **deterministically** at capture time — never resolving the ambiguity with a
-per-file heuristic that guesses differently across the codebase.
+per-file heuristic that guesses differently across the codebase. If no review channel is
+reachable at author time, take the **conservative** path — capture nothing / honest-null —
+rather than guess: a known gap is recoverable later, a wrong model silently is not.
 
 | Ambiguity | Why it needs a human decision |
 |---|---|
@@ -94,7 +97,9 @@ per-file heuristic that guesses differently across the codebase.
 | **The construct maps to no existing vocabulary** | Inventing meaning is where hallucination starts |
 
 Most syntax has one right answer you discover empirically (see the reference guide). The
-point is only that the moment *interpretation* is required, a human makes the call.
+point is only that the moment *interpretation* is required, a human makes the call. The
+dividing line for storage shape (§5): **reusing** an existing node / edge / statement kind is
+a call you make yourself; **introducing a new** one is a schema-wide commitment to raise.
 
 ## 3. The three ways to extend capture
 
@@ -190,7 +195,10 @@ schema-wide commitment — ask.
 - **Design for scale without gold-plating.** Capture streams NDJSON so a large repo never
   sits fully in memory; parsing is per-file and parallelized, so keep parsers free of
   cross-file mutable state (use the repo-wide index hook for shared data, returning a
-  picklable value).
+  picklable value). When that hook (`build_index`) parses every file, structure it as a
+  picklable per-file worker plus a deterministic (order-independent) reduce and run it
+  through the shared `parallel_map(files, fn, jobs)` — so it honours `--jobs` (serial at
+  `jobs<=1`) like the parse stage, instead of looping single-threaded.
 - **Test every behavioral change** — happy path, edges, failure modes. For parser work,
   also validate emitted records against the schema and dogfood on a real repository; a unit
   test passing is not enough.
@@ -228,6 +236,7 @@ src/breezeai_cog/parsers/
 ├─ treesitter.py           # grammar loading + bounded parse
 ├─ statements_common.py    # shared flat-statement emission + detection wiring
 ├─ callresolve.py          # calls[].path resolution
+├─ index_common.py         # shared build_index helpers: ambiguity collapse, heritage, parallel_map
 ├─ detection/              # shared cross-language classifiers (api/db/query) — reuse, don't fork
 ├─ <lang>/                 # one base language parser package per language
 └─ <lang>_<framework>/     # framework parsers (subclass the base; one wins per file)
