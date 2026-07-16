@@ -279,3 +279,56 @@ def test_endpoint_verb_first_arg(tmp_path) -> None:
     assert _api(tmp_path, "function f(){ http.request('GET', '/orders'); }") == [("GET", "/orders")]
     # unresolvable URL (an identifier) yields no endpoint rather than the verb string
     assert _api(tmp_path, "function f(u){ http.request('GET', u); }") == [("GET", None)]
+
+
+# --- inherited base-class call resolution (this.M() → base file) ----------------------
+
+def _parse_repo(tmp_path, files: dict[str, str], target: str) -> FileRecord:
+    """Write a multi-file TS repo, run build_index, parse `target` with the index."""
+    for rel, text in files.items():
+        p = tmp_path / rel
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(text)
+    parser = TypeScriptParser()
+    index = parser.build_index(tmp_path, list(tmp_path.rglob("*.ts")))
+    p = tmp_path / target
+    ctx = ParseContext(path=target, abs_path=p, source=p.read_bytes(),
+                       repo_root=tmp_path, capture_statements=True, resolution_index=index)
+    return parser.parse_file(ctx)
+
+
+def test_inherited_this_call_resolves(tmp_path) -> None:
+    # `this.M()` where M is declared on an in-repo base class → the base's file.
+    rec = _parse_repo(tmp_path, {
+        "base.service.ts": "export class BaseService { protected log(m: string){ console.log(m); } }\n",
+        "order.service.ts":
+            "import { BaseService } from './base.service';\n"
+            "export class OrderService extends BaseService {\n"
+            "  create(){ this.log('created'); }\n}\n",
+    }, "order.service.ts")
+    calls = {c.name: c.path for f in rec.functions for c in f.calls}
+    assert calls.get("log") == "base.service.ts"
+
+
+def test_explicit_super_call_resolves(tmp_path) -> None:
+    # `super.M()` → the base class's file.
+    rec = _parse_repo(tmp_path, {
+        "parent.ts": "export class Parent { setup(){} }\n",
+        "child.ts":
+            "import { Parent } from './parent';\n"
+            "export class Child extends Parent { init(){ super.setup(); } }\n",
+    }, "child.ts")
+    calls = {c.name: c.path for f in rec.functions for c in f.calls}
+    assert calls.get("setup") == "parent.ts"
+
+
+def test_same_name_class_does_not_inherit(tmp_path) -> None:
+    # Two distinct `Base` classes (different files) → ambiguous → the subclass must not
+    # mis-inherit; the inherited call stays unresolved (honest-null).
+    rec = _parse_repo(tmp_path, {
+        "a/base.ts": "export class Base { helper(){} }\n",
+        "b/base.ts": "export class Base { other(){} }\n",
+        "sub.ts": "import { Base } from './a/base';\nexport class Sub extends Base { go(){ this.helper(); } }\n",
+    }, "sub.ts")
+    calls = {c.name: c.path for f in rec.functions for c in f.calls}
+    assert calls.get("helper") is None

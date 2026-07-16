@@ -394,6 +394,20 @@ def test_partial_class_split_base_clause_resolves(tmp_path) -> None:
     assert calls.get("AppendGridColumns") == "Ctl/SplendidControl.cs"
 
 
+def test_explicit_base_call_resolves(tmp_path) -> None:
+    # `base.M()` → the ancestor that declares M (even though the owner overrides it).
+    rec = _parse_repo(tmp_path, {
+        "Svc/BaseService.cs":
+            "namespace App;\npublic class BaseService { protected virtual void Save(){} }\n",
+        "Svc/OrderService.cs":
+            "namespace App;\n"
+            "public class OrderService : BaseService {\n"
+            "    public override void Save(){ base.Save(); }\n}\n",
+    }, "Svc/OrderService.cs")
+    calls = {c.name: c.path for f in rec.functions for c in f.calls}
+    assert calls.get("Save") == "Svc/BaseService.cs"
+
+
 def test_same_simple_name_distinct_types_do_not_inherit(tmp_path) -> None:
     # Two distinct `Widget` types (different namespaces): one derives from an in-repo base
     # with a method, the other is baseless. The FQN projection must collapse the shared simple

@@ -34,22 +34,30 @@ def _fqcn_index_one(args: tuple[str, str]) -> dict[str, str] | None:
         source = Path(file_s).read_bytes()
     except OSError:
         return None
-    root = parse_source("java", source, 0).root_node
-    package = ""
-    for node in root.named_children:
-        if node.type == "package_declaration":
-            nm = next((c for c in node.named_children
-                       if c.type in ("scoped_identifier", "identifier")), None)
-            package = node_text(nm, source) if nm is not None else ""
-            break
-    frag: dict[str, str] = {}
-    for node in root.named_children:
-        if node.type in _TYPE_DECLS:
-            nm = node.child_by_field_name("name")
-            if nm is not None:
-                name = node_text(nm, source)
-                frag[f"{package}.{name}" if package else name] = rel
-    return frag
+    try:
+        root = parse_source("java", source, 0).root_node
+        package = ""
+        for node in root.named_children:
+            if node.type == "package_declaration":
+                nm = next((c for c in node.named_children
+                           if c.type in ("scoped_identifier", "identifier")), None)
+                package = node_text(nm, source) if nm is not None else ""
+                break
+        frag: dict[str, str] = {}
+        for node in root.named_children:
+            if node.type in _TYPE_DECLS:
+                nm = node.child_by_field_name("name")
+                if nm is not None:
+                    name = node_text(nm, source)
+                    frag[f"{package}.{name}" if package else name] = rel
+        return frag
+    except Exception as exc:  # parse OR a pathologically deep AST walk (RecursionError) — skip this file
+        from ...logging import get_logger
+        get_logger("breezeai_cog.index").warning(
+            "index.file.skipped", path=file_s, language="java",
+            error_type=type(exc).__name__, error=str(exc),
+        )
+        return None
 
 
 def build_fqcn_index(repo_root: Path, files, jobs: int = 1) -> FqcnIndex:
