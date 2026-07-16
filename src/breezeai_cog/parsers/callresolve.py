@@ -14,9 +14,9 @@ first hit wins, a tie resolves to ``None``, never a guessed edge:
   is an in-repo extension method on that type (``static M(this T …)``) → the defining file,
   via ``ext_index[(M, T)]`` (simple type names). Only fires when Phase 2 found nothing, so
   it never overrides an existing edge.
-* **Inheritance:** ``this.M()`` / ``self.M()`` where ``M`` is declared on an in-repo base
-  class → the nearest ancestor (up the enclosing ``owner``'s heritage chain) that declares
-  ``M``, resolved to that ancestor's file.
+* **Inheritance:** ``this.M()`` / ``self.M()`` (own class doesn't declare ``M``) or an explicit
+  base call ``super.M()`` / ``base.M()`` / ``MyBase.M()`` → the nearest ancestor (up the
+  enclosing ``owner``'s heritage chain) that declares ``M``, resolved to that ancestor's file.
 
 The Extension and Inheritance tiers are inert unless ``ext_index`` / ``heritage`` are
 supplied (and, for inheritance, the call passes the ``owner`` class), so callers that omit
@@ -78,6 +78,8 @@ def make_resolver(
             if owner is not None:  # inherited base-class method
                 return _inherited(name, owner)
             return None
+        if receiver in ("super", "base", "MyBase"):  # explicit base call → an ancestor's method
+            return _inherited(name, owner) if owner is not None else None
         if receiver is None:
             if name in bindings:  # imported function
                 return bindings[name]

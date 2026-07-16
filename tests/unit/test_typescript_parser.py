@@ -310,6 +310,18 @@ def test_inherited_this_call_resolves(tmp_path) -> None:
     assert calls.get("log") == "base.service.ts"
 
 
+def test_explicit_super_call_resolves(tmp_path) -> None:
+    # `super.M()` → the base class's file.
+    rec = _parse_repo(tmp_path, {
+        "parent.ts": "export class Parent { setup(){} }\n",
+        "child.ts":
+            "import { Parent } from './parent';\n"
+            "export class Child extends Parent { init(){ super.setup(); } }\n",
+    }, "child.ts")
+    calls = {c.name: c.path for f in rec.functions for c in f.calls}
+    assert calls.get("setup") == "parent.ts"
+
+
 def test_same_name_class_does_not_inherit(tmp_path) -> None:
     # Two distinct `Base` classes (different files) → ambiguous → the subclass must not
     # mis-inherit; the inherited call stays unresolved (honest-null).
