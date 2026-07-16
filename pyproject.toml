@@ -24,16 +24,20 @@ dependencies = [
   "tree-sitter>=0.24,<0.26",
   "tree-sitter-language-pack>=0.2",
   "pyyaml>=6.0",
+  # --upload (services/upload.py) and notify (services/notify.py) are first-class
+  # CLI features, so their HTTP client is a core dependency — not an opt-in extra.
+  "httpx>=0.27",
 ]
 
+# httpx is a core dependency (see [project.dependencies]), so CLI upload works with
+# a base install — no extra needed. Extras below add only what they uniquely require.
 [project.optional-dependencies]
-upload = ["httpx>=0.27", "boto3>=1.34"]
 server = [
-  "fastapi>=0.110", "uvicorn>=0.29", "httpx>=0.27", "gitpython>=3.1",
+  "fastapi>=0.110", "uvicorn>=0.29", "gitpython>=3.1",
   "python-multipart>=0.0.9", "boto3>=1.34", "sqlglot>=23",
 ]
 all = [
-  "httpx>=0.27", "boto3>=1.34",
+  "boto3>=1.34",
   "fastapi>=0.110", "uvicorn>=0.29", "gitpython>=3.1",
   "python-multipart>=0.0.9", "sqlglot>=23",
 ]

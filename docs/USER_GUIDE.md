@@ -63,9 +63,10 @@ brackets when installing (approach 1 or 2):
 
 | Extra | Adds |
 |---|---|
-| `[upload]` | Uploading results to a Breeze backend. |
 | `[server]` | The HTTP service, plus S3 and SQL support. |
 | `[all]` | Everything above. |
+
+Uploading results to a Breeze backend (`--upload`) works with the base install — no extra required.
 
 ```bash
 uv tool install "/path/to/breezeai-cog[server]"   # note the quotes — your shell needs them
