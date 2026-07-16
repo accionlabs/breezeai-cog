@@ -18,6 +18,7 @@ from ..base import ParseContext
 from ..csharp.parser import CSharpParser
 from ..treesitter import parse_source
 from .mounts import read_sibling_markup, resolve_master, resolve_mounts
+from .navigation import detect_navigation
 from .routes import detect_master_layout, detect_webforms_pages
 
 #: Web Forms code-behind imports System.Web.UI (Page/UserControl) — NOT the MVC/Core
@@ -51,6 +52,11 @@ class WebFormsParser(CSharpParser):
             )
             if layout:
                 record.statements.extend(layout)
+                record.framework = "aspnet-webforms"
+            # Page→page navigation → routeKind=navigation statements (item 4).
+            nav = detect_navigation(record, ctx.path, root, ctx.source, markup, ctx.repo_root)
+            if nav:
+                record.statements.extend(nav)
                 record.framework = "aspnet-webforms"
         # Host→control mounts → importFiles (IMPORTS edge). Not statement-gated: importFiles
         # is a core cross-file field, always emitted. Deduped against existing imports,

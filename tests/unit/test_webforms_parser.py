@@ -325,6 +325,100 @@ def test_master_layout_no_master_no_statement() -> None:
     assert detect_master_layout(_parse(WebFormsParser(), PAGE, "P.aspx.cs"), "P.aspx.cs", None) == []
 
 
+def _nav_page(body: bytes) -> bytes:
+    return b'''
+using System; using System.Web.UI;
+namespace Acme { public partial class Nav1 : Page {
+  protected void Submit(object s, EventArgs e) { ''' + body + b''' }
+} }
+'''
+
+
+def _navs(rec: FileRecord) -> list:
+    return [s for s in rec.statements if s.routeKind == "navigation"]
+
+
+def test_navigation_redirect_real_node() -> None:
+    rec = _parse(WebFormsParser(), _nav_page(b'Response.Redirect("~/Login.aspx?ReturnUrl=x");'),
+                 "CMS/Nav1.aspx.cs")
+    navs = _navs(rec)
+    assert len(navs) == 1
+    assert navs[0].endpoint == "/Login.aspx"              # query stripped
+    assert navs[0].nodeType == "invocation_expression"    # real call, not synthetic
+    assert navs[0].semanticType == "route"
+
+
+def test_navigation_server_transfer() -> None:
+    rec = _parse(WebFormsParser(), _nav_page(b'Server.Transfer("~/Confirm.aspx");'), "P.aspx.cs")
+    assert [s.endpoint for s in _navs(rec)] == ["/Confirm.aspx"]
+
+
+def test_navigation_external_and_friendly_skipped() -> None:
+    rec = _parse(WebFormsParser(),
+                 _nav_page(b'Response.Redirect("https://x.com/a"); Response.Redirect("~/enroll/5");'),
+                 "P.aspx.cs")
+    assert _navs(rec) == []                                # external + friendly-URL (no .aspx) → none
+
+
+def test_navigation_dynamic_and_wrong_receiver_skipped() -> None:
+    rec = _parse(WebFormsParser(),
+                 _nav_page(b'Response.Redirect(url); helper.Transfer("~/X.aspx");'), "P.aspx.cs")
+    assert _navs(rec) == []                                # non-literal + non-Response/Server receiver
+
+
+def test_navigation_markup_attrs(tmp_path: Path) -> None:
+    rec = _parse_repo(WebFormsParser(), tmp_path, "CMS/Page.aspx.cs", {
+        "web.config": b"<configuration/>",
+        "CMS/Page.aspx": b'<asp:HyperLink NavigateUrl="~/Help.aspx"/>'
+                         b'<asp:Button PostBackUrl="~/Submit.aspx"/>',
+        "CMS/Page.aspx.cs": PAGE,
+    })
+    navs = _navs(rec)
+    assert sorted(s.endpoint for s in navs) == ["/Help.aspx", "/Submit.aspx"]
+    assert all(s.nodeType == "synthetic" for s in navs)   # markup attrs → synthetic
+
+
+def test_mount_case_insensitive(tmp_path: Path) -> None:
+    # Web Forms path refs are routinely mis-cased vs disk (case-insensitive Windows origin).
+    # `~/Controls/NAV.ascx` must resolve to the real `Nav.ascx.cs` (so the IMPORTS join lands).
+    rec = _parse_repo(WebFormsParser(), tmp_path, "Page.aspx.cs", {
+        "web.config": b"<configuration/>",
+        "Page.aspx": b'<%@ Register Src="~/Controls/NAV.ascx" %>',   # uppercase in the ref
+        "Page.aspx.cs": PAGE,
+        "Controls/Nav.ascx.cs": CTRL_CB,                            # real casing on disk
+    })
+    assert "Controls/Nav.ascx.cs" in rec.importFiles                # real casing, not "NAV"
+
+
+def test_master_case_insensitive(tmp_path: Path) -> None:
+    # `~/Root.Master` (capital M in the ref) → the real `Root.master` (SplendidCRM's exact case bug).
+    rec = _parse_repo(WebFormsParser(), tmp_path, "P.aspx.cs", {
+        "web.config": b"<configuration/>",
+        "P.aspx": b'<%@ Page MasterPageFile="~/Root.Master" %>',
+        "P.aspx.cs": PAGE,
+        "Root.master": b'<%@ Master %>', "Root.master.cs": MASTER_CB,
+    })
+    layouts = [s for s in rec.statements if s.routeKind == "layout"]
+    assert len(layouts) == 1 and layouts[0].endpoint == "/Root.master"   # real casing
+
+
+def test_mount_case_collision_honest_null(tmp_path: Path) -> None:
+    # Two controls differing only in case → the name is ambiguous → no mount (honest-null,
+    # never an arbitrary pick). Only creatable on a case-sensitive filesystem.
+    (tmp_path / "Controls").mkdir()
+    (tmp_path / "Controls" / "Nav.ascx.cs").write_bytes(CTRL_CB)
+    (tmp_path / "Controls" / "NAV.ascx.cs").write_bytes(CTRL_CB)
+    if len(list((tmp_path / "Controls").iterdir())) < 2:
+        import pytest
+        pytest.skip("case-insensitive filesystem — collision not reproducible")
+    rec = _parse_repo(WebFormsParser(), tmp_path, "Page.aspx.cs", {
+        "web.config": b"<configuration/>",
+        "Page.aspx": b'<%@ Register Src="~/Controls/nav.ascx" %>',
+        "Page.aspx.cs": PAGE,
+    })
+    assert [i for i in rec.importFiles if i.lower().endswith(".ascx.cs")] == []
+
+
 def test_output_validates() -> None:
     for src, name in [(PAGE, "CMS/Enrollment.aspx.cs"), (CONTROL, "CMS/Ctrl.ascx.cs")]:
         rec = _parse(WebFormsParser(), src, name)
