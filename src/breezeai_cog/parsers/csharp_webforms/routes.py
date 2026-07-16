@@ -43,9 +43,16 @@ def _page_class(record: FileRecord, path: str) -> Class | None:
     return by_name.get(stem) or (record.classes[0] if record.classes else None)
 
 
-def detect_webforms_pages(record: FileRecord, path: str) -> list[Statement]:
-    """Emit one file-parented ``route`` statement for a Web Forms page / user control.
-    Returns ``[]`` for anything else (e.g. ``.master.cs`` or a plain base-class file)."""
+def detect_webforms_pages(
+    record: FileRecord, path: str, page_routes: dict[str, list[str]] | None = None
+) -> list[Statement]:
+    """Emit file-parented ``route`` statement(s) for a Web Forms page / user control.
+    Returns ``[]`` for anything else (e.g. ``.master.cs`` or a plain base-class file).
+
+    When ``page_routes`` (from the C# index) maps this page's physical ``.aspx`` to friendly
+    ``MapPageRoute`` URLs, the endpoint is **enriched** with the real routed URL(s) — one
+    route per URL — instead of the physical path (BREEZEAI-765 item 2); otherwise a single
+    physical-path route is emitted, as before."""
     match = next((kv for sfx, kv in _KIND_BY_SUFFIX.items() if path.endswith(sfx)), None)
     if match is None:
         return []
@@ -54,20 +61,27 @@ def detect_webforms_pages(record: FileRecord, path: str) -> list[Statement]:
     start = cls.startLine if cls is not None else 1
     end = cls.endLine if cls is not None else 1
     seen = {s.id for s in record.statements}
-    return [
-        Statement(
+
+    # friendly MapPageRoute URLs win over the physical .aspx path (page routeKind only —
+    # a mount/control isn't page-routed). Key is the physical .aspx repo path (path − ".cs").
+    friendly = (page_routes or {}).get(path[: -len(".cs")]) if route_kind == "page" else None
+    endpoints = [f"/{u.lstrip('/')}" for u in friendly] if friendly else [_endpoint(path)]
+
+    out: list[Statement] = []
+    for endpoint in endpoints:
+        out.append(Statement(
             id=disambiguate(statement_id(path, start, 0), seen),
             parentId=file_id(path),
             nodeType=node_type,
             semanticType="route",
             text=path.rsplit("/", 1)[-1],
             method="GET",
-            endpoint=_endpoint(path),
+            endpoint=endpoint,
             framework="aspnet-webforms",
             routeKind=route_kind,
             handler=cls.name if cls is not None else None,
             startLine=start,
             endLine=end,
             path=path,
-        )
-    ]
+        ))
+    return out

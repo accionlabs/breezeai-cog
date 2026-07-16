@@ -14,6 +14,7 @@ from breezeai_cog.parsers.base import ParseContext
 from breezeai_cog.parsers.csharp.parser import CSharpParser
 from breezeai_cog.parsers.csharp_aspnet.parser import AspNetCoreParser
 from breezeai_cog.parsers.csharp_webforms.parser import WebFormsParser
+from breezeai_cog.parsers.csharp_webforms.routes import detect_webforms_pages
 from breezeai_cog.schemas import FileRecord
 
 PAGE = b'''
@@ -176,6 +177,89 @@ def test_mount_requires_disk_context() -> None:
     # In-memory parse (no repo_root/abs_path) must not crash and yields no mounts.
     rec = _parse(WebFormsParser(), PAGE, "CMS/Page.aspx.cs")
     assert rec.importFiles == []
+
+
+def _page_routes(*cs_sources: bytes) -> dict[str, list[str]]:
+    """Build the C# index over given RouteConfig-style sources and return page_routes."""
+    import tempfile
+    from breezeai_cog.parsers.csharp.imports import build_csharp_index
+    with tempfile.TemporaryDirectory() as d:
+        root = Path(d)
+        files = []
+        for i, src in enumerate(cs_sources):
+            p = root / f"App_Start/RouteConfig{i}.cs"
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_bytes(src)
+            files.append(p)
+        return build_csharp_index(root, files).page_routes
+
+
+ROUTECFG = b'''
+using System.Web.Routing;
+namespace Acme {
+  public static class RouteConfig {
+    public static void Register(RouteCollection routes) {
+      routes.MapPageRoute("enroll", "enroll/{id}", "~/CMS/Enrollment.aspx");
+    }
+  }
+}
+'''
+
+
+def test_mappageroute_index_extracts_literal() -> None:
+    pr = _page_routes(ROUTECFG)
+    assert pr == {"CMS/Enrollment.aspx": ["enroll/{id}"]}
+
+
+def test_mappageroute_ast_only_ignores_comment_and_string() -> None:
+    # A MapPageRoute in a comment or string must NOT be picked up (AST extraction, not regex).
+    src = b'''
+namespace X { class C {
+  // routes.MapPageRoute("ghost", "ghost/{id}", "~/Ghost.aspx");
+  string s = "routes.MapPageRoute(\\"s\\",\\"s\\",\\"~/S.aspx\\")";
+} }
+'''
+    assert _page_routes(src) == {}
+
+
+def test_mappageroute_dynamic_arg_unresolved() -> None:
+    # Non-literal physical/url arg → honest-null, no mapping.
+    src = b'''
+namespace X { class C { void R(System.Web.Routing.RouteCollection routes, string phys) {
+  routes.MapPageRoute("n", "url/{id}", phys);
+} } }
+'''
+    assert _page_routes(src) == {}
+
+
+def test_page_route_uses_friendly_url() -> None:
+    rec = _parse(WebFormsParser(), PAGE, "CMS/Enrollment.aspx.cs")
+    routes = detect_webforms_pages(rec, "CMS/Enrollment.aspx.cs",
+                                   {"CMS/Enrollment.aspx": ["enroll/{id}"]})
+    assert len(routes) == 1
+    assert routes[0].endpoint == "/enroll/{id}"          # friendly, not /CMS/Enrollment.aspx
+    assert routes[0].routeKind == "page"
+
+
+def test_page_route_multiple_friendly_urls() -> None:
+    routes = detect_webforms_pages(_parse(WebFormsParser(), PAGE, "P.aspx.cs"), "P.aspx.cs",
+                                   {"P.aspx": ["a/{id}", "b/{id}"]})
+    assert sorted(r.endpoint for r in routes) == ["/a/{id}", "/b/{id}"]
+    assert len({r.id for r in routes}) == 2              # distinct ids
+
+
+def test_page_route_physical_fallback_without_mapping() -> None:
+    routes = detect_webforms_pages(_parse(WebFormsParser(), PAGE, "CMS/Enrollment.aspx.cs"),
+                                   "CMS/Enrollment.aspx.cs", {"Other.aspx": ["x"]})
+    assert routes[0].endpoint == "/CMS/Enrollment.aspx"  # no match → physical, as before
+
+
+def test_mount_not_friendly_routed() -> None:
+    # A control (routeKind=mount) never takes a MapPageRoute URL, even if one keys its path.
+    routes = detect_webforms_pages(_parse(WebFormsParser(), CONTROL, "Ctrl.ascx.cs"),
+                                   "Ctrl.ascx.cs", {"Ctrl.ascx": ["should/not/apply"]})
+    assert routes[0].endpoint == "/Ctrl.ascx"
+    assert routes[0].routeKind == "mount"
 
 
 def test_output_validates() -> None:

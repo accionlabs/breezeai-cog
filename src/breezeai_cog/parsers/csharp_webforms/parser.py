@@ -39,7 +39,8 @@ class WebFormsParser(CSharpParser):
         root = parse_source("csharp", ctx.source, ctx.parse_timeout_micros).root_node
         record = self.extract(root, ctx)  # inherited C# extraction (one parse)
         if ctx.capture_statements:  # routes are statements — gated (spec A4)
-            routes = detect_webforms_pages(record, ctx.path)
+            page_routes = getattr(ctx.resolution_index, "page_routes", None)
+            routes = detect_webforms_pages(record, ctx.path, page_routes)
             if routes:
                 record.statements.extend(routes)
                 record.framework = "aspnet-webforms"
