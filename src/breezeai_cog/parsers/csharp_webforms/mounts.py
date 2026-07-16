@@ -174,3 +174,13 @@ def resolve_master(markup: bytes, rel_path: str, repo_root: Path | None) -> str 
         return None
     actual = ci_resolve(repo_root, rel)  # case-insensitive → real on-disk casing
     return "/" + actual if actual is not None else None
+
+
+def master_codebehind(master_endpoint: str | None, repo_root: Path | None) -> str | None:
+    """The master's **code-behind** repo path (for the page→master ``IMPORTS`` edge), in real
+    on-disk casing, or ``None`` when there's no master or it has no code-behind (an inline-code
+    master → honest-null, no dangling edge). ``master_endpoint`` is the already-resolved
+    ``/…​.master`` from :func:`resolve_master`; its ``.cs`` sibling is the master's FileRecord."""
+    if master_endpoint is None or repo_root is None:
+        return None
+    return ci_resolve(repo_root, master_endpoint.lstrip("/") + ".cs")

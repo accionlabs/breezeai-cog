@@ -300,6 +300,32 @@ def test_master_layout_nesting(tmp_path: Path) -> None:
     assert len(layouts) == 1 and layouts[0].endpoint == "/Root.master"
 
 
+def test_master_import_edge(tmp_path: Path) -> None:
+    # Page→master is also a traversable IMPORTS edge (to the master's code-behind), not only
+    # the routeKind=layout statement.
+    rec = _parse_repo(WebFormsParser(), tmp_path, "CMS/Enrollment.aspx.cs", {
+        "web.config": b"<configuration/>",
+        "CMS/Enrollment.aspx": b'<%@ Page MasterPageFile="~/Site.master" %>',
+        "CMS/Enrollment.aspx.cs": PAGE,
+        "Site.master": b'<%@ Master %>', "Site.master.cs": MASTER_CB,
+    })
+    assert "Site.master.cs" in rec.importFiles                       # page→master IMPORTS edge
+    assert any(s.routeKind == "layout" for s in rec.statements)      # and the layout statement
+
+
+def test_master_inline_no_import_edge(tmp_path: Path) -> None:
+    # Master with no code-behind (inline <script runat=server>) → layout fact captured, but no
+    # dangling IMPORTS edge (honest-null).
+    rec = _parse_repo(WebFormsParser(), tmp_path, "P.aspx.cs", {
+        "web.config": b"<configuration/>",
+        "P.aspx": b'<%@ Page MasterPageFile="~/Inline.master" %>',
+        "P.aspx.cs": PAGE,
+        "Inline.master": b'<%@ Master %>',                           # no Inline.master.cs
+    })
+    assert [s for s in rec.statements if s.routeKind == "layout"]    # layout fact present
+    assert "Inline.master.cs" not in rec.importFiles                 # no dangling edge
+
+
 def test_master_missing_file_skipped(tmp_path: Path) -> None:
     # Declared master not present in the repo → honest-null, no layout statement.
     rec = _parse_repo(WebFormsParser(), tmp_path, "P.aspx.cs", {
