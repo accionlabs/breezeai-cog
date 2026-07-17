@@ -257,6 +257,79 @@ def test_nested_named_functions_extracted(tmp_path) -> None:
     assert "addEventListener" in {c.name for c in parent.calls}
 
 
+OBJECT_PROPERTY_FN_SRC = b'''export class SyncWorker {
+  async connectConsumer() {
+    this.setup();
+    await this.consumer.run({
+      eachMessage: async ({ message }) => {
+        handleRecord(message);
+      },
+    });
+    items.forEach(function step(i) { visitStep(i); });
+  }
+}
+'''
+
+
+def test_object_property_and_named_expression_functions_extracted(tmp_path) -> None:
+    # Regression (nested-function-gap): a named function nested inside a CLASS METHOD
+    # via an object property (`{ eachMessage: async () => {} }` — the Kafka-consumer
+    # handler) or as a named function expression (`forEach(function step(){})`) must
+    # each be emitted as its own Function, parented to the enclosing method. The prior
+    # parser only recognized `function` declarations and `const f = () =>` bindings, so
+    # these callback handlers were silently dropped from class code.
+    p = tmp_path / "sync-worker.ts"
+    p.write_bytes(OBJECT_PROPERTY_FN_SRC)
+    ctx = ParseContext(path="sync-worker.ts", abs_path=p, source=OBJECT_PROPERTY_FN_SRC,
+                       repo_root=tmp_path, capture_statements=True)
+    rec = TypeScriptParser().parse_file(ctx)
+    by_name = {f.name: f for f in rec.functions}
+    assert {"connectConsumer", "eachMessage", "step"} <= set(by_name)
+    # object-property arrow and named FE are parented to the enclosing method
+    assert by_name["eachMessage"].parentId == by_name["connectConsumer"].id
+    assert by_name["step"].parentId == by_name["connectConsumer"].id
+    # barrier: each callback's own calls stay on it, not folded into the method
+    assert "handleRecord" in {c.name for c in by_name["eachMessage"].calls}
+    assert "visitStep" in {c.name for c in by_name["step"].calls}
+    assert "handleRecord" not in {c.name for c in by_name["connectConsumer"].calls}
+    assert "visitStep" not in {c.name for c in by_name["connectConsumer"].calls}
+    # but the method's own direct calls remain
+    assert {"setup", "run"} <= {c.name for c in by_name["connectConsumer"].calls}
+
+
+DECORATOR_ARG_FN_SRC = b'''import { Module } from '@nestjs/common';
+
+@Module({
+  imports: [
+    TypeOrmModule.forRootAsync({
+      inject: [ConfigService],
+      useFactory: (configService) => {
+        return buildDataSource(configService);
+      },
+    }),
+  ],
+})
+export class DatabaseModule {}
+'''
+
+
+def test_decorator_argument_functions_extracted(tmp_path) -> None:
+    # Regression (nested-function-gap): a named function inside a class DECORATOR
+    # argument (NestJS `@Module({ … useFactory: () => … })`) sits outside every method
+    # body, so per-body recursion never reaches it. It must still be emitted as its own
+    # Function, parented to the class.
+    p = tmp_path / "database.module.ts"
+    p.write_bytes(DECORATOR_ARG_FN_SRC)
+    ctx = ParseContext(path="database.module.ts", abs_path=p, source=DECORATOR_ARG_FN_SRC,
+                       repo_root=tmp_path, capture_statements=True)
+    rec = TypeScriptParser().parse_file(ctx)
+    by_name = {f.name: f for f in rec.functions}
+    cls = next(c for c in rec.classes if c.name == "DatabaseModule")
+    assert "useFactory" in by_name
+    assert by_name["useFactory"].parentId == cls.id
+    assert "buildDataSource" in {c.name for c in by_name["useFactory"].calls}
+
+
 def test_chain_inner_call_classified(tmp_path) -> None:
     # #4: a db method that is NOT the outermost call in a chain must still be detected.
     p = tmp_path / "chain.ts"

@@ -156,13 +156,28 @@ def _span(node: Node) -> tuple[int, int]:
     return (node.start_byte, node.end_byte)
 
 
+def _property_key_name(key: Node | None, source: bytes) -> str:
+    """Object-property key → function name. Strips quotes from string keys so
+    ``{ "eachMessage": () => … }`` names the function ``eachMessage``."""
+    if key is None:
+        return ""
+    text = node_text(key, source)
+    if key.type in ("string", "string_fragment") and len(text) >= 2 and text[0] in "\"'`":
+        return text[1:-1]
+    return text
+
+
 def collect_nested_functions(body: Node | None, source: bytes) -> list[tuple[Node, str, str]]:
     """Named functions declared *inside* this body whose nearest named enclosing
-    function is this one: in-body ``function`` declarations and ``const f = () =>`` /
-    function-expression bindings (the React event-handler pattern). Descends through
-    anonymous callbacks and control flow — a handler defined inside
-    ``useEffect(() => …)`` still belongs here — but stops at each named function,
-    since those deeper names belong to that function's own recursion.
+    function is this one. Recognizes every way a nested function acquires a name:
+    in-body ``function`` declarations, ``const f = () =>`` / function-expression
+    bindings (the React event-handler pattern), object-property arrows/functions
+    (``{ eachMessage: async () => … }`` — the Kafka handler / NestJS ``useFactory``
+    pattern), and named function expressions passed as callbacks
+    (``arr.forEach(function step() { … })``). Descends through anonymous callbacks
+    and control flow — a handler defined inside ``useEffect(() => …)`` still belongs
+    here — but stops at each named function, since those deeper names belong to that
+    function's own recursion.
 
     Returns ``(value_node, name, kind)`` per nested function; the value nodes double
     as the barrier set so the enclosing function does not also fold their calls/
@@ -189,6 +204,23 @@ def collect_nested_functions(body: Node | None, source: bytes) -> list[tuple[Nod
                     elif val is not None:
                         visit(val)  # e.g. const x = arr.map(() => { const g = () => {} })
                 continue
+            if c.type == "pair":
+                # Object-property function: name comes from the key
+                # (``{ eachMessage: async () => … }``, NestJS ``{ useFactory: () => … }``).
+                val = c.child_by_field_name("value")
+                if val is not None and val.type in NESTED_FN_VALUE_TYPES:
+                    out.append((val, _property_key_name(c.child_by_field_name("key"), source), val.type))
+                    continue  # barrier: its body belongs to it
+                visit(c)
+                continue
+            if c.type == "function_expression":
+                # Named function expression used as a callback
+                # (``arr.forEach(function step() { … })``). Anonymous ones fall
+                # through to ``visit`` so their calls stay with the enclosing fn.
+                nm = c.child_by_field_name("name")
+                if nm is not None:
+                    out.append((c, node_text(nm, source), "function_expression"))
+                    continue  # barrier: its body belongs to it
             visit(c)  # anonymous callbacks, control flow, blocks, expressions
 
     visit(body)
