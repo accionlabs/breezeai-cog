@@ -148,9 +148,56 @@ def extract_params(params_node: Node | None, source: bytes) -> list[Parameter]:
     return out
 
 
+NESTED_FN_VALUE_TYPES = ("arrow_function", "function_expression", "function")
+
+
+def _span(node: Node) -> tuple[int, int]:
+    """Stable identity for a node within one parse (used as a barrier key)."""
+    return (node.start_byte, node.end_byte)
+
+
+def collect_nested_functions(body: Node | None, source: bytes) -> list[tuple[Node, str, str]]:
+    """Named functions declared *inside* this body whose nearest named enclosing
+    function is this one: in-body ``function`` declarations and ``const f = () =>`` /
+    function-expression bindings (the React event-handler pattern). Descends through
+    anonymous callbacks and control flow — a handler defined inside
+    ``useEffect(() => …)`` still belongs here — but stops at each named function,
+    since those deeper names belong to that function's own recursion.
+
+    Returns ``(value_node, name, kind)`` per nested function; the value nodes double
+    as the barrier set so the enclosing function does not also fold their calls/
+    statements (preserving one-call-per-nearest-named-function attribution)."""
+    if body is None:
+        return []
+    out: list[tuple[Node, str, str]] = []
+
+    def visit(n: Node) -> None:
+        for c in n.named_children:
+            if c.type == "function_declaration":
+                nm = c.child_by_field_name("name")
+                out.append((c, node_text(nm, source) if nm is not None else "", "function"))
+                continue  # barrier: its body belongs to it, not to the enclosing fn
+            if c.type in ("lexical_declaration", "variable_declaration"):
+                for d in c.named_children:
+                    if d.type != "variable_declarator":
+                        visit(d)
+                        continue
+                    val = d.child_by_field_name("value")
+                    if val is not None and val.type in NESTED_FN_VALUE_TYPES:
+                        nm = d.child_by_field_name("name")
+                        out.append((val, node_text(nm, source) if nm is not None else "", val.type))
+                    elif val is not None:
+                        visit(val)  # e.g. const x = arr.map(() => { const g = () => {} })
+                continue
+            visit(c)  # anonymous callbacks, control flow, blocks, expressions
+
+    visit(body)
+    return out
+
+
 def _calls(
     body: Node | None, source: bytes, resolve: CallResolver = noop_resolver,
-    owner: str | None = None,
+    owner: str | None = None, barriers: frozenset[tuple[int, int]] = frozenset(),
 ) -> list[Call]:
     if body is None:
         return []
@@ -158,10 +205,12 @@ def _calls(
     seen: set[str] = set()
 
     def visit(node: Node) -> None:
-        # Descend into every scope, including inline callbacks/lambdas and nested
-        # functions — their calls belong to the nearest named enclosing function
-        # (this body never contains a separately-extracted scope). See build_function.
+        # Descend into inline callbacks/lambdas — their calls belong to the nearest
+        # named enclosing function — but stop at ``barriers``: the spans of nested
+        # named functions extracted as their own scope. See build_function.
         for child in node.named_children:
+            if _span(child) in barriers:
+                continue
             if child.type == "call_expression":
                 fn = child.child_by_field_name("function")
                 if fn is not None:
@@ -193,10 +242,15 @@ def build_function(
     capture: bool,
     limit: int,
     resolve: CallResolver = noop_resolver,
-) -> tuple[Function, list[Statement]]:
+) -> tuple[list[Function], list[Statement]]:
     start, end = line_span(node)
     fid = disambiguate(function_id(path, name, start, class_name=class_name), seen_ids)
     body = node.child_by_field_name("body")
+    # Nested named functions (in-body `function`/`const f = () =>`) are extracted as
+    # their own Function nodes, parented to this one; their spans become barriers so
+    # this function does not also fold their calls/statements.
+    nested = collect_nested_functions(body, source)
+    barriers = frozenset(_span(v) for v, _, _ in nested)
     fn = Function(
         id=fid,
         parentId=parent_id,
@@ -211,10 +265,20 @@ def build_function(
         returnType=_type_text(node.child_by_field_name("return_type"), source),
         startLine=start,
         endLine=end,
-        calls=_calls(body, source, resolve, class_name),
+        calls=_calls(body, source, resolve, class_name, barriers),
     )
     statements = extract_statements(
         body, source, path, parent_id=fid, capture=capture, limit=limit, seen_ids=seen_ids,
         descend_all=True,  # walk inline callbacks/lambdas — attribute their statements here
+        barriers=barriers,  # …except separately-extracted nested named functions
     )
-    return fn, statements
+    functions = [fn]
+    for value_node, nested_name, nested_kind in nested:
+        sub_fns, sub_stmts = build_function(
+            value_node, name=nested_name, kind=nested_kind, decorators=[], source=source,
+            path=path, parent_id=fid, class_name=class_name, seen_ids=seen_ids,
+            capture=capture, limit=limit, resolve=resolve,
+        )
+        functions.extend(sub_fns)
+        statements.extend(sub_stmts)
+    return functions, statements
