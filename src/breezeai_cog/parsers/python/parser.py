@@ -55,12 +55,12 @@ class PythonParser(BaseParser):
                 functions.extend(methods)
                 statements.extend(cls_statements)
             elif defn.type == "function_definition":
-                fn, fn_statements = build_function(
+                fns, fn_statements = build_function(
                     defn, extract_decorators(decs, source), source, path,
                     parent_id=fid, class_name=None, seen_ids=seen_ids,
                     capture=capture, limit=limit, resolve=resolve,
                 )
-                functions.append(fn)
+                functions.extend(fns)
                 statements.extend(fn_statements)
 
         # file-scope statements (parented to the file)
