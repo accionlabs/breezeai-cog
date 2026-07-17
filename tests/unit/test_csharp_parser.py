@@ -175,6 +175,32 @@ def test_chain_multi_hit(tmp_path) -> None:
     assert {"CreateQueryBuilder", "ToListAsync"} <= methods
 
 
+def test_local_function_extracted(tmp_path) -> None:
+    # Regression (nested-function-gap): a local function declared inside a method body
+    # must be emitted as its own Function, parented to the enclosing method. Its own
+    # calls stay on it (barrier), not folded into the parent; but the parent keeps its
+    # direct calls and calls from anonymous lambdas (which are not extracted separately).
+    src = ("class W { void Connect() { Setup(); "
+           "void EachMessage(string m) { Handle(m); } "
+           "Run(x => Process(x)); } }")
+    p = tmp_path / REL
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(src)
+    ctx = ParseContext(path=REL, abs_path=p, source=src.encode(), repo_root=tmp_path,
+                       capture_statements=True)
+    rec = CSharpParser().parse_file(ctx)
+    by_name = {f.name: f for f in rec.functions}
+    assert {"Connect", "EachMessage"} <= set(by_name)
+    assert by_name["EachMessage"].type == "function"
+    # local function is parented to the enclosing method
+    assert by_name["EachMessage"].parentId == by_name["Connect"].id
+    # barrier: the local function's own call stays on it, not on the method
+    assert "Handle" in {c.name for c in by_name["EachMessage"].calls}
+    assert "Handle" not in {c.name for c in by_name["Connect"].calls}
+    # the method keeps its own direct call and the anonymous-lambda call
+    assert {"Setup", "Run", "Process"} <= {c.name for c in by_name["Connect"].calls}
+
+
 def test_endpoint_interpolated_string(tmp_path) -> None:
     # #3: C# interpolated string $"/users/{id}" -> /users/{id}.
     src = 'class C { void M(int id){ httpClient.GetAsync($"/users/{id}"); } }'
