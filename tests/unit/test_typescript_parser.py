@@ -212,6 +212,51 @@ def test_top_level_arrow_not_double_emitted(tmp_path) -> None:
     assert len(returns) == 1
 
 
+NESTED_FN_SRC = b'''export default function OpportunityDetail(props) {
+  const onClose = () => { closeDialog(); };
+
+  const handleSubmit = () => {
+    validateForm();
+    saveOpportunity();
+  };
+
+  useEffect(() => {
+    const onKey = (e) => { escHandler(e); };
+    window.addEventListener('keydown', onKey);
+  }, []);
+
+  fetchInitial();
+  return null;
+}
+'''
+
+
+def test_nested_named_functions_extracted(tmp_path) -> None:
+    # Regression (code-capture-gap): in-body handlers (`const handleX = () => {}`)
+    # and functions declared inside anonymous callbacks (useEffect) must each be
+    # emitted as their own Function node, parented to the enclosing function —
+    # this is the dominant React functional-component pattern.
+    p = tmp_path / "OpportunityDetail.jsx"
+    p.write_bytes(NESTED_FN_SRC)
+    ctx = ParseContext(path="OpportunityDetail.jsx", abs_path=p, source=NESTED_FN_SRC,
+                       repo_root=tmp_path, capture_statements=True)
+    rec = TypeScriptParser().parse_file(ctx)
+    by_name = {f.name: f for f in rec.functions}
+    # the component plus all three nested handlers are present
+    assert {"OpportunityDetail", "onClose", "handleSubmit", "onKey"} <= set(by_name)
+    parent = by_name["OpportunityDetail"]
+    # nested handlers are parented to the enclosing function, not the file
+    for h in ("onClose", "handleSubmit", "onKey"):
+        assert by_name[h].parentId == parent.id, h
+    # a handler's OWN calls stay on the handler (barrier), NOT folded into the parent
+    assert {"validateForm", "saveOpportunity"} <= {c.name for c in by_name["handleSubmit"].calls}
+    assert "validateForm" not in {c.name for c in parent.calls}
+    assert "escHandler" not in {c.name for c in parent.calls}
+    # but a direct body call and an anonymous-callback call still belong to the parent
+    assert "fetchInitial" in {c.name for c in parent.calls}
+    assert "addEventListener" in {c.name for c in parent.calls}
+
+
 def test_chain_inner_call_classified(tmp_path) -> None:
     # #4: a db method that is NOT the outermost call in a chain must still be detected.
     p = tmp_path / "chain.ts"

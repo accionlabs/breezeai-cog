@@ -80,16 +80,58 @@ def extract_params(params_node: Node | None, source: bytes) -> list[Parameter]:
     return out
 
 
-def _extract_calls(body: Node | None, source: bytes, resolve: CallResolver = noop_resolver) -> list[Call]:
+def _span(node: Node) -> tuple[int, int]:
+    """Stable identity for a node within one parse (used as a barrier key)."""
+    return (node.start_byte, node.end_byte)
+
+
+def collect_nested_functions(body: Node | None, source: bytes) -> list[tuple[Node, list[Node]]]:
+    """Nested ``def``s whose nearest named enclosing function is this one (closures,
+    decorator factories, in-method helpers). Descends through lambdas and control
+    flow but stops at each nested function (deeper names belong to its own recursion)
+    and does not descend into a nested class (its methods belong to that class, and
+    nested classes are not extracted here). Returns (function_node, decorator_nodes);
+    the function nodes' spans double as the barrier set so the enclosing function
+    does not also fold their calls/statements."""
+    if body is None:
+        return []
+    out: list[tuple[Node, list[Node]]] = []
+
+    def visit(n: Node) -> None:
+        for c in n.named_children:
+            inner, decs = c, []
+            if c.type == "decorated_definition":
+                decs = [d for d in c.named_children if d.type == "decorator"]
+                inner = next(
+                    (d for d in c.named_children if d.type in ("function_definition", "class_definition")), c
+                )
+            if inner.type == "function_definition":
+                out.append((inner, decs))
+                continue  # barrier: its body belongs to it, not to the enclosing fn
+            if inner.type == "class_definition":
+                continue  # nested class: not extracted here; leave its folding unchanged
+            visit(c)  # lambdas, control flow, blocks, expressions
+
+    visit(body)
+    return out
+
+
+def _extract_calls(
+    body: Node | None, source: bytes, resolve: CallResolver = noop_resolver,
+    barriers: frozenset[tuple[int, int]] = frozenset(),
+) -> list[Call]:
     if body is None:
         return []
     calls: list[Call] = []
     seen: set[str] = set()
 
     def visit(node: Node) -> None:
-        # Descend into every scope, including lambdas and nested defs — their calls
-        # belong to the nearest named enclosing function (see build_function).
+        # Descend into lambdas — their calls belong to the nearest named enclosing
+        # function — but stop at ``barriers``: the spans of nested ``def``s extracted
+        # as their own scope (see build_function).
         for child in node.named_children:
+            if _span(child) in barriers:
+                continue
             if child.type == "call":
                 fn = child.child_by_field_name("function")
                 if fn is not None:
@@ -117,14 +159,18 @@ def build_function(
     capture: bool = False,
     limit: int,
     resolve: CallResolver = noop_resolver,
-) -> tuple[Function, list[Statement]]:
-    """Return the Function and its (flat) statements — the caller collects statements
-    onto ``FileRecord.statements`` (statements are not nested on the Function)."""
+) -> tuple[list[Function], list[Statement]]:
+    """Return the Function(s) and their (flat) statements — the caller collects
+    statements onto ``FileRecord.statements`` (statements are not nested on the
+    Function). The list is this function plus any nested ``def``s, which are
+    extracted as their own Functions parented to this one."""
     name = node_text(fnode.child_by_field_name("name"), source)
     start, end = line_span(fnode)
     fid = disambiguate(function_id(path, name, start, class_name=class_name), seen_ids)
     ret = fnode.child_by_field_name("return_type")
     body = fnode.child_by_field_name("body")
+    nested = collect_nested_functions(body, source)
+    barriers = frozenset(_span(f) for f, _ in nested)
     fn = Function(
         id=fid,
         parentId=parent_id,
@@ -140,10 +186,20 @@ def build_function(
         returnType=node_text(ret, source) if ret is not None else None,
         startLine=start,
         endLine=end,
-        calls=_extract_calls(body, source, resolve),
+        calls=_extract_calls(body, source, resolve, barriers),
     )
     statements = extract_statements(
         body, source, path, parent_id=fid, capture=capture, limit=limit, seen_ids=seen_ids,
-        descend_all=True,  # walk inline lambdas/nested defs — attribute their statements here
+        descend_all=True,  # walk inline lambdas — attribute their statements here
+        barriers=barriers,  # …except separately-extracted nested defs
     )
-    return fn, statements
+    functions = [fn]
+    for nested_fnode, nested_decs in nested:
+        sub_fns, sub_stmts = build_function(
+            nested_fnode, extract_decorators(nested_decs, source), source, path,
+            parent_id=fid, class_name=None, seen_ids=seen_ids,
+            capture=capture, limit=limit, resolve=resolve,
+        )
+        functions.extend(sub_fns)
+        statements.extend(sub_stmts)
+    return functions, statements

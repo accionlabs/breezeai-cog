@@ -124,6 +124,38 @@ def test_inline_lambda_body_captured(tmp_path) -> None:
     assert any("repo.save" in s.text for s in db)
 
 
+def test_nested_member_classes_extracted(tmp_path) -> None:
+    # Regression (code-capture-gap): member (inner) classes / interfaces / enums,
+    # and their methods, must each be extracted as their own node parented to the
+    # enclosing class — not dropped. Nesting recurses to arbitrary depth.
+    src = (
+        "package com.x;\n"
+        "public class Outer {\n"
+        "  void run() { java.util.List.of().forEach(o -> handle(o)); }\n"
+        "  static class Inner {\n"
+        "    void innerMethod() { innerCall(); }\n"
+        "    class DeepInner { void deep() { deepCall(); } }\n"
+        "  }\n"
+        "  interface Callback { void onDone(); }\n"
+        "  enum Status { OK, FAIL }\n"
+        "}\n"
+    ).encode()
+    p = tmp_path / "Outer.java"
+    p.write_text(src.decode())
+    ctx = ParseContext(path="Outer.java", abs_path=p, source=src, repo_root=tmp_path,
+                       capture_statements=True)
+    rec = JavaParser().parse_file(ctx)
+    by_cls = {c.name: c for c in rec.classes}
+    assert {"Outer", "Inner", "DeepInner", "Callback", "Status"} <= set(by_cls)
+    assert by_cls["Callback"].type == "interface" and by_cls["Status"].type == "enum"
+    assert by_cls["Inner"].parentId == by_cls["Outer"].id
+    assert by_cls["DeepInner"].parentId == by_cls["Inner"].id
+    fn_names = {f.name for f in rec.functions}
+    assert {"innerMethod", "deep", "onDone"} <= fn_names
+    # the lambda in run() still folds into run (anonymous scope)
+    assert "handle" in {c.name for f in rec.functions if f.name == "run" for c in f.calls}
+
+
 def test_control_statement_not_mislabeled(tmp_path) -> None:
     # #4/smear: a db call nested in an if/for body must not tag the enclosing control statements.
     src = ("class C { void m(java.util.List<Order> o){ if(o.size()>0){ for(Order x: o){ repo.save(x); } } } }").encode()

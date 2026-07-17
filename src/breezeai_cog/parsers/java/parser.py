@@ -57,11 +57,11 @@ class JavaParser(BaseParser):
 
         for child in root.named_children:
             if child.type in _CLASS_TYPES:
-                cls, methods, cls_statements = build_class(
+                cls_list, methods, cls_statements = build_class(
                     child, source, path,
                     parent_id=fid, seen_ids=seen_ids, capture=capture, limit=limit, resolve=resolve,
                 )
-                classes.append(cls)
+                classes.extend(cls_list)
                 functions.extend(methods)
                 statements.extend(cls_statements)
 

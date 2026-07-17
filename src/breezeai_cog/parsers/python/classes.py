@@ -61,17 +61,17 @@ def build_class(
         for child in body.named_children:
             defn, decs = _unwrap(child)
             if defn.type == "function_definition":
-                fn, fn_statements = build_function(
+                fns, fn_statements = build_function(
                     defn, extract_decorators(decs, source), source, path,
                     parent_id=cid, class_name=name, seen_ids=seen_ids,
                     capture=capture, limit=limit, resolve=resolve,
                 )
-                methods.append(fn)
+                methods.extend(fns)
                 statements.extend(fn_statements)
-                if fn.name == "__init__":
+                if fns[0].name == "__init__":
                     ctor_params = [
                         ConstructorParam(name=p.name, type=p.type)
-                        for p in fn.params if p.name not in ("self", "cls")
+                        for p in fns[0].params if p.name not in ("self", "cls")
                     ]
 
     cls = Class(

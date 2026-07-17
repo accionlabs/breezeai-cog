@@ -170,13 +170,13 @@ class TypeScriptParser(BaseParser):
             statements.extend(cls_stmts)
         elif decl.type == "function_declaration":
             name_node = decl.child_by_field_name("name")
-            fn, fn_stmts = build_function(
+            fns, fn_stmts = build_function(
                 decl, name=node_text(name_node, source) if name_node else "",
                 kind="function", decorators=extract_decorators(decorators, source),
                 source=source, path=path, parent_id=fid, class_name=None,
                 seen_ids=seen_ids, capture=capture, limit=limit, resolve=resolve,
             )
-            functions.append(fn)
+            functions.extend(fns)
             statements.extend(fn_stmts)
         elif decl.type in ("lexical_declaration", "variable_declaration"):
             for vd in decl.named_children:
@@ -186,13 +186,13 @@ class TypeScriptParser(BaseParser):
                 name_node = vd.child_by_field_name("name")
                 decl_name = node_text(name_node, source) if name_node else ""
                 if value is not None and value.type in _FUNC_VALUES:
-                    fn, fn_stmts = build_function(
+                    fns, fn_stmts = build_function(
                         value, name=decl_name,
                         kind=value.type, decorators=[], source=source, path=path,
                         parent_id=fid, class_name=None, seen_ids=seen_ids,
                         capture=capture, limit=limit, resolve=resolve,
                     )
-                    functions.append(fn)
+                    functions.extend(fns)
                     statements.extend(fn_stmts)
                 elif value is not None and value.type == "object" and _bears_function(value):
                     # G2: functions attached as object-literal properties (resolver maps,
@@ -214,12 +214,12 @@ class TypeScriptParser(BaseParser):
                 continue
             name = f"{name_prefix}.{_member_name(key, source)}"
             if value.type in _FUNC_VALUES:
-                fn, fn_stmts = build_function(
+                fns, fn_stmts = build_function(
                     value, name=name, kind=value.type, decorators=[], source=source,
                     path=path, parent_id=fid, class_name=None, seen_ids=seen_ids,
                     capture=capture, limit=limit, resolve=resolve,
                 )
-                functions.append(fn)
+                functions.extend(fns)
                 statements.extend(fn_stmts)
             elif value.type == "object" and _bears_function(value):
                 self._object_functions(

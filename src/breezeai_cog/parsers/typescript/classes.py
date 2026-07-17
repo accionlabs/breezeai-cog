@@ -88,13 +88,13 @@ def build_class(
             if child.type == "method_definition":
                 mname_node = child.child_by_field_name("name")
                 mname = node_text(mname_node, source) if mname_node is not None else ""
-                fn, fn_statements = build_function(
+                fns, fn_statements = build_function(
                     child, name=mname, kind="constructor" if mname == "constructor" else "method",
                     decorators=extract_decorators(pending, source), source=source, path=path,
                     parent_id=cid, class_name=name, seen_ids=seen_ids, capture=capture, limit=limit,
                     resolve=resolve,
                 )
-                methods.append(fn)
+                methods.extend(fns)
                 statements.extend(fn_statements)
                 if mname == "constructor":
                     ctor_params = [
