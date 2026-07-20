@@ -22,7 +22,7 @@ from .classes import build_class
 from ..callresolve import make_resolver
 from .aws_events import detect_aws_events
 from ..typescript_express.routes import detect_express
-from .functions import build_function, defined_names, extract_decorators, type_map
+from .functions import build_function, collect_nested_functions, defined_names, extract_decorators, type_map
 from .imports import TsAliasIndex, build_ts_index, extract_imports
 from .mappings import FRAMEWORKS, STATEMENT_TYPES
 from .statements import extract_statements
@@ -124,6 +124,21 @@ class TypeScriptParser(BaseParser):
             decorators = pending + exp_decs
             pending = []
             if decl is None:
+                # `export default <expr>` is not a declaration, so it isn't handled above —
+                # but it commonly wraps a named function: `export default React.memo(function
+                # Foo(){…})`, `export default function bar(){}`. Descend it with the named-only
+                # collector so the component (and, via build_function's recursion, its nested
+                # handlers) are seeded. Anonymous `export default () => …` yields nothing.
+                if child.type == "export_statement":
+                    for value_node, nested_name, nested_kind in collect_nested_functions(child, source):
+                        fns, fn_stmts = build_function(
+                            value_node, name=nested_name or "default", kind=nested_kind,
+                            decorators=[], source=source, path=path, parent_id=fid,
+                            class_name=None, seen_ids=seen_ids, capture=capture, limit=limit,
+                            resolve=resolve,
+                        )
+                        functions.extend(fns)
+                        statements.extend(fn_stmts)
                 continue
             self._handle(decl, decorators, source, path, fid, seen_ids, capture, limit,
                          functions, classes, statements, resolve)
@@ -202,10 +217,40 @@ class TypeScriptParser(BaseParser):
                         value, decl_name, source, path, fid, seen_ids, capture, limit,
                         functions, statements, resolve,
                     )
+                elif value is not None:
+                    # Value is a wrapper expression (call/parens/ternary/array/await/as …)
+                    # that may hide named functions — e.g. Zustand `create((set) => ({ open:
+                    # () => … }))`, nested `create(persist(…))`, Sequelize `hasMany(() => M)`.
+                    # Reuse the named-only nested collector: it descends call args at any
+                    # depth and seeds by property key / binding name, skipping anonymous
+                    # callbacks (the same machinery build_class uses for decorator args). This
+                    # is callee-agnostic — no wrapper-name allow-list.
+                    for value_node, nested_name, nested_kind in collect_nested_functions(value, source):
+                        fns, fn_stmts = build_function(
+                            value_node, name=nested_name or decl_name, kind=nested_kind,
+                            decorators=[], source=source, path=path, parent_id=fid,
+                            class_name=None, seen_ids=seen_ids, capture=capture, limit=limit,
+                            resolve=resolve,
+                        )
+                        functions.extend(fns)
+                        statements.extend(fn_stmts)
 
     def _object_functions(self, obj, name_prefix, source, path, fid, seen_ids, capture,
                           limit, functions, statements, resolve) -> None:
         for pair in obj.named_children:
+            if pair.type == "method_definition":
+                # Object shorthand method: `{ n() {} }` (name from the property key).
+                key = pair.child_by_field_name("name")
+                if key is None:
+                    continue
+                fns, fn_stmts = build_function(
+                    pair, name=f"{name_prefix}.{_member_name(key, source)}", kind="method",
+                    decorators=[], source=source, path=path, parent_id=fid, class_name=None,
+                    seen_ids=seen_ids, capture=capture, limit=limit, resolve=resolve,
+                )
+                functions.extend(fns)
+                statements.extend(fn_stmts)
+                continue
             if pair.type != "pair":
                 continue
             key = pair.child_by_field_name("key")

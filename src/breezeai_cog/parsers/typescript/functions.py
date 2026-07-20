@@ -213,6 +213,11 @@ def collect_nested_functions(body: Node | None, source: bytes) -> list[tuple[Nod
                     continue  # barrier: its body belongs to it
                 visit(c)
                 continue
+            if c.type == "method_definition" and n.type == "object":
+                # Object shorthand method: ``{ n() { … } }`` (name from the key). Guarded to
+                # object literals so class-body methods are left to build_class.
+                out.append((c, _property_key_name(c.child_by_field_name("name"), source), "method"))
+                continue  # barrier: its body belongs to it
             if c.type == "function_expression":
                 # Named function expression used as a callback
                 # (``arr.forEach(function step() { … })``). Anonymous ones fall

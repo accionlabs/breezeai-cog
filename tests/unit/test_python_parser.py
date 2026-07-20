@@ -212,6 +212,48 @@ def test_bare_call_in_control_body_not_mislabeled(tmp_path) -> None:
     assert any(s.nodeType == "call" and s.semanticType == "db_method_call" for s in rec.statements)
 
 
+def test_defs_nested_in_blocks_are_seeded(tmp_path) -> None:
+    # Regression: functions/classes nested in module- or class-level block
+    # statements (with/if/for/try, e.g. Airflow `with DAG(...):` + `@task def`)
+    # must be extracted, not only direct children of the module/class body.
+    src = (
+        "with DAG('d') as dag:\n"
+        "    @task\n"
+        "    def extract_task():\n"
+        "        repo.load()\n"                 # bare call — must attach to the fn
+        "    def _helper():\n"
+        "        return 1\n"
+        "\n"
+        "if FLAG:\n"
+        "    for x in items:\n"
+        "        def looped():\n"
+        "            return x\n"
+        "\n"
+        "class Svc:\n"
+        "    if TYPE_CHECKING:\n"
+        "        def guarded(self):\n"
+        "            return 2\n"
+    ).encode()
+    p = tmp_path / "dag.py"
+    p.write_text(src.decode())
+    ctx = ParseContext(path="dag.py", abs_path=p, source=src, repo_root=tmp_path,
+                       capture_statements=True)
+    rec = PythonParser().parse_file(ctx)
+    names = {f.name for f in rec.functions}
+    assert {"extract_task", "_helper", "looped", "guarded"} <= names
+    et = next(f for f in rec.functions if f.name == "extract_task")
+    assert any(d.name == "task" for d in et.decorators)          # decorator preserved
+    guarded = next(f for f in rec.functions if f.name == "guarded")
+    assert guarded.type == "method"                              # attached to the class
+    # the fn body statement is attributed to the fn, not duplicated at file scope
+    load_stmts = [s for s in rec.statements if s.nodeType == "call" and "repo.load" in s.text]
+    assert len(load_stmts) == 1 and load_stmts[0].parentId == et.id
+    # emitted record still validates against the capture schema
+    schema = FileRecord.model_json_schema(by_alias=True)
+    errors = list(Draft202012Validator(schema).iter_errors(json.loads(to_line(rec))))
+    assert not errors, "\n".join(str(e) for e in errors)
+
+
 def test_endpoint_fstring_and_concat(tmp_path) -> None:
     # #3: f-string / concatenation endpoints resolve to {param} paths (was the raw first arg).
     src = "def f(id):\n    requests.get(f'/users/{id}')\n    requests.get('/a/' + str(id))\n".encode()
