@@ -10,7 +10,7 @@ from ...utils import count_loc
 from ..base import BaseParser, ParseContext
 from ..treesitter import parse_source
 from ..callresolve import make_resolver
-from .classes import _unwrap, build_class
+from .classes import build_class, iter_definitions
 from .functions import build_function, defined_names, extract_decorators
 from .imports import extract_imports
 from .mappings import FRAMEWORKS, STATEMENT_TYPES
@@ -44,17 +44,18 @@ class PythonParser(BaseParser):
         functions: list[Function] = []
         classes = []
         statements: list[Statement] = []
-        for child in root.named_children:
-            defn, decs = _unwrap(child)
+        # Walk the whole module (not just direct children): defs nested in
+        # module-level blocks (``with DAG(...):``, ``if``/``for`` …) are seeded too.
+        for defn, decs in iter_definitions(root):
             if defn.type == "class_definition":
-                cls, methods, cls_statements = build_class(
+                cls_list, methods, cls_statements = build_class(
                     defn, decs, source, path,
                     parent_id=fid, seen_ids=seen_ids, capture=capture, limit=limit, resolve=resolve,
                 )
-                classes.append(cls)
+                classes.extend(cls_list)
                 functions.extend(methods)
                 statements.extend(cls_statements)
-            elif defn.type == "function_definition":
+            else:  # function_definition
                 fns, fn_statements = build_function(
                     defn, extract_decorators(decs, source), source, path,
                     parent_id=fid, class_name=None, seen_ids=seen_ids,

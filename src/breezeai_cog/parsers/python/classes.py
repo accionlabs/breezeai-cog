@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterator
+
 from tree_sitter import Node
 
 from ...emit import class_id, disambiguate
@@ -22,6 +24,28 @@ def _unwrap(node: Node) -> tuple[Node, list[Node]]:
     return node, []
 
 
+_DEFINITION_TYPES = ("function_definition", "class_definition")
+
+
+def iter_definitions(body: Node) -> Iterator[tuple[Node, list[Node]]]:
+    """Yield ``(definition, decorator_nodes)`` for every ``function_definition`` /
+    ``class_definition`` reachable from ``body`` in source order, descending
+    recursively through any intervening block statement (``with`` / ``if`` / ``try``
+    / ``for`` / ``while`` / ``match`` and their async & clause variants) but **not**
+    into a definition's own body — that definition's builder recurses its own
+    nesting. Without this, a ``def`` nested in a module- or class-level
+    ``with DAG(...):`` (Airflow) or ``if/for`` block is never seeded, since the
+    walkers otherwise look only at *direct* children. Descending generically
+    (rather than allow-listing block types) also covers ``while`` / ``match`` /
+    ``async`` blocks that no single codebase exercises."""
+    for child in body.named_children:
+        defn, decs = _unwrap(child)
+        if defn.type in _DEFINITION_TYPES:
+            yield defn, decs  # barrier: the builder recurses nesting inside this def
+        else:
+            yield from iter_definitions(child)
+
+
 def build_class(
     cnode: Node,
     decorator_nodes: list[Node],
@@ -33,10 +57,12 @@ def build_class(
     capture: bool,
     limit: int,
     resolve: CallResolver = noop_resolver,
-) -> tuple[Class, list[Function], list[Statement]]:
-    """Return (Class, methods, statements). Methods and statements are flat — the
-    caller collects them onto ``FileRecord.functions``/``.statements`` (linked by
-    parentId), not nested on the Class."""
+) -> tuple[list[Class], list[Function], list[Statement]]:
+    """Return ([this class, *nested classes], methods, statements). Classes,
+    methods and statements are flat — the caller collects them onto
+    ``FileRecord.classes``/``.functions``/``.statements`` (linked by parentId),
+    not nested on the Class. Nested classes/methods reachable through in-body
+    blocks (``if``/``with``/``try`` …) are included via ``iter_definitions``."""
     name = node_text(cnode.child_by_field_name("name"), source)
     start, end = line_span(cnode)
     cid = disambiguate(class_id(path, name), seen_ids)
@@ -51,6 +77,7 @@ def build_class(
 
     methods: list[Function] = []
     statements: list[Statement] = []
+    nested_classes: list[Class] = []
     ctor_params: list[ConstructorParam] = []
     body = cnode.child_by_field_name("body")
     if body is not None:
@@ -58,8 +85,7 @@ def build_class(
         statements.extend(
             extract_statements(body, source, path, parent_id=cid, capture=capture, limit=limit, seen_ids=seen_ids)
         )
-        for child in body.named_children:
-            defn, decs = _unwrap(child)
+        for defn, decs in iter_definitions(body):
             if defn.type == "function_definition":
                 fns, fn_statements = build_function(
                     defn, extract_decorators(decs, source), source, path,
@@ -73,6 +99,14 @@ def build_class(
                         ConstructorParam(name=p.name, type=p.type)
                         for p in fns[0].params if p.name not in ("self", "cls")
                     ]
+            else:  # class_definition — nested class, extracted parented to this one
+                sub_classes, sub_methods, sub_statements = build_class(
+                    defn, decs, source, path,
+                    parent_id=cid, seen_ids=seen_ids, capture=capture, limit=limit, resolve=resolve,
+                )
+                nested_classes.extend(sub_classes)
+                methods.extend(sub_methods)
+                statements.extend(sub_statements)
 
     cls = Class(
         id=cid,
@@ -90,4 +124,4 @@ def build_class(
         startLine=start,
         endLine=end,
     )
-    return cls, methods, statements
+    return [cls, *nested_classes], methods, statements
