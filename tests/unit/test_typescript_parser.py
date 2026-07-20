@@ -169,6 +169,56 @@ def test_object_function_ids_are_unique(tmp_path) -> None:
     assert len(ids) == len(set(ids))  # deterministic, disambiguated ids
 
 
+WRAPPED_FN_SRC = b'''import { create } from "zustand";
+import { persist } from "zustand/middleware";
+
+export const useStore = create((set) => ({          // call-wrapped object members
+  openDialog: () => set({ open: true }),
+  closeDialog: () => set({ open: false }),
+}));
+
+export const useP = create(persist((set) => ({      // nested call wrappers
+  reset: () => set({}),
+})));
+
+const obj = { shorthand() { return 1; }, arrow: () => 2 };  // shorthand method + arrow
+
+class Widget {
+  onClick = () => { return this.render(); };        // arrow class field
+  render() { return 1; }
+}
+
+export default React.memo(function Panel() {         // export default: named fn in a HOC
+  const handleClick = () => save();                  // nested handler in the component
+  return null;
+});
+'''
+
+
+def test_wrapped_and_field_functions_captured(tmp_path) -> None:
+    # Task-2 named forms: call-wrapped object members (Zustand), nested wrappers,
+    # object shorthand methods, arrow class fields, and `export default` HOC-wrapped
+    # named functions (plus their nested handlers). Anonymous callbacks stay uncaptured.
+    p = tmp_path / "store.tsx"
+    p.write_bytes(WRAPPED_FN_SRC)
+    ctx = ParseContext(path="store.tsx", abs_path=p, source=WRAPPED_FN_SRC,
+                       repo_root=tmp_path, capture_statements=True)
+    rec = TypeScriptParser().parse_file(ctx)
+    names = {f.name for f in rec.functions}
+    assert {"openDialog", "closeDialog"} <= names          # call-wrapper (create)
+    assert "reset" in names                                # nested create(persist(...))
+    assert "obj.shorthand" in names and "obj.arrow" in names  # shorthand method + arrow prop
+    assert "onClick" in names                              # arrow class field
+    assert "Panel" in names                                # export default React.memo(function Panel)
+    assert "handleClick" in names                          # nested handler inside Panel
+    onclick = next(f for f in rec.functions if f.name == "onClick")
+    assert onclick.type == "arrow_function"
+    # emitted record still validates against the capture schema
+    errors = list(Draft202012Validator(FileRecord.model_json_schema(by_alias=True))
+                  .iter_errors(json.loads(to_line(rec))))
+    assert not errors, "\n".join(str(e) for e in errors)
+
+
 def test_module_extensions_matched() -> None:
     # .mts/.cts (TS) and .mjs/.cjs (JS) module files must be claimed by the parser.
     parser = TypeScriptParser()

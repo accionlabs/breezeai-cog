@@ -248,6 +248,10 @@ def test_defs_nested_in_blocks_are_seeded(tmp_path) -> None:
     # the fn body statement is attributed to the fn, not duplicated at file scope
     load_stmts = [s for s in rec.statements if s.nodeType == "call" and "repo.load" in s.text]
     assert len(load_stmts) == 1 and load_stmts[0].parentId == et.id
+    # emitted record still validates against the capture schema
+    schema = FileRecord.model_json_schema(by_alias=True)
+    errors = list(Draft202012Validator(schema).iter_errors(json.loads(to_line(rec))))
+    assert not errors, "\n".join(str(e) for e in errors)
 
 
 def test_endpoint_fstring_and_concat(tmp_path) -> None:
