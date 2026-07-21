@@ -107,8 +107,67 @@ export async function f(client: Chargebee) { return client.customer.frobnicate({
     assert _api_calls(rec) == []
 
 
+# ts-force (Salesforce): a generated entity `extends RestObject` with a static retrieve()
+# that funnels through RestObject.query<T>(T, qry) — the real hubspot-tools shape.
+TSFORCE_ENTITY_SRC = b"""import { RestObject, QueryOpts, buildQuery } from 'ts-force';
+
+export class Account extends RestObject {
+  public static async retrieve(qryParam, opts?: QueryOpts): Promise<Account[]> {
+    const qry = buildQuery(Account, qryParam);
+    return await RestObject.query<Account>(Account, qry, opts);
+  }
+}
+"""
+
+# ts-force generic helper: client.query<T>(qry) where T is an unbound type parameter —
+# the SObject is NOT knowable here (resolved at each caller). Endpoint must be honest-null.
+TSFORCE_GENERIC_SRC = b"""import { Rest, RestObject } from 'ts-force';
+
+export async function* queryAll<T extends RestObject>(type, qry: string) {
+  const client = new Rest();
+  const response = await client.query<T>(qry);
+  yield* response.records;
+}
+"""
+
+
+def test_tsforce_entity_query_detected(tmp_path) -> None:
+    rec = _parse(tmp_path, TSFORCE_ENTITY_SRC, "src/shared/salesforce/entities/Account.ts")
+    calls = _api_calls(rec)
+    assert len(calls) == 1
+    c = calls[0]
+    assert c.framework == "salesforce"
+    assert c.endpoint == "Account"  # SObject from the generic <Account>
+    assert c.method is None
+    assert c.dataAccessHint is None  # reclassified away from db_method_call/orm
+
+
+def test_tsforce_generic_query_is_honest_null(tmp_path) -> None:
+    rec = _parse(tmp_path, TSFORCE_GENERIC_SRC, "src/shared/salesforce/connection.ts")
+    calls = _api_calls(rec)
+    assert len(calls) == 1
+    c = calls[0]
+    assert c.framework == "salesforce"
+    assert c.endpoint is None  # unbound <T> → SObject unknown → null, never the literal "T"
+
+
+def test_tsforce_requires_import(tmp_path) -> None:
+    # Same shape but no ts-force import → not tagged (byte guard).
+    src = b"""class Account extends RestObject {
+  static async retrieve() { return await RestObject.query<Account>(Account, 'x'); }
+}
+"""
+    rec = _parse(tmp_path, src, "src/x.ts")
+    assert [s for s in _api_calls(rec) if s.framework == "salesforce"] == []
+
+
 def test_output_validates(tmp_path) -> None:
-    for src, rel in ((HUBSPOT_SRC, "src/hs.ts"), (CHARGEBEE_SRC, "src/cb.ts")):
+    for src, rel in (
+        (HUBSPOT_SRC, "src/hs.ts"),
+        (CHARGEBEE_SRC, "src/cb.ts"),
+        (TSFORCE_ENTITY_SRC, "src/entities/Account.ts"),
+        (TSFORCE_GENERIC_SRC, "src/connection.ts"),
+    ):
         rec = _parse(tmp_path, src, rel)
         errors = list(
             Draft202012Validator(FileRecord.model_json_schema(by_alias=True)).iter_errors(

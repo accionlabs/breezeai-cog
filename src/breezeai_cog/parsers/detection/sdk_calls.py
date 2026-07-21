@@ -20,18 +20,27 @@ bound client identifier, AND the tail method must be a known SDK operation. All 
 required, so a same-named method on an unrelated object is not mis-tagged (honest — absent
 beats wrong).
 
-**Pending ratification:** the ``framework`` vendor values (``hubspot``/``chargebee``) are NOT
-yet in the Code Ontology Parser Target Spec's ``framework`` enum (§4.1) — same status as
-``nextjs``. The backend may drop the value at ingestion until the spec enum + allow-list are
-updated. The parser emits the honest label deliberately; adding the vendors to the enum is the
-tracked follow-up with the spec owner. Spec: https://accionlabs.atlassian.net/wiki/x/BIAGl
+Two call-shape families are handled, each verified against real code:
 
-**Scope (first cut):** the two ``client.<resource>.<op>(...)``-shaped SDKs verified against
-real code — HubSpot (``@hubspot/api-client``) and Chargebee (``chargebee``). Salesforce
-``ts-force`` is a query-builder shape (``buildQuery`` + ``new Rest()``), structurally unlike
-these — its call shape needs its own verification pass and is intentionally NOT guessed here
-(see ``_DEFERRED_SDKS``). The registry is one entry per SDK so a new one is a small, tested
-addition — never a speculative broad list of unverified call shapes.
+* **Client-chain SDKs** (``client.<resource>.<op>(...)``) — HubSpot (``@hubspot/api-client``)
+  and Chargebee (``chargebee``). The receiver must resolve to the SDK *client type* and the
+  tail must be a known operation; endpoint = the call chain. See ``_SDKS`` / ``_client_identifiers``.
+* **ts-force (Salesforce)** — a SOQL ORM, NOT a client chain: reads go through
+  ``RestObject.query<SObject>(...)`` / ``Entity.retrieve(...)``, writes are instance methods.
+  The endpoint is the **SObject type** (from the generic ``<T>`` or an ``extends RestObject``
+  receiver — recognised from the code's own inheritance, no hardcoded entity list). Because a
+  SOQL query is an outbound call to Salesforce (not local data access), these are reclassified
+  from the generic ``db_method_call``/``orm`` tag to ``api_call``. See ``_detect_tsforce``.
+
+**Pending ratification:** the ``framework`` vendor values (``hubspot``/``chargebee``/
+``salesforce``) are NOT yet in the Code Ontology Parser Target Spec's ``framework`` enum
+(§4.1) — same status as ``nextjs``. The backend may drop the value at ingestion until the spec
+enum + allow-list are updated. The parser emits the honest label deliberately; adding the
+vendors to the enum is the tracked follow-up with the spec owner. Spec:
+https://accionlabs.atlassian.net/wiki/x/BIAGl
+
+The registry (``_SDKS``) is one entry per client-chain SDK, so adding another is a small,
+tested addition — never a speculative broad list of unverified call shapes.
 """
 
 from __future__ import annotations
@@ -92,10 +101,19 @@ _SDKS: tuple[_Sdk, ...] = (
     ),
 )
 
-# Known but intentionally NOT implemented — a different call shape that must be verified before
-# it is modelled (never guessed). ts-force: SOQL query-builder (`buildQuery(type, …)` + `new
-# Rest().query(...)`/`RestObject.retrieve()`), not a `client.<resource>.<op>()` chain.
-_DEFERRED_SDKS = {b"ts-force": "salesforce"}
+# --- Salesforce (ts-force) -------------------------------------------------------------
+# ts-force has NO client.<resource>.<op>() chain — it is a SOQL ORM. Every read funnels
+# through ``RestObject.query<SObject>(SObject, qry)`` (also on generated ``Entity.retrieve``
+# static methods), and writes are instance methods (``rec.insert()``/``update``/``delete``).
+# The outbound target is the **SObject type** — carried in the call's generic ``<Account>`` or
+# as the receiver of ``Account.retrieve(...)`` — which we recognise by the code's own
+# ``extends RestObject`` inheritance (no hardcoded entity list). The generic ORM classifier
+# grabs ``.query`` first as ``db_method_call``; we reclassify those to ``api_call`` since a
+# SOQL query is an outbound call to Salesforce, not local data access.
+_TSFORCE_MARKER = b"ts-force"
+_TSFORCE_BASE = "RestObject"
+_TSFORCE_QUERY_METHODS = {"query", "retrieve"}  # read surface (SObject in <T>/receiver)
+_TSFORCE_WRITE_METHODS = {"insert", "update", "delete"}  # instance writes on a RestObject
 
 
 def _sdks_in(source: bytes) -> list[_Sdk]:
@@ -121,6 +139,9 @@ def _callee_chain(call: Node, source: bytes) -> tuple[str, str, str] | None:
     ``root_identifier`` is the leftmost name in the chain (the client), ``tail_method`` the
     final property (the operation)."""
     fn = call.child_by_field_name("function")
+    # `await x.y()` / `(x.y)()` put an await/paren wrapper in the function slot — unwrap it.
+    while fn is not None and fn.type in ("await_expression", "parenthesized_expression"):
+        fn = fn.named_children[0] if fn.named_children else None
     if fn is None or fn.type != "member_expression":
         return None
     prop = fn.child_by_field_name("property")
@@ -238,17 +259,60 @@ def _owner_function(line: int, functions: list[Function], fallback: str) -> str:
     return best_id
 
 
+def _emit_outbound(
+    call: Node,
+    line: int,
+    endpoint: str,
+    framework: str,
+    source: bytes,
+    path: str,
+    record: FileRecord,
+    seen: set[str],
+    *,
+    reclassify_db: bool = False,
+) -> None:
+    """Enrich the enclosing statement in place, or append a fresh ``api_call``. Enriches when
+    the enclosing statement is unclassified — or, for SDKs whose calls the generic ORM
+    classifier grabs first (ts-force → ``db_method_call``), when ``reclassify_db`` and the
+    statement is that ORM mis-tag; otherwise appends (so a genuinely different classified
+    span is never overwritten)."""
+    stmt = _enclosing_statement(line, record.statements)
+    enrichable = stmt is not None and (
+        stmt.semanticType is None or (reclassify_db and stmt.semanticType == "db_method_call")
+    )
+    ep = endpoint or None  # empty → honest-null (unresolved SObject); never a blank string
+    if enrichable and stmt is not None:
+        stmt.semanticType = "api_call"
+        stmt.framework = framework
+        stmt.endpoint = ep
+        stmt.method = None  # SDK call carries no HTTP verb (honest-null)
+        stmt.dataAccessHint = None  # clear the ORM hint if we reclassified a db_method_call
+    else:
+        new_id = disambiguate(statement_id(path, line, call.start_point[1]), seen)
+        seen.add(new_id)
+        record.statements.append(
+            Statement(
+                id=new_id,
+                parentId=_owner_function(line, record.functions, file_id(path)),
+                nodeType=call.type,
+                semanticType="api_call",
+                text=first_line(node_text(call, source)),
+                endpoint=ep,
+                framework=framework,
+                startLine=line,
+                endLine=call.end_point[0] + 1,
+                path=path,
+            )
+        )
+
+
 def detect_sdk_calls(root: Node, source: bytes, path: str, record: FileRecord) -> str | None:
     """Enrich/add vendor-SDK ``api_call`` statements on ``record``. Returns the first vendor
     framework label seen (for the file-level rollup), or ``None``."""
-    sdks = _sdks_in(source)
-    if not sdks:
-        return None
-    fid = file_id(path)
     seen = {s.id for s in record.statements}
     file_fw: str | None = None
 
-    for sdk in sdks:
+    for sdk in _sdks_in(source):
         clients = _client_identifiers(root, source, sdk)
         if not clients:
             continue  # SDK imported but no client bound in this file → nothing to attribute
@@ -259,29 +323,95 @@ def detect_sdk_calls(root: Node, source: bytes, path: str, record: FileRecord) -
             callee, receiver, tail = chain
             if receiver not in clients or tail not in sdk.operations:
                 continue
-            line = call.start_point[0] + 1
-            stmt = _enclosing_statement(line, record.statements)
-            if stmt is not None and stmt.semanticType is None:  # enrich base statement in place
-                stmt.semanticType = "api_call"
-                stmt.framework = sdk.framework
-                stmt.endpoint = callee
-            else:  # span already classified, or no base statement here → append one
-                new_id = disambiguate(statement_id(path, line, call.start_point[1]), seen)
-                seen.add(new_id)
-                record.statements.append(
-                    Statement(
-                        id=new_id,
-                        parentId=_owner_function(line, record.functions, fid),
-                        nodeType=call.type,
-                        semanticType="api_call",
-                        text=first_line(node_text(call, source)),
-                        endpoint=callee,
-                        framework=sdk.framework,
-                        startLine=line,
-                        endLine=call.end_point[0] + 1,
-                        path=path,
-                    )
-                )
+            _emit_outbound(
+                call,
+                call.start_point[0] + 1,
+                callee,
+                sdk.framework,
+                source,
+                path,
+                record,
+                seen,
+            )
             file_fw = file_fw or sdk.framework
 
+    if _detect_tsforce(root, source, path, record, seen):
+        file_fw = file_fw or "salesforce"
+
     return file_fw
+
+
+def _restobject_entities(record: FileRecord) -> set[str]:
+    """SObject entity names = classes that ``extends RestObject`` (the base parser already
+    captured ``Class.extends``). Derived from the code's own inheritance — no hardcoded list."""
+    return {c.name for c in record.classes if c.extends == _TSFORCE_BASE}
+
+
+def _type_arg_name(call: Node, source: bytes) -> str | None:
+    """The single type argument of ``fn<T>(...)`` → ``T`` (e.g. ``query<Account>`` → Account)."""
+    ta = call.child_by_field_name("type_arguments")
+    if ta is None:
+        return None
+    inner = next(
+        (c for c in ta.named_children if c.type in ("type_identifier", "identifier")), None
+    )
+    return node_text(inner, source) if inner is not None else None
+
+
+def _detect_tsforce(
+    root: Node, source: bytes, path: str, record: FileRecord, seen: set[str]
+) -> bool:
+    """ts-force outbound detection. Two read shapes + instance writes, endpoint = SObject:
+
+    * ``RestObject.query<Account>(Account, qry)`` / ``client.query<Contact>(qry)`` → SObject
+      from the generic ``<T>`` (fallback: a first-arg identifier that is a known entity).
+    * ``Account.retrieve(...)`` — static call whose receiver is a known ``RestObject`` entity.
+    * ``rec.insert()/update()/delete()`` — instance write; endpoint left null unless the
+      receiver itself is an entity name (honest-null — we don't guess the instance's type).
+
+    Only fires in a file importing ``ts-force`` (byte guard). SObject is resolved from the
+    code (``<T>`` / receiver / known entity), else ``endpoint`` stays null — never guessed."""
+    if _TSFORCE_MARKER not in source:
+        return False
+    entities = _restobject_entities(record)
+    emitted = False
+
+    for call in _walk_calls(root):
+        chain = _callee_chain(call, source)
+        if chain is None:
+            continue
+        _callee, receiver, tail = chain
+        endpoint: str | None = None
+
+        if tail in _TSFORCE_QUERY_METHODS:
+            # read: SObject lives in the generic <T> or a known-entity receiver. Only accept it
+            # as the endpoint when it resolves to a real entity — a bare/unbound type param
+            # (``client.query<T>(qry)`` inside a generic helper) leaves endpoint null (honest;
+            # the concrete SObject is known only at the caller, reachable via the call graph).
+            type_arg = _type_arg_name(call, source)
+            if type_arg in entities:
+                endpoint = type_arg
+            elif receiver in entities:
+                endpoint = receiver
+            # require SOME ts-force signal: a RestObject-family receiver, or a resolved SObject.
+            if endpoint is None and receiver != _TSFORCE_BASE and type_arg is None:
+                continue
+        elif tail in _TSFORCE_WRITE_METHODS and receiver in entities:
+            endpoint = receiver
+        else:
+            continue
+
+        _emit_outbound(
+            call,
+            call.start_point[0] + 1,
+            endpoint or "",
+            "salesforce",
+            source,
+            path,
+            record,
+            seen,
+            reclassify_db=True,
+        )
+        emitted = True
+
+    return emitted
