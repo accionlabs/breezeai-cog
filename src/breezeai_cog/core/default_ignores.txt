@@ -12,6 +12,13 @@ vendor/
 bower_components/
 jspm_packages/
 
+# Generated dependency lockfiles (machine-written, no meaningful code; inflate LOC)
+package-lock.json
+npm-shrinkwrap.json
+yarn.lock
+pnpm-lock.yaml
+bun.lockb
+
 # Python envs / caches
 __pycache__/
 *.pyc
