@@ -63,14 +63,17 @@ def _by_name(records: list[dict]) -> dict[str, dict]:
     return {r["name"]: r for r in records}
 
 
+# The Oracle dialect is parsed by the hand-rolled parser (_parse_oracle_ddl), which folds
+# unquoted identifiers to upper case exactly as Oracle does — so names come back UPPER-CASED
+# (a "quoted" name would preserve its case). This matches the legacy Node tool byte-for-byte.
 def test_sqlplus_directives_do_not_block_parsing() -> None:
     r = parse_ddl(ORACLE_SQLPLUS, "co_create.sql")
     # Without directive stripping every table/view fails to parse (rem/Prompt glue
     # onto the following CREATE); the whole file should now parse cleanly.
     assert r["dialect"] == "oracle"
     assert r["parseStats"]["failed"] == 0
-    assert {t["name"] for t in r["tables"]} == {"customers", "orders"}
-    assert {v["name"] for v in r["views"]} == {"customer_orders"}
+    assert {t["name"] for t in r["tables"]} == {"CUSTOMERS", "ORDERS"}
+    assert {v["name"] for v in r["views"]} == {"CUSTOMER_ORDERS"}
     assert len(r["allIndexes"]) == 1
 
 
@@ -79,29 +82,29 @@ def test_alter_table_constraints_are_captured() -> None:
     tables = _by_name(r["tables"])
 
     # PK declared via ALTER TABLE must set hasPrimaryKey + the column flag.
-    customers = tables["customers"]
+    customers = tables["CUSTOMERS"]
     assert customers["hasPrimaryKey"] is True
-    assert _by_name(customers["columns"])["customer_id"]["isPrimaryKey"] is True
+    assert _by_name(customers["columns"])["CUSTOMER_ID"]["isPrimaryKey"] is True
 
     # FK declared via ALTER TABLE must be captured with ref table/columns + column flag.
-    orders = tables["orders"]
+    orders = tables["ORDERS"]
     fks = [c for c in orders["constraints"] if c["constraintType"] == "FOREIGN_KEY"]
     assert len(fks) == 1
-    assert fks[0]["refTableName"] == "customers" and fks[0]["refColumns"] == ["customer_id"]
-    assert _by_name(orders["columns"])["customer_id"]["isForeignKey"] is True
+    assert fks[0]["refTableName"] == "CUSTOMERS" and fks[0]["refColumns"] == ["CUSTOMER_ID"]
+    assert _by_name(orders["columns"])["CUSTOMER_ID"]["isForeignKey"] is True
 
     # UNIQUE via ALTER TABLE captured as a constraint.
     uniques = [c["columns"] for c in customers["constraints"] if c["constraintType"] == "UNIQUE"]
-    assert uniques == [["email_address"]]
+    assert uniques == [["EMAIL_ADDRESS"]]
 
     # Index ownership + isIndexed wiring still works alongside ALTER constraints.
-    assert _by_name(orders["columns"])["customer_id"]["isIndexed"] is True
+    assert _by_name(orders["columns"])["CUSTOMER_ID"]["isIndexed"] is True
 
 
 def test_index_only_ownership() -> None:
     r = parse_ddl(ORACLE_SQLPLUS, "co_create.sql")
-    orders = _by_name(r["tables"])["orders"]
-    assert [i["name"] for i in orders["indexes"]] == ["orders_customer_id_i"]
+    orders = _by_name(r["tables"])["ORDERS"]
+    assert [i["name"] for i in orders["indexes"]] == ["ORDERS_CUSTOMER_ID_I"]
 
 
 def test_multiline_string_survives_stripping() -> None:
@@ -120,7 +123,7 @@ def test_line_comment_apostrophe_does_not_flip_string_state() -> None:
     assert "SET FEEDBACK 1" not in cleaned
     assert "CREATE TABLE t" in cleaned
     r = parse_ddl(text, "t_ora.sql")
-    assert [t["name"] for t in r["tables"]] == ["t"]
+    assert [t["name"] for t in r["tables"]] == ["T"]  # Oracle folds unquoted names to upper case
 
 
 def test_block_comment_body_preserved() -> None:
@@ -135,3 +138,57 @@ def test_bare_slash_terminator_dropped() -> None:
     text = "CREATE TABLE t (id INTEGER)\n/\n"
     cleaned = _strip_sqlplus(text)
     assert "\n/" not in cleaned and not cleaned.strip().endswith("/")
+
+
+# A PL/SQL program script: a function whose body contains statement-terminating ';'
+# inside BEGIN/END (which must not split the statement), a row trigger, and a sequence.
+# sqlglot degrades all of these to a generic Command; the hand-rolled Oracle parser
+# (ported from the Node tool) extracts them.
+ORACLE_PLSQL = """CREATE OR REPLACE FUNCTION staging.string_aggregate
+  (i_query VARCHAR2, i_separator VARCHAR2 DEFAULT ',')
+  RETURN VARCHAR2
+IS
+  l_result VARCHAR2(4000);
+BEGIN
+  l_result := i_query;
+  RETURN l_result;
+END string_aggregate;
+/
+
+CREATE OR REPLACE EDITIONABLE TRIGGER staging.watch_address
+  AFTER INSERT OR UPDATE ON staging.address
+  FOR EACH ROW
+BEGIN
+  NULL;
+END;
+/
+
+CREATE SEQUENCE staging.address_seq START WITH 1 INCREMENT BY 1 NOCACHE NOCYCLE;
+"""
+
+
+def test_plsql_function_and_trigger_and_sequence_extracted() -> None:
+    r = parse_ddl(ORACLE_PLSQL, "obj_ora.sql")
+    assert r["dialect"] == "oracle"
+
+    procs = _by_name(r["procedures"])
+    # The reported failure case: CREATE OR REPLACE FUNCTION ... (VARCHAR2 params) RETURN.
+    fn = procs["STRING_AGGREGATE"]
+    assert fn["procedureType"] == "function"
+    assert fn["returnType"] == "VARCHAR2"
+    assert [(p["name"], p["direction"], p["dataType"]) for p in fn["parameters"]] == [
+        ("I_QUERY", "IN", "VARCHAR2"),
+        ("I_SEPARATOR", "IN", "VARCHAR2"),
+    ]
+
+    trig = procs["WATCH_ADDRESS"]
+    assert trig["procedureType"] == "trigger"
+    assert trig["trigger"]["timing"] == "AFTER"
+    assert set(trig["trigger"]["events"]) == {"INSERT", "UPDATE"}
+    assert trig["trigger"]["targetTable"] == "ADDRESS"
+    assert trig["trigger"]["level"] == "ROW"
+
+    seqs = _by_name(r["sequences"])
+    seq = seqs["ADDRESS_SEQ"]
+    assert seq["startWith"] == 1 and seq["incrementBy"] == 1
+    assert seq["cache"] == 0 and seq["cycle"] is False
