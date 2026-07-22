@@ -17,7 +17,7 @@ from ...emit import file_id
 from ...schemas import SCHEMA_VERSION, FileRecord
 from ...utils import count_loc
 from ..base import BaseParser, ParseContext
-from .extractors import extract_config
+from .extractors import extract_config, is_dotnet_config
 
 
 class ConfigParser(BaseParser):
@@ -25,17 +25,37 @@ class ConfigParser(BaseParser):
     schema_version = SCHEMA_VERSION
     # suffixes + exact filenames (the registry matches either); patterns via `matches`
     extensions = (
-        ".json", ".yaml", ".yml", ".toml", ".ini", ".xml", ".gradle",
-        ".csproj", ".vbproj", ".fsproj", ".vcxproj", ".sln",
-        "Dockerfile", "Makefile", "requirements.txt", "Pipfile",
-        ".gitignore", ".dockerignore", "LICENSE", "README.md", "README.rst", ".env",
+        ".json",
+        ".yaml",
+        ".yml",
+        ".toml",
+        ".ini",
+        ".xml",
+        ".gradle",
+        ".csproj",
+        ".vbproj",
+        ".fsproj",
+        ".vcxproj",
+        ".sln",
+        "Dockerfile",
+        "Makefile",
+        "requirements.txt",
+        "Pipfile",
+        ".gitignore",
+        ".dockerignore",
+        "LICENSE",
+        "README.md",
+        "README.rst",
+        ".env",
     )
 
     def matches(self, path: str | Path) -> bool:
         if super().matches(path):
             return True
         name = Path(path).name  # glob-style config names the registry can't express
-        return name.startswith("Dockerfile.") or name.startswith(".env.")
+        if name.startswith("Dockerfile.") or name.startswith(".env."):
+            return True
+        return is_dotnet_config(name)  # Web.config / App.config (+ transforms) — one source of truth
 
     def parse_file(self, ctx: ParseContext) -> FileRecord:
         text = ctx.source.decode("utf-8", "replace")
