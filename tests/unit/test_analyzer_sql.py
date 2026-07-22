@@ -1,9 +1,20 @@
-"""parse_ddl — Oracle SQL*Plus script handling: directive stripping, ALTER TABLE
-constraint extraction, and the string/comment scanner that guards both."""
+"""parse_ddl — SQL DDL extraction across dialects.
+
+Covers the two code paths in ``analyzers/sql.py``:
+* the **sqlglot** path for non-Oracle dialects (postgres/mysql/tsql) — tables, columns,
+  views, indexes;
+* the hand-rolled **Oracle** path (``_parse_oracle_ddl``) — SQL*Plus directive stripping,
+  data types, defaults, inline + table constraints, virtual columns, ALTER-TABLE lifecycle,
+  sequences, index kinds, comments, and PL/SQL programs (procedure/function/package/trigger).
+
+Note on identifier case: the Oracle path folds **unquoted** identifiers to UPPER CASE (Oracle
+semantics) while a ``"Quoted"`` name preserves its case; the sqlglot path preserves source
+case. Assertions below reflect that difference. Oracle fixtures use ``*_ora.sql`` filenames so
+``detect_dialect`` routes them to the Oracle parser regardless of content signatures."""
 
 from __future__ import annotations
 
-from breezeai_cog.analyzers.sql import _strip_sqlplus, parse_ddl
+from breezeai_cog.analyzers.sql import _strip_sqlplus, detect_dialect, parse_ddl
 
 # A trimmed Oracle SQL*Plus script in the shape of a real schema install script:
 # rem/Prompt/SET directives between statements, a multi-line COMMENT string, and all
@@ -192,3 +203,254 @@ def test_plsql_function_and_trigger_and_sequence_extracted() -> None:
     seq = seqs["ADDRESS_SEQ"]
     assert seq["startWith"] == 1 and seq["incrementBy"] == 1
     assert seq["cache"] == 0 and seq["cycle"] is False
+
+
+# ---------------------------------------------------------------------------
+# Non-Oracle dialects: parsed by sqlglot (source identifier case is preserved).
+# ---------------------------------------------------------------------------
+
+POSTGRES_DDL = """CREATE TABLE app.users (
+  id SERIAL PRIMARY KEY,
+  email VARCHAR(255) NOT NULL UNIQUE,
+  created_at TIMESTAMP DEFAULT now()
+);
+CREATE VIEW active_users AS SELECT id FROM app.users;
+CREATE INDEX users_email_idx ON app.users(email);
+"""
+
+
+def test_postgres_tables_views_indexes_via_sqlglot() -> None:
+    # No Oracle filename hint and no Oracle content signature → sqlglot postgres path.
+    r = parse_ddl(POSTGRES_DDL, "schema.sql")
+    assert r["dialect"] == "postgresql"
+    assert r["parseStats"]["failed"] == 0
+
+    users = _by_name(r["tables"])["users"]  # case preserved (not upper-cased)
+    assert users["fullName"] == "app.users" and users["hasPrimaryKey"] is True
+    cols = _by_name(users["columns"])
+    assert cols["id"]["isPrimaryKey"] is True
+    assert cols["email"]["nullable"] is False and cols["email"]["isUnique"] is True
+    # CREATE INDEX wiring flips isIndexed on the covered column.
+    assert cols["email"]["isIndexed"] is True
+
+    assert [v["name"] for v in r["views"]] == ["active_users"]
+    assert [i["name"] for i in r["allIndexes"]] == ["users_email_idx"]
+    # sqlglot path never populates procedures/sequences.
+    assert r["procedures"] == [] and r["sequences"] == []
+
+
+def test_mysql_and_tsql_dialects_detected_and_parsed() -> None:
+    m = parse_ddl(
+        "CREATE TABLE `t` (id INT NOT NULL PRIMARY KEY, name VARCHAR(20)) ENGINE=InnoDB;",
+        "db_mysql.sql",
+    )
+    assert m["dialect"] == "mysql"
+    mcols = _by_name(m["tables"][0]["columns"])
+    assert mcols["id"]["isPrimaryKey"] is True and mcols["name"]["nullable"] is True
+
+    ts = parse_ddl("CREATE TABLE dbo.t (id INT IDENTITY PRIMARY KEY, s NVARCHAR(10));", "db_mssql.sql")
+    assert ts["dialect"] == "transactsql"
+    assert ts["tables"][0]["fullName"] == "dbo.t"
+
+
+def test_detect_dialect_hint_signature_and_default() -> None:
+    # filename hint wins first, then content signature, then the postgresql default.
+    assert detect_dialect("CREATE TABLE t (id INT)", "app_pg.sql") == "postgresql"
+    assert detect_dialect("CREATE TABLE t (id NUMBER(10))", "x.sql") == "oracle"  # `number(` signature
+    assert detect_dialect("CREATE TABLE t (v VARCHAR2(10))", "x.sql") == "oracle"  # `varchar2` signature
+    assert detect_dialect("CREATE TABLE t (id INT)", "plain.sql") == "postgresql"  # fallback
+
+
+# ---------------------------------------------------------------------------
+# Oracle: data types, defaults, inline + table-level constraints, virtual columns.
+# ---------------------------------------------------------------------------
+
+ORACLE_TABLE = """CREATE TABLE hr.employees (
+  emp_id      NUMBER(10) PRIMARY KEY,
+  salary      NUMBER(10,2) DEFAULT 0 NOT NULL,
+  bonus       NUMBER(10,2) DEFAULT (salary * 0.1),
+  name        VARCHAR2(100 CHAR) NOT NULL,
+  created_at  TIMESTAMP(6) DEFAULT SYSTIMESTAMP,
+  status      VARCHAR2(10) DEFAULT 'ACTIVE' CHECK (status IN ('ACTIVE','GONE')),
+  dept_id     NUMBER(6) CONSTRAINT emp_dept_fk REFERENCES hr.departments(dept_id) ON DELETE CASCADE,
+  "MixedCol"  VARCHAR2(20),
+  full_name   VARCHAR2(200) GENERATED ALWAYS AS (name) VIRTUAL,
+  CONSTRAINT emp_salary_ck CHECK (salary >= 0) ENABLE VALIDATE
+);
+"""
+
+
+def _emp_table() -> dict:
+    return parse_ddl(ORACLE_TABLE, "emp_ora.sql")["tables"][0]
+
+
+def test_oracle_data_types_parsed() -> None:
+    cols = _by_name(_emp_table()["columns"])
+    assert cols["EMP_ID"]["dataType"] == "NUMBER" and cols["EMP_ID"]["precision"] == 10
+    assert (cols["SALARY"]["precision"], cols["SALARY"]["scale"]) == (10, 2)
+    assert (cols["NAME"]["length"], cols["NAME"]["charSemantics"]) == (100, "CHAR")
+    assert cols["CREATED_AT"]["dataType"] == "TIMESTAMP" and cols["CREATED_AT"]["precision"] == 6
+
+
+def test_oracle_default_value_kinds() -> None:
+    cols = _by_name(_emp_table()["columns"])
+    assert (cols["SALARY"]["defaultValue"], cols["SALARY"]["defaultKind"]) == ("0", "literal")
+    assert cols["BONUS"]["defaultKind"] == "expression"  # DEFAULT (salary * 0.1)
+    assert (cols["STATUS"]["defaultValue"], cols["STATUS"]["defaultKind"]) == ("'ACTIVE'", "literal")
+    assert cols["CREATED_AT"]["defaultKind"] == "pseudo_column"  # SYSTIMESTAMP
+
+
+def test_oracle_quoted_identifier_case_preserved() -> None:
+    cols = _by_name(_emp_table()["columns"])
+    assert "MixedCol" in cols  # a "quoted" name keeps its case; bare names fold to upper
+    assert cols["NAME"]["nullable"] is False
+
+
+def test_oracle_virtual_column() -> None:
+    col = _by_name(_emp_table()["columns"])["FULL_NAME"]
+    assert col["isVirtual"] is True and col["virtualExpression"] == "name"
+
+
+def test_oracle_inline_and_table_constraints() -> None:
+    t = _emp_table()
+    by_type: dict[str, list[dict]] = {}
+    for c in t["constraints"]:
+        by_type.setdefault(c["constraintType"], []).append(c)
+
+    assert [c["columns"] for c in by_type["PRIMARY_KEY"]] == [["EMP_ID"]]
+
+    fk = by_type["FOREIGN_KEY"][0]
+    assert fk["name"] == "EMP_DEPT_FK"
+    assert fk["refTableName"] == "DEPARTMENTS" and fk["refTableSchema"] == "HR"
+    assert fk["refColumns"] == ["DEPT_ID"] and fk["onDelete"] == "CASCADE"
+    assert _by_name(t["columns"])["DEPT_ID"]["isForeignKey"] is True
+
+    named_check = next(c for c in by_type["CHECK"] if c["name"] == "EMP_SALARY_CK")
+    assert named_check["checkExpression"] == "salary >= 0"
+    assert named_check["enabled"] is True and named_check["validated"] is True
+
+
+# ---------------------------------------------------------------------------
+# Oracle: ALTER TABLE lifecycle applied in file order.
+# ---------------------------------------------------------------------------
+
+ORACLE_ALTER = """CREATE TABLE s.t (a NUMBER, b VARCHAR2(10), c DATE);
+ALTER TABLE s.t ADD (d NUMBER(5) DEFAULT 1, e VARCHAR2(3));
+ALTER TABLE s.t MODIFY (b VARCHAR2(50) NOT NULL);
+ALTER TABLE s.t RENAME COLUMN a TO a_id;
+ALTER TABLE s.t DROP COLUMN c;
+ALTER TABLE s.t ADD CONSTRAINT t_pk PRIMARY KEY (a_id);
+ALTER TABLE s.t DROP CONSTRAINT t_pk;
+"""
+
+
+def test_oracle_alter_table_lifecycle() -> None:
+    t = parse_ddl(ORACLE_ALTER, "alter_ora.sql")["tables"][0]
+    # c dropped, a renamed → a_id, d/e added; order reflects add-at-end.
+    assert [c["name"] for c in t["columns"]] == ["A_ID", "B", "D", "E"]
+    cols = _by_name(t["columns"])
+    assert cols["B"]["length"] == 50 and cols["B"]["nullable"] is False  # MODIFY applied
+    assert cols["D"]["defaultValue"] == "1"
+    # PK added then dropped → nothing survives.
+    assert t["constraints"] == [] and t["hasPrimaryKey"] is False
+
+
+# ---------------------------------------------------------------------------
+# Oracle: sequences, index kinds, comments.
+# ---------------------------------------------------------------------------
+
+
+def test_oracle_sequence_options() -> None:
+    r = parse_ddl(
+        "CREATE SEQUENCE s.seq1 START WITH 100 INCREMENT BY 2 MAXVALUE 999 CACHE 20 CYCLE ORDER;",
+        "seq_ora.sql",
+    )
+    seq = _by_name(r["sequences"])["SEQ1"]
+    assert seq["fullName"] == "S.SEQ1"
+    assert (seq["startWith"], seq["incrementBy"], seq["maxValue"], seq["cache"]) == (100, 2, 999, 20)
+    assert seq["cycle"] is True and seq["order"] is True
+
+
+ORACLE_INDEXES = """CREATE TABLE s.t (a NUMBER, b VARCHAR2(10), c DATE);
+CREATE UNIQUE INDEX s.uix ON s.t (a, b);
+CREATE BITMAP INDEX s.bix ON s.t (c);
+CREATE INDEX s.fix ON s.t (UPPER(b));
+COMMENT ON TABLE s.t IS 'the t table';
+COMMENT ON COLUMN s.t.a IS 'primary key col';
+"""
+
+
+def test_oracle_index_kinds_and_comments() -> None:
+    r = parse_ddl(ORACLE_INDEXES, "idx_ora.sql")
+    idx = _by_name(r["allIndexes"])
+    assert idx["UIX"]["isUnique"] is True and idx["UIX"]["indexType"] == "BTREE"
+    assert idx["UIX"]["columns"] == ["A", "B"]
+    assert idx["BIX"]["indexType"] == "BITMAP" and idx["BIX"]["columns"] == ["C"]
+    # A function-based index carries no plain columns (the expression is captured separately).
+    assert idx["FIX"]["indexType"] == "FUNCTION_BASED" and idx["FIX"]["columns"] == []
+
+    t = r["tables"][0]
+    assert t["comment"] == "the t table"
+    assert _by_name(t["columns"])["A"]["comment"] == "primary key col"
+    # Indexes are wired onto the owning table; covered columns get isIndexed.
+    assert {i["name"] for i in t["indexes"]} == {"UIX", "BIX", "FIX"}
+    assert _by_name(t["columns"])["A"]["isIndexed"] is True
+
+
+# ---------------------------------------------------------------------------
+# Oracle: PL/SQL programs (package header + procedure with typed params).
+# ---------------------------------------------------------------------------
+
+ORACLE_PROGRAMS = """CREATE OR REPLACE PACKAGE s.pkg AS
+  PROCEDURE do_it(p_id IN NUMBER, p_out OUT VARCHAR2);
+END pkg;
+/
+CREATE OR REPLACE PROCEDURE s.reset_all(p_when IN DATE DEFAULT SYSDATE) IS
+BEGIN
+  DELETE FROM s.t;
+END reset_all;
+/
+"""
+
+
+def test_oracle_package_and_procedure_params() -> None:
+    procs = _by_name(parse_ddl(ORACLE_PROGRAMS, "prog_ora.sql")["procedures"])
+    # A package spec has no parameter list of its own.
+    assert procs["PKG"]["procedureType"] == "package" and procs["PKG"]["parameters"] == []
+    proc = procs["RESET_ALL"]
+    assert proc["procedureType"] == "procedure"
+    assert [(p["name"], p["direction"], p["dataType"]) for p in proc["parameters"]] == [
+        ("P_WHEN", "IN", "DATE"),
+    ]
+
+
+# ---------------------------------------------------------------------------
+# Oracle: edge cases — temp tables, q-quoted defaults, unrecognized statements.
+# ---------------------------------------------------------------------------
+
+
+def test_oracle_temp_table_and_qquote_default() -> None:
+    # A GLOBAL TEMPORARY table with a quoted schema/name and a q'[...]' default whose
+    # body contains both an apostrophe and a ';' — neither may break statement splitting.
+    r = parse_ddl(
+        'CREATE GLOBAL TEMPORARY TABLE "MySchema"."TempTbl" (\n'
+        "  id NUMBER,\n"
+        "  note VARCHAR2(50) DEFAULT q'[Bob's ; default]'\n"
+        ");\n",
+        "temp_ora.sql",
+    )
+    assert r["parseStats"]["failed"] == 0
+    t = r["tables"][0]
+    assert t["tableType"] == "temporary"
+    assert t["name"] == "TempTbl" and t["schema"] == "MySchema"  # quoted → case preserved
+    assert _by_name(t["columns"])["NOTE"]["defaultValue"] == "q'[Bob's ; default]'"
+
+
+def test_oracle_unrecognized_statement_counted_in_stats() -> None:
+    r = parse_ddl(
+        "CREATE TABLE t (id NUMBER);\nGRANT EXECUTE ON s.pkg TO app_role;\n",
+        "grant_ora.sql",
+    )
+    assert r["parseStats"]["ok"] == 1
+    assert r["parseStats"]["failed"] == 1
+    assert any("GRANT" in s for s in r["parseStats"]["sampleErrors"])
