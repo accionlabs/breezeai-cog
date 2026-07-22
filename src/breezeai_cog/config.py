@@ -114,6 +114,22 @@ class Settings(BaseSettings):
             return level
         return v
 
+    @property
+    def aws_credentials_kwargs(self) -> dict[str, str]:
+        """Static AWS credential kwargs for boto3 clients, when configured.
+
+        Returns the ``aws_access_key_id`` / ``aws_secret_access_key`` pair only
+        when both are set, so callers can splat it into ``boto3.client(...)``.
+        When empty, boto3 falls back to its default provider chain — IAM Roles
+        for Service Accounts (IRSA) in-cluster, or the local AWS profile for dev.
+        """
+        if self.aws_access_key and self.aws_secret_key:
+            return {
+                "aws_access_key_id": self.aws_access_key,
+                "aws_secret_access_key": self.aws_secret_key.get_secret_value(),
+            }
+        return {}
+
     @model_validator(mode="after")
     def _check_upload_requirements(self) -> "Settings":
         """`--upload` requires baseurl + uuid + user_api_key."""
