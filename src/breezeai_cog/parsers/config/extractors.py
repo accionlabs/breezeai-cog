@@ -318,19 +318,73 @@ def is_dotnet_config(name: str) -> bool:
     """Whether ``name`` is a .NET app-config file: ``Web.config`` / ``App.config`` and their
     build transforms (``Web.Release.config``). Name-matched, **not** a bare ``.config`` suffix,
     so unrelated ``*.config`` (NLog/packages/log4net) is not claimed. Single source of truth —
-    ``ConfigParser.matches`` (claim) and ``_dispatch`` (extract) both call this."""
-    return name in ("Web.config", "App.config") or (
-        name.startswith(("Web.", "App.")) and name.endswith(".config")
+    ``ConfigParser.matches`` (claim) and ``_dispatch`` (extract) both call this.
+
+    Case-insensitive: real .NET repos use both ``Web.config`` and ``web.config`` /
+    ``app.config`` (Windows filesystems are case-preserving-but-insensitive)."""
+    low = name.lower()
+    return low in ("web.config", "app.config") or (
+        low.startswith(("web.", "app.")) and low.endswith(".config")
     )
 
 
+def _endpoints(container: ET.Element) -> list[dict[str, str | None]]:
+    """The ``<endpoint>`` children of a ``<service>``/``<client>`` → their WCF-defining
+    attributes. ``address`` may be empty (a service endpoint relative to the host base
+    address); ``binding``/``contract`` are the wire-shape and the interface — left ``None``
+    (honest) when the attribute is absent."""
+    out: list[dict[str, str | None]] = []
+    for ep in container:
+        if _strip(ep.tag) == "endpoint":
+            out.append(
+                {
+                    "address": ep.get("address"),
+                    "binding": ep.get("binding"),
+                    "contract": ep.get("contract"),
+                }
+            )
+    return out
+
+
+def _service_model(root: ET.Element) -> dict[str, Any] | None:
+    """WCF ``<system.serviceModel>`` → hosted ``services`` and consumer ``clients``.
+
+    * ``services[]`` = server side (this app *hosts* the endpoint): the service ``name`` (impl
+      FQN) + its endpoints' contracts.
+    * ``clients[]`` = consumer side (this app *calls* the endpoint over the wire): the decisive
+      in-process-vs-WCF signal — a client endpoint means the call is a WCF wire call, not a
+      local in-process binding.
+
+    Namespace-agnostic (tags matched by local name via ``_strip``). Returns ``None`` when the
+    file has no ``<system.serviceModel>`` (so a plain Web.config adds nothing)."""
+    sm = next((e for e in root.iter() if _strip(e.tag) == "system.serviceModel"), None)
+    if sm is None:
+        return None
+    services: list[dict[str, Any]] = []
+    clients: list[dict[str, str | None]] = []
+    for node in sm.iter():
+        tag = _strip(node.tag)
+        if tag == "service":
+            services.append({"name": node.get("name"), "endpoints": _endpoints(node)})
+        elif tag == "client":
+            clients.extend(_endpoints(node))
+    return {"services": services, "clients": clients}
+
+
 def _dotnet_config(text: str) -> dict[str, Any]:
-    """A .NET app-config file. It is XML, so reuse the generic XML parse for a baseline blob;
-    ``category="dotnet-config"`` marks it for the framework-semantic pass (WCF ``<system.
-    serviceModel>`` endpoint extraction — BREEZEAI-841) to enrich."""
-    meta = _generic_xml(text)
-    meta["kind"] = "dotnet-config"
-    meta["category"] = "dotnet-config"
+    """A .NET app-config file (``Web.config``/``App.config``). XML, so reuse the generic parse
+    for a baseline blob, then extract the WCF ``<system.serviceModel>`` endpoints (BREEZEAI-841)
+    — the ``<services>``/``<client>`` config that resolves whether a service call is in-process
+    or WCF-over-the-wire. Only added when ``<system.serviceModel>`` is present (honest-null)."""
+    root = ET.fromstring(text)
+    meta: dict[str, Any] = {
+        "kind": "dotnet-config",
+        "category": "dotnet-config",
+        "rootElement": _strip(root.tag),
+    }
+    service_model = _service_model(root)
+    if service_model is not None:
+        meta["serviceModel"] = service_model
     return meta
 
 
