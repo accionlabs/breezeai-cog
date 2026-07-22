@@ -16,9 +16,9 @@ from breezeai_cog.schemas import FileRecord
 
 # Typical: all three attributes, CodeBehind that will resolve on disk.
 SVC_FULL = (
-    b'<%@ ServiceHost Language="C#" Service="KUCare.Services.AttendanceService" '
+    b'<%@ ServiceHost Language="C#" Service="Acme.Services.OrderService" '
     b'Factory="System.ServiceModel.Activation.ServiceHostFactory" '
-    b'CodeBehind="AttendanceService.svc.cs" %>\n'
+    b'CodeBehind="OrderService.svc.cs" %>\n'
 )
 # Attribute order swapped, no CodeBehind.
 SVC_NO_CODEBEHIND = b'<%@ ServiceHost Service="A.B.OrderService" Factory="X.Y.F" %>\n'
@@ -57,19 +57,19 @@ def _routes(rec: FileRecord):
 
 
 def test_file_captured_with_svc_language() -> None:
-    rec = _parse(SVC_FULL, "Services/AttendanceService.svc")
+    rec = _parse(SVC_FULL, "Services/OrderService.svc")
     assert rec.type == "code"
     assert rec.language == "svc"  # own artifact — not folded into csharp rollups
 
 
 def test_servicehost_emits_rpc_route() -> None:
-    rec = _parse(SVC_FULL, "Services/AttendanceService.svc")
+    rec = _parse(SVC_FULL, "Services/OrderService.svc")
     routes = _routes(rec)
     assert len(routes) == 1
     r = routes[0]
     assert (r.framework, r.method, r.routeKind, r.nodeType) == ("wcf", "RPC", "rpc", "synthetic")
-    assert r.handler == "KUCare.Services.AttendanceService"  # concrete impl FQN (interface→impl)
-    assert r.endpoint == "Services/AttendanceService.svc"
+    assert r.handler == "Acme.Services.OrderService"  # concrete impl FQN (interface→impl)
+    assert r.endpoint == "Services/OrderService.svc"
     assert r.parentId == rec.id  # the .svc file owns the endpoint
     assert rec.framework == "wcf"
 
@@ -92,13 +92,13 @@ def test_multiline_lowercase_directive() -> None:
 def test_codebehind_resolves_to_import(tmp_path: Path) -> None:
     rec = _parse_repo(
         tmp_path,
-        "Services/AttendanceService.svc",
+        "Services/OrderService.svc",
         {
-            "Services/AttendanceService.svc": SVC_FULL,
-            "Services/AttendanceService.svc.cs": b"namespace KUCare.Services { public class AttendanceService {} }",
+            "Services/OrderService.svc": SVC_FULL,
+            "Services/OrderService.svc.cs": b"namespace Acme.Services { public class OrderService {} }",
         },
     )
-    assert rec.importFiles == ["Services/AttendanceService.svc.cs"]  # CodeBehind → IMPORTS edge
+    assert rec.importFiles == ["Services/OrderService.svc.cs"]  # CodeBehind → IMPORTS edge
 
 
 def test_codebehind_missing_file_is_honest_null(tmp_path: Path) -> None:
@@ -120,7 +120,7 @@ def test_no_directive_emits_nothing() -> None:
 
 
 def test_route_requires_capture_statements() -> None:
-    rec = _parse(SVC_FULL, "Services/AttendanceService.svc", capture=False)
+    rec = _parse(SVC_FULL, "Services/OrderService.svc", capture=False)
     assert _routes(rec) == []
     assert rec.framework is None  # gated — no route, no framework label
     assert rec.language == "svc"  # file still captured for structure

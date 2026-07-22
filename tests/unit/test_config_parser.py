@@ -211,6 +211,8 @@ def test_dotnet_config_claimed_by_name() -> None:
     assert p.matches("Web.config") and p.matches("App.config")
     assert p.matches("Web.Release.config") and p.matches("App.Debug.config")
     assert p.matches("src/api/Web.config")
+    # Case-insensitive: real repos use web.config / app.config too (Windows FS).
+    assert p.matches("web.config") and p.matches("app.config") and p.matches("x/app.config")
     # Name-matched, NOT a bare `.config` suffix — unrelated *.config stays unsupported.
     for other in ("NLog.config", "packages.config", "log4net.config", "foo.config"):
         assert not p.matches(other), other
@@ -224,6 +226,73 @@ def test_dotnet_config_metadata() -> None:
     # malformed XML must not fail the run (wrapped extractor → parseError, not a crash)
     bad = _meta("App.config", "<configuration>")
     assert "parseError" in bad
+
+
+_WCF_WEBCONFIG = """<?xml version="1.0"?>
+<configuration>
+  <system.serviceModel>
+    <services>
+      <service name="Acme.Services.OrderService">
+        <endpoint address="" binding="basicHttpBinding" contract="Acme.Contracts.IOrderService" />
+        <endpoint address="mex" binding="mexHttpBinding" contract="IMetadataExchange" />
+      </service>
+    </services>
+    <client>
+      <endpoint address="http://legacy/Shipping.svc" binding="wsHttpBinding" contract="Acme.Contracts.IShippingService" />
+    </client>
+  </system.serviceModel>
+</configuration>"""
+
+
+def test_wcf_service_model_extracted() -> None:
+    sm = _meta("Web.config", _WCF_WEBCONFIG)["serviceModel"]
+    # hosted service: impl FQN (name) + its endpoint contracts
+    assert len(sm["services"]) == 1
+    svc = sm["services"][0]
+    assert svc["name"] == "Acme.Services.OrderService"
+    assert [e["contract"] for e in svc["endpoints"]] == [
+        "Acme.Contracts.IOrderService",
+        "IMetadataExchange",
+    ]
+    assert svc["endpoints"][0]["binding"] == "basicHttpBinding"
+
+
+def test_wcf_client_endpoint_is_the_wire_signal() -> None:
+    # The <client> endpoint is the decisive in-process-vs-WCF-over-the-wire signal.
+    sm = _meta("Web.config", _WCF_WEBCONFIG)["serviceModel"]
+    assert len(sm["clients"]) == 1
+    client = sm["clients"][0]
+    assert client["contract"] == "Acme.Contracts.IShippingService"  # joins to the [ServiceContract]
+    assert client["address"] == "http://legacy/Shipping.svc"
+    assert client["binding"] == "wsHttpBinding"
+
+
+def test_namespaced_service_model_extracted() -> None:
+    # .NET config often carries an xmlns; extraction is namespace-agnostic (local-name match).
+    ns = (
+        '<configuration xmlns="urn:x"><system.serviceModel>'
+        '<client><endpoint address="net.tcp://h/S" binding="netTcpBinding" contract="A.ISvc"/></client>'
+        "</system.serviceModel></configuration>"
+    )
+    sm = _meta("Web.config", ns)["serviceModel"]
+    assert sm["clients"][0]["contract"] == "A.ISvc"
+
+
+def test_plain_dotnet_config_has_no_service_model() -> None:
+    # A Web.config without <system.serviceModel> adds no serviceModel key (honest-null).
+    md = _meta("Web.config", '<?xml version="1.0"?><configuration><appSettings/></configuration>')
+    assert "serviceModel" not in md
+
+
+def test_service_model_honest_null_on_missing_attrs() -> None:
+    # Endpoint with a contract but no binding/address → those stay None, not fabricated.
+    xml = (
+        "<configuration><system.serviceModel><services>"
+        '<service name="A.Svc"><endpoint contract="A.ISvc"/></service>'
+        "</services></system.serviceModel></configuration>"
+    )
+    ep = _meta("Web.config", xml)["serviceModel"]["services"][0]["endpoints"][0]
+    assert ep == {"address": None, "binding": None, "contract": "A.ISvc"}
 
 
 def test_pipeline_captures_config_and_aggregates(tmp_path) -> None:
