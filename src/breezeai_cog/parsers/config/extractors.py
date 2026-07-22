@@ -23,9 +23,17 @@ except Exception:  # pragma: no cover
     yaml = None
 
 _EXT_CATEGORY = {
-    ".json": "json", ".yaml": "yaml", ".yml": "yaml", ".toml": "toml",
-    ".ini": "ini", ".xml": "xml", ".gradle": "gradle",
-    ".csproj": "dotnet", ".vbproj": "dotnet", ".fsproj": "dotnet", ".vcxproj": "dotnet",
+    ".json": "json",
+    ".yaml": "yaml",
+    ".yml": "yaml",
+    ".toml": "toml",
+    ".ini": "ini",
+    ".xml": "xml",
+    ".gradle": "gradle",
+    ".csproj": "dotnet",
+    ".vbproj": "dotnet",
+    ".fsproj": "dotnet",
+    ".vcxproj": "dotnet",
     ".sln": "dotnet",
 }
 _GRADLE_DEP = re.compile(
@@ -89,6 +97,8 @@ def _dispatch(name: str, suffix: str, text: str) -> dict[str, Any]:
         return _license(text)
     if name in ("README.md", "README.rst"):
         return {"kind": "readme", "category": "other", "lines": len(text.splitlines())}
+    if is_dotnet_config(name):  # Web.config / App.config (+ transforms) — XML, .NET runtime config
+        return _dotnet_config(text)
     # generic by extension
     if suffix == ".json":
         return _generic_json(text)
@@ -111,14 +121,20 @@ def _package_json(text: str) -> dict[str, Any]:
     deps = list((d.get("dependencies") or {}).keys())
     dev = list((d.get("devDependencies") or {}).keys())
     return {
-        "kind": "package.json", "category": "json", "packageManager": "npm",
+        "kind": "package.json",
+        "category": "json",
+        "packageManager": "npm",
         "packageInfo": {
-            "name": d.get("name"), "version": d.get("version"),
-            "description": d.get("description"), "main": d.get("main"),
+            "name": d.get("name"),
+            "version": d.get("version"),
+            "description": d.get("description"),
+            "main": d.get("main"),
             "scripts": list((d.get("scripts") or {}).keys()),
-            "dependencies": deps, "devDependencies": dev,
+            "dependencies": deps,
+            "devDependencies": dev,
         },
-        "dependencyCount": len(deps), "devDependencyCount": len(dev),
+        "dependencyCount": len(deps),
+        "devDependencyCount": len(dev),
     }
 
 
@@ -126,20 +142,29 @@ def _tsconfig(name: str, text: str) -> dict[str, Any]:
     d = json.loads(text)
     co = d.get("compilerOptions") or {}
     return {
-        "kind": name, "category": "json", "buildTool": "typescript",
+        "kind": name,
+        "category": "json",
+        "buildTool": "typescript",
         "compilerConfig": {
-            "target": co.get("target"), "module": co.get("module"),
-            "outDir": co.get("outDir"), "rootDir": co.get("rootDir"),
-            "strict": co.get("strict"), "paths": list((co.get("paths") or {}).keys()),
-            "include": d.get("include"), "exclude": d.get("exclude"),
+            "target": co.get("target"),
+            "module": co.get("module"),
+            "outDir": co.get("outDir"),
+            "rootDir": co.get("rootDir"),
+            "strict": co.get("strict"),
+            "paths": list((co.get("paths") or {}).keys()),
+            "include": d.get("include"),
+            "exclude": d.get("exclude"),
         },
     }
 
 
 def _generic_json(text: str) -> dict[str, Any]:
     d = json.loads(text)
-    return {"kind": "json", "category": "json",
-            "topLevelKeys": list(d.keys()) if isinstance(d, dict) else []}
+    return {
+        "kind": "json",
+        "category": "json",
+        "topLevelKeys": list(d.keys()) if isinstance(d, dict) else [],
+    }
 
 
 # ── YAML family ─────────────────────────────────────────────────────────────
@@ -159,10 +184,14 @@ def _docker_compose(text: str) -> dict[str, Any]:
             volumes.append(v.get("source", "") if isinstance(v, dict) else str(v))
     networks = d.get("networks") if isinstance(d, dict) else None
     return {
-        "kind": "docker-compose", "category": "yaml",
+        "kind": "docker-compose",
+        "category": "yaml",
         "dockerCompose": {
-            "services": list(services.keys()), "serviceCount": len(services),
-            "images": images, "exposedPorts": ports, "volumes": volumes,
+            "services": list(services.keys()),
+            "serviceCount": len(services),
+            "images": images,
+            "exposedPorts": ports,
+            "volumes": volumes,
             "networks": list(networks.keys()) if isinstance(networks, dict) else [],
         },
     }
@@ -185,16 +214,23 @@ def _generic_yaml(text: str) -> dict[str, Any]:
         if kinds:  # e.g. Kubernetes manifests → ["Deployment", "Service", "Ingress"]
             out["resourceKinds"] = kinds
     else:  # pragma: no cover
-        out["topLevelKeys"] = [ln.split(":")[0] for ln in text.splitlines()
-                               if re.match(r"^\w", ln) and ":" in ln]
+        out["topLevelKeys"] = [
+            ln.split(":")[0] for ln in text.splitlines() if re.match(r"^\w", ln) and ":" in ln
+        ]
     return out
 
 
 # ── Docker / env ─────────────────────────────────────────────────────────────
 def _dockerfile(text: str) -> dict[str, Any]:
     info: dict[str, Any] = {
-        "baseImages": [], "exposedPorts": [], "volumes": [], "workdir": None,
-        "entrypoint": None, "cmd": None, "env": [], "stages": [],
+        "baseImages": [],
+        "exposedPorts": [],
+        "volumes": [],
+        "workdir": None,
+        "entrypoint": None,
+        "cmd": None,
+        "env": [],
+        "stages": [],
     }
     for raw in text.splitlines():
         line = raw.strip()
@@ -252,22 +288,104 @@ def _pom(text: str) -> dict[str, Any]:
     for d in deps_el if deps_el is not None else []:
         if _strip(d.tag) != "dependency":
             continue
-        deps.append({t: (_child(d, t).text if _child(d, t) is not None else None)
-                     for t in ("groupId", "artifactId", "version", "scope")})
+        deps.append(
+            {
+                t: (_child(d, t).text if _child(d, t) is not None else None)
+                for t in ("groupId", "artifactId", "version", "scope")
+            }
+        )
     return {
-        "kind": "pom.xml", "category": "xml", "packageManager": "maven", "buildTool": "maven",
+        "kind": "pom.xml",
+        "category": "xml",
+        "packageManager": "maven",
+        "buildTool": "maven",
         "mavenInfo": {
             "groupId": getattr(_child(root, "groupId"), "text", None),
             "artifactId": getattr(_child(root, "artifactId"), "text", None),
             "version": getattr(_child(root, "version"), "text", None),
             "packaging": getattr(_child(root, "packaging"), "text", None),
-            "dependencies": deps, "dependencyCount": len(deps),
+            "dependencies": deps,
+            "dependencyCount": len(deps),
         },
     }
 
 
 def _generic_xml(text: str) -> dict[str, Any]:
     return {"kind": "xml", "category": "xml", "rootElement": _strip(ET.fromstring(text).tag)}
+
+
+def is_dotnet_config(name: str) -> bool:
+    """Whether ``name`` is a .NET app-config file: ``Web.config`` / ``App.config`` and their
+    build transforms (``Web.Release.config``). Name-matched, **not** a bare ``.config`` suffix,
+    so unrelated ``*.config`` (NLog/packages/log4net) is not claimed. Single source of truth —
+    ``ConfigParser.matches`` (claim) and ``_dispatch`` (extract) both call this.
+
+    Case-insensitive: real .NET repos use both ``Web.config`` and ``web.config`` /
+    ``app.config`` (Windows filesystems are case-preserving-but-insensitive)."""
+    low = name.lower()
+    return low in ("web.config", "app.config") or (
+        low.startswith(("web.", "app.")) and low.endswith(".config")
+    )
+
+
+def _endpoints(container: ET.Element) -> list[dict[str, str | None]]:
+    """The ``<endpoint>`` children of a ``<service>``/``<client>`` → their WCF-defining
+    attributes. ``address`` may be empty (a service endpoint relative to the host base
+    address); ``binding``/``contract`` are the wire-shape and the interface — left ``None``
+    (honest) when the attribute is absent."""
+    out: list[dict[str, str | None]] = []
+    for ep in container:
+        if _strip(ep.tag) == "endpoint":
+            out.append(
+                {
+                    "address": ep.get("address"),
+                    "binding": ep.get("binding"),
+                    "contract": ep.get("contract"),
+                }
+            )
+    return out
+
+
+def _service_model(root: ET.Element) -> dict[str, Any] | None:
+    """WCF ``<system.serviceModel>`` → hosted ``services`` and consumer ``clients``.
+
+    * ``services[]`` = server side (this app *hosts* the endpoint): the service ``name`` (impl
+      FQN) + its endpoints' contracts.
+    * ``clients[]`` = consumer side (this app *calls* the endpoint over the wire): the decisive
+      in-process-vs-WCF signal — a client endpoint means the call is a WCF wire call, not a
+      local in-process binding.
+
+    Namespace-agnostic (tags matched by local name via ``_strip``). Returns ``None`` when the
+    file has no ``<system.serviceModel>`` (so a plain Web.config adds nothing)."""
+    sm = next((e for e in root.iter() if _strip(e.tag) == "system.serviceModel"), None)
+    if sm is None:
+        return None
+    services: list[dict[str, Any]] = []
+    clients: list[dict[str, str | None]] = []
+    for node in sm.iter():
+        tag = _strip(node.tag)
+        if tag == "service":
+            services.append({"name": node.get("name"), "endpoints": _endpoints(node)})
+        elif tag == "client":
+            clients.extend(_endpoints(node))
+    return {"services": services, "clients": clients}
+
+
+def _dotnet_config(text: str) -> dict[str, Any]:
+    """A .NET app-config file (``Web.config``/``App.config``). XML, so reuse the generic parse
+    for a baseline blob, then extract the WCF ``<system.serviceModel>`` endpoints (BREEZEAI-841)
+    — the ``<services>``/``<client>`` config that resolves whether a service call is in-process
+    or WCF-over-the-wire. Only added when ``<system.serviceModel>`` is present (honest-null)."""
+    root = ET.fromstring(text)
+    meta: dict[str, Any] = {
+        "kind": "dotnet-config",
+        "category": "dotnet-config",
+        "rootElement": _strip(root.tag),
+    }
+    service_model = _service_model(root)
+    if service_model is not None:
+        meta["serviceModel"] = service_model
+    return meta
 
 
 def _csproj(text: str, kind: str = "csproj") -> dict[str, Any]:
@@ -297,10 +415,15 @@ def _csproj(text: str, kind: str = "csproj") -> dict[str, Any]:
         elif tag in ("TargetFramework", "TargetFrameworks") and el.text:
             frameworks.extend(f.strip() for f in el.text.split(";") if f.strip())
     return {
-        "kind": kind, "category": "dotnet", "packageManager": "nuget", "buildTool": "dotnet",
+        "kind": kind,
+        "category": "dotnet",
+        "packageManager": "nuget",
+        "buildTool": "dotnet",
         "dotnetInfo": {
-            "sdk": root.get("Sdk"), "targetFrameworks": frameworks,
-            "packageReferences": packages, "projectReferences": projects,
+            "sdk": root.get("Sdk"),
+            "targetFrameworks": frameworks,
+            "packageReferences": packages,
+            "projectReferences": projects,
             "projectReferenceCount": len(projects),
         },
         "dependencyCount": len(packages),
@@ -321,7 +444,9 @@ def _sln(text: str) -> dict[str, Any]:
         if "/" in norm or norm.endswith((".csproj", ".vbproj", ".fsproj", ".vcxproj")):
             projects.append({"name": name, "path": norm})
     return {
-        "kind": "sln", "category": "dotnet", "buildTool": "dotnet",
+        "kind": "sln",
+        "category": "dotnet",
+        "buildTool": "dotnet",
         "solutionInfo": {"projectCount": len(projects), "projects": projects},
     }
 
@@ -336,8 +461,13 @@ def _requirements(text: str) -> dict[str, Any]:
         name = _REQ_NAME.split(line, 1)[0].strip()
         if name:
             deps.append(name)
-    return {"kind": "requirements.txt", "category": "python", "packageManager": "pip",
-            "dependencies": deps, "dependencyCount": len(deps)}
+    return {
+        "kind": "requirements.txt",
+        "category": "python",
+        "packageManager": "pip",
+        "dependencies": deps,
+        "dependencyCount": len(deps),
+    }
 
 
 def _pyproject(text: str) -> dict[str, Any]:
@@ -350,19 +480,34 @@ def _pyproject(text: str) -> dict[str, Any]:
         info = {"name": poetry.get("name"), "version": poetry.get("version")}
     else:
         pm = "pip"
-        names = [_REQ_NAME.split(x, 1)[0].strip() for x in (project.get("dependencies") or [])
-                 if isinstance(x, str)]
+        names = [
+            _REQ_NAME.split(x, 1)[0].strip()
+            for x in (project.get("dependencies") or [])
+            if isinstance(x, str)
+        ]
         info = {"name": project.get("name"), "version": project.get("version")}
-    return {"kind": "pyproject.toml", "category": "toml", "packageManager": pm,
-            "projectInfo": info, "dependencies": names, "dependencyCount": len(names)}
+    return {
+        "kind": "pyproject.toml",
+        "category": "toml",
+        "packageManager": pm,
+        "projectInfo": info,
+        "dependencies": names,
+        "dependencyCount": len(names),
+    }
 
 
 def _pipfile(text: str) -> dict[str, Any]:
     d = tomllib.loads(text)
     pkgs = list((d.get("packages") or {}).keys())
     dev = list((d.get("dev-packages") or {}).keys())
-    return {"kind": "Pipfile", "category": "python", "packageManager": "pipenv",
-            "dependencies": pkgs, "devDependencies": dev, "dependencyCount": len(pkgs)}
+    return {
+        "kind": "Pipfile",
+        "category": "python",
+        "packageManager": "pipenv",
+        "dependencies": pkgs,
+        "devDependencies": dev,
+        "dependencyCount": len(pkgs),
+    }
 
 
 def _generic_toml(text: str) -> dict[str, Any]:
@@ -377,9 +522,14 @@ def _generic_ini(text: str) -> dict[str, Any]:
 
 # ── Gradle / other ───────────────────────────────────────────────────────────
 def _gradle(name: str, text: str) -> dict[str, Any]:
-    return {"kind": "gradle", "category": "gradle", "packageManager": "gradle",
-            "buildTool": "gradle", "dependencyCount": len(_GRADLE_DEP.findall(text)),
-            "isKotlinDSL": name.endswith(".kts")}
+    return {
+        "kind": "gradle",
+        "category": "gradle",
+        "packageManager": "gradle",
+        "buildTool": "gradle",
+        "dependencyCount": len(_GRADLE_DEP.findall(text)),
+        "isKotlinDSL": name.endswith(".kts"),
+    }
 
 
 def _makefile(text: str) -> dict[str, Any]:
@@ -388,7 +538,9 @@ def _makefile(text: str) -> dict[str, Any]:
 
 
 def _ignorefile(name: str, text: str) -> dict[str, Any]:
-    patterns = [ln.strip() for ln in text.splitlines() if ln.strip() and not ln.strip().startswith("#")]
+    patterns = [
+        ln.strip() for ln in text.splitlines() if ln.strip() and not ln.strip().startswith("#")
+    ]
     return {"kind": name.lstrip("."), "category": "other", "patternCount": len(patterns)}
 
 
