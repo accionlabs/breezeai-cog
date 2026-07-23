@@ -38,6 +38,31 @@ def test_classify_db() -> None:
     assert classify_call("Order.findOne", "findOne") == ("db_method_call", "findOne", "orm")
 
 
+def test_query_execute_require_db_receiver() -> None:
+    # `query`/`execute` are high-collision in TS/JS — a bare call, or one on a non-DB
+    # receiver, must NOT default to `orm` (these are the dominant false positives:
+    # Apollo/API clients, Angular animations/DebugElement, command/use-case pattern).
+    assert classify_call("this.api.query", "query") is None
+    assert classify_call("backendService.query", "query") is None
+    assert classify_call("productCatalogueApollo.query", "query") is None
+    assert classify_call("debugElement.query", "query") is None
+    assert classify_call("query", "query") is None  # bare query(':enter') animation
+    assert classify_call("useCase.execute", "execute") is None
+    assert classify_call("this.execute", "execute") is None
+    assert classify_call("command.execute", "execute") is None
+    # `pool`/`client` are deliberately NOT DB-receiver suffixes (worker pools, Apollo client)
+    assert classify_call("workerPool.execute", "execute") is None
+
+    # Genuine raw-SQL / ORM handles are still captured via suffix or vendor hint.
+    assert classify_call("dataSource.query", "query") == ("db_method_call", "query", "orm")
+    assert classify_call("queryRunner.query", "query") == ("db_method_call", "query", "orm")
+    assert classify_call("connection.execute", "execute") == ("db_method_call", "execute", "orm")
+    assert classify_call("conn.query", "query") == ("db_method_call", "query", "orm")
+    assert classify_call("userRepository.execute", "execute") == ("db_method_call", "execute", "typeorm")
+    # vendor-hint path is unaffected (checked before the high-collision gate)
+    assert classify_call("db.session.query", "query") == ("db_method_call", "query", "sqlalchemy")
+
+
 def test_classify_db_recall() -> None:
     # DBs/ORMs added for recall parity with the legacy DB_METHOD_MAP.
     assert classify_call("client.hset", "hset") == ("db_method_call", "hset", "redis")
@@ -208,3 +233,31 @@ def test_entity_framework_verbs_are_dotnet_gated() -> None:
     # unknown language stays permissive (backward compatible)
     assert classify_call("ctx.Users.ToListAsync", "ToListAsync") == \
         ("db_method_call", "ToListAsync", "entity_framework")
+
+
+def test_sync_linq_terminals_require_ef_source() -> None:
+    # Sync LINQ terminals (ToList/FirstOrDefault/…) run over BOTH a DbSet (EF → SQL) and an
+    # in-memory List/array/ZipArchive (LINQ-to-Objects → no DB). Tag EF only with a queryable
+    # source in the chain, else drop — these are the HUBS-201 / HUBS-196 false positives.
+    for callee, m in [
+        ("doc.Sections.ToList", "ToList"),                 # Aspose node list
+        ("bundleZip.Entries.SingleOrDefault", "SingleOrDefault"),  # ZipArchive
+        ("fontSources.ToArray", "ToArray"),                # List<>
+        ("candidates.FirstOrDefault", "FirstOrDefault"),   # local List
+    ]:
+        assert classify_call(callee, m, None, "csharp") is None, (callee, m)
+
+    # Genuine EF: a DbContext/DbSet/queryable source anywhere in the chain → entity_framework.
+    assert classify_call("dbContext.Users.ToList", "ToList", None, "csharp") == \
+        ("db_method_call", "ToList", "entity_framework")
+    # query operators between source and terminal don't hide the source (whole-chain scan).
+    assert classify_call("_context.Orders.Where(o => o.Paid).FirstOrDefault", "FirstOrDefault",
+                         None, "csharp") == ("db_method_call", "FirstOrDefault", "entity_framework")
+    assert classify_call("repo.Set<User>().ToList", "ToList", None, "csharp") == \
+        ("db_method_call", "ToList", "entity_framework")
+
+    # Async LINQ has no in-memory twin → stays unconditional EF (still .NET-gated elsewhere).
+    assert classify_call("items.ToListAsync", "ToListAsync", None, "csharp") == \
+        ("db_method_call", "ToListAsync", "entity_framework")
+    # In a non-.NET file these are never EF (an in-memory .toList() in JS, etc.).
+    assert classify_call("dbContext.Users.ToList", "ToList", None, "typescript") is None

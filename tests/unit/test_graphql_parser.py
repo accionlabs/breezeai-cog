@@ -50,12 +50,50 @@ export const typeDefs = gql`
 '''
 
 
+# Client-side operations — a gql tagged template holding query/mutation *operations*
+# (caller side), invoked via apollo.query. Mixes: named query with a variable + fragment
+# spread, a mutation, and an interpolated (${...}) document. This file is NOT a resolver map
+# or server SDL, so it is owned by the base TypeScriptParser, not GraphQLParser.
+CLIENT_SRC = b'''import { gql } from 'apollo-angular';
+
+const GetSpecification = gql`
+  query specification($id: String!) {
+    specification(id: $id) { ...SpecificationInfo }
+  }
+  ${fragments.specificationInfo}
+`;
+
+const CreateSpec = gql`
+  mutation createSpecification($input: CreateSpecInput!) {
+    createSpecification(input: $input) { id }
+  }
+`;
+
+const Interpolated = gql`
+  query items {
+    items { ${prefixer.moved} name }
+  }
+`;
+'''
+
+
 def _parse(tmp_path, src: bytes, name: str, *, capture=True) -> FileRecord:
     p = tmp_path / name
     p.write_bytes(src)
     ctx = ParseContext(path=name, abs_path=p, source=src, repo_root=tmp_path,
                        capture_statements=capture)
     return GraphQLParser().parse_file(ctx)
+
+
+def _parse_base(tmp_path, src: bytes, name: str, *, capture=True) -> FileRecord:
+    """Parse via the BASE TypeScriptParser (client-op detection is additive, so it must fire
+    even in files the GraphQLParser does not claim)."""
+    from breezeai_cog.parsers.typescript.parser import TypeScriptParser
+    p = tmp_path / name
+    p.write_bytes(src)
+    ctx = ParseContext(path=name, abs_path=p, source=src, repo_root=tmp_path,
+                       capture_statements=capture)
+    return TypeScriptParser().parse_file(ctx)
 
 
 def test_routes_require_capture_statements(tmp_path) -> None:
@@ -96,6 +134,48 @@ def test_sdl_operations_detected_with_dtos(tmp_path) -> None:
     # SDL re-parsed from a gql`` template string has no host-AST node → synthetic
     # (not the GraphQL grammar's "field_definition", not a fabricated "graphql_field").
     assert routes["procurementItem"].nodeType == "synthetic"
+
+
+def test_client_operations_detected_via_base_parser(tmp_path) -> None:
+    # Client-op detection is additive: a plain gql-client file (no resolver map / no server
+    # SDL) is owned by the base TypeScriptParser, yet client ops must still be captured.
+    rec = _parse_base(tmp_path, CLIENT_SRC, "specification-queries.ts")
+    routes = {s.endpoint: s for s in rec.statements if s.semanticType == "route"}
+    # endpoint = the invoked root selection field (joins to a server route), NOT the op name.
+    assert set(routes) == {"specification", "createSpecification", "items"}
+    assert rec.framework == "graphql"
+
+    spec = routes["specification"]
+    assert spec.routeKind == "client_query"      # client_* distinguishes caller from server route
+    assert spec.method == "QUERY"
+    assert spec.framework == "graphql"
+    assert spec.handler == "specification"       # operation name kept as the client-side label
+    assert spec.requestDTO == "String"           # from $id: String!
+    assert spec.nodeType == "synthetic"
+    assert spec.parentId == rec.id
+
+    mut = routes["createSpecification"]
+    assert mut.routeKind == "client_mutation"
+    assert mut.method == "MUTATION"
+    assert mut.requestDTO == "CreateSpecInput"
+
+    # Interpolated (${...}) document is not dropped — the operation header still parses.
+    assert routes["items"].routeKind == "client_query"
+
+
+def test_client_ops_ignore_plain_template_and_server_sdl(tmp_path) -> None:
+    # A plain (untagged) template literal that merely contains the word "query" is NOT a
+    # GraphQL client op.
+    plain = b'const msg = `query executed in ${ms}ms for query ${name}`;\n'
+    rec = _parse_base(tmp_path, plain, "log.ts")
+    assert [s for s in rec.statements if s.semanticType == "route"] == []
+    assert rec.framework is None
+
+    # Server SDL is handled by the SDL pass (routeKind query/mutation), never emitted twice
+    # as a client op — SDL and client passes are disjoint by GraphQL node type.
+    rec_sdl = _parse(tmp_path, SDL_SRC, "schema.ts")
+    kinds = {s.routeKind for s in rec_sdl.statements if s.semanticType == "route"}
+    assert kinds == {"query", "mutation"}  # no client_* leakage
 
 
 def test_base_extraction_reused(tmp_path) -> None:
