@@ -115,15 +115,26 @@ _DOTNET = frozenset({"csharp", "vb"})
 # we require *positive* evidence of a DB receiver (opt-in) instead of defaulting to ``orm``
 # (opt-out) — mirroring the api-call detector, which only fires on a client hint. Real ORM
 # calls on these verbs still match earlier via ``_RECEIVER_HINTS`` (repository/session/…).
-_HIGH_COLLISION = frozenset({"find", "create", "update", "delete", "remove", "persist", "merge"})
+# ``query``/``execute`` belong here too: in TS/JS they are dominated by non-DB callers —
+# Apollo ``client.query``/``api.execute``, Angular animation ``query(':enter')`` and test
+# ``DebugElement.query``, and the command/use-case pattern ``useCase.execute`` — so a bare
+# ``.query()``/``.execute()`` should NOT default to ``orm``. Genuine raw-SQL callers use a
+# recognisable handle (``dataSource``/``queryRunner``/``connection``/``repository``) picked
+# up by the suffix/hint gates below.
+_HIGH_COLLISION = frozenset(
+    {"find", "create", "update", "delete", "remove", "persist", "merge", "query", "execute"}
+)
 
 # Terminal receiver-segment suffixes that positively signal a DB/ORM handle (beyond the
 # vendor substrings in _RECEIVER_HINTS). Matched by suffix on the receiver's last segment
 # (``userModel`` -> ``model``, ``orderDao`` -> ``dao``). Kept unambiguous — no short tokens
-# like ``em``/``db`` that would also match ``item``/``webdb``.
+# like ``em``/``db`` that would also match ``item``/``webdb``. ``connection``/``conn`` cover
+# raw driver handles for ``query``/``execute`` (mysql2 ``connection.execute``, node-pg
+# ``conn.query``); ``pool``/``client`` are deliberately excluded — they collide with worker
+# pools (``workerPool.execute``) and non-DB clients (Apollo ``client.query``).
 _DB_RECEIVER_SUFFIXES = (
     "repository", "repo", "model", "models", "dao", "collection",
-    "datasource", "queryrunner", "database", "manager",
+    "datasource", "queryrunner", "database", "manager", "connection", "conn",
 )
 
 # ElasticSearch / OpenSearch client verbs. These collide with ordinary code (``search`` is

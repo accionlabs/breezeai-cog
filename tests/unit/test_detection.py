@@ -38,6 +38,31 @@ def test_classify_db() -> None:
     assert classify_call("Order.findOne", "findOne") == ("db_method_call", "findOne", "orm")
 
 
+def test_query_execute_require_db_receiver() -> None:
+    # `query`/`execute` are high-collision in TS/JS — a bare call, or one on a non-DB
+    # receiver, must NOT default to `orm` (these are the dominant false positives:
+    # Apollo/API clients, Angular animations/DebugElement, command/use-case pattern).
+    assert classify_call("this.api.query", "query") is None
+    assert classify_call("backendService.query", "query") is None
+    assert classify_call("productCatalogueApollo.query", "query") is None
+    assert classify_call("debugElement.query", "query") is None
+    assert classify_call("query", "query") is None  # bare query(':enter') animation
+    assert classify_call("useCase.execute", "execute") is None
+    assert classify_call("this.execute", "execute") is None
+    assert classify_call("command.execute", "execute") is None
+    # `pool`/`client` are deliberately NOT DB-receiver suffixes (worker pools, Apollo client)
+    assert classify_call("workerPool.execute", "execute") is None
+
+    # Genuine raw-SQL / ORM handles are still captured via suffix or vendor hint.
+    assert classify_call("dataSource.query", "query") == ("db_method_call", "query", "orm")
+    assert classify_call("queryRunner.query", "query") == ("db_method_call", "query", "orm")
+    assert classify_call("connection.execute", "execute") == ("db_method_call", "execute", "orm")
+    assert classify_call("conn.query", "query") == ("db_method_call", "query", "orm")
+    assert classify_call("userRepository.execute", "execute") == ("db_method_call", "execute", "typeorm")
+    # vendor-hint path is unaffected (checked before the high-collision gate)
+    assert classify_call("db.session.query", "query") == ("db_method_call", "query", "sqlalchemy")
+
+
 def test_classify_db_recall() -> None:
     # DBs/ORMs added for recall parity with the legacy DB_METHOD_MAP.
     assert classify_call("client.hset", "hset") == ("db_method_call", "hset", "redis")
