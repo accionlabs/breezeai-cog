@@ -48,16 +48,23 @@ _DB_METHODS: dict[str, tuple[str, ...]] = {
     "elasticsearch": ("msearch",),
     "firebase": ("getdocs", "getdoc", "setdoc", "updatedoc", "deletedoc", "adddoc", "onsnapshot"),
     "entity_framework": (
-        "tolistasync", "tolist", "toarrayasync", "toarray",
-        "firstordefaultasync", "firstordefault", "firstasync",
-        "singleordefaultasync", "singleordefault", "singleasync",
-        "lastordefaultasync", "lastordefault",
+        # Async LINQ has no in-memory-collection equivalent, so `*Async` is EF on sight.
+        "tolistasync", "toarrayasync",
+        "firstordefaultasync", "firstasync",
+        "singleordefaultasync", "singleasync",
+        "lastordefaultasync",
         "countasync", "longcountasync", "anyasync", "allasync",
         "minasync", "maxasync", "sumasync", "averageasync",
         "findasync", "addasync", "addrangeasync", "savechangesasync", "savechanges",
+        # EF-distinctive operators (no LINQ-to-Objects collision).
         "include", "theninclude", "asnotracking", "astracking",
         "fromsqlraw", "fromsqlinterpolated", "executesqlraw", "executesqlinterpolated",
     ),
+    # NOTE: the synchronous LINQ terminals `tolist`/`toarray`/`firstordefault`/
+    # `singleordefault`/`lastordefault` are deliberately NOT here — they collide with
+    # LINQ-to-Objects over in-memory collections (List/array/ZipArchive). They are matched
+    # in `match_db` via `_EF_LINQ_VERBS`, gated on a positive EF/queryable source in the
+    # call chain, else dropped (precision-first, like `_HIGH_COLLISION`).
     "django": (
         "select_related", "prefetch_related",
         "get_or_create", "update_or_create", "bulk_update", "values_list",
@@ -137,6 +144,27 @@ _DB_RECEIVER_SUFFIXES = (
     "datasource", "queryrunner", "database", "manager", "connection", "conn",
 )
 
+# Synchronous LINQ terminal operators that are AMBIGUOUS: identical method names run over
+# both a DbSet/IQueryable (EF → a SQL round-trip) and an in-memory List/array/ZipArchive
+# (LINQ-to-Objects → no DB). Their async twins stay in _DISTINCTIVE (in-memory collections
+# have no `*Async`). We tag these `entity_framework` only when the call chain shows a
+# positive EF/queryable source (`_has_ef_source`), else drop — precision-first, mirroring
+# `_HIGH_COLLISION`. Only .NET files reach this branch (gated on `language in _DOTNET`).
+_EF_LINQ_VERBS = frozenset({
+    "tolist", "toarray", "firstordefault", "singleordefault", "lastordefault",
+})
+
+# Substrings in the FULL callee chain that positively mark an EF/queryable source, so a sync
+# LINQ terminal on it is a DB query, not LINQ-to-Objects. Scanned across the whole (lowercased)
+# chain because query operators sit between the source and the terminal
+# (``_context.Orders.Where(...).FirstOrDefault()`` -> ``context`` precedes the terminal). Kept
+# specific to avoid re-catching an in-memory receiver (``fontSources``/``bundleZip.Entries``).
+_EF_SOURCE_MARKERS = ("dbcontext", "dbset", "iqueryable", "queryable", "context.", ".set(", ".set<")
+
+
+def _has_ef_source(low_callee: str) -> bool:
+    return any(mk in low_callee for mk in _EF_SOURCE_MARKERS)
+
 # ElasticSearch / OpenSearch client verbs. These collide with ordinary code (``search`` is
 # ``String.prototype.search``; app repos/services expose ``.search()`` too — 270+ in one repo)
 # and with HTTP (``get``/``delete``), so they are gated on an ES-*client* receiver and the
@@ -157,6 +185,10 @@ def match_db(callee: str, method: str, language: str | None = None) -> str | Non
         # EF verbs are .NET-only; suppress them in a known non-.NET file (name collision).
         if not (db == "entity_framework" and language is not None and language not in _DOTNET):
             return db
+    # Ambiguous sync LINQ terminals (ToList/FirstOrDefault/…): EF only in a .NET file AND when
+    # the call chain shows a queryable/DbContext source; else LINQ-to-Objects — drop, don't tag.
+    if m in _EF_LINQ_VERBS and language in _DOTNET:
+        return "entity_framework" if _has_ef_source(low) else None
     receiver = low.rsplit(".", 1)[0].rsplit(".", 1)[-1] if "." in low else ""
     if m in _ES_VERBS and receiver and (receiver.endswith("client") or receiver in _ES_RECEIVERS):
         return "elasticsearch"  # e.g. this.client.search(dsl) / esClient.bulk(...)

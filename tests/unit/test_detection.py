@@ -233,3 +233,31 @@ def test_entity_framework_verbs_are_dotnet_gated() -> None:
     # unknown language stays permissive (backward compatible)
     assert classify_call("ctx.Users.ToListAsync", "ToListAsync") == \
         ("db_method_call", "ToListAsync", "entity_framework")
+
+
+def test_sync_linq_terminals_require_ef_source() -> None:
+    # Sync LINQ terminals (ToList/FirstOrDefault/…) run over BOTH a DbSet (EF → SQL) and an
+    # in-memory List/array/ZipArchive (LINQ-to-Objects → no DB). Tag EF only with a queryable
+    # source in the chain, else drop — these are the HUBS-201 / HUBS-196 false positives.
+    for callee, m in [
+        ("doc.Sections.ToList", "ToList"),                 # Aspose node list
+        ("bundleZip.Entries.SingleOrDefault", "SingleOrDefault"),  # ZipArchive
+        ("fontSources.ToArray", "ToArray"),                # List<>
+        ("candidates.FirstOrDefault", "FirstOrDefault"),   # local List
+    ]:
+        assert classify_call(callee, m, None, "csharp") is None, (callee, m)
+
+    # Genuine EF: a DbContext/DbSet/queryable source anywhere in the chain → entity_framework.
+    assert classify_call("dbContext.Users.ToList", "ToList", None, "csharp") == \
+        ("db_method_call", "ToList", "entity_framework")
+    # query operators between source and terminal don't hide the source (whole-chain scan).
+    assert classify_call("_context.Orders.Where(o => o.Paid).FirstOrDefault", "FirstOrDefault",
+                         None, "csharp") == ("db_method_call", "FirstOrDefault", "entity_framework")
+    assert classify_call("repo.Set<User>().ToList", "ToList", None, "csharp") == \
+        ("db_method_call", "ToList", "entity_framework")
+
+    # Async LINQ has no in-memory twin → stays unconditional EF (still .NET-gated elsewhere).
+    assert classify_call("items.ToListAsync", "ToListAsync", None, "csharp") == \
+        ("db_method_call", "ToListAsync", "entity_framework")
+    # In a non-.NET file these are never EF (an in-memory .toList() in JS, etc.).
+    assert classify_call("dbContext.Users.ToList", "ToList", None, "typescript") is None
