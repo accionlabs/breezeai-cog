@@ -23,6 +23,7 @@ from ..treesitter import parse_source
 from .classes import build_class
 from .functions import defined_names, type_map
 from .imports import CSharpIndex, build_csharp_index, extract_imports
+from .lambda_events import detect_lambda_handlers
 from .mappings import FRAMEWORKS, STATEMENT_TYPES
 
 _CLASS_TYPES = (
@@ -84,7 +85,7 @@ class CSharpParser(BaseParser):
             functions.extend(methods)
             statements.extend(cls_statements)
 
-        return FileRecord(
+        record = FileRecord(
             id=fid,
             path=path,
             type="code",
@@ -96,3 +97,11 @@ class CSharpParser(BaseParser):
             classes=classes,
             statements=statements,
         )
+        # Additive detectors — gated by --capture-statements, layered on top of base + any
+        # framework subclass's extraction (a Lambda handler is an orthogonal capability, so it
+        # co-exists with an ASP.NET controller in the same file rather than displacing it).
+        # Mirrors TypeScript's `typescript/aws_events.py` (sibling module, not a peer parser).
+        if capture and not self.is_fixture_file(path):  # entry-point emitter → skip fixtures/tests
+            if detect_lambda_handlers(root, source, path, record) and record.framework is None:
+                record.framework = "aws-lambda"
+        return record
