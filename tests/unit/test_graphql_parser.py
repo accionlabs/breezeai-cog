@@ -49,6 +49,28 @@ export const typeDefs = gql`
 `;
 '''
 
+# SDL with @key entity types — graphql-tools stitching (selectionSet) and Apollo Federation
+# (fields) forms, both alongside the root Query type.
+ENTITY_SRC = b'''import gql from 'graphql-tag';
+
+export const typeDefs = gql`
+  type ProcurementItem @key(selectionSet: "{ id }") @canonical {
+    id: ID!
+    title: String
+  }
+  type Tenderer @key(fields: "id contactId") {
+    id: ID!
+    contactId: ID!
+  }
+  type Plain {
+    name: String
+  }
+  type Query {
+    procurementItems: [ProcurementItem!]!
+  }
+`;
+'''
+
 
 # Client-side operations — a gql tagged template holding query/mutation *operations*
 # (caller side), invoked via apollo.query. Mixes: named query with a variable + fragment
@@ -178,13 +200,29 @@ def test_client_ops_ignore_plain_template_and_server_sdl(tmp_path) -> None:
     assert kinds == {"query", "mutation"}  # no client_* leakage
 
 
+def test_key_entities_detected(tmp_path) -> None:
+    rec = _parse(tmp_path, ENTITY_SRC, "schema.ts")
+    entities = {s.endpoint: s for s in rec.statements if s.semanticType == "graphql_entity"}
+    # Only @key-bearing types are entities; the plain type and the root Query are not.
+    assert set(entities) == {"ProcurementItem", "Tenderer"}
+    # selectionSet form → key fields parsed from "{ id }".
+    assert entities["ProcurementItem"].keyFields == ["id"]
+    assert entities["ProcurementItem"].framework == "graphql"
+    # fields form → multi-field key.
+    assert entities["Tenderer"].keyFields == ["id", "contactId"]
+    # the root Query field still emits its route (entities don't displace routes).
+    routes = {s.endpoint for s in rec.statements if s.semanticType == "route"}
+    assert "procurementItems" in routes
+
+
 def test_base_extraction_reused(tmp_path) -> None:
     rec = _parse(tmp_path, RESOLVER_SRC, "r.resolvers.ts")
     assert rec.language == "typescript"
 
 
 def test_output_validates(tmp_path) -> None:
-    for src, name in ((RESOLVER_SRC, "r.resolvers.ts"), (SDL_SRC, "schema.ts")):
+    for src, name in ((RESOLVER_SRC, "r.resolvers.ts"), (SDL_SRC, "schema.ts"),
+                      (ENTITY_SRC, "entities.ts")):
         rec = _parse(tmp_path, src, name)
         errors = list(Draft202012Validator(FileRecord.model_json_schema(by_alias=True))
                       .iter_errors(json.loads(to_line(rec))))
