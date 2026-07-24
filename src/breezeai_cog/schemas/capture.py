@@ -90,6 +90,9 @@ class Statement(BaseModel):
     dataLoaders: list[str] | None = None
     # db_method_call-only
     dataAccessHint: str | None = None
+    # graphql_entity-only: the key field(s) that identify a federated/stitched entity
+    # (from a ``@key(selectionSet: "{ id }")`` / ``@key(fields: "id")`` directive).
+    keyFields: list[str] | None = None
 
 
 class Function(BaseModel):

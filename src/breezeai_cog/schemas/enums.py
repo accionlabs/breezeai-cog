@@ -34,4 +34,5 @@ SemanticType = Literal[
     "verticle_deploy",
     "service_proxy",
     "timer",
+    "graphql_entity",
 ]

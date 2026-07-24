@@ -204,10 +204,83 @@ def _emit_fields(obj: Node, kind: str, sdl: bytes, row_base: int, path: str,
         ))
 
 
+# The federation / graphql-tools-stitching key directive. Its key fields live in either a
+# ``fields: "id"`` (Apollo Federation) or ``selectionSet: "{ id }"`` (graphql-tools stitching)
+# argument — a top-level selection of field names. We extract those names; nested selections
+# (``{ org { id } }``) keep only the top-level names (best-effort, honest about depth).
+_KEY_ARG_NAMES = ("fields", "selectionSet")
+
+
+def _string_arg_value(directive: Node, arg_name: str, sdl: bytes) -> str | None:
+    """The raw string value of a directive argument (``@key(selectionSet: "{ id }")`` -> the
+    ``{ id }`` text), quotes stripped, else None."""
+    args = _child(directive, "arguments")
+    if args is None:
+        return None
+    for arg in args.named_children:
+        if arg.type != "argument":
+            continue
+        name = _child(arg, "name")
+        if name is None or node_text(name, sdl) != arg_name:
+            continue
+        value = _child(arg, "value")
+        return node_text(value, sdl).strip('"').strip() if value is not None else None
+    return None
+
+
+def _key_fields(obj: Node, sdl: bytes) -> list[str] | None:
+    """Key field names from an object type's ``@key`` directive, or None if it has no ``@key``.
+    Handles both ``fields: "id"`` and ``selectionSet: "{ id }"`` forms; braces stripped, split
+    on whitespace/commas, top-level names only."""
+    directives = _child(obj, "directives")
+    if directives is None:
+        return None
+    key_dir = next(
+        (d for d in directives.named_children
+         if d.type == "directive" and (n := _child(d, "name")) is not None
+         and node_text(n, sdl) == "key"),
+        None,
+    )
+    if key_dir is None:
+        return None
+    raw = next((v for a in _KEY_ARG_NAMES if (v := _string_arg_value(key_dir, a, sdl))), None)
+    if raw is None:
+        return []  # a @key with an unreadable arg — entity is real, key fields unknown
+    inner = raw.strip("{} \t\n")
+    return [tok for tok in inner.replace(",", " ").split() if tok]
+
+
+def _emit_entity(obj: Node, sdl: bytes, row_base: int, path: str,
+                 seen: set[str], routes: list[Statement]) -> None:
+    """Emit a ``graphql_entity`` statement for a ``@key``-bearing type — the federated/stitched
+    entity, keyed by its ``@key`` fields, joinable to operations on ``endpoint`` (the type name)."""
+    key_fields = _key_fields(obj, sdl)
+    if key_fields is None:  # no @key → not an entity
+        return
+    name = _child(obj, "name")
+    if name is None:
+        return
+    line = row_base + name.start_point[0] + 1
+    routes.append(Statement(
+        id=disambiguate(statement_id(path, line, name.start_point[1]), seen),
+        parentId=file_id(path),
+        nodeType="synthetic",
+        semanticType="graphql_entity",
+        text=first_line(node_text(obj, sdl))[:120],
+        endpoint=node_text(name, source=sdl),  # the entity type name (joins to op DTOs)
+        framework="graphql",
+        keyFields=key_fields,
+        startLine=line,
+        endLine=row_base + obj.end_point[0] + 1,
+        path=path,
+    ))
+
+
 def _parse_sdl_fragment(frag: Node, source: bytes, path: str, seen: set[str],
                         routes: list[Statement], timeout_micros: int) -> None:
-    """Re-parse one ``string_fragment``'s bytes with the ``graphql`` grammar and emit a
-    route per root-type field. Line numbers map back via the fragment's TS start row."""
+    """Re-parse one ``string_fragment``'s bytes with the ``graphql`` grammar and emit a route
+    per root-type field, plus a ``graphql_entity`` for every ``@key``-bearing type. Line numbers
+    map back via the fragment's TS start row."""
     sdl = source[frag.start_byte:frag.end_byte]
     row_base = frag.start_point[0]
     gql_root = parse_source("graphql", sdl, timeout_micros).root_node
@@ -218,6 +291,8 @@ def _parse_sdl_fragment(frag: Node, source: bytes, path: str, seen: set[str],
             kind = _ROOT_TYPES.get(node_text(name, sdl)) if name is not None else None
             if kind is not None:
                 _emit_fields(n, kind, sdl, row_base, path, seen, routes)
+            else:
+                _emit_entity(n, sdl, row_base, path, seen, routes)  # non-root type: maybe an entity
         for c in n.named_children:
             walk(c)
 
