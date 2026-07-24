@@ -1,0 +1,7 @@
+# Groovy per-language ignore defaults (layer 2).
+*.class
+target/
+build/
+.gradle/
+*.jar
+*.war

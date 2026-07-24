@@ -3,20 +3,43 @@
 Note: ``tree_sitter_language_pack.get_parser`` is broken under tree-sitter 0.25
 (``parse`` rejects bytes), so we build ``Parser(get_language(name))`` ourselves.
 Parsers are cached per language per process (warmed in the pool initializer).
+
+Most grammars come from ``tree_sitter_language_pack``. A few languages need a
+standalone PyPI grammar because the language-pack build is unusable — those are
+registered in ``_EXTERNAL_GRAMMARS`` and loaded from their own module. Groovy is the
+first: the language-pack ``groovy`` grammar is a structureless "command soup" (no
+``class``/``method``/``import`` nodes), so we use ``dekobon-tree-sitter-groovy``, a
+real structural grammar. See ``.todo/groovy-grammar-evaluation.md``.
 """
 
 from __future__ import annotations
 
 import warnings
 from functools import lru_cache
+from typing import Callable
 
-from tree_sitter import Node, Parser, Tree
+from tree_sitter import Language, Node, Parser, Tree
 from tree_sitter_language_pack import get_language
+
+
+def _load_dekobon_groovy() -> Language:
+    import dekobon_tree_sitter_groovy
+
+    return Language(dekobon_tree_sitter_groovy.language())
+
+
+#: Languages whose grammar is a standalone PyPI package, not in the language pack.
+#: name → zero-arg loader returning a ``tree_sitter.Language``.
+_EXTERNAL_GRAMMARS: dict[str, Callable[[], Language]] = {
+    "groovy": _load_dekobon_groovy,
+}
 
 
 @lru_cache(maxsize=None)
 def get_parser(language: str) -> Parser:
-    return Parser(get_language(language))
+    loader = _EXTERNAL_GRAMMARS.get(language)
+    lang = loader() if loader is not None else get_language(language)
+    return Parser(lang)
 
 
 def parse_source(language: str, source: bytes, timeout_micros: int = 0) -> Tree:
