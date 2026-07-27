@@ -170,10 +170,8 @@ def test_generic_verb_non_db_receiver_guarded() -> None:
         ("cartItems.remove", "remove"), ("this.userCache.delete", "delete"),
     ]:
         assert classify_call(callee, method) is None, callee
-    # true positives preserved: explicit repo/session, plain document saves, distinctive methods
+    # true positives preserved: explicit repo/vendor hint and distinctive methods
     assert classify_call("orderRepo.save", "save") == ("db_method_call", "save", "typeorm")
-    assert classify_call("user.save", "save") == ("db_method_call", "save", "orm")
-    assert classify_call("userStore.save", "save") == ("db_method_call", "save", "orm")
     assert classify_call("redisCache.hget", "hget") == ("db_method_call", "hget", "redis")
 
 
@@ -190,6 +188,9 @@ def test_high_collision_verbs_require_db_receiver() -> None:
         ("Cookies.remove", "remove"),       # js-cookie
         ("this.list.delete", "delete"),     # collection
         ("items.remove", "remove"),
+        ("docx.Save", "Save"),              # Aspose.Words Document serialization to a Stream — not DB
+        ("htmlDoc.Save", "Save"),           # Aspose HTML serialization — not DB
+        ("user.save", "save"),              # bare active-record save, no DB receiver → ambiguous, drop
     ]:
         assert classify_call(callee, method) is None, callee
     # real ORM on these verbs still matches via a positive DB receiver / vendor hint:
@@ -197,6 +198,7 @@ def test_high_collision_verbs_require_db_receiver() -> None:
     assert classify_call("this.repo.delete", "delete") == ("db_method_call", "delete", "typeorm")
     assert classify_call("userModel.create", "create") == ("db_method_call", "create", "orm")
     assert classify_call("orderDao.update", "update") == ("db_method_call", "update", "orm")
+    assert classify_call("orderRepo.save", "save") == ("db_method_call", "save", "typeorm")
     assert classify_call("prisma.user.create", "create") == ("db_method_call", "create", "prisma")
     # em.merge / session.persist (Hibernate) keep matching via receiver hints:
     assert classify_call("this.entityManager.merge", "merge") == ("db_method_call", "merge", "typeorm")
