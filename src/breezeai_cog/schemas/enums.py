@@ -19,6 +19,7 @@ ClassType = Literal[
     "record",
     "enum",
     "module",
+    "trait",
 ]
 
 # statement.semanticType — the schema's enum also allows null, expressed in the
@@ -34,4 +35,5 @@ SemanticType = Literal[
     "verticle_deploy",
     "service_proxy",
     "timer",
+    "graphql_entity",
 ]

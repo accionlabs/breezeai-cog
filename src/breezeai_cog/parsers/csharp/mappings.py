@@ -54,4 +54,10 @@ NESTED_SCOPES = {
 
 STATEMENT_TYPES = sorted(EMIT_TYPES)
 
-FRAMEWORKS = ["aspnet", "aspnetcore"]
+FRAMEWORKS = [
+    "aspnet", "aspnetcore",
+    # AWS Lambda handlers (see lambda_events.py) — transport carried on statement.framework,
+    # mirroring the TypeScript FRAMEWORKS list. event-source triggers vs APIGateway/ALB HTTP.
+    "aws-lambda", "aws-s3", "aws-sqs", "aws-sns", "aws-eventbridge",
+    "aws-dynamodb", "aws-kinesis", "aws-ses", "aws-apigw",
+]

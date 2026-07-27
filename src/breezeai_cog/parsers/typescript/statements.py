@@ -91,19 +91,26 @@ def _call_details(call: Node, source: bytes) -> tuple[str, str, str | None] | No
     return callee, method, endpoint
 
 
-def _iter_in_scope(node: Node, descend_all: bool = False):
+def _span(node: Node) -> tuple[int, int]:
+    return (node.start_byte, node.end_byte)
+
+
+def _iter_in_scope(node: Node, descend_all: bool = False, barriers: frozenset[tuple[int, int]] = frozenset()):
     """Yield EMIT_TYPES statement nodes. When ``descend_all`` is False (file-root /
     class-body scope) nested scopes remain barriers — they are extracted as their own
-    Function/Class. When True (a function body) we descend into inline callbacks,
-    lambdas and any nested scope, attributing their statements to this function — a
-    function body never contains a separately-extracted scope, so there is no
-    double-emit (see build_function). This closes the "callback black hole"."""
+    Function/Class. When True (a function body) we descend into inline callbacks and
+    lambdas, attributing their statements to this function, EXCEPT nested named
+    functions (their spans are in ``barriers``): those are extracted as their own
+    scope, so descending would double-emit. This closes the "callback black hole"
+    while keeping one-statement-per-nearest-named-function (see build_function)."""
     for child in node.named_children:
+        if _span(child) in barriers:
+            continue
         if not descend_all and child.type in NESTED_SCOPES:
             continue
         if child.type in EMIT_TYPES:
             yield child
-        yield from _iter_in_scope(child, descend_all)
+        yield from _iter_in_scope(child, descend_all, barriers)
 
 
 def extract_statements(
@@ -116,11 +123,12 @@ def extract_statements(
     limit: int,
     seen_ids: set[str],
     descend_all: bool = False,
+    barriers: frozenset[tuple[int, int]] = frozenset(),
 ) -> list[Statement]:
     if not capture or body is None:
         return []
     out: list[Statement] = []
-    for node in _iter_in_scope(body, descend_all):
+    for node in _iter_in_scope(body, descend_all, barriers):
         out.extend(
             classify_statement(
                 node, source, path, parent_id=parent_id, limit=limit, seen_ids=seen_ids,

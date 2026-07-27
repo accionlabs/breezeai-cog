@@ -58,11 +58,10 @@ class S3StreamUpload:
 def _default_client(settings: Settings) -> Any:
     import boto3
 
+    # Credentials come from boto3's default provider chain (IRSA in-cluster)
+    # unless static keys are explicitly configured; see settings.
     return boto3.client(
         "s3",
         region_name=settings.aws_region,
-        aws_access_key_id=settings.aws_access_key,
-        aws_secret_access_key=(
-            settings.aws_secret_key.get_secret_value() if settings.aws_secret_key else None
-        ),
+        **settings.aws_credentials_kwargs,
     )

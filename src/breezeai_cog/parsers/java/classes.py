@@ -17,6 +17,7 @@ _TYPE = {
     "enum_declaration": "enum",
     "record_declaration": "record",
 }
+_NESTED_CLASS_TYPES = tuple(_TYPE)  # member (inner) types nested in a class body
 _TYPE_NODES = ("type_identifier", "scoped_type_identifier", "generic_type")
 
 
@@ -44,7 +45,10 @@ def build_class(
     capture: bool,
     limit: int,
     resolve: CallResolver = noop_resolver,
-) -> tuple[Class, list[Function], list[Statement]]:
+) -> tuple[list[Class], list[Function], list[Statement]]:
+    """Return (classes, methods, statements) — all flat, linked by parentId. The
+    class list is this class plus any nested (inner) member types, each parented to
+    its enclosing class."""
     name = node_text(node.child_by_field_name("name"), source)
     start, end = line_span(node)
     cid = disambiguate(class_id(path, name), seen_ids)
@@ -63,6 +67,7 @@ def build_class(
 
     methods: list[Function] = []
     statements: list[Statement] = []
+    nested_classes: list[Class] = []
     ctor_params: list[ConstructorParam] = []
 
     body = node.child_by_field_name("body")
@@ -84,6 +89,16 @@ def build_class(
                         ConstructorParam(name=p.name, type=p.type)
                         for p in extract_params(member.child_by_field_name("parameters"), source)
                     ]
+            elif member.type in _NESTED_CLASS_TYPES:
+                # Member (inner) class / interface / enum / record — extracted as its
+                # own Class parented to this one (recursing for arbitrarily deep nesting).
+                sub_classes, sub_methods, sub_statements = build_class(
+                    member, source, path,
+                    parent_id=cid, seen_ids=seen_ids, capture=capture, limit=limit, resolve=resolve,
+                )
+                nested_classes.extend(sub_classes)
+                methods.extend(sub_methods)
+                statements.extend(sub_statements)
 
     cls = Class(
         id=cid,
@@ -101,4 +116,4 @@ def build_class(
         startLine=start,
         endLine=end,
     )
-    return cls, methods, statements
+    return [cls, *nested_classes], methods, statements

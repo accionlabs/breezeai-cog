@@ -23,6 +23,10 @@ dependencies = [
   # source form. Lower bound 0.24 is where timeout_micros stabilized.
   "tree-sitter>=0.24,<0.26",
   "tree-sitter-language-pack>=0.2",
+  # Standalone Groovy grammar — the language-pack `groovy` grammar is a structureless
+  # "command soup" (no class/method/import nodes); dekobon's is a real structural
+  # grammar. See .todo/groovy-grammar-evaluation.md and parsers/treesitter.py.
+  "dekobon-tree-sitter-groovy>=0.2.2",
   "pyyaml>=6.0",
   # --upload (services/upload.py) and notify (services/notify.py) are first-class
   # CLI features, so their HTTP client is a core dependency — not an opt-in extra.

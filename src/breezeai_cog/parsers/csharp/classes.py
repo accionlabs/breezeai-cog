@@ -21,6 +21,7 @@ _TYPE = {
 }
 _METHOD_MEMBERS = ("method_declaration", "constructor_declaration",
                    "destructor_declaration", "operator_declaration")
+_NESTED_CLASS_TYPES = tuple(_TYPE)  # member (nested) types declared in a type body
 
 
 def _heritage(node: Node, source: bytes) -> tuple[str | None, list[str]]:
@@ -81,12 +82,12 @@ def build_class(
         )
         for member in body.named_children:
             if member.type in _METHOD_MEMBERS:
-                fn, fn_statements = build_method(
+                fns, fn_statements = build_method(
                     member, source, path,
                     parent_id=cid, class_name=name, seen_ids=seen_ids, capture=capture, limit=limit,
                     resolve=resolve,
                 )
-                methods.append(fn)
+                methods.extend(fns)
                 statements.extend(fn_statements)
                 if member.type == "constructor_declaration" and not ctor_params:
                     ctor_params = [

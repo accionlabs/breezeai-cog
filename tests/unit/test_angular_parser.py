@@ -117,7 +117,9 @@ from breezeai_cog.parsers.typescript.imports import build_ts_index  # noqa: E402
 
 # defines the constants the routing module references (cross-file)
 _CONSTS_SRC = '''
-export class RouteNames { public static readonly ROOT = ''; static readonly DIAGNOSTICS = 'diagnostics'; }
+export class RouteNames { public static readonly ROOT = ''; static readonly DIAGNOSTICS = 'diagnostics';
+  static readonly ORGANISATION_CONTEXT = 'org'; static readonly PROJECT_CONTEXT = 'project'; }
+export class RouteParams { static readonly ORG_ID = 'orgId'; static readonly PROJECT_ID = 'projectId'; }
 export enum BrandTab { Overview = 'overview', Products = 'products' }
 '''
 
@@ -133,6 +135,8 @@ const routes: Routes = [
   { path: RouteNames.DIAGNOSTICS, component: DiagComponent },
   { path: RouteNames.ROOT, component: HomeComponent },
   { path: BrandTab.Products, component: ProductsComponent },
+  { path: RouteNames.ORGANISATION_CONTEXT + '/:' + RouteParams.ORG_ID, component: OrgComponent },
+  { path: `${RouteNames.PROJECT_CONTEXT}/:${RouteParams.PROJECT_ID}`, component: ProjComponent },
   { path: `dyn/${x}`, component: DynComponent },
   { path: buildPath(), component: CalcComponent },
 ];
@@ -164,13 +168,27 @@ def test_const_and_enum_path_resolution(tmp_path) -> None:
     assert not any(e and "RouteNames" in e for e, _ in eps)
 
 
+def test_templated_path_resolution(tmp_path) -> None:
+    # A path built from resolvable consts + a literal :param — concatenation and template
+    # forms — assembles to a templated endpoint (all pieces resolve), not None.
+    rec = _parse_with_index(
+        {"route-names.ts": _CONSTS_SRC, "brand-tab.ts": _CONSTS_SRC, "app-routing.module.ts": _ROUTING_SRC},
+        "app-routing.module.ts", tmp_path)
+    by_handler = {s.handler: s for s in rec.statements if s.semanticType == "route"}
+    # RouteNames.ORGANISATION_CONTEXT + '/:' + RouteParams.ORG_ID  ->  org/:orgId
+    assert by_handler["OrgComponent"].endpoint == "/org/:orgId"
+    # `${RouteNames.PROJECT_CONTEXT}/:${RouteParams.PROJECT_ID}`  ->  project/:projectId
+    assert by_handler["ProjComponent"].endpoint == "/project/:projectId"
+
+
 def test_unresolved_paths_are_honest_null(tmp_path) -> None:
     rec = _parse_with_index(
         {"route-names.ts": _CONSTS_SRC, "brand-tab.ts": _CONSTS_SRC, "app-routing.module.ts": _ROUTING_SRC},
         "app-routing.module.ts", tmp_path)
     by_handler = {s.handler: s for s in rec.statements if s.semanticType == "route"}
-    # template literal and function-call paths can't be resolved → endpoint None (not garbled)
+    # a template with a dynamic (non-const) substitution `${x}` stays None (never stringified)
     assert by_handler["DynComponent"].endpoint is None
+    # a function-call path stays None
     assert by_handler["CalcComponent"].endpoint is None
 
 
@@ -185,3 +203,63 @@ const routes: Routes = [ { path: DUP, component: C } ];
                             "app-routing.module.ts", tmp_path)
     ep = next(s.endpoint for s in rec.statements if s.semanticType == "route")
     assert ep is None
+
+
+# ── Lazy loadChildren cross-file path (Tier-2) ─────────────────────────────────
+_APP_ROUTING = b'''import { RouterModule, Routes } from '@angular/router';
+export const routes: Routes = [
+  { path: 'orgs', loadChildren: () => import('./org.module').then(m => m.OrgModule) },
+];
+export class AppRoutingModule {}
+'''
+_ORG_ROUTING = b'''import { RouterModule, Routes } from '@angular/router';
+export const routes: Routes = [
+  { path: 'projects', component: ProjectsComponent },
+  { path: 'settings', loadChildren: () => import('./settings.module').then(m => m.SettingsModule) },
+];
+export class OrgModule {}
+'''
+_SETTINGS_ROUTING = b'''import { RouterModule, Routes } from '@angular/router';
+export const routes: Routes = [
+  { path: 'billing', component: BillingComponent },
+];
+export class SettingsModule {}
+'''
+
+
+def test_lazy_loadchildren_cross_file_prefix(tmp_path) -> None:
+    # A child module parsed in its own file gets the parent mount's prefix prepended.
+    files = {"app.module.ts": _APP_ROUTING, "org.module.ts": _ORG_ROUTING}
+    rec = _parse_with_index(files, "org.module.ts", tmp_path)
+    eps = {s.handler: s.endpoint for s in rec.statements if s.semanticType == "route"}
+    # OrgModule is mounted at 'orgs' → its own routes compose under it.
+    assert eps["ProjectsComponent"] == "/orgs/projects"
+
+
+def test_lazy_loadchildren_chain_composition(tmp_path) -> None:
+    # app → org (orgs) → settings (settings): a grandchild gets the FULL composed chain.
+    files = {"app.module.ts": _APP_ROUTING, "org.module.ts": _ORG_ROUTING,
+             "settings.module.ts": _SETTINGS_ROUTING}
+    rec = _parse_with_index(files, "settings.module.ts", tmp_path)
+    eps = {s.handler: s.endpoint for s in rec.statements if s.semanticType == "route"}
+    assert eps["BillingComponent"] == "/orgs/settings/billing"
+
+
+def test_lazy_multi_mount_module_is_honest_null(tmp_path) -> None:
+    # A module mounted at TWO different prefixes → ambiguous → child keeps its own bare path
+    # (never wrongly attributed to one parent).
+    app = b'''import { RouterModule, Routes } from '@angular/router';
+export const routes: Routes = [
+  { path: 'a', loadChildren: () => import('./shared.module').then(m => m.SharedModule) },
+  { path: 'b', loadChildren: () => import('./shared.module').then(m => m.SharedModule) },
+];
+export class AppRoutingModule {}
+'''
+    shared = b'''import { RouterModule, Routes } from '@angular/router';
+export const routes: Routes = [ { path: 'x', component: XComponent } ];
+export class SharedModule {}
+'''
+    rec = _parse_with_index({"app.module.ts": app, "shared.module.ts": shared},
+                            "shared.module.ts", tmp_path)
+    eps = {s.handler: s.endpoint for s in rec.statements if s.semanticType == "route"}
+    assert eps["XComponent"] == "/x"  # bare path, not /a/x or /b/x

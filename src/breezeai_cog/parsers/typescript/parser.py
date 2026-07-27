@@ -21,17 +21,34 @@ from ..treesitter import node_text, parse_source
 from .classes import build_class
 from ..callresolve import make_resolver
 from .aws_events import detect_aws_events
+from ..detection.sdk_calls import detect_sdk_calls
 from ..typescript_express.routes import detect_express
-from .functions import build_function, defined_names, extract_decorators, type_map
+from .functions import (
+    build_function,
+    collect_nested_functions,
+    defined_names,
+    extract_decorators,
+    type_map,
+)
 from .imports import TsAliasIndex, build_ts_index, extract_imports
 from .mappings import FRAMEWORKS, STATEMENT_TYPES
 from .statements import extract_statements
 
 _DECLS = (
-    "class_declaration", "abstract_class_declaration", "interface_declaration",
-    "enum_declaration", "function_declaration", "lexical_declaration", "variable_declaration",
+    "class_declaration",
+    "abstract_class_declaration",
+    "interface_declaration",
+    "enum_declaration",
+    "function_declaration",
+    "lexical_declaration",
+    "variable_declaration",
 )
-_CLASSES = ("class_declaration", "abstract_class_declaration", "interface_declaration", "enum_declaration")
+_CLASSES = (
+    "class_declaration",
+    "abstract_class_declaration",
+    "interface_declaration",
+    "enum_declaration",
+)
 _TSX_EXT = (".tsx", ".jsx")
 _JS_EXT = (".js", ".jsx", ".mjs", ".cjs")
 #: JS/TS route-only fixture markers, layered on top of the global set (base.py). Storybook
@@ -86,7 +103,9 @@ class TypeScriptParser(BaseParser):
         # framework parser (React/NestJS/Express/…).
         return (*super().fixture_markers(), *_TS_FIXTURE_MARKERS)
 
-    def build_index(self, repo_root: Path, files: Sequence[Path], jobs: int = 1) -> TsAliasIndex | None:
+    def build_index(
+        self, repo_root: Path, files: Sequence[Path], jobs: int = 1
+    ) -> TsAliasIndex | None:
         """Repo-level pre-pass: tsconfig path aliases + a string-constant value map (for
         resolving non-literal route paths like Angular's ``path: RouteNames.X``)."""
         return build_ts_index(Path(repo_root), files, jobs)
@@ -106,7 +125,10 @@ class TypeScriptParser(BaseParser):
             root, source, path, ctx.repo_root, ctx.resolution_index
         )
         resolve = make_resolver(  # calls[].path (Tiers 1+2 + Phase 2 + inherited this.M())
-            bindings, defined_names(root, source), path, type_map(root, source),
+            bindings,
+            defined_names(root, source),
+            path,
+            type_map(root, source),
             heritage=getattr(ctx.resolution_index, "class_heritage", None),
         )
         functions: list[Function] = []
@@ -124,12 +146,51 @@ class TypeScriptParser(BaseParser):
             decorators = pending + exp_decs
             pending = []
             if decl is None:
+                # `export default <expr>` is not a declaration, so it isn't handled above —
+                # but it commonly wraps a named function: `export default React.memo(function
+                # Foo(){…})`, `export default function bar(){}`. Descend it with the named-only
+                # collector so the component (and, via build_function's recursion, its nested
+                # handlers) are seeded. Anonymous `export default () => …` yields nothing.
+                if child.type == "export_statement":
+                    for value_node, nested_name, nested_kind in collect_nested_functions(
+                        child, source
+                    ):
+                        fns, fn_stmts = build_function(
+                            value_node,
+                            name=nested_name or "default",
+                            kind=nested_kind,
+                            decorators=[],
+                            source=source,
+                            path=path,
+                            parent_id=fid,
+                            class_name=None,
+                            seen_ids=seen_ids,
+                            capture=capture,
+                            limit=limit,
+                            resolve=resolve,
+                        )
+                        functions.extend(fns)
+                        statements.extend(fn_stmts)
                 continue
-            self._handle(decl, decorators, source, path, fid, seen_ids, capture, limit,
-                         functions, classes, statements, resolve)
+            self._handle(
+                decl,
+                decorators,
+                source,
+                path,
+                fid,
+                seen_ids,
+                capture,
+                limit,
+                functions,
+                classes,
+                statements,
+                resolve,
+            )
 
         statements.extend(
-            extract_statements(root, source, path, parent_id=fid, capture=capture, limit=limit, seen_ids=seen_ids)
+            extract_statements(
+                root, source, path, parent_id=fid, capture=capture, limit=limit, seen_ids=seen_ids
+            )
         )
 
         record = FileRecord(
@@ -156,27 +217,73 @@ class TypeScriptParser(BaseParser):
             aws_fw = detect_aws_events(root, source, path, record)
             if aws_fw and record.framework is None:
                 record.framework = aws_fw
+            sdk_fw = detect_sdk_calls(
+                root,
+                source,
+                path,
+                record,
+                getattr(ctx.resolution_index, "class_heritage", None),
+            )
+            if sdk_fw and record.framework is None:
+                record.framework = sdk_fw
+            # Deferred import: typescript_graphql.parser subclasses this module, so a
+            # top-level import would cycle. routes.py itself has no such dependency.
+            from ..typescript_graphql.routes import detect_graphql_client
+
+            if not self.is_fixture_file(path) and detect_graphql_client(
+                root, source, path, record, ctx.parse_timeout_micros
+            ):
+                if record.framework is None:
+                    record.framework = "graphql"
         return record
 
-    def _handle(self, decl, decorators, source, path, fid, seen_ids, capture, limit,
-                functions, classes, statements, resolve) -> None:
+    def _handle(
+        self,
+        decl,
+        decorators,
+        source,
+        path,
+        fid,
+        seen_ids,
+        capture,
+        limit,
+        functions,
+        classes,
+        statements,
+        resolve,
+    ) -> None:
         if decl.type in _CLASSES:
             cls, methods, cls_stmts = build_class(
-                decl, decorators, source, path,
-                parent_id=fid, seen_ids=seen_ids, capture=capture, limit=limit, resolve=resolve,
+                decl,
+                decorators,
+                source,
+                path,
+                parent_id=fid,
+                seen_ids=seen_ids,
+                capture=capture,
+                limit=limit,
+                resolve=resolve,
             )
             classes.append(cls)
             functions.extend(methods)
             statements.extend(cls_stmts)
         elif decl.type == "function_declaration":
             name_node = decl.child_by_field_name("name")
-            fn, fn_stmts = build_function(
-                decl, name=node_text(name_node, source) if name_node else "",
-                kind="function", decorators=extract_decorators(decorators, source),
-                source=source, path=path, parent_id=fid, class_name=None,
-                seen_ids=seen_ids, capture=capture, limit=limit, resolve=resolve,
+            fns, fn_stmts = build_function(
+                decl,
+                name=node_text(name_node, source) if name_node else "",
+                kind="function",
+                decorators=extract_decorators(decorators, source),
+                source=source,
+                path=path,
+                parent_id=fid,
+                class_name=None,
+                seen_ids=seen_ids,
+                capture=capture,
+                limit=limit,
+                resolve=resolve,
             )
-            functions.append(fn)
+            functions.extend(fns)
             statements.extend(fn_stmts)
         elif decl.type in ("lexical_declaration", "variable_declaration"):
             for vd in decl.named_children:
@@ -186,26 +293,104 @@ class TypeScriptParser(BaseParser):
                 name_node = vd.child_by_field_name("name")
                 decl_name = node_text(name_node, source) if name_node else ""
                 if value is not None and value.type in _FUNC_VALUES:
-                    fn, fn_stmts = build_function(
-                        value, name=decl_name,
-                        kind=value.type, decorators=[], source=source, path=path,
-                        parent_id=fid, class_name=None, seen_ids=seen_ids,
-                        capture=capture, limit=limit, resolve=resolve,
+                    fns, fn_stmts = build_function(
+                        value,
+                        name=decl_name,
+                        kind=value.type,
+                        decorators=[],
+                        source=source,
+                        path=path,
+                        parent_id=fid,
+                        class_name=None,
+                        seen_ids=seen_ids,
+                        capture=capture,
+                        limit=limit,
+                        resolve=resolve,
                     )
-                    functions.append(fn)
+                    functions.extend(fns)
                     statements.extend(fn_stmts)
                 elif value is not None and value.type == "object" and _bears_function(value):
                     # G2: functions attached as object-literal properties (resolver maps,
                     # service/hook objects). Descend from this declaration site, recursing
                     # only through function-bearing sub-objects (Query/Mutation groupings).
                     self._object_functions(
-                        value, decl_name, source, path, fid, seen_ids, capture, limit,
-                        functions, statements, resolve,
+                        value,
+                        decl_name,
+                        source,
+                        path,
+                        fid,
+                        seen_ids,
+                        capture,
+                        limit,
+                        functions,
+                        statements,
+                        resolve,
                     )
+                elif value is not None:
+                    # Value is a wrapper expression (call/parens/ternary/array/await/as …)
+                    # that may hide named functions — e.g. Zustand `create((set) => ({ open:
+                    # () => … }))`, nested `create(persist(…))`, Sequelize `hasMany(() => M)`.
+                    # Reuse the named-only nested collector: it descends call args at any
+                    # depth and seeds by property key / binding name, skipping anonymous
+                    # callbacks (the same machinery build_class uses for decorator args). This
+                    # is callee-agnostic — no wrapper-name allow-list.
+                    for value_node, nested_name, nested_kind in collect_nested_functions(
+                        value, source
+                    ):
+                        fns, fn_stmts = build_function(
+                            value_node,
+                            name=nested_name or decl_name,
+                            kind=nested_kind,
+                            decorators=[],
+                            source=source,
+                            path=path,
+                            parent_id=fid,
+                            class_name=None,
+                            seen_ids=seen_ids,
+                            capture=capture,
+                            limit=limit,
+                            resolve=resolve,
+                        )
+                        functions.extend(fns)
+                        statements.extend(fn_stmts)
 
-    def _object_functions(self, obj, name_prefix, source, path, fid, seen_ids, capture,
-                          limit, functions, statements, resolve) -> None:
+    def _object_functions(
+        self,
+        obj,
+        name_prefix,
+        source,
+        path,
+        fid,
+        seen_ids,
+        capture,
+        limit,
+        functions,
+        statements,
+        resolve,
+    ) -> None:
         for pair in obj.named_children:
+            if pair.type == "method_definition":
+                # Object shorthand method: `{ n() {} }` (name from the property key).
+                key = pair.child_by_field_name("name")
+                if key is None:
+                    continue
+                fns, fn_stmts = build_function(
+                    pair,
+                    name=f"{name_prefix}.{_member_name(key, source)}",
+                    kind="method",
+                    decorators=[],
+                    source=source,
+                    path=path,
+                    parent_id=fid,
+                    class_name=None,
+                    seen_ids=seen_ids,
+                    capture=capture,
+                    limit=limit,
+                    resolve=resolve,
+                )
+                functions.extend(fns)
+                statements.extend(fn_stmts)
+                continue
             if pair.type != "pair":
                 continue
             key = pair.child_by_field_name("key")
@@ -214,15 +399,33 @@ class TypeScriptParser(BaseParser):
                 continue
             name = f"{name_prefix}.{_member_name(key, source)}"
             if value.type in _FUNC_VALUES:
-                fn, fn_stmts = build_function(
-                    value, name=name, kind=value.type, decorators=[], source=source,
-                    path=path, parent_id=fid, class_name=None, seen_ids=seen_ids,
-                    capture=capture, limit=limit, resolve=resolve,
+                fns, fn_stmts = build_function(
+                    value,
+                    name=name,
+                    kind=value.type,
+                    decorators=[],
+                    source=source,
+                    path=path,
+                    parent_id=fid,
+                    class_name=None,
+                    seen_ids=seen_ids,
+                    capture=capture,
+                    limit=limit,
+                    resolve=resolve,
                 )
-                functions.append(fn)
+                functions.extend(fns)
                 statements.extend(fn_stmts)
             elif value.type == "object" and _bears_function(value):
                 self._object_functions(
-                    value, name, source, path, fid, seen_ids, capture, limit,
-                    functions, statements, resolve,
+                    value,
+                    name,
+                    source,
+                    path,
+                    fid,
+                    seen_ids,
+                    capture,
+                    limit,
+                    functions,
+                    statements,
+                    resolve,
                 )

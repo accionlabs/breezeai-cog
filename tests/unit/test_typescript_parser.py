@@ -169,6 +169,56 @@ def test_object_function_ids_are_unique(tmp_path) -> None:
     assert len(ids) == len(set(ids))  # deterministic, disambiguated ids
 
 
+WRAPPED_FN_SRC = b'''import { create } from "zustand";
+import { persist } from "zustand/middleware";
+
+export const useStore = create((set) => ({          // call-wrapped object members
+  openDialog: () => set({ open: true }),
+  closeDialog: () => set({ open: false }),
+}));
+
+export const useP = create(persist((set) => ({      // nested call wrappers
+  reset: () => set({}),
+})));
+
+const obj = { shorthand() { return 1; }, arrow: () => 2 };  // shorthand method + arrow
+
+class Widget {
+  onClick = () => { return this.render(); };        // arrow class field
+  render() { return 1; }
+}
+
+export default React.memo(function Panel() {         // export default: named fn in a HOC
+  const handleClick = () => save();                  // nested handler in the component
+  return null;
+});
+'''
+
+
+def test_wrapped_and_field_functions_captured(tmp_path) -> None:
+    # Task-2 named forms: call-wrapped object members (Zustand), nested wrappers,
+    # object shorthand methods, arrow class fields, and `export default` HOC-wrapped
+    # named functions (plus their nested handlers). Anonymous callbacks stay uncaptured.
+    p = tmp_path / "store.tsx"
+    p.write_bytes(WRAPPED_FN_SRC)
+    ctx = ParseContext(path="store.tsx", abs_path=p, source=WRAPPED_FN_SRC,
+                       repo_root=tmp_path, capture_statements=True)
+    rec = TypeScriptParser().parse_file(ctx)
+    names = {f.name for f in rec.functions}
+    assert {"openDialog", "closeDialog"} <= names          # call-wrapper (create)
+    assert "reset" in names                                # nested create(persist(...))
+    assert "obj.shorthand" in names and "obj.arrow" in names  # shorthand method + arrow prop
+    assert "onClick" in names                              # arrow class field
+    assert "Panel" in names                                # export default React.memo(function Panel)
+    assert "handleClick" in names                          # nested handler inside Panel
+    onclick = next(f for f in rec.functions if f.name == "onClick")
+    assert onclick.type == "arrow_function"
+    # emitted record still validates against the capture schema
+    errors = list(Draft202012Validator(FileRecord.model_json_schema(by_alias=True))
+                  .iter_errors(json.loads(to_line(rec))))
+    assert not errors, "\n".join(str(e) for e in errors)
+
+
 def test_module_extensions_matched() -> None:
     # .mts/.cts (TS) and .mjs/.cjs (JS) module files must be claimed by the parser.
     parser = TypeScriptParser()
@@ -210,6 +260,124 @@ def test_top_level_arrow_not_double_emitted(tmp_path) -> None:
     rec = TypeScriptParser().parse_file(ctx)
     returns = [s for s in rec.statements if s.nodeType == "return_statement" and "doTop" in s.text]
     assert len(returns) == 1
+
+
+NESTED_FN_SRC = b'''export default function OpportunityDetail(props) {
+  const onClose = () => { closeDialog(); };
+
+  const handleSubmit = () => {
+    validateForm();
+    saveOpportunity();
+  };
+
+  useEffect(() => {
+    const onKey = (e) => { escHandler(e); };
+    window.addEventListener('keydown', onKey);
+  }, []);
+
+  fetchInitial();
+  return null;
+}
+'''
+
+
+def test_nested_named_functions_extracted(tmp_path) -> None:
+    # Regression (code-capture-gap): in-body handlers (`const handleX = () => {}`)
+    # and functions declared inside anonymous callbacks (useEffect) must each be
+    # emitted as their own Function node, parented to the enclosing function —
+    # this is the dominant React functional-component pattern.
+    p = tmp_path / "OpportunityDetail.jsx"
+    p.write_bytes(NESTED_FN_SRC)
+    ctx = ParseContext(path="OpportunityDetail.jsx", abs_path=p, source=NESTED_FN_SRC,
+                       repo_root=tmp_path, capture_statements=True)
+    rec = TypeScriptParser().parse_file(ctx)
+    by_name = {f.name: f for f in rec.functions}
+    # the component plus all three nested handlers are present
+    assert {"OpportunityDetail", "onClose", "handleSubmit", "onKey"} <= set(by_name)
+    parent = by_name["OpportunityDetail"]
+    # nested handlers are parented to the enclosing function, not the file
+    for h in ("onClose", "handleSubmit", "onKey"):
+        assert by_name[h].parentId == parent.id, h
+    # a handler's OWN calls stay on the handler (barrier), NOT folded into the parent
+    assert {"validateForm", "saveOpportunity"} <= {c.name for c in by_name["handleSubmit"].calls}
+    assert "validateForm" not in {c.name for c in parent.calls}
+    assert "escHandler" not in {c.name for c in parent.calls}
+    # but a direct body call and an anonymous-callback call still belong to the parent
+    assert "fetchInitial" in {c.name for c in parent.calls}
+    assert "addEventListener" in {c.name for c in parent.calls}
+
+
+OBJECT_PROPERTY_FN_SRC = b'''export class SyncWorker {
+  async connectConsumer() {
+    this.setup();
+    await this.consumer.run({
+      eachMessage: async ({ message }) => {
+        handleRecord(message);
+      },
+    });
+    items.forEach(function step(i) { visitStep(i); });
+  }
+}
+'''
+
+
+def test_object_property_and_named_expression_functions_extracted(tmp_path) -> None:
+    # Regression (nested-function-gap): a named function nested inside a CLASS METHOD
+    # via an object property (`{ eachMessage: async () => {} }` — the Kafka-consumer
+    # handler) or as a named function expression (`forEach(function step(){})`) must
+    # each be emitted as its own Function, parented to the enclosing method. The prior
+    # parser only recognized `function` declarations and `const f = () =>` bindings, so
+    # these callback handlers were silently dropped from class code.
+    p = tmp_path / "sync-worker.ts"
+    p.write_bytes(OBJECT_PROPERTY_FN_SRC)
+    ctx = ParseContext(path="sync-worker.ts", abs_path=p, source=OBJECT_PROPERTY_FN_SRC,
+                       repo_root=tmp_path, capture_statements=True)
+    rec = TypeScriptParser().parse_file(ctx)
+    by_name = {f.name: f for f in rec.functions}
+    assert {"connectConsumer", "eachMessage", "step"} <= set(by_name)
+    # object-property arrow and named FE are parented to the enclosing method
+    assert by_name["eachMessage"].parentId == by_name["connectConsumer"].id
+    assert by_name["step"].parentId == by_name["connectConsumer"].id
+    # barrier: each callback's own calls stay on it, not folded into the method
+    assert "handleRecord" in {c.name for c in by_name["eachMessage"].calls}
+    assert "visitStep" in {c.name for c in by_name["step"].calls}
+    assert "handleRecord" not in {c.name for c in by_name["connectConsumer"].calls}
+    assert "visitStep" not in {c.name for c in by_name["connectConsumer"].calls}
+    # but the method's own direct calls remain
+    assert {"setup", "run"} <= {c.name for c in by_name["connectConsumer"].calls}
+
+
+DECORATOR_ARG_FN_SRC = b'''import { Module } from '@nestjs/common';
+
+@Module({
+  imports: [
+    TypeOrmModule.forRootAsync({
+      inject: [ConfigService],
+      useFactory: (configService) => {
+        return buildDataSource(configService);
+      },
+    }),
+  ],
+})
+export class DatabaseModule {}
+'''
+
+
+def test_decorator_argument_functions_extracted(tmp_path) -> None:
+    # Regression (nested-function-gap): a named function inside a class DECORATOR
+    # argument (NestJS `@Module({ … useFactory: () => … })`) sits outside every method
+    # body, so per-body recursion never reaches it. It must still be emitted as its own
+    # Function, parented to the class.
+    p = tmp_path / "database.module.ts"
+    p.write_bytes(DECORATOR_ARG_FN_SRC)
+    ctx = ParseContext(path="database.module.ts", abs_path=p, source=DECORATOR_ARG_FN_SRC,
+                       repo_root=tmp_path, capture_statements=True)
+    rec = TypeScriptParser().parse_file(ctx)
+    by_name = {f.name: f for f in rec.functions}
+    cls = next(c for c in rec.classes if c.name == "DatabaseModule")
+    assert "useFactory" in by_name
+    assert by_name["useFactory"].parentId == cls.id
+    assert "buildDataSource" in {c.name for c in by_name["useFactory"].calls}
 
 
 def test_chain_inner_call_classified(tmp_path) -> None:

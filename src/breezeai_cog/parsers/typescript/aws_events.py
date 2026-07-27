@@ -63,11 +63,38 @@ _CONSUMER_HANDLERS = {
     "KinesisStreamHandler": "aws-kinesis",
     "S3Handler": "aws-s3",
     "SESHandler": "aws-ses",
+    "CloudFrontRequestHandler": "aws-cloudfront",
+    "CloudFrontResponseHandler": "aws-cloudfront",
 }
 # HTTP-facing Lambda handler types → route (not an event consumer).
 _ROUTE_HANDLERS = {"APIGatewayProxyHandler", "APIGatewayProxyHandlerV2", "ALBHandler"}
 # Keys in an SDK argument object that name the destination address.
 _ADDRESS_KEYS = {"TopicArn", "TargetArn", "QueueUrl", "EventBusName"}
+
+# AWS Lambda *event* parameter types → framework. Used to recognise an UNTYPED handler
+# (``export const handler = async (event: S3Event) => …`` / ``exports.handler = …``) — the
+# dominant real-world shape, which carries no ``: SQSHandler`` annotation for the maps above.
+# Detection keys on the FIRST parameter's type; ``APIGateway*``/``ALB*`` events are HTTP
+# (→ route), the rest are event-source consumers.
+_EVENT_PARAM_TYPES = {
+    "S3Event": "aws-s3",
+    "SQSEvent": "aws-sqs",
+    "SNSEvent": "aws-sns",
+    "DynamoDBStreamEvent": "aws-dynamodb",
+    "KinesisStreamEvent": "aws-kinesis",
+    "EventBridgeEvent": "aws-eventbridge",
+    "ScheduledEvent": "aws-eventbridge",
+    "SESEvent": "aws-ses",
+    "CloudFrontRequestEvent": "aws-cloudfront",
+    "CloudFrontResponseEvent": "aws-cloudfront",
+}
+_ROUTE_PARAM_TYPES = {
+    "APIGatewayProxyEvent": "aws-apigw",
+    "APIGatewayProxyEventV2": "aws-apigw",
+    "ALBEvent": "aws-apigw",
+}
+# Exported names that mark a Lambda entry point (``export const handler`` / ``exports.handler``).
+_HANDLER_NAMES = {"handler", "lambdaHandler", "main"}
 
 
 def _has_aws(source: bytes) -> bool:
@@ -175,6 +202,58 @@ def _handler(
     return None
 
 
+def _first_param_type(fn: Node, source: bytes) -> str | None:
+    """Base type name of an arrow/function's FIRST parameter (``(event: S3Event)`` → ``S3Event``),
+    generics stripped (``EventBridgeEvent<'x'>`` → ``EventBridgeEvent``). None if untyped."""
+    params = fn.child_by_field_name("parameters")
+    if params is None:
+        return None
+    first = next((c for c in params.named_children
+                  if c.type in ("required_parameter", "optional_parameter")), None)
+    if first is None:
+        return None
+    annotation = next((c for c in first.named_children if c.type == "type_annotation"), None)
+    return _type_name(annotation, source) if annotation is not None else None
+
+
+def _fn_value(node: Node) -> Node | None:
+    """The arrow/function assigned in a ``variable_declarator`` or ``assignment_expression``."""
+    val = node.child_by_field_name("value") if node.type == "variable_declarator" else (
+        node.child_by_field_name("right") if node.type == "assignment_expression" else None
+    )
+    return val if val is not None and val.type in ("arrow_function", "function_expression") else None
+
+
+def _untyped_handler(node: Node, source: bytes) -> tuple[SemanticType, str, str | None, str | None] | None:
+    """A Lambda entry point declared WITHOUT a handler type annotation — recognised by an
+    exported ``handler`` name whose function's first parameter is an AWS event type.
+    → (semanticType, framework, routeKind, handlerName), else None.
+
+    Precision gate: BOTH the handler name (``handler``/``exports.handler``) AND an AWS event
+    parameter type must be present, so an ordinary ``export const handler = (x) => …`` (no AWS
+    event) never matches."""
+    if node.type == "variable_declarator":
+        name_node = node.child_by_field_name("name")
+        hname = node_text(name_node, source) if name_node is not None else None
+    elif node.type == "assignment_expression":  # exports.handler = / module.exports.handler =
+        left = node.child_by_field_name("left")
+        prop = left.child_by_field_name("property") if left is not None and left.type == "member_expression" else None
+        hname = node_text(prop, source) if prop is not None else None
+    else:
+        return None
+    if hname not in _HANDLER_NAMES:
+        return None
+    fn = _fn_value(node)
+    if fn is None:
+        return None
+    ptype = _first_param_type(fn, source)
+    if ptype in _EVENT_PARAM_TYPES:
+        return "eventbus_consumer", _EVENT_PARAM_TYPES[ptype], None, hname
+    if ptype in _ROUTE_PARAM_TYPES:
+        return "route", _ROUTE_PARAM_TYPES[ptype], "route", hname
+    return None
+
+
 def _enclosing_statement(line: int, statements: list[Statement]) -> Statement | None:
     best: Statement | None = None
     best_span: int | None = None
@@ -231,8 +310,13 @@ def detect_aws_events(root: Node, source: bytes, path: str, record: FileRecord) 
             ))
         file_fw = file_fw or fw
 
-    for decl in _walk(root, frozenset({"variable_declarator"})):
-        hinfo = _handler(decl, source)
+    # Handler entry points: a typed const (``const h: SQSHandler = …``), else an untyped but
+    # AWS-event-parameterised ``handler`` export (``export const handler = (e: S3Event) => …`` /
+    # ``exports.handler = …``). One statement per handler; the typed form wins if both apply.
+    for decl in _walk(root, frozenset({"variable_declarator", "assignment_expression"})):
+        hinfo = _handler(decl, source) if decl.type == "variable_declarator" else None
+        if hinfo is None:
+            hinfo = _untyped_handler(decl, source)
         if hinfo is None:
             continue
         sem, fw, route_kind, hname = hinfo

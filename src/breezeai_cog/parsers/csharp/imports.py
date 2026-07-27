@@ -23,6 +23,7 @@ recorded as external (the namespace itself is not a single file)."""
 
 from __future__ import annotations
 
+import posixpath
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -63,6 +64,11 @@ class CSharpIndex:
     #: same (name, type) is defined in >1 file (ambiguous → honest-null). Drives the resolver's
     #: extension-method tier (``recv.M()`` where ``M`` is ``static M(this T …)``).
     ext_methods: dict[tuple[str, str], str | None] = field(default_factory=dict)
+    #: physical ``.aspx`` repo path (``~/`` stripped) → its friendly ``MapPageRoute`` URLs,
+    #: sorted. Web Forms routing (BREEZEAI-765 item 2): the Web Forms parser overrides a page's
+    #: physical endpoint with these real routed URLs. Registrations are central (Global.asax /
+    #: RouteConfig), so they cross files — hence they ride this repo-level index.
+    page_routes: dict[str, list[str]] = field(default_factory=dict)
 
     def project_of(self, path: str) -> str | None:
         """The owning project (nearest ancestor ``.csproj`` dir) of a repo-relative file."""
@@ -173,6 +179,80 @@ def _index_members(
             record_distinct(index.ext_methods, (mname, this_type), rel)
 
 
+def _called_name(inv: Node, source: bytes) -> str | None:
+    """Simple method name of an ``invocation_expression`` (``x.MapPageRoute(…)`` → ``MapPageRoute``)."""
+    fn = inv.child_by_field_name("function")
+    if fn is None:
+        return None
+    if fn.type == "member_access_expression":
+        nm = fn.child_by_field_name("name")
+        return node_text(nm, source) if nm is not None else None
+    if fn.type == "identifier":
+        return node_text(fn, source)
+    return None
+
+
+def _positional_args(inv: Node) -> list[Node]:
+    """Argument value expressions of an invocation, in order (named args unwrapped to value)."""
+    arglist = inv.child_by_field_name("arguments")
+    if arglist is None:
+        return []
+    out: list[Node] = []
+    for a in arglist.named_children:
+        if a.type == "argument":
+            if a.named_children:
+                out.append(a.named_children[-1])  # value is the last child (after any `name:`)
+        else:
+            out.append(a)
+    return out
+
+
+def _string_literal(node: Node | None, source: bytes) -> str | None:
+    """Unquoted text of a plain/verbatim C# string literal; ``None`` for interpolated or
+    non-literal args (honest-null — never a guessed value)."""
+    if node is None or node.type not in ("string_literal", "verbatim_string_literal"):
+        return None
+    txt = node_text(node, source)
+    if txt.startswith("@"):  # verbatim  @"…"
+        txt = txt[1:]
+    if len(txt) >= 2 and txt[0] == '"' and txt[-1] == '"':
+        return txt[1:-1]
+    return None
+
+
+def _physical_aspx_key(physical: str) -> str | None:
+    """A ``MapPageRoute`` physical arg → repo-relative ``.aspx`` key (``~/CMS/E.aspx`` →
+    ``CMS/E.aspx``). Assumes app-root = repo-root: a subdir app is a false-negative (page
+    keeps its physical endpoint), never a wrong match."""
+    p = physical.strip().replace("\\", "/")
+    if p.startswith("~/"):
+        p = p[2:]
+    elif p.startswith("/"):
+        p = p[1:]
+    p = posixpath.normpath(p)
+    return p if p.lower().endswith(".aspx") and not p.startswith("..") else None
+
+
+def _index_map_page_routes(root: Node, source: bytes, index: CSharpIndex) -> None:
+    """Collect ``routes.MapPageRoute(name, url, "~/physical.aspx")`` mappings from the AST
+    (not raw text — so matches in comments/strings are excluded). Only string-literal
+    ``url``/``physical`` args are recorded; the physical ``.aspx`` keys the friendly url.
+    Iterative walk (no recursion — deep ASTs can't blow the stack)."""
+    stack = [root]
+    while stack:
+        n = stack.pop()
+        if n.type == "invocation_expression" and _called_name(n, source) == "MapPageRoute":
+            args = _positional_args(n)
+            if len(args) >= 3:
+                url = _string_literal(args[1], source)
+                key = _physical_aspx_key(_string_literal(args[2], source) or "")
+                if url is not None and key is not None:
+                    urls = index.page_routes.setdefault(key, [])
+                    if url not in urls:
+                        urls.append(url)
+        stack.extend(n.named_children)
+
+
 def _index_file(
     root: Node, source: bytes, rel: str, index: CSharpIndex,
     by_fqn: dict[str, ClassHeritage | None],
@@ -185,6 +265,8 @@ def _index_file(
             kind, name, _ = _classify_using(child, source)
             if kind == "global" and name:
                 index.global_usings.add(name)
+    if b"MapPageRoute" in source:  # cheap gate — full-tree scan only where it can match
+        _index_map_page_routes(root, source, index)
 
     def walk(node: Node, ns: str) -> None:
         local_ns = ns
@@ -271,6 +353,9 @@ def _merge_fragment(
     index.global_usings |= fidx.global_usings
     for tname, tfiles in fidx.types.items():
         index.types.setdefault(tname, set()).update(tfiles)
+    for pkey, purls in fidx.page_routes.items():
+        dst = index.page_routes.setdefault(pkey, [])
+        dst.extend(u for u in purls if u not in dst)
     for ekey, efile in fidx.ext_methods.items():
         record_distinct(index.ext_methods, ekey, efile)
     for mkey, mfile in fmf.items():
@@ -309,6 +394,8 @@ def build_csharp_index(repo_root: Path, files, jobs: int = 1) -> CSharpIndex:
         if heritage is not None:
             heritage.methods[mname] = mfile
     index.class_heritage = project_heritage(by_fqn)
+    # canonicalise friendly-url lists so output is fragment-order-independent (deterministic).
+    index.page_routes = {k: sorted(set(v)) for k, v in index.page_routes.items()}
     return index
 
 

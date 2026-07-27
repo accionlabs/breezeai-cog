@@ -105,6 +105,37 @@ def test_param_default_captures_depends(tmp_path) -> None:
     assert by_name["q"].type == "int" and by_name["q"].default == "0"
 
 
+def test_nested_defs_extracted(tmp_path) -> None:
+    # Regression (code-capture-gap): nested `def`s (closures / decorator factories /
+    # in-method helpers) must each be their own Function parented to the enclosing
+    # function, and their calls must attribute to them — not fold into the parent.
+    # Anonymous lambdas still fold into the nearest named function.
+    src = (b"def outer(x):\n"
+           b"    def helper(y):\n"
+           b"        return compute(y)\n"
+           b"    lam = lambda a: sideeffect(a)\n"
+           b"    return helper(x)\n"
+           b"\n"
+           b"class C:\n"
+           b"    def method(self):\n"
+           b"        def inner():\n"
+           b"            return log('hi')\n"
+           b"        return inner()\n")
+    p = tmp_path / "n.py"
+    p.write_bytes(src)
+    ctx = ParseContext(path="n.py", abs_path=p, source=src, repo_root=tmp_path,
+                       capture_statements=True)
+    rec = PythonParser().parse_file(ctx)
+    by_name = {f.name: f for f in rec.functions}
+    assert {"outer", "helper", "method", "inner"} <= set(by_name)
+    assert by_name["helper"].parentId == by_name["outer"].id
+    assert by_name["inner"].parentId == by_name["method"].id
+    # nested-def call lands on the nested def; the anonymous lambda's call stays on the parent
+    assert "compute" in {c.name for c in by_name["helper"].calls}
+    assert "compute" not in {c.name for c in by_name["outer"].calls}
+    assert "sideeffect" in {c.name for c in by_name["outer"].calls}
+
+
 def test_statements_are_flat_and_gated(tmp_path) -> None:
     # off by default -> no statements anywhere
     assert _parse(tmp_path, capture=False).statements == []
@@ -179,6 +210,48 @@ def test_bare_call_in_control_body_not_mislabeled(tmp_path) -> None:
     ifs = [s for s in rec.statements if s.nodeType == "if_statement"]
     assert ifs and all(s.semanticType is None for s in ifs)
     assert any(s.nodeType == "call" and s.semanticType == "db_method_call" for s in rec.statements)
+
+
+def test_defs_nested_in_blocks_are_seeded(tmp_path) -> None:
+    # Regression: functions/classes nested in module- or class-level block
+    # statements (with/if/for/try, e.g. Airflow `with DAG(...):` + `@task def`)
+    # must be extracted, not only direct children of the module/class body.
+    src = (
+        "with DAG('d') as dag:\n"
+        "    @task\n"
+        "    def extract_task():\n"
+        "        repo.load()\n"                 # bare call — must attach to the fn
+        "    def _helper():\n"
+        "        return 1\n"
+        "\n"
+        "if FLAG:\n"
+        "    for x in items:\n"
+        "        def looped():\n"
+        "            return x\n"
+        "\n"
+        "class Svc:\n"
+        "    if TYPE_CHECKING:\n"
+        "        def guarded(self):\n"
+        "            return 2\n"
+    ).encode()
+    p = tmp_path / "dag.py"
+    p.write_text(src.decode())
+    ctx = ParseContext(path="dag.py", abs_path=p, source=src, repo_root=tmp_path,
+                       capture_statements=True)
+    rec = PythonParser().parse_file(ctx)
+    names = {f.name for f in rec.functions}
+    assert {"extract_task", "_helper", "looped", "guarded"} <= names
+    et = next(f for f in rec.functions if f.name == "extract_task")
+    assert any(d.name == "task" for d in et.decorators)          # decorator preserved
+    guarded = next(f for f in rec.functions if f.name == "guarded")
+    assert guarded.type == "method"                              # attached to the class
+    # the fn body statement is attributed to the fn, not duplicated at file scope
+    load_stmts = [s for s in rec.statements if s.nodeType == "call" and "repo.load" in s.text]
+    assert len(load_stmts) == 1 and load_stmts[0].parentId == et.id
+    # emitted record still validates against the capture schema
+    schema = FileRecord.model_json_schema(by_alias=True)
+    errors = list(Draft202012Validator(schema).iter_errors(json.loads(to_line(rec))))
+    assert not errors, "\n".join(str(e) for e in errors)
 
 
 def test_endpoint_fstring_and_concat(tmp_path) -> None:

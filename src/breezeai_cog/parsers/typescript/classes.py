@@ -9,7 +9,13 @@ from ...emit import class_id, disambiguate
 from ...schemas import Class, ConstructorParam, Function, Statement
 from ..treesitter import line_span, node_text
 from ..callresolve import CallResolver, noop_resolver
-from .functions import build_function, extract_decorators, extract_params
+from .functions import (
+    NESTED_FN_VALUE_TYPES,
+    build_function,
+    collect_nested_functions,
+    extract_decorators,
+    extract_params,
+)
 from .statements import extract_statements
 
 _TYPE = {
@@ -88,20 +94,49 @@ def build_class(
             if child.type == "method_definition":
                 mname_node = child.child_by_field_name("name")
                 mname = node_text(mname_node, source) if mname_node is not None else ""
-                fn, fn_statements = build_function(
+                fns, fn_statements = build_function(
                     child, name=mname, kind="constructor" if mname == "constructor" else "method",
                     decorators=extract_decorators(pending, source), source=source, path=path,
                     parent_id=cid, class_name=name, seen_ids=seen_ids, capture=capture, limit=limit,
                     resolve=resolve,
                 )
-                methods.append(fn)
+                methods.extend(fns)
                 statements.extend(fn_statements)
                 if mname == "constructor":
                     ctor_params = [
                         ConstructorParam(name=p.name, type=p.type)
                         for p in extract_params(child.child_by_field_name("parameters"), source)
                     ]
+            elif child.type in ("public_field_definition", "field_definition"):
+                # Arrow/function class field: `handleClick = () => {}` (React handler idiom).
+                # These sit outside method bodies, so build_function's recursion never reaches
+                # them; seed each as a method named by its field key.
+                value = child.child_by_field_name("value")
+                if value is not None and value.type in NESTED_FN_VALUE_TYPES:
+                    fname_node = child.child_by_field_name("name")
+                    fns, fn_statements = build_function(
+                        value, name=node_text(fname_node, source) if fname_node is not None else "",
+                        kind=value.type, decorators=extract_decorators(pending, source),
+                        source=source, path=path, parent_id=cid, class_name=name,
+                        seen_ids=seen_ids, capture=capture, limit=limit, resolve=resolve,
+                    )
+                    methods.extend(fns)
+                    statements.extend(fn_statements)
             pending = []
+
+    # Named functions living inside class-decorator arguments (NestJS `@Module({ …
+    # useFactory: () => … })`, TypeORM `forRootAsync`, etc.). These sit outside every
+    # method body, so build_function's per-body recursion never reaches them; collect
+    # them here and parent them to the class.
+    for dec_node in decorator_nodes:
+        for value_node, nested_name, nested_kind in collect_nested_functions(dec_node, source):
+            fns, fn_statements = build_function(
+                value_node, name=nested_name, kind=nested_kind, decorators=[], source=source,
+                path=path, parent_id=cid, class_name=name, seen_ids=seen_ids,
+                capture=capture, limit=limit, resolve=resolve,
+            )
+            methods.extend(fns)
+            statements.extend(fn_statements)
 
     cls = Class(
         id=cid,

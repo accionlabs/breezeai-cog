@@ -90,6 +90,50 @@ def test_consumers_and_route_entry(tmp_path) -> None:
     assert rec.framework == "aws-lambda"
 
 
+# Untyped handler shapes — the dominant real-world form: no `: SQSHandler` annotation, the
+# AWS event type is on the handler's first PARAMETER. Modeled on nimbus-document-import and
+# source-catalogue lambda entrypoints (`export const handler = async (e: S3Event) => …`).
+UNTYPED = b'''
+import { S3Event, Context } from 'aws-lambda';
+
+export const handler = async (event: S3Event, context: Context): Promise<void> => {
+  for (const record of event.Records) { await ingest(record); }
+};
+'''
+
+# CommonJS export + EventBridge, plus a CloudFront handler type not previously in the maps.
+UNTYPED_CJS = b'''
+import { EventBridgeEvent } from 'aws-lambda';
+exports.handler = async (event: EventBridgeEvent<'trigger', unknown>) => { await run(event); };
+export const edge: CloudFrontRequestHandler = async (e) => { return e.Records[0].cf.request; };
+'''
+
+
+def test_untyped_handler_detected_by_event_param(tmp_path) -> None:
+    rec = _parse(tmp_path, "index.ts", UNTYPED)
+    sem = _by_semantic(rec)
+    assert "eventbus_consumer" in sem
+    c = sem["eventbus_consumer"][0]
+    assert c.framework == "aws-s3"      # from the S3Event parameter type
+    assert c.handler == "handler"
+    assert rec.framework == "aws-lambda"
+
+
+def test_untyped_handler_cjs_and_cloudfront(tmp_path) -> None:
+    rec = _parse(tmp_path, "index.ts", UNTYPED_CJS)
+    frameworks = {(s.framework, s.handler) for s in _by_semantic(rec).get("eventbus_consumer", [])}
+    assert ("aws-eventbridge", "handler") in frameworks   # exports.handler = async (e: EventBridgeEvent)
+    assert ("aws-cloudfront", "edge") in frameworks       # newly-mapped CloudFrontRequestHandler type
+
+
+def test_untyped_handler_requires_aws_event_param(tmp_path) -> None:
+    # An ordinary exported `handler` whose param is NOT an AWS event type must NOT match
+    # (precision gate: the AWS event parameter is what distinguishes a Lambda entry point).
+    src = b"export const handler = async (event: MyDomainEvent) => { doThing(event); };\n"
+    rec = _parse(tmp_path, "not-lambda.ts", src)
+    assert [s for s in rec.statements if s.semanticType] == []
+
+
 def test_generic_publish_not_misdetected(tmp_path) -> None:
     # A GraphQL/pubsub .publish(name, payload) with no AWS SDK import must not match.
     src = b"export class S { emit() { this.pubsub.publish('topic', payload); } }\n"

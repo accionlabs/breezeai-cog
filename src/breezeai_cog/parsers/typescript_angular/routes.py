@@ -82,8 +82,10 @@ def _string_val(node: Node | None, source: bytes) -> str:
 def _resolve_path(node: Node | None, source: bytes, index: object) -> str | None:
     """The route ``path`` as a literal string, resolving non-literal forms via the repo
     value index: a string literal verbatim; ``RouteNames.X`` / a bare ``CONST`` resolved to
-    its declared literal (cross-file, globally-unique); anything else (template, call,
-    concatenation, ambiguous) → ``None`` (honest-null — never the raw symbol text)."""
+    its declared literal (cross-file, globally-unique); a ``+`` concatenation or a template
+    literal whose **every** piece resolves, assembled in source order (``RouteNames.X + '/:' +
+    RouteParams.Y`` -> ``org/:orgId``). Anything with an unresolved piece — a call, a variable
+    not in the index, an ambiguous const — → ``None`` (honest-null, never a guessed segment)."""
     if node is None:
         return None
     if node.type == "string":
@@ -95,7 +97,45 @@ def _resolve_path(node: Node | None, source: bytes, index: object) -> str | None
             return values.get(f"{node_text(obj, source)}.{node_text(prop, source)}")
     elif node.type == "identifier":
         return values.get(node_text(node, source))
+    elif node.type == "binary_expression":
+        return _resolve_concat(node, source, index)
+    elif node.type == "template_string":
+        return _resolve_template(node, source, index)
     return None
+
+
+def _resolve_concat(node: Node, source: bytes, index: object) -> str | None:
+    """A ``+`` string concatenation: resolve the left and right operands and join. Any operator
+    other than ``+``, or an unresolved operand, → ``None`` (a single wrong operand must not
+    yield a fabricated path). Left-nested ``a + b + c`` recurses down the left operand."""
+    op = node.child_by_field_name("operator")
+    if op is None or node_text(op, source) != "+":
+        return None
+    left, right = node.child_by_field_name("left"), node.child_by_field_name("right")
+    lv = _resolve_path(left, source, index)
+    rv = _resolve_path(right, source, index)
+    if lv is None or rv is None:
+        return None
+    return lv + rv
+
+
+def _resolve_template(node: Node, source: bytes, index: object) -> str | None:
+    """A template literal: concatenate its ``string_fragment`` parts (verbatim) with each
+    ``${…}`` substitution resolved via the index. Any substitution that does not resolve to a
+    const literal → ``None`` (never stringify a dynamic expression)."""
+    parts: list[str] = []
+    for child in node.named_children:
+        if child.type == "string_fragment":
+            parts.append(node_text(child, source))
+        elif child.type == "template_substitution":
+            inner = next((c for c in child.named_children), None)
+            resolved = _resolve_path(inner, source, index)
+            if resolved is None:
+                return None
+            parts.append(resolved)
+        else:  # any other child (e.g. an escape) — be conservative
+            return None
+    return "".join(parts)
 
 
 def _compose(prefix: str | None, sub: str | None) -> str | None:
@@ -167,10 +207,28 @@ def _process(arr: Node, prefix: str | None, source: bytes, path: str, seen: set[
             _process(children, full, source, path, seen, routes, index)
 
 
+def _mount_prefix(root: Node, source: bytes, index: object) -> str:
+    """The lazy-mount prefix this file's routes hang under, from the repo mount index — the
+    fully-composed parent prefix keyed by a class this file declares (a lazy child module is
+    reached via ``.then(m => m.XModule)``). Empty string when this file is a routing root, its
+    module isn't mounted, or the mount is ambiguous/unresolved (honest-null → own bare paths)."""
+    mounts = getattr(index, "route_mounts", None) or {}
+    if not mounts:
+        return ""
+    for cls in _all(root, "class_declaration"):
+        name = cls.child_by_field_name("name")
+        if name is not None:
+            prefix = mounts.get(node_text(name, source))
+            if prefix is not None:
+                return prefix
+    return ""
+
+
 def detect_angular_routes(root: Node, source: bytes, path: str, *, seen_ids: set[str],
                           index: object = None) -> list[Statement]:
     routes: list[Statement] = []
+    prefix = _mount_prefix(root, source, index)  # parent mount prefix (cross-file), else ""
     for arr in _all(root, "array"):
         if _is_route_array(arr, source) and not _is_children_value(arr, source):
-            _process(arr, "", source, path, seen_ids, routes, index)
+            _process(arr, prefix, source, path, seen_ids, routes, index)
     return routes

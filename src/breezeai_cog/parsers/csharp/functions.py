@@ -86,9 +86,36 @@ def _callee(func: Node, source: bytes) -> tuple[str, str | None]:
     return method_name(func, source), None
 
 
+def _span(node: Node) -> tuple[int, int]:
+    """Stable identity for a node within one parse (used as a barrier key)."""
+    return (node.start_byte, node.end_byte)
+
+
+def collect_local_functions(body: Node | None, source: bytes) -> list[Node]:
+    """Local functions whose nearest named enclosing function is this one. Descends
+    through lambdas / anonymous methods and control flow — a local function declared
+    inside a lambda still belongs here — but stops at each local function (deeper ones
+    belong to its own recursion). Their spans double as the barrier set so the
+    enclosing function does not also fold their calls/statements. (C# has no local
+    classes, so local functions are the only named nested scope in a method body.)"""
+    if body is None:
+        return []
+    out: list[Node] = []
+
+    def visit(n: Node) -> None:
+        for c in n.named_children:
+            if c.type == "local_function_statement":
+                out.append(c)
+                continue  # barrier: its body belongs to it, not the enclosing fn
+            visit(c)
+
+    visit(body)
+    return out
+
+
 def _calls(
     body: Node | None, source: bytes, resolve: CallResolver = noop_resolver,
-    owner: str | None = None,
+    owner: str | None = None, barriers: frozenset[tuple[int, int]] = frozenset(),
 ) -> list[Call]:
     if body is None:
         return []
@@ -96,9 +123,12 @@ def _calls(
     seen: set[str] = set()
 
     def visit(node: Node) -> None:
-        # Descend into every scope, including inline lambdas/anonymous methods — their
-        # calls belong to the nearest named enclosing function (see build_function).
+        # Descend into inline lambdas/anonymous methods — their calls belong to the
+        # nearest named enclosing function — but stop at ``barriers``: the spans of
+        # nested local functions extracted as their own scope (see build_method).
         for child in node.named_children:
+            if _span(child) in barriers:
+                continue
             if child.type == "invocation_expression":
                 func = child.child_by_field_name("function")
                 if func is not None:
@@ -185,7 +215,10 @@ def build_method(
     capture: bool,
     limit: int,
     resolve: CallResolver = noop_resolver,
-) -> tuple[Function, list[Statement]]:
+) -> tuple[list[Function], list[Statement]]:
+    """Return the Function(s) and their (flat) statements — this function plus any
+    nested local functions, which are extracted as their own Functions parented to
+    this one."""
     name_node = node.child_by_field_name("name")
     name = node_text(name_node, source) if name_node is not None else "<anonymous>"
     start, end = line_span(node)
@@ -193,7 +226,14 @@ def build_method(
     visibility, is_static = flags(node, source)
     ret = node.child_by_field_name("returns")
     body = node.child_by_field_name("body")
-    kind = "constructor" if node.type in ("constructor_declaration", "destructor_declaration") else "method"
+    nested = collect_local_functions(body, source)
+    barriers = frozenset(_span(n) for n in nested)
+    if node.type == "local_function_statement":
+        kind = "function"
+    elif node.type in ("constructor_declaration", "destructor_declaration"):
+        kind = "constructor"
+    else:
+        kind = "method"
     fn = Function(
         id=fid,
         parentId=parent_id,
@@ -207,10 +247,19 @@ def build_method(
         returnType=node_text(ret, source) if ret is not None else None,
         startLine=start,
         endLine=end,
-        calls=_calls(body, source, resolve, class_name),
+        calls=_calls(body, source, resolve, class_name, barriers),
     )
     statements = extract_statements(
         body, source, path, parent_id=fid, capture=capture, limit=limit, seen_ids=seen_ids,
         descend_all=True,  # walk inline lambdas/anonymous methods — attribute their statements here
+        barriers=barriers,  # …except separately-extracted nested local functions
     )
-    return fn, statements
+    functions = [fn]
+    for nested_node in nested:
+        sub_fns, sub_stmts = build_method(
+            nested_node, source, path, parent_id=fid, class_name=None, seen_ids=seen_ids,
+            capture=capture, limit=limit, resolve=resolve,
+        )
+        functions.extend(sub_fns)
+        statements.extend(sub_stmts)
+    return functions, statements
