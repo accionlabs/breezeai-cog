@@ -91,12 +91,13 @@ _RECEIVER_HINTS = (
     ("session", "sqlalchemy"), ("queryset", "django"), ("objects", "django"),
 )
 
-# Receiver terminal-segment suffixes that are clearly NOT a database: a generic ORM verb
-# (``save``/``delete``/``create``…) on one of these is app logic, not data access, so we
-# drop the weak ``"orm"`` fallback for them. Matched on the receiver's final segment by
-# suffix (``formState`` -> ``state``, ``userCache`` -> ``cache``) — deliberately narrow to
-# avoid suppressing real ORM saves (``user.save``, ``userStore.save`` are NOT listed). A
-# distinctive method or a positive receiver hint (checked first) always overrides this.
+# Receiver terminal-segment suffixes that are clearly NOT a database: an opt-out generic ORM
+# verb (``findOne``/``findById`` — the ``_GENERIC`` verbs that are NOT high-collision) on one
+# of these is app logic, not data access, so we drop the weak ``"orm"`` fallback for them.
+# Matched on the receiver's final segment by suffix (``formState`` -> ``state``, ``userCache``
+# -> ``cache``). A distinctive method or a positive receiver hint (checked first) always
+# overrides this. (Write verbs like ``save``/``delete``/``create`` are opt-in via
+# ``_HIGH_COLLISION`` and never reach this fallback.)
 _NON_DB_RECEIVERS = (
     "cache", "logger", "emitter", "eventbus", "eventemitter", "state",
     "buffer", "console", "clipboard", "factory", "list", "items", "queue", "stack",
@@ -128,8 +129,13 @@ _DOTNET = frozenset({"csharp", "vb"})
 # ``.query()``/``.execute()`` should NOT default to ``orm``. Genuine raw-SQL callers use a
 # recognisable handle (``dataSource``/``queryRunner``/``connection``/``repository``) picked
 # up by the suffix/hint gates below.
+# ``save`` is here too: a bare ``X.Save(...)`` collides with non-DB serialization — most
+# painfully Aspose ``Document.Save(stream)`` / ``htmlDoc.Save(stream)`` (format conversion, no
+# database), also ``bitmap.Save``/``xmlDoc.Save``. Real ORM saves keep matching via a positive
+# receiver hint/suffix (``orderRepo.save`` -> typeorm); a bare active-record ``user.save`` now
+# drops (precision-first, matching its write-verb siblings ``persist``/``merge``/``create``).
 _HIGH_COLLISION = frozenset(
-    {"find", "create", "update", "delete", "remove", "persist", "merge", "query", "execute"}
+    {"find", "create", "update", "delete", "remove", "save", "persist", "merge", "query", "execute"}
 )
 
 # Terminal receiver-segment suffixes that positively signal a DB/ORM handle (beyond the
