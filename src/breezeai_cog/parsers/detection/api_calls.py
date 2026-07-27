@@ -10,7 +10,7 @@ from __future__ import annotations
 # ``request`` is a generic client verb (axios.request, session.request, restTemplate…);
 # it only counts when the callee also carries a client hint (below), so it can't match a
 # bare ``foo.request()``.
-HTTP_VERBS = {"get", "post", "put", "patch", "delete", "head", "options", "request"}
+_HTTP_VERBS = {"get", "post", "put", "patch", "delete", "head", "options", "request"}
 
 # Substrings in the callee that signal an HTTP client (matches JS ``API_CLIENT_NAMES``,
 # minus a bare ``client`` which would over-match s3Client/dbClient/graphqlClient as
@@ -42,7 +42,7 @@ def match_api(callee: str, method: str) -> str | None:
     # client-hint substring is still required, so a bare ``FooAsync()`` never matches).
     if m.endswith("async") and len(m) > len("async"):
         m = m[: -len("async")]
-    if m in HTTP_VERBS and any(hint in low for hint in _CLIENT_HINTS):
+    if m in _HTTP_VERBS and any(hint in low for hint in _CLIENT_HINTS):
         if any(mk in low for mk in _DB_CHAIN_MARKERS):
             return None  # an ORM query chain (e.g. session.query(...).filter(...).delete())
         return m.upper()  # ``request`` -> "REQUEST" (verb lives in the config arg; matches legacy)

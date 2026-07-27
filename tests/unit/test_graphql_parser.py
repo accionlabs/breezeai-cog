@@ -162,13 +162,16 @@ def test_client_operations_detected_via_base_parser(tmp_path) -> None:
     # Client-op detection is additive: a plain gql-client file (no resolver map / no server
     # SDL) is owned by the base TypeScriptParser, yet client ops must still be captured.
     rec = _parse_base(tmp_path, CLIENT_SRC, "specification-queries.ts")
-    routes = {s.endpoint: s for s in rec.statements if s.semanticType == "route"}
+    # A client op is an OUTBOUND call, so it is an ``api_call`` (not a ``route``); direction
+    # lives on ``semanticType`` (api_call = caller, route = server), so ``routeKind`` carries
+    # the plain operation kind with no ``client_`` prefix.
+    routes = {s.endpoint: s for s in rec.statements if s.semanticType == "api_call"}
     # endpoint = the invoked root selection field (joins to a server route), NOT the op name.
     assert set(routes) == {"specification", "createSpecification", "items"}
     assert rec.framework == "graphql"
 
     spec = routes["specification"]
-    assert spec.routeKind == "client_query"      # client_* distinguishes caller from server route
+    assert spec.routeKind == "query"             # plain kind; api_call marks it as the caller side
     assert spec.method == "QUERY"
     assert spec.framework == "graphql"
     assert spec.handler == "specification"       # operation name kept as the client-side label
@@ -177,12 +180,12 @@ def test_client_operations_detected_via_base_parser(tmp_path) -> None:
     assert spec.parentId == rec.id
 
     mut = routes["createSpecification"]
-    assert mut.routeKind == "client_mutation"
+    assert mut.routeKind == "mutation"
     assert mut.method == "MUTATION"
     assert mut.requestDTO == "CreateSpecInput"
 
     # Interpolated (${...}) document is not dropped — the operation header still parses.
-    assert routes["items"].routeKind == "client_query"
+    assert routes["items"].routeKind == "query"
 
 
 def test_client_ops_ignore_plain_template_and_server_sdl(tmp_path) -> None:
@@ -190,14 +193,16 @@ def test_client_ops_ignore_plain_template_and_server_sdl(tmp_path) -> None:
     # GraphQL client op.
     plain = b'const msg = `query executed in ${ms}ms for query ${name}`;\n'
     rec = _parse_base(tmp_path, plain, "log.ts")
-    assert [s for s in rec.statements if s.semanticType == "route"] == []
+    assert [s for s in rec.statements if s.semanticType in ("route", "api_call")] == []
     assert rec.framework is None
 
-    # Server SDL is handled by the SDL pass (routeKind query/mutation), never emitted twice
-    # as a client op — SDL and client passes are disjoint by GraphQL node type.
+    # Server SDL is handled by the SDL pass (semanticType=route, routeKind query/mutation),
+    # never emitted as a client ``api_call`` — SDL and client passes are disjoint by GraphQL
+    # node type.
     rec_sdl = _parse(tmp_path, SDL_SRC, "schema.ts")
     kinds = {s.routeKind for s in rec_sdl.statements if s.semanticType == "route"}
-    assert kinds == {"query", "mutation"}  # no client_* leakage
+    assert kinds == {"query", "mutation"}
+    assert [s for s in rec_sdl.statements if s.semanticType == "api_call"] == []  # no client-op leakage
 
 
 def test_key_entities_detected(tmp_path) -> None:

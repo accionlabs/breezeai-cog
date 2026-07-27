@@ -327,8 +327,11 @@ def _detect_sdl(root: Node, source: bytes, path: str, seen: set[str],
 # the operation's ROOT SELECTION FIELD (``specification``) — that is what matches a server
 # route's ``endpoint``, so we emit one statement per root field and key ``endpoint`` on it
 # (the operation NAME, e.g. ``GetSpecification``, is a client-side label kept in ``handler``).
-# ``routeKind`` is prefixed ``client_`` so a client op is never confused with the inbound
-# server route of the same field, while still joining on ``(framework, endpoint)``.
+# Direction lives on ``semanticType``: a client op is an OUTBOUND call, so it is emitted as
+# ``semanticType="api_call"`` (like ``axios.post``), while a server route stays ``route``.
+# ``routeKind`` therefore keeps the plain operation kind (``query``/``mutation``/``subscription``)
+# with no prefix — the client op still joins to its server route on ``(framework, endpoint)``,
+# and the two are told apart by ``semanticType`` (api_call = caller, route = server).
 
 # Only operation keywords are lowercase in GraphQL (``query``/``mutation``); ``type Query``
 # carries a capital Q, so this prefilter never fires on SDL. Operation vs SDL are also
@@ -414,14 +417,14 @@ def _emit_client_ops(op_def: Node, kind: str, sdl: bytes, row_base: int, col_bas
             id=disambiguate(statement_id(path, line, col), seen),
             parentId=file_id(path),
             nodeType="synthetic",
-            semanticType="route",
+            semanticType="api_call",
             text=first_line(node_text(field, sdl))[:120],
             method=kind.upper(),
             # endpoint = invoked API field (joins to a server route); operation name is the
             # client-side label, kept in handler.
             endpoint=node_text(name, source=sdl),
             framework="graphql",
-            routeKind=f"client_{kind}",
+            routeKind=kind,
             handler=op_name,
             requestDTO=request_dto,
             startLine=line,
