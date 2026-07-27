@@ -217,12 +217,19 @@ class TypeScriptParser(BaseParser):
             aws_fw = detect_aws_events(root, source, path, record)
             if aws_fw and record.framework is None:
                 record.framework = aws_fw
-            sdk_fw = detect_sdk_calls(root, source, path, record)
+            sdk_fw = detect_sdk_calls(
+                root,
+                source,
+                path,
+                record,
+                getattr(ctx.resolution_index, "class_heritage", None),
+            )
             if sdk_fw and record.framework is None:
                 record.framework = sdk_fw
             # Deferred import: typescript_graphql.parser subclasses this module, so a
             # top-level import would cycle. routes.py itself has no such dependency.
             from ..typescript_graphql.routes import detect_graphql_client
+
             if not self.is_fixture_file(path) and detect_graphql_client(
                 root, source, path, record, ctx.parse_timeout_micros
             ):

@@ -51,6 +51,7 @@ from tree_sitter import Node
 
 from ...emit import disambiguate, file_id, statement_id
 from ...schemas import FileRecord, Function, Statement
+from ..index_common import ClassHeritage
 from ..treesitter import first_line, node_text
 
 
@@ -112,8 +113,16 @@ _SDKS: tuple[_Sdk, ...] = (
 # SOQL query is an outbound call to Salesforce, not local data access.
 _TSFORCE_MARKER = b"ts-force"
 _TSFORCE_BASE = "RestObject"
-_TSFORCE_QUERY_METHODS = {"query", "retrieve"}  # read surface (SObject in <T>/receiver)
+_TSFORCE_QUERY_METHODS = {
+    "query",
+    "queryMore",
+    "retrieve",
+}  # read surface (SObject in <T>/receiver)
 _TSFORCE_WRITE_METHODS = {"insert", "update", "delete"}  # instance writes on a RestObject
+# ts-force composite/bulk-DML classes: ``new CompositeCollection().update(records)`` writes a
+# whole array in one call. The SObject is the element type of the array argument, not the
+# receiver (which is the collection), so these resolve the endpoint from the argument.
+_TSFORCE_BULK_WRITERS = {"CompositeCollection"}
 
 
 def _sdks_in(source: bytes) -> list[_Sdk]:
@@ -306,9 +315,22 @@ def _emit_outbound(
         )
 
 
-def detect_sdk_calls(root: Node, source: bytes, path: str, record: FileRecord) -> str | None:
+def detect_sdk_calls(
+    root: Node,
+    source: bytes,
+    path: str,
+    record: FileRecord,
+    class_heritage: dict[str, ClassHeritage | None] | None = None,
+) -> str | None:
     """Enrich/add vendor-SDK ``api_call`` statements on ``record``. Returns the first vendor
-    framework label seen (for the file-level rollup), or ``None``."""
+    framework label seen (for the file-level rollup), or ``None``.
+
+    ``class_heritage`` is the repo-wide simple-name → heritage index (from the parser's
+    ``build_index`` pre-pass). ts-force needs it because the real read call sites
+    (``Account.retrieve(...)``, ``client.query<Account>(...)``) live in *different files* than
+    the generated ``class Account extends RestObject`` entity — so the SObject set has to be
+    resolved repo-wide, not just from this file's classes. Omitting it (``None``) degrades
+    gracefully to file-local resolution."""
     seen = {s.id for s in record.statements}
     file_fw: str | None = None
 
@@ -335,7 +357,7 @@ def detect_sdk_calls(root: Node, source: bytes, path: str, record: FileRecord) -
             )
             file_fw = file_fw or sdk.framework
 
-    if _detect_tsforce(root, source, path, record, seen):
+    if _detect_tsforce(root, source, path, record, seen, _repo_entities(class_heritage)):
         file_fw = file_fw or "salesforce"
 
     return file_fw
@@ -345,6 +367,113 @@ def _restobject_entities(record: FileRecord) -> set[str]:
     """SObject entity names = classes that ``extends RestObject`` (the base parser already
     captured ``Class.extends``). Derived from the code's own inheritance — no hardcoded list."""
     return {c.name for c in record.classes if c.extends == _TSFORCE_BASE}
+
+
+def _repo_entities(class_heritage: dict[str, ClassHeritage | None] | None) -> set[str]:
+    """Repo-wide SObject entity names = every class the heritage index records as directly
+    ``extends RestObject``. This is the same ``extends``-based rule as ``_restobject_entities``,
+    lifted to the whole repo so a read call site can resolve an entity defined in another file.
+    A simple name the index collapsed to ``None`` (declared with conflicting bases in >1 file)
+    is skipped — honest: an ambiguous name is not a confirmed entity."""
+    if not class_heritage:
+        return set()
+    return {n for n, ch in class_heritage.items() if ch is not None and ch.extends == _TSFORCE_BASE}
+
+
+def _entity_typed_vars(root: Node, source: bytes, types: set[str]) -> dict[str, str]:
+    """Local identifiers whose type resolves to one of ``types`` → that type name. Recognizes
+    a variable assigned ``new T(...)`` and a variable/parameter annotated ``: T``. Used both to
+    resolve a write receiver to its SObject (``rec.insert()`` where ``types`` = the entities)
+    and to resolve a bulk-writer receiver (``bulk.update()`` where ``types`` =
+    :data:`_TSFORCE_BULK_WRITERS`); a receiver not found here is left uncaptured (honest — we do
+    not guess the instance's type). Sibling of :func:`_client_identifiers` (which resolves SDK
+    *client* types, incl. factory returns)."""
+    out: dict[str, str] = {}
+
+    def go(n: Node) -> None:
+        if n.type == "required_parameter":  # (rec: Account)
+            t = _annotation_type(n, source)
+            if t in types:
+                name = n.child_by_field_name("pattern") or (
+                    n.named_children[0] if n.named_children else None
+                )
+                if name is not None and name.type == "identifier":
+                    out[node_text(name, source)] = t
+        elif n.type == "variable_declarator":
+            name = n.child_by_field_name("name")
+            if name is not None and name.type == "identifier":
+                t = _annotation_type(n, source)
+                if t in types:  # let rec: Account
+                    out[node_text(name, source)] = t
+                else:
+                    v = n.child_by_field_name("value")
+                    while v is not None and v.type in (
+                        "await_expression",
+                        "parenthesized_expression",
+                    ):
+                        v = v.named_children[0] if v.named_children else None
+                    if v is not None and v.type == "new_expression":  # const rec = new Account()
+                        ctor = v.child_by_field_name("constructor")
+                        if ctor is not None and node_text(ctor, source) in types:
+                            out[node_text(name, source)] = node_text(ctor, source)
+        for c in n.named_children:
+            go(c)
+
+    go(root)
+    return out
+
+
+def _array_element_type(node: Node, source: bytes) -> str | None:
+    """Element type name of a ``: Type[]`` annotation on ``node`` (``accounts: Account[]`` →
+    ``Account``), else None. Only the ``T[]`` array syntax is unwrapped; ``Array<T>`` and other
+    shapes return None (honest — not resolved rather than guessed)."""
+    ann = next((c for c in node.named_children if c.type == "type_annotation"), None)
+    if ann is None:
+        return None
+    inner = ann.named_children[0] if ann.named_children else None
+    if inner is None or inner.type != "array_type":
+        return None
+    el = next(
+        (c for c in inner.named_children if c.type in ("type_identifier", "identifier")), None
+    )
+    return node_text(el, source) if el is not None else None
+
+
+def _entity_array_vars(root: Node, source: bytes, entities: set[str]) -> dict[str, str]:
+    """Identifiers declared as ``Entity[]`` → that entity name. The endpoint of a bulk write
+    (``bulk.update(accounts)``) is the SObject *element type* of the array argument, not the
+    receiver, so it is resolved from the argument variable's array annotation. Only a
+    locally-declared ``: Entity[]`` resolves; an inferred or unannotated array is skipped."""
+    out: dict[str, str] = {}
+
+    def go(n: Node) -> None:
+        target: Node | None = None
+        if n.type == "required_parameter":  # (accounts: Account[])
+            target = n.child_by_field_name("pattern") or (
+                n.named_children[0] if n.named_children else None
+            )
+        elif n.type == "variable_declarator":  # const accounts: Account[] = []
+            target = n.child_by_field_name("name")
+        if target is not None and target.type == "identifier":
+            el = _array_element_type(n, source)
+            if el is not None and el in entities:
+                out[node_text(target, source)] = el
+        for c in n.named_children:
+            go(c)
+
+    go(root)
+    return out
+
+
+def _first_arg_identifier(call: Node, source: bytes) -> str | None:
+    """Name of the first call argument when it is a plain identifier (``f(accounts)`` →
+    ``accounts``), else None — inline array literals / spreads / expressions are not resolved
+    (honest: the element type is not a single knowable declared symbol there)."""
+    args = call.child_by_field_name("arguments")
+    if args is None:
+        return None
+    first = next((c for c in args.named_children if c.type != "comment"), None)
+    return node_text(first, source) if first is not None and first.type == "identifier" else None
 
 
 def _type_arg_name(call: Node, source: bytes) -> str | None:
@@ -359,21 +488,50 @@ def _type_arg_name(call: Node, source: bytes) -> str | None:
 
 
 def _detect_tsforce(
-    root: Node, source: bytes, path: str, record: FileRecord, seen: set[str]
+    root: Node,
+    source: bytes,
+    path: str,
+    record: FileRecord,
+    seen: set[str],
+    repo_entities: set[str],
 ) -> bool:
     """ts-force outbound detection. Two read shapes + instance writes, endpoint = SObject:
 
     * ``RestObject.query<Account>(Account, qry)`` / ``client.query<Contact>(qry)`` → SObject
       from the generic ``<T>`` (fallback: a first-arg identifier that is a known entity).
     * ``Account.retrieve(...)`` — static call whose receiver is a known ``RestObject`` entity.
-    * ``rec.insert()/update()/delete()`` — instance write; endpoint left null unless the
-      receiver itself is an entity name (honest-null — we don't guess the instance's type).
+    * ``rec.insert()/update()/delete()`` — instance write. The receiver variable's type is
+      resolved to a known SObject (``rec = new Account()`` or ``rec: Account``); an
+      unresolvable receiver (``current.delete()`` where ``current`` is a ``Set``, or a var
+      returned from a helper) is left **uncaptured** — absent beats wrong. We never tag a
+      write we could not confirm is on an SObject.
+    * ``bulk.update(accounts)`` — composite/bulk write where the receiver is a
+      :data:`_TSFORCE_BULK_WRITERS` instance; the SObject is the element type of the array
+      argument (``accounts: Account[]`` → ``Account``), resolved from the argument variable's
+      declared array type. Skipped when the receiver isn't a bulk writer, the argument isn't a
+      plain identifier, or its element type isn't a known SObject.
 
-    Only fires in a file importing ``ts-force`` (byte guard). SObject is resolved from the
-    code (``<T>`` / receiver / known entity), else ``endpoint`` stays null — never guessed."""
-    if _TSFORCE_MARKER not in source:
+    Byte guard: the file either imports ``ts-force`` **or** references a known SObject in the
+    three positions a call site uses it — as a static receiver (``Account.``), a constructed
+    instance (``new Account``), or a typed binding (``: Account``) — the real call sites import
+    the generated entity, not ``ts-force`` itself. The SObject set is this file's
+    ``extends RestObject`` classes **plus** ``repo_entities`` (the same set resolved repo-wide),
+    so a call whose entity is defined in another file still resolves. The guard is only a cheap
+    pre-filter — every emit still requires the receiver to resolve to a confirmed entity, so a
+    stray substring match costs a wasted AST walk, never a wrong tag. SObject is resolved from
+    the code (``<T>`` / receiver / receiver-var type), else the call is skipped or ``endpoint``
+    stays null — never guessed."""
+    entities = _restobject_entities(record) | repo_entities
+    if _TSFORCE_MARKER not in source and not any(
+        e.encode() + b"." in source
+        or b"new " + e.encode() in source
+        or b": " + e.encode() in source
+        for e in entities
+    ):
         return False
-    entities = _restobject_entities(record)
+    entity_vars = _entity_typed_vars(root, source, entities)
+    bulk_writer_vars = set(_entity_typed_vars(root, source, _TSFORCE_BULK_WRITERS))
+    array_vars = _entity_array_vars(root, source, entities)
     emitted = False
 
     for call in _walk_calls(root):
@@ -396,8 +554,23 @@ def _detect_tsforce(
             # require SOME ts-force signal: a RestObject-family receiver, or a resolved SObject.
             if endpoint is None and receiver != _TSFORCE_BASE and type_arg is None:
                 continue
-        elif tail in _TSFORCE_WRITE_METHODS and receiver in entities:
-            endpoint = receiver
+        elif tail in _TSFORCE_WRITE_METHODS:
+            # write: resolve the receiver to an SObject — a static write on the class itself
+            # (``Account.delete(id)``, rare) or an instance whose variable type is a known
+            # entity. An unresolvable receiver is skipped (we don't guess the instance's type).
+            if receiver in entities:
+                endpoint = receiver
+            elif receiver in entity_vars:
+                endpoint = entity_vars[receiver]
+            elif receiver in bulk_writer_vars:
+                # composite/bulk write: endpoint is the SObject element type of the array
+                # argument (``bulk.update(accounts)`` where ``accounts: Account[]``).
+                arg = _first_arg_identifier(call, source)
+                endpoint = array_vars.get(arg) if arg is not None else None
+                if endpoint is None:
+                    continue  # unresolvable element type → skip (absent beats wrong)
+            else:
+                continue
         else:
             continue
 
