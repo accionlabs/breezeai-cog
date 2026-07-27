@@ -42,10 +42,12 @@ _FILENAME_HINTS = [
 ]
 
 _CONTENT_SIGNATURES = {
-    "oracle": r"varchar2|number\s*\(|sysdate|pls_integer",
+    # `sysdate` is word-bounded so it does NOT match T-SQL's `sysdatetime()` (a real-world
+    # false positive that mis-routed SQL Server dumps to the Oracle parser).
+    "oracle": r"\bvarchar2\b|\bnumber\s*\(|\bsysdate\b|\bpls_integer\b",
     "postgresql": r"\bserial\b|bytea|::|\$\$",
     "mysql": r"`|auto_increment|engine\s*=|unsigned",
-    "transactsql": r"\[\w+\]\.\[\w+\]|nvarchar\(max\)|identity\s*\(",
+    "transactsql": r"\[\w+\]\.\[\w+\]|nvarchar\s*\(\s*max\s*\)|\bidentity\s*\(",
     "sqlite": r"autoincrement|without\s+rowid|pragma",
 }
 
@@ -139,7 +141,12 @@ def detect_dialect(text: str, filepath: str | None) -> str:
     for dialect, hints in _FILENAME_HINTS:
         if any(h in name for h in hints):
             return dialect
-    scores = {d: (1 if re.search(p, text, re.I) else 0) for d, p in _CONTENT_SIGNATURES.items()}
+    # Score by how MANY signature hits each dialect has, not merely present/absent. A file
+    # dense in one dialect's markers (e.g. hundreds of `[schema].[table]` T-SQL references)
+    # then beats an incidental token from another dialect (a lone backtick, one `sysdate`).
+    # The old 1/0 scheme tied at 1 and broke the tie by dict order — `oracle` being first,
+    # any file that merely mentioned an Oracle-ish token was mis-routed to the Oracle parser.
+    scores = {d: len(re.findall(p, text, re.I)) for d, p in _CONTENT_SIGNATURES.items()}
     best = max(scores, key=lambda k: scores[k])
     return best if scores[best] > 0 else "postgresql"
 
@@ -322,6 +329,17 @@ def _index(create: exp.Create, dialect: str) -> dict[str, Any]:
 
 def parse_ddl(text: str, filepath: str | None = None) -> dict[str, Any]:
     dialect = detect_dialect(text, filepath)
+
+    # T-SQL / SQL Server: a dedicated path (see _parse_tsql_ddl), fully separate from Oracle.
+    # It uses its own GO/program-aware statement splitter (so stored-procedure/trigger bodies
+    # stay intact instead of being shredded by the naive `;` split), extracts tables/views/
+    # indexes via sqlglot after stripping SQL Server storage clauses (_preprocess_tsql), AND
+    # extracts stored programs (procedures/functions/triggers) via hand-rolled headers.
+    # SQL*Plus stripping is Oracle/generic-only — it would clobber T-SQL SET/PRINT/EXEC — so
+    # it is intentionally NOT applied on this branch.
+    if dialect == "transactsql":
+        return {"dialect": dialect, **_parse_tsql_ddl(text)}
+
     text = _strip_sqlplus(text)
 
     # Oracle: sqlglot can't parse real Oracle dumps — physical-storage clauses on tables
@@ -410,6 +428,471 @@ def _safe_parse_each(text: str, read: str, sample_errors: list[str]):
             if len(sample_errors) < 5:
                 sample_errors.append(str(exc))
             yield None
+
+
+# SQL Server / T-SQL storage & replication clauses that sqlglot's ``tsql`` dialect cannot
+# parse. Left in place, a CREATE TABLE carrying any of them degrades to a generic ``Command``
+# node (logging "contains unsupported syntax. Falling back to parsing as a 'Command'") and
+# yields NO table record — so a real SSMS-generated script extracts almost nothing. Each
+# clause here is DDL-only decoration (physical layout / identity behaviour), never part of
+# the logical schema we capture, so stripping it is lossless for our record shapes.
+_TSQL_STRIPS = (
+    re.compile(r"(?im)^\s*GO\s*$"),                                  # batch separators
+    re.compile(r"(?i)\bNOT\s+FOR\s+REPLICATION\b"),                 # on IDENTITY / FK / CHECK
+    re.compile(r"(?i)\b(?:NON)?CLUSTERED\b"),                       # PK/UNIQUE index kind → hides the PK node
+    # Column sort direction inside a key/index column list — sqlglot's tsql parser rejects
+    # it in a UNIQUE constraint (`UNIQUE ([a] ASC, [b] ASC)`). Anchored to a list position
+    # (`,`/`)`) so it only strips ordering keywords, never a column/table literally named so.
+    # We do not capture sort direction, so this is lossless for our records.
+    re.compile(r"(?i)\s+(?:ASC|DESC)\b(?=\s*[,)])"),
+    re.compile(r"(?i)\bWITH\s*\([^()]*\)"),                         # index/constraint storage opts (FILLFACTOR, PAD_INDEX, …)
+    re.compile(r"(?i)\bTEXTIMAGE_ON\s+(?:\[[^\]]+\]|\"[^\"]+\"|\w+)"),  # LOB filegroup
+    # Trailing filegroup ``ON [PRIMARY]`` — anchored to a clause end (``,`` / ``)`` / ``;`` /
+    # EOL) so it never eats ``ON DELETE``/``ON UPDATE`` actions or ``CREATE INDEX … ON tbl``.
+    re.compile(r"(?i)\bON\s+(?:\[[^\]]+\]|\"[^\"]+\"|\w+)(?=\s*[;,)]|\s*$)"),
+)
+
+
+def _preprocess_tsql(text: str) -> str:
+    """Strip SQL Server storage/replication decoration so sqlglot's ``tsql`` dialect parses
+    the CREATE TABLE/INDEX statements instead of falling back to ``Command``. Order matters:
+    ``GO`` first (so it can't attach to the next statement in the ``;``-split fallback),
+    then per-clause strips. All patterns are word-/clause-anchored to avoid touching
+    ``ON DELETE``/``ON UPDATE`` referential actions or an index's ``ON <table>`` target."""
+    for pat in _TSQL_STRIPS:
+        text = pat.sub("", text)
+    return text
+
+
+# ---------------------------------------------------------------------------
+# T-SQL / SQL Server: dedicated parser (separate from Oracle). Real SSMS-generated dumps
+# interleave CREATE TABLE/VIEW/INDEX + ALTER with stored PROGRAMS (procedures/functions/
+# triggers) whose bodies contain their own ``;`` and ``BEGIN…END`` — a naive ``;`` split
+# shreds them. So we split on ``GO`` batches, keep each program batch whole, extract
+# structural objects via sqlglot (after _preprocess_tsql), and extract program HEADERS with
+# regexes (mirroring the Oracle record shape: name/schema/fullName/procedureType/parameters/
+# returnType/body[+trigger]). Temp tables (``#…``) and non-DDL statements are ignored.
+# ---------------------------------------------------------------------------
+
+# A T-SQL identifier: [bracketed] | "quoted" | bare (may start with @/# for params/temp).
+_TSQL_ID = r'(?:\[[^\]]+\]|"[^"]+"|[A-Za-z_@#][A-Za-z0-9_@#$]*)'
+
+# GO batch separator: a line that is only GO (optionally with a batch count), case-insensitive.
+_TSQL_GO = re.compile(r"(?im)^[ \t]*GO(?:[ \t]+\d+)?[ \t]*(?:--[^\n]*)?$")
+
+# A program batch (kept whole, never split on inner ``;``).
+_TSQL_PROG = re.compile(
+    r"^\s*CREATE\s+(?:OR\s+ALTER\s+)?(PROCEDURE|PROC|FUNCTION|TRIGGER)\b", re.IGNORECASE
+)
+_TSQL_PROG_FULL = re.compile(
+    r"^\s*CREATE\s+(?:OR\s+ALTER\s+)?(PROCEDURE|PROC|FUNCTION|TRIGGER)\s+"
+    r"(?:(" + _TSQL_ID + r")\.)?(" + _TSQL_ID + r")(.*)",
+    re.IGNORECASE | re.DOTALL,
+)
+_TSQL_SEQ = re.compile(
+    r"^\s*CREATE\s+SEQUENCE\s+(?:(" + _TSQL_ID + r")\.)?(" + _TSQL_ID + r")\b(.*)",
+    re.IGNORECASE | re.DOTALL,
+)
+# User-defined TABLE type (TVP schema): CREATE TYPE [s].[n] AS TABLE ( col defs… ). Captures
+# the (optionally schema-qualified) name and the ``( … )`` body so it can be re-shaped as a
+# CREATE TABLE and run through the normal table extractor. Scalar/alias types (CREATE TYPE …
+# FROM <type>) do NOT match here and are ignored.
+_TSQL_TABLETYPE = re.compile(
+    r"^\s*CREATE\s+TYPE\s+((?:" + _TSQL_ID + r"\.)?" + _TSQL_ID + r")\s+AS\s+TABLE\s*(\(.*)$",
+    re.IGNORECASE | re.DOTALL,
+)
+_TSQL_KIND = [
+    ("table", re.compile(r"^\s*CREATE\s+TABLE\b", re.IGNORECASE)),
+    ("view", re.compile(r"^\s*CREATE\s+(?:OR\s+ALTER\s+)?VIEW\b", re.IGNORECASE)),
+    ("index", re.compile(r"^\s*CREATE\s+(?:UNIQUE\s+)?(?:(?:NON)?CLUSTERED\s+)?INDEX\b", re.IGNORECASE)),
+    ("alter", re.compile(r"^\s*ALTER\s+TABLE\b", re.IGNORECASE)),
+]
+
+
+def _tsql_unquote(ident: str) -> str:
+    """Strip [brackets]/\"quotes\"; T-SQL preserves source case (unlike the Oracle upper-fold)."""
+    ident = ident.strip()
+    if len(ident) >= 2 and ident[0] == "[" and ident[-1] == "]":
+        return ident[1:-1]
+    if len(ident) >= 2 and ident[0] == '"' and ident[-1] == '"':
+        return ident[1:-1].replace('""', '"')
+    return ident
+
+
+def _strip_leading_noise(b: str) -> str:
+    """Drop leading whitespace + line/block comments so the CREATE keyword is at position 0."""
+    prev = None
+    while prev != b:
+        prev = b
+        b = re.sub(r"^\s+", "", b)
+        b = re.sub(r"^--[^\n]*\n?", "", b)
+        b = re.sub(r"^/\*.*?\*/\s*", "", b, flags=re.DOTALL)
+    return b
+
+
+def _split_tsql_semicolons(sql: str) -> list[str]:
+    """Split a non-program batch on top-level ``;`` while respecting ``'..'`` strings (``''``
+    escape), ``[..]``/``".."`` identifiers, ``--``/``/* */`` comments, and parentheses."""
+    stmts: list[str] = []
+    buf: list[str] = []
+    i, n = 0, len(sql)
+    in_s = in_b = in_d = lc = bc = False
+    depth = 0
+    while i < n:
+        ch = sql[i]
+        nx = sql[i + 1] if i + 1 < n else ""
+        if lc:
+            buf.append(ch)
+            if ch == "\n":
+                lc = False
+            i += 1
+        elif bc:
+            buf.append(ch)
+            if ch == "*" and nx == "/":
+                buf.append(nx)
+                i += 2
+                bc = False
+            else:
+                i += 1
+        elif in_s:
+            buf.append(ch)
+            if ch == "'":
+                if nx == "'":
+                    buf.append(nx)
+                    i += 2
+                    continue
+                in_s = False
+            i += 1
+        elif in_b:
+            buf.append(ch)
+            if ch == "]":
+                in_b = False
+            i += 1
+        elif in_d:
+            buf.append(ch)
+            if ch == '"':
+                in_d = False
+            i += 1
+        elif ch == "-" and nx == "-":
+            lc = True
+            buf.append(ch)
+            i += 1
+        elif ch == "/" and nx == "*":
+            bc = True
+            buf.append(ch)
+            buf.append(nx)
+            i += 2
+        elif ch == "'":
+            in_s = True
+            buf.append(ch)
+            i += 1
+        elif ch == "[":
+            in_b = True
+            buf.append(ch)
+            i += 1
+        elif ch == '"':
+            in_d = True
+            buf.append(ch)
+            i += 1
+        elif ch == "(":
+            depth += 1
+            buf.append(ch)
+            i += 1
+        elif ch == ")":
+            depth = max(0, depth - 1)
+            buf.append(ch)
+            i += 1
+        elif ch == ";" and depth == 0:
+            s = "".join(buf).strip()
+            if s:
+                stmts.append(s)
+            buf = []
+            i += 1
+        else:
+            buf.append(ch)
+            i += 1
+    s = "".join(buf).strip()
+    if s:
+        stmts.append(s)
+    return stmts
+
+
+def _split_tsql_statements(text: str) -> list[str]:
+    """T-SQL statement splitter: split into ``GO`` batches; a program batch (PROCEDURE/
+    FUNCTION/TRIGGER) is kept WHOLE (its body has inner ``;`` we must not cut on), every other
+    batch is split on top-level ``;``. This keeps stored-program bodies intact."""
+    out: list[str] = []
+    for batch in _TSQL_GO.split(text):
+        b = batch.strip()
+        if not b:
+            continue
+        if _TSQL_PROG.match(_strip_leading_noise(b)):
+            out.append(b)
+        else:
+            out.extend(_split_tsql_semicolons(b))
+    return out
+
+
+def _parse_tsql_params(seg: str) -> list[dict[str, Any]]:
+    """Parse a T-SQL parameter list segment (``@p type [= default] [OUT|OUTPUT|READONLY]``,
+    comma-separated) into the Oracle-compatible ``{name, direction, dataType}`` shape."""
+    params: list[dict[str, Any]] = []
+    for pd in _split_paren_aware(seg):
+        pm = re.match(r"^\s*(@\w+)\s+(.*)$", pd.strip(), re.DOTALL)
+        if not pm:
+            continue
+        name, tail = pm.group(1), pm.group(2).strip()
+        direction = "IN"
+        dm = re.search(r"\b(OUTPUT|OUT|READONLY)\s*$", tail, re.IGNORECASE)
+        if dm:
+            direction = "READONLY" if dm.group(1).upper() == "READONLY" else "OUT"
+            tail = tail[: dm.start()].strip()
+        tail = re.split(r"\s*=\s*", tail, maxsplit=1)[0].strip()  # drop default
+        params.append({"name": name, "direction": direction, "dataType": tail.upper()})
+    return params
+
+
+def _tsql_before_as(rest: str) -> str:
+    """Text up to the first top-level ``AS`` keyword (balanced parens / even quotes / matched
+    brackets before it) — i.e. the program header before its body. Whole string if no ``AS``."""
+    for m in re.finditer(r"\bAS\b", rest, re.IGNORECASE):
+        seg = rest[: m.start()]
+        if (
+            seg.count("(") <= seg.count(")")
+            and seg.count("'") % 2 == 0
+            and seg.count("[") == seg.count("]")
+        ):
+            return seg
+    return rest
+
+
+def _parse_tsql_trigger(rest: str) -> dict[str, Any]:
+    """Extract T-SQL trigger timing/events/target from the header (before the body ``AS``).
+    T-SQL triggers are statement-level; ``FOR`` is an alias for ``AFTER``."""
+    header = _tsql_before_as(rest)
+    info: dict[str, Any] = {}
+    om = re.search(r"\bON\s+(?:(" + _TSQL_ID + r")\.)?(" + _TSQL_ID + r")", header, re.IGNORECASE)
+    if om:
+        if om.group(1):
+            info["targetSchema"] = _tsql_unquote(om.group(1))
+        info["targetTable"] = _tsql_unquote(om.group(2))
+    tm = re.search(r"\b(AFTER|INSTEAD\s+OF|FOR)\s+(?:INSERT|UPDATE|DELETE)", header, re.IGNORECASE)
+    if tm:
+        t = re.sub(r"\s+", " ", tm.group(1).upper())
+        info["timing"] = "AFTER" if t == "FOR" else t
+        evt_region = header[tm.start():]
+    else:
+        evt_region = header
+    events = [e for e in ("INSERT", "UPDATE", "DELETE") if re.search(r"\b" + e + r"\b", evt_region, re.IGNORECASE)]
+    if events:
+        info["events"] = events
+    info["level"] = "STATEMENT"
+    return info
+
+
+def _parse_tsql_program(stmt: str) -> dict[str, Any] | None:
+    """Parse a CREATE [OR ALTER] PROCEDURE|PROC|FUNCTION|TRIGGER header into the same record
+    shape the Oracle parser produces (so both dialects' programs share one schema)."""
+    m = _TSQL_PROG_FULL.match(stmt)
+    if not m:
+        return None
+    kw = m.group(1).upper()
+    proc_type = "PROCEDURE" if kw in ("PROCEDURE", "PROC") else kw
+    schema = _tsql_unquote(m.group(2)) if m.group(2) else None
+    name = _tsql_unquote(m.group(3))
+    full = f"{schema}.{name}" if schema else name
+    rest = m.group(4) or ""
+
+    parameters: list[dict[str, Any]] = []
+    return_type: str | None = None
+    trigger: dict[str, Any] | None = None
+
+    if proc_type == "FUNCTION":
+        ps = rest.find("(")
+        if ps != -1:
+            pe = _find_matching_paren(rest, ps)
+            if pe != -1:
+                parameters = _parse_tsql_params(rest[ps + 1 : pe])
+        rm = re.search(
+            r"\bRETURNS\s+(@\w+\s+TABLE|[A-Za-z_@#][\w$#.]*(?:\s*\([^)]*\))?)",
+            rest,
+            re.IGNORECASE,
+        )
+        if rm:
+            return_type = rm.group(1).strip().upper()
+    elif proc_type == "PROCEDURE":
+        head = _tsql_before_as(rest).strip()
+        if head.startswith("("):
+            pe = _find_matching_paren(head, 0)
+            head = head[1:pe] if pe != -1 else head[1:]
+        parameters = _parse_tsql_params(head)
+    elif proc_type == "TRIGGER":
+        trigger = _parse_tsql_trigger(rest)
+
+    # Full program body — the complete CREATE statement, not truncated (downstream needs the
+    # whole logic, e.g. to later extract table reads/writes from the body).
+    out: dict[str, Any] = {
+        "name": name,
+        "schema": schema,
+        "fullName": full,
+        "procedureType": proc_type.lower(),
+        "parameters": parameters,
+        "returnType": return_type,
+        "body": stmt,
+    }
+    if trigger:
+        out["trigger"] = trigger
+    return out
+
+
+def _parse_tsql_sequence(stmt: str) -> dict[str, Any] | None:
+    """CREATE SEQUENCE [schema.]name [START WITH n] [INCREMENT BY n] [MIN/MAX] [CYCLE] …"""
+    m = _TSQL_SEQ.match(stmt)
+    if not m:
+        return None
+    schema = _tsql_unquote(m.group(1)) if m.group(1) else None
+    name = _tsql_unquote(m.group(2))
+    rest = m.group(3) or ""
+
+    def _num(pat: str) -> int | None:
+        g = re.search(pat, rest, re.IGNORECASE)
+        return int(g.group(1)) if g else None
+
+    out: dict[str, Any] = {
+        "name": name,
+        "schema": schema,
+        "fullName": f"{schema}.{name}" if schema else name,
+        "startValue": _num(r"\bSTART\s+WITH\s+(-?\d+)"),
+        "increment": _num(r"\bINCREMENT\s+BY\s+(-?\d+)"),
+        "minValue": _num(r"\bMINVALUE\s+(-?\d+)"),
+        "maxValue": _num(r"\bMAXVALUE\s+(-?\d+)"),
+        "cycle": bool(re.search(r"(?<!NO\s)\bCYCLE\b", rest, re.IGNORECASE)),
+    }
+    return out
+
+
+def _parse_tsql_table_type(stmt: str) -> dict[str, Any] | None:
+    """Parse a ``CREATE TYPE [s].[n] AS TABLE ( … )`` user-defined table type into a table
+    record. These carry a real column schema (used as table-valued parameters on procedures),
+    but are NOT physical storage — so the record is tagged ``tableType="table_type"`` to keep
+    it distinguishable from a base table downstream. Implementation reuses the normal table
+    extractor by re-shaping the body as a ``CREATE TABLE`` (columns/constraints are identical)."""
+    m = _TSQL_TABLETYPE.match(stmt)
+    if not m:
+        return None
+    rewritten = f"CREATE TABLE {m.group(1)} {m.group(2)}"
+    node = sqlglot.parse_one(_preprocess_tsql(rewritten), read="tsql")
+    if not isinstance(node, exp.Create):
+        return None
+    tbl = _table(node, "transactsql")
+    tbl["tableType"] = "table_type"
+    return tbl
+
+
+def _parse_tsql_ddl(text: str) -> dict[str, Any]:
+    """T-SQL entry point. Split into GO/program-aware statements, then route each: structural
+    objects (TABLE/VIEW/INDEX/ALTER) through sqlglot's ``tsql`` dialect after
+    _preprocess_tsql; stored programs (PROC/FUNCTION/TRIGGER) + sequences through the
+    hand-rolled header parsers. Temp tables (``#…``) and non-DDL statements are skipped (not
+    counted as failures). Returns the same payload shape as the Oracle path."""
+    tables: list[dict[str, Any]] = []
+    table_types: list[dict[str, Any]] = []
+    views: list[dict[str, Any]] = []
+    all_indexes: list[dict[str, Any]] = []
+    procedures: list[dict[str, Any]] = []
+    sequences: list[dict[str, Any]] = []
+    alters: list[exp.Alter] = []
+    ok = failed = 0
+    sample_errors: list[str] = []
+
+    def _fail(msg: str) -> None:
+        nonlocal failed
+        failed += 1
+        if len(sample_errors) < 5:
+            sample_errors.append(msg[:200])
+
+    for stmt in _split_tsql_statements(text):
+        s = _strip_leading_noise(stmt)
+        if not s:
+            continue
+        try:
+            if _TSQL_PROG.match(s):
+                prog = _parse_tsql_program(s)
+                if prog:
+                    procedures.append(prog)
+                    ok += 1
+                else:
+                    _fail(f"program_unparsed: {s[:80]}")
+                continue
+            if _TSQL_SEQ.match(s):
+                seq = _parse_tsql_sequence(s)
+                if seq:
+                    sequences.append(seq)
+                    ok += 1
+                continue
+            if _TSQL_TABLETYPE.match(s):
+                tt = _parse_tsql_table_type(s)
+                if tt:
+                    table_types.append(tt)
+                    ok += 1
+                else:
+                    _fail(f"table_type_unparsed: {s[:80]}")
+                continue
+
+            kind = next((k for k, pat in _TSQL_KIND if pat.match(s)), None)
+            if kind is None:
+                continue  # non-DDL (INSERT/GRANT/SET/EXEC/CREATE SCHEMA…) — skip, not a failure
+
+            node = sqlglot.parse_one(_preprocess_tsql(s), read="tsql")
+            if kind == "table" and isinstance(node, exp.Create):
+                tbl = _table(node, "transactsql")
+                if tbl["name"].startswith("#"):  # session temp table — not schema DDL
+                    continue
+                tables.append(tbl)
+                ok += 1
+            elif kind == "view" and isinstance(node, exp.Create):
+                views.append(_view(node, "transactsql"))
+                ok += 1
+            elif kind == "index" and isinstance(node, exp.Create):
+                all_indexes.append(_index(node, "transactsql"))
+                ok += 1
+            elif kind == "alter" and isinstance(node, exp.Alter):
+                alters.append(node)
+                ok += 1
+            else:
+                _fail(f"{kind}_unparsed: {s[:80]}")
+        except Exception as exc:
+            _fail(f"{s[:40]}: {exc}")
+
+    by_table = {t["name"]: t for t in tables}
+    for alter in alters:
+        _apply_alter(alter, by_table)
+    for idx in all_indexes:
+        owner = by_table.get(idx["tableName"])
+        if owner is not None:
+            owner["indexes"].append(idx)
+            for col in owner["columns"]:
+                if col["name"] in idx["columns"]:
+                    col["isIndexed"] = True
+    for table in tables:
+        _wire_columns(table)
+
+    # Table-valued types are appended AFTER the ALTER/index wiring above — they never receive
+    # an ALTER or a standalone CREATE INDEX, and keeping them out of `by_table` avoids a name
+    # collision with a base table of the same name. They still get column PK/FK flags wired.
+    for tt in table_types:
+        _wire_columns(tt)
+    tables.extend(table_types)
+
+    return {
+        "tables": tables,
+        "views": views,
+        "procedures": procedures,
+        "allIndexes": all_indexes,
+        "indexes": [i for i in all_indexes if i["tableName"] is None],
+        "sequences": sequences,
+        "parseStats": {"ok": ok, "failed": failed, "sampleErrors": sample_errors},
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -765,7 +1248,8 @@ def _parse_create_procedure(stmt: str) -> dict[str, Any] | None:
 
     trigger = _parse_trigger_info(rest) if proc_type == "TRIGGER" else None
 
-    body = stmt[:1000] + ("\n-- [truncated]" if len(stmt) > 1000 else "")
+    # Full program body — the complete CREATE statement, not truncated (consistent with the
+    # T-SQL path; downstream needs the whole PL/SQL logic, e.g. to mine table reads/writes).
     out: dict[str, Any] = {
         "name": name,
         "schema": schema,
@@ -773,7 +1257,7 @@ def _parse_create_procedure(stmt: str) -> dict[str, Any] | None:
         "procedureType": proc_type.lower().replace("_", " "),
         "parameters": parameters,
         "returnType": return_type,
-        "body": body,
+        "body": stmt,
     }
     if trigger:
         out["trigger"] = trigger
@@ -1169,7 +1653,7 @@ def _parse_create_table(stmt: str) -> dict[str, Any] | None:
                 if col["name"] in con["columns"]:
                     col["isForeignKey"] = True
 
-    ddl_text = stmt[:1000] + ("\n-- [truncated]" if len(stmt) > 1000 else "")
+    ddl_text = stmt  # full CREATE TABLE text, not truncated (consistent with program bodies)
     return {
         "name": name,
         "schema": schema,

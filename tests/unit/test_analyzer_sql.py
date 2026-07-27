@@ -262,6 +262,160 @@ def test_detect_dialect_hint_signature_and_default() -> None:
 
 
 # ---------------------------------------------------------------------------
+# T-SQL / SQL Server: real SSMS-generated dumps. Two regressions guarded here —
+#  (1) dialect detection must NOT mis-route to Oracle on incidental tokens
+#      (T-SQL `sysdatetime()` used to match the Oracle `sysdate` signature and win
+#      the 1/0 tie by dict order), and
+#  (2) SQL Server storage/replication clauses must be stripped so sqlglot extracts the
+#      table instead of falling back to a generic `Command` (0 tables).
+# ---------------------------------------------------------------------------
+
+TSQL_SSMS = """CREATE TABLE [mail].[MailBox_Archive_2025-11-18] (
+    [idMailBox]      INT            IDENTITY (1, 1) NOT FOR REPLICATION NOT NULL,
+    [idMailTemplate] INT            NOT NULL,
+    [Application]    VARCHAR (100)  NOT NULL,
+    [Body]           VARCHAR (MAX)  NOT NULL,
+    [CreatedDate]    DATETIME       CONSTRAINT [DF_Created] DEFAULT (sysdatetime()) NOT NULL,
+    CONSTRAINT [PK_MailBox] PRIMARY KEY CLUSTERED ([idMailBox] ASC) WITH (FILLFACTOR = 90),
+    CONSTRAINT [UQ_MailBox_App] UNIQUE ([Application] ASC, [idMailTemplate] ASC),
+    CONSTRAINT [FK_MailBox_Template] FOREIGN KEY ([idMailTemplate])
+        REFERENCES [mail].[MailTemplate] ([idMailTemplate]) ON DELETE CASCADE
+) ON [PRIMARY] TEXTIMAGE_ON [PRIMARY];
+GO
+CREATE INDEX [IX_MailBox_Created] ON [mail].[MailBox_Archive_2025-11-18] ([CreatedDate] ASC) ON [PRIMARY];
+GO
+"""
+
+
+def test_tsql_sysdatetime_not_misdetected_as_oracle() -> None:
+    # `sysdatetime()` must not trip the (word-bounded) Oracle `sysdate` signature, and the
+    # dense `[schema].[table]` markers must win the content score → transactsql.
+    assert detect_dialect(TSQL_SSMS, "onecms-db-ddl.sql") == "transactsql"
+
+
+def test_tsql_ssms_clauses_stripped_and_table_extracted() -> None:
+    r = parse_ddl(TSQL_SSMS, "onecms-db-ddl.sql")  # no filename hint — exercises detection too
+    assert r["dialect"] == "transactsql"
+    assert r["parseStats"]["failed"] == 0
+    tbl = next(t for t in r["tables"] if t["name"] == "MailBox_Archive_2025-11-18")
+    cols = _by_name(tbl["columns"])
+    # NOT FOR REPLICATION on the IDENTITY column no longer breaks the parse
+    assert set(cols) >= {"idMailBox", "idMailTemplate", "Application", "Body", "CreatedDate"}
+    # CLUSTERED + WITH(FILLFACTOR) stripped → PK still detected
+    assert cols["idMailBox"]["isPrimaryKey"] is True
+    ctypes = {c["constraintType"] for c in tbl.get("constraints", [])}
+    assert "FOREIGN_KEY" in ctypes  # FK survives; `ON DELETE CASCADE` not eaten by the filegroup strip
+    # the CREATE INDEX ... ON [table] target survived the `ON [PRIMARY]` filegroup strip
+    assert any(i["tableName"] == "MailBox_Archive_2025-11-18" for i in r["allIndexes"])
+
+
+# A GO-batched SSMS script mixing a permanent table, a procedure whose body has its own
+# `;` and a temp table, a scalar function, and a trigger — the dedicated T-SQL program path
+# must keep each program body whole and extract its header.
+TSQL_PROGRAMS = """CREATE TABLE [dbo].[Account] ([id] INT NOT NULL PRIMARY KEY, [name] NVARCHAR(50));
+GO
+CREATE PROCEDURE [dbo].[usp_Sync] @idSite INT, @name VARCHAR(50) = NULL, @out INT OUTPUT
+AS
+BEGIN
+    SET NOCOUNT ON;
+    CREATE TABLE #staging ([id] INT NOT NULL);
+    INSERT INTO #staging SELECT [id] FROM [dbo].[Account];
+    SELECT @out = COUNT(*) FROM #staging;
+END
+GO
+CREATE FUNCTION [dbo].[fn_FullName] (@first NVARCHAR(50), @last NVARCHAR(50))
+RETURNS NVARCHAR(101)
+AS
+BEGIN
+    RETURN @first + ' ' + @last;
+END
+GO
+CREATE TRIGGER [dbo].[trg_Account_Audit] ON [dbo].[Account]
+AFTER INSERT, UPDATE
+AS
+BEGIN
+    UPDATE [dbo].[Account] SET [name] = [name];
+END
+GO
+"""
+
+
+def _by_full(items: list[dict]) -> dict:
+    return {i["fullName"]: i for i in items}
+
+
+def test_tsql_programs_extracted_separately_from_tables() -> None:
+    r = parse_ddl(TSQL_PROGRAMS, "app.sql")  # content-detected as transactsql
+    assert r["dialect"] == "transactsql"
+
+    # the permanent table is captured; the temp table declared INSIDE the proc body is NOT
+    assert [t["name"] for t in r["tables"]] == ["Account"]
+    assert not any(t["name"].startswith("#") for t in r["tables"])
+
+    progs = _by_full(r["procedures"])
+    assert set(progs) == {"dbo.usp_Sync", "dbo.fn_FullName", "dbo.trg_Account_Audit"}
+
+    proc = progs["dbo.usp_Sync"]
+    assert proc["procedureType"] == "procedure"
+    pnames = {p["name"]: p for p in proc["parameters"]}
+    assert set(pnames) == {"@idSite", "@name", "@out"}
+    assert pnames["@out"]["direction"] == "OUT"
+    # body kept intact — the inner `;`/CREATE TABLE #staging did not shred the program
+    assert "#staging" in proc["body"] and "END" in proc["body"]
+    # full body stored (no 1000-char truncation): starts at CREATE, ends at END, no marker
+    assert proc["body"].strip().startswith("CREATE")
+    assert proc["body"].rstrip().endswith("END")
+    assert "[truncated]" not in proc["body"]
+
+    fn = progs["dbo.fn_FullName"]
+    assert fn["procedureType"] == "function"
+    assert fn["returnType"] == "NVARCHAR(101)"
+    assert len(fn["parameters"]) == 2
+
+    trg = progs["dbo.trg_Account_Audit"]
+    assert trg["procedureType"] == "trigger"
+    assert trg["trigger"]["targetTable"] == "Account"
+    assert trg["trigger"]["timing"] == "AFTER"
+    assert trg["trigger"]["events"] == ["INSERT", "UPDATE"]
+
+
+# A user-defined table-valued type (TVP schema) + a base table + a scalar alias type.
+TSQL_TABLE_TYPE = """CREATE TABLE [dbo].[Student] ([id] INT NOT NULL PRIMARY KEY);
+GO
+CREATE TYPE [dbo].[StudentInfoTableType] AS TABLE (
+    [Id] INT NOT NULL,
+    [IdStudent] INT NOT NULL,
+    [IsPayer] VARCHAR (100) NOT NULL,
+    PRIMARY KEY ([Id]));
+GO
+CREATE TYPE [dbo].[SsnType] FROM VARCHAR(11) NOT NULL;
+GO
+"""
+
+
+def test_tsql_table_type_extracted_as_tagged_table_node() -> None:
+    r = parse_ddl(TSQL_TABLE_TYPE, "app.sql")
+    assert r["dialect"] == "transactsql"
+
+    base = [t for t in r["tables"] if t.get("tableType") != "table_type"]
+    tvts = [t for t in r["tables"] if t.get("tableType") == "table_type"]
+
+    # base table keeps tableType="table" (unchanged); the table type is a tagged node
+    assert [t["name"] for t in base] == ["Student"]
+    assert base[0]["tableType"] == "table"
+    assert [t["fullName"] for t in tvts] == ["dbo.StudentInfoTableType"]
+
+    tvt = tvts[0]
+    assert tvt["tableType"] == "table_type"  # distinguishable from a physical table
+    cols = _by_name(tvt["columns"])
+    assert set(cols) == {"Id", "IdStudent", "IsPayer"}
+    assert cols["Id"]["isPrimaryKey"] is True  # inline PK wired
+
+    # a scalar alias type (CREATE TYPE … FROM) is NOT a table — must be ignored
+    assert not any(t["name"] == "SsnType" for t in r["tables"])
+
+
+# ---------------------------------------------------------------------------
 # Oracle: data types, defaults, inline + table-level constraints, virtual columns.
 # ---------------------------------------------------------------------------
 
