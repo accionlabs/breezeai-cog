@@ -19,6 +19,7 @@ ClassType = Literal[
     "record",
     "enum",
     "module",
+    "trait",
 ]
 
 # statement.semanticType — the schema's enum also allows null, expressed in the

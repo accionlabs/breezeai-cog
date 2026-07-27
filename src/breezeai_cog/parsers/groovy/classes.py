@@ -5,12 +5,10 @@ Groovy's heritage differs from Java's grammar shape: a ``superclass`` and a
 ``qualified_type`` types, and modifiers are inline children of the declaration (no
 ``modifiers`` wrapper).
 
-A **trait** is mapped to the ``interface`` class type. The schema's ``ClassType`` enum is
-restricted (``class/interface/struct/record/enum/module`` — no ``trait``), so any other
-value would be dropped at ingestion. ``interface`` is also the right model for the reading
-agent: a class *uses* a trait via ``implements`` (not ``extends``), so the ``IMPLEMENTS``
-edge the agent traverses points at an ``interface``-typed node — internally consistent, and
-the trait's methods/heritage are all still captured."""
+A **trait** is emitted with its own ``trait`` class type (a member of the ``ClassType`` enum).
+A class *uses* a trait via ``implements`` (not ``extends``), so the ``IMPLEMENTS`` edge the
+agent traverses points at the ``trait``-typed node, and the trait's methods/heritage are all
+still captured."""
 
 from __future__ import annotations
 
@@ -27,7 +25,7 @@ _TYPE = {
     "class_declaration": "class",
     "interface_declaration": "interface",
     "enum_declaration": "enum",
-    "trait_declaration": "interface",  # no `trait` in the ClassType enum; a trait is used via `implements`
+    "trait_declaration": "trait",
 }
 _NESTED_CLASS_TYPES = tuple(_TYPE)  # member (inner) types nested in a class body
 _TYPE_NODES = ("type_identifier", "scoped_type_identifier", "generic_type", "qualified_type")

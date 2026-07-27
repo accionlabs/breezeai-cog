@@ -108,15 +108,15 @@ def test_statements_and_detection(tmp_path) -> None:
     assert db and db[0].dataAccessHint  # repo.findById(...) detected as a DB call
 
 
-def test_trait_mapped_to_interface(tmp_path) -> None:
-    # No `trait` in the ClassType enum; a trait is used via `implements`, so map to interface.
+def test_trait_mapped_to_trait_type(tmp_path) -> None:
+    # A trait gets its own `trait` ClassType; a class still uses it via `implements`.
     src = b"trait Reversible { def reverse() {} }\nclass Sentence implements Reversible {}\n"
     p = tmp_path / "T.groovy"
     p.write_bytes(src)
     ctx = ParseContext(path="T.groovy", abs_path=p, source=src, repo_root=tmp_path)
     rec = GroovyParser().parse_file(ctx)
     by_name = {c.name: c for c in rec.classes}
-    assert by_name["Reversible"].type == "interface"
+    assert by_name["Reversible"].type == "trait"
     assert by_name["Sentence"].implements == ["Reversible"]
     assert "reverse" in {f.name for f in rec.functions}
 
