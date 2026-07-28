@@ -103,11 +103,21 @@ def repo_to_json_tree(
             typer.secho(f"error: no subdirectories to analyze in {repo}", fg=typer.colors.RED, err=True)
             raise typer.Exit(1)
         typer.echo(f"Batch: analyzing {len(repos)} project(s) in {repo} ...")
+        failed: list[str] = []
         for sub in repos:
             typer.echo(f"\n[{sub.name}]")
-            _analyze_and_report(service, settings, sub, show_bar=show_bar, render_table=render_table)
+            if not _analyze_and_report(service, settings, sub, show_bar=show_bar, render_table=render_table):
+                failed.append(sub.name)
+        if failed:
+            typer.secho(
+                f"Upload failed for {len(failed)} project(s): {', '.join(failed)}",
+                fg=typer.colors.RED,
+                err=True,
+            )
+            raise typer.Exit(1)
     else:
-        _analyze_and_report(service, settings, repo, show_bar=show_bar, render_table=render_table)
+        if not _analyze_and_report(service, settings, repo, show_bar=show_bar, render_table=render_table):
+            raise typer.Exit(1)
 
 
 def _analyze_and_report(
@@ -117,8 +127,12 @@ def _analyze_and_report(
     *,
     show_bar: bool,
     render_table: bool,
-) -> None:
-    """Analyze one repository, render its summary, and (if configured) upload it."""
+) -> bool:
+    """Analyze one repository, render its summary, and (if configured) upload it.
+
+    Returns True on success; False if upload was attempted and failed (the
+    analysis itself always completes first, leaving the .ndjson.gz on disk).
+    """
     stats: dict[str, Any] = {}
 
     def analyze(progress: Callable[[int, int], None] | None) -> AnalysisResult:
@@ -161,7 +175,7 @@ def _analyze_and_report(
             f"No parseable source files — skipped {name} (no ndjson written).",
             fg=typer.colors.YELLOW,
         )
-        return
+        return True
     if render_table:
         _print_summary_table(m, stats, result.out_path)
     else:
@@ -172,16 +186,43 @@ def _analyze_and_report(
 
     if settings.upload:
         from .errors import UploadError
-        from .services import upload_ontology
+        from .services import extract_ontology_id, poll_ontology_status, upload_ontology
 
         assert result.out_path is not None  # CLI always owns a FileSink (out_path set)
         typer.echo(f"Uploading {result.out_path.name} to {settings.baseurl} ...")
         try:
-            upload_ontology(settings, result.out_path, repository_name=m.repositoryName)
+            upload_resp = upload_ontology(settings, result.out_path, repository_name=m.repositoryName)
         except UploadError as exc:
             typer.secho(f"upload failed: {exc}", fg=typer.colors.RED, err=True)
-            raise typer.Exit(1) from exc
+            return False
         typer.secho("Upload complete.", fg=typer.colors.GREEN)
+        if upload_resp:
+            typer.echo(f"  Upload response: {json.dumps(upload_resp)}")
+
+        ontology_id = extract_ontology_id(upload_resp)
+        if ontology_id:
+            typer.echo(f"Waiting for backend to process ontology {ontology_id} ...")
+            try:
+                final_status = poll_ontology_status(
+                    settings,
+                    ontology_id,
+                    on_response=lambda p: typer.echo(f"  Poll response: {json.dumps(p)}"),
+                    on_waiting=lambda s: typer.echo(
+                        f"  status: {s or 'pending'} — rechecking in 60s ..."
+                    ),
+                )
+            except UploadError as exc:
+                typer.secho(f"status poll failed: {exc}", fg=typer.colors.YELLOW, err=True)
+            else:
+                color = typer.colors.GREEN if final_status == "active" else typer.colors.YELLOW
+                typer.secho(f"Processing status: {final_status}.", fg=color)
+        else:
+            typer.secho(
+                "  (upload response missing '_id'; skipping status check)",
+                fg=typer.colors.YELLOW,
+            )
+
+    return True
 
 
 def _print_summary_table(meta: ProjectMetaData, stats: dict[str, Any], out_path: Path | None) -> None:

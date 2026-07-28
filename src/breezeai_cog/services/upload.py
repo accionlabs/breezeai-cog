@@ -18,14 +18,18 @@ from __future__ import annotations
 
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from ..config import Settings
 from ..errors import UploadError
 
 _GENERATE_PATH = "/code-ontology/generate"
+_STATUS_PATH = "/code-ontology"
 _MAX_ATTEMPTS = 3
 _TIMEOUT = 300.0  # seconds; large artifacts stream over a single request
+_STATUS_TIMEOUT = 30.0
+_TERMINAL_STATUSES: frozenset[str] = frozenset({"active", "error"})
+_DEFAULT_POLL_INTERVAL = 60  # seconds
 
 
 def upload_ontology(
@@ -75,3 +79,90 @@ def upload_ontology(
             time.sleep(attempt)  # linear backoff
 
     raise UploadError(f"upload failed for {path.name}: {last_error}")
+
+
+def extract_ontology_id(payload: Any) -> str | None:
+    """Return the ``_id`` from an upload response, or ``None`` if absent.
+
+    Handles both a raw document ``{"_id": "..."}`` and a ``{"data": {...}}``
+    wrapper (common in Strapi-style REST APIs).
+    """
+    if not isinstance(payload, dict):
+        return None
+    doc = payload.get("data", payload)
+    return doc.get("_id") if isinstance(doc, dict) else None
+
+
+def _extract_status(payload: Any) -> str | None:
+    """Return ``fileGraphStatus`` from a list-style poll response, or ``None``."""
+    if isinstance(payload, list):
+        docs: list[Any] = payload
+    elif isinstance(payload, dict):
+        inner = payload.get("data", [])
+        if isinstance(inner, list):
+            docs = inner
+        elif isinstance(inner, dict):
+            docs = [inner]
+        else:
+            docs = []
+    else:
+        return None
+    return docs[0].get("fileGraphStatus") if docs else None
+
+
+def poll_ontology_status(
+    settings: Settings,
+    ontology_id: str,
+    *,
+    poll_interval: float = _DEFAULT_POLL_INTERVAL,
+    on_waiting: Callable[[str | None], None] | None = None,
+    on_response: Callable[[Any], None] | None = None,
+) -> str:
+    """Poll ``GET /code-ontology`` until ``fileGraphStatus`` reaches a terminal value.
+
+    Terminal values are ``"active"`` and ``"error"``; any other value (or a
+    missing field) triggers a sleep of ``poll_interval`` seconds and a retry.
+
+    ``on_response(payload)`` is called on *every* successful HTTP response
+    (including the terminal one) so callers can log the raw data.
+    ``on_waiting(current_status)`` is called just before each sleep.
+
+    Returns the terminal status string.
+    Raises :class:`UploadError` on HTTP or network errors.
+    """
+    import httpx
+
+    base = settings.baseurl
+    if not base:
+        raise UploadError("baseurl is not configured")
+    if settings.user_api_key is None:
+        raise UploadError("user_api_key is not configured")
+
+    url = f"{base.rstrip('/')}{_STATUS_PATH}"
+    headers = {"api-key": settings.user_api_key.get_secret_value()}
+    params = {
+        "filters[projectUuid][$eq]": settings.uuid,
+        "filters[_id][$eq]": ontology_id,
+        "selectedFields": "_id,fileGraphStatus",
+    }
+
+    while True:
+        try:
+            resp = httpx.get(url, params=params, headers=headers, timeout=_STATUS_TIMEOUT)
+        except httpx.TransportError as exc:
+            raise UploadError(f"status poll network error: {exc}") from exc
+
+        if resp.status_code >= 400:
+            raise UploadError(f"status poll HTTP {resp.status_code}: {resp.text}")
+
+        payload = resp.json()
+        if on_response is not None:
+            on_response(payload)
+
+        status = _extract_status(payload)
+        if status in _TERMINAL_STATUSES:
+            return status
+
+        if on_waiting is not None:
+            on_waiting(status)
+        time.sleep(poll_interval)
