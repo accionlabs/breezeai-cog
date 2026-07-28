@@ -153,3 +153,104 @@ def test_repo_to_json_tree_batch_skips_empty_projects(tmp_path) -> None:
     assert sorted(p.name for p in out_dir.glob("*.ndjson.gz")) == [
         "code-project-analysis.ndjson.gz",
     ]
+
+
+def test_repo_to_json_tree_batch_upload(tmp_path, monkeypatch) -> None:
+    """--batch --upload uploads each sub-project and polls for status before the next."""
+    workspace = tmp_path / "workspace"
+    (workspace / "proj-a").mkdir(parents=True)
+    (workspace / "proj-b").mkdir()
+    (workspace / "empty").mkdir()  # no code files → no upload, no poll
+    (workspace / "proj-a" / "a.py").write_text("def f():\n    return 1\n")
+    (workspace / "proj-b" / "b.py").write_text("class B:\n    pass\n")
+    (workspace / "empty" / "notes.txt").write_text("no code\n")
+    out_dir = tmp_path / "results"
+
+    uploaded: list[str] = []
+    polled: list[str] = []
+
+    def fake_upload(settings, file_path, *, repository_name: str):  # type: ignore[misc]
+        uploaded.append(repository_name)
+        return {"_id": f"id-{repository_name}"}
+
+    def fake_poll(settings, ontology_id, *, poll_interval=60, on_waiting=None, on_response=None):  # type: ignore[misc]
+        polled.append(ontology_id)
+        return "active"
+
+    import breezeai_cog.services as _svc
+
+    monkeypatch.setattr(_svc, "upload_ontology", fake_upload)
+    monkeypatch.setattr(_svc, "poll_ontology_status", fake_poll)
+
+    result = runner.invoke(
+        app,
+        [
+            "repo-to-json-tree",
+            "--repo", str(workspace),
+            "--batch",
+            "--out", str(out_dir),
+            "--jobs", "1",
+            "--upload",
+            "--baseurl", "http://fake.test",
+            "--uuid", "test-uuid-123",
+            "--user-api-key", "test-key",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    # one upload + one poll per project with parseable code; empty sub-dir skipped
+    assert sorted(uploaded) == ["proj-a", "proj-b"]
+    assert sorted(polled) == ["id-proj-a", "id-proj-b"]
+
+
+def test_repo_to_json_tree_batch_upload_partial_failure(tmp_path, monkeypatch) -> None:
+    """--batch --upload continues after one upload failure; reports non-zero at the end."""
+    workspace = tmp_path / "workspace"
+    (workspace / "proj-a").mkdir(parents=True)
+    (workspace / "proj-b").mkdir()
+    (workspace / "proj-a" / "a.py").write_text("def f():\n    return 1\n")
+    (workspace / "proj-b" / "b.py").write_text("class B:\n    pass\n")
+    out_dir = tmp_path / "results"
+
+    from breezeai_cog.errors import UploadError
+
+    upload_calls: list[str] = []
+    polled: list[str] = []
+
+    def fake_upload(settings, file_path, *, repository_name: str):  # type: ignore[misc]
+        upload_calls.append(repository_name)
+        if repository_name == "proj-a":  # first project (sorted) fails
+            raise UploadError("network error")
+        return {"_id": f"id-{repository_name}"}
+
+    def fake_poll(settings, ontology_id, *, poll_interval=60, on_waiting=None, on_response=None):  # type: ignore[misc]
+        polled.append(ontology_id)
+        return "active"
+
+    import breezeai_cog.services as _svc
+
+    monkeypatch.setattr(_svc, "upload_ontology", fake_upload)
+    monkeypatch.setattr(_svc, "poll_ontology_status", fake_poll)
+
+    result = runner.invoke(
+        app,
+        [
+            "repo-to-json-tree",
+            "--repo", str(workspace),
+            "--batch",
+            "--out", str(out_dir),
+            "--jobs", "1",
+            "--upload",
+            "--baseurl", "http://fake.test",
+            "--uuid", "test-uuid",
+            "--user-api-key", "test-key",
+        ],
+    )
+    # overall exit is non-zero because at least one upload failed
+    assert result.exit_code == 1
+    # both sub-projects were analyzed (ndjson files written)
+    assert (out_dir / "proj-a-project-analysis.ndjson.gz").exists()
+    assert (out_dir / "proj-b-project-analysis.ndjson.gz").exists()
+    # both uploads attempted — batch did not stop at the first failure
+    assert sorted(upload_calls) == ["proj-a", "proj-b"]
+    # poll only runs for the project whose upload succeeded
+    assert polled == ["id-proj-b"]

@@ -1,6 +1,6 @@
-"""Tests for the backend upload client (``services.upload.upload_ontology``): the
-multipart contract, the ``api-key`` header, bounded retry on transient failures, and
-the fatal-vs-retryable status split. ``httpx.post`` is faked — no network."""
+"""Tests for the backend upload client: upload_ontology (multipart contract, bounded
+retry, fatal-vs-retryable split) and poll_ontology_status (status polling contract).
+``httpx.post`` / ``httpx.get`` are faked — no network."""
 
 from __future__ import annotations
 
@@ -11,7 +11,7 @@ import pytest
 
 from breezeai_cog.config import Settings
 from breezeai_cog.errors import UploadError
-from breezeai_cog.services.upload import upload_ontology
+from breezeai_cog.services.upload import extract_ontology_id, poll_ontology_status, upload_ontology
 
 
 def _settings(**kwargs) -> Settings:
@@ -132,3 +132,137 @@ def test_upload_missing_config(artifact, monkeypatch):
     s = Settings(_env_file=None)  # upload disabled, no baseurl/uuid/key
     with pytest.raises(UploadError):
         upload_ontology(s, artifact, repository_name="r")
+
+
+# ---------------------------------------------------------------------------
+# extract_ontology_id
+# ---------------------------------------------------------------------------
+
+def test_extract_id_from_flat_dict():
+    assert extract_ontology_id({"_id": "abc123", "name": "x"}) == "abc123"
+
+
+def test_extract_id_from_data_wrapped_dict():
+    assert extract_ontology_id({"data": {"_id": "abc123"}}) == "abc123"
+
+
+def test_extract_id_missing_returns_none():
+    assert extract_ontology_id({"name": "x"}) is None
+
+
+def test_extract_id_none_payload_returns_none():
+    assert extract_ontology_id(None) is None
+
+
+# ---------------------------------------------------------------------------
+# poll_ontology_status
+# ---------------------------------------------------------------------------
+
+def _get_settings():
+    return _settings()
+
+
+def test_poll_returns_active_immediately(monkeypatch):
+    def fake_get(url, *, params, headers, timeout):
+        assert params["filters[_id][$eq]"] == "oid-1"
+        assert params["selectedFields"] == "_id,fileGraphStatus"
+        return _Resp(200, b'[{"_id": "oid-1", "fileGraphStatus": "active"}]')
+
+    monkeypatch.setattr(httpx, "get", fake_get)
+
+    status = poll_ontology_status(_get_settings(), "oid-1")
+    assert status == "active"
+
+
+def test_poll_terminal_error_status(monkeypatch):
+    def fake_get(url, *, params, headers, timeout):
+        return _Resp(200, b'[{"_id": "x", "fileGraphStatus": "error"}]')
+
+    monkeypatch.setattr(httpx, "get", fake_get)
+    assert poll_ontology_status(_get_settings(), "x") == "error"
+
+
+def test_poll_waits_until_terminal(monkeypatch):
+    monkeypatch.setattr("time.sleep", lambda *_: None)
+    responses = [
+        b'[{"_id": "oid-1", "fileGraphStatus": "processing"}]',
+        b'[{"_id": "oid-1", "fileGraphStatus": "processing"}]',
+        b'[{"_id": "oid-1", "fileGraphStatus": "active"}]',
+    ]
+    calls: list[int] = []
+
+    def fake_get(url, *, params, headers, timeout):
+        idx = len(calls)
+        calls.append(idx)
+        return _Resp(200, responses[idx])
+
+    monkeypatch.setattr(httpx, "get", fake_get)
+    waiting: list[str | None] = []
+
+    status = poll_ontology_status(
+        _get_settings(), "oid-1", poll_interval=0, on_waiting=waiting.append
+    )
+    assert status == "active"
+    assert len(calls) == 3
+    assert waiting == ["processing", "processing"]  # called before each sleep, not on terminal
+
+
+def test_poll_data_wrapped_response(monkeypatch):
+    def fake_get(url, *, params, headers, timeout):
+        return _Resp(200, b'{"data": [{"_id": "x", "fileGraphStatus": "active"}], "meta": {}}')
+
+    monkeypatch.setattr(httpx, "get", fake_get)
+    assert poll_ontology_status(_get_settings(), "x") == "active"
+
+
+def test_poll_http_error_raises(monkeypatch):
+    def fake_get(url, *, params, headers, timeout):
+        return _Resp(403, b'{"message": "forbidden"}')
+
+    monkeypatch.setattr(httpx, "get", fake_get)
+    with pytest.raises(UploadError, match="HTTP 403"):
+        poll_ontology_status(_get_settings(), "x")
+
+
+def test_poll_network_error_raises(monkeypatch):
+    def fake_get(url, *, params, headers, timeout):
+        raise httpx.ConnectError("refused")
+
+    monkeypatch.setattr(httpx, "get", fake_get)
+    with pytest.raises(UploadError, match="network error"):
+        poll_ontology_status(_get_settings(), "x")
+
+
+def test_poll_on_response_called_for_every_response_including_terminal(monkeypatch):
+    monkeypatch.setattr("time.sleep", lambda *_: None)
+    responses = [
+        b'[{"_id": "x", "fileGraphStatus": "processing"}]',
+        b'[{"_id": "x", "fileGraphStatus": "active"}]',
+    ]
+    calls: list[int] = []
+
+    def fake_get(url, *, params, headers, timeout):
+        idx = len(calls)
+        calls.append(idx)
+        return _Resp(200, responses[idx])
+
+    monkeypatch.setattr(httpx, "get", fake_get)
+    received: list[Any] = []
+
+    poll_ontology_status(_get_settings(), "x", poll_interval=0, on_response=received.append)
+    # on_response is called for every response, including the terminal one
+    assert len(received) == 2
+    assert received[0][0]["fileGraphStatus"] == "processing"
+    assert received[1][0]["fileGraphStatus"] == "active"
+
+
+def test_poll_strips_trailing_slash_from_baseurl(monkeypatch):
+    seen: dict[str, str] = {}
+
+    def fake_get(url, *, params, headers, timeout):
+        seen["url"] = url
+        return _Resp(200, b'[{"_id": "x", "fileGraphStatus": "active"}]')
+
+    monkeypatch.setattr(httpx, "get", fake_get)
+    poll_ontology_status(_settings(baseurl="https://api.example.com/"), "x")
+    assert seen["url"] == "https://api.example.com/code-ontology"
