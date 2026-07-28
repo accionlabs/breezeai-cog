@@ -106,7 +106,7 @@ Watch the host-tree qualifier for **embedded DSLs**: SQL in a string, or GraphQL
 the established precedent (a SQL string `const q = "SELECT …"` → `lexical_declaration`, the *host* node
 that wraps it) — surface the wrapping host node, or `synthetic` when there's no distinct one per item;
 **never** the embedded grammar's own node type (e.g. `field_definition`). The page / mount / rpc /
-graphql distinction is carried by `routeKind` + `framework`, **not** by `nodeType`, so nothing is lost.
+`query`/`mutation`/`subscription` (GraphQL) distinction is carried by `routeKind` + `framework`, **not** by `nodeType`, so nothing is lost.
 
 ---
 
