@@ -145,6 +145,7 @@ found) and the path to the output file.
 | `--out <dir>` | the repo's parent folder | Output **directory** (not a filename). The file is named `<repo>-project-analysis.ndjson.gz`. |
 | `--language <name>` | all (auto-detected) | Only analyze this language. Repeat the flag for several (e.g. `--language python --language java`). |
 | `--capture-statements` | off | Also record statements *inside* functions — needed to detect API calls, DB queries, and routes. Off by default because it produces more data. |
+| `--batch` | off | Treat `--repo` as a **workspace folder** and analyze each immediate subdirectory as its own project (one `.ndjson.gz` per subdir). See *Batch mode* below. |
 | `--jobs <n>` | number of CPU cores | How many files to parse in parallel. |
 | `--upload` | off | After analysis, upload the `.ndjson.gz` to the Breeze backend (`POST /code-ontology/generate`). Requires `--baseurl`, `--uuid`, and `--user-api-key` (each also readable from the environment). |
 | `--baseurl <url>` | env `BREEZE_API_URL` | Breeze backend base URL (used with `--upload`). |
@@ -192,6 +193,37 @@ and `API_KEY` environment variables (or `.env`), so you can keep secrets out of 
 
 > This command only reads **local** folders. To analyze a remote repository by cloning or diffing
 > commits, use the HTTP service's `/api/analyze-diff` endpoint (below).
+
+### Batch mode
+
+When you have several repositories side by side under one **workspace folder**, `--batch` analyzes
+them all in a single command instead of one run each. Point `--repo` at the workspace and the tool
+treats **each immediate subdirectory as its own project**, writing one `.ndjson.gz` per subdirectory.
+
+```
+workspace/            ← point --repo here, with --batch
+├── service-a/        → service-a-project-analysis.ndjson.gz
+├── service-b/        → service-b-project-analysis.ndjson.gz
+└── shared-lib/       → shared-lib-project-analysis.ndjson.gz
+```
+
+```bash
+breezeai-cog repo-to-json-tree --repo ./workspace --batch --capture-statements --out ./out
+```
+
+- Only **immediate** subdirectories are analyzed — the tool does not recurse into deeper nesting.
+- **Dot-directories** (e.g. `.git`) and any **loose files** sitting directly in the workspace are
+  skipped; only real subfolders become projects.
+- Each subdirectory is analyzed independently and prints its own summary under a `[name]` heading.
+- If the workspace has no subdirectories to analyze, the command exits with an error.
+
+Batch mode combines with all the other flags (`--language`, `--capture-statements`, `--jobs`, and
+the `--upload` group), applying them to every project in the run.
+
+> ⚠️ **Uploading in batch:** `--upload` uses a single `--uuid`, so **every** subdirectory is uploaded
+> into that **same** Breeze project. To land each repository in its own project, run them separately
+> with their own `--uuid` instead of using `--batch`. If any project's upload fails, the remaining
+> projects still run and the command exits non-zero, listing which ones failed.
 
 ---
 
