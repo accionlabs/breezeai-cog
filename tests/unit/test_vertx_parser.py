@@ -85,8 +85,43 @@ def test_claims_selects_vertx() -> None:
     registry.register(JavaParser())
     registry.register(VertxParser())
     assert registry.select("X.java", b"import io.vertx.core.Vertx;").name == "java-vertx"
+    # Vert.x 2.x package root (P3 webapp-engine modules) must also select the Vert.x parser
+    assert registry.select("X.java", b"import org.vertx.java.platform.Verticle;").name == "java-vertx"
     assert registry.select("X.java", b"package x;").name == "java"  # plain Java -> base
     registry.clear()
+
+
+# Vert.x 2.x ServiceServer idiom (P3 Group-A): registerHandler in a loop over a handler map.
+_V2_SRC = b'''package jp.co.payroll.p3.service;
+
+import org.vertx.java.platform.Verticle;
+import org.vertx.java.core.Handler;
+
+public class ServiceServer extends Verticle {
+    public void start() {
+        for (Map.Entry<String, BusModBase> entry : serviceEventBus.entrySet()) {
+            String ebName = entry.getKey();
+            vertx.eventBus().registerHandler(ebName, (Handler<Message<JsonObject>>) entry.getValue());
+        }
+    }
+}
+'''
+
+
+def test_vertx2_registerHandler_detected_as_consumer(tmp_path) -> None:
+    # Gap 1 parts 1+2: org.vertx.java activation + registerHandler → eventbus_consumer.
+    p = tmp_path / "ServiceServer.java"
+    p.write_text(_V2_SRC.decode())
+    ctx = ParseContext(path="ServiceServer.java", abs_path=p, source=_V2_SRC,
+                       repo_root=tmp_path, capture_statements=True)
+    rec = VertxParser().parse_file(ctx)
+    assert rec.framework == "vertx"
+    consumers = [s for s in rec.statements if s.semanticType == "eventbus_consumer"]
+    assert len(consumers) == 1
+    assert consumers[0].framework == "vertx"
+    # endpoint is the loop variable — address resolution (layers 3/4 + constant folding) is
+    # deliberately out of scope for this fix; we only assert the consumer is now detected.
+    assert consumers[0].endpoint == "ebName"
 
 
 def test_output_validates(tmp_path) -> None:

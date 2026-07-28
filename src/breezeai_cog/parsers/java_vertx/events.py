@@ -26,6 +26,8 @@ _EVENTBUS = {
     "publish": "eventbus_publish",
     "consumer": "eventbus_consumer",
     "localConsumer": "eventbus_consumer",
+    "registerHandler": "eventbus_consumer",  # Vert.x 2.x consumer API (renamed consumer in 3.x)
+    "registerLocalHandler": "eventbus_consumer",  # 2.x cluster-local variant
 }
 _TIMERS = {"setTimer", "setPeriodic"}
 _HTTP_VERBS = {"get", "post", "put", "delete", "patch", "options", "head"}
