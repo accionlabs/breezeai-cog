@@ -1,5 +1,5 @@
-"""Vert.x event/route detection. Vert.x is call-based, so this
-walks the Java AST for method invocations and maps them to event/messaging semantics:
+"""Vert.x event/route detection over the **Java** AST. Vert.x is call-based, so this
+walks method invocations and maps them to event/messaging/route semantics:
 
   eventBus.send/publish/consumer → eventbus_send / eventbus_publish / eventbus_consumer
   vertx.setTimer/setPeriodic     → timer
@@ -7,30 +7,23 @@ walks the Java AST for method invocations and maps them to event/messaging seman
   ServiceBinder…setAddress(...)  → service_proxy    (+ @ProxyGen interfaces)
   router.get/post/…("/path")     → route
 
-Per the capture contract, a detection sets ``semanticType`` on the **same span**:
-so where the base parser already captured the enclosing statement (top level of a method
-body) we enrich it in place; for calls inside lambda handlers — which the base skips as a
-nested scope — we add a statement parented to the enclosing function. Mutates ``record``."""
+The shared decision table (which call → which semanticType) lives in
+``parsers/vertx_common``; only the Java-grammar AST extraction (``_parts``) is here. The
+Groovy counterpart is ``parsers/groovy_vertx/events.py``.
+
+Per the capture contract, a detection sets ``semanticType`` on the **same span**: where the
+base parser already captured the enclosing statement (top level of a method body) we enrich
+it in place; for calls inside lambda handlers — which the base skips as a nested scope — we
+add a statement parented to the enclosing function. Mutates ``record``."""
 
 from __future__ import annotations
 
 from tree_sitter import Node
 
 from ...emit import disambiguate, file_id, statement_id
-from ...schemas import FileRecord, Statement
+from ...schemas import FileRecord, SemanticType, Statement
 from ..treesitter import first_line, node_text
-
-_EVENTBUS = {
-    "send": "eventbus_send",
-    "request": "eventbus_send",  # modern send-with-reply (point-to-point) → same as send
-    "publish": "eventbus_publish",
-    "consumer": "eventbus_consumer",
-    "localConsumer": "eventbus_consumer",
-    "registerHandler": "eventbus_consumer",  # Vert.x 2.x consumer API (renamed consumer in 3.x)
-    "registerLocalHandler": "eventbus_consumer",  # 2.x cluster-local variant
-}
-_TIMERS = {"setTimer", "setPeriodic"}
-_HTTP_VERBS = {"get", "post", "put", "delete", "patch", "options", "head"}
+from ..vertx_common import classify_call, enclosing_statement, owner_function
 
 
 def _invocations(root: Node) -> list[Node]:
@@ -47,6 +40,8 @@ def _invocations(root: Node) -> list[Node]:
 
 
 def _parts(call: Node, source: bytes) -> tuple[str, str | None, str | None, str]:
+    """(method, first-string-arg, raw-first-arg, receiver) for a Java ``method_invocation``.
+    The Java grammar exposes ``object``/``name``/``arguments`` fields directly on the call."""
     name_node = call.child_by_field_name("name")
     method = node_text(name_node, source) if name_node is not None else ""
     obj_node = call.child_by_field_name("object")
@@ -62,49 +57,10 @@ def _parts(call: Node, source: bytes) -> tuple[str, str | None, str | None, str]
     return method, first_str, first_arg, obj
 
 
-def _classify(call: Node, source: bytes) -> tuple[str, str | None, str | None, str | None] | None:
+def _classify(call: Node, source: bytes) -> tuple[SemanticType, str | None, str | None, str | None] | None:
     """→ (semanticType, method, endpoint, routeKind) or None."""
     method, first_str, first_arg, obj = _parts(call, source)
-    obj_l = obj.lower()
-
-    if method in _EVENTBUS and ("bus" in obj_l or obj_l == "eb"):
-        # Address may be a string literal OR a constant/variable (common in real code:
-        # `eventBus.send(ADDRESS, msg)`) — fall back to the first-arg text so the flow
-        # is still captured (endpoint = the symbol name; None only if there is no arg).
-        return _EVENTBUS[method], None, first_str or first_arg, None
-    if method in _TIMERS:
-        return "timer", None, None, None
-    if method == "deployVerticle":
-        return "verticle_deploy", None, first_str or first_arg, None
-    if method == "setAddress" and first_str is not None:
-        return "service_proxy", None, first_str, None
-    if method in _HTTP_VERBS and first_str and first_str.startswith("/") and "router" in obj_l:
-        return "route", method.upper(), first_str, "route"
-    if method == "route" and first_str and first_str.startswith("/") and "router" in obj_l:
-        return "route", None, first_str, "route"
-    return None
-
-
-def _enclosing_statement(line: int, statements: list[Statement]) -> Statement | None:
-    best: Statement | None = None
-    best_span: int | None = None
-    for s in statements:
-        if s.startLine <= line <= s.endLine:
-            span = s.endLine - s.startLine
-            if best_span is None or span < best_span:
-                best, best_span = s, span
-    return best
-
-
-def _owner_function(line: int, functions, fallback: str) -> str:
-    best = None
-    best_span: int | None = None
-    for f in functions:
-        if f.startLine <= line <= f.endLine:
-            span = f.endLine - f.startLine
-            if best_span is None or span < best_span:
-                best, best_span = f, span
-    return best.id if best is not None else fallback
+    return classify_call(method, first_str, first_arg, obj)
 
 
 def detect_vertx(root: Node, source: bytes, path: str, record: FileRecord) -> bool:
@@ -120,7 +76,7 @@ def detect_vertx(root: Node, source: bytes, path: str, record: FileRecord) -> bo
         semantic, method, endpoint, route_kind = info
         line = call.start_point[0] + 1
 
-        stmt = _enclosing_statement(line, record.statements)
+        stmt = enclosing_statement(line, record.statements)
         if stmt is not None:  # detection on the same span → enrich in place
             stmt.semanticType = semantic
             stmt.framework = "vertx"
@@ -134,7 +90,7 @@ def detect_vertx(root: Node, source: bytes, path: str, record: FileRecord) -> bo
             new_id = disambiguate(statement_id(path, line, call.start_point[1]), seen)
             record.statements.append(Statement(
                 id=new_id,
-                parentId=_owner_function(line, record.functions, fid),
+                parentId=owner_function(line, record.functions, fid),
                 nodeType=call.type,
                 semanticType=semantic,
                 text=first_line(node_text(call, source)),
