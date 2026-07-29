@@ -237,10 +237,14 @@ def match_db(callee: str, method: str, language: str | None = None,
                 return "elasticsearch"
         elif receiver.endswith("client") or receiver in _ES_RECEIVERS:
             return "elasticsearch"  # e.g. this.client.search(dsl) / this.searchService.search(...)
-    # Cache/Redis service calls — gated on the TERMINAL receiver only (like ES above), so a
-    # ``…cache``-named object deeper in the chain can't drag a plain ``Map.delete`` into redis:
-    # ``this.responseCache.entries.delete(key)`` is a Map op on ``entries``, not a Redis call.
-    if receiver and (receiver in _CACHE_RECEIVERS or receiver.endswith("cache") or receiver.endswith("redis")):
+    # Cache/Redis service calls — gated on the TERMINAL receiver only (like ES above), and on an
+    # explicit cache/redis receiver NAME. A bare ``endswith("cache")`` is deliberately NOT used:
+    # in-memory ``Map``/``LRUCache`` fields are routinely named ``…Cache`` (e.g. a DataLoader
+    # ``dataLoaderCache: Map<K,V>``), and their ``.get()``/``.set()`` are memory ops, not Redis.
+    # Residual: an in-memory object named exactly ``cache``/``cacheService`` still matches, and the
+    # NestJS ``Cache`` abstraction may be memory-backed — resolving those needs type resolution
+    # (see typed_db_ids) plus a cache-vs-redis vocabulary decision; left for a follow-up.
+    if receiver and (receiver in _CACHE_RECEIVERS or receiver.endswith("redis")):
         if m in _CACHE_VERBS or m in ("delete", "remove"):
             return "redis"
     if m in _GENERIC:
