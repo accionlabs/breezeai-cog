@@ -130,10 +130,6 @@ _DOTNET = frozenset({"csharp", "vb"})
 # TypeScript ``response.objects.filter()`` is not mislabelled as Django (mirrors the EF gate).
 _PYTHON = frozenset({"python"})
 
-# JS/TS files must never match Django verbs — ``Array.find``/``.filter()``/``.values()`` are
-# standard JS collection methods, not ORM calls.
-_JS_TS = frozenset({"typescript", "javascript"})
-
 # Generic verbs that collide heavily with ordinary (non-DB) code: ``find`` is
 # ``Array.prototype.find``, ``update`` is ``dict.update``/``Map.set``-adjacent, ``create``
 # is ``Object.create``/Zustand ``create``, ``remove`` is ``Cookies.remove``, etc. For these
@@ -273,7 +269,7 @@ def match_db(callee: str, method: str, language: str | None = None,
         if receiver and any(receiver.endswith(s) for s in _NON_DB_RECEIVERS):
             return None  # a cache/collection/UI-state/etc. receiver — not data access
         return "orm"
-    if m in _DJANGO_VERBS and language not in _JS_TS and (language is None or language in _PYTHON) and (
+    if m in _DJANGO_VERBS and (language is None or language in _PYTHON) and (
         ".objects." in low or low.startswith("objects.") or "queryset" in low
     ):
         return "django"
