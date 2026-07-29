@@ -130,6 +130,10 @@ _DOTNET = frozenset({"csharp", "vb"})
 # TypeScript ``response.objects.filter()`` is not mislabelled as Django (mirrors the EF gate).
 _PYTHON = frozenset({"python"})
 
+# JS/TS files must never match Django verbs — ``Array.find``/``.filter()``/``.values()`` are
+# standard JS collection methods, not ORM calls.
+_JS_TS = frozenset({"typescript", "javascript"})
+
 # Generic verbs that collide heavily with ordinary (non-DB) code: ``find`` is
 # ``Array.prototype.find``, ``update`` is ``dict.update``/``Map.set``-adjacent, ``create``
 # is ``Object.create``/Zustand ``create``, ``remove`` is ``Cookies.remove``, etc. For these
@@ -222,10 +226,24 @@ def match_db(callee: str, method: str, language: str | None = None,
     if m in _EF_LINQ_VERBS and language in _DOTNET:
         return "entity_framework" if _has_ef_source(low) else None
     receiver = low.rsplit(".", 1)[0].rsplit(".", 1)[-1] if "." in low else ""
-    if m in _ES_VERBS and receiver and (receiver.endswith("client") or receiver in _ES_RECEIVERS):
-        return "elasticsearch"  # e.g. this.client.search(dsl) / esClient.bulk(...)
+    # Also extract the full receiver chain (everything before the method) so we can match
+    # service-wrapper patterns like ``this.searchService.search()`` where the terminal segment
+    # is ``searchservice`` but ``receiver`` (the segment before it) resolves to ``this``.
+    _receiver_chain = low.rsplit(".", 1)[0] if "." in low else ""
+    # Check all segments in the chain for an ES/cache receiver match.
+    _chain_segments = _receiver_chain.split(".") if _receiver_chain else []
+    _any_es_receiver = receiver and (receiver.endswith("client") or receiver in _ES_RECEIVERS) or \
+        any(seg in _ES_RECEIVERS or seg.endswith("client") for seg in _chain_segments)
+    if m in _ES_VERBS and _any_es_receiver:
+        return "elasticsearch"  # e.g. this.client.search(dsl) / this.searchService.search(...)
     # Cache/Redis service calls — gated on a cache-specific receiver so Map.get/Set.set stay out.
-    if receiver and (receiver in _CACHE_RECEIVERS or receiver.endswith("cache") or receiver.endswith("redis")):
+    _any_cache_receiver = (
+        receiver and (receiver in _CACHE_RECEIVERS or receiver.endswith("cache") or receiver.endswith("redis"))
+    ) or any(
+        seg in _CACHE_RECEIVERS or seg.endswith("cache") or seg.endswith("redis")
+        for seg in _chain_segments
+    )
+    if _any_cache_receiver:
         if m in _CACHE_VERBS or m in ("delete", "remove"):
             return "redis"
     if m in _GENERIC:
@@ -239,6 +257,10 @@ def match_db(callee: str, method: str, language: str | None = None,
                     continue
             return hint
         if m in _HIGH_COLLISION:
+            # Non-DB receivers (canvas ctx, logger, cache, …) are never data access — bail
+            # early before the suffix heuristic can misfire (e.g. ``ctx.save()``).
+            if receiver and any(receiver.endswith(s) for s in _NON_DB_RECEIVERS):
+                return None
             if typed_db_ids is not None:
                 # Type-resolved gate (TypeScript class context): only match when the receiver
                 # is a field explicitly typed as an ORM client — avoids name-suffix guessing.
@@ -250,7 +272,7 @@ def match_db(callee: str, method: str, language: str | None = None,
         if receiver and any(receiver.endswith(s) for s in _NON_DB_RECEIVERS):
             return None  # a cache/collection/UI-state/etc. receiver — not data access
         return "orm"
-    if m in _DJANGO_VERBS and (language is None or language in _PYTHON) and (
+    if m in _DJANGO_VERBS and language not in _JS_TS and (language is None or language in _PYTHON) and (
         ".objects." in low or low.startswith("objects.") or "queryset" in low
     ):
         return "django"
