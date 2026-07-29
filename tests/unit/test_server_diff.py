@@ -14,6 +14,7 @@ from fastapi.testclient import TestClient
 from breezeai_cog.config import Settings
 from breezeai_cog.server.app import create_app
 from breezeai_cog.server.deps import ServerDeps
+from breezeai_cog.server.git import parse_repo_url
 
 BODY = {
     "repoUrl": "https://github.com/acme/widgets.git",
@@ -109,6 +110,16 @@ def test_missing_fields(captured: _Captured) -> None:
 
 def test_invalid_repo_url(captured: _Captured) -> None:
     client = _make_client(captured, filter_set=None, deleted=[])
-    r = client.post("/api/analyze-diff", json={**BODY, "repoUrl": "https://example.com/a/b"})
+    r = client.post("/api/analyze-diff", json={**BODY, "repoUrl": "https://unsupported-host.com/a/b"})
     assert r.status_code == 400
-    assert r.json() == {"error": "Invalid repo URL (supported hosts: github.com, gitlab.com, bitbucket.org)"}
+    assert r.json() == {"error": "Invalid repo URL (supported hosts: github.com, bitbucket.org, gitlab.com, dev.azure.com)"}
+
+
+def test_azure_devops_repo_url() -> None:
+    url = "https://dev.azure.com/my-org/my-project/_git/my-repo"
+    res = parse_repo_url(url)
+    assert res == {
+        "provider": "azure_devops",
+        "owner": "my-org",
+        "repo": "my-project/my-repo"
+    }

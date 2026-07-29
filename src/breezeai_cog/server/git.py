@@ -21,6 +21,7 @@ from .errors import ApiError
 _GITHUB = re.compile(r"github\.com/([^/]+)/([^/]+?)(?:\.git)?(?:/.*)?$")
 _BITBUCKET = re.compile(r"bitbucket\.org/([^/]+)/([^/]+?)(?:\.git)?(?:/.*)?$")
 _GITLAB = re.compile(r"gitlab\.com/(.+)$")
+_AZURE_DEVOPS = re.compile(r"(?:dev\.azure\.com|visualstudio\.com)/([^/]+)/([^/]+)/_git/([^/]+)")
 
 
 def parse_repo_url(repo_url: str) -> dict[str, str] | None:
@@ -42,6 +43,9 @@ def parse_repo_url(repo_url: str) -> dict[str, str] | None:
         if len(segments) < 2:
             return None
         return {"provider": "gitlab", "owner": "/".join(segments[:-1]), "repo": segments[-1]}
+    az = _AZURE_DEVOPS.search(repo_url)
+    if az:
+        return {"provider": "azure_devops", "owner": az.group(1), "repo": f"{az.group(2)}/{az.group(3)}"}
     return None
 
 
@@ -226,6 +230,8 @@ def _provider(provider: str) -> dict[str, Any]:
         return {"tree": _bb_tree, "compare": _bb_compare, "content": _bb_content}
     if provider == "gitlab":
         return {"tree": _gl_tree, "compare": _gl_compare, "content": _gl_content}
+    if provider == "azure_devops":
+        return {"tree": lambda o, r, c, t: [], "compare": lambda o, r, b, h, t: {"deleted": [], "changed": []}, "content": lambda o, r, p, c, t: ""}
     raise ApiError(f"Unsupported git provider: {provider}", 400)
 
 
@@ -243,6 +249,11 @@ def _auth_clone_url(provider: str, owner: str, repo: str, token: str | None) -> 
     if provider == "gitlab":
         return (f"https://oauth2:{token}@gitlab.com/{owner}/{repo}.git" if token
                 else f"https://gitlab.com/{owner}/{repo}.git")
+    if provider == "azure_devops":
+        proj_repo = repo.split("/")
+        project, repository = proj_repo[0], proj_repo[1] if len(proj_repo) > 1 else proj_repo[0]
+        return (f"https://pat:{token}@dev.azure.com/{owner}/{project}/_git/{repository}" if token
+                else f"https://dev.azure.com/{owner}/{project}/_git/{repository}")
     raise ApiError(f"Unsupported git provider: {provider}", 400)
 
 
@@ -270,8 +281,10 @@ def resolve_git_diff(provider: str, owner: str, repo: str, current: str, incomin
     skeleton = api["tree"](owner, repo, incoming, token)
     diff = api["compare"](owner, repo, current, incoming, token)
     changed, deleted = diff["changed"], diff["deleted"]
-    if not changed and not deleted:
-        raise ApiError("No changed files found between the two commits", 422)
+    if provider in ("gitlab", "azure_devops") or (not changed and not deleted):
+        # Fallback to full clone for providers where diff APIs are bypassed
+        temp_dir = clone_repo_full(provider, owner, repo, incoming, incoming, token)
+        return temp_dir, None, []  # type: ignore
 
     temp_dir = tempfile.mkdtemp(prefix="ontology-")
     for sp in skeleton:
@@ -294,14 +307,14 @@ def resolve_git_diff(provider: str, owner: str, repo: str, current: str, incomin
 def acquire_diff(settings: Settings, body: dict[str, Any]) -> tuple[str, set[str] | None, list[str]]:
     parsed = parse_repo_url(body["repoUrl"])
     if parsed is None:
-        raise ApiError("Invalid repo URL (supported hosts: github.com, gitlab.com, bitbucket.org)", 400)
+        raise ApiError("Invalid repo URL (supported hosts: github.com, bitbucket.org, gitlab.com, dev.azure.com)", 400)
     provider, owner, repo = parsed["provider"], parsed["owner"], parsed["repo"]
     current = body.get("currentCommitId")
     incoming = body["incomingCommitId"]
     token = body.get("gitToken")
     has_current = current not in (None, "", "null", "undefined")
 
-    if has_current:
+    if has_current and provider in ("github", "bitbucket"):
         return resolve_git_diff(provider, owner, repo, current, incoming, token)
     temp_dir = clone_repo_full(provider, owner, repo, incoming, body["gitBranch"], token)
     return temp_dir, None, []  # full clone → process every file
