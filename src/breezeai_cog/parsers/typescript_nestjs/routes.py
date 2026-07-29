@@ -35,6 +35,16 @@ _MESSAGING_DECORATORS = {"EventPattern": "EVENT", "MessagePattern": "MESSAGE"}
 # they are NOT emitted as routes (matching the TypeScript resolver-map/SDL detector).
 _RESOLVER_DECORATORS = {"Resolver"}
 _GRAPHQL_OPS = {"Query": "query", "Mutation": "mutation", "Subscription": "subscription"}
+# @ResolveField/@ResolveProperty — field-resolver methods on a @Resolver class.
+# Unlike @Query/@Mutation they are not root operations, but they are the actual
+# implementation of individual GraphQL fields and must appear in the ontology.
+_FIELD_RESOLVERS = {"ResolveField", "ResolveProperty"}
+# Extracts the return type from a @ResolveField(() => Brand) / @ResolveField(() => [Brand]) arg.
+_RESOLVE_RETURN_RE = re.compile(r"=>\s*\[?\s*([A-Za-z_$][\w$]*)")
+# Singleton-only variant (no leading `[`): distinguishes a grouping-object return
+# `@Mutation(() => NotificationsMutation)` from an array return `@Query(() => [Brand])`.
+# Grouping resolvers always return a singleton shell; entity queries return arrays.
+_SINGLETON_RETURN_RE = re.compile(r"=>\s*([A-Za-z_$][\w$]*)")
 _NAME_OPT_RE = re.compile(r"""\bname\s*:\s*['"`]([^'"`]+)['"`]""")  # @Query(..., { name: 'x' })
 _LEADING_ID_RE = re.compile(r"[A-Za-z_$][\w$]*")
 
@@ -64,6 +74,8 @@ _NON_DTO_TYPES = {
     "Promise", "Observable", "Array", "Map", "Set", "Record", "Partial", "Readonly",
     "void", "any", "unknown", "never", "null", "undefined", "string", "number",
     "boolean", "object", "bigint", "symbol", "this", "true", "false",
+    # NestJS/GraphQL scalar wrappers used as @ResolveField return types (e.g. () => Number)
+    "Number", "String", "Boolean",
 }
 
 
@@ -130,6 +142,80 @@ def _request_dto(member: Node, source: bytes) -> str | None:
     return None
 
 
+def _field_resolver_return_dto(dec: Decorator) -> str | None:
+    """Extract the GraphQL return type from ``@ResolveField(() => Brand)`` — the first
+    identifier after ``=>`` in the first decorator arg, skipping primitive scalars."""
+    if not dec.args:
+        return None
+    m = _RESOLVE_RETURN_RE.search(dec.args[0])
+    if m is None:
+        return None
+    return _dto_from_type(m.group(1))
+
+
+def _resolver_grouping_type(decs: list[Node], source: bytes) -> str | None:
+    """The explicit type arg of ``@Resolver(() => T)`` → ``T``, else ``None`` for plain
+    ``@Resolver()`` / ``@Resolver('field')`` (standard entity resolvers)."""
+    for dec in decs:
+        d = decorator(dec, source)
+        if d.name in _RESOLVER_DECORATORS and d.args:
+            m = _RESOLVE_RETURN_RE.search(d.args[0])
+            if m:
+                return m.group(1)
+    return None
+
+
+def _parent_op_for_grouping(
+    body: Node, source: bytes, grouping_type: str
+) -> tuple[str, str] | None:
+    """Scan the class body for a ``@Query``/``@Mutation`` that returns a **singleton**
+    ``grouping_type`` — e.g. ``@Mutation(() => NotificationsMutation)`` (no ``[``).
+    Returns ``(op_name, 'MUTATION'|'QUERY')`` or ``None``.
+
+    Distinguishes grouping resolvers (singleton shell, ``@Mutation(() => T)``) from
+    entity resolvers (array return, ``@Query(() => [T])``): ``_SINGLETON_RETURN_RE``
+    does not match when ``[`` follows ``=>`` because ``[`` is not in ``[A-Za-z_$]``."""
+    pending: list[Node] = []
+    for member in body.named_children:
+        if member.type == "decorator":
+            pending.append(member)
+            continue
+        if member.type != "method_definition":
+            pending = []
+            continue
+        for dec in pending:
+            d = decorator(dec, source)
+            gql_method = _GRAPHQL_OPS.get(d.name)
+            if gql_method is None or not d.args:
+                continue
+            m = _SINGLETON_RETURN_RE.search(d.args[0])
+            if m and m.group(1) == grouping_type:
+                mname = node_text(member.child_by_field_name("name"), source)
+                return _graphql_op_name(d, mname), gql_method.upper()
+        pending = []
+    return None
+
+
+def _args_dto(member: Node, source: bytes) -> str | None:
+    """The requestDTO for a ``@ResolveField`` method — the first ``@Args()``-decorated
+    parameter whose declared type is a non-primitive class (e.g. ``GetBrandsArgs``).
+    Prefers a parameter named ``input``/``data`` (conventional DTO name), then takes the
+    first class-typed ``@Args()`` param. Returns ``None`` when all ``@Args`` are scalars."""
+    preferred: str | None = None
+    first_class: str | None = None
+    for p in extract_params(member.child_by_field_name("parameters"), source):
+        if not any(d.name == "Args" for d in p.decorators):
+            continue
+        t = _dto_from_type(p.type)
+        if t is None:
+            continue
+        if first_class is None:
+            first_class = t
+        if p.name in ("input", "data") and preferred is None:
+            preferred = t
+    return preferred or first_class
+
+
 def _join(base: str, sub: str) -> str:
     parts = [p.strip("/") for p in (base, sub) if p and p.strip("/")]
     return "/" + "/".join(parts) if parts else "/"
@@ -193,6 +279,13 @@ def detect_nest_routes(
             continue
         ctrl_guards = _guards(decs, source) if is_controller else []
         ctrl_version = _version(decs, source) if is_controller else None
+        # Grouping resolver: @Resolver(() => T) where a @Mutation/@Query on the class
+        # returns a singleton T — @ResolveField methods inherit the parent op's identity.
+        parent_op_info: tuple[str, str] | None = None
+        if is_resolver:
+            grouping_type = _resolver_grouping_type(decs, source)
+            if grouping_type:
+                parent_op_info = _parent_op_for_grouping(body, source, grouping_type)
         pending: list[Node] = []
         for member in body.named_children:
             if member.type == "decorator":
@@ -210,7 +303,8 @@ def detect_nest_routes(
                     verb = _METHOD_DECORATORS.get(d.name) if is_controller else None
                     msg = _MESSAGING_DECORATORS.get(d.name)
                     gql = _GRAPHQL_OPS.get(d.name) if is_resolver else None
-                    if verb is None and msg is None and gql is None:
+                    fld = d.name if (is_resolver and d.name in _FIELD_RESOLVERS) else None
+                    if verb is None and msg is None and gql is None and fld is None:
                         continue
                     sl, sc = dec.start_point[0] + 1, dec.start_point[1]
                     common = dict(
@@ -254,7 +348,30 @@ def detect_nest_routes(
                             method=gql.upper(),
                             endpoint=_graphql_op_name(d, mname),
                             routeKind=gql,
-                            responseDTO=_return_dto(member, source),
+                            responseDTO=_field_resolver_return_dto(d) or _return_dto(member, source),
                         ))
+                    elif fld is not None:  # @ResolveField/@ResolveProperty field resolver
+                        if parent_op_info is not None:
+                            # Grouping resolver: inherit parent @Mutation/@Query identity.
+                            op_name, op_method = parent_op_info
+                            routes.append(Statement(
+                                **{**common, "framework": "graphql"},
+                                semanticType="route",
+                                method=op_method,
+                                endpoint=f"{op_name}.{mname}",
+                                routeKind=op_method.lower(),
+                                requestDTO=_args_dto(member, source),
+                                responseDTO=_field_resolver_return_dto(d) or _return_dto(member, source),
+                            ))
+                        else:
+                            routes.append(Statement(
+                                **{**common, "framework": "graphql"},
+                                semanticType="route",
+                                method="QUERY",
+                                endpoint=mname,
+                                routeKind="field_resolver",
+                                requestDTO=_args_dto(member, source),
+                                responseDTO=_field_resolver_return_dto(d) or _return_dto(member, source),
+                            ))
             pending = []
     return routes

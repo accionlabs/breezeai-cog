@@ -279,6 +279,7 @@ def build_function(
     capture: bool,
     limit: int,
     resolve: CallResolver = noop_resolver,
+    typed_db_ids: frozenset[str] | None = None,
 ) -> tuple[list[Function], list[Statement]]:
     start, end = line_span(node)
     fid = disambiguate(function_id(path, name, start, class_name=class_name), seen_ids)
@@ -308,13 +309,14 @@ def build_function(
         body, source, path, parent_id=fid, capture=capture, limit=limit, seen_ids=seen_ids,
         descend_all=True,  # walk inline callbacks/lambdas — attribute their statements here
         barriers=barriers,  # …except separately-extracted nested named functions
+        typed_db_ids=typed_db_ids,
     )
     functions = [fn]
     for value_node, nested_name, nested_kind in nested:
         sub_fns, sub_stmts = build_function(
             value_node, name=nested_name, kind=nested_kind, decorators=[], source=source,
             path=path, parent_id=fid, class_name=class_name, seen_ids=seen_ids,
-            capture=capture, limit=limit, resolve=resolve,
+            capture=capture, limit=limit, resolve=resolve, typed_db_ids=typed_db_ids,
         )
         functions.extend(sub_fns)
         statements.extend(sub_stmts)
