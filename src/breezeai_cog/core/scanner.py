@@ -17,7 +17,7 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Iterator
+from typing import Callable, Iterator, Protocol
 
 from .ignore import IgnoreEngine, read_dir_ignore_spec, read_dir_include_spec
 
@@ -26,6 +26,16 @@ _Stack = list[tuple[str, object]]
 
 #: Returns the language name for a path, or ``None`` if no parser claims it.
 Classifier = Callable[[str], str | None]
+
+
+class OnSkip(Protocol):
+    """Called once per dropped file/directory. ``reason`` is one of
+    ``ignored`` / ``unsupported`` / ``oversized``; ``is_dir`` marks a pruned
+    directory; ``size`` carries the byte size for ``oversized`` files."""
+
+    def __call__(
+        self, path: str, reason: str, *, is_dir: bool = ..., size: int | None = ...
+    ) -> None: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -51,7 +61,7 @@ def scan(
     engine: IgnoreEngine,
     max_file_size: int,
     follow_symlinks: bool = False,
-    on_skip: Callable[[str, str], None] | None = None,
+    on_skip: OnSkip | None = None,
 ) -> Iterator[ScanEntry]:
     root = Path(repo_root)
     visited: set[str] = set()
@@ -87,6 +97,8 @@ def scan(
                 # symlinked dirs are skipped unless follow_symlinks; the visited-set
                 # guards against loops when following is enabled.
                 if not keep(rel, True, ig, inc):
+                    if on_skip is not None:
+                        on_skip(rel, "ignored", is_dir=True)  # whole subtree pruned
                     continue
                 yield from walk(Path(entry.path), rel, ig, inc)
             elif entry.is_file(follow_symlinks=True):
@@ -105,7 +117,7 @@ def scan(
                     continue
                 if max_file_size and size > max_file_size:
                     if on_skip is not None:
-                        on_skip(rel, "oversized")
+                        on_skip(rel, "oversized", size=size)
                     continue
                 yield ScanEntry(path=rel, language=language)
 

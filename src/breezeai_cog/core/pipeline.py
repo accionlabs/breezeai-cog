@@ -21,6 +21,7 @@ from . import executor
 from .ignore import IgnoreEngine
 from .registry import base_parser_for, discover_builtin, registered
 from .scanner import ScanEntry, scan
+from .skips import SkipReport
 
 log = get_logger("breezeai_cog.pipeline")
 
@@ -38,18 +39,18 @@ def _classifier(languages: set[str] | None) -> Callable[[str], str | None]:
 
 
 def _scan_entries(
-    repo_root: Path, settings, skips: dict[str, int] | None = None
+    repo_root: Path, settings, report: SkipReport | None = None
 ) -> Iterator[ScanEntry]:
     discover_builtin()
     engine = IgnoreEngine.build(registered())
     languages = set(settings.languages) if settings.languages else None
     debug_on = settings.log_level == "DEBUG"
 
-    def on_skip(path: str, reason: str) -> None:
-        if skips is not None:  # cheap tally for the run summary (ignored/unsupported/oversized)
-            skips[reason] = skips.get(reason, 0) + 1
+    def on_skip(path: str, reason: str, *, is_dir: bool = False, size: int | None = None) -> None:
+        if report is not None:  # tally + detail for the run summary and the sidecar report
+            report.record(path, reason, is_dir=is_dir, size=size)
         if debug_on:  # gated so structlog never renders below DEBUG
-            log.debug("scan.file.skipped", path=path, reason=reason)
+            log.debug("scan.file.skipped", path=path, reason=reason, is_dir=is_dir)
 
     for entry in scan(
         repo_root, _classifier(languages),
@@ -266,16 +267,19 @@ def run(
     """
     repo_root = Path(repo_root)
     debug_on = settings.log_level == "DEBUG"
-    skips: dict[str, int] = {}
-    entries = list(_scan_entries(repo_root, settings, skips))
+    report = SkipReport()
+    entries = list(_scan_entries(repo_root, settings, report))
     jobs = settings.jobs if settings.jobs and settings.jobs > 0 else (os.cpu_count() or 1)
     indexes = _build_indexes(repo_root, entries, jobs, debug_on=debug_on)
     records = executor.parse_entries(entries, repo_root, settings, indexes)
-    return _assemble(
-        repo_root, records, sink, candidates=len(entries), skips=skips,
+    meta = _assemble(
+        repo_root, records, sink, candidates=len(entries), skips=report.counts,
         debug_on=debug_on, progress=progress,
         summary_out=summary_out, log_summary=log_summary,
     )
+    if summary_out is not None:  # full detail for the CLI console summary + sidecar report
+        summary_out["skip_report"] = report
+    return meta
 
 
 def run_inprocess(repo_root: str | Path, settings, sink) -> ProjectMetaData:
@@ -284,8 +288,8 @@ def run_inprocess(repo_root: str | Path, settings, sink) -> ProjectMetaData:
     startup would dominate."""
     repo_root = Path(repo_root)
     debug_on = settings.log_level == "DEBUG"
-    skips: dict[str, int] = {}
-    entries = list(_scan_entries(repo_root, settings, skips))
+    report = SkipReport()
+    entries = list(_scan_entries(repo_root, settings, report))
     options = executor._options(settings)
     options["indexes"] = _build_indexes(repo_root, entries, debug_on=debug_on)
 
@@ -296,5 +300,5 @@ def run_inprocess(repo_root: str | Path, settings, sink) -> ProjectMetaData:
                 yield record.language, record
 
     return _assemble(
-        repo_root, gen(), sink, candidates=len(entries), skips=skips, debug_on=debug_on
+        repo_root, gen(), sink, candidates=len(entries), skips=report.counts, debug_on=debug_on
     )
