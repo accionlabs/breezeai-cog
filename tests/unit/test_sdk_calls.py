@@ -330,12 +330,169 @@ def test_tsforce_requires_import(tmp_path) -> None:
     assert [s for s in _api_calls(rec) if s.framework == "salesforce"] == []
 
 
+APOLLO_SRC = b"""import { Apollo } from 'apollo-angular';
+import { gql } from '@apollo/client';
+
+const GET_USER = gql`query getUser($id: ID!) { user(id: $id) { name } }`;
+const CREATE_USER = gql`mutation createUser($input: CreateUserInput!) { createUser(input: $input) { id } }`;
+
+@Injectable({ providedIn: 'root' })
+export class UserService {
+  constructor(private apollo: Apollo) {}
+
+  getUser(id: string) {
+    return this.apollo.query({ query: GET_USER, variables: { id } });
+  }
+
+  createUser(input: any) {
+    return this.apollo.mutate({ mutation: CREATE_USER, variables: { input } });
+  }
+}
+"""
+
+
+def test_apollo_di_calls_detected(tmp_path) -> None:
+    rec = _parse(tmp_path, APOLLO_SRC, "src/user.service.ts")
+    # Filter to SDK-emitted calls (non-synthetic gql tag detections have routeKind set)
+    calls = [c for c in _api_calls(rec) if c.routeKind is None]
+    assert len(calls) == 2
+    frameworks = {c.framework for c in calls}
+    assert frameworks == {"graphql"}
+    endpoints = {c.endpoint for c in calls}
+    assert "GET_USER" in endpoints
+    assert "CREATE_USER" in endpoints
+    assert all(c.method is None for c in calls)
+    assert rec.framework == "graphql"
+
+
+APOLLO_ACCESSOR_SRC = b"""import { ApolloAccessor } from './apollo-accessor.service';
+import { getUser, createUser } from './queries';
+
+@Injectable({ providedIn: 'root' })
+export class UserService {
+  constructor(private readonly apollo: ApolloAccessor) {}
+
+  getUser(id: string) {
+    return this.apollo.productCatalogueApollo.query({ query: getUser, variables: { id } });
+  }
+
+  createUser(input: any) {
+    return this.apollo.productCatalogueApollo.mutate({ mutation: createUser, variables: { input } });
+  }
+
+  search(term: string) {
+    return this.apollo.searchApollo.query({ query: getUser, variables: { term } });
+  }
+}
+"""
+
+
+def test_apollo_accessor_wrapper_calls_detected(tmp_path) -> None:
+    # ApolloAccessor is a wrapper service exposing named Apollo clients as getters.
+    # Calls go through this.accessor.namedClient.method(...) — 3-level pattern.
+    rec = _parse(tmp_path, APOLLO_ACCESSOR_SRC, "src/user.service.ts")
+    calls = _api_calls(rec)
+    assert len(calls) == 3
+    frameworks = {c.framework for c in calls}
+    assert frameworks == {"graphql"}
+    endpoints = {c.endpoint for c in calls}
+    # endpoint = GQL constant name extracted from the first argument
+    assert "getUser" in endpoints
+    assert "createUser" in endpoints
+    assert all(c.method is None for c in calls)
+    assert rec.framework == "graphql"
+
+
+def test_apollo_accessor_no_false_positive_on_unrelated_3level(tmp_path) -> None:
+    # A 3-level call this.F1.F2.method() where F1 is NOT an ApolloAccessor must not be tagged.
+    src = b"""import { ApolloAccessor } from './apollo-accessor.service';
+@Injectable()
+export class FooService {
+  constructor(private readonly repo: SomeRepo) {}
+  doWork() { return this.repo.productCatalogueApollo.query({}); }
+}
+"""
+    rec = _parse(tmp_path, src, "src/foo.service.ts")
+    calls = _api_calls(rec)
+    assert calls == []
+
+
+APICLIENT_SRC = b"""import { ApiClient } from './api-client';
+
+@Injectable({ providedIn: 'root' })
+export class DataService {
+  constructor(private apiClient: ApiClient) {}
+
+  getData() {
+    return this.apiClient.typedQuery({ query: GET_DATA, variables: {} });
+  }
+
+  updateData(input: any) {
+    return this.apiClient.typedMutate({ mutation: UPDATE_DATA, variables: { input } });
+  }
+}
+"""
+
+
+def test_apiclient_typed_query_detected(tmp_path) -> None:
+    rec = _parse(tmp_path, APICLIENT_SRC, "src/data.service.ts")
+    calls = _api_calls(rec)
+    assert len(calls) == 2
+    assert all(c.framework == "graphql" for c in calls)
+    endpoints = {c.endpoint for c in calls}
+    assert "GET_DATA" in endpoints
+    assert "UPDATE_DATA" in endpoints
+    assert all(c.method is None for c in calls)
+
+
+S3_SRC = b"""import { S3Client, PutObjectCommand, GetObjectCommand } from '@aws-sdk/client-s3';
+
+@Injectable()
+export class StorageService {
+  constructor(private s3: S3Client) {}
+
+  async upload(key: string, body: Buffer) {
+    await this.s3.send(new PutObjectCommand({ Bucket: 'my-bucket', Key: key, Body: body }));
+  }
+
+  async download(key: string) {
+    return await this.s3.send(new GetObjectCommand({ Bucket: 'my-bucket', Key: key }));
+  }
+}
+"""
+
+
+def test_s3_command_pattern_detected(tmp_path) -> None:
+    rec = _parse(tmp_path, S3_SRC, "src/storage.service.ts")
+    calls = _api_calls(rec)
+    assert len(calls) == 2
+    assert all(c.framework == "aws-s3" for c in calls)
+    endpoints = {c.endpoint for c in calls}
+    assert "PutObjectCommand" in endpoints
+    assert "GetObjectCommand" in endpoints
+    assert all(c.method is None for c in calls)
+
+
+def test_s3_no_false_positive_without_import(tmp_path) -> None:
+    src = b"""export class Svc {
+  constructor(private s3: S3Client) {}
+  async f() { await this.s3.send(new PutObjectCommand({})); }
+}
+"""
+    rec = _parse(tmp_path, src, "src/x.ts")
+    assert _api_calls(rec) == []
+
+
 def test_output_validates(tmp_path) -> None:
     for src, rel in (
         (HUBSPOT_SRC, "src/hs.ts"),
         (CHARGEBEE_SRC, "src/cb.ts"),
         (TSFORCE_ENTITY_SRC, "src/entities/Account.ts"),
         (TSFORCE_GENERIC_SRC, "src/connection.ts"),
+        (APOLLO_SRC, "src/user.service.ts"),
+        (APOLLO_ACCESSOR_SRC, "src/user2.service.ts"),
+        (APICLIENT_SRC, "src/data.service.ts"),
+        (S3_SRC, "src/storage.service.ts"),
     ):
         rec = _parse(tmp_path, src, rel)
         errors = list(

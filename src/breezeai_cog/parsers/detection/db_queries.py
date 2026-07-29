@@ -23,9 +23,9 @@ from __future__ import annotations
 # the first DB wins (mirrors the legacy reverse-map "first one wins").
 _DB_METHODS: dict[str, tuple[str, ...]] = {
     "sql": ("executemany",),
-    "sequelize": ("findall", "findbypk", "bulkcreate", "findorcreate", "findandcountall", "upsert"),
+    "sequelize": ("findall", "findbypk", "bulkcreate", "findorcreate", "findandcountall"),
     "prisma": ("findfirst", "findunique", "findmany"),
-    "typeorm": ("createquerybuilder", "getrepository"),
+    "typeorm": ("createquerybuilder", "getrepository", "upsert", "findandcount"),
     "mongodb": (
         "aggregate", "insertone", "insertmany", "updateone", "updatemany",
         "deleteone", "deletemany", "replaceone", "bulkwrite",
@@ -85,11 +85,18 @@ _GENERIC = {
 }
 
 # Receiver substring -> hint (refines _GENERIC).
+# Needles checked via `needle in low` (full lowercased callee). Ambiguous short tokens
+# ("session", "objects") require a dot-anchored match so they don't fire on *containing*
+# identifiers like ``sessionFactory`` / ``productObjects``; others are distinctive enough
+# (``prisma``, ``sequelize``, ``mongoose``, ``repository``) that substring is fine.
 _RECEIVER_HINTS = (
     ("prisma", "prisma"), ("sequelize", "sequelize"), ("mongoose", "mongodb"),
     ("repository", "typeorm"), ("repo", "typeorm"), ("entitymanager", "typeorm"),
     ("session", "sqlalchemy"), ("queryset", "django"), ("objects", "django"),
 )
+# Needles that must appear as a whole dot-segment (not as a prefix/suffix of a longer name).
+# e.g. "session" must match "db.session.query" but NOT "sessionFactory.create".
+_ANCHORED_HINTS: frozenset[str] = frozenset({"session", "objects"})
 
 # Receiver terminal-segment suffixes that are clearly NOT a database: an opt-out generic ORM
 # verb (``findOne``/``findById`` — the ``_GENERIC`` verbs that are NOT high-collision) on one
@@ -101,6 +108,8 @@ _RECEIVER_HINTS = (
 _NON_DB_RECEIVERS = (
     "cache", "logger", "emitter", "eventbus", "eventemitter", "state",
     "buffer", "console", "clipboard", "factory", "list", "items", "queue", "stack",
+    # HTML Canvas / 2D rendering context — ctx.save()/restore() are draw-state calls, not DB.
+    "ctx", "canvas", "context2d",
 )
 
 # Django queryset verbs (ambiguous alone -> require a queryset-ish receiver).
@@ -116,6 +125,10 @@ _NEO4J_RUN_RECEIVERS = ("session", "tx", "transaction", "driver", "neo4j")
 # the file is a non-.NET language we treat the EF match as a collision and fall through;
 # an unknown language (``None``) stays permissive for backward compatibility.
 _DOTNET = frozenset({"csharp", "vb"})
+
+# Django is Python-only; suppress Django-queryset verbs in known non-Python files so that
+# TypeScript ``response.objects.filter()`` is not mislabelled as Django (mirrors the EF gate).
+_PYTHON = frozenset({"python"})
 
 # Generic verbs that collide heavily with ordinary (non-DB) code: ``find`` is
 # ``Array.prototype.find``, ``update`` is ``dict.update``/``Map.set``-adjacent, ``create``
@@ -177,13 +190,26 @@ def _has_ef_source(low_callee: str) -> bool:
 # high-collision HTTP verbs (get/update/delete/create) are deliberately excluded. ``msearch``
 # stays in _DISTINCTIVE (unambiguous, no receiver needed); ``mget`` is left to Redis.
 _ES_VERBS = frozenset({"search", "bulk", "index", "scroll", "reindex", "count"})
+
+# Cache/Redis service verbs — too generic alone (Map.get, Set.set), so gated on a
+# cache-specific receiver, mirroring the ES verb/receiver pattern.
+_CACHE_VERBS = frozenset({"get", "set", "del", "reset", "store"})
+_CACHE_RECEIVERS = frozenset({
+    "cache", "cachemanager", "cacheservice",
+    "redisservice", "redis", "redisclient",
+})
 # Terminal receiver segment that identifies an ES client (``this.client`` / ``esClient`` /
 # ``osClient``). Anything ending in ``client`` plus the explicit ES names — but NOT the DB
 # receivers above, so ``xxxCustomRepository.search`` / ``xService.search`` are excluded.
-_ES_RECEIVERS = frozenset({"client", "esclient", "es", "elastic", "elasticsearch", "opensearch", "osclient"})
+_ES_RECEIVERS = frozenset({
+    "client", "esclient", "es", "elastic", "elasticsearch",
+    "opensearch", "osclient",
+    "searchservice", "searchclient", "opensearchservice",  # service-wrapper patterns
+})
 
 
-def match_db(callee: str, method: str, language: str | None = None) -> str | None:
+def match_db(callee: str, method: str, language: str | None = None,
+             typed_db_ids: "frozenset[str] | None" = None) -> str | None:
     m = method.lower()
     low = callee.lower()
     if m in _DISTINCTIVE:
@@ -198,19 +224,35 @@ def match_db(callee: str, method: str, language: str | None = None) -> str | Non
     receiver = low.rsplit(".", 1)[0].rsplit(".", 1)[-1] if "." in low else ""
     if m in _ES_VERBS and receiver and (receiver.endswith("client") or receiver in _ES_RECEIVERS):
         return "elasticsearch"  # e.g. this.client.search(dsl) / esClient.bulk(...)
+    # Cache/Redis service calls — gated on a cache-specific receiver so Map.get/Set.set stay out.
+    if receiver and (receiver in _CACHE_RECEIVERS or receiver.endswith("cache") or receiver.endswith("redis")):
+        if m in _CACHE_VERBS or m in ("delete", "remove"):
+            return "redis"
     if m in _GENERIC:
         for needle, hint in _RECEIVER_HINTS:  # positive vendor hint wins
-            if needle in low:
-                return hint
+            if needle not in low:
+                continue
+            # Anchored needles must appear as a dot-segment, not embedded in a longer name
+            # (e.g. "session" must match "db.session.query" but NOT "sessionFactory.create").
+            if needle in _ANCHORED_HINTS:
+                if not (f".{needle}." in low or low.startswith(f"{needle}.")):
+                    continue
+            return hint
         if m in _HIGH_COLLISION:
-            # Opt-in: data access only on a positive DB receiver, else drop (no bare `orm`).
+            if typed_db_ids is not None:
+                # Type-resolved gate (TypeScript class context): only match when the receiver
+                # is a field explicitly typed as an ORM client — avoids name-suffix guessing.
+                return "orm" if receiver in typed_db_ids else None
+            # Opt-in heuristic (Python, non-class TS, etc.): positive DB suffix wins.
             if receiver and any(receiver.endswith(s) for s in _DB_RECEIVER_SUFFIXES):
                 return "orm"
             return None
         if receiver and any(receiver.endswith(s) for s in _NON_DB_RECEIVERS):
             return None  # a cache/collection/UI-state/etc. receiver — not data access
         return "orm"
-    if m in _DJANGO_VERBS and ("objects" in low or "queryset" in low):
+    if m in _DJANGO_VERBS and (language is None or language in _PYTHON) and (
+        ".objects." in low or low.startswith("objects.") or "queryset" in low
+    ):
         return "django"
     if m == "run" and "." in low:
         # callee includes the method (``session.run``); the receiver is everything before

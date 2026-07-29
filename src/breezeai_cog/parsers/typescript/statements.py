@@ -18,6 +18,85 @@ from .mappings import CONTROL_FLOW, EMIT_TYPES, NESTED_SCOPES
 
 _CALL_TYPE = "call_expression"
 
+# TypeScript ORM/DB client type names that positively identify a DI field as a database
+# client. When a class constructor declares ``private repo: Repository<User>``, ``repo``
+# is added to the typed_db_ids set and HIGH_COLLISION verbs on it are trusted as ORM calls.
+# This prevents ``stateManager.find()`` / ``itemsCollection.create()`` false positives.
+_TS_ORM_TYPES = frozenset({
+    "Repository", "DataSource", "EntityManager", "Connection", "QueryRunner",
+    "MongoRepository", "TreeRepository",  # TypeORM
+    "Model",  # Mongoose
+})
+
+
+def _field_annotation_type(node: Node, source: bytes) -> str | None:
+    """Base type name from a ``: Type<…>`` / ``: Type`` annotation on a node, else None."""
+    ann = next((c for c in node.named_children if c.type == "type_annotation"), None)
+    if ann is None:
+        return None
+    inner = ann.named_children[0] if ann.named_children else None
+    if inner is None:
+        return None
+    if inner.type == "generic_type":
+        name_node = inner.child_by_field_name("name") or (
+            inner.named_children[0] if inner.named_children else None
+        )
+        return node_text(name_node, source) if name_node is not None else None
+    return node_text(inner, source) if inner.type in ("type_identifier", "identifier") else None
+
+
+def _has_inject_repository_decorator(param: Node, source: bytes) -> bool:
+    """True when ``param`` carries an ``@InjectRepository(…)`` decorator — the NestJS/TypeORM
+    DI marker. This is a reliable signal that the parameter is a TypeORM Repository even when
+    the type annotation is missing or uses a custom subclass not in ``_TS_ORM_TYPES``."""
+    for child in param.named_children:
+        if child.type == "decorator":
+            inner = child.named_children[0] if child.named_children else None
+            if inner is not None and inner.type == "call_expression":
+                fn = inner.child_by_field_name("function")
+                if fn is not None and node_text(fn, source) == "InjectRepository":
+                    return True
+    return False
+
+
+def collect_typed_db_receivers(class_body: Node, source: bytes) -> frozenset[str]:
+    """Return the set of field/parameter names declared with a known ORM client type.
+
+    Scans the class body for:
+    * Constructor parameters typed as an ORM type (Angular/NestJS DI:
+      ``constructor(private userRepo: Repository<User>)`` → ``{"userRepo"}``)
+    * Constructor parameters with an ``@InjectRepository(…)`` decorator (fallback when
+      the type annotation is missing or uses a custom Repository subclass)
+    * Class field declarations typed as an ORM type (``userRepo: Repository<User>``)
+
+    The resulting set is passed to ``match_db`` as ``typed_db_ids`` so that
+    HIGH_COLLISION verbs (``find``/``create``/``save``/…) are only tagged as
+    ``db_method_call`` when the receiver is a known-typed ORM field, not just any
+    receiver whose *name* ends in "manager"/"model"/"collection"."""
+    ids: set[str] = set()
+    for node in class_body.named_children:
+        if node.type == "method_definition":
+            name_node = node.child_by_field_name("name")
+            if name_node is not None and node_text(name_node, source) == "constructor":
+                params = node.child_by_field_name("parameters")
+                if params is not None:
+                    for p in params.named_children:
+                        if p.type != "required_parameter":
+                            continue
+                        if _field_annotation_type(p, source) in _TS_ORM_TYPES or \
+                           _has_inject_repository_decorator(p, source):
+                            name = p.child_by_field_name("pattern") or next(
+                                (c for c in p.named_children if c.type == "identifier"), None
+                            )
+                            if name is not None:
+                                ids.add(node_text(name, source))
+        elif node.type in ("public_field_definition", "property_declaration", "field_definition"):
+            if _field_annotation_type(node, source) in _TS_ORM_TYPES:
+                name = node.child_by_field_name("name")
+                if name is not None:
+                    ids.add(node_text(name, source))
+    return frozenset(ids)
+
 
 def _name_of(node: Node, source: bytes) -> str | None:
     if node.type == "lexical_declaration":
@@ -124,6 +203,7 @@ def extract_statements(
     seen_ids: set[str],
     descend_all: bool = False,
     barriers: frozenset[tuple[int, int]] = frozenset(),
+    typed_db_ids: frozenset[str] | None = None,
 ) -> list[Statement]:
     if not capture or body is None:
         return []
@@ -134,6 +214,7 @@ def extract_statements(
                 node, source, path, parent_id=parent_id, limit=limit, seen_ids=seen_ids,
                 emit_types=EMIT_TYPES, control_flow=CONTROL_FLOW, call_type=_CALL_TYPE,
                 name_of=_name_of, call_details=_call_details, language="typescript",
+                typed_db_ids=typed_db_ids,
             )
         )
     return out

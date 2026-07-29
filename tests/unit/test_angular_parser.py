@@ -245,6 +245,57 @@ def test_lazy_loadchildren_chain_composition(tmp_path) -> None:
     assert eps["BillingComponent"] == "/orgs/settings/billing"
 
 
+def test_redirect_to_routes_are_skipped(tmp_path) -> None:
+    # redirectTo routes must not be emitted as page/mount routes (they are not endpoints).
+    src = b'''import { Routes } from '@angular/router';
+export const routes: Routes = [
+  { path: '', redirectTo: '/home', pathMatch: 'full' },
+  { path: 'home', component: HomeComponent },
+];
+'''
+    p = tmp_path / "app.routes.ts"
+    p.write_bytes(src)
+    ctx = ParseContext(path="app.routes.ts", abs_path=p, source=src, repo_root=tmp_path,
+                       capture_statements=True)
+    rec = AngularParser().parse_file(ctx)
+    routes = {s.endpoint: s for s in rec.statements if s.semanticType == "route"}
+    # The redirectTo route must NOT appear
+    assert not any(s.endpoint == "/" for s in rec.statements if s.semanticType == "route")
+    # The real route must still appear
+    assert "/home" in routes
+
+
+def test_ngmodule_import_propagation(tmp_path) -> None:
+    # When BrandModule (loaded via loadChildren) has @NgModule({imports: [BrandRoutingModule]}),
+    # the routing module should get the parent prefix applied too.
+    app_module = b'''import { RouterModule, Routes } from '@angular/router';
+export const routes: Routes = [
+  { path: 'brand', loadChildren: () => import('./brand.module').then(m => m.BrandModule) },
+];
+export class AppRoutingModule {}
+'''
+    brand_module = b'''import { NgModule } from '@angular/core';
+import { BrandRoutingModule } from './brand-routing.module';
+
+@NgModule({ imports: [BrandRoutingModule] })
+export class BrandModule {}
+'''
+    brand_routing = b'''import { RouterModule, Routes } from '@angular/router';
+export const routes: Routes = [
+  { path: 'products', component: ProductsComponent },
+];
+export class BrandRoutingModule {}
+'''
+    files = {
+        "app.module.ts": app_module,
+        "brand.module.ts": brand_module,
+        "brand-routing.module.ts": brand_routing,
+    }
+    rec = _parse_with_index(files, "brand-routing.module.ts", tmp_path)
+    eps = {s.handler: s.endpoint for s in rec.statements if s.semanticType == "route"}
+    assert eps["ProductsComponent"] == "/brand/products"
+
+
 def test_lazy_multi_mount_module_is_honest_null(tmp_path) -> None:
     # A module mounted at TWO different prefixes → ambiguous → child keeps its own bare path
     # (never wrongly attributed to one parent).
@@ -263,3 +314,111 @@ export class SharedModule {}
                             "shared.module.ts", tmp_path)
     eps = {s.handler: s.endpoint for s in rec.statements if s.semanticType == "route"}
     assert eps["XComponent"] == "/x"  # bare path, not /a/x or /b/x
+
+
+def test_breadcrumb_objects_not_captured_as_routes(tmp_path) -> None:
+    # Breadcrumb/nav config arrays with {name, path, children} must NOT be captured as
+    # Angular routes — even when the file imports ActivatedRoute from @angular/router
+    # (which triggers the byte guard) the objects lack router-discriminating keys.
+    src = b"""import { Injectable } from '@angular/core';
+import { ActivatedRoute } from '@angular/router';
+import { BreadcrumbItem } from './breadcrumb.model';
+
+@Injectable({ providedIn: 'root' })
+export class BreadcrumbService {
+  constructor(private route: ActivatedRoute) {}
+  getBreadcrumbs() {
+    return [
+      { name: 'Home', path: '/' },
+      { name: 'Orders', path: '/orders', children: [
+        { name: 'Detail', path: '/orders/:id' },
+      ]},
+    ];
+  }
+}
+"""
+    p = tmp_path / "breadcrumb.service.ts"
+    p.write_bytes(src)
+    ctx = ParseContext(path="breadcrumb.service.ts", abs_path=p, source=src,
+                       repo_root=tmp_path, capture_statements=True)
+    rec = AngularParser().parse_file(ctx)
+    assert not any(s.semanticType == "route" for s in rec.statements)
+
+
+def test_breadcrumb_name_key_excluded_even_with_router_discriminating_keys(tmp_path) -> None:
+    # If a nav object has BOTH a "name" key AND a router-discriminating key (e.g. pathMatch),
+    # the "name" key takes precedence: it is not an Angular route (the route discriminating
+    # keys check ensures the array is processed, but each element with "name" is skipped).
+    src = b"""import { RouterModule, Routes } from '@angular/router';
+export const routes: Routes = [
+  { path: 'home', component: HomeComponent },
+];
+export class AppRoutingModule {}
+"""
+    # Mix: same file also has a nav array with "name" + "path" + "pathMatch" in objects
+    src2 = b"""import { RouterModule, Routes } from '@angular/router';
+export const routes: Routes = [
+  { path: 'home', component: HomeComponent },
+];
+const nav = [
+  { name: 'Home', path: '/home', pathMatch: 'full' },
+];
+export class AppRoutingModule {}
+"""
+    for s, expected_count in [(src, 1), (src2, 1)]:
+        p = tmp_path / "app.ts"
+        p.write_bytes(s)
+        ctx = ParseContext(path="app.ts", abs_path=p, source=s, repo_root=tmp_path,
+                           capture_statements=True)
+        rec = AngularParser().parse_file(ctx)
+        route_nodes = [st for st in rec.statements if st.semanticType == "route"]
+        assert len(route_nodes) == expected_count, (
+            f"expected {expected_count} route(s), got {len(route_nodes)}: {route_nodes}"
+        )
+
+
+def test_ngmodule_chain_3level_prefix(tmp_path) -> None:
+    # 3-level NgModule chain: AppModule mounts BrandModule (loadChildren) → BrandModule's
+    # @NgModule imports BrandRoutingModule → BrandRoutingModule mounts ProductsModule
+    # (loadChildren) → ProductsModule's @NgModule imports ProductsRoutingModule.
+    # ProductsRoutingModule's routes must carry the full composed prefix.
+    app = b'''import { RouterModule, Routes } from '@angular/router';
+export const routes: Routes = [
+  { path: 'brand', loadChildren: () => import('./brand.module').then(m => m.BrandModule) },
+];
+export class AppRoutingModule {}
+'''
+    brand_module = b'''import { NgModule } from '@angular/core';
+import { BrandRoutingModule } from './brand-routing.module';
+@NgModule({ imports: [BrandRoutingModule] })
+export class BrandModule {}
+'''
+    brand_routing = b'''import { RouterModule, Routes } from '@angular/router';
+export const routes: Routes = [
+  { path: 'products', loadChildren: () => import('./products.module').then(m => m.ProductsModule) },
+];
+export class BrandRoutingModule {}
+'''
+    products_module = b'''import { NgModule } from '@angular/core';
+import { ProductsRoutingModule } from './products-routing.module';
+@NgModule({ imports: [ProductsRoutingModule] })
+export class ProductsModule {}
+'''
+    products_routing = b'''import { RouterModule, Routes } from '@angular/router';
+export const routes: Routes = [
+  { path: 'edit/:id', component: EditComponent },
+];
+export class ProductsRoutingModule {}
+'''
+    files = {
+        "app.module.ts": app,
+        "brand.module.ts": brand_module,
+        "brand-routing.module.ts": brand_routing,
+        "products.module.ts": products_module,
+        "products-routing.module.ts": products_routing,
+    }
+    rec = _parse_with_index(files, "products-routing.module.ts", tmp_path)
+    eps = {s.handler: s.endpoint for s in rec.statements if s.semanticType == "route"}
+    assert eps.get("EditComponent") == "/brand/products/edit/:id", (
+        f"expected /brand/products/edit/:id, got {eps}"
+    )

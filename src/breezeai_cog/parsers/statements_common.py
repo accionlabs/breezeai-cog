@@ -130,6 +130,7 @@ def classify_statement(
     stmt_expr: Collection[str] = (),
     container_types: Collection[str] = (),
     language: str | None = None,
+    typed_db_ids: "frozenset[str] | None" = None,
 ) -> list[Statement]:
     text = node_text(node, source)
     if node.type in control_flow:
@@ -144,7 +145,7 @@ def classify_statement(
         det = call_details(call, source)
         if det is None:
             continue
-        classified = classify_call(det[0], det[1], det[2], language)
+        classified = classify_call(det[0], det[1], det[2], language, typed_db_ids=typed_db_ids)
         if classified is None:
             continue
         sem, meth, dh = classified
