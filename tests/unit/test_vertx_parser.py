@@ -85,13 +85,13 @@ def test_claims_selects_vertx() -> None:
     registry.register(JavaParser())
     registry.register(VertxParser())
     assert registry.select("X.java", b"import io.vertx.core.Vertx;").name == "java-vertx"
-    # Vert.x 2.x package root (P3 webapp-engine modules) must also select the Vert.x parser
+    # Vert.x 2.x package root must also select the Vert.x parser
     assert registry.select("X.java", b"import org.vertx.java.platform.Verticle;").name == "java-vertx"
     assert registry.select("X.java", b"package x;").name == "java"  # plain Java -> base
     registry.clear()
 
 
-# Vert.x 2.x ServiceServer idiom (P3 Group-A): registerHandler in a loop over a handler map.
+# Vert.x 2.x ServiceServer idiom: registerHandler in a loop over a handler map.
 _V2_SRC = b'''package jp.co.payroll.p3.service;
 
 import org.vertx.java.platform.Verticle;
@@ -109,7 +109,7 @@ public class ServiceServer extends Verticle {
 
 
 def test_vertx2_registerHandler_detected_as_consumer(tmp_path) -> None:
-    # Gap 1 parts 1+2: org.vertx.java activation + registerHandler → eventbus_consumer.
+    # org.vertx.java (2.x) activation + registerHandler → eventbus_consumer.
     p = tmp_path / "ServiceServer.java"
     p.write_text(_V2_SRC.decode())
     ctx = ParseContext(path="ServiceServer.java", abs_path=p, source=_V2_SRC,
