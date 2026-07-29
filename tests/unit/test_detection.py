@@ -344,6 +344,16 @@ def test_cache_redis_calls_detected() -> None:
     assert classify_call("settings.set", "set") is None
 
 
+def test_non_terminal_cache_segment_does_not_hijack_redis() -> None:
+    # A ``…cache``-named object deeper in the chain must not pull a plain Map/array op into
+    # redis — only the terminal receiver counts (mirrors the ES terminal-only gate).
+    assert classify_call("this.responseCache.entries.delete", "delete") is None
+    assert classify_call("this.pageCache.items.get", "get") is None
+    # …but a terminal cache receiver still classifies.
+    assert classify_call("this.responseCache.get", "get") == \
+        ("db_method_call", "get", "redis")
+
+
 def test_dataaccess_false_positives() -> None:
     """Regression: 4 false positive dataAccessHint patterns from real repos."""
     from breezeai_cog.parsers.detection.db_queries import match_db
