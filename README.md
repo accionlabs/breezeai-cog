@@ -18,7 +18,7 @@ Python reimplementation of `breezeai-code-ontology-generator`.
 
 | Language | Extensions | Framework / detector support |
 |---|---|---|
-| TypeScript / JavaScript | `.ts .tsx .mts .cts .js .jsx .mjs .cjs` | NestJS, Angular, Express, React, Next.js (App + Pages Router API routes), LoopBack, GraphQL; AWS SNS/SQS/EventBridge/Lambda (additive) |
+| TypeScript / JavaScript | `.ts .tsx .mts .cts .js .jsx .mjs .cjs` | NestJS (& routing-controllers), Angular, Express, React, Next.js (App + Pages Router API routes), LoopBack, GraphQL (server + client ops); AWS SNS/SQS/EventBridge/Lambda/S3/SES/CloudFront/Kinesis/DynamoDB/API Gateway (additive); HubSpot/Chargebee/Salesforce SDKs (additive) |
 | Python | `.py` | FastAPI |
 | Java | `.java` | Spring Boot, JAX-RS, Vert.x |
 | C# | `.cs` | ASP.NET, GraphQL (graphql-dotnet) |
@@ -27,7 +27,7 @@ Python reimplementation of `breezeai-code-ontology-generator`.
 | Config | `package.json`, `tsconfig`, `Dockerfile`, `docker-compose`, `pom.xml`, `requirements.txt`, `build.gradle`, … | — |
 
 † **Groovy is best-effort / second-tier.** It reliably captures the package / import /
-class / method / field / enum skeleton, but the grammar
+class / interface / enum / trait / method / field skeleton, but the grammar
 ([dekobon-tree-sitter-groovy](https://pypi.org/project/dekobon-tree-sitter-groovy/)) degrades
 on some expression bodies (named-argument commas, parenthesised enum constants) and does not
 parse **nested type declarations** (a `class`/`enum` inside a class body). Degradation is
