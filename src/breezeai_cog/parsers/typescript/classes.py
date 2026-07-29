@@ -16,7 +16,7 @@ from .functions import (
     extract_decorators,
     extract_params,
 )
-from .statements import extract_statements
+from .statements import collect_typed_db_receivers, extract_statements
 
 _TYPE = {
     "class_declaration": "class",
@@ -81,8 +81,14 @@ def build_class(
 
     body = cnode.child_by_field_name("body")
     if body is not None:
+        # Collect ORM-typed field names from the constructor so HIGH_COLLISION verbs
+        # (find/create/save/…) are only tagged as db_method_call when the receiver is
+        # a field typed as Repository/DataSource/EntityManager/etc. — not stateManager,
+        # itemsCollection, or other non-DB names that happen to have a DB-suffix.
+        typed_db_ids = collect_typed_db_receivers(body, source)
         statements.extend(
-            extract_statements(body, source, path, parent_id=cid, capture=capture, limit=limit, seen_ids=seen_ids)
+            extract_statements(body, source, path, parent_id=cid, capture=capture, limit=limit,
+                               seen_ids=seen_ids, typed_db_ids=typed_db_ids)
         )
         pending: list[Node] = []
         for child in body.named_children:
@@ -98,7 +104,7 @@ def build_class(
                     child, name=mname, kind="constructor" if mname == "constructor" else "method",
                     decorators=extract_decorators(pending, source), source=source, path=path,
                     parent_id=cid, class_name=name, seen_ids=seen_ids, capture=capture, limit=limit,
-                    resolve=resolve,
+                    resolve=resolve, typed_db_ids=typed_db_ids,
                 )
                 methods.extend(fns)
                 statements.extend(fn_statements)
@@ -119,6 +125,7 @@ def build_class(
                         kind=value.type, decorators=extract_decorators(pending, source),
                         source=source, path=path, parent_id=cid, class_name=name,
                         seen_ids=seen_ids, capture=capture, limit=limit, resolve=resolve,
+                        typed_db_ids=typed_db_ids,
                     )
                     methods.extend(fns)
                     statements.extend(fn_statements)

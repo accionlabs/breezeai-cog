@@ -165,11 +165,15 @@ def test_generic_verb_non_db_receiver_guarded() -> None:
     # #8: a generic ORM verb (save/delete/create/remove) on a clearly non-DB receiver
     # (cache/collection/UI-state/emitter/factory) is NOT data access.
     for callee, method in [
-        ("formState.save", "save"), ("cache.delete", "delete"),
+        ("formState.save", "save"),
         ("emitter.remove", "remove"), ("figureFactory.create", "create"),
-        ("cartItems.remove", "remove"), ("this.userCache.delete", "delete"),
+        ("cartItems.remove", "remove"),
     ]:
         assert classify_call(callee, method) is None, callee
+    # An explicit ``cache`` receiver name is tagged redis; a ``…Cache`` suffix is NOT (it is
+    # commonly an in-memory Map — see test_suffix_named_cache_is_not_redis).
+    assert classify_call("cache.delete", "delete") == ("db_method_call", "delete", "redis")
+    assert classify_call("this.userCache.delete", "delete") is None
     # true positives preserved: explicit repo/vendor hint and distinctive methods
     assert classify_call("orderRepo.save", "save") == ("db_method_call", "save", "typeorm")
     assert classify_call("redisCache.hget", "hget") == ("db_method_call", "hget", "redis")
@@ -263,3 +267,197 @@ def test_sync_linq_terminals_require_ef_source() -> None:
         ("db_method_call", "ToListAsync", "entity_framework")
     # In a non-.NET file these are never EF (an in-memory .toList() in JS, etc.).
     assert classify_call("dbContext.Users.ToList", "ToList", None, "typescript") is None
+
+
+def test_array_filter_on_productobjects_not_django() -> None:
+    # Gap 3: Array.filter() on a variable containing "objects" in its name (e.g.
+    # productObjects, digitalObjects) must NOT be tagged as django. The fix checks
+    # for ".objects." (Django queryset manager segment) not substring "objects".
+    from breezeai_cog.parsers.detection.db_queries import match_db
+    assert match_db("r?.productObjects?.filter", "filter") is None
+    assert match_db("digitalObjects?.filter", "filter") is None
+    assert match_db("items.filter", "filter") is None
+    # Real Django patterns must still match
+    assert match_db("MyModel.objects.filter", "filter") == "django"
+    assert match_db("queryset.filter", "filter") == "django"
+    assert match_db("User.objects.all", "all") == "django"
+
+
+def test_django_verbs_gated_to_python() -> None:
+    # Django queryset verbs (.filter/.get/.all) must NOT fire in TypeScript files —
+    # TS code with `.objects.filter()` is JS array/object manipulation, not Django.
+    assert classify_call("data.objects.filter", "filter", None, "typescript") is None
+    assert classify_call("response.objects.get", "get", None, "typescript") is None
+    # Python files: Django still works
+    assert classify_call("MyModel.objects.filter", "filter", None, "python") == \
+        ("db_method_call", "filter", "django")
+    # unknown language stays permissive (backward compat)
+    assert classify_call("MyModel.objects.filter", "filter") == \
+        ("db_method_call", "filter", "django")
+
+
+def test_opensearch_service_receivers_detected() -> None:
+    # OpenSearch/ES calls through service wrappers must be detected.
+    assert classify_call("this.searchService.search", "search") == \
+        ("db_method_call", "search", "elasticsearch")
+    assert classify_call("this.searchClient.bulk", "bulk") == \
+        ("db_method_call", "bulk", "elasticsearch")
+    assert classify_call("this.opensearchService.count", "count") == \
+        ("db_method_call", "count", "elasticsearch")
+    # existing ES patterns still work
+    assert classify_call("this.client.search", "search") == \
+        ("db_method_call", "search", "elasticsearch")
+
+
+def test_non_terminal_client_segment_does_not_hijack_es() -> None:
+    # A bare ``…client`` deeper in the chain must not pull an ORM/HTTP verb into ES.
+    # ``count`` isn't a _GENERIC verb, so these fall through to None (never elasticsearch).
+    assert classify_call("this.prismaClient.user.count", "count") is None
+    assert classify_call("this.apiClient.users.index", "index") is None
+    # Terminal ``…client`` + a collision verb (count/index) is also not enough on its own —
+    # only an explicit ES receiver name qualifies.
+    assert classify_call("httpClient.count", "count") is None
+    assert classify_call("this.restClient.index", "index") is None
+    # …but explicit ES receivers with a collision verb still match.
+    assert classify_call("this.client.index", "index") == \
+        ("db_method_call", "index", "elasticsearch")
+    assert classify_call("this.opensearchService.count", "count") == \
+        ("db_method_call", "count", "elasticsearch")
+    # Distinctive ES verbs (search/bulk/scroll) still accept any ``…client`` receiver.
+    assert classify_call("esClient.bulk", "bulk") == \
+        ("db_method_call", "bulk", "elasticsearch")
+
+
+def test_cache_redis_calls_detected() -> None:
+    # Cache/Redis service .get()/.set()/.del() must be tagged as redis.
+    assert classify_call("this.cacheService.get", "get") == \
+        ("db_method_call", "get", "redis")
+    assert classify_call("this.cacheManager.set", "set") == \
+        ("db_method_call", "set", "redis")
+    assert classify_call("this.cacheService.del", "del") == \
+        ("db_method_call", "del", "redis")
+    assert classify_call("this.redisService.get", "get") == \
+        ("db_method_call", "get", "redis")
+    assert classify_call("this.cacheService.delete", "delete") == \
+        ("db_method_call", "delete", "redis")
+    # plain Map.get / Set.set stay unclassified (no cache receiver)
+    assert classify_call("map.get", "get") is None
+    assert classify_call("settings.set", "set") is None
+
+
+def test_suffix_named_cache_is_not_redis() -> None:
+    # A bare ``…Cache`` suffix no longer implies redis: in-memory Map/LRU fields are routinely
+    # named ``…Cache`` (dogfooded on nimbus-api: ``dataLoaderCache: Map<K, DataLoader>``), and
+    # their ``.get()``/``.set()`` are memory ops, not Redis. Only explicit cache/redis receiver
+    # names — or a ``…redis`` suffix — classify.
+    assert classify_call("this.dataLoaderCache.get", "get") is None  # Map<K, DataLoader>
+    assert classify_call("this.productCache.set", "set") is None
+    assert classify_call("this.responseCache.delete", "delete") is None
+    # a ``…cache`` segment deeper in the chain also stays out (terminal receiver is entries/items)
+    assert classify_call("this.responseCache.entries.delete", "delete") is None
+    assert classify_call("this.pageCache.items.get", "get") is None
+    # …but explicit cache/redis receiver names still classify.
+    assert classify_call("this.cacheService.get", "get") == \
+        ("db_method_call", "get", "redis")
+    assert classify_call("this.userRedis.get", "get") == \
+        ("db_method_call", "get", "redis")
+
+
+def test_dataaccess_false_positives() -> None:
+    """Regression: 4 false positive dataAccessHint patterns from real repos."""
+    from breezeai_cog.parsers.detection.db_queries import match_db
+
+    # 1. Canvas ctx.save() / canvas.save() must NOT be ORM (draw-state call).
+    assert match_db("ctx.save", "save") is None
+    assert match_db("canvas.save", "save") is None
+    assert match_db("this.ctx.save", "save") is None
+
+    # 2. TypeORM repository.upsert() must be "typeorm", not "sequelize".
+    assert match_db("this.userRepository.upsert", "upsert") == "typeorm"
+    assert match_db("repository.upsert", "upsert") == "typeorm"
+
+    # 3. JS Array.find() on a non-DB collection must not match.
+    assert match_db("formFields.find", "find") is None
+
+    # 4. sessionFactory.create() must NOT be tagged sqlalchemy — "session" is a compound
+    #    name, not a standalone SQLAlchemy session. Anchored needle check prevents this.
+    assert match_db("sessionFactory.create", "create") is None
+    assert match_db("sessionData.find", "find") is None
+
+    # Real SQLAlchemy session queries must still match.
+    assert match_db("db.session.query", "query") == "sqlalchemy"
+    assert match_db("session.query", "query") == "sqlalchemy"
+
+
+def test_typed_db_ids_gate_high_collision_verbs(tmp_path) -> None:
+    """TypeScript class methods: HIGH_COLLISION verbs only fire on ORM-typed receivers.
+
+    ``stateManager.find()`` / ``itemsCollection.create()`` must not emit db_method_call
+    when the class has no ORM-typed fields. ``userRepository.find()`` (typed as
+    Repository<User> in the constructor) must still emit the correct ORM hit."""
+    src = b"""
+import { Injectable } from '@angular/core';
+import { InjectRepository } from '@nestjs/typeorm';
+import { Repository } from 'typeorm';
+import { User } from './user.entity';
+
+@Injectable()
+export class UserService {
+  constructor(
+    @InjectRepository(User)
+    private userRepository: Repository<User>,
+    private stateManager: StateManagerService,
+  ) {}
+
+  findAll() {
+    return this.userRepository.find();   // TRUE positive: Repository<User>
+  }
+
+  findActive() {
+    return this.stateManager.find();     // FALSE positive without type gate
+  }
+
+  process(items: Item[]) {
+    return items.find(x => x.active);   // FALSE positive without type gate
+  }
+}
+"""
+    p = tmp_path / "user.service.ts"
+    p.write_bytes(src)
+    from breezeai_cog.parsers.base import ParseContext
+    ctx = ParseContext(path="user.service.ts", abs_path=p, source=src,
+                       repo_root=tmp_path, capture_statements=True)
+    rec = TypeScriptParser().parse_file(ctx)
+    db_stmts = [s for s in rec.statements if s.semanticType == "db_method_call"]
+    # Only the Repository-typed receiver should produce a db_method_call.
+    assert len(db_stmts) == 1
+    assert db_stmts[0].dataAccessHint in ("typeorm", "orm")  # repository hint wins
+
+
+def test_inject_repository_decorator_gates_db_calls(tmp_path) -> None:
+    """@InjectRepository(Entity) without an explicit Repository<> type annotation
+    must still gate HIGH_COLLISION verbs as ORM calls."""
+    src = b"""
+import { Injectable } from '@angular/core';
+import { InjectRepository } from '@nestjs/typeorm';
+
+@Injectable()
+export class TaskService {
+  constructor(
+    @InjectRepository(Task)
+    private taskRepo,
+  ) {}
+
+  findAll() {
+    return this.taskRepo.find();
+  }
+}
+"""
+    p = tmp_path / "task.service.ts"
+    p.write_bytes(src)
+    ctx = ParseContext(path="task.service.ts", abs_path=p, source=src,
+                       repo_root=tmp_path, capture_statements=True)
+    rec = TypeScriptParser().parse_file(ctx)
+    db_stmts = [s for s in rec.statements if s.semanticType == "db_method_call"]
+    assert len(db_stmts) == 1
+    assert db_stmts[0].dataAccessHint in ("typeorm", "orm")

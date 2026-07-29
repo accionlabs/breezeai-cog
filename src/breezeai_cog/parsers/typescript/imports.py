@@ -240,13 +240,82 @@ def _collect_route_mounts(root: Node, source: bytes) -> tuple[list[str], list[_M
     return classes, mounts
 
 
+_CLASS_NODES_SET = frozenset(_CLASS_NODES)
+
+
+def _ngmodule_import_names(dec: Node, source: bytes) -> list[str] | None:
+    """Given a ``decorator`` node, return the list of identifier names from its
+    ``@NgModule({imports: [...]})`` array, or None if it is not an NgModule decorator."""
+    call = next((c for c in dec.named_children if c.type == "call_expression"), None)
+    if call is None:
+        return None
+    fn = call.child_by_field_name("function")
+    if fn is None or node_text(fn, source) != "NgModule":
+        return None
+    args = call.child_by_field_name("arguments")
+    if args is None:
+        return None
+    config = next((c for c in args.named_children if c.type == "object"), None)
+    if config is None:
+        return None
+    for pair in config.named_children:
+        if pair.type != "pair":
+            continue
+        k = pair.child_by_field_name("key")
+        v = pair.child_by_field_name("value")
+        if k is None or node_text(k, source).strip("'\"") != "imports":
+            continue
+        if v is None or v.type != "array":
+            continue
+        return [node_text(c, source) for c in v.named_children if c.type == "identifier"]
+    return None
+
+
+def _collect_ngmodule_imports(root: Node, source: bytes) -> dict[str, list[str]]:
+    """Return a map of class name → list of identifier names from the class's
+    ``@NgModule({imports: [...]})`` decorator. Only top-level class declarations
+    are considered (the Angular module pattern). Returns empty dict if no NgModule found."""
+    if b"NgModule" not in source:
+        return {}
+    result: dict[str, list[str]] = {}
+    pending: list[str] | None = None  # imports from the most recent @NgModule decorator
+
+    for child in root.named_children:
+        if child.type == "decorator":
+            pending = _ngmodule_import_names(child, source)
+            continue
+        if child.type == "comment":
+            continue  # comments don't clear pending decorators (mirrors TypeScriptParser.extract)
+
+        # inline decorator inside export_statement (export @NgModule class Foo {})
+        if child.type == "export_statement":
+            inner_dec = next((c for c in child.named_children if c.type == "decorator"), None)
+            if inner_dec is not None:
+                imports = _ngmodule_import_names(inner_dec, source)
+                if imports is not None:
+                    pending = imports
+            cls_node = next((c for c in child.named_children if c.type in _CLASS_NODES_SET), None)
+        else:
+            cls_node = child if child.type in _CLASS_NODES_SET else None
+
+        if cls_node is not None and pending is not None:
+            nm = cls_node.child_by_field_name("name")
+            if nm is not None:
+                result[node_text(nm, source)] = pending
+        pending = None
+
+    return result
+
+
 def _ts_index_one(
     args: tuple[str, str]
-) -> tuple[dict[str, str | None], dict[str, ClassHeritage], list[str], list[_MountRaw]] | None:
+) -> tuple[dict[str, str | None], dict[str, ClassHeritage], list[str], list[_MountRaw], dict[str, list[str]]] | None:
     """Parse one TS/JS file into its partials (string-constant map, class-heritage map, the
-    classes it declares, and its lazy-route mounts) — pure, picklable worker for
+    classes it declares, its lazy-route mounts, and NgModule imports) — pure, picklable worker for
     :func:`parallel_map`. Returns ``None`` on read/parse failure."""
     file_s, rel = args
+    if not Path(file_s).is_file():
+        return None
     try:
         src = Path(file_s).read_bytes()
     except OSError:
@@ -257,7 +326,8 @@ def _ts_index_one(
         const_values: dict[str, str | None] = {}
         _collect_const_values(root, src, const_values)
         classes, mounts = _collect_route_mounts(root, src)
-        return const_values, _collect_heritage(root, src, rel), classes, mounts
+        ngmodule_imports = _collect_ngmodule_imports(root, src)
+        return const_values, _collect_heritage(root, src, rel), classes, mounts, ngmodule_imports
     except Exception as exc:  # parse OR a pathologically deep AST walk (RecursionError) — skip this file
         from ...logging import get_logger
         get_logger("breezeai_cog.index").warning(
@@ -330,17 +400,19 @@ def build_ts_index(repo_root: Path, files: Sequence[Path], jobs: int = 1) -> TsA
     own_prefix: dict[str, str | None] = {}
     parent_of: dict[str, str | None] = {}
     file_mounts: list[tuple[frozenset[str], list[_MountRaw]]] = []
+    all_ngmodule_imports: dict[str, list[str]] = {}
     args = [(str(f), repo_relative(f, repo_root)) for f in files]
     for frag in parallel_map(args, _ts_index_one, jobs):
         if not frag:
             continue
-        cv, heritage, classes, mounts = frag
+        cv, heritage, classes, mounts, ngmodule_imports = frag
         for sym, literal in cv.items():
             record_distinct(const_values, sym, literal)
         for cname, ch in heritage.items():  # same class name in >1 file → None (distinct types)
             record_distinct(class_heritage, cname, ch, same=lambda a, b: False)
         if mounts:
             file_mounts.append((frozenset(classes), mounts))
+        all_ngmodule_imports.update(ngmodule_imports)
 
     # Now const_values is complete: resolve each mount's path and wire the graph. A module
     # symbol mounted at >1 distinct prefix (or an unresolved path) collapses to None — the
@@ -351,7 +423,32 @@ def build_ts_index(repo_root: Path, files: Sequence[Path], jobs: int = 1) -> TsA
             record_distinct(own_prefix, target, _resolve_pieces(pieces, const_values))
             if enclosing is not None:
                 record_distinct(parent_of, target, enclosing)
+    # Pre-composition NgModule propagation: if BrandModule is a loadChildren target and its
+    # @NgModule imports BrandRoutingModule, inject BrandRoutingModule into own_prefix/parent_of
+    # with the same own-path and parent as BrandModule BEFORE _compose_route_mounts runs.
+    # This makes BrandRoutingModule a proper node in the composition graph, so that
+    # ProductsModule (whose parent_of entry is BrandRoutingModule) chains correctly all the
+    # way up to /company/:brandId/products instead of stopping at /products.
+    for class_name, ngmod_imports in all_ngmodule_imports.items():
+        own = own_prefix.get(class_name)
+        if own is None:
+            continue  # class not a loadChildren target, or path is ambiguous
+        parent = parent_of.get(class_name)
+        for imported in ngmod_imports:
+            if imported not in own_prefix:
+                record_distinct(own_prefix, imported, own)
+                if parent is not None:
+                    record_distinct(parent_of, imported, parent)
+
     route_mounts = _compose_route_mounts(own_prefix, parent_of)
+
+    # Post-composition NgModule propagation: for modules that are now in route_mounts after
+    # composition (e.g. ProductsModule → /company/:brandId/products), also add their NgModule-
+    # imported routing modules (e.g. ProductsRoutingModule) so _mount_prefix() finds them.
+    for class_name, prefix in list(route_mounts.items()):
+        for imported_name in all_ngmodule_imports.get(class_name, []):
+            if imported_name not in route_mounts:
+                route_mounts[imported_name] = prefix
 
     if alias is None and not const_values and not class_heritage and not route_mounts:
         return None

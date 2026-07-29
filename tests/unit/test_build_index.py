@@ -56,6 +56,24 @@ def test_pipeline_wires_build_index(tmp_path) -> None:
     assert any(p.endswith("src/app/foo.ts") for p in records["main.ts"].importFiles)
 
 
+def test_build_index_skips_directory_path(tmp_path) -> None:
+    """Fix 2: a path that is a directory (e.g. bulk-actions.service.ts/) must be silently
+    skipped — not crash the index pre-pass with IsADirectoryError."""
+    # Create a directory whose name looks like a .ts file (the real-repo bug pattern).
+    dir_path = tmp_path / "bulk-actions.service.ts"
+    dir_path.mkdir()
+    (dir_path / "bulk-actions.service.ts").write_text("export class BulkActionsService {}\n")
+    (tmp_path / "good.ts").write_text("export class GoodService {}\n")
+
+    # Pass the directory path as if it were a file — must not raise.
+    index = TypeScriptParser().build_index(
+        tmp_path, [dir_path, tmp_path / "good.ts"], 1
+    )
+    # The good file is still indexed; the directory is silently skipped.
+    assert isinstance(index, TsAliasIndex)
+    assert "GoodService" in index.class_heritage
+
+
 def test_build_index_survives_deeply_nested_file(tmp_path, capsys) -> None:
     """A pathologically deep AST (>recursion limit) must skip that one file, not abort the
     index pre-pass. Regression for the RecursionError in ``_collect_heritage.walk`` that

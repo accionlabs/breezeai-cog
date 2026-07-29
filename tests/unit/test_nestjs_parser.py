@@ -150,13 +150,69 @@ def test_graphql_code_first_operations(tmp_path) -> None:
         assert s.framework == "graphql"
     assert ops[("QUERY", "getConversations")].routeKind == "query"
     assert ops[("SUBSCRIPTION", "chatEvents")].routeKind == "subscription"
-    # @ResolveField is a field resolver, not a client-callable op → not a route
-    assert "title" not in {s.endpoint for s in ops.values()}
+    # @ResolveField is now captured as a field_resolver route (Gap 1)
+    assert ("QUERY", "title") in ops
+    assert ops[("QUERY", "title")].routeKind == "field_resolver"
+    assert ops[("QUERY", "title")].framework == "graphql"
+    # @ResolveField(() => String) — String is a scalar → responseDTO is None
+    assert ops[("QUERY", "title")].responseDTO is None
     # the @Query PARAM decorator on SearchResolver.search must NOT produce a route
     assert "search" not in {s.endpoint for s in ops.values()}
     # ops parent to their handler methods
     fn_ids = {f.id for f in rec.functions}
     assert all(s.parentId in fn_ids for s in ops.values())
+
+
+_RESOLVE_FIELD_SRC = b'''import { Resolver, ResolveField, Args, Query } from '@nestjs/graphql';
+
+@Resolver(() => Brand)
+export class BrandsQueryResolver {
+  @Query(() => [Brand])
+  async brands(): Promise<Brand[]> { return []; }
+
+  @ResolveField(() => BrandResult)
+  async byObjectIds(
+    @Args({ name: 'objectIds', type: () => [String] }) objectIds: string[],
+    @Args({ nullable: true }) { skip, take }: GetBrandsArgs,
+  ): Promise<BrandResult> { return null; }
+
+  @ResolveField(() => Number)
+  async count(@Args() { region }: RegionArgs): Promise<number> { return 0; }
+}
+'''
+
+
+def test_resolve_field_captured(tmp_path) -> None:
+    # Gap 1: @ResolveField methods produce route statements with routeKind="field_resolver".
+    p = tmp_path / "brands.resolver.ts"
+    p.write_text(_RESOLVE_FIELD_SRC.decode())
+    ctx = ParseContext(path="brands.resolver.ts", abs_path=p, source=_RESOLVE_FIELD_SRC,
+                       repo_root=tmp_path, capture_statements=True)
+    rec = NestJSParser().parse_file(ctx)
+    fields = {s.endpoint: s for s in rec.statements
+              if s.semanticType == "route" and s.routeKind == "field_resolver"}
+    assert set(fields) == {"byObjectIds", "count"}
+    # return type from @ResolveField(() => BrandResult) → responseDTO
+    assert fields["byObjectIds"].responseDTO == "BrandResult"
+    # @ResolveField(() => Number) → Number is a scalar → responseDTO None
+    assert fields["count"].responseDTO is None
+    # framework is graphql
+    assert all(s.framework == "graphql" for s in fields.values())
+
+
+def test_resolve_field_args_dto(tmp_path) -> None:
+    # Gap 2: @Args()-decorated params with class types are captured as requestDTO.
+    p = tmp_path / "brands.resolver.ts"
+    p.write_text(_RESOLVE_FIELD_SRC.decode())
+    ctx = ParseContext(path="brands.resolver.ts", abs_path=p, source=_RESOLVE_FIELD_SRC,
+                       repo_root=tmp_path, capture_statements=True)
+    rec = NestJSParser().parse_file(ctx)
+    by_endpoint = {s.endpoint: s for s in rec.statements
+                   if s.semanticType == "route" and s.routeKind == "field_resolver"}
+    # GetBrandsArgs is the first class-typed @Args param (objectIds is scalar string[])
+    assert by_endpoint["byObjectIds"].requestDTO == "GetBrandsArgs"
+    # RegionArgs is the @Args() type for count
+    assert by_endpoint["count"].requestDTO == "RegionArgs"
 
 
 def test_output_validates(tmp_path) -> None:
@@ -362,3 +418,92 @@ def test_json_controller_base(tmp_path) -> None:
     routes = [s for s in rec.statements if s.semanticType == "route"]
     assert len(routes) == 1
     assert routes[0].endpoint == "/users/me" and routes[0].method == "GET"
+
+
+# Namespace/grouping resolver: @Resolver(() => NotificationsMutation) with a singleton-return
+# @Mutation and @ResolveField methods that represent the real operations.
+_GROUPING_RESOLVER_SRC = b'''import { Resolver, Mutation, ResolveField, Args } from '@nestjs/graphql';
+
+@ObjectType()
+class NotificationsMutation {}
+
+@Resolver(() => NotificationsMutation)
+export class NotificationsMutationResolver {
+  @Mutation(() => NotificationsMutation)
+  notifications(): NotificationsMutation { return new NotificationsMutation(); }
+
+  @ResolveField(() => NotificationDto)
+  async create(@Args('input') input: CreateNotificationInput): Promise<NotificationDto> {
+    return null;
+  }
+
+  @ResolveField(() => NotificationDto)
+  async markAsRead(@Args('id') id: string): Promise<NotificationDto> {
+    return null;
+  }
+}
+
+@Resolver(() => Brand)
+export class BrandEntityResolver {
+  @Query(() => [Brand])
+  async brands(): Promise<Brand[]> { return []; }
+
+  @ResolveField(() => [NotificationDto])
+  async all(): Promise<NotificationDto[]> { return []; }
+}
+'''
+
+
+def test_grouping_resolver_resolve_fields_inherit_parent_op(tmp_path) -> None:
+    # Gap 1: @ResolveField on a grouping resolver inherits the parent @Mutation/@Query
+    # identity: endpoint = "<op>.<field>", method = MUTATION/QUERY, routeKind = mutation/query.
+    p = tmp_path / "notifications-mutation.resolver.ts"
+    p.write_text(_GROUPING_RESOLVER_SRC.decode())
+    ctx = ParseContext(path="notifications-mutation.resolver.ts", abs_path=p,
+                       source=_GROUPING_RESOLVER_SRC, repo_root=tmp_path, capture_statements=True)
+    rec = NestJSParser().parse_file(ctx)
+    by_ep = {s.endpoint: s for s in rec.statements if s.semanticType == "route"}
+    # Grouping @Mutation fields: endpoint = "<op>.<field>", method = MUTATION
+    assert "notifications.create" in by_ep
+    assert "notifications.markAsRead" in by_ep
+    assert by_ep["notifications.create"].method == "MUTATION"
+    assert by_ep["notifications.create"].routeKind == "mutation"
+    assert by_ep["notifications.create"].framework == "graphql"
+    assert by_ep["notifications.create"].responseDTO == "NotificationDto"
+    assert by_ep["notifications.create"].requestDTO == "CreateNotificationInput"
+    assert by_ep["notifications.markAsRead"].method == "MUTATION"
+    # Entity resolver (@Query returning array): @ResolveField keeps field_resolver behavior
+    assert "all" in by_ep
+    assert by_ep["all"].routeKind == "field_resolver"
+    assert by_ep["all"].method == "QUERY"
+
+
+def test_gql_op_response_dto_from_decorator_arg(tmp_path) -> None:
+    # Gap 2: @Query/@Mutation with arrow-function arg expose responseDTO from the arg type,
+    # e.g. @Query(() => UserDto) → responseDTO="UserDto".
+    src = b'''import { Resolver, Query, Mutation } from '@nestjs/graphql';
+
+@Resolver(() => User)
+export class UserResolver {
+  @Query(() => UserDto)
+  async getUser(): Promise<UserDto> { return null; }
+
+  @Mutation(() => [UserDto])
+  async createUser(): Promise<UserDto[]> { return []; }
+
+  @Query(() => String)
+  async ping(): Promise<string> { return ''; }
+}
+'''
+    p = tmp_path / "user.resolver.ts"
+    p.write_bytes(src)
+    ctx = ParseContext(path="user.resolver.ts", abs_path=p, source=src,
+                       repo_root=tmp_path, capture_statements=True)
+    rec = NestJSParser().parse_file(ctx)
+    by_ep = {s.endpoint: s for s in rec.statements if s.semanticType == "route"}
+    # @Query(() => UserDto) → responseDTO from decorator arg, not return type
+    assert by_ep["getUser"].responseDTO == "UserDto"
+    # @Mutation(() => [UserDto]) — array form → UserDto (scalar stripped by _dto_from_type)
+    assert by_ep["createUser"].responseDTO == "UserDto"
+    # @Query(() => String) — scalar → responseDTO None
+    assert by_ep["ping"].responseDTO is None

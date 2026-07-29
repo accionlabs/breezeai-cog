@@ -315,6 +315,329 @@ def _emit_outbound(
         )
 
 
+_APOLLO_BYTE_GUARDS = (
+    b"apollo-angular", b"@apollo/client",
+    # Type-annotation guards catch barrel imports where the package name isn't in source
+    # (e.g. ``import { Apollo } from '@app/core'`` re-exporting from apollo-angular).
+    b": Apollo", b": ApolloBase", b": ApolloClient",
+    # ApolloAccessor is an app-level wrapper service that exposes named Apollo clients as
+    # getters (e.g. .productCatalogueApollo, .searchApollo) — handled via Pattern B below.
+    b": ApolloAccessor",
+    # ApiClient is a custom wrapper that delegates to Apollo for typed GraphQL operations.
+    b": ApiClient",
+    # GraphQLService wraps Apollo in Angular services.
+    b": GraphQLService",
+)
+_APOLLO_CLIENT_TYPES = frozenset({"Apollo", "ApolloBase", "ApolloClient", "ApiClient", "GraphQLService"})
+_APOLLO_ACCESSOR_TYPES = frozenset({"ApolloAccessor"})
+_APOLLO_METHODS = frozenset({
+    "query", "mutate", "watchQuery", "subscribe",
+    "typedQuery", "typedMutate",  # custom wrappers over Apollo query/mutate
+})
+
+
+def _apollo_accessor_fields(root: Node, source: bytes) -> set[str]:
+    """Field names typed as ApolloAccessor — a wrapper service whose getter properties
+    (e.g. ``.productCatalogueApollo``, ``.searchApollo``) each return an ``ApolloBase``
+    client. Calls go through ``this.FIELD.namedClient.method(...)`` (Pattern B)."""
+    fields: set[str] = set()
+
+    def walk(n: Node) -> None:
+        if n.type == "required_parameter":
+            if _annotation_type(n, source) in _APOLLO_ACCESSOR_TYPES:
+                name_node = (
+                    n.child_by_field_name("pattern")
+                    or n.child_by_field_name("name")
+                    or next((c for c in n.named_children if c.type == "identifier"), None)
+                )
+                if name_node is not None:
+                    fields.add(node_text(name_node, source))
+        for c in n.named_children:
+            walk(c)
+
+    walk(root)
+    return fields
+
+
+def _this_deep_call(call: Node, source: bytes) -> tuple[str, str, str] | None:
+    """(outer_field, inner_field, method) for ``this.F1.F2.method(...)``, else None.
+    Handles the ApolloAccessor pattern: ``this.accessor.namedClient.query(...)``."""
+    fn = call.child_by_field_name("function")
+    if fn is None or fn.type != "member_expression":
+        return None
+    method_prop = fn.child_by_field_name("property")
+    method = node_text(method_prop, source) if method_prop is not None else ""
+    # obj should be: this.F1.F2
+    obj = fn.child_by_field_name("object")
+    if obj is None or obj.type != "member_expression":
+        return None
+    inner_prop = obj.child_by_field_name("property")
+    inner = node_text(inner_prop, source) if inner_prop is not None else ""
+    # base should be: this.F1
+    base = obj.child_by_field_name("object")
+    if base is None or base.type != "member_expression":
+        return None
+    outer_prop = base.child_by_field_name("property")
+    this_node = base.child_by_field_name("object")
+    if this_node is None or this_node.type != "this":
+        return None
+    outer = node_text(outer_prop, source) if outer_prop is not None else ""
+    return outer, inner, method
+
+
+def _apollo_injected_fields(root: Node, source: bytes) -> set[str]:
+    """Field names on ``this`` that carry an Apollo client, identified by constructor-param
+    type annotation. Covers ``private apollo: Apollo`` Angular DI style."""
+    fields: set[str] = set()
+
+    def walk(n: Node) -> None:
+        if n.type == "required_parameter":
+            if _annotation_type(n, source) in _APOLLO_CLIENT_TYPES:
+                name_node = (
+                    n.child_by_field_name("pattern")
+                    or n.child_by_field_name("name")
+                    or next((c for c in n.named_children if c.type == "identifier"), None)
+                )
+                if name_node is not None:
+                    fields.add(node_text(name_node, source))
+        for c in n.named_children:
+            walk(c)
+
+    walk(root)
+    return fields
+
+
+def _this_member_call(call: Node, source: bytes) -> tuple[str, str] | None:
+    """(field, method) when the call is ``this.field.method(...)``, else None.
+    Handles the Angular DI pattern where apollo is accessed via ``this.apollo``."""
+    fn = call.child_by_field_name("function")
+    if fn is None or fn.type != "member_expression":
+        return None
+    method_prop = fn.child_by_field_name("property")
+    method = node_text(method_prop, source) if method_prop is not None else ""
+    obj = fn.child_by_field_name("object")
+    if obj is None or obj.type != "member_expression":
+        return None
+    field_prop = obj.child_by_field_name("property")
+    base = obj.child_by_field_name("object")
+    if field_prop is None or base is None or base.type != "this":
+        return None
+    return node_text(field_prop, source), method
+
+
+def _apollo_endpoint(call: Node, source: bytes) -> str | None:
+    """Extract the GQL constant name from ``apollo.query({query: Foo})`` — the first
+    ``query:``/``mutation:``/``document:`` identifier in the first argument object."""
+    args = call.child_by_field_name("arguments")
+    if args is None:
+        return None
+    first = next((c for c in args.named_children if c.type == "object"), None)
+    if first is None:
+        return None
+    for pair in first.named_children:
+        if pair.type != "pair":
+            continue
+        k = pair.child_by_field_name("key")
+        v = pair.child_by_field_name("value")
+        if k is None or v is None:
+            continue
+        kname = node_text(k, source).strip("'\"")
+        if kname in ("query", "mutation", "document"):
+            return node_text(v, source) if v.type in ("identifier", "member_expression") else None
+    return None
+
+
+def _detect_apollo_calls(
+    root: Node, source: bytes, path: str, record: FileRecord, seen: set[str]
+) -> bool:
+    """Detect Apollo GraphQL calls in two patterns:
+
+    * **Pattern A** — direct Apollo DI (``this.apollo.query/mutate(...)``): the field is
+      annotated as ``Apollo``/``ApolloBase``/``ApolloClient`` and the call is 2-level.
+    * **Pattern B** — ApolloAccessor wrapper (``this.accessor.namedClient.query(...)``):
+      the field is annotated as ``ApolloAccessor`` (a service that exposes named Apollo
+      clients as getters such as ``.productCatalogueApollo``); the call is 3-level.
+
+    Guards on an Apollo byte-marker and at least one recognisable typed field.
+    Returns True if any Apollo call was emitted."""
+    if not any(m in source for m in _APOLLO_BYTE_GUARDS):
+        return False
+
+    # Pattern A: fields typed as direct Apollo client (2-level this.F.method call)
+    direct_fields = _apollo_injected_fields(root, source)
+    # Pattern B: fields typed as ApolloAccessor wrapper (3-level this.F1.F2.method call)
+    accessor_fields = _apollo_accessor_fields(root, source)
+
+    if not direct_fields and not accessor_fields:
+        return False
+
+    emitted = False
+    for call in _walk_calls(root):
+        # Pattern A: this.directField.method(...)
+        if direct_fields:
+            result = _this_member_call(call, source)
+            if result is not None:
+                field, method = result
+                if field in direct_fields and method in _APOLLO_METHODS:
+                    endpoint = _apollo_endpoint(call, source) or f"{field}.{method}"
+                    _emit_outbound(
+                        call, call.start_point[0] + 1, endpoint, "graphql", source, path,
+                        record, seen,
+                    )
+                    emitted = True
+                    continue
+
+        # Pattern B: this.accessorField.namedClient.method(...)
+        if accessor_fields:
+            deep = _this_deep_call(call, source)
+            if deep is not None:
+                outer, inner, method = deep
+                if outer in accessor_fields and method in _APOLLO_METHODS:
+                    endpoint = _apollo_endpoint(call, source) or f"{inner}.{method}"
+                    _emit_outbound(
+                        call, call.start_point[0] + 1, endpoint, "graphql", source, path,
+                        record, seen,
+                    )
+                    emitted = True
+
+    return emitted
+
+
+# --- AWS S3 (command pattern) -------------------------------------------------
+# AWS SDK v3 uses ``client.send(new PutObjectCommand({...}))`` — a command-pattern
+# call, not a method chain.  The endpoint is the Command class name.
+_S3_BYTE_GUARD = b"@aws-sdk/client-s3"
+_S3_CLIENT_TYPES = frozenset({"S3Client", "S3"})
+
+
+def _s3_injected_fields(root: Node, source: bytes) -> set[str]:
+    """Field names on ``this`` typed as an S3 client (constructor DI pattern)."""
+    fields: set[str] = set()
+
+    def walk(n: Node) -> None:
+        if n.type == "required_parameter":
+            if _annotation_type(n, source) in _S3_CLIENT_TYPES:
+                name_node = (
+                    n.child_by_field_name("pattern")
+                    or n.child_by_field_name("name")
+                    or next((c for c in n.named_children if c.type == "identifier"), None)
+                )
+                if name_node is not None:
+                    fields.add(node_text(name_node, source))
+        elif n.type == "variable_declarator":
+            name = n.child_by_field_name("name")
+            if name is not None and name.type == "identifier":
+                if _annotation_type(n, source) in _S3_CLIENT_TYPES:
+                    fields.add(node_text(name, source))
+                else:
+                    v = n.child_by_field_name("value")
+                    while v is not None and v.type in ("await_expression", "parenthesized_expression"):
+                        v = v.named_children[0] if v.named_children else None
+                    if v is not None and v.type == "new_expression":
+                        ctor = v.child_by_field_name("constructor")
+                        if ctor is not None and node_text(ctor, source) in _S3_CLIENT_TYPES:
+                            fields.add(node_text(name, source))
+        for c in n.named_children:
+            walk(c)
+
+    walk(root)
+    return fields
+
+
+def _command_variables(root: Node, source: bytes) -> dict[str, str]:
+    """Map variable name → Command class name for ``const cmd = new PutObjectCommand(…)``."""
+    out: dict[str, str] = {}
+
+    def walk(n: Node) -> None:
+        if n.type == "variable_declarator":
+            name = n.child_by_field_name("name")
+            v = n.child_by_field_name("value")
+            if name is not None and name.type == "identifier" and v is not None:
+                if v.type == "new_expression":
+                    ctor = v.child_by_field_name("constructor")
+                    if ctor is not None:
+                        cn = node_text(ctor, source)
+                        if cn.endswith("Command"):
+                            out[node_text(name, source)] = cn
+        for c in n.named_children:
+            walk(c)
+
+    walk(root)
+    return out
+
+
+def _extract_command_name(
+    call: Node, source: bytes, cmd_vars: dict[str, str] | None = None,
+) -> str | None:
+    """Extract the Command class name from ``client.send(new XxxCommand(…))`` or
+    ``client.send(commandVar)`` where ``commandVar = new XxxCommand(…)``."""
+    args = call.child_by_field_name("arguments")
+    if args is None:
+        return None
+    first_arg = next((c for c in args.named_children if c.type != "comment"), None)
+    if first_arg is None:
+        return None
+    if first_arg.type == "await_expression" and first_arg.named_children:
+        first_arg = first_arg.named_children[0]
+    if first_arg.type == "new_expression":
+        ctor = first_arg.child_by_field_name("constructor")
+        if ctor is None:
+            return None
+        name = node_text(ctor, source)
+        return name if name.endswith("Command") else None
+    # Variable reference: resolve via pre-scanned command variables
+    if first_arg.type == "identifier" and cmd_vars:
+        return cmd_vars.get(node_text(first_arg, source))
+    return None
+
+
+def _detect_aws_s3_calls(
+    root: Node, source: bytes, path: str, record: FileRecord, seen: set[str]
+) -> bool:
+    """Detect AWS S3 ``client.send(new XxxCommand(…))`` calls.  Handles both
+    ``this.field.send(…)`` (DI pattern) and ``variable.send(…)`` (free variable).
+    The endpoint is the Command class name."""
+    if _S3_BYTE_GUARD not in source:
+        return False
+    # DI fields (this.s3) — same pattern as Apollo injected fields
+    di_fields = _s3_injected_fields(root, source)
+    # Free-variable clients — reuse _client_identifiers
+    s3_sdk = _Sdk(
+        import_marker=_S3_BYTE_GUARD,
+        framework="aws-s3",
+        client_types=_S3_CLIENT_TYPES,
+        operations=frozenset(),
+    )
+    free_clients = _client_identifiers(root, source, s3_sdk)
+    if not di_fields and not free_clients:
+        return False
+    cmd_vars = _command_variables(root, source)
+    emitted = False
+    for call in _walk_calls(root):
+        command_name: str | None = None
+        # Pattern A: this.field.send(new Cmd(…)) or this.field.send(cmdVar) — DI
+        if di_fields:
+            result = _this_member_call(call, source)
+            if result is not None:
+                field, method = result
+                if field in di_fields and method == "send":
+                    command_name = _extract_command_name(call, source, cmd_vars)
+        # Pattern B: variable.send(new Cmd(…)) or variable.send(cmdVar) — free variable
+        if command_name is None and free_clients:
+            chain = _callee_chain(call, source)
+            if chain is not None:
+                _callee_text, receiver, tail = chain
+                if receiver in free_clients and tail == "send":
+                    command_name = _extract_command_name(call, source, cmd_vars)
+        if command_name is not None:
+            _emit_outbound(
+                call, call.start_point[0] + 1, command_name, "aws-s3",
+                source, path, record, seen,
+            )
+            emitted = True
+    return emitted
+
+
 def detect_sdk_calls(
     root: Node,
     source: bytes,
@@ -359,6 +682,12 @@ def detect_sdk_calls(
 
     if _detect_tsforce(root, source, path, record, seen, _repo_entities(class_heritage)):
         file_fw = file_fw or "salesforce"
+
+    if _detect_apollo_calls(root, source, path, record, seen):
+        file_fw = file_fw or "graphql"
+
+    if _detect_aws_s3_calls(root, source, path, record, seen):
+        file_fw = file_fw or "aws-s3"
 
     return file_fw
 
