@@ -308,6 +308,25 @@ def test_opensearch_service_receivers_detected() -> None:
         ("db_method_call", "search", "elasticsearch")
 
 
+def test_non_terminal_client_segment_does_not_hijack_es() -> None:
+    # A bare ``…client`` deeper in the chain must not pull an ORM/HTTP verb into ES.
+    # ``count`` isn't a _GENERIC verb, so these fall through to None (never elasticsearch).
+    assert classify_call("this.prismaClient.user.count", "count") is None
+    assert classify_call("this.apiClient.users.index", "index") is None
+    # Terminal ``…client`` + a collision verb (count/index) is also not enough on its own —
+    # only an explicit ES receiver name qualifies.
+    assert classify_call("httpClient.count", "count") is None
+    assert classify_call("this.restClient.index", "index") is None
+    # …but explicit ES receivers with a collision verb still match.
+    assert classify_call("this.client.index", "index") == \
+        ("db_method_call", "index", "elasticsearch")
+    assert classify_call("this.opensearchService.count", "count") == \
+        ("db_method_call", "count", "elasticsearch")
+    # Distinctive ES verbs (search/bulk/scroll) still accept any ``…client`` receiver.
+    assert classify_call("esClient.bulk", "bulk") == \
+        ("db_method_call", "bulk", "elasticsearch")
+
+
 def test_cache_redis_calls_detected() -> None:
     # Cache/Redis service .get()/.set()/.del() must be tagged as redis.
     assert classify_call("this.cacheService.get", "get") == \
