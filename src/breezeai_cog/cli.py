@@ -14,6 +14,7 @@ import typer
 
 from ._version import __version__
 from .config import Settings
+from .core.skips import SkipReport
 from .logging import setup_logging
 from .schemas import ProjectMetaData
 from .services import AnalysisResult, AnalysisService
@@ -169,12 +170,14 @@ def _analyze_and_report(
         result = analyze(None)
 
     m = result.project_meta
+    report = stats.get("skip_report")
     if not result.written:
         name = result.out_path.name if result.out_path else "output"
         typer.secho(
             f"No parseable source files — skipped {name} (no ndjson written).",
             fg=typer.colors.YELLOW,
         )
+        _report_skips(report, result.out_path, m.repositoryName)
         return True
     if render_table:
         _print_summary_table(m, stats, result.out_path)
@@ -183,6 +186,7 @@ def _analyze_and_report(
             f"{m.totalFiles} files, {m.totalFunctions} functions, {m.totalClasses} classes "
             f"({', '.join(m.analyzedLanguages) or 'none'}) -> {result.out_path}"
         )
+    _report_skips(report, result.out_path, m.repositoryName)
 
     if settings.upload:
         from .errors import UploadError
@@ -257,6 +261,60 @@ def _print_summary_table(meta: ProjectMetaData, stats: dict[str, Any], out_path:
     table.add_row("Output", str(out_path))
 
     Console().print(table)
+
+
+def _human_size(n: int) -> str:
+    size = float(n)
+    for unit in ("B", "KB", "MB", "GB"):
+        if size < 1024 or unit == "GB":
+            return f"{size:.0f} {unit}" if unit == "B" else f"{size:.1f} {unit}"
+        size /= 1024
+    return f"{n} B"
+
+
+def _report_skips(report: SkipReport | None, out_path: Path | None, repo_name: str) -> None:
+    """Print a grouped skip summary and write the full ``<repo>-skipped-report.json`` sidecar.
+
+    Covers the files/folders the scanner dropped and why (unsupported extension, ignore
+    rule, or oversized). The console view is truncated; the sidecar holds the full list.
+    """
+    if report is None:
+        return
+    if report.is_empty:
+        typer.echo("No files or folders skipped.")
+        return
+
+    typer.secho(
+        f"Skipped {report.total_files:,} file(s), {len(report.dirs):,} folder(s):",
+        fg=typer.colors.CYAN,
+    )
+    for reason in ("unsupported", "ignored", "oversized"):
+        count = report.counts.get(reason, 0)
+        if not count:
+            continue
+        extra = ""
+        if reason == "unsupported":
+            top = ", ".join(f"{ext} {cnt}" for ext, cnt in report.top_extensions(6))
+            more = " ..." if len(report.extensions) > 6 else ""
+            extra = f" — {top}{more}" if top else ""
+        elif reason == "oversized":
+            big = [f for f in report.files if f["reason"] == "oversized"][:3]
+            samples = ", ".join(f"{f['path']} ({_human_size(f.get('size', 0))})" for f in big)
+            extra = f" — {samples}" if samples else ""
+        typer.echo(f"  {reason:<12}({count:,}){extra}")
+
+    if report.dirs:
+        shown = ", ".join(sorted(report.dirs)[:6])
+        more = " ..." if len(report.dirs) > 6 else ""
+        typer.echo(f"  {'folders':<12}({len(report.dirs):,}) — {shown}{more}")
+
+    if out_path is not None:
+        sidecar = out_path.with_name(f"{repo_name}-skipped-report.json")
+        try:
+            sidecar.write_text(json.dumps(report.to_dict(), indent=2))
+            typer.secho(f"  Wrote {sidecar.name}", fg=typer.colors.GREEN)
+        except OSError as exc:
+            typer.secho(f"  (could not write skip report: {exc})", fg=typer.colors.YELLOW, err=True)
 
 
 @app.command()

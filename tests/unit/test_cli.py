@@ -50,6 +50,33 @@ def test_repo_to_json_tree(tmp_path) -> None:
     assert records[0]["totalFiles"] == 2
 
 
+def test_repo_to_json_tree_writes_skip_report(tmp_path) -> None:
+    """After analysis, a <repo>-skipped-report.json sidecar lists ignored/unsupported files."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "a.py").write_text("def f():\n    return 1\n")
+    (repo / "notes.txt").write_text("hello\n")  # unsupported extension
+    (repo / "image.bin").write_text("data\n")  # unsupported extension
+    (repo / "node_modules").mkdir()  # ignored directory (built-in default_ignores)
+    (repo / "node_modules" / "dep.js").write_text("module.exports = {}\n")
+    out_dir = tmp_path / "results"
+
+    result = runner.invoke(
+        app, ["repo-to-json-tree", "--repo", str(repo), "--out", str(out_dir), "--jobs", "1"]
+    )
+    assert result.exit_code == 0, result.output
+
+    sidecar = out_dir / "repo-skipped-report.json"
+    assert sidecar.exists()
+    report = json.loads(sidecar.read_text())
+    assert report["summary"].get("unsupported", 0) >= 2
+    assert report["unsupportedExtensions"].get(".txt") == 1
+    assert report["unsupportedExtensions"].get(".bin") == 1
+    assert "node_modules" in report["ignoredDirectories"]
+    # the pruned dir's contents are not enumerated as individual files
+    assert not any(f["path"].startswith("node_modules/") for f in report["files"])
+
+
 def test_repo_to_json_tree_batch(tmp_path) -> None:
     """--batch analyzes each immediate subdirectory as its own project."""
     workspace = tmp_path / "workspace"
