@@ -170,9 +170,10 @@ def test_generic_verb_non_db_receiver_guarded() -> None:
         ("cartItems.remove", "remove"),
     ]:
         assert classify_call(callee, method) is None, callee
-    # cache.delete / userCache.delete are now correctly tagged as redis (cache receiver)
+    # An explicit ``cache`` receiver name is tagged redis; a ``…Cache`` suffix is NOT (it is
+    # commonly an in-memory Map — see test_suffix_named_cache_is_not_redis).
     assert classify_call("cache.delete", "delete") == ("db_method_call", "delete", "redis")
-    assert classify_call("this.userCache.delete", "delete") == ("db_method_call", "delete", "redis")
+    assert classify_call("this.userCache.delete", "delete") is None
     # true positives preserved: explicit repo/vendor hint and distinctive methods
     assert classify_call("orderRepo.save", "save") == ("db_method_call", "save", "typeorm")
     assert classify_call("redisCache.hget", "hget") == ("db_method_call", "hget", "redis")
@@ -344,13 +345,21 @@ def test_cache_redis_calls_detected() -> None:
     assert classify_call("settings.set", "set") is None
 
 
-def test_non_terminal_cache_segment_does_not_hijack_redis() -> None:
-    # A ``…cache``-named object deeper in the chain must not pull a plain Map/array op into
-    # redis — only the terminal receiver counts (mirrors the ES terminal-only gate).
+def test_suffix_named_cache_is_not_redis() -> None:
+    # A bare ``…Cache`` suffix no longer implies redis: in-memory Map/LRU fields are routinely
+    # named ``…Cache`` (dogfooded on nimbus-api: ``dataLoaderCache: Map<K, DataLoader>``), and
+    # their ``.get()``/``.set()`` are memory ops, not Redis. Only explicit cache/redis receiver
+    # names — or a ``…redis`` suffix — classify.
+    assert classify_call("this.dataLoaderCache.get", "get") is None  # Map<K, DataLoader>
+    assert classify_call("this.productCache.set", "set") is None
+    assert classify_call("this.responseCache.delete", "delete") is None
+    # a ``…cache`` segment deeper in the chain also stays out (terminal receiver is entries/items)
     assert classify_call("this.responseCache.entries.delete", "delete") is None
     assert classify_call("this.pageCache.items.get", "get") is None
-    # …but a terminal cache receiver still classifies.
-    assert classify_call("this.responseCache.get", "get") == \
+    # …but explicit cache/redis receiver names still classify.
+    assert classify_call("this.cacheService.get", "get") == \
+        ("db_method_call", "get", "redis")
+    assert classify_call("this.userRedis.get", "get") == \
         ("db_method_call", "get", "redis")
 
 
