@@ -109,6 +109,6 @@ def test_missing_fields(captured: _Captured) -> None:
 
 def test_invalid_repo_url(captured: _Captured) -> None:
     client = _make_client(captured, filter_set=None, deleted=[])
-    r = client.post("/api/analyze-diff", json={**BODY, "repoUrl": "https://gitlab.com/a/b"})
+    r = client.post("/api/analyze-diff", json={**BODY, "repoUrl": "https://example.com/a/b"})
     assert r.status_code == 400
-    assert r.json() == {"error": "Invalid repo URL (supported hosts: github.com, bitbucket.org)"}
+    assert r.json() == {"error": "Invalid repo URL (supported hosts: github.com, gitlab.com, bitbucket.org)"}
