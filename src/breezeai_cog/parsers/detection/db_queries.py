@@ -241,16 +241,10 @@ def match_db(callee: str, method: str, language: str | None = None,
                 return "elasticsearch"
         elif receiver.endswith("client") or receiver in _ES_RECEIVERS:
             return "elasticsearch"  # e.g. this.client.search(dsl) / this.searchService.search(...)
-    # Cache/Redis service calls — gated on a cache-specific receiver so Map.get/Set.set stay out.
-    # The full chain is scanned here (a cache is commonly reached as ``this.xCache.store.get``).
-    _chain_segments = low.rsplit(".", 1)[0].split(".") if "." in low else []
-    _any_cache_receiver = (
-        receiver and (receiver in _CACHE_RECEIVERS or receiver.endswith("cache") or receiver.endswith("redis"))
-    ) or any(
-        seg in _CACHE_RECEIVERS or seg.endswith("cache") or seg.endswith("redis")
-        for seg in _chain_segments
-    )
-    if _any_cache_receiver:
+    # Cache/Redis service calls — gated on the TERMINAL receiver only (like ES above), so a
+    # ``…cache``-named object deeper in the chain can't drag a plain ``Map.delete`` into redis:
+    # ``this.responseCache.entries.delete(key)`` is a Map op on ``entries``, not a Redis call.
+    if receiver and (receiver in _CACHE_RECEIVERS or receiver.endswith("cache") or receiver.endswith("redis")):
         if m in _CACHE_VERBS or m in ("delete", "remove"):
             return "redis"
     if m in _GENERIC:
