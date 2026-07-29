@@ -194,6 +194,10 @@ def _has_ef_source(low_callee: str) -> bool:
 # high-collision HTTP verbs (get/update/delete/create) are deliberately excluded. ``msearch``
 # stays in _DISTINCTIVE (unambiguous, no receiver needed); ``mget`` is left to Redis.
 _ES_VERBS = frozenset({"search", "bulk", "index", "scroll", "reindex", "count"})
+# Subset of _ES_VERBS that also collide heavily with ORM/array/generic code (``repo.count()``,
+# ``.index()``): these require a receiver that is *explicitly* an ES name (in _ES_RECEIVERS),
+# not merely something ending in "client" — otherwise ``httpClient.count()`` reads as ES.
+_ES_COLLISION_VERBS = frozenset({"count", "index"})
 
 # Cache/Redis service verbs — too generic alone (Map.get, Set.set), so gated on a
 # cache-specific receiver, mirroring the ES verb/receiver pattern.
@@ -226,17 +230,20 @@ def match_db(callee: str, method: str, language: str | None = None,
     if m in _EF_LINQ_VERBS and language in _DOTNET:
         return "entity_framework" if _has_ef_source(low) else None
     receiver = low.rsplit(".", 1)[0].rsplit(".", 1)[-1] if "." in low else ""
-    # Also extract the full receiver chain (everything before the method) so we can match
-    # service-wrapper patterns like ``this.searchService.search()`` where the terminal segment
-    # is ``searchservice`` but ``receiver`` (the segment before it) resolves to ``this``.
-    _receiver_chain = low.rsplit(".", 1)[0] if "." in low else ""
-    # Check all segments in the chain for an ES/cache receiver match.
-    _chain_segments = _receiver_chain.split(".") if _receiver_chain else []
-    _any_es_receiver = receiver and (receiver.endswith("client") or receiver in _ES_RECEIVERS) or \
-        any(seg in _ES_RECEIVERS or seg.endswith("client") for seg in _chain_segments)
-    if m in _ES_VERBS and _any_es_receiver:
-        return "elasticsearch"  # e.g. this.client.search(dsl) / this.searchService.search(...)
+    # ES match is gated on the TERMINAL receiver only (the segment the verb is invoked on) —
+    # never a deeper chain segment, so a bare ``…client`` further up (``prismaClient``,
+    # ``apiClient``) can't hijack the call: ``this.prismaClient.user.count()`` stays out of ES.
+    if m in _ES_VERBS and receiver:
+        if m in _ES_COLLISION_VERBS:
+            # count/index also mean ORM/array ops — demand an explicit ES receiver name,
+            # a bare ``…client`` (httpClient) is not enough.
+            if receiver in _ES_RECEIVERS:
+                return "elasticsearch"
+        elif receiver.endswith("client") or receiver in _ES_RECEIVERS:
+            return "elasticsearch"  # e.g. this.client.search(dsl) / this.searchService.search(...)
     # Cache/Redis service calls — gated on a cache-specific receiver so Map.get/Set.set stay out.
+    # The full chain is scanned here (a cache is commonly reached as ``this.xCache.store.get``).
+    _chain_segments = low.rsplit(".", 1)[0].split(".") if "." in low else []
     _any_cache_receiver = (
         receiver and (receiver in _CACHE_RECEIVERS or receiver.endswith("cache") or receiver.endswith("redis"))
     ) or any(
