@@ -21,8 +21,9 @@ from .errors import ApiError
 _GITHUB = re.compile(r"github\.com/([^/]+)/([^/]+?)(?:\.git)?(?:/.*)?$")
 _BITBUCKET = re.compile(r"bitbucket\.org/([^/]+)/([^/]+?)(?:\.git)?(?:/.*)?$")
 _GITLAB = re.compile(r"gitlab\.com/(.+)$")
-_AZURE_DEVOPS = re.compile(r"(?:dev\.azure\.com|visualstudio\.com)/([^/]+)/([^/]+)/_git/([^/]+)")
-
+_AZURE_DEVOPS = re.compile(
+    r"(?:dev\.azure\.com/([^/]+)/([^/]+)|([a-zA-Z0-9-]+)\.visualstudio\.com/([^/]+)(?:/([^/]+))?)/_git/([^/]+)"
+)
 
 def parse_repo_url(repo_url: str) -> dict[str, str] | None:
     gh = _GITHUB.search(repo_url)
@@ -41,9 +42,16 @@ def parse_repo_url(repo_url: str) -> dict[str, str] | None:
             return {"provider": "gitlab", "owner": "/".join(segments[:-1]), "repo": segments[-1]}
     az = _AZURE_DEVOPS.search(repo_url)
     if az:
-        return {"provider": "azure_devops", "owner": az.group(1), "repo": f"{az.group(2)}/{az.group(3)}"}
+        if az.group(1):  # dev.azure.com format
+            owner = az.group(1)
+            repo_path = f"{az.group(2)}"
+        else:  # visualstudio.com format
+            owner = az.group(3)
+            p1 = az.group(4)
+            p2 = az.group(5)
+            repo_path = f"{p1}/{p2}" if p2 else p1
+        return {"provider": "azure_devops", "owner": owner, "repo": repo_path}
     return None
-
 
 def _scrub(s: str) -> str:
     return re.sub(r"//[^/@\s]+:[^/@\s]+@", "//***:***@", str(s or ""))
@@ -181,11 +189,17 @@ def _auth_clone_url(provider: str, owner: str, repo: str, token: str | None) -> 
         return (f"https://oauth2:{token}@gitlab.com/{owner}/{repo}.git" if token
                 else f"https://gitlab.com/{owner}/{repo}.git")
     if provider == "azure_devops":
-        # Azure DevOps clone URL layout with token support
         proj_repo = repo.split("/")
-        project, repository = proj_repo[0], proj_repo[1] if len(proj_repo) > 1 else proj_repo[0]
-        return (f"https://pat:{token}@dev.azure.com/{owner}/{project}/_git/{repository}" if token
-                else f"https://dev.azure.com/{owner}/{project}/_git/{repository}")
+        project = proj_repo[0]
+        repository = proj_repo[1] if len(proj_repo) > 1 else proj_repo[0]
+        
+        if ".visualstudio.com" in repo or (not repo.startswith("dev.azure.com") and len(proj_repo) == 1):
+            domain_url = f"{owner}.visualstudio.com/{project}/_git/{repository}"
+        else:
+            domain_url = f"dev.azure.com/{owner}/{project}/_git/{repository}"
+
+        return (f"https://pat:{token}@{domain_url}" if token else f"https://{domain_url}")
+    
     raise ApiError(f"Unsupported git provider: {provider}", 400)
 
 
