@@ -5,6 +5,7 @@ retry, fatal-vs-retryable split) and poll_ontology_status (status polling contra
 from __future__ import annotations
 
 import gzip
+from typing import Any
 
 import httpx
 import pytest
