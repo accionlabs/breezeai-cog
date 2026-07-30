@@ -100,6 +100,69 @@ def test_output_validates(tmp_path) -> None:
     assert not errors, errors
 
 
+def test_deep_string_concat_does_not_recurse(tmp_path) -> None:
+    # Regression: a statement with a very deep `+` chain (generated HTML/JS builders, e.g.
+    # P3 WizardHtmlBuilder with 859 concats) is a left-nested binary_expression tree that
+    # folding recurses through → RecursionError. render_concat must bail past its depth cap.
+    import sys
+
+    body = " + ".join(['"a"'] * 800)  # 800-deep concat — over the 100 cap, near the 1000 limit
+    # must be a CALL ARGUMENT — that's what triggers endpoint rendering (render_concat)
+    src = ("class C { void m() { sink(" + body + "); } }").encode()
+    p = tmp_path / "C.java"
+    p.write_text(src.decode())
+    ctx = ParseContext(path="C.java", abs_path=p, source=src, repo_root=tmp_path,
+                       capture_statements=True)
+    old = sys.getrecursionlimit()
+    sys.setrecursionlimit(1000)  # ensure the default limit is in force for the assertion
+    try:
+        rec = JavaParser().parse_file(ctx)  # must NOT raise RecursionError
+    finally:
+        sys.setrecursionlimit(old)
+    assert rec.functions  # the method is still captured; the concat just yields no endpoint
+
+
+def test_short_concat_still_renders_endpoint() -> None:
+    # The depth cap must not regress normal URL/path concatenation rendering.
+    from breezeai_cog.parsers.java.statements import _render_url
+    from breezeai_cog.parsers.treesitter import parse_source
+
+    src = b'class C { void m() { String u = "http://api/" + id + "/x"; } }'
+    root = parse_source("java", src, 0).root_node
+    concat = next(n for n in _walk(root) if n.type == "binary_expression")
+    assert _render_url(concat, src) == "http://api/{id}/x"
+
+
+def _walk(node):
+    yield node
+    for c in node.named_children:
+        yield from _walk(c)
+
+
+def test_deep_concat_tracked_and_summarized(tmp_path) -> None:
+    # Deep concats are collected per file and rendered as ONE human-readable summary line.
+    import breezeai_cog.parsers.statements_common as sc
+
+    body = " + ".join(['"a"'] * 400)
+    src = ("class C { void m() { sink(" + body + "); } }").encode()  # call arg triggers render
+    p = tmp_path / "C.java"
+    p.write_text(src.decode())
+    ctx = ParseContext(path="C.java", abs_path=p, source=src, repo_root=tmp_path,
+                       capture_statements=True)
+
+    sc.begin_concat_tracking()
+    JavaParser().parse_file(ctx)
+    summary = sc.summarize_skipped_concats("app/C.java")
+
+    assert summary is not None
+    assert summary.startswith("app/C.java:")
+    assert "1 deeply-nested string concatenation" in summary  # count + phrasing
+    assert "still\n captured" not in summary  # sanity: it's one readable line
+    assert "Line: 1" in summary
+    # collector is cleared after summarizing
+    assert sc.summarize_skipped_concats("app/C.java") is None
+
+
 def test_inline_lambda_body_captured(tmp_path) -> None:
     # Regression (#1): statements & calls inside a lambda are attributed to the
     # nearest named enclosing method, not dropped.

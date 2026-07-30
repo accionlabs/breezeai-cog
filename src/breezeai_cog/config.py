@@ -57,6 +57,11 @@ class Settings(BaseSettings):
     text_truncation_limit: int = 8000  # max captured statement `text` length (utils/text.py)
     max_file_size: int = 2_000_000  # bytes; scanner skips larger files (core/scanner.py)
     parse_timeout: float = 10.0  # seconds; per-file tree-sitter native timeout (0 disables)
+    # --max-concat-depth; max `+` nesting folded into an endpoint before bailing to null.
+    # Guards against RecursionError on generated HTML/JS string builders. Keep modest — a
+    # real URL concat is <10 parts, and very high values can re-trigger the recursion the
+    # cap prevents (those files are then dropped with a warning). (parsers/statements_common)
+    max_concat_depth: int = Field(default=100, ge=1)
 
     # ── Logging ─────────────────────────────────────────────────
     log_level: str = "INFO"

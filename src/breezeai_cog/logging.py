@@ -21,6 +21,8 @@ import re
 import socket
 import sys
 import time
+from collections.abc import Iterator
+from contextlib import contextmanager
 from datetime import date as _date
 from datetime import timedelta
 from pathlib import Path
@@ -234,6 +236,59 @@ def setup_worker_logging(queue: object, log_format: str, log_level: str) -> None
 
 def get_logger(name: str | None = None) -> structlog.stdlib.BoundLogger:
     return structlog.get_logger(name or APP_LOGGER)
+
+
+#: Log-level → rich style for console-routed records (INFO stays default/uncolored).
+_LEVEL_STYLE = {
+    logging.WARNING: "yellow",
+    logging.ERROR: "bold red",
+    logging.CRITICAL: "bold red",
+}
+
+
+class _ConsoleLogHandler(logging.Handler):
+    """Emit each record through a shared rich ``Console``. When that console has an active
+    ``Live``/``Progress`` display, rich prints the line **above** the pinned bar (on its own
+    line) instead of clobbering it — and colours it by level."""
+
+    def __init__(self, console: Any) -> None:
+        super().__init__()
+        self._console = console
+        self.setFormatter(logging.Formatter("%(message)s"))
+
+    def emit(self, record: logging.LogRecord) -> None:
+        try:
+            self._console.print(
+                self.format(record),
+                style=_LEVEL_STYLE.get(record.levelno),
+                markup=False,      # log text is literal — never interpret `[...]` as markup
+                highlight=False,   # no auto-highlighting of numbers/paths
+                soft_wrap=False,
+            )
+        except Exception:  # pragma: no cover - logging must never raise
+            self.handleError(record)
+
+
+@contextmanager
+def route_logs_through_console(console: Any) -> Iterator[None]:
+    """Temporarily route the app logger through ``console`` so records render above a live
+    ``Progress`` bar — on their own lines, coloured by level — rather than tearing it apart.
+
+    Must wrap the analysis run (before the process-pool ``QueueListener`` snapshots the app
+    logger's handlers), so funnelled worker warnings render through the console too. Restores
+    the original handlers on exit."""
+    logger = logging.getLogger(APP_LOGGER)
+    saved = logger.handlers[:]
+    handler = _ConsoleLogHandler(console)
+    handler.setLevel(logger.level)
+    # Replace only the console/stream output with the rich-routed one; keep file handlers
+    # (``--log-to-file``) writing as usual.
+    kept = [h for h in saved if isinstance(h, logging.FileHandler)]
+    logger.handlers = kept + [handler]
+    try:
+        yield
+    finally:
+        logger.handlers = saved
 
 
 # ── Context helpers (per-run / per-file) — thin wrappers over structlog.contextvars ──

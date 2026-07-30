@@ -34,6 +34,7 @@ def _options(settings) -> dict:
         "capture_statements": settings.capture_statements,
         "text_truncation_limit": settings.text_truncation_limit,
         "parse_timeout_micros": int(settings.parse_timeout * 1_000_000),
+        "max_concat_depth": settings.max_concat_depth,
         "log_format": settings.log_format,
         "log_level": settings.log_level,
     }
@@ -55,6 +56,14 @@ def _parse_entry(path: str, repo_root: str, options: dict) -> FileRecord | None:
         return None
     base = base_parser_for(path)
     index = options.get("indexes", {}).get(base.name if base is not None else "")
+    from ..parsers.statements_common import (
+        begin_concat_tracking,
+        set_concat_depth,
+        summarize_skipped_concats,
+    )
+
+    set_concat_depth(options.get("max_concat_depth"))  # apply configured cap in this process
+    begin_concat_tracking()  # collect concats the fold cap skips, for one per-file summary
     try:
         ctx = ParseContext(
             path=path,
@@ -66,12 +75,16 @@ def _parse_entry(path: str, repo_root: str, options: dict) -> FileRecord | None:
             parse_timeout_micros=options["parse_timeout_micros"],
             resolution_index=index,
         )
-        return parser.parse_file(ctx)
+        record = parser.parse_file(ctx)
     except Exception as exc:  # per-file isolation (incl. parse timeout)
         get_logger("breezeai_cog.worker").warning(
             "parse.file.failed", path=path, parser=parser.name, error=str(exc)
         )
         return None
+    summary = summarize_skipped_concats(path)  # one clean, human-readable line if any
+    if summary:
+        get_logger("breezeai_cog.worker").warning(summary)
+    return record
 
 
 def _init_worker(log_queue: object, repo_root: str, options: dict) -> None:

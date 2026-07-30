@@ -42,6 +42,11 @@ def repo_to_json_tree(
              "(one .ndjson.gz per subdir). Dot-directories and loose files are skipped.",
     ),
     jobs: Optional[int] = typer.Option(None, "--jobs", help="Worker processes (default: CPU count)."),
+    max_concat_depth: Optional[int] = typer.Option(
+        None, "--max-concat-depth", min=1,
+        help="Max `+` nesting folded into an endpoint before bailing to null (default 100; "
+             "env: BREEZEAI_COG_MAX_CONCAT_DEPTH). Guards generated HTML/JS string builders.",
+    ),
     upload: bool = typer.Option(
         False, "--upload", help="Upload the result to the Breeze backend (needs --baseurl, --uuid, --user-api-key)."
     ),
@@ -68,6 +73,8 @@ def repo_to_json_tree(
         overrides["uuid"] = uuid
     if user_api_key is not None:
         overrides["user_api_key"] = user_api_key
+    if max_concat_depth is not None:
+        overrides["max_concat_depth"] = max_concat_depth
 
     from pydantic import ValidationError
 
@@ -147,12 +154,18 @@ def _analyze_and_report(
             BarColumn, MofNCompleteColumn, Progress, TextColumn, TimeElapsedColumn,
         )
 
-        with Progress(
+        from .logging import route_logs_through_console
+
+        console = Console(stderr=True)  # shared by the bar AND the log routing below
+        # Route logs through the same console so warnings render above the pinned bar (own
+        # lines, coloured) instead of shredding it. Entered BEFORE analyze() so the worker
+        # QueueListener funnels through it too.
+        with route_logs_through_console(console), Progress(
             TextColumn("[progress.description]{task.description}"),
             BarColumn(),
             MofNCompleteColumn(),
             TimeElapsedColumn(),
-            console=Console(stderr=True),
+            console=console,
             transient=True,            # clear the bar when done; the summary remains
             refresh_per_second=10,     # throttled redraw — cheap regardless of file count
         ) as prog:

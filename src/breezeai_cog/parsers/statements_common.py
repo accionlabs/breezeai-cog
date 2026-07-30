@@ -20,6 +20,7 @@ concise-bodied lambda (``x => repo.save(x)``) is still classified here.
 
 from __future__ import annotations
 
+import contextvars
 from collections.abc import Callable, Collection, Iterator
 
 from tree_sitter import Node
@@ -29,6 +30,36 @@ from ..schemas import Statement
 from ..utils import truncate
 from .detection import classify_call, text_has_query
 from .treesitter import first_line, node_text
+
+# Per-file collector for concatenations skipped by the fold cap. ``render_concat`` records
+# the line of each; the executor resets it around each file and emits ONE human-readable
+# summary — far cleaner than a machine log line per concat shredding the progress display.
+_skipped_concat_lines: contextvars.ContextVar["list[int] | None"] = contextvars.ContextVar(
+    "skipped_concat_lines", default=None
+)
+
+
+def begin_concat_tracking() -> None:
+    """Start collecting skipped-concat lines for the current file (call before parsing)."""
+    _skipped_concat_lines.set([])
+
+
+def summarize_skipped_concats(path: str) -> str | None:
+    """One human-readable summary line for the concats skipped since
+    :func:`begin_concat_tracking` (and clear the collector), or ``None`` if none."""
+    lines = _skipped_concat_lines.get() or []
+    _skipped_concat_lines.set(None)
+    if not lines:
+        return None
+    shown = ", ".join(str(n) for n in lines[:10])
+    more = "" if len(lines) <= 10 else f" (+{len(lines) - 10} more)"
+    plural = "s" if len(lines) != 1 else ""
+    return (
+        f"{path}: skipped endpoint resolution for {len(lines)} deeply-nested string "
+        f"concatenation{plural} (over {_MAX_CONCAT_DEPTH} levels — typically generated "
+        f"HTML/JS builders); the statement{plural} {'are' if plural else 'is'} still "
+        f"captured, only the endpoint is omitted. Line{plural}: {shown}{more}"
+    )
 
 # (callee, method, first_string_arg) or None for a single call node.
 CallDetails = Callable[[Node, bytes], "tuple[str, str, str | None] | None"]
@@ -56,8 +87,50 @@ def strip_leading_base(url: str) -> str:
     return url
 
 
+#: Max binary-expression nesting ``render_concat`` will fold. String concatenation is
+#: left-associative, so ``a + b + … + z`` is a deeply *nested* tree; folding it recurses
+#: once per ``+`` (``render_concat`` ↔ the language ``_render_url``). Generated HTML/JS
+#: builders chain hundreds-to-thousands of ``+`` in one statement (P3 ``WizardHtmlBuilder``
+#: hits 859), which overflows the Python stack (``RecursionError``). A real URL/path concat
+#: is <10 parts, so bailing to ``None`` past this bound loses nothing meaningful — and 100 ×
+#: ~2 frames/level stays well under the 1000-frame limit even atop the parser's own stack.
+_MAX_CONCAT_DEPTH = 100
+
+
+def set_concat_depth(depth: int | None) -> None:
+    """Override the fold cap for this process (from ``Settings.max_concat_depth`` /
+    ``BREEZEAI_COG_MAX_CONCAT_DEPTH`` / ``--max-concat-depth``). The executor calls this per
+    file so it applies in every worker process. No-op for a falsy/non-positive value."""
+    global _MAX_CONCAT_DEPTH
+    if depth and depth > 0:
+        _MAX_CONCAT_DEPTH = depth
+
+
+def _nests_too_deep(node: Node, limit: int) -> bool:
+    """True if ``node``'s binary-expression nesting exceeds ``limit``. Measured with an
+    explicit stack (the deep tree is exactly why we can't recurse) and early-exits at
+    ``limit`` + 1, so a pathological concat costs O(limit), not O(nodes)."""
+    stack = [(node, 0)]
+    while stack:
+        n, depth = stack.pop()
+        if depth > limit:
+            return True
+        if n.type == "binary_expression":
+            for c in n.named_children:
+                stack.append((c, depth + 1))
+    return False
+
+
 def render_concat(node: Node, source: bytes, render: UrlRenderer) -> str | None:
-    """Render a binary string-concatenation node to a path (non-string parts -> ``{name}``)."""
+    """Render a binary string-concatenation node to a path (non-string parts -> ``{name}``).
+    Pathologically deep concatenations (generated HTML builders) are not a real endpoint and
+    would overflow the stack, so they return ``None`` past :data:`_MAX_CONCAT_DEPTH`."""
+    if _nests_too_deep(node, _MAX_CONCAT_DEPTH):
+        # Record the line for the executor's per-file summary (see summarize_skipped_concats).
+        tracker = _skipped_concat_lines.get()
+        if tracker is not None:
+            tracker.append(node.start_point[0] + 1)
+        return None
     rendered = [render(c, source) for c in node.named_children]
     if not any(r is not None for r in rendered):
         return None
