@@ -9,7 +9,7 @@ language-agnostic and shared here so Java and Groovy Vert.x stay in lock-step.
 
 Both Vert.x generations are covered: 3.x (``io.vertx``, ``Router.router(vertx)``,
 ``eventBus.consumer``) and 2.x (``org.vertx.java`` / ``org.vertx.groovy``, ``RouteMatcher``,
-``eventBus().registerHandler``) — the latter is what the P3 webapp-engine API modules use.
+``eventBus().registerHandler``).
 """
 
 from __future__ import annotations
@@ -17,10 +17,12 @@ from __future__ import annotations
 from ..schemas import Function, SemanticType, Statement
 
 #: EventBus method → semanticType. Includes the Vert.x 2.x ``registerHandler`` family
-#: (renamed ``consumer`` in 3.x) and ``request`` (3.x send-with-reply → same as ``send``).
+#: (renamed ``consumer`` in 3.x), ``sendWithTimeout`` (2.x send-with-reply-and-timeout), and
+#: ``request`` (3.x send-with-reply → same as ``send``).
 EVENTBUS: dict[str, SemanticType] = {
     "send": "eventbus_send",
     "request": "eventbus_send",
+    "sendWithTimeout": "eventbus_send",
     "publish": "eventbus_publish",
     "consumer": "eventbus_consumer",
     "localConsumer": "eventbus_consumer",

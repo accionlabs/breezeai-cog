@@ -108,6 +108,23 @@ public class ServiceServer extends Verticle {
 '''
 
 
+def test_vertx2_sendWithTimeout_is_eventbus_send(tmp_path) -> None:
+    # Vert.x 2.x send-with-reply-and-timeout must map to eventbus_send.
+    src = (
+        b"package x;\nimport io.vertx.core.AbstractVerticle;\n"
+        b"public class R extends AbstractVerticle {\n"
+        b"  void m() { vertx.eventBus().sendWithTimeout(ADDR, msg, 1000, cb); }\n}"
+    )
+    p = tmp_path / "R.java"
+    p.write_text(src.decode())
+    ctx = ParseContext(path="R.java", abs_path=p, source=src, repo_root=tmp_path,
+                       capture_statements=True)
+    rec = VertxParser().parse_file(ctx)
+    sends = [s for s in rec.statements if s.semanticType == "eventbus_send"]
+    assert len(sends) == 1
+    assert sends[0].framework == "vertx" and sends[0].endpoint == "ADDR"
+
+
 def test_vertx2_registerHandler_detected_as_consumer(tmp_path) -> None:
     # org.vertx.java (2.x) activation + registerHandler → eventbus_consumer.
     p = tmp_path / "ServiceServer.java"
