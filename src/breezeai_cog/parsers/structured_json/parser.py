@@ -46,7 +46,7 @@ class StructuredJsonParser(BaseParser):
     name = "structured-json"
     schema_version = SCHEMA_VERSION
     extensions = (".json",)
-    #: Beats ConfigParser (0); leaves room for a client subclass (e.g. P3 at 5).
+    #: Beats ConfigParser (0); leaves room for a client-specific subclass (priority 5).
     priority = 3
 
     #: Case-insensitive substrings; any leaf key containing one has its value redacted to

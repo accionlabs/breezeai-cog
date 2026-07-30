@@ -90,8 +90,8 @@ def strip_leading_base(url: str) -> str:
 #: Max binary-expression nesting ``render_concat`` will fold. String concatenation is
 #: left-associative, so ``a + b + … + z`` is a deeply *nested* tree; folding it recurses
 #: once per ``+`` (``render_concat`` ↔ the language ``_render_url``). Generated HTML/JS
-#: builders chain hundreds-to-thousands of ``+`` in one statement (P3 ``WizardHtmlBuilder``
-#: hits 859), which overflows the Python stack (``RecursionError``). A real URL/path concat
+#: builders chain hundreds-to-thousands of ``+`` in one statement (800+ levels observed),
+#: which overflows the Python stack (``RecursionError``). A real URL/path concat
 #: is <10 parts, so bailing to ``None`` past this bound loses nothing meaningful — and 100 ×
 #: ~2 frames/level stays well under the 1000-frame limit even atop the parser's own stack.
 _MAX_CONCAT_DEPTH = 100
