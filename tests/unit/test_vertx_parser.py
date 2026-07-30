@@ -151,6 +151,32 @@ def test_same_file_constant_address_folds(tmp_path) -> None:
     assert "NF" in eps                  # non-final → not folded, stays symbolic
 
 
+def test_cross_file_constant_address_folds(tmp_path) -> None:
+    # A constant declared in one file (Constant.APP_ID) resolves inside another file's
+    # address, incl. a chain (Bus.NAME = Constant.APP_ID + "/x"), via the repo-wide index.
+    (tmp_path / "Constant.java").write_text(
+        'package a;\npublic class Constant { public static final String APP_ID = "CEPAY0957"; }\n'
+    )
+    (tmp_path / "Bus.java").write_text(
+        'package a;\npublic class Bus { public static final String NAME = Constant.APP_ID + "/x"; }\n'
+    )
+    v = tmp_path / "V.java"
+    v.write_text(
+        "package a;\nimport io.vertx.core.AbstractVerticle;\n"
+        "public class V extends AbstractVerticle {\n"
+        '  void start() { vertx.eventBus().registerHandler("view/" + Constant.APP_ID, h);\n'
+        "                 vertx.eventBus().registerHandler(Bus.NAME, h); }\n}\n"
+    )
+    parser = VertxParser()
+    idx = parser.build_index(tmp_path, list(tmp_path.rglob("*.java")))
+    ctx = ParseContext(path="V.java", abs_path=v, source=v.read_bytes(), repo_root=tmp_path,
+                       resolution_index=idx, capture_statements=True)
+    rec = parser.parse_file(ctx)
+    eps = {s.endpoint for s in rec.statements if s.semanticType == "eventbus_consumer"}
+    assert "view/CEPAY0957" in eps   # cross-file constant in a concat
+    assert "CEPAY0957/x" in eps      # cross-file constant chain
+
+
 def test_vertx2_registerHandler_detected_as_consumer(tmp_path) -> None:
     # org.vertx.java (2.x) activation + registerHandler → eventbus_consumer.
     p = tmp_path / "ServiceServer.java"

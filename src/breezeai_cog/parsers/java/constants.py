@@ -7,6 +7,8 @@ non-final field has no compile-time value and is skipped."""
 
 from __future__ import annotations
 
+from collections.abc import Iterator
+
 from tree_sitter import Node
 
 from ..constfold import Token, resolve_tokens
@@ -46,7 +48,7 @@ def fold_arg(node: Node, source: bytes, values: dict[str, str]) -> str | None:
     return resolve_tokens(tokens, values) if tokens is not None else None
 
 
-def _final_string_declarators(cls: Node, source: bytes):
+def _final_string_declarators(cls: Node, source: bytes) -> Iterator[tuple[str, Node]]:
     """Yield ``(name, initializer_node)`` for each ``static final String`` field on ``cls``."""
     body = cls.child_by_field_name("body")
     if body is None:

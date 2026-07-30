@@ -16,6 +16,8 @@ reference another (e.g. ``BUS_NAME = APP_ID + "/x"``).
 
 from __future__ import annotations
 
+from collections.abc import Mapping
+
 #: One initializer fragment: ``("lit", text)`` (a string literal) or ``("ref", name)`` (a
 #: reference to another constant, by simple name or ``Class.field``).
 Token = tuple[str, str]
@@ -36,11 +38,14 @@ def resolve_tokens(tokens: list[Token], values: dict[str, str]) -> str | None:
     return "".join(out)
 
 
-def resolve_all(raw: dict[str, list[Token] | None]) -> dict[str, str]:
+def resolve_all(
+    raw: Mapping[str, list[Token] | None], base: dict[str, str] | None = None
+) -> dict[str, str]:
     """Fold a ``name → tokens`` map to ``name → value`` via a bounded fixpoint, so a constant
-    may reference another (chains are short in practice). ``None`` tokens (an ambiguous name)
-    and anything still unresolved after the passes are dropped — honest-null."""
-    values: dict[str, str] = {}
+    may reference another (chains are short in practice). ``base`` seeds already-resolved
+    values (e.g. a repo-wide index), so a local constant can reference a cross-file one.
+    ``None`` tokens (an ambiguous name) and anything still unresolved are dropped — honest-null."""
+    values: dict[str, str] = dict(base or {})
     pending = {k: v for k, v in raw.items() if v is not None}
     for _ in range(len(pending) if pending else 0):  # worst case: a chain of every constant
         progressed = False
