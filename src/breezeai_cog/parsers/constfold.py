@@ -18,9 +18,47 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 
+from tree_sitter import Node
+
+from .treesitter import node_text
+
 #: One initializer fragment: ``("lit", text)`` (a string literal) or ``("ref", name)`` (a
 #: reference to another constant, by simple name or ``Class.field``).
 Token = tuple[str, str]
+
+#: Groovy string-interpolation node types — a GString has no compile-time value, so it never
+#: folds to a constant.
+_INTERPOLATION = ("interpolation", "gstring_interpolation")
+
+
+def init_tokens(node: Node, source: bytes) -> list[Token] | None:
+    """A constant-initializer / argument expression → fold tokens, or ``None`` if it is not a
+    plain string literal, a ``+`` concatenation of literals, or a reference to another
+    constant. Shared across languages (Java/Groovy use the same node types); handles both
+    quote styles and skips interpolated (GString) literals."""
+    t = node.type
+    if t == "string_literal":
+        if any(c.type in _INTERPOLATION for c in node.named_children):
+            return None  # interpolated → not a compile-time constant
+        frag = next((c for c in node.named_children if c.type == "string_fragment"), None)
+        if frag is not None:
+            return [("lit", node_text(frag, source))]
+        text = node_text(node, source)
+        return [("lit", text[1:-1] if len(text) >= 2 and text[0] in "\"'" else text)]
+    if t == "binary_expression":  # only string `+` concatenation folds
+        parts: list[Token] = []
+        for child in node.named_children:
+            sub = init_tokens(child, source)
+            if sub is None:
+                return None
+            parts += sub
+        return parts
+    if t == "parenthesized_expression":
+        inner = next(iter(node.named_children), None)
+        return init_tokens(inner, source) if inner is not None else None
+    if t in ("identifier", "field_access"):  # reference to another constant (NAME / Class.FIELD)
+        return [("ref", node_text(node, source))]
+    return None
 
 
 def resolve_tokens(tokens: list[Token], values: dict[str, str]) -> str | None:

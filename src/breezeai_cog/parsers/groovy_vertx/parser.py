@@ -15,6 +15,9 @@ from __future__ import annotations
 
 from ...schemas import FileRecord
 from ..base import ParseContext
+from ..constfold import resolve_all
+from ..groovy.constants import collect_constants
+from ..groovy.imports import GroovyIndex
 from ..groovy.parser import GroovyParser
 from ..treesitter import parse_source
 from .events import detect_vertx_groovy
@@ -32,6 +35,9 @@ class GroovyVertxParser(GroovyParser):
         root = parse_source("groovy", ctx.source, ctx.parse_timeout_micros).root_node
         record = self.extract(root, ctx)  # inherited Groovy extraction (one parse)
         if ctx.capture_statements:  # routes/events are statements — gated by --capture-statements
-            if detect_vertx_groovy(root, ctx.source, ctx.path, record):
+            idx = ctx.resolution_index
+            cross = idx.consts if isinstance(idx, GroovyIndex) else {}  # repo-wide constants
+            consts = resolve_all(collect_constants(root, ctx.source), base=cross)
+            if detect_vertx_groovy(root, ctx.source, ctx.path, record, consts):
                 record.framework = "vertx"
         return record

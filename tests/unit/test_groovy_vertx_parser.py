@@ -125,6 +125,30 @@ class C extends Verticle {
     assert _routes(rec) == set()
 
 
+def test_constant_addresses_fold(tmp_path) -> None:
+    # A `static final String` address folds to its value (same-file and cross-file); a runtime
+    # variable has no compile-time value and stays symbolic.
+    (tmp_path / "Addr.groovy").write_text(
+        "package a\nclass Addr { public static final String WEB = 'svc/web' }\n"
+    )
+    src = (
+        b"package a\n"
+        b"import org.vertx.groovy.platform.Verticle\n"
+        b"class N extends Verticle {\n"
+        b"  static final String LOCAL = 'svc/local'\n"
+        b"  def start() {\n"
+        b"    eb.registerHandler(LOCAL, h)\n"
+        b"    eb.registerHandler(Addr.WEB, h)\n"
+        b"    eb.registerHandler(runtimeVar, h)\n"
+        b"  }\n}\n"
+    )
+    rec = _parse(tmp_path, src, "N.groovy")
+    eps = {s.endpoint for s in rec.statements if s.semanticType == "eventbus_consumer"}
+    assert "svc/local" in eps    # same-file constant
+    assert "svc/web" in eps      # cross-file constant (Addr.WEB)
+    assert "runtimeVar" in eps   # unresolvable var → symbol
+
+
 def test_routes_require_capture_statements(tmp_path) -> None:
     rec = _parse(tmp_path, EMPLOYEE_SRC, "HttpServerVerticle.groovy", capture=False)
     assert [s for s in rec.statements if s.semanticType] == []
