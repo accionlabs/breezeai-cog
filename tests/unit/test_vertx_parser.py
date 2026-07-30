@@ -125,6 +125,32 @@ def test_vertx2_sendWithTimeout_is_eventbus_send(tmp_path) -> None:
     assert sends[0].framework == "vertx" and sends[0].endpoint == "ADDR"
 
 
+def test_same_file_constant_address_folds(tmp_path) -> None:
+    # A `static final String` address (literal or literal-plus-constant concat) folds to its
+    # value; a non-final field is not a compile-time constant, so it stays symbolic.
+    src = (
+        b"package x;\nimport io.vertx.core.AbstractVerticle;\n"
+        b"public class V extends AbstractVerticle {\n"
+        b'  public static final String ADDR = "svc/lookup";\n'
+        b'  public static final String PREF = "app/" + ADDR;\n'
+        b'  static String NF = "nf";\n'
+        b"  void start() {\n"
+        b"    vertx.eventBus().registerHandler(ADDR, h);\n"
+        b"    vertx.eventBus().registerHandler(PREF, h);\n"
+        b"    vertx.eventBus().send(NF, m);\n"
+        b"  }\n}"
+    )
+    p = tmp_path / "V.java"
+    p.write_text(src.decode())
+    ctx = ParseContext(path="V.java", abs_path=p, source=src, repo_root=tmp_path,
+                       capture_statements=True)
+    rec = VertxParser().parse_file(ctx)
+    eps = {s.endpoint for s in rec.statements if (s.semanticType or "").startswith("eventbus")}
+    assert "svc/lookup" in eps          # ADDR folded
+    assert "app/svc/lookup" in eps      # PREF folded (concat + same-file constant ref)
+    assert "NF" in eps                  # non-final → not folded, stays symbolic
+
+
 def test_vertx2_registerHandler_detected_as_consumer(tmp_path) -> None:
     # org.vertx.java (2.x) activation + registerHandler → eventbus_consumer.
     p = tmp_path / "ServiceServer.java"
@@ -158,16 +184,17 @@ public class AddrVerticle extends AbstractVerticle {
     public void start() {
         var bus = vertx.eventBus();
         bus.request("orders.ask", req, reply -> handle(reply));   // modern send-with-reply
-        bus.send(TOPIC, auditMsg);                                // constant address
+        bus.send(TOPIC, auditMsg);                                // constant address -> folds
         bus.consumer(TOPIC).handler(m -> process(m));             // constant address consumer
+        bus.send(runtimeAddr, msg);                               // runtime var -> stays symbolic
     }
 }
 '''
 
 
 def test_eventbus_request_and_constant_addresses(tmp_path) -> None:
-    # Regression: eventBus.request(...) → eventbus_send, and constant/variable addresses
-    # (not just string literals) are captured, with the symbol name as endpoint.
+    # eventBus.request(...) → eventbus_send; a `static final String` constant address folds to
+    # its value; a runtime variable has no compile-time value and stays symbolic (honest-null).
     p = tmp_path / "AddrVerticle.java"
     p.write_text(_ADDR_SRC.decode())
     ctx = ParseContext(path="AddrVerticle.java", abs_path=p, source=_ADDR_SRC,
@@ -180,7 +207,8 @@ def test_eventbus_request_and_constant_addresses(tmp_path) -> None:
 
     sends = {s.endpoint for s in by_sem.get("eventbus_send", [])}
     consumers = {s.endpoint for s in by_sem.get("eventbus_consumer", [])}
-    assert "orders.ask" in sends   # request(...) mapped to eventbus_send
-    assert "TOPIC" in sends        # constant-address send captured (endpoint = symbol)
-    assert "TOPIC" in consumers    # constant-address consumer captured
+    assert "orders.ask" in sends       # request(...) mapped to eventbus_send
+    assert "orders.audit" in sends     # constant TOPIC folded to its value
+    assert "orders.audit" in consumers
+    assert "runtimeAddr" in sends      # unresolvable var → symbol (no compile-time value)
     assert all(s.framework == "vertx" for s in by_sem.get("eventbus_send", []))
