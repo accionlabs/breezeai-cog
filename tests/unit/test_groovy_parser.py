@@ -240,3 +240,20 @@ def test_degraded_file_keeps_class_skeleton(tmp_path) -> None:
     assert "isPrelims" in {f.name for f in rec.functions}
     # No fabricated keyword-named class from the misparsed enum.
     assert not ({c.name for c in rec.classes} & {"class", "enum", "interface", "trait"})
+
+
+def test_same_package_call_resolves_without_import(tmp_path) -> None:
+    # A same-package class needs no import; `RestCommon.dataGet()` must still resolve
+    # cross-file via the FQCN index (seeded into the call-resolution bindings).
+    (tmp_path / "RestCommon.groovy").write_text(
+        "package a.b\nclass RestCommon { static Map dataGet(String u) { return [:] } }\n"
+    )
+    main = tmp_path / "Action.groovy"
+    main.write_text("package a.b\nclass Action { def run() { RestCommon.dataGet('/x') } }\n")
+    parser = GroovyParser()
+    idx = parser.build_index(tmp_path, list(tmp_path.rglob("*.groovy")))
+    rec = parser.parse_file(ParseContext(path="Action.groovy", abs_path=main,
+                                         source=main.read_bytes(), repo_root=tmp_path,
+                                         resolution_index=idx, capture_statements=True))
+    call = next(c for f in rec.functions for c in f.calls if c.name == "dataGet")
+    assert call.path == "RestCommon.groovy"

@@ -15,7 +15,7 @@ from tree_sitter import Node
 
 from ...utils import repo_relative
 from ..constfold import Token, resolve_all
-from ..index_common import parallel_map, record_distinct
+from ..index_common import parallel_map, record_distinct, seed_same_package
 from ..treesitter import node_text, parse_source
 from .constants import collect_constants
 
@@ -99,6 +99,15 @@ def build_fqcn_index(repo_root: Path, files: Sequence[Path], jobs: int = 1) -> J
     return JavaIndex(fqcn=fqcn, consts=resolve_all(raw_consts))
 
 
+def _package_of(root: Node, source: bytes) -> str:
+    for node in root.named_children:
+        if node.type == "package_declaration":
+            nm = next((c for c in node.named_children
+                       if c.type in ("scoped_identifier", "identifier")), None)
+            return node_text(nm, source) if nm is not None else ""
+    return ""
+
+
 def _resolve(fqcn: str, is_static: bool, index: FqcnIndex | None) -> str | None:
     if index is None:
         return None
@@ -134,4 +143,5 @@ def extract_imports(
         if resolved:  # `import a.b.Foo` → receiver "Foo"; `import static a.b.U.f` → "f"
             bindings[fqcn.rsplit(".", 1)[-1]] = resolved
 
+    seed_same_package(bindings, _package_of(root, source), index)  # same-package: no import needed
     return list(internal), list(external), [], bindings  # Java has no explicit exports

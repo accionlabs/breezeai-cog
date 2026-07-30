@@ -16,7 +16,7 @@ from tree_sitter import Node
 
 from ...utils import repo_relative
 from ..constfold import Token, resolve_all
-from ..index_common import parallel_map, record_distinct
+from ..index_common import parallel_map, record_distinct, seed_same_package
 from ..treesitter import node_text, parse_source
 from .constants import collect_constants
 
@@ -147,4 +147,5 @@ def extract_imports(
             key = node_text(alias, source) if alias is not None else fqcn.rsplit(".", 1)[-1]
             bindings[key] = resolved
 
+    seed_same_package(bindings, _package_of(root, source), index)  # same-package: no import needed
     return list(internal), list(external), [], bindings  # Groovy has no explicit exports
