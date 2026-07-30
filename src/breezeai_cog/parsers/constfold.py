@@ -26,11 +26,6 @@ from .treesitter import node_text
 #: reference to another constant, by simple name or ``Class.field``).
 Token = tuple[str, str]
 
-#: Groovy string-interpolation node types — a GString has no compile-time value, so it never
-#: folds to a constant.
-_INTERPOLATION = ("interpolation", "gstring_interpolation")
-
-
 def init_tokens(node: Node, source: bytes) -> list[Token] | None:
     """A constant-initializer / argument expression → fold tokens, or ``None`` if it is not a
     plain string literal, a ``+`` concatenation of literals, or a reference to another
@@ -38,8 +33,9 @@ def init_tokens(node: Node, source: bytes) -> list[Token] | None:
     quote styles and skips interpolated (GString) literals."""
     t = node.type
     if t == "string_literal":
-        if any(c.type in _INTERPOLATION for c in node.named_children):
-            return None  # interpolated → not a compile-time constant
+        # a Groovy GString (any `*interpolation*` child) has no compile-time value
+        if any("interpolation" in c.type for c in node.named_children):
+            return None
         frag = next((c for c in node.named_children if c.type == "string_fragment"), None)
         if frag is not None:
             return [("lit", node_text(frag, source))]

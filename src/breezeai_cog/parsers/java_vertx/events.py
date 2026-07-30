@@ -22,9 +22,14 @@ from tree_sitter import Node
 
 from ...emit import disambiguate, file_id, statement_id
 from ...schemas import FileRecord, SemanticType, Statement
-from ..java.constants import fold_arg
 from ..treesitter import first_line, node_text
-from ..vertx_common import classify_call, enclosing_statement, owner_function
+from ..vertx_common import classify_call, enclosing_statement, owner_function, render_address
+
+
+def _java_string(node: Node, source: bytes) -> str | None:
+    """A Java ``string_literal`` node → its text value (Java has no string interpolation)."""
+    frag = next((c for c in node.named_children if c.type == "string_fragment"), None)
+    return node_text(frag, source) if frag is not None else node_text(node, source).strip('"')
 
 
 def _invocations(root: Node) -> list[Node]:
@@ -56,7 +61,7 @@ def _parts(
     if args is not None and args.named_children:
         first_node = args.named_children[0]
         first_arg = node_text(first_node, source)
-        first_str = fold_arg(first_node, source, consts)  # literal or resolved constant, else None
+        first_str = render_address(first_node, source, consts, _java_string)
     return method, first_str, first_arg, obj
 
 

@@ -125,6 +125,25 @@ def test_vertx2_sendWithTimeout_is_eventbus_send(tmp_path) -> None:
     assert sends[0].framework == "vertx" and sends[0].endpoint == "ADDR"
 
 
+def test_dynamic_prefix_address_renders_placeholder(tmp_path) -> None:
+    # A route/address that concatenates a runtime variable with a literal renders the runtime
+    # part as a placeholder (matching GString rendering) instead of being dropped.
+    src = (
+        b"package x;\nimport io.vertx.ext.web.Router;\n"
+        b"public class V {\n"
+        b'  void start() { router.post(cfg.base + "/job", h);\n'
+        b'                 vertx.eventBus().send(prefix + "/audit", m); }\n}'
+    )
+    p = tmp_path / "V.java"
+    p.write_text(src.decode())
+    ctx = ParseContext(path="V.java", abs_path=p, source=src, repo_root=tmp_path,
+                       capture_statements=True)
+    rec = VertxParser().parse_file(ctx)
+    by = {(s.semanticType, s.method, s.endpoint) for s in rec.statements if s.semanticType}
+    assert ("route", "POST", "{base}/job") in by
+    assert ("eventbus_send", None, "{prefix}/audit") in by
+
+
 def test_same_file_constant_address_folds(tmp_path) -> None:
     # A `static final String` address (literal or literal-plus-constant concat) folds to its
     # value; a non-final field is not a compile-time constant, so it stays symbolic.

@@ -149,6 +149,25 @@ def test_constant_addresses_fold(tmp_path) -> None:
     assert "runtimeVar" in eps   # unresolvable var → symbol
 
 
+def test_dynamic_prefix_route_renders_placeholder(tmp_path) -> None:
+    # A route path that concatenates a runtime variable with a literal (`cfg.path + '/job'`)
+    # renders the runtime part as a placeholder — the route surface stays visible.
+    src = (
+        b"package a\n"
+        b"import org.vertx.groovy.core.http.RouteMatcher\n"
+        b"class M extends Verticle {\n"
+        b"  def routes() {\n"
+        b"    def router = new RouteMatcher()\n"
+        b"    router.post(cfg.path + '/job', h)\n"
+        b"    router.delete(cfg.path + '/job/:jobId', h)\n"
+        b"  }\n}\n"
+    )
+    rec = _parse(tmp_path, src, "M.groovy")
+    routes = _routes(rec)
+    assert ("POST", "{path}/job") in routes
+    assert ("DELETE", "{path}/job/:jobId") in routes
+
+
 def test_routes_require_capture_statements(tmp_path) -> None:
     rec = _parse(tmp_path, EMPLOYEE_SRC, "HttpServerVerticle.groovy", capture=False)
     assert [s for s in rec.statements if s.semanticType] == []

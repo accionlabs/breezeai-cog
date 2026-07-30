@@ -18,9 +18,8 @@ from tree_sitter import Node
 
 from ...emit import disambiguate, file_id, statement_id
 from ...schemas import FileRecord, Statement
-from ..groovy.constants import fold_arg
 from ..treesitter import first_line, node_text
-from ..vertx_common import classify_call, enclosing_statement, owner_function
+from ..vertx_common import classify_call, enclosing_statement, owner_function, render_address
 
 
 def _invocations(root: Node) -> list[Node]:
@@ -83,10 +82,7 @@ def _parts(
     if args is not None and args.named_children:
         first_node = args.named_children[0]
         first_arg = node_text(first_node, source)
-        if first_node.type == "string_literal":
-            path = _render_path(first_node, source)
-        else:
-            path = fold_arg(first_node, source, consts)
+        path = render_address(first_node, source, consts, _render_path)
     return method, path, first_arg, obj
 
 

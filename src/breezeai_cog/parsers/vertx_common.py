@@ -14,7 +14,17 @@ Both Vert.x generations are covered: 3.x (``io.vertx``, ``Router.router(vertx)``
 
 from __future__ import annotations
 
+from collections.abc import Callable
+
+from tree_sitter import Node
+
 from ..schemas import Function, SemanticType, Statement
+from .constfold import init_tokens, resolve_tokens
+from .statements_common import render_concat
+from .treesitter import node_text
+
+#: Renders a language's ``string_literal`` node to a path (GString-aware in Groovy).
+StringRender = Callable[[Node, bytes], "str | None"]
 
 #: EventBus method → semanticType. Includes the Vert.x 2.x ``registerHandler`` family
 #: (renamed ``consumer`` in 3.x), ``sendWithTimeout`` (2.x send-with-reply-and-timeout), and
@@ -82,6 +92,37 @@ def classify_call(
         return "route", method.upper(), path, "route"
     if method == "route" and path and is_route_receiver(obj_l):
         return "route", None, path, "route"
+    return None
+
+
+def _addr_leaf(node: Node, source: bytes, consts: dict[str, str], string_render: StringRender) -> str | None:
+    """Leaf renderer for :func:`render_address`'s concatenation walk: a string literal renders
+    (GString-aware), a constant resolves to its value, anything else → ``None`` so
+    ``render_concat`` inserts a ``{name}`` placeholder."""
+    if node.type == "string_literal":
+        return string_render(node, source)
+    if node.type == "binary_expression":
+        return render_concat(node, source, lambda n, s: _addr_leaf(n, s, consts, string_render))
+    return consts.get(node_text(node, source))
+
+
+def render_address(
+    node: Node, source: bytes, consts: dict[str, str], string_render: StringRender
+) -> str | None:
+    """Resolve a Vert.x address/path argument to a string. A fully-constant expression folds to
+    its exact value; a string literal renders via ``string_render`` (GString-aware); a
+    concatenation with runtime parts renders with ``{name}`` placeholders (constants folded,
+    literals kept) — matching how GString paths render. Returns ``None`` for a bare runtime
+    variable, so the caller keeps its symbol fallback."""
+    tokens = init_tokens(node, source)
+    if tokens is not None:
+        exact = resolve_tokens(tokens, consts)
+        if exact is not None:
+            return exact
+    if node.type == "string_literal":
+        return string_render(node, source)
+    if node.type == "binary_expression":
+        return render_concat(node, source, lambda n, s: _addr_leaf(n, s, consts, string_render))
     return None
 
 
