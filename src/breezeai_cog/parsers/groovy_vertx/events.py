@@ -19,7 +19,7 @@ from tree_sitter import Node
 from ...emit import disambiguate, file_id, statement_id
 from ...schemas import FileRecord, Statement
 from ..treesitter import first_line, node_text
-from ..vertx_common import classify_call, enclosing_statement, owner_function
+from ..vertx_common import classify_call, enclosing_statement, owner_function, render_address
 
 
 def _invocations(root: Node) -> list[Node]:
@@ -59,10 +59,14 @@ def _render_path(node: Node, source: bytes) -> str | None:
     return text or None
 
 
-def _parts(call: Node, source: bytes) -> tuple[str, str | None, str | None, str]:
+def _parts(
+    call: Node, source: bytes, consts: dict[str, str]
+) -> tuple[str, str | None, str | None, str]:
     """(method, rendered-path, raw-first-arg, receiver) for a Groovy ``method_invocation``.
     The dekobon grammar puts the callee in the ``function`` field: a bare ``identifier``
-    (receiver ``""``) or a ``field_access`` (``obj.method``)."""
+    (receiver ``""``) or a ``field_access`` (``obj.method``). The address/path is the first
+    argument: a string literal renders as a (GString-aware) path; otherwise ``consts`` folds a
+    ``static final String`` constant address to its value."""
     fn = call.child_by_field_name("function")
     method = obj = ""
     if fn is not None:
@@ -76,26 +80,28 @@ def _parts(call: Node, source: bytes) -> tuple[str, str | None, str | None, str]
     args = call.child_by_field_name("arguments")
     path = first_arg = None
     if args is not None and args.named_children:
-        first_arg = node_text(args.named_children[0], source)
-        for a in args.named_children:
-            if a.type == "string_literal":
-                path = _render_path(a, source)
-                break
+        first_node = args.named_children[0]
+        first_arg = node_text(first_node, source)
+        path = render_address(first_node, source, consts, _render_path)
     return method, path, first_arg, obj
 
 
-def detect_vertx_groovy(root: Node, source: bytes, path: str, record: FileRecord) -> bool:
-    """Enrich/add Vert.x statements on ``record``. Returns True if anything matched."""
+def detect_vertx_groovy(
+    root: Node, source: bytes, path: str, record: FileRecord, consts: dict[str, str] | None = None
+) -> bool:
+    """Enrich/add Vert.x statements on ``record``. Returns True if anything matched.
+    ``consts`` (``name → value``) folds symbolic addresses to their String value."""
     matched = False
     fid = file_id(path)
     seen = {s.id for s in record.statements}
+    consts = consts or {}
     # Vert.x 2.x RouteMatcher: bare `get("/x", h)` calls (no receiver) inside `rm.with {}`
     # are routes only when the file actually builds a RouteMatcher — a cheap file-level gate
     # that keeps a stray `map.get(...)` from being mistaken for a route.
     uses_routematcher = b"RouteMatcher" in source
 
     for call in _invocations(root):
-        method, endpoint_path, first_arg, obj = _parts(call, source)
+        method, endpoint_path, first_arg, obj = _parts(call, source, consts)
         route_scope = bool(
             uses_routematcher and obj == "" and endpoint_path and "/" in endpoint_path
         )

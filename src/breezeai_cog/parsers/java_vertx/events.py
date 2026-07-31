@@ -23,7 +23,13 @@ from tree_sitter import Node
 from ...emit import disambiguate, file_id, statement_id
 from ...schemas import FileRecord, SemanticType, Statement
 from ..treesitter import first_line, node_text
-from ..vertx_common import classify_call, enclosing_statement, owner_function
+from ..vertx_common import classify_call, enclosing_statement, owner_function, render_address
+
+
+def _java_string(node: Node, source: bytes) -> str | None:
+    """A Java ``string_literal`` node → its text value (Java has no string interpolation)."""
+    frag = next((c for c in node.named_children if c.type == "string_fragment"), None)
+    return node_text(frag, source) if frag is not None else node_text(node, source).strip('"')
 
 
 def _invocations(root: Node) -> list[Node]:
@@ -39,9 +45,13 @@ def _invocations(root: Node) -> list[Node]:
     return out
 
 
-def _parts(call: Node, source: bytes) -> tuple[str, str | None, str | None, str]:
-    """(method, first-string-arg, raw-first-arg, receiver) for a Java ``method_invocation``.
-    The Java grammar exposes ``object``/``name``/``arguments`` fields directly on the call."""
+def _parts(
+    call: Node, source: bytes, consts: dict[str, str]
+) -> tuple[str, str | None, str | None, str]:
+    """(method, folded-first-arg, raw-first-arg, receiver) for a Java ``method_invocation``.
+    The Java grammar exposes ``object``/``name``/``arguments`` fields directly on the call.
+    The address/path is the first argument; ``consts`` folds it when it is a String literal or
+    a ``static final String`` constant (``registerHandler(ADDRESS_WEB, h)`` → its value)."""
     name_node = call.child_by_field_name("name")
     method = node_text(name_node, source) if name_node is not None else ""
     obj_node = call.child_by_field_name("object")
@@ -49,28 +59,32 @@ def _parts(call: Node, source: bytes) -> tuple[str, str | None, str | None, str]
     args = call.child_by_field_name("arguments")
     first_str = first_arg = None
     if args is not None and args.named_children:
-        first_arg = node_text(args.named_children[0], source)
-        for a in args.named_children:
-            if a.type == "string_literal":
-                first_str = node_text(a, source).strip('"')
-                break
+        first_node = args.named_children[0]
+        first_arg = node_text(first_node, source)
+        first_str = render_address(first_node, source, consts, _java_string)
     return method, first_str, first_arg, obj
 
 
-def _classify(call: Node, source: bytes) -> tuple[SemanticType, str | None, str | None, str | None] | None:
+def _classify(
+    call: Node, source: bytes, consts: dict[str, str]
+) -> tuple[SemanticType, str | None, str | None, str | None] | None:
     """→ (semanticType, method, endpoint, routeKind) or None."""
-    method, first_str, first_arg, obj = _parts(call, source)
+    method, first_str, first_arg, obj = _parts(call, source, consts)
     return classify_call(method, first_str, first_arg, obj)
 
 
-def detect_vertx(root: Node, source: bytes, path: str, record: FileRecord) -> bool:
-    """Enrich/add Vert.x statements on ``record``. Returns True if anything matched."""
+def detect_vertx(
+    root: Node, source: bytes, path: str, record: FileRecord, consts: dict[str, str] | None = None
+) -> bool:
+    """Enrich/add Vert.x statements on ``record``. Returns True if anything matched.
+    ``consts`` (``name → value``) folds symbolic addresses to their String value."""
     matched = False
     fid = file_id(path)
     seen = {s.id for s in record.statements}
+    consts = consts or {}
 
     for call in _invocations(root):
-        info = _classify(call, source)
+        info = _classify(call, source, consts)
         if info is None:
             continue
         semantic, method, endpoint, route_kind = info

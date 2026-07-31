@@ -11,6 +11,9 @@ from __future__ import annotations
 
 from ...schemas import FileRecord
 from ..base import ParseContext
+from ..constfold import resolve_all
+from ..java.constants import collect_constants
+from ..java.imports import JavaIndex
 from ..java.parser import JavaParser
 from ..treesitter import parse_source
 from .events import detect_vertx
@@ -28,6 +31,9 @@ class VertxParser(JavaParser):
         root = parse_source("java", ctx.source, ctx.parse_timeout_micros).root_node
         record = self.extract(root, ctx)  # inherited Java extraction (one parse)
         if ctx.capture_statements:  # events/routes are statements — gated by --capture-statements
-            if detect_vertx(root, ctx.source, ctx.path, record):
+            idx = ctx.resolution_index
+            cross = idx.consts if isinstance(idx, JavaIndex) else {}  # repo-wide constants
+            consts = resolve_all(collect_constants(root, ctx.source), base=cross)
+            if detect_vertx(root, ctx.source, ctx.path, record, consts):
                 record.framework = "vertx"
         return record

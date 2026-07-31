@@ -100,6 +100,23 @@ def test_output_validates(tmp_path) -> None:
     assert not errors, errors
 
 
+def test_same_package_call_resolves_without_import(tmp_path) -> None:
+    # A same-package class needs no import, so `Helper.go()` must still resolve cross-file
+    # via the FQCN index (seeded into the call-resolution bindings).
+    (tmp_path / "Helper.java").write_text(
+        "package a.b;\npublic class Helper { public static String go() { return \"x\"; } }\n"
+    )
+    main = tmp_path / "Main.java"
+    main.write_text("package a.b;\npublic class Main { void run() { Helper.go(); } }\n")
+    parser = JavaParser()
+    idx = parser.build_index(tmp_path, list(tmp_path.rglob("*.java")))
+    rec = parser.parse_file(ParseContext(path="Main.java", abs_path=main,
+                                         source=main.read_bytes(), repo_root=tmp_path,
+                                         resolution_index=idx, capture_statements=True))
+    go = next(c for f in rec.functions for c in f.calls if c.name == "go")
+    assert go.path == "Helper.java"
+
+
 def test_deep_string_concat_does_not_recurse(tmp_path) -> None:
     # Regression: a statement with a very deep `+` chain (generated HTML/JS builders, e.g.
     # P3 WizardHtmlBuilder with 859 concats) is a left-nested binary_expression tree that

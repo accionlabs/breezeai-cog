@@ -26,6 +26,23 @@ T = TypeVar("T")
 R = TypeVar("R")
 
 
+def seed_same_package(
+    bindings: dict[str, str], package: str, index: "dict[str, str | None] | None"
+) -> None:
+    """Add same-package types to the call-resolution ``bindings``. A class in the same package
+    needs no ``import`` (a language visibility rule), so a bare ``SameClass.method()`` has no
+    import binding to resolve through. For each top-level ``<package>.<Class> → path`` in the
+    FQCN ``index``, bind the simple name → path so it resolves like an imported one. Explicit
+    imports win (``setdefault``); ambiguous/unresolved entries (path ``None``) are skipped."""
+    if not package or not index:
+        return
+    prefix = f"{package}."
+    for fqcn, rel in index.items():
+        suffix = fqcn[len(prefix):]
+        if rel and fqcn.startswith(prefix) and "." not in suffix:  # top-level, same package
+            bindings.setdefault(suffix, rel)
+
+
 def parallel_map(items: Sequence[T], fn: Callable[[T], R], jobs: int = 1) -> list[R]:
     """Map ``fn`` over ``items`` across a process pool, preserving order. Falls back to a
     plain serial map when ``jobs <= 1`` or there is at most one item (so ``--jobs 1`` stays

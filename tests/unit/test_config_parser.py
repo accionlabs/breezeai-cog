@@ -321,3 +321,30 @@ def test_config_registered_and_selected() -> None:
     discover_builtin()
     assert "config" in registry.capabilities()["languages"]
     assert registry.select("package.json", b'{"name":"x"}').name == "config"
+
+
+def test_mod_json_verticle_main() -> None:
+    # Vert.x module descriptor is JSONC (has // comments) — strict json rejects it; we strip
+    # comments and surface `main` as verticleMain (groovy: language prefix removed).
+    md = _meta(
+        "mod.json",
+        '{\n'
+        '  // Compiled Groovy verticle\n'
+        '  "main":"groovy:jp.co.payroll.p3.async.Main",\n'
+        '  "homepage": "http://example/page",  // url must survive comment stripping\n'
+        '  "auto-redeploy": true\n'
+        '}\n',
+    )
+    assert md["kind"] == "mod.json"
+    assert md["verticleMain"] == "jp.co.payroll.p3.async.Main"  # groovy: prefix stripped
+    assert "parseError" not in md
+
+
+def test_mod_json_java_verticle_no_prefix() -> None:
+    md = _meta("mod.json", '{ "main": "com.example.ServiceServer", "auto-redeploy": true }')
+    assert md["verticleMain"] == "com.example.ServiceServer"
+
+
+def test_mod_json_missing_main_is_honest_null() -> None:
+    md = _meta("mod.json", '{ "description": "x" }')
+    assert "verticleMain" not in md and md["kind"] == "mod.json"
