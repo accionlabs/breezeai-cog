@@ -27,7 +27,6 @@ from ...emit import file_id
 from ...schemas import SCHEMA_VERSION, FileRecord, Function, Statement
 from ...utils import count_loc
 from ..base import BaseParser, ParseContext
-from ..callresolve import make_resolver
 from ..treesitter import node_text, parse_source
 from .classes import _CLASS_TYPES, _unwrap_template, build_class
 from .functions import (
@@ -35,9 +34,9 @@ from .functions import (
     defined_names,
     function_declarator_of,
     has_declaration_error,
-    type_map,
 )
-from .imports import HeaderIndex, build_header_index, extract_imports
+from .imports import extract_imports
+from .index import CppIndex, build_cpp_index, make_cpp_resolver
 from .mappings import FRAMEWORKS, STATEMENT_TYPES
 
 #: Transparent wrappers whose *members* are top-level declarations: the ``#ifndef GUARD``
@@ -59,10 +58,11 @@ class CppParser(BaseParser):
     statement_types = STATEMENT_TYPES
     frameworks = FRAMEWORKS
 
-    def build_index(self, repo_root: Path, files: Sequence[Path], jobs: int = 1) -> HeaderIndex:
-        """Repo-wide header basename → path map for local ``#include`` resolution
-        (honest-null on a basename shared by >1 file). A pure filename map — no parse."""
-        return build_header_index(Path(repo_root), files)
+    def build_index(self, repo_root: Path, files: Sequence[Path], jobs: int = 1) -> CppIndex:
+        """Repo-wide index: the ``#include`` header map plus a parse pre-pass mapping
+        free-function / ``Scope::method`` **definitions** → path (for cross-file call
+        resolution). Honest-null on any name shared by >1 file."""
+        return build_cpp_index(Path(repo_root), files, jobs)
 
     def parse_file(self, ctx: ParseContext) -> FileRecord:
         root = parse_source("cpp", ctx.source, ctx.parse_timeout_micros).root_node
@@ -74,9 +74,9 @@ class CppParser(BaseParser):
         seen_ids: set[str] = set()
         capture, limit = ctx.capture_statements, ctx.text_truncation_limit
 
-        idx = ctx.resolution_index if isinstance(ctx.resolution_index, dict) else None
-        internal, external, _, bindings = extract_imports(root, source, idx)
-        resolve = make_resolver(bindings, defined_names(root, source), path, type_map(root, source))
+        idx = ctx.resolution_index if isinstance(ctx.resolution_index, CppIndex) else None
+        internal, external, _, _ = extract_imports(root, source, idx.headers if idx else None)
+        resolve = make_cpp_resolver(defined_names(root, source), path, idx)
 
         functions: list[Function] = []
         classes = []

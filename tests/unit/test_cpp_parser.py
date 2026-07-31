@@ -199,6 +199,71 @@ def test_same_file_free_function_call_resolves(tmp_path) -> None:
     assert call.path == "s.cpp"  # same-file definition → resolved to this file
 
 
+def _parse_with_index(tmp_path, rel: str) -> FileRecord:
+    """Parse ``rel`` with a repo-wide index built over every .cpp/.h/.hpp under tmp_path
+    (so cross-file call resolution can fire)."""
+    parser = CppParser()
+    files = (list(tmp_path.rglob("*.cpp")) + list(tmp_path.rglob("*.h"))
+             + list(tmp_path.rglob("*.hpp")))
+    index = parser.build_index(tmp_path, files)
+    p = tmp_path / rel
+    return parser.parse_file(ParseContext(path=rel, abs_path=p, source=p.read_bytes(),
+                                          repo_root=tmp_path, resolution_index=index))
+
+
+def test_cross_file_qualified_call_resolves(tmp_path) -> None:
+    # An explicit Class::method() call resolves to the file defining that method, and matches
+    # regardless of how verbosely the call's scope is written (N::Util::run vs Util::run).
+    (tmp_path / "util.cpp").write_bytes(b"int Util::run() { return 1; }\n")
+    (tmp_path / "svc.cpp").write_bytes(b"void go() { Util::run(); N::Util::run(); }\n")
+    rec = _parse_with_index(tmp_path, "svc.cpp")
+    resolved = {c.path for c in _fn(rec, "go").calls if c.name.endswith("run")}
+    assert resolved == {"util.cpp"}  # both scope spellings → the defining file
+
+
+def test_cross_file_free_function_resolves(tmp_path) -> None:
+    (tmp_path / "helpers.cpp").write_bytes(b"int MakeId() { return 7; }\n")
+    (tmp_path / "svc.cpp").write_bytes(b"int go() { return MakeId(); }\n")
+    rec = _parse_with_index(tmp_path, "svc.cpp")
+    call = next(c for c in _fn(rec, "go").calls if c.name == "MakeId")
+    assert call.path == "helpers.cpp"  # repo-wide free function → its file
+
+
+def test_cross_file_implicit_this_call_resolves(tmp_path) -> None:
+    # A bare Foo() inside a method is an implicit-this call → owner::Foo, resolved even when
+    # the method body lives in a different file from the class declaration.
+    (tmp_path / "judge.h").write_bytes(b"class Judge { public:\n int Decide();\n int Score();\n};\n")
+    (tmp_path / "judge.cpp").write_bytes(
+        b'#include "judge.h"\nint Judge::Score() { return 1; }\n'
+        b"int Judge::Decide() { return Score(); }\n")
+    rec = _parse_with_index(tmp_path, "judge.cpp")
+    call = next(c for c in _fn(rec, "Decide").calls if c.name == "Score")
+    assert call.path == "judge.cpp"  # owner::Score → same file here (definition lives here)
+
+
+def test_ambiguous_name_is_honest_null(tmp_path) -> None:
+    # A free function defined in TWO files collapses to None — no guessed edge.
+    (tmp_path / "a.cpp").write_bytes(b"int Ping() { return 1; }\n")
+    (tmp_path / "b.cpp").write_bytes(b"int Ping() { return 2; }\n")
+    (tmp_path / "svc.cpp").write_bytes(b"int go() { return Ping(); }\n")
+    rec = _parse_with_index(tmp_path, "svc.cpp")
+    call = next(c for c in _fn(rec, "go").calls if c.name == "Ping")
+    assert call.path is None  # ambiguous across files → honest-null
+
+
+def test_member_call_on_object_is_not_resolved(tmp_path) -> None:
+    # obj->method() needs the receiver's type to resolve — must stay null, not guess.
+    (tmp_path / "dep.cpp").write_bytes(b"int Dep::Work() { return 1; }\n")
+    (tmp_path / "svc.cpp").write_bytes(b"void go(Dep* d) { d->Work(); }\n")
+    rec = _parse_with_index(tmp_path, "svc.cpp")
+    call = next(c for c in _fn(rec, "go").calls if c.name == "Work")
+    assert call.path is None  # unresolved receiver → null
+
+
+def _fn(rec: FileRecord, name: str):
+    return next(f for f in rec.functions if f.name == name)
+
+
 def test_template_class_captured(tmp_path) -> None:
     src = b"template<typename T>\nclass Box : public Base<T> {\npublic:\n  T* get(int i);\n};\n"
     p = tmp_path / "b.cpp"

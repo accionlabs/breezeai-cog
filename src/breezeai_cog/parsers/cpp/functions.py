@@ -136,7 +136,15 @@ def _callee(call: Node, source: bytes) -> tuple[str, str | None] | None:
     return None
 
 
-def _calls(body: Node | None, source: bytes, resolve: CallResolver = noop_resolver) -> list[Call]:
+def _calls(
+    body: Node | None,
+    source: bytes,
+    resolve: CallResolver = noop_resolver,
+    owner: str | None = None,
+) -> list[Call]:
+    """Calls in ``body``. ``owner`` is the simple/qualified name of the class the body
+    belongs to (``None`` for a free function) — it lets a bare implicit-``this`` call
+    ``Foo()`` resolve to ``owner::Foo`` in the repo index."""
     if body is None:
         return []
     calls: list[Call] = []
@@ -152,7 +160,7 @@ def _calls(body: Node | None, source: bytes, resolve: CallResolver = noop_resolv
                     name, receiver = res
                     if name and name not in seen:
                         seen.add(name)
-                        calls.append(Call(name=name, path=resolve(name, receiver)))
+                        calls.append(Call(name=name, path=resolve(name, receiver, owner)))
             visit(child)
 
     visit(body)
@@ -250,7 +258,7 @@ def build_function(
         returnType=node_text(ret, source) if ret is not None else None,
         startLine=start,
         endLine=end,
-        calls=_calls(body, source, resolve),
+        calls=_calls(body, source, resolve, class_name),
     )
     statements = extract_statements(
         body, source, path, parent_id=fid, capture=capture, limit=limit, seen_ids=seen_ids,
@@ -295,7 +303,7 @@ def build_member_function(
         returnType=node_text(ret, source) if ret is not None else None,
         startLine=start,
         endLine=end,
-        calls=_calls(body, source, resolve),
+        calls=_calls(body, source, resolve, class_name),
     )
     statements = extract_statements(
         body, source, path, parent_id=fid, capture=capture, limit=limit, seen_ids=seen_ids,
