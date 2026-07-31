@@ -304,6 +304,34 @@ def test_reassigned_receiver_is_honest_null(tmp_path) -> None:
     assert next(c for c in _fn(rec, "go").calls if c.name == "Run").path is None
 
 
+def test_inherited_method_call_resolves(tmp_path) -> None:
+    # A bare call to a method the owner INHERITS resolves to the base class's file.
+    (tmp_path / "base.h").write_bytes(b"class Base { public: int Shared(); };\n")
+    (tmp_path / "base.cpp").write_bytes(b'#include "base.h"\nint Base::Shared() { return 1; }\n')
+    (tmp_path / "derived.h").write_bytes(b'#include "base.h"\nclass Derived : public Base { int Run(); };\n')
+    (tmp_path / "derived.cpp").write_bytes(
+        b'#include "derived.h"\nint Derived::Run() { return Shared(); }\n')
+    rec = _parse_with_index(tmp_path, "derived.cpp")
+    assert next(c for c in _fn(rec, "Run").calls if c.name == "Shared").path == "base.cpp"
+
+
+def test_explicit_base_call_resolves(tmp_path) -> None:
+    (tmp_path / "base.h").write_bytes(b"class Base { public: int Shared(); };\n")
+    (tmp_path / "base.cpp").write_bytes(b'#include "base.h"\nint Base::Shared() { return 1; }\n')
+    (tmp_path / "derived.cpp").write_bytes(
+        b"struct Derived : Base { int Run() { return Base::Shared(); } };\n")
+    rec = _parse_with_index(tmp_path, "derived.cpp")
+    assert next(c for c in _fn(rec, "Run").calls if c.name == "Shared").path == "base.cpp"
+
+
+def test_external_base_does_not_resolve(tmp_path) -> None:
+    # Base class is not in the repo (std::exception) → the inherited walk stops, no edge.
+    (tmp_path / "e.cpp").write_bytes(
+        b"struct MyErr : std::exception { int Run() { return what2(); } };\n")
+    rec = _parse_with_index(tmp_path, "e.cpp")
+    assert next(c for c in _fn(rec, "Run").calls if c.name == "what2").path is None
+
+
 def _fn(rec: FileRecord, name: str):
     return next(f for f in rec.functions if f.name == name)
 

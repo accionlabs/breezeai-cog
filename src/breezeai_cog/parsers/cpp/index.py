@@ -32,9 +32,9 @@ from tree_sitter import Node
 
 from ...utils import repo_relative
 from ..callresolve import CallResolver
-from ..index_common import parallel_map, record_distinct
+from ..index_common import ClassHeritage, parallel_map, record_distinct, walk_heritage
 from ..treesitter import node_text, parse_source
-from .classes import _CLASS_TYPES, _unwrap_template
+from .classes import _CLASS_TYPES, _heritage, _unwrap_template
 from .functions import function_declarator_of, has_declaration_error
 from .imports import HeaderIndex, build_header_index
 from .types import field_types
@@ -73,6 +73,10 @@ class CppIndex:
     #: ``Class::field`` → the field's written class type (``None`` on collision), so a
     #: ``this->member_->method()`` receiver can be typed to look up the method's file.
     fields: dict[str, str | None] = field(default_factory=dict)
+    #: simple class name → its heritage (base + method→file), for resolving a call to a
+    #: method a class *inherits*. ``None`` when the name is declared with differing bases
+    #: (ambiguous → the resolver must not walk through it).
+    heritage: dict[str, ClassHeritage | None] = field(default_factory=dict)
 
 
 def _has_body(node: Node) -> bool:
@@ -107,11 +111,30 @@ def _record_def(frag: CppIndex, node: Node, source: bytes, rel: str, class_name:
             _record_qual(frag, scope, name, rel)
 
 
+def _simple(name: str) -> str:
+    """Simple (unqualified) class name — drop namespace and template args."""
+    return name.rsplit("::", 1)[-1].split("<", 1)[0]
+
+
+def _class_heritage(frag: CppIndex, class_name: str) -> ClassHeritage:
+    """Get-or-create the heritage record for a class in a fragment."""
+    ch = frag.heritage.get(class_name)
+    if ch is None:
+        ch = ClassHeritage(extends=None, decorators=[], methods={})
+        frag.heritage[class_name] = ch
+    return ch
+
+
 def _record_qual(frag: CppIndex, scope: str, name: str, rel: str) -> None:
-    """Record a definition under its trailing ``Class::method`` key (honest-null on collision)."""
+    """Record a definition under its trailing ``Class::method`` key (honest-null on collision),
+    and register it as a method of its class for inherited-call resolution. Both the class and
+    the method come from the normalized key — the tree-sitter grammar can split a deep
+    ``A::B::C::m`` as scope ``A`` / name ``B::C::m``, so ``scope`` alone is not the class."""
     key = _class_method_key(scope, name)
     if key is not None:
         record_distinct(frag.qual, key, rel)
+        cls, _, method = key.partition("::")  # key is exactly "Class::method"
+        record_distinct(_class_heritage(frag, cls).methods, method, rel)
 
 
 def _index_class(frag: CppIndex, node: Node, source: bytes, rel: str) -> None:
@@ -123,6 +146,9 @@ def _index_class(frag: CppIndex, node: Node, source: bytes, rel: str) -> None:
         return
     class_name = node_text(name_node, source)
     field_types(class_name, body, source, frag.fields)
+    extends, _ = _heritage(node, source)  # primary base (first) — the chain walked for inheritance
+    if extends is not None:
+        _class_heritage(frag, class_name).extends = _simple(extends)
     for member in body.named_children:
         member = _unwrap_template(member)
         if has_declaration_error(member):
@@ -193,7 +219,34 @@ def build_cpp_index(repo_root: Path, files: Sequence[Path], jobs: int = 1) -> Cp
             _merge(index.qual, key, rel)
         for key, ftype in frag.fields.items():
             _merge(index.fields, key, ftype)
+        for cname, ch in frag.heritage.items():
+            if ch is not None:  # a fragment only ever creates real records
+                _merge_heritage(index.heritage, cname, ch)
     return index
+
+
+def _merge_heritage(
+    dst: dict[str, ClassHeritage | None], name: str, frag_ch: ClassHeritage
+) -> None:
+    """Fold one fragment's heritage for a class into the shared map. A class's declaration
+    (its base) and its out-of-file method definitions arrive in separate fragments, so base
+    and methods are merged across them; a differing base collapses the whole record to
+    ``None`` (honest-null)."""
+    if name not in dst:
+        dst[name] = ClassHeritage(
+            extends=frag_ch.extends, decorators=[], methods=dict(frag_ch.methods))
+        return
+    cur = dst[name]
+    if cur is None:  # already ambiguous
+        return
+    if frag_ch.extends is not None:
+        if cur.extends is None:
+            cur.extends = frag_ch.extends
+        elif cur.extends != frag_ch.extends:  # two different bases for one name → refuse
+            dst[name] = None
+            return
+    for m, f in frag_ch.methods.items():
+        record_distinct(cur.methods, m, f)
 
 
 def _merge(dst: dict[str, str | None], key: str, value: str | None) -> None:
@@ -225,6 +278,7 @@ def make_cpp_resolver(
     funcs = index.funcs if index is not None else {}
     qual = index.qual if index is not None else {}
     fields = index.fields if index is not None else {}
+    heritage = index.heritage if index is not None else {}
 
     def _method(scope: str | None, name: str) -> str | None:
         """Resolve ``scope::name`` via the trailing ``Class::method`` key (``None`` for a
@@ -233,6 +287,21 @@ def make_cpp_resolver(
             return None
         key = _class_method_key(scope, name)
         return qual.get(key) if key is not None else None
+
+    def _inherited(owner: str | None, name: str) -> str | None:
+        """A method ``owner`` inherits: walk its base chain nearest-first, the first ancestor
+        that declares ``name`` wins (its file, or ``None`` when that file is ambiguous). Stops
+        at a base that is external or ambiguous — never resolves past what it can see."""
+        if not owner:
+            return None
+        simple = owner.rsplit("::", 1)[-1]
+        start = heritage.get(simple)
+        if start is None:
+            return None
+        for anc in walk_heritage(simple, start.extends, heritage).ancestors:
+            if name in anc.methods:
+                return anc.methods[name]
+        return None
 
     def _receiver_type(receiver: str, owner: str | None, types: dict[str, str | None]) -> str | None:
         """Written class type of an ``obj`` / ``this->obj`` receiver: a local/param first,
@@ -253,11 +322,15 @@ def make_cpp_resolver(
         if receiver is None:
             if name in local_defs:  # same-file free function / out-of-class method
                 return path
-            return funcs.get(name) or _method(owner, name)  # free fn, else implicit-this owner::name
-        if receiver in ("self", "this"):
-            return path if name in local_defs else _method(owner, name)
-        if receiver in ("super", "base", "MyBase"):
-            return None  # base-class call — resolving needs the base chain (not walked here)
+            # implicit-this: own method, then an inherited one (a member hides a free function
+            # in C++ name lookup), then a repo-wide free function.
+            return _method(owner, name) or _inherited(owner, name) or funcs.get(name)
+        if receiver in ("self", "this"):  # explicit this-> : own method, then inherited
+            if name in local_defs:
+                return path
+            return _method(owner, name) or _inherited(owner, name)
+        if receiver in ("super", "base", "MyBase"):  # explicit base call → an inherited method
+            return _inherited(owner, name)
         # A qualified A::b() has a class scope as receiver; an obj.m() has a variable. Try the
         # scope reading first (harmless miss when the receiver is a variable — no class is named
         # like a lowercase var), then type the receiver and resolve Type::method.
