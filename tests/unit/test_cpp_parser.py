@@ -332,6 +332,45 @@ def test_external_base_does_not_resolve(tmp_path) -> None:
     assert next(c for c in _fn(rec, "Run").calls if c.name == "what2").path is None
 
 
+def test_enum_captured_with_enumerators(tmp_path) -> None:
+    rec = _parse_src(tmp_path, b"enum Color { RED, GREEN, BLUE };\n", "c.h")
+    color = next((c for c in rec.classes if c.name == "Color"), None)
+    assert color is not None and color.type == "enum"
+    assert color.metadata == {"enumerators": ["RED", "GREEN", "BLUE"]}
+
+
+def test_scoped_enum_is_enum(tmp_path) -> None:
+    # enum class / enum struct are scoped enums — captured as type "enum", never "struct".
+    rec = _parse_src(tmp_path, b"enum struct Mode : int { A = 1, B = 2 };\n", "m.h")
+    mode = next((c for c in rec.classes if c.name == "Mode"), None)
+    assert mode is not None and mode.type == "enum"
+    assert mode.metadata == {"enumerators": ["A", "B"]}
+
+
+def test_union_has_its_own_type(tmp_path) -> None:
+    # A union is a distinct kind — captured as type "union", not flattened to "struct".
+    rec = _parse_src(tmp_path, b"union Value { int i; double d; };\n", "v.h")
+    value = next((c for c in rec.classes if c.name == "Value"), None)
+    assert value is not None and value.type == "union"
+
+
+def test_nested_union_and_enum_captured(tmp_path) -> None:
+    # A union/enum nested in a class parses as a field_declaration — both must still emit.
+    src = b"class Outer {\n  union Chunk { int i; };\n  enum Kind { A, B };\n};\n"
+    rec = _parse_src(tmp_path, src, "o.h")
+    by_name = {c.name: c.type for c in rec.classes}
+    assert by_name.get("Chunk") == "union"
+    assert by_name.get("Kind") == "enum"
+    kind = next(c for c in rec.classes if c.name == "Kind")
+    assert kind.metadata == {"enumerators": ["A", "B"]}
+
+
+def test_anonymous_and_forward_enum_not_fabricated(tmp_path) -> None:
+    # Anonymous enum (no name) and a forward declaration (no body) emit nothing.
+    rec = _parse_src(tmp_path, b"enum { X, Y };\nenum Fwd;\n", "a.h")
+    assert not any(c.type == "enum" for c in rec.classes)
+
+
 def _fn(rec: FileRecord, name: str):
     return next(f for f in rec.functions if f.name == name)
 

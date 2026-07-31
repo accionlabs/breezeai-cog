@@ -28,7 +28,7 @@ from ...schemas import SCHEMA_VERSION, FileRecord, Function, Statement
 from ...utils import count_loc
 from ..base import BaseParser, ParseContext
 from ..treesitter import node_text, parse_source
-from .classes import _CLASS_TYPES, _unwrap_template, build_class
+from .classes import _CLASS_TYPES, _unwrap_template, build_class, build_enum
 from .functions import (
     build_function,
     defined_names,
@@ -104,6 +104,10 @@ class CppParser(BaseParser):
                     statements.extend(cls_stmts)
                     for c in cls_list:
                         class_map.setdefault(c.name, c.id)
+                elif node.type == "enum_specifier":
+                    enum_cls = build_enum(node, source, path, parent_id=fid, seen_ids=seen_ids)
+                    if enum_cls is not None:
+                        classes.append(enum_cls)
                 elif node.type == "function_definition":
                     _emit_function(node)
 

@@ -16,6 +16,7 @@ ClassType = Literal[
     "class",
     "interface",
     "struct",
+    "union",
     "record",
     "enum",
     "module",
