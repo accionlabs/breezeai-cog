@@ -69,6 +69,8 @@ def _dispatch(name: str, suffix: str, text: str) -> dict[str, Any]:
         return _package_json(text)
     if name in ("tsconfig.json", "jsconfig.json"):
         return _tsconfig(name, text)
+    if name == "mod.json":
+        return _mod_json(text)
     if name in ("docker-compose.yml", "docker-compose.yaml"):
         return _docker_compose(text)
     if name == "Dockerfile" or name.startswith("Dockerfile."):
@@ -165,6 +167,53 @@ def _generic_json(text: str) -> dict[str, Any]:
         "category": "json",
         "topLevelKeys": list(d.keys()) if isinstance(d, dict) else [],
     }
+
+
+def _strip_json_comments(text: str) -> str:
+    """Remove ``//`` line and ``/* */`` block comments, ignoring ``/`` inside string literals
+    (so a value like ``"http://…"`` is untouched). Used for JSONC configs (e.g. Vert.x
+    ``mod.json``) that standard ``json`` rejects."""
+    out: list[str] = []
+    i, n, in_str, esc = 0, len(text), False, False
+    while i < n:
+        ch = text[i]
+        if in_str:
+            out.append(ch)
+            if esc:
+                esc = False
+            elif ch == "\\":
+                esc = True
+            elif ch == '"':
+                in_str = False
+            i += 1
+        elif ch == '"':
+            in_str = True
+            out.append(ch)
+            i += 1
+        elif ch == "/" and i + 1 < n and text[i + 1] == "/":
+            while i < n and text[i] != "\n":
+                i += 1
+        elif ch == "/" and i + 1 < n and text[i + 1] == "*":
+            i += 2
+            while i + 1 < n and not (text[i] == "*" and text[i + 1] == "/"):
+                i += 1
+            i += 2
+        else:
+            out.append(ch)
+            i += 1
+    return "".join(out)
+
+
+def _mod_json(text: str) -> dict[str, Any]:
+    """Vert.x module descriptor (``mod.json``) — a JSONC file whose ``main`` names the entry
+    verticle class. Surface it as ``verticleMain`` (a leading ``groovy:``/``java:`` language
+    prefix stripped so the FQN matches the captured class). Honest-null when ``main`` is absent."""
+    data = json.loads(_strip_json_comments(text))
+    meta: dict[str, Any] = {"kind": "mod.json", "category": "json"}
+    main = data.get("main") if isinstance(data, dict) else None
+    if isinstance(main, str) and main:
+        meta["verticleMain"] = main.split(":", 1)[-1] if ":" in main else main
+    return meta
 
 
 # ── YAML family ─────────────────────────────────────────────────────────────
