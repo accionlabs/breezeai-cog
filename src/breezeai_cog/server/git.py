@@ -9,6 +9,7 @@ The returned temp dir is the caller's to clean up after streaming."""
 from __future__ import annotations
 
 import base64
+import logging
 import re
 import subprocess
 import tempfile
@@ -17,6 +18,8 @@ from typing import Any
 
 from ..config import Settings
 from .errors import ApiError
+
+logger = logging.getLogger(__name__)
 
 _GITHUB = re.compile(r"github\.com/([^/]+)/([^/]+?)(?:\.git)?(?:/.*)?$")
 _BITBUCKET = re.compile(r"bitbucket\.org/([^/]+)/([^/]+?)(?:\.git)?(?:/.*)?$")
@@ -282,12 +285,28 @@ def resolve_git_diff(provider: str, owner: str, repo: str, current: str, incomin
     for path in changed:
         try:
             content = api["content"](owner, repo, path, incoming, token)
-        except Exception:
-            continue  # binary/unreadable
+        except Exception as exc:
+            # Binary or genuinely unreadable files are expected to skip; but log
+            # them so an empty ingest (e.g. a token that lacks read access) is
+            # diagnosable rather than silently reported as "no changes".
+            logger.warning("Skipping unreadable changed file %s: %s", path, exc)
+            continue
         full = Path(temp_dir) / path
         full.parent.mkdir(parents=True, exist_ok=True)
         full.write_text(content)
         filter_set.add(path)
+
+    # The compare found changed files but none could be read. Treat this as a
+    # failure rather than an empty (no-op) diff: otherwise the caller streams an
+    # empty result, the backend advances the stored commit, and the graph is left
+    # stale while "already up to date" is reported. Failing keeps the sync retryable.
+    if changed and not filter_set:
+        raise ApiError(
+            "Detected changed files but none could be read from the provider — "
+            "check the token scope (GitLab needs read_api) and repository access.",
+            502,
+        )
+
     return temp_dir, filter_set, deleted
 
 
