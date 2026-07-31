@@ -26,6 +26,7 @@ from ...schemas import Call, Function, Parameter, Statement
 from ..callresolve import CallResolver, noop_resolver
 from ..treesitter import line_span, node_text
 from .statements import extract_statements
+from .types import build_type_map
 
 #: Declarator wrappers that sit between a declaration's ``type`` and the real
 #: ``function_declarator`` / name (``int* f()``, ``int& g()``, ``int (*p)()``).
@@ -141,10 +142,12 @@ def _calls(
     source: bytes,
     resolve: CallResolver = noop_resolver,
     owner: str | None = None,
+    types: dict[str, str | None] | None = None,
 ) -> list[Call]:
     """Calls in ``body``. ``owner`` is the simple/qualified name of the class the body
     belongs to (``None`` for a free function) — it lets a bare implicit-``this`` call
-    ``Foo()`` resolve to ``owner::Foo`` in the repo index."""
+    ``Foo()`` resolve to ``owner::Foo``; ``types`` maps this body's locals/params to their
+    class type so an ``obj.method()`` receiver can be typed."""
     if body is None:
         return []
     calls: list[Call] = []
@@ -160,7 +163,7 @@ def _calls(
                     name, receiver = res
                     if name and name not in seen:
                         seen.add(name)
-                        calls.append(Call(name=name, path=resolve(name, receiver, owner)))
+                        calls.append(Call(name=name, path=resolve(name, receiver, owner, types)))
             visit(child)
 
     visit(body)
@@ -197,26 +200,6 @@ def defined_names(root: Node, source: bytes) -> set[str]:
     names: set[str] = set()
     _defs_in(root, source, names)
     return names
-
-
-def _types_in(node: Node, source: bytes, types: dict[str, str]) -> None:
-    """Local ``variable → declared type`` map for receiver-type call resolution. Only
-    declarations whose type is a named ``type_identifier`` contribute — a ``primitive_type``
-    or ``auto`` resolves to nothing cross-file, so it is left out (honest-null)."""
-    for c in node.named_children:
-        if c.type in ("declaration", "parameter_declaration", "field_declaration"):
-            tnode = c.child_by_field_name("type")
-            if tnode is not None and tnode.type == "type_identifier":
-                name_node = _first_identifier(c.child_by_field_name("declarator"))
-                if name_node is not None:
-                    types.setdefault(node_text(name_node, source), node_text(tnode, source))
-        _types_in(c, source, types)
-
-
-def type_map(root: Node, source: bytes) -> dict[str, str]:
-    types: dict[str, str] = {}
-    _types_in(root, source, types)
-    return types
 
 
 def build_function(
@@ -258,7 +241,7 @@ def build_function(
         returnType=node_text(ret, source) if ret is not None else None,
         startLine=start,
         endLine=end,
-        calls=_calls(body, source, resolve, class_name),
+        calls=_calls(body, source, resolve, class_name, build_type_map(body, params, source)),
     )
     statements = extract_statements(
         body, source, path, parent_id=fid, capture=capture, limit=limit, seen_ids=seen_ids,
@@ -303,7 +286,7 @@ def build_member_function(
         returnType=node_text(ret, source) if ret is not None else None,
         startLine=start,
         endLine=end,
-        calls=_calls(body, source, resolve, class_name),
+        calls=_calls(body, source, resolve, class_name, build_type_map(body, params, source)),
     )
     statements = extract_statements(
         body, source, path, parent_id=fid, capture=capture, limit=limit, seen_ids=seen_ids,

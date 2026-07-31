@@ -251,13 +251,57 @@ def test_ambiguous_name_is_honest_null(tmp_path) -> None:
     assert call.path is None  # ambiguous across files → honest-null
 
 
-def test_member_call_on_object_is_not_resolved(tmp_path) -> None:
-    # obj->method() needs the receiver's type to resolve — must stay null, not guess.
+def test_member_call_typed_by_param(tmp_path) -> None:
+    # obj->method() resolves via the receiver's declared type (a param): Dep* d → Dep::Work.
     (tmp_path / "dep.cpp").write_bytes(b"int Dep::Work() { return 1; }\n")
     (tmp_path / "svc.cpp").write_bytes(b"void go(Dep* d) { d->Work(); }\n")
     rec = _parse_with_index(tmp_path, "svc.cpp")
-    call = next(c for c in _fn(rec, "go").calls if c.name == "Work")
-    assert call.path is None  # unresolved receiver → null
+    assert next(c for c in _fn(rec, "go").calls if c.name == "Work").path == "dep.cpp"
+
+
+def test_member_call_typed_by_smart_pointer(tmp_path) -> None:
+    # shared_ptr<Judge> unwraps to Judge; a container (vector) must NOT unwrap.
+    (tmp_path / "judge.cpp").write_bytes(b"int Judge::Decide() { return 1; }\n")
+    (tmp_path / "svc.cpp").write_bytes(
+        b"void go(std::shared_ptr<Judge> j, std::vector<Judge> v) { j->Decide(); v.Decide(); }\n")
+    calls = {c.name: c.path for c in _fn(_parse_with_index(tmp_path, "svc.cpp"), "go").calls}
+    assert calls["Decide"] == "judge.cpp"  # j (shared_ptr<Judge>) → Judge::Decide; v (vector) → null-keyed
+
+
+def test_member_call_typed_by_field(tmp_path) -> None:
+    # this->dep_->Compute() resolves via the owner class's member-field type.
+    (tmp_path / "dep.cpp").write_bytes(b"int Dep::Compute() { return 1; }\n")
+    (tmp_path / "svc.h").write_bytes(b"class Svc { Dep* dep_;\n int Run(); };\n")
+    (tmp_path / "svc.cpp").write_bytes(
+        b'#include "svc.h"\nint Svc::Run() { return this->dep_->Compute(); }\n')
+    rec = _parse_with_index(tmp_path, "svc.cpp")
+    assert next(c for c in _fn(rec, "Run").calls if c.name == "Compute").path == "dep.cpp"
+
+
+def test_auto_make_shared_resolves(tmp_path) -> None:
+    (tmp_path / "judge.cpp").write_bytes(b"int Judge::Decide() { return 1; }\n")
+    (tmp_path / "svc.cpp").write_bytes(
+        b"void go() { auto j = std::make_shared<Judge>(); j->Decide(); }\n")
+    rec = _parse_with_index(tmp_path, "svc.cpp")
+    assert next(c for c in _fn(rec, "go").calls if c.name == "Decide").path == "judge.cpp"
+
+
+def test_auto_from_unknown_return_is_null(tmp_path) -> None:
+    # auto from a call whose return type we cannot see → no type, no edge (not a guess).
+    (tmp_path / "judge.cpp").write_bytes(b"int Judge::Decide() { return 1; }\n")
+    (tmp_path / "svc.cpp").write_bytes(
+        b"void go() { auto j = Factory::Create(); j->Decide(); }\n")
+    rec = _parse_with_index(tmp_path, "svc.cpp")
+    assert next(c for c in _fn(rec, "go").calls if c.name == "Decide").path is None
+
+
+def test_reassigned_receiver_is_honest_null(tmp_path) -> None:
+    # Guard: a variable reassigned after its declaration has an untrustworthy type → null.
+    (tmp_path / "foo.cpp").write_bytes(b"int Foo::Run() { return 1; }\n")
+    (tmp_path / "svc.cpp").write_bytes(
+        b"void go(Foo* f, Foo* g) { f = g; f->Run(); }\n")
+    rec = _parse_with_index(tmp_path, "svc.cpp")
+    assert next(c for c in _fn(rec, "go").calls if c.name == "Run").path is None
 
 
 def _fn(rec: FileRecord, name: str):

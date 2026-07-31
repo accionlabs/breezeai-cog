@@ -37,6 +37,7 @@ from ..treesitter import node_text, parse_source
 from .classes import _CLASS_TYPES, _unwrap_template
 from .functions import function_declarator_of, has_declaration_error
 from .imports import HeaderIndex, build_header_index
+from .types import field_types
 
 _TRANSPARENT_SCOPES = frozenset({
     "preproc_ifdef", "preproc_if", "preproc_ifndef", "preproc_else", "preproc_elif",
@@ -69,6 +70,9 @@ class CppIndex:
     #: ambiguous). Normalising to the last two components makes a call resolve regardless of
     #: how verbosely its scope is written (``N::C::m()`` and ``C::m()`` share the key ``C::m``).
     qual: dict[str, str | None] = field(default_factory=dict)
+    #: ``Class::field`` → the field's written class type (``None`` on collision), so a
+    #: ``this->member_->method()`` receiver can be typed to look up the method's file.
+    fields: dict[str, str | None] = field(default_factory=dict)
 
 
 def _has_body(node: Node) -> bool:
@@ -111,12 +115,14 @@ def _record_qual(frag: CppIndex, scope: str, name: str, rel: str) -> None:
 
 
 def _index_class(frag: CppIndex, node: Node, source: bytes, rel: str) -> None:
-    """Record inline member-function definitions (those with a body) of a class/struct."""
+    """Record a class/struct's inline member-function definitions (those with a body) and
+    its member-variable types (for receiver typing)."""
     name_node = node.child_by_field_name("name")
     body = node.child_by_field_name("body")
     if name_node is None or body is None:
         return
     class_name = node_text(name_node, source)
+    field_types(class_name, body, source, frag.fields)
     for member in body.named_children:
         member = _unwrap_template(member)
         if has_declaration_error(member):
@@ -185,6 +191,8 @@ def build_cpp_index(repo_root: Path, files: Sequence[Path], jobs: int = 1) -> Cp
             _merge(index.funcs, name, rel)
         for key, rel in frag.qual.items():
             _merge(index.qual, key, rel)
+        for key, ftype in frag.fields.items():
+            _merge(index.fields, key, ftype)
     return index
 
 
@@ -200,21 +208,23 @@ def _merge(dst: dict[str, str | None], key: str, value: str | None) -> None:
 def make_cpp_resolver(
     local_defs: set[str], path: str, index: CppIndex | None
 ) -> CallResolver:
-    """``(name, receiver, owner=None) -> repo path | None`` for C++. ``owner`` is the class
-    the call is written in (``None`` in a free function). Precision-first:
+    """``(name, receiver, owner=None, types=None) -> repo path | None`` for C++. ``owner`` is
+    the class the call is written in (``None`` in a free function); ``types`` maps the calling
+    function's local/param names to their written class type. Precision-first:
 
     * bare call (``receiver`` None) → same-file definition; else a repo-wide **free function**;
       else, inside a method, an implicit-``this`` call to ``owner::name``;
     * ``self``/``this`` method call → same-file method, else ``owner::name`` in the index;
     * qualified ``A::b()`` (``receiver`` is the scope) → the ``Scope::name`` definition;
-    * ``obj.method()`` / ``obj->method()`` → ``None`` — resolving these needs the receiver's
-      type, which is not inferred here;
+    * ``obj.method()`` / ``obj->method()`` → type ``obj`` (a local/param, or ``owner``'s member
+      field), then resolve ``Type::method``. An untyped/ambiguous receiver stays ``None``;
     * ``super``/``base`` call → ``None`` — resolving these needs the base-class chain, which is
       not walked here.
 
     Unresolved / ambiguous always returns ``None`` — never a guessed edge."""
     funcs = index.funcs if index is not None else {}
     qual = index.qual if index is not None else {}
+    fields = index.fields if index is not None else {}
 
     def _method(scope: str | None, name: str) -> str | None:
         """Resolve ``scope::name`` via the trailing ``Class::method`` key (``None`` for a
@@ -224,7 +234,22 @@ def make_cpp_resolver(
         key = _class_method_key(scope, name)
         return qual.get(key) if key is not None else None
 
-    def resolve(name: str, receiver: str | None, owner: str | None = None) -> str | None:
+    def _receiver_type(receiver: str, owner: str | None, types: dict[str, str | None]) -> str | None:
+        """Written class type of an ``obj`` / ``this->obj`` receiver: a local/param first,
+        else ``owner``'s member field. ``None`` (not resolved) for anything that is not a bare
+        variable (a chained ``a.b`` receiver, a call, …) or whose type is unknown/ambiguous."""
+        var = receiver[len("this->"):] if receiver.startswith("this->") else receiver
+        if not var.isidentifier():  # chained / expression receiver — needs deeper analysis
+            return None
+        if var in types:  # a known local/param (value may be None = ambiguous → do not resolve)
+            return types[var]
+        return fields.get(f"{owner}::{var}") if owner else None
+
+    def resolve(
+        name: str, receiver: str | None, owner: str | None = None,
+        types: dict[str, str | None] | None = None,
+    ) -> str | None:
+        types = types or {}
         if receiver is None:
             if name in local_defs:  # same-file free function / out-of-class method
                 return path
@@ -233,6 +258,9 @@ def make_cpp_resolver(
             return path if name in local_defs else _method(owner, name)
         if receiver in ("super", "base", "MyBase"):
             return None  # base-class call — resolving needs the base chain (not walked here)
-        return _method(receiver, name)  # qualified A::b() (None for a variable receiver)
+        # A qualified A::b() has a class scope as receiver; an obj.m() has a variable. Try the
+        # scope reading first (harmless miss when the receiver is a variable — no class is named
+        # like a lowercase var), then type the receiver and resolve Type::method.
+        return _method(receiver, name) or _method(_receiver_type(receiver, owner, types), name)
 
     return resolve
