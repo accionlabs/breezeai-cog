@@ -263,15 +263,27 @@ def _auth_clone_url(provider: str, owner: str, project: str, repo: str, token: s
     raise ApiError(f"Unsupported git provider: {provider}", 400)
 
 
-def clone_repo_full(provider: str, owner: str, project: str, repo: str, incoming: str, branch: str, token: str | None) -> str:
+def clone_repo_full(provider: str, owner: str, project: str, repo: str, incoming: str, branch: str, token: str | None, timeout: float = 1800.0) -> str:
     temp_dir = tempfile.mkdtemp(prefix="ontology-clone-")
     auth_url = _auth_clone_url(provider, owner, project, repo, token)
     try:
-        subprocess.run(["git", "clone", "--branch", branch, "--single-branch", auth_url, temp_dir],
-                       check=True, capture_output=True)
+        # Shallow single-branch clone: big repos can take ~10 min otherwise.
+        subprocess.run(
+            ["git", "clone", "--depth", "1", "--branch", branch, "--single-branch", auth_url, temp_dir],
+            check=True, capture_output=True, timeout=timeout,
+        )
         if incoming:
-            subprocess.run(["git", "-C", temp_dir, "checkout", "--quiet", incoming],
-                           check=True, capture_output=True)
+            try:
+                subprocess.run(["git", "-C", temp_dir, "checkout", "--quiet", incoming],
+                               check=True, capture_output=True, timeout=timeout)
+            except subprocess.CalledProcessError:
+                # Shallow clone only has the branch tip; fetch the exact commit if needed
+                subprocess.run(["git", "-C", temp_dir, "fetch", "--depth", "1", "origin", incoming],
+                               check=True, capture_output=True, timeout=timeout)
+                subprocess.run(["git", "-C", temp_dir, "checkout", "--quiet", incoming],
+                               check=True, capture_output=True, timeout=timeout)
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeError(f"git clone timed out: {_scrub(str(exc))}")
     except subprocess.CalledProcessError as exc:
         stderr = exc.stderr.decode() if exc.stderr else str(exc)
         raise RuntimeError(f"git clone failed: {_scrub(stderr)}")
@@ -282,14 +294,14 @@ def clone_repo_full(provider: str, owner: str, project: str, repo: str, incoming
 
 
 def resolve_git_diff(provider: str, owner: str, project: str, repo: str, current: str, incoming: str,
-                     token: str | None) -> tuple[str, set[str], list[str]]:
+                     token: str | None, timeout: float = 1800.0) -> tuple[str, set[str], list[str]]:
     api = _provider(provider)
     skeleton = api["tree"](owner, repo, incoming, token)
     diff = api["compare"](owner, repo, current, incoming, token)
     changed, deleted = diff["changed"], diff["deleted"]
     if provider in ("gitlab", "azure_devops") or (not changed and not deleted):
         # Fallback to full clone for providers where diff APIs are bypassed
-        temp_dir = clone_repo_full(provider, owner, project, repo, incoming, incoming, token)
+        temp_dir = clone_repo_full(provider, owner, project, repo, incoming, incoming, token, timeout)
         return temp_dir, None, []  # type: ignore
 
     temp_dir = tempfile.mkdtemp(prefix="ontology-")
@@ -322,6 +334,6 @@ def acquire_diff(settings: Settings, body: dict[str, Any]) -> tuple[str, set[str
     has_current = current not in (None, "", "null", "undefined")
 
     if has_current and provider in ("github", "bitbucket"):
-        return resolve_git_diff(provider, owner, project, repo, current, incoming, token)
-    temp_dir = clone_repo_full(provider, owner, project, repo, incoming, body["gitBranch"], token)
+        return resolve_git_diff(provider, owner, project, repo, current, incoming, token, settings.git_clone_timeout)
+    temp_dir = clone_repo_full(provider, owner, project, repo, incoming, body["gitBranch"], token, settings.git_clone_timeout)
     return temp_dir, None, []  # full clone → process every file
