@@ -46,15 +46,14 @@ def parse_repo_url(repo_url: str) -> dict[str, str] | None:
         return {"provider": "gitlab", "owner": "/".join(segments[:-1]), "repo": segments[-1]}
     az = _AZURE_DEVOPS.search(repo_url)
     if az:
+        repo_name = az.group(6)
         if az.group(1):  # dev.azure.com format
             owner = az.group(1)
-            repo_path = f"{az.group(2)}"
+            project = az.group(2)
         else:  # visualstudio.com format
             owner = az.group(3)
-            p1 = az.group(4)
-            p2 = az.group(5)
-            repo_path = f"{p1}/{p2}" if p2 else p1
-        return {"provider": "azure_devops", "owner": owner, "repo": repo_path}
+            project = az.group(4)
+        return {"provider": "azure_devops", "owner": owner, "project": project, "repo": repo_name}
     return None
 
 def _scrub(s: str) -> str:
@@ -243,7 +242,7 @@ def _provider(provider: str) -> dict[str, Any]:
     raise ApiError(f"Unsupported git provider: {provider}", 400)
 
 
-def _auth_clone_url(provider: str, owner: str, repo: str, token: str | None) -> str:
+def _auth_clone_url(provider: str, owner: str, project: str, repo: str, token: str | None) -> str:
     if provider == "github":
         return (f"https://x-access-token:{token}@github.com/{owner}/{repo}.git" if token
                 else f"https://github.com/{owner}/{repo}.git")
@@ -258,23 +257,15 @@ def _auth_clone_url(provider: str, owner: str, repo: str, token: str | None) -> 
         return (f"https://oauth2:{token}@gitlab.com/{owner}/{repo}.git" if token
                 else f"https://gitlab.com/{owner}/{repo}.git")
     if provider == "azure_devops":
-        proj_repo = repo.split("/")
-        project = proj_repo[0]
-        repository = proj_repo[1] if len(proj_repo) > 1 else proj_repo[0]
-        
-        if ".visualstudio.com" in repo or (not repo.startswith("dev.azure.com") and len(proj_repo) == 1):
-            domain_url = f"{owner}.visualstudio.com/{project}/_git/{repository}"
-        else:
-            domain_url = f"dev.azure.com/{owner}/{project}/_git/{repository}"
-
+        domain_url = f"{owner}.visualstudio.com/{project}/_git/{repo}"
         return (f"https://pat:{token}@{domain_url}" if token else f"https://{domain_url}")
-    
+
     raise ApiError(f"Unsupported git provider: {provider}", 400)
 
 
-def clone_repo_full(provider: str, owner: str, repo: str, incoming: str, branch: str, token: str | None) -> str:
+def clone_repo_full(provider: str, owner: str, project: str, repo: str, incoming: str, branch: str, token: str | None) -> str:
     temp_dir = tempfile.mkdtemp(prefix="ontology-clone-")
-    auth_url = _auth_clone_url(provider, owner, repo, token)
+    auth_url = _auth_clone_url(provider, owner, project, repo, token)
     try:
         subprocess.run(["git", "clone", "--branch", branch, "--single-branch", auth_url, temp_dir],
                        check=True, capture_output=True)
@@ -290,7 +281,7 @@ def clone_repo_full(provider: str, owner: str, repo: str, incoming: str, branch:
     return temp_dir
 
 
-def resolve_git_diff(provider: str, owner: str, repo: str, current: str, incoming: str,
+def resolve_git_diff(provider: str, owner: str, project: str, repo: str, current: str, incoming: str,
                      token: str | None) -> tuple[str, set[str], list[str]]:
     api = _provider(provider)
     skeleton = api["tree"](owner, repo, incoming, token)
@@ -298,7 +289,7 @@ def resolve_git_diff(provider: str, owner: str, repo: str, current: str, incomin
     changed, deleted = diff["changed"], diff["deleted"]
     if provider in ("gitlab", "azure_devops") or (not changed and not deleted):
         # Fallback to full clone for providers where diff APIs are bypassed
-        temp_dir = clone_repo_full(provider, owner, repo, incoming, incoming, token)
+        temp_dir = clone_repo_full(provider, owner, project, repo, incoming, incoming, token)
         return temp_dir, None, []  # type: ignore
 
     temp_dir = tempfile.mkdtemp(prefix="ontology-")
@@ -324,12 +315,13 @@ def acquire_diff(settings: Settings, body: dict[str, Any]) -> tuple[str, set[str
     if parsed is None:
         raise ApiError("Invalid repo URL (supported hosts: github.com, bitbucket.org, gitlab.com, dev.azure.com)", 400)
     provider, owner, repo = parsed["provider"], parsed["owner"], parsed["repo"]
+    project = parsed.get("project", "")
     current = body.get("currentCommitId")
     incoming = body["incomingCommitId"]
     token = body.get("gitToken")
     has_current = current not in (None, "", "null", "undefined")
 
     if has_current and provider in ("github", "bitbucket"):
-        return resolve_git_diff(provider, owner, repo, current, incoming, token)
-    temp_dir = clone_repo_full(provider, owner, repo, incoming, body["gitBranch"], token)
+        return resolve_git_diff(provider, owner, project, repo, current, incoming, token)
+    temp_dir = clone_repo_full(provider, owner, project, repo, incoming, body["gitBranch"], token)
     return temp_dir, None, []  # full clone → process every file
