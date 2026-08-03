@@ -1,0 +1,11 @@
+*.class
+build/
+.gradle/
+.idea/
+*.jar
+*.aar
+*.apk
+*.klib
+*.dex
+out/
+generated/
