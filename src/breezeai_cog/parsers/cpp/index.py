@@ -77,6 +77,10 @@ class CppIndex:
     #: method a class *inherits*. ``None`` when the name is declared with differing bases
     #: (ambiguous → the resolver must not walk through it).
     heritage: dict[str, ClassHeritage | None] = field(default_factory=dict)
+    #: simple class name → the repo file that *declares* the class (its body). ``None`` on a
+    #: name shared by >1 file. Lets an out-of-class ``Scope::method`` definition attach to the
+    #: class node in the header rather than orphaning to its own file.
+    classdecl: dict[str, str | None] = field(default_factory=dict)
 
 
 def _has_body(node: Node) -> bool:
@@ -145,6 +149,7 @@ def _index_class(frag: CppIndex, node: Node, source: bytes, rel: str) -> None:
     if name_node is None or body is None:
         return
     class_name = node_text(name_node, source)
+    record_distinct(frag.classdecl, class_name, rel)  # this file declares the class body
     field_types(class_name, body, source, frag.fields)
     extends, _ = _heritage(node, source)  # primary base (first) — the chain walked for inheritance
     if extends is not None:
@@ -219,6 +224,8 @@ def build_cpp_index(repo_root: Path, files: Sequence[Path], jobs: int = 1) -> Cp
             _merge(index.qual, key, rel)
         for key, ftype in frag.fields.items():
             _merge(index.fields, key, ftype)
+        for cname, decl_rel in frag.classdecl.items():
+            _merge(index.classdecl, cname, decl_rel)
         for cname, ch in frag.heritage.items():
             if ch is not None:  # a fragment only ever creates real records
                 _merge_heritage(index.heritage, cname, ch)

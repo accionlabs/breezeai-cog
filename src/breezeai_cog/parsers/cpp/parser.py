@@ -23,7 +23,7 @@ from typing import Sequence
 
 from tree_sitter import Node
 
-from ...emit import file_id
+from ...emit import class_id, file_id
 from ...schemas import SCHEMA_VERSION, FileRecord, Function, Statement
 from ...utils import count_loc
 from ..base import BaseParser, ParseContext
@@ -117,13 +117,16 @@ class CppParser(BaseParser):
             if inner is None:
                 return  # not a recognizable function — do not fabricate
             if inner.type == "qualified_identifier":
-                scope_node = inner.child_by_field_name("scope")
-                scope_name = node_text(scope_node, source) if scope_node is not None else None
-                cid = _class_for(scope_name)
+                # The class is the second-to-last component of the full path — the grammar
+                # splits `A::B::Cls::method` as scope `A` / name `B::Cls::method`, so `scope`
+                # alone is the outer namespace, not the class.
+                parts = [p for p in node_text(inner, source).split("::") if p]
+                class_simple = parts[-2] if len(parts) >= 2 else None
+                cid = _class_for(class_simple)
                 fn, fn_stmts = build_function(
                     node, source, path,
                     parent_id=cid or fid, seen_ids=seen_ids, capture=capture, limit=limit,
-                    resolve=resolve, class_name=scope_name, kind="method",
+                    resolve=resolve, class_name=class_simple, kind="method",
                 )
             else:
                 fn, fn_stmts = build_function(
@@ -135,13 +138,22 @@ class CppParser(BaseParser):
             functions.append(fn)
             statements.extend(fn_stmts)
 
-        def _class_for(scope_name: str | None) -> str | None:
-            """The in-file class id for an out-of-class definition's scope, matched on the
-            exact scope or its trailing simple name; ``None`` when the class is not in this
-            file (its definition parents to the file — honest-null, no fabricated edge)."""
-            if scope_name is None:
+        def _class_for(class_simple: str | None) -> str | None:
+            """The class id an out-of-class definition belongs to, given the simple class name.
+            A class declared in *this* file wins by its same-file id; otherwise the repo index
+            gives the file that declares the class (its header) and we reconstruct that class
+            node's id, so the definition attaches to the class instead of orphaning to its own
+            file. ``None`` when the class is unknown or its name is repo-ambiguous — honest-null."""
+            if not class_simple:
                 return None
-            return class_map.get(scope_name) or class_map.get(scope_name.rsplit("::", 1)[-1])
+            simple = class_simple.split("<", 1)[0]
+            same_file = class_map.get(simple)
+            if same_file is not None:
+                return same_file
+            if idx is None:
+                return None
+            decl_path = idx.classdecl.get(simple)  # None if unknown or declared in >1 file
+            return class_id(decl_path, simple) if decl_path is not None else None
 
         process(root)
 

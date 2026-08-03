@@ -332,6 +332,23 @@ def test_external_base_does_not_resolve(tmp_path) -> None:
     assert next(c for c in _fn(rec, "Run").calls if c.name == "what2").path is None
 
 
+def test_out_of_class_definition_attaches_to_header_class(tmp_path) -> None:
+    # A method defined in a .cpp attaches to its class node in the header (cross-file),
+    # instead of orphaning to the .cpp file.
+    (tmp_path / "judge.h").write_bytes(b"class Judge { public:\n int Decide();\n};\n")
+    (tmp_path / "judge.cpp").write_bytes(
+        b'#include "judge.h"\nint Judge::Decide() { return 1; }\n')
+    parser = CppParser()
+    files = list(tmp_path.rglob("*.h")) + list(tmp_path.rglob("*.cpp"))
+    index = parser.build_index(tmp_path, files)
+    from breezeai_cog.emit import class_id
+    cpp = tmp_path / "judge.cpp"
+    rec = parser.parse_file(ParseContext(path="judge.cpp", abs_path=cpp, source=cpp.read_bytes(),
+                                         repo_root=tmp_path, resolution_index=index))
+    decide = next(f for f in rec.functions if f.name == "Decide")
+    assert decide.parentId == class_id("judge.h", "Judge")  # the header class node, not the file
+
+
 def test_enum_captured_with_enumerators(tmp_path) -> None:
     rec = _parse_src(tmp_path, b"enum Color { RED, GREEN, BLUE };\n", "c.h")
     color = next((c for c in rec.classes if c.name == "Color"), None)
