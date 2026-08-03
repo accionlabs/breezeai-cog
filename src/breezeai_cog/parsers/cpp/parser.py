@@ -23,7 +23,7 @@ from typing import Sequence
 
 from tree_sitter import Node
 
-from ...emit import class_id, file_id
+from ...emit import file_id
 from ...schemas import SCHEMA_VERSION, FileRecord, Function, Statement
 from ...utils import count_loc
 from ..base import BaseParser, ParseContext
@@ -36,7 +36,7 @@ from .functions import (
     has_declaration_error,
 )
 from .imports import extract_imports
-from .index import CppIndex, build_cpp_index, make_cpp_resolver
+from .index import CppIndex, _join_ns, _ns_name, build_cpp_index, make_cpp_resolver
 from .mappings import FRAMEWORKS, STATEMENT_TYPES
 
 #: Transparent wrappers whose *members* are top-level declarations: the ``#ifndef GUARD``
@@ -83,17 +83,17 @@ class CppParser(BaseParser):
         statements: list[Statement] = []
         class_map: dict[str, str] = {}  # simple class name → class id (out-of-class method attach)
 
-        def process(scope: Node) -> None:
+        def process(scope: Node, ns: str = "") -> None:
             for child in scope.named_children:
                 node = _unwrap_template(child)
                 if has_declaration_error(node):
                     continue  # corrupt header — skip rather than emit fabricated data
                 if node.type in _TRANSPARENT_SCOPES:
-                    process(node)  # include guard / preproc conditional / extern "C" — recurse
+                    process(node, ns)  # include guard / preproc conditional / extern "C" — recurse
                 elif node.type == "namespace_definition":
                     body = node.child_by_field_name("body")
-                    if body is not None:
-                        process(body)  # flatten: namespace members parent to the file
+                    if body is not None:  # flatten members to the file, but track the ns path
+                        process(body, _join_ns(ns, _ns_name(node, source)))
                 elif node.type in _CLASS_TYPES:
                     cls_list, methods, cls_stmts = build_class(
                         node, source, path,
@@ -109,20 +109,21 @@ class CppParser(BaseParser):
                     if enum_cls is not None:
                         classes.append(enum_cls)
                 elif node.type == "function_definition":
-                    _emit_function(node)
+                    _emit_function(node, ns)
 
-        def _emit_function(node: Node) -> None:
+        def _emit_function(node: Node, ns: str) -> None:
             fd = function_declarator_of(node.child_by_field_name("declarator"))
             inner = fd.child_by_field_name("declarator") if fd is not None else None
             if inner is None:
                 return  # not a recognizable function — do not fabricate
             if inner.type == "qualified_identifier":
-                # The class is the second-to-last component of the full path — the grammar
-                # splits `A::B::Cls::method` as scope `A` / name `B::Cls::method`, so `scope`
-                # alone is the outer namespace, not the class.
+                # `A::B::Cls::method` — the class is everything but the last component. The
+                # class's fully-qualified name is the enclosing namespace path plus that prefix,
+                # so a definition binds only to a class whose whole path matches.
                 parts = [p for p in node_text(inner, source).split("::") if p]
                 class_simple = parts[-2] if len(parts) >= 2 else None
-                cid = _class_for(class_simple)
+                class_fqn = _join_ns(ns, "::".join(parts[:-1])) if len(parts) >= 2 else None
+                cid = _class_for(class_fqn, class_simple)
                 fn, fn_stmts = build_function(
                     node, source, path,
                     parent_id=cid or fid, seen_ids=seen_ids, capture=capture, limit=limit,
@@ -138,22 +139,19 @@ class CppParser(BaseParser):
             functions.append(fn)
             statements.extend(fn_stmts)
 
-        def _class_for(class_simple: str | None) -> str | None:
-            """The class id an out-of-class definition belongs to, given the simple class name.
-            A class declared in *this* file wins by its same-file id; otherwise the repo index
-            gives the file that declares the class (its header) and we reconstruct that class
-            node's id, so the definition attaches to the class instead of orphaning to its own
-            file. ``None`` when the class is unknown or its name is repo-ambiguous — honest-null."""
-            if not class_simple:
+        def _class_for(class_fqn: str | None, class_simple: str | None) -> str | None:
+            """The class-node id an out-of-class definition attaches to. A class in *this* file
+            wins by its same-file id (matched on the simple name). Otherwise the repo index maps
+            the class's **fully-qualified** name → the declaring class node's id — so a definition
+            binds only when the whole namespace path matches, never to a same-named class in
+            another namespace or one outside the repo. ``None`` when unresolved — honest-null."""
+            if class_simple:
+                same_file = class_map.get(class_simple.split("<", 1)[0])
+                if same_file is not None:
+                    return same_file
+            if idx is None or class_fqn is None:
                 return None
-            simple = class_simple.split("<", 1)[0]
-            same_file = class_map.get(simple)
-            if same_file is not None:
-                return same_file
-            if idx is None:
-                return None
-            decl_path = idx.classdecl.get(simple)  # None if unknown or declared in >1 file
-            return class_id(decl_path, simple) if decl_path is not None else None
+            return idx.classdecl.get(class_fqn)  # exact node id, or None when ambiguous/unknown
 
         process(root)
 

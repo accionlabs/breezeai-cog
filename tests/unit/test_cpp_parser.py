@@ -349,6 +349,37 @@ def test_out_of_class_definition_attaches_to_header_class(tmp_path) -> None:
     assert decide.parentId == class_id("judge.h", "Judge")  # the header class node, not the file
 
 
+def _parse_cross_file(tmp_path, target: str):
+    parser = CppParser()
+    files = list(tmp_path.rglob("*.h")) + list(tmp_path.rglob("*.cpp"))
+    index = parser.build_index(tmp_path, files)
+    p = tmp_path / target
+    return parser.parse_file(ParseContext(path=target, abs_path=p, source=p.read_bytes(),
+                                          repo_root=tmp_path, resolution_index=index))
+
+
+def test_namespaced_definition_attaches_by_qualified_name(tmp_path) -> None:
+    # Two classes share the simple name Foo in different namespaces/files. A .cpp definition must
+    # attach to the class with the MATCHING fully-qualified name, never the other namesake.
+    from breezeai_cog.emit import class_id
+    (tmp_path / "a.h").write_bytes(b"namespace A { class Foo { public: int run(); }; }\n")
+    (tmp_path / "b.h").write_bytes(b"namespace B { class Foo { public: int run(); }; }\n")
+    (tmp_path / "a.cpp").write_bytes(b'#include "a.h"\nint A::Foo::run() { return 1; }\n')
+    rec = _parse_cross_file(tmp_path, "a.cpp")
+    run = next(f for f in rec.functions if f.name.endswith("run"))
+    assert run.parentId == class_id("a.h", "Foo")  # A::Foo — never B::Foo in b.h
+
+
+def test_definition_of_external_namesake_does_not_attach(tmp_path) -> None:
+    # The repo has A::Widget; a .cpp defines a method on a DIFFERENT namespace's Widget, whose
+    # class is not in the repo. The qualified name doesn't match A::Widget → no edge (honest-null).
+    (tmp_path / "a.h").write_bytes(b"namespace A { class Widget { void paint(); }; }\n")
+    (tmp_path / "ext.cpp").write_bytes(b"void Ext::Widget::paint() { }\n")
+    rec = _parse_cross_file(tmp_path, "ext.cpp")
+    paint = next(f for f in rec.functions if f.name.endswith("paint"))
+    assert paint.parentId == "ext.cpp"  # orphaned to file, not attached to A::Widget
+
+
 def test_enum_captured_with_enumerators(tmp_path) -> None:
     rec = _parse_src(tmp_path, b"enum Color { RED, GREEN, BLUE };\n", "c.h")
     color = next((c for c in rec.classes if c.name == "Color"), None)

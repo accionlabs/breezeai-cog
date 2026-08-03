@@ -30,6 +30,7 @@ from typing import Sequence
 
 from tree_sitter import Node
 
+from ...emit import class_id
 from ...utils import repo_relative
 from ..callresolve import CallResolver
 from ..index_common import ClassHeritage, parallel_map, record_distinct, walk_heritage
@@ -77,10 +78,18 @@ class CppIndex:
     #: method a class *inherits*. ``None`` when the name is declared with differing bases
     #: (ambiguous → the resolver must not walk through it).
     heritage: dict[str, ClassHeritage | None] = field(default_factory=dict)
-    #: simple class name → the repo file that *declares* the class (its body). ``None`` on a
-    #: name shared by >1 file. Lets an out-of-class ``Scope::method`` definition attach to the
-    #: class node in the header rather than orphaning to its own file.
+    #: **fully-qualified** class name (``Payroll::DataFlow::Judge``) → the declaring class's
+    #: node id (``header.h#Judge``), or ``None`` when ambiguous. Lets an out-of-class
+    #: ``Scope::method`` definition attach to the class node in the header rather than orphaning
+    #: to its own file. Keyed on the *qualified* name (not the simple name) so a definition binds
+    #: only when the whole namespace path matches — a same-named class in another namespace, or
+    #: one outside the repo, does not draw a false edge. ``None`` when the same qualified name is
+    #: declared in >1 file, or when the simple name is declared more than once in the one
+    #: declaring file (the real node id is then disambiguated and cannot be reconstructed).
     classdecl: dict[str, str | None] = field(default_factory=dict)
+    #: transient (fragment-only): fully-qualified class name → declaring file, before the
+    #: reduce resolves it to a node id. Empty on the final index.
+    classdecl_raw: dict[str, str | None] = field(default_factory=dict)
 
 
 def _has_body(node: Node) -> bool:
@@ -120,6 +129,18 @@ def _simple(name: str) -> str:
     return name.rsplit("::", 1)[-1].split("<", 1)[0]
 
 
+def _join_ns(ns: str, name: str) -> str:
+    """Append a name to a ``::``-joined namespace/class path (``"A::B"`` + ``"C"`` → ``"A::B::C"``)."""
+    return f"{ns}::{name}" if ns else name
+
+
+def _ns_name(node: Node, source: bytes) -> str:
+    """The name of a ``namespace_definition`` (may be nested, ``A::B``); ``""`` for an
+    anonymous namespace (its members keep the enclosing path)."""
+    nm = node.child_by_field_name("name")
+    return node_text(nm, source) if nm is not None else ""
+
+
 def _class_heritage(frag: CppIndex, class_name: str) -> ClassHeritage:
     """Get-or-create the heritage record for a class in a fragment."""
     ch = frag.heritage.get(class_name)
@@ -141,15 +162,17 @@ def _record_qual(frag: CppIndex, scope: str, name: str, rel: str) -> None:
         record_distinct(_class_heritage(frag, cls).methods, method, rel)
 
 
-def _index_class(frag: CppIndex, node: Node, source: bytes, rel: str) -> None:
-    """Record a class/struct's inline member-function definitions (those with a body) and
-    its member-variable types (for receiver typing)."""
+def _index_class(frag: CppIndex, node: Node, source: bytes, rel: str, ns: str) -> None:
+    """Record a class/struct's declaration (its fully-qualified name → file), its inline
+    member-function definitions (those with a body), and its member-variable types. ``ns`` is
+    the enclosing namespace/class path, so the class is keyed by its qualified name."""
     name_node = node.child_by_field_name("name")
     body = node.child_by_field_name("body")
     if name_node is None or body is None:
         return
     class_name = node_text(name_node, source)
-    record_distinct(frag.classdecl, class_name, rel)  # this file declares the class body
+    fqn = _join_ns(ns, class_name)
+    record_distinct(frag.classdecl_raw, fqn, rel)  # this file declares the class body
     field_types(class_name, body, source, frag.fields)
     extends, _ = _heritage(node, source)  # primary base (first) — the chain walked for inheritance
     if extends is not None:
@@ -161,24 +184,25 @@ def _index_class(frag: CppIndex, node: Node, source: bytes, rel: str) -> None:
         if member.type in _MEMBER_FN_TYPES and _has_body(member):
             if function_declarator_of(member.child_by_field_name("declarator")) is not None:
                 _record_def(frag, member, source, rel, class_name)
-        elif member.type in _CLASS_TYPES:
-            _index_class(frag, member, source, rel)
+        elif member.type in _CLASS_TYPES:  # nested type — qualified under this class
+            _index_class(frag, member, source, rel, fqn)
 
 
-def _index_scope(frag: CppIndex, scope: Node, source: bytes, rel: str) -> None:
-    """Walk a file/namespace scope, recording every function/method definition."""
+def _index_scope(frag: CppIndex, scope: Node, source: bytes, rel: str, ns: str = "") -> None:
+    """Walk a file/namespace scope, recording every definition. ``ns`` accumulates the
+    enclosing namespace path so classes are keyed by their fully-qualified name."""
     for child in scope.named_children:
         node = _unwrap_template(child)
         if has_declaration_error(node):
             continue
         if node.type in _TRANSPARENT_SCOPES:
-            _index_scope(frag, node, source, rel)
+            _index_scope(frag, node, source, rel, ns)
         elif node.type == "namespace_definition":
             body = node.child_by_field_name("body")
             if body is not None:
-                _index_scope(frag, body, source, rel)
+                _index_scope(frag, body, source, rel, _join_ns(ns, _ns_name(node, source)))
         elif node.type in _CLASS_TYPES:
-            _index_class(frag, node, source, rel)
+            _index_class(frag, node, source, rel, ns)
         elif node.type == "function_definition":
             _record_def(frag, node, source, rel, None)
 
@@ -213,6 +237,7 @@ def build_cpp_index(repo_root: Path, files: Sequence[Path], jobs: int = 1) -> Cp
     (``jobs<=1`` → serial), so the result is identical regardless of fragment order."""
     repo_root = Path(repo_root)
     index = CppIndex(headers=build_header_index(repo_root, files))
+    fqn_file: dict[str, str | None] = {}  # fully-qualified class name → declaring file (or None)
     rels = [repo_relative(f, repo_root) for f in files]
     fragments = parallel_map([(str(f), rel) for f, rel in zip(files, rels)], _index_one, jobs)
     for frag in fragments:
@@ -224,12 +249,35 @@ def build_cpp_index(repo_root: Path, files: Sequence[Path], jobs: int = 1) -> Cp
             _merge(index.qual, key, rel)
         for key, ftype in frag.fields.items():
             _merge(index.fields, key, ftype)
-        for cname, decl_rel in frag.classdecl.items():
-            _merge(index.classdecl, cname, decl_rel)
+        for fqn, decl_rel in frag.classdecl_raw.items():
+            _merge(fqn_file, fqn, decl_rel)
         for cname, ch in frag.heritage.items():
             if ch is not None:  # a fragment only ever creates real records
                 _merge_heritage(index.heritage, cname, ch)
+    index.classdecl = _finalize_classdecl(fqn_file)
     return index
+
+
+def _finalize_classdecl(fqn_file: dict[str, str | None]) -> dict[str, str | None]:
+    """Resolve each fully-qualified class name to its node id, honest-null where it cannot be
+    resolved unambiguously. A class node's id is ``file#simplename`` (the simple name, even for
+    a namespaced/nested class), so the id is reconstructable **only** when that simple name is
+    declared once in the file; if the same simple name is declared more than once in one file
+    (different namespaces), the real ids are disambiguated (``#2`` …) and cannot be reconstructed
+    from the name alone, so those entries collapse to ``None`` rather than draw a wrong edge."""
+    per_file_simple: dict[tuple[str, str], set[str]] = {}
+    for fqn, rel in fqn_file.items():
+        if rel is not None:
+            per_file_simple.setdefault((rel, _simple(fqn)), set()).add(fqn)
+    out: dict[str, str | None] = {}
+    for fqn, rel in fqn_file.items():
+        if rel is None:  # same qualified name declared in >1 file — ambiguous
+            out[fqn] = None
+            continue
+        simple = _simple(fqn)
+        # unique simple name in this file → id is exactly file#simple; else honest-null
+        out[fqn] = class_id(rel, simple) if len(per_file_simple[(rel, simple)]) == 1 else None
+    return out
 
 
 def _merge_heritage(
