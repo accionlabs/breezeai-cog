@@ -23,6 +23,7 @@ Python reimplementation of `breezeai-code-ontology-generator`.
 | Java | `.java` | Spring Boot, JAX-RS, Vert.x |
 | C# | `.cs` | ASP.NET, GraphQL (graphql-dotnet) |
 | VB.NET | `.vb` | ASP.NET |
+| Kotlin | `.kt` | Ktor |
 | Groovy † | `.groovy` | — |
 | Config | `package.json`, `tsconfig`, `Dockerfile`, `docker-compose`, `pom.xml`, `requirements.txt`, `build.gradle`, … | — |
 
