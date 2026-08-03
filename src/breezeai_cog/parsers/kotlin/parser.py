@@ -50,7 +50,7 @@ def _infix_object_name(node: Node, source: bytes) -> str | None:
     may be nested inside another infix_expression when adjacent declarations share a line
     without braces.
     """
-    named = list(node.named_children)
+    named = node.named_children
     if not named:
         return None
     if named[0].type == "object_literal":

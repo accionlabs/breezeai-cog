@@ -5,17 +5,19 @@ from tree_sitter import Node
 from ..treesitter import node_text
 
 
+_DECL_TYPES = frozenset({
+    "class_declaration", "object_declaration",
+    "function_declaration", "secondary_constructor",
+})
+
+
 def defined_names(root: Node, source: bytes) -> set[str]:
     """All top-level and nested declaration names (classes, objects, functions)."""
     names: set[str] = set()
-    _decl_types = {
-        "class_declaration", "object_declaration",
-        "function_declaration", "secondary_constructor",
-    }
 
     def walk(n: Node) -> None:
         for c in n.named_children:
-            if c.type in _decl_types:
+            if c.type in _DECL_TYPES:
                 name_node = next(
                     (ch for ch in c.named_children
                      if ch.type in {"type_identifier", "simple_identifier"}),

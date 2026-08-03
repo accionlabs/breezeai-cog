@@ -46,7 +46,6 @@ def _render_url(node: Node, source: bytes) -> str | None:
 def _call_details(call: Node, source: bytes) -> tuple[str, str, str | None] | None:
     if call.type != "call_expression":
         return None
-    # callee
     callee_node = call.named_children[0] if call.named_children else None
     if callee_node is None:
         return None
