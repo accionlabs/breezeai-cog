@@ -212,6 +212,98 @@ def test_vertx2_registerHandler_detected_as_consumer(tmp_path) -> None:
     assert consumers[0].endpoint == "ebName"
 
 
+# Delegation-wrapper idiom: a private helper forwards its address parameter to
+# registerHandler; the real addresses live at the call sites in start(). The wrapper is
+# named `bind` (not `register`) to prove detection is structural, not keyed on any name.
+_WRAPPER_SRC = b'''package com.acme;
+
+import org.vertx.java.platform.Verticle;
+import org.vertx.java.core.Handler;
+import org.vertx.java.core.eventbus.Message;
+import org.vertx.java.core.json.JsonObject;
+
+public class AppVerticle extends Verticle {
+    public void start() {
+        final String app = "svc";
+        bind("FULL_" + app + "/formal", new FormalHandler(this));
+        bind(app + "/submit", new SubmitHandler(this));
+        bind("view/APP", new ViewHandler(this));
+    }
+
+    private void bind(final String address, Handler<Message<JsonObject>> handler) {
+        vertx.eventBus().registerHandler(address, handler, new Handler<AsyncResult<Void>>() {
+            @Override
+            public void handle(AsyncResult<Void> ar) {
+                if (ar.failed()) { container.logger().error("failed: " + address); }
+            }
+        });
+    }
+}
+'''
+
+
+def test_delegation_wrapper_promotes_call_sites(tmp_path) -> None:
+    # A private wrapper that forwards its first String param to registerHandler makes its
+    # call sites the real consumers; the wrapper's own registerHandler (address = parameter)
+    # is suppressed rather than emitted with endpoint="address" (honest-null).
+    p = tmp_path / "AppVerticle.java"
+    p.write_text(_WRAPPER_SRC.decode())
+    ctx = ParseContext(path="AppVerticle.java", abs_path=p, source=_WRAPPER_SRC,
+                       repo_root=tmp_path, capture_statements=True)
+    rec = VertxParser().parse_file(ctx)
+    consumers = {s.endpoint for s in rec.statements if s.semanticType == "eventbus_consumer"}
+    # three real call-site addresses (`app` is a local var → rendered as placeholder)
+    assert consumers == {"FULL_{app}/formal", "{app}/submit", "view/APP"}
+    # the wrapper's own forwarded call is NOT emitted as a junk consumer
+    assert "address" not in consumers
+    assert rec.framework == "vertx"
+
+
+def test_send_wrapper_promotes_call_sites(tmp_path) -> None:
+    # The alias mechanism is not consumer-specific: a wrapper delegating to send() makes its
+    # call sites eventbus_send.
+    src = (
+        b"package x;\nimport io.vertx.core.AbstractVerticle;\n"
+        b"public class V extends AbstractVerticle {\n"
+        b'  void start() { emit("orders.audit", payload); }\n'
+        b"  private void emit(String address, Object body) {\n"
+        b"    vertx.eventBus().send(address, body);\n"
+        b"  }\n}"
+    )
+    p = tmp_path / "V.java"
+    p.write_text(src.decode())
+    ctx = ParseContext(path="V.java", abs_path=p, source=src, repo_root=tmp_path,
+                       capture_statements=True)
+    rec = VertxParser().parse_file(ctx)
+    sends = {s.endpoint for s in rec.statements if s.semanticType == "eventbus_send"}
+    assert sends == {"orders.audit"}  # only the call site; wrapper's own send suppressed
+
+
+def test_non_wrapper_private_method_is_not_aliased(tmp_path) -> None:
+    # A private method whose first String param is NOT forwarded as the address (it is
+    # transformed, and the address is a different variable) must not become an alias — its
+    # call sites stay unclassified. Guards against false positives.
+    src = (
+        b"package x;\nimport io.vertx.core.AbstractVerticle;\n"
+        b"public class V extends AbstractVerticle {\n"
+        b'  void start() { fire("orders", data); }\n'
+        b"  private void fire(String name, Object data) {\n"
+        b'    String addr = "topic/" + name;\n'
+        b"    vertx.eventBus().send(addr, data);\n"  # address is `addr`, not the param `name`
+        b"  }\n}"
+    )
+    p = tmp_path / "V.java"
+    p.write_text(src.decode())
+    ctx = ParseContext(path="V.java", abs_path=p, source=src, repo_root=tmp_path,
+                       capture_statements=True)
+    rec = VertxParser().parse_file(ctx)
+    # `fire(...)` call site is not classified; the in-wrapper send(addr, ...) is still a send
+    # (addr is a local var → symbolic, not suppressed since it is not the parameter).
+    sends = [s for s in rec.statements if s.semanticType == "eventbus_send"]
+    assert {s.endpoint for s in sends} == {"addr"}
+    assert not any(s.semanticType and s.text.startswith("fire(") for s in rec.statements)
+
+
 def test_output_validates(tmp_path) -> None:
     rec = _parse(tmp_path)
     errors = list(Draft202012Validator(FileRecord.model_json_schema(by_alias=True))

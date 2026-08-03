@@ -55,6 +55,14 @@ def is_route_receiver(obj_l: str) -> bool:
     )
 
 
+def is_bus_receiver(obj: str) -> bool:
+    """Whether a receiver denotes an EventBus (``vertx.eventBus()``, ``eb``, a ``…Bus`` var).
+    The single source of truth for ``classify_call`` and the wrapper detector alike, so an
+    EventBus call and a wrapper that forwards to one are recognised by the same rule."""
+    obj_l = obj.lower()
+    return "bus" in obj_l or obj_l == "eb"
+
+
 def classify_call(
     method: str,
     path: str | None,
@@ -80,7 +88,7 @@ def classify_call(
     """
     obj_l = obj.lower()
 
-    if method in EVENTBUS and ("bus" in obj_l or obj_l == "eb"):
+    if method in EVENTBUS and is_bus_receiver(obj):
         return EVENTBUS[method], None, path or first_arg, None
     if method in TIMERS:
         return "timer", None, None, None
