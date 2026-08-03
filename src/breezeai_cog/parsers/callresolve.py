@@ -104,5 +104,8 @@ def make_resolver(
     return resolve
 
 
-def noop_resolver(name: str, receiver: str | None, owner: str | None = None) -> None:
+def noop_resolver(
+    name: str, receiver: str | None, owner: str | None = None,
+    types: dict[str, str | None] | None = None,
+) -> None:
     return None  # default when unresolved
