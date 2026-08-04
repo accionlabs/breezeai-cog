@@ -85,7 +85,7 @@ async def analyze_diff(request: Request, background_tasks: BackgroundTasks) -> d
         )
     parsed = parse_repo_url(repo_url)
     if parsed is None:
-        raise ApiError("Invalid repo URL (supported hosts: github.com, gitlab.com, bitbucket.org)", 400)
+        raise ApiError("Invalid repo URL (supported hosts: github.com, bitbucket.org, gitlab.com, dev.azure.com)", 400)
     repo_name = parsed["repo"]
 
     temp_dir, filter_set, deleted_files = await run_in_threadpool(deps.acquire_diff, settings, body)

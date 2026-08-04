@@ -72,6 +72,9 @@ class Settings(BaseSettings):
     # ── Server ────────────────────────────────────────────────────────────
     port: int = 3000
 
+    # ── Git ───────────────────────────────────────────────────────────────
+    git_clone_timeout: float = 1800.0  # seconds; git clone/fetch/checkout cap (server/git.py)
+
     # ── Backend upload ────────────────────────────────────────────────────
     upload: bool = False  # --upload toggle
     baseurl: str | None = Field(
