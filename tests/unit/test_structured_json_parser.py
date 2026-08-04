@@ -51,6 +51,14 @@ def test_does_not_claim_malformed_json() -> None:
     assert StructuredJsonParser().claims("x.json", b"{not json") is False
 
 
+def test_does_not_crash_on_deeply_nested_json() -> None:
+    # A JSON array nested 1200 levels deep exceeds Python's default recursion limit
+    # (1000) during decoding. Claims must return False, not propagate RecursionError.
+    depth = 1200
+    src = ("[" * depth + "]" * depth).encode()
+    assert StructuredJsonParser().claims("x.json", src) is False
+
+
 # ── denylist guard: don't steal ConfigParser's richly-handled JSON ──────────────
 def test_does_not_claim_package_json_with_contributors_array() -> None:
     # `contributors: [{...}]` is a record array but package.json must stay with ConfigParser

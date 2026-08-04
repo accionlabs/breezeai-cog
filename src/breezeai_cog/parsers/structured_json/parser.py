@@ -108,7 +108,7 @@ class StructuredJsonParser(BaseParser):
     def _parse(source: bytes) -> Any:
         try:
             return json.loads(source.decode("utf-8", "replace"))
-        except (ValueError, TypeError):
+        except (ValueError, TypeError, RecursionError):
             return None
 
     @staticmethod
