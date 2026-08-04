@@ -19,8 +19,12 @@ from ...utils import repo_relative
 from ..index_common import ClassHeritage, parallel_map, record_distinct
 from ..treesitter import node_text, parse_source
 
-_SUFFIXES = (".ts", ".tsx", ".d.ts", ".js", ".jsx", ".mjs", ".cjs")
-_INDEXES = ("index.ts", "index.tsx", "index.js", "index.jsx")
+# `.vue` is appended LAST so an extensionless import next to both `Foo.ts` and `Foo.vue`
+# still resolves to the JS/TS file (matching bundler resolution order). Only `.vue` is added
+# here — the Vue parser emits a real `File` node for it, so the edge lands on a graph identity;
+# extensions with no parser (e.g. `.svelte`) are deliberately omitted to avoid dangling edges.
+_SUFFIXES = (".ts", ".tsx", ".d.ts", ".js", ".jsx", ".mjs", ".cjs", ".vue")
+_INDEXES = ("index.ts", "index.tsx", "index.js", "index.jsx", "index.vue")
 _TSCONFIGS = ("tsconfig.json", "jsconfig.json")
 
 
@@ -462,6 +466,11 @@ def build_ts_index(repo_root: Path, files: Sequence[Path], jobs: int = 1) -> TsA
 
 
 def _try_paths(target: Path, repo_root: Path) -> str | None:
+    # An explicit-extension target (Vue imports are conventionally `./Avatar.vue`) resolves
+    # as-is; the suffix loop below only ever APPENDS an extension, so without this an explicit
+    # `.vue`/`.ts` specifier would be probed as `Avatar.vue.vue` and missed.
+    if target.is_file():
+        return repo_relative(target, repo_root)
     for suffix in _SUFFIXES:
         cand = target.with_name(target.name + suffix)
         if cand.is_file():
