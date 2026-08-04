@@ -7,6 +7,7 @@ the shared parse_source() helper.
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Sequence
 
@@ -34,6 +35,22 @@ from .imports import KotlinIndex, build_fqcn_index, extract_imports
 from .mappings import FRAMEWORKS, STATEMENT_TYPES
 
 _CLASS_TYPES = ("class_declaration", "object_declaration")
+
+_LOCAL_DECL_TYPES = frozenset({"function_declaration"} | set(_CLASS_TYPES))
+_LOCAL_SCOPE_STOP = frozenset({"lambda_literal", "class_body", "enum_class_body"})
+
+
+def _local_decl_members(node: Node) -> Iterator[Node]:
+    """Yield local function/class declarations directly owned by a function body.
+
+    Descends through control-flow and block wrapper nodes but stops at lambda
+    literals and class bodies — those are separate scopes handled elsewhere.
+    """
+    for child in node.named_children:
+        if child.type in _LOCAL_DECL_TYPES:
+            yield child
+        elif child.type not in _LOCAL_SCOPE_STOP:
+            yield from _local_decl_members(child)
 
 # First unnamed child token that distinguishes class kind.
 _CLASS_KIND_MAP: dict[str, ClassType] = {
@@ -214,11 +231,13 @@ class KotlinParser(BaseParser):
                 functions.extend(methods)
                 statements.extend(cls_statements)
             elif child.type == "function_declaration":
-                fn, fn_statements = self._build_function(
+                fn, nested_fns, nested_cls, fn_statements = self._build_function(
                     child, source, path, parent_id=fid, seen_ids=seen_ids,
                     capture=capture, limit=limit, resolve=resolve,
                 )
                 functions.append(fn)
+                functions.extend(nested_fns)
+                classes.extend(nested_cls)
                 statements.extend(fn_statements)
             elif child.type == "infix_expression":
                 # tree-sitter misparses `object Name` (no body) as infix_expression
@@ -283,11 +302,13 @@ class KotlinParser(BaseParser):
             )
             for member in body.named_children:
                 if member.type == "function_declaration":
-                    fn, fn_stmts = self._build_function(
+                    fn, sub_fns, sub_cls, fn_stmts = self._build_function(
                         member, source, path, parent_id=cid, seen_ids=seen_ids,
                         capture=capture, limit=limit, resolve=resolve,
                     )
                     methods.append(fn)
+                    methods.extend(sub_fns)
+                    nested_classes.extend(sub_cls)
                     statements.extend(fn_stmts)
                 elif member.type in _CLASS_TYPES:
                     # Nested inner class/object — returned flat, parented to this class.
@@ -372,7 +393,7 @@ class KotlinParser(BaseParser):
         capture: bool,
         limit: int,
         resolve: CallResolver = noop_resolver,
-    ) -> tuple[Function, list[Statement]]:
+    ) -> tuple[Function, list[Function], list[Class], list[Statement]]:
         name = self._decl_name(node, source)
         start, end = line_span(node)
         fid = disambiguate(function_id(path, name, start, class_name=None), seen_ids)
@@ -396,13 +417,34 @@ class KotlinParser(BaseParser):
         body = next((c for c in node.named_children if c.type == "function_body"), None)
         calls: list[Call] = []
         statements: list[Statement] = []
+        nested_fns: list[Function] = []
+        nested_cls: list[Class] = []
         if body is not None:
             calls = self._collect_calls(body, source, resolve)
             from .statements import extract_statements as _extract_stmts
             statements = _extract_stmts(
                 body, source, path, parent_id=fid, capture=capture,
                 limit=limit, seen_ids=seen_ids, descend_all=True,
+                stop_at=_LOCAL_DECL_TYPES,
             )
+            for member in _local_decl_members(body):
+                if member.type == "function_declaration":
+                    sub_fn, sub_fns, sub_cls, sub_stmts = self._build_function(
+                        member, source, path, parent_id=fid, seen_ids=seen_ids,
+                        capture=capture, limit=limit, resolve=resolve,
+                    )
+                    nested_fns.append(sub_fn)
+                    nested_fns.extend(sub_fns)
+                    nested_cls.extend(sub_cls)
+                    statements.extend(sub_stmts)
+                else:
+                    sub_cls_list, sub_methods, sub_stmts = self._build_class(
+                        member, source, path, parent_id=fid, seen_ids=seen_ids,
+                        capture=capture, limit=limit, resolve=resolve,
+                    )
+                    nested_cls.extend(sub_cls_list)
+                    nested_fns.extend(sub_methods)
+                    statements.extend(sub_stmts)
 
         fn = Function(
             id=fid,
@@ -418,7 +460,7 @@ class KotlinParser(BaseParser):
             endLine=end,
             calls=calls,
         )
-        return fn, statements
+        return fn, nested_fns, nested_cls, statements
 
     def _decl_name(self, node: Node, source: bytes) -> str:
         # Kotlin grammar doesn't define field names on most nodes; use typed child search.

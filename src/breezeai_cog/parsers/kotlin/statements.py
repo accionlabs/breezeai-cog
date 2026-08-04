@@ -86,13 +86,19 @@ def _call_details(call: Node, source: bytes) -> tuple[str, str, str | None] | No
     return callee, method, endpoint
 
 
-def _iter_in_scope(node: Node, descend_all: bool = False) -> Iterator[Node]:
+def _iter_in_scope(
+    node: Node,
+    descend_all: bool = False,
+    stop_at: frozenset[str] = frozenset(),
+) -> Iterator[Node]:
     for child in node.named_children:
+        if child.type in stop_at:
+            continue
         if not descend_all and child.type in NESTED_SCOPES:
             continue
         if child.type in EMIT_TYPES:
             yield child
-        yield from _iter_in_scope(child, descend_all)
+        yield from _iter_in_scope(child, descend_all, stop_at)
 
 
 def extract_statements(
@@ -105,11 +111,12 @@ def extract_statements(
     limit: int,
     seen_ids: set[str],
     descend_all: bool = False,
+    stop_at: frozenset[str] = frozenset(),
 ) -> list[Statement]:
     if not capture or body is None:
         return []
     out: list[Statement] = []
-    for node in _iter_in_scope(body, descend_all):
+    for node in _iter_in_scope(body, descend_all, stop_at):
         out.extend(
             classify_statement(
                 node, source, path, parent_id=parent_id, limit=limit, seen_ids=seen_ids,

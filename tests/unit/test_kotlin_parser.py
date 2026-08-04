@@ -53,3 +53,30 @@ def test_functions_and_primary_constructor(tmp_path) -> None:
     assert fn.params[0].name == "id"
     assert fn.params[0].type == "Long"
     assert any(c.name == "findById" for c in fn.calls)
+
+
+_LOCAL_FN_SRC = b'''\
+package com.acme
+
+fun processOrder(id: Int): Int {
+    fun applyTax(amount: Int) = amount * 2
+    return applyTax(id)
+}
+'''
+
+
+def test_local_function_inside_body(tmp_path) -> None:
+    """Local functions declared inside a function body are captured as separate Function records."""
+    p = tmp_path / "LocalFn.kt"
+    p.write_text(_LOCAL_FN_SRC.decode())
+    ctx = ParseContext(
+        path="LocalFn.kt",
+        abs_path=p,
+        source=_LOCAL_FN_SRC,
+        repo_root=tmp_path,
+        capture_statements=True,
+    )
+    rec = KotlinParser().parse_file(ctx)
+    fn_names = {f.name for f in rec.functions}
+    assert "processOrder" in fn_names
+    assert "applyTax" in fn_names, f"Local function applyTax not captured; got: {fn_names}"

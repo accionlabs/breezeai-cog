@@ -100,21 +100,9 @@ def _lambda_body(call: Node) -> Node | None:
 
 def _callee_name(call: Node, source: bytes) -> str | None:
     callee = call.named_children[0] if call.named_children else None
-    if callee is None:
+    if callee is None or callee.type != "simple_identifier":
         return None
-    if callee.type == "simple_identifier":
-        return node_text(callee, source)
-    if callee.type == "navigation_expression":
-        suffix = next(
-            (c for c in reversed(callee.named_children) if c.type == "navigation_suffix"),
-            None,
-        )
-        if suffix is not None:
-            id_node = next(
-                (c for c in suffix.named_children if c.type == "simple_identifier"), None
-            )
-            return node_text(id_node, source) if id_node else None
-    return None
+    return node_text(callee, source)
 
 
 def _collect_routes(

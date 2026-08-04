@@ -162,3 +162,32 @@ def test_ktor_framework_set_regardless_of_routes():
     """framework='ktor' is set even when no string-literal routes are captured."""
     rec = _parse(_CONST_ROUTE_SRC)
     assert rec.framework == "ktor"
+
+
+_CLIENT_SRC = b'''\
+package com.acme
+
+import io.ktor.server.routing.*
+import io.ktor.server.application.*
+
+fun Application.configureRouting() {
+    routing {
+        get("/profile") {
+            val info = httpClient.get("https://www.googleapis.com/oauth2/v2/userinfo")
+        }
+    }
+}
+'''
+
+
+def test_qualified_call_not_a_route() -> None:
+    """Qualified calls like httpClient.get(...) must not be captured as route statements."""
+    rec = _parse(_CLIENT_SRC)
+    routes = [s for s in rec.statements if s.semanticType == "route"]
+    outbound_url = "https://www.googleapis.com/oauth2/v2/userinfo"
+    assert all(s.endpoint != outbound_url for s in routes), (
+        f"httpClient.get(...) must not be a route; got: {[(s.method, s.endpoint) for s in routes]}"
+    )
+    assert any(s.endpoint == "/profile" for s in routes), (
+        f"Expected /profile route; got: {[(s.method, s.endpoint) for s in routes]}"
+    )
