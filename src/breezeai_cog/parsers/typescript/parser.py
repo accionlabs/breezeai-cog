@@ -53,7 +53,7 @@ _TSX_EXT = (".tsx", ".jsx")
 _JS_EXT = (".js", ".jsx", ".mjs", ".cjs")
 #: JS/TS route-only fixture markers, layered on top of the global set (base.py). Storybook
 #: stories (not covered by the universal test-file ignores) + Cypress/Playwright specs.
-_TS_FIXTURE_MARKERS = (".stories.", ".cy.", ".e2e.")
+_TS_FIXTURE_MARKERS = (".stories.", ".cy.", ".e2e.", ".mock.")
 
 
 _FUNC_VALUES = ("arrow_function", "function_expression")
@@ -93,7 +93,7 @@ def _member_name(key: Node, source: bytes) -> str:
 
 class TypeScriptParser(BaseParser):
     name = "typescript"
-    extensions = (".ts", ".tsx", ".mts", ".cts", ".js", ".jsx", ".mjs", ".cjs")
+    extensions: tuple[str, ...] = (".ts", ".tsx", ".mts", ".cts", ".js", ".jsx", ".mjs", ".cjs")
     schema_version = SCHEMA_VERSION
     statement_types = STATEMENT_TYPES
     frameworks = FRAMEWORKS
@@ -235,6 +235,22 @@ class TypeScriptParser(BaseParser):
             ):
                 if record.framework is None:
                     record.framework = "graphql"
+            # Vue route configs are plain-data {path, component} arrays that often live in a
+            # file importing nothing from vue-router (a default-export array, a router/modules/*
+            # fragment), so — unlike React/Angular — they can't be caught by a claims-gated
+            # parser and must be detected additively here. Self-guards structurally on the array
+            # shape; defers to Angular/React. Deferred import: typescript_vue subclasses this
+            # module (would cycle at import time).
+            from ..typescript_vue.routes import detect_vue_routes
+
+            if not self.is_fixture_file(path):
+                vue_routes = detect_vue_routes(
+                    root, source, path, seen_ids={s.id for s in record.statements}
+                )
+                if vue_routes:
+                    record.statements.extend(vue_routes)
+                    if record.framework is None:
+                        record.framework = "vue"
         return record
 
     def _handle(
