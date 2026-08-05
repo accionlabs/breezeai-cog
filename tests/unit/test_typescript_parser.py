@@ -655,3 +655,48 @@ def test_vue_import_edge_in_record(tmp_path) -> None:
     rec = TypeScriptParser().parse_file(ctx)
     assert "Avatar.vue" in rec.importFiles
     assert "./Avatar.vue" not in rec.externalImports
+
+
+# --- barrel files (re-export indirection) -------------------------------------------------
+# A barrel re-exports symbols from sibling modules. The re-export source must become an edge
+# so the barrel is a real waypoint (consumer → barrel → definition), and `default as X` must
+# be recorded under the exported name X, not `default`.
+
+BARREL_FILES = {
+    "tsconfig.json": '{ "compilerOptions": { "baseUrl": ".", "paths": { "@/*": ["src/*"] } } }',
+    "src/components/Avatar.vue": "",
+    "src/components/UserCard.vue": "",
+    "src/components/Button.ts": "export const Button = 1;\n",
+    "src/components/index.ts":
+        "export { default as Avatar } from './Avatar.vue';\n"
+        "export { UserCard } from './UserCard.vue';\n"
+        "export * from './Button';\n"
+        "export { fmt } from 'some-lib';\n"      # external re-export
+        "const localOnly = 'hello';\nexport { localOnly };\n",  # NOT a re-export (no `from`)
+    "src/views/Home.ts": "import { Avatar, UserCard } from '@/components';\nexport const Home = 1;\n",
+}
+
+
+def test_barrel_reexport_sources_become_edges(tmp_path) -> None:
+    rec = _parse_repo(tmp_path, BARREL_FILES, "src/components/index.ts")
+    # every re-export SOURCE that resolves in-repo is an edge...
+    assert set(rec.importFiles) == {
+        "src/components/Avatar.vue",
+        "src/components/UserCard.vue",
+        "src/components/Button.ts",
+    }
+    # ...an external re-export source goes external, like a static import
+    assert "some-lib" in rec.externalImports
+    # `default as Avatar` is recorded as `Avatar`, not `default`
+    assert "Avatar" in rec.exports and "default" not in rec.exports
+    # a plain `export { localOnly }` (no `from`) must NOT create a phantom edge
+    assert not any("localOnly" in f for f in rec.importFiles + rec.externalImports)
+
+
+def test_barrel_consumer_reaches_definition(tmp_path) -> None:
+    # The consumer links to the barrel; combined with the barrel's edges that is a connected
+    # path Home.ts → index.ts → Avatar.vue (the graph is no longer a dead end).
+    consumer = _parse_repo(tmp_path, BARREL_FILES, "src/views/Home.ts")
+    assert "src/components/index.ts" in consumer.importFiles
+    barrel = _parse_repo(tmp_path, BARREL_FILES, "src/components/index.ts")
+    assert "src/components/Avatar.vue" in barrel.importFiles

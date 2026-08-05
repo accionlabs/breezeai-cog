@@ -526,7 +526,9 @@ def _export_names(node: Node, source: bytes) -> list[str]:
     while stack:
         sub = stack.pop()
         if sub.type == "export_specifier":
-            name = sub.child_by_field_name("name")
+            # The exported name is the alias when present (`export { default as Avatar }` →
+            # `Avatar`, the name other files import), else the bare name.
+            name = sub.child_by_field_name("alias") or sub.child_by_field_name("name")
             if name is not None:
                 names.append(node_text(name, source))
         elif sub.type in ("class_declaration", "function_declaration"):
@@ -580,5 +582,15 @@ def extract_imports(
                     bindings[nm] = resolved
         elif node.type == "export_statement":
             exports.extend(_export_names(node, source))
+            # A re-export (`export … from './X'`) — a barrel-file edge. Resolve the source so
+            # the barrel becomes a real graph waypoint (consumer → barrel → definition) instead
+            # of a dead end. Gate on the `source` field, not a string search, so a plain
+            # `export const s = 'hello'` is never mistaken for a re-export. All forms (named,
+            # `default as`, `export *`, `* as ns`) are covered — only the source is resolved.
+            if node.child_by_field_name("source") is not None:
+                module = _module_of(node, source)
+                if module:
+                    resolved = _resolve(module, file_path, repo_root, index)
+                    (internal if resolved else external).setdefault(resolved or module, None)
 
     return list(internal), list(external), exports, bindings
