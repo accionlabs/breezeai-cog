@@ -30,9 +30,10 @@ from .functions import (
     extract_decorators,
     type_map,
 )
+from ..statements_common import reset_http_client_ids, set_http_client_ids
 from .imports import TsAliasIndex, build_ts_index, extract_imports
 from .mappings import FRAMEWORKS, STATEMENT_TYPES
-from .statements import extract_statements
+from .statements import collect_http_client_ids, extract_statements
 
 _DECLS = (
     "class_declaration",
@@ -116,6 +117,17 @@ class TypeScriptParser(BaseParser):
         return self.extract(root, ctx)
 
     def extract(self, root: Node, ctx: ParseContext) -> FileRecord:
+        # Collect the per-file wrapped-HTTP-client names and make them available to the shared
+        # statement classifier for the duration of this file's extraction, resetting in a
+        # finally so the value never leaks into the next file a reused worker handles.
+        ids = collect_http_client_ids(root, ctx.source) if ctx.capture_statements else frozenset()
+        token = set_http_client_ids(ids)
+        try:
+            return self._extract(root, ctx)
+        finally:
+            reset_http_client_ids(token)
+
+    def _extract(self, root: Node, ctx: ParseContext) -> FileRecord:
         source, path = ctx.source, ctx.path
         fid = file_id(path)
         seen_ids: set[str] = set()

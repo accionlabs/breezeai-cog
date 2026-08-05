@@ -700,3 +700,56 @@ def test_barrel_consumer_reaches_definition(tmp_path) -> None:
     assert "src/components/index.ts" in consumer.importFiles
     barrel = _parse_repo(tmp_path, BARREL_FILES, "src/components/index.ts")
     assert "src/components/Avatar.vue" in barrel.importFiles
+
+
+# --- wrapped client→backend API calls -----------------------------------------------------
+# The HTTP-client hint test keys off the callee NAME, so a wrapped axios instance
+# (arbitrary name) or a config-object wrapper call slips past it. Both should be recognised.
+
+def _api_calls(tmp_path, body: str) -> set[tuple[str, str]]:
+    p = tmp_path / "api.ts"
+    p.write_text(body)
+    ctx = ParseContext(
+        path="api.ts", abs_path=p, source=p.read_bytes(), repo_root=tmp_path,
+        capture_statements=True,
+    )
+    rec = TypeScriptParser().parse_file(ctx)
+    return {(s.method, s.endpoint) for s in rec.statements if s.semanticType == "api_call"}
+
+
+def test_wrapped_axios_instance_method_form(tmp_path) -> None:
+    # `const service = axios.create(...)` → calls on `service` are HTTP even though `service`
+    # is not a client-hint substring.
+    calls = _api_calls(
+        tmp_path,
+        "const service = axios.create({ baseURL: '/api' });\n"
+        "export const getUser = (id) => service.get(`/users/${id}`);\n",
+    )
+    assert ("GET", "/users/{id}") in calls
+
+
+def test_wrapped_config_object_form(tmp_path) -> None:
+    # `request({ url, method })` — the config-object shape is HTTP regardless of the callee.
+    calls = _api_calls(
+        tmp_path,
+        "import request from '@/utils/request';\n"
+        "export const login = (d) => request({ url: '/login', method: 'post', data: d });\n",
+    )
+    assert ("POST", "/login") in calls
+
+
+def test_direct_axios_still_detected(tmp_path) -> None:
+    # No regression: hinted callees keep matching.
+    assert ("GET", "/direct") in _api_calls(tmp_path, "export const raw = () => axios.get('/direct');\n")
+
+
+def test_wrapper_detection_no_false_positives(tmp_path) -> None:
+    # A router `{ path, component }` config is not an API call, and an interceptor
+    # registration (`.use`) is not an HTTP verb.
+    calls = _api_calls(
+        tmp_path,
+        "const service = axios.create({});\n"
+        "const routes = [{ path: '/home', component: Home }];\n"
+        "service.interceptors.request.use((c) => c);\n",
+    )
+    assert calls == set()

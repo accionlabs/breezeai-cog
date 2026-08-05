@@ -38,6 +38,27 @@ _skipped_concat_lines: contextvars.ContextVar["list[int] | None"] = contextvars.
     "skipped_concat_lines", default=None
 )
 
+# Per-file set of names known to be HTTP clients that a callee-substring hint can't reach —
+# a wrapped axios instance or a config-object wrapper call (see collect_http_client_ids). A
+# parser sets it (and resets it) around a file so classify_statement can pass it to the shared
+# api-call classifier without threading the value through every build_function call. Defaults
+# empty, so a language/file that never sets it — and any parser that doesn't opt in — is
+# unaffected. The setting parser MUST reset in a finally so it never leaks to the next file
+# handled by the same (possibly reused) worker process.
+_http_client_ids: contextvars.ContextVar[frozenset[str]] = contextvars.ContextVar(
+    "http_client_ids", default=frozenset()
+)
+
+
+def set_http_client_ids(ids: frozenset[str]) -> "contextvars.Token[frozenset[str]]":
+    """Set the per-file HTTP-client name set; returns a token to pass to
+    :func:`reset_http_client_ids` (in a ``finally``)."""
+    return _http_client_ids.set(ids)
+
+
+def reset_http_client_ids(token: "contextvars.Token[frozenset[str]]") -> None:
+    _http_client_ids.reset(token)
+
 
 def begin_concat_tracking() -> None:
     """Start collecting skipped-concat lines for the current file (call before parsing)."""
@@ -218,7 +239,14 @@ def classify_statement(
         det = call_details(call, source)
         if det is None:
             continue
-        classified = classify_call(det[0], det[1], det[2], language, typed_db_ids=typed_db_ids)
+        classified = classify_call(
+            det[0],
+            det[1],
+            det[2],
+            language,
+            typed_db_ids=typed_db_ids,
+            http_client_ids=_http_client_ids.get() or None,
+        )
         if classified is None:
             continue
         sem, meth, dh = classified
