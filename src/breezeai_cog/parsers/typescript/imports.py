@@ -561,6 +561,34 @@ def _imported_names(node: Node, source: bytes) -> list[str]:
     return names
 
 
+# A dynamic import is `import('x')` — a call_expression whose `function` child is the `import`
+# node. It can sit anywhere (a lazy route `component: () => import(...)`, `defineAsyncComponent`,
+# an `await import()`), so unlike a static import it isn't a top-level statement. The byte guard
+# short-circuits the tree walk for the ~all files that use no dynamic import.
+_DYNAMIC_IMPORT_GUARD = b"import("
+
+
+def _dynamic_import_specifiers(root: Node, source: bytes) -> list[str]:
+    """Every dynamic ``import('x')`` specifier in the tree. A non-literal specifier
+    (a template/concat computed path) yields no string node and is skipped — honest-null,
+    never a guessed path."""
+    out: list[str] = []
+    stack = [root]
+    while stack:
+        n = stack.pop()
+        if n.type == "call_expression":
+            fn = n.child_by_field_name("function")
+            if fn is not None and fn.type == "import":
+                args = n.child_by_field_name("arguments")
+                strings = args.named_children if args is not None else []
+                s = next((c for c in strings if c.type == "string"), None)
+                spec = _string_literal(s, source)
+                if spec:
+                    out.append(spec)
+        stack.extend(n.named_children)
+    return out
+
+
 def extract_imports(
     root: Node, source: bytes, file_path: str, repo_root: str | Path, index: TsAliasIndex | None = None
 ) -> tuple[list[str], list[str], list[str], dict[str, str]]:
@@ -592,5 +620,13 @@ def extract_imports(
                 if module:
                     resolved = _resolve(module, file_path, repo_root, index)
                     (internal if resolved else external).setdefault(resolved or module, None)
+
+    # Dynamic imports (`import('x')`) — lazy pages / code-split components. Resolved into the
+    # same file-level edge set as static imports (no binding: a dynamic import binds a Promise,
+    # not a clean symbol, so calls[].path can't attribute through it — honest-null).
+    if _DYNAMIC_IMPORT_GUARD in source:
+        for module in _dynamic_import_specifiers(root, source):
+            resolved = _resolve(module, file_path, repo_root, index)
+            (internal if resolved else external).setdefault(resolved or module, None)
 
     return list(internal), list(external), exports, bindings

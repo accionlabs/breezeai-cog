@@ -753,3 +753,34 @@ def test_wrapper_detection_no_false_positives(tmp_path) -> None:
         "service.interceptors.request.use((c) => c);\n",
     )
     assert calls == set()
+
+
+# --- lazy / dynamic import() targets ------------------------------------------------------
+# A dynamic import() (lazy route page, defineAsyncComponent, await import) is a nested call,
+# not a top-level statement, so the static extractor never saw it. Its target should resolve
+# into the same file-level importFiles edge as a static import.
+
+DYNAMIC_IMPORT_FILES = {
+    "tsconfig.json": '{ "compilerOptions": { "baseUrl": ".", "paths": { "@/*": ["src/*"] } } }',
+    "views/UserDetail.vue": "",
+    "src/views/Reports.vue": "",
+    "chunks/Heavy.ts": "export const Heavy = 1;\n",
+    "app.ts":
+        "const UserDetail = defineAsyncComponent(() => import('./views/UserDetail.vue'));\n"
+        "const routes = [{ path: '/x', component: () => import('@/views/Reports.vue') }];\n"
+        "async function load() { return await import('./chunks/Heavy.ts'); }\n"
+        "const computed = (n) => import('./views/' + n);\n"   # computed → unresolved
+        "const ext = () => import('lodash-es');\n",           # external package
+}
+
+
+def test_dynamic_imports_resolve_to_import_files(tmp_path) -> None:
+    rec = _parse_repo(tmp_path, DYNAMIC_IMPORT_FILES, "app.ts")
+    # relative .vue (defineAsyncComponent), aliased .vue (lazy route), relative .ts (await)
+    assert "views/UserDetail.vue" in rec.importFiles
+    assert "src/views/Reports.vue" in rec.importFiles      # @/ alias resolved
+    assert "chunks/Heavy.ts" in rec.importFiles
+    # an external package dynamic import goes external, like a static one
+    assert "lodash-es" in rec.externalImports
+    # a computed specifier ('./views/' + n) can't resolve → left out entirely (honest-null)
+    assert not any("computed" in f or f.endswith("/views/") for f in rec.importFiles)
