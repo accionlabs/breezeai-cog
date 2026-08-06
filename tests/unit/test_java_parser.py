@@ -118,9 +118,9 @@ def test_same_package_call_resolves_without_import(tmp_path) -> None:
 
 
 def test_deep_string_concat_does_not_recurse(tmp_path) -> None:
-    # Regression: a statement with a very deep `+` chain (generated HTML/JS builders, e.g.
-    # P3 WizardHtmlBuilder with 859 concats) is a left-nested binary_expression tree that
-    # folding recurses through → RecursionError. render_concat must bail past its depth cap.
+    # Regression: a statement with a very deep `+` chain (e.g. a generated HTML/JS builder
+    # with hundreds of concats) is a left-nested binary_expression tree that folding recurses
+    # through → RecursionError. render_concat must bail past its depth cap.
     import sys
 
     body = " + ".join(['"a"'] * 800)  # 800-deep concat — over the 100 cap, near the 1000 limit
@@ -257,3 +257,81 @@ def test_endpoint_concatenation(tmp_path) -> None:
                        capture_statements=True)
     rec = JavaParser().parse_file(ctx)
     assert any(s.semanticType == "api_call" and s.endpoint == "/users/{id}" for s in rec.statements)
+
+
+# --- N1: enum constant VALUE + doc capture (BREEZEAI-943) ---------------------
+
+def _enum_meta(tmp_path, src: str):
+    p = tmp_path / "E.java"
+    p.write_text(src)
+    ctx = ParseContext(path="E.java", abs_path=p, source=src.encode(), repo_root=tmp_path,
+                       capture_statements=True)
+    rec = JavaParser().parse_file(ctx)
+    enum = next(c for c in rec.classes if c.type == "enum")
+    return rec, (enum.metadata or {}).get("constants")
+
+
+def test_enum_constant_values_and_javadoc(tmp_path) -> None:
+    # NAME("value") with a preceding Javadoc gloss -> {name, value, doc}.
+    src = ('enum Priority {\n'
+           '  /** high urgency */\n'
+           '  HIGH("3"),\n'
+           '  /** low urgency */\n'
+           '  LOW("1");\n}\n')
+    _, consts = _enum_meta(tmp_path, src)
+    assert consts == [
+        {"name": "HIGH", "value": "3", "doc": "high urgency"},
+        {"name": "LOW", "value": "1", "doc": "low urgency"},
+    ]
+
+
+def test_enum_trailing_line_comment(tmp_path) -> None:
+    # Trailing // comment (incl. non-ASCII) is the doc; a following bare constant must NOT
+    # inherit the previous constant's trailing comment.
+    src = 'enum Color {\n  RED("f00"), //café red\n  GREEN("0f0"), // grass\n  BLUE;\n}\n'
+    _, consts = _enum_meta(tmp_path, src)
+    assert consts == [
+        {"name": "RED", "value": "f00", "doc": "café red"},
+        {"name": "GREEN", "value": "0f0", "doc": "grass"},
+        {"name": "BLUE", "value": None, "doc": None},
+    ]
+
+
+def test_enum_non_literal_and_no_arg_are_honest_null(tmp_path) -> None:
+    # No argument, and a non-literal (computed) argument -> value None, never a guess.
+    src = 'enum S {\n  BARE,\n  COMPUTED(compute()),\n  NUM(3);\n}\n'
+    _, consts = _enum_meta(tmp_path, src)
+    by = {c["name"]: c["value"] for c in consts}
+    assert by == {"BARE": None, "COMPUTED": None, "NUM": "3"}
+
+
+def test_enum_constants_emit_no_statements(tmp_path) -> None:
+    # Enum members are vocabulary, not behaviour: they must not appear as statements.
+    src = 'enum S { A("1"), B("2"); }'
+    rec, consts = _enum_meta(tmp_path, src)
+    assert len(consts) == 2
+    assert not any((s.text or "").startswith("A(") for s in rec.statements)
+
+
+def test_plain_class_metadata_stays_none(tmp_path) -> None:
+    # A `NAME = "value"` field already lands as a statement; the class carries no constants metadata.
+    src = 'class A { private static final String NAME = "value"; }'
+    p = tmp_path / "A.java"
+    p.write_text(src)
+    ctx = ParseContext(path="A.java", abs_path=p, source=src.encode(), repo_root=tmp_path,
+                       capture_statements=True)
+    rec = JavaParser().parse_file(ctx)
+    assert all(c.metadata is None for c in rec.classes)
+    assert any((s.text or "").find("NAME") >= 0 for s in rec.statements)
+
+
+def test_enum_metadata_output_validates(tmp_path) -> None:
+    src = 'enum S {\n  /** x */\n  A("1");\n}\n'
+    p = tmp_path / "E.java"
+    p.write_text(src)
+    ctx = ParseContext(path="E.java", abs_path=p, source=src.encode(), repo_root=tmp_path,
+                       capture_statements=True)
+    rec = JavaParser().parse_file(ctx)
+    errors = list(Draft202012Validator(FileRecord.model_json_schema(by_alias=True))
+                  .iter_errors(json.loads(to_line(rec))))
+    assert not errors, errors
