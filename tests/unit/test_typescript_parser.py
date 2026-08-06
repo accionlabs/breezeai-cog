@@ -784,3 +784,34 @@ def test_dynamic_imports_resolve_to_import_files(tmp_path) -> None:
     assert "lodash-es" in rec.externalImports
     # a computed specifier ('./views/' + n) can't resolve → left out entirely (honest-null)
     assert not any("computed" in f or f.endswith("/views/") for f in rec.importFiles)
+
+
+# --- export-name capture for const / default forms ----------------------------------------
+# `export const X = …` and `export default …` were missing from `exports` (only
+# function/class declarations and `export { … }` specifiers were captured).
+
+def test_exports_capture_const_and_default(tmp_path) -> None:
+    p = tmp_path / "e.ts"
+    p.write_text(
+        "export const X = defineComponent({ setup(){ const nested = 1 } });\n"  # nested local
+        "export const plain = 1;\n"                            # const = literal
+        "export const arrowFn = () => {};\n"                   # const = arrow (a captured fn)
+        "export function decl() {}\n"                          # function decl (already worked)
+        "export class C {}\n"                                  # class decl (already worked)
+        "export default foo;\n"                                # default export
+        "const a = 1, b = 2;\nexport { a, b };\n"              # specifier list (already worked)
+        "export const { p, q } = obj;\n"                       # destructuring → skipped
+    )
+    ctx = ParseContext(
+        path="e.ts", abs_path=p, source=p.read_bytes(), repo_root=tmp_path,
+        capture_statements=False, text_truncation_limit=1000,
+    )
+    exports = set(TypeScriptParser().parse_file(ctx).exports)
+    # newly captured
+    assert {"X", "plain", "arrowFn", "default"} <= exports
+    # still captured
+    assert {"decl", "C", "a", "b"} <= exports
+    # destructuring pattern names are not emitted (honest-null, no pattern text)
+    assert "p" not in exports and "q" not in exports
+    # a local const inside the exported value's body must NOT leak into exports
+    assert "nested" not in exports

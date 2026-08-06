@@ -521,21 +521,36 @@ def _module_of(import_node: Node, source: bytes) -> str | None:
 
 
 def _export_names(node: Node, source: bytes) -> list[str]:
+    """Exported names of one ``export_statement``. Scans the statement's TOP-LEVEL structure
+    only — never descending into a declaration's value — so a nested local (``export const X =
+    defineComponent({ setup(){ const n = 1 } })``) is not mistaken for an export."""
     names: list[str] = []
-    stack = [node]
-    while stack:
-        sub = stack.pop()
-        if sub.type == "export_specifier":
-            # The exported name is the alias when present (`export { default as Avatar }` →
-            # `Avatar`, the name other files import), else the bare name.
-            name = sub.child_by_field_name("alias") or sub.child_by_field_name("name")
+    if node.type != "export_statement":
+        return names
+    if any(c.type == "default" for c in node.children):
+        # `export default …` provides the module's default binding (a named
+        # `export default function foo(){}` also yields `foo` via the declaration branch below).
+        names.append("default")
+    for child in node.named_children:
+        if child.type == "export_clause":  # `export { a, b as c }` / `export { … } from '…'`
+            for spec in child.named_children:
+                if spec.type == "export_specifier":
+                    # exported name is the alias when present, else the bare name
+                    name = spec.child_by_field_name("alias") or spec.child_by_field_name("name")
+                    if name is not None:
+                        names.append(node_text(name, source))
+        elif child.type in ("class_declaration", "function_declaration"):
+            name = child.child_by_field_name("name")
             if name is not None:
                 names.append(node_text(name, source))
-        elif sub.type in ("class_declaration", "function_declaration"):
-            name = sub.child_by_field_name("name")
-            if name is not None:
-                names.append(node_text(name, source))
-        stack.extend(sub.named_children)
+        elif child.type in ("lexical_declaration", "variable_declaration"):
+            # `export const X = …` (incl. `export const a = 1, b = 2`). Only the top-level
+            # declarators — a destructuring pattern (non-identifier name) is skipped (honest-null).
+            for d in child.named_children:
+                if d.type == "variable_declarator":
+                    name = d.child_by_field_name("name")
+                    if name is not None and name.type == "identifier":
+                        names.append(node_text(name, source))
     return names
 
 
