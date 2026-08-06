@@ -18,6 +18,8 @@ are scanned; the walk never descends into a body. The statement-anchored form ap
 
 from __future__ import annotations
 
+import re
+
 from tree_sitter import Node
 
 from ...schemas import FileRecord
@@ -30,6 +32,29 @@ _FACTORY_SPECS = (
     ("defineStore", "pinia", "store"),
 )
 _FACTORY_NAME_BYTES = tuple(name.encode() for name, _, _ in _FACTORY_SPECS)
+
+# Vue reactivity-STATE primitives — calling one is the structural mark of composition-API
+# reactive logic. (Lifecycle hooks like onMounted are deliberately excluded: they appear in a
+# component's own setup too, so they don't distinguish a composable from a component.)
+_VUE_REACTIVITY = frozenset(
+    {
+        "ref",
+        "reactive",
+        "computed",
+        "watch",
+        "watchEffect",
+        "shallowRef",
+        "shallowReactive",
+        "readonly",
+        "toRef",
+        "toRefs",
+        "customRef",
+        "triggerRef",
+    }
+)
+# A composable is named `useX` by convention; combined with a reactivity call that convention
+# becomes verifiable (a `useX`-named util with no reactive state is NOT marked).
+_COMPOSABLE_NAME = re.compile(r"^use[A-Z]")
 
 
 def _factory_locals(root: Node, source: bytes) -> dict[str, str]:
@@ -112,3 +137,45 @@ def mark_factory_ui_roles(root: Node, source: bytes, record: FileRecord) -> None
                 role = line_roles.get(s.startLine)
                 if role is not None:
                     s.uiRole = role
+
+
+def _imported_locals(root: Node, source: bytes, module: str, wanted: frozenset[str]) -> set[str]:
+    """Local names bound to any of ``wanted`` imported from ``module`` (handles ``as`` alias)."""
+    locals_set: set[str] = set()
+    for node in root.named_children:
+        if node.type != "import_statement" or _module_of(node, source) != module:
+            continue
+        clause = next((c for c in node.named_children if c.type == "import_clause"), None)
+        if clause is None:
+            continue
+        for c in clause.named_children:
+            if c.type != "named_imports":
+                continue
+            for spec in c.named_children:
+                if spec.type != "import_specifier":
+                    continue
+                idents = [x for x in spec.named_children if x.type == "identifier"]
+                if idents and node_text(idents[0], source) in wanted:
+                    locals_set.add(node_text(idents[-1], source))
+    return locals_set
+
+
+def mark_composables(root: Node, source: bytes, record: FileRecord) -> None:
+    """Mark ``uiRole="composable"`` on Vue composables — a function that is BOTH named ``useX``
+    AND calls a Vue reactivity primitive imported from ``vue``. The name says "intended as a
+    composable"; the reactivity call verifies it genuinely produces reactive state (so a
+    ``useX``-named plain util is not marked, and a component's own ``setup`` — which uses
+    reactivity but isn't named ``useX`` — is not either)."""
+    if b"vue" not in source:
+        return
+    reactivity = _imported_locals(root, source, "vue", _VUE_REACTIVITY)
+    if not reactivity:
+        return
+    for fn in record.functions:
+        if (
+            fn.uiRole is None
+            and fn.name is not None
+            and _COMPOSABLE_NAME.match(fn.name)
+            and any(call.name in reactivity for call in fn.calls)
+        ):
+            fn.uiRole = "composable"

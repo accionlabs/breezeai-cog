@@ -24,7 +24,7 @@ from ...schemas import FileRecord
 from ..base import ParseContext
 from ..treesitter import parse_source
 from ..typescript.parser import TypeScriptParser
-from .components import mark_factory_ui_roles
+from .components import mark_composables, mark_factory_ui_roles
 from .sfc import script_grammar, script_ranges, shadow_source
 
 # Byte guards for a vue import in a .ts/.js file: ``from 'vue'`` / ``from "vue"`` (the app
@@ -79,4 +79,6 @@ class VueParser(TypeScriptParser):
         # (component) / Pinia `defineStore` (store) — mark the File (default export) or the
         # binding's `lexical_declaration` statement.
         mark_factory_ui_roles(root, parsed_source, record)
+        # Composables — a `useX` function that calls a Vue reactivity primitive.
+        mark_composables(root, parsed_source, record)
         return record

@@ -311,6 +311,42 @@ def test_component_and_store_in_one_file(tmp_path) -> None:
     assert _stmt_roles(_parse("src/m.ts", src, tmp_path)) == {"C": "component", "useS": "store"}
 
 
+# ── composables ──────────────────────────────────────────────────────────────────
+
+
+def _fn_roles(rec):
+    return {f.name: f.uiRole for f in rec.functions}
+
+
+def test_composable_marked_by_reactivity_call(tmp_path) -> None:
+    # A `useX` function that calls a Vue reactivity primitive → uiRole="composable".
+    # A `useX` util with no reactivity is NOT marked, and a component's setup (not useX) is not.
+    src = (
+        b"import { ref, computed } from 'vue'\n"
+        b"import { defineComponent } from 'vue'\n"
+        b"export function useAuth(){ const u = ref(null); const x = computed(() => u.value); return { u, x } }\n"
+        b"export function useLegacyConfig(k){ return CFG[k] }\n"
+        b"export const C = defineComponent({ setup(){ const n = ref(0); return { n } } })\n"
+    )
+    roles = _fn_roles(_parse("src/c.ts", src, tmp_path))
+    assert roles.get("useAuth") == "composable"
+    assert roles.get("useLegacyConfig") is None      # useX but no reactive state
+    assert roles.get("setup") is None                # reactivity, but not a useX composable
+
+
+def test_composable_arrow_and_alias(tmp_path) -> None:
+    arrow = b"import { reactive } from 'vue'\nexport const useStore2 = () => { const s = reactive({}); return s }\n"
+    assert _fn_roles(_parse("src/a.ts", arrow, tmp_path)).get("useStore2") == "composable"
+    aliased = b"import { ref as r } from 'vue'\nexport function useThing(){ const v = r(0); return v }\n"
+    assert _fn_roles(_parse("src/b.ts", aliased, tmp_path)).get("useThing") == "composable"
+
+
+def test_composable_local_reactivity_not_from_vue(tmp_path) -> None:
+    # A local `ref` (not imported from vue) must not make a useX function a composable.
+    src = b"function ref(x){ return x }\nexport function useX(){ const v = ref(1); return v }\n"
+    assert _fn_roles(_parse("src/n.ts", src, tmp_path)).get("useX") is None
+
+
 # ── selection ──────────────────────────────────────────────────────────────────
 
 
