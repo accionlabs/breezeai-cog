@@ -47,7 +47,9 @@ def test_routes_require_capture_statements(tmp_path) -> None:
     # Routes are statements — only emitted with --capture-statements.
     rec = _parse("src/router/index.ts", _V3_ROUTER, tmp_path, capture=False)
     assert [s for s in rec.statements if s.semanticType == "route"] == []
-    assert rec.framework is None
+    # framework is the parser's identity (set unconditionally on any file it claims), not a
+    # route-detection by-product — so a vue-importing router config is "vue" even uncaptured.
+    assert rec.framework == "vue"
 
 
 def test_vue3_routes(tmp_path) -> None:
@@ -197,18 +199,30 @@ def test_sfc_line_numbers_preserved(tmp_path) -> None:
     assert save.startLine == 11
 
 
-def test_sfc_language_is_vue(tmp_path) -> None:
-    # A populated SFC is labelled `vue`, not `typescript` — consistent with the
-    # template-only case below.
+def test_sfc_language_is_script_lang_and_framework_is_vue(tmp_path) -> None:
+    # Two orthogonal axes: `language` is the script's JS/TS lang (here `<script lang="ts">`
+    # -> typescript, NOT "vue" — the extension can't carry the JS/TS fact); `framework` is
+    # the framework identity (vue). `uiRole` (component) is the third axis.
     rec = _parse("src/components/Widget.vue", _SFC, tmp_path)
-    assert rec.language == "vue"
+    assert rec.language == "typescript"
+    assert rec.framework == "vue"
+    assert rec.uiRole == "component"
+
+
+def test_sfc_language_javascript_without_lang_ts(tmp_path) -> None:
+    # A plain `<script>` (or `lang="js"`) SFC is javascript on the language axis.
+    src = b"<template><p>{{ x }}</p></template>\n<script>\nexport default { data: () => ({ x: 1 }) }\n</script>\n"
+    rec = _parse("src/components/JsWidget.vue", src, tmp_path)
+    assert rec.language == "javascript" and rec.framework == "vue"
 
 
 def test_template_only_sfc(tmp_path) -> None:
-    # An SFC with no <script> block has no code to capture — a minimal, valid record.
+    # An SFC with no <script> block has no code to capture — a minimal, valid record. No
+    # script -> javascript on the language axis (the type-free baseline; never guess TS).
     src = b"<template>\n  <p>only markup</p>\n</template>\n<style>.p {}</style>\n"
     rec = _parse("src/components/Static.vue", src, tmp_path)
-    assert rec.language == "vue" and rec.functions == [] and rec.statements == []
+    assert rec.language == "javascript" and rec.framework == "vue"
+    assert rec.functions == [] and rec.statements == []
 
 
 def test_sfc_marked_as_component(tmp_path) -> None:
