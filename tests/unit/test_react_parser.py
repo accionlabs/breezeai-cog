@@ -50,7 +50,9 @@ def _parse(tmp_path, src: bytes, name: str, *, capture=True) -> FileRecord:
 def test_routes_require_capture_statements(tmp_path) -> None:
     rec = _parse(tmp_path, JSX_SRC, "App.tsx", capture=False)
     assert [s for s in rec.statements if s.semanticType == "route"] == []
-    assert rec.framework is None
+    # framework is the parser's identity (set unconditionally), not a route-detection
+    # by-product — a React file is "react" even with statements/routes disabled.
+    assert rec.framework == "react"
 
 
 def test_jsx_routes_detected_and_nested(tmp_path) -> None:
@@ -224,8 +226,9 @@ def test_story_file_emits_no_routes_but_keeps_structure(tmp_path) -> None:
     # decorator router must NOT produce routes.
     rec = _parse(tmp_path, STORY_SRC, "company-card.stories.tsx")
     assert [s for s in rec.statements if s.semanticType == "route"] == []
-    assert rec.framework is None
-    # still parsed for structure (imports captured) — exclusion is route-only.
+    # still parsed for structure — exclusion is route-only. framework is the file's identity
+    # (a story is still a React file), so it's stamped; language stays typescript (.tsx).
+    assert rec.framework == "react"
     assert rec.language == "typescript"
 
 
@@ -236,5 +239,75 @@ def test_claims_selects_react() -> None:
     registry.register(TypeScriptParser())
     registry.register(ReactParser())
     assert registry.select("App.tsx", b"import { Route } from 'react-router-dom';").name == "typescript-react"
-    assert registry.select("App.tsx", b"const x = 1;").name == "typescript"  # plain TS/React -> base
+    # A bare `react` import (a plain component file, no router) is now claimed too.
+    assert registry.select("Button.tsx", b"import React from 'react';").name == "typescript-react"
+    assert registry.select("App.tsx", b"const x = 1;").name == "typescript"  # non-React -> base
     registry.clear()
+
+
+# ---- uiRole: class / function components -----------------------------------
+
+COMPONENTS_SRC = b'''import React from 'react';
+
+export class Panel extends React.Component {
+  render() { return <div>{this.props.title}</div>; }
+}
+
+class Badge extends PureComponent {
+  render() { return <span/>; }
+}
+
+export function Header() {
+  return <header><h1>Hi</h1></header>;
+}
+
+const Card = ({ items }) => (
+  <ul>{items.map((i) => <li key={i}>{i}</li>)}</ul>
+);
+
+export function formatDate(d) {
+  return d.toISOString();
+}
+
+function Compute() {
+  return 2 + 2;
+}
+
+const useThing = () => {
+  return <div/>;
+};
+'''
+
+
+def test_component_ui_roles(tmp_path) -> None:
+    rec = _parse(tmp_path, COMPONENTS_SRC, "components.tsx")
+    # Three orthogonal axes: framework identity, source language, per-node uiRole.
+    assert rec.framework == "react" and rec.language == "typescript"
+    class_roles = {c.name: c.uiRole for c in rec.classes}
+    fn_roles = {f.name: f.uiRole for f in rec.functions}
+    # Class components via `extends`.
+    assert class_roles["Panel"] == "component"      # React.Component
+    assert class_roles["Badge"] == "component"       # bare PureComponent
+    # Function components: PascalCase + renders JSX (declaration + arrow, incl. .map JSX).
+    assert fn_roles["Header"] == "component"
+    assert fn_roles["Card"] == "component"
+    # PascalCase utils with no JSX -> not marked; lowercase util -> not marked.
+    assert fn_roles["Compute"] is None
+    assert fn_roles["formatDate"] is None
+    # `useX` hook is camelCase -> not caught by the PascalCase gate (hook role deferred).
+    assert fn_roles["useThing"] is None
+
+
+def test_component_ui_roles_without_capture_statements(tmp_path) -> None:
+    rec = _parse(tmp_path, COMPONENTS_SRC, "components.tsx", capture=False)
+    assert {c.name: c.uiRole for c in rec.classes}["Panel"] == "component"
+    assert {f.name: f.uiRole for f in rec.functions}["Header"] == "component"
+
+
+def test_jsx_file_is_javascript_language(tmp_path) -> None:
+    # The JS/TS distinction lives on the `language` axis, orthogonal to framework: a .jsx
+    # React file is (framework=react, language=javascript); a .tsx is (react, typescript).
+    src = b"import React from 'react';\nexport function Widget() { return <div/>; }\n"
+    rec = _parse(tmp_path, src, "Widget.jsx")
+    assert rec.framework == "react" and rec.language == "javascript"
+    assert {f.name: f.uiRole for f in rec.functions}["Widget"] == "component"
