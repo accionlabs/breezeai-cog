@@ -55,6 +55,20 @@ def script_grammar(source: bytes) -> str:
     return "typescript"
 
 
+def script_language(source: bytes) -> str:
+    """The SFC's source LANGUAGE label — ``typescript`` if any ``<script>`` block declares a
+    TS ``lang`` (``lang="ts"`` / ``lang="tsx"``), else ``javascript``. Distinct from
+    ``script_grammar`` (which only selects a tree-sitter grammar): this drives
+    ``FileRecord.language`` so the JS/TS distinction survives on ``.vue`` files, where the
+    ``.vue`` extension can't carry it. A template-only SFC (no ``<script>``) has no code, so it
+    defaults to ``javascript`` — the type-free baseline; we never guess TS."""
+    for m in _SCRIPT_RE.finditer(source):
+        attrs = m.group("attrs").lower()
+        if b"lang=" in attrs and b"ts" in attrs:  # matches lang="ts" and lang="tsx"
+            return "typescript"
+    return "javascript"
+
+
 def shadow_source(source: bytes, ranges: list[tuple[int, int]]) -> bytes:
     """A same-length copy of ``source`` with everything outside ``ranges`` blanked to
     spaces (newlines preserved), so the TS grammar parses only the script content while

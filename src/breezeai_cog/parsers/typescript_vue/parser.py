@@ -25,7 +25,7 @@ from ..base import ParseContext
 from ..treesitter import parse_source
 from ..typescript.parser import TypeScriptParser
 from .components import mark_composables, mark_factory_ui_roles
-from .sfc import script_grammar, script_ranges, shadow_source
+from .sfc import script_grammar, script_language, script_ranges, shadow_source
 
 # Byte guards for a vue import in a .ts/.js file: ``from 'vue'`` / ``from "vue"`` (the app
 # and store modules) or any ``vue-router`` reference (the router config).
@@ -53,7 +53,10 @@ class VueParser(TypeScriptParser):
                     id=file_id(ctx.path),
                     path=ctx.path,
                     type="code",
-                    language="vue",
+                    # language = the JS/TS axis (from <script lang>); a template-only SFC has
+                    # no script → javascript. framework = the framework axis; uiRole = the role.
+                    language=script_language(ctx.source),
+                    framework="vue",
                     loc=0,
                     uiRole="component",  # a .vue SFC is a component even with no <script>
                 )
@@ -70,10 +73,15 @@ class VueParser(TypeScriptParser):
 
         root = parse_source(grammar, parsed_source, ctx.parse_timeout_micros).root_node
         record = self.extract(root, parse_ctx)  # runs detect_vue_routes in its additive pass
+        # framework axis: every file this parser claims IS a Vue file (an SFC, or a .ts/.js
+        # router/bootstrap that imports vue) — stamp it unconditionally so "list Vue files" is
+        # answerable, not only when a route array happened to be detected. Authoritative over
+        # any tentative label the additive extract pass set.
+        record.framework = "vue"
         if ctx.path.endswith(".vue"):
-            record.language = (
-                "vue"  # an SFC is a Vue file, not a bare .ts (matches empty-SFC label)
-            )
+            # language axis: the SFC's script lang (ts/js), NOT "vue" — "vue" is the framework,
+            # which the extension can't carry, so JS/TS would otherwise be lost on .vue files.
+            record.language = script_language(ctx.source)
             record.uiRole = "component"  # a .vue SFC is, by definition, a component
         # Factory-defined UI entities in any file this parser handles — Vue `defineComponent`
         # (component) / Pinia `defineStore` (store) — mark the File (default export) or the

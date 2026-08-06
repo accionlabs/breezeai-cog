@@ -45,7 +45,9 @@ def test_routes_require_capture_statements(tmp_path) -> None:
     # Routes are statements — only emitted with --capture-statements (spec A4).
     rec = _parse(tmp_path, capture=False)
     assert [s for s in rec.statements if s.semanticType == "route"] == []
-    assert rec.framework is None
+    # framework is the parser's identity (set unconditionally on any @angular/ file), not a
+    # route-detection by-product — so it's "angular" even with statements disabled.
+    assert rec.framework == "angular"
 
 
 def test_routes(tmp_path) -> None:
@@ -422,3 +424,56 @@ export class ProductsRoutingModule {}
     assert eps.get("EditComponent") == "/brand/products/edit/:id", (
         f"expected /brand/products/edit/:id, got {eps}"
     )
+
+
+# ---- uiRole: @Component / @Directive / @Pipe -------------------------------
+
+UIROLE_SRC = b'''import { Component, Directive, Pipe, Injectable } from '@angular/core';
+
+@Component({ selector: 'app-user', template: '<p>u</p>' })
+export class UserComponent {}
+
+@Directive({ selector: '[appHi]' })
+export class HighlightDirective {}
+
+@Pipe({ name: 'money' })
+export class MoneyPipe {}
+
+@Injectable({ providedIn: 'root' })
+export class UserService {}
+
+export class PlainHelper {}
+'''
+
+
+def _parse_src(tmp_path, src: bytes, name: str) -> FileRecord:
+    p = tmp_path / name
+    p.write_bytes(src)
+    ctx = ParseContext(path=name, abs_path=p, source=src, repo_root=tmp_path,
+                       capture_statements=True)
+    return AngularParser().parse_file(ctx)
+
+
+def test_decorator_ui_roles(tmp_path) -> None:
+    rec = _parse_src(tmp_path, UIROLE_SRC, "widgets.ts")
+    # Three orthogonal axes: framework identity, source language, and per-node uiRole.
+    assert rec.framework == "angular"
+    assert rec.language == "typescript"
+    roles = {c.name: c.uiRole for c in rec.classes}
+    assert roles["UserComponent"] == "component"
+    assert roles["HighlightDirective"] == "directive"
+    assert roles["MoneyPipe"] == "pipe"
+    assert roles["UserService"] is None  # @Injectable is a service, not a UI role
+    assert roles["PlainHelper"] is None
+
+
+def test_ui_roles_without_capture_statements(tmp_path) -> None:
+    # Classes are always captured, so uiRole marking does not depend on --capture-statements.
+    p = tmp_path / "widgets.ts"
+    p.write_bytes(UIROLE_SRC)
+    ctx = ParseContext(path="widgets.ts", abs_path=p, source=UIROLE_SRC, repo_root=tmp_path,
+                       capture_statements=False)
+    rec = AngularParser().parse_file(ctx)
+    roles = {c.name: c.uiRole for c in rec.classes}
+    assert roles["UserComponent"] == "component"
+    assert roles["MoneyPipe"] == "pipe"
