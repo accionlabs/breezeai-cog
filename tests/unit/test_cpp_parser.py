@@ -380,11 +380,15 @@ def test_definition_of_external_namesake_does_not_attach(tmp_path) -> None:
     assert paint.parentId == "ext.cpp"  # orphaned to file, not attached to A::Widget
 
 
-def test_enum_captured_with_enumerators(tmp_path) -> None:
+def test_enum_captured_with_constants(tmp_path) -> None:
     rec = _parse_src(tmp_path, b"enum Color { RED, GREEN, BLUE };\n", "c.h")
     color = next((c for c in rec.classes if c.name == "Color"), None)
     assert color is not None and color.type == "enum"
-    assert color.metadata == {"enumerators": ["RED", "GREEN", "BLUE"]}
+    assert color.metadata == {"constants": [
+        {"name": "RED", "value": None, "doc": None},
+        {"name": "GREEN", "value": None, "doc": None},
+        {"name": "BLUE", "value": None, "doc": None},
+    ]}
 
 
 def test_scoped_enum_is_enum(tmp_path) -> None:
@@ -392,7 +396,10 @@ def test_scoped_enum_is_enum(tmp_path) -> None:
     rec = _parse_src(tmp_path, b"enum struct Mode : int { A = 1, B = 2 };\n", "m.h")
     mode = next((c for c in rec.classes if c.name == "Mode"), None)
     assert mode is not None and mode.type == "enum"
-    assert mode.metadata == {"enumerators": ["A", "B"]}
+    assert mode.metadata == {"constants": [
+        {"name": "A", "value": "1", "doc": None},
+        {"name": "B", "value": "2", "doc": None},
+    ]}
 
 
 def test_union_has_its_own_type(tmp_path) -> None:
@@ -410,7 +417,10 @@ def test_nested_union_and_enum_captured(tmp_path) -> None:
     assert by_name.get("Chunk") == "union"
     assert by_name.get("Kind") == "enum"
     kind = next(c for c in rec.classes if c.name == "Kind")
-    assert kind.metadata == {"enumerators": ["A", "B"]}
+    assert kind.metadata == {"constants": [
+        {"name": "A", "value": None, "doc": None},
+        {"name": "B", "value": None, "doc": None},
+    ]}
 
 
 def test_anonymous_and_forward_enum_not_fabricated(tmp_path) -> None:
@@ -468,3 +478,59 @@ def test_forward_declaration_is_not_a_class(tmp_path) -> None:
     rec = _parse_src(tmp_path, src)
     names = {c.name for c in rec.classes}
     assert "Real" in names and "Fwd" not in names
+
+
+# --- N2/N3: class constant + enum VALUES and doc (BREEZEAI-943) ---------------
+
+def test_class_constants_captured_with_value_and_doc(tmp_path) -> None:
+    # constexpr/static-const class fields with a literal + Doxygen `//!<` gloss -> constants.
+    src = (b'class Codes {\n public:\n'
+           b'  constexpr static const char* kFirst = "A1"; //!< first code\n'
+           b'  static const int kMax = 9;                  //!< upper bound\n'
+           b'  int plain;\n'                       # not const -> not a constant
+           b'};\n')
+    rec = _parse_src(tmp_path, src, "h.h")
+    codes = next(c for c in rec.classes if c.name == "Codes")
+    assert codes.metadata == {"constants": [
+        {"name": "kFirst", "value": "A1", "doc": "first code"},
+        {"name": "kMax", "value": "9", "doc": "upper bound"},
+    ]}
+
+
+def test_enum_values_and_doc_captured(tmp_path) -> None:
+    # N3: enumerator values + trailing/preceding doc; a bare member must not inherit a doc.
+    src = (b'enum Status {\n'
+           b'  OK = 3,      //!< ok doc\n'
+           b'  FAIL = 9,    // failed\n'
+           b'  UNKNOWN\n'
+           b'};\n')
+    rec = _parse_src(tmp_path, src, "s.h")
+    st = next(c for c in rec.classes if c.name == "Status")
+    assert st.metadata == {"constants": [
+        {"name": "OK", "value": "3", "doc": "ok doc"},
+        {"name": "FAIL", "value": "9", "doc": "failed"},
+        {"name": "UNKNOWN", "value": None, "doc": None},
+    ]}
+
+
+def test_class_with_no_constants_has_no_metadata(tmp_path) -> None:
+    rec = _parse_src(tmp_path, b"class C {\n public:\n  int x;\n  void m();\n};\n", "c.h")
+    c = next(x for x in rec.classes if x.name == "C")
+    assert c.metadata is None
+
+
+def test_class_constants_emit_no_statements(tmp_path) -> None:
+    src = b'class C { public:\n constexpr static const char* k = "v";\n };'
+    rec = _parse_src(tmp_path, src, "c.h", capture=True)
+    assert next(c for c in rec.classes if c.name == "C").metadata == {
+        "constants": [{"name": "k", "value": "v", "doc": None}]}
+    assert not any((s.text or "").find('k = "v"') >= 0 for s in rec.statements)
+
+
+def test_cpp_constants_output_validates(tmp_path) -> None:
+    src = (b'class C { public:\n constexpr static const char* k = "v"; //!< d\n };\n'
+           b'enum E { A = 1 };\n')
+    rec = _parse_src(tmp_path, src, "c.h")
+    errors = list(Draft202012Validator(FileRecord.model_json_schema(by_alias=True))
+                  .iter_errors(json.loads(to_line(rec))))
+    assert not errors, errors
