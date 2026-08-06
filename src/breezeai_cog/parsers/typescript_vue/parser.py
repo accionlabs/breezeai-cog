@@ -49,7 +49,12 @@ class VueParser(TypeScriptParser):
             ranges = script_ranges(ctx.source)
             if not ranges:  # a template/style-only SFC has no code to capture
                 return FileRecord(
-                    id=file_id(ctx.path), path=ctx.path, type="code", language="vue", loc=0
+                    id=file_id(ctx.path),
+                    path=ctx.path,
+                    type="code",
+                    language="vue",
+                    loc=0,
+                    uiRole="component",  # a .vue SFC is a component even with no <script>
                 )
             grammar = script_grammar(ctx.source)
             # Parse the shadow (script bytes at their real offsets, everything else blanked);
@@ -68,4 +73,5 @@ class VueParser(TypeScriptParser):
             record.language = (
                 "vue"  # an SFC is a Vue file, not a bare .ts (matches empty-SFC label)
             )
+            record.uiRole = "component"  # a .vue SFC is, by definition, a component
         return record

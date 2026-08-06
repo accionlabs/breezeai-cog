@@ -74,6 +74,9 @@ class Statement(BaseModel):
     semanticType: SemanticType | None = None
     path: str | None = None
     name: str | None = None  # declared name (declaration node types)
+    # see FileRecord.uiRole — used when a component is a bare declaration
+    # (e.g. `export const X = defineComponent({…})`)
+    uiRole: str | None = None
     # route-only
     framework: str | None = None
     method: str | None = None  # HTTP verb (route/api_call) or db method (db_method_call)
@@ -111,6 +114,8 @@ class Function(BaseModel):
     params: list[Parameter] = Field(default_factory=list)
     decorators: list[Decorator] = Field(default_factory=list)
     returnType: str | None = None
+    # see FileRecord.uiRole (a function-anchored component / composable / hook)
+    uiRole: str | None = None
     metadata: dict[str, Any] | None = None
     calls: list[Call] = Field(default_factory=list)
     # Statements are NOT nested here — they live flat on FileRecord.statements and
@@ -133,6 +138,8 @@ class Class(BaseModel):
     isAbstract: bool | None = None
     generics: str | None = None
     extends: str | None = None  # parent class name → builds EXTENDS
+    # see FileRecord.uiRole (a class-anchored component, e.g. an Angular @Component)
+    uiRole: str | None = None
     implements: list[str] = Field(default_factory=list)
     constructorParams: list[ConstructorParam] = Field(default_factory=list)
     decorators: list[Decorator] = Field(default_factory=list)
@@ -153,6 +160,12 @@ class FileRecord(BaseModel):
     loc: int
     # optional
     framework: str | None = None
+    #: UI role of the node when it is a frontend component or state unit — one of
+    #: ``component`` / ``page`` / ``layout`` / ``store`` / ``composable`` / ``hook`` /
+    #: ``directive`` (open string). Set by the parser on the node that *is* the component
+    #: (File for an SFC, Class/Function/Statement for other declaration forms); absent
+    #: otherwise. Framework-neutral marker so "list components" is one query across parsers.
+    uiRole: str | None = None
     importFiles: list[str] = Field(default_factory=list)  # in-repo paths → builds IMPORTS
     externalImports: list[str] = Field(default_factory=list)
     exports: list[str] = Field(default_factory=list)

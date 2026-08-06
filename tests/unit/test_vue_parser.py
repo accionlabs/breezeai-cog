@@ -211,6 +211,25 @@ def test_template_only_sfc(tmp_path) -> None:
     assert rec.language == "vue" and rec.functions == [] and rec.statements == []
 
 
+def test_sfc_marked_as_component(tmp_path) -> None:
+    # Every .vue SFC is a component — File carries uiRole="component".
+    assert _parse("src/components/Widget.vue", _SFC, tmp_path).uiRole == "component"
+
+
+def test_template_only_sfc_is_component(tmp_path) -> None:
+    # The empty/template-only SFC path also carries the marker.
+    src = b"<template><p>x</p></template>\n"
+    assert _parse("src/components/Static.vue", src, tmp_path).uiRole == "component"
+
+
+def test_vue_claimed_ts_is_not_a_component(tmp_path) -> None:
+    # A .ts file the Vue parser also claims (a router/config that imports vue) is NOT a
+    # component — the marker is gated on the .vue extension.
+    src = b"import { createRouter } from 'vue-router'\nexport const r = createRouter({})\n"
+    rec = _parse("src/router.ts", src, tmp_path)
+    assert rec.language == "typescript" and rec.uiRole is None
+
+
 # ── selection ──────────────────────────────────────────────────────────────────
 
 
