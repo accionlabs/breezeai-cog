@@ -520,6 +520,32 @@ def _module_of(import_node: Node, source: bytes) -> str | None:
     return node_text(frag, source) if frag is not None else node_text(src_node, source).strip("'\"")
 
 
+def imported_locals(root: Node, source: bytes, module: str, wanted: frozenset[str]) -> set[str]:
+    """Local names bound to any of ``wanted`` imported from ``module`` (handles ``as`` alias).
+    ``import { useState as useS } from 'react'`` with ``wanted={"useState"}`` → ``{"useS"}``.
+    Used to detect framework-primitive calls (Vue reactivity, React hooks) by the *local*
+    binding rather than the bare name, so aliasing and same-named locals don't confuse it."""
+    locals_set: set[str] = set()
+    for node in root.named_children:
+        if node.type != "import_statement" or _module_of(node, source) != module:
+            continue
+        clause = next((c for c in node.named_children if c.type == "import_clause"), None)
+        if clause is None:
+            continue
+        for c in clause.named_children:
+            if c.type != "named_imports":
+                continue
+            for spec in c.named_children:
+                if spec.type != "import_specifier":
+                    continue
+                idents = [x for x in spec.named_children if x.type == "identifier"]
+                # `{ useState }` -> [useState]; `{ useState as useS }` -> [useState, useS].
+                # First is the imported name, last is the local binding.
+                if idents and node_text(idents[0], source) in wanted:
+                    locals_set.add(node_text(idents[-1], source))
+    return locals_set
+
+
 def _export_names(node: Node, source: bytes) -> list[str]:
     """Exported names of one ``export_statement``. Scans the statement's TOP-LEVEL structure
     only — never descending into a declaration's value — so a nested local (``export const X =

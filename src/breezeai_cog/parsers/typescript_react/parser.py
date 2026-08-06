@@ -10,7 +10,7 @@ from ...schemas import FileRecord
 from ..base import ParseContext
 from ..treesitter import parse_source
 from ..typescript.parser import TypeScriptParser
-from .components import mark_react_components
+from .components import mark_react_components, mark_react_hooks
 from .routes import detect_react_routes
 
 # Byte guards for a React file: a router import (routes) OR a bare ``react`` import — the
@@ -35,6 +35,8 @@ class ReactParser(TypeScriptParser):
         # Class components (`extends React.Component`) and function components (PascalCase +
         # renders JSX) -> uiRole. Nodes are always captured, so this is not gated on statements.
         mark_react_components(root, ctx.source, record)
+        # Custom hooks — a `useX` function that calls a React hook primitive (`useState`/…).
+        mark_react_hooks(root, ctx.source, record)
         # framework axis: every file this parser claims IS a React file — stamp it
         # unconditionally so "list React files" is answerable, not only on route files. The
         # JS/TS distinction lives on the orthogonal `language` axis (.tsx -> typescript,
