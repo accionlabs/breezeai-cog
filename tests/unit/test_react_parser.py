@@ -294,7 +294,8 @@ def test_component_ui_roles(tmp_path) -> None:
     # PascalCase utils with no JSX -> not marked; lowercase util -> not marked.
     assert fn_roles["Compute"] is None
     assert fn_roles["formatDate"] is None
-    # `useX` hook is camelCase -> not caught by the PascalCase gate (hook role deferred).
+    # `useThing` is camelCase (not a component) AND calls no React hook primitive (the file
+    # only does a default `import React`, no named hook import) -> not a hook either.
     assert fn_roles["useThing"] is None
 
 
@@ -302,6 +303,53 @@ def test_component_ui_roles_without_capture_statements(tmp_path) -> None:
     rec = _parse(tmp_path, COMPONENTS_SRC, "components.tsx", capture=False)
     assert {c.name: c.uiRole for c in rec.classes}["Panel"] == "component"
     assert {f.name: f.uiRole for f in rec.functions}["Header"] == "component"
+
+
+# ---- uiRole: custom hooks (useX + a React hook primitive) -------------------
+
+HOOKS_SRC = b'''import { useState, useEffect, useContext as useCtx } from 'react';
+import { useAuth } from './auth';
+
+export function useCounter(initial) {
+  const [n, setN] = useState(initial);
+  useEffect(() => { document.title = `${n}`; }, [n]);
+  return { n, inc: () => setN(n + 1) };
+}
+
+const useTheme = () => {
+  const theme = useCtx(ThemeContext);   // aliased react import still resolves
+  return theme;
+};
+
+export function useCache(key) {          // useX name, but touches no React primitive
+  return cacheStore.get(key);
+}
+
+export function useCurrentUser() {       // real hook, but only wraps a *custom* hook
+  const { user } = useAuth();            // -> honest null (recoverable via calls[])
+  return user;
+}
+'''
+
+
+def test_hook_ui_roles(tmp_path) -> None:
+    rec = _parse(tmp_path, HOOKS_SRC, "hooks.tsx")
+    roles = {f.name: f.uiRole for f in rec.functions}
+    # useX + a React hook primitive (direct, and via an aliased import) -> hook.
+    assert roles["useCounter"] == "hook"
+    assert roles["useTheme"] == "hook"
+    # useX name but no primitive call -> not a hook (the false positive we avoid).
+    assert roles["useCache"] is None
+    # A hook that only wraps another custom hook -> honest null (recoverable, not guessed).
+    assert roles["useCurrentUser"] is None
+
+
+def test_hooks_and_components_dont_collide(tmp_path) -> None:
+    # The useX vs PascalCase name split keeps the two roles disjoint: a PascalCase component
+    # that calls useState is a component, never a hook.
+    src = b"import { useState } from 'react';\nexport function Panel() { const [x] = useState(0); return <div>{x}</div>; }\n"
+    rec = _parse(tmp_path, src, "Panel.tsx")
+    assert {f.name: f.uiRole for f in rec.functions}["Panel"] == "component"
 
 
 def test_jsx_file_is_javascript_language(tmp_path) -> None:

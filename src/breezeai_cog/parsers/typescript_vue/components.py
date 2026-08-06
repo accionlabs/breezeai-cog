@@ -24,7 +24,7 @@ from tree_sitter import Node
 
 from ...schemas import FileRecord
 from ..treesitter import node_text
-from ..typescript.imports import _module_of
+from ..typescript.imports import _module_of, imported_locals
 
 # (imported name, source module, uiRole) — factory calls whose binding defines a UI entity.
 _FACTORY_SPECS = (
@@ -139,27 +139,6 @@ def mark_factory_ui_roles(root: Node, source: bytes, record: FileRecord) -> None
                     s.uiRole = role
 
 
-def _imported_locals(root: Node, source: bytes, module: str, wanted: frozenset[str]) -> set[str]:
-    """Local names bound to any of ``wanted`` imported from ``module`` (handles ``as`` alias)."""
-    locals_set: set[str] = set()
-    for node in root.named_children:
-        if node.type != "import_statement" or _module_of(node, source) != module:
-            continue
-        clause = next((c for c in node.named_children if c.type == "import_clause"), None)
-        if clause is None:
-            continue
-        for c in clause.named_children:
-            if c.type != "named_imports":
-                continue
-            for spec in c.named_children:
-                if spec.type != "import_specifier":
-                    continue
-                idents = [x for x in spec.named_children if x.type == "identifier"]
-                if idents and node_text(idents[0], source) in wanted:
-                    locals_set.add(node_text(idents[-1], source))
-    return locals_set
-
-
 def mark_composables(root: Node, source: bytes, record: FileRecord) -> None:
     """Mark ``uiRole="composable"`` on Vue composables — a function that is BOTH named ``useX``
     AND calls a Vue reactivity primitive imported from ``vue``. The name says "intended as a
@@ -168,7 +147,7 @@ def mark_composables(root: Node, source: bytes, record: FileRecord) -> None:
     reactivity but isn't named ``useX`` — is not either)."""
     if b"vue" not in source:
         return
-    reactivity = _imported_locals(root, source, "vue", _VUE_REACTIVITY)
+    reactivity = imported_locals(root, source, "vue", _VUE_REACTIVITY)
     if not reactivity:
         return
     for fn in record.functions:
