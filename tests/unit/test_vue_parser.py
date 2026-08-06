@@ -271,6 +271,46 @@ def test_local_definecomponent_not_from_vue_not_marked(tmp_path) -> None:
     assert _stmt_roles(_parse("src/W.ts", src, tmp_path)).get("W") is None
 
 
+# ── defineStore (Pinia) stores ───────────────────────────────────────────────────
+
+
+def test_definestore_marks_statement_as_store(tmp_path) -> None:
+    # Pinia stores (setup and options form) → the lexical_declaration statement gets uiRole=store.
+    src = (
+        b"import { defineStore } from 'pinia'\n"
+        b"export const useUserStore = defineStore('user', () => ({}))\n"
+        b"export const useCart = defineStore('cart', { state: () => ({}) })\n"
+    )
+    assert _stmt_roles(_parse("src/store.ts", src, tmp_path)) == {
+        "useUserStore": "store",
+        "useCart": "store",
+    }
+
+
+def test_definestore_default_export_marks_file(tmp_path) -> None:
+    src = b"import { defineStore } from 'pinia'\nexport default defineStore('x', {})\n"
+    assert _parse("src/s.ts", src, tmp_path).uiRole == "store"
+
+
+def test_definestore_alias_and_non_pinia(tmp_path) -> None:
+    # alias resolved; a local defineStore not imported from pinia is not marked.
+    aliased = b"import { defineStore as ds } from 'pinia'\nexport const useX = ds('x', {})\n"
+    assert _stmt_roles(_parse("src/a.ts", aliased, tmp_path)) == {"useX": "store"}
+    local = b"function defineStore(a, b){ return b }\nexport const useY = defineStore('y', {})\n"
+    assert _stmt_roles(_parse("src/b.ts", local, tmp_path)).get("useY") is None
+
+
+def test_component_and_store_in_one_file(tmp_path) -> None:
+    # Both factories resolve to their own roles within a single module.
+    src = (
+        b"import { defineComponent } from 'vue'\n"
+        b"import { defineStore } from 'pinia'\n"
+        b"export const C = defineComponent({})\n"
+        b"export const useS = defineStore('s', {})\n"
+    )
+    assert _stmt_roles(_parse("src/m.ts", src, tmp_path)) == {"C": "component", "useS": "store"}
+
+
 # ── selection ──────────────────────────────────────────────────────────────────
 
 
