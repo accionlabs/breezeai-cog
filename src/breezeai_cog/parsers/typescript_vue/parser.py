@@ -24,6 +24,7 @@ from ...schemas import FileRecord
 from ..base import ParseContext
 from ..treesitter import parse_source
 from ..typescript.parser import TypeScriptParser
+from .components import mark_define_components
 from .sfc import script_grammar, script_ranges, shadow_source
 
 # Byte guards for a vue import in a .ts/.js file: ``from 'vue'`` / ``from "vue"`` (the app
@@ -74,4 +75,7 @@ class VueParser(TypeScriptParser):
                 "vue"  # an SFC is a Vue file, not a bare .ts (matches empty-SFC label)
             )
             record.uiRole = "component"  # a .vue SFC is, by definition, a component
+        # Components authored via `defineComponent(...)` in any file this parser handles — mark
+        # the File (default export) or the binding's `lexical_declaration` statement.
+        mark_define_components(root, parsed_source, record)
         return record

@@ -230,6 +230,47 @@ def test_vue_claimed_ts_is_not_a_component(tmp_path) -> None:
     assert rec.language == "typescript" and rec.uiRole is None
 
 
+# ── defineComponent components ───────────────────────────────────────────────────
+
+
+def _stmt_roles(rec):
+    return {s.name: s.uiRole for s in rec.statements if s.nodeType == "lexical_declaration"}
+
+
+def test_default_export_definecomponent_marks_file(tmp_path) -> None:
+    # `export default defineComponent(...)` — one component per module → File.uiRole.
+    src = b"import { defineComponent } from 'vue'\nexport default defineComponent({ setup(){ const n = 1 } })\n"
+    rec = _parse("src/Comp.ts", src, tmp_path)
+    assert rec.uiRole == "component"
+    assert _stmt_roles(rec).get("n") is None  # a nested local is not a component
+
+
+def test_named_definecomponent_marks_statement(tmp_path) -> None:
+    # `export const X = …` (object) and `const Y = …` (functional) → the lexical_declaration
+    # statement carries uiRole; the File does not (multiple components can share a module).
+    src = (
+        b"import { defineComponent } from 'vue'\n"
+        b"export const X = defineComponent({ setup(){} })\n"
+        b"const Y = defineComponent(() => () => null)\n"
+    )
+    rec = _parse("src/Comps.ts", src, tmp_path)
+    assert rec.uiRole is None
+    assert _stmt_roles(rec) == {"X": "component", "Y": "component"}
+
+
+def test_definecomponent_import_alias_resolved(tmp_path) -> None:
+    # `import { defineComponent as dc }` — the alias is resolved from the import specifier.
+    src = b"import { defineComponent as dc } from 'vue'\nexport const Z = dc({ setup(){} })\n"
+    assert _stmt_roles(_parse("src/Z.ts", src, tmp_path)) == {"Z": "component"}
+
+
+def test_local_definecomponent_not_from_vue_not_marked(tmp_path) -> None:
+    # A local function coincidentally named defineComponent (not imported from vue) is NOT a
+    # component — detection is keyed on the real vue import, not the bare callee text.
+    src = b"function defineComponent(x){ return x }\nexport const W = defineComponent({})\n"
+    assert _stmt_roles(_parse("src/W.ts", src, tmp_path)).get("W") is None
+
+
 # ── selection ──────────────────────────────────────────────────────────────────
 
 
