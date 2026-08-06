@@ -14,6 +14,7 @@ from ..statements_common import (
     url_placeholder,
 )
 from ..treesitter import node_text
+from .imports import _imported_names, _module_of
 from .mappings import CONTROL_FLOW, EMIT_TYPES, NESTED_SCOPES
 
 _CALL_TYPE = "call_expression"
@@ -95,6 +96,94 @@ def collect_typed_db_receivers(class_body: Node, source: bytes) -> frozenset[str
                 name = node.child_by_field_name("name")
                 if name is not None:
                     ids.add(node_text(name, source))
+    return frozenset(ids)
+
+
+# --- Wrapped HTTP-client detection (per-file) ---------------------------------------------
+# The shared api-call classifier recognises a client by a substring hint in the callee
+# (``axios``/``http``/…). A WRAPPED client's name is arbitrary, so it slips past that test.
+# Two forms cover almost all Vue/React service layers; both are collected into a per-file set
+# of client names, which classify_statement passes to match_api:
+#   1. an in-file axios instance:      const service = axios.create({...})   → ``service``
+#   2. a config-object wrapper call:   request({ url: '/x', method: 'post' }) → ``request``
+# Form 2 is caught by shape (a ``{url, method}`` argument), so an imported wrapper needs no
+# cross-file resolution. ``axios.create`` is an unambiguous client factory, keeping form 1
+# precise; form 2's two-key co-occurrence is HTTP-request-config-specific.
+_URL_KEYS = frozenset({"url", "uri", "path"})
+_HTTP_VERB_LITERALS = frozenset({"get", "post", "put", "patch", "delete", "head", "options"})
+
+
+def _string_fragment(node: Node, source: bytes) -> str:
+    frag = next((c for c in node.named_children if c.type == "string_fragment"), None)
+    return node_text(frag, source) if frag is not None else ""
+
+
+def _is_http_config_object(obj: Node, source: bytes) -> bool:
+    """True if an object literal is an HTTP request config — carries both a URL-family key
+    and a ``method`` key. A ``method`` given as a string literal must be an HTTP verb (a
+    non-verb literal rules it out); a non-literal ``method`` (a variable) is allowed."""
+    has_url = has_method = False
+    for pair in obj.named_children:
+        if pair.type != "pair":
+            continue
+        key = pair.child_by_field_name("key")
+        if key is None:
+            continue
+        kname = node_text(key, source).strip("'\"")
+        if kname in _URL_KEYS:
+            has_url = True
+        elif kname == "method":
+            val = pair.child_by_field_name("value")
+            if (
+                val is not None
+                and val.type == "string"
+                and _string_fragment(val, source).lower() not in _HTTP_VERB_LITERALS
+            ):
+                return False
+            has_method = True
+    return has_url and has_method
+
+
+def collect_http_client_ids(root: Node, source: bytes) -> frozenset[str]:
+    """Per-file set of names that are HTTP clients but carry no callee hint (see the note
+    above). Byte-guarded so files with neither an axios instance nor a config-object call are
+    skipped without a walk."""
+    if b"axios" not in source and b"method" not in source:
+        return frozenset()
+    axios_names = {"axios", "Axios"}
+    for node in root.named_children:
+        if node.type == "import_statement" and _module_of(node, source) == "axios":
+            axios_names.update(_imported_names(node, source))
+    ids: set[str] = set()
+    stack = [root]
+    while stack:
+        n = stack.pop()
+        if n.type == "variable_declarator":  # form 1: const X = <axios>.create(...)
+            name = n.child_by_field_name("name")
+            value = n.child_by_field_name("value")
+            if (name is not None and name.type == "identifier"
+                    and value is not None and value.type == "call_expression"):
+                fn = value.child_by_field_name("function")
+                if fn is not None and fn.type == "member_expression":
+                    obj = fn.child_by_field_name("object")
+                    prop = fn.child_by_field_name("property")
+                    if (prop is not None and node_text(prop, source) == "create"
+                            and obj is not None and node_text(obj, source) in axios_names):
+                        ids.add(node_text(name, source))
+        elif n.type == "call_expression":  # form 2: NAME({ url, method })
+            fn = n.child_by_field_name("function")
+            args = n.child_by_field_name("arguments")
+            if fn is not None and args is not None:
+                first = next(iter(args.named_children), None)
+                if (
+                    first is not None
+                    and first.type == "object"
+                    and _is_http_config_object(first, source)
+                ):
+                    recv = node_text(fn, source).split(".", 1)[0]
+                    if recv.replace("_", "").replace("$", "").isalnum():
+                        ids.add(recv)
+        stack.extend(n.named_children)
     return frozenset(ids)
 
 

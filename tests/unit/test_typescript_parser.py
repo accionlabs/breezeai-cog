@@ -11,7 +11,7 @@ from breezeai_cog.parsers.base import ParseContext
 from breezeai_cog.parsers.typescript.parser import TypeScriptParser
 from breezeai_cog.schemas import FileRecord
 
-SRC = b'''import { Foo } from './foo';
+SRC = b"""import { Foo } from './foo';
 import axios from 'axios';
 export { Bar };
 
@@ -32,15 +32,21 @@ export function top(a: number, b = 'x'): string {
 }
 
 const arrow = (x: number): number => x + 1;
-'''
+"""
 
 
 def _parse(tmp_path, *, capture=False) -> FileRecord:
     (tmp_path / "foo.ts").write_text("export const Foo = 1;\n")  # makes './foo' resolvable
     p = tmp_path / "order.controller.ts"
     p.write_text(SRC.decode())
-    ctx = ParseContext(path="order.controller.ts", abs_path=p, source=SRC, repo_root=tmp_path,
-                       capture_statements=capture, text_truncation_limit=1000)
+    ctx = ParseContext(
+        path="order.controller.ts",
+        abs_path=p,
+        source=SRC,
+        repo_root=tmp_path,
+        capture_statements=capture,
+        text_truncation_limit=1000,
+    )
     return TypeScriptParser().parse_file(ctx)
 
 
@@ -59,7 +65,9 @@ def test_class(tmp_path) -> None:
     assert cls.implements == ["IFoo", "IBar"]
     assert [d.name for d in cls.decorators] == ["Controller"]
     assert cls.constructorParams == [
-        __import__("breezeai_cog.schemas", fromlist=["ConstructorParam"]).ConstructorParam(name="repo", type="OrderRepo")
+        __import__("breezeai_cog.schemas", fromlist=["ConstructorParam"]).ConstructorParam(
+            name="repo", type="OrderRepo"
+        )
     ]
 
 
@@ -97,8 +105,9 @@ def test_output_validates(tmp_path) -> None:
 def test_type_alias_captured(tmp_path) -> None:
     p = tmp_path / "t.ts"
     p.write_text("type UserId = string;\ntype Point = { x: number };\nconst z = 1;\n")
-    ctx = ParseContext(path="t.ts", abs_path=p, source=p.read_bytes(),
-                       repo_root=tmp_path, capture_statements=True)
+    ctx = ParseContext(
+        path="t.ts", abs_path=p, source=p.read_bytes(), repo_root=tmp_path, capture_statements=True
+    )
     rec = TypeScriptParser().parse_file(ctx)
     aliases = [s.name for s in rec.statements if s.nodeType == "type_alias_declaration"]
     assert aliases == ["UserId", "Point"]
@@ -106,17 +115,24 @@ def test_type_alias_captured(tmp_path) -> None:
 
 def test_class_fields_captured(tmp_path) -> None:
     p = tmp_path / "c.ts"
-    p.write_text("class C { count: number = 0; private label = 'x';\n  greet(): number { return this.count; } }\n")
-    ctx = ParseContext(path="c.ts", abs_path=p, source=p.read_bytes(),
-                       repo_root=tmp_path, capture_statements=True)
+    p.write_text(
+        "class C { count: number = 0; private label = 'x';\n  greet(): number { return this.count; } }\n"
+    )
+    ctx = ParseContext(
+        path="c.ts", abs_path=p, source=p.read_bytes(), repo_root=tmp_path, capture_statements=True
+    )
     rec = TypeScriptParser().parse_file(ctx)
-    fields = [s.name for s in rec.statements if s.nodeType in ("public_field_definition", "field_definition")]
+    fields = [
+        s.name
+        for s in rec.statements
+        if s.nodeType in ("public_field_definition", "field_definition")
+    ]
     assert fields == ["count", "label"]
 
 
 # G2: arrow functions attached as object-literal properties (resolver maps, service
 # objects) are lifted into the function inventory, named by their key-trail.
-OBJ_FN_SRC = b'''const DENOM = { PI: 3.14 };                 // pure data: NOT descended
+OBJ_FN_SRC = b"""const DENOM = { PI: 3.14 };                 // pure data: NOT descended
 
 export const api = {                          // depth-1 service object
   getUser: async (id) => { return fetch(id); },
@@ -134,14 +150,19 @@ export const resolvers = {
 };
 
 function plain() { return 1; }
-'''
+"""
 
 
 def test_object_property_functions_captured(tmp_path) -> None:
     p = tmp_path / "resolvers.ts"
     p.write_bytes(OBJ_FN_SRC)
-    ctx = ParseContext(path="resolvers.ts", abs_path=p, source=OBJ_FN_SRC,
-                       repo_root=tmp_path, capture_statements=True)
+    ctx = ParseContext(
+        path="resolvers.ts",
+        abs_path=p,
+        source=OBJ_FN_SRC,
+        repo_root=tmp_path,
+        capture_statements=True,
+    )
     rec = TypeScriptParser().parse_file(ctx)
     names = {f.name for f in rec.functions}
     # depth-1 service arrows, named by key-trail.
@@ -162,14 +183,19 @@ def test_object_property_functions_captured(tmp_path) -> None:
 def test_object_function_ids_are_unique(tmp_path) -> None:
     p = tmp_path / "resolvers.ts"
     p.write_bytes(OBJ_FN_SRC)
-    ctx = ParseContext(path="resolvers.ts", abs_path=p, source=OBJ_FN_SRC,
-                       repo_root=tmp_path, capture_statements=True)
+    ctx = ParseContext(
+        path="resolvers.ts",
+        abs_path=p,
+        source=OBJ_FN_SRC,
+        repo_root=tmp_path,
+        capture_statements=True,
+    )
     rec = TypeScriptParser().parse_file(ctx)
     ids = [f.id for f in rec.functions]
     assert len(ids) == len(set(ids))  # deterministic, disambiguated ids
 
 
-WRAPPED_FN_SRC = b'''import { create } from "zustand";
+WRAPPED_FN_SRC = b"""import { create } from "zustand";
 import { persist } from "zustand/middleware";
 
 export const useStore = create((set) => ({          // call-wrapped object members
@@ -192,7 +218,7 @@ export default React.memo(function Panel() {         // export default: named fn
   const handleClick = () => save();                  // nested handler in the component
   return null;
 });
-'''
+"""
 
 
 def test_wrapped_and_field_functions_captured(tmp_path) -> None:
@@ -201,21 +227,29 @@ def test_wrapped_and_field_functions_captured(tmp_path) -> None:
     # named functions (plus their nested handlers). Anonymous callbacks stay uncaptured.
     p = tmp_path / "store.tsx"
     p.write_bytes(WRAPPED_FN_SRC)
-    ctx = ParseContext(path="store.tsx", abs_path=p, source=WRAPPED_FN_SRC,
-                       repo_root=tmp_path, capture_statements=True)
+    ctx = ParseContext(
+        path="store.tsx",
+        abs_path=p,
+        source=WRAPPED_FN_SRC,
+        repo_root=tmp_path,
+        capture_statements=True,
+    )
     rec = TypeScriptParser().parse_file(ctx)
     names = {f.name for f in rec.functions}
-    assert {"openDialog", "closeDialog"} <= names          # call-wrapper (create)
-    assert "reset" in names                                # nested create(persist(...))
+    assert {"openDialog", "closeDialog"} <= names  # call-wrapper (create)
+    assert "reset" in names  # nested create(persist(...))
     assert "obj.shorthand" in names and "obj.arrow" in names  # shorthand method + arrow prop
-    assert "onClick" in names                              # arrow class field
-    assert "Panel" in names                                # export default React.memo(function Panel)
-    assert "handleClick" in names                          # nested handler inside Panel
+    assert "onClick" in names  # arrow class field
+    assert "Panel" in names  # export default React.memo(function Panel)
+    assert "handleClick" in names  # nested handler inside Panel
     onclick = next(f for f in rec.functions if f.name == "onClick")
     assert onclick.type == "arrow_function"
     # emitted record still validates against the capture schema
-    errors = list(Draft202012Validator(FileRecord.model_json_schema(by_alias=True))
-                  .iter_errors(json.loads(to_line(rec))))
+    errors = list(
+        Draft202012Validator(FileRecord.model_json_schema(by_alias=True)).iter_errors(
+            json.loads(to_line(rec))
+        )
+    )
     assert not errors, "\n".join(str(e) for e in errors)
 
 
@@ -239,8 +273,9 @@ def test_inline_callback_body_captured(tmp_path) -> None:
         "  });\n"
         "}\n"
     )
-    ctx = ParseContext(path="cb.ts", abs_path=p, source=p.read_bytes(),
-                       repo_root=tmp_path, capture_statements=True)
+    ctx = ParseContext(
+        path="cb.ts", abs_path=p, source=p.read_bytes(), repo_root=tmp_path, capture_statements=True
+    )
     rec = TypeScriptParser().parse_file(ctx)
     fn = next(f for f in rec.functions if f.name == "processOrder")
     # calls inside the callback now land on the enclosing function
@@ -255,14 +290,15 @@ def test_top_level_arrow_not_double_emitted(tmp_path) -> None:
     # already extracted as its own Function).
     p = tmp_path / "d.ts"
     p.write_text("const topFn = (x) => { return doTop(x); };\n")
-    ctx = ParseContext(path="d.ts", abs_path=p, source=p.read_bytes(),
-                       repo_root=tmp_path, capture_statements=True)
+    ctx = ParseContext(
+        path="d.ts", abs_path=p, source=p.read_bytes(), repo_root=tmp_path, capture_statements=True
+    )
     rec = TypeScriptParser().parse_file(ctx)
     returns = [s for s in rec.statements if s.nodeType == "return_statement" and "doTop" in s.text]
     assert len(returns) == 1
 
 
-NESTED_FN_SRC = b'''export default function OpportunityDetail(props) {
+NESTED_FN_SRC = b"""export default function OpportunityDetail(props) {
   const onClose = () => { closeDialog(); };
 
   const handleSubmit = () => {
@@ -278,7 +314,7 @@ NESTED_FN_SRC = b'''export default function OpportunityDetail(props) {
   fetchInitial();
   return null;
 }
-'''
+"""
 
 
 def test_nested_named_functions_extracted(tmp_path) -> None:
@@ -288,8 +324,13 @@ def test_nested_named_functions_extracted(tmp_path) -> None:
     # this is the dominant React functional-component pattern.
     p = tmp_path / "OpportunityDetail.jsx"
     p.write_bytes(NESTED_FN_SRC)
-    ctx = ParseContext(path="OpportunityDetail.jsx", abs_path=p, source=NESTED_FN_SRC,
-                       repo_root=tmp_path, capture_statements=True)
+    ctx = ParseContext(
+        path="OpportunityDetail.jsx",
+        abs_path=p,
+        source=NESTED_FN_SRC,
+        repo_root=tmp_path,
+        capture_statements=True,
+    )
     rec = TypeScriptParser().parse_file(ctx)
     by_name = {f.name: f for f in rec.functions}
     # the component plus all three nested handlers are present
@@ -307,7 +348,7 @@ def test_nested_named_functions_extracted(tmp_path) -> None:
     assert "addEventListener" in {c.name for c in parent.calls}
 
 
-OBJECT_PROPERTY_FN_SRC = b'''export class SyncWorker {
+OBJECT_PROPERTY_FN_SRC = b"""export class SyncWorker {
   async connectConsumer() {
     this.setup();
     await this.consumer.run({
@@ -318,7 +359,7 @@ OBJECT_PROPERTY_FN_SRC = b'''export class SyncWorker {
     items.forEach(function step(i) { visitStep(i); });
   }
 }
-'''
+"""
 
 
 def test_object_property_and_named_expression_functions_extracted(tmp_path) -> None:
@@ -330,8 +371,13 @@ def test_object_property_and_named_expression_functions_extracted(tmp_path) -> N
     # these callback handlers were silently dropped from class code.
     p = tmp_path / "sync-worker.ts"
     p.write_bytes(OBJECT_PROPERTY_FN_SRC)
-    ctx = ParseContext(path="sync-worker.ts", abs_path=p, source=OBJECT_PROPERTY_FN_SRC,
-                       repo_root=tmp_path, capture_statements=True)
+    ctx = ParseContext(
+        path="sync-worker.ts",
+        abs_path=p,
+        source=OBJECT_PROPERTY_FN_SRC,
+        repo_root=tmp_path,
+        capture_statements=True,
+    )
     rec = TypeScriptParser().parse_file(ctx)
     by_name = {f.name: f for f in rec.functions}
     assert {"connectConsumer", "eachMessage", "step"} <= set(by_name)
@@ -347,7 +393,7 @@ def test_object_property_and_named_expression_functions_extracted(tmp_path) -> N
     assert {"setup", "run"} <= {c.name for c in by_name["connectConsumer"].calls}
 
 
-DECORATOR_ARG_FN_SRC = b'''import { Module } from '@nestjs/common';
+DECORATOR_ARG_FN_SRC = b"""import { Module } from '@nestjs/common';
 
 @Module({
   imports: [
@@ -360,7 +406,7 @@ DECORATOR_ARG_FN_SRC = b'''import { Module } from '@nestjs/common';
   ],
 })
 export class DatabaseModule {}
-'''
+"""
 
 
 def test_decorator_argument_functions_extracted(tmp_path) -> None:
@@ -370,8 +416,13 @@ def test_decorator_argument_functions_extracted(tmp_path) -> None:
     # Function, parented to the class.
     p = tmp_path / "database.module.ts"
     p.write_bytes(DECORATOR_ARG_FN_SRC)
-    ctx = ParseContext(path="database.module.ts", abs_path=p, source=DECORATOR_ARG_FN_SRC,
-                       repo_root=tmp_path, capture_statements=True)
+    ctx = ParseContext(
+        path="database.module.ts",
+        abs_path=p,
+        source=DECORATOR_ARG_FN_SRC,
+        repo_root=tmp_path,
+        capture_statements=True,
+    )
     rec = TypeScriptParser().parse_file(ctx)
     by_name = {f.name: f for f in rec.functions}
     cls = next(c for c in rec.classes if c.name == "DatabaseModule")
@@ -383,9 +434,16 @@ def test_decorator_argument_functions_extracted(tmp_path) -> None:
 def test_chain_inner_call_classified(tmp_path) -> None:
     # #4: a db method that is NOT the outermost call in a chain must still be detected.
     p = tmp_path / "chain.ts"
-    p.write_text("function f(repo){ const rows = repo.createQueryBuilder('o').where('x').getMany(); }")
-    ctx = ParseContext(path="chain.ts", abs_path=p, source=p.read_bytes(),
-                       repo_root=tmp_path, capture_statements=True)
+    p.write_text(
+        "function f(repo){ const rows = repo.createQueryBuilder('o').where('x').getMany(); }"
+    )
+    ctx = ParseContext(
+        path="chain.ts",
+        abs_path=p,
+        source=p.read_bytes(),
+        repo_root=tmp_path,
+        capture_statements=True,
+    )
     rec = TypeScriptParser().parse_file(ctx)
     db = [s for s in rec.statements if s.semanticType == "db_method_call"]
     assert any(s.method == "createQueryBuilder" and s.dataAccessHint == "typeorm" for s in db)
@@ -396,8 +454,13 @@ def test_multi_hit_emits_synthetic(tmp_path) -> None:
     # each single-valued, at the same span.
     p = tmp_path / "multi.ts"
     p.write_text("function f(){ const d = http.get('/a').then(r => auditRepo.save(r)); }")
-    ctx = ParseContext(path="multi.ts", abs_path=p, source=p.read_bytes(),
-                       repo_root=tmp_path, capture_statements=True)
+    ctx = ParseContext(
+        path="multi.ts",
+        abs_path=p,
+        source=p.read_bytes(),
+        repo_root=tmp_path,
+        capture_statements=True,
+    )
     rec = TypeScriptParser().parse_file(ctx)
     kinds = {s.semanticType for s in rec.statements if s.semanticType}
     assert {"api_call", "db_method_call"} <= kinds
@@ -407,10 +470,19 @@ def test_control_statement_not_mislabeled(tmp_path) -> None:
     # #4/smear: a db call nested in an if/for body must not tag the if/for themselves.
     p = tmp_path / "smear.ts"
     p.write_text("function h(o){ if(o.length>0){ for(const x of o){ repo.save(x); } } }")
-    ctx = ParseContext(path="smear.ts", abs_path=p, source=p.read_bytes(),
-                       repo_root=tmp_path, capture_statements=True)
+    ctx = ParseContext(
+        path="smear.ts",
+        abs_path=p,
+        source=p.read_bytes(),
+        repo_root=tmp_path,
+        capture_statements=True,
+    )
     rec = TypeScriptParser().parse_file(ctx)
-    control = [s for s in rec.statements if s.nodeType in ("if_statement", "for_in_statement", "for_statement")]
+    control = [
+        s
+        for s in rec.statements
+        if s.nodeType in ("if_statement", "for_in_statement", "for_statement")
+    ]
     assert control and all(s.semanticType is None for s in control)
     assert any(s.semanticType == "db_method_call" for s in rec.statements)
 
@@ -418,28 +490,33 @@ def test_control_statement_not_mislabeled(tmp_path) -> None:
 def _api(tmp_path, body):
     p = tmp_path / "u.ts"
     p.write_text(body)
-    ctx = ParseContext(path="u.ts", abs_path=p, source=p.read_bytes(),
-                       repo_root=tmp_path, capture_statements=True)
+    ctx = ParseContext(
+        path="u.ts", abs_path=p, source=p.read_bytes(), repo_root=tmp_path, capture_statements=True
+    )
     rec = TypeScriptParser().parse_file(ctx)
     return [(s.method, s.endpoint) for s in rec.statements if s.semanticType == "api_call"]
 
 
 def test_endpoint_template_string(tmp_path) -> None:
     # #3: template literal -> path with {param}; leading base/host var dropped.
-    assert _api(tmp_path, "function f(baseURL,id){ axios.get(`${baseURL}/users/${id}`); }") \
-        == [("GET", "/users/{id}")]
+    assert _api(tmp_path, "function f(baseURL,id){ axios.get(`${baseURL}/users/${id}`); }") == [
+        ("GET", "/users/{id}")
+    ]
     assert _api(tmp_path, "function f(id){ axios.get(`/api/${id}`); }") == [("GET", "/api/{id}")]
 
 
 def test_endpoint_concatenation(tmp_path) -> None:
     # #3: string concatenation -> path with {param}.
-    assert _api(tmp_path, "function f(id){ axios.get('/a/' + id + '/b'); }") == [("GET", "/a/{id}/b")]
+    assert _api(tmp_path, "function f(id){ axios.get('/a/' + id + '/b'); }") == [
+        ("GET", "/a/{id}/b")
+    ]
 
 
 def test_endpoint_config_object(tmp_path) -> None:
     # #3: axios({ url, method }) — both were missed before.
-    assert _api(tmp_path, "function f(){ axios({ url: '/orders', method: 'get' }); }") \
-        == [("GET", "/orders")]
+    assert _api(tmp_path, "function f(){ axios({ url: '/orders', method: 'get' }); }") == [
+        ("GET", "/orders")
+    ]
 
 
 def test_endpoint_verb_first_arg(tmp_path) -> None:
@@ -451,6 +528,7 @@ def test_endpoint_verb_first_arg(tmp_path) -> None:
 
 # --- inherited base-class call resolution (this.M() → base file) ----------------------
 
+
 def _parse_repo(tmp_path, files: dict[str, str], target: str) -> FileRecord:
     """Write a multi-file TS repo, run build_index, parse `target` with the index."""
     for rel, text in files.items():
@@ -460,32 +538,44 @@ def _parse_repo(tmp_path, files: dict[str, str], target: str) -> FileRecord:
     parser = TypeScriptParser()
     index = parser.build_index(tmp_path, list(tmp_path.rglob("*.ts")))
     p = tmp_path / target
-    ctx = ParseContext(path=target, abs_path=p, source=p.read_bytes(),
-                       repo_root=tmp_path, capture_statements=True, resolution_index=index)
+    ctx = ParseContext(
+        path=target,
+        abs_path=p,
+        source=p.read_bytes(),
+        repo_root=tmp_path,
+        capture_statements=True,
+        resolution_index=index,
+    )
     return parser.parse_file(ctx)
 
 
 def test_inherited_this_call_resolves(tmp_path) -> None:
     # `this.M()` where M is declared on an in-repo base class → the base's file.
-    rec = _parse_repo(tmp_path, {
-        "base.service.ts": "export class BaseService { protected log(m: string){ console.log(m); } }\n",
-        "order.service.ts":
-            "import { BaseService } from './base.service';\n"
+    rec = _parse_repo(
+        tmp_path,
+        {
+            "base.service.ts": "export class BaseService { protected log(m: string){ console.log(m); } }\n",
+            "order.service.ts": "import { BaseService } from './base.service';\n"
             "export class OrderService extends BaseService {\n"
             "  create(){ this.log('created'); }\n}\n",
-    }, "order.service.ts")
+        },
+        "order.service.ts",
+    )
     calls = {c.name: c.path for f in rec.functions for c in f.calls}
     assert calls.get("log") == "base.service.ts"
 
 
 def test_explicit_super_call_resolves(tmp_path) -> None:
     # `super.M()` → the base class's file.
-    rec = _parse_repo(tmp_path, {
-        "parent.ts": "export class Parent { setup(){} }\n",
-        "child.ts":
-            "import { Parent } from './parent';\n"
+    rec = _parse_repo(
+        tmp_path,
+        {
+            "parent.ts": "export class Parent { setup(){} }\n",
+            "child.ts": "import { Parent } from './parent';\n"
             "export class Child extends Parent { init(){ super.setup(); } }\n",
-    }, "child.ts")
+        },
+        "child.ts",
+    )
     calls = {c.name: c.path for f in rec.functions for c in f.calls}
     assert calls.get("setup") == "parent.ts"
 
@@ -493,10 +583,235 @@ def test_explicit_super_call_resolves(tmp_path) -> None:
 def test_same_name_class_does_not_inherit(tmp_path) -> None:
     # Two distinct `Base` classes (different files) → ambiguous → the subclass must not
     # mis-inherit; the inherited call stays unresolved (honest-null).
-    rec = _parse_repo(tmp_path, {
-        "a/base.ts": "export class Base { helper(){} }\n",
-        "b/base.ts": "export class Base { other(){} }\n",
-        "sub.ts": "import { Base } from './a/base';\nexport class Sub extends Base { go(){ this.helper(); } }\n",
-    }, "sub.ts")
+    rec = _parse_repo(
+        tmp_path,
+        {
+            "a/base.ts": "export class Base { helper(){} }\n",
+            "b/base.ts": "export class Base { other(){} }\n",
+            "sub.ts": "import { Base } from './a/base';\nexport class Sub extends Base { go(){ this.helper(); } }\n",
+        },
+        "sub.ts",
+    )
     calls = {c.name: c.path for f in rec.functions for c in f.calls}
     assert calls.get("helper") is None
+
+
+# --- `.vue` import target resolution -------------------------------------------------------
+# Vue imports components by explicit `.vue` extension, usually behind a tsconfig `@/*` alias.
+# The resolver must resolve those to the real File node the Vue parser emits — otherwise the
+# component-composition edge is lost (parked in externalImports).
+
+
+def _mk(root, rel: str) -> None:
+    p = root / rel
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text("")
+
+
+def test_vue_import_targets_resolve(tmp_path) -> None:
+    from breezeai_cog.parsers.typescript.imports import build_alias_index, _resolve
+
+    (tmp_path / "tsconfig.json").write_text(
+        '{ "compilerOptions": { "baseUrl": ".", "paths": { "@/*": ["src/*"] } } }'
+    )
+    for rel in (
+        "src/components/Avatar.vue",
+        "src/views/UserList.vue",
+        "src/widgets/index.vue",
+        "src/util.ts",
+        "src/components/Button.ts",
+        "src/components/Button.vue",
+    ):
+        _mk(tmp_path, rel)
+    idx = build_alias_index(tmp_path)
+
+    def r(mod: str) -> str | None:
+        return _resolve(mod, "src/App.vue", tmp_path, idx)
+
+    # explicit `.vue`, via alias and relative, plus extensionless and directory-index forms
+    assert r("@/components/Avatar.vue") == "src/components/Avatar.vue"
+    assert r("./components/Avatar.vue") == "src/components/Avatar.vue"
+    assert r("@/views/UserList") == "src/views/UserList.vue"  # extensionless → .vue
+    assert r("@/widgets") == "src/widgets/index.vue"  # directory → index.vue
+    # precedence: an extensionless import next to both must still pick the JS/TS file
+    assert r("@/components/Button") == "src/components/Button.ts"
+    # control: a `.ts` target is unchanged
+    assert r("@/util") == "src/util.ts"
+
+
+def test_vue_import_edge_in_record(tmp_path) -> None:
+    # End-to-end: an explicit `.vue` import lands in importFiles, not externalImports.
+    (tmp_path / "Avatar.vue").write_text("<template><div/></template>\n")
+    p = tmp_path / "Home.ts"
+    p.write_text("import Avatar from './Avatar.vue';\nexport const Home = Avatar;\n")
+    ctx = ParseContext(
+        path="Home.ts",
+        abs_path=p,
+        source=p.read_bytes(),
+        repo_root=tmp_path,
+        capture_statements=False,
+        text_truncation_limit=1000,
+    )
+    rec = TypeScriptParser().parse_file(ctx)
+    assert "Avatar.vue" in rec.importFiles
+    assert "./Avatar.vue" not in rec.externalImports
+
+
+# --- barrel files (re-export indirection) -------------------------------------------------
+# A barrel re-exports symbols from sibling modules. The re-export source must become an edge
+# so the barrel is a real waypoint (consumer → barrel → definition), and `default as X` must
+# be recorded under the exported name X, not `default`.
+
+BARREL_FILES = {
+    "tsconfig.json": '{ "compilerOptions": { "baseUrl": ".", "paths": { "@/*": ["src/*"] } } }',
+    "src/components/Avatar.vue": "",
+    "src/components/UserCard.vue": "",
+    "src/components/Button.ts": "export const Button = 1;\n",
+    "src/components/index.ts":
+        "export { default as Avatar } from './Avatar.vue';\n"
+        "export { UserCard } from './UserCard.vue';\n"
+        "export * from './Button';\n"
+        "export { fmt } from 'some-lib';\n"      # external re-export
+        "const localOnly = 'hello';\nexport { localOnly };\n",  # NOT a re-export (no `from`)
+    "src/views/Home.ts": "import { Avatar, UserCard } from '@/components';\nexport const Home = 1;\n",
+}
+
+
+def test_barrel_reexport_sources_become_edges(tmp_path) -> None:
+    rec = _parse_repo(tmp_path, BARREL_FILES, "src/components/index.ts")
+    # every re-export SOURCE that resolves in-repo is an edge...
+    assert set(rec.importFiles) == {
+        "src/components/Avatar.vue",
+        "src/components/UserCard.vue",
+        "src/components/Button.ts",
+    }
+    # ...an external re-export source goes external, like a static import
+    assert "some-lib" in rec.externalImports
+    # `default as Avatar` is recorded as `Avatar`, not `default`
+    assert "Avatar" in rec.exports and "default" not in rec.exports
+    # a plain `export { localOnly }` (no `from`) must NOT create a phantom edge
+    assert not any("localOnly" in f for f in rec.importFiles + rec.externalImports)
+
+
+def test_barrel_consumer_reaches_definition(tmp_path) -> None:
+    # The consumer links to the barrel; combined with the barrel's edges that is a connected
+    # path Home.ts → index.ts → Avatar.vue (the graph is no longer a dead end).
+    consumer = _parse_repo(tmp_path, BARREL_FILES, "src/views/Home.ts")
+    assert "src/components/index.ts" in consumer.importFiles
+    barrel = _parse_repo(tmp_path, BARREL_FILES, "src/components/index.ts")
+    assert "src/components/Avatar.vue" in barrel.importFiles
+
+
+# --- wrapped client→backend API calls -----------------------------------------------------
+# The HTTP-client hint test keys off the callee NAME, so a wrapped axios instance
+# (arbitrary name) or a config-object wrapper call slips past it. Both should be recognised.
+
+def _api_calls(tmp_path, body: str) -> set[tuple[str, str]]:
+    p = tmp_path / "api.ts"
+    p.write_text(body)
+    ctx = ParseContext(
+        path="api.ts", abs_path=p, source=p.read_bytes(), repo_root=tmp_path,
+        capture_statements=True,
+    )
+    rec = TypeScriptParser().parse_file(ctx)
+    return {(s.method, s.endpoint) for s in rec.statements if s.semanticType == "api_call"}
+
+
+def test_wrapped_axios_instance_method_form(tmp_path) -> None:
+    # `const service = axios.create(...)` → calls on `service` are HTTP even though `service`
+    # is not a client-hint substring.
+    calls = _api_calls(
+        tmp_path,
+        "const service = axios.create({ baseURL: '/api' });\n"
+        "export const getUser = (id) => service.get(`/users/${id}`);\n",
+    )
+    assert ("GET", "/users/{id}") in calls
+
+
+def test_wrapped_config_object_form(tmp_path) -> None:
+    # `request({ url, method })` — the config-object shape is HTTP regardless of the callee.
+    calls = _api_calls(
+        tmp_path,
+        "import request from '@/utils/request';\n"
+        "export const login = (d) => request({ url: '/login', method: 'post', data: d });\n",
+    )
+    assert ("POST", "/login") in calls
+
+
+def test_direct_axios_still_detected(tmp_path) -> None:
+    # No regression: hinted callees keep matching.
+    assert ("GET", "/direct") in _api_calls(tmp_path, "export const raw = () => axios.get('/direct');\n")
+
+
+def test_wrapper_detection_no_false_positives(tmp_path) -> None:
+    # A router `{ path, component }` config is not an API call, and an interceptor
+    # registration (`.use`) is not an HTTP verb.
+    calls = _api_calls(
+        tmp_path,
+        "const service = axios.create({});\n"
+        "const routes = [{ path: '/home', component: Home }];\n"
+        "service.interceptors.request.use((c) => c);\n",
+    )
+    assert calls == set()
+
+
+# --- lazy / dynamic import() targets ------------------------------------------------------
+# A dynamic import() (lazy route page, defineAsyncComponent, await import) is a nested call,
+# not a top-level statement, so the static extractor never saw it. Its target should resolve
+# into the same file-level importFiles edge as a static import.
+
+DYNAMIC_IMPORT_FILES = {
+    "tsconfig.json": '{ "compilerOptions": { "baseUrl": ".", "paths": { "@/*": ["src/*"] } } }',
+    "views/UserDetail.vue": "",
+    "src/views/Reports.vue": "",
+    "chunks/Heavy.ts": "export const Heavy = 1;\n",
+    "app.ts":
+        "const UserDetail = defineAsyncComponent(() => import('./views/UserDetail.vue'));\n"
+        "const routes = [{ path: '/x', component: () => import('@/views/Reports.vue') }];\n"
+        "async function load() { return await import('./chunks/Heavy.ts'); }\n"
+        "const computed = (n) => import('./views/' + n);\n"   # computed → unresolved
+        "const ext = () => import('lodash-es');\n",           # external package
+}
+
+
+def test_dynamic_imports_resolve_to_import_files(tmp_path) -> None:
+    rec = _parse_repo(tmp_path, DYNAMIC_IMPORT_FILES, "app.ts")
+    # relative .vue (defineAsyncComponent), aliased .vue (lazy route), relative .ts (await)
+    assert "views/UserDetail.vue" in rec.importFiles
+    assert "src/views/Reports.vue" in rec.importFiles      # @/ alias resolved
+    assert "chunks/Heavy.ts" in rec.importFiles
+    # an external package dynamic import goes external, like a static one
+    assert "lodash-es" in rec.externalImports
+    # a computed specifier ('./views/' + n) can't resolve → left out entirely (honest-null)
+    assert not any("computed" in f or f.endswith("/views/") for f in rec.importFiles)
+
+
+# --- export-name capture for const / default forms ----------------------------------------
+# `export const X = …` and `export default …` were missing from `exports` (only
+# function/class declarations and `export { … }` specifiers were captured).
+
+def test_exports_capture_const_and_default(tmp_path) -> None:
+    p = tmp_path / "e.ts"
+    p.write_text(
+        "export const X = defineComponent({ setup(){ const nested = 1 } });\n"  # nested local
+        "export const plain = 1;\n"                            # const = literal
+        "export const arrowFn = () => {};\n"                   # const = arrow (a captured fn)
+        "export function decl() {}\n"                          # function decl (already worked)
+        "export class C {}\n"                                  # class decl (already worked)
+        "export default foo;\n"                                # default export
+        "const a = 1, b = 2;\nexport { a, b };\n"              # specifier list (already worked)
+        "export const { p, q } = obj;\n"                       # destructuring → skipped
+    )
+    ctx = ParseContext(
+        path="e.ts", abs_path=p, source=p.read_bytes(), repo_root=tmp_path,
+        capture_statements=False, text_truncation_limit=1000,
+    )
+    exports = set(TypeScriptParser().parse_file(ctx).exports)
+    # newly captured
+    assert {"X", "plain", "arrowFn", "default"} <= exports
+    # still captured
+    assert {"decl", "C", "a", "b"} <= exports
+    # destructuring pattern names are not emitted (honest-null, no pattern text)
+    assert "p" not in exports and "q" not in exports
+    # a local const inside the exported value's body must NOT leak into exports
+    assert "nested" not in exports

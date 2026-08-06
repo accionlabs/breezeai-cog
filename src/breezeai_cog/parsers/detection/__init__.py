@@ -11,8 +11,12 @@ from .queries import is_query, text_has_query
 
 
 def classify_call(
-    callee: str, method: str, arg: str | None = None, language: str | None = None,
+    callee: str,
+    method: str,
+    arg: str | None = None,
+    language: str | None = None,
     typed_db_ids: "frozenset[str] | None" = None,
+    http_client_ids: "frozenset[str] | None" = None,
 ) -> tuple[str, str, str | None] | None:
     """Classify a normalized call into ``(semanticType, method, dataAccessHint)``.
 
@@ -26,7 +30,7 @@ def classify_call(
     permissive). API is tried first (so ``objects.get`` is a Django query, not an HTTP GET);
     raw queries before ORM (so ``createNativeQuery("SELECT …")`` is a ``query_statement``).
     """
-    verb = match_api(callee, method)
+    verb = match_api(callee, method, http_client_ids=http_client_ids)
     if verb is not None:
         return "api_call", verb, None
     if is_query(method, arg):

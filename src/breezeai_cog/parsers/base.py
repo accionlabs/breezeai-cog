@@ -35,6 +35,15 @@ def _read_sibling_lines(obj: object, filename: str) -> list[str]:
 #: this list is the narrower route-only guard for files that are still captured.
 _GLOBAL_FIXTURE_MARKERS: tuple[str, ...] = (".test.", ".spec.")
 
+#: Directory names (matched as whole path segments, not substrings) whose files are mock /
+#: fixture data — parsed for structure but never a real route source. A route config living
+#: under one of these is a dev stand-in (e.g. a mock backend that serves the app's dynamic
+#: routes), not the wired router, so route/entry-point emitters skip it. Segment-exact so
+#: ``mockups/`` (a real word) does not match ``mock``.
+_GLOBAL_FIXTURE_DIRS: frozenset[str] = frozenset(
+    {"mock", "mocks", "__mocks__", "fixtures", "__fixtures__"}
+)
+
 
 @dataclass(frozen=True, slots=True)
 class ParseContext:
@@ -93,7 +102,9 @@ class BaseParser:
         their framework's signature in ``source`` (e.g. ``b"@nestjs/" in source``)."""
         return True
 
-    def build_index(self, repo_root: Path, files: Sequence[Path], jobs: int = 1) -> Any | None:  # optional pre-pass
+    def build_index(
+        self, repo_root: Path, files: Sequence[Path], jobs: int = 1
+    ) -> Any | None:  # optional pre-pass
         return None
 
     def ignore_patterns(self) -> list[str]:
@@ -113,9 +124,14 @@ class BaseParser:
         return _GLOBAL_FIXTURE_MARKERS
 
     def is_fixture_file(self, path: str) -> bool:
-        """Whether ``path`` is a route-only fixture for this parser's language/framework."""
-        base = path.rsplit("/", 1)[-1]
-        return any(marker in base for marker in self.fixture_markers())
+        """Whether ``path`` is a route-only fixture — either a basename fixture marker
+        (``.stories.``/``.mock.``…) or a file living under a fixture directory (``mock``/
+        ``__mocks__``/``fixtures``…). Structural capture is unaffected; only route/entry-point
+        emitters consult this."""
+        parts = path.replace("\\", "/").split("/")
+        if any(marker in parts[-1] for marker in self.fixture_markers()):
+            return True
+        return any(seg in _GLOBAL_FIXTURE_DIRS for seg in parts[:-1])
 
     def parse_file(self, ctx: ParseContext) -> FileRecord:  # pragma: no cover - abstract
         raise NotImplementedError

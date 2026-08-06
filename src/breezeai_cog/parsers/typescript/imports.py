@@ -19,8 +19,12 @@ from ...utils import repo_relative
 from ..index_common import ClassHeritage, parallel_map, record_distinct
 from ..treesitter import node_text, parse_source
 
-_SUFFIXES = (".ts", ".tsx", ".d.ts", ".js", ".jsx", ".mjs", ".cjs")
-_INDEXES = ("index.ts", "index.tsx", "index.js", "index.jsx")
+# `.vue` is appended LAST so an extensionless import next to both `Foo.ts` and `Foo.vue`
+# still resolves to the JS/TS file (matching bundler resolution order). Only `.vue` is added
+# here — the Vue parser emits a real `File` node for it, so the edge lands on a graph identity;
+# extensions with no parser (e.g. `.svelte`) are deliberately omitted to avoid dangling edges.
+_SUFFIXES = (".ts", ".tsx", ".d.ts", ".js", ".jsx", ".mjs", ".cjs", ".vue")
+_INDEXES = ("index.ts", "index.tsx", "index.js", "index.jsx", "index.vue")
 _TSCONFIGS = ("tsconfig.json", "jsconfig.json")
 
 
@@ -462,6 +466,11 @@ def build_ts_index(repo_root: Path, files: Sequence[Path], jobs: int = 1) -> TsA
 
 
 def _try_paths(target: Path, repo_root: Path) -> str | None:
+    # An explicit-extension target (Vue imports are conventionally `./Avatar.vue`) resolves
+    # as-is; the suffix loop below only ever APPENDS an extension, so without this an explicit
+    # `.vue`/`.ts` specifier would be probed as `Avatar.vue.vue` and missed.
+    if target.is_file():
+        return repo_relative(target, repo_root)
     for suffix in _SUFFIXES:
         cand = target.with_name(target.name + suffix)
         if cand.is_file():
@@ -512,19 +521,36 @@ def _module_of(import_node: Node, source: bytes) -> str | None:
 
 
 def _export_names(node: Node, source: bytes) -> list[str]:
+    """Exported names of one ``export_statement``. Scans the statement's TOP-LEVEL structure
+    only — never descending into a declaration's value — so a nested local (``export const X =
+    defineComponent({ setup(){ const n = 1 } })``) is not mistaken for an export."""
     names: list[str] = []
-    stack = [node]
-    while stack:
-        sub = stack.pop()
-        if sub.type == "export_specifier":
-            name = sub.child_by_field_name("name")
+    if node.type != "export_statement":
+        return names
+    if any(c.type == "default" for c in node.children):
+        # `export default …` provides the module's default binding (a named
+        # `export default function foo(){}` also yields `foo` via the declaration branch below).
+        names.append("default")
+    for child in node.named_children:
+        if child.type == "export_clause":  # `export { a, b as c }` / `export { … } from '…'`
+            for spec in child.named_children:
+                if spec.type == "export_specifier":
+                    # exported name is the alias when present, else the bare name
+                    name = spec.child_by_field_name("alias") or spec.child_by_field_name("name")
+                    if name is not None:
+                        names.append(node_text(name, source))
+        elif child.type in ("class_declaration", "function_declaration"):
+            name = child.child_by_field_name("name")
             if name is not None:
                 names.append(node_text(name, source))
-        elif sub.type in ("class_declaration", "function_declaration"):
-            name = sub.child_by_field_name("name")
-            if name is not None:
-                names.append(node_text(name, source))
-        stack.extend(sub.named_children)
+        elif child.type in ("lexical_declaration", "variable_declaration"):
+            # `export const X = …` (incl. `export const a = 1, b = 2`). Only the top-level
+            # declarators — a destructuring pattern (non-identifier name) is skipped (honest-null).
+            for d in child.named_children:
+                if d.type == "variable_declarator":
+                    name = d.child_by_field_name("name")
+                    if name is not None and name.type == "identifier":
+                        names.append(node_text(name, source))
     return names
 
 
@@ -550,6 +576,34 @@ def _imported_names(node: Node, source: bytes) -> list[str]:
     return names
 
 
+# A dynamic import is `import('x')` — a call_expression whose `function` child is the `import`
+# node. It can sit anywhere (a lazy route `component: () => import(...)`, `defineAsyncComponent`,
+# an `await import()`), so unlike a static import it isn't a top-level statement. The byte guard
+# short-circuits the tree walk for the ~all files that use no dynamic import.
+_DYNAMIC_IMPORT_GUARD = b"import("
+
+
+def _dynamic_import_specifiers(root: Node, source: bytes) -> list[str]:
+    """Every dynamic ``import('x')`` specifier in the tree. A non-literal specifier
+    (a template/concat computed path) yields no string node and is skipped — honest-null,
+    never a guessed path."""
+    out: list[str] = []
+    stack = [root]
+    while stack:
+        n = stack.pop()
+        if n.type == "call_expression":
+            fn = n.child_by_field_name("function")
+            if fn is not None and fn.type == "import":
+                args = n.child_by_field_name("arguments")
+                strings = args.named_children if args is not None else []
+                s = next((c for c in strings if c.type == "string"), None)
+                spec = _string_literal(s, source)
+                if spec:
+                    out.append(spec)
+        stack.extend(n.named_children)
+    return out
+
+
 def extract_imports(
     root: Node, source: bytes, file_path: str, repo_root: str | Path, index: TsAliasIndex | None = None
 ) -> tuple[list[str], list[str], list[str], dict[str, str]]:
@@ -571,5 +625,23 @@ def extract_imports(
                     bindings[nm] = resolved
         elif node.type == "export_statement":
             exports.extend(_export_names(node, source))
+            # A re-export (`export … from './X'`) — a barrel-file edge. Resolve the source so
+            # the barrel becomes a real graph waypoint (consumer → barrel → definition) instead
+            # of a dead end. Gate on the `source` field, not a string search, so a plain
+            # `export const s = 'hello'` is never mistaken for a re-export. All forms (named,
+            # `default as`, `export *`, `* as ns`) are covered — only the source is resolved.
+            if node.child_by_field_name("source") is not None:
+                module = _module_of(node, source)
+                if module:
+                    resolved = _resolve(module, file_path, repo_root, index)
+                    (internal if resolved else external).setdefault(resolved or module, None)
+
+    # Dynamic imports (`import('x')`) — lazy pages / code-split components. Resolved into the
+    # same file-level edge set as static imports (no binding: a dynamic import binds a Promise,
+    # not a clean symbol, so calls[].path can't attribute through it — honest-null).
+    if _DYNAMIC_IMPORT_GUARD in source:
+        for module in _dynamic_import_specifiers(root, source):
+            resolved = _resolve(module, file_path, repo_root, index)
+            (internal if resolved else external).setdefault(resolved or module, None)
 
     return list(internal), list(external), exports, bindings

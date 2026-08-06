@@ -31,8 +31,17 @@ _BARE_FUNCTIONS = {"fetch", "$fetch", "usefetch", "apifetch", "authfetch", "cust
 _DB_CHAIN_MARKERS = ("query(", ".filter", ".where", "query.")
 
 
-def match_api(callee: str, method: str) -> str | None:
-    """Return the HTTP verb (uppercased) if ``callee.method(...)`` is an HTTP call."""
+def match_api(
+    callee: str, method: str, http_client_ids: "frozenset[str] | None" = None
+) -> str | None:
+    """Return the HTTP verb (uppercased) if ``callee.method(...)`` is an HTTP call.
+
+    ``http_client_ids`` is a per-file set of names known to be HTTP clients that a
+    substring hint can't reach — a wrapped axios instance (``const service =
+    axios.create(...)`` → ``service.get(...)``) or a config-object wrapper call
+    (``request({ url, method })``), whose names are arbitrary. A callee whose receiver
+    (or the bare callee itself) is in that set counts as a client, same as a hint match.
+    """
     m = method.lower()
     low = callee.lower()
     if m in _BARE_FUNCTIONS or low in _BARE_FUNCTIONS or low.endswith(".fetch"):
@@ -42,7 +51,14 @@ def match_api(callee: str, method: str) -> str | None:
     # client-hint substring is still required, so a bare ``FooAsync()`` never matches).
     if m.endswith("async") and len(m) > len("async"):
         m = m[: -len("async")]
-    if m in _HTTP_VERBS and any(hint in low for hint in _CLIENT_HINTS):
+    if m not in _HTTP_VERBS:
+        return None
+    is_client = any(hint in low for hint in _CLIENT_HINTS)
+    if not is_client and http_client_ids:
+        # names are original-case identifiers; the receiver is the segment before the first dot
+        # (``service.get`` → ``service``), or the whole callee for a bare call (``request``).
+        is_client = callee in http_client_ids or callee.split(".", 1)[0] in http_client_ids
+    if is_client:
         if any(mk in low for mk in _DB_CHAIN_MARKERS):
             return None  # an ORM query chain (e.g. session.query(...).filter(...).delete())
         return m.upper()  # ``request`` -> "REQUEST" (verb lives in the config arg; matches legacy)
