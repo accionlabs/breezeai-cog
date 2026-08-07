@@ -15,6 +15,8 @@ from fastapi.responses import JSONResponse
 from starlette.concurrency import run_in_threadpool
 
 from ..analyzers.es import BuildError, build_es_records
+from ..analyzers.nosql import BuildError as NoSqlBuildError
+from ..analyzers.nosql import build_nosql_records
 from ..analyzers.sql import parse_ddl
 from ..services.diff import empty_meta, run_diff_stream
 from ..services.inprocess import analyze_in_memory
@@ -187,6 +189,62 @@ async def analyze_sql(
         "indexCount": len(parsed["allIndexes"]),
         "sequenceCount": len(parsed["sequences"]),
         "message": "SQL parsed, NDJSON.gz streamed to S3, ingestion notification sent.",
+    })
+
+
+@router.post("/api/analyze-nosql")
+async def analyze_nosql(
+    request: Request,
+    background_tasks: BackgroundTasks,
+    file: list[UploadFile] = File(None),
+    projectUuid: str = Form(None),
+    dataLakeId: str = Form(None),
+    repositoryName: str = Form(None),
+) -> JSONResponse:
+    deps: ServerDeps = request.app.state.deps
+
+    if not file:
+        raise ApiError("At least one multipart 'file' is required", 400)
+    if not projectUuid:
+        raise ApiError("projectUuid is required", 400)
+    if not dataLakeId:
+        raise ApiError("dataLakeId is required", 400)
+
+    uploads = []
+    for f in file:
+        data = await f.read()
+        uploads.append({"name": f.filename or "uploaded.json", "text": data.decode("utf-8"), "size": len(data)})
+
+    try:
+        build = build_nosql_records(uploads)
+    except NoSqlBuildError as exc:
+        raise ApiError(str(exc), exc.status_code)
+
+    primary_name = build["collections"][0]
+    s3_key = f"nosql-ontology/{projectUuid}/{dataLakeId}/{_now_ms()}-{_safe_name(primary_name)}.ndjson.gz"
+    await run_in_threadpool(_stream_records_to_s3, deps, s3_key, build["records"])
+    background_tasks.add_task(
+        deps.notify, "/db-ontology/stream-ingest-s3",
+        {"s3Key": s3_key, "projectUuid": projectUuid, "dataLakeId": dataLakeId,
+         "repositoryName": repositoryName or primary_name},
+    )
+
+    n = len(uploads)
+    cc = build["collectionCount"]
+    message = (
+        f"NoSQL schema ({n} file{'' if n == 1 else 's'}, "
+        f"{cc} collection{'' if cc == 1 else 's'}) parsed; "
+        "NDJSON.gz streamed to S3 and ingestion notification sent."
+    )
+    return JSONResponse(status_code=202, content={
+        "success": True,
+        "s3Key": s3_key,
+        "collections": build["collections"],
+        "recordCount": len(build["records"]),
+        "collectionCount": cc,
+        "fieldCount": build["fieldCount"],
+        "indexCount": build["indexCount"],
+        "message": message,
     })
 
 
