@@ -137,7 +137,8 @@ class StructuredJsonParser(BaseParser):
 
     def _flatten(self, obj: Any, max_value_len: int | None = None) -> dict[str, Any]:
         """Recursively flatten the whole document to ``{dotted.path: primitive}``. Dicts
-        join with ``.``, list items with ``[i]``. ``None`` leaves are dropped (noise);
+        join with ``.``, list items with ``[i]``. ``None`` leaves are emitted as empty
+        strings (so a present-but-null field is distinguishable from an absent one);
         secret-named keys are redacted; strings truncated to ``max_value_len`` (falls back
         to :attr:`MAX_VALUE_LEN`; ``<= 0`` disables truncation); bounded by
         :attr:`MAX_LEAVES`."""
@@ -153,7 +154,7 @@ class StructuredJsonParser(BaseParser):
                     if isinstance(v, (dict, list)):
                         walk(v, key)
                     elif v is None:
-                        continue
+                        out[key] = ""  # explicit empty: present-but-null != absent
                     elif self._is_secret_key(str(k)):
                         out[key] = "***"
                     else:
@@ -163,6 +164,8 @@ class StructuredJsonParser(BaseParser):
                     walk(v, f"{prefix}[{i}]")
             elif node is not None:
                 out[prefix] = self._leaf(node, limit)
+            elif prefix:  # a null list element (root scalars are excluded by claims())
+                out[prefix] = ""
 
         walk(obj, "")
         return out

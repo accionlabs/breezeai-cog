@@ -174,7 +174,7 @@ def test_cross_file_constant_address_folds(tmp_path) -> None:
     # A constant declared in one file (Constant.APP_ID) resolves inside another file's
     # address, incl. a chain (Bus.NAME = Constant.APP_ID + "/x"), via the repo-wide index.
     (tmp_path / "Constant.java").write_text(
-        'package a;\npublic class Constant { public static final String APP_ID = "CEPAY0957"; }\n'
+        'package a;\npublic class Constant { public static final String APP_ID = "APP0957"; }\n'
     )
     (tmp_path / "Bus.java").write_text(
         'package a;\npublic class Bus { public static final String NAME = Constant.APP_ID + "/x"; }\n'
@@ -192,8 +192,8 @@ def test_cross_file_constant_address_folds(tmp_path) -> None:
                        resolution_index=idx, capture_statements=True)
     rec = parser.parse_file(ctx)
     eps = {s.endpoint for s in rec.statements if s.semanticType == "eventbus_consumer"}
-    assert "view/CEPAY0957" in eps   # cross-file constant in a concat
-    assert "CEPAY0957/x" in eps      # cross-file constant chain
+    assert "view/APP0957" in eps   # cross-file constant in a concat
+    assert "APP0957/x" in eps      # cross-file constant chain
 
 
 def test_vertx2_registerHandler_detected_as_consumer(tmp_path) -> None:
