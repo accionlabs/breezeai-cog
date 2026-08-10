@@ -59,6 +59,12 @@ def repo_to_json_tree(
     user_api_key: Optional[str] = typer.Option(
         None, "--user-api-key", help="Backend API key, sent as `api-key` (with --upload; env: API_KEY).",
     ),
+    llm_platform: Optional[str] = typer.Option(
+        None, "--llm-platform",
+        help="Embedding platform sent as `?llmPlatform=` on upload (default AWSBEDROCK, matches the "
+             "web UI; env: BREEZEAI_COG_LLM_PLATFORM). Must be configured on the deployment or the "
+             "backend leaves the ontology stuck in 'creating_embeddings'.",
+    ),
     verbose: bool = typer.Option(False, "--verbose", help="Verbose (DEBUG) logging."),
 ) -> None:
     """Analyze a repository to a gzipped NDJSON ontology (optionally uploading it)."""
@@ -73,6 +79,8 @@ def repo_to_json_tree(
         overrides["uuid"] = uuid
     if user_api_key is not None:
         overrides["user_api_key"] = user_api_key
+    if llm_platform is not None:
+        overrides["llm_platform"] = llm_platform
     if max_concat_depth is not None:
         overrides["max_concat_depth"] = max_concat_depth
 

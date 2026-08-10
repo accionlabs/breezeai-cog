@@ -10,8 +10,12 @@ Request contract (from the backend controller):
   * header      ``api-key``     — ``settings.user_api_key``
 
 Transient failures (network errors / HTTP 5xx) get a bounded retry; 4xx is fatal.
-Following the port convention (see ``notify.py``), ``llmPlatform`` is never sent — the
-backend query param is optional and defaults when absent.
+
+``llmPlatform`` (``settings.llm_platform``, default ``AWSBEDROCK``) is sent as a query
+param, mirroring the web UI. It selects the platform the backend uses to embed the
+uploaded ontology; if omitted the backend falls back to its own default embedding
+platform, which on some deployments is unconfigured and leaves the ontology stuck in
+``creating_embeddings`` (never reaching ``active``).
 """
 
 from __future__ import annotations
@@ -55,6 +59,9 @@ def upload_ontology(
         raise UploadError(f"upload artifact not found: {path}")
 
     url = f"{base.rstrip('/')}{_GENERATE_PATH}"
+    if settings.llm_platform:
+        from urllib.parse import quote
+        url = f"{url}?llmPlatform={quote(settings.llm_platform)}"
     headers = {"api-key": settings.user_api_key.get_secret_value()}
     data = {"projectUuid": settings.uuid, "name": repository_name}
 

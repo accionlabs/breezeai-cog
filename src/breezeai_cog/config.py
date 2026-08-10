@@ -88,6 +88,11 @@ class Settings(BaseSettings):
         default=None,
         validation_alias=AliasChoices("BREEZEAI_COG_USER_API_KEY", "API_KEY"),
     )
+    # Embedding platform sent as `?llmPlatform=` on /code-ontology/generate. The backend
+    # embeds the uploaded ontology with this platform; if omitted it falls back to the
+    # deployment's default, which may be an unconfigured platform — leaving the ontology
+    # stuck in `creating_embeddings`. Default matches the web UI (AWSBEDROCK).
+    llm_platform: str = "AWSBEDROCK"  # --llm-platform
 
     # ── AWS / S3 (server, conventional unprefixed names) ──────────────────
     aws_access_key: str | None = Field(
