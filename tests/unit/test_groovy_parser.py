@@ -8,7 +8,9 @@ assert the skeleton + resolution the graph depends on.
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
+import pytest
 from jsonschema import Draft202012Validator
 
 from breezeai_cog.emit import to_line
@@ -58,6 +60,29 @@ def _parse(tmp_path, *, capture=False) -> FileRecord:
     ctx = ParseContext(path=REL, abs_path=p, source=SRC, repo_root=tmp_path,
                        resolution_index=index, capture_statements=capture)
     return parser.parse_file(ctx)
+
+
+def _parse_src(tmp_path, src: bytes, *, capture=False) -> FileRecord:
+    p = tmp_path / "T.groovy"
+    p.write_bytes(src)
+    ctx = ParseContext(path="T.groovy", abs_path=p, source=src, repo_root=tmp_path,
+                       capture_statements=capture)
+    return GroovyParser().parse_file(ctx)
+
+
+def _grammar_supports_nested() -> bool:
+    """True when the loaded Groovy grammar captures nested (inner) types — i.e. the patched
+    fork is installed. Stock dekobon cannot, so nesting-dependent tests skip there."""
+    src = b"class A { class B {} }"
+    ctx = ParseContext(path="A.groovy", abs_path=Path("A.groovy"), source=src, repo_root=Path("."))
+    rec = GroovyParser().parse_file(ctx)
+    return "B" in {c.name for c in rec.classes}
+
+
+requires_patched_grammar = pytest.mark.skipif(
+    not _grammar_supports_nested(),
+    reason="requires the patched Groovy grammar (nested types / modifier enums); stock dekobon lacks it",
+)
 
 
 def test_imports_and_fqcn_resolution(tmp_path) -> None:
@@ -136,24 +161,45 @@ def test_closure_calls_fold_into_enclosing_method(tmp_path) -> None:
     assert "handle" in {c.name for f in rec.functions if f.name == "run" for c in f.calls}
 
 
-def test_nested_type_is_a_blind_spot_not_fabricated(tmp_path) -> None:
-    # The dekobon grammar cannot parse a nested type declaration — `class Inner {}` inside
-    # a class body misparses as a field. This is a documented best-effort limitation. The
-    # guarantee: the parser NEVER fabricates a class node from that misparse (no keyword-named
-    # or bogus class), and the outer class is still captured. Absent > wrong.
+def test_nested_type_no_fabrication(tmp_path) -> None:
+    # Invariant that holds under BOTH grammars: the outer class is captured and the parser
+    # NEVER fabricates a class node from a misparse (no keyword-named or bogus class).
+    # Absent > wrong. (The positive nested-capture assertion lives in the gated test below.)
     src = (
         "class Outer {\n"
         "  static class Inner { void innerMethod() {} }\n"
         "  void run() {}\n"
         "}\n"
     ).encode()
-    p = tmp_path / "Outer.groovy"
-    p.write_bytes(src)
-    ctx = ParseContext(path="Outer.groovy", abs_path=p, source=src, repo_root=tmp_path)
-    rec = GroovyParser().parse_file(ctx)
+    rec = _parse_src(tmp_path, src)
     names = {c.name for c in rec.classes}
     assert "Outer" in names
     assert not (names & {"class", "enum", "interface", "trait"})  # no fabricated keyword-class
+
+
+@requires_patched_grammar
+def test_nested_type_captured(tmp_path) -> None:
+    # With the patched grammar the inner type is a real Class parented to the outer, the
+    # outer's members before/after it are correctly attributed, and the outer span reaches
+    # its true closing brace (no truncation).
+    src = (
+        "class Outer {\n"                       # line 1
+        "  void run() {}\n"                     # 2
+        "  static class Inner {\n"              # 3
+        "    void innerMethod() {}\n"           # 4
+        "  }\n"                                 # 5
+        "  void after() {}\n"                   # 6
+        "}\n"                                   # 7
+    ).encode()
+    rec = _parse_src(tmp_path, src)
+    outer = next(c for c in rec.classes if c.name == "Outer")
+    inner = next(c for c in rec.classes if c.name == "Inner")
+    assert inner.parentId == outer.id  # nested, not hoisted to the file
+    assert outer.endLine == 7  # outer span not truncated at the nested type
+    innerm = next(f for f in rec.functions if f.name == "innerMethod")
+    assert innerm.parentId == inner.id  # inner method parented to Inner, not Outer
+    after = next(f for f in rec.functions if f.name == "after")
+    assert after.parentId == outer.id  # member after the nested type still on Outer, not orphaned
 
 
 def test_endpoint_concatenation(tmp_path) -> None:
@@ -257,3 +303,67 @@ def test_same_package_call_resolves_without_import(tmp_path) -> None:
                                          resolution_index=idx, capture_statements=True))
     call = next(c for f in rec.functions for c in f.calls if c.name == "dataGet")
     assert call.path == "RestCommon.groovy"
+
+
+# --- enum constant VALUE + doc capture (BREEZEAI-943) ---
+
+def test_enum_constant_values_and_doc(tmp_path) -> None:
+    src = (
+        "enum Priority {\n"
+        "  LOW('1'),    // lowest\n"
+        "  /** the peak */\n"
+        "  HIGH('3')\n"
+        "}\n"
+    ).encode()
+    rec = _parse_src(tmp_path, src)
+    enum = next(c for c in rec.classes if c.type == "enum")
+    assert (enum.metadata or {}).get("constants") == [
+        {"name": "LOW", "value": "1", "doc": "lowest"},   # trailing same-line comment
+        {"name": "HIGH", "value": "3", "doc": "the peak"},  # preceding groovydoc
+    ]
+
+
+def test_enum_constant_no_arg_and_non_literal_are_honest_null(tmp_path) -> None:
+    rec = _parse_src(tmp_path, b"enum E { A, B(compute()) }")
+    enum = next(c for c in rec.classes if c.type == "enum")
+    assert (enum.metadata or {}).get("constants") == [
+        {"name": "A", "value": None, "doc": None},   # no argument
+        {"name": "B", "value": None, "doc": None},   # non-literal argument → honest-null
+    ]
+
+
+def test_enum_constants_emit_no_statements(tmp_path) -> None:
+    # Constants are vocabulary carried on metadata, never emitted as statements.
+    rec = _parse_src(tmp_path, b"enum E { A('1'), B('2') }", capture=True)
+    assert rec.statements == []
+
+
+def test_plain_class_metadata_stays_none(tmp_path) -> None:
+    rec = _parse_src(tmp_path, b"class C { int x }")
+    assert next(c for c in rec.classes if c.name == "C").metadata is None
+
+
+@requires_patched_grammar
+def test_modifier_and_nested_enum_constants(tmp_path) -> None:
+    # The load-bearing real-world shape: a modifier-prefixed enum nested in a class, whose
+    # members follow the constants without a `;`. Grammar fix + capture together recover the
+    # constant VALUES that previously landed nowhere.
+    src = (
+        "class Holder {\n"
+        "  public enum Entry {\n"
+        "    APPLY_STATUS('CAPLC09'),\n"
+        "    APPLY_DATE('CAPLC11')\n"
+        "    private final String col\n"
+        "    Entry(String col) { this.col = col }\n"
+        "  }\n"
+        "  def use() {}\n"
+        "}\n"
+    ).encode()
+    rec = _parse_src(tmp_path, src)
+    holder = next(c for c in rec.classes if c.name == "Holder")
+    entry = next(c for c in rec.classes if c.name == "Entry")
+    assert entry.type == "enum" and entry.parentId == holder.id
+    assert (entry.metadata or {}).get("constants") == [
+        {"name": "APPLY_STATUS", "value": "CAPLC09", "doc": None},
+        {"name": "APPLY_DATE", "value": "CAPLC11", "doc": None},
+    ]

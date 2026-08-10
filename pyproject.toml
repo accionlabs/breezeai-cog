@@ -26,7 +26,11 @@ dependencies = [
   # Standalone Groovy grammar — the language-pack `groovy` grammar is a structureless
   # "command soup" (no class/method/import nodes); dekobon's is a real structural
   # grammar. See .todo/groovy-grammar-evaluation.md and parsers/treesitter.py.
-  "dekobon-tree-sitter-groovy>=0.2.2",
+  # Pinned to the Accionlabs fork, which adds nested-type / modifier-enum /
+  # enum-members-without-`;` / enhanced-for support that stock dekobon 0.2.2 lacks (the
+  # fixes are contributed upstream; move this back to a released `dekobon-tree-sitter-groovy`
+  # version once the PR merges).
+  "dekobon-tree-sitter-groovy @ git+https://github.com/accionlabs/tree-sitter-groovy@main",
   "pyyaml>=6.0",
   # --upload (services/upload.py) and notify (services/notify.py) are first-class
   # CLI features, so their HTTP client is a core dependency — not an opt-in extra.
@@ -56,6 +60,12 @@ breezeai-cog = "breezeai_cog.cli:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/breezeai_cog"]
+
+# Permit the git direct reference on dekobon-tree-sitter-groovy (the patched Groovy
+# grammar fork) above. Interim until the upstream fix releases and the pin moves back to a
+# published version.
+[tool.hatch.metadata]
+allow-direct-references = true
 
 [tool.pytest.ini_options]
 pythonpath = ["src"]
