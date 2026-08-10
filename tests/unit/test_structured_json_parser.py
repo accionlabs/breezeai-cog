@@ -28,7 +28,7 @@ def _claims(obj) -> bool:
 
 # ── claim gating (which JSON is captured in full) ──────────────────────────────
 def test_claims_values_array_of_records() -> None:
-    assert _claims({"values": [{"MAPLAK3": "CEPAY0673"}]}) is True
+    assert _claims({"values": [{"code": "REC-1"}]}) is True
 
 
 def test_claims_root_array_of_objects() -> None:
@@ -85,7 +85,7 @@ def test_still_claims_other_configs_with_record_arrays() -> None:
 
 # ── emission: File.metadata only, no Function/Class nodes ───────────────────────
 def test_emits_config_record_no_functions() -> None:
-    rec = _parse("json/MAPL(CEPAY0673).json", {"values": [{"MAPLAK3": "CEPAY0673"}]})
+    rec = _parse("json/records.json", {"values": [{"code": "REC-1"}]})
     assert rec.type == "config" and rec.language == "structured-json"
     assert rec.functions == [] and rec.classes == []  # never mints graph-function noise
     assert rec.metadata["kind"] == "structured-json"
@@ -93,18 +93,29 @@ def test_emits_config_record_no_functions() -> None:
 
 def test_full_recursive_flatten_of_whole_document() -> None:
     rec = _parse(
-        "json/MSCR(S97R).json",
-        {"values": [{"MSCRAK3": "S97R", "MSCRD01": "画面",
-                     "MSCRP": {"20000101": {"01": {"MSCRP01": "$FULL_x/formal"}}},
-                     "MSCRD02": None}]},
+        "json/records.json",
+        {"values": [{"code": "REC-1", "label": "widget",
+                     "spec": {"2020": {"01": {"kind": "full"}}},
+                     "note": None}]},
     )
     f = rec.metadata["fields"]
     # whole-document flatten: the wrapper array index is part of the path
-    assert f["values[0].MSCRAK3"] == "S97R"
-    assert f["values[0].MSCRD01"] == "画面"
-    assert f["values[0].MSCRP.20000101.01.MSCRP01"] == "$FULL_x/formal"
-    assert "values[0].MSCRD02" not in f  # None dropped
+    assert f["values[0].code"] == "REC-1"
+    assert f["values[0].label"] == "widget"
+    assert f["values[0].spec.2020.01.kind"] == "full"
+    assert f["values[0].note"] == ""  # None emitted as explicit empty (present != absent)
     assert rec.metadata["leafCount"] == len(f)
+
+
+def test_null_leaves_emitted_as_empty_not_dropped() -> None:
+    # a present-but-null field is kept as "" so it is distinguishable from an absent one.
+    present = _fields("a.json", [{"code": "REC", "rule": "x", "joins": None}])
+    assert present["[0].joins"] == ""            # present-but-null -> explicit empty
+    absent = _fields("a.json", [{"code": "REC", "rule": "x"}])
+    assert "[0].joins" not in absent             # truly absent -> still absent
+    # null elements inside a list are also emitted as empty
+    lst = _fields("a.json", [{"vals": ["x", None, "y"]}])
+    assert lst["[0].vals[1]"] == ""
 
 
 def test_no_field_is_interpreted_as_a_name() -> None:
@@ -161,7 +172,7 @@ def test_selection_beats_config_for_records_only() -> None:
     registry.clear()
     registry.discover_builtin()
     try:
-        assert registry.select("MAPL(x).json", b'{"values":[{"a":1}]}').name == "structured-json"
+        assert registry.select("records.json", b'{"values":[{"a":1}]}').name == "structured-json"
         assert registry.select("package.json", b'{"name":"x"}').name == "config"
         assert registry.select("batch_config.json", b'{"prefix":"http://"}').name == "config"
         # denylist: record-array inside a specialized config still routes to ConfigParser
@@ -172,7 +183,7 @@ def test_selection_beats_config_for_records_only() -> None:
             "tsconfig.json", b'{"references":[{"path":"../x"}]}'
         ).name == "config"
         # base language label / extension allow-list still driven by ConfigParser (priority 0)
-        assert registry.base_parser_for("MAPL(x).json").name == "config"
+        assert registry.base_parser_for("records.json").name == "config"
     finally:
         registry.clear()
         registry.discover_builtin()
