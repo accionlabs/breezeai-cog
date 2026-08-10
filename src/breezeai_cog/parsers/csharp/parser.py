@@ -62,7 +62,7 @@ class CSharpParser(BaseParser):
         source, path = ctx.source, ctx.path
         fid = file_id(path)
         seen_ids: set[str] = set()
-        capture, limit = ctx.capture_statements, ctx.text_truncation_limit
+        capture, limit = ctx.capture_statements, ctx.statement_text_limit
 
         internal, external, _, bindings = extract_imports(
             root, source, path, ctx.resolution_index

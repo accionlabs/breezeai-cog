@@ -32,7 +32,8 @@ _WORKER: dict[str, object] = {}
 def _options(settings) -> dict:
     return {
         "capture_statements": settings.capture_statements,
-        "text_truncation_limit": settings.text_truncation_limit,
+        "statement_text_limit": settings.statement_text_limit,
+        "metadata_value_limit": settings.metadata_value_limit,
         "parse_timeout_micros": int(settings.parse_timeout * 1_000_000),
         "max_concat_depth": settings.max_concat_depth,
         "log_format": settings.log_format,
@@ -71,7 +72,8 @@ def _parse_entry(path: str, repo_root: str, options: dict) -> FileRecord | None:
             source=source,
             repo_root=Path(repo_root),
             capture_statements=options["capture_statements"],
-            text_truncation_limit=options["text_truncation_limit"],
+            statement_text_limit=options["statement_text_limit"],
+            metadata_value_limit=options["metadata_value_limit"],
             parse_timeout_micros=options["parse_timeout_micros"],
             resolution_index=index,
         )
