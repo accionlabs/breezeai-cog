@@ -54,7 +54,8 @@ class ParseContext:
     source: bytes  # read by the worker (cached per-process); only the path crosses the boundary
     repo_root: Path
     capture_statements: bool = False
-    text_truncation_limit: int = 8000
+    statement_text_limit: int = 8000  # max captured code statement text/body length
+    metadata_value_limit: int = 4000  # max structured-JSON leaf value length (0 = disabled)
     parse_timeout_micros: int = 0  # cross-platform tree-sitter timeout (0 = none)
     resolution_index: Any | None = None  # result of the language's build_index, or None
 

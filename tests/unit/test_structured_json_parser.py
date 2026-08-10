@@ -11,14 +11,15 @@ from breezeai_cog.parsers.base import ParseContext
 from breezeai_cog.parsers.structured_json.parser import StructuredJsonParser
 
 
-def _parse(path: str, obj):
+def _parse(path: str, obj, metadata_value_limit: int | None = None):
     src = json.dumps(obj, ensure_ascii=False).encode()
-    ctx = ParseContext(path=path, abs_path=None, source=src, repo_root=".")
+    kwargs = {} if metadata_value_limit is None else {"metadata_value_limit": metadata_value_limit}
+    ctx = ParseContext(path=path, abs_path=None, source=src, repo_root=".", **kwargs)
     return StructuredJsonParser().parse_file(ctx)
 
 
-def _fields(path: str, obj) -> dict:
-    return _parse(path, obj).metadata["fields"]
+def _fields(path: str, obj, metadata_value_limit: int | None = None) -> dict:
+    return _parse(path, obj, metadata_value_limit).metadata["fields"]
 
 
 def _claims(obj) -> bool:
@@ -120,11 +121,26 @@ def test_credential_keys_redacted_including_nested() -> None:
     assert f["[0].user"] == "bob"
 
 
-def test_value_length_bound() -> None:
+def test_value_length_kept_under_default_limit() -> None:
+    # A multi-KB leaf is preserved up to the default cap (4000 in ParseContext), not the
+    # older 500 fallback — so realistic large metadata values are no longer over-truncated.
     long = "x" * 5000
     f = _fields("a.json", [{"blob": long}])
+    assert f["[0].blob"] == long[:4000] + "…"  # capped at the 4000 default, not 500
+    assert len(f["[0].blob"]) == 4001
+
+
+def test_value_length_bound_is_configurable() -> None:
+    long = "x" * 5000
+    f = _fields("a.json", [{"blob": long}], metadata_value_limit=500)
     assert f["[0].blob"].endswith("…")
-    assert len(f["[0].blob"]) == StructuredJsonParser.MAX_VALUE_LEN + 1
+    assert len(f["[0].blob"]) == 501
+
+
+def test_value_length_truncation_disabled_at_zero() -> None:
+    long = "x" * 5000
+    f = _fields("a.json", [{"blob": long}], metadata_value_limit=0)
+    assert f["[0].blob"] == long  # 0 disables truncation
 
 
 def test_leaf_count_bound_and_flag() -> None:

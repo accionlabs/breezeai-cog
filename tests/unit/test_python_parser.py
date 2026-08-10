@@ -47,7 +47,7 @@ def _parse(tmp_path: Path, *, capture: bool = False) -> FileRecord:
     abs_path.write_text(SRC.decode())
     ctx = ParseContext(
         path="pkg/order.py", abs_path=abs_path, source=SRC, repo_root=repo,
-        capture_statements=capture, text_truncation_limit=1000,
+        capture_statements=capture, statement_text_limit=1000,
     )
     return PythonParser().parse_file(ctx)
 
@@ -159,7 +159,7 @@ def test_extract_reuses_a_prebuilt_tree(tmp_path) -> None:
     (tmp_path / "pkg" / "utils.py").write_text("def helper(x): return x\n")
     abs_path.write_text(SRC.decode())
     ctx = ParseContext(path="pkg/order.py", abs_path=abs_path, source=SRC, repo_root=tmp_path,
-                       capture_statements=True, text_truncation_limit=1000)
+                       capture_statements=True, statement_text_limit=1000)
     parser = PythonParser()
 
     root = parse_source("python", SRC, 0).root_node  # parse once, externally

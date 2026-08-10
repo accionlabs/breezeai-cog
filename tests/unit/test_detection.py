@@ -108,7 +108,7 @@ def test_classify_none() -> None:
 
 def _ctx(path, src, repo):
     return ParseContext(path=path, abs_path=Path(repo) / path, source=src, repo_root=Path(repo),
-                        capture_statements=True, text_truncation_limit=1000)
+                        capture_statements=True, statement_text_limit=1000)
 
 
 def test_python_statement_detection(tmp_path) -> None:

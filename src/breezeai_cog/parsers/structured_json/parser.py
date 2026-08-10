@@ -60,6 +60,10 @@ class StructuredJsonParser(BaseParser):
         }
     )
     #: Bounds so a pathological file can't blow up the node's metadata / the embedding text.
+    #: ``MAX_LEAVES`` caps how many leaves are captured; the per-value length cap is supplied
+    #: per-file via ``ParseContext.metadata_value_limit`` (Settings /
+    #: ``BREEZEAI_COG_METADATA_VALUE_LIMIT``). ``MAX_VALUE_LEN`` is only the fallback used
+    #: when ``_flatten`` / ``_leaf`` are called without an explicit limit.
     MAX_LEAVES = 5000
     MAX_VALUE_LEN = 500
 
@@ -82,7 +86,8 @@ class StructuredJsonParser(BaseParser):
     def parse_file(self, ctx: ParseContext) -> FileRecord:
         text = ctx.source.decode("utf-8", "replace")
         data = self._parse(ctx.source)
-        fields = self._flatten(data)  # full recursive key/value walk of the whole document
+        # full recursive key/value walk of the whole document; per-value length cap from ctx
+        fields = self._flatten(data, ctx.metadata_value_limit)
 
         meta: dict[str, Any] = {
             "kind": "structured-json",
@@ -130,10 +135,13 @@ class StructuredJsonParser(BaseParser):
         low = key.lower()
         return any(token in low for token in self.CREDENTIAL_TOKENS)
 
-    def _flatten(self, obj: Any) -> dict[str, Any]:
+    def _flatten(self, obj: Any, max_value_len: int | None = None) -> dict[str, Any]:
         """Recursively flatten the whole document to ``{dotted.path: primitive}``. Dicts
         join with ``.``, list items with ``[i]``. ``None`` leaves are dropped (noise);
-        secret-named keys are redacted; strings truncated; bounded by :attr:`MAX_LEAVES`."""
+        secret-named keys are redacted; strings truncated to ``max_value_len`` (falls back
+        to :attr:`MAX_VALUE_LEN`; ``<= 0`` disables truncation); bounded by
+        :attr:`MAX_LEAVES`."""
+        limit = self.MAX_VALUE_LEN if max_value_len is None else max_value_len
         out: dict[str, Any] = {}
 
         def walk(node: Any, prefix: str) -> None:
@@ -149,17 +157,18 @@ class StructuredJsonParser(BaseParser):
                     elif self._is_secret_key(str(k)):
                         out[key] = "***"
                     else:
-                        out[key] = self._leaf(v)
+                        out[key] = self._leaf(v, limit)
             elif isinstance(node, list):
                 for i, v in enumerate(node):
                     walk(v, f"{prefix}[{i}]")
             elif node is not None:
-                out[prefix] = self._leaf(node)
+                out[prefix] = self._leaf(node, limit)
 
         walk(obj, "")
         return out
 
-    def _leaf(self, value: Any) -> Any:
-        if isinstance(value, str) and len(value) > self.MAX_VALUE_LEN:
-            return value[: self.MAX_VALUE_LEN] + "…"
+    def _leaf(self, value: Any, max_value_len: int | None = None) -> Any:
+        limit = self.MAX_VALUE_LEN if max_value_len is None else max_value_len
+        if limit > 0 and isinstance(value, str) and len(value) > limit:
+            return value[:limit] + "…"
         return value

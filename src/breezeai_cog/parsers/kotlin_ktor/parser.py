@@ -46,7 +46,7 @@ class KtorParser(KotlinParser):
                 ctx.path,
                 fid,
                 seen_ids,
-                ctx.text_truncation_limit,
+                ctx.statement_text_limit,
             )
             record.statements.extend(routes)
 

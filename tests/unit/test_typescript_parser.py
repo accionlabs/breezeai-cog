@@ -45,7 +45,7 @@ def _parse(tmp_path, *, capture=False) -> FileRecord:
         source=SRC,
         repo_root=tmp_path,
         capture_statements=capture,
-        text_truncation_limit=1000,
+        statement_text_limit=1000,
     )
     return TypeScriptParser().parse_file(ctx)
 
@@ -650,7 +650,7 @@ def test_vue_import_edge_in_record(tmp_path) -> None:
         source=p.read_bytes(),
         repo_root=tmp_path,
         capture_statements=False,
-        text_truncation_limit=1000,
+        statement_text_limit=1000,
     )
     rec = TypeScriptParser().parse_file(ctx)
     assert "Avatar.vue" in rec.importFiles
@@ -804,7 +804,7 @@ def test_exports_capture_const_and_default(tmp_path) -> None:
     )
     ctx = ParseContext(
         path="e.ts", abs_path=p, source=p.read_bytes(), repo_root=tmp_path,
-        capture_statements=False, text_truncation_limit=1000,
+        capture_statements=False, statement_text_limit=1000,
     )
     exports = set(TypeScriptParser().parse_file(ctx).exports)
     # newly captured
