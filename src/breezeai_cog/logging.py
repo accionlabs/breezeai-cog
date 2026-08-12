@@ -195,7 +195,7 @@ def setup_logging(settings: "Settings") -> None:
 
     if settings.log_to_file:
         file_handler = _DailyDatedFileHandler(
-            dir_path=Path(settings.log_location),
+            dir_path=Path(settings.log_location or "./logs"),
             prefix=APP_NAME,
             backup_count=_LOG_BACKUP_DAYS,
             max_bytes=_LOG_MAX_BYTES,

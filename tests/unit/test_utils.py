@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
-from breezeai_cog.utils import SourceCache, count_loc, repo_relative, snippet, truncate
+from pathlib import Path
+
+from breezeai_cog.utils import SourceCache, cog_dir, count_loc, repo_relative, snippet, truncate
 
 
 def test_count_loc_excludes_blank_lines() -> None:
@@ -25,6 +27,14 @@ def test_snippet_is_1_based_inclusive() -> None:
 def test_repo_relative_posix() -> None:
     assert repo_relative("/repo/src/a.py", "/repo") == "src/a.py"
     assert repo_relative("/repo/a.py", "/repo") == "a.py"
+
+
+def test_cog_dir(tmp_path) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    assert cog_dir(repo) == repo.resolve() / ".cog"
+    # resolves relative input against cwd
+    assert cog_dir(Path(".")).name == ".cog"
 
 
 def test_source_cache_reads_once(tmp_path) -> None:

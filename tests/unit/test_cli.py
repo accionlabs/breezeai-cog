@@ -50,6 +50,68 @@ def test_repo_to_json_tree(tmp_path) -> None:
     assert records[0]["totalFiles"] == 2
 
 
+def test_repo_to_json_tree_defaults_to_cog_dir(tmp_path) -> None:
+    """With no --out, the export lands in <repo>/.cog and the repo's parent stays clean."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "a.py").write_text("def f():\n    return 1\n")
+
+    result = runner.invoke(app, ["repo-to-json-tree", "--repo", str(repo), "--jobs", "1"])
+    assert result.exit_code == 0, result.output
+
+    assert (repo / ".cog" / "repo-project-analysis.ndjson.gz").exists()
+    # nothing leaked into the repo's parent (the old default location)
+    assert list(tmp_path.glob("*.ndjson.gz")) == []
+
+
+def test_out_redirects_only_export_skip_report_stays_in_cog(tmp_path) -> None:
+    """--out redirects the ndjson.gz but the skip report still goes to <repo>/.cog."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "a.py").write_text("def f():\n    return 1\n")
+    (repo / "notes.txt").write_text("hello\n")  # unsupported → produces a skip report
+    out_dir = tmp_path / "results"
+
+    result = runner.invoke(
+        app, ["repo-to-json-tree", "--repo", str(repo), "--out", str(out_dir), "--jobs", "1"]
+    )
+    assert result.exit_code == 0, result.output
+    assert (out_dir / "repo-project-analysis.ndjson.gz").exists()
+    assert (repo / ".cog" / "repo-skipped-report.json").exists()
+    assert not (repo / ".cog" / "repo-project-analysis.ndjson.gz").exists()
+
+
+def test_warns_when_cog_not_gitignored(tmp_path) -> None:
+    """A .gitignore that doesn't ignore .cog triggers a readable nudge."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "a.py").write_text("def f():\n    return 1\n")
+    (repo / ".gitignore").write_text("*.pyc\n")
+
+    result = runner.invoke(app, ["repo-to-json-tree", "--repo", str(repo), "--jobs", "1"])
+    assert result.exit_code == 0, result.output
+    assert ".cog/" in result.output and ".gitignore" in result.output
+
+
+def test_no_warning_when_cog_gitignored(tmp_path) -> None:
+    """No nudge when .cog is already ignored, and none when there's no .gitignore at all."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "a.py").write_text("def f():\n    return 1\n")
+    (repo / ".gitignore").write_text(".cog/\n")
+
+    result = runner.invoke(app, ["repo-to-json-tree", "--repo", str(repo), "--jobs", "1"])
+    assert result.exit_code == 0, result.output
+    assert "not ignored by" not in result.output
+
+    repo2 = tmp_path / "repo2"
+    repo2.mkdir()
+    (repo2 / "a.py").write_text("def f():\n    return 1\n")
+    result2 = runner.invoke(app, ["repo-to-json-tree", "--repo", str(repo2), "--jobs", "1"])
+    assert result2.exit_code == 0, result2.output
+    assert "not ignored by" not in result2.output
+
+
 def test_repo_to_json_tree_writes_skip_report(tmp_path) -> None:
     """After analysis, a <repo>-skipped-report.json sidecar lists ignored/unsupported files."""
     repo = tmp_path / "repo"
@@ -66,8 +128,10 @@ def test_repo_to_json_tree_writes_skip_report(tmp_path) -> None:
     )
     assert result.exit_code == 0, result.output
 
-    sidecar = out_dir / "repo-skipped-report.json"
+    # The skip report always lands in <repo>/.cog — never in --out (which only redirects the export).
+    sidecar = repo / ".cog" / "repo-skipped-report.json"
     assert sidecar.exists()
+    assert not (out_dir / "repo-skipped-report.json").exists()
     report = json.loads(sidecar.read_text())
     assert report["summary"].get("unsupported", 0) >= 2
     assert report["unsupportedExtensions"].get(".txt") == 1
