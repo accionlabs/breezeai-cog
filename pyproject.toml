@@ -26,11 +26,13 @@ dependencies = [
   # Standalone Groovy grammar — the language-pack `groovy` grammar is a structureless
   # "command soup" (no class/method/import nodes); dekobon's is a real structural
   # grammar. See .todo/groovy-grammar-evaluation.md and parsers/treesitter.py.
-  # Pinned to the Accionlabs fork, which adds nested-type / modifier-enum /
-  # enum-members-without-`;` / enhanced-for support that stock dekobon 0.2.2 lacks (the
-  # fixes are contributed upstream; move this back to a released `dekobon-tree-sitter-groovy`
-  # version once the PR merges).
-  "dekobon-tree-sitter-groovy @ git+https://github.com/accionlabs/tree-sitter-groovy@main",
+  # Pinned to the Accionlabs fork's `groovy-grammar-upstream` branch, which adds
+  # nested-type / modifier-enum / enum-members-without-`;` / enhanced-for / typed-for-in /
+  # range / diamond-operator / untyped-catch support that stock dekobon 0.2.2 (and the
+  # fork's `main`) lack. Without these, real P3 Groovy classes fail to parse and their
+  # bodies collapse to the file root (BREEZEAI: groovy class-collapse). Move this back to a
+  # released `dekobon-tree-sitter-groovy` version once the PR merges.
+  "dekobon-tree-sitter-groovy @ git+https://github.com/accionlabs/tree-sitter-groovy@groovy-grammar-upstream",
   "pyyaml>=6.0",
   # --upload (services/upload.py) and notify (services/notify.py) are first-class
   # CLI features, so their HTTP client is a core dependency — not an opt-in extra.
