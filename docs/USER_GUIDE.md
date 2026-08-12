@@ -115,13 +115,31 @@ uvx --from git+https://github.com/accionlabs/breezeai-cog breezeai-cog repo-to-j
 ```
 
 - `--repo .` — the directory to analyze (`.` means "here").
-- `--out ./out` — the **output directory**. The tool creates a file inside it named
-  `<repo-name>-project-analysis.ndjson.gz`.
+- `--out ./out` — the **output directory** for the export. The tool creates a file inside it named
+  `<repo-name>-project-analysis.ndjson.gz`. Optional — see *Where artifacts go* below.
 
 While it runs in an interactive terminal, a live progress bar shows files parsed out of the total,
 with elapsed time. (The bar is automatically suppressed when output is piped or redirected, and when
 `--verbose` is on.) When it finishes, it prints a one-line summary (files / functions / classes
 found) and the path to the output file.
+
+### Where artifacts go
+
+By default every artifact a run produces lands in a single **`.cog/` directory at the repo root**:
+
+```
+<repo>/.cog/
+├── <repo>-project-analysis.ndjson.gz   # the export
+├── <repo>-skipped-report.json          # what was skipped and why
+└── logs/                               # dated run logs
+```
+
+`--out <dir>` redirects **only** the `.ndjson.gz` export; the skip report and logs always stay in
+`<repo>/.cog/`. In `--batch` mode each sub-project gets its own `<sub>/.cog/`.
+
+`.cog/` holds generated output you normally don't want to commit — if the repo has a `.gitignore`
+that doesn't already ignore it, the run prints a one-line reminder to add `.cog/`. (The tool never
+edits your `.gitignore` itself, and it always skips a `.cog/` directory when scanning.)
 
 ---
 
@@ -142,7 +160,7 @@ found) and the path to the output file.
 | Option | Default | Description |
 |---|---|---|
 | `--repo <dir>` | *(required)* | The folder to analyze. |
-| `--out <dir>` | the repo's parent folder | Output **directory** (not a filename). The file is named `<repo>-project-analysis.ndjson.gz`. |
+| `--out <dir>` | `<repo>/.cog` | Output **directory** for the export only (not a filename). The file is named `<repo>-project-analysis.ndjson.gz`. The skip report and logs always go to `<repo>/.cog`. |
 | `--language <name>` | all (auto-detected) | Only analyze this language. Repeat the flag for several (e.g. `--language python --language java`). |
 | `--capture-statements` | off | Also record statements *inside* functions — needed to detect API calls, DB queries, and routes. Off by default because it produces more data. |
 | `--batch` | off | Treat `--repo` as a **workspace folder** and analyze each immediate subdirectory as its own project (one `.ndjson.gz` per subdir). See *Batch mode* below. |

@@ -65,6 +65,9 @@ logs/
 tmp/
 temp/
 
+# breezeai-cog's own artifact directory (export / skip report / logs) — never re-ingest it
+.cog/
+
 # Tests (excluded by default; re-include via .repoinclude)
 test/
 tests/

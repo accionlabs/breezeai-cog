@@ -18,6 +18,7 @@ from .core.skips import SkipReport
 from .logging import setup_logging
 from .schemas import ProjectMetaData
 from .services import AnalysisResult, AnalysisService
+from .utils.paths import cog_dir
 
 app = typer.Typer(
     name="breezeai-cog",
@@ -32,7 +33,8 @@ def repo_to_json_tree(
     repo: Path = typer.Option(..., "--repo", exists=True, file_okay=False, help="Repository directory."),
     out: Optional[Path] = typer.Option(
         None, "--out", file_okay=False,
-        help="Output directory (default: the repo's parent). File: <repo>-project-analysis.ndjson.gz.",
+        help="Output directory for the export only (default: <repo>/.cog). "
+             "File: <repo>-project-analysis.ndjson.gz. The skip report and logs always go to <repo>/.cog.",
     ),
     language: Optional[list[str]] = typer.Option(None, "--language", help="Restrict to languages (repeatable)."),
     capture_statements: bool = typer.Option(False, "--capture-statements", help="Capture in-body statements."),
@@ -92,6 +94,10 @@ def repo_to_json_tree(
         for err in exc.errors():
             typer.secho(f"error: {err['msg']}", fg=typer.colors.RED, err=True)
         raise typer.Exit(1) from exc
+    # Default logs into the repo's .cog/logs (in batch, the workspace's — one log stream per
+    # run). An explicit BREEZEAI_COG_LOG_LOCATION resolves to a non-None value and wins.
+    if settings.log_location is None:
+        settings = settings.model_copy(update={"log_location": cog_dir(repo) / "logs"})
     setup_logging(settings)
     service = AnalysisService(settings)
 
@@ -128,6 +134,37 @@ def repo_to_json_tree(
             raise typer.Exit(1)
 
 
+def _display_path(path: Path, repo: Path) -> str:
+    """A readable path for the summary: repo-relative (POSIX) when it lives under the repo
+    (the common ``.cog/…`` case), otherwise the absolute path."""
+    resolved = path.resolve()
+    try:
+        return resolved.relative_to(repo.resolve()).as_posix()
+    except ValueError:
+        return str(resolved)
+
+
+def _print_artifacts(
+    repo: Path, settings: Settings, *, export: Path | None, skip_report: Path | None
+) -> None:
+    """Compact footer listing where this run's artifacts were written. Rows are shown
+    repo-relative (the common ``.cog/…`` case); the export uses its absolute path when the
+    user chose an explicit ``--out``. Only the artifacts that were actually produced appear."""
+    rows: list[tuple[str, str]] = []
+    if export is not None:
+        rows.append(("Export", str(export.resolve()) if settings.out else _display_path(export, repo)))
+    if skip_report is not None:
+        rows.append(("Skip report", _display_path(skip_report, repo)))
+    if settings.log_to_file and settings.log_location is not None:
+        rows.append(("Logs", _display_path(Path(settings.log_location), repo)))
+    if not rows:
+        return
+    width = max(len(label) for label, _ in rows)
+    typer.secho("Artifacts", fg=typer.colors.CYAN, bold=True)
+    for label, value in rows:
+        typer.echo(f"  {label:<{width}}  {value}")
+
+
 def _analyze_and_report(
     service: AnalysisService,
     settings: Settings,
@@ -141,6 +178,7 @@ def _analyze_and_report(
     Returns True on success; False if upload was attempted and failed (the
     analysis itself always completes first, leaving the .ndjson.gz on disk).
     """
+    _warn_if_cog_not_gitignored(repo)
     stats: dict[str, Any] = {}
 
     def analyze(progress: Callable[[int, int], None] | None) -> AnalysisResult:
@@ -190,16 +228,18 @@ def _analyze_and_report(
             f"No parseable source files — skipped {name} (no ndjson written).",
             fg=typer.colors.YELLOW,
         )
-        _report_skips(report, result.out_path, m.repositoryName)
+        skip_report_path = _report_skips(report, cog_dir(repo), m.repositoryName)
+        _print_artifacts(repo, settings, export=None, skip_report=skip_report_path)
         return True
     if render_table:
-        _print_summary_table(m, stats, result.out_path)
+        _print_summary_table(m, stats)
     else:
         typer.echo(
             f"{m.totalFiles} files, {m.totalFunctions} functions, {m.totalClasses} classes "
-            f"({', '.join(m.analyzedLanguages) or 'none'}) -> {result.out_path}"
+            f"({', '.join(m.analyzedLanguages) or 'none'})"
         )
-    _report_skips(report, result.out_path, m.repositoryName)
+    skip_report_path = _report_skips(report, cog_dir(repo), m.repositoryName)
+    _print_artifacts(repo, settings, export=result.out_path, skip_report=skip_report_path)
 
     if settings.upload:
         from .errors import UploadError
@@ -242,8 +282,9 @@ def _analyze_and_report(
     return True
 
 
-def _print_summary_table(meta: ProjectMetaData, stats: dict[str, Any], out_path: Path | None) -> None:
-    """Render the run summary as a readable table (interactive terminal)."""
+def _print_summary_table(meta: ProjectMetaData, stats: dict[str, Any]) -> None:
+    """Render the run summary as a readable table (interactive terminal). Artifact paths are
+    printed separately by :func:`_print_artifacts`."""
     from rich import box
     from rich.console import Console
     from rich.table import Table
@@ -271,7 +312,6 @@ def _print_summary_table(meta: ProjectMetaData, stats: dict[str, Any], out_path:
     table.add_row("Lines of code", f"{meta.totalLinesOfCode:,}")
     table.add_section()
     table.add_row("Languages", ", ".join(meta.analyzedLanguages) or "none")
-    table.add_row("Output", str(out_path))
 
     Console().print(table)
 
@@ -285,17 +325,42 @@ def _human_size(n: int) -> str:
     return f"{n} B"
 
 
-def _report_skips(report: SkipReport | None, out_path: Path | None, repo_name: str) -> None:
-    """Print a grouped skip summary and write the full ``<repo>-skipped-report.json`` sidecar.
+def _warn_if_cog_not_gitignored(repo: Path) -> None:
+    """Nudge the user to git-ignore ``.cog`` when the repo has a ``.gitignore`` that does not
+    already ignore it. ``.cog`` holds generated artifacts (export / skip report / logs) that
+    normally shouldn't be committed. We never edit the user's ``.gitignore`` — only warn."""
+    gitignore = repo.resolve() / ".gitignore"
+    if not gitignore.is_file():
+        return
+    from .core.ignore import compile_spec
+
+    try:
+        spec = compile_spec(gitignore.read_text("utf-8", errors="replace").splitlines())
+    except OSError:
+        return
+    if spec.match_file(".cog/"):  # already ignored (matches .cog, .cog/, /.cog, …)
+        return
+    typer.secho(
+        f"warning: '.cog/' is not ignored by {gitignore}. breezeai-cog writes its artifacts "
+        "(export, skip report, logs) there — add '.cog/' to your .gitignore to keep them out of git.",
+        fg=typer.colors.YELLOW,
+        err=True,
+    )
+
+
+def _report_skips(report: SkipReport | None, out_dir: Path, repo_name: str) -> Path | None:
+    """Print a grouped skip summary and write the full ``<repo>-skipped-report.json`` sidecar
+    into ``out_dir`` (the repo's ``.cog`` dir). Returns the sidecar path when one was written
+    (so the caller can list it in the artifacts footer), else ``None``.
 
     Covers the files/folders the scanner dropped and why (unsupported extension, ignore
     rule, or oversized). The console view is truncated; the sidecar holds the full list.
     """
     if report is None:
-        return
+        return None
     if report.is_empty:
         typer.echo("No files or folders skipped.")
-        return
+        return None
 
     typer.secho(
         f"Skipped {report.total_files:,} file(s), {len(report.dirs):,} folder(s):",
@@ -321,13 +386,14 @@ def _report_skips(report: SkipReport | None, out_path: Path | None, repo_name: s
         more = " ..." if len(report.dirs) > 6 else ""
         typer.echo(f"  {'folders':<12}({len(report.dirs):,}) — {shown}{more}")
 
-    if out_path is not None:
-        sidecar = out_path.with_name(f"{repo_name}-skipped-report.json")
-        try:
-            sidecar.write_text(json.dumps(report.to_dict(), indent=2))
-            typer.secho(f"  Wrote {sidecar.name}", fg=typer.colors.GREEN)
-        except OSError as exc:
-            typer.secho(f"  (could not write skip report: {exc})", fg=typer.colors.YELLOW, err=True)
+    sidecar = out_dir / f"{repo_name}-skipped-report.json"
+    try:
+        out_dir.mkdir(parents=True, exist_ok=True)
+        sidecar.write_text(json.dumps(report.to_dict(), indent=2))
+    except OSError as exc:
+        typer.secho(f"  (could not write skip report: {exc})", fg=typer.colors.YELLOW, err=True)
+        return None
+    return sidecar
 
 
 @app.command()

@@ -67,7 +67,9 @@ class Settings(BaseSettings):
     log_level: str = "INFO"
     log_format: Literal["plaintext", "json"] = "plaintext"
     log_to_file: bool = True
-    log_location: Path = Path("./logs")
+    # None = auto: the CLI resolves it to `<repo>/.cog/logs`; the server falls back to
+    # `./logs`. An explicit BREEZEAI_COG_LOG_LOCATION (env/.env) always wins.
+    log_location: Path | None = None
 
     # ── Server ────────────────────────────────────────────────────────────
     port: int = 3000

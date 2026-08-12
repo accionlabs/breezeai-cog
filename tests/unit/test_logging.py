@@ -61,3 +61,12 @@ def test_setup_logging_writes_file_with_context(tmp_path) -> None:
     assert record["message"] == "file.event"
     assert record["k"] == "v"
     assert record["run_id"] == "r1" and record["repo"] == "my-app"
+
+
+def test_setup_logging_none_location_falls_back_to_logs(tmp_path, monkeypatch) -> None:
+    """log_location=None (the default) falls back to ./logs relative to cwd."""
+    monkeypatch.chdir(tmp_path)
+    settings = Settings(_env_file=None, log_to_file=True, log_location=None, log_level="INFO")
+    setup_logging(settings)
+    get_logger("breezeai_cog.test").info("fallback.event")
+    assert (tmp_path / "logs").is_dir()

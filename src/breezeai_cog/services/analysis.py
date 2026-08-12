@@ -10,6 +10,7 @@ from ..config import Settings
 from ..core import pipeline
 from ..emit.sinks import FileSink, Sink
 from ..schemas import FileRecord, ProjectMetaData
+from ..utils.paths import cog_dir
 
 
 @dataclass(frozen=True, slots=True)
@@ -26,10 +27,11 @@ class AnalysisService:
         self.settings = settings
 
     def _default_out(self, repo: Path) -> Path:
-        """Resolve the output file inside the output **directory** (`--out`, default the
-        repo's parent): `<out_dir>/<repo-name>-project-analysis.ndjson.gz`."""
+        """Resolve the export file inside the output **directory**: `--out` when given,
+        otherwise the repo's `.cog/` artifact dir. File:
+        `<out_dir>/<repo-name>-project-analysis.ndjson.gz`."""
         repo = repo.resolve()
-        out_dir = Path(self.settings.out) if self.settings.out is not None else repo.parent
+        out_dir = Path(self.settings.out) if self.settings.out is not None else cog_dir(repo)
         return out_dir / f"{repo.name}-project-analysis.ndjson.gz"
 
     def analyze_repo(
