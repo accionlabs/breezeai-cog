@@ -3,8 +3,10 @@
 Groovy structurally mirrors Java (package/import/class/method/field/enum), so this
 parser follows the Java parser's model: imports + classes (with flat methods and
 statements), a repo-level FQCN ``build_index`` for import resolution, and the same
-receiver-type call resolver. Unlike Java, Groovy also allows **top-level (script)
-methods** outside any class, which are extracted as functions parented to the file.
+receiver-type call resolver. Unlike Java, Groovy also allows **top-level (script) code**
+outside any class: top-level *methods* are extracted as functions parented to the file,
+and top-level *statements* (module-level declarations, bare calls, control flow) are
+captured and parented to the file — mirroring the Python/TypeScript parsers.
 
 Groovy is a **best-effort / second-tier** language: the dekobon grammar recovers the
 package/class/method/field/enum skeleton reliably, but degrades expression bodies with
@@ -29,6 +31,7 @@ from .classes import build_class
 from .functions import build_function, defined_names, has_declaration_error, type_map
 from .imports import GroovyIndex, build_fqcn_index, extract_imports
 from .mappings import FRAMEWORKS, STATEMENT_TYPES
+from .statements import extract_statements
 
 _CLASS_TYPES = (
     "class_declaration", "interface_declaration", "enum_declaration", "trait_declaration",
@@ -87,6 +90,13 @@ class GroovyParser(BaseParser):
                 )
                 functions.append(fn)
                 statements.extend(fn_statements)
+
+        # file-scope (script-body) statements — parented to the file, like Python/TypeScript.
+        # descend_all defaults to False, so class/method/closure bodies are barriers here
+        # (their statements are captured by build_class / build_method) — no double capture.
+        statements.extend(
+            extract_statements(root, source, path, parent_id=fid, capture=capture, limit=limit, seen_ids=seen_ids)
+        )
 
         return FileRecord(
             id=fid,

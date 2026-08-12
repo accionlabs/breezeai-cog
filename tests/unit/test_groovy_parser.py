@@ -133,6 +133,31 @@ def test_statements_and_detection(tmp_path) -> None:
     assert db and db[0].dataAccessHint  # repo.findById(...) detected as a DB call
 
 
+def test_file_scope_script_statements_captured(tmp_path) -> None:
+    # Groovy allows top-level script code outside any class/method — module-level
+    # declarations and bare calls are captured and parented to the file, not dropped.
+    src = b'''\
+def cfg = loadConfig()
+println "booting"
+
+class Holder {
+    def run() { doWork() }
+}
+'''
+    assert _parse_src(tmp_path, src, capture=False).statements == []  # gating preserved
+    rec = _parse_src(tmp_path, src, capture=True)
+
+    file_stmts = [s for s in rec.statements if s.parentId == rec.id]
+    assert file_stmts  # top-level `def cfg = ...` / `println ...` attributed to the file
+
+    # Statements inside Holder.run stay parented to the function, never hoisted to the
+    # file — guards against the NESTED_SCOPES barrier regressing / double-capture.
+    run = next(f for f in rec.functions if f.name == "run")
+    run_stmts = [s for s in rec.statements if s.parentId == run.id]
+    assert run_stmts
+    assert all(s.parentId != rec.id for s in run_stmts)
+
+
 def test_trait_mapped_to_trait_type(tmp_path) -> None:
     # A trait gets its own `trait` ClassType; a class still uses it via `implements`.
     src = b"trait Reversible { def reverse() {} }\nclass Sentence implements Reversible {}\n"
