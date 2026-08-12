@@ -112,6 +112,30 @@ def test_no_warning_when_cog_gitignored(tmp_path) -> None:
     assert "not ignored by" not in result2.output
 
 
+def test_skip_rows_go_to_log_file_not_console(tmp_path, monkeypatch) -> None:
+    """Each skipped file gets its own `file.skipped` row in the LOG FILE (path + reason),
+    but those rows never appear on the console — they must not pollute the summary output."""
+    monkeypatch.setenv("BREEZEAI_COG_LOG_TO_FILE", "true")  # override the autouse off-switch
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "a.py").write_text("def f():\n    return 1\n")
+    (repo / "notes.txt").write_text("x\n")  # unsupported
+    (repo / "data.bin").write_text("y\n")  # unsupported
+
+    result = runner.invoke(app, ["repo-to-json-tree", "--repo", str(repo), "--jobs", "1"])
+    assert result.exit_code == 0, result.output
+    # never on the console (would pollute the summary)
+    assert "file.skipped" not in result.output
+
+    logs = list((repo / ".cog" / "logs").glob("breezeai-cog-*.log"))
+    assert logs, "no log file written"
+    content = logs[0].read_text("utf-8")
+    assert content.count("file.skipped") == 2  # one row per skipped file
+    assert "path=notes.txt" in content and "path=data.bin" in content
+    assert "reason=unsupported" in content
+    assert "analysis.complete" in content  # summary is captured too
+
+
 def test_repo_to_json_tree_writes_skip_report(tmp_path) -> None:
     """After analysis, a <repo>-skipped-report.json sidecar lists ignored/unsupported files."""
     repo = tmp_path / "repo"

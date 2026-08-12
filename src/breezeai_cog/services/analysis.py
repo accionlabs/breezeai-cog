@@ -41,15 +41,13 @@ class AnalysisService:
         sink: Sink | None = None,
         progress: Callable[[int, int], None] | None = None,
         summary_out: dict | None = None,
-        log_summary: bool = True,
     ) -> AnalysisResult:
         repo = Path(repo)
         owns_sink = sink is None
         out_path = self._default_out(repo) if owns_sink else None
         sink = sink or FileSink(out_path)  # type: ignore[arg-type]
         meta = pipeline.run(
-            repo, self.settings, sink,
-            progress=progress, summary_out=summary_out, log_summary=log_summary,
+            repo, self.settings, sink, progress=progress, summary_out=summary_out,
         )
         # A FileSink skips emitting a file when nothing was parsed; caller-supplied sinks
         # own their own semantics, so assume they always "wrote".

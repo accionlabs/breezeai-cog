@@ -37,6 +37,10 @@ if TYPE_CHECKING:
 HOSTNAME = socket.gethostname()
 APP_NAME = "breezeai-cog"
 APP_LOGGER = "breezeai_cog"
+#: File-only sub-logger for high-volume, low-signal detail (e.g. per-file skips). It carries
+#: the file handler but never a console handler, so its records land in the log file without
+#: polluting the terminal summary. Silent when file logging is off.
+DETAIL_LOGGER = "breezeai_cog.detail"
 
 _LOG_MAX_BYTES = 20 * 1024 * 1024
 _LOG_BACKUP_DAYS = 30
@@ -193,6 +197,13 @@ def setup_logging(settings: "Settings") -> None:
     stdout_handler.setFormatter(formatter)
     logger.addHandler(stdout_handler)
 
+    # File-only detail sink: same file, no console handler, no propagation — so its records
+    # are captured on disk but never echoed to the terminal summary. Reset each setup.
+    detail_logger = logging.getLogger(DETAIL_LOGGER)
+    detail_logger.handlers.clear()
+    detail_logger.setLevel(settings.log_level)
+    detail_logger.propagate = False
+
     if settings.log_to_file:
         file_handler = _DailyDatedFileHandler(
             dir_path=Path(settings.log_location or "./logs"),
@@ -202,6 +213,7 @@ def setup_logging(settings: "Settings") -> None:
         )
         file_handler.setFormatter(formatter)
         logger.addHandler(file_handler)
+        detail_logger.addHandler(file_handler)  # detail goes ONLY to the file
 
     _configure_structlog(settings.log_format)
 
@@ -236,6 +248,17 @@ def setup_worker_logging(queue: object, log_format: str, log_level: str) -> None
 
 def get_logger(name: str | None = None) -> structlog.stdlib.BoundLogger:
     return structlog.get_logger(name or APP_LOGGER)
+
+
+def quiet_console(*, level: int = logging.WARNING) -> None:
+    """Raise the app logger's **console** (stdout) handler threshold to ``level`` without
+    touching file handlers. Lets the CLI keep INFO summaries flowing to the log file while
+    the terminal shows only the Rich table (plus WARNING/ERROR). Idempotent; a no-op once
+    the console has been routed through a live display."""
+    logger = logging.getLogger(APP_LOGGER)
+    for handler in logger.handlers:
+        if isinstance(handler, logging.StreamHandler) and not isinstance(handler, logging.FileHandler):
+            handler.setLevel(level)
 
 
 #: Log-level → rich style for console-routed records (INFO stays default/uncolored).
@@ -280,7 +303,13 @@ def route_logs_through_console(console: Any) -> Iterator[None]:
     logger = logging.getLogger(APP_LOGGER)
     saved = logger.handlers[:]
     handler = _ConsoleLogHandler(console)
-    handler.setLevel(logger.level)
+    # Inherit the threshold of the stream handler we're replacing so a prior quiet_console()
+    # (INFO summary suppressed on-screen when a table is shown) carries over to the bar too.
+    stream_levels = [
+        h.level for h in saved
+        if isinstance(h, logging.StreamHandler) and not isinstance(h, logging.FileHandler)
+    ]
+    handler.setLevel(min(stream_levels) if stream_levels else logger.level)
     # Replace only the console/stream output with the rich-routed one; keep file handlers
     # (``--log-to-file``) writing as usual.
     kept = [h for h in saved if isinstance(h, logging.FileHandler)]

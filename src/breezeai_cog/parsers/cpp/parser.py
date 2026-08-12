@@ -72,7 +72,7 @@ class CppParser(BaseParser):
         source, path = ctx.source, ctx.path
         fid = file_id(path)
         seen_ids: set[str] = set()
-        capture, limit = ctx.capture_statements, ctx.text_truncation_limit
+        capture, limit = ctx.capture_statements, ctx.statement_text_limit
 
         idx = ctx.resolution_index if isinstance(ctx.resolution_index, CppIndex) else None
         internal, external, _, _ = extract_imports(root, source, idx.headers if idx else None)

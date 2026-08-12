@@ -55,7 +55,7 @@ class GroovyParser(BaseParser):
         source, path = ctx.source, ctx.path
         fid = file_id(path)
         seen_ids: set[str] = set()
-        capture, limit = ctx.capture_statements, ctx.text_truncation_limit
+        capture, limit = ctx.capture_statements, ctx.statement_text_limit
 
         idx = ctx.resolution_index
         fqcn = idx.fqcn if isinstance(idx, GroovyIndex) else idx  # bare FqcnIndex/None still ok

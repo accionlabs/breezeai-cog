@@ -109,6 +109,14 @@ def repo_to_json_tree(
     show_bar = not verbose and sys.stderr.isatty()
     render_table = not verbose and sys.stdout.isatty()
 
+    # When a Rich summary table is shown, keep the structured `analysis.complete` /
+    # `files.skipped` lines flowing to the log file but drop them from the terminal (the
+    # table + skip block present the same info). Piped/CI runs keep the console lines.
+    if render_table:
+        from .logging import quiet_console
+
+        quiet_console()
+
     if batch:
         # Immediate subdirectories only; skip dot-directories. Loose files are ignored
         # because we iterate directories, never the workspace itself.
@@ -182,9 +190,7 @@ def _analyze_and_report(
     stats: dict[str, Any] = {}
 
     def analyze(progress: Callable[[int, int], None] | None) -> AnalysisResult:
-        return service.analyze_repo(
-            repo, progress=progress, summary_out=stats, log_summary=not render_table,
-        )
+        return service.analyze_repo(repo, progress=progress, summary_out=stats)
 
     if show_bar:
         from rich.console import Console

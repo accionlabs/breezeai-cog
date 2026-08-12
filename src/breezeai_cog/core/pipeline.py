@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Callable, Iterator
 
 from .._version import __version__
-from ..logging import get_logger
+from ..logging import DETAIL_LOGGER, get_logger
 from ..schemas import FileRecord, ProjectMetaData
 from . import executor
 from .ignore import IgnoreEngine
@@ -24,6 +24,8 @@ from .scanner import ScanEntry, scan
 from .skips import SkipReport
 
 log = get_logger("breezeai_cog.pipeline")
+# File-only sink for per-file skip rows — captured in the log, never echoed to the console.
+detail_log = get_logger(DETAIL_LOGGER)
 
 
 def _classifier(languages: set[str] | None) -> Callable[[str], str | None]:
@@ -174,15 +176,16 @@ def _assemble(
     debug_on: bool = False,
     progress: Callable[[int, int], None] | None = None,
     summary_out: dict | None = None,
-    log_summary: bool = True,
 ) -> ProjectMetaData:
     """Stream (language, record) pairs to the sink and accumulate projectMetaData.
 
-    Logs an ``analysis.complete`` summary (candidate files, parsed, failed, skipped +
-    cumulative totals) at INFO, or DEBUG when ``log_summary`` is False (the caller will
-    present it itself, e.g. as a table). If ``summary_out`` is given it's filled with the
-    same numbers. ``progress(done, total)`` — if given — is called as records arrive.
-    Under ``--verbose`` a per-file ``parse.file.done`` is also logged.
+    Always logs an ``analysis.complete`` summary at INFO (candidate files, parsed, failed,
+    skipped + cumulative totals) — so it lands in the log file regardless of console mode.
+    A CLI showing a Rich table quiets it on the *console* (see ``logging.quiet_console``),
+    not in the file. Per-file ``file.skipped`` WARNINGs are emitted by :func:`run` at scan
+    time. If ``summary_out`` is given it's filled with the same numbers. ``progress(done,
+    total)`` — if given — is called as records arrive. Under ``--verbose`` a per-file
+    ``parse.file.done`` is also logged.
     """
     total_files = total_functions = total_classes = total_loc = config_files = 0
     total_statements = 0
@@ -238,8 +241,7 @@ def _assemble(
             scanned=scanned, parsed=parsed, failed=failed,
             skipped=skipped_total, skips=dict(skips), statements=total_statements,
         )
-    emit = log.info if log_summary else log.debug
-    emit(
+    log.info(
         "analysis.complete",
         scanned=scanned,                   # files walked = parsed + failed + skipped
         parsed=parsed,                     # records produced
@@ -258,24 +260,31 @@ def run(
     *,
     progress: Callable[[int, int], None] | None = None,
     summary_out: dict | None = None,
-    log_summary: bool = True,
 ) -> ProjectMetaData:
     """Full analysis to a sink (parallel) → assembled projectMetaData.
 
     ``progress(done, total)`` — if given — receives live counts as files complete.
-    ``summary_out`` / ``log_summary`` — see :func:`_assemble`.
+    ``summary_out`` — see :func:`_assemble`.
     """
     repo_root = Path(repo_root)
     debug_on = settings.log_level == "DEBUG"
     report = SkipReport()
     entries = list(_scan_entries(repo_root, settings, report))
+    # One row per skipped file (with its reason) to the file-only detail log — individually
+    # recorded on disk, without polluting the console summary.
+    for skipped in report.files:
+        detail_log.warning(
+            "file.skipped",
+            path=skipped["path"],
+            reason=skipped["reason"],
+            **({"size": skipped["size"]} if "size" in skipped else {}),
+        )
     jobs = settings.jobs if settings.jobs and settings.jobs > 0 else (os.cpu_count() or 1)
     indexes = _build_indexes(repo_root, entries, jobs, debug_on=debug_on)
     records = executor.parse_entries(entries, repo_root, settings, indexes)
     meta = _assemble(
         repo_root, records, sink, candidates=len(entries), skips=report.counts,
-        debug_on=debug_on, progress=progress,
-        summary_out=summary_out, log_summary=log_summary,
+        debug_on=debug_on, progress=progress, summary_out=summary_out,
     )
     if summary_out is not None:  # full detail for the CLI console summary + sidecar report
         summary_out["skip_report"] = report
