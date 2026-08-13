@@ -330,37 +330,24 @@ def test_same_package_call_resolves_without_import(tmp_path) -> None:
     assert call.path == "RestCommon.groovy"
 
 
-# --- enum constant VALUE + doc capture (BREEZEAI-943) ---
+# --- enum members captured as flat statements (queryable text) ---
 
-def test_enum_constant_values_and_doc(tmp_path) -> None:
-    src = (
-        "enum Priority {\n"
-        "  LOW('1'),    // lowest\n"
-        "  /** the peak */\n"
-        "  HIGH('3')\n"
-        "}\n"
-    ).encode()
-    rec = _parse_src(tmp_path, src)
-    enum = next(c for c in rec.classes if c.type == "enum")
-    assert (enum.metadata or {}).get("constants") == [
-        {"name": "LOW", "value": "1", "doc": "lowest"},   # trailing same-line comment
-        {"name": "HIGH", "value": "3", "doc": "the peak"},  # preceding groovydoc
-    ]
-
-
-def test_enum_constant_no_arg_and_non_literal_are_honest_null(tmp_path) -> None:
-    rec = _parse_src(tmp_path, b"enum E { A, B(compute()) }")
-    enum = next(c for c in rec.classes if c.type == "enum")
-    assert (enum.metadata or {}).get("constants") == [
-        {"name": "A", "value": None, "doc": None},   # no argument
-        {"name": "B", "value": None, "doc": None},   # non-literal argument → honest-null
-    ]
-
-
-def test_enum_constants_emit_no_statements(tmp_path) -> None:
-    # Constants are vocabulary carried on metadata, never emitted as statements.
-    rec = _parse_src(tmp_path, b"enum E { A('1'), B('2') }", capture=True)
-    assert rec.statements == []
+def test_enum_constants_captured_as_statements(tmp_path) -> None:
+    # Enum constants become flat statements parented to the enum Class (best-effort; the
+    # Groovy grammar drops parenthesised constants). The value rides inside the text.
+    src = b"enum Status { ACTIVE, CLOSED }\n"
+    p = tmp_path / "s.groovy"
+    p.write_bytes(src)
+    ctx = ParseContext(path="s.groovy", abs_path=p, source=src, repo_root=tmp_path,
+                       capture_statements=True)
+    rec = GroovyParser().parse_file(ctx)
+    st = next(c for c in rec.classes if c.type == "enum")
+    assert st.metadata is None
+    members = [(s.name, s.text, s.nodeType) for s in rec.statements if s.parentId == st.id]
+    assert members == [("ACTIVE", "ACTIVE", "enum_constant"), ("CLOSED", "CLOSED", "enum_constant")]
+    ctx2 = ParseContext(path="s.groovy", abs_path=p, source=src, repo_root=tmp_path,
+                        capture_statements=False)
+    assert GroovyParser().parse_file(ctx2).statements == []
 
 
 def test_plain_class_metadata_stays_none(tmp_path) -> None:
@@ -372,7 +359,8 @@ def test_plain_class_metadata_stays_none(tmp_path) -> None:
 def test_modifier_and_nested_enum_constants(tmp_path) -> None:
     # The load-bearing real-world shape: a modifier-prefixed enum nested in a class, whose
     # members follow the constants without a `;`. Grammar fix + capture together recover the
-    # constant VALUES that previously landed nowhere.
+    # parenthesised constants (their VALUE rides inside the statement text) that previously
+    # landed nowhere.
     src = (
         "class Holder {\n"
         "  public enum Entry {\n"
@@ -384,11 +372,13 @@ def test_modifier_and_nested_enum_constants(tmp_path) -> None:
         "  def use() {}\n"
         "}\n"
     ).encode()
-    rec = _parse_src(tmp_path, src)
+    rec = _parse_src(tmp_path, src, capture=True)
     holder = next(c for c in rec.classes if c.name == "Holder")
     entry = next(c for c in rec.classes if c.name == "Entry")
-    assert entry.type == "enum" and entry.parentId == holder.id
-    assert (entry.metadata or {}).get("constants") == [
-        {"name": "APPLY_STATUS", "value": "CAPLC09", "doc": None},
-        {"name": "APPLY_DATE", "value": "CAPLC11", "doc": None},
+    assert entry.type == "enum" and entry.parentId == holder.id and entry.metadata is None
+    members = [(s.name, s.text) for s in rec.statements
+               if s.parentId == entry.id and s.nodeType == "enum_constant"]
+    assert members == [
+        ("APPLY_STATUS", "APPLY_STATUS('CAPLC09')"),
+        ("APPLY_DATE", "APPLY_DATE('CAPLC11')"),
     ]

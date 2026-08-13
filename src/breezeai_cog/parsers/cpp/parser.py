@@ -105,9 +105,13 @@ class CppParser(BaseParser):
                     for c in cls_list:
                         class_map.setdefault(c.name, c.id)
                 elif node.type == "enum_specifier":
-                    enum_cls = build_enum(node, source, path, parent_id=fid, seen_ids=seen_ids)
+                    enum_cls, enum_stmts = build_enum(
+                        node, source, path, parent_id=fid, seen_ids=seen_ids,
+                        capture=capture, limit=limit,
+                    )
                     if enum_cls is not None:
                         classes.append(enum_cls)
+                        statements.extend(enum_stmts)
                 elif node.type == "function_definition":
                     _emit_function(node, ns)
 

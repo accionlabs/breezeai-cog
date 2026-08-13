@@ -7,6 +7,7 @@ from tree_sitter import Node
 
 from ...emit import class_id, disambiguate
 from ...schemas import Class, ConstructorParam, Function, Statement
+from ..statements_common import emit_enum_members
 from ..treesitter import line_span, node_text
 from ..callresolve import CallResolver, noop_resolver
 from .functions import (
@@ -130,6 +131,22 @@ def build_class(
                     methods.extend(fns)
                     statements.extend(fn_statements)
             pending = []
+
+    # Enum members become flat statements parented to the enum Class (their `text` — incl.
+    # any `= value` — is queryable). Valued members are `enum_assignment`, bare ones are a
+    # `property_identifier`. Gated by --capture-statements like every other statement.
+    if capture and cnode.type == "enum_declaration":
+        ebody = cnode.child_by_field_name("body") or next(
+            (c for c in cnode.named_children if c.type == "enum_body"), None
+        )
+        if ebody is not None:
+            statements.extend(
+                emit_enum_members(
+                    ebody, source, path,
+                    member_types={"enum_assignment", "property_identifier"},
+                    parent_id=cid, limit=limit, seen_ids=seen_ids,
+                )
+            )
 
     # Named functions living inside class-decorator arguments (NestJS `@Module({ …
     # useFactory: () => … })`, TypeORM `forRootAsync`, etc.). These sit outside every

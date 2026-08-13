@@ -259,62 +259,56 @@ def test_endpoint_concatenation(tmp_path) -> None:
     assert any(s.semanticType == "api_call" and s.endpoint == "/users/{id}" for s in rec.statements)
 
 
-# --- N1: enum constant VALUE + doc capture (BREEZEAI-943) ---------------------
+# --- N1: enum members captured as flat statements (queryable text) ------------
 
-def _enum_meta(tmp_path, src: str):
+def _enum_members(tmp_path, src: str):
     p = tmp_path / "E.java"
     p.write_text(src)
     ctx = ParseContext(path="E.java", abs_path=p, source=src.encode(), repo_root=tmp_path,
                        capture_statements=True)
     rec = JavaParser().parse_file(ctx)
     enum = next(c for c in rec.classes if c.type == "enum")
-    return rec, (enum.metadata or {}).get("constants")
+    members = [s for s in rec.statements if s.parentId == enum.id]
+    return rec, enum, members
 
 
-def test_enum_constant_values_and_javadoc(tmp_path) -> None:
-    # NAME("value") with a preceding Javadoc gloss -> {name, value, doc}.
+def test_enum_members_captured_as_statements(tmp_path) -> None:
+    # NAME("value") members become flat statements parented to the enum Class; the value
+    # rides inside the statement text (no more metadata.constants channel).
     src = ('enum Priority {\n'
            '  /** high urgency */\n'
            '  HIGH("3"),\n'
            '  /** low urgency */\n'
            '  LOW("1");\n}\n')
-    _, consts = _enum_meta(tmp_path, src)
-    assert consts == [
-        {"name": "HIGH", "value": "3", "doc": "high urgency"},
-        {"name": "LOW", "value": "1", "doc": "low urgency"},
+    _, enum, members = _enum_members(tmp_path, src)
+    assert enum.metadata is None
+    assert [(m.name, m.text) for m in members] == [("HIGH", 'HIGH("3")'), ("LOW", 'LOW("1")')]
+    assert all(m.nodeType == "enum_constant" and m.semanticType is None for m in members)
+
+
+def test_enum_bare_and_valued_members(tmp_path) -> None:
+    # Bare (no-arg) and valued constants both captured; each member's own text is its span.
+    src = 'enum Color {\n  RED("f00"),\n  GREEN("0f0"),\n  BLUE;\n}\n'
+    _, _, members = _enum_members(tmp_path, src)
+    assert [(m.name, m.text) for m in members] == [
+        ("RED", 'RED("f00")'), ("GREEN", 'GREEN("0f0")'), ("BLUE", "BLUE"),
     ]
 
 
-def test_enum_trailing_line_comment(tmp_path) -> None:
-    # Trailing // comment (incl. non-ASCII) is the doc; a following bare constant must NOT
-    # inherit the previous constant's trailing comment.
-    src = 'enum Color {\n  RED("f00"), //café red\n  GREEN("0f0"), // grass\n  BLUE;\n}\n'
-    _, consts = _enum_meta(tmp_path, src)
-    assert consts == [
-        {"name": "RED", "value": "f00", "doc": "café red"},
-        {"name": "GREEN", "value": "0f0", "doc": "grass"},
-        {"name": "BLUE", "value": None, "doc": None},
-    ]
-
-
-def test_enum_non_literal_and_no_arg_are_honest_null(tmp_path) -> None:
-    # No argument, and a non-literal (computed) argument -> value None, never a guess.
-    src = 'enum S {\n  BARE,\n  COMPUTED(compute()),\n  NUM(3);\n}\n'
-    _, consts = _enum_meta(tmp_path, src)
-    by = {c["name"]: c["value"] for c in consts}
-    assert by == {"BARE": None, "COMPUTED": None, "NUM": "3"}
-
-
-def test_enum_constants_emit_no_statements(tmp_path) -> None:
-    # Enum members are vocabulary, not behaviour: they must not appear as statements.
+def test_enum_members_gated_by_capture_flag(tmp_path) -> None:
+    # Enum members are statements now → gated by --capture-statements (absent without it).
     src = 'enum S { A("1"), B("2"); }'
-    rec, consts = _enum_meta(tmp_path, src)
-    assert len(consts) == 2
-    assert not any((s.text or "").startswith("A(") for s in rec.statements)
+    p = tmp_path / "E.java"
+    p.write_text(src)
+    ctx = ParseContext(path="E.java", abs_path=p, source=src.encode(), repo_root=tmp_path,
+                       capture_statements=False)
+    rec = JavaParser().parse_file(ctx)
+    assert rec.statements == []
+    assert all(c.metadata is None for c in rec.classes)
 
 
 def test_plain_class_metadata_stays_none(tmp_path) -> None:
-    # A `NAME = "value"` field already lands as a statement; the class carries no constants metadata.
+    # A `NAME = "value"` field lands as a statement; the class carries no constants metadata.
     src = 'class A { private static final String NAME = "value"; }'
     p = tmp_path / "A.java"
     p.write_text(src)
@@ -325,8 +319,8 @@ def test_plain_class_metadata_stays_none(tmp_path) -> None:
     assert any((s.text or "").find("NAME") >= 0 for s in rec.statements)
 
 
-def test_enum_metadata_output_validates(tmp_path) -> None:
-    src = 'enum S {\n  /** x */\n  A("1");\n}\n'
+def test_enum_members_output_validates(tmp_path) -> None:
+    src = 'enum S {\n  A("1"),\n  B("2");\n}\n'
     p = tmp_path / "E.java"
     p.write_text(src)
     ctx = ParseContext(path="E.java", abs_path=p, source=src.encode(), repo_root=tmp_path,

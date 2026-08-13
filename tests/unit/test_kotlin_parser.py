@@ -80,3 +80,19 @@ def test_local_function_inside_body(tmp_path) -> None:
     fn_names = {f.name for f in rec.functions}
     assert "processOrder" in fn_names
     assert "applyTax" in fn_names, f"Local function applyTax not captured; got: {fn_names}"
+
+
+def test_enum_entries_captured_as_statements(tmp_path) -> None:
+    # Enum entries become flat statements parented to the enum Class (queryable text).
+    src = b"enum class Dir { NORTH, SOUTH }\n"
+    p = tmp_path / "d.kt"
+    p.write_bytes(src)
+    ctx = ParseContext(path="d.kt", abs_path=p, source=src, repo_root=tmp_path,
+                       capture_statements=True)
+    rec = KotlinParser().parse_file(ctx)
+    d = next(c for c in rec.classes if c.type == "enum")
+    members = [(s.name, s.text, s.nodeType) for s in rec.statements if s.parentId == d.id]
+    assert members == [("NORTH", "NORTH", "enum_entry"), ("SOUTH", "SOUTH", "enum_entry")]
+    ctx2 = ParseContext(path="d.kt", abs_path=p, source=src, repo_root=tmp_path,
+                        capture_statements=False)
+    assert KotlinParser().parse_file(ctx2).statements == []

@@ -117,7 +117,14 @@ parse once and reuse the base extraction. Always provide it.
   decorators, `isStatic`, visibility, `calls`). Return `(Function, list[Statement])`.
 - **classes.py**: `Class` per class/interface/enum/struct (`extends`/`implements`,
   decorators, `constructorParams`, methods as flat `Function`s). Return
-  `(Class, list[Function], list[Statement])`.
+  `(Class, list[Function], list[Statement])`. **Enum members** are emitted as flat
+  `Statement`s parented to the enum `Class` (one per member — `nodeType` = the grammar's
+  member node, `name` = the declared name, `text` = the member source, incl. any
+  `= value`), via `emit_enum_members(body, source, path, member_types={…}, parent_id=cid,
+  limit=…, seen_ids=…)` from `statements_common` — gated behind `--capture-statements` like
+  every other statement. (Do **not** carry members in `Class.metadata["constants"]`, and do
+  **not** un-barrier the enum from `NESTED_SCOPES` — enum bodies can hold methods that must
+  still be extracted as their own scope.)
 
 ### Step 4 — ids (deterministic) + FLAT statements
 - Assign ids **only** via `emit` helpers (`function_id(path, name, line, class_name=…)`,
