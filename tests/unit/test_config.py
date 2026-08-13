@@ -43,6 +43,25 @@ def test_defaults(env) -> None:
     assert s.statement_text_limit == 8000 and s.max_file_size == 2_000_000
     assert s.metadata_value_limit == 4000
     assert s.aws_region == "us-west-2"
+    # upload tuning defaults
+    assert s.upload_timeout == 900.0
+    assert s.upload_parallelism == 1
+    assert s.upload_max_retries == 1
+
+
+def test_upload_tuning_env_and_bounds(env) -> None:
+    env.setenv("BREEZEAI_COG_UPLOAD_TIMEOUT", "120")
+    env.setenv("BREEZEAI_COG_UPLOAD_PARALLELISM", "4")
+    env.setenv("BREEZEAI_COG_UPLOAD_MAX_RETRIES", "0")
+    s = _settings()
+    assert s.upload_timeout == 120.0 and s.upload_parallelism == 4 and s.upload_max_retries == 0
+    # bounds: parallelism >= 1, retries >= 0, timeout > 0
+    with pytest.raises(ValidationError):
+        _settings(upload_parallelism=0)
+    with pytest.raises(ValidationError):
+        _settings(upload_max_retries=-1)
+    with pytest.raises(ValidationError):
+        _settings(upload_timeout=0)
 
 
 def test_env_prefix(env) -> None:

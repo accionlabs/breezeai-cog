@@ -164,11 +164,16 @@ edits your `.gitignore` itself, and it always skips a `.cog/` directory when sca
 | `--language <name>` | all (auto-detected) | Only analyze this language. Repeat the flag for several (e.g. `--language python --language java`). |
 | `--capture-statements` | off | Also record statements *inside* functions — needed to detect API calls, DB queries, and routes. Off by default because it produces more data. |
 | `--batch` | off | Treat `--repo` as a **workspace folder** and analyze each immediate subdirectory as its own project (one `.ndjson.gz` per subdir). See *Batch mode* below. |
+| `--repo-list <file>` | all subdirs | With `--batch`: a file of immediate-subdirectory **names** (one per line; `#` comments and blank lines ignored) to restrict the run to. |
 | `--jobs <n>` | number of CPU cores | How many files to parse in parallel. |
 | `--upload` | off | After analysis, upload the `.ndjson.gz` to the Breeze backend (`POST /code-ontology/generate`). Requires `--baseurl`, `--uuid`, and `--user-api-key` (each also readable from the environment). |
 | `--baseurl <url>` | env `BREEZE_API_URL` | Breeze backend base URL (used with `--upload`). |
 | `--uuid <uuid>` | — | Project UUID to upload into (used with `--upload`). |
 | `--user-api-key <key>` | env `API_KEY` | Backend API key, sent as the `api-key` header (used with `--upload`). |
+| `--upload-timeout <secs>` | `900` (15 min) | Per-repo timeout — caps **both** the upload request **and** the wait for the backend to finish processing (reach `active`); the repo fails past this. Env `BREEZEAI_COG_UPLOAD_TIMEOUT`. |
+| `--parallel-uploads <n>` | `1` | How many repos to upload concurrently in `--batch`. Env `BREEZEAI_COG_UPLOAD_PARALLELISM`. |
+| `--upload-max-retries <n>` | `1` | Retries after a failed upload (total attempts = retries + 1). Only transient failures — network / timeout / HTTP 5xx — retry; a 4xx is fatal. Env `BREEZEAI_COG_UPLOAD_MAX_RETRIES`. |
+| `--force` | off | With `--batch --upload`: ignore any saved resume state and re-upload every selected project from scratch. |
 | `--verbose` | off | Print detailed (debug) logs: per-file parse results, each skipped file with its reason (`ignored` / `unsupported` / `oversized`), and index-build timing. |
 
 Every run — even without `--verbose` — ends with a one-line summary showing files **found** vs
@@ -205,9 +210,21 @@ breezeai-cog repo-to-json-tree --repo . --capture-statements \
 
 With `--upload`, the run analyzes as usual, writes the `.ndjson.gz`, then POSTs it as
 `multipart/form-data` to `POST /code-ontology/generate` (the backend streams it to S3 and
-starts ingestion). Transient network / 5xx failures get a bounded retry; a 4xx or exhausted
-retries exits non-zero. `--baseurl` and `--user-api-key` fall back to the `BREEZE_API_URL`
-and `API_KEY` environment variables (or `.env`), so you can keep secrets out of the command line.
+starts ingestion). Each upload is capped at `--upload-timeout` seconds (default 15 min);
+transient network / timeout / 5xx failures retry up to `--upload-max-retries` times (default
+1); a 4xx or exhausted retries exits non-zero. Progress shows one overall bar
+(`uploaded/total` + total elapsed) with a line per concurrently-uploading repo below it:
+
+```
+Uploading  ━━━━━━━━━━╺━━━━━━━━━  1/12 [01:12:59]
+  repo-1 [05:12] . attempt 1
+  repo-2 [08:11] . attempt 2
+```
+
+The raw backend response is written to the `.cog/logs` log file instead of the console.
+`--baseurl` and
+`--user-api-key` fall back to the `BREEZE_API_URL` and `API_KEY` environment variables (or
+`.env`), so you can keep secrets out of the command line.
 
 > This command only reads **local** folders. To analyze a remote repository by cloning or diffing
 > commits, use the HTTP service's `/api/analyze-diff` endpoint (below).
@@ -238,10 +255,33 @@ breezeai-cog repo-to-json-tree --repo ./workspace --batch --capture-statements -
 Batch mode combines with all the other flags (`--language`, `--capture-statements`, `--jobs`, and
 the `--upload` group), applying them to every project in the run.
 
+**Uploading a subset.** Pass `--repo-list <file>` to restrict the run to specific subdirectories.
+The file lists **subdirectory names**, one per line (`#` comments and blank lines are ignored); a
+name with no matching subdirectory is an error.
+
+```bash
+breezeai-cog repo-to-json-tree --repo ./workspace --batch --repo-list ./to-upload.txt \
+    --upload --baseurl … --uuid … --user-api-key "$API_KEY"
+```
+
+**Two phases + resume (with `--upload`).** Batch upload runs in two phases: it first **analyzes**
+every selected project (each writing to its own `<subdir>/.cog/`), then runs a single **upload
+phase** that uploads them — up to `--parallel-uploads` at a time — showing the status summary
+above one progress bar. Completed uploads are tracked in `<workspace>/.cog/batch-upload-state.json`
+(a repo is recorded only once the backend confirms it is `active`). If the run is interrupted,
+**rerun the exact same command** — already-uploaded projects are skipped and only the remaining
+ones are retried. Once every selected project is uploaded, the state file is deleted automatically.
+Pass `--force` to discard that state and re-upload everything from scratch.
+
+Each per-repo `--upload-timeout` bounds **both** the upload request and the subsequent wait for the
+backend to finish processing — if a repo hasn't reached `active` within the timeout it is marked
+failed (and the run continues / exits non-zero), rather than polling forever.
+
 > ⚠️ **Uploading in batch:** `--upload` uses a single `--uuid`, so **every** subdirectory is uploaded
 > into that **same** Breeze project. To land each repository in its own project, run them separately
 > with their own `--uuid` instead of using `--batch`. If any project's upload fails, the remaining
-> projects still run and the command exits non-zero, listing which ones failed.
+> projects still run and the command exits non-zero, listing which ones failed (rerun to retry only
+> those).
 
 ---
 
@@ -311,6 +351,9 @@ Most-used settings:
 | Server port | `BREEZEAI_COG_PORT` | `3000` |
 | Backend URL (for upload) | `BREEZE_API_URL` | — |
 | Backend API key | `API_KEY` | — |
+| Upload timeout (seconds, per repo) | `BREEZEAI_COG_UPLOAD_TIMEOUT` | `900` |
+| Parallel uploads (batch) | `BREEZEAI_COG_UPLOAD_PARALLELISM` | `1` |
+| Upload retries (after a failure) | `BREEZEAI_COG_UPLOAD_MAX_RETRIES` | `1` |
 | AWS S3 (server) | `AWS_ACCESS_KEY` · `AWS_SECRET_KEY` · `AWS_REGION` · `AWS_S3_BUCKET` | region `us-west-2` |
 
 ### Choosing which files are analyzed
