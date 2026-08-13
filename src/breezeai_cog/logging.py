@@ -204,6 +204,16 @@ def setup_logging(settings: "Settings") -> None:
     detail_logger.setLevel(settings.log_level)
     detail_logger.propagate = False
 
+    # httpx/httpcore log every request at INFO ("HTTP Request: POST ... 201 Created"). That
+    # noise would shred the upload progress bar and leak backend URLs to the console. Keep it
+    # OFF the console (propagate=False → never reaches the root stdout handler) but still route
+    # it to the log file below, so the request trail is retained for debugging.
+    http_loggers = [logging.getLogger(name) for name in ("httpx", "httpcore")]
+    for lg in http_loggers:
+        lg.handlers.clear()
+        lg.setLevel(settings.log_level)
+        lg.propagate = False
+
     if settings.log_to_file:
         file_handler = _DailyDatedFileHandler(
             dir_path=Path(settings.log_location or "./logs"),
@@ -214,6 +224,8 @@ def setup_logging(settings: "Settings") -> None:
         file_handler.setFormatter(formatter)
         logger.addHandler(file_handler)
         detail_logger.addHandler(file_handler)  # detail goes ONLY to the file
+        for lg in http_loggers:
+            lg.addHandler(file_handler)  # httpx request trail → file only, never the console
 
     _configure_structlog(settings.log_format)
 

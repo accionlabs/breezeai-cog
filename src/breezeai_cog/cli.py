@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Any, Callable, Optional
+from typing import TYPE_CHECKING, Any, Callable, Optional
 
 import typer
 
@@ -19,6 +19,10 @@ from .logging import setup_logging
 from .schemas import ProjectMetaData
 from .services import AnalysisResult, AnalysisService
 from .utils.paths import cog_dir
+
+if TYPE_CHECKING:
+    from .services import UploadState, UploadTask
+    from .services.batch_upload import TrackerSnapshot
 
 app = typer.Typer(
     name="breezeai-cog",
@@ -43,6 +47,11 @@ def repo_to_json_tree(
         help="Treat --repo as a workspace folder: analyze each immediate subdirectory as its own project "
              "(one .ndjson.gz per subdir). Dot-directories and loose files are skipped.",
     ),
+    repo_list: Optional[Path] = typer.Option(
+        None, "--repo-list", exists=True, dir_okay=False,
+        help="With --batch: a file of immediate-subdirectory names (one per line; '#' comments and "
+             "blank lines ignored) to restrict the run to. Default: every subdirectory.",
+    ),
     jobs: Optional[int] = typer.Option(None, "--jobs", help="Worker processes (default: CPU count)."),
     max_concat_depth: Optional[int] = typer.Option(
         None, "--max-concat-depth", min=1,
@@ -61,9 +70,33 @@ def repo_to_json_tree(
     user_api_key: Optional[str] = typer.Option(
         None, "--user-api-key", help="Backend API key, sent as `api-key` (with --upload; env: API_KEY).",
     ),
+    upload_timeout: Optional[float] = typer.Option(
+        None, "--upload-timeout", min=0,
+        help="Per-repo upload timeout in seconds — caps both the upload request and the wait "
+             "for the backend to finish processing; the repo fails past this "
+             "(default 900 = 15 min; env: BREEZEAI_COG_UPLOAD_TIMEOUT).",
+    ),
+    parallel_uploads: Optional[int] = typer.Option(
+        None, "--parallel-uploads", min=1,
+        help="Concurrent uploads in --batch mode (default 1; env: BREEZEAI_COG_UPLOAD_PARALLELISM).",
+    ),
+    upload_max_retries: Optional[int] = typer.Option(
+        None, "--upload-max-retries", min=0,
+        help="Retries after a failed upload; total attempts = retries + 1 "
+             "(default 1; env: BREEZEAI_COG_UPLOAD_MAX_RETRIES).",
+    ),
+    force: bool = typer.Option(
+        False, "--force",
+        help="With --batch --upload: ignore any saved resume state and re-upload every "
+             "selected project from scratch.",
+    ),
     verbose: bool = typer.Option(False, "--verbose", help="Verbose (DEBUG) logging."),
 ) -> None:
     """Analyze a repository to a gzipped NDJSON ontology (optionally uploading it)."""
+    if repo_list is not None and not batch:
+        typer.secho("error: --repo-list requires --batch", fg=typer.colors.RED, err=True)
+        raise typer.Exit(1)
+
     # Only forward upload flags that were actually supplied so env / .env can fill the
     # rest (init kwargs outrank env in pydantic-settings — passing None would clobber it).
     overrides: dict[str, Any] = {}
@@ -75,6 +108,12 @@ def repo_to_json_tree(
         overrides["uuid"] = uuid
     if user_api_key is not None:
         overrides["user_api_key"] = user_api_key
+    if upload_timeout is not None:
+        overrides["upload_timeout"] = upload_timeout
+    if parallel_uploads is not None:
+        overrides["upload_parallelism"] = parallel_uploads
+    if upload_max_retries is not None:
+        overrides["upload_max_retries"] = upload_max_retries
     if max_concat_depth is not None:
         overrides["max_concat_depth"] = max_concat_depth
 
@@ -118,28 +157,122 @@ def repo_to_json_tree(
         quiet_console()
 
     if batch:
-        # Immediate subdirectories only; skip dot-directories. Loose files are ignored
-        # because we iterate directories, never the workspace itself.
-        repos = sorted(p for p in repo.iterdir() if p.is_dir() and not p.name.startswith("."))
-        if not repos:
-            typer.secho(f"error: no subdirectories to analyze in {repo}", fg=typer.colors.RED, err=True)
-            raise typer.Exit(1)
-        typer.echo(f"Batch: analyzing {len(repos)} project(s) in {repo} ...")
-        failed: list[str] = []
-        for sub in repos:
-            typer.echo(f"\n[{sub.name}]")
-            if not _analyze_and_report(service, settings, sub, show_bar=show_bar, render_table=render_table):
-                failed.append(sub.name)
-        if failed:
-            typer.secho(
-                f"Upload failed for {len(failed)} project(s): {', '.join(failed)}",
-                fg=typer.colors.RED,
-                err=True,
-            )
-            raise typer.Exit(1)
+        _run_batch(
+            service, settings, repo, repo_list,
+            force=force,
+            show_bar=show_bar, render_table=render_table, live_display=render_table,
+        )
     else:
-        if not _analyze_and_report(service, settings, repo, show_bar=show_bar, render_table=render_table):
+        result = _analyze_and_report(service, settings, repo, show_bar=show_bar, render_table=render_table)
+        if settings.upload and result.written:
+            from .services import UploadTask
+
+            assert result.out_path is not None  # CLI always owns a FileSink (out_path set)
+            tasks = [UploadTask(result.project_meta.repositoryName, result.out_path)]
+            failed = _run_upload_phase(tasks, settings, state=None, live_display=render_table)
+            if failed:
+                raise typer.Exit(1)
+
+
+def _select_batch_repos(workspace: Path, repo_list: Path | None) -> list[Path]:
+    """Immediate subdirectories of ``workspace`` (dot-dirs and loose files skipped), optionally
+    restricted to the names listed in ``repo_list``. Errors out if the selection is empty or a
+    listed name has no matching subdirectory."""
+    subdirs = sorted(p for p in workspace.iterdir() if p.is_dir() and not p.name.startswith("."))
+    if repo_list is None:
+        if not subdirs:
+            typer.secho(f"error: no subdirectories to analyze in {workspace}", fg=typer.colors.RED, err=True)
             raise typer.Exit(1)
+        return subdirs
+
+    names = [
+        line.strip()
+        for line in repo_list.read_text("utf-8").splitlines()
+        if line.strip() and not line.strip().startswith("#")
+    ]
+    by_name = {p.name: p for p in subdirs}
+    missing = [n for n in names if n not in by_name]
+    if missing:
+        typer.secho(
+            f"error: --repo-list names have no matching subdirectory in {workspace}: "
+            f"{', '.join(missing)}",
+            fg=typer.colors.RED, err=True,
+        )
+        raise typer.Exit(1)
+    # De-dupe while preserving list order.
+    selected = [by_name[n] for n in dict.fromkeys(names)]
+    if not selected:
+        typer.secho(f"error: --repo-list {repo_list} selected no projects", fg=typer.colors.RED, err=True)
+        raise typer.Exit(1)
+    return selected
+
+
+def _run_batch(
+    service: AnalysisService,
+    settings: Settings,
+    workspace: Path,
+    repo_list: Path | None,
+    *,
+    force: bool,
+    show_bar: bool,
+    render_table: bool,
+    live_display: bool,
+) -> None:
+    """Two-phase batch: analyze every selected project, then (if configured) upload them all
+    with a resumable, optionally-parallel upload phase."""
+    from .services import UploadState, UploadTask
+
+    repos = _select_batch_repos(workspace, repo_list)
+
+    # Resume: skip repos already uploaded in a previous (interrupted) run. State lives in the
+    # workspace's .cog and is keyed by repository name (== subdirectory name). --force discards
+    # any saved state so every selected project is uploaded again.
+    state = UploadState.load(workspace) if settings.upload else None
+    if state is not None and force:
+        state.clear()
+        state.completed.clear()
+        typer.secho("--force: ignoring saved resume state; re-uploading all selected projects.",
+                    fg=typer.colors.YELLOW)
+    if state is not None and state.completed:
+        already = [r for r in repos if state.is_done(r.name)]
+        repos = [r for r in repos if not state.is_done(r.name)]
+        if already:
+            typer.secho(
+                f"Resuming: {len(already)} project(s) already uploaded — "
+                f"skipping {', '.join(sorted(r.name for r in already))}.",
+                fg=typer.colors.CYAN,
+            )
+        if not repos:
+            typer.secho("All selected projects already uploaded.", fg=typer.colors.GREEN)
+            state.clear()
+            return
+
+    # ── Phase 1: analyze ──────────────────────────────────────────────────────
+    typer.echo(f"Batch: analyzing {len(repos)} project(s) in {workspace} ...")
+    tasks: list[UploadTask] = []
+    for sub in repos:
+        typer.echo(f"\n[{sub.name}]")
+        result = _analyze_and_report(service, settings, sub, show_bar=show_bar, render_table=render_table)
+        if settings.upload and result.written and result.out_path is not None:
+            tasks.append(UploadTask(result.project_meta.repositoryName, result.out_path))
+
+    # ── Phase 2: upload ───────────────────────────────────────────────────────
+    if not settings.upload:
+        return
+    if not tasks:
+        typer.secho("No uploadable artifacts produced — nothing to upload.", fg=typer.colors.YELLOW)
+        return
+    failed = _run_upload_phase(tasks, settings, state=state, live_display=live_display)
+    if failed:
+        typer.secho(
+            f"Upload failed for {len(failed)} project(s): {', '.join(sorted(failed))} "
+            f"(rerun the same command to retry only these).",
+            fg=typer.colors.RED, err=True,
+        )
+        raise typer.Exit(1)
+    if state is not None:
+        state.clear()
+    typer.secho(f"All {len(tasks)} upload(s) complete.", fg=typer.colors.GREEN)
 
 
 def _display_path(path: Path, repo: Path) -> str:
@@ -180,11 +313,11 @@ def _analyze_and_report(
     *,
     show_bar: bool,
     render_table: bool,
-) -> bool:
-    """Analyze one repository, render its summary, and (if configured) upload it.
+) -> AnalysisResult:
+    """Analyze one repository and render its summary (no upload — the caller drives that).
 
-    Returns True on success; False if upload was attempted and failed (the
-    analysis itself always completes first, leaving the .ndjson.gz on disk).
+    Returns the :class:`AnalysisResult`; ``result.written`` is False when the parser
+    produced nothing and no ``.ndjson.gz`` was emitted.
     """
     _warn_if_cog_not_gitignored(repo)
     stats: dict[str, Any] = {}
@@ -236,7 +369,7 @@ def _analyze_and_report(
         )
         skip_report_path = _report_skips(report, cog_dir(repo), m.repositoryName)
         _print_artifacts(repo, settings, export=None, skip_report=skip_report_path)
-        return True
+        return result
     if render_table:
         _print_summary_table(m, stats)
     else:
@@ -246,46 +379,135 @@ def _analyze_and_report(
         )
     skip_report_path = _report_skips(report, cog_dir(repo), m.repositoryName)
     _print_artifacts(repo, settings, export=result.out_path, skip_report=skip_report_path)
+    return result
 
-    if settings.upload:
-        from .errors import UploadError
-        from .services import extract_ontology_id, poll_ontology_status, upload_ontology
 
-        assert result.out_path is not None  # CLI always owns a FileSink (out_path set)
-        typer.echo(f"Uploading {result.out_path.name} to {settings.baseurl} ...")
-        try:
-            upload_resp = upload_ontology(settings, result.out_path, repository_name=m.repositoryName)
-        except UploadError as exc:
-            typer.secho(f"upload failed: {exc}", fg=typer.colors.RED, err=True)
-            return False
-        typer.secho("Upload complete.", fg=typer.colors.GREEN)
-        if upload_resp:
-            typer.echo(f"  Upload response: {json.dumps(upload_resp)}")
+def _fmt_mmss(seconds: float) -> str:
+    """``MM:SS`` (zero-padded) for a single repo's elapsed time."""
+    total = int(seconds)
+    return f"{total // 60:02d}:{total % 60:02d}"
 
-        ontology_id = extract_ontology_id(upload_resp)
-        if ontology_id:
-            typer.echo(f"Waiting for backend to process ontology {ontology_id} ...")
-            try:
-                final_status = poll_ontology_status(
-                    settings,
-                    ontology_id,
-                    on_response=lambda p: typer.echo(f"  Poll response: {json.dumps(p)}"),
-                    on_waiting=lambda s: typer.echo(
-                        f"  status: {s or 'pending'} — rechecking in 60s ..."
-                    ),
-                )
-            except UploadError as exc:
-                typer.secho(f"status poll failed: {exc}", fg=typer.colors.YELLOW, err=True)
-            else:
-                color = typer.colors.GREEN if final_status == "active" else typer.colors.YELLOW
-                typer.secho(f"Processing status: {final_status}.", fg=color)
-        else:
-            typer.secho(
-                "  (upload response missing '_id'; skipping status check)",
-                fg=typer.colors.YELLOW,
-            )
 
-    return True
+def _fmt_hms(seconds: float) -> str:
+    """``HH:MM:SS`` (zero-padded) for the cumulative phase time."""
+    total = int(seconds)
+    return f"{total // 3600:02d}:{(total % 3600) // 60:02d}:{total % 60:02d}"
+
+
+def _upload_active_lines(snap: "TrackerSnapshot", width: int) -> list[Any]:
+    """One indented ``  <repo> [MM:SS] . attempt <n>`` line per in-flight upload (truncated to
+    ``width`` so it never wraps — a wrapping line would corrupt the Live redraw)."""
+    from rich.text import Text
+
+    lines: list[Any] = []
+    for a in snap.active:
+        line = Text(no_wrap=True, overflow="ellipsis")
+        line.append(f"  {a.name} ", style="white")
+        line.append(f"[{_fmt_mmss(a.elapsed)}]", style="cyan")
+        line.append(" . ", style="dim")
+        line.append(f"attempt {a.attempt}", style="cyan")
+        line.truncate(max(width, 1), overflow="ellipsis")
+        lines.append(line)
+    return lines
+
+
+def _run_upload_phase(
+    tasks: "list[UploadTask]",
+    settings: Settings,
+    *,
+    state: "UploadState | None",
+    live_display: bool,
+) -> list[str]:
+    """Upload ``tasks`` (single-repo or batch). On an interactive terminal this shows one overall
+    progress bar with a line per concurrently-uploading repo::
+
+        Uploading  ━━━━━━━━━╺━━━━━━━━  1/12 [01:12:59]
+          repo-1 [05:12] . attempt 1
+          repo-2 [08:11] . attempt 2
+
+    Raw backend responses go to the log file only. Returns the list of repo names that failed."""
+    import threading
+
+    from .services import UploadTracker, run_batch_uploads
+
+    typer.echo(
+        f"\nUploading {len(tasks)} project(s) to {settings.baseurl} "
+        f"({settings.upload_parallelism} at a time) ..."
+    )
+    tracker = UploadTracker(total=len(tasks))
+    holder: dict[str, list[str]] = {}
+
+    def _drive() -> None:
+        holder["failed"] = run_batch_uploads(tasks, settings, tracker, state=state)
+
+    worker = threading.Thread(target=_drive, name="upload-phase")
+
+    if not live_display:
+        # Piped / CI / --verbose: no live bar; the file log carries the raw responses.
+        worker.start()
+        worker.join()
+        failed = holder.get("failed", [])
+        snap = tracker.snapshot()
+        typer.echo(f"Uploaded {snap.completed}/{snap.total}." + (f" Failed: {', '.join(sorted(failed))}." if failed else ""))
+        _print_upload_errors(tracker.errors)
+        return failed
+
+    import time as _time
+
+    from rich.console import Console, Group
+    from rich.live import Live
+    from rich.progress import BarColumn, MofNCompleteColumn, Progress, TextColumn
+
+    from .logging import route_logs_through_console
+
+    console = Console(stderr=True)
+    # Overall bar on top; one indented repo line per in-flight upload below (grows/shrinks with
+    # concurrency). Each line is truncated to the console width, so the render height is always
+    # 1 + len(active) fixed lines — no wrapping to corrupt the Live redraw.
+    progress = Progress(
+        TextColumn("Uploading"),
+        BarColumn(),
+        MofNCompleteColumn(),
+        TextColumn("[{task.fields[total_el]}]"),
+        TextColumn("{task.fields[failed_txt]}", style="red"),
+        console=console,
+    )
+    bar = progress.add_task("", total=len(tasks), total_el="00:00:00", failed_txt="")
+
+    def _renderable() -> Any:
+        snap = tracker.snapshot()
+        # ``\[`` escapes the literal bracket so Rich markup renders "[N failed]" (not a tag).
+        failed_txt = f"\\[{len(snap.failed)} failed]" if snap.failed else ""
+        progress.update(
+            bar,
+            completed=snap.completed,
+            total_el=_fmt_hms(snap.total_elapsed),
+            failed_txt=failed_txt,
+        )
+        return Group(progress, *_upload_active_lines(snap, console.width))
+
+    # Route logs through the same console so any WARNING/ERROR renders above the display (raw
+    # responses are INFO and stay in the log file — the console handler is already quieted).
+    with route_logs_through_console(console), Live(
+        _renderable(), console=console, refresh_per_second=4, transient=False
+    ) as live:
+        worker.start()
+        while worker.is_alive():
+            live.update(_renderable())
+            _time.sleep(0.25)
+        live.update(_renderable())  # final frame
+    worker.join()
+    _print_upload_errors(tracker.errors)
+    return holder.get("failed", [])
+
+
+def _print_upload_errors(errors: dict[str, str]) -> None:
+    """Surface each failed upload's reason on the console (the full response is in the log file)."""
+    if not errors:
+        return
+    typer.secho("Upload errors:", fg=typer.colors.RED, bold=True, err=True)
+    for name, msg in sorted(errors.items()):
+        typer.secho(f"  {name}: {msg}", fg=typer.colors.RED, err=True)
 
 
 def _print_summary_table(meta: ProjectMetaData, stats: dict[str, Any]) -> None:

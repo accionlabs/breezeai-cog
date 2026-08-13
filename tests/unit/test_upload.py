@@ -101,7 +101,8 @@ def test_upload_retries_5xx_then_succeeds(artifact, monkeypatch):
 
     monkeypatch.setattr(httpx, "post", fake_post)
 
-    result = upload_ontology(_settings(), artifact, repository_name="r")
+    # 2 retries → 3 total attempts, succeeding on the third.
+    result = upload_ontology(_settings(upload_max_retries=2), artifact, repository_name="r")
     assert result == {"ok": True}
     assert calls["n"] == 3
 
@@ -117,9 +118,41 @@ def test_upload_retries_network_error_then_exhausts(artifact, monkeypatch):
     monkeypatch.setattr(httpx, "post", fake_post)
 
     with pytest.raises(UploadError) as exc:
-        upload_ontology(_settings(), artifact, repository_name="r")
-    assert calls["n"] == 3  # bounded retry
+        upload_ontology(_settings(upload_max_retries=2), artifact, repository_name="r")
+    assert calls["n"] == 3  # bounded retry (2 retries + 1)
     assert "network error" in str(exc.value)
+
+
+def test_upload_default_retries_is_one_attempt_plus_one(artifact, monkeypatch):
+    """Default upload_max_retries=1 → 2 total attempts."""
+    monkeypatch.setattr("time.sleep", lambda *_: None)
+    calls = {"n": 0}
+
+    def fake_post(url, **kw):
+        calls["n"] += 1
+        raise httpx.ConnectError("boom")
+
+    monkeypatch.setattr(httpx, "post", fake_post)
+    with pytest.raises(UploadError):
+        upload_ontology(_settings(), artifact, repository_name="r")
+    assert calls["n"] == 2
+
+
+def test_upload_uses_configured_timeout_and_reports_attempts(artifact, monkeypatch):
+    seen: dict[str, object] = {}
+    attempts: list[int] = []
+
+    def fake_post(url, *, data, files, headers, timeout):
+        seen["timeout"] = timeout
+        return _Resp(201)
+
+    monkeypatch.setattr(httpx, "post", fake_post)
+    upload_ontology(
+        _settings(upload_timeout=42.0), artifact,
+        repository_name="r", on_attempt=attempts.append,
+    )
+    assert seen["timeout"] == 42.0
+    assert attempts == [1]  # one attempt on immediate success
 
 
 def test_upload_missing_artifact(tmp_path, monkeypatch):
@@ -255,6 +288,24 @@ def test_poll_on_response_called_for_every_response_including_terminal(monkeypat
     assert len(received) == 2
     assert received[0][0]["fileGraphStatus"] == "processing"
     assert received[1][0]["fileGraphStatus"] == "active"
+
+
+def test_poll_overall_timeout_gives_up(monkeypatch):
+    """A never-terminal status bails with UploadError once overall_timeout elapses."""
+    monkeypatch.setattr("time.sleep", lambda *_: None)
+    calls = {"n": 0}
+
+    def fake_get(url, *, params, headers, timeout):
+        calls["n"] += 1
+        return _Resp(200, b'[{"_id": "x", "fileGraphStatus": "processing"}]')
+
+    # monotonic advances 1s per read so the 2s budget is exceeded after a couple of polls
+    ticks = iter([0.0, 0.0, 1.0, 2.0, 3.0, 4.0, 5.0])
+    monkeypatch.setattr("time.monotonic", lambda: next(ticks))
+    monkeypatch.setattr(httpx, "get", fake_get)
+
+    with pytest.raises(UploadError, match="did not finish processing"):
+        poll_ontology_status(_get_settings(), "x", poll_interval=0, overall_timeout=2)
 
 
 def test_poll_strips_trailing_slash_from_baseurl(monkeypatch):

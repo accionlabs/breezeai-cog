@@ -284,18 +284,18 @@ def test_repo_to_json_tree_batch_upload(tmp_path, monkeypatch) -> None:
     uploaded: list[str] = []
     polled: list[str] = []
 
-    def fake_upload(settings, file_path, *, repository_name: str):  # type: ignore[misc]
+    def fake_upload(settings, file_path, *, repository_name: str, on_attempt=None):  # type: ignore[misc]
         uploaded.append(repository_name)
         return {"_id": f"id-{repository_name}"}
 
-    def fake_poll(settings, ontology_id, *, poll_interval=60, on_waiting=None, on_response=None):  # type: ignore[misc]
+    def fake_poll(settings, ontology_id, *, poll_interval=60, overall_timeout=None, on_waiting=None, on_response=None):  # type: ignore[misc]
         polled.append(ontology_id)
         return "active"
 
-    import breezeai_cog.services as _svc
+    import breezeai_cog.services.batch_upload as _bu
 
-    monkeypatch.setattr(_svc, "upload_ontology", fake_upload)
-    monkeypatch.setattr(_svc, "poll_ontology_status", fake_poll)
+    monkeypatch.setattr(_bu, "upload_ontology", fake_upload)
+    monkeypatch.setattr(_bu, "poll_ontology_status", fake_poll)
 
     result = runner.invoke(
         app,
@@ -331,20 +331,20 @@ def test_repo_to_json_tree_batch_upload_partial_failure(tmp_path, monkeypatch) -
     upload_calls: list[str] = []
     polled: list[str] = []
 
-    def fake_upload(settings, file_path, *, repository_name: str):  # type: ignore[misc]
+    def fake_upload(settings, file_path, *, repository_name: str, on_attempt=None):  # type: ignore[misc]
         upload_calls.append(repository_name)
         if repository_name == "proj-a":  # first project (sorted) fails
             raise UploadError("network error")
         return {"_id": f"id-{repository_name}"}
 
-    def fake_poll(settings, ontology_id, *, poll_interval=60, on_waiting=None, on_response=None):  # type: ignore[misc]
+    def fake_poll(settings, ontology_id, *, poll_interval=60, overall_timeout=None, on_waiting=None, on_response=None):  # type: ignore[misc]
         polled.append(ontology_id)
         return "active"
 
-    import breezeai_cog.services as _svc
+    import breezeai_cog.services.batch_upload as _bu
 
-    monkeypatch.setattr(_svc, "upload_ontology", fake_upload)
-    monkeypatch.setattr(_svc, "poll_ontology_status", fake_poll)
+    monkeypatch.setattr(_bu, "upload_ontology", fake_upload)
+    monkeypatch.setattr(_bu, "poll_ontology_status", fake_poll)
 
     result = runner.invoke(
         app,
@@ -369,3 +369,178 @@ def test_repo_to_json_tree_batch_upload_partial_failure(tmp_path, monkeypatch) -
     assert sorted(upload_calls) == ["proj-a", "proj-b"]
     # poll only runs for the project whose upload succeeded
     assert polled == ["id-proj-b"]
+    # the failure reason is surfaced on the console, not just the log file
+    assert "Upload errors:" in result.output
+    assert "proj-a" in result.output and "network error" in result.output
+
+
+# ---------------------------------------------------------------------------
+# --repo-list selection
+# ---------------------------------------------------------------------------
+
+def _workspace_with(tmp_path, names):
+    ws = tmp_path / "workspace"
+    for n in names:
+        (ws / n).mkdir(parents=True)
+        (ws / n / "m.py").write_text("def f():\n    return 1\n")
+    return ws
+
+
+def test_repo_list_requires_batch(tmp_path) -> None:
+    ws = _workspace_with(tmp_path, ["a"])
+    listing = tmp_path / "list.txt"
+    listing.write_text("a\n")
+    result = runner.invoke(app, ["repo-to-json-tree", "--repo", str(ws), "--repo-list", str(listing)])
+    assert result.exit_code == 1
+    assert "--repo-list requires --batch" in result.output
+
+
+def test_repo_list_filters_to_named_subdirs(tmp_path) -> None:
+    ws = _workspace_with(tmp_path, ["a", "b", "c"])
+    out_dir = tmp_path / "out"
+    listing = tmp_path / "list.txt"
+    listing.write_text("# only these\na\n\nc\n")
+
+    result = runner.invoke(
+        app,
+        ["repo-to-json-tree", "--repo", str(ws), "--batch", "--repo-list", str(listing),
+         "--out", str(out_dir), "--jobs", "1"],
+    )
+    assert result.exit_code == 0, result.output
+    assert sorted(p.name for p in out_dir.glob("*.ndjson.gz")) == [
+        "a-project-analysis.ndjson.gz",
+        "c-project-analysis.ndjson.gz",
+    ]
+
+
+def test_repo_list_unknown_name_errors(tmp_path) -> None:
+    ws = _workspace_with(tmp_path, ["a"])
+    listing = tmp_path / "list.txt"
+    listing.write_text("a\nnope\n")
+    result = runner.invoke(
+        app, ["repo-to-json-tree", "--repo", str(ws), "--batch", "--repo-list", str(listing), "--jobs", "1"]
+    )
+    assert result.exit_code == 1
+    assert "nope" in result.output
+
+
+# ---------------------------------------------------------------------------
+# resume + upload observability
+# ---------------------------------------------------------------------------
+
+def _fake_upload_poll(monkeypatch, uploaded, polled):
+    import breezeai_cog.services.batch_upload as _bu
+
+    def fake_upload(settings, file_path, *, repository_name, on_attempt=None):
+        uploaded.append(repository_name)
+        return {"_id": f"id-{repository_name}"}
+
+    def fake_poll(settings, ontology_id, *, poll_interval=60, overall_timeout=None, on_waiting=None, on_response=None):
+        polled.append(ontology_id)
+        return "active"
+
+    monkeypatch.setattr(_bu, "upload_ontology", fake_upload)
+    monkeypatch.setattr(_bu, "poll_ontology_status", fake_poll)
+
+
+def test_batch_upload_resume_skips_completed_and_clears_state(tmp_path, monkeypatch) -> None:
+    import json as _json
+
+    from breezeai_cog.utils.paths import cog_dir
+
+    ws = _workspace_with(tmp_path, ["proj-a", "proj-b"])
+    # Pre-seed a resume state marking proj-a already uploaded.
+    state_file = cog_dir(ws) / "batch-upload-state.json"
+    state_file.parent.mkdir(parents=True, exist_ok=True)
+    state_file.write_text(_json.dumps({"completed": ["proj-a"]}))
+
+    uploaded: list[str] = []
+    polled: list[str] = []
+    _fake_upload_poll(monkeypatch, uploaded, polled)
+
+    result = runner.invoke(
+        app,
+        ["repo-to-json-tree", "--repo", str(ws), "--batch", "--out", str(tmp_path / "out"),
+         "--jobs", "1", "--upload", "--baseurl", "http://x", "--uuid", "u", "--user-api-key", "k"],
+    )
+    assert result.exit_code == 0, result.output
+    assert uploaded == ["proj-b"]  # proj-a skipped
+    assert "already uploaded" in result.output
+    # state file deleted after the run completes fully
+    assert not state_file.exists()
+
+
+def test_batch_upload_raw_response_goes_to_log_not_console(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("BREEZEAI_COG_LOG_TO_FILE", "true")  # override autouse off-switch
+    from breezeai_cog.utils.paths import cog_dir
+
+    ws = _workspace_with(tmp_path, ["proj-a"])
+    uploaded: list[str] = []
+    polled: list[str] = []
+    _fake_upload_poll(monkeypatch, uploaded, polled)
+
+    result = runner.invoke(
+        app,
+        ["repo-to-json-tree", "--repo", str(ws), "--batch", "--out", str(tmp_path / "out"),
+         "--jobs", "1", "--upload", "--baseurl", "http://x", "--uuid", "u", "--user-api-key", "k"],
+    )
+    assert result.exit_code == 0, result.output
+    # the old raw-response console prefixes are gone
+    assert "Upload response:" not in result.output
+    assert "Poll response:" not in result.output
+    # the raw response is captured in the workspace .cog log file
+    logs = list((cog_dir(ws) / "logs").glob("breezeai-cog-*.log"))
+    assert logs, "no log file written"
+    content = logs[0].read_text("utf-8")
+    assert "upload.response" in content and "id-proj-a" in content
+
+
+def test_batch_upload_force_reuploads_everything(tmp_path, monkeypatch) -> None:
+    import json as _json
+
+    from breezeai_cog.utils.paths import cog_dir
+
+    ws = _workspace_with(tmp_path, ["proj-a", "proj-b"])
+    state_file = cog_dir(ws) / "batch-upload-state.json"
+    state_file.parent.mkdir(parents=True, exist_ok=True)
+    state_file.write_text(_json.dumps({"completed": ["proj-a", "proj-b"]}))  # both "done"
+
+    uploaded: list[str] = []
+    polled: list[str] = []
+    _fake_upload_poll(monkeypatch, uploaded, polled)
+
+    result = runner.invoke(
+        app,
+        ["repo-to-json-tree", "--repo", str(ws), "--batch", "--force", "--out", str(tmp_path / "out"),
+         "--jobs", "1", "--upload", "--baseurl", "http://x", "--uuid", "u", "--user-api-key", "k"],
+    )
+    assert result.exit_code == 0, result.output
+    assert "--force" in result.output
+    # both re-uploaded despite the pre-seeded state
+    assert sorted(uploaded) == ["proj-a", "proj-b"]
+    assert not state_file.exists()  # cleared after a fully-successful run
+
+
+def test_upload_tuning_flags_plumb_into_settings(tmp_path, monkeypatch) -> None:
+    import breezeai_cog.services.batch_upload as _bu
+
+    captured: dict[str, object] = {}
+
+    def fake_upload(settings, file_path, *, repository_name, on_attempt=None):
+        captured["timeout"] = settings.upload_timeout
+        captured["parallelism"] = settings.upload_parallelism
+        captured["retries"] = settings.upload_max_retries
+        return {"_id": f"id-{repository_name}"}
+
+    monkeypatch.setattr(_bu, "upload_ontology", fake_upload)
+    monkeypatch.setattr(_bu, "poll_ontology_status", lambda s, oid, **k: "active")
+
+    ws = _workspace_with(tmp_path, ["proj-a"])
+    result = runner.invoke(
+        app,
+        ["repo-to-json-tree", "--repo", str(ws), "--batch", "--out", str(tmp_path / "out"),
+         "--jobs", "1", "--upload", "--baseurl", "http://x", "--uuid", "u", "--user-api-key", "k",
+         "--upload-timeout", "30", "--parallel-uploads", "2", "--upload-max-retries", "0"],
+    )
+    assert result.exit_code == 0, result.output
+    assert captured == {"timeout": 30.0, "parallelism": 2, "retries": 0}

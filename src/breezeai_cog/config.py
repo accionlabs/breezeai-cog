@@ -90,6 +90,14 @@ class Settings(BaseSettings):
         default=None,
         validation_alias=AliasChoices("BREEZEAI_COG_USER_API_KEY", "API_KEY"),
     )
+    # Per-repo upload POST cap (seconds); the request fails/retries past this. Default 15 min —
+    # large ontologies stream over a single request (services/upload.py). --upload-timeout.
+    upload_timeout: float = Field(default=900.0, gt=0)
+    # Concurrent uploads in --batch mode. Default 1 (serial). --parallel-uploads.
+    upload_parallelism: int = Field(default=1, ge=1)
+    # Retries after a failed upload (total attempts = upload_max_retries + 1). Only transient
+    # failures (network / timeout / HTTP 5xx) retry; a 4xx is fatal. --upload-max-retries.
+    upload_max_retries: int = Field(default=1, ge=0)
 
     # ── AWS / S3 (server, conventional unprefixed names) ──────────────────
     aws_access_key: str | None = Field(
