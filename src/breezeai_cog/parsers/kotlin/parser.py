@@ -29,6 +29,7 @@ from ...schemas.enums import ClassType
 from ...utils import count_loc
 from ..base import BaseParser, ParseContext
 from ..callresolve import CallResolver, make_resolver, noop_resolver
+from ..statements_common import emit_enum_members
 from ..treesitter import line_span, node_text, parse_source
 from .functions import defined_names, type_map
 from .imports import KotlinIndex, build_fqcn_index, extract_imports
@@ -319,6 +320,16 @@ class KotlinParser(BaseParser):
                     nested_classes.extend(sub_cls)
                     methods.extend(sub_methods)
                     statements.extend(sub_stmts)
+
+            # Enum entries become flat statements parented to the enum Class (their `text`
+            # is queryable). Gated by --capture-statements like every other statement.
+            if capture and body.type == "enum_class_body":
+                statements.extend(
+                    emit_enum_members(
+                        body, source, path,
+                        member_types={"enum_entry"}, parent_id=cid, limit=limit, seen_ids=seen_ids,
+                    )
+                )
 
         cls = Class(
             id=cid,

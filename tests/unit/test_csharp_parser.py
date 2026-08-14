@@ -448,9 +448,9 @@ def test_same_simple_name_distinct_types_do_not_inherit(tmp_path) -> None:
     assert calls.get("Helper") is None
 
 
-# --- N4: enum member VALUE + doc capture (BREEZEAI-943) -----------------------
+# --- N4: enum members captured as flat statements (queryable text) ------------
 
-def _cs_enum_constants(tmp_path, src: str):
+def _cs_enum_members(tmp_path, src: str):
     p = tmp_path / REL
     p.parent.mkdir(parents=True, exist_ok=True)
     p.write_text(src)
@@ -458,33 +458,37 @@ def _cs_enum_constants(tmp_path, src: str):
                        capture_statements=True)
     rec = CSharpParser().parse_file(ctx)
     enum = next(c for c in rec.classes if c.type == "enum")
-    return rec, (enum.metadata or {}).get("constants")
+    members = [s for s in rec.statements if s.parentId == enum.id]
+    return rec, enum, members
 
 
-def test_enum_member_values_and_doc(tmp_path) -> None:
-    # XML /// doc (summary unwrapped), trailing // doc, and a bare member (honest-null).
+def test_enum_members_captured_as_statements(tmp_path) -> None:
+    # Members become flat statements parented to the enum Class; the value rides inside
+    # the statement text (no more metadata.constants channel).
     src = ('enum Status {\n'
-           '  /// <summary>ok</summary>\n'
            '  OK = 3,\n'
-           '  Fail = 9, // failed\n'
+           '  Fail = 9,\n'
            '  Unknown\n'
            '}\n')
-    _, consts = _cs_enum_constants(tmp_path, src)
-    assert consts == [
-        {"name": "OK", "value": "3", "doc": "ok"},
-        {"name": "Fail", "value": "9", "doc": "failed"},
-        {"name": "Unknown", "value": None, "doc": None},
+    _, enum, members = _cs_enum_members(tmp_path, src)
+    assert enum.metadata is None
+    assert [(m.name, m.text) for m in members] == [
+        ("OK", "OK = 3"), ("Fail", "Fail = 9"), ("Unknown", "Unknown"),
     ]
+    assert all(m.nodeType == "enum_member_declaration" and m.semanticType is None for m in members)
 
 
-def test_enum_computed_value_is_honest_null(tmp_path) -> None:
-    # A computed value (shift expression) has no literal -> value None, never a guess.
+def test_enum_members_gated_by_capture_flag(tmp_path) -> None:
+    # Enum members are statements now → gated by --capture-statements (absent without it).
     src = 'enum Flags {\n  A = 1,\n  B = 1 << 2,\n}\n'
-    _, consts = _cs_enum_constants(tmp_path, src)
-    assert consts == [
-        {"name": "A", "value": "1", "doc": None},
-        {"name": "B", "value": None, "doc": None},
-    ]
+    p = tmp_path / REL
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(src)
+    ctx = ParseContext(path=REL, abs_path=p, source=src.encode(), repo_root=tmp_path,
+                       capture_statements=False)
+    rec = CSharpParser().parse_file(ctx)
+    assert rec.statements == []
+    assert all(c.metadata is None for c in rec.classes)
 
 
 def test_non_enum_class_has_no_constants_metadata(tmp_path) -> None:
@@ -498,8 +502,8 @@ def test_non_enum_class_has_no_constants_metadata(tmp_path) -> None:
     assert all(c.metadata is None for c in rec.classes)
 
 
-def test_enum_metadata_output_validates(tmp_path) -> None:
-    src = 'enum S {\n  /// <summary>d</summary>\n  A = 1\n}\n'
+def test_enum_members_output_validates(tmp_path) -> None:
+    src = 'enum S {\n  A = 1,\n  B = 2\n}\n'
     p = tmp_path / REL
     p.parent.mkdir(parents=True, exist_ok=True)
     p.write_text(src)

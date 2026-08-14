@@ -815,3 +815,23 @@ def test_exports_capture_const_and_default(tmp_path) -> None:
     assert "p" not in exports and "q" not in exports
     # a local const inside the exported value's body must NOT leak into exports
     assert "nested" not in exports
+
+
+def test_enum_members_captured_as_statements(tmp_path) -> None:
+    # Enum members become flat statements parented to the enum Class; valued members are
+    # `enum_assignment`, bare ones a `property_identifier`. The value rides inside the text.
+    src = b"enum Role { Admin = 'admin', User }\n"
+    p = tmp_path / "r.ts"
+    p.write_bytes(src)
+    ctx = ParseContext(path="r.ts", abs_path=p, source=src, repo_root=tmp_path,
+                       capture_statements=True)
+    rec = TypeScriptParser().parse_file(ctx)
+    role = next(c for c in rec.classes if c.type == "enum")
+    members = [(s.name, s.text, s.nodeType) for s in rec.statements if s.parentId == role.id]
+    assert members == [
+        ("Admin", "Admin = 'admin'", "enum_assignment"),
+        ("User", "User", "property_identifier"),
+    ]
+    ctx2 = ParseContext(path="r.ts", abs_path=p, source=src, repo_root=tmp_path,
+                        capture_statements=False)
+    assert TypeScriptParser().parse_file(ctx2).statements == []

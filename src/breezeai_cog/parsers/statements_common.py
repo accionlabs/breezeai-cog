@@ -299,3 +299,74 @@ def classify_statement(
             )
         )
     return records
+
+
+# --- Member declarations (enum members + other name/text-only declarations) --------------
+# Enum members — and declarations that carry no executable expression — are captured as flat
+# Statements parented to their owner (the enum Class), so their source ``text`` is queryable,
+# using the same two-axis model as every other statement (``semanticType`` stays null: they
+# are structural, not route/db/api/event). The declared name goes on ``name``. This replaces
+# the older ``Class.metadata["constants"]`` channel — a member's value, when the language has
+# one, stays inside ``text`` (``ACTIVE("A")`` / ``Admin = 'admin'`` / ``Active = 1``).
+
+_MEMBER_NAME_TYPES = ("identifier", "simple_identifier", "property_identifier")
+
+
+def _member_name(node: Node, source: bytes) -> str | None:
+    """The declared name of a member node: the ``name`` field if the grammar exposes one,
+    else the first identifier-like child, else the node's own text when it *is* a bare
+    identifier (a valueless TS ``property_identifier`` enum member). Honest-null otherwise."""
+    nm = node.child_by_field_name("name")
+    if nm is not None:
+        return node_text(nm, source)
+    first = next((c for c in node.named_children if c.type in _MEMBER_NAME_TYPES), None)
+    if first is not None:
+        return node_text(first, source)
+    if node.type in _MEMBER_NAME_TYPES:
+        return node_text(node, source)
+    return None
+
+
+def member_statement(
+    node: Node,
+    source: bytes,
+    path: str,
+    *,
+    parent_id: str,
+    limit: int,
+    seen_ids: set[str],
+    name: str | None = None,
+) -> Statement:
+    """One flat declaration Statement for ``node`` (``nodeType`` = the AST node, ``text`` =
+    its source, ``semanticType`` null). ``name`` defaults to the member's declared name."""
+    start, col = node.start_point[0] + 1, node.start_point[1]
+    end = node.end_point[0] + 1
+    return Statement(
+        id=disambiguate(statement_id(path, start, col), seen_ids),
+        parentId=parent_id,
+        nodeType=node.type,
+        text=truncate(node_text(node, source), limit),
+        name=name if name is not None else _member_name(node, source),
+        startLine=start,
+        endLine=end,
+        path=path,
+    )
+
+
+def emit_enum_members(
+    body: Node,
+    source: bytes,
+    path: str,
+    *,
+    member_types: Collection[str],
+    parent_id: str,
+    limit: int,
+    seen_ids: set[str],
+) -> list[Statement]:
+    """Emit one Statement per enum member — a direct child of ``body`` whose type is in
+    ``member_types`` — parented to the enum's Class id."""
+    return [
+        member_statement(node, source, path, parent_id=parent_id, limit=limit, seen_ids=seen_ids)
+        for node in body.named_children
+        if node.type in member_types
+    ]

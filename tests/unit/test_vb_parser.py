@@ -98,3 +98,19 @@ def test_output_validates(tmp_path) -> None:
     errors = list(Draft202012Validator(FileRecord.model_json_schema(by_alias=True))
                   .iter_errors(json.loads(to_line(rec))))
     assert not errors, errors
+
+
+def test_enum_members_captured_as_statements(tmp_path) -> None:
+    # Enum members become flat statements parented to the enum Class (queryable text).
+    src = b"Enum Status\n  Active = 1\n  Closed\nEnd Enum\n"
+    p = tmp_path / "s.vb"
+    p.write_bytes(src)
+    ctx = ParseContext(path="s.vb", abs_path=p, source=src, repo_root=tmp_path,
+                       capture_statements=True)
+    rec = VbParser().parse_file(ctx)
+    st = next(c for c in rec.classes if c.type == "enum")
+    members = [(s.name, s.nodeType) for s in rec.statements if s.parentId == st.id]
+    assert members == [("Active", "enum_member"), ("Closed", "enum_member")]
+    ctx2 = ParseContext(path="s.vb", abs_path=p, source=src, repo_root=tmp_path,
+                        capture_statements=False)
+    assert VbParser().parse_file(ctx2).statements == []

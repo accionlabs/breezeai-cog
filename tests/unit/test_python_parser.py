@@ -264,3 +264,21 @@ def test_endpoint_fstring_and_concat(tmp_path) -> None:
     eps = [s.endpoint for s in rec.statements if s.semanticType == "api_call"]
     assert "/users/{id}" in eps
     assert any(e and e.startswith("/a/") for e in eps)
+
+
+def test_enum_members_captured_as_statements(tmp_path) -> None:
+    # Python enums are plain classes; their members are assignment statements parented to
+    # the class, with the declared name populated (queryable text).
+    src = b"from enum import Enum\n\nclass Color(Enum):\n    RED = 1\n    GREEN = 2\n"
+    p = tmp_path / "color.py"
+    p.write_bytes(src)
+    ctx = ParseContext(path="color.py", abs_path=p, source=src, repo_root=tmp_path,
+                       capture_statements=True)
+    rec = PythonParser().parse_file(ctx)
+    color = next(c for c in rec.classes if c.name == "Color")
+    members = [(s.name, s.text) for s in rec.statements if s.parentId == color.id]
+    assert members == [("RED", "RED = 1"), ("GREEN", "GREEN = 2")]
+    assert all(
+        s.nodeType == "assignment" and s.semanticType is None
+        for s in rec.statements if s.parentId == color.id
+    )
