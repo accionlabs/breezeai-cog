@@ -37,4 +37,11 @@ SemanticType = Literal[
     "service_proxy",
     "timer",
     "graphql_entity",
+    # data/metadata document (not a behaviour) — the whole content of a captured
+    # structured-JSON file, serialized as TOON on the statement `text`. Format-independent
+    # by design (see structured_json parser); the serialization is carried on `framework`.
+    # The backend persists semanticType verbatim (no enum check) and indexes it, so this
+    # value ingests + filters with no backend change; adding it to the Confluence spec's
+    # semanticType list (§2.4) is a documentation step, not a functional prerequisite.
+    "structured_data",
 ]

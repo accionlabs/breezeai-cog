@@ -37,6 +37,7 @@ dependencies = [
   # --upload (services/upload.py) and notify (services/notify.py) are first-class
   # CLI features, so their HTTP client is a core dependency — not an opt-in extra.
   "httpx>=0.27",
+  "toon-format==0.9.0b1",
 ]
 
 # httpx is a core dependency (see [project.dependencies]), so CLI upload works with
