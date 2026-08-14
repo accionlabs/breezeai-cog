@@ -42,6 +42,10 @@ NESTED_SCOPES = {
 
 STATEMENT_TYPES = sorted(EMIT_TYPES)
 
+#: Comment node types the shared comment pass captures (``semanticType="comment"``; each
+#: statement keeps its real tree-sitter ``nodeType``).
+COMMENT_TYPES = {"comment"}
+
 FRAMEWORKS = [
     "angular", "nestjs", "loopback", "express", "react", "vue",
     # AWS messaging / Lambda (see aws_events.py) — transport carried on statement.framework.

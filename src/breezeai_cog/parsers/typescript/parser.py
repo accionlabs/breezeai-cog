@@ -32,7 +32,8 @@ from .functions import (
 )
 from ..statements_common import reset_http_client_ids, set_http_client_ids
 from .imports import TsAliasIndex, build_ts_index, extract_imports
-from .mappings import FRAMEWORKS, STATEMENT_TYPES
+from ..comments_common import comment_statements_for
+from .mappings import COMMENT_TYPES, CONTROL_FLOW, FRAMEWORKS, STATEMENT_TYPES
 from .statements import collect_http_client_ids, extract_statements
 
 _DECLS = (
@@ -204,6 +205,15 @@ class TypeScriptParser(BaseParser):
                 root, source, path, parent_id=fid, capture=capture, limit=limit, seen_ids=seen_ids
             )
         )
+
+        if capture:
+            statements.extend(
+                comment_statements_for(
+                    root, source, path, file_id=fid, functions=functions, classes=classes,
+                    statements=statements, control_flow=CONTROL_FLOW,
+                    comment_types=COMMENT_TYPES, limit=limit, seen_ids=seen_ids,
+                )
+            )
 
         record = FileRecord(
             id=fid,

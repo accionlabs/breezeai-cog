@@ -33,7 +33,8 @@ from ..statements_common import emit_enum_members
 from ..treesitter import line_span, node_text, parse_source
 from .functions import defined_names, type_map
 from .imports import KotlinIndex, build_fqcn_index, extract_imports
-from .mappings import FRAMEWORKS, STATEMENT_TYPES
+from ..comments_common import comment_statements_for
+from .mappings import COMMENT_TYPES, CONTROL_FLOW, FRAMEWORKS, STATEMENT_TYPES
 
 _CLASS_TYPES = ("class_declaration", "object_declaration")
 
@@ -245,6 +246,15 @@ class KotlinParser(BaseParser):
                 obj_name = _infix_object_name(child, source)
                 if obj_name:
                     classes.append(self._synthetic_object(obj_name, child, source, path, fid, seen_ids))
+
+        if capture:
+            statements.extend(
+                comment_statements_for(
+                    root, source, path, file_id=fid, functions=functions, classes=classes,
+                    statements=statements, control_flow=CONTROL_FLOW,
+                    comment_types=COMMENT_TYPES, limit=limit, seen_ids=seen_ids,
+                )
+            )
 
         return FileRecord(
             id=fid,
