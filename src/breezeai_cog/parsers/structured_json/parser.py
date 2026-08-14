@@ -2,27 +2,34 @@
 opposed to the build/config JSON that :class:`~breezeai_cog.parsers.config.parser.ConfigParser`
 handles). Where ``ConfigParser`` reduces a generic ``.json`` file to
 ``topLevelKeys: ["values"]`` and discards the content, this parser recurses the whole
-document and captures **every key and value** as a flat ``{dotted.path: value}`` map on
-``FileRecord.metadata`` — which the backend folds into the File node's embedding text, so
-the content becomes semantically searchable in the code graph.
+document and captures **every key and value**, serialized as **TOON** (see :mod:`.toon`) —
+a compact, uniform-array-aware form that is far denser than a per-leaf dotted map.
+
+The whole document is captured as a single ``structured_data`` **statement** (``text`` = the
+TOON), emitted only under ``--capture-statements``. Statements are not embedded, but they are
+exactly/lexically filterable by label (``Get_Code_Nodes_By_Label`` label=Statement,
+``semanticType=structured_data``), so an agent that already has (or greps for) the file can
+read the whole document as one node. ``nodeType=synthetic`` (JSON is not tree-sitter parsed →
+no backing AST node); the serialization is carried on ``framework=toon``.
+
+``FileRecord.metadata`` carries only a **structural summary** (``topLevelKeys``,
+``recordCount``, ``leafCount``, ``format``) — *not* the content. Note the trade-off: because
+the TOON is on the (unembedded) statement and not in ``File.metadata``, the content is **not**
+reachable by semantic ``Code_Graph_Search`` — only lexically by label, or once the File is
+otherwise found. Concept-based discovery of JSON values is forgone by this design.
 
 Design constraints (both must hold):
 
 1. **Client-agnostic.** It only ever recurses over keys and values. It never interprets a
-   field's *meaning* — no "this field is the identity", no "this array element is a record",
-   no per-element graph nodes. Anything that assigns domain meaning (naming a record from an
-   id field, turning a filter into a ``query_statement``, wiring step chains into ``calls[]``)
-   is a client concern and belongs in a subclass at a higher ``priority``.
-2. **Usable in the code graph by an agent.** Content lands on ``File.metadata`` (an embedded
-   node property) rather than on ``Function`` nodes. Mapping data records onto ``Function``
-   nodes was rejected: it has no precedent in cog (config emits zero functions), it inflates
-   ``projectMetaData.totalFunctions`` (the Gap-8 defect), it pollutes the ``:Function`` label
-   for call-graph/complexity queries, and it multiplies embedding cost. Per-record granularity
-   is a client-semantic decision → the subclass opts into it.
+   field's *meaning* — no "this field is the identity", no per-record graph nodes. Anything
+   that assigns domain meaning (naming a record from an id field, turning a filter into a
+   ``query_statement``) is a client concern → a subclass at a higher ``priority``.
+2. **Reliability (extend-capture skill).** Secret-named keys are redacted, string leaves are
+   length-capped, and the leaf count is bounded — all applied *inside* the TOON encoder.
 
 Selection (registry ``priority``):
 * ``ConfigParser``            priority 0 — named/build configs (package.json, tsconfig, …) + flat generic JSON
-* ``StructuredJsonParser``    priority 3 — JSON with record structure (array-of-objects) → full key/value capture
+* ``StructuredJsonParser``    priority 3 — JSON with record structure (array-of-objects) → full TOON capture
 * ``<Client>MetadataParser``  priority 5 — client-specific refinement (subclass), if installed
 
 ``claims`` gates on record structure (a non-empty array-of-objects, at the root or under a
@@ -36,10 +43,11 @@ import json
 from pathlib import Path
 from typing import Any
 
-from ...emit import file_id
-from ...schemas import SCHEMA_VERSION, FileRecord
+from ...emit import file_id, statement_id
+from ...schemas import SCHEMA_VERSION, FileRecord, Statement
 from ...utils import count_loc
 from ..base import BaseParser, ParseContext
+from .toon import encode
 
 
 class StructuredJsonParser(BaseParser):
@@ -48,6 +56,9 @@ class StructuredJsonParser(BaseParser):
     extensions = (".json",)
     #: Beats ConfigParser (0); leaves room for a client-specific subclass (priority 5).
     priority = 3
+    #: `framework` value carried on the statement to name the serialization (§4.1 of the
+    #: target spec: technology → `framework`). Keeps `semanticType` format-independent.
+    serialization = "toon"
 
     #: Case-insensitive substrings; any leaf key containing one has its value redacted to
     #: ``"***"``. Applied to *keys only*, never inferred from values. Deliberately
@@ -55,17 +66,23 @@ class StructuredJsonParser(BaseParser):
     #: architecture); a subclass may extend it. Over-redaction beats leaking a secret.
     CREDENTIAL_TOKENS: frozenset[str] = frozenset(
         {
-            "password", "passwd", "secret", "token", "apikey", "api_key",
-            "authorization", "credential", "private_key", "privatekey",
+            "password",
+            "passwd",
+            "secret",
+            "token",
+            "apikey",
+            "api_key",
+            "authorization",
+            "credential",
+            "private_key",
+            "privatekey",
         }
     )
-    #: Bounds so a pathological file can't blow up the node's metadata / the embedding text.
-    #: ``MAX_LEAVES`` caps how many leaves are captured; the per-value length cap is supplied
-    #: per-file via ``ParseContext.metadata_value_limit`` (Settings /
-    #: ``BREEZEAI_COG_METADATA_VALUE_LIMIT``). ``MAX_VALUE_LEN`` is only the fallback used
-    #: when ``_flatten`` / ``_leaf`` are called without an explicit limit.
+    #: Bound so a pathological file can't blow up the node's metadata / the embedding text.
+    #: ``MAX_LEAVES`` caps how many leaves the TOON walk captures; the per-value length cap
+    #: is supplied per-file via ``ParseContext.metadata_value_limit`` (Settings /
+    #: ``BREEZEAI_COG_METADATA_VALUE_LIMIT``).
     MAX_LEAVES = 5000
-    MAX_VALUE_LEN = 500
 
     #: JSON files ConfigParser extracts *richly* by name — declined here even when they
     #: carry a record array (``package.json``'s ``contributors``/``funding``,
@@ -86,29 +103,74 @@ class StructuredJsonParser(BaseParser):
     def parse_file(self, ctx: ParseContext) -> FileRecord:
         text = ctx.source.decode("utf-8", "replace")
         data = self._parse(ctx.source)
-        # full recursive key/value walk of the whole document; per-value length cap from ctx
-        fields = self._flatten(data, ctx.metadata_value_limit)
+        loc = count_loc(text)
+
+        # Full TOON serialization of the whole document (secret-redacted, value-capped,
+        # leaf-bounded — all inside the encoder). Per-value cap from ctx. The content lives
+        # only on the statement below; metadata carries a structural summary, not the TOON.
+        toon = encode(
+            data,
+            is_secret=self._is_secret_key,
+            value_limit=ctx.metadata_value_limit,
+            max_leaves=self.MAX_LEAVES,
+        )
 
         meta: dict[str, Any] = {
             "kind": "structured-json",
             "category": "json",
+            "format": self.serialization,
             "topLevelKeys": list(data.keys()) if isinstance(data, dict) else [],
-            "leafCount": len(fields),
-            "fields": fields,
+            "recordCount": self._record_count(data),
+            "leafCount": toon.leaf_count,
         }
-        if len(fields) >= self.MAX_LEAVES:
+        if toon.truncated:
             meta["truncated"] = True  # honest signal that MAX_LEAVES capped the walk
+
+        # The whole document is captured ONLY as this statement (TOON in `text`) — a semantic
+        # capture, so gated behind --capture-statements (extend-capture skill §9). The text is
+        # not embedded; it is the lexical/label retrieval handle (semanticType=structured_data).
+        statements: list[Statement] = []
+        if ctx.capture_statements:
+            statements.append(
+                self._document_statement(ctx.path, toon.text, loc, ctx.statement_text_limit)
+            )
 
         return FileRecord(
             id=file_id(ctx.path),
             path=ctx.path,
             type="config",  # data/metadata, not code — no functions/classes emitted
             language=self.name,  # distinguishes full-capture from ConfigParser's topLevelKeys
-            loc=count_loc(text),
+            loc=loc,
             metadata=meta,
+            statements=statements,
         )
 
     # ── helpers ──────────────────────────────────────────────────────────────
+    def _document_statement(
+        self, path: str, toon_text: str, loc: int, text_limit: int
+    ) -> Statement:
+        """One statement standing for the whole file, TOON in ``text``. ``nodeType`` is the
+        spec's ``synthetic`` sentinel (no backing tree-sitter node); ``framework`` carries
+        the serialization so ``semanticType`` stays format-independent. ``endpoint`` is left
+        null — it is reserved for a resolved address/target (route/URL/event address), which
+        a data document has none of; the document's identity is the owning File itself
+        (``parentId`` → HAS_STATEMENT, plus ``path``). Text is clipped to the statement cap."""
+        clipped = toon_text
+        if text_limit > 0 and len(clipped) > text_limit:
+            clipped = clipped[:text_limit] + "…"
+        return Statement(
+            id=statement_id(path, 1, 0),
+            parentId=file_id(path),
+            nodeType="synthetic",
+            semanticType="structured_data",
+            framework=self.serialization,
+            text=clipped,
+            startLine=1,
+            endLine=max(loc, 1),
+            path=path,
+            name=Path(path).name,
+        )
+
     @staticmethod
     def _parse(source: bytes) -> Any:
         try:
@@ -118,7 +180,9 @@ class StructuredJsonParser(BaseParser):
 
     @staticmethod
     def _is_record_array(value: Any) -> bool:
-        return isinstance(value, list) and len(value) > 0 and all(isinstance(v, dict) for v in value)
+        return (
+            isinstance(value, list) and len(value) > 0 and all(isinstance(v, dict) for v in value)
+        )
 
     def _has_record_structure(self, data: Any) -> bool:
         """True if ``data`` carries a collection of records: it *is* a non-empty
@@ -131,47 +195,17 @@ class StructuredJsonParser(BaseParser):
             return any(self._is_record_array(v) for v in data.values())
         return False
 
+    def _record_count(self, data: Any) -> int:
+        """Element count of the primary record array (the root array, or the first
+        top-level key mapping to one) — the honest ``[N]`` the TOON header declares."""
+        if self._is_record_array(data):
+            return len(data)
+        if isinstance(data, dict):
+            for v in data.values():
+                if self._is_record_array(v):
+                    return len(v)
+        return 0
+
     def _is_secret_key(self, key: str) -> bool:
         low = key.lower()
         return any(token in low for token in self.CREDENTIAL_TOKENS)
-
-    def _flatten(self, obj: Any, max_value_len: int | None = None) -> dict[str, Any]:
-        """Recursively flatten the whole document to ``{dotted.path: primitive}``. Dicts
-        join with ``.``, list items with ``[i]``. ``None`` leaves are emitted as empty
-        strings (so a present-but-null field is distinguishable from an absent one);
-        secret-named keys are redacted; strings truncated to ``max_value_len`` (falls back
-        to :attr:`MAX_VALUE_LEN`; ``<= 0`` disables truncation); bounded by
-        :attr:`MAX_LEAVES`."""
-        limit = self.MAX_VALUE_LEN if max_value_len is None else max_value_len
-        out: dict[str, Any] = {}
-
-        def walk(node: Any, prefix: str) -> None:
-            if len(out) >= self.MAX_LEAVES:
-                return
-            if isinstance(node, dict):
-                for k, v in node.items():
-                    key = f"{prefix}.{k}" if prefix else str(k)
-                    if isinstance(v, (dict, list)):
-                        walk(v, key)
-                    elif v is None:
-                        out[key] = ""  # explicit empty: present-but-null != absent
-                    elif self._is_secret_key(str(k)):
-                        out[key] = "***"
-                    else:
-                        out[key] = self._leaf(v, limit)
-            elif isinstance(node, list):
-                for i, v in enumerate(node):
-                    walk(v, f"{prefix}[{i}]")
-            elif node is not None:
-                out[prefix] = self._leaf(node, limit)
-            elif prefix:  # a null list element (root scalars are excluded by claims())
-                out[prefix] = ""
-
-        walk(obj, "")
-        return out
-
-    def _leaf(self, value: Any, max_value_len: int | None = None) -> Any:
-        limit = self.MAX_VALUE_LEN if max_value_len is None else max_value_len
-        if limit > 0 and isinstance(value, str) and len(value) > limit:
-            return value[:limit] + "…"
-        return value
