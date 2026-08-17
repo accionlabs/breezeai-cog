@@ -13,16 +13,6 @@ from .mappings import CONTROL_FLOW, EMIT_TYPES, NESTED_SCOPES
 _CALL_TYPE = "method_invocation"
 
 
-def _name_of(node: Node, source: bytes) -> str | None:
-    if node.type in ("local_variable_declaration", "field_declaration"):
-        decl = node.child_by_field_name("declarator")
-        if decl is not None:
-            name = decl.child_by_field_name("name")
-            if name is not None:
-                return node_text(name, source)
-    return None
-
-
 def _render_url(node: Node, source: bytes) -> str | None:
     """Best-effort URL/path from a string literal or ``+`` concatenation (Java has no
     string interpolation); non-string parts of a concatenation become ``{name}``."""
@@ -79,7 +69,7 @@ def extract_statements(
             classify_statement(
                 node, source, path, parent_id=parent_id, limit=limit, seen_ids=seen_ids,
                 emit_types=EMIT_TYPES, control_flow=CONTROL_FLOW, call_type=_CALL_TYPE,
-                name_of=_name_of, call_details=_call_details, language="java",
+                call_details=_call_details, language="java",
             )
         )
     return out

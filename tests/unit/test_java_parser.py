@@ -284,7 +284,7 @@ def test_enum_members_captured_as_statements(tmp_path) -> None:
            '  LOW("1");\n}\n')
     _, enum, members = _enum_members(tmp_path, src)
     assert enum.metadata is None
-    assert [(m.name, m.text) for m in members] == [("HIGH", 'HIGH("3")'), ("LOW", 'LOW("1")')]
+    assert [m.text for m in members] == ['HIGH("3")', 'LOW("1")']
     assert all(m.nodeType == "enum_constant" and m.semanticType is None for m in members)
 
 
@@ -292,9 +292,7 @@ def test_enum_bare_and_valued_members(tmp_path) -> None:
     # Bare (no-arg) and valued constants both captured; each member's own text is its span.
     src = 'enum Color {\n  RED("f00"),\n  GREEN("0f0"),\n  BLUE;\n}\n'
     _, _, members = _enum_members(tmp_path, src)
-    assert [(m.name, m.text) for m in members] == [
-        ("RED", 'RED("f00")'), ("GREEN", 'GREEN("0f0")'), ("BLUE", "BLUE"),
-    ]
+    assert [m.text for m in members] == ['RED("f00")', 'GREEN("0f0")', "BLUE"]
 
 
 def test_enum_members_gated_by_capture_flag(tmp_path) -> None:

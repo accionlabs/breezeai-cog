@@ -168,7 +168,6 @@ class StructuredJsonParser(BaseParser):
             startLine=1,
             endLine=max(loc, 1),
             path=path,
-            name=Path(path).name,
         )
 
     @staticmethod

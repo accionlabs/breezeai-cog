@@ -91,8 +91,8 @@ def test_enum_entries_captured_as_statements(tmp_path) -> None:
                        capture_statements=True)
     rec = KotlinParser().parse_file(ctx)
     d = next(c for c in rec.classes if c.type == "enum")
-    members = [(s.name, s.text, s.nodeType) for s in rec.statements if s.parentId == d.id]
-    assert members == [("NORTH", "NORTH", "enum_entry"), ("SOUTH", "SOUTH", "enum_entry")]
+    members = [(s.text, s.nodeType) for s in rec.statements if s.parentId == d.id]
+    assert members == [("NORTH", "enum_entry"), ("SOUTH", "enum_entry")]
     ctx2 = ParseContext(path="d.kt", abs_path=p, source=src, repo_root=tmp_path,
                         capture_statements=False)
     assert KotlinParser().parse_file(ctx2).statements == []

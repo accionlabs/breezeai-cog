@@ -343,8 +343,8 @@ def test_enum_constants_captured_as_statements(tmp_path) -> None:
     rec = GroovyParser().parse_file(ctx)
     st = next(c for c in rec.classes if c.type == "enum")
     assert st.metadata is None
-    members = [(s.name, s.text, s.nodeType) for s in rec.statements if s.parentId == st.id]
-    assert members == [("ACTIVE", "ACTIVE", "enum_constant"), ("CLOSED", "CLOSED", "enum_constant")]
+    members = [(s.text, s.nodeType) for s in rec.statements if s.parentId == st.id]
+    assert members == [("ACTIVE", "enum_constant"), ("CLOSED", "enum_constant")]
     ctx2 = ParseContext(path="s.groovy", abs_path=p, source=src, repo_root=tmp_path,
                         capture_statements=False)
     assert GroovyParser().parse_file(ctx2).statements == []
@@ -376,9 +376,9 @@ def test_modifier_and_nested_enum_constants(tmp_path) -> None:
     holder = next(c for c in rec.classes if c.name == "Holder")
     entry = next(c for c in rec.classes if c.name == "Entry")
     assert entry.type == "enum" and entry.parentId == holder.id and entry.metadata is None
-    members = [(s.name, s.text) for s in rec.statements
+    members = [s.text for s in rec.statements
                if s.parentId == entry.id and s.nodeType == "enum_constant"]
     assert members == [
-        ("APPLY_STATUS", "APPLY_STATUS('CAPLC09')"),
-        ("APPLY_DATE", "APPLY_DATE('CAPLC11')"),
+        "APPLY_STATUS('CAPLC09')",
+        "APPLY_DATE('CAPLC11')",
     ]

@@ -32,14 +32,6 @@ _STMT_EXPR = ("call", "await")
 _CONTAINERS = ("block", "module")
 
 
-def _name_of(node: Node, source: bytes) -> str | None:
-    if node.type in ("assignment", "augmented_assignment"):
-        lhs = node.named_children[0] if node.named_children else None
-        if lhs is not None and lhs.type == "identifier":
-            return node_text(lhs, source)
-    return None
-
-
 def _render_url(node: Node, source: bytes) -> str | None:
     """Best-effort URL/path from a string, f-string, or ``+`` concatenation. f-string
     interpolations become ``{name}`` placeholders; a leading interpolated base is dropped."""
@@ -144,7 +136,7 @@ def extract_statements(
             classify_statement(
                 node, source, path, parent_id=parent_id, limit=limit, seen_ids=seen_ids,
                 emit_types=EMIT_TYPES, control_flow=CONTROL_FLOW, call_type=_CALL_TYPE,
-                name_of=_name_of, call_details=_call_details,
+                call_details=_call_details,
                 stmt_expr=_STMT_EXPR, container_types=_CONTAINERS, language="python",
             )
         )

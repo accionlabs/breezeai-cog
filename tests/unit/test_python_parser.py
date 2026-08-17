@@ -276,8 +276,8 @@ def test_enum_members_captured_as_statements(tmp_path) -> None:
                        capture_statements=True)
     rec = PythonParser().parse_file(ctx)
     color = next(c for c in rec.classes if c.name == "Color")
-    members = [(s.name, s.text) for s in rec.statements if s.parentId == color.id]
-    assert members == [("RED", "RED = 1"), ("GREEN", "GREEN = 2")]
+    members = [s.text for s in rec.statements if s.parentId == color.id]
+    assert members == ["RED = 1", "GREEN = 2"]
     assert all(
         s.nodeType == "assignment" and s.semanticType is None
         for s in rec.statements if s.parentId == color.id

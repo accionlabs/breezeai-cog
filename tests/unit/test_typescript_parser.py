@@ -109,8 +109,8 @@ def test_type_alias_captured(tmp_path) -> None:
         path="t.ts", abs_path=p, source=p.read_bytes(), repo_root=tmp_path, capture_statements=True
     )
     rec = TypeScriptParser().parse_file(ctx)
-    aliases = [s.name for s in rec.statements if s.nodeType == "type_alias_declaration"]
-    assert aliases == ["UserId", "Point"]
+    aliases = [s.text for s in rec.statements if s.nodeType == "type_alias_declaration"]
+    assert aliases == ["type UserId = string;", "type Point = { x: number };"]
 
 
 def test_class_fields_captured(tmp_path) -> None:
@@ -123,11 +123,11 @@ def test_class_fields_captured(tmp_path) -> None:
     )
     rec = TypeScriptParser().parse_file(ctx)
     fields = [
-        s.name
+        s.text
         for s in rec.statements
         if s.nodeType in ("public_field_definition", "field_definition")
     ]
-    assert fields == ["count", "label"]
+    assert fields == ["count: number = 0", "private label = 'x'"]
 
 
 # G2: arrow functions attached as object-literal properties (resolver maps, service
@@ -827,10 +827,10 @@ def test_enum_members_captured_as_statements(tmp_path) -> None:
                        capture_statements=True)
     rec = TypeScriptParser().parse_file(ctx)
     role = next(c for c in rec.classes if c.type == "enum")
-    members = [(s.name, s.text, s.nodeType) for s in rec.statements if s.parentId == role.id]
+    members = [(s.text, s.nodeType) for s in rec.statements if s.parentId == role.id]
     assert members == [
-        ("Admin", "Admin = 'admin'", "enum_assignment"),
-        ("User", "User", "property_identifier"),
+        ("Admin = 'admin'", "enum_assignment"),
+        ("User", "property_identifier"),
     ]
     ctx2 = ParseContext(path="r.ts", abs_path=p, source=src, repo_root=tmp_path,
                         capture_statements=False)

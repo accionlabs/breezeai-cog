@@ -19,23 +19,6 @@ from .mappings import CONTROL_FLOW, EMIT_TYPES, NESTED_SCOPES
 _CALL_TYPE = "invocation_expression"
 
 
-def _name_of(node: Node, source: bytes) -> str | None:
-    if node.type in ("local_declaration_statement", "field_declaration"):
-        vd = next((c for c in node.named_children if c.type == "variable_declaration"), None)
-        if vd is not None:
-            decl = next((c for c in vd.named_children if c.type == "variable_declarator"), None)
-            if decl is not None:
-                nm = decl.child_by_field_name("name") or (
-                    decl.named_children[0] if decl.named_children else None)
-                if nm is not None:
-                    return node_text(nm, source)
-    elif node.type == "property_declaration":  # `public int Count { get; set; }` -> Count
-        nm = node.child_by_field_name("name")
-        if nm is not None:
-            return node_text(nm, source)
-    return None
-
-
 def method_name(name_node: Node | None, source: bytes) -> str:
     """Method name from an invocation's ``function``/``name`` node, dropping generic
     type arguments (``GetById<Order>`` -> ``GetById``) so db/api classification and
@@ -132,7 +115,7 @@ def extract_statements(
             classify_statement(
                 node, source, path, parent_id=parent_id, limit=limit, seen_ids=seen_ids,
                 emit_types=EMIT_TYPES, control_flow=CONTROL_FLOW, call_type=_CALL_TYPE,
-                name_of=_name_of, call_details=_call_details, language="csharp",
+                call_details=_call_details, language="csharp",
             )
         )
     return out

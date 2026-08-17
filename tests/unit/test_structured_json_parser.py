@@ -225,7 +225,6 @@ def test_document_statement_shape() -> None:
     assert st.semanticType == "structured_data"
     assert st.framework == "toon"
     assert st.endpoint is None  # no address/target for a data document (honest-null)
-    assert st.name == "team.json"
     assert st.parentId == "cfg/team.json"  # = file_id → HAS_STATEMENT to the File
     assert st.startLine == 1
     assert "members[1]{name}:" in st.text  # the TOON body

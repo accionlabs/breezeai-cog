@@ -24,17 +24,6 @@ def _unwrap(node: Node) -> Node:
     return node
 
 
-def _name_of(node: Node, source: bytes) -> str | None:
-    if node.type == "dim_statement":
-        nm = node.child_by_field_name("name")
-        if nm is not None:
-            return node_text(nm, source)
-        decl = next((c for c in node.named_children if c.type == "variable_declarator"), None)
-        if decl is not None and decl.named_children:
-            return node_text(decl.named_children[0], source)
-    return None
-
-
 def _call_details(call: Node, source: bytes) -> tuple[str, str, str | None] | None:
     target = call.child_by_field_name("target")
     if target is not None and target.type == "member_access":
@@ -99,7 +88,7 @@ def extract_statements(
             classify_statement(
                 node, source, path, parent_id=parent_id, limit=limit, seen_ids=seen_ids,
                 emit_types=EMIT_TYPES, control_flow=CONTROL_FLOW, call_type=_CALL_TYPE,
-                name_of=_name_of, call_details=_call_details, language="vb",
+                call_details=_call_details, language="vb",
             )
         )
     return out
