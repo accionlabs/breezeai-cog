@@ -132,7 +132,7 @@ def test_plain_statement_omits_route_only_fields() -> None:
                   text="if x:", startLine=3, endLine=5)
     )
     assert not ({"method", "endpoint", "guards", "semanticType", "handler"} & set(plain))
-    assert set(plain) == {"id", "parentId", "nodeType", "text", "startLine", "endLine"}
+    assert set(plain) == {"id", "parentId", "nodeType", "text", "startLine", "endLine", "decorators"}
 
 
 def test_open_node_preserves_extra(file_record: FileRecord) -> None:

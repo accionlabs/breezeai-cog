@@ -5,7 +5,7 @@ from __future__ import annotations
 
 from tree_sitter import Node
 
-from ...schemas import Statement
+from ...schemas import Decorator, Statement
 from ..statements_common import (
     classify_statement,
     render_concat,
@@ -15,6 +15,9 @@ from ..statements_common import (
 )
 from ..treesitter import node_text
 from .mappings import CONTROL_FLOW, EMIT_TYPES, NESTED_SCOPES
+
+# C# declaration node types that may carry attributes ([NotMapped], [Required], etc.)
+_ATTRIBUTED_DECL_TYPES = {"field_declaration", "property_declaration"}
 
 _CALL_TYPE = "invocation_expression"
 
@@ -112,6 +115,35 @@ def _iter_in_scope(node: Node, descend_all: bool = False, barriers: frozenset[tu
         yield from _iter_in_scope(child, descend_all, barriers)
 
 
+def _parse_attribute(node: Node, source: bytes) -> Decorator:
+    """Parse a single C# attribute node into a Decorator model."""
+    name_node = node.child_by_field_name("name")
+    name = node_text(name_node, source).rsplit(".", 1)[-1] if name_node is not None else ""
+    args: list[str] = []
+    arglist = next((c for c in node.named_children if c.type == "attribute_argument_list"), None)
+    if arglist is not None:
+        for arg in arglist.named_children:
+            if arg.type != "attribute_argument":
+                continue
+            text = node_text(arg, source)
+            inner = next((c for c in arg.named_children if c.type == "string_literal"), None)
+            if inner is not None:
+                text = node_text(inner, source).strip('"')
+            args.append(text)
+    return Decorator(name=name, args=args)
+
+
+def _field_attributes(node: Node, source: bytes) -> list[Decorator] | None:
+    """Extract structured decorators (C# attributes) from a field/property node, if any."""
+    if node.type not in _ATTRIBUTED_DECL_TYPES:
+        return None
+    out: list[Decorator] = []
+    for child in node.children:
+        if child.type == "attribute_list":
+            out.extend(_parse_attribute(a, source) for a in child.named_children if a.type == "attribute")
+    return out if out else None
+
+
 def extract_statements(
     body: Node | None,
     source: bytes,
@@ -133,6 +165,7 @@ def extract_statements(
                 node, source, path, parent_id=parent_id, limit=limit, seen_ids=seen_ids,
                 emit_types=EMIT_TYPES, control_flow=CONTROL_FLOW, call_type=_CALL_TYPE,
                 name_of=_name_of, call_details=_call_details, language="csharp",
+                decorators=_field_attributes(node, source),
             )
         )
     return out

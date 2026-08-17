@@ -5,7 +5,7 @@ from __future__ import annotations
 
 from tree_sitter import Node
 
-from ...schemas import Statement
+from ...schemas import Decorator, Statement
 from ..statements_common import (
     classify_statement,
     render_concat,
@@ -16,6 +16,9 @@ from ..statements_common import (
 from ..treesitter import node_text
 from .imports import _imported_names, _module_of
 from .mappings import CONTROL_FLOW, EMIT_TYPES, NESTED_SCOPES
+
+# Field definition node types that may carry decorators (@Input, @Output, etc.)
+_DECORATED_FIELD_TYPES = {"public_field_definition", "field_definition"}
 
 _CALL_TYPE = "call_expression"
 
@@ -281,6 +284,28 @@ def _iter_in_scope(node: Node, descend_all: bool = False, barriers: frozenset[tu
         yield from _iter_in_scope(child, descend_all, barriers)
 
 
+def _parse_decorator(node: Node, source: bytes) -> Decorator:
+    """Parse a single TS decorator node into a Decorator model."""
+    inner = node.named_children[0] if node.named_children else None
+    if inner is None:
+        return Decorator(name=node_text(node, source).lstrip("@"), args=[])
+    args: list[str] = []
+    if inner.type == "call_expression":
+        arglist = inner.child_by_field_name("arguments")
+        if arglist is not None:
+            args = [node_text(a, source) for a in arglist.named_children]
+        inner = inner.child_by_field_name("function") or inner
+    return Decorator(name=node_text(inner, source).rsplit(".", 1)[-1], args=args)
+
+
+def _field_decorators(node: Node, source: bytes) -> list[Decorator] | None:
+    """Extract structured decorators from a field definition node, if any."""
+    if node.type not in _DECORATED_FIELD_TYPES:
+        return None
+    dec_nodes = [c for c in node.children if c.type == "decorator"]
+    return [_parse_decorator(d, source) for d in dec_nodes] if dec_nodes else None
+
+
 def extract_statements(
     body: Node | None,
     source: bytes,
@@ -304,6 +329,7 @@ def extract_statements(
                 emit_types=EMIT_TYPES, control_flow=CONTROL_FLOW, call_type=_CALL_TYPE,
                 name_of=_name_of, call_details=_call_details, language="typescript",
                 typed_db_ids=typed_db_ids,
+                decorators=_field_decorators(node, source),
             )
         )
     return out
