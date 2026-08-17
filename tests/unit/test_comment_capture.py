@@ -31,6 +31,52 @@ def _parse(tmp_path, parser, filename: str, src: str, *, capture: bool = True):
     return parser.parse_file(ctx)
 
 
+def _stmt_texts(rec):
+    """text of every non-comment statement."""
+    return [s.text for s in rec.statements if s.semanticType != "comment"]
+
+
+def test_inline_comment_folds_into_statement_text(tmp_path) -> None:
+    """A same-line trailing comment is folded into its statement's ``text`` (not a separate
+    comment node); an own-line comment stays a first-class comment node."""
+    src = (
+        "class A {\n"
+        "    // fields section\n"                 # L2 own line -> comment node
+        "    int count = 0; // instance count\n"  # L3 trailing -> folded into field text
+        "    void run() {\n"
+        "        if (count > 0) { // positive\n"   # L5 control-flow header trailing -> folded
+        "            count--; // decrement\n"       # L6 trailing -> folded
+        "        }\n"
+        "        return; // done\n"                 # L8 trailing -> folded
+        "    }\n"
+        "}\n"
+    )
+    rec = _parse(tmp_path, JavaParser(), "A.java", src)
+    texts = _stmt_texts(rec)
+    comment_texts = [t for t, *_ in _comments(rec)]
+
+    # trailing comments live inside statement text …
+    assert "int count = 0; // instance count" in texts
+    assert "if (count > 0) { // positive" in texts
+    assert "count--; // decrement" in texts
+    assert "return; // done" in texts
+    # … and are NOT also emitted as their own comment nodes
+    for frag in ("instance count", "positive", "decrement", "done"):
+        assert not any(frag in c for c in comment_texts), frag
+    # the own-line comment IS a comment node, not folded
+    assert "// fields section" in comment_texts
+
+
+def test_last_enum_member_trailing_doc_folds(tmp_path) -> None:
+    """Trailing doc on the last enum member (which trails a ``;`` marker node) still folds."""
+    src = "enum S {\n  A(1),  // first\n  B(2);  // second\n}\n"
+    rec = _parse(tmp_path, JavaParser(), "S.java", src)
+    texts = _stmt_texts(rec)
+    assert "A(1),  // first" in texts
+    assert "B(2);  // second" in texts
+    assert not any("first" in c or "second" in c for c, *_ in _comments(rec))
+
+
 def _comments(rec):
     """(text, parentName) for each comment statement, using a scope-id → name map."""
     names = {rec.id: "<FILE>"}

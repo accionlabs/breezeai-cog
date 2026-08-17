@@ -162,12 +162,17 @@ def comment_statements_for(
     only when ``--capture-statements`` is on."""
     scope_spans: list[ScopeSpan] = [(f.startLine, f.endLine, f.id) for f in functions]
     scope_spans += [(c.startLine, c.endLine, c.id) for c in classes]
+    # Absorbing spans = where a comment already lives in a statement's ``text`` (so it must not
+    # also become its own node). A non-control-flow statement absorbs its whole line range
+    # (interior + folded same-line trailing comment); a control-flow statement absorbs only its
+    # header line (its ``text`` is ``first_line`` — a comment on the header rides along, but
+    # in-body comments on later lines must still be captured).
+    absorbing = [(s.startLine, s.endLine) for s in statements if s.nodeType not in control_flow]
+    absorbing += [(s.startLine, s.startLine) for s in statements if s.nodeType in control_flow]
     return collect_comment_statements(
         root, source, path, file_id=file_id, scope_spans=scope_spans,
         stmt_start_lines=[s.startLine for s in statements],
-        absorbing_spans=[
-            (s.startLine, s.endLine) for s in statements if s.nodeType not in control_flow
-        ],
+        absorbing_spans=absorbing,
         comment_types=comment_types, limit=limit, seen_ids=seen_ids,
     )
 
