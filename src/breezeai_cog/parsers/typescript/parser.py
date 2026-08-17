@@ -21,6 +21,7 @@ from ..treesitter import node_text, parse_source
 from .classes import build_class
 from ..callresolve import make_resolver
 from .aws_events import detect_aws_events
+from .nosql import detect_nosql_schemas
 from ..detection.sdk_calls import detect_sdk_calls
 from ..typescript_express.routes import detect_express
 from .functions import (
@@ -273,6 +274,13 @@ class TypeScriptParser(BaseParser):
                     record.statements.extend(vue_routes)
                     if record.framework is None:
                         record.framework = "vue"
+        # NoSQL schema detection runs unconditionally (schema extraction is structural,
+        # not gated by --capture-statements). Adds NEW Class records only.
+        nosql_classes, nosql_functions = detect_nosql_schemas(root, source, path, fid, seen_ids)
+        if nosql_classes:
+            record.classes.extend(nosql_classes)
+        if nosql_functions:
+            record.functions.extend(nosql_functions)
         return record
 
     def _handle(
