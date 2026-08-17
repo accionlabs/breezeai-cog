@@ -9,15 +9,19 @@ That structured map is called a **code ontology**. `breezeai-cog` is the first s
 system: it generates the ontology, a separate Breeze backend loads it into a graph database, and
 tools query it. This guide only covers the generator — the part you run against your code.
 
-**What it understands today:**
-- **Languages:** Python, TypeScript/JavaScript, Java.
-- **Frameworks** (route detection on top of those languages): FastAPI (Python), NestJS & Angular
-  (TypeScript), Spring Boot (Java).
+**What it understands today** (run `breezeai-cog capabilities` for the authoritative, live list):
+- **Languages:** TypeScript/JavaScript, Python, Java, C#, VB.NET, Kotlin, Groovy, and C++.
+- **Frameworks** (route/event detection on top of those languages): FastAPI (Python); NestJS,
+  Angular, Express, React, Vue, Next.js, LoopBack, and GraphQL (TypeScript); Spring Boot, JAX-RS,
+  and Vert.x (Java); ASP.NET, Web Forms, WCF/ASMX, and GraphQL (C#); ASP.NET (VB.NET); Ktor
+  (Kotlin); Vert.x (Groovy). Cross-cutting SDK detectors (AWS messaging, HubSpot, Chargebee,
+  Salesforce) layer on top additively.
 - **Database/search schemas:** SQL DDL files and Elasticsearch mappings (via the HTTP service).
-- **Config files:** `package.json`, `tsconfig.json`, `Dockerfile`, `docker-compose.yml`, `pom.xml`,
-  `build.gradle`, `pyproject.toml`, `requirements.txt`, `Pipfile`, `.ini`/`.toml`/`.xml`/`.yaml`, and
-  more — parsed into structured `metadata` (dependencies, scripts, images/ports, …) and summarized in
-  `projectMetaData.configs`.
+- **Config & structured data:** `package.json`, `tsconfig.json`, `Dockerfile`, `docker-compose.yml`,
+  `pom.xml`, `build.gradle`, `pyproject.toml`, `requirements.txt`, `Pipfile`, `.csproj`/`.vbproj`/`.sln`,
+  `.ini`/`.toml`/`.xml`/`.yaml`, and more — parsed into structured `metadata` (dependencies, scripts,
+  images/ports, …) and summarized in `projectMetaData.configs`. Standalone JSON/data documents are
+  also captured whole as a compact `structured_data` statement.
 
 It does **not** run or execute your code — it only reads and parses the source text, so it's safe to
 point at any repository.
@@ -302,8 +306,8 @@ the tool version.
 | `externalImports` | Imports of third-party/external packages. |
 | `functions[]` | Each function/method: name, parameters, return type, decorators, visibility, the calls it makes. |
 | `classes[]` | Each class/interface/enum: name, what it extends/implements, its methods. |
-| `statements[]` | *(only with `--capture-statements`)* notable in-body statements — including detected API calls, DB queries, and framework routes. |
-| `framework` | Set when a framework is detected in the file (e.g. `fastapi`, `nestjs`, `angular`, `spring`). |
+| `statements[]` | *(only with `--capture-statements`)* notable in-body statements — including detected API calls, DB queries, framework routes, event-bus/messaging operations, GraphQL entities, source comments, and captured structured data. |
+| `framework` | Set when a framework is detected in the file (e.g. `fastapi`, `nestjs`, `angular`, `spring`, `vertx`, `aspnet`, `wcf`). |
 
 **How things link together:** every function, class, and statement carries an `id`, and a
 `parentId` pointing to its container (a method's `parentId` is its class; a statement's `parentId`

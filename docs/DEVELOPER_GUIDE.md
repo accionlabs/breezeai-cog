@@ -32,8 +32,8 @@ src/breezeai_cog/
     base.py       #   BaseParser, ParseContext, the LanguageParser protocol
     treesitter.py #   grammar loading + bounded parse
     detection/    #   shared, language-agnostic API/DB/route classification
-    <lang>/       #   language parser (python, typescript, java)
-    <lang>_<fw>/  #   framework parser (python_fastapi, typescript_nestjs/angular, java_springboot)
+    <lang>/       #   base language parser (python, typescript, java, csharp, vb, kotlin, groovy, cpp, …)
+    <lang>_<fw>/  #   framework parser (e.g. python_fastapi, typescript_nestjs, java_springboot, csharp_wcf) — run `breezeai-cog capabilities` for the live list
   emit/           # id convention · ndjson · gzip · sinks (file/memory) · s3 streaming
   analyzers/      # non-AST: sql (DDL via sqlglot), es (Elasticsearch mappings)
   services/       # analysis · inprocess · diff · notify
