@@ -21,6 +21,13 @@ ClassType = Literal[
     "enum",
     "module",
     "trait",
+    # NoSQL/Graph database schema types
+    "collection",
+    "graph_node",
+    "graph_relationship",
+    "table",
+    "key_schema",
+    "index_mapping",
 ]
 
 # statement.semanticType — the schema's enum also allows null, expressed in the

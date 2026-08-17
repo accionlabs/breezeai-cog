@@ -118,6 +118,7 @@ class Function(BaseModel):
     uiRole: str | None = None
     metadata: dict[str, Any] | None = None
     calls: list[Call] = Field(default_factory=list)
+    sourceCode: str | None = None  # raw query source (set by Cypher parser)
     # Statements are NOT nested here — they live flat on FileRecord.statements and
     # link back via parentId (like methods link to their class). See FileRecord.
 
