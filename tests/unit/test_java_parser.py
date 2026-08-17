@@ -268,7 +268,9 @@ def _enum_members(tmp_path, src: str):
                        capture_statements=True)
     rec = JavaParser().parse_file(ctx)
     enum = next(c for c in rec.classes if c.type == "enum")
-    members = [s for s in rec.statements if s.parentId == enum.id]
+    # Exclude comment statements: the enum members' doc-comments (``/** … */``) are now
+    # captured as their own ``semanticType="comment"`` statements parented to the enum.
+    members = [s for s in rec.statements if s.parentId == enum.id and s.semanticType != "comment"]
     return rec, enum, members
 
 

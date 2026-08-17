@@ -10,7 +10,9 @@ from __future__ import annotations
 
 from tree_sitter import Node
 
+from ...emit import disambiguate, statement_id
 from ...schemas import Statement
+from ...utils import truncate
 from ..statements_common import (
     classify_statement,
     render_concat,
@@ -87,6 +89,36 @@ def _iter_in_scope(node: Node, descend_all: bool = False, barriers: frozenset[tu
         yield from _iter_in_scope(child, descend_all, barriers)
 
 
+def _docstring_statement(
+    body: Node, source: bytes, path: str, *, parent_id: str, limit: int, seen_ids: set[str]
+) -> Statement | None:
+    """A docstring Statement for the leading docstring of a scope ``body`` (module / class /
+    function block), else ``None``. A Python docstring is a bare ``string`` node (no
+    ``expression_statement`` wrapper) as the first real child, so it is *not* an ``EMIT_TYPES``
+    node and is never yielded by ``_iter_in_scope`` — we emit it here with its real ``nodeType``
+    (``string``) tagged ``semanticType="comment"`` so it is discoverable alongside real comments
+    and scoped to its owner (``parent_id``)."""
+    doc: Node | None = None
+    for child in body.named_children:
+        if child.type == "comment":
+            continue
+        doc = child if child.type == "string" else None
+        break
+    if doc is None:
+        return None
+    start, col, end = doc.start_point[0] + 1, doc.start_point[1], doc.end_point[0] + 1
+    return Statement(
+        id=disambiguate(statement_id(path, start, col), seen_ids),
+        parentId=parent_id,
+        nodeType=doc.type,
+        semanticType="comment",
+        text=truncate(node_text(doc, source), limit),
+        startLine=start,
+        endLine=end,
+        path=path,
+    )
+
+
 def extract_statements(
     body: Node | None,
     source: bytes,
@@ -102,6 +134,11 @@ def extract_statements(
     if not capture or body is None:
         return []
     out: list[Statement] = []
+    doc = _docstring_statement(
+        body, source, path, parent_id=parent_id, limit=limit, seen_ids=seen_ids
+    )
+    if doc is not None:
+        out.append(doc)
     for node in _iter_in_scope(body, descend_all, barriers):
         out.extend(
             classify_statement(

@@ -86,6 +86,38 @@ def summarize_skipped_concats(path: str) -> str | None:
 CallDetails = Callable[[Node, bytes], "tuple[str, str, str | None] | None"]
 NameOf = Callable[[Node, bytes], "str | None"]
 
+
+def _trailing_comment_end(node: Node, source: bytes) -> int:
+    """``end_byte`` extended over an inline (trailing) comment that immediately follows
+    ``node`` on the same line, else ``node.end_byte``. This folds ``x = 5; // note`` into the
+    statement's own ``text`` (the comment is a sibling *after* the node's bytes, so a plain
+    ``node_text`` would drop it). Language-agnostic: every grammar's comment node type ends in
+    ``comment`` (``comment`` / ``line_comment`` / ``block_comment`` / ``multiline_comment`` /
+    ``groovydoc_comment`` …).
+
+    Steps over a lone same-line separator sibling (a bare ``;`` / ``,`` the grammar breaks out
+    as its own node — e.g. Java's ``enum_body_declarations`` after the last enum constant) so a
+    trailing doc on the *last* member still folds. A separator is recognised only when its whole
+    text is punctuation, so a real following statement (``a = 1; b = 2; // c``) is never skipped
+    (its own fold claims the comment)."""
+    sib = node.next_named_sibling
+    if (
+        sib is not None
+        and not sib.type.endswith("comment")
+        and sib.start_point[0] == node.end_point[0]
+        and node_text(sib, source).strip() in (";", ",", "")
+    ):
+        sib = sib.next_named_sibling
+    if sib is not None and sib.type.endswith("comment") and sib.start_point[0] == node.end_point[0]:
+        return sib.end_byte
+    return node.end_byte
+
+
+def text_with_trailing_comment(node: Node, source: bytes) -> str:
+    """``node``'s source text, extended to include a same-line trailing comment (see
+    :func:`_trailing_comment_end`)."""
+    return source[node.start_byte : _trailing_comment_end(node, source)].decode("utf-8", "replace")
+
 # --- Endpoint resolution, shared across languages -------------------
 # HTTP verbs that may appear as the *first argument* (``request('GET', url)``).
 HTTP_VERB_ARGS = frozenset({"get", "post", "put", "patch", "delete", "head", "options"})
@@ -226,9 +258,15 @@ def classify_statement(
     language: str | None = None,
     typed_db_ids: "frozenset[str] | None" = None,
 ) -> list[Statement]:
-    text = node_text(node, source)
+    # ``code_text`` (comment-free) drives query/semantic detection; ``display_text`` is what
+    # lands on the record — for a normal statement it folds in a same-line trailing comment
+    # (``x = 5; // note``); a control-flow statement keeps only its header line (which already
+    # carries any comment on that line), so no separate fold is needed.
+    code_text = node_text(node, source)
     if node.type in control_flow:
-        text = first_line(text)
+        code_text = display_text = first_line(code_text)
+    else:
+        display_text = text_with_trailing_comment(node, source)
     start, col = node.start_point[0] + 1, node.start_point[1]
     end = node.end_point[0] + 1
 
@@ -262,7 +300,7 @@ def classify_statement(
         semantic, method_value, endpoint, hint, _ = hits[0]
     else:
         semantic = method_value = endpoint = hint = None
-        if text_has_query(text):  # raw SQL/Cypher string literal, no classified call
+        if text_has_query(code_text):  # raw SQL/Cypher string literal, no classified call
             semantic = "query_statement"
     records.append(
         Statement(
@@ -270,7 +308,7 @@ def classify_statement(
             parentId=parent_id,
             nodeType=node.type,
             semanticType=semantic,
-            text=truncate(text, limit),
+            text=truncate(display_text, limit),
             name=name_of(node, source),
             method=method_value,
             endpoint=endpoint,
@@ -345,7 +383,9 @@ def member_statement(
         id=disambiguate(statement_id(path, start, col), seen_ids),
         parentId=parent_id,
         nodeType=node.type,
-        text=truncate(node_text(node, source), limit),
+        # Fold a same-line trailing doc (``kCAPLC09 = 1000, ///< Apply Status``) into the
+        # member's text — the high-value constant-doc case.
+        text=truncate(text_with_trailing_comment(node, source), limit),
         name=name if name is not None else _member_name(node, source),
         startLine=start,
         endLine=end,

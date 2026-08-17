@@ -30,7 +30,8 @@ from ..treesitter import parse_source
 from .classes import build_class
 from .functions import build_function, defined_names, has_declaration_error, type_map
 from .imports import GroovyIndex, build_fqcn_index, extract_imports
-from .mappings import FRAMEWORKS, STATEMENT_TYPES
+from ..comments_common import comment_statements_for
+from .mappings import COMMENT_TYPES, CONTROL_FLOW, FRAMEWORKS, STATEMENT_TYPES
 from .statements import extract_statements
 
 _CLASS_TYPES = (
@@ -97,6 +98,15 @@ class GroovyParser(BaseParser):
         statements.extend(
             extract_statements(root, source, path, parent_id=fid, capture=capture, limit=limit, seen_ids=seen_ids)
         )
+
+        if capture:
+            statements.extend(
+                comment_statements_for(
+                    root, source, path, file_id=fid, functions=functions, classes=classes,
+                    statements=statements, control_flow=CONTROL_FLOW,
+                    comment_types=COMMENT_TYPES, limit=limit, seen_ids=seen_ids,
+                )
+            )
 
         return FileRecord(
             id=fid,

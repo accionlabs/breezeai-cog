@@ -24,7 +24,8 @@ from .classes import build_class
 from .functions import defined_names, type_map
 from .imports import CSharpIndex, build_csharp_index, extract_imports
 from .lambda_events import detect_lambda_handlers
-from .mappings import FRAMEWORKS, STATEMENT_TYPES
+from ..comments_common import comment_statements_for
+from .mappings import COMMENT_TYPES, CONTROL_FLOW, FRAMEWORKS, STATEMENT_TYPES
 
 _CLASS_TYPES = (
     "class_declaration", "interface_declaration", "enum_declaration",
@@ -84,6 +85,15 @@ class CSharpParser(BaseParser):
             classes.append(cls)
             functions.extend(methods)
             statements.extend(cls_statements)
+
+        if capture:
+            statements.extend(
+                comment_statements_for(
+                    root, source, path, file_id=fid, functions=functions, classes=classes,
+                    statements=statements, control_flow=CONTROL_FLOW,
+                    comment_types=COMMENT_TYPES, limit=limit, seen_ids=seen_ids,
+                )
+            )
 
         record = FileRecord(
             id=fid,

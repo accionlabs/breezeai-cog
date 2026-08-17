@@ -489,10 +489,12 @@ def test_class_members_captured_as_statements(tmp_path) -> None:
     rec = _parse_src(tmp_path, src, "h.h", capture=True)
     codes = next(c for c in rec.classes if c.name == "Codes")
     assert codes.metadata is None
+    # A same-line trailing doc (``//!< …``) folds into the member's text — the high-value
+    # constant-doc case (BREEZEAI-974): the human meaning rides on the member statement.
     members = [(s.name, s.text) for s in rec.statements if s.parentId == codes.id]
     assert members == [
-        ("kFirst", 'constexpr static const char* kFirst = "A1";'),
-        ("kMax", "static const int kMax = 9;"),
+        ("kFirst", 'constexpr static const char* kFirst = "A1"; //!< first code'),
+        ("kMax", "static const int kMax = 9;                  //!< upper bound"),
         ("plain", "int plain;"),
     ]
     assert all(s.nodeType == "field_declaration" for s in rec.statements if s.parentId == codes.id)

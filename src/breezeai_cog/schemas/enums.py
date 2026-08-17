@@ -44,4 +44,11 @@ SemanticType = Literal[
     # value ingests + filters with no backend change; adding it to the Confluence spec's
     # semanticType list (§2.4) is a documentation step, not a functional prerequisite.
     "structured_data",
+    # source comment (not a behaviour) — a comment string captured as a first-class
+    # Statement (keeping its real structural ``nodeType``: ``comment`` / ``line_comment`` /
+    # ``block_comment`` / ``string`` for a Python docstring …) so it is embedded, scoped and
+    # searchable. Emitted by the shared comment pass (``parsers/comments_common``) for every
+    # language, plus Python docstrings. Persisted verbatim by the backend like
+    # ``structured_data`` above.
+    "comment",
 ]

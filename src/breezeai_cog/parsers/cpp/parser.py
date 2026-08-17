@@ -37,7 +37,8 @@ from .functions import (
 )
 from .imports import extract_imports
 from .index import CppIndex, _join_ns, _ns_name, build_cpp_index, make_cpp_resolver
-from .mappings import FRAMEWORKS, STATEMENT_TYPES
+from ..comments_common import comment_statements_for
+from .mappings import COMMENT_TYPES, CONTROL_FLOW, FRAMEWORKS, STATEMENT_TYPES
 
 #: Transparent wrappers whose *members* are top-level declarations: the ``#ifndef GUARD``
 #: include guard every header uses (``preproc_ifdef``), other preprocessor conditionals, and
@@ -158,6 +159,15 @@ class CppParser(BaseParser):
             return idx.classdecl.get(class_fqn)  # exact node id, or None when ambiguous/unknown
 
         process(root)
+
+        if capture:
+            statements.extend(
+                comment_statements_for(
+                    root, source, path, file_id=fid, functions=functions, classes=classes,
+                    statements=statements, control_flow=CONTROL_FLOW,
+                    comment_types=COMMENT_TYPES, limit=limit, seen_ids=seen_ids,
+                )
+            )
 
         return FileRecord(
             id=fid,

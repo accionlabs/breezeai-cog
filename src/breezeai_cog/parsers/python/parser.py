@@ -8,12 +8,13 @@ from ...emit import file_id
 from ...schemas import SCHEMA_VERSION, FileRecord, Function, Statement
 from ...utils import count_loc
 from ..base import BaseParser, ParseContext
+from ..comments_common import comment_statements_for
 from ..treesitter import parse_source
 from ..callresolve import make_resolver
 from .classes import build_class, iter_definitions
 from .functions import build_function, defined_names, extract_decorators
 from .imports import extract_imports
-from .mappings import FRAMEWORKS, STATEMENT_TYPES
+from .mappings import COMMENT_TYPES, CONTROL_FLOW, FRAMEWORKS, STATEMENT_TYPES
 from .statements import extract_statements
 
 
@@ -68,6 +69,16 @@ class PythonParser(BaseParser):
         statements.extend(
             extract_statements(root, source, path, parent_id=fid, capture=capture, limit=limit, seen_ids=seen_ids)
         )
+
+        # Comments as flat Statements, scoped by the shared binding rule (see comments_common).
+        if capture:
+            statements.extend(
+                comment_statements_for(
+                    root, source, path, file_id=fid, functions=functions, classes=classes,
+                    statements=statements, control_flow=CONTROL_FLOW,
+                    comment_types=COMMENT_TYPES, limit=limit, seen_ids=seen_ids,
+                )
+            )
 
         return FileRecord(
             id=fid,
