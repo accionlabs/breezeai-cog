@@ -216,4 +216,9 @@ class ProjectMetaData(BaseModel):
         docker = cfg.get("docker") or {}
         if docker.get("hasDockerfile") or docker.get("hasCompose"):
             return True
+        # A captured JSON data document (structured-json full capture, category "json")
+        # is real signal worth persisting — e.g. an n8n workflow export in a repo with no
+        # code. Lone READMEs / .env / yaml stay category "other"/etc. and are still skipped.
+        if (cfg.get("byType") or {}).get("json"):
+            return True
         return bool(cfg.get("packageManagers") or cfg.get("buildTools"))
