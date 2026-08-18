@@ -27,7 +27,6 @@ from tree_sitter import Node
 
 from ..emit import disambiguate, statement_id
 from ..schemas import Statement
-from ..utils import truncate
 from .detection import classify_call, text_has_query
 from .treesitter import first_line, node_text
 
@@ -308,7 +307,7 @@ def classify_statement(
             parentId=parent_id,
             nodeType=node.type,
             semanticType=semantic,
-            text=truncate(display_text, limit),
+            text=display_text,
             name=name_of(node, source),
             method=method_value,
             endpoint=endpoint,
@@ -327,7 +326,7 @@ def classify_statement(
                 parentId=parent_id,
                 nodeType=call.type,
                 semanticType=semantic,
-                text=truncate(node_text(call, source), limit),
+                text=node_text(call, source),
                 method=method_value,
                 endpoint=endpoint,
                 dataAccessHint=hint,
@@ -385,7 +384,7 @@ def member_statement(
         nodeType=node.type,
         # Fold a same-line trailing doc (``kCAPLC09 = 1000, ///< Apply Status``) into the
         # member's text — the high-value constant-doc case.
-        text=truncate(text_with_trailing_comment(node, source), limit),
+        text=text_with_trailing_comment(node, source),
         name=name if name is not None else _member_name(node, source),
         startLine=start,
         endLine=end,

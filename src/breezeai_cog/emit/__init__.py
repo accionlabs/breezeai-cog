@@ -6,6 +6,7 @@ from __future__ import annotations
 from .ids import class_id, disambiguate, file_id, function_id, statement_id
 from .ndjson import to_line
 from .sinks import FileSink
+from .split import split_oversized_statements
 
 __all__ = [
     "file_id",
@@ -15,4 +16,5 @@ __all__ = [
     "disambiguate",
     "to_line",
     "FileSink",
+    "split_oversized_statements",
 ]

@@ -131,9 +131,7 @@ class StructuredJsonParser(BaseParser):
         # not embedded; it is the lexical/label retrieval handle (semanticType=structured_data).
         statements: list[Statement] = []
         if ctx.capture_statements:
-            statements.append(
-                self._document_statement(ctx.path, toon.text, loc, ctx.statement_text_limit)
-            )
+            statements.append(self._document_statement(ctx.path, toon.text, loc))
 
         return FileRecord(
             id=file_id(ctx.path),
@@ -146,25 +144,22 @@ class StructuredJsonParser(BaseParser):
         )
 
     # ── helpers ──────────────────────────────────────────────────────────────
-    def _document_statement(
-        self, path: str, toon_text: str, loc: int, text_limit: int
-    ) -> Statement:
+    def _document_statement(self, path: str, toon_text: str, loc: int) -> Statement:
         """One statement standing for the whole file, TOON in ``text``. ``nodeType`` is the
         spec's ``synthetic`` sentinel (no backing tree-sitter node); ``framework`` carries
         the serialization so ``semanticType`` stays format-independent. ``endpoint`` is left
         null — it is reserved for a resolved address/target (route/URL/event address), which
         a data document has none of; the document's identity is the owning File itself
-        (``parentId`` → HAS_STATEMENT, plus ``path``). Text is clipped to the statement cap."""
-        clipped = toon_text
-        if text_limit > 0 and len(clipped) > text_limit:
-            clipped = clipped[:text_limit] + "…"
+        (``parentId`` → HAS_STATEMENT, plus ``path``). The full TOON is kept here; sizing to
+        the statement cap (splitting into ``#partNofN`` records) happens once at emit
+        (``emit.split.split_oversized_statements``), so a large document is never dropped."""
         return Statement(
             id=statement_id(path, 1, 0),
             parentId=file_id(path),
             nodeType="synthetic",
             semanticType="structured_data",
             framework=self.serialization,
-            text=clipped,
+            text=toon_text,
             startLine=1,
             endLine=max(loc, 1),
             path=path,

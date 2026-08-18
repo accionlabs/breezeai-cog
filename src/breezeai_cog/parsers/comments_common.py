@@ -43,7 +43,6 @@ from tree_sitter import Node
 
 from ..emit import disambiguate, statement_id
 from ..schemas import Statement
-from ..utils import truncate
 
 # (startLine, endLine, id) for a Function/Class scope.
 ScopeSpan = tuple[int, int, str]
@@ -222,7 +221,7 @@ def collect_comment_statements(
                 parentId=parent,
                 nodeType=grp.first.type,  # actual tree-sitter type (comment/line_comment/…)
                 semanticType="comment",
-                text=truncate(text, limit),
+                text=text,
                 startLine=cs,
                 endLine=ce,
                 path=path,
