@@ -187,21 +187,6 @@ def collect_http_client_ids(root: Node, source: bytes) -> frozenset[str]:
     return frozenset(ids)
 
 
-def _name_of(node: Node, source: bytes) -> str | None:
-    if node.type == "lexical_declaration":
-        decl = next((c for c in node.named_children if c.type == "variable_declarator"), None)
-        if decl is not None:
-            name = decl.child_by_field_name("name")
-            if name is not None and name.type == "identifier":
-                return node_text(name, source)
-    elif node.type in ("type_alias_declaration", "public_field_definition", "field_definition"):
-        # `type X = …` -> X ;  class field `count = 0` -> count
-        name = node.child_by_field_name("name")
-        if name is not None:
-            return node_text(name, source)
-    return None
-
-
 def _render_url(node: Node, source: bytes) -> str | None:
     """Best-effort URL/path from a string, template literal, or ``+`` concatenation.
     Interpolations become ``{name}`` placeholders; a leading interpolated base/host
@@ -302,7 +287,7 @@ def extract_statements(
             classify_statement(
                 node, source, path, parent_id=parent_id, limit=limit, seen_ids=seen_ids,
                 emit_types=EMIT_TYPES, control_flow=CONTROL_FLOW, call_type=_CALL_TYPE,
-                name_of=_name_of, call_details=_call_details, language="typescript",
+                call_details=_call_details, language="typescript",
                 typed_db_ids=typed_db_ids,
             )
         )

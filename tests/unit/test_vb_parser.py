@@ -109,8 +109,8 @@ def test_enum_members_captured_as_statements(tmp_path) -> None:
                        capture_statements=True)
     rec = VbParser().parse_file(ctx)
     st = next(c for c in rec.classes if c.type == "enum")
-    members = [(s.name, s.nodeType) for s in rec.statements if s.parentId == st.id]
-    assert members == [("Active", "enum_member"), ("Closed", "enum_member")]
+    members = [(s.text.strip(), s.nodeType) for s in rec.statements if s.parentId == st.id]
+    assert members == [("Active = 1", "enum_member"), ("Closed", "enum_member")]
     ctx2 = ParseContext(path="s.vb", abs_path=p, source=src, repo_root=tmp_path,
                         capture_statements=False)
     assert VbParser().parse_file(ctx2).statements == []

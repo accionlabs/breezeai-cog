@@ -18,25 +18,6 @@ from .mappings import CONTROL_FLOW, EMIT_TYPES, NESTED_SCOPES
 _CALL_TYPE = "call_expression"
 
 
-def _name_of(node: Node, source: bytes) -> str | None:
-    """Declared variable name for a ``declaration`` (``Judge j;`` / ``int a = 1;``)."""
-    if node.type != "declaration":
-        return None
-    decl = node.child_by_field_name("declarator")
-    while decl is not None and decl.type in (
-        "init_declarator", "pointer_declarator", "reference_declarator", "parenthesized_declarator",
-    ):
-        nxt = decl.child_by_field_name("declarator")
-        if nxt is None:
-            nxt = next((c for c in decl.named_children if c.type == "identifier"), None)
-        if nxt is None or nxt is decl:
-            break
-        decl = nxt
-    if decl is not None and decl.type == "identifier":
-        return node_text(decl, source)
-    return None
-
-
 def _render_url(node: Node, source: bytes) -> str | None:
     """Best-effort URL/path from a string literal or ``+`` concatenation. A non-string
     part becomes ``{name}`` via the shared placeholder logic."""
@@ -108,7 +89,7 @@ def extract_statements(
             classify_statement(
                 node, source, path, parent_id=parent_id, limit=limit, seen_ids=seen_ids,
                 emit_types=EMIT_TYPES, control_flow=CONTROL_FLOW, call_type=_CALL_TYPE,
-                name_of=_name_of, call_details=_call_details, language="cpp",
+                call_details=_call_details, language="cpp",
             )
         )
     return out

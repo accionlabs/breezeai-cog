@@ -150,8 +150,8 @@ def test_property_declaration_captured(tmp_path) -> None:
     ctx = ParseContext(path=REL, abs_path=p, source=PROPERTY_SRC, repo_root=tmp_path,
                        capture_statements=True)
     rec = CSharpParser().parse_file(ctx)
-    props = [s.name for s in rec.statements if s.nodeType == "property_declaration"]
-    assert props == ["Count", "Name"]
+    props = [s.text for s in rec.statements if s.nodeType == "property_declaration"]
+    assert props == ["public int Count { get; set; }", "public string Name => _n;"]
 
 
 def test_output_validates(tmp_path) -> None:
@@ -472,9 +472,7 @@ def test_enum_members_captured_as_statements(tmp_path) -> None:
            '}\n')
     _, enum, members = _cs_enum_members(tmp_path, src)
     assert enum.metadata is None
-    assert [(m.name, m.text) for m in members] == [
-        ("OK", "OK = 3"), ("Fail", "Fail = 9"), ("Unknown", "Unknown"),
-    ]
+    assert [m.text for m in members] == ["OK = 3", "Fail = 9", "Unknown"]
     assert all(m.nodeType == "enum_member_declaration" and m.semanticType is None for m in members)
 
 

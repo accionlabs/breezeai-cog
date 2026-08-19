@@ -119,7 +119,7 @@ parse once and reuse the base extraction. Always provide it.
   decorators, `constructorParams`, methods as flat `Function`s). Return
   `(Class, list[Function], list[Statement])`. **Enum members** are emitted as flat
   `Statement`s parented to the enum `Class` (one per member — `nodeType` = the grammar's
-  member node, `name` = the declared name, `text` = the member source, incl. any
+  member node, `text` = the member source, incl. any
   `= value`), via `emit_enum_members(body, source, path, member_types={…}, parent_id=cid,
   limit=…, seen_ids=…)` from `statements_common` — gated behind `--capture-statements` like
   every other statement. (Do **not** carry members in `Class.metadata["constants"]`, and do

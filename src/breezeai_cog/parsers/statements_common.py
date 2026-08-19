@@ -1,7 +1,7 @@
 """Shared statement-record emission for --capture-statements (all languages).
 
 The per-language ``statements.py`` yields statement nodes (``_iter_in_scope``) and
-supplies a language-specific ``name_of`` + ``call_details`` + call node type; this
+supplies a language-specific ``call_details`` + call node type; this
 module turns one statement node into its ``Statement`` record(s):
 
   * a **base** structural record (``nodeType`` = the AST node), carrying the *first*
@@ -84,7 +84,6 @@ def summarize_skipped_concats(path: str) -> str | None:
 
 # (callee, method, first_string_arg) or None for a single call node.
 CallDetails = Callable[[Node, bytes], "tuple[str, str, str | None] | None"]
-NameOf = Callable[[Node, bytes], "str | None"]
 
 
 def _trailing_comment_end(node: Node, source: bytes) -> int:
@@ -251,7 +250,6 @@ def classify_statement(
     emit_types: Collection[str],
     control_flow: Collection[str],
     call_type: str,
-    name_of: NameOf,
     call_details: CallDetails,
     stmt_expr: Collection[str] = (),
     container_types: Collection[str] = (),
@@ -309,7 +307,6 @@ def classify_statement(
             nodeType=node.type,
             semanticType=semantic,
             text=truncate(display_text, limit),
-            name=name_of(node, source),
             method=method_value,
             endpoint=endpoint,
             dataAccessHint=hint,
@@ -347,24 +344,6 @@ def classify_statement(
 # the older ``Class.metadata["constants"]`` channel — a member's value, when the language has
 # one, stays inside ``text`` (``ACTIVE("A")`` / ``Admin = 'admin'`` / ``Active = 1``).
 
-_MEMBER_NAME_TYPES = ("identifier", "simple_identifier", "property_identifier")
-
-
-def _member_name(node: Node, source: bytes) -> str | None:
-    """The declared name of a member node: the ``name`` field if the grammar exposes one,
-    else the first identifier-like child, else the node's own text when it *is* a bare
-    identifier (a valueless TS ``property_identifier`` enum member). Honest-null otherwise."""
-    nm = node.child_by_field_name("name")
-    if nm is not None:
-        return node_text(nm, source)
-    first = next((c for c in node.named_children if c.type in _MEMBER_NAME_TYPES), None)
-    if first is not None:
-        return node_text(first, source)
-    if node.type in _MEMBER_NAME_TYPES:
-        return node_text(node, source)
-    return None
-
-
 def member_statement(
     node: Node,
     source: bytes,
@@ -373,10 +352,9 @@ def member_statement(
     parent_id: str,
     limit: int,
     seen_ids: set[str],
-    name: str | None = None,
 ) -> Statement:
     """One flat declaration Statement for ``node`` (``nodeType`` = the AST node, ``text`` =
-    its source, ``semanticType`` null). ``name`` defaults to the member's declared name."""
+    its source, ``semanticType`` null)."""
     start, col = node.start_point[0] + 1, node.start_point[1]
     end = node.end_point[0] + 1
     return Statement(
@@ -386,7 +364,6 @@ def member_statement(
         # Fold a same-line trailing doc (``kCAPLC09 = 1000, ///< Apply Status``) into the
         # member's text — the high-value constant-doc case.
         text=truncate(text_with_trailing_comment(node, source), limit),
-        name=name if name is not None else _member_name(node, source),
         startLine=start,
         endLine=end,
         path=path,

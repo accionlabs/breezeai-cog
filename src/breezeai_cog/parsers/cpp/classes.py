@@ -88,21 +88,6 @@ def _heritage(node: Node, source: bytes) -> tuple[str | None, list[str]]:
     return bases[0], bases[1:]
 
 
-def _declarator_name(node: Node | None, source: bytes) -> str | None:
-    """Innermost declared name, unwrapping pointer/reference/array/init declarators
-    (``* kName`` → ``kName``)."""
-    if node is None:
-        return None
-    if node.type in ("field_identifier", "identifier"):
-        return node_text(node, source)
-    inner = node.child_by_field_name("declarator") or next(
-        (c for c in node.named_children
-         if c.type in ("field_identifier", "identifier") or c.type.endswith("declarator")),
-        None,
-    )
-    return _declarator_name(inner, source) if inner is not None else None
-
-
 def build_class(
     node: Node,
     source: bytes,
@@ -171,7 +156,6 @@ def build_class(
                         statements.append(
                             member_statement(
                                 member, source, path, parent_id=cid, limit=limit, seen_ids=seen_ids,
-                                name=_declarator_name(member.child_by_field_name("declarator"), source),
                             )
                         )
                     continue

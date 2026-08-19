@@ -73,7 +73,6 @@ class Statement(BaseModel):
     # common optional
     semanticType: SemanticType | None = None
     path: str | None = None
-    name: str | None = None  # declared name (declaration node types)
     # see FileRecord.uiRole — used when a component is a bare declaration
     # (e.g. `export const X = defineComponent({…})`)
     uiRole: str | None = None

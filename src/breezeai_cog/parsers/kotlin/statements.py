@@ -14,16 +14,6 @@ from .mappings import CONTROL_FLOW, EMIT_TYPES, NESTED_SCOPES
 _CALL_TYPE = "call_expression"
 
 
-def _name_of(node: Node, source: bytes) -> str | None:
-    if node.type == "property_declaration":
-        var_decl = next((c for c in node.named_children if c.type == "variable_declaration"), None)
-        if var_decl is not None:
-            ident = next((c for c in var_decl.named_children if c.type == "simple_identifier"), None)
-            if ident is not None:
-                return node_text(ident, source)
-    return None
-
-
 def _render_url(node: Node, source: bytes) -> str | None:
     if node.type == "string_literal":
         # Kotlin string literals: content is in string_content children
@@ -121,7 +111,7 @@ def extract_statements(
             classify_statement(
                 node, source, path, parent_id=parent_id, limit=limit, seen_ids=seen_ids,
                 emit_types=EMIT_TYPES, control_flow=CONTROL_FLOW, call_type=_CALL_TYPE,
-                name_of=_name_of, call_details=_call_details, language="kotlin",
+                call_details=_call_details, language="kotlin",
             )
         )
     return out

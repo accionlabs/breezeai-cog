@@ -6,6 +6,7 @@ and schema conformance."""
 from __future__ import annotations
 
 import json
+import re
 
 from jsonschema import Draft202012Validator
 
@@ -247,8 +248,18 @@ def test_vue_claimed_ts_is_not_a_component(tmp_path) -> None:
 # ── defineComponent components ───────────────────────────────────────────────────
 
 
+def _decl_name(text):
+    # The lexical_declaration's declared identifier, parsed from its source text.
+    m = re.search(r"\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)", text)
+    return m.group(1) if m else text
+
+
 def _stmt_roles(rec):
-    return {s.name: s.uiRole for s in rec.statements if s.nodeType == "lexical_declaration"}
+    return {
+        _decl_name(s.text): s.uiRole
+        for s in rec.statements
+        if s.nodeType == "lexical_declaration"
+    }
 
 
 def test_default_export_definecomponent_marks_file(tmp_path) -> None:

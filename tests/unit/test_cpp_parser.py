@@ -386,7 +386,7 @@ def test_enum_captured_with_member_statements(tmp_path) -> None:
     color = next((c for c in rec.classes if c.name == "Color"), None)
     assert color is not None and color.type == "enum" and color.metadata is None
     members = [s for s in rec.statements if s.parentId == color.id]
-    assert [(m.name, m.text) for m in members] == [("RED", "RED"), ("GREEN", "GREEN"), ("BLUE", "BLUE")]
+    assert [m.text for m in members] == ["RED", "GREEN", "BLUE"]
     assert all(m.nodeType == "enumerator" and m.semanticType is None for m in members)
 
 
@@ -396,7 +396,7 @@ def test_scoped_enum_is_enum(tmp_path) -> None:
     mode = next((c for c in rec.classes if c.name == "Mode"), None)
     assert mode is not None and mode.type == "enum" and mode.metadata is None
     members = [s for s in rec.statements if s.parentId == mode.id]
-    assert [(m.name, m.text) for m in members] == [("A", "A = 1"), ("B", "B = 2")]
+    assert [m.text for m in members] == ["A = 1", "B = 2"]
 
 
 def test_union_has_its_own_type(tmp_path) -> None:
@@ -416,7 +416,7 @@ def test_nested_union_and_enum_captured(tmp_path) -> None:
     kind = next(c for c in rec.classes if c.name == "Kind")
     assert kind.metadata is None
     members = [s for s in rec.statements if s.parentId == kind.id]
-    assert [(m.name, m.text) for m in members] == [("A", "A"), ("B", "B")]
+    assert [m.text for m in members] == ["A", "B"]
 
 
 def test_anonymous_and_forward_enum_not_fabricated(tmp_path) -> None:
@@ -491,11 +491,11 @@ def test_class_members_captured_as_statements(tmp_path) -> None:
     assert codes.metadata is None
     # A same-line trailing doc (``//!< …``) folds into the member's text — the high-value
     # constant-doc case (BREEZEAI-974): the human meaning rides on the member statement.
-    members = [(s.name, s.text) for s in rec.statements if s.parentId == codes.id]
+    members = [s.text for s in rec.statements if s.parentId == codes.id]
     assert members == [
-        ("kFirst", 'constexpr static const char* kFirst = "A1"; //!< first code'),
-        ("kMax", "static const int kMax = 9;                  //!< upper bound"),
-        ("plain", "int plain;"),
+        'constexpr static const char* kFirst = "A1"; //!< first code',
+        "static const int kMax = 9;                  //!< upper bound",
+        "int plain;",
     ]
     assert all(s.nodeType == "field_declaration" for s in rec.statements if s.parentId == codes.id)
 
@@ -510,8 +510,8 @@ def test_enum_values_captured_as_statements(tmp_path) -> None:
     rec = _parse_src(tmp_path, src, "s.h", capture=True)
     st = next(c for c in rec.classes if c.name == "Status")
     assert st.metadata is None
-    members = [(s.name, s.text) for s in rec.statements if s.parentId == st.id]
-    assert members == [("OK", "OK = 3"), ("FAIL", "FAIL = 9"), ("UNKNOWN", "UNKNOWN")]
+    members = [s.text for s in rec.statements if s.parentId == st.id]
+    assert members == ["OK = 3", "FAIL = 9", "UNKNOWN"]
 
 
 def test_class_members_gated_by_capture_flag(tmp_path) -> None:
