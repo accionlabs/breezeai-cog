@@ -12,7 +12,6 @@ from tree_sitter import Node
 
 from ...emit import disambiguate, statement_id
 from ...schemas import Statement
-from ...utils import truncate
 from ..statements_common import (
     classify_statement,
     render_concat,
@@ -112,7 +111,7 @@ def _docstring_statement(
         parentId=parent_id,
         nodeType=doc.type,
         semanticType="comment",
-        text=truncate(node_text(doc, source), limit),
+        text=node_text(doc, source),
         startLine=start,
         endLine=end,
         path=path,

@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Callable, Iterator
 
 from .._version import __version__
+from ..emit import split_oversized_statements
 from ..logging import DETAIL_LOGGER, get_logger
 from ..schemas import FileRecord, ProjectMetaData
 from . import executor
@@ -171,6 +172,7 @@ def _assemble(
     records: Iterator[tuple[str, FileRecord]],
     sink,
     *,
+    statement_text_limit: int = 0,
     candidates: int | None = None,
     skips: dict[str, int] | None = None,
     debug_on: bool = False,
@@ -196,6 +198,9 @@ def _assemble(
         progress(0, candidates)  # establish the total up front
 
     for language, record in records:
+        # Split any statement whose text exceeds the cap into ordered `#partNofN`
+        # records (lossless) so the backend never drops an oversized statement whole.
+        record.statements = split_oversized_statements(record.statements, statement_text_limit)
         sink.write(record)
         total_files += 1
         total_functions += len(record.functions)
@@ -283,7 +288,8 @@ def run(
     indexes = _build_indexes(repo_root, entries, jobs, debug_on=debug_on)
     records = executor.parse_entries(entries, repo_root, settings, indexes)
     meta = _assemble(
-        repo_root, records, sink, candidates=len(entries), skips=report.counts,
+        repo_root, records, sink, statement_text_limit=settings.statement_text_limit,
+        candidates=len(entries), skips=report.counts,
         debug_on=debug_on, progress=progress, summary_out=summary_out,
     )
     if summary_out is not None:  # full detail for the CLI console summary + sidecar report
@@ -309,5 +315,6 @@ def run_inprocess(repo_root: str | Path, settings, sink) -> ProjectMetaData:
                 yield record.language, record
 
     return _assemble(
-        repo_root, gen(), sink, candidates=len(entries), skips=report.counts, debug_on=debug_on
+        repo_root, gen(), sink, statement_text_limit=settings.statement_text_limit,
+        candidates=len(entries), skips=report.counts, debug_on=debug_on,
     )

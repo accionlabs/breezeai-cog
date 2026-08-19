@@ -54,7 +54,9 @@ class Settings(BaseSettings):
     )
     capture_statements: bool = False  # --capture-statements
     jobs: int | None = None  # --jobs; None = CPU count (resolved in the executor)
-    statement_text_limit: int = 8000  # max captured code statement `text`/body length (utils/text.py)
+    # Max statement `text` length before it is split into ordered `#partNofN` records at
+    # emit (emit/split.py) so the backend never drops an oversized statement; 0 disables.
+    statement_text_limit: int = 8000
     metadata_value_limit: int = 4000  # max structured-JSON leaf value length on File.metadata
     #: (structured_json/parser.py); 0 disables truncation.
     max_file_size: int = 2_000_000  # bytes; scanner skips larger files (core/scanner.py)

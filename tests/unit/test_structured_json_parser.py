@@ -231,11 +231,15 @@ def test_document_statement_shape() -> None:
     assert "members[1]{name}:" in st.text  # the TOON body
 
 
-def test_document_statement_text_clipped_to_limit() -> None:
+def test_document_statement_captures_full_text_uncapped() -> None:
+    # The parser keeps the full TOON — no clip, no ellipsis. Sizing (splitting a large
+    # document into `#partNofN` records) happens once at emit (see test_pipeline_split),
+    # so the parser must not lose the tail here regardless of statement_text_limit.
     big = {"rows": [{"v": "y" * 100} for _ in range(50)]}
     rec = _parse("a.json", big, capture_statements=True, statement_text_limit=200)
     st = rec.statements[0]
-    assert len(st.text) == 201 and st.text.endswith("…")
+    assert len(st.text) > 200 and not st.text.endswith("…")  # full document, not clipped
+    assert st.text.count("y" * 100) == 50  # every row's value survives
     assert "toon" not in rec.metadata  # content is not duplicated on metadata
 
 
