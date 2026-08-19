@@ -173,6 +173,7 @@ def _assemble(
     sink,
     *,
     statement_text_limit: int = 0,
+    max_statement_parts: int = 0,
     candidates: int | None = None,
     skips: dict[str, int] | None = None,
     debug_on: bool = False,
@@ -200,7 +201,9 @@ def _assemble(
     for language, record in records:
         # Split any statement whose text exceeds the cap into ordered `#partNofN`
         # records (lossless) so the backend never drops an oversized statement whole.
-        record.statements = split_oversized_statements(record.statements, statement_text_limit)
+        record.statements = split_oversized_statements(
+            record.statements, statement_text_limit, max_statement_parts
+        )
         sink.write(record)
         total_files += 1
         total_functions += len(record.functions)
@@ -289,6 +292,7 @@ def run(
     records = executor.parse_entries(entries, repo_root, settings, indexes)
     meta = _assemble(
         repo_root, records, sink, statement_text_limit=settings.statement_text_limit,
+        max_statement_parts=settings.max_statement_parts,
         candidates=len(entries), skips=report.counts,
         debug_on=debug_on, progress=progress, summary_out=summary_out,
     )
@@ -316,5 +320,6 @@ def run_inprocess(repo_root: str | Path, settings, sink) -> ProjectMetaData:
 
     return _assemble(
         repo_root, gen(), sink, statement_text_limit=settings.statement_text_limit,
+        max_statement_parts=settings.max_statement_parts,
         candidates=len(entries), skips=report.counts, debug_on=debug_on,
     )

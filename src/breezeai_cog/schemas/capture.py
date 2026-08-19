@@ -78,6 +78,13 @@ class Statement(BaseModel):
     # see FileRecord.uiRole — used when a component is a bare declaration
     # (e.g. `export const X = defineComponent({…})`)
     uiRole: str | None = None
+    #: True on each record of a statement whose ``text`` exceeded the cap and was split into
+    #: ordered ``#part{i}of{n}`` parts at emit (see ``emit.split``). The reader reassembles the
+    #: full text by concatenating siblings (same ``captureId`` base, ordered by the ``#partNofN``
+    #: suffix). Absent on unsplit statements. Distinct from a *lossy* truncation: parts are
+    #: lossless unless a ``max_statement_parts`` cap dropped the tail (marked inline in the last
+    #: part's text).
+    isPartial: bool | None = None
     # route-only
     framework: str | None = None
     method: str | None = None  # HTTP verb (route/api_call) or db method (db_method_call)

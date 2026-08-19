@@ -12,7 +12,8 @@ import json
 from typing import Any
 
 # Capture contract version (semver). Bump on schema change.
-SCHEMA_VERSION = "2.0"
+# 2.1: additive optional `Statement.isPartial` (oversized-statement split parts).
+SCHEMA_VERSION = "2.1"
 
 
 def export_json_schema() -> dict[str, Any]:

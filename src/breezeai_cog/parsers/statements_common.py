@@ -27,7 +27,6 @@ from tree_sitter import Node
 
 from ..emit import disambiguate, statement_id
 from ..schemas import Decorator, Statement
-from ..utils import truncate
 from .detection import classify_call, text_has_query
 from .treesitter import first_line, node_text
 
