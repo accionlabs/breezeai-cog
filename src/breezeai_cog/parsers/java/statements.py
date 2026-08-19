@@ -5,12 +5,15 @@ from __future__ import annotations
 
 from tree_sitter import Node
 
-from ...schemas import Statement
+from ...schemas import Decorator, Statement
 from ..statements_common import classify_statement, render_concat, resolve_endpoint
 from ..treesitter import node_text
 from .mappings import CONTROL_FLOW, EMIT_TYPES, NESTED_SCOPES
 
 _CALL_TYPE = "method_invocation"
+
+# Declaration node types that may carry annotations (@Column, @Autowired, @NotNull, ...).
+_ANNOTATED_DECL_TYPES = {"field_declaration"}
 
 
 def _name_of(node: Node, source: bytes) -> str | None:
@@ -47,6 +50,16 @@ def _call_details(call: Node, source: bytes) -> tuple[str, str, str | None] | No
     return callee, method, endpoint
 
 
+def _field_decorators(node: Node, source: bytes) -> list[Decorator] | None:
+    """Structured annotations on a field declaration, via the shared ``extract_annotations``
+    (same parser used for class/method/param annotations)."""
+    if node.type not in _ANNOTATED_DECL_TYPES:
+        return None
+    from .functions import extract_annotations, modifiers_node  # lazy — avoid an import cycle with functions.py
+
+    return extract_annotations(modifiers_node(node), source)
+
+
 def _iter_in_scope(node: Node, descend_all: bool = False):
     """Yield EMIT_TYPES statement nodes. ``descend_all=True`` (a function body) walks
     into inline lambdas, attributing their statements to this function; ``False``
@@ -80,6 +93,7 @@ def extract_statements(
                 node, source, path, parent_id=parent_id, limit=limit, seen_ids=seen_ids,
                 emit_types=EMIT_TYPES, control_flow=CONTROL_FLOW, call_type=_CALL_TYPE,
                 name_of=_name_of, call_details=_call_details, language="java",
+                decorators=_field_decorators(node, source),
             )
         )
     return out

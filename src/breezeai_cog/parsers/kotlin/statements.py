@@ -6,12 +6,15 @@ from collections.abc import Iterator
 
 from tree_sitter import Node
 
-from ...schemas import Statement
+from ...schemas import Decorator, Statement
 from ..statements_common import classify_statement, render_concat, resolve_endpoint
 from ..treesitter import node_text
 from .mappings import CONTROL_FLOW, EMIT_TYPES, NESTED_SCOPES
 
 _CALL_TYPE = "call_expression"
+
+# Declaration node types that may carry annotations (@Autowired, @Column, @Inject, ...).
+_ANNOTATED_DECL_TYPES = {"property_declaration"}
 
 
 def _name_of(node: Node, source: bytes) -> str | None:
@@ -86,6 +89,16 @@ def _call_details(call: Node, source: bytes) -> tuple[str, str, str | None] | No
     return callee, method, endpoint
 
 
+def _field_decorators(node: Node, source: bytes) -> list[Decorator] | None:
+    """Structured annotations on a property declaration, via the shared annotation parser
+    (same one used for class/function/param annotations)."""
+    if node.type not in _ANNOTATED_DECL_TYPES:
+        return None
+    from .parser import _annotations, _modifiers  # lazy — avoid an import cycle with parser.py
+
+    return _annotations(_modifiers(node), source)
+
+
 def _iter_in_scope(
     node: Node,
     descend_all: bool = False,
@@ -122,6 +135,7 @@ def extract_statements(
                 node, source, path, parent_id=parent_id, limit=limit, seen_ids=seen_ids,
                 emit_types=EMIT_TYPES, control_flow=CONTROL_FLOW, call_type=_CALL_TYPE,
                 name_of=_name_of, call_details=_call_details, language="kotlin",
+                decorators=_field_decorators(node, source),
             )
         )
     return out

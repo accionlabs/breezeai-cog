@@ -331,3 +331,16 @@ def test_enum_members_output_validates(tmp_path) -> None:
     errors = list(Draft202012Validator(FileRecord.model_json_schema(by_alias=True))
                   .iter_errors(json.loads(to_line(rec))))
     assert not errors, errors
+
+
+def test_field_annotations_captured_on_statements(tmp_path) -> None:
+    # A decorated field declaration is flattened into a Statement; its annotations
+    # must be structured (not left only in raw text).
+    src = "class User {\n  @Column(nullable = false)\n  @Id\n  private String email;\n}\n"
+    p = tmp_path / "User.java"
+    p.write_text(src)
+    ctx = ParseContext(path="User.java", abs_path=p, source=src.encode(), repo_root=tmp_path,
+                       capture_statements=True)
+    rec = JavaParser().parse_file(ctx)
+    field = next(s for s in rec.statements if s.name == "email")
+    assert [(d.name, d.args) for d in field.decorators] == [("Column", ["nullable = false"]), ("Id", [])]
