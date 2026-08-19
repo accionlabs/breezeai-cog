@@ -382,3 +382,12 @@ def test_modifier_and_nested_enum_constants(tmp_path) -> None:
         ("APPLY_STATUS", "APPLY_STATUS('CAPLC09')"),
         ("APPLY_DATE", "APPLY_DATE('CAPLC11')"),
     ]
+
+
+def test_field_annotations_captured_on_statements(tmp_path) -> None:
+    # A decorated field declaration is flattened into a Statement; its annotations
+    # must be structured (not left only in raw text).
+    src = b"class Svc {\n  @Autowired\n  UserService userService\n}\n"
+    rec = _parse_src(tmp_path, src, capture=True)
+    field = next(s for s in rec.statements if s.name == "userService")
+    assert [(d.name, d.args) for d in field.decorators] == [("Autowired", [])]

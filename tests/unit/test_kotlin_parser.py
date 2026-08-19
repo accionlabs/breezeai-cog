@@ -96,3 +96,16 @@ def test_enum_entries_captured_as_statements(tmp_path) -> None:
     ctx2 = ParseContext(path="d.kt", abs_path=p, source=src, repo_root=tmp_path,
                         capture_statements=False)
     assert KotlinParser().parse_file(ctx2).statements == []
+
+
+def test_property_annotations_captured_on_statements(tmp_path) -> None:
+    # A decorated property declaration is flattened into a Statement; its annotations
+    # must be structured (not left only in raw text).
+    src = b"class Svc {\n  @Autowired\n  lateinit var repo: UserRepository\n}\n"
+    p = tmp_path / "Svc.kt"
+    p.write_bytes(src)
+    ctx = ParseContext(path="Svc.kt", abs_path=p, source=src, repo_root=tmp_path,
+                       capture_statements=True)
+    rec = KotlinParser().parse_file(ctx)
+    prop = next(s for s in rec.statements if s.name == "repo")
+    assert [(d.name, d.args) for d in prop.decorators] == [("Autowired", [])]
