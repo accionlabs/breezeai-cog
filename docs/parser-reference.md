@@ -224,9 +224,15 @@ PARSERS = [GoParser()]
 side-effects.
 
 ### Step 8 — Language label
-`FileRecord.language` is the **base language string** (e.g. `"go"`), set in `extract`. The
-pipeline reports `analyzedLanguages` from `record.language`, *not* the parser name — so
-framework parsers still report the base language.
+`FileRecord.language` is the **underlying format string**, set in `extract`. The pipeline
+reports `analyzedLanguages` from `record.language`, *not* the parser name.
+
+- **Code parsers** set `language` to the grammar name (e.g. `"go"`, `"typescript"`) — framework
+  parsers inherit this.
+- **Config parsers** set `language` to the data format (e.g. `"hcl"`, `"json"`, `"yaml"`) and
+  `framework` to the toolchain (e.g. `"terraform"`). This separates *what the
+  file is* from *how it's used*, and lets multiple toolchains share the same
+  grammar.
 
 ### Step 9 — Test + dogfood + validate
 - Unit tests: instantiate the parser directly (`GoParser().parse_file(ctx)`); assert
@@ -355,7 +361,8 @@ highest-`priority` parser whose `claims(path, source)` is True; the base languag
 - [ ] Imports resolved to repo-relative paths where possible (drives `IMPORTS`).
 - [ ] Shared `classify_call(callee, method, arg)` wired for api/db/query (don't reimplement);
       pass the string arg.
-- [ ] `FileRecord.language` = base language string.
+- [ ] `FileRecord.language` = underlying format string; `framework` = toolchain (config parsers only — see Step 8).
+- [ ] **Config/IaC parsers**: use `iac_*` `semanticType` values; set `platform` on `Statement` (from resource-type prefix / provider name) and on `FileRecord` (dominant platform across statements — omit when none).
 - [ ] `PARSERS` exported from `__init__.py`.
 - [ ] `ignore.txt` / `include.txt` — **language-scoped, post-scan**; universal directory
       prunes go in `core/default_ignores.txt`.
