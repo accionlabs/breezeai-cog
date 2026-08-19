@@ -31,7 +31,7 @@ from tree_sitter import Node
 from ...emit import disambiguate, function_id, statement_id
 from ...schemas import Decorator, Statement
 from ..treesitter import node_text
-from ..typescript.functions import decorator
+from ..typescript.decorators import decorator
 
 _OPS = {"Query": "query", "Mutation": "mutation", "Subscription": "subscription"}
 _AUTH_DECORATORS = {"RequireScopes", "RequireAPIScope", "Authorized"}

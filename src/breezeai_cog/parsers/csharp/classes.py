@@ -10,7 +10,8 @@ from ...schemas import Class, ConstructorParam, Function, Statement
 from ..callresolve import CallResolver, noop_resolver
 from ..statements_common import emit_enum_members
 from ..treesitter import line_span, node_text
-from .functions import build_method, extract_attributes, extract_params, flags
+from .attributes import extract_attributes
+from .functions import build_method, extract_params, flags
 from .statements import extract_statements
 
 _TYPE = {

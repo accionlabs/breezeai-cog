@@ -11,7 +11,8 @@ from __future__ import annotations
 from tree_sitter import Node
 
 from ...emit import disambiguate, function_id, statement_id
-from ...parsers.typescript.functions import decorator, dto_from_type, extract_params, return_dto
+from ...parsers.typescript.decorators import decorator
+from ...parsers.typescript.functions import dto_from_type, extract_params, return_dto
 from ...schemas import Statement
 from ..statements_common import render_concat, url_placeholder
 from ..treesitter import node_text

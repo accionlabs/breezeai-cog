@@ -10,11 +10,11 @@ from ...schemas import Class, ConstructorParam, Function, Statement
 from ..statements_common import emit_enum_members
 from ..treesitter import line_span, node_text
 from ..callresolve import CallResolver, noop_resolver
+from .decorators import extract_decorators
 from .functions import (
     NESTED_FN_VALUE_TYPES,
     build_function,
     collect_nested_functions,
-    extract_decorators,
     extract_params,
 )
 from .statements import collect_typed_db_receivers, extract_statements

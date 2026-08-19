@@ -26,7 +26,8 @@ from collections.abc import Callable, Collection, Iterator
 from tree_sitter import Node
 
 from ..emit import disambiguate, statement_id
-from ..schemas import Statement
+from ..schemas import Decorator, Statement
+from ..utils import truncate
 from .detection import classify_call, text_has_query
 from .treesitter import first_line, node_text
 
@@ -256,6 +257,7 @@ def classify_statement(
     container_types: Collection[str] = (),
     language: str | None = None,
     typed_db_ids: "frozenset[str] | None" = None,
+    decorators: "list[Decorator] | None" = None,
 ) -> list[Statement]:
     # ``code_text`` (comment-free) drives query/semantic detection; ``display_text`` is what
     # lands on the record — for a normal statement it folds in a same-line trailing comment
@@ -312,6 +314,7 @@ def classify_statement(
             method=method_value,
             endpoint=endpoint,
             dataAccessHint=hint,
+            decorators=decorators or [],
             startLine=start,
             endLine=end,
             path=path,
@@ -373,6 +376,7 @@ def member_statement(
     limit: int,
     seen_ids: set[str],
     name: str | None = None,
+    decorators: "list[Decorator] | None" = None,
 ) -> Statement:
     """One flat declaration Statement for ``node`` (``nodeType`` = the AST node, ``text`` =
     its source, ``semanticType`` null). ``name`` defaults to the member's declared name."""
@@ -386,6 +390,7 @@ def member_statement(
         # member's text — the high-value constant-doc case.
         text=text_with_trailing_comment(node, source),
         name=name if name is not None else _member_name(node, source),
+        decorators=decorators or [],
         startLine=start,
         endLine=end,
         path=path,

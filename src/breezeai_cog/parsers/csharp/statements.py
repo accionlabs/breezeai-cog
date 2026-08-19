@@ -5,7 +5,7 @@ from __future__ import annotations
 
 from tree_sitter import Node
 
-from ...schemas import Statement
+from ...schemas import Decorator, Statement
 from ..statements_common import (
     classify_statement,
     render_concat,
@@ -14,7 +14,11 @@ from ..statements_common import (
     url_placeholder,
 )
 from ..treesitter import node_text
+from .attributes import extract_attributes
 from .mappings import CONTROL_FLOW, EMIT_TYPES, NESTED_SCOPES
+
+# C# declaration node types that may carry attributes ([NotMapped], [Required], etc.)
+_ATTRIBUTED_DECL_TYPES = {"field_declaration", "property_declaration"}
 
 _CALL_TYPE = "invocation_expression"
 
@@ -112,6 +116,14 @@ def _iter_in_scope(node: Node, descend_all: bool = False, barriers: frozenset[tu
         yield from _iter_in_scope(child, descend_all, barriers)
 
 
+def _field_attributes(node: Node, source: bytes) -> list[Decorator] | None:
+    """Structured decorators (C# attributes) on a field/property node, via the shared
+    ``extract_attributes`` (same parser used for class/method/param attributes)."""
+    if node.type not in _ATTRIBUTED_DECL_TYPES:
+        return None
+    return extract_attributes(node, source)
+
+
 def extract_statements(
     body: Node | None,
     source: bytes,
@@ -133,6 +145,7 @@ def extract_statements(
                 node, source, path, parent_id=parent_id, limit=limit, seen_ids=seen_ids,
                 emit_types=EMIT_TYPES, control_flow=CONTROL_FLOW, call_type=_CALL_TYPE,
                 name_of=_name_of, call_details=_call_details, language="csharp",
+                decorators=_field_attributes(node, source),
             )
         )
     return out

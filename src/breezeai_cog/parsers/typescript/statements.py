@@ -5,7 +5,7 @@ from __future__ import annotations
 
 from tree_sitter import Node
 
-from ...schemas import Statement
+from ...schemas import Decorator, Statement
 from ..statements_common import (
     classify_statement,
     render_concat,
@@ -14,8 +14,12 @@ from ..statements_common import (
     url_placeholder,
 )
 from ..treesitter import node_text
+from .decorators import extract_decorators
 from .imports import _imported_names, _module_of
 from .mappings import CONTROL_FLOW, EMIT_TYPES, NESTED_SCOPES
+
+# Field definition node types that may carry decorators (@Input, @Output, etc.)
+_DECORATED_FIELD_TYPES = {"public_field_definition", "field_definition"}
 
 _CALL_TYPE = "call_expression"
 
@@ -281,6 +285,14 @@ def _iter_in_scope(node: Node, descend_all: bool = False, barriers: frozenset[tu
         yield from _iter_in_scope(child, descend_all, barriers)
 
 
+def _field_decorators(node: Node, source: bytes) -> list[Decorator] | None:
+    """Structured decorators on a field-definition node, via the shared
+    ``extract_decorators`` (same parser used for class/method/param decorators)."""
+    if node.type not in _DECORATED_FIELD_TYPES:
+        return None
+    return extract_decorators([c for c in node.children if c.type == "decorator"], source)
+
+
 def extract_statements(
     body: Node | None,
     source: bytes,
@@ -304,6 +316,7 @@ def extract_statements(
                 emit_types=EMIT_TYPES, control_flow=CONTROL_FLOW, call_type=_CALL_TYPE,
                 name_of=_name_of, call_details=_call_details, language="typescript",
                 typed_db_ids=typed_db_ids,
+                decorators=_field_decorators(node, source),
             )
         )
     return out
