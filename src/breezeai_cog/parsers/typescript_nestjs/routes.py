@@ -19,7 +19,8 @@ from tree_sitter import Node
 
 from ...emit import disambiguate, function_id, statement_id
 from ...schemas import Decorator, Statement
-from ...parsers.typescript.functions import _type_text, decorator, extract_params
+from ...parsers.typescript.decorators import decorator
+from ...parsers.typescript.functions import _type_text, extract_params
 from ..treesitter import node_text
 
 _METHOD_DECORATORS = {

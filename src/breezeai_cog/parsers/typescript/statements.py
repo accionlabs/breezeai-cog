@@ -14,6 +14,7 @@ from ..statements_common import (
     url_placeholder,
 )
 from ..treesitter import node_text
+from .decorators import extract_decorators
 from .imports import _imported_names, _module_of
 from .mappings import CONTROL_FLOW, EMIT_TYPES, NESTED_SCOPES
 
@@ -284,26 +285,12 @@ def _iter_in_scope(node: Node, descend_all: bool = False, barriers: frozenset[tu
         yield from _iter_in_scope(child, descend_all, barriers)
 
 
-def _parse_decorator(node: Node, source: bytes) -> Decorator:
-    """Parse a single TS decorator node into a Decorator model."""
-    inner = node.named_children[0] if node.named_children else None
-    if inner is None:
-        return Decorator(name=node_text(node, source).lstrip("@"), args=[])
-    args: list[str] = []
-    if inner.type == "call_expression":
-        arglist = inner.child_by_field_name("arguments")
-        if arglist is not None:
-            args = [node_text(a, source) for a in arglist.named_children]
-        inner = inner.child_by_field_name("function") or inner
-    return Decorator(name=node_text(inner, source).rsplit(".", 1)[-1], args=args)
-
-
 def _field_decorators(node: Node, source: bytes) -> list[Decorator] | None:
-    """Extract structured decorators from a field definition node, if any."""
+    """Structured decorators on a field-definition node, via the shared
+    ``extract_decorators`` (same parser used for class/method/param decorators)."""
     if node.type not in _DECORATED_FIELD_TYPES:
         return None
-    dec_nodes = [c for c in node.children if c.type == "decorator"]
-    return [_parse_decorator(d, source) for d in dec_nodes] if dec_nodes else None
+    return extract_decorators([c for c in node.children if c.type == "decorator"], source)
 
 
 def extract_statements(

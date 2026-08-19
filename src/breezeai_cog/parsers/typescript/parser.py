@@ -23,11 +23,11 @@ from ..callresolve import make_resolver
 from .aws_events import detect_aws_events
 from ..detection.sdk_calls import detect_sdk_calls
 from ..typescript_express.routes import detect_express
+from .decorators import extract_decorators
 from .functions import (
     build_function,
     collect_nested_functions,
     defined_names,
-    extract_decorators,
     type_map,
 )
 from ..statements_common import reset_http_client_ids, set_http_client_ids

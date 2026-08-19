@@ -34,7 +34,8 @@ from ..index_common import (
     ClassHeritage, merge_heritage, parallel_map, project_heritage, record_distinct,
 )
 from ..treesitter import node_text, parse_source
-from .functions import extract_attributes, flags
+from .attributes import extract_attributes
+from .functions import flags
 
 _NAME_NODES = ("qualified_name", "identifier", "alias_qualified_name", "member_access_expression")
 _CLASS_TYPES = (
