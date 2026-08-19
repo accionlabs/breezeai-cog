@@ -313,6 +313,11 @@ the tool version.
 `parentId` pointing to its container (a method's `parentId` is its class; a statement's `parentId`
 is the function it lives in). That parent/child linking is what lets the data form a graph.
 
+**Very large statements** (e.g. a whole captured data document, a generated blob) are **split**
+into ordered parts rather than dropped: each part's `id` gains a `#partNofN` suffix, carries
+`"isPartial": true`, and concatenating the parts in order rebuilds the original text. See the
+`statement text limit` / `max statement parts` settings below to tune the threshold and the cap.
+
 To see the precise shape of every field, generate the schema:
 
 ```bash
@@ -349,6 +354,8 @@ Most-used settings:
 | Languages | `BREEZEAI_COG_LANGUAGE` | all |
 | Capture statements | `BREEZEAI_COG_CAPTURE_STATEMENTS` | `false` |
 | Worker processes | `BREEZEAI_COG_JOBS` | CPU count |
+| Statement text limit (chars; longer → split into `#partNofN` parts, `0` off) | `BREEZEAI_COG_STATEMENT_TEXT_LIMIT` | `8000` |
+| Max statement parts (cap; over it the tail is dropped + logged, `0` = unbounded) | `BREEZEAI_COG_MAX_STATEMENT_PARTS` | `0` |
 | Max file size (bytes) | `BREEZEAI_COG_MAX_FILE_SIZE` | `2000000` |
 | Parse timeout (seconds, per file) | `BREEZEAI_COG_PARSE_TIMEOUT` | `10` |
 | Log level / format | `BREEZEAI_COG_LOG_LEVEL` · `BREEZEAI_COG_LOG_FORMAT` | `INFO` · `plaintext` |
