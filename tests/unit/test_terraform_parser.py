@@ -113,6 +113,17 @@ module "custom" {
 }
 """
 
+_GENERIC_SRC = b"""\
+resource "random_id" "suffix" {
+  byte_length = 8
+}
+
+resource "local_file" "config" {
+  content  = "hello"
+  filename = "/tmp/config.txt"
+}
+"""
+
 
 def _parse(path: str, source: bytes, *, capture_statements: bool = False):
     ctx = ParseContext(
@@ -131,7 +142,8 @@ def _parse(path: str, source: bytes, *, capture_statements: bool = False):
 def test_emits_config_record() -> None:
     rec = _parse("main.tf", _TF_SRC)
     assert rec.type == "config"
-    assert rec.language == "terraform"
+    assert rec.language == "hcl"
+    assert rec.framework == "terraform"
 
 
 def test_no_metadata() -> None:
@@ -162,57 +174,116 @@ def test_statements_emitted_with_flag() -> None:
     assert len(rec.statements) > 0
 
 
-# ── statement fields ─────────────────────────────────────────────────────────
+# ── statement nodeType ────────────────────────────────────────────────────────
 
 
-def test_resource_statement_node_type() -> None:
+def test_tf_block_node_type_is_block() -> None:
     rec = _parse("main.tf", _TF_SRC, capture_statements=True)
-    resource_stmts = [s for s in rec.statements if s.nodeType == "resource"]
+    assert all(s.nodeType == "block" for s in rec.statements)
+
+
+def test_tfvars_node_type_is_attribute() -> None:
+    rec = _parse("prod.auto.tfvars", _TFVARS_SRC, capture_statements=True)
+    assert all(s.nodeType == "attribute" for s in rec.statements)
+
+
+# ── statement semanticType ────────────────────────────────────────────────────
+
+
+def test_resource_semantic_type() -> None:
+    rec = _parse("main.tf", _TF_SRC, capture_statements=True)
+    resource_stmts = [s for s in rec.statements if s.semanticType == "iac_resource"]
     assert len(resource_stmts) == 2
+
+
+def test_data_semantic_type() -> None:
+    rec = _parse("main.tf", _TF_SRC, capture_statements=True)
+    assert any(s.semanticType == "iac_data_source" for s in rec.statements)
+
+
+def test_variable_semantic_type() -> None:
+    rec = _parse("main.tf", _TF_SRC, capture_statements=True)
+    assert any(s.semanticType == "iac_variable" for s in rec.statements)
+
+
+def test_output_semantic_type() -> None:
+    rec = _parse("main.tf", _TF_SRC, capture_statements=True)
+    assert any(s.semanticType == "iac_output" for s in rec.statements)
+
+
+def test_module_semantic_type() -> None:
+    rec = _parse("main.tf", _TF_SRC, capture_statements=True)
+    assert any(s.semanticType == "iac_module" for s in rec.statements)
+
+
+def test_provider_semantic_type() -> None:
+    rec = _parse("main.tf", _TF_SRC, capture_statements=True)
+    assert any(s.semanticType == "iac_provider" for s in rec.statements)
+
+
+def test_locals_semantic_type() -> None:
+    rec = _parse("main.tf", _TF_SRC, capture_statements=True)
+    assert any(s.semanticType == "iac_local" for s in rec.statements)
+
+
+def test_terraform_block_semantic_type() -> None:
+    rec = _parse("main.tf", _TF_SRC, capture_statements=True)
+    assert any(s.semanticType == "iac_settings" for s in rec.statements)
+
+
+def test_tfvars_semantic_type_is_variable_value() -> None:
+    rec = _parse("prod.auto.tfvars", _TFVARS_SRC, capture_statements=True)
+    assert all(s.semanticType == "iac_variable_value" for s in rec.statements)
+
+
+# ── statement name (address) ──────────────────────────────────────────────────
 
 
 def test_resource_statement_name_is_address() -> None:
     rec = _parse("main.tf", _TF_SRC, capture_statements=True)
-    names = {s.name for s in rec.statements if s.nodeType == "resource"}
+    names = {s.name for s in rec.statements if s.semanticType == "iac_resource"}
     assert "aws_s3_bucket.my_bucket" in names
     assert "aws_instance.web" in names
 
 
 def test_data_statement_name_is_address() -> None:
     rec = _parse("main.tf", _TF_SRC, capture_statements=True)
-    data_stmt = next(s for s in rec.statements if s.nodeType == "data")
+    data_stmt = next(s for s in rec.statements if s.semanticType == "iac_data_source")
     assert data_stmt.name == "aws_ami.ubuntu"
 
 
 def test_variable_statement_name() -> None:
     rec = _parse("main.tf", _TF_SRC, capture_statements=True)
-    var_stmt = next(s for s in rec.statements if s.nodeType == "variable")
+    var_stmt = next(s for s in rec.statements if s.semanticType == "iac_variable")
     assert var_stmt.name == "region"
 
 
 def test_output_statement_name() -> None:
     rec = _parse("main.tf", _TF_SRC, capture_statements=True)
-    out_stmt = next(s for s in rec.statements if s.nodeType == "output")
+    out_stmt = next(s for s in rec.statements if s.semanticType == "iac_output")
     assert out_stmt.name == "bucket_arn"
 
 
 def test_module_statement_name() -> None:
     rec = _parse("main.tf", _TF_SRC, capture_statements=True)
-    mod_stmts = {s.name for s in rec.statements if s.nodeType == "module"}
+    mod_stmts = {s.name for s in rec.statements if s.semanticType == "iac_module"}
     assert "vpc" in mod_stmts
     assert "local_mod" in mod_stmts
 
 
 def test_provider_statement_name() -> None:
     rec = _parse("main.tf", _TF_SRC, capture_statements=True)
-    prov = next(s for s in rec.statements if s.nodeType == "provider")
+    prov = next(s for s in rec.statements if s.semanticType == "iac_provider")
     assert prov.name == "aws"
 
 
 def test_locals_statement_has_no_name() -> None:
     rec = _parse("main.tf", _TF_SRC, capture_statements=True)
-    loc_stmt = next(s for s in rec.statements if s.nodeType == "locals")
+    loc_stmt = next(s for s in rec.statements if s.semanticType == "iac_local")
     assert loc_stmt.name is None
+
+
+# ── statement line numbers / ids ──────────────────────────────────────────────
 
 
 def test_statement_line_numbers() -> None:
@@ -257,10 +328,69 @@ def test_containsi_azure_no_match_on_aws_file() -> None:
 
 
 def test_statement_text_is_full_block_source() -> None:
-    # text must include the closing brace so the full block is reconstructable
     rec = _parse("main.tf", _TF_SRC, capture_statements=True)
     for stmt in rec.statements:
         assert "{" in stmt.text and "}" in stmt.text
+
+
+# ── platform ──────────────────────────────────────────────────────────────────
+
+
+def test_aws_resource_platform() -> None:
+    rec = _parse("main.tf", _TF_SRC, capture_statements=True)
+    resources = [s for s in rec.statements if s.semanticType == "iac_resource"]
+    assert all(s.platform == "aws" for s in resources)
+
+
+def test_aws_data_source_platform() -> None:
+    rec = _parse("main.tf", _TF_SRC, capture_statements=True)
+    data_stmts = [s for s in rec.statements if s.semanticType == "iac_data_source"]
+    assert all(s.platform == "aws" for s in data_stmts)
+
+
+def test_provider_platform() -> None:
+    rec = _parse("main.tf", _TF_SRC, capture_statements=True)
+    prov = next(s for s in rec.statements if s.semanticType == "iac_provider")
+    assert prov.platform == "aws"
+
+
+def test_azure_resource_platform() -> None:
+    rec = _parse("azure.tf", _AZURE_SRC, capture_statements=True)
+    resources = [s for s in rec.statements if s.semanticType == "iac_resource"]
+    assert all(s.platform == "azure" for s in resources)
+
+
+def test_generic_resource_no_platform() -> None:
+    rec = _parse("generic.tf", _GENERIC_SRC, capture_statements=True)
+    resources = [s for s in rec.statements if s.semanticType == "iac_resource"]
+    assert all(s.platform is None for s in resources)
+
+
+def test_non_resource_blocks_no_platform() -> None:
+    rec = _parse("main.tf", _TF_SRC, capture_statements=True)
+    no_platform = [s for s in rec.statements if s.semanticType in ("iac_variable", "iac_output", "iac_local", "iac_settings", "iac_module")]
+    assert all(s.platform is None for s in no_platform)
+
+
+def test_file_platform_aws() -> None:
+    rec = _parse("main.tf", _TF_SRC, capture_statements=True)
+    assert rec.platform == "aws"
+
+
+def test_file_platform_azure() -> None:
+    rec = _parse("azure.tf", _AZURE_SRC, capture_statements=True)
+    assert rec.platform == "azure"
+
+
+def test_file_platform_none_for_generic() -> None:
+    rec = _parse("generic.tf", _GENERIC_SRC, capture_statements=True)
+    assert rec.platform is None
+
+
+def test_file_platform_none_without_capture_statements() -> None:
+    # statements not captured → no platform signal
+    rec = _parse("main.tf", _TF_SRC, capture_statements=False)
+    assert rec.platform is None
 
 
 # ── .tfvars statements ────────────────────────────────────────────────────────
@@ -269,9 +399,10 @@ def test_statement_text_is_full_block_source() -> None:
 def test_tfvars_emits_variable_value_statements() -> None:
     rec = _parse("prod.auto.tfvars", _TFVARS_SRC, capture_statements=True)
     assert rec.type == "config"
-    assert rec.language == "terraform"
+    assert rec.language == "hcl"
+    assert rec.framework == "terraform"
     node_types = {s.nodeType for s in rec.statements}
-    assert node_types == {"variable_value"}
+    assert node_types == {"attribute"}
 
 
 def test_tfvars_statement_names_are_variable_names() -> None:
@@ -367,7 +498,6 @@ def test_ignore_patterns_include_override() -> None:
 
 
 def test_ignore_patterns_no_dead_entries() -> None:
-    # State files and lock file live in default_ignores now — not in parser ignore
     patterns = TerraformParser().ignore_patterns()
     assert not any("tfstate" in p for p in patterns)
     assert not any("lock.hcl" in p for p in patterns)
@@ -380,7 +510,9 @@ def test_record_serializes_schema_valid() -> None:
     rec = _parse("main.tf", _TF_SRC, capture_statements=True)
     data = json.loads(rec.model_dump_json(by_alias=True, exclude_none=True))
     assert data["type"] == "config"
-    assert data["language"] == "terraform"
+    assert data["language"] == "hcl"
+    assert data["framework"] == "terraform"
+    assert data["platform"] == "aws"
     assert "statements" in data
     assert "metadata" not in data
 
@@ -389,7 +521,15 @@ def test_tfvars_record_serializes_schema_valid() -> None:
     rec = _parse("prod.auto.tfvars", _TFVARS_SRC, capture_statements=True)
     data = json.loads(rec.model_dump_json(by_alias=True, exclude_none=True))
     assert data["type"] == "config"
+    assert data["language"] == "hcl"
+    assert data["framework"] == "terraform"
     assert "statements" in data
+
+
+def test_platform_absent_from_json_when_none() -> None:
+    rec = _parse("generic.tf", _GENERIC_SRC, capture_statements=True)
+    data = json.loads(rec.model_dump_json(by_alias=True, exclude_none=True))
+    assert "platform" not in data
 
 
 # ── registry integration ──────────────────────────────────────────────────────

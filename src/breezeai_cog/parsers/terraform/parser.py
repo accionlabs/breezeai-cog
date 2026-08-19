@@ -11,6 +11,7 @@ so the file-level graph retains dependency edges regardless of the statements fl
 
 from __future__ import annotations
 
+from collections import Counter
 from pathlib import Path
 
 from tree_sitter import Node
@@ -21,6 +22,54 @@ from ...utils import count_loc
 from ..base import BaseParser, ParseContext
 from ..treesitter import node_text, parse_source
 from .mappings import FRAMEWORKS, STATEMENT_TYPES
+
+
+# ── semantic type mapping ─────────────────────────────────────────────────────
+
+_SEMANTIC_TYPE: dict[str, str] = {
+    "resource": "iac_resource",
+    "data": "iac_data_source",
+    "module": "iac_module",
+    "provider": "iac_provider",
+    "variable": "iac_variable",
+    "output": "iac_output",
+    "locals": "iac_local",
+    "terraform": "iac_settings",
+}
+
+# ── platform detection ────────────────────────────────────────────────────────
+
+_CLOUD_PREFIXES: dict[str, str] = {
+    "aws_": "aws",
+    "azurerm_": "azure",
+    "google_": "google",
+}
+
+_PROVIDER_PLATFORMS: dict[str, str] = {
+    "aws": "aws",
+    "azurerm": "azure",
+    "google": "google",
+}
+
+
+def _block_platform(keyword: str, labels: list[str]) -> str | None:
+    """Derive cloud provider from the block's resource type prefix or provider name."""
+    if keyword in ("resource", "data") and labels:
+        resource_type = labels[0]
+        for prefix, platform in _CLOUD_PREFIXES.items():
+            if resource_type.startswith(prefix):
+                return platform
+    elif keyword == "provider" and labels:
+        return _PROVIDER_PLATFORMS.get(labels[0])
+    return None
+
+
+def _dominant_platform(statements: list[Statement]) -> str | None:
+    """Return the most frequent non-None platform across statements, or None."""
+    platforms = [s.platform for s in statements if s.platform is not None]
+    if not platforms:
+        return None
+    return Counter(platforms).most_common(1)[0][0]
 
 
 # ── AST helpers ───────────────────────────────────────────────────────────────
@@ -164,7 +213,8 @@ class TerraformParser(BaseParser):
                     statements.append(Statement(
                         id=sid,
                         parentId=fid,
-                        nodeType="variable_value",
+                        nodeType="attribute",
+                        semanticType="iac_variable_value",
                         text=node_text(attr, source),
                         startLine=start,
                         endLine=end,
@@ -201,19 +251,23 @@ class TerraformParser(BaseParser):
                     statements.append(Statement(
                         id=sid,
                         parentId=fid,
-                        nodeType=keyword,
+                        nodeType="block",
+                        semanticType=_SEMANTIC_TYPE.get(keyword),
                         text=node_text(block, source),
                         startLine=start,
                         endLine=end,
                         name=_block_address(keyword, labels),
+                        platform=_block_platform(keyword, labels),
                     ))
 
         return FileRecord(
             id=fid,
             path=path,
             type="config",
-            language="terraform",
+            language="hcl",
+            framework="terraform",
             loc=count_loc(source.decode("utf-8", "replace")),
             externalImports=sorted(external_imports),
             statements=statements,
+            platform=_dominant_platform(statements),
         )
