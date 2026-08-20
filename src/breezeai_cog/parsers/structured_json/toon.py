@@ -5,7 +5,8 @@ array-of-objects becomes a table (``members[2]{name,role}:`` + one comma-joined 
 which is far denser than repeating ``members[i].field``; nested / non-uniform data falls
 back to an indented block form. This module owns only the capture *safety* the library does
 not provide: it produces a **sanitized copy** of the parsed JSON — secret-named keys
-redacted, string leaves length-capped, total leaf count bounded — and hands that to the
+redacted (layer 1), secret-shaped string values redacted (layer 2, see `.redaction`),
+string leaves length-capped, total leaf count bounded — and hands that to the
 library. Sanitizing before serializing keeps the two concerns cleanly separated (and means a
 secret can never reach the encoder).
 
@@ -24,6 +25,8 @@ from dataclasses import dataclass
 from typing import Any, Callable
 
 import toon_format
+
+from .redaction import redact_secrets
 
 IsSecret = Callable[[str], bool]
 
@@ -103,6 +106,8 @@ def _sanitize(
         return items
     if not budget.take():
         return _OMIT
-    if key is not None and is_secret(key):
+    if key is not None and is_secret(key):  # layer 1: redact by secret-looking key name
         return "***"
+    if isinstance(value, str):  # layer 2: redact by secret-*shaped* value (see .redaction)
+        value = redact_secrets(value)
     return _cap(value, value_limit)
