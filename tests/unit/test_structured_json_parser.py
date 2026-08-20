@@ -51,26 +51,34 @@ def test_claims_root_array_of_objects() -> None:
     assert _claims([{"id": 1}, {"id": 2}]) is True
 
 
-def test_does_not_claim_flat_config() -> None:
-    assert _claims({"prefix": "http://"}) is False
+def test_claims_flat_config() -> None:
+    # post-merge: any non-empty JSON not named-rich is captured in full, flat configs included
+    assert _claims({"prefix": "http://"}) is True
 
 
-def test_does_not_claim_package_json_shape() -> None:
-    assert _claims({"name": "app", "dependencies": {"react": "^18"}}) is False
+def test_claims_package_shaped_dict_under_non_package_name() -> None:
+    # shape no longer matters — only the NAME excludes (a package.json shape at path x.json is data)
+    assert _claims({"name": "app", "dependencies": {"react": "^18"}}) is True
 
 
-def test_does_not_claim_array_of_scalars() -> None:
-    assert _claims(["a", "b", "c"]) is False
+def test_claims_array_of_scalars() -> None:
+    assert _claims(["a", "b", "c"]) is True
+
+
+def test_does_not_claim_empty_or_scalar() -> None:
+    assert _claims({}) is False and _claims([]) is False and _claims("hello") is False
 
 
 def test_does_not_claim_malformed_json() -> None:
     assert StructuredJsonParser().claims("x.json", b"{not json") is False
 
 
-def test_does_not_crash_on_deeply_nested_json() -> None:
-    depth = 1200
-    src = ("[" * depth + "]" * depth).encode()
-    assert StructuredJsonParser().claims("x.json", src) is False
+def test_claims_robust_on_deeply_nested_json() -> None:
+    # claims() must not crash on adversarial nesting (json.loads handles it, or _parse returns
+    # None). Parse-time recursion safety is delegated to the executor's per-file isolation
+    # (core.executor._parse_entry catches any parse_file exception), not guarded here.
+    src = ("[" * 1200 + "]" * 1200).encode()
+    assert StructuredJsonParser().claims("x.json", src) is True
 
 
 # ── denylist guard: don't steal ConfigParser's richly-handled JSON ──────────────
@@ -261,7 +269,9 @@ def test_selection_beats_config_for_records_only() -> None:
     try:
         assert registry.select("records.json", b'{"values":[{"a":1}]}').name == "structured-json"
         assert registry.select("package.json", b'{"name":"x"}').name == "config"
-        assert registry.select("batch_config.json", b'{"prefix":"http://"}').name == "config"
+        # post-merge: a generic non-empty config is now captured, not reduced
+        assert registry.select("batch_config.json", b'{"prefix":"http://"}').name == "structured-json"
+        assert registry.select("empty.json", b"{}").name == "config"  # nothing to capture
         assert (
             registry.select("package.json", b'{"name":"x","contributors":[{"name":"a"}]}').name
             == "config"

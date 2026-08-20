@@ -1,22 +1,17 @@
-"""Locked spec for the JSON classifier refactor (the ③/④ merge).
+"""Locked spec for the JSON classifier.
 
 Each row asserts which parser *selects* a given JSON shape — the single decision that
 determines full capture (``structured-json``) vs rich/reduced config handling
-(``config``). This is the acceptance test for the refactor:
-
-* Rows that already hold on ``main`` pass now (characterization — guards against regression).
-* Rows marked ``xfail(strict=True)`` are the refactor's TODO. They flip to green when the
-  new claim predicate lands; ``strict`` makes pytest FAIL if one passes while still marked,
-  so the marks can't be silently left behind.
+(``config``). This is the classifier's acceptance test and a regression guard.
 
 Target claim predicate (decision: capture-everything-unknown):
 
     claims(path, data) = data is a non-empty (dict | list)
                          AND Path(path).name not in NAME_RICH
 
-``NAME_RICH`` are the JSON files ConfigParser extracts *richly* by name; everything else
-non-empty is captured in full. Empty containers and scalar roots have nothing to capture
-and stay with ConfigParser.
+``NAME_RICH`` are the JSON files ConfigParser extracts *richly* by name; every other
+non-empty JSON is captured in full. Empty containers and scalar roots have nothing to
+capture and stay with ConfigParser.
 """
 
 from __future__ import annotations
@@ -28,19 +23,13 @@ import pytest
 from breezeai_cog.core import registry
 
 #: JSON filenames ConfigParser owns with a dedicated rich extractor — never full-captured.
-#: Must stay in sync with the refactored claim predicate + ConfigParser._dispatch.
+#: Must stay in sync with StructuredJsonParser.CONFIG_JSON_NAMES + ConfigParser._dispatch.
 NAME_RICH = {"package.json", "tsconfig.json", "jsconfig.json", "mod.json"}
 
 CONFIG = "config"
 CAPTURE = "structured-json"
 
-
-def _xf(reason: str):
-    return pytest.mark.xfail(reason=reason, strict=True)
-
-
-# (path, json_obj, target_parser). Rows whose CURRENT selection differs from the target
-# carry an xfail with the reason (what the refactor must change).
+# (path, json_obj, target_parser)
 _CASES = [
     # ── named-rich configs: stay with ConfigParser ──────────────────────────────
     pytest.param("package.json", {"name": "app", "dependencies": {"react": "^18"}}, CONFIG,
@@ -52,7 +41,7 @@ _CASES = [
     pytest.param("mod.json", {"main": "Verticle", "requires": {}}, CONFIG,
                  id="named:mod.json"),
 
-    # ── data (record arrays): already captured today ────────────────────────────
+    # ── data (record arrays) ────────────────────────────────────────────────────
     pytest.param("n8n-workflow.json", {"nodes": [{"id": "1"}], "connections": {}}, CAPTURE,
                  id="data:n8n-nodes-array"),
     pytest.param("json/MAAP(X).json", {"values": [{"MAAPAK1": "MAAP"}]}, CAPTURE,
@@ -60,32 +49,24 @@ _CASES = [
     pytest.param("records.json", [{"id": 1}, {"id": 2}], CAPTURE,
                  id="data:root-record-array"),
 
-    # ── B1 map-shaped DATA: currently REDUCED (values lost) → must be captured ───
+    # ── map-shaped data: previously reduced to keys (values lost), now captured ──
     pytest.param("p3-keyed-map.json", {"19000101": {"MAAPP01": "x"}, "19000102": {"MAAPP01": "y"}},
-                 CAPTURE, id="data:keyed-map-of-objects",
-                 marks=_xf("B4: claim homogeneous map-of-objects (dict-of-records)")),
+                 CAPTURE, id="data:keyed-map-of-objects"),
     pytest.param("cms-template-mappings.json", {"00 01 03": "t1", "00 01 05": "t1"}, CAPTURE,
-                 id="data:flat-scalar-map",
-                 marks=_xf("B4: claim homogeneous flat-scalar map (lookup table)")),
+                 id="data:flat-scalar-map"),
     pytest.param("i18n/en-GB.json", {"permissionLevels": {"Excluded": "No Access"}}, CAPTURE,
-                 id="data:nested-object-tree",
-                 marks=_xf("B4: claim nested object tree")),
+                 id="data:nested-object-tree"),
     pytest.param("content-set-config-schema.json", {"tags": ["a", "b"], "cats": ["c"]}, CAPTURE,
-                 id="data:dict-of-scalar-arrays",
-                 marks=_xf("B4: claim dict of scalar-arrays")),
-    pytest.param("allowlist.json", ["en", "fr", "de"], CAPTURE, id="data:root-scalar-array",
-                 marks=_xf("B4: claim non-empty root array (any element type)")),
+                 id="data:dict-of-scalar-arrays"),
+    pytest.param("allowlist.json", ["en", "fr", "de"], CAPTURE, id="data:root-scalar-array"),
 
-    # ── heterogeneous configs w/o rich extractor: capture too (decision: merge) ──
+    # ── heterogeneous configs w/o rich extractor: captured too (merge decision) ──
     pytest.param(".eslintrc.json", {"env": {"node": True}, "rules": {"eqeqeq": "error"},
-                                    "extends": ["airbnb"]}, CAPTURE, id="config:eslintrc-heterogeneous",
-                 marks=_xf("B4: capture-everything-unknown (not a named-rich config)")),
+                                    "extends": ["airbnb"]}, CAPTURE, id="config:eslintrc-heterogeneous"),
     pytest.param("angular.json", {"version": 1, "projects": {"app": {"root": ""}}}, CAPTURE,
-                 id="config:angular.json",
-                 marks=_xf("B4: capture-everything-unknown (not a named-rich config)")),
+                 id="config:angular.json"),
     pytest.param("tsconfig.base.json", {"compilerOptions": {"strict": True}}, CAPTURE,
-                 id="config:tsconfig.base-non-exact-name",
-                 marks=_xf("B4: capture-everything-unknown (only exact tsconfig.json is name-rich)")),
+                 id="config:tsconfig.base-non-exact-name"),
 
     # ── nothing to capture: stay with ConfigParser ──────────────────────────────
     pytest.param("empty.json", {}, CONFIG, id="empty:object"),
@@ -121,17 +102,14 @@ def test_named_rich_never_captured_even_with_record_array() -> None:
 
 
 def test_captured_data_preserves_values_not_just_keys() -> None:
-    # once captured, the lookup table's VALUES survive (the whole point of the refactor)
+    # once captured, the lookup table's VALUES survive — the whole point of the refactor
     from breezeai_cog.parsers.base import ParseContext
     from breezeai_cog.parsers.structured_json.parser import StructuredJsonParser
 
     obj = {"00 01 03": "template1", "00 01 05": "template2"}
-    ctx = ParseContext(path="m.json", abs_path=None, source=json.dumps(obj).encode(),
-                       repo_root=".", capture_statements=True, statement_text_limit=8000)
-    # NOTE: today StructuredJsonParser.claims() would decline this map; this asserts the
-    # capture *content* contract for when it does claim it (green after B4).
-    if StructuredJsonParser().claims("m.json", json.dumps(obj).encode()):
-        toon = StructuredJsonParser().parse_file(ctx).statements[0].text
-        assert "template1" in toon and "template2" in toon
-    else:
-        pytest.xfail("B4: homogeneous map not yet claimed for full capture")
+    src = json.dumps(obj).encode()
+    assert StructuredJsonParser().claims("m.json", src)
+    ctx = ParseContext(path="m.json", abs_path=None, source=src, repo_root=".",
+                       capture_statements=True, statement_text_limit=8000)
+    toon = StructuredJsonParser().parse_file(ctx).statements[0].text
+    assert "template1" in toon and "template2" in toon
