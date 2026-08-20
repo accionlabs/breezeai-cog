@@ -78,12 +78,6 @@ class StructuredJsonParser(BaseParser):
             "privatekey",
         }
     )
-    #: Bound so a pathological file can't blow up the node's metadata / the embedding text.
-    #: ``MAX_LEAVES`` caps how many leaves the TOON walk captures; the per-value length cap
-    #: is supplied per-file via ``ParseContext.metadata_value_limit`` (Settings /
-    #: ``BREEZEAI_COG_METADATA_VALUE_LIMIT``).
-    MAX_LEAVES = 5000
-
     #: JSON files ConfigParser extracts *richly* by name — declined here even when they
     #: carry a record array (``package.json``'s ``contributors``/``funding``,
     #: ``tsconfig``'s ``references``), so a stray array-of-objects never diverts them from
@@ -105,15 +99,11 @@ class StructuredJsonParser(BaseParser):
         data = self._parse(ctx.source)
         loc = count_loc(text)
 
-        # Full TOON serialization of the whole document (secret-redacted, value-capped,
-        # leaf-bounded — all inside the encoder). Per-value cap from ctx. The content lives
-        # only on the statement below; metadata carries a structural summary, not the TOON.
-        toon = encode(
-            data,
-            is_secret=self._is_secret_key,
-            value_limit=ctx.metadata_value_limit,
-            max_leaves=self.MAX_LEAVES,
-        )
+        # Full TOON serialization of the whole document — secret-redacted, nothing else.
+        # Sizing is NOT done here: an oversized statement is split losslessly at emit
+        # (``emit.split``), so the document below is always complete. The content lives only
+        # on the statement; metadata carries a structural summary, never the TOON.
+        toon = encode(data, is_secret=self._is_secret_key)
 
         meta: dict[str, Any] = {
             "kind": "structured-json",
@@ -123,8 +113,6 @@ class StructuredJsonParser(BaseParser):
             "recordCount": self._record_count(data),
             "leafCount": toon.leaf_count,
         }
-        if toon.truncated:
-            meta["truncated"] = True  # honest signal that MAX_LEAVES capped the walk
 
         # The whole document is captured ONLY as this statement (TOON in `text`) — a semantic
         # capture, so gated behind --capture-statements (extend-capture skill §9). The text is

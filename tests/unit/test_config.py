@@ -41,7 +41,6 @@ def test_defaults(env) -> None:
     assert s.log_level == "INFO" and s.log_format == "plaintext" and s.log_to_file is True
     assert s.port == 3000
     assert s.statement_text_limit == 8000 and s.max_file_size == 2_000_000
-    assert s.metadata_value_limit == 4000
     assert s.aws_region == "us-west-2"
     # upload tuning defaults
     assert s.upload_timeout == 900.0
