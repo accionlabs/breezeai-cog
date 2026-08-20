@@ -24,8 +24,10 @@ Design constraints (both must hold):
    field's *meaning* — no "this field is the identity", no per-record graph nodes. Anything
    that assigns domain meaning (naming a record from an id field, turning a filter into a
    ``query_statement``) is a client concern → a subclass at a higher ``priority``.
-2. **Reliability (extend-capture skill).** Secret-named keys are redacted, string leaves are
-   length-capped, and the leaf count is bounded — all applied *inside* the TOON encoder.
+2. **Reliability (extend-capture skill).** Secret-named keys (layer 1) and secret-shaped
+   values (layer 2) are redacted *inside* the TOON encoder. Nothing is truncated or dropped
+   there: an oversized document is split into ordered ``#partNofN`` statements at emit
+   (``emit.split``), so a captured document is always complete.
 
 Selection (registry ``priority``):
 * ``ConfigParser``            priority 0 — named/build configs (package.json, tsconfig, …) + flat generic JSON
