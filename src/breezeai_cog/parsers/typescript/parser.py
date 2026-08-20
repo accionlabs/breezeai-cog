@@ -233,7 +233,9 @@ class TypeScriptParser(BaseParser):
         # it also fires in files owned by another framework). Each detector self-guards on a
         # cheap marker. A more-specific framework label set by a subclass afterwards wins.
         if capture:
-            if not self.is_fixture_file(path) and detect_express(root, source, path, record):
+            if not self.is_fixture_file(path) and detect_express(
+                root, source, path, record, ctx.resolution_index, bindings
+            ):
                 if record.framework is None:
                     record.framework = "express"
             aws_fw = detect_aws_events(root, source, path, record)
