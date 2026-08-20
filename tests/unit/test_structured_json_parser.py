@@ -200,11 +200,13 @@ def test_value_length_truncation_disabled_at_zero() -> None:
     assert long in toon
 
 
-def test_leaf_count_bound_and_flag() -> None:
-    big = [{"n": i} for i in range(StructuredJsonParser.MAX_LEAVES + 100)]
+def test_large_document_keeps_every_leaf_no_truncation() -> None:
+    # No leaf cap: a large document is captured in full (leafCount == every leaf) and never
+    # flagged truncated — oversized TOON is split into parts downstream (emit.split), not dropped.
+    big = [{"n": i} for i in range(5100)]
     rec = _parse("a.json", big)
-    assert rec.metadata["leafCount"] == StructuredJsonParser.MAX_LEAVES
-    assert rec.metadata["truncated"] is True
+    assert rec.metadata["leafCount"] == 5100
+    assert "truncated" not in rec.metadata
 
 
 # ── the single structured_data statement (gated behind --capture-statements) ─────
