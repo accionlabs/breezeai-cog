@@ -25,7 +25,9 @@ class ConfigParser(BaseParser):
     schema_version = SCHEMA_VERSION
     # suffixes + exact filenames (the registry matches either); patterns via `matches`
     extensions = (
-        ".json",
+        # NOTE: ``.json`` is owned by ``JsonParser`` (parsers/structured_json), not here.
+        # ConfigParser still extracts JSON *content* via ``extractors.extract_config``, which
+        # JsonParser calls for the named-rich configs and empty/scalar JSON.
         ".yaml",
         ".yml",
         ".toml",

@@ -1,40 +1,23 @@
-"""StructuredJsonParser — a domain-agnostic parser for *data* / *metadata* JSON (as
-opposed to the build/config JSON that :class:`~breezeai_cog.parsers.config.parser.ConfigParser`
-handles). Where ``ConfigParser`` reduces a generic ``.json`` file to
-``topLevelKeys: ["values"]`` and discards the content, this parser recurses the whole
-document and captures **every key and value**, serialized as **TOON** (see :mod:`.toon`) —
-a compact, uniform-array-aware form that is far denser than a per-leaf dotted map.
+"""JsonParser — the single owner of ``.json`` files.
 
-The whole document is captured as a single ``structured_data`` **statement** (``text`` = the
-TOON), emitted only under ``--capture-statements``. Statements are not embedded, but they are
-exactly/lexically filterable by label (``Get_Code_Nodes_By_Label`` label=Statement,
-``semanticType=structured_data``), so an agent that already has (or greps for) the file can
-read the whole document as one node. ``nodeType=synthetic`` (JSON is not tree-sitter parsed →
-no backing AST node); the serialization is carried on ``framework=toon``.
+It routes each JSON to one of two representations:
 
-``FileRecord.metadata`` carries only a **structural summary** (``topLevelKeys``,
-``recordCount``, ``leafCount``, ``format``) — *not* the content. Note the trade-off: because
-the TOON is on the (unembedded) statement and not in ``File.metadata``, the content is **not**
-reachable by semantic ``Code_Graph_Search`` — only lexically by label, or once the File is
-otherwise found. Concept-based discovery of JSON values is forgone by this design.
+* **Rich config** — named build/config files with a dedicated extractor (``package.json``,
+  ``tsconfig`` / ``jsconfig``, ``mod.json`` — see ``config.extractors.RICH_JSON_NAMES``) and
+  any empty/scalar JSON with nothing to capture. These become ``type="config"``,
+  ``language="config"`` records whose ``metadata`` is the extractor's structural summary
+  (``topLevelKeys``, dependencies, build tool, …).
+* **Full capture** — every OTHER non-empty JSON (data / metadata: lookup maps, nested trees,
+  record arrays, heterogeneous configs). The whole document is serialized as **TOON** (see
+  :mod:`.toon`) and carried on a single ``structured_data`` **statement** (``text`` = the
+  TOON), emitted only under ``--capture-statements``. ``language="structured-json"``,
+  ``metadata.format="toon"``, ``nodeType=synthetic`` (JSON is not tree-sitter parsed).
 
-Design constraints (both must hold):
-
-1. **Domain-agnostic.** It only ever recurses over keys and values. It never interprets a
-   field's *meaning* — no "this field is the identity", no per-record graph nodes.
-2. **Reliability.** Secret-named keys and secret-shaped string values are redacted *inside*
-   the TOON encoder — the only transform. Nothing is truncated or dropped; an oversized
-   document is split into ``#partNofN`` statements at emit (``emit.split``).
-
-Selection (registry ``priority``):
-* ``ConfigParser``            priority 0 — the ``CONFIG_JSON_NAMES`` rich extractors + empty/scalar JSON
-* ``StructuredJsonParser``    priority 3 — every other non-empty JSON → full TOON capture
-
-``claims`` captures any non-empty JSON container (dict or list) whose filename is not in
-``CONFIG_JSON_NAMES`` — shape-independent, so a lookup map, a nested tree, and a
-heterogeneous config are all captured, not just a record array. The named rich configs
-(``package.json`` / ``tsconfig`` / ``mod.json`` …) and empty/scalar roots stay with
-``ConfigParser``.
+Capture is domain-agnostic (it only recurses over keys and values, never interpreting a
+field's meaning) and lossless (secret redaction is the only transform; nothing is truncated —
+an oversized TOON is split into ``#partNofN`` statements at emit, see ``emit.split``). The
+captured content lives only on the (unembedded) statement, reachable lexically by label
+(``semanticType=structured_data``), not by semantic ``Code_Graph_Search``.
 """
 
 from __future__ import annotations
@@ -47,17 +30,16 @@ from ...emit import file_id, statement_id
 from ...schemas import SCHEMA_VERSION, FileRecord, Statement
 from ...utils import count_loc
 from ..base import BaseParser, ParseContext
+from ..config.extractors import RICH_JSON_NAMES, extract_config
 from .toon import encode
 
 
-class StructuredJsonParser(BaseParser):
-    name = "structured-json"
+class JsonParser(BaseParser):
+    name = "json"
     schema_version = SCHEMA_VERSION
-    extensions = (".json",)
-    #: Beats ConfigParser (0), so it wins for any non-empty JSON it claims.
-    priority = 3
-    #: `framework` value carried on the statement to name the serialization (§4.1 of the
-    #: target spec: technology → `framework`). Keeps `semanticType` format-independent.
+    extensions = (".json",)  # the sole ``.json`` owner (ConfigParser no longer claims .json)
+    #: `framework` value carried on the statement to name the serialization. Keeps
+    #: `semanticType` format-independent.
     serialization = "toon"
 
     #: Case-insensitive substrings; any leaf key containing one has its value redacted to
@@ -78,36 +60,34 @@ class StructuredJsonParser(BaseParser):
             "privatekey",
         }
     )
-    #: JSON files ConfigParser extracts *richly* by name — declined here so their rich
-    #: extraction is never replaced by full capture (``package.json``'s
-    #: ``contributors``/``funding``, ``tsconfig``'s ``references``, a ``mod.json`` map).
-    #: Mirrors the JSON name-cases in ``parsers/config/extractors._dispatch``; keep the
-    #: two in sync. Every OTHER non-empty JSON is captured in full.
-    CONFIG_JSON_NAMES: frozenset[str] = frozenset(
-        {"package.json", "tsconfig.json", "jsconfig.json", "mod.json"}
-    )
-
-    # ── selection ────────────────────────────────────────────────────────────
-    def claims(self, path: str, source: bytes) -> bool:
-        if Path(path).name in self.CONFIG_JSON_NAMES:
-            return False  # ConfigParser owns these — do not steal its rich extraction
-        return self._is_capturable(self._parse(source))
-
-    @staticmethod
-    def _is_capturable(data: Any) -> bool:
-        """Capture any non-empty JSON container (dict or list) in full — the domain-agnostic
-        'worth capturing' signal. Shape is irrelevant: a record array, a
-        lookup map, a nested tree, or a heterogeneous config all qualify. Only empty
-        containers and scalar/None roots (malformed JSON) have nothing to capture and are
-        left to ConfigParser."""
-        return isinstance(data, (dict, list)) and len(data) > 0
 
     # ── parse ────────────────────────────────────────────────────────────────
     def parse_file(self, ctx: ParseContext) -> FileRecord:
         text = ctx.source.decode("utf-8", "replace")
         data = self._parse(ctx.source)
         loc = count_loc(text)
+        # Named-rich configs, and empty/scalar JSON with nothing to capture, are config records
+        # handled by the shared extractor; every other non-empty JSON is captured in full.
+        if Path(ctx.path).name in RICH_JSON_NAMES or not self._is_capturable(data):
+            return FileRecord(
+                id=file_id(ctx.path),
+                path=ctx.path,
+                type="config",
+                language="config",
+                loc=loc,
+                metadata=extract_config(ctx.path, text),
+            )
+        return self._capture(ctx, data, loc)
 
+    @staticmethod
+    def _is_capturable(data: Any) -> bool:
+        """A non-empty JSON container (dict or list) is captured in full — shape-independent
+        (record array, lookup map, nested tree, heterogeneous config all qualify). Empty
+        containers and scalar/None roots (malformed JSON) have nothing to capture."""
+        return isinstance(data, (dict, list)) and len(data) > 0
+
+    # ── full capture ─────────────────────────────────────────────────────────
+    def _capture(self, ctx: ParseContext, data: Any, loc: int) -> FileRecord:
         # Full TOON serialization of the whole document (secret-redacted inside the encoder).
         # Nothing is truncated: the whole document is kept and an oversized TOON is split into
         # `#partNofN` statements downstream (emit.split). The content lives only on the
@@ -124,8 +104,8 @@ class StructuredJsonParser(BaseParser):
         }
 
         # The whole document is captured ONLY as this statement (TOON in `text`) — a semantic
-        # capture, so gated behind --capture-statements. The text is
-        # not embedded; it is the lexical/label retrieval handle (semanticType=structured_data).
+        # capture, so gated behind --capture-statements. The text is not embedded; it is the
+        # lexical/label retrieval handle (semanticType=structured_data).
         statements: list[Statement] = []
         if ctx.capture_statements:
             statements.append(self._document_statement(ctx.path, toon.text, loc))
@@ -134,7 +114,7 @@ class StructuredJsonParser(BaseParser):
             id=file_id(ctx.path),
             path=ctx.path,
             type="config",  # data/metadata, not code — no functions/classes emitted
-            language=self.name,  # distinguishes full-capture from ConfigParser's topLevelKeys
+            language="structured-json",  # distinguishes full capture from a reduced config
             loc=loc,
             metadata=meta,
             statements=statements,
@@ -143,12 +123,12 @@ class StructuredJsonParser(BaseParser):
     # ── helpers ──────────────────────────────────────────────────────────────
     def _document_statement(self, path: str, toon_text: str, loc: int) -> Statement:
         """One statement standing for the whole file, TOON in ``text``. ``nodeType`` is the
-        spec's ``synthetic`` sentinel (no backing tree-sitter node); ``framework`` carries
-        the serialization so ``semanticType`` stays format-independent. ``endpoint`` is left
-        null — it is reserved for a resolved address/target (route/URL/event address), which
-        a data document has none of; the document's identity is the owning File itself
-        (``parentId`` → HAS_STATEMENT, plus ``path``). The full TOON is kept here; sizing to
-        the statement cap (splitting into ``#partNofN`` records) happens once at emit
+        spec's ``synthetic`` sentinel (no backing tree-sitter node); ``framework`` carries the
+        serialization so ``semanticType`` stays format-independent. ``endpoint`` is left null —
+        it is reserved for a resolved address/target (route/URL/event address), which a data
+        document has none of; the document's identity is the owning File itself (``parentId`` →
+        HAS_STATEMENT, plus ``path``). The full TOON is kept here; sizing to the statement cap
+        (splitting into ``#partNofN`` records) happens once at emit
         (``emit.split.split_oversized_statements``), so a large document is never dropped."""
         return Statement(
             id=statement_id(path, 1, 0),
@@ -177,8 +157,8 @@ class StructuredJsonParser(BaseParser):
         )
 
     def _record_count(self, data: Any) -> int:
-        """Element count of the primary record array (the root array, or the first
-        top-level key mapping to one) — the honest ``[N]`` the TOON header declares."""
+        """Element count of the primary record array (the root array, or the first top-level
+        key mapping to one) — the honest ``[N]`` the TOON header declares."""
         if self._is_record_array(data):
             return len(data)
         if isinstance(data, dict):
