@@ -4,13 +4,19 @@ The formatting is delegated to the reference **``toon-format``** library — a u
 array-of-objects becomes a table (``members[2]{name,role}:`` + one comma-joined row each),
 which is far denser than repeating ``members[i].field``; nested / non-uniform data falls
 back to an indented block form. This module owns only the capture *safety* the library does
-not provide: it produces a **sanitized copy** of the parsed JSON — secret-named keys
-redacted (layer 1), secret-shaped string values redacted (layer 2, see `.redaction`), and
-string leaves length-capped — and hands that to the library. Sanitizing before serializing
-keeps the two concerns cleanly separated (and means a secret can never reach the encoder).
+not provide: it produces a **redacted copy** of the parsed JSON — secret-named keys redacted
+(layer 1), secret-shaped string values redacted (layer 2, see `.redaction`) — and hands that
+to the library. Redacting before serializing keeps the two concerns cleanly separated (and
+means a secret can never reach the encoder).
 
-The whole document is kept: an oversized TOON is split into ordered parts downstream
-(``emit.split``), never dropped here.
+**Size is not this module's concern.** The full document is encoded here; sizing happens once
+at the emit choke point (``emit.split.split_oversized_statements``), which slices an oversized
+statement into ordered ``#partNofN`` records that concatenate back byte-for-byte, with
+``max_statement_parts`` as the node-explosion backstop. This module previously also capped
+each string leaf and bounded the total leaf count — both were size control predating the
+splitter, and both were *lossy and silent*: a clipped value kept its head, so a presence check
+still passed while the tail was gone. They are deliberately absent now, so a captured document
+is always complete.
 
 Example — ``{"team":"pay","members":[{"name":"Al","role":"admin"},
 {"name":"Bo","role":"viewer"}]}`` encodes to::
@@ -34,50 +40,44 @@ IsSecret = Callable[[str], bool]
 
 
 @dataclass
-class _LeafCounter:
-    """Tallies scalar leaves as the document is walked — informational only (no cap)."""
-
-    count: int = 0
-
-
-@dataclass
 class Encoded:
     text: str
     leaf_count: int
 
 
-def encode(obj: Any, *, is_secret: IsSecret, value_limit: int) -> Encoded:
-    """Serialize ``obj`` to TOON. ``is_secret(key)`` → redact that leaf to ``***``; string
-    leaves are truncated to ``value_limit`` (``<= 0`` disables). Every leaf is kept — an
-    oversized result is split into parts downstream (``emit.split``), not dropped here."""
+def encode(obj: Any, *, is_secret: IsSecret) -> Encoded:
+    """Serialize ``obj`` to TOON in full. A leaf is redacted to ``***`` when its key looks
+    secret (layer 1) or its value has a recognizable secret shape (layer 2). Nothing is
+    truncated or dropped; ``Encoded.leaf_count`` reports how many scalar leaves the document
+    holds (counted during the redaction walk, so it is free)."""
     counter = _LeafCounter()
-    sanitized = _sanitize(obj, is_secret, value_limit, counter)
-    return Encoded(toon_format.encode(sanitized), counter.count)
+    redacted = _redact(obj, is_secret, counter)
+    return Encoded(toon_format.encode(redacted), counter.count)
 
 
-def _cap(value: Any, value_limit: int) -> Any:
-    if isinstance(value, str) and value_limit > 0 and len(value) > value_limit:
-        return value[:value_limit] + "…"
-    return value
+@dataclass
+class _LeafCounter:
+    """Counts scalar leaves during the redaction walk — reporting only, never a bound."""
+
+    count: int = 0
 
 
-def _sanitize(
+def _redact(
     value: Any,
     is_secret: IsSecret,
-    value_limit: int,
     counter: _LeafCounter,
     key: str | None = None,
 ) -> Any:
-    """Return a copy of ``value`` with secret leaves redacted and string leaves length-capped;
-    ``counter`` tallies scalar leaves. Redaction keys on a scalar's *immediate* key, matching
-    the flat capture's per-leaf rule."""
+    """Return a copy of ``value`` with secret leaves replaced by ``***``, counting scalar
+    leaves on the way. Layer 1 keys on a scalar's *immediate* key name, matching the flat
+    capture's per-leaf rule; layer 2 then redacts secret-*shaped* string values in place."""
     if isinstance(value, dict):
-        return {str(k): _sanitize(v, is_secret, value_limit, counter, str(k)) for k, v in value.items()}
+        return {str(k): _redact(v, is_secret, counter, str(k)) for k, v in value.items()}
     if isinstance(value, list):
-        return [_sanitize(v, is_secret, value_limit, counter) for v in value]
+        return [_redact(v, is_secret, counter) for v in value]
     counter.count += 1
     if key is not None and is_secret(key):  # layer 1: redact by secret-looking key name
         return "***"
     if isinstance(value, str):  # layer 2: redact by secret-*shaped* value (see .redaction)
-        value = redact_secrets(value)
-    return _cap(value, value_limit)
+        return redact_secrets(value)
+    return value

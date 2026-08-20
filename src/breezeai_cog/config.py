@@ -62,8 +62,6 @@ class Settings(BaseSettings):
     # dropped and marked inline in the last part's text. 0 = unbounded (fully lossless; the
     # absolute worst case is already bounded by `max_file_size`). (emit/split.py)
     max_statement_parts: int = Field(default=0, ge=0)
-    metadata_value_limit: int = 4000  # max structured-JSON leaf value length on File.metadata
-    #: (structured_json/parser.py); 0 disables truncation.
     max_file_size: int = 2_000_000  # bytes; scanner skips larger files (core/scanner.py)
     parse_timeout: float = 10.0  # seconds; per-file tree-sitter native timeout (0 disables)
     # --max-concat-depth; max `+` nesting folded into an endpoint before bailing to null.

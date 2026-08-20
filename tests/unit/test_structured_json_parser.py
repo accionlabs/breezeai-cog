@@ -15,12 +15,11 @@ def _parse(
     path: str,
     obj,
     *,
-    metadata_value_limit: int | None = None,
     capture_statements: bool = False,
     statement_text_limit: int = 8000,
 ):
     src = json.dumps(obj, ensure_ascii=False).encode()
-    kwargs = {} if metadata_value_limit is None else {"metadata_value_limit": metadata_value_limit}
+    kwargs: dict = {}
     ctx = ParseContext(
         path=path,
         abs_path=None,
@@ -180,33 +179,28 @@ def test_credential_keys_redacted_including_nested() -> None:
     assert "hunter2" not in toon and "sk-1" not in toon
 
 
-def test_value_length_capped_at_default() -> None:
-    long = "x" * 5000
+def test_long_values_are_never_truncated() -> None:
+    """A value far longer than the old 4000-char cap survives byte-for-byte. Sizing is the
+    emit-time splitter's job, so the encoder must not clip."""
+    long = "x" * 250_000  # mirrors a real ~250KB n8n `jsCode` leaf
     toon = _toon("a.json", [{"blob": long}])
-    assert "x" * 4000 + "…" in toon
-    assert "x" * 4001 not in toon  # capped at the 4000 default
-
-
-def test_value_length_bound_is_configurable() -> None:
-    long = "x" * 5000
-    toon = _toon("a.json", [{"blob": long}], metadata_value_limit=500)
-    assert "x" * 500 + "…" in toon
-    assert "x" * 501 not in toon
-
-
-def test_value_length_truncation_disabled_at_zero() -> None:
-    long = "x" * 5000
-    toon = _toon("a.json", [{"blob": long}], metadata_value_limit=0)
     assert long in toon
+    assert "…" not in toon
 
 
-def test_large_document_keeps_every_leaf_no_truncation() -> None:
-    # No leaf cap: a large document is captured in full (leafCount == every leaf) and never
-    # flagged truncated — oversized TOON is split into parts downstream (emit.split), not dropped.
-    big = [{"n": i} for i in range(5100)]
+def test_leaf_count_is_exact_and_unbounded() -> None:
+    """leafCount reports the whole document and never acts as a bound."""
+    big = [{"n": i} for i in range(6000)]  # over the old 5000-leaf cap
     rec = _parse("a.json", big)
-    assert rec.metadata["leafCount"] == 5100
+    assert rec.metadata["leafCount"] == 6000
     assert "truncated" not in rec.metadata
+
+
+def test_every_leaf_reaches_the_toon() -> None:
+    """No leaf is pruned: each distinct marker survives past the old bound."""
+    big = [{"marker": f"m{i}"} for i in range(6000)]
+    toon = _toon("a.json", big)
+    assert "m0" in toon and "m5999" in toon
 
 
 # ── the single structured_data statement (gated behind --capture-statements) ─────

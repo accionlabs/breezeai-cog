@@ -24,8 +24,10 @@ Design constraints (both must hold):
    field's *meaning* — no "this field is the identity", no per-record graph nodes. Anything
    that assigns domain meaning (naming a record from an id field, turning a filter into a
    ``query_statement``) is a client concern → a subclass at a higher ``priority``.
-2. **Reliability (extend-capture skill).** Secret-named keys are redacted, string leaves are
-   length-capped, and the leaf count is bounded — all applied *inside* the TOON encoder.
+2. **Reliability (extend-capture skill).** Secret-named keys (layer 1) and secret-shaped
+   values (layer 2) are redacted *inside* the TOON encoder. Nothing is truncated or dropped
+   there: an oversized document is split into ordered ``#partNofN`` statements at emit
+   (``emit.split``), so a captured document is always complete.
 
 Selection (registry ``priority``):
 * ``ConfigParser``            priority 0 — named/build configs (package.json, tsconfig, …) + flat generic JSON
@@ -99,15 +101,11 @@ class StructuredJsonParser(BaseParser):
         data = self._parse(ctx.source)
         loc = count_loc(text)
 
-        # Full TOON serialization of the whole document (secret-redacted, value-capped — all
-        # inside the encoder). Per-value cap from ctx. The whole document is kept; an oversized
-        # TOON is split into `#partNofN` statements downstream (emit.split), never truncated.
-        # The content lives only on the statement below; metadata carries a structural summary.
-        toon = encode(
-            data,
-            is_secret=self._is_secret_key,
-            value_limit=ctx.metadata_value_limit,
-        )
+        # Full TOON serialization of the whole document — secret-redacted, nothing else.
+        # Sizing is NOT done here: an oversized statement is split losslessly at emit
+        # (``emit.split``), so the document below is always complete. The content lives only
+        # on the statement; metadata carries a structural summary, never the TOON.
+        toon = encode(data, is_secret=self._is_secret_key)
 
         meta: dict[str, Any] = {
             "kind": "structured-json",
