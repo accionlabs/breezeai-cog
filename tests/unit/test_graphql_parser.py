@@ -15,7 +15,7 @@ from breezeai_cog.schemas import FileRecord
 
 # Resolver map (Apollo / graphql-tools). Root operations under Query/Mutation are routes;
 # the ProcurementItem type-field resolver is NOT a route.
-RESOLVER_SRC = b'''import type { Resolvers } from './generated.js';
+RESOLVER_SRC = b"""import type { Resolvers } from './generated.js';
 
 export const resolvers: Resolvers = {
   Query: {
@@ -29,10 +29,10 @@ export const resolvers: Resolvers = {
     tenders: (parent, _, ctx) => ctx.repo.tendersFor(parent.id),
   },
 };
-'''
+"""
 
 # SDL in a gql template — carries request/response DTOs.
-SDL_SRC = b'''import gql from 'graphql-tag';
+SDL_SRC = b"""import gql from 'graphql-tag';
 
 export const typeDefs = gql`
   type Query {
@@ -47,11 +47,11 @@ export const typeDefs = gql`
     _byIds(ids: [ID!]!): [ProcurementItem]! @merge(keyField: "id")
   }
 `;
-'''
+"""
 
 # SDL with @key entity types — graphql-tools stitching (selectionSet) and Apollo Federation
 # (fields) forms, both alongside the root Query type.
-ENTITY_SRC = b'''import gql from 'graphql-tag';
+ENTITY_SRC = b"""import gql from 'graphql-tag';
 
 export const typeDefs = gql`
   type ProcurementItem @key(selectionSet: "{ id }") @canonical {
@@ -69,14 +69,14 @@ export const typeDefs = gql`
     procurementItems: [ProcurementItem!]!
   }
 `;
-'''
+"""
 
 
 # Client-side operations — a gql tagged template holding query/mutation *operations*
 # (caller side), invoked via apollo.query. Mixes: named query with a variable + fragment
 # spread, a mutation, and an interpolated (${...}) document. This file is NOT a resolver map
 # or server SDL, so it is owned by the base TypeScriptParser, not GraphQLParser.
-CLIENT_SRC = b'''import { gql } from 'apollo-angular';
+CLIENT_SRC = b"""import { gql } from 'apollo-angular';
 
 const GetSpecification = gql`
   query specification($id: String!) {
@@ -96,14 +96,15 @@ const Interpolated = gql`
     items { ${prefixer.moved} name }
   }
 `;
-'''
+"""
 
 
 def _parse(tmp_path, src: bytes, name: str, *, capture=True) -> FileRecord:
     p = tmp_path / name
     p.write_bytes(src)
-    ctx = ParseContext(path=name, abs_path=p, source=src, repo_root=tmp_path,
-                       capture_statements=capture)
+    ctx = ParseContext(
+        path=name, abs_path=p, source=src, repo_root=tmp_path, capture_statements=capture
+    )
     return GraphQLParser().parse_file(ctx)
 
 
@@ -111,10 +112,12 @@ def _parse_base(tmp_path, src: bytes, name: str, *, capture=True) -> FileRecord:
     """Parse via the BASE TypeScriptParser (client-op detection is additive, so it must fire
     even in files the GraphQLParser does not claim)."""
     from breezeai_cog.parsers.typescript.parser import TypeScriptParser
+
     p = tmp_path / name
     p.write_bytes(src)
-    ctx = ParseContext(path=name, abs_path=p, source=src, repo_root=tmp_path,
-                       capture_statements=capture)
+    ctx = ParseContext(
+        path=name, abs_path=p, source=src, repo_root=tmp_path, capture_statements=capture
+    )
     return TypeScriptParser().parse_file(ctx)
 
 
@@ -143,7 +146,10 @@ def test_sdl_operations_detected_with_dtos(tmp_path) -> None:
     rec = _parse(tmp_path, SDL_SRC, "schema.ts")
     routes = {s.endpoint: s for s in rec.statements if s.semanticType == "route"}
     assert set(routes) == {
-        "procurementItem", "procurementItems", "createProcurementItem", "_byIds",
+        "procurementItem",
+        "procurementItems",
+        "createProcurementItem",
+        "_byIds",
     }
     # response/request DTOs cleaned of [ ] ! decorations.
     assert routes["procurementItem"].responseDTO == "ProcurementItem"
@@ -171,11 +177,11 @@ def test_client_operations_detected_via_base_parser(tmp_path) -> None:
     assert rec.framework == "graphql"
 
     spec = routes["specification"]
-    assert spec.routeKind == "query"             # plain kind; api_call marks it as the caller side
+    assert spec.routeKind == "query"  # plain kind; api_call marks it as the caller side
     assert spec.method == "QUERY"
     assert spec.framework == "graphql"
-    assert spec.handler == "specification"       # operation name kept as the client-side label
-    assert spec.requestDTO == "String"           # from $id: String!
+    assert spec.handler == "specification"  # operation name kept as the client-side label
+    assert spec.requestDTO == "String"  # from $id: String!
     assert spec.nodeType == "synthetic"
     assert spec.parentId == rec.id
 
@@ -191,7 +197,7 @@ def test_client_operations_detected_via_base_parser(tmp_path) -> None:
 def test_client_ops_ignore_plain_template_and_server_sdl(tmp_path) -> None:
     # A plain (untagged) template literal that merely contains the word "query" is NOT a
     # GraphQL client op.
-    plain = b'const msg = `query executed in ${ms}ms for query ${name}`;\n'
+    plain = b"const msg = `query executed in ${ms}ms for query ${name}`;\n"
     rec = _parse_base(tmp_path, plain, "log.ts")
     assert [s for s in rec.statements if s.semanticType in ("route", "api_call")] == []
     assert rec.framework is None
@@ -202,7 +208,9 @@ def test_client_ops_ignore_plain_template_and_server_sdl(tmp_path) -> None:
     rec_sdl = _parse(tmp_path, SDL_SRC, "schema.ts")
     kinds = {s.routeKind for s in rec_sdl.statements if s.semanticType == "route"}
     assert kinds == {"query", "mutation"}
-    assert [s for s in rec_sdl.statements if s.semanticType == "api_call"] == []  # no client-op leakage
+    assert [
+        s for s in rec_sdl.statements if s.semanticType == "api_call"
+    ] == []  # no client-op leakage
 
 
 def test_key_entities_detected(tmp_path) -> None:
@@ -210,11 +218,11 @@ def test_key_entities_detected(tmp_path) -> None:
     entities = {s.endpoint: s for s in rec.statements if s.semanticType == "graphql_entity"}
     # Only @key-bearing types are entities; the plain type and the root Query are not.
     assert set(entities) == {"ProcurementItem", "Tenderer"}
-    # selectionSet form → key fields parsed from "{ id }".
-    assert entities["ProcurementItem"].keyFields == ["id"]
     assert entities["ProcurementItem"].framework == "graphql"
-    # fields form → multi-field key.
-    assert entities["Tenderer"].keyFields == ["id", "contactId"]
+    # keyFields is dropped; the @key directive stays visible in the entity's text.
+    assert entities["ProcurementItem"].keyFields is None
+    assert "@key" in entities["ProcurementItem"].text
+    assert entities["Tenderer"].keyFields is None
     # the root Query field still emits its route (entities don't displace routes).
     routes = {s.endpoint for s in rec.statements if s.semanticType == "route"}
     assert "procurementItems" in routes
@@ -226,11 +234,17 @@ def test_base_extraction_reused(tmp_path) -> None:
 
 
 def test_output_validates(tmp_path) -> None:
-    for src, name in ((RESOLVER_SRC, "r.resolvers.ts"), (SDL_SRC, "schema.ts"),
-                      (ENTITY_SRC, "entities.ts")):
+    for src, name in (
+        (RESOLVER_SRC, "r.resolvers.ts"),
+        (SDL_SRC, "schema.ts"),
+        (ENTITY_SRC, "entities.ts"),
+    ):
         rec = _parse(tmp_path, src, name)
-        errors = list(Draft202012Validator(FileRecord.model_json_schema(by_alias=True))
-                      .iter_errors(json.loads(to_line(rec))))
+        errors = list(
+            Draft202012Validator(FileRecord.model_json_schema(by_alias=True)).iter_errors(
+                json.loads(to_line(rec))
+            )
+        )
         assert not errors, errors
 
 

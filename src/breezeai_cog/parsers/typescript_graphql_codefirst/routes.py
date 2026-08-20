@@ -164,7 +164,7 @@ def _classes_with_decorators(root: Node) -> Iterator[tuple[Node, list[Node]]]:
             yield cls, decs
 
 
-def detect_nbs_graphql_routes(
+def detect_codefirst_graphql_routes(
     root: Node, source: bytes, path: str, *, seen_ids: set[str], timeout_micros: int = 0
 ) -> list[Statement]:
     routes: list[Statement] = []

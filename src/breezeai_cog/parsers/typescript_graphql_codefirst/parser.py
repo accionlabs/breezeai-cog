@@ -1,4 +1,4 @@
-"""NbsGraphQLParser — a TypeScript framework parser for an in-house code-first GraphQL
+"""GraphQLCodeFirstParser — a TypeScript framework parser for an in-house code-first GraphQL
 framework whose operation decorators (``@Query``/``@Mutation``/``@Subscription``) are
 defined locally and imported from a project-relative ``decorators`` module (resolver
 classes are plain ``@Service`` DI classes, not ``@Resolver``). A sibling of the other TS
@@ -13,7 +13,7 @@ from ...schemas import FileRecord
 from ..base import ParseContext
 from ..treesitter import parse_source
 from ..typescript.parser import TypeScriptParser
-from .routes import detect_nbs_graphql_routes
+from .routes import detect_codefirst_graphql_routes
 
 # Decisive, collision-proof signature: the operation decorators are imported from a
 # project-relative ``decorators`` module AND applied as method decorators. This excludes
@@ -23,8 +23,8 @@ _DECORATORS_IMPORT = re.compile(rb"""from\s+['"][^'"]*\bdecorators['"]""")
 _OP_USAGE = re.compile(rb"@(?:Query|Mutation|Subscription)\s*\(")
 
 
-class NbsGraphQLParser(TypeScriptParser):
-    name = "typescript-nbs-graphql"
+class GraphQLCodeFirstParser(TypeScriptParser):
+    name = "typescript-graphql-codefirst"
     priority = 15  # above graphql/express/angular (10); below nestjs (20)
     frameworks = ["graphql"]
 
@@ -36,7 +36,7 @@ class NbsGraphQLParser(TypeScriptParser):
         root = parse_source(grammar, ctx.source, ctx.parse_timeout_micros).root_node
         record = self.extract(root, ctx)  # inherited base extraction (one parse)
         if ctx.capture_statements and not self.is_fixture_file(ctx.path):
-            routes = detect_nbs_graphql_routes(
+            routes = detect_codefirst_graphql_routes(
                 root, ctx.source, ctx.path, seen_ids={s.id for s in record.statements},
                 timeout_micros=ctx.parse_timeout_micros,
             )
