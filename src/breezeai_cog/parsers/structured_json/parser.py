@@ -22,8 +22,9 @@ Design constraints (both must hold):
 
 1. **Domain-agnostic.** It only ever recurses over keys and values. It never interprets a
    field's *meaning* — no "this field is the identity", no per-record graph nodes.
-2. **Reliability.** Secret-named keys and secret-shaped string values are redacted and string
-   leaves are length-capped — all applied *inside* the TOON encoder.
+2. **Reliability.** Secret-named keys and secret-shaped string values are redacted *inside*
+   the TOON encoder — the only transform. Nothing is truncated or dropped; an oversized
+   document is split into ``#partNofN`` statements at emit (``emit.split``).
 
 Selection (registry ``priority``):
 * ``ConfigParser``            priority 0 — the ``CONFIG_JSON_NAMES`` rich extractors + empty/scalar JSON
@@ -107,15 +108,11 @@ class StructuredJsonParser(BaseParser):
         data = self._parse(ctx.source)
         loc = count_loc(text)
 
-        # Full TOON serialization of the whole document (secret-redacted, value-capped — all
-        # inside the encoder). Per-value cap from ctx. The whole document is kept; an oversized
-        # TOON is split into `#partNofN` statements downstream (emit.split), never truncated.
-        # The content lives only on the statement below; metadata carries a structural summary.
-        toon = encode(
-            data,
-            is_secret=self._is_secret_key,
-            value_limit=ctx.metadata_value_limit,
-        )
+        # Full TOON serialization of the whole document (secret-redacted inside the encoder).
+        # Nothing is truncated: the whole document is kept and an oversized TOON is split into
+        # `#partNofN` statements downstream (emit.split). The content lives only on the
+        # statement below; metadata carries a structural summary.
+        toon = encode(data, is_secret=self._is_secret_key)
 
         meta: dict[str, Any] = {
             "kind": "structured-json",
