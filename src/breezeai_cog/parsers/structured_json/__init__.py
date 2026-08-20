@@ -1,8 +1,8 @@
-"""Structured-JSON analyzer. Emits ``type="config"``, ``language="structured-json"``
-FileRecords whose ``metadata.toon`` holds a TOON serialization of the whole data/metadata
-JSON document (domain-agnostic; no per-record graph nodes), plus — under
-``--capture-statements`` — a single ``structured_data`` statement carrying the same TOON."""
+"""JSON analyzer — the single owner of ``.json``. Routes named build/config files and
+empty/scalar JSON to the shared config extractor (``type="config"``, ``language="config"``);
+captures every other non-empty JSON in full as TOON on a ``structured_data`` statement
+(``language="structured-json"``), emitted under ``--capture-statements``."""
 
-from .parser import StructuredJsonParser
+from .parser import JsonParser
 
-PARSERS = [StructuredJsonParser()]
+PARSERS = [JsonParser()]

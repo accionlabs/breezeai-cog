@@ -13,7 +13,7 @@ import json
 import pytest
 
 from breezeai_cog.parsers.base import ParseContext
-from breezeai_cog.parsers.structured_json.parser import StructuredJsonParser
+from breezeai_cog.parsers.structured_json.parser import JsonParser
 from breezeai_cog.parsers.structured_json.redaction import redact_secrets
 
 # ── benign values that MUST survive verbatim (false-positive guard) ─────────────
@@ -108,7 +108,7 @@ def _toon(obj) -> str:
         capture_statements=True,
         statement_text_limit=8000,
     )
-    return StructuredJsonParser().parse_file(ctx).statements[0].text
+    return JsonParser().parse_file(ctx).statements[0].text
 
 
 def test_value_shaped_secret_redacted_even_under_innocuous_key() -> None:

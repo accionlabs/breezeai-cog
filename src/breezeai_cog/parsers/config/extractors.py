@@ -64,6 +64,14 @@ def extract_config(path: str, text: str) -> dict[str, Any]:
     return meta
 
 
+#: JSON filenames with a dedicated rich extractor in ``_dispatch`` below. The ``JsonParser``
+#: captures every OTHER non-empty ``.json`` in full, but routes these to their rich extraction
+#: even though they are non-empty. Keep in step with the ``.json`` name-cases in ``_dispatch``.
+RICH_JSON_NAMES: frozenset[str] = frozenset(
+    {"package.json", "tsconfig.json", "jsconfig.json", "mod.json"}
+)
+
+
 def _dispatch(name: str, suffix: str, text: str) -> dict[str, Any]:
     if name == "package.json":
         return _package_json(text)

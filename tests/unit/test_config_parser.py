@@ -199,7 +199,8 @@ def test_multi_document_yaml() -> None:
 
 def test_matches_patterns() -> None:
     p = ConfigParser()
-    assert p.matches("package.json") and p.matches("x/Dockerfile") and p.matches("a.yml")
+    assert p.matches("x/Dockerfile") and p.matches("a.yml")
+    assert not p.matches("package.json") and not p.matches("data.json")  # .json → JsonParser
     assert p.matches("Dockerfile.dev") and p.matches(".env.local")  # glob-style
     assert p.matches("src/Svc.csproj") and p.matches("App.sln")  # .NET manifests
     assert not p.matches("main.py") and not p.matches("app.ts")
@@ -320,7 +321,7 @@ def test_config_registered_and_selected() -> None:
 
     discover_builtin()
     assert "config" in registry.capabilities()["languages"]
-    assert registry.select("package.json", b'{"name":"x"}').name == "config"
+    assert registry.select("package.json", b'{"name":"x"}').name == "json"  # JsonParser owns .json
 
 
 def test_mod_json_verticle_main() -> None:

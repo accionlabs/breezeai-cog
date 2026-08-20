@@ -1,6 +1,6 @@
-"""StructuredJsonParser: record-structure claim gating, whole-document TOON capture onto
-File.metadata (no Function nodes), the gated single `structured_data` statement, credential
-redaction, bounds, and selection priority vs ConfigParser."""
+"""JsonParser: routing (full capture vs config record), whole-document TOON capture, the
+gated single `structured_data` statement, credential redaction, lossless capture, and single
+ownership of `.json`."""
 
 from __future__ import annotations
 
@@ -8,7 +8,7 @@ import json
 
 from breezeai_cog.core import registry
 from breezeai_cog.parsers.base import ParseContext
-from breezeai_cog.parsers.structured_json.parser import StructuredJsonParser
+from breezeai_cog.parsers.structured_json.parser import JsonParser
 
 
 def _parse(
@@ -27,7 +27,7 @@ def _parse(
         capture_statements=capture_statements,
         statement_text_limit=statement_text_limit,
     )
-    return StructuredJsonParser().parse_file(ctx)
+    return JsonParser().parse_file(ctx)
 
 
 def _toon(path: str, obj, **kw) -> str:
@@ -35,80 +35,49 @@ def _toon(path: str, obj, **kw) -> str:
     return _parse(path, obj, capture_statements=True, **kw).statements[0].text
 
 
-def _claims(obj) -> bool:
-    return StructuredJsonParser().claims("x.json", json.dumps(obj).encode())
+def _language(path: str, obj) -> str:
+    return _parse(path, obj).language
 
 
-# ── claim gating (which JSON is captured in full) ──────────────────────────────
-def test_claims_values_array_of_records() -> None:
-    assert _claims({"values": [{"code": "REC-1"}]}) is True
+# ── routing: full capture ("structured-json") vs reduced/rich config ("config") ─
+def test_captures_record_array() -> None:
+    assert _language("x.json", {"values": [{"code": "REC-1"}]}) == "structured-json"
+    assert _language("x.json", [{"id": 1}, {"id": 2}]) == "structured-json"
 
 
-def test_claims_root_array_of_objects() -> None:
-    assert _claims([{"id": 1}, {"id": 2}]) is True
+def test_captures_flat_map_and_scalar_array() -> None:
+    # shape-independent: flat config, uniform map, and root scalar array all captured in full
+    assert _language("x.json", {"prefix": "http://"}) == "structured-json"
+    assert _language("x.json", {"a": "1", "b": "2"}) == "structured-json"
+    assert _language("x.json", ["a", "b", "c"]) == "structured-json"
 
 
-def test_claims_flat_config() -> None:
-    # post-merge: any non-empty JSON not named-rich is captured in full, flat configs included
-    assert _claims({"prefix": "http://"}) is True
+def test_named_rich_configs_stay_config() -> None:
+    # only the NAME excludes — a record array inside package.json/tsconfig never diverts them
+    assert _language("package.json", {"name": "app", "dependencies": {"react": "^18"}}) == "config"
+    assert _language("package.json", {"name": "app", "contributors": [{"name": "Al"}]}) == "config"
+    assert _language("tsconfig.json", {"compilerOptions": {}, "references": [{"path": "../x"}]}) == "config"
+    assert _language("mod.json", {"main": "Verticle"}) == "config"
 
 
-def test_claims_package_shaped_dict_under_non_package_name() -> None:
-    # shape no longer matters — only the NAME excludes (a package.json shape at path x.json is data)
-    assert _claims({"name": "app", "dependencies": {"react": "^18"}}) is True
+def test_composer_json_is_captured_not_named_rich() -> None:
+    # composer.json has no dedicated extractor → captured in full (only RICH_JSON_NAMES are config)
+    assert _language("composer.json", {"name": "v/p", "authors": [{"name": "X"}]}) == "structured-json"
 
 
-def test_claims_array_of_scalars() -> None:
-    assert _claims(["a", "b", "c"]) is True
+def test_empty_and_scalar_are_config() -> None:
+    assert _language("x.json", {}) == "config"
+    assert _language("x.json", []) == "config"
+    assert _language("x.json", "hello") == "config"
 
 
-def test_does_not_claim_empty_or_scalar() -> None:
-    assert _claims({}) is False and _claims([]) is False and _claims("hello") is False
+def test_malformed_json_routes_to_config() -> None:
+    # unparseable → nothing to capture → the shared config extractor (parseError metadata)
+    ctx = ParseContext(path="x.json", abs_path=None, source=b"{not json", repo_root=".")
+    assert JsonParser().parse_file(ctx).language == "config"
 
 
-def test_does_not_claim_malformed_json() -> None:
-    assert StructuredJsonParser().claims("x.json", b"{not json") is False
-
-
-def test_claims_robust_on_deeply_nested_json() -> None:
-    # claims() must not crash on adversarial nesting (json.loads handles it, or _parse returns
-    # None). Parse-time recursion safety is delegated to the executor's per-file isolation
-    # (core.executor._parse_entry catches any parse_file exception), not guarded here.
-    src = ("[" * 1200 + "]" * 1200).encode()
-    assert StructuredJsonParser().claims("x.json", src) is True
-
-
-# ── denylist guard: don't steal ConfigParser's richly-handled JSON ──────────────
-def test_does_not_claim_package_json_with_contributors_array() -> None:
-    src = json.dumps(
-        {
-            "name": "app",
-            "dependencies": {"react": "^18"},
-            "contributors": [{"name": "Al", "email": "a@x.com"}],
-        }
-    ).encode()
-    assert StructuredJsonParser().claims("package.json", src) is False
-    assert StructuredJsonParser().claims("pkgs/app/package.json", src) is False
-
-
-def test_does_not_claim_tsconfig_with_references_array() -> None:
-    src = json.dumps(
-        {"compilerOptions": {"strict": True}, "references": [{"path": "../lib"}]}
-    ).encode()
-    assert StructuredJsonParser().claims("tsconfig.json", src) is False
-    assert StructuredJsonParser().claims("jsconfig.json", src) is False
-
-
-def test_still_claims_other_configs_with_record_arrays() -> None:
-    assert (
-        StructuredJsonParser().claims(
-            "composer.json", json.dumps({"name": "v/p", "authors": [{"name": "X"}]}).encode()
-        )
-        is True
-    )
-
-
-# ── emission: File.metadata (TOON), no Function/Class nodes ─────────────────────
+# ── emission: capture record, no Function/Class nodes ───────────────────────────
 def test_emits_config_record_no_functions() -> None:
     rec = _parse("json/records.json", {"values": [{"code": "REC-1"}]})
     assert rec.type == "config" and rec.language == "structured-json"
@@ -235,7 +204,7 @@ def test_document_statement_shape() -> None:
 
 def test_document_statement_captures_full_text_uncapped() -> None:
     # The parser keeps the full TOON — no clip, no ellipsis. Sizing (splitting a large
-    # document into `#partNofN` records) happens once at emit (see test_pipeline_split),
+    # document into `#partNofN` records) happens once at emit (see test_split),
     # so the parser must not lose the tail here regardless of statement_text_limit.
     big = {"rows": [{"v": "y" * 100} for _ in range(50)]}
     rec = _parse("a.json", big, capture_statements=True, statement_text_limit=200)
@@ -254,24 +223,16 @@ def test_record_serializes_schema_valid_with_statement() -> None:
     assert '"structured_data"' in line
 
 
-# ── selection priority (registry integration) ──────────────────────────────────
-def test_selection_beats_config_for_records_only() -> None:
+# ── single ownership of .json (registry integration) ────────────────────────────
+def test_json_is_sole_owner_of_dot_json() -> None:
     registry.clear()
     registry.discover_builtin()
     try:
-        assert registry.select("records.json", b'{"values":[{"a":1}]}').name == "structured-json"
-        assert registry.select("package.json", b'{"name":"x"}').name == "config"
-        # post-merge: a generic non-empty config is now captured, not reduced
-        assert registry.select("batch_config.json", b'{"prefix":"http://"}').name == "structured-json"
-        assert registry.select("empty.json", b"{}").name == "config"  # nothing to capture
-        assert (
-            registry.select("package.json", b'{"name":"x","contributors":[{"name":"a"}]}').name
-            == "config"
-        )
-        assert (
-            registry.select("tsconfig.json", b'{"references":[{"path":"../x"}]}').name == "config"
-        )
-        assert registry.base_parser_for("records.json").name == "config"
+        for path in ("records.json", "package.json", "tsconfig.json", "empty.json", "cfg.json"):
+            assert registry.select(path, b'{"a":1}').name == "json"
+        assert registry.base_parser_for("records.json").name == "json"
+        # selection never parses, so it is safe on adversarially nested JSON
+        assert registry.select("x.json", ("[" * 1200 + "]" * 1200).encode()).name == "json"
     finally:
         registry.clear()
         registry.discover_builtin()
