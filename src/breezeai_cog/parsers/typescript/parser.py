@@ -238,7 +238,9 @@ class TypeScriptParser(BaseParser):
             ):
                 if record.framework is None:
                     record.framework = "express"
-            aws_fw = detect_aws_events(root, source, path, record)
+            aws_fw = detect_aws_events(
+                root, source, path, record, is_fixture=self.is_fixture_file(path)
+            )
             if aws_fw and record.framework is None:
                 record.framework = aws_fw
             sdk_fw = detect_sdk_calls(
