@@ -835,3 +835,224 @@ def test_enum_members_captured_as_statements(tmp_path) -> None:
     ctx2 = ParseContext(path="r.ts", abs_path=p, source=src, repo_root=tmp_path,
                         capture_statements=False)
     assert TypeScriptParser().parse_file(ctx2).statements == []
+
+
+# --- Express router-factory mount join ------------------------------------------------------
+# A factory (`() => { const r = Router(); r.get('/:id'); return r }`) is mounted elsewhere with
+# `app.use('/users', factory())`. The base path and the routes live in different files, so the
+# join resolves through the repo index (TsAliasIndex.express_mounts): the factory's own routes
+# are recorded at their real served URL, not the bare router-local path.
+
+def _express_routes(rec) -> dict:
+    return {s.endpoint: s for s in rec.statements if s.semanticType == "route"}
+
+
+def _factory_default(local: str, verb: str = "get") -> str:
+    return (
+        "import { Router, Request, Response } from 'express';\n"
+        "const factory = () => {\n"
+        "  const route = Router();\n"
+        f"  route.{verb}('{local}', (req: Request, res: Response) => res.end());\n"
+        "  return route;\n"
+        "};\n"
+        "export default factory;\n"
+    )
+
+
+def _factory_named(name: str, local: str, verb: str = "post") -> str:
+    return (
+        "import { Router, Request, Response } from 'express';\n"
+        f"export const {name} = () => {{\n"
+        "  const route = Router();\n"
+        f"  route.{verb}('{local}', (req: Request, res: Response) => res.end());\n"
+        "  return route;\n"
+        "};\n"
+    )
+
+
+def test_express_mount_join_default_export(tmp_path) -> None:
+    # `app.use('/users', usersRouter())` where usersRouter is a DEFAULT export in another file →
+    # the factory's `route.get('/:id')` is recorded as GET /users/:id.
+    rec = _parse_repo(
+        tmp_path,
+        {
+            "server.ts": "import express from 'express';\n"
+            "import usersRouter from './routes/users-router';\n"
+            "const app = express();\n"
+            "app.use('/users', usersRouter());\n",
+            "routes/users-router.ts": _factory_default("/:id"),
+        },
+        "routes/users-router.ts",
+    )
+    routes = _express_routes(rec)
+    assert "/users/:id" in routes, routes.keys()
+    assert "/:id" not in routes  # the bare local path is replaced, not duplicated
+    assert routes["/users/:id"].method == "GET"
+    assert routes["/users/:id"].framework == "express"
+    assert routes["/users/:id"].routeKind == "route"
+
+
+def test_express_mount_join_named_export_and_middleware(tmp_path) -> None:
+    # Named-export factory, mounted with auth/rate-limit middleware around it (the real-world
+    # form): `app.use('/orders', auth.check(), ordersRouter(), rateLimit)`. Only the bare
+    # imported factory call is the mount target — the member call and the bare reference are not.
+    rec = _parse_repo(
+        tmp_path,
+        {
+            "server.ts": "import express from 'express';\n"
+            "import { auth } from './auth';\n"
+            "import { ordersRouter } from './routes/orders-router';\n"
+            "import { rateLimit } from './mw';\n"
+            "const app = express();\n"
+            "app.use('/orders', auth.check(), ordersRouter(), rateLimit);\n",
+            "routes/orders-router.ts": _factory_named("ordersRouter", "/"),
+        },
+        "routes/orders-router.ts",
+    )
+    routes = _express_routes(rec)
+    # base '/orders' + local '/' → '/orders'
+    assert "/orders" in routes, routes.keys()
+    assert routes["/orders"].method == "POST"
+
+
+def test_express_mount_join_root_base_and_root_local(tmp_path) -> None:
+    # `app.use('/', homeRouter())` + `route.get('/')` → '/' (no doubled slash).
+    rec = _parse_repo(
+        tmp_path,
+        {
+            "server.ts": "import express from 'express';\n"
+            "import homeRouter from './home-router';\n"
+            "const app = express();\n"
+            "app.use('/', homeRouter());\n",
+            "home-router.ts": _factory_default("/"),
+        },
+        "home-router.ts",
+    )
+    routes = _express_routes(rec)
+    assert set(routes) == {"/"}
+
+
+def test_express_mount_join_ambiguous_is_honest_null(tmp_path) -> None:
+    # Same factory mounted at two DIFFERENT bases in two non-fixture files → ambiguous → the
+    # factory keeps its own bare path (never wrongly attributed to one base).
+    rec = _parse_repo(
+        tmp_path,
+        {
+            "server-a.ts": "import express from 'express';\n"
+            "import shared from './shared-router';\n"
+            "const app = express();\napp.use('/a', shared());\n",
+            "server-b.ts": "import express from 'express';\n"
+            "import shared from './shared-router';\n"
+            "const app = express();\napp.use('/b', shared());\n",
+            "shared-router.ts": _factory_default("/x"),
+        },
+        "shared-router.ts",
+    )
+    routes = _express_routes(rec)
+    assert "/x" in routes
+    assert "/a/x" not in routes and "/b/x" not in routes
+
+
+def test_express_mount_join_ignores_fixture_mount(tmp_path) -> None:
+    # A test/spec that mounts the factory at a throwaway base must NOT make the real prefix
+    # ambiguous: server.ts mounts at '/orders', the .spec mounts at '/', and '/orders' wins.
+    rec = _parse_repo(
+        tmp_path,
+        {
+            "server.ts": "import express from 'express';\n"
+            "import { ordersRouter } from './routes/orders-router';\n"
+            "const app = express();\napp.use('/orders', ordersRouter());\n",
+            "routes/orders-router.spec.ts": "import express from 'express';\n"
+            "import { ordersRouter } from './orders-router';\n"
+            "const app = express();\napp.use('/', ordersRouter());\n",
+            "routes/orders-router.ts": _factory_named("ordersRouter", "/y"),
+        },
+        "routes/orders-router.ts",
+    )
+    routes = _express_routes(rec)
+    assert "/orders/y" in routes, routes.keys()
+    assert "/y" not in routes
+
+
+def test_express_no_index_leaves_local_path(tmp_path) -> None:
+    # Backstop: a factory file parsed with no repo index (resolution_index=None) keeps its bare
+    # local path — the join is purely additive and never fabricates a base.
+    p = tmp_path / "solo-router.ts"
+    p.write_text(_factory_default("/list"))
+    ctx = ParseContext(
+        path="solo-router.ts", abs_path=p, source=p.read_bytes(), repo_root=tmp_path,
+        capture_statements=True, resolution_index=None,
+    )
+    rec = TypeScriptParser().parse_file(ctx)
+    routes = _express_routes(rec)
+    assert "/list" in routes
+
+
+# --- Express guards + handler on the mount chain --------------------------------------------
+# `app.use('/orders', Auth.check(), ordersRouter(), rateLimit)` — the mounted router is the
+# handler; the surrounding auth/rate-limit middleware are guards (so a "protected route" query
+# no longer sees an empty `guards` and reports it as open).
+
+def test_express_mount_guards_and_handler(tmp_path) -> None:
+    rec = _parse_repo(
+        tmp_path,
+        {
+            "server.ts": "import express from 'express';\n"
+            "import { Auth } from './auth';\n"
+            "import { ordersRouter } from './routes/orders-router';\n"
+            "import { rateLimit } from './mw';\n"
+            "const app = express();\n"
+            "app.use('/orders', Auth.check(), ordersRouter(), rateLimit);\n",
+            "routes/orders-router.ts": _factory_named("ordersRouter", "/"),
+            "auth.ts": "export const Auth = { check: () => (q: any,s: any,n: any)=>n() };\n",
+            "mw.ts": "export const rateLimit = (q: any,s: any,n: any)=>n();\n",
+        },
+        "server.ts",
+    )
+    mount = next(s for s in rec.statements
+                 if s.semanticType == "route" and s.routeKind == "mount" and s.endpoint == "/orders")
+    assert mount.handler == "ordersRouter"  # the mounted router, not the trailing guard
+    assert mount.guards == ["Auth.check", "rateLimit"]
+    assert mount.authRequired is True
+
+
+def test_express_verb_route_guards(tmp_path) -> None:
+    # `router.get('/items/:id', requireAuth, getItem)` — the last arg is the handler, the
+    # middleware before it are guards.
+    rec = _parse_repo(
+        tmp_path,
+        {
+            "r.ts": "import { Router } from 'express';\n"
+            "import { requireAuth } from './auth';\n"
+            "import { getItem } from './h';\n"
+            "const router = Router();\n"
+            "router.get('/items/:id', requireAuth, getItem);\n",
+            "auth.ts": "export const requireAuth = (q: any,s: any,n: any)=>n();\n",
+            "h.ts": "export const getItem = (q: any,s: any)=>s.end();\n",
+        },
+        "r.ts",
+    )
+    route = next(s for s in rec.statements if s.semanticType == "route" and s.endpoint == "/items/:id")
+    assert route.handler == "getItem"
+    assert route.guards == ["requireAuth"]
+    assert route.authRequired is True
+
+
+def test_express_route_no_guards_is_unknown_not_open(tmp_path) -> None:
+    # No route-level middleware → guards None and authRequired None (unknown), never False —
+    # app-level auth may still protect it (honest-null). Handler still resolves.
+    rec = _parse_repo(
+        tmp_path,
+        {
+            "server.ts": "import express from 'express';\n"
+            "import healthRouter from './routes/health-router';\n"
+            "const app = express();\napp.use('/health', healthRouter());\n",
+            "routes/health-router.ts": _factory_default("/"),
+        },
+        "server.ts",
+    )
+    mount = next(s for s in rec.statements
+                 if s.semanticType == "route" and s.routeKind == "mount" and s.endpoint == "/health")
+    assert mount.handler == "healthRouter"  # resolved handler
+    assert mount.guards is None
+    assert mount.authRequired is None  # not False

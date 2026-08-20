@@ -50,6 +50,13 @@ class TsAliasIndex:
     #: :func:`build_ts_index`; a symbol mounted at >1 prefix (or with an unresolved chain) → not
     #: present (honest-null — the child then falls back to its own bare path).
     route_mounts: dict[str, str] = field(default_factory=dict)
+    #: Express mount linkage: a mounted router-factory's defining FILE (repo-relative) → the base
+    #: path it is served under (``app.use('/users', usersRouter())`` → ``users-router.ts`` maps
+    #: to ``/users``). A factory file mounted at >1 distinct base collapses to None and is
+    #: dropped (honest-null — its routes then keep their own bare path); test/fixture mounts are
+    #: not collected. Consumed by ``detect_express`` to prefix a factory's router-local routes
+    #: with their real base — the Express analogue of ``route_mounts`` for Angular lazy routes.
+    express_mounts: dict[str, str] = field(default_factory=dict)
 
 
 def _load_jsonc(path: Path) -> dict | None:
@@ -244,6 +251,106 @@ def _collect_route_mounts(root: Node, source: bytes) -> tuple[list[str], list[_M
     return classes, mounts
 
 
+# --- Express mount extraction (picklable worker side) --------------------------------------
+#
+# An Express router factory (``const r = () => { const route = Router(); route.get(...); return
+# route }``) lives in its own file and is mounted elsewhere with ``app.use('/base', factory())``.
+# The base path and the factory's routes sit in different files, so — like the Angular lazy
+# mounts above — the linkage resolves through the repo-wide index: this collector records, at
+# each mount site, ``defining-file → base`` so the factory file can later prefix its own routes.
+
+# Filename infixes / dirs whose mounts are test scaffolding, not the wired app (mirrors
+# base._GLOBAL_FIXTURE_MARKERS + TypeScriptParser._TS_FIXTURE_MARKERS; kept in sync by hand to
+# avoid an import cycle with the parser module). A test that mounts a factory at a throwaway base
+# must not define — or make ambiguous — that factory's real mount prefix.
+_FIXTURE_MOUNT_MARKERS = (".test.", ".spec.", ".stories.", ".cy.", ".e2e.", ".mock.")
+_FIXTURE_MOUNT_DIRS = frozenset({"mock", "mocks", "__mocks__", "fixtures", "__fixtures__"})
+
+
+def _is_fixture_path(rel: str) -> bool:
+    parts = rel.replace("\\", "/").split("/")
+    if any(m in parts[-1] for m in _FIXTURE_MOUNT_MARKERS):
+        return True
+    return any(seg in _FIXTURE_MOUNT_DIRS for seg in parts[:-1])
+
+
+def _relative_import_map(root: Node, source: bytes) -> dict[str, str]:
+    """local imported name → its **relative** module specifier (only ``.``-prefixed, since a
+    factory mount is resolved file-to-file in the reduce). Bare/aliased specifiers are omitted."""
+    out: dict[str, str] = {}
+    for node in root.named_children:
+        if node.type != "import_statement":
+            continue
+        module = _module_of(node, source)
+        if module is None or not module.startswith("."):
+            continue
+        for nm in _imported_names(node, source):
+            out[nm] = module
+    return out
+
+
+def _mount_receiver_ok(obj_text: str) -> bool:
+    """Whether a ``X.use(...)`` receiver looks like an Express app/router — mirrors the runtime
+    detector's ``_is_router_obj`` heuristic (duplicated to keep the framework parser out of the
+    index module's imports)."""
+    tail = obj_text.lower().rsplit(".", 1)[-1].strip()
+    return tail in {"app", "router", "server", "api", "route"} or tail.endswith(("router", "app"))
+
+
+def _factory_call_name(arg: Node, source: bytes) -> str | None:
+    """If ``arg`` is a bare ``factory()`` call, its callee identifier name; else None. Member
+    calls (``Auth.check()``) and non-calls are skipped."""
+    if arg.type != "call_expression":
+        return None
+    fn = arg.child_by_field_name("function")
+    return node_text(fn, source) if fn is not None and fn.type == "identifier" else None
+
+
+def _collect_express_mounts(
+    root: Node, source: bytes, rel: str, repo_root: Path
+) -> list[tuple[str, str]]:
+    """(mounted-factory file, base path) for each ``app.use('/base', factory())`` in this file.
+    The factory identifier is resolved to its defining file via this file's relative imports. A
+    mount whose base is not a plain string, or whose factory is not a single relative-imported
+    bare call, is skipped — honest-null, never a guessed link. Test/fixture files are not a mount
+    source (their throwaway bases must not define a factory's real prefix)."""
+    if b".use(" not in source or _is_fixture_path(rel):
+        return []
+    import_map = _relative_import_map(root, source)
+    if not import_map:
+        return []
+    mount_dir = (repo_root / rel).parent
+    out: list[tuple[str, str]] = []
+
+    def walk(node: Node) -> None:
+        if node.type == "call_expression":
+            fn = node.child_by_field_name("function")
+            if fn is not None and fn.type == "member_expression":
+                prop = fn.child_by_field_name("property")
+                obj = fn.child_by_field_name("object")
+                if (prop is not None and node_text(prop, source) == "use"
+                        and obj is not None and _mount_receiver_ok(node_text(obj, source))):
+                    args = node.child_by_field_name("arguments")
+                    arg_nodes = list(args.named_children) if args is not None else []
+                    base = _string_literal(arg_nodes[0], source) if arg_nodes else None
+                    if base is not None and base.startswith("/"):
+                        specs = [
+                            import_map[name]
+                            for a in arg_nodes[1:]
+                            if (name := _factory_call_name(a, source)) is not None
+                            and name in import_map
+                        ]
+                        if len(specs) == 1:  # exactly one imported factory arg → unambiguous
+                            resolved = _try_paths(mount_dir / specs[0], repo_root)
+                            if resolved is not None:
+                                out.append((resolved, base))
+        for c in node.named_children:
+            walk(c)
+
+    walk(root)
+    return out
+
+
 _CLASS_NODES_SET = frozenset(_CLASS_NODES)
 
 
@@ -312,12 +419,12 @@ def _collect_ngmodule_imports(root: Node, source: bytes) -> dict[str, list[str]]
 
 
 def _ts_index_one(
-    args: tuple[str, str]
-) -> tuple[dict[str, str | None], dict[str, ClassHeritage], list[str], list[_MountRaw], dict[str, list[str]]] | None:
+    args: tuple[str, str, str]
+) -> tuple[dict[str, str | None], dict[str, ClassHeritage], list[str], list[_MountRaw], dict[str, list[str]], list[tuple[str, str]]] | None:
     """Parse one TS/JS file into its partials (string-constant map, class-heritage map, the
-    classes it declares, its lazy-route mounts, and NgModule imports) — pure, picklable worker for
-    :func:`parallel_map`. Returns ``None`` on read/parse failure."""
-    file_s, rel = args
+    classes it declares, its lazy-route mounts, NgModule imports, and Express factory mounts) —
+    pure, picklable worker for :func:`parallel_map`. Returns ``None`` on read/parse failure."""
+    file_s, rel, repo_root_s = args
     if not Path(file_s).is_file():
         return None
     try:
@@ -331,7 +438,9 @@ def _ts_index_one(
         _collect_const_values(root, src, const_values)
         classes, mounts = _collect_route_mounts(root, src)
         ngmodule_imports = _collect_ngmodule_imports(root, src)
-        return const_values, _collect_heritage(root, src, rel), classes, mounts, ngmodule_imports
+        express_mounts = _collect_express_mounts(root, src, rel, Path(repo_root_s))
+        return (const_values, _collect_heritage(root, src, rel), classes, mounts,
+                ngmodule_imports, express_mounts)
     except Exception as exc:  # parse OR a pathologically deep AST walk (RecursionError) — skip this file
         from ...logging import get_logger
         get_logger("breezeai_cog.index").warning(
@@ -405,11 +514,14 @@ def build_ts_index(repo_root: Path, files: Sequence[Path], jobs: int = 1) -> TsA
     parent_of: dict[str, str | None] = {}
     file_mounts: list[tuple[frozenset[str], list[_MountRaw]]] = []
     all_ngmodule_imports: dict[str, list[str]] = {}
-    args = [(str(f), repo_relative(f, repo_root)) for f in files]
+    # Express: mounted-factory file → its base path. A factory file mounted at >1 distinct base
+    # collapses to None (honest-null) via record_distinct; the None entries are dropped below.
+    express_mount_of: dict[str, str | None] = {}
+    args = [(str(f), repo_relative(f, repo_root), str(repo_root)) for f in files]
     for frag in parallel_map(args, _ts_index_one, jobs):
         if not frag:
             continue
-        cv, heritage, classes, mounts, ngmodule_imports = frag
+        cv, heritage, classes, mounts, ngmodule_imports, file_express_mounts = frag
         for sym, literal in cv.items():
             record_distinct(const_values, sym, literal)
         for cname, ch in heritage.items():  # same class name in >1 file → None (distinct types)
@@ -417,6 +529,8 @@ def build_ts_index(repo_root: Path, files: Sequence[Path], jobs: int = 1) -> TsA
         if mounts:
             file_mounts.append((frozenset(classes), mounts))
         all_ngmodule_imports.update(ngmodule_imports)
+        for factory_file, base in file_express_mounts:
+            record_distinct(express_mount_of, factory_file, base)
 
     # Now const_values is complete: resolve each mount's path and wire the graph. A module
     # symbol mounted at >1 distinct prefix (or an unresolved path) collapses to None — the
@@ -454,7 +568,12 @@ def build_ts_index(repo_root: Path, files: Sequence[Path], jobs: int = 1) -> TsA
             if imported_name not in route_mounts:
                 route_mounts[imported_name] = prefix
 
-    if alias is None and not const_values and not class_heritage and not route_mounts:
+    # Drop ambiguous (None) Express mounts — a factory mounted at conflicting bases keeps its
+    # own bare paths rather than being wrongly attributed to one of them (honest-null).
+    express_mounts = {k: v for k, v in express_mount_of.items() if v is not None}
+
+    if (alias is None and not const_values and not class_heritage and not route_mounts
+            and not express_mounts):
         return None
     return TsAliasIndex(
         base_dir=alias.base_dir if alias else str(repo_root),
@@ -462,6 +581,7 @@ def build_ts_index(repo_root: Path, files: Sequence[Path], jobs: int = 1) -> TsA
         const_values=const_values,
         class_heritage=class_heritage,
         route_mounts=route_mounts,
+        express_mounts=express_mounts,
     )
 
 

@@ -95,11 +95,22 @@ _ROUTE_PARAM_TYPES = {
 }
 # Exported names that mark a Lambda entry point (``export const handler`` / ``exports.handler``).
 _HANDLER_NAMES = {"handler", "lambdaHandler", "main"}
+# Names accepted for the UNTYPED CommonJS fallback (``exports.handler = () => …``). Narrower
+# than ``_HANDLER_NAMES``: ``main`` is dropped — without a typed event it is too generic (a CLI
+# entry, not necessarily a Lambda) to claim on the CJS form alone.
+_CJS_HANDLER_NAMES = {"handler", "lambdaHandler"}
+# CommonJS export receivers that make ``<recv>.handler = …`` a module entry point (not an
+# arbitrary ``someObj.handler = fn`` assignment).
+_CJS_EXPORT_RECEIVERS = {"exports", "module.exports"}
 
 
 def _has_aws(source: bytes) -> bool:
-    """Cheap byte guard so the walk only runs on files touching the AWS SDK / Lambda."""
-    return b"aws-sdk" in source or b"aws-lambda" in source
+    """Cheap byte guard so the walk only runs on files touching the AWS SDK / Lambda, OR
+    declaring a CommonJS ``exports.handler`` / ``module.exports.handler`` — a Lambda entry-point
+    idiom that need not import the SDK (the deployment config wires it), which the untyped-CJS
+    handler path (:func:`_untyped_cjs_handler`) relies on. The substring covers both receivers;
+    the precise structural check lives in that function, so this only decides whether to walk."""
+    return b"aws-sdk" in source or b"aws-lambda" in source or b"exports.handler" in source
 
 
 def _walk(root: Node, types: frozenset[str]) -> list[Node]:
@@ -254,6 +265,36 @@ def _untyped_handler(node: Node, source: bytes) -> tuple[SemanticType, str, str 
     return None
 
 
+def _untyped_cjs_handler(
+    node: Node, source: bytes
+) -> tuple[SemanticType, str, str | None, str | None] | None:
+    """A Lambda entry point in the CommonJS ``exports.handler = () => …`` /
+    ``module.exports.handler = …`` form that carries NO typed AWS event to key on (the nullary /
+    untyped shape — a real Lambda idiom that the typed-parameter path above cannot see).
+
+    Precision: recognised ONLY for a ``exports``/``module.exports`` receiver (not an arbitrary
+    ``obj.handler = fn``) and the narrow ``handler``/``lambdaHandler`` names, in a file that
+    already imports the AWS SDK / Lambda types (:func:`_has_aws`). An ESM ``export const handler``
+    is deliberately NOT accepted here — that shape is common in non-Lambda code, so it stays
+    gated on the event type. The trigger is unknowable without the event type, so the framework
+    is the generic ``aws-lambda`` (honest-null on the specific transport)."""
+    if node.type != "assignment_expression":
+        return None
+    left = node.child_by_field_name("left")
+    if left is None or left.type != "member_expression":
+        return None
+    obj = left.child_by_field_name("object")
+    prop = left.child_by_field_name("property")
+    if obj is None or node_text(obj, source) not in _CJS_EXPORT_RECEIVERS:
+        return None
+    hname = node_text(prop, source) if prop is not None else None
+    if hname not in _CJS_HANDLER_NAMES:
+        return None
+    if _fn_value(node) is None:  # must assign an arrow/function, not a re-export of a value
+        return None
+    return "eventbus_consumer", "aws-lambda", None, hname
+
+
 def _enclosing_statement(line: int, statements: list[Statement]) -> Statement | None:
     best: Statement | None = None
     best_span: int | None = None
@@ -276,9 +317,15 @@ def _owner_function(line: int, functions: list[Function], fallback: str) -> str:
     return best.id if best is not None else fallback
 
 
-def detect_aws_events(root: Node, source: bytes, path: str, record: FileRecord) -> str | None:
+def detect_aws_events(
+    root: Node, source: bytes, path: str, record: FileRecord, *, is_fixture: bool = False
+) -> str | None:
     """Enrich/add AWS event statements on ``record``. Returns a file-level framework label
-    (``aws-lambda`` for a handler file, else the first producer transport) or ``None``."""
+    (``aws-lambda`` for a handler file, else the first producer transport) or ``None``.
+
+    ``is_fixture`` gates only the untyped-CommonJS handler fallback (:func:`_untyped_cjs_handler`),
+    whose looser signature would otherwise match a mocked ``exports.handler`` in a test file — the
+    detector is not fixture-guarded at the call site, so the guard is applied here."""
     if not _has_aws(source):
         return None
     fid = file_id(path)
@@ -310,13 +357,17 @@ def detect_aws_events(root: Node, source: bytes, path: str, record: FileRecord) 
             ))
         file_fw = file_fw or fw
 
-    # Handler entry points: a typed const (``const h: SQSHandler = …``), else an untyped but
-    # AWS-event-parameterised ``handler`` export (``export const handler = (e: S3Event) => …`` /
-    # ``exports.handler = …``). One statement per handler; the typed form wins if both apply.
+    # Handler entry points, most-precise first: a typed const (``const h: SQSHandler = …``), an
+    # untyped but AWS-event-parameterised ``handler`` export (``export const handler = (e:
+    # S3Event) => …`` / ``exports.handler = …``), and — last resort — the untyped CommonJS
+    # ``exports.handler = () => …`` shape (generic ``aws-lambda``, non-fixture only). One
+    # statement per handler; the earliest (most specific) match wins.
     for decl in _walk(root, frozenset({"variable_declarator", "assignment_expression"})):
         hinfo = _handler(decl, source) if decl.type == "variable_declarator" else None
         if hinfo is None:
             hinfo = _untyped_handler(decl, source)
+        if hinfo is None and not is_fixture:  # last resort: the untyped CommonJS handler shape
+            hinfo = _untyped_cjs_handler(decl, source)
         if hinfo is None:
             continue
         sem, fw, route_kind, hname = hinfo
