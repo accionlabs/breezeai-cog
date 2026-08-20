@@ -37,7 +37,8 @@ class NbsGraphQLParser(TypeScriptParser):
         record = self.extract(root, ctx)  # inherited base extraction (one parse)
         if ctx.capture_statements and not self.is_fixture_file(ctx.path):
             routes = detect_nbs_graphql_routes(
-                root, ctx.source, ctx.path, seen_ids={s.id for s in record.statements}
+                root, ctx.source, ctx.path, seen_ids={s.id for s in record.statements},
+                timeout_micros=ctx.parse_timeout_micros,
             )
             if routes:
                 record.statements.extend(routes)
