@@ -205,28 +205,29 @@ class ProjectMetaData(BaseModel):
     toolVersion: str
     # optional
     repositoryPath: str | None = None
-    configs: dict[str, Any] | None = None  # {totalConfigFiles, byType, packageManagers}
+    configs: dict[str, Any] | None = None  # {totalConfigFiles, capturedDataDocuments, byType, ...}
 
     def has_content(self) -> bool:
         """True if the analysis captured anything worth persisting.
 
         Source code (any detected language, function, or class) always counts. A
-        config-only result counts only when it carries real signal — dependencies,
-        a package manager / build tool, or docker. A folder whose sole file is a
-        trivial config (e.g. a lone README or empty JSON) yields ``False`` so no
-        empty ontology is written.
+        config-only result counts only when it carries real signal — a captured data
+        document, dependencies, a package manager / build tool, or docker. A folder whose
+        sole file is a trivial config (a lone README, or an empty / scalar JSON that
+        captured no content) yields ``False`` so no empty ontology is written.
         """
         if self.analyzedLanguages or self.totalFunctions or self.totalClasses:
             return True
         cfg = self.configs or {}
+        # Any data document captured in full (e.g. an n8n workflow or a lookup table in a
+        # repo with no code) is real content worth persisting. Counts actual captures, not
+        # file types — an empty ``{}`` is a JSON file but captures nothing, so it does not
+        # count. Format-neutral: covers every full-capture parser, not just JSON.
+        if (cfg.get("capturedDataDocuments") or 0) > 0:
+            return True
         if (cfg.get("dependencies") or {}).get("total", 0):
             return True
         docker = cfg.get("docker") or {}
         if docker.get("hasDockerfile") or docker.get("hasCompose"):
-            return True
-        # A captured JSON data document (structured-json full capture, category "json")
-        # is real signal worth persisting — e.g. an n8n workflow export in a repo with no
-        # code. Lone READMEs / .env / yaml stay category "other"/etc. and are still skipped.
-        if (cfg.get("byType") or {}).get("json"):
             return True
         return bool(cfg.get("packageManagers") or cfg.get("buildTools"))

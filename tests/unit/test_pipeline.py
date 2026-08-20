@@ -40,6 +40,29 @@ def test_analyze_repo_writes_metadata_first(tmp_path) -> None:
     assert paths == ["app.py", "util.py"]
 
 
+def test_data_only_repo_is_saved(tmp_path) -> None:
+    # a code-less repo whose only file is a captured JSON data document still writes its export
+    repo = tmp_path / "data"
+    repo.mkdir()
+    (repo / "workflow.json").write_text('{"nodes":[{"id":"1","name":"a"}],"active":true}')
+    result = analyze_repo(repo)
+    assert result.written is True
+    assert result.out_path is not None and result.out_path.exists()
+    meta = json.loads(gzip.open(result.out_path, "rt", encoding="utf-8").readline())
+    assert meta["configs"]["capturedDataDocuments"] >= 1
+
+
+def test_empty_json_only_repo_is_not_saved(tmp_path) -> None:
+    # empty / scalar JSON captures nothing → no export file is written (capturedDataDocuments 0)
+    repo = tmp_path / "empty"
+    repo.mkdir()
+    (repo / "config.json").write_text("{}")
+    (repo / "other.json").write_text("null")
+    result = analyze_repo(repo)
+    assert result.written is False
+    assert not (result.out_path and result.out_path.exists())
+
+
 def test_iter_file_records(tmp_path) -> None:
     repo = tmp_path / "r2"
     repo.mkdir()

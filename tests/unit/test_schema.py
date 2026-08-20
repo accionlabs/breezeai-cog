@@ -53,6 +53,37 @@ def project_meta() -> ProjectMetaData:
     )
 
 
+def _codeless_meta(configs: dict) -> ProjectMetaData:
+    return ProjectMetaData(
+        repositoryName="r", analyzedLanguages=[], totalFiles=1, totalFunctions=0,
+        totalClasses=0, totalLinesOfCode=1, generatedAt="2026-06-29T00:00:00Z",
+        toolVersion="0.0.0", configs=configs,
+    )
+
+
+def test_has_content_true_for_code(project_meta: ProjectMetaData) -> None:
+    assert project_meta.has_content() is True  # analyzedLanguages present
+
+
+def test_has_content_true_for_captured_data_document() -> None:
+    # a code-less repo that captured a data document (e.g. an n8n workflow) is persisted
+    assert _codeless_meta({"capturedDataDocuments": 1, "byType": {"json": 1}}).has_content() is True
+
+
+def test_has_content_false_when_json_present_but_nothing_captured() -> None:
+    # empty/scalar JSON is a "json" file but captures nothing → not persisted. (Guards against
+    # the old byType["json"] heuristic, which wrongly saved this.)
+    assert _codeless_meta({"capturedDataDocuments": 0, "byType": {"json": 5}}).has_content() is False
+
+
+def test_has_content_dependencies_still_count() -> None:
+    assert _codeless_meta({"dependencies": {"total": 3}}).has_content() is True
+
+
+def test_has_content_false_for_trivial_config_only() -> None:
+    assert _codeless_meta({"totalConfigFiles": 1, "byType": {"other": 1}}).has_content() is False
+
+
 @pytest.fixture
 def file_record() -> FileRecord:
     route = Statement(

@@ -15,12 +15,10 @@ def _parse(
     path: str,
     obj,
     *,
-    metadata_value_limit: int | None = None,
     capture_statements: bool = False,
     statement_text_limit: int = 8000,
 ):
     src = json.dumps(obj, ensure_ascii=False).encode()
-    kwargs = {} if metadata_value_limit is None else {"metadata_value_limit": metadata_value_limit}
     ctx = ParseContext(
         path=path,
         abs_path=None,
@@ -28,7 +26,6 @@ def _parse(
         repo_root=".",
         capture_statements=capture_statements,
         statement_text_limit=statement_text_limit,
-        **kwargs,
     )
     return StructuredJsonParser().parse_file(ctx)
 
@@ -51,26 +48,34 @@ def test_claims_root_array_of_objects() -> None:
     assert _claims([{"id": 1}, {"id": 2}]) is True
 
 
-def test_does_not_claim_flat_config() -> None:
-    assert _claims({"prefix": "http://"}) is False
+def test_claims_flat_config() -> None:
+    # post-merge: any non-empty JSON not named-rich is captured in full, flat configs included
+    assert _claims({"prefix": "http://"}) is True
 
 
-def test_does_not_claim_package_json_shape() -> None:
-    assert _claims({"name": "app", "dependencies": {"react": "^18"}}) is False
+def test_claims_package_shaped_dict_under_non_package_name() -> None:
+    # shape no longer matters — only the NAME excludes (a package.json shape at path x.json is data)
+    assert _claims({"name": "app", "dependencies": {"react": "^18"}}) is True
 
 
-def test_does_not_claim_array_of_scalars() -> None:
-    assert _claims(["a", "b", "c"]) is False
+def test_claims_array_of_scalars() -> None:
+    assert _claims(["a", "b", "c"]) is True
+
+
+def test_does_not_claim_empty_or_scalar() -> None:
+    assert _claims({}) is False and _claims([]) is False and _claims("hello") is False
 
 
 def test_does_not_claim_malformed_json() -> None:
     assert StructuredJsonParser().claims("x.json", b"{not json") is False
 
 
-def test_does_not_crash_on_deeply_nested_json() -> None:
-    depth = 1200
-    src = ("[" * depth + "]" * depth).encode()
-    assert StructuredJsonParser().claims("x.json", src) is False
+def test_claims_robust_on_deeply_nested_json() -> None:
+    # claims() must not crash on adversarial nesting (json.loads handles it, or _parse returns
+    # None). Parse-time recursion safety is delegated to the executor's per-file isolation
+    # (core.executor._parse_entry catches any parse_file exception), not guarded here.
+    src = ("[" * 1200 + "]" * 1200).encode()
+    assert StructuredJsonParser().claims("x.json", src) is True
 
 
 # ── denylist guard: don't steal ConfigParser's richly-handled JSON ──────────────
@@ -180,33 +185,28 @@ def test_credential_keys_redacted_including_nested() -> None:
     assert "hunter2" not in toon and "sk-1" not in toon
 
 
-def test_value_length_capped_at_default() -> None:
-    long = "x" * 5000
+def test_long_value_survives_uncapped() -> None:
+    # No per-value cap: a ~250k-char leaf is captured byte-for-byte, with no ellipsis truncation.
+    long = "x" * 250_000
     toon = _toon("a.json", [{"blob": long}])
-    assert "x" * 4000 + "…" in toon
-    assert "x" * 4001 not in toon  # capped at the 4000 default
-
-
-def test_value_length_bound_is_configurable() -> None:
-    long = "x" * 5000
-    toon = _toon("a.json", [{"blob": long}], metadata_value_limit=500)
-    assert "x" * 500 + "…" in toon
-    assert "x" * 501 not in toon
-
-
-def test_value_length_truncation_disabled_at_zero() -> None:
-    long = "x" * 5000
-    toon = _toon("a.json", [{"blob": long}], metadata_value_limit=0)
     assert long in toon
+    assert "…" not in toon
 
 
 def test_large_document_keeps_every_leaf_no_truncation() -> None:
     # No leaf cap: a large document is captured in full (leafCount == every leaf) and never
     # flagged truncated — oversized TOON is split into parts downstream (emit.split), not dropped.
-    big = [{"n": i} for i in range(5100)]
+    big = [{"n": i} for i in range(6000)]
     rec = _parse("a.json", big)
-    assert rec.metadata["leafCount"] == 5100
+    assert rec.metadata["leafCount"] == 6000
     assert "truncated" not in rec.metadata
+
+
+def test_every_leaf_marker_reaches_toon() -> None:
+    # distinct markers m0..m5999 each survive to the TOON — no leaf silently dropped
+    toon = _toon("a.json", [{"v": f"m{i}"} for i in range(6000)])
+    rows = {line.strip() for line in toon.splitlines()}
+    assert all(f"m{i}" in rows for i in range(6000))
 
 
 # ── the single structured_data statement (gated behind --capture-statements) ─────
@@ -261,7 +261,9 @@ def test_selection_beats_config_for_records_only() -> None:
     try:
         assert registry.select("records.json", b'{"values":[{"a":1}]}').name == "structured-json"
         assert registry.select("package.json", b'{"name":"x"}').name == "config"
-        assert registry.select("batch_config.json", b'{"prefix":"http://"}').name == "config"
+        # post-merge: a generic non-empty config is now captured, not reduced
+        assert registry.select("batch_config.json", b'{"prefix":"http://"}').name == "structured-json"
+        assert registry.select("empty.json", b"{}").name == "config"  # nothing to capture
         assert (
             registry.select("package.json", b'{"name":"x","contributors":[{"name":"a"}]}').name
             == "config"

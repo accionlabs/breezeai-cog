@@ -1,4 +1,4 @@
-"""StructuredJsonParser — a client-agnostic parser for *data* / *metadata* JSON (as
+"""StructuredJsonParser — a domain-agnostic parser for *data* / *metadata* JSON (as
 opposed to the build/config JSON that :class:`~breezeai_cog.parsers.config.parser.ConfigParser`
 handles). Where ``ConfigParser`` reduces a generic ``.json`` file to
 ``topLevelKeys: ["values"]`` and discards the content, this parser recurses the whole
@@ -20,21 +20,21 @@ otherwise found. Concept-based discovery of JSON values is forgone by this desig
 
 Design constraints (both must hold):
 
-1. **Client-agnostic.** It only ever recurses over keys and values. It never interprets a
-   field's *meaning* — no "this field is the identity", no per-record graph nodes. Anything
-   that assigns domain meaning (naming a record from an id field, turning a filter into a
-   ``query_statement``) is a client concern → a subclass at a higher ``priority``.
-2. **Reliability (extend-capture skill).** Secret-named keys are redacted, string leaves are
-   length-capped, and the leaf count is bounded — all applied *inside* the TOON encoder.
+1. **Domain-agnostic.** It only ever recurses over keys and values. It never interprets a
+   field's *meaning* — no "this field is the identity", no per-record graph nodes.
+2. **Reliability.** Secret-named keys and secret-shaped string values are redacted *inside*
+   the TOON encoder — the only transform. Nothing is truncated or dropped; an oversized
+   document is split into ``#partNofN`` statements at emit (``emit.split``).
 
 Selection (registry ``priority``):
-* ``ConfigParser``            priority 0 — named/build configs (package.json, tsconfig, …) + flat generic JSON
-* ``StructuredJsonParser``    priority 3 — JSON with record structure (array-of-objects) → full TOON capture
-* ``<Client>MetadataParser``  priority 5 — client-specific refinement (subclass), if installed
+* ``ConfigParser``            priority 0 — the ``CONFIG_JSON_NAMES`` rich extractors + empty/scalar JSON
+* ``StructuredJsonParser``    priority 3 — every other non-empty JSON → full TOON capture
 
-``claims`` gates on record structure (a non-empty array-of-objects, at the root or under a
-top-level key). This cleanly excludes ``package.json`` (dict-of-strings) / ``tsconfig.json``
-(dict) / flat ``{"prefix": …}`` configs, which stay with ``ConfigParser`` untouched.
+``claims`` captures any non-empty JSON container (dict or list) whose filename is not in
+``CONFIG_JSON_NAMES`` — shape-independent, so a lookup map, a nested tree, and a
+heterogeneous config are all captured, not just a record array. The named rich configs
+(``package.json`` / ``tsconfig`` / ``mod.json`` …) and empty/scalar roots stay with
+``ConfigParser``.
 """
 
 from __future__ import annotations
@@ -54,7 +54,7 @@ class StructuredJsonParser(BaseParser):
     name = "structured-json"
     schema_version = SCHEMA_VERSION
     extensions = (".json",)
-    #: Beats ConfigParser (0); leaves room for a client-specific subclass (priority 5).
+    #: Beats ConfigParser (0), so it wins for any non-empty JSON it claims.
     priority = 3
     #: `framework` value carried on the statement to name the serialization (§4.1 of the
     #: target spec: technology → `framework`). Keeps `semanticType` format-independent.
@@ -63,7 +63,7 @@ class StructuredJsonParser(BaseParser):
     #: Case-insensitive substrings; any leaf key containing one has its value redacted to
     #: ``"***"``. Applied to *keys only*, never inferred from values. Deliberately
     #: stack-neutral (no ``jdbc``/``wallet``/``connectionstring`` — those hint an
-    #: architecture); a subclass may extend it. Over-redaction beats leaking a secret.
+    #: architecture). Over-redaction beats leaking a secret.
     CREDENTIAL_TOKENS: frozenset[str] = frozenset(
         {
             "password",
@@ -78,20 +78,29 @@ class StructuredJsonParser(BaseParser):
             "privatekey",
         }
     )
-    #: JSON files ConfigParser extracts *richly* by name — declined here even when they
-    #: carry a record array (``package.json``'s ``contributors``/``funding``,
-    #: ``tsconfig``'s ``references``), so a stray array-of-objects never diverts them from
-    #: that rich extraction. Mirrors the JSON name-cases in
-    #: ``parsers/config/extractors._dispatch``; keep the two in sync.
+    #: JSON files ConfigParser extracts *richly* by name — declined here so their rich
+    #: extraction is never replaced by full capture (``package.json``'s
+    #: ``contributors``/``funding``, ``tsconfig``'s ``references``, a ``mod.json`` map).
+    #: Mirrors the JSON name-cases in ``parsers/config/extractors._dispatch``; keep the
+    #: two in sync. Every OTHER non-empty JSON is captured in full.
     CONFIG_JSON_NAMES: frozenset[str] = frozenset(
-        {"package.json", "tsconfig.json", "jsconfig.json"}
+        {"package.json", "tsconfig.json", "jsconfig.json", "mod.json"}
     )
 
     # ── selection ────────────────────────────────────────────────────────────
     def claims(self, path: str, source: bytes) -> bool:
         if Path(path).name in self.CONFIG_JSON_NAMES:
             return False  # ConfigParser owns these — do not steal its rich extraction
-        return self._has_record_structure(self._parse(source))
+        return self._is_capturable(self._parse(source))
+
+    @staticmethod
+    def _is_capturable(data: Any) -> bool:
+        """Capture any non-empty JSON container (dict or list) in full — the domain-agnostic
+        'worth capturing' signal. Shape is irrelevant: a record array, a
+        lookup map, a nested tree, or a heterogeneous config all qualify. Only empty
+        containers and scalar/None roots (malformed JSON) have nothing to capture and are
+        left to ConfigParser."""
+        return isinstance(data, (dict, list)) and len(data) > 0
 
     # ── parse ────────────────────────────────────────────────────────────────
     def parse_file(self, ctx: ParseContext) -> FileRecord:
@@ -99,15 +108,11 @@ class StructuredJsonParser(BaseParser):
         data = self._parse(ctx.source)
         loc = count_loc(text)
 
-        # Full TOON serialization of the whole document (secret-redacted, value-capped — all
-        # inside the encoder). Per-value cap from ctx. The whole document is kept; an oversized
-        # TOON is split into `#partNofN` statements downstream (emit.split), never truncated.
-        # The content lives only on the statement below; metadata carries a structural summary.
-        toon = encode(
-            data,
-            is_secret=self._is_secret_key,
-            value_limit=ctx.metadata_value_limit,
-        )
+        # Full TOON serialization of the whole document (secret-redacted inside the encoder).
+        # Nothing is truncated: the whole document is kept and an oversized TOON is split into
+        # `#partNofN` statements downstream (emit.split). The content lives only on the
+        # statement below; metadata carries a structural summary.
+        toon = encode(data, is_secret=self._is_secret_key)
 
         meta: dict[str, Any] = {
             "kind": "structured-json",
@@ -119,7 +124,7 @@ class StructuredJsonParser(BaseParser):
         }
 
         # The whole document is captured ONLY as this statement (TOON in `text`) — a semantic
-        # capture, so gated behind --capture-statements (extend-capture skill §9). The text is
+        # capture, so gated behind --capture-statements. The text is
         # not embedded; it is the lexical/label retrieval handle (semanticType=structured_data).
         statements: list[Statement] = []
         if ctx.capture_statements:
@@ -170,17 +175,6 @@ class StructuredJsonParser(BaseParser):
         return (
             isinstance(value, list) and len(value) > 0 and all(isinstance(v, dict) for v in value)
         )
-
-    def _has_record_structure(self, data: Any) -> bool:
-        """True if ``data`` carries a collection of records: it *is* a non-empty
-        array-of-objects, or it is a dict with a top-level key mapping to one. This is the
-        client-agnostic 'worth capturing in full' signal — it excludes flat configs and
-        dict-of-strings files, which ConfigParser keeps."""
-        if self._is_record_array(data):
-            return True
-        if isinstance(data, dict):
-            return any(self._is_record_array(v) for v in data.values())
-        return False
 
     def _record_count(self, data: Any) -> int:
         """Element count of the primary record array (the root array, or the first

@@ -133,9 +133,15 @@ class _ConfigSummary:
         self.ports: set[str] = set()
         self.has_dockerfile = self.has_compose = False
         self.dep_total = self.dep_prod = self.dep_dev = 0
+        self.captured_documents = 0
 
     def add(self, md: dict) -> None:
         self.by_type[md.get("category", "other")] = self.by_type.get(md.get("category", "other"), 0) + 1
+        # A ``format`` marks a data document captured in full (its content serialized, e.g. as
+        # TOON) rather than reduced to a summary. Format-neutral: any full-capture parser sets
+        # it, so this counts real captured content regardless of the source file type.
+        if md.get("format"):
+            self.captured_documents += 1
         if md.get("packageManager"):
             self.package_managers.add(md["packageManager"])
         if md.get("buildTool"):
@@ -155,6 +161,7 @@ class _ConfigSummary:
     def result(self, total: int) -> dict:
         return {
             "totalConfigFiles": total,
+            "capturedDataDocuments": self.captured_documents,
             "byType": self.by_type,
             "packageManagers": sorted(self.package_managers),
             "buildTools": sorted(self.build_tools),
