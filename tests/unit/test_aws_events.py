@@ -14,7 +14,7 @@ from breezeai_cog.parsers.typescript_nestjs.parser import NestJSParser
 from breezeai_cog.emit import to_line
 from breezeai_cog.schemas import FileRecord
 
-# Producer shapes (SDK v3 command + v2 method), modeled on notifications/libs/sns + apps/api.
+# Producer shapes (SDK v3 command + v2 method).
 PRODUCER = b'''
 import { SNSClient, PublishCommand } from '@aws-sdk/client-sns';
 import { SQS } from 'aws-sdk';
@@ -33,7 +33,7 @@ export class Dispatch {
 }
 '''
 
-# Consumer + HTTP-entry shapes, modeled on notifications/apps/*-lambda/src/main.ts.
+# Consumer + HTTP-entry shapes.
 CONSUMER = b'''
 import { SQSEvent, SQSHandler, APIGatewayProxyHandlerV2 } from 'aws-lambda';
 
@@ -90,9 +90,8 @@ def test_consumers_and_route_entry(tmp_path) -> None:
     assert rec.framework == "aws-lambda"
 
 
-# Untyped handler shapes — the dominant real-world form: no `: SQSHandler` annotation, the
-# AWS event type is on the handler's first PARAMETER. Modeled on nimbus-document-import and
-# source-catalogue lambda entrypoints (`export const handler = async (e: S3Event) => …`).
+# Untyped handler shapes — the dominant real-world form: no `: SQSHandler` annotation, the AWS
+# event type is on the handler's first PARAMETER (`export const handler = async (e: S3Event) => …`).
 UNTYPED = b'''
 import { S3Event, Context } from 'aws-lambda';
 
@@ -171,3 +170,67 @@ def test_output_validates(tmp_path) -> None:
     errors = list(Draft202012Validator(FileRecord.model_json_schema(by_alias=True))
                   .iter_errors(json.loads(to_line(rec))))
     assert not errors, errors
+
+
+# --- Untyped CommonJS Lambda handler -------------------------------------------------------
+# `exports.handler = async () => {}` carries no typed AWS event, so the typed-parameter path
+# can't see it. In an AWS-touching file the CommonJS `exports.handler`/`module.exports.handler`
+# shape is a Lambda entry point on its own — captured as a generic `aws-lambda` consumer.
+UNTYPED_CJS_NULLARY = b'''
+import { S3 } from 'aws-sdk';
+exports.handler = async () => {
+  await check();
+  await new Handler().handle();
+};
+'''
+
+
+def test_untyped_cjs_nullary_handler_detected(tmp_path) -> None:
+    rec = _parse(tmp_path, "index.ts", UNTYPED_CJS_NULLARY)
+    consumers = _by_semantic(rec).get("eventbus_consumer", [])
+    assert [(c.framework, c.handler) for c in consumers] == [("aws-lambda", "handler")]
+    assert rec.framework == "aws-lambda"
+
+
+def test_module_exports_handler_detected(tmp_path) -> None:
+    src = b"import 'aws-sdk';\nmodule.exports.handler = async () => { await run(); };\n"
+    rec = _parse(tmp_path, "index.ts", src)
+    fw = {(c.framework, c.handler) for c in _by_semantic(rec).get("eventbus_consumer", [])}
+    assert ("aws-lambda", "handler") in fw
+
+
+def test_cjs_main_not_matched_without_event(tmp_path) -> None:
+    # `main` is too generic to claim as a Lambda without a typed event (could be a CLI entry).
+    src = b"import 'aws-sdk';\nexports.main = async () => { await run(); };\n"
+    rec = _parse(tmp_path, "index.ts", src)
+    assert [s for s in rec.statements if s.semanticType] == []
+
+
+def test_arbitrary_object_handler_not_matched(tmp_path) -> None:
+    # Only `exports`/`module.exports` receivers — not an arbitrary `obj.handler = fn`.
+    src = b"import 'aws-sdk';\nconst app: any = {};\napp.handler = async () => { await run(); };\n"
+    rec = _parse(tmp_path, "index.ts", src)
+    assert [s for s in rec.statements if s.semanticType] == []
+
+
+def test_esm_export_const_nullary_still_gated(tmp_path) -> None:
+    # The ESM `export const handler = () => {}` shape (common in non-Lambda code) stays gated on
+    # a typed AWS event — a nullary one is NOT matched.
+    src = b"import 'aws-sdk';\nexport const handler = async () => { await run(); };\n"
+    rec = _parse(tmp_path, "index.ts", src)
+    assert [s for s in rec.statements if s.semanticType] == []
+
+
+def test_cjs_nullary_handler_skipped_in_fixture(tmp_path) -> None:
+    # A mocked `exports.handler` in a test/spec file must not be captured (fixture guard).
+    rec = _parse(tmp_path, "handler.spec.ts", UNTYPED_CJS_NULLARY)
+    assert [s for s in rec.statements if s.semanticType] == []
+
+
+def test_untyped_cjs_handler_without_aws_import(tmp_path) -> None:
+    # The real-world case: a CJS `exports.handler` Lambda whose file imports no AWS SDK (it is a
+    # Lambda by deployment config). The CommonJS handler form is itself the entry-point signal.
+    src = b"import { check } from './checker';\nexports.handler = async () => { await check(); };\n"
+    rec = _parse(tmp_path, "index.ts", src)
+    fw = {(c.framework, c.handler) for c in _by_semantic(rec).get("eventbus_consumer", [])}
+    assert ("aws-lambda", "handler") in fw
