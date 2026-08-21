@@ -112,6 +112,48 @@ def test_no_warning_when_cog_gitignored(tmp_path) -> None:
     assert "not ignored by" not in result2.output
 
 
+def test_cog_pre_exists_as_file_gives_clean_error(tmp_path, monkeypatch) -> None:
+    """Bug 1: a pre-existing .cog *file* (not dir) must yield a clean error, not a raw
+    NotADirectoryError traceback."""
+    monkeypatch.setenv("BREEZEAI_COG_LOG_TO_FILE", "true")  # exercise the log-dir mkdir
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "a.py").write_text("def f():\n    return 1\n")
+    (repo / ".cog").write_text("not a dir\n")  # .cog is a regular file
+
+    result = runner.invoke(app, ["repo-to-json-tree", "--repo", str(repo), "--jobs", "1"])
+    assert result.exit_code == 1
+    assert "not a directory" in result.output
+    assert "Traceback" not in result.output
+    assert "NotADirectoryError" not in result.output
+
+
+@pytest.mark.skipif(
+    hasattr(__import__("os"), "geteuid") and __import__("os").geteuid() == 0,
+    reason="root bypasses filesystem permission checks",
+)
+def test_cog_read_only_gives_clean_error(tmp_path, monkeypatch) -> None:
+    """Bug 2: a read-only .cog directory must yield a clean permission error, not a raw
+    PermissionError traceback."""
+    import os
+
+    monkeypatch.setenv("BREEZEAI_COG_LOG_TO_FILE", "true")
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "a.py").write_text("def f():\n    return 1\n")
+    cog = repo / ".cog"
+    cog.mkdir()
+    os.chmod(cog, 0o555)  # read-only: can't create .cog/logs inside it
+    try:
+        result = runner.invoke(app, ["repo-to-json-tree", "--repo", str(repo), "--jobs", "1"])
+        assert result.exit_code == 1
+        assert "permission denied" in result.output
+        assert "Traceback" not in result.output
+        assert "PermissionError" not in result.output
+    finally:
+        os.chmod(cog, 0o755)  # restore so tmp_path cleanup can remove it
+
+
 def test_skip_rows_go_to_log_file_not_console(tmp_path, monkeypatch) -> None:
     """Each skipped file gets its own `file.skipped` row in the LOG FILE (path + reason),
     but those rows never appear on the console — they must not pollute the summary output."""

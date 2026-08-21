@@ -32,6 +32,41 @@ app = typer.Typer(
 )
 
 
+def _setup_logging_or_exit(settings: Settings) -> None:
+    """Call ``setup_logging`` but turn a failure to create the log directory into a clean,
+    user-facing error instead of a raw traceback. The log dir defaults to ``<repo>/.cog/logs``;
+    a pre-existing ``.cog`` file (``NotADirectoryError``) or a read-only ``.cog`` directory
+    (``PermissionError``) both surface here as ``OSError`` from the handler's ``mkdir``."""
+    try:
+        setup_logging(settings)
+    except NotADirectoryError:
+        location = settings.log_location or "./logs"
+        typer.secho(
+            f"Error: a parent of '{location}' exists but is not a directory. "
+            "Please remove it and re-run.",
+            fg=typer.colors.RED,
+            err=True,
+        )
+        raise typer.Exit(1) from None
+    except PermissionError:
+        location = settings.log_location or "./logs"
+        typer.secho(
+            f"Error: cannot write to '{location}' — permission denied. "
+            "Check directory permissions.",
+            fg=typer.colors.RED,
+            err=True,
+        )
+        raise typer.Exit(1) from None
+    except OSError as exc:
+        location = settings.log_location or "./logs"
+        typer.secho(
+            f"Error: could not set up logging at '{location}': {exc.strerror or exc}.",
+            fg=typer.colors.RED,
+            err=True,
+        )
+        raise typer.Exit(1) from None
+
+
 @app.command("repo-to-json-tree")
 def repo_to_json_tree(
     repo: Path = typer.Option(..., "--repo", exists=True, file_okay=False, help="Repository directory."),
@@ -137,7 +172,7 @@ def repo_to_json_tree(
     # run). An explicit BREEZEAI_COG_LOG_LOCATION resolves to a non-None value and wins.
     if settings.log_location is None:
         settings = settings.model_copy(update={"log_location": cog_dir(repo) / "logs"})
-    setup_logging(settings)
+    _setup_logging_or_exit(settings)
     service = AnalysisService(settings)
 
     # A live bar + final table for humans on an interactive terminal (not under --verbose,
@@ -647,7 +682,7 @@ def serve(
     from .server.app import create_app
 
     settings = Settings(port=port) if port is not None else Settings()
-    setup_logging(settings)
+    _setup_logging_or_exit(settings)
     bind_port = port or int(os.environ.get("PORT", settings.port))
     uvicorn.run(create_app(settings), host=host, port=bind_port)
 

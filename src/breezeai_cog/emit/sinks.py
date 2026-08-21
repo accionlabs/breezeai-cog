@@ -9,6 +9,7 @@ compressed with streaming gzip. Memory stays bounded.
 from __future__ import annotations
 
 import shutil
+import tempfile
 from pathlib import Path
 from typing import Protocol
 
@@ -51,9 +52,19 @@ class FileSink:
     def __init__(self, out_path: str | Path, *, gzip_level: int = DEFAULT_LEVEL) -> None:
         self.out_path = Path(out_path)
         self._gzip_level = gzip_level
-        self._tmp = self.out_path.with_name(self.out_path.name + ".body.tmp")
         self.out_path.parent.mkdir(parents=True, exist_ok=True)
-        self._body = self._tmp.open("w", encoding="utf-8")
+        # A per-run randomized temp name (not a deterministic ``<name>.body.tmp``) so two
+        # concurrent runs against the same repo — e.g. parallel CI jobs — get isolated temp
+        # files and don't collide (one deleting the other's temp mid-run).
+        self._body = tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            dir=self.out_path.parent,
+            prefix=self.out_path.name + ".",
+            suffix=".body.tmp",
+            delete=False,
+        )
+        self._tmp = Path(self._body.name)
         self._finalized = False
         self.wrote = False  # True once finalize writes an actual file
 
