@@ -58,6 +58,23 @@ mutation Make($input: CreateUserInput!) { createUser(input: $input) { id } }
 fragment UserFields on User { id name }
 """
 
+# A multi-line operation whose invoked field carries a nested selection set — the full
+# field body must be captured, not just the first line up to the opening brace.
+MULTILINE_OP = """\
+query GetProjects($filter: ProjectFilter!, $pagination: PaginationInput!) {
+  projects(filter: $filter, pagination: $pagination) {
+    items {
+      id
+      name
+    }
+    pageInfo {
+      totalCount
+      hasNextPage
+    }
+  }
+}
+"""
+
 
 def _parse(tmp_path, filename: str, src: str, *, capture: bool = True) -> FileRecord:
     p = tmp_path / filename
@@ -149,6 +166,19 @@ def test_operations_and_fragment(tmp_path) -> None:
     frag = next(s for s in rec.statements if s.nodeType == "fragment_definition")
     assert frag.name == "UserFields"
     assert frag.endpoint == "User"
+
+
+def test_multiline_operation_captured_in_full(tmp_path) -> None:
+    rec = _parse(tmp_path, "projects.graphql", MULTILINE_OP)
+    op = _by_name(rec, "GetProjects", "field")
+    assert op.semanticType == "api_call"
+    assert op.endpoint == "projects"
+    # the entire invoked field — nested selection set included — is captured, not truncated
+    # at the opening brace of `projects(...) {`
+    assert "items {" in op.text
+    assert "pageInfo {" in op.text
+    assert "totalCount" in op.text
+    assert op.text.rstrip().endswith("}")
 
 
 def test_capture_gate(tmp_path) -> None:

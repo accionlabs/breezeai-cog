@@ -27,7 +27,7 @@ from tree_sitter import Node
 
 from ...emit import disambiguate, file_id, statement_id
 from ...schemas import Statement
-from ..treesitter import first_line, node_text
+from ..treesitter import node_text
 
 #: Root operation types — their fields are endpoints (routes), not entity columns.
 _ROOT_TYPES = {"Query": "query", "Mutation": "mutation", "Subscription": "subscription"}
@@ -51,7 +51,6 @@ _PLAIN = frozenset(
     }
 )
 
-_FIELD_TEXT_LIMIT = 200  # a single field/operation line — the body limit is per whole type
 
 
 # ---- small AST helpers ------------------------------------------------------
@@ -174,7 +173,7 @@ def collect_graphql_statements(
                     nodeType="field_definition",
                     semanticType="route",
                     name=node_text(name, source),
-                    text=first_line(node_text(field, source))[:_FIELD_TEXT_LIMIT],
+                    text=node_text(field, source)[:limit],
                     method=kind.upper(),
                     endpoint=node_text(name, source),
                     routeKind=kind,
@@ -218,7 +217,7 @@ def collect_graphql_statements(
                     method=method,
                     routeKind=kind,
                     handler=op_name,
-                    text=first_line(node_text(n, source))[:_FIELD_TEXT_LIMIT],
+                    text=node_text(n, source)[:limit],
                 )
             )
             return
@@ -239,7 +238,7 @@ def collect_graphql_statements(
                     method=method,
                     routeKind=kind,
                     handler=op_name,
-                    text=first_line(node_text(field, source))[:_FIELD_TEXT_LIMIT],
+                    text=node_text(field, source)[:limit],
                 )
             )
 
@@ -255,7 +254,7 @@ def collect_graphql_statements(
                 nodeType="fragment_definition",
                 name=_fragment_name(n, source),
                 endpoint=target,
-                text=first_line(node_text(n, source))[:_FIELD_TEXT_LIMIT],
+                text=node_text(n, source)[:limit],
             )
         )
 
