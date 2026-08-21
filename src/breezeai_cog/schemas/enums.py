@@ -51,4 +51,14 @@ SemanticType = Literal[
     # language, plus Python docstrings. Persisted verbatim by the backend like
     # ``structured_data`` above.
     "comment",
+    # IaC block / attribute types (HCL/Terraform family)
+    "iac_resource",
+    "iac_data_source",
+    "iac_module",
+    "iac_provider",
+    "iac_variable",
+    "iac_output",
+    "iac_local",
+    "iac_settings",
+    "iac_variable_value",
 ]

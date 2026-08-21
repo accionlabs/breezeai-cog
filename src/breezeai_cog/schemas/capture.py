@@ -104,6 +104,8 @@ class Statement(BaseModel):
     # graphql_entity-only: the key field(s) that identify a federated/stitched entity
     # (from a ``@key(selectionSet: "{ id }")`` / ``@key(fields: "id")`` directive).
     keyFields: list[str] | None = None
+    # iac-only: cloud provider inferred from resource type prefix or provider name
+    platform: str | None = None
 
 
 class Function(BaseModel):
@@ -168,6 +170,8 @@ class FileRecord(BaseModel):
     loc: int
     # optional
     framework: str | None = None
+    # iac-only: dominant cloud provider across this file's statements
+    platform: str | None = None
     #: UI role of the node when it is a frontend component or state unit — one of
     #: ``component`` / ``page`` / ``layout`` / ``store`` / ``composable`` / ``hook`` /
     #: ``directive`` (open string). Set by the parser on the node that *is* the component
