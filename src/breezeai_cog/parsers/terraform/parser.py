@@ -1,4 +1,4 @@
-"""TerraformParser — parses ``.tf`` and ``.tfvars`` files into ``type="config"`` FileRecords.
+"""TerraformParser — parses ``.tf``, ``.tfvars``, and ``.hcl`` files into FileRecords.
 
 Each top-level HCL block becomes a Statement (gated by ``--capture-statements``) whose
 ``text`` is the verbatim block source.  This makes blocks directly filterable via the MCP
@@ -237,7 +237,7 @@ def _required_provider_sources(terraform_body: Node, source: bytes) -> list[str]
 
 class TerraformParser(BaseParser):
     name = "terraform"
-    extensions = (".tf", ".tfvars")
+    extensions = (".tf", ".tfvars", ".hcl")
     schema_version = SCHEMA_VERSION
     statement_types = STATEMENT_TYPES
     frameworks = FRAMEWORKS

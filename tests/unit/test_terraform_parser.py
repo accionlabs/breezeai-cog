@@ -199,6 +199,20 @@ def test_loc_positive() -> None:
     assert _parse("main.tf", _TF_SRC).loc > 0
 
 
+# ── extensions ───────────────────────────────────────────────────────────────
+
+
+def test_hcl_extension_handled() -> None:
+    rec = _parse("backend.hcl", _TF_SRC)
+    assert rec.language == "hcl"
+    assert rec.framework == "terraform"
+
+
+def test_tfvars_extension_handled() -> None:
+    rec = _parse("prod.auto.tfvars", _TFVARS_SRC)
+    assert rec.language == "hcl"
+
+
 # ── statements gating ─────────────────────────────────────────────────────────
 
 
@@ -723,6 +737,29 @@ def test_registry_selects_terraform_for_tfvars() -> None:
     registry.discover_builtin()
     try:
         assert registry.select("prod.tfvars", b"region = \"us-east-1\"").name == "terraform"
+    finally:
+        registry.clear()
+        registry.discover_builtin()
+
+
+def test_registry_selects_terraform_for_hcl() -> None:
+    registry.clear()
+    registry.discover_builtin()
+    try:
+        assert registry.select("backend.hcl", b"").name == "terraform"
+    finally:
+        registry.clear()
+        registry.discover_builtin()
+
+
+def test_hcl_in_capabilities_extensions() -> None:
+    registry.clear()
+    registry.discover_builtin()
+    try:
+        caps = registry.capabilities()
+        assert ".hcl" in caps["extensions"]
+        assert ".tf" in caps["extensions"]
+        assert ".tfvars" in caps["extensions"]
     finally:
         registry.clear()
         registry.discover_builtin()
