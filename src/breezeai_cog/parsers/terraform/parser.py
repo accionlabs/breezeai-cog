@@ -25,16 +25,18 @@ from .mappings import FRAMEWORKS, STATEMENT_TYPES
 
 
 # ── semantic type mapping ─────────────────────────────────────────────────────
+# Only behaviour-bearing block types get a semanticType.  Structure-only blocks
+# (variable / output / locals / provider / terraform) carry nodeType only.
 
-_SEMANTIC_TYPE: dict[str, str] = {
+_SEMANTIC_TYPE: dict[str, str | None] = {
     "resource": "iac_resource",
-    "data": "iac_data_source",
+    "data": "iac_data",
     "module": "iac_module",
-    "provider": "iac_provider",
-    "variable": "iac_variable",
-    "output": "iac_output",
-    "locals": "iac_local",
-    "terraform": "iac_settings",
+    "provider": None,
+    "variable": None,
+    "output": None,
+    "locals": None,
+    "terraform": None,
 }
 
 # ── platform detection ────────────────────────────────────────────────────────
