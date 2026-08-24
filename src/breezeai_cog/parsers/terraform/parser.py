@@ -14,7 +14,6 @@ so the file-level graph retains dependency edges regardless of the statements fl
 
 from __future__ import annotations
 
-from collections import Counter
 from pathlib import Path
 
 from tree_sitter import Node
@@ -53,34 +52,42 @@ _MODULE_META_ARGS: frozenset[str] = frozenset(
 _CLOUD_PREFIXES: dict[str, str] = {
     "aws_": "aws",
     "azurerm_": "azure",
-    "google_": "google",
+    "google_": "gcp",
 }
 
 _PROVIDER_PLATFORMS: dict[str, str] = {
     "aws": "aws",
     "azurerm": "azure",
-    "google": "google",
+    "google": "gcp",
+    "google-beta": "gcp",
 }
 
 
 def _block_platform(keyword: str, labels: list[str]) -> str | None:
-    """Derive cloud provider from the block's resource type prefix or provider name."""
+    """Derive cloud provider from resource/data resource-type prefix (statement level only).
+
+    Provider blocks inform file-level platform via ``_file_platform`` but do NOT set
+    platform on the Statement itself — provider is a structure-only block.
+    """
     if keyword in ("resource", "data") and labels:
         resource_type = labels[0]
         for prefix, platform in _CLOUD_PREFIXES.items():
             if resource_type.startswith(prefix):
                 return platform
-    elif keyword == "provider" and labels:
-        return _PROVIDER_PLATFORMS.get(labels[0])
     return None
 
 
-def _dominant_platform(statements: list[Statement]) -> str | None:
-    """Return the most frequent non-None platform across statements, or None."""
-    platforms = [s.platform for s in statements if s.platform is not None]
-    if not platforms:
-        return None
-    return Counter(platforms).most_common(1)[0][0]
+def _unanimous_platform(platforms: list[str]) -> str | None:
+    """Return the single platform when every entry agrees, or None for mixed/empty."""
+    distinct = set(platforms)
+    return distinct.pop() if len(distinct) == 1 else None
+
+
+def _provider_platform(keyword: str, labels: list[str]) -> str | None:
+    """Platform derived from a provider block name — used as file-level fallback only."""
+    if keyword == "provider" and labels:
+        return _PROVIDER_PLATFORMS.get(labels[0])
+    return None
 
 
 # ── AST helpers ───────────────────────────────────────────────────────────────
@@ -257,6 +264,7 @@ class TerraformParser(BaseParser):
         statements: list[Statement] = []
         classes: list[Class] = []
         external_imports: set[str] = set()
+        provider_platforms: list[str] = []  # file-level fallback when no resource blocks
         seen_ids: set[str] = set()
 
         body = next((c for c in root.named_children if c.type == "body"), root)
@@ -319,6 +327,12 @@ class TerraformParser(BaseParser):
                         constructorParams=_module_constructor_params(body_node, source),
                     ))
 
+                # Collect provider platform for file-level fallback (ungated)
+                if keyword == "provider":
+                    p = _provider_platform(keyword, labels)
+                    if p:
+                        provider_platforms.append(p)
+
                 # Always collect required_providers sources (ungated)
                 if keyword == "terraform" and body_node:
                     for src in _required_provider_sources(body_node, source):
@@ -340,6 +354,14 @@ class TerraformParser(BaseParser):
                         platform=_block_platform(keyword, labels),
                     ))
 
+        # File-level platform: set only when every resource/data block agrees on one platform.
+        # Fall back to provider blocks when there are no resource/data blocks — again only
+        # when all providers agree.  Mixed-provider files get null.
+        stmt_platforms = [s.platform for s in statements if s.platform is not None]
+        file_platform = _unanimous_platform(stmt_platforms)
+        if file_platform is None and provider_platforms:
+            file_platform = _unanimous_platform(provider_platforms)
+
         return FileRecord(
             id=fid,
             path=path,
@@ -350,5 +372,5 @@ class TerraformParser(BaseParser):
             externalImports=sorted(external_imports),
             classes=classes,
             statements=statements,
-            platform=_dominant_platform(statements),
+            platform=file_platform,
         )

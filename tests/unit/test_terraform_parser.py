@@ -80,6 +80,17 @@ resource "azurerm_storage_account" "store" {
 }
 """
 
+_GCP_SRC = b"""\
+resource "google_storage_bucket" "assets" {
+  name     = "my-bucket"
+  location = "US"
+}
+
+provider "google" {
+  project = "my-project"
+}
+"""
+
 _PROVIDERS_SRC = b"""\
 terraform {
   required_version = ">= 1.0"
@@ -122,6 +133,23 @@ resource "random_id" "suffix" {
 resource "local_file" "config" {
   content  = "hello"
   filename = "/tmp/config.txt"
+}
+"""
+
+_MIXED_SRC = b"""\
+resource "aws_s3_bucket" "bucket" {
+  bucket = "my-bucket"
+}
+
+resource "azurerm_resource_group" "rg" {
+  name     = "my-rg"
+  location = "East US"
+}
+"""
+
+_PROVIDER_ONLY_SRC = b"""\
+provider "aws" {
+  region = "us-east-1"
 }
 """
 
@@ -280,7 +308,7 @@ def test_output_statement_name() -> None:
     assert out_stmt.name == "bucket_arn"
 
 
-def test_module_statement_name() -> None:
+def test_module_statement_name_is_instance_name() -> None:
     rec = _parse("main.tf", _TF_SRC, capture_statements=True)
     mod_stmts = {s.name for s in rec.statements if s.semanticType == "iac_module"}
     assert "vpc" in mod_stmts
@@ -386,16 +414,16 @@ def test_aws_data_source_platform() -> None:
     assert all(s.platform == "aws" for s in data_stmts)
 
 
-def test_provider_platform() -> None:
-    rec = _parse("main.tf", _TF_SRC, capture_statements=True)
-    prov = next(s for s in rec.statements if "provider" in s.text and s.name == "aws")
-    assert prov.platform == "aws"
-
-
 def test_azure_resource_platform() -> None:
     rec = _parse("azure.tf", _AZURE_SRC, capture_statements=True)
     resources = [s for s in rec.statements if s.semanticType == "iac_resource"]
     assert all(s.platform == "azure" for s in resources)
+
+
+def test_gcp_resource_platform() -> None:
+    rec = _parse("gcp.tf", _GCP_SRC, capture_statements=True)
+    resources = [s for s in rec.statements if s.semanticType == "iac_resource"]
+    assert all(s.platform == "gcp" for s in resources)
 
 
 def test_generic_resource_no_platform() -> None:
@@ -404,10 +432,10 @@ def test_generic_resource_no_platform() -> None:
     assert all(s.platform is None for s in resources)
 
 
-def test_non_resource_blocks_no_platform() -> None:
+def test_structure_only_blocks_no_platform() -> None:
     rec = _parse("main.tf", _TF_SRC, capture_statements=True)
-    no_platform = [s for s in rec.statements if s.semanticType in ("iac_variable", "iac_output", "iac_local", "iac_settings", "iac_module")]
-    assert all(s.platform is None for s in no_platform)
+    no_semantic = [s for s in rec.statements if s.semanticType is None]
+    assert all(s.platform is None for s in no_semantic)
 
 
 def test_file_platform_aws() -> None:
@@ -420,15 +448,40 @@ def test_file_platform_azure() -> None:
     assert rec.platform == "azure"
 
 
+def test_file_platform_gcp() -> None:
+    rec = _parse("gcp.tf", _GCP_SRC, capture_statements=True)
+    assert rec.platform == "gcp"
+
+
 def test_file_platform_none_for_generic() -> None:
     rec = _parse("generic.tf", _GENERIC_SRC, capture_statements=True)
     assert rec.platform is None
 
 
-def test_file_platform_none_without_capture_statements() -> None:
-    # statements not captured → no platform signal
+def test_file_platform_from_provider_even_without_capture_statements() -> None:
+    # provider block is always scanned (ungated) — same as externalImports collection —
+    # so file-level platform is available without --capture-statements
     rec = _parse("main.tf", _TF_SRC, capture_statements=False)
+    assert rec.platform == "aws"
+
+
+def test_file_platform_null_on_mixed_providers() -> None:
+    # mixed aws + azure in same file → no unanimous agreement → null
+    rec = _parse("mixed.tf", _MIXED_SRC, capture_statements=True)
     assert rec.platform is None
+
+
+def test_file_platform_from_provider_block_fallback() -> None:
+    # provider-only file with no resource blocks → platform from provider block
+    rec = _parse("provider.tf", _PROVIDER_ONLY_SRC, capture_statements=True)
+    assert rec.platform == "aws"
+
+
+def test_provider_block_platform_is_null_at_statement_level() -> None:
+    # provider is structure-only: its Statement has no platform
+    rec = _parse("provider.tf", _PROVIDER_ONLY_SRC, capture_statements=True)
+    prov_stmt = next(s for s in rec.statements if "provider" in s.text)
+    assert prov_stmt.platform is None
 
 
 # ── .tfvars statements ────────────────────────────────────────────────────────
