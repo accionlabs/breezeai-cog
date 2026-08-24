@@ -236,20 +236,20 @@ def test_tfvars_semantic_type_is_variable_value() -> None:
     assert all(s.semanticType == "iac_variable_value" for s in rec.statements)
 
 
-# ── statement name (address) ──────────────────────────────────────────────────
+# ── statement name ────────────────────────────────────────────────────────────
 
 
-def test_resource_statement_name_is_address() -> None:
+def test_resource_statement_name_is_resource_type() -> None:
     rec = _parse("main.tf", _TF_SRC, capture_statements=True)
     names = {s.name for s in rec.statements if s.semanticType == "iac_resource"}
-    assert "aws_s3_bucket.my_bucket" in names
-    assert "aws_instance.web" in names
+    assert "aws_s3_bucket" in names
+    assert "aws_instance" in names
 
 
-def test_data_statement_name_is_address() -> None:
+def test_data_statement_name_is_data_type() -> None:
     rec = _parse("main.tf", _TF_SRC, capture_statements=True)
     data_stmt = next(s for s in rec.statements if s.semanticType == "iac_data_source")
-    assert data_stmt.name == "aws_ami.ubuntu"
+    assert data_stmt.name == "aws_ami"
 
 
 def test_variable_statement_name() -> None:
@@ -283,6 +283,34 @@ def test_locals_statement_has_no_name() -> None:
     assert loc_stmt.name is None
 
 
+# ── statement endpoint (Terraform address) ────────────────────────────────────
+
+
+def test_resource_endpoint_is_terraform_address() -> None:
+    rec = _parse("main.tf", _TF_SRC, capture_statements=True)
+    endpoints = {s.endpoint for s in rec.statements if s.semanticType == "iac_resource"}
+    assert "aws_s3_bucket.my_bucket" in endpoints
+    assert "aws_instance.web" in endpoints
+
+
+def test_data_endpoint_has_data_prefix() -> None:
+    rec = _parse("main.tf", _TF_SRC, capture_statements=True)
+    data_stmt = next(s for s in rec.statements if s.semanticType == "iac_data_source")
+    assert data_stmt.endpoint == "data.aws_ami.ubuntu"
+
+
+def test_module_endpoint_has_module_prefix() -> None:
+    rec = _parse("main.tf", _TF_SRC, capture_statements=True)
+    vpc_stmt = next(s for s in rec.statements if s.semanticType == "iac_module" and s.name == "vpc")
+    assert vpc_stmt.endpoint == "module.vpc"
+
+
+def test_structure_only_blocks_have_no_endpoint() -> None:
+    rec = _parse("main.tf", _TF_SRC, capture_statements=True)
+    no_endpoint = [s for s in rec.statements if s.semanticType is None]
+    assert all(s.endpoint is None for s in no_endpoint)
+
+
 # ── statement line numbers / ids ──────────────────────────────────────────────
 
 
@@ -309,7 +337,7 @@ def test_statement_ids_unique() -> None:
 
 def test_statement_text_contains_block_source() -> None:
     rec = _parse("main.tf", _TF_SRC, capture_statements=True)
-    bucket = next(s for s in rec.statements if s.name == "aws_s3_bucket.my_bucket")
+    bucket = next(s for s in rec.statements if s.endpoint == "aws_s3_bucket.my_bucket")
     assert "aws_s3_bucket" in bucket.text
     assert "my_bucket" in bucket.text
     assert "my-bucket-name" in bucket.text
@@ -530,6 +558,20 @@ def test_platform_absent_from_json_when_none() -> None:
     rec = _parse("generic.tf", _GENERIC_SRC, capture_statements=True)
     data = json.loads(rec.model_dump_json(by_alias=True, exclude_none=True))
     assert "platform" not in data
+
+
+def test_endpoint_present_for_resource_in_json() -> None:
+    rec = _parse("main.tf", _TF_SRC, capture_statements=True)
+    data = json.loads(rec.model_dump_json(by_alias=True, exclude_none=True))
+    resource_stmts = [s for s in data["statements"] if s.get("semanticType") == "iac_resource"]
+    assert all("endpoint" in s for s in resource_stmts)
+
+
+def test_endpoint_absent_from_json_for_structure_blocks() -> None:
+    rec = _parse("main.tf", _TF_SRC, capture_statements=True)
+    data = json.loads(rec.model_dump_json(by_alias=True, exclude_none=True))
+    no_semantic = [s for s in data["statements"] if "semanticType" not in s]
+    assert all("endpoint" not in s for s in no_semantic)
 
 
 # ── registry integration ──────────────────────────────────────────────────────

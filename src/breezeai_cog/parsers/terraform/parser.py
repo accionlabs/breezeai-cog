@@ -114,11 +114,26 @@ def _object_get(expr: Node, key: str, source: bytes) -> str | None:
     return None
 
 
-def _block_address(keyword: str, labels: list[str]) -> str | None:
-    """Human-readable address for an HCL block, used as the statement ``name``."""
-    if keyword in ("resource", "data") and len(labels) >= 2:
+def _block_name(keyword: str, labels: list[str]) -> str | None:
+    """The ``name`` for a Statement: resource type for resource/data, instance name otherwise."""
+    if not labels:
+        return None
+    return labels[0]  # resource type OR module/variable/output/provider name
+
+
+def _terraform_address(keyword: str, labels: list[str]) -> str | None:
+    """The Terraform resource address used as Statement ``endpoint``.
+
+    This is the join key: a reference ``aws_s3_bucket.assets`` resolves to the block
+    whose ``endpoint`` is ``"aws_s3_bucket.assets"``.
+    """
+    if keyword == "resource" and len(labels) >= 2:
         return f"{labels[0]}.{labels[1]}"
-    return labels[0] if labels else None
+    if keyword == "data" and len(labels) >= 2:
+        return f"data.{labels[0]}.{labels[1]}"
+    if keyword == "module" and labels:
+        return f"module.{labels[0]}"
+    return None
 
 
 def _module_source(body_node: Node, source: bytes) -> str | None:
@@ -256,7 +271,8 @@ class TerraformParser(BaseParser):
                         text=node_text(block, source),
                         startLine=start,
                         endLine=end,
-                        name=_block_address(keyword, labels),
+                        name=_block_name(keyword, labels),
+                        endpoint=_terraform_address(keyword, labels),
                         platform=_block_platform(keyword, labels),
                     ))
 
