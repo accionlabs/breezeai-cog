@@ -168,13 +168,38 @@ def _supertypes(node: Node, source: bytes) -> tuple[str | None, list[str]]:
                 if ti is not None:
                     extends = node_text(ti, source)
             continue
-        # bare user_type → interface being implemented
+        # bare user_type → interface being implemented. Preserve type arguments
+        # (Repository<Order>, not Repository) to match Java/C#/Groovy on `implements`.
         ut = next((c for c in child.named_children if c.type == "user_type"), None)
         if ut is not None:
-            ti = next((c for c in ut.named_children if c.type == "type_identifier"), None)
-            if ti is not None:
-                implements.append(node_text(ti, source))
+            implements.append(node_text(ut, source))
     return extends, implements
+
+
+def _find_type_identifier(node: Node, source: bytes) -> str | None:
+    """First nested type_identifier text (used for receiver-type extraction)."""
+    for child in node.named_children:
+        if child.type == "type_identifier":
+            return node_text(child, source)
+        found = _find_type_identifier(child, source)
+        if found is not None:
+            return found
+    return None
+
+
+def _has_modifier(modifiers: Node | None, keyword: str, source: bytes) -> bool:
+    """True if the modifiers node carries a bare keyword (e.g. suspend, sealed)."""
+    if modifiers is None:
+        return False
+    return any(node_text(c, source) == keyword for c in modifiers.named_children)
+
+
+def _receiver_type(node: Node, source: bytes) -> str | None:
+    """Extension-function receiver type, e.g. "String" from `fun String.slugify()`."""
+    rt = next((c for c in node.named_children if c.type == "receiver_type"), None)
+    if rt is None:
+        return None
+    return _find_type_identifier(rt, source) or node_text(rt, source)
 
 
 def _return_type(node: Node, source: bytes) -> str | None:
@@ -305,6 +330,9 @@ class KotlinParser(BaseParser):
         if ctor is not None:
             ctor_params = self._primary_ctor_params(ctor, source)
 
+        # Members of an `object` (singleton) are static, like companion members.
+        member_static = node.type == "object_declaration"
+
         if body is not None:
             from .statements import extract_statements as _extract_stmts
             statements.extend(
@@ -316,11 +344,22 @@ class KotlinParser(BaseParser):
                     fn, sub_fns, sub_cls, fn_stmts = self._build_function(
                         member, source, path, parent_id=cid, seen_ids=seen_ids,
                         capture=capture, limit=limit, resolve=resolve,
+                        func_type="method", is_static=member_static,
                     )
                     methods.append(fn)
                     methods.extend(sub_fns)
                     nested_classes.extend(sub_cls)
                     statements.extend(fn_stmts)
+                elif member.type == "companion_object":
+                    # Companion object is Kotlin's static-member holder — its members
+                    # attach to the enclosing class, not a separate node (BREEZEAI-839).
+                    comp_cls, comp_methods, comp_stmts = self._build_companion(
+                        member, source, path, parent_id=cid, seen_ids=seen_ids,
+                        capture=capture, limit=limit, resolve=resolve,
+                    )
+                    nested_classes.extend(comp_cls)
+                    methods.extend(comp_methods)
+                    statements.extend(comp_stmts)
                 elif member.type in _CLASS_TYPES:
                     # Nested inner class/object — returned flat, parented to this class.
                     sub_cls, sub_methods, sub_stmts = self._build_class(
@@ -349,6 +388,7 @@ class KotlinParser(BaseParser):
             type=_class_kind(node),
             visibility=visibility,
             isAbstract=is_abstract,
+            isSealed=True if _has_modifier(mods, "sealed", source) else None,
             generics=generics,
             extends=extends,
             implements=implements,
@@ -358,6 +398,57 @@ class KotlinParser(BaseParser):
             endLine=end,
         )
         return [cls, *nested_classes], methods, statements
+
+    def _build_companion(
+        self,
+        node: Node,
+        source: bytes,
+        path: str,
+        *,
+        parent_id: str,
+        seen_ids: set[str],
+        capture: bool,
+        limit: int,
+        resolve: CallResolver = noop_resolver,
+    ) -> tuple[list[Class], list[Function], list[Statement]]:
+        """Extract a `companion object`'s members, attached to the enclosing class.
+
+        Companion members are Kotlin's static-member equivalent, so functions are
+        emitted as static methods and const/val properties as statements — all
+        parented to the enclosing class rather than a distinct companion node.
+        """
+        body = next((c for c in node.named_children if c.type == "class_body"), None)
+        classes: list[Class] = []
+        methods: list[Function] = []
+        statements: list[Statement] = []
+        if body is None:
+            return classes, methods, statements
+
+        from .statements import extract_statements as _extract_stmts
+        statements.extend(
+            _extract_stmts(body, source, path, parent_id=parent_id, capture=capture,
+                            limit=limit, seen_ids=seen_ids)
+        )
+        for member in body.named_children:
+            if member.type == "function_declaration":
+                fn, sub_fns, sub_cls, fn_stmts = self._build_function(
+                    member, source, path, parent_id=parent_id, seen_ids=seen_ids,
+                    capture=capture, limit=limit, resolve=resolve,
+                    func_type="method", is_static=True,
+                )
+                methods.append(fn)
+                methods.extend(sub_fns)
+                classes.extend(sub_cls)
+                statements.extend(fn_stmts)
+            elif member.type in _CLASS_TYPES:
+                sub_cls, sub_methods, sub_stmts = self._build_class(
+                    member, source, path, parent_id=parent_id, seen_ids=seen_ids,
+                    capture=capture, limit=limit, resolve=resolve,
+                )
+                classes.extend(sub_cls)
+                methods.extend(sub_methods)
+                statements.extend(sub_stmts)
+        return classes, methods, statements
 
     def _primary_ctor_params(self, ctor: Node, source: bytes) -> list[ConstructorParam]:
         params: list[ConstructorParam] = []
@@ -414,6 +505,8 @@ class KotlinParser(BaseParser):
         capture: bool,
         limit: int,
         resolve: CallResolver = noop_resolver,
+        func_type: str = "function",
+        is_static: bool | None = None,
     ) -> tuple[Function, list[Function], list[Class], list[Statement]]:
         name = self._decl_name(node, source)
         start, end = line_span(node)
@@ -467,16 +560,21 @@ class KotlinParser(BaseParser):
                     nested_fns.extend(sub_methods)
                     statements.extend(sub_stmts)
 
+        is_async = True if _has_modifier(mods, "suspend", source) else None
+
         fn = Function(
             id=fid,
             parentId=parent_id,
             path=path,
             name=name,
-            type="function",
+            type=func_type,
             visibility=visibility,
+            isStatic=is_static,
+            isAsync=is_async,
             params=params,
             decorators=decorators,
             returnType=ret,
+            receiverType=_receiver_type(node, source),
             startLine=start,
             endLine=end,
             calls=calls,

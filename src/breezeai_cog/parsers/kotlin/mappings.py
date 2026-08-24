@@ -26,6 +26,7 @@ EMIT_TYPES = CONTROL_FLOW | JUMP | DECLARATIONS
 NESTED_SCOPES = {
     "class_declaration",
     "object_declaration",
+    "companion_object",
     "function_declaration",
     "lambda_literal",
     "anonymous_initializer",
