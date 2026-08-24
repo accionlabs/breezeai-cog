@@ -2,8 +2,11 @@
 
 Each top-level HCL block becomes a Statement (gated by ``--capture-statements``) whose
 ``text`` is the verbatim block source.  This makes blocks directly filterable via the MCP
-``get_nodes_by_label`` tool (e.g. ``filterby[text][containsi]="azure"``), without relying
-on embedding search or metadata blob parsing.
+``get_nodes_by_label`` tool (e.g. ``filterby[text][containsi]="azure"``).
+
+``module`` blocks additionally yield Class records (always, not gated) whose
+``constructorParams`` are the input variables passed to the module — the IaC equivalent of
+dependency-injected constructor parameters.
 
 Module and provider sources are also surfaced as ``externalImports`` (always, ungated),
 so the file-level graph retains dependency edges regardless of the statements flag.
@@ -16,8 +19,9 @@ from pathlib import Path
 
 from tree_sitter import Node
 
-from ...emit import disambiguate, file_id, statement_id
+from ...emit import class_id, disambiguate, file_id, statement_id
 from ...schemas import SCHEMA_VERSION, FileRecord, Statement
+from ...schemas.capture import Class, ConstructorParam
 from ...utils import count_loc
 from ..base import BaseParser, ParseContext
 from ..treesitter import node_text, parse_source
@@ -38,6 +42,11 @@ _SEMANTIC_TYPE: dict[str, str | None] = {
     "locals": None,
     "terraform": None,
 }
+
+# Terraform meta-arguments in module blocks — NOT constructor params
+_MODULE_META_ARGS: frozenset[str] = frozenset(
+    {"source", "version", "count", "for_each", "providers", "depends_on"}
+)
 
 # ── platform detection ────────────────────────────────────────────────────────
 
@@ -116,6 +125,24 @@ def _object_get(expr: Node, key: str, source: bytes) -> str | None:
     return None
 
 
+def _infer_value_type(expr_node: Node, source: bytes) -> str:
+    """Infer the HCL type of a value expression from its AST structure."""
+    if expr_node.type != "expression":
+        return "any"
+    for child in expr_node.named_children:
+        if child.type != "literal_value":
+            continue
+        for lit in child.named_children:
+            if lit.type == "string_lit":
+                return "string"
+            if lit.type == "numeric_lit":
+                return "number"
+        raw = node_text(child, source).strip()
+        if raw in ("true", "false"):
+            return "bool"
+    return "any"
+
+
 def _block_name(keyword: str, labels: list[str]) -> str | None:
     """The ``name`` for a Statement: resource type for resource/data, instance name otherwise."""
     if not labels:
@@ -155,6 +182,22 @@ def _module_source(body_node: Node, source: bytes) -> str | None:
             raw = node_text(kids[1], source).strip()
             return raw if raw else None
     return None
+
+
+def _module_constructor_params(body_node: Node, source: bytes) -> list[ConstructorParam]:
+    """Extract module input variables from a module body, skipping meta-arguments."""
+    params: list[ConstructorParam] = []
+    for attr in body_node.named_children:
+        if attr.type != "attribute":
+            continue
+        kids = attr.named_children
+        if len(kids) < 2 or kids[0].type != "identifier":
+            continue
+        attr_name = node_text(kids[0], source)
+        if attr_name in _MODULE_META_ARGS:
+            continue
+        params.append(ConstructorParam(name=attr_name, type=_infer_value_type(kids[1], source)))
+    return params
 
 
 def _required_provider_sources(terraform_body: Node, source: bytes) -> list[str]:
@@ -202,6 +245,9 @@ class TerraformParser(BaseParser):
         With ``--capture-statements``: each top-level block → one Statement whose
         ``text`` is the verbatim HCL source, making it directly filterable by MCP.
         Without the flag: only ``externalImports`` (module + provider sources) are captured.
+
+        Module blocks always yield a Class record (ungated) whose ``constructorParams``
+        are the input variables passed to the module.
         """
         source = ctx.source
         path = ctx.path
@@ -209,6 +255,7 @@ class TerraformParser(BaseParser):
         is_tfvars = Path(path).suffix == ".tfvars"
 
         statements: list[Statement] = []
+        classes: list[Class] = []
         external_imports: set[str] = set()
         seen_ids: set[str] = set()
 
@@ -257,6 +304,21 @@ class TerraformParser(BaseParser):
                     if src and not src.startswith(("./", "../")):
                         external_imports.add(src)
 
+                    # Module blocks yield a Class record (ungated — mirrors how code
+                    # parsers always capture class structure regardless of statement flag)
+                    instance_name = labels[0]
+                    cid = disambiguate(class_id(path, instance_name), seen_ids)
+                    seen_ids.add(cid)
+                    classes.append(Class(
+                        id=cid,
+                        parentId=fid,
+                        name=instance_name,
+                        type="module",
+                        startLine=start,
+                        endLine=end,
+                        constructorParams=_module_constructor_params(body_node, source),
+                    ))
+
                 # Always collect required_providers sources (ungated)
                 if keyword == "terraform" and body_node:
                     for src in _required_provider_sources(body_node, source):
@@ -286,6 +348,7 @@ class TerraformParser(BaseParser):
             framework="terraform",
             loc=count_loc(source.decode("utf-8", "replace")),
             externalImports=sorted(external_imports),
+            classes=classes,
             statements=statements,
             platform=_dominant_platform(statements),
         )

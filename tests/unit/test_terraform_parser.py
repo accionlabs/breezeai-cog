@@ -1,5 +1,5 @@
-"""TerraformParser: statement emission (gated by capture_statements), externalImports,
-ignore patterns, and registry integration."""
+"""TerraformParser: statement emission (gated by capture_statements), module Class records,
+externalImports, platform detection, endpoint addressing, ignore patterns, and registry integration."""
 
 from __future__ import annotations
 
@@ -40,6 +40,7 @@ output "bucket_arn" {
 module "vpc" {
   source  = "terraform-aws-modules/vpc/aws"
   version = "3.0.0"
+  cidr    = "10.0.0.0/16"
 }
 
 module "local_mod" {
@@ -124,6 +125,16 @@ resource "local_file" "config" {
 }
 """
 
+_MODULE_ATTRS_SRC = b"""\
+module "network" {
+  source      = "terraform-aws-modules/vpc/aws"
+  version     = "3.0.0"
+  cidr        = "10.0.0.0/16"
+  enable_nat  = true
+  az_count    = 3
+}
+"""
+
 
 def _parse(path: str, source: bytes, *, capture_statements: bool = False):
     ctx = ParseContext(
@@ -151,10 +162,9 @@ def test_no_metadata() -> None:
     assert rec.metadata is None
 
 
-def test_no_functions_or_classes() -> None:
+def test_no_functions() -> None:
     rec = _parse("main.tf", _TF_SRC)
     assert rec.functions == []
-    assert rec.classes == []
 
 
 def test_loc_positive() -> None:
@@ -450,6 +460,73 @@ def test_tfvars_no_statements_without_flag() -> None:
     assert rec.statements == []
 
 
+def test_tfvars_no_classes() -> None:
+    rec = _parse("prod.auto.tfvars", _TFVARS_SRC)
+    assert rec.classes == []
+
+
+# ── module Class records ──────────────────────────────────────────────────────
+
+
+def test_module_yields_class_record() -> None:
+    rec = _parse("main.tf", _TF_SRC)
+    class_names = {c.name for c in rec.classes}
+    assert "vpc" in class_names
+    assert "local_mod" in class_names
+
+
+def test_module_class_type_is_module() -> None:
+    rec = _parse("main.tf", _TF_SRC)
+    for cls in rec.classes:
+        assert cls.type == "module"
+
+
+def test_module_class_parent_id_is_file_id() -> None:
+    rec = _parse("main.tf", _TF_SRC)
+    assert all(c.parentId == rec.id for c in rec.classes)
+
+
+def test_module_class_ids_unique() -> None:
+    rec = _parse("main.tf", _DEDUP_SRC)
+    ids = [c.id for c in rec.classes]
+    assert len(ids) == len(set(ids))
+
+
+def test_module_class_emitted_without_capture_statements() -> None:
+    # Class records are not gated by --capture-statements
+    rec = _parse("main.tf", _TF_SRC, capture_statements=False)
+    assert len(rec.classes) > 0
+
+
+def test_module_constructor_params_exclude_meta_args() -> None:
+    rec = _parse("network.tf", _MODULE_ATTRS_SRC)
+    net_cls = next(c for c in rec.classes if c.name == "network")
+    param_names = {p.name for p in net_cls.constructorParams}
+    # meta-args must be excluded
+    assert "source" not in param_names
+    assert "version" not in param_names
+    # input variables must be included
+    assert "cidr" in param_names
+    assert "enable_nat" in param_names
+    assert "az_count" in param_names
+
+
+def test_module_constructor_params_type_inference() -> None:
+    rec = _parse("network.tf", _MODULE_ATTRS_SRC)
+    net_cls = next(c for c in rec.classes if c.name == "network")
+    params = {p.name: p.type for p in net_cls.constructorParams}
+    assert params["cidr"] == "string"
+    assert params["enable_nat"] == "bool"
+    assert params["az_count"] == "number"
+
+
+def test_module_class_line_numbers() -> None:
+    rec = _parse("network.tf", _MODULE_ATTRS_SRC)
+    net_cls = next(c for c in rec.classes if c.name == "network")
+    assert net_cls.startLine >= 1
+    assert net_cls.endLine >= net_cls.startLine
+
+
 # ── externalImports: module sources (ungated) ─────────────────────────────────
 
 
@@ -512,6 +589,7 @@ def test_empty_tf_file() -> None:
     assert rec.type == "config"
     assert rec.statements == []
     assert rec.externalImports == []
+    assert rec.classes == []
 
 
 # ── ignore patterns ───────────────────────────────────────────────────────────
