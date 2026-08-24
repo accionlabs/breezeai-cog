@@ -114,3 +114,43 @@ def test_enum_members_captured_as_statements(tmp_path) -> None:
     ctx2 = ParseContext(path="s.vb", abs_path=p, source=src, repo_root=tmp_path,
                         capture_statements=False)
     assert VbParser().parse_file(ctx2).statements == []
+
+
+def test_class_constants_and_fields_captured_as_statements(tmp_path) -> None:
+    # Class-level Const / Shared ReadOnly / plain fields become flat statements parented
+    # to the Class, with the value preserved in `text`. Heritage clauses (Inherits /
+    # Implements), which tree-sitter-vb misparses as field_declaration / ERROR, must NOT
+    # leak in as spurious member statements.
+    src = (
+        b"Public Class Config\n"
+        b"    Inherits BaseConfig\n"
+        b"    Implements IConfig\n"
+        b"    Public Const MaxRetries As Integer = 5\n"
+        b"    Public Shared ReadOnly Name As String = \"x\"\n"
+        b"    Private counter As Integer\n"
+        b"    Public Property Size As Integer\n"
+        b"        Get\n"
+        b"            Return 42\n"
+        b"        End Get\n"
+        b"    End Property\n"
+        b"End Class\n"
+    )
+    p = tmp_path / "c.vb"
+    p.write_bytes(src)
+    ctx = ParseContext(path="c.vb", abs_path=p, source=src, repo_root=tmp_path,
+                       capture_statements=True)
+    rec = VbParser().parse_file(ctx)
+    cls = next(c for c in rec.classes if c.name == "Config")
+    members = {s.name: (s.nodeType, (s.text or "").strip()) for s in rec.statements if s.parentId == cls.id}
+    assert members["MaxRetries"] == ("const_declaration", "Public Const MaxRetries As Integer = 5")
+    assert "Name" in members and members["Name"][0] == "field_declaration"
+    assert "counter" in members
+    # Heritage misparses must not appear as statements.
+    assert "IConfig" not in members and "BaseConfig" not in members
+    # Property accessor bodies must NOT be pulled up and mis-parented to the class.
+    class_texts = [t for _, t in members.values()]
+    assert not any("Return 42" in t for t in class_texts), "property body leaked into class"
+    # Nothing captured without the flag.
+    ctx2 = ParseContext(path="c.vb", abs_path=p, source=src, repo_root=tmp_path,
+                        capture_statements=False)
+    assert VbParser().parse_file(ctx2).statements == []

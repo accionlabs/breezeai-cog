@@ -120,10 +120,16 @@ class Function(BaseModel):
     path: str | None = None
     visibility: str | None = None
     isStatic: bool | None = None
+    # async / coroutine boundary — language-neutral (Kotlin `suspend`, and the
+    # analogue for TS/C#/Python `async`). Present (True) only when async.
+    isAsync: bool | None = None
     generics: str | None = None
     params: list[Parameter] = Field(default_factory=list)
     decorators: list[Decorator] = Field(default_factory=list)
     returnType: str | None = None
+    # extension-function receiver type, e.g. "String" for `fun String.slugify()`
+    # (Kotlin; C# `this`-parameter extension methods are the analogue). Base type only.
+    receiverType: str | None = None
     # see FileRecord.uiRole (a function-anchored component / composable / hook)
     uiRole: str | None = None
     metadata: dict[str, Any] | None = None
@@ -146,6 +152,9 @@ class Class(BaseModel):
     path: str | None = None
     visibility: str | None = None
     isAbstract: bool | None = None
+    # closed hierarchy — Kotlin `sealed` (C#/Java `sealed` are the analogue).
+    # Sibling of isAbstract; present (True) only when sealed.
+    isSealed: bool | None = None
     generics: str | None = None
     extends: str | None = None  # parent class name → builds EXTENDS
     # see FileRecord.uiRole (a class-anchored component, e.g. an Angular @Component)

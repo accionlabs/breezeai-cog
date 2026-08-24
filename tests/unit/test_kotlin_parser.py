@@ -49,7 +49,9 @@ def test_imports_and_basic_structure(tmp_path) -> None:
 def test_functions_and_primary_constructor(tmp_path) -> None:
     rec = _parse(tmp_path)
     fn = next(f for f in rec.functions if f.name == "getOrder")
-    assert fn.type == "function"
+    # Class members are methods (not plain functions), and not static.
+    assert fn.type == "method"
+    assert fn.isStatic is False
     assert fn.params[0].name == "id"
     assert fn.params[0].type == "Long"
     assert any(c.name == "findById" for c in fn.calls)
@@ -96,6 +98,104 @@ def test_enum_entries_captured_as_statements(tmp_path) -> None:
     ctx2 = ParseContext(path="d.kt", abs_path=p, source=src, repo_root=tmp_path,
                         capture_statements=False)
     assert KotlinParser().parse_file(ctx2).statements == []
+
+
+# BREEZEAI-839: companion members, method typing, suspend/receiver metadata,
+# implements type args, and sealed marking.
+_GAPS_SRC = b'''\
+package com.acme
+
+interface Repository<T> {
+    fun findById(id: String): T?
+}
+
+abstract class ServiceBase(val audit: Audit) {
+    abstract fun flush()
+}
+
+sealed class Result
+
+object Registry {
+    fun register(x: Int) {}
+}
+
+class OrderService(audit: Audit) : ServiceBase(audit), Repository<Order> {
+    companion object {
+        const val MAX = 100
+        fun <R> mapAll(src: List<Order>, f: (Order) -> R): List<R> = src.map(f)
+    }
+    override fun findById(id: String): Order? = null
+    override fun flush() {}
+    suspend fun loadAsync(id: String): Order? = null
+}
+
+fun String.slugify(): String = this.lowercase()
+'''
+
+
+def _parse_gaps(tmp_path) -> FileRecord:
+    p = tmp_path / "Gaps.kt"
+    p.write_bytes(_GAPS_SRC)
+    ctx = ParseContext(path="Gaps.kt", abs_path=p, source=_GAPS_SRC,
+                       repo_root=tmp_path, capture_statements=True)
+    return KotlinParser().parse_file(ctx)
+
+
+def test_companion_object_function_captured_as_static_method(tmp_path) -> None:
+    rec = _parse_gaps(tmp_path)
+    mapall = next((f for f in rec.functions if f.name == "mapAll"), None)
+    assert mapall is not None, "companion object function mapAll not captured"
+    assert mapall.type == "method"
+    assert mapall.isStatic is True
+    svc = next(c for c in rec.classes if c.name == "OrderService")
+    assert mapall.parentId == svc.id, "companion member must attach to enclosing class"
+    # const val is captured as a statement attached to the enclosing class.
+    max_stmt = next((s for s in rec.statements if s.name == "MAX"), None)
+    assert max_stmt is not None and max_stmt.parentId == svc.id
+
+
+def test_class_members_typed_method_with_is_static(tmp_path) -> None:
+    rec = _parse_gaps(tmp_path)
+    instance = next(f for f in rec.functions if f.name == "flush" and f.type == "method")
+    assert instance.isStatic is False
+    # object (singleton) members are static methods.
+    register = next(f for f in rec.functions if f.name == "register")
+    assert register.type == "method" and register.isStatic is True
+    # top-level extension stays a function.
+    slug = next(f for f in rec.functions if f.name == "slugify")
+    assert slug.type == "function"
+
+
+def test_suspend_and_receiver_fields(tmp_path) -> None:
+    rec = _parse_gaps(tmp_path)
+    # suspend → first-class isAsync (language-neutral async boundary).
+    load = next(f for f in rec.functions if f.name == "loadAsync")
+    assert load.isAsync is True
+    assert load.receiverType is None
+    # extension receiver → first-class receiverType (base type only).
+    slug = next(f for f in rec.functions if f.name == "slugify")
+    assert slug.receiverType == "String"
+    assert slug.isAsync is None
+    # A plain instance method carries neither.
+    plain = next(f for f in rec.functions if f.name == "findById")
+    assert plain.isAsync is None and plain.receiverType is None
+
+
+def test_implements_preserves_type_arguments(tmp_path) -> None:
+    rec = _parse_gaps(tmp_path)
+    svc = next(c for c in rec.classes if c.name == "OrderService")
+    assert svc.implements == ["Repository<Order>"]
+    assert svc.extends == "ServiceBase"
+
+
+def test_sealed_class_field(tmp_path) -> None:
+    rec = _parse_gaps(tmp_path)
+    # sealed → first-class isSealed (sibling of isAbstract).
+    result = next(c for c in rec.classes if c.name == "Result")
+    assert result.isSealed is True
+    # non-sealed classes carry no isSealed marker.
+    svc = next(c for c in rec.classes if c.name == "OrderService")
+    assert svc.isSealed is None
 
 
 def test_property_annotations_captured_on_statements(tmp_path) -> None:

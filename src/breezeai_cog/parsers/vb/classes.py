@@ -85,6 +85,17 @@ def build_class(
                     for p in extract_params(member.child_by_field_name("parameters"), source)
                 ]
 
+    # Class-level constants and static/readonly fields (`Const`, `Shared ReadOnly`, plain
+    # fields) become flat statements parented to this Class — their `text` (incl. any
+    # `= value`) is the queryable business vocabulary. Method bodies are NESTED_SCOPES and
+    # are extracted by build_method, so this only picks up the type's own members.
+    if capture:
+        from .statements import extract_statements as _extract_stmts
+        statements.extend(
+            _extract_stmts(node, source, path, parent_id=cid, capture=capture,
+                           limit=limit, seen_ids=seen_ids)
+        )
+
     # Enum members become flat statements parented to the enum Class (their `text` — incl.
     # any `= value` — is queryable). Gated by --capture-statements like every other statement.
     if capture and node.type == "enum_block":
