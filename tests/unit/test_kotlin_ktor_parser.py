@@ -68,18 +68,33 @@ def test_ktor_get_route():
     """`get("/users") { }` produces a route Statement with correct fields."""
     rec = _parse(_KTOR_SRC)
     routes = [s for s in rec.statements if s.semanticType == "route"]
-    get_routes = [s for s in routes if s.method == "get"]
+    get_routes = [s for s in routes if s.method == "GET"]
     assert any(s.endpoint == "/users" for s in get_routes), (
         f"Expected /users GET route; got: {[(s.method, s.endpoint) for s in routes]}"
     )
 
 
 def test_ktor_multiple_verbs():
-    """All HTTP verb calls produce separate route statements."""
+    """All HTTP verb calls produce separate route statements (uppercase verbs)."""
     rec = _parse(_KTOR_SRC)
     routes = [s for s in rec.statements if s.semanticType == "route"]
     methods = {s.method for s in routes}
-    assert {"get", "post", "put", "delete"} <= methods
+    assert {"GET", "POST", "PUT", "DELETE"} <= methods
+
+
+def test_ktor_route_framework_and_uppercase_method():
+    """Every Ktor route carries framework="ktor" and an uppercase HTTP verb, so
+    the standard route filters (by framework / by GET) match it."""
+    rec = _parse(_KTOR_SRC)
+    routes = [s for s in rec.statements if s.semanticType == "route"]
+    assert routes, "expected Ktor route statements"
+    # framework stamped on every route statement (not just the FileRecord).
+    assert all(s.framework == "ktor" for s in routes), (
+        f"missing framework=ktor; got: {[(s.method, s.endpoint, s.framework) for s in routes]}"
+    )
+    # verbs are uppercase, matching every other route parser.
+    assert all(s.method == s.method.upper() for s in routes)
+    assert any(s.method == "GET" and s.endpoint == "/users" for s in routes)
 
 
 def test_ktor_nested_route_prefix():
@@ -152,7 +167,7 @@ def test_ktor_constant_route_prefix():
 def test_ktor_no_arg_post_inherits_prefix():
     """`post {{ }}` inside `route(CONSTANT)` emits route with prefix as endpoint."""
     rec = _parse(_CONST_ROUTE_SRC)
-    routes = [s for s in rec.statements if s.semanticType == "route" and s.method == "post"]
+    routes = [s for s in rec.statements if s.semanticType == "route" and s.method == "POST"]
     # One route should be exactly "{API_PATH}" (no suffix), another "{API_PATH}{ASYNC_PATH}"
     endpoints = {s.endpoint for s in routes}
     assert "{API_PATH}" in endpoints, f"Expected plain-prefix POST route; got {endpoints}"
