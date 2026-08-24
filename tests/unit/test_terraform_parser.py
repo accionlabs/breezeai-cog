@@ -185,9 +185,9 @@ def test_emits_config_record() -> None:
     assert rec.framework == "terraform"
 
 
-def test_no_metadata() -> None:
+def test_metadata_category_is_iac() -> None:
     rec = _parse("main.tf", _TF_SRC)
-    assert rec.metadata is None
+    assert rec.metadata == {"category": "iac"}
 
 
 def test_no_functions() -> None:
@@ -498,40 +498,6 @@ def test_provider_block_platform_is_null_at_statement_level() -> None:
     assert prov_stmt.platform is None
 
 
-# ── .tfvars statements ────────────────────────────────────────────────────────
-
-
-def test_tfvars_emits_variable_value_statements() -> None:
-    rec = _parse("prod.auto.tfvars", _TFVARS_SRC, capture_statements=True)
-    assert rec.type == "config"
-    assert rec.language == "hcl"
-    assert rec.framework == "terraform"
-    node_types = {s.nodeType for s in rec.statements}
-    assert node_types == {"attribute"}
-
-
-def test_tfvars_statement_names_are_variable_names() -> None:
-    rec = _parse("prod.auto.tfvars", _TFVARS_SRC, capture_statements=True)
-    names = {s.name for s in rec.statements}
-    assert names == {"region", "instance_count", "enable_logging"}
-
-
-def test_tfvars_statement_text_contains_value() -> None:
-    rec = _parse("prod.auto.tfvars", _TFVARS_SRC, capture_statements=True)
-    region_stmt = next(s for s in rec.statements if s.name == "region")
-    assert "eu-west-1" in region_stmt.text
-
-
-def test_tfvars_no_statements_without_flag() -> None:
-    rec = _parse("prod.auto.tfvars", _TFVARS_SRC, capture_statements=False)
-    assert rec.statements == []
-
-
-def test_tfvars_no_classes() -> None:
-    rec = _parse("prod.auto.tfvars", _TFVARS_SRC)
-    assert rec.classes == []
-
-
 # ── module Class records ──────────────────────────────────────────────────────
 
 
@@ -592,6 +558,40 @@ def test_module_class_line_numbers() -> None:
     net_cls = next(c for c in rec.classes if c.name == "network")
     assert net_cls.startLine >= 1
     assert net_cls.endLine >= net_cls.startLine
+
+
+# ── .tfvars statements ────────────────────────────────────────────────────────
+
+
+def test_tfvars_emits_variable_value_statements() -> None:
+    rec = _parse("prod.auto.tfvars", _TFVARS_SRC, capture_statements=True)
+    assert rec.type == "config"
+    assert rec.language == "hcl"
+    assert rec.framework == "terraform"
+    node_types = {s.nodeType for s in rec.statements}
+    assert node_types == {"attribute"}
+
+
+def test_tfvars_statement_names_are_variable_names() -> None:
+    rec = _parse("prod.auto.tfvars", _TFVARS_SRC, capture_statements=True)
+    names = {s.name for s in rec.statements}
+    assert names == {"region", "instance_count", "enable_logging"}
+
+
+def test_tfvars_statement_text_contains_value() -> None:
+    rec = _parse("prod.auto.tfvars", _TFVARS_SRC, capture_statements=True)
+    region_stmt = next(s for s in rec.statements if s.name == "region")
+    assert "eu-west-1" in region_stmt.text
+
+
+def test_tfvars_no_statements_without_flag() -> None:
+    rec = _parse("prod.auto.tfvars", _TFVARS_SRC, capture_statements=False)
+    assert rec.statements == []
+
+
+def test_tfvars_no_classes() -> None:
+    rec = _parse("prod.auto.tfvars", _TFVARS_SRC)
+    assert rec.classes == []
 
 
 # ── externalImports: module sources (ungated) ─────────────────────────────────
@@ -687,7 +687,7 @@ def test_record_serializes_schema_valid() -> None:
     assert data["framework"] == "terraform"
     assert data["platform"] == "aws"
     assert "statements" in data
-    assert "metadata" not in data
+    assert data["metadata"] == {"category": "iac"}
 
 
 def test_tfvars_record_serializes_schema_valid() -> None:

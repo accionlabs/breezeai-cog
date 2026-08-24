@@ -229,6 +229,10 @@ class ProjectMetaData(BaseModel):
         # count. Format-neutral: covers every full-capture parser, not just JSON.
         if (cfg.get("capturedDataDocuments") or 0) > 0:
             return True
+        # IaC repos (Terraform, etc.) have no code language or functions but are real
+        # content — detected via the "iac" category set in FileRecord.metadata.
+        if "iac" in (cfg.get("byType") or {}):
+            return True
         if (cfg.get("dependencies") or {}).get("total", 0):
             return True
         docker = cfg.get("docker") or {}

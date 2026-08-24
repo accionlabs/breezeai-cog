@@ -120,18 +120,6 @@ def _expr_str(node: Node, source: bytes) -> str | None:
     return None
 
 
-def _object_get(expr: Node, key: str, source: bytes) -> str | None:
-    """Get the string value of *key* from an HCL object expression."""
-    for node in _iter_nodes(expr):
-        if node.type == "object_elem":
-            kids = node.named_children
-            if len(kids) >= 2:
-                k = node_text(kids[0], source).strip('"')
-                if k == key:
-                    return _expr_str(kids[1], source)
-    return None
-
-
 def _infer_value_type(expr_node: Node, source: bytes) -> str:
     """Infer the HCL type of a value expression from its AST structure."""
     if expr_node.type != "expression":
@@ -148,6 +136,18 @@ def _infer_value_type(expr_node: Node, source: bytes) -> str:
         if raw in ("true", "false"):
             return "bool"
     return "any"
+
+
+def _object_get(expr: Node, key: str, source: bytes) -> str | None:
+    """Get the string value of *key* from an HCL object expression."""
+    for node in _iter_nodes(expr):
+        if node.type == "object_elem":
+            kids = node.named_children
+            if len(kids) >= 2:
+                k = node_text(kids[0], source).strip('"')
+                if k == key:
+                    return _expr_str(kids[1], source)
+    return None
 
 
 def _block_name(keyword: str, labels: list[str]) -> str | None:
@@ -373,4 +373,5 @@ class TerraformParser(BaseParser):
             classes=classes,
             statements=statements,
             platform=file_platform,
+            metadata={"category": "iac"},
         )
