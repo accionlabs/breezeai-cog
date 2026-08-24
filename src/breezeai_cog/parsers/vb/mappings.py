@@ -31,6 +31,7 @@ DECLARATIONS = {
     "dim_statement",
     "call_statement",
     "field_declaration",
+    "const_declaration",
     "local_declaration_statement",
     "assignment_statement",
 }
@@ -46,6 +47,11 @@ NESTED_SCOPES = {
     "module_block",
     "method_declaration",
     "constructor_declaration",
+    # Members with their own bodies — barrier them during class-body statement capture so
+    # their accessor/handler statements aren't pulled up and mis-parented to the class.
+    "property_declaration",
+    "event_declaration",
+    "operator_declaration",
     "lambda_expression",
 }
 
