@@ -68,6 +68,12 @@ temp/
 # breezeai-cog's own artifact directory (export / skip report / logs) — never re-ingest it
 .cog/
 
+# Terraform state / lock (generated, machine-written — never meaningful source)
+*.tfstate
+*.tfstate.backup
+*.tfstate.*.backup
+.terraform.lock.hcl
+
 # Tests (excluded by default; re-include via .repoinclude)
 test/
 tests/

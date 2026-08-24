@@ -51,4 +51,15 @@ SemanticType = Literal[
     # language, plus Python docstrings. Persisted verbatim by the backend like
     # ``structured_data`` above.
     "comment",
+    # IaC block types (HCL/Terraform family) — behaviour-only:
+    #   resource  = declares/owns infrastructure
+    #   data      = reads existing infrastructure owned elsewhere
+    #   module    = composition/reuse
+    # Structure-only blocks (variable/output/locals/provider/terraform) carry nodeType
+    # but NO semanticType, so they are excluded from this enum.
+    "iac_resource",
+    "iac_data",
+    "iac_module",
+    # .tfvars attribute assignment (variable values, not variable declarations)
+    "iac_variable_value",
 ]

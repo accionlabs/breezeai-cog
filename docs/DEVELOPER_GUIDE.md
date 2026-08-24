@@ -108,6 +108,15 @@ that wraps it) — surface the wrapping host node, or `synthetic` when there's n
 **never** the embedded grammar's own node type (e.g. `field_definition`). The page / mount / rpc /
 `query`/`mutation`/`subscription` (GraphQL) distinction is carried by `routeKind` + `framework`, **not** by `nodeType`, so nothing is lost.
 
+### IaC parsers (`semanticType` + `platform`)
+
+Config parsers for Infrastructure-as-Code tools use a dedicated **`iac_*` `semanticType` family**
+(e.g. `iac_resource`, `iac_provider`, `iac_variable`) instead of the route/db/event family — see
+`schemas/enums.py` for the full list. They also set a **`platform`** field (`"aws"`, `"azure"`,
+`"google"`, `etc.) on each `Statement` (inferred from the resource-type prefix or
+provider name) and on `FileRecord` (dominant platform across statements). Both fields are absent
+when no cloud provider can be inferred, and omit from serialized output via `exclude_none=True`.
+
 ---
 
 ## Testing & quality

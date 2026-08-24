@@ -104,6 +104,8 @@ class Statement(BaseModel):
     # graphql_entity-only: the key field(s) that identify a federated/stitched entity
     # (from a ``@key(selectionSet: "{ id }")`` / ``@key(fields: "id")`` directive).
     keyFields: list[str] | None = None
+    # iac-only: cloud provider inferred from resource type prefix or provider name
+    platform: str | None = None
 
 
 class Function(BaseModel):
@@ -168,6 +170,8 @@ class FileRecord(BaseModel):
     loc: int
     # optional
     framework: str | None = None
+    # iac-only: dominant cloud provider across this file's statements
+    platform: str | None = None
     #: UI role of the node when it is a frontend component or state unit — one of
     #: ``component`` / ``page`` / ``layout`` / ``store`` / ``composable`` / ``hook`` /
     #: ``directive`` (open string). Set by the parser on the node that *is* the component
@@ -224,6 +228,10 @@ class ProjectMetaData(BaseModel):
         # file types — an empty ``{}`` is a JSON file but captures nothing, so it does not
         # count. Format-neutral: covers every full-capture parser, not just JSON.
         if (cfg.get("capturedDataDocuments") or 0) > 0:
+            return True
+        # IaC repos (Terraform, etc.) have no code language or functions but are real
+        # content — detected via the "iac" category set in FileRecord.metadata.
+        if "iac" in (cfg.get("byType") or {}):
             return True
         if (cfg.get("dependencies") or {}).get("total", 0):
             return True
