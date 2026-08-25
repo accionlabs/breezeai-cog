@@ -8,10 +8,11 @@ a tsconfig ``compilerOptions.paths`` alias — those are resolved via the repo-l
 from __future__ import annotations
 
 import json
+import os
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Sequence
+from typing import Iterator, Sequence
 
 from tree_sitter import Node
 
@@ -25,7 +26,6 @@ from ..treesitter import node_text, parse_source
 # extensions with no parser (e.g. `.svelte`) are deliberately omitted to avoid dangling edges.
 _SUFFIXES = (".ts", ".tsx", ".d.ts", ".js", ".jsx", ".mjs", ".cjs", ".vue")
 _INDEXES = ("index.ts", "index.tsx", "index.js", "index.jsx", "index.vue")
-_TSCONFIGS = ("tsconfig.json", "jsconfig.json")
 
 
 @dataclass(frozen=True)
@@ -38,8 +38,13 @@ class TsAliasIndex:
     declared with differing literals in >1 place maps to ``None`` (ambiguous → do not
     resolve through it — precision-first, mirroring the C# type index)."""
 
-    base_dir: str  # absolute baseUrl directory
-    paths: dict[str, list[str]]  # e.g. {"@app/*": ["src/app/*"]}
+    base_dir: str  # absolute baseUrl directory (legacy single-config resolution)
+    paths: dict[str, list[str]]  # e.g. {"@app/*": ["src/app/*"]} — relative to base_dir (legacy)
+    #: Per-tsconfig alias scopes: ``(config_dir_abs, {pattern: [absolute targets]})`` sorted
+    #: deepest-first. A monorepo declares aliases in *per-package* tsconfigs (an app's ``@/*``
+    #: means *its own* ``src``), so resolution picks the **nearest** enclosing config — never a
+    #: sibling package's same-named alias. When set, this supersedes ``paths``/``base_dir``.
+    alias_scopes: tuple[tuple[str, dict[str, list[str]]], ...] = ()
     const_values: dict[str, str | None] = field(default_factory=dict)
     #: simple class name → heritage (base + method→file), for resolving inherited `this.M()`
     #: calls to the declaring base file. A name declared in >1 file → ``None`` (ambiguous).
@@ -75,18 +80,73 @@ def _load_jsonc(path: Path) -> dict | None:
         return None
 
 
+#: Directories never worth walking for tsconfigs (dependencies + build output).
+_PRUNE_DIRS = frozenset({"node_modules", "dist", "build", "out", ".next", "coverage", ".git"})
+
+
+def _iter_tsconfigs(repo_root: Path) -> Iterator[Path]:
+    """Every ``tsconfig*.json`` / ``jsconfig.json`` in the tree, node_modules & build output
+    pruned. tsconfigs are ``.json``, so they go to the config parser — the alias index must
+    find them by its own bounded walk, not the TypeScript file list."""
+    for dirpath, dirnames, filenames in os.walk(repo_root):
+        dirnames[:] = [d for d in dirnames if d not in _PRUNE_DIRS]
+        for fn in filenames:
+            if fn == "jsconfig.json" or (fn.startswith("tsconfig") and fn.endswith(".json")):
+                yield Path(dirpath) / fn
+
+
+def _abs_targets(base_url_dir: Path, targets: list[str]) -> list[str]:
+    """Resolve tsconfig ``paths`` targets to absolute strings, preserving a trailing ``/*``."""
+    out: list[str] = []
+    for tgt in targets:
+        star = tgt.endswith("/*")
+        core = tgt[:-2] if star else tgt
+        abs_core = str((base_url_dir / core).resolve())
+        out.append(abs_core + "/*" if star else abs_core)
+    return out
+
+
+def _collect_tsconfig_paths(cfg: Path, seen: set[Path], out: dict[str, list[str]]) -> None:
+    """Merge one tsconfig's ``compilerOptions.paths`` (absolute targets) into ``out``, then
+    follow a **local** ``extends`` (relative/absolute path only — a package-name base lives in
+    node_modules and is left unresolved, honest-null). Cycle-guarded via ``seen``."""
+    if cfg in seen:
+        return
+    seen.add(cfg)
+    data = _load_jsonc(cfg)
+    if data is None:
+        return
+    opts = data.get("compilerOptions") or {}
+    base_url_dir = (cfg.parent / opts.get("baseUrl", ".")).resolve()
+    for pattern, targets in (opts.get("paths") or {}).items():
+        if isinstance(targets, list):
+            lst = out.setdefault(pattern, [])
+            for abs_tgt in _abs_targets(base_url_dir, [str(t) for t in targets]):
+                if abs_tgt not in lst:
+                    lst.append(abs_tgt)
+    ext = data.get("extends")
+    for e in (ext if isinstance(ext, list) else [ext]):
+        if isinstance(e, str) and (e.startswith(".") or e.startswith("/")):
+            base_cfg = (cfg.parent / e).resolve()
+            if base_cfg.suffix != ".json":
+                base_cfg = base_cfg / "tsconfig.json"
+            _collect_tsconfig_paths(base_cfg, seen, out)
+
+
 def build_alias_index(repo_root: Path) -> TsAliasIndex | None:
-    for name in _TSCONFIGS:
-        data = _load_jsonc(repo_root / name)
-        if data is None:
-            continue
-        opts = data.get("compilerOptions") or {}
-        paths = opts.get("paths")
-        if not paths:
-            continue
-        base_dir = str((repo_root / opts.get("baseUrl", ".")).resolve())
-        return TsAliasIndex(base_dir=base_dir, paths={k: list(v) for k, v in paths.items()})
-    return None
+    """Collect tsconfig path aliases from **every** tsconfig in the tree (not just the root),
+    each scope carrying absolute targets so an app's ``@/*`` resolves against its own package.
+    Scopes are ordered deepest-first for nearest-config resolution."""
+    scopes: list[tuple[str, dict[str, list[str]]]] = []
+    for cfg in _iter_tsconfigs(repo_root):
+        paths: dict[str, list[str]] = {}
+        _collect_tsconfig_paths(cfg, set(), paths)  # fresh cycle-guard per config
+        if paths:
+            scopes.append((str(cfg.parent.resolve()), paths))
+    if not scopes:
+        return None
+    scopes.sort(key=lambda s: len(Path(s[0]).parts), reverse=True)
+    return TsAliasIndex(base_dir=str(repo_root), paths={}, alias_scopes=tuple(scopes))
 
 
 def _string_literal(node: Node | None, source: bytes) -> str | None:
@@ -578,11 +638,23 @@ def build_ts_index(repo_root: Path, files: Sequence[Path], jobs: int = 1) -> TsA
     return TsAliasIndex(
         base_dir=alias.base_dir if alias else str(repo_root),
         paths=alias.paths if alias else {},
+        alias_scopes=alias.alias_scopes if alias else (),
         const_values=const_values,
         class_heritage=class_heritage,
         route_mounts=route_mounts,
         express_mounts=express_mounts,
     )
+
+
+#: ESM / NodeNext specifiers name the *emitted* file (`./x.js`) while the source on disk is
+#: TypeScript (`./x.ts` / `.tsx`). tsc never rewrites the extension in the specifier, so a
+#: literal `.js` probe misses. Map each JS-family suffix to the TS siblings to try instead.
+_EXT_REWRITE = {
+    ".js": (".ts", ".tsx"),
+    ".jsx": (".tsx",),
+    ".mjs": (".mts",),
+    ".cjs": (".cts",),
+}
 
 
 def _try_paths(target: Path, repo_root: Path) -> str | None:
@@ -591,6 +663,13 @@ def _try_paths(target: Path, repo_root: Path) -> str | None:
     # `.vue`/`.ts` specifier would be probed as `Avatar.vue.vue` and missed.
     if target.is_file():
         return repo_relative(target, repo_root)
+    # `./x.js` → `./x.ts`/`.tsx`. Gated on is_file, so it only ever resolves to a real File
+    # node (honest-null); the literal `.js` is tried first above, so a repo that genuinely
+    # ships `x.js` beside `x.ts` still binds to the real `.js`.
+    for ts_suffix in _EXT_REWRITE.get(target.suffix, ()):
+        cand = target.with_suffix(ts_suffix)
+        if cand.is_file():
+            return repo_relative(cand, repo_root)
     for suffix in _SUFFIXES:
         cand = target.with_name(target.name + suffix)
         if cand.is_file():
@@ -602,31 +681,52 @@ def _try_paths(target: Path, repo_root: Path) -> str | None:
     return None
 
 
-def _resolve_alias(module: str, index: TsAliasIndex, repo_root: Path) -> str | None:
-    base = Path(index.base_dir)
-    for pattern, targets in index.paths.items():
+def _match_alias(
+    module: str, paths: dict[str, list[str]], repo_root: Path, base: Path | None
+) -> str | None:
+    """Resolve ``module`` against one alias map. ``base`` joins **relative** targets (legacy
+    single-config); ``None`` means targets are already absolute (per-scope index)."""
+    def loc(tgt: str) -> Path:
+        return base / tgt if base is not None else Path(tgt)
+
+    for pattern, targets in paths.items():
         if pattern.endswith("/*"):
             prefix = pattern[:-1]  # "@app/"
             if module.startswith(prefix):
                 rest = module[len(prefix):]
                 for tgt in targets:
                     sub = tgt[:-1] + rest if tgt.endswith("/*") else tgt
-                    resolved = _try_paths(base / sub, repo_root)
+                    resolved = _try_paths(loc(sub), repo_root)
                     if resolved:
                         return resolved
         elif module == pattern:
             for tgt in targets:
-                resolved = _try_paths(base / tgt, repo_root)
+                resolved = _try_paths(loc(tgt), repo_root)
                 if resolved:
                     return resolved
     return None
+
+
+def _resolve_alias(module: str, index: TsAliasIndex, repo_root: Path, file_path: str) -> str | None:
+    if index.alias_scopes:
+        # Nearest-config wins: try each enclosing tsconfig scope deepest-first, so an app's
+        # `@/*` resolves against its own `src`, never a sibling package's same-named alias.
+        file_dir = (repo_root / file_path).parent.resolve()
+        for cfg_dir, paths in index.alias_scopes:
+            cd = Path(cfg_dir)
+            if cd == file_dir or cd in file_dir.parents:
+                resolved = _match_alias(module, paths, repo_root, None)
+                if resolved:
+                    return resolved
+        return None
+    return _match_alias(module, index.paths, repo_root, Path(index.base_dir))
 
 
 def _resolve(module: str, file_path: str, repo_root: Path, index: TsAliasIndex | None) -> str | None:
     if module.startswith("."):
         return _try_paths((repo_root / file_path).parent / module, repo_root)
     if index is not None:
-        return _resolve_alias(module, index, repo_root)
+        return _resolve_alias(module, index, repo_root, file_path)
     return None
 
 
