@@ -131,6 +131,31 @@ def test_param_defaults_and_isasync(tmp_path) -> None:
     assert plain.params[0].default is None  # no default → honest null
 
 
+def test_multiline_control_flow_header_kept_whole(tmp_path) -> None:
+    p = tmp_path / "h.ts"
+    p.write_text(
+        "function f(o) {\n"
+        "  if (o.total > 100 &&\n"
+        '      o.currency === "USD") {\n'
+        "    apply(o);\n"
+        "  }\n"
+        "  if (o.ok) { done(o); }\n"  # single-line: unchanged (first line, incl. body)
+        "}\n"
+    )
+    ctx = ParseContext(path="h.ts", abs_path=p, source=p.read_bytes(),
+                       repo_root=tmp_path, capture_statements=True)
+    rec = TypeScriptParser().parse_file(ctx)
+    ifs = [s for s in rec.statements if s.nodeType == "if_statement"]
+    multi = next(s for s in ifs if s.startLine == 2)
+    single = next(s for s in ifs if s.startLine == 6)
+    # multi-line condition captured whole (not truncated to the first line), body excluded.
+    assert "o.currency" in multi.text and "apply(o)" not in multi.text
+    # single-line header is unchanged (first physical line).
+    assert single.text == "if (o.ok) { done(o); }"
+    # the body statement is still its own node (searchable by line containment).
+    assert any(s.nodeType == "expression_statement" and "apply(o)" in s.text for s in rec.statements)
+
+
 def test_output_validates(tmp_path) -> None:
     rec = _parse(tmp_path, capture=True)
     schema = FileRecord.model_json_schema(by_alias=True)
