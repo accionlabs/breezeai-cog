@@ -6,32 +6,38 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Any, Callable, Protocol
-
+from src.breezeai_cog.infra.interface import InfraStream
 from ..config import Settings
 
 
-class S3Stream(Protocol):
-    def write_line(self, line: str) -> None: ...
-    def close(self) -> str: ...
-
+# class S3Stream(Protocol):
+#     def write_line(self, line: str) -> None: ...
+#     def close(self) -> str: ...
+# class InfraStream(Protocol):
+#     def write_line(self, line: str) -> None: ...
+#     def close(self) -> str: ...
 
 @dataclass
 class ServerDeps:
     settings: Settings
-    open_s3: Callable[[str], S3Stream]            # key -> open streaming upload
+    # open_s3: Callable[[str], S3Stream]            # key -> open streaming upload
+    open_stream: Callable[[str], InfraStream]
     notify: Callable[[str, dict[str, Any]], Any]  # (backend path, payload) -> response
     # body -> (temp_dir, filter_set | None, deleted_files); None filter = full clone
     acquire_diff: Callable[[Settings, dict[str, Any]], tuple[str, set[str] | None, list[str]]] | None = None
 
 
 def default_deps(settings: Settings) -> ServerDeps:
-    from ..emit.s3 import S3StreamUpload
+    # from ..emit.s3 import S3StreamUpload
+    from src.breezeai_cog.infra import provider
     from ..services.notify import post_notification
     from .git import acquire_diff
 
     return ServerDeps(
         settings=settings,
-        open_s3=lambda key: S3StreamUpload(key, settings),
+        # open_s3=lambda key: S3StreamUpload(key, settings),
+        open_stream=lambda key: provider.open_stream(key,settings),
+        
         notify=lambda path, payload: post_notification(settings, path, payload),
         acquire_diff=acquire_diff,
     )

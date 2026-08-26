@@ -20,7 +20,35 @@ def _now() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-class _S3StreamSink:
+# class _S3StreamSink:
+#     """Streams (optionally filtered) FileRecords to an open S3 upload and tallies
+#     projectMetaData over the records actually written. The meta is delivered
+#     out-of-band, so ``finalize`` writes nothing to the stream."""
+
+#     def __init__(self, upload: Any, filter_paths: set[str] | None) -> None:
+#         self._upload = upload
+#         self._filter = filter_paths
+#         self.files = self.funcs = self.classes = self.loc = self.config = 0
+#         self.languages: set[str] = set()
+#         self.by_type: dict[str, int] = {}
+
+#     def write(self, record: FileRecord) -> None:
+#         if self._filter is not None and record.path not in self._filter:
+#             return
+#         self._upload.write_line(to_line(record))
+#         self.files += 1
+#         self.funcs += len(record.functions)
+#         self.classes += len(record.classes)
+#         self.loc += record.loc
+#         self.languages.add(record.language)
+#         self.by_type[record.language] = self.by_type.get(record.language, 0) + 1
+#         if record.type == "config":
+#             self.config += 1
+
+#     def finalize(self, _meta: Any) -> None:  # out-of-band; nothing to the stream
+#         pass
+
+class _InfraStreamSink:
     """Streams (optionally filtered) FileRecords to an open S3 upload and tallies
     projectMetaData over the records actually written. The meta is delivered
     out-of-band, so ``finalize`` writes nothing to the stream."""
@@ -52,7 +80,7 @@ class _S3StreamSink:
 def run_diff_stream(
     settings: Settings, upload: Any, temp_dir: str | Path, filter_set: set[str] | None, repo_name: str
 ) -> dict[str, Any]:
-    sink = _S3StreamSink(upload, filter_set)
+    sink = _InfraStreamSink(upload, filter_set)
     pipeline.run_inprocess(temp_dir, settings, sink)
     upload.close()
     return {
