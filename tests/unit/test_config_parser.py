@@ -38,6 +38,30 @@ def test_package_json() -> None:
     assert md["dependencyCount"] == 2 and md["devDependencyCount"] == 1
 
 
+def test_package_json_keeps_specifiers_and_workspace_deps() -> None:
+    md = _meta("package.json", json.dumps({
+        "dependencies": {"@acme/ui": "workspace:*", "axios": "^1.6"},
+        "devDependencies": {"internal-lib": "file:../lib"},
+    }))
+    # Specifiers retained (not just names) → workspace:/file: deps are distinguishable.
+    assert md["packageInfo"]["dependencies"]["@acme/ui"] == "workspace:*"
+    assert md["packageInfo"]["dependencies"]["axios"] == "^1.6"
+    assert md["workspaceDependencies"] == ["@acme/ui", "internal-lib"]
+
+
+def test_project_json_and_pnpm_workspace_retained() -> None:
+    pj = _meta("project.json", json.dumps({
+        "name": "web", "tags": ["type:app"], "implicitDependencies": ["gateway"],
+        "targets": {"build": {}, "test": {}},
+    }))
+    assert pj["buildTool"] == "nx"
+    assert pj["projectInfo"]["implicitDependencies"] == ["gateway"]
+    assert pj["projectInfo"]["tags"] == ["type:app"]
+    assert set(pj["projectInfo"]["targets"]) == {"build", "test"}
+    ws = _meta("pnpm-workspace.yaml", "packages:\n  - apps/*\n  - packages/*\n")
+    assert ws["buildTool"] == "pnpm" and ws["workspaceGlobs"] == ["apps/*", "packages/*"]
+
+
 def test_pyproject_deps_extracted() -> None:
     # Improvement over the JS analyzer, which only line-counted pyproject.toml.
     md = _meta(
@@ -179,7 +203,8 @@ def test_requirements_and_tsconfig_and_generic() -> None:
             }
         ),
     )
-    assert ts["buildTool"] == "typescript" and ts["compilerConfig"]["paths"] == ["@app/*"]
+    assert ts["buildTool"] == "typescript"
+    assert ts["compilerConfig"]["paths"] == {"@app/*": ["src/*"]}  # alias → targets, not keys only
     gj = _meta("data.json", json.dumps({"a": 1, "b": 2}))
     assert gj["category"] == "json" and set(gj["topLevelKeys"]) == {"a", "b"}
 
