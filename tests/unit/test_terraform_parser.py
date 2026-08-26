@@ -175,6 +175,44 @@ def _parse(path: str, source: bytes, *, capture_statements: bool = False):
     return TerraformParser().parse_file(ctx)
 
 
+def test_local_module_source_resolves_to_import_files(tmp_path) -> None:
+    # A local `module` source names a directory; it must resolve to the .tf files it loads
+    # (File→File IMPORTS), while a registry source stays an externalImport.
+    (tmp_path / "terraform/modules/app-network").mkdir(parents=True)
+    (tmp_path / "terraform/modules/app-network/main.tf").write_text('resource "aws_lb" "x" {}\n')
+    (tmp_path / "terraform/modules/app-network/variables.tf").write_text('variable "env" {}\n')
+    (tmp_path / "terraform/env/prod").mkdir(parents=True)
+    env_tf = tmp_path / "terraform/env/prod/api.tf"
+    env_tf.write_text(
+        'module "ecs" {\n  source = "../../modules/app-network"\n}\n'
+        'module "vpc" {\n  source = "terraform-aws-modules/vpc/aws"\n}\n'
+    )
+    parser = TerraformParser()
+    idx = parser.build_index(tmp_path, list(tmp_path.rglob("*.tf")))
+    ctx = ParseContext(path="terraform/env/prod/api.tf", abs_path=env_tf,
+                       source=env_tf.read_bytes(), repo_root=tmp_path, resolution_index=idx)
+    rec = parser.parse_file(ctx)
+    assert rec.importFiles == [
+        "terraform/modules/app-network/main.tf",
+        "terraform/modules/app-network/variables.tf",
+    ]
+    assert rec.externalImports == ["terraform-aws-modules/vpc/aws"]  # registry source unchanged
+
+
+def test_local_module_source_unresolved_is_honest_null(tmp_path) -> None:
+    # A local source whose target dir isn't indexed yields no edge (honest-null), never a
+    # dangling importFiles entry.
+    env_tf = tmp_path / "main.tf"
+    env_tf.write_text('module "m" {\n  source = "./nope"\n}\n')
+    parser = TerraformParser()
+    idx = parser.build_index(tmp_path, list(tmp_path.rglob("*.tf")))
+    ctx = ParseContext(path="main.tf", abs_path=env_tf, source=env_tf.read_bytes(),
+                       repo_root=tmp_path, resolution_index=idx)
+    rec = parser.parse_file(ctx)
+    assert rec.importFiles == []
+    assert rec.externalImports == []
+
+
 # ── FileRecord shape ──────────────────────────────────────────────────────────
 
 
