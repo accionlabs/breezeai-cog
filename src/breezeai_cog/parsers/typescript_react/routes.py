@@ -22,6 +22,7 @@ from tree_sitter import Node
 from ...emit import disambiguate, file_id, statement_id
 from ...schemas import Statement
 from ..treesitter import node_text
+from ..typescript.imports import resolve_const_value
 
 
 def _join(base: str, sub: str) -> str:
@@ -238,25 +239,38 @@ def _emit_v7(call: Node, kind: str, endpoint: str, handler_arg: Node | None,
     ))
 
 
+def _path_arg(node: Node | None, source: bytes, const_values: dict[str, str | None] | None) -> str:
+    """A route/prefix path argument → its resolved string. Folds a constant (``paths.discover.root``
+    / a `${…}` template of consts) via the repo-wide ``const_values``; falls back to the raw text
+    when it doesn't fully resolve — so an unresolved path is no worse than today, never a *different*
+    wrong URL (honest-null)."""
+    if node is not None and const_values:
+        resolved = resolve_const_value(node, source, const_values)
+        if resolved is not None:
+            return resolved
+    return _string_val(node, source)
+
+
 def _process_v7(node: Node, prefix: str, source: bytes, path: str, seen: set[str],
                 routes: list[Statement], consts: dict[str, Node],
-                guard: frozenset[str]) -> None:
+                guard: frozenset[str], const_values: dict[str, str | None] | None) -> None:
     """Recursively resolve a v7 route node under the accumulated ``prefix``. Handles the
-    array / spread / const-identifier / helper-call forms; ``guard`` breaks const cycles."""
+    array / spread / const-identifier / helper-call forms; ``guard`` breaks const cycles.
+    ``const_values`` folds a path built from a ``{…} as const`` object into its literal URL."""
     if node.type == "array":
         for child in node.named_children:
-            _process_v7(child, prefix, source, path, seen, routes, consts, guard)
+            _process_v7(child, prefix, source, path, seen, routes, consts, guard, const_values)
         return
     if node.type == "spread_element":
         inner = node.named_children[0] if node.named_children else None
         if inner is not None:
-            _process_v7(inner, prefix, source, path, seen, routes, consts, guard)
+            _process_v7(inner, prefix, source, path, seen, routes, consts, guard, const_values)
         return
     if node.type == "identifier":  # ...groupConst -> resolve to its definition (once)
         name = node_text(node, source)
         target = consts.get(name)
         if target is not None and name not in guard:
-            _process_v7(target, prefix, source, path, seen, routes, consts, guard | {name})
+            _process_v7(target, prefix, source, path, seen, routes, consts, guard | {name}, const_values)
         return
     if node.type != "call_expression":
         return
@@ -265,7 +279,7 @@ def _process_v7(node: Node, prefix: str, source: bytes, path: str, seen: set[str
         return
     args = _call_args(node)
     if kind == "route":  # route(path, file, opts?)
-        seg = _string_val(args[0], source) if args else ""
+        seg = _path_arg(args[0], source, const_values) if args else ""
         handler = args[1] if len(args) > 1 else None
         _emit_v7(node, kind, _join(prefix, seg), handler, source, path, seen, routes)
     elif kind == "index":  # index(file, opts?) -> renders at the parent path
@@ -274,12 +288,12 @@ def _process_v7(node: Node, prefix: str, source: bytes, path: str, seen: set[str
         _emit_v7(node, kind, _join(prefix, ""), args[0] if args else None, source, path, seen, routes)
         children = _last_array(args)
         if children is not None:
-            _process_v7(children, prefix, source, path, seen, routes, consts, guard)
+            _process_v7(children, prefix, source, path, seen, routes, consts, guard, const_values)
     elif kind == "prefix":  # prefix(base, [children]) -> add base, no node of its own
-        base = _string_val(args[0], source) if args else ""
+        base = _path_arg(args[0], source, const_values) if args else ""
         children = _last_array(args)
         if children is not None:
-            _process_v7(children, _join(prefix, base), source, path, seen, routes, consts, guard)
+            _process_v7(children, _join(prefix, base), source, path, seen, routes, consts, guard, const_values)
 
 
 def _v7_entry(root: Node, source: bytes) -> Node | None:
@@ -296,17 +310,20 @@ def _v7_entry(root: Node, source: bytes) -> Node | None:
     return None
 
 
-def _detect_v7(root: Node, source: bytes, path: str, seen: set[str], routes: list[Statement]) -> None:
+def _detect_v7(root: Node, source: bytes, path: str, seen: set[str], routes: list[Statement],
+               const_values: dict[str, str | None] | None) -> None:
     # Gate: the route/index/layout/prefix call helpers exist only in v7 framework mode.
     # Keying on the import keeps this inert on v5/v6 (react-router-dom) code.
     if b"@react-router/dev" not in source:
         return
     entry = _v7_entry(root, source)
     if entry is not None:
-        _process_v7(entry, "", source, path, seen, routes, _collect_consts(root, source), frozenset())
+        _process_v7(entry, "", source, path, seen, routes,
+                    _collect_consts(root, source), frozenset(), const_values)
 
 
-def detect_react_routes(root: Node, source: bytes, path: str, *, seen_ids: set[str]) -> list[Statement]:
+def detect_react_routes(root: Node, source: bytes, path: str, *, seen_ids: set[str],
+                        const_values: dict[str, str | None] | None = None) -> list[Statement]:
     routes: list[Statement] = []
     # JSX <Route>: start only at top-level Routes (no <Route> ancestor); recursion handles nesting.
     jsx: list[Node] = []
@@ -322,5 +339,5 @@ def detect_react_routes(root: Node, source: bytes, path: str, *, seen_ids: set[s
         if _is_route_array(arr, source) and not _is_children_value(arr, source):
             _process_config(arr, "", source, path, seen_ids, routes)
     # v7 framework-mode config DSL (gated on the @react-router/dev import).
-    _detect_v7(root, source, path, seen_ids, routes)
+    _detect_v7(root, source, path, seen_ids, routes, const_values)
     return routes

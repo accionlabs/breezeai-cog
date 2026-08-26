@@ -157,15 +157,132 @@ def _string_literal(node: Node | None, source: bytes) -> str | None:
     return node_text(frag, source) if frag is not None else ""
 
 
+# ── reusable constant-value resolution ─────────────────────────────────────────
+# These resolve a value that is built from a *constant* (a symbol, a member path into a
+# ``{…} as const`` object, or a template of those) to its literal string — the general primitive
+# behind route ``endpoint`` / api-call URL / event-address folding. They read the repo-wide
+# ``const_values`` map (flat + dotted keys) and are honest-null: an unresolved value → None.
+
+
+def member_path(node: Node, source: bytes) -> str | None:
+    """A member-expression / identifier → its dotted symbol path (``paths.discover.root``), or
+    None if it is not a plain identifier/member chain (a computed ``a[k]`` breaks it)."""
+    parts: list[str] = []
+    n: Node | None = node
+    while n is not None and n.type == "member_expression":
+        prop = n.child_by_field_name("property")
+        if prop is None or prop.type != "property_identifier":
+            return None
+        parts.append(node_text(prop, source))
+        n = n.child_by_field_name("object")
+    if n is not None and n.type == "identifier":
+        parts.append(node_text(n, source))
+        return ".".join(reversed(parts))
+    return None
+
+
+def _unwrap_const_expr(node: Node | None) -> Node | None:
+    """Strip ``as const`` / ``satisfies`` / parentheses to the underlying value node."""
+    while node is not None and node.type in (
+        "as_expression", "satisfies_expression", "parenthesized_expression",
+    ):
+        node = node.named_children[0] if node.named_children else None
+    return node
+
+
+def _pair_key_name(key: Node | None, source: bytes) -> str | None:
+    if key is None:
+        return None
+    if key.type == "string":
+        return _string_literal(key, source)
+    if key.type in ("property_identifier", "identifier"):
+        return node_text(key, source)
+    return None  # computed key [x] → skip
+
+
+def resolve_const_value(node: Node, source: bytes, consts: dict[str, str | None]) -> str | None:
+    """A value node → its literal string via ``consts``: a string literal, a template whose every
+    ``${…}`` resolves, or a member/identifier reference. None if not fully resolvable (honest-null).
+    The call site every detector uses to fold a const-built address into its literal."""
+    if node.type == "string":
+        return _string_literal(node, source)
+    if node.type == "template_string":
+        return _resolve_template(node, source, consts)
+    if node.type in ("identifier", "member_expression"):
+        key = member_path(node, source)
+        return consts.get(key) if key is not None else None
+    return None
+
+
+def _resolve_template(node: Node, source: bytes, consts: dict[str, str | None]) -> str | None:
+    out: list[str] = []
+    for c in node.children:
+        if c.type == "string_fragment":
+            out.append(node_text(c, source))
+        elif c.type == "template_substitution":
+            inner = c.named_children[0] if c.named_children else None
+            val = resolve_const_value(inner, source, consts) if inner is not None else None
+            if val is None:
+                return None  # any unresolved substitution → whole template unresolved
+            out.append(val)
+    return "".join(out)
+
+
+def flatten_const_object(
+    base: str, obj: Node, source: bytes,
+    str_consts: dict[str, str | None], obj_consts: dict[str, Node],
+    out: dict[str, str], seen: frozenset[str] = frozenset(), depth: int = 0,
+) -> None:
+    """Flatten a ``{…} as const`` object literal into ``base.a.b → value`` for every leaf that
+    resolves to a string (literal / template / const-ref), following an object-valued reference
+    (``tabs: sharedTabs``) into that object. Non-literal / unresolved leaves are skipped
+    (honest-null); recursion is depth- and cycle-bounded."""
+    if depth > 6:
+        return
+
+    def add_ref(path: str, ref: str) -> None:
+        """A property whose value is an identifier: inline-flatten a referenced object const,
+        else resolve a referenced scalar const."""
+        if ref in obj_consts and ref not in seen:
+            flatten_const_object(path, obj_consts[ref], source, str_consts, obj_consts,
+                                 out, seen | {ref}, depth + 1)
+        else:
+            r = str_consts.get(ref)
+            if r is not None:
+                out[path] = r
+
+    for prop in obj.named_children:
+        if prop.type == "shorthand_property_identifier":  # `{ tabs }` == `tabs: tabs`
+            name = node_text(prop, source)
+            add_ref(f"{base}.{name}", name)
+            continue
+        if prop.type != "pair":
+            continue
+        kname = _pair_key_name(prop.child_by_field_name("key"), source)
+        val = _unwrap_const_expr(prop.child_by_field_name("value"))
+        if kname is None or val is None:
+            continue
+        path = f"{base}.{kname}"
+        if val.type == "object":
+            flatten_const_object(path, val, source, str_consts, obj_consts, out, seen, depth + 1)
+        elif val.type == "identifier":
+            add_ref(path, node_text(val, source))
+        else:
+            resolved = resolve_const_value(val, source, str_consts)
+            if resolved is not None:
+                out[path] = resolved
+
+
 def _collect_const_values(root: Node, source: bytes, const_values: dict[str, str | None]) -> None:
-    """Record ``symbol → literal`` from one file's top-level string constants:
-    ``const NAME = 'x'``, ``enum E { M = 'x' }`` (→ ``E.M``), and ``static readonly M = 'x'``
-    class fields (→ ``C.M``). Non-string values are skipped; a symbol seen with >1 distinct
-    literal collapses to ``None`` (ambiguous, honest-null) via :func:`record_distinct`."""
+    """Record ``symbol → literal`` from one file's top-level constants: ``const NAME = 'x'``,
+    ``enum E { M = 'x' }`` (→ ``E.M``), ``static readonly M = 'x'`` (→ ``C.M``), and the leaves of
+    a ``const X = {…} as const`` object (→ ``X.a.b``, folding templates + const refs). Non-string
+    values are skipped; a symbol seen with >1 distinct literal collapses to ``None`` (honest-null)."""
     def add(sym: str, val: str | None) -> None:
         if val is not None:
             record_distinct(const_values, sym, val)
 
+    obj_consts: dict[str, Node] = {}  # const name → object-literal node (for §pass 2 flattening)
     for child in root.named_children:
         node: Node | None = child
         if child.type == "export_statement":
@@ -179,7 +296,10 @@ def _collect_const_values(root: Node, source: bytes, const_values: dict[str, str
                 if d.type == "variable_declarator":
                     nm = d.child_by_field_name("name")
                     if nm is not None and nm.type == "identifier":
-                        add(node_text(nm, source), _string_literal(d.child_by_field_name("value"), source))
+                        value = _unwrap_const_expr(d.child_by_field_name("value"))
+                        add(node_text(nm, source), _string_literal(value, source))
+                        if value is not None and value.type == "object":
+                            obj_consts[node_text(nm, source)] = value
         elif node.type == "enum_declaration":
             ename = next((c for c in node.named_children if c.type in ("identifier", "type_identifier")), None)
             body = next((c for c in node.named_children if c.type == "enum_body"), None)
@@ -200,6 +320,14 @@ def _collect_const_values(root: Node, source: bytes, const_values: dict[str, str
                         fv = next((c for c in f.named_children if c.type == "string"), None)
                         if fn is not None:
                             add(f"{node_text(cname, source)}.{node_text(fn, source)}", _string_literal(fv, source))
+
+    # Pass 2: flatten object consts now that flat consts are collected (their leaves may reference
+    # a sibling flat const via a `${…}` template, e.g. `root: `/${segment}``).
+    for name, obj in obj_consts.items():
+        flat: dict[str, str] = {}
+        flatten_const_object(name, obj, source, const_values, obj_consts, flat)
+        for k, v in flat.items():
+            add(k, v)
 
 
 _CLASS_NODES = ("class_declaration", "class", "abstract_class_declaration")

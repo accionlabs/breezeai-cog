@@ -44,6 +44,28 @@ def test_alias_resolution_with_index(tmp_path) -> None:
     assert "axios" in rec.externalImports
 
 
+def test_const_object_flattened_to_dotted_values() -> None:
+    # `flatten_const_object` (via _collect_const_values) records `X.a.b -> literal`, folding
+    # templates, sibling flat consts, and object references — the reusable const-folding primitive.
+    from breezeai_cog.parsers.treesitter import parse_source
+    from breezeai_cog.parsers.typescript.imports import _collect_const_values
+
+    src = (
+        b"const seg = 'discover';\n"
+        b"const tabs = { projects: 'projects' } as const;\n"
+        b"export const paths = {\n"
+        b"  root: `/${seg}`,\n"
+        b"  discover: { tabs: tabs },\n"
+        b"  dyn: someVar,\n"           # non-literal leaf -> not recorded (honest-null)
+        b"} as const;\n"
+    )
+    cv: dict[str, str | None] = {}
+    _collect_const_values(parse_source("typescript", src).root_node, src, cv)
+    assert cv["paths.root"] == "/discover"                    # template + sibling flat const
+    assert cv["paths.discover.tabs.projects"] == "projects"   # object-reference inline flatten
+    assert "paths.dyn" not in cv                              # non-literal leaf dropped
+
+
 def test_esm_js_specifier_resolves_to_ts_sibling(tmp_path) -> None:
     # ESM/NodeNext names the emitted `./x.js`; the source on disk is `x.ts`. The edge must
     # still resolve (importFiles), not leak into externalImports.
