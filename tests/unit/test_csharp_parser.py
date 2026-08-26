@@ -478,6 +478,24 @@ def test_enum_members_captured_as_statements(tmp_path) -> None:
     assert all(m.nodeType == "enum_member_declaration" and m.semanticType is None for m in members)
 
 
+def test_catch_finally_clauses_emitted(tmp_path) -> None:
+    src = ("class X {\n"
+           "  void M() {\n"
+           "    try { Save(); }\n"
+           "    catch (Exception e) { Log(e); }\n"
+           "    finally { Cleanup(); }\n"
+           "  }\n"
+           "}\n")
+    p = tmp_path / REL
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(src)
+    ctx = ParseContext(path=REL, abs_path=p, source=p.read_bytes(),
+                       repo_root=tmp_path, capture_statements=True)
+    rec = CSharpParser().parse_file(ctx)
+    node_types = {s.nodeType for s in rec.statements}
+    assert {"try_statement", "catch_clause", "finally_clause"} <= node_types
+
+
 def test_enum_members_gated_by_capture_flag(tmp_path) -> None:
     # Enum members are statements now → gated by --capture-statements (absent without it).
     src = 'enum Flags {\n  A = 1,\n  B = 1 << 2,\n}\n'

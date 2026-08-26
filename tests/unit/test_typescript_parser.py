@@ -95,6 +95,25 @@ def test_statements_flat_and_gated(tmp_path) -> None:
     assert "if_statement" in node_types and "return_statement" in node_types
 
 
+def test_catch_finally_clauses_emitted(tmp_path) -> None:
+    p = tmp_path / "e.ts"
+    p.write_text(
+        "async function run() {\n"
+        "  try { await save(); }\n"
+        "  catch (e) { log(e); }\n"
+        "  finally { cleanup(); }\n"
+        "}\n"
+    )
+    ctx = ParseContext(
+        path="e.ts", abs_path=p, source=p.read_bytes(), repo_root=tmp_path, capture_statements=True
+    )
+    rec = TypeScriptParser().parse_file(ctx)
+    node_types = {s.nodeType for s in rec.statements}
+    assert {"try_statement", "catch_clause", "finally_clause"} <= node_types
+    # bodies inside the clauses are still captured (not swallowed by the boundary node).
+    assert any(s.nodeType == "expression_statement" and "cleanup" in s.text for s in rec.statements)
+
+
 def test_output_validates(tmp_path) -> None:
     rec = _parse(tmp_path, capture=True)
     schema = FileRecord.model_json_schema(by_alias=True)
