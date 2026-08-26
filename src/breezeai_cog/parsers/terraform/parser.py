@@ -14,17 +14,30 @@ so the file-level graph retains dependency edges regardless of the statements fl
 
 from __future__ import annotations
 
+import posixpath
+from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Sequence
 
 from tree_sitter import Node
 
 from ...emit import class_id, disambiguate, file_id, statement_id
 from ...schemas import SCHEMA_VERSION, FileRecord, Statement
 from ...schemas.capture import Class, ConstructorParam
-from ...utils import count_loc
+from ...utils import count_loc, repo_relative
 from ..base import BaseParser, ParseContext
 from ..treesitter import node_text, parse_source
 from .mappings import FRAMEWORKS, STATEMENT_TYPES
+
+
+@dataclass(frozen=True)
+class TerraformIndex:
+    """Repo-wide index for resolving local ``module`` sources to real files (picklable —
+    crosses the process boundary). A module ``source`` names a **directory**; Terraform loads
+    every ``.tf`` in it, so this maps repo-relative dir → its ``.tf`` files, and a local
+    ``module`` reference resolves to File→File ``IMPORTS`` edges against those files."""
+
+    tf_by_dir: dict[str, list[str]] = field(default_factory=dict)
 
 
 # ── semantic type mapping ─────────────────────────────────────────────────────
@@ -172,6 +185,18 @@ def _terraform_address(keyword: str, labels: list[str]) -> str | None:
     return None
 
 
+def _resolve_local_module(
+    src: str, path: str, tf_by_dir: dict[str, list[str]] | None
+) -> list[str]:
+    """The ``.tf`` files a local ``module`` ``source`` (a directory, relative to the
+    referencing file) loads — the endpoints of its File→File ``IMPORTS`` edges. Empty when the
+    target directory isn't indexed (honest-null → no edge); never links a file to itself."""
+    if not tf_by_dir:
+        return []
+    target_dir = posixpath.normpath(posixpath.join(posixpath.dirname(path), src))
+    return [f for f in tf_by_dir.get(target_dir, []) if f != path]
+
+
 def _module_source(body_node: Node, source: bytes) -> str | None:
     """Extract the ``source`` value from a module body.
 
@@ -242,6 +267,21 @@ class TerraformParser(BaseParser):
     statement_types = STATEMENT_TYPES
     frameworks = FRAMEWORKS
 
+    def build_index(
+        self, repo_root: Path, files: Sequence[Path], jobs: int = 1
+    ) -> TerraformIndex | None:
+        """Group every ``.tf`` file by its directory, so a local ``module`` ``source`` (which
+        names a directory) can resolve to the real files it loads. No parsing — path grouping
+        only; returns None when there is nothing to resolve against."""
+        tf_by_dir: dict[str, list[str]] = {}
+        for f in files:
+            rel = repo_relative(f, Path(repo_root))
+            if rel.endswith(".tf"):
+                tf_by_dir.setdefault(posixpath.dirname(rel), []).append(rel)
+        for members in tf_by_dir.values():
+            members.sort()
+        return TerraformIndex(tf_by_dir=tf_by_dir) if tf_by_dir else None
+
     def parse_file(self, ctx: ParseContext) -> FileRecord:
         root = parse_source("terraform", ctx.source, ctx.parse_timeout_micros).root_node
         return self.extract(root, ctx)
@@ -264,6 +304,8 @@ class TerraformParser(BaseParser):
         statements: list[Statement] = []
         classes: list[Class] = []
         external_imports: set[str] = set()
+        import_files: set[str] = set()  # resolved local module sources → IMPORTS (§3.1)
+        tf_by_dir = getattr(ctx.resolution_index, "tf_by_dir", None)
         provider_platforms: list[str] = []  # file-level fallback when no resource blocks
         seen_ids: set[str] = set()
 
@@ -306,10 +348,13 @@ class TerraformParser(BaseParser):
                 start = block.start_point[0] + 1
                 end = block.end_point[0] + 1
 
-                # Always collect external module sources (ungated)
+                # Module sources: a LOCAL source (./ ../) resolves to the .tf files it loads
+                # (File→File IMPORTS); a remote/registry source is an external dependency.
                 if keyword == "module" and labels and body_node:
                     src = _module_source(body_node, source)
-                    if src and not src.startswith(("./", "../")):
+                    if src and src.startswith(("./", "../")):
+                        import_files.update(_resolve_local_module(src, path, tf_by_dir))
+                    elif src:
                         external_imports.add(src)
 
                     # Module blocks yield a Class record (ungated — mirrors how code
@@ -370,6 +415,7 @@ class TerraformParser(BaseParser):
             framework="terraform",
             loc=count_loc(source.decode("utf-8", "replace")),
             externalImports=sorted(external_imports),
+            importFiles=sorted(import_files),
             classes=classes,
             statements=statements,
             platform=file_platform,

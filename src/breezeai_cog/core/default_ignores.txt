@@ -20,12 +20,14 @@ pnpm-lock.yaml
 bun.lockb
 
 # Python envs / caches
+# NB: `env/` is NOT here — it's an ambiguous name (Terraform `terraform/env/`, config trees),
+# so it lives in parsers/python/ignore.txt (layer 2, Python-scoped) instead of pruning the walk
+# for every language. `.venv/`/`venv/` are kept universal — unambiguously Python, never collide.
 __pycache__/
 *.pyc
 *.pyo
 .venv/
 venv/
-env/
 .tox/
 .mypy_cache/
 .pytest_cache/

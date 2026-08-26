@@ -9,6 +9,8 @@ CONTROL_FLOW = {
     "while_statement",
     "do_while_statement",
     "try_expression",
+    "catch_block",  # error-handling boundary (bodies already captured; this adds the clause node)
+    "finally_block",
 }
 
 JUMP = {

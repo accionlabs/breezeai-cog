@@ -8,10 +8,11 @@ a tsconfig ``compilerOptions.paths`` alias — those are resolved via the repo-l
 from __future__ import annotations
 
 import json
+import os
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Sequence
+from typing import Iterator, Sequence
 
 from tree_sitter import Node
 
@@ -25,7 +26,6 @@ from ..treesitter import node_text, parse_source
 # extensions with no parser (e.g. `.svelte`) are deliberately omitted to avoid dangling edges.
 _SUFFIXES = (".ts", ".tsx", ".d.ts", ".js", ".jsx", ".mjs", ".cjs", ".vue")
 _INDEXES = ("index.ts", "index.tsx", "index.js", "index.jsx", "index.vue")
-_TSCONFIGS = ("tsconfig.json", "jsconfig.json")
 
 
 @dataclass(frozen=True)
@@ -38,8 +38,13 @@ class TsAliasIndex:
     declared with differing literals in >1 place maps to ``None`` (ambiguous → do not
     resolve through it — precision-first, mirroring the C# type index)."""
 
-    base_dir: str  # absolute baseUrl directory
-    paths: dict[str, list[str]]  # e.g. {"@app/*": ["src/app/*"]}
+    base_dir: str  # absolute baseUrl directory (legacy single-config resolution)
+    paths: dict[str, list[str]]  # e.g. {"@app/*": ["src/app/*"]} — relative to base_dir (legacy)
+    #: Per-tsconfig alias scopes: ``(config_dir_abs, {pattern: [absolute targets]})`` sorted
+    #: deepest-first. A monorepo declares aliases in *per-package* tsconfigs (an app's ``@/*``
+    #: means *its own* ``src``), so resolution picks the **nearest** enclosing config — never a
+    #: sibling package's same-named alias. When set, this supersedes ``paths``/``base_dir``.
+    alias_scopes: tuple[tuple[str, dict[str, list[str]]], ...] = ()
     const_values: dict[str, str | None] = field(default_factory=dict)
     #: simple class name → heritage (base + method→file), for resolving inherited `this.M()`
     #: calls to the declaring base file. A name declared in >1 file → ``None`` (ambiguous).
@@ -75,18 +80,73 @@ def _load_jsonc(path: Path) -> dict | None:
         return None
 
 
+#: Directories never worth walking for tsconfigs (dependencies + build output).
+_PRUNE_DIRS = frozenset({"node_modules", "dist", "build", "out", ".next", "coverage", ".git"})
+
+
+def _iter_tsconfigs(repo_root: Path) -> Iterator[Path]:
+    """Every ``tsconfig*.json`` / ``jsconfig.json`` in the tree, node_modules & build output
+    pruned. tsconfigs are ``.json``, so they go to the config parser — the alias index must
+    find them by its own bounded walk, not the TypeScript file list."""
+    for dirpath, dirnames, filenames in os.walk(repo_root):
+        dirnames[:] = [d for d in dirnames if d not in _PRUNE_DIRS]
+        for fn in filenames:
+            if fn == "jsconfig.json" or (fn.startswith("tsconfig") and fn.endswith(".json")):
+                yield Path(dirpath) / fn
+
+
+def _abs_targets(base_url_dir: Path, targets: list[str]) -> list[str]:
+    """Resolve tsconfig ``paths`` targets to absolute strings, preserving a trailing ``/*``."""
+    out: list[str] = []
+    for tgt in targets:
+        star = tgt.endswith("/*")
+        core = tgt[:-2] if star else tgt
+        abs_core = str((base_url_dir / core).resolve())
+        out.append(abs_core + "/*" if star else abs_core)
+    return out
+
+
+def _collect_tsconfig_paths(cfg: Path, seen: set[Path], out: dict[str, list[str]]) -> None:
+    """Merge one tsconfig's ``compilerOptions.paths`` (absolute targets) into ``out``, then
+    follow a **local** ``extends`` (relative/absolute path only — a package-name base lives in
+    node_modules and is left unresolved, honest-null). Cycle-guarded via ``seen``."""
+    if cfg in seen:
+        return
+    seen.add(cfg)
+    data = _load_jsonc(cfg)
+    if data is None:
+        return
+    opts = data.get("compilerOptions") or {}
+    base_url_dir = (cfg.parent / opts.get("baseUrl", ".")).resolve()
+    for pattern, targets in (opts.get("paths") or {}).items():
+        if isinstance(targets, list):
+            lst = out.setdefault(pattern, [])
+            for abs_tgt in _abs_targets(base_url_dir, [str(t) for t in targets]):
+                if abs_tgt not in lst:
+                    lst.append(abs_tgt)
+    ext = data.get("extends")
+    for e in (ext if isinstance(ext, list) else [ext]):
+        if isinstance(e, str) and (e.startswith(".") or e.startswith("/")):
+            base_cfg = (cfg.parent / e).resolve()
+            if base_cfg.suffix != ".json":
+                base_cfg = base_cfg / "tsconfig.json"
+            _collect_tsconfig_paths(base_cfg, seen, out)
+
+
 def build_alias_index(repo_root: Path) -> TsAliasIndex | None:
-    for name in _TSCONFIGS:
-        data = _load_jsonc(repo_root / name)
-        if data is None:
-            continue
-        opts = data.get("compilerOptions") or {}
-        paths = opts.get("paths")
-        if not paths:
-            continue
-        base_dir = str((repo_root / opts.get("baseUrl", ".")).resolve())
-        return TsAliasIndex(base_dir=base_dir, paths={k: list(v) for k, v in paths.items()})
-    return None
+    """Collect tsconfig path aliases from **every** tsconfig in the tree (not just the root),
+    each scope carrying absolute targets so an app's ``@/*`` resolves against its own package.
+    Scopes are ordered deepest-first for nearest-config resolution."""
+    scopes: list[tuple[str, dict[str, list[str]]]] = []
+    for cfg in _iter_tsconfigs(repo_root):
+        paths: dict[str, list[str]] = {}
+        _collect_tsconfig_paths(cfg, set(), paths)  # fresh cycle-guard per config
+        if paths:
+            scopes.append((str(cfg.parent.resolve()), paths))
+    if not scopes:
+        return None
+    scopes.sort(key=lambda s: len(Path(s[0]).parts), reverse=True)
+    return TsAliasIndex(base_dir=str(repo_root), paths={}, alias_scopes=tuple(scopes))
 
 
 def _string_literal(node: Node | None, source: bytes) -> str | None:
@@ -97,15 +157,132 @@ def _string_literal(node: Node | None, source: bytes) -> str | None:
     return node_text(frag, source) if frag is not None else ""
 
 
+# ── reusable constant-value resolution ─────────────────────────────────────────
+# These resolve a value that is built from a *constant* (a symbol, a member path into a
+# ``{…} as const`` object, or a template of those) to its literal string — the general primitive
+# behind route ``endpoint`` / api-call URL / event-address folding. They read the repo-wide
+# ``const_values`` map (flat + dotted keys) and are honest-null: an unresolved value → None.
+
+
+def member_path(node: Node, source: bytes) -> str | None:
+    """A member-expression / identifier → its dotted symbol path (``paths.discover.root``), or
+    None if it is not a plain identifier/member chain (a computed ``a[k]`` breaks it)."""
+    parts: list[str] = []
+    n: Node | None = node
+    while n is not None and n.type == "member_expression":
+        prop = n.child_by_field_name("property")
+        if prop is None or prop.type != "property_identifier":
+            return None
+        parts.append(node_text(prop, source))
+        n = n.child_by_field_name("object")
+    if n is not None and n.type == "identifier":
+        parts.append(node_text(n, source))
+        return ".".join(reversed(parts))
+    return None
+
+
+def _unwrap_const_expr(node: Node | None) -> Node | None:
+    """Strip ``as const`` / ``satisfies`` / parentheses to the underlying value node."""
+    while node is not None and node.type in (
+        "as_expression", "satisfies_expression", "parenthesized_expression",
+    ):
+        node = node.named_children[0] if node.named_children else None
+    return node
+
+
+def _pair_key_name(key: Node | None, source: bytes) -> str | None:
+    if key is None:
+        return None
+    if key.type == "string":
+        return _string_literal(key, source)
+    if key.type in ("property_identifier", "identifier"):
+        return node_text(key, source)
+    return None  # computed key [x] → skip
+
+
+def resolve_const_value(node: Node, source: bytes, consts: dict[str, str | None]) -> str | None:
+    """A value node → its literal string via ``consts``: a string literal, a template whose every
+    ``${…}`` resolves, or a member/identifier reference. None if not fully resolvable (honest-null).
+    The call site every detector uses to fold a const-built address into its literal."""
+    if node.type == "string":
+        return _string_literal(node, source)
+    if node.type == "template_string":
+        return _resolve_template(node, source, consts)
+    if node.type in ("identifier", "member_expression"):
+        key = member_path(node, source)
+        return consts.get(key) if key is not None else None
+    return None
+
+
+def _resolve_template(node: Node, source: bytes, consts: dict[str, str | None]) -> str | None:
+    out: list[str] = []
+    for c in node.children:
+        if c.type == "string_fragment":
+            out.append(node_text(c, source))
+        elif c.type == "template_substitution":
+            inner = c.named_children[0] if c.named_children else None
+            val = resolve_const_value(inner, source, consts) if inner is not None else None
+            if val is None:
+                return None  # any unresolved substitution → whole template unresolved
+            out.append(val)
+    return "".join(out)
+
+
+def flatten_const_object(
+    base: str, obj: Node, source: bytes,
+    str_consts: dict[str, str | None], obj_consts: dict[str, Node],
+    out: dict[str, str], seen: frozenset[str] = frozenset(), depth: int = 0,
+) -> None:
+    """Flatten a ``{…} as const`` object literal into ``base.a.b → value`` for every leaf that
+    resolves to a string (literal / template / const-ref), following an object-valued reference
+    (``tabs: sharedTabs``) into that object. Non-literal / unresolved leaves are skipped
+    (honest-null); recursion is depth- and cycle-bounded."""
+    if depth > 6:
+        return
+
+    def add_ref(path: str, ref: str) -> None:
+        """A property whose value is an identifier: inline-flatten a referenced object const,
+        else resolve a referenced scalar const."""
+        if ref in obj_consts and ref not in seen:
+            flatten_const_object(path, obj_consts[ref], source, str_consts, obj_consts,
+                                 out, seen | {ref}, depth + 1)
+        else:
+            r = str_consts.get(ref)
+            if r is not None:
+                out[path] = r
+
+    for prop in obj.named_children:
+        if prop.type == "shorthand_property_identifier":  # `{ tabs }` == `tabs: tabs`
+            name = node_text(prop, source)
+            add_ref(f"{base}.{name}", name)
+            continue
+        if prop.type != "pair":
+            continue
+        kname = _pair_key_name(prop.child_by_field_name("key"), source)
+        val = _unwrap_const_expr(prop.child_by_field_name("value"))
+        if kname is None or val is None:
+            continue
+        path = f"{base}.{kname}"
+        if val.type == "object":
+            flatten_const_object(path, val, source, str_consts, obj_consts, out, seen, depth + 1)
+        elif val.type == "identifier":
+            add_ref(path, node_text(val, source))
+        else:
+            resolved = resolve_const_value(val, source, str_consts)
+            if resolved is not None:
+                out[path] = resolved
+
+
 def _collect_const_values(root: Node, source: bytes, const_values: dict[str, str | None]) -> None:
-    """Record ``symbol → literal`` from one file's top-level string constants:
-    ``const NAME = 'x'``, ``enum E { M = 'x' }`` (→ ``E.M``), and ``static readonly M = 'x'``
-    class fields (→ ``C.M``). Non-string values are skipped; a symbol seen with >1 distinct
-    literal collapses to ``None`` (ambiguous, honest-null) via :func:`record_distinct`."""
+    """Record ``symbol → literal`` from one file's top-level constants: ``const NAME = 'x'``,
+    ``enum E { M = 'x' }`` (→ ``E.M``), ``static readonly M = 'x'`` (→ ``C.M``), and the leaves of
+    a ``const X = {…} as const`` object (→ ``X.a.b``, folding templates + const refs). Non-string
+    values are skipped; a symbol seen with >1 distinct literal collapses to ``None`` (honest-null)."""
     def add(sym: str, val: str | None) -> None:
         if val is not None:
             record_distinct(const_values, sym, val)
 
+    obj_consts: dict[str, Node] = {}  # const name → object-literal node (for §pass 2 flattening)
     for child in root.named_children:
         node: Node | None = child
         if child.type == "export_statement":
@@ -119,7 +296,10 @@ def _collect_const_values(root: Node, source: bytes, const_values: dict[str, str
                 if d.type == "variable_declarator":
                     nm = d.child_by_field_name("name")
                     if nm is not None and nm.type == "identifier":
-                        add(node_text(nm, source), _string_literal(d.child_by_field_name("value"), source))
+                        value = _unwrap_const_expr(d.child_by_field_name("value"))
+                        add(node_text(nm, source), _string_literal(value, source))
+                        if value is not None and value.type == "object":
+                            obj_consts[node_text(nm, source)] = value
         elif node.type == "enum_declaration":
             ename = next((c for c in node.named_children if c.type in ("identifier", "type_identifier")), None)
             body = next((c for c in node.named_children if c.type == "enum_body"), None)
@@ -140,6 +320,14 @@ def _collect_const_values(root: Node, source: bytes, const_values: dict[str, str
                         fv = next((c for c in f.named_children if c.type == "string"), None)
                         if fn is not None:
                             add(f"{node_text(cname, source)}.{node_text(fn, source)}", _string_literal(fv, source))
+
+    # Pass 2: flatten object consts now that flat consts are collected (their leaves may reference
+    # a sibling flat const via a `${…}` template, e.g. `root: `/${segment}``).
+    for name, obj in obj_consts.items():
+        flat: dict[str, str] = {}
+        flatten_const_object(name, obj, source, const_values, obj_consts, flat)
+        for k, v in flat.items():
+            add(k, v)
 
 
 _CLASS_NODES = ("class_declaration", "class", "abstract_class_declaration")
@@ -578,11 +766,23 @@ def build_ts_index(repo_root: Path, files: Sequence[Path], jobs: int = 1) -> TsA
     return TsAliasIndex(
         base_dir=alias.base_dir if alias else str(repo_root),
         paths=alias.paths if alias else {},
+        alias_scopes=alias.alias_scopes if alias else (),
         const_values=const_values,
         class_heritage=class_heritage,
         route_mounts=route_mounts,
         express_mounts=express_mounts,
     )
+
+
+#: ESM / NodeNext specifiers name the *emitted* file (`./x.js`) while the source on disk is
+#: TypeScript (`./x.ts` / `.tsx`). tsc never rewrites the extension in the specifier, so a
+#: literal `.js` probe misses. Map each JS-family suffix to the TS siblings to try instead.
+_EXT_REWRITE = {
+    ".js": (".ts", ".tsx"),
+    ".jsx": (".tsx",),
+    ".mjs": (".mts",),
+    ".cjs": (".cts",),
+}
 
 
 def _try_paths(target: Path, repo_root: Path) -> str | None:
@@ -591,6 +791,13 @@ def _try_paths(target: Path, repo_root: Path) -> str | None:
     # `.vue`/`.ts` specifier would be probed as `Avatar.vue.vue` and missed.
     if target.is_file():
         return repo_relative(target, repo_root)
+    # `./x.js` → `./x.ts`/`.tsx`. Gated on is_file, so it only ever resolves to a real File
+    # node (honest-null); the literal `.js` is tried first above, so a repo that genuinely
+    # ships `x.js` beside `x.ts` still binds to the real `.js`.
+    for ts_suffix in _EXT_REWRITE.get(target.suffix, ()):
+        cand = target.with_suffix(ts_suffix)
+        if cand.is_file():
+            return repo_relative(cand, repo_root)
     for suffix in _SUFFIXES:
         cand = target.with_name(target.name + suffix)
         if cand.is_file():
@@ -602,31 +809,52 @@ def _try_paths(target: Path, repo_root: Path) -> str | None:
     return None
 
 
-def _resolve_alias(module: str, index: TsAliasIndex, repo_root: Path) -> str | None:
-    base = Path(index.base_dir)
-    for pattern, targets in index.paths.items():
+def _match_alias(
+    module: str, paths: dict[str, list[str]], repo_root: Path, base: Path | None
+) -> str | None:
+    """Resolve ``module`` against one alias map. ``base`` joins **relative** targets (legacy
+    single-config); ``None`` means targets are already absolute (per-scope index)."""
+    def loc(tgt: str) -> Path:
+        return base / tgt if base is not None else Path(tgt)
+
+    for pattern, targets in paths.items():
         if pattern.endswith("/*"):
             prefix = pattern[:-1]  # "@app/"
             if module.startswith(prefix):
                 rest = module[len(prefix):]
                 for tgt in targets:
                     sub = tgt[:-1] + rest if tgt.endswith("/*") else tgt
-                    resolved = _try_paths(base / sub, repo_root)
+                    resolved = _try_paths(loc(sub), repo_root)
                     if resolved:
                         return resolved
         elif module == pattern:
             for tgt in targets:
-                resolved = _try_paths(base / tgt, repo_root)
+                resolved = _try_paths(loc(tgt), repo_root)
                 if resolved:
                     return resolved
     return None
+
+
+def _resolve_alias(module: str, index: TsAliasIndex, repo_root: Path, file_path: str) -> str | None:
+    if index.alias_scopes:
+        # Nearest-config wins: try each enclosing tsconfig scope deepest-first, so an app's
+        # `@/*` resolves against its own `src`, never a sibling package's same-named alias.
+        file_dir = (repo_root / file_path).parent.resolve()
+        for cfg_dir, paths in index.alias_scopes:
+            cd = Path(cfg_dir)
+            if cd == file_dir or cd in file_dir.parents:
+                resolved = _match_alias(module, paths, repo_root, None)
+                if resolved:
+                    return resolved
+        return None
+    return _match_alias(module, index.paths, repo_root, Path(index.base_dir))
 
 
 def _resolve(module: str, file_path: str, repo_root: Path, index: TsAliasIndex | None) -> str | None:
     if module.startswith("."):
         return _try_paths((repo_root / file_path).parent / module, repo_root)
     if index is not None:
-        return _resolve_alias(module, index, repo_root)
+        return _resolve_alias(module, index, repo_root, file_path)
     return None
 
 

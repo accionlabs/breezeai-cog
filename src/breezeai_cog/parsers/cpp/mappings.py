@@ -18,6 +18,7 @@ CONTROL_FLOW = {
     "do_statement",
     "switch_statement",
     "try_statement",
+    "catch_clause",  # error-handling boundary (C++ has no finally)
 }
 
 JUMP = {

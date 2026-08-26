@@ -212,10 +212,30 @@ _ES_RECEIVERS = frozenset({
 })
 
 
+# Prisma client API verbs. Several (`deleteMany`/`updateMany`/`upsert`/`aggregate`) collide
+# with Mongo/TypeORM distinctive names, so a receiver-blind table mislabels a Prisma call as
+# that other store. When the call chain is an explicit Prisma-client access (`prisma.x.op()` /
+# `this.prisma.x.op()`), the vendor is unambiguous — this positive signal wins. It only ADDS
+# precision: a genuine Mongo/TypeORM call has no `prisma.` in its chain, so nothing regresses.
+_PRISMA_VERBS = frozenset({
+    "findfirst", "findunique", "findmany", "finduniqueorthrow", "findfirstorthrow",
+    "create", "createmany", "update", "updatemany", "delete", "deletemany",
+    "upsert", "count", "aggregate", "groupby",
+})
+
+
+def _is_prisma_chain(low: str) -> bool:
+    """The receiver chain is a real Prisma-client access (`prisma.` root or a `.prisma.`
+    segment, e.g. `this.prisma.user.findMany`)."""
+    return low.startswith("prisma.") or ".prisma." in low
+
+
 def match_db(callee: str, method: str, language: str | None = None,
              typed_db_ids: "frozenset[str] | None" = None) -> str | None:
     m = method.lower()
     low = callee.lower()
+    if m in _PRISMA_VERBS and _is_prisma_chain(low):
+        return "prisma"
     if m in _DISTINCTIVE:
         db = _DISTINCTIVE[m]
         # EF verbs are .NET-only; suppress them in a known non-.NET file (name collision).

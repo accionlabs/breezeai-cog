@@ -119,19 +119,22 @@ def _request_dto(field: Node, src: bytes) -> str | None:
 
 
 def collect_graphql_statements(
-    root: Node, source: bytes, path: str, seen_ids: set[str], limit: int
+    root: Node, source: bytes, path: str, seen_ids: set[str], limit: int, row_offset: int = 0
 ) -> list[Statement]:
+    """Walk a parsed GraphQL document and emit flat ``Statement``s. ``row_offset`` shifts every
+    line back to the host file when the document is an SDL fragment re-parsed out of a ``gql``
+    template literal (0 for a standalone ``.graphql`` file)."""
     out: list[Statement] = []
     fid = file_id(path)
 
     def stmt(node: Node, line: int, col: int, **fields: object) -> Statement:
         return Statement(
-            id=disambiguate(statement_id(path, line, col), seen_ids),
+            id=disambiguate(statement_id(path, line + row_offset, col), seen_ids),
             parentId=fid,
             path=path,
             framework="graphql",
-            startLine=line,
-            endLine=node.end_point[0] + 1,
+            startLine=line + row_offset,
+            endLine=node.end_point[0] + 1 + row_offset,
             **fields,  # type: ignore[arg-type]
         )
 

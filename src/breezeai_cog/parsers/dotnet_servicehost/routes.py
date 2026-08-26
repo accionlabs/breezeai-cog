@@ -32,7 +32,7 @@ from pathlib import Path
 
 from ...emit import disambiguate, file_id, statement_id
 from ...schemas import Statement
-from ..csharp_webforms.mounts import ci_resolve
+from ..csharp_webforms.mounts import _app_root, _to_repo_path, ci_resolve
 
 
 @dataclass(frozen=True)
@@ -75,13 +75,15 @@ def _attr(body: bytes, name: str) -> str | None:
 def _codebehind_import(code_behind: str, rel_path: str, repo_root: Path | None) -> str | None:
     """The ``CodeBehind`` attribute → the code-behind ``.cs`` repo path (real on-disk casing)
     for the IMPORTS edge, or None when absent / unresolved (honest-null — no dangling edge).
-    Resolved relative to the host file's own directory (the standard CodeBehind convention)."""
+
+    Resolved through the shared Web Forms virtual-path resolver so ``.svc``/``.asmx`` honour the
+    same ASP.NET path rules as the ``.aspx`` mount pass: ``~/`` and ``/`` resolve against the
+    **application root** (nearest ancestor ``web.config``, else the repo root), a bare path
+    against the host file's own directory (the standard same-folder ``CodeBehind`` convention)."""
     if repo_root is None:
         return None
-    rel = posixpath.normpath(
-        posixpath.join(posixpath.dirname(rel_path), code_behind.replace("\\", "/"))
-    )
-    if rel.startswith(".."):  # escaped the repo root
+    rel = _to_repo_path(code_behind, posixpath.dirname(rel_path), _app_root(rel_path, repo_root))
+    if rel is None:  # escaped the repo root
         return None
     return ci_resolve(repo_root, rel)
 
@@ -117,7 +119,7 @@ def detect_service_host(
         parentId=file_id(rel_path),  # the host file owns the endpoint (no functions here)
         nodeType="synthetic",  # directive-derived, no backing AST node
         semanticType="route",
-        text=f"{spec.directive} {cls}",
+        text=m.group(0).decode("utf-8", "replace"),  # the full <%@ … %> directive — source of every derived field (Service/Class, Factory, CodeBehind, Language)
         framework=spec.framework,
         method="RPC",  # SOAP operation host — addressed by name, no HTTP verb
         endpoint=rel_path,  # the served endpoint (physical path)

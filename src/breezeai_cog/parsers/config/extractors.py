@@ -77,6 +77,12 @@ def _dispatch(name: str, suffix: str, text: str) -> dict[str, Any]:
         return _package_json(text)
     if name in ("tsconfig.json", "jsconfig.json"):
         return _tsconfig(name, text)
+    if name == "project.json":
+        return _project_json(text)
+    if name == "nx.json":
+        return _nx_json(text)
+    if name in ("pnpm-workspace.yaml", "pnpm-workspace.yml"):
+        return _pnpm_workspace(text)
     if name == "mod.json":
         return _mod_json(text)
     if name in ("docker-compose.yml", "docker-compose.yaml"):
@@ -128,8 +134,14 @@ def _dispatch(name: str, suffix: str, text: str) -> dict[str, Any]:
 # ── JSON family ───────────────────────────────────────────────────────────────
 def _package_json(text: str) -> dict[str, Any]:
     d = json.loads(text)
-    deps = list((d.get("dependencies") or {}).keys())
-    dev = list((d.get("devDependencies") or {}).keys())
+    # Keep name → specifier (not just names) so an internal `workspace:*` / `file:` / `link:`
+    # dependency is distinguishable from an npm one, and surface the internal ones directly.
+    deps = dict(d.get("dependencies") or {})
+    dev = dict(d.get("devDependencies") or {})
+    workspace_deps = sorted(
+        name for name, spec in {**deps, **dev}.items()
+        if isinstance(spec, str) and spec.startswith(("workspace:", "file:", "link:"))
+    )
     return {
         "kind": "package.json",
         "category": "json",
@@ -143,6 +155,7 @@ def _package_json(text: str) -> dict[str, Any]:
             "dependencies": deps,
             "devDependencies": dev,
         },
+        "workspaceDependencies": workspace_deps,  # internal monorepo deps (workspace:/file:/link:)
         "dependencyCount": len(deps),
         "devDependencyCount": len(dev),
     }
@@ -161,10 +174,55 @@ def _tsconfig(name: str, text: str) -> dict[str, Any]:
             "outDir": co.get("outDir"),
             "rootDir": co.get("rootDir"),
             "strict": co.get("strict"),
-            "paths": list((co.get("paths") or {}).keys()),
+            "paths": dict(co.get("paths") or {}),  # alias → targets (targets are what a resolver needs)
+            "baseUrl": co.get("baseUrl"),
+            "extends": d.get("extends"),
             "include": d.get("include"),
             "exclude": d.get("exclude"),
         },
+    }
+
+
+def _project_json(text: str) -> dict[str, Any]:
+    """Nx (or similar) per-project config — retains the module-boundary values a generic
+    top-level-keys pass would discard: declared inter-project deps, tags, and target names."""
+    d = json.loads(text)
+    return {
+        "kind": "project.json",
+        "category": "json",
+        "buildTool": "nx",
+        "projectInfo": {
+            "name": d.get("name"),
+            "tags": d.get("tags") or [],
+            "implicitDependencies": d.get("implicitDependencies") or [],
+            "targets": list((d.get("targets") or {}).keys()),
+        },
+    }
+
+
+def _nx_json(text: str) -> dict[str, Any]:
+    """Nx workspace config — keep the declared target defaults and plugins, not just keys."""
+    d = json.loads(text)
+    plugins = [p.get("plugin") if isinstance(p, dict) else p for p in (d.get("plugins") or [])]
+    return {
+        "kind": "nx.json",
+        "category": "json",
+        "buildTool": "nx",
+        "nxConfig": {
+            "targetDefaults": list((d.get("targetDefaults") or {}).keys()),
+            "plugins": [p for p in plugins if isinstance(p, str)],
+        },
+    }
+
+
+def _pnpm_workspace(text: str) -> dict[str, Any]:
+    """pnpm workspace file — keep the `packages` globs that define the workspace members."""
+    d = (yaml.safe_load(text) if yaml is not None else None) or {}
+    return {
+        "kind": "pnpm-workspace.yaml",
+        "category": "yaml",
+        "buildTool": "pnpm",
+        "workspaceGlobs": d.get("packages") or [],
     }
 
 

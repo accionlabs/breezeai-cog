@@ -33,7 +33,13 @@ from .functions import (
 from ..statements_common import reset_http_client_ids, set_http_client_ids
 from .imports import TsAliasIndex, build_ts_index, extract_imports
 from ..comments_common import comment_statements_for
-from .mappings import COMMENT_TYPES, CONTROL_FLOW, FRAMEWORKS, STATEMENT_TYPES
+from .mappings import (
+    COMMENT_TYPES,
+    CONTROL_FLOW,
+    FRAMEWORKS,
+    JS_BUILTIN_METHODS,
+    STATEMENT_TYPES,
+)
 from .statements import collect_http_client_ids, extract_statements
 
 _DECLS = (
@@ -143,6 +149,7 @@ class TypeScriptParser(BaseParser):
             path,
             type_map(root, source),
             heritage=getattr(ctx.resolution_index, "class_heritage", None),
+            builtin_methods=JS_BUILTIN_METHODS,
         )
         functions: list[Function] = []
         classes = []

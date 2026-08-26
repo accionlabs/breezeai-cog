@@ -285,7 +285,7 @@ def test_enum_members_captured_as_statements(tmp_path) -> None:
     _, enum, members = _enum_members(tmp_path, src)
     assert enum.metadata is None
     assert [(m.name, m.text) for m in members] == [("HIGH", 'HIGH("3")'), ("LOW", 'LOW("1")')]
-    assert all(m.nodeType == "enum_constant" and m.semanticType is None for m in members)
+    assert all(m.nodeType == "enum_constant" and m.semanticType == "enum_member" for m in members)
 
 
 def test_enum_bare_and_valued_members(tmp_path) -> None:

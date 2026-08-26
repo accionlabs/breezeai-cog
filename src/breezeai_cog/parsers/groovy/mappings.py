@@ -19,6 +19,8 @@ CONTROL_FLOW = {
     "switch_statement",
     "switch_expression",
     "try_statement",
+    "catch_clause",  # error-handling boundary (bodies already captured; this adds the clause node)
+    "finally_clause",
 }
 
 JUMP = {
