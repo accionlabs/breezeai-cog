@@ -837,20 +837,26 @@ def test_exports_capture_const_and_default(tmp_path) -> None:
 
 
 def test_enum_members_captured_as_statements(tmp_path) -> None:
-    # Enum members become flat statements parented to the enum Class; valued members are
-    # `enum_assignment`, bare ones a `property_identifier`. The value rides inside the text.
-    src = b"enum Role { Admin = 'admin', User }\n"
+    # Every enum member is a flat statement parented to the enum Class. nodeType stays the raw
+    # grammar type (valued → enum_assignment, bare → property_identifier) and text stays literal
+    # source; semanticType="enum_member" is the uniform, cross-language role marker.
+    src = b"enum Cat { Internal = -1, Unhandled = 0, GraphQL, Network }\n"
     p = tmp_path / "r.ts"
     p.write_bytes(src)
     ctx = ParseContext(path="r.ts", abs_path=p, source=src, repo_root=tmp_path,
                        capture_statements=True)
     rec = TypeScriptParser().parse_file(ctx)
-    role = next(c for c in rec.classes if c.type == "enum")
-    members = [(s.name, s.text, s.nodeType) for s in rec.statements if s.parentId == role.id]
+    cat = next(c for c in rec.classes if c.type == "enum")
+    members = [(s.name, s.text, s.nodeType, s.semanticType) for s in rec.statements
+               if s.parentId == cat.id]
     assert members == [
-        ("Admin", "Admin = 'admin'", "enum_assignment"),
-        ("User", "User", "property_identifier"),
+        ("Internal", "Internal = -1", "enum_assignment", "enum_member"),
+        ("Unhandled", "Unhandled = 0", "enum_assignment", "enum_member"),
+        ("GraphQL", "GraphQL", "property_identifier", "enum_member"),  # bare: honest raw type + text
+        ("Network", "Network", "property_identifier", "enum_member"),
     ]
+    # A single semanticType filter finds every member regardless of the split nodeType.
+    assert len([s for s in rec.statements if s.semanticType == "enum_member"]) == 4
     ctx2 = ParseContext(path="r.ts", abs_path=p, source=src, repo_root=tmp_path,
                         capture_statements=False)
     assert TypeScriptParser().parse_file(ctx2).statements == []

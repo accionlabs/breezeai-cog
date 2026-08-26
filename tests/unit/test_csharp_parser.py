@@ -475,7 +475,8 @@ def test_enum_members_captured_as_statements(tmp_path) -> None:
     assert [(m.name, m.text) for m in members] == [
         ("OK", "OK = 3"), ("Fail", "Fail = 9"), ("Unknown", "Unknown"),
     ]
-    assert all(m.nodeType == "enum_member_declaration" and m.semanticType is None for m in members)
+    assert all(m.nodeType == "enum_member_declaration" and m.semanticType == "enum_member"
+               for m in members)
 
 
 def test_catch_finally_clauses_emitted(tmp_path) -> None:

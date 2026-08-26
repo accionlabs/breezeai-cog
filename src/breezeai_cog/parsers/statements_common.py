@@ -376,15 +376,18 @@ def member_statement(
     seen_ids: set[str],
     name: str | None = None,
     decorators: "list[Decorator] | None" = None,
+    semantic_type: str | None = None,
 ) -> Statement:
     """One flat declaration Statement for ``node`` (``nodeType`` = the AST node, ``text`` =
-    its source, ``semanticType`` null). ``name`` defaults to the member's declared name."""
+    its source). ``name`` defaults to the member's declared name; ``semantic_type`` marks the
+    member's role on the same record while ``nodeType`` stays the raw grammar type."""
     start, col = node.start_point[0] + 1, node.start_point[1]
     end = node.end_point[0] + 1
     return Statement(
         id=disambiguate(statement_id(path, start, col), seen_ids),
         parentId=parent_id,
         nodeType=node.type,
+        semanticType=semantic_type,
         # Fold a same-line trailing doc (``kCAPLC09 = 1000, ///< Apply Status``) into the
         # member's text — the high-value constant-doc case.
         text=text_with_trailing_comment(node, source),
@@ -407,9 +410,11 @@ def emit_enum_members(
     seen_ids: set[str],
 ) -> list[Statement]:
     """Emit one Statement per enum member — a direct child of ``body`` whose type is in
-    ``member_types`` — parented to the enum's Class id."""
+    ``member_types`` — parented to the enum's Class id. Each carries ``semanticType`` =
+    ``enum_member`` (the cross-language role) while ``nodeType`` keeps its raw grammar type."""
     return [
-        member_statement(node, source, path, parent_id=parent_id, limit=limit, seen_ids=seen_ids)
+        member_statement(node, source, path, parent_id=parent_id, limit=limit,
+                         seen_ids=seen_ids, semantic_type="enum_member")
         for node in body.named_children
         if node.type in member_types
     ]

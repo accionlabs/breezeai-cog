@@ -7,7 +7,7 @@ from tree_sitter import Node
 
 from ...emit import class_id, disambiguate
 from ...schemas import Class, ConstructorParam, Function, Statement
-from ..statements_common import member_statement
+from ..statements_common import emit_enum_members
 from ..treesitter import line_span, node_text
 from ..callresolve import CallResolver, noop_resolver
 from .decorators import extract_decorators
@@ -25,54 +25,6 @@ _TYPE = {
     "interface_declaration": "interface",
     "enum_declaration": "enum",
 }
-
-
-def _enum_int(assignment: Node, source: bytes) -> int | None:
-    """The integer value of a ``Name = <literal>`` enum member (handles ``-1``, ``0x1F``);
-    ``None`` when the initializer is non-integer (string/computed) — after which the next
-    implicit ordinal is unknowable."""
-    kids = assignment.named_children
-    if len(kids) < 2:
-        return None
-    txt = node_text(kids[-1], source).strip()
-    for base in (10, 0):  # plain decimal, then 0x/0b/0o
-        try:
-            return int(txt, base)
-        except ValueError:
-            continue
-    return None
-
-
-def _emit_ts_enum_members(
-    ebody: Node, source: bytes, path: str, parent_id: str, limit: int, seen_ids: set[str]
-) -> list[Statement]:
-    """Emit one Statement per TS enum member, parented to the enum Class. A **bare** member
-    (no initializer) is grammar-typed ``property_identifier``; normalize it to
-    ``enum_assignment`` so every member of an enum is uniformly queryable, and fold in its
-    resolved ordinal (0, or the last explicit integer + 1). The ordinal is emitted only while
-    it is a known integer — once a member has a non-integer initializer the implicit value is
-    unknowable, so later bare members keep just their name (honest-null)."""
-    out: list[Statement] = []
-    next_ordinal: int | None = 0
-    for node in ebody.named_children:
-        if node.type == "enum_assignment":
-            out.append(member_statement(
-                node, source, path, parent_id=parent_id, limit=limit, seen_ids=seen_ids,
-            ))
-            value = _enum_int(node, source)
-            next_ordinal = value + 1 if value is not None else None
-        elif node.type == "property_identifier":
-            name = node_text(node, source)
-            if next_ordinal is not None:
-                text: str | None = f"{name} = {next_ordinal}"
-                next_ordinal += 1
-            else:
-                text = None  # value unknowable → keep the bare name (member_statement default)
-            out.append(member_statement(
-                node, source, path, parent_id=parent_id, limit=limit, seen_ids=seen_ids,
-                name=name, node_type="enum_assignment", text=text,
-            ))
-    return out
 
 
 def _heritage(cnode: Node, source: bytes) -> tuple[str | None, list[str]]:
@@ -188,7 +140,11 @@ def build_class(
         )
         if ebody is not None:
             statements.extend(
-                _emit_ts_enum_members(ebody, source, path, cid, limit, seen_ids)
+                emit_enum_members(
+                    ebody, source, path,
+                    member_types={"enum_assignment", "property_identifier"},
+                    parent_id=cid, limit=limit, seen_ids=seen_ids,
+                )
             )
 
     # Named functions living inside class-decorator arguments (NestJS `@Module({ …

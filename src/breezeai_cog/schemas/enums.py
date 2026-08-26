@@ -51,6 +51,13 @@ SemanticType = Literal[
     # language, plus Python docstrings. Persisted verbatim by the backend like
     # ``structured_data`` above.
     "comment",
+    # enum member (not a behaviour) — the semantic role of an enum-member declaration, marked
+    # on the *same* record while ``nodeType`` keeps its real, per-language grammar type
+    # (``enum_assignment`` / ``property_identifier`` / ``enum_member_declaration`` /
+    # ``enum_constant`` …). Gives a single cross-language "all enum members" filter that a
+    # grammar-coupled ``nodeType`` cannot. Persisted verbatim by the backend (no enum check);
+    # adding it to the Confluence spec's §2.4 list is a documentation step.
+    "enum_member",
     # IaC block types (HCL/Terraform family) — behaviour-only:
     #   resource  = declares/owns infrastructure
     #   data      = reads existing infrastructure owned elsewhere
