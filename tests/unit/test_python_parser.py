@@ -267,18 +267,33 @@ def test_endpoint_fstring_and_concat(tmp_path) -> None:
 
 
 def test_enum_members_captured_as_statements(tmp_path) -> None:
-    # Python enums are plain classes; their members are assignment statements parented to
-    # the class, with the declared name populated (queryable text).
-    src = b"from enum import Enum\n\nclass Color(Enum):\n    RED = 1\n    GREEN = 2\n"
+    # Python enums are plain classes; their members are assignment statements parented to the
+    # class — nodeType/text stay raw source, and semanticType="enum_member" is the
+    # cross-language role marker. Non-members (annotation-only, sunder, dunder) are not tagged.
+    src = (
+        b"from enum import Enum\n\nclass Color(Enum):\n"
+        b"    RED = 1\n    GREEN = 2\n    _ignore_ = ['x']\n    label: str\n    ALPHA: int = 9\n"
+    )
     p = tmp_path / "color.py"
     p.write_bytes(src)
     ctx = ParseContext(path="color.py", abs_path=p, source=src, repo_root=tmp_path,
                        capture_statements=True)
     rec = PythonParser().parse_file(ctx)
     color = next(c for c in rec.classes if c.name == "Color")
-    members = [(s.name, s.text) for s in rec.statements if s.parentId == color.id]
-    assert members == [("RED", "RED = 1"), ("GREEN", "GREEN = 2")]
-    assert all(
-        s.nodeType == "assignment" and s.semanticType is None
-        for s in rec.statements if s.parentId == color.id
-    )
+    by_name = {s.name: s for s in rec.statements if s.parentId == color.id}
+    assert by_name["RED"].text == "RED = 1" and by_name["RED"].nodeType == "assignment"
+    members = {n for n, s in by_name.items() if s.semanticType == "enum_member"}
+    assert members == {"RED", "GREEN", "ALPHA"}  # value assignments with normal names
+    # non-members are untagged: sunder, and an annotation without a value
+    assert by_name["_ignore_"].semanticType is None
+    assert by_name["label"].semanticType is None
+
+
+def test_non_enum_class_assignments_not_tagged(tmp_path) -> None:
+    src = b"class Config:\n    RED = 1\n    GREEN = 2\n"
+    p = tmp_path / "c.py"
+    p.write_bytes(src)
+    ctx = ParseContext(path="c.py", abs_path=p, source=src, repo_root=tmp_path,
+                       capture_statements=True)
+    rec = PythonParser().parse_file(ctx)
+    assert all(s.semanticType is None for s in rec.statements if s.nodeType == "assignment")
