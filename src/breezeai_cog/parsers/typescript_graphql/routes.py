@@ -46,6 +46,7 @@ from tree_sitter import Node
 
 from ...emit import disambiguate, file_id, statement_id
 from ...schemas import FileRecord, Statement
+from ..graphql.sdl import collect_graphql_statements
 from ..treesitter import first_line, node_text, parse_source
 
 # The three root operation types. Everything else keyed in a resolver map
@@ -157,7 +158,7 @@ def _base_type_name(node: Node | None, source: bytes) -> str | None:
 
 def _request_dto(field: Node, source: bytes) -> str | None:
     """The input DTO of a field's args — the ``input``/``data`` arg if present, else the
-    first arg — as its base type name."""
+    first arg — as its base type name. Shared with the code-first GraphQL detector."""
     args = _child(field, "arguments_definition")
     if args is None:
         return None
@@ -175,92 +176,6 @@ def _request_dto(field: Node, source: bytes) -> str | None:
     return _base_type_name(_child(chosen, "type"), source)
 
 
-def _emit_fields(
-    obj: Node,
-    kind: str,
-    sdl: bytes,
-    row_base: int,
-    path: str,
-    seen: set[str],
-    routes: list[Statement],
-) -> None:
-    fields_def = _child(obj, "fields_definition")
-    if fields_def is None:
-        return
-    for field in fields_def.named_children:
-        if field.type != "field_definition":
-            continue
-        name = _child(field, "name")
-        if name is None:
-            continue
-        # Anchor the line to the field name, not the field_definition span (which the
-        # grammar extends up over any leading """description""" block). SDL rows are
-        # 0-based within the fragment; row_base is the fragment's TS row.
-        line = row_base + name.start_point[0] + 1
-        routes.append(
-            Statement(
-                id=disambiguate(statement_id(path, line, name.start_point[1]), seen),
-                parentId=file_id(path),
-                # SDL re-parsed from a gql`` template string — no node in the host (TS) AST, so
-                # synthetic (not the GraphQL grammar's own node type).
-                nodeType="synthetic",
-                semanticType="route",
-                text=first_line(node_text(field, sdl))[:120],
-                method=kind.upper(),
-                endpoint=node_text(name, source=sdl),
-                framework="graphql",
-                routeKind=kind,
-                requestDTO=_request_dto(field, sdl),
-                responseDTO=_base_type_name(_child(field, "type"), sdl),
-                startLine=line,
-                endLine=row_base + field.end_point[0] + 1,
-                path=path,
-            )
-        )
-
-
-def _has_key(obj: Node, sdl: bytes) -> bool:
-    """Whether an object type carries a Federation / graphql-tools-stitching ``@key`` directive —
-    the marker that it is a federated/stitched entity. The key field *names* are not extracted
-    (dropped for now — the ``@key`` directive itself stays visible in the entity's ``text``)."""
-    directives = _child(obj, "directives")
-    if directives is None:
-        return False
-    return any(
-        d.type == "directive"
-        and (n := _child(d, "name")) is not None
-        and node_text(n, sdl) == "key"
-        for d in directives.named_children
-    )
-
-
-def _emit_entity(
-    obj: Node, sdl: bytes, row_base: int, path: str, seen: set[str], routes: list[Statement]
-) -> None:
-    """Emit a ``graphql_entity`` statement for a ``@key``-bearing type — the federated/stitched
-    entity, joinable to operations on ``endpoint`` (the type name)."""
-    if not _has_key(obj, sdl):  # no @key → not an entity
-        return
-    name = _child(obj, "name")
-    if name is None:
-        return
-    line = row_base + name.start_point[0] + 1
-    routes.append(
-        Statement(
-            id=disambiguate(statement_id(path, line, name.start_point[1]), seen),
-            parentId=file_id(path),
-            nodeType="synthetic",
-            semanticType="graphql_entity",
-            text=first_line(node_text(obj, sdl))[:120],
-            endpoint=node_text(name, source=sdl),  # the entity type name (joins to op DTOs)
-            framework="graphql",
-            startLine=line,
-            endLine=row_base + obj.end_point[0] + 1,
-            path=path,
-        )
-    )
-
-
 def _parse_sdl_fragment(
     frag: Node,
     source: bytes,
@@ -268,30 +183,23 @@ def _parse_sdl_fragment(
     seen: set[str],
     routes: list[Statement],
     timeout_micros: int,
+    limit: int,
 ) -> None:
-    """Re-parse one ``string_fragment``'s bytes with the ``graphql`` grammar and emit a route
-    per root-type field, plus a ``graphql_entity`` for every ``@key``-bearing type. Line numbers
-    map back via the fragment's TS start row."""
+    """Re-parse one ``string_fragment``'s bytes with the ``graphql`` grammar and emit the SAME
+    full statement set a standalone ``.graphql`` file gets — root-type fields as ``route``,
+    every object/interface/union as ``graphql_entity``, and inputs/enums/scalars as plain
+    statements — via the shared :func:`collect_graphql_statements` walker, with ``row_offset``
+    mapping each line back to the host TS file (one walker, one behaviour for embedded vs
+    standalone SDL)."""
     sdl = source[frag.start_byte : frag.end_byte]
-    row_base = frag.start_point[0]
     gql_root = parse_source("graphql", sdl, timeout_micros).root_node
-
-    def walk(n: Node) -> None:
-        if n.type in ("object_type_definition", "object_type_extension"):
-            name = _child(n, "name")
-            kind = _ROOT_TYPES.get(node_text(name, sdl)) if name is not None else None
-            if kind is not None:
-                _emit_fields(n, kind, sdl, row_base, path, seen, routes)
-            else:
-                _emit_entity(n, sdl, row_base, path, seen, routes)  # non-root type: maybe an entity
-        for c in n.named_children:
-            walk(c)
-
-    walk(gql_root)
+    routes.extend(
+        collect_graphql_statements(gql_root, sdl, path, seen, limit, row_offset=frag.start_point[0])
+    )
 
 
 def _detect_sdl(
-    root: Node, source: bytes, path: str, seen: set[str], timeout_micros: int
+    root: Node, source: bytes, path: str, seen: set[str], timeout_micros: int, limit: int
 ) -> list[Statement]:
     routes: list[Statement] = []
 
@@ -299,7 +207,7 @@ def _detect_sdl(
         if n.type == "string_fragment":
             frag = source[n.start_byte : n.end_byte]
             if any(m in frag for m in _SDL_MARKERS):
-                _parse_sdl_fragment(n, source, path, seen, routes, timeout_micros)
+                _parse_sdl_fragment(n, source, path, seen, routes, timeout_micros, limit)
         for c in n.named_children:
             walk(c)
 
@@ -351,6 +259,21 @@ def _is_gql_tagged(tmpl: Node, source: bytes) -> bool:
     ``template_string`` -> ``call_expression`` whose function is the tag identifier. Guards
     against plain template strings that merely contain the word ``query`` (a log message)."""
     call = tmpl.parent
+    if call is None or call.type != "call_expression":
+        return False
+    fn = call.child_by_field_name("function")
+    return fn is not None and node_text(fn, source).rsplit(".", 1)[-1] in _GQL_TAGS
+
+
+def _is_gql_call_arg(tmpl: Node, source: bytes) -> bool:
+    """True if this ``template_string`` is the argument of a ``gql(…)`` / ``graphql(…)`` CALL —
+    the graphql-codegen *client-preset* form ``gql(`query …`)`` (vs the tagged form
+    ``gql`…` `` handled by :func:`_is_gql_tagged`). Parent chain is ``template_string`` ->
+    ``arguments`` -> ``call_expression`` whose function is the ``gql``/``graphql`` identifier."""
+    args = tmpl.parent
+    if args is None or args.type != "arguments":
+        return False
+    call = args.parent
     if call is None or call.type != "call_expression":
         return False
     fn = call.child_by_field_name("function")
@@ -448,7 +371,9 @@ def _detect_client_ops(
         # fragments, none of which is a complete GraphQL document. We reconstruct the full
         # document from the template's inner span (between the backticks) and blank the
         # ``${…}`` regions so the interpolated document parses as one operation.
-        if n.type == "template_string" and _is_gql_tagged(n, source):
+        if n.type == "template_string" and (
+            _is_gql_tagged(n, source) or _is_gql_call_arg(n, source)
+        ):
             # Inner span: strip the enclosing backticks (first/last byte of the node).
             inner_start, inner_end = n.start_byte + 1, n.end_byte - 1
             body = source[inner_start:inner_end]
@@ -482,15 +407,17 @@ def _detect_client_ops(
 
 
 def detect_graphql(
-    root: Node, source: bytes, path: str, *, seen_ids: set[str], timeout_micros: int = 0
+    root: Node, source: bytes, path: str, *, seen_ids: set[str],
+    timeout_micros: int = 0, limit: int = 8000,
 ) -> list[Statement]:
     """Server-side GraphQL routes — resolver-map operations (with handlers) and SDL operations
     (with DTOs). ``timeout_micros`` bounds the secondary ``graphql`` parse of embedded SDL,
-    threaded from ``ctx.parse_timeout_micros`` like every other ``parse_source`` call. Returns
-    statements to append to the record. (Client operations are handled additively for every TS
-    file by :func:`detect_graphql_client`, not here — GraphQLParser owns only server files.)"""
+    threaded from ``ctx.parse_timeout_micros`` like every other ``parse_source`` call; ``limit``
+    bounds statement ``text`` like ``ctx.statement_text_limit``. Returns statements to append to
+    the record. (Client operations are handled additively for every TS file by
+    :func:`detect_graphql_client`, not here — GraphQLParser owns only server files.)"""
     routes = _detect_resolver_maps(root, source, path, seen_ids)
-    routes += _detect_sdl(root, source, path, seen_ids, timeout_micros)
+    routes += _detect_sdl(root, source, path, seen_ids, timeout_micros, limit)
     return routes
 
 
@@ -503,7 +430,7 @@ def detect_graphql_client(
 ) -> bool:
     """Add client-side GraphQL operation statements (``gql`` tagged templates) to ``record``.
     Returns True if any were found. Cheap byte-guard first so non-GraphQL files skip the walk."""
-    if b"gql`" not in source and b"graphql`" not in source:
+    if not any(m in source for m in (b"gql`", b"graphql`", b"gql(", b"graphql(")):
         return False
     routes = _detect_client_ops(
         root, source, path, {s.id for s in record.statements}, timeout_micros

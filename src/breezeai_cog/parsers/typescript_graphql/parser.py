@@ -44,6 +44,7 @@ class GraphQLParser(TypeScriptParser):
                 root, ctx.source, ctx.path,
                 seen_ids={s.id for s in record.statements},
                 timeout_micros=ctx.parse_timeout_micros,
+                limit=ctx.statement_text_limit,
             )
             if routes:
                 record.statements.extend(routes)

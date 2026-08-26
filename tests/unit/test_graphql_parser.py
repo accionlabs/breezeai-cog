@@ -159,9 +159,9 @@ def test_sdl_operations_detected_with_dtos(tmp_path) -> None:
     assert routes["procurementItems"].responseDTO == "ProcurementItemConnection"
     # trailing directive stripped from the return type.
     assert routes["_byIds"].responseDTO == "ProcurementItem"
-    # SDL re-parsed from a gql`` template string has no host-AST node → synthetic
-    # (not the GraphQL grammar's "field_definition", not a fabricated "graphql_field").
-    assert routes["procurementItem"].nodeType == "synthetic"
+    # Embedded SDL is now walked by the shared collect_graphql_statements (same as a standalone
+    # .graphql file), so a root-type field carries its real GraphQL node type, not "synthetic".
+    assert routes["procurementItem"].nodeType == "field_definition"
 
 
 def test_client_operations_detected_via_base_parser(tmp_path) -> None:
@@ -216,16 +216,61 @@ def test_client_ops_ignore_plain_template_and_server_sdl(tmp_path) -> None:
 def test_key_entities_detected(tmp_path) -> None:
     rec = _parse(tmp_path, ENTITY_SRC, "schema.ts")
     entities = {s.endpoint: s for s in rec.statements if s.semanticType == "graphql_entity"}
-    # Only @key-bearing types are entities; the plain type and the root Query are not.
-    assert set(entities) == {"ProcurementItem", "Tenderer"}
+    # Every object type is now an entity (unified with the standalone .graphql walker), not only
+    # @key-bearing ones — the root Query still becomes routes, not an entity.
+    assert set(entities) == {"ProcurementItem", "Tenderer", "Plain"}
     assert entities["ProcurementItem"].framework == "graphql"
-    # keyFields is dropped; the @key directive stays visible in the entity's text.
-    assert entities["ProcurementItem"].keyFields is None
+    # The @key directive stays visible in the entity's text (key field names are not extracted).
     assert "@key" in entities["ProcurementItem"].text
-    assert entities["Tenderer"].keyFields is None
+    assert "@key" not in entities["Plain"].text
     # the root Query field still emits its route (entities don't displace routes).
     routes = {s.endpoint for s in rec.statements if s.semanticType == "route"}
     assert "procurementItems" in routes
+
+
+SDL_TYPES_SRC = b"""import gql from 'graphql-tag';
+
+export const typeDefs = gql`
+  type Query { info(id: ID!): Information }
+  input InformationFilter { status: Status }
+  enum Status { DRAFT PUBLISHED }
+  interface Node { id: ID! }
+`;
+"""
+
+
+def test_embedded_sdl_captures_inputs_enums_interfaces(tmp_path) -> None:
+    # A5: embedded SDL now yields the same non-root definitions a standalone .graphql file does
+    # (input/enum/interface), not only root fields + @key entities.
+    rec = _parse(tmp_path, SDL_TYPES_SRC, "schema.ts")
+    by_type = {s.name: s.nodeType for s in rec.statements if s.framework == "graphql"}
+    assert by_type.get("InformationFilter") == "input_object_type_definition"
+    assert by_type.get("Status") == "enum_type_definition"
+    assert by_type.get("Node") == "interface_type_definition"
+    # startLine maps back to the host .ts file (row-offset), not the fragment's own line 1:
+    # `enum Status` is the 6th line of schema.ts.
+    status = next(s for s in rec.statements if s.name == "Status")
+    assert status.startLine == 6
+
+
+# graphql-codegen client-preset uses the CALL form `gql(`...`)`, not the tagged form.
+CLIENT_CALL_SRC = b"""import { gql } from '@/__generated__';
+
+const GetInfo = gql(`
+  query GetInfo($id: ID!) {
+    information(id: $id) { id }
+  }
+`);
+"""
+
+
+def test_client_call_form_detected(tmp_path) -> None:
+    # A20: `gql(`query ...`)` (codegen client-preset) must be captured like the tagged form.
+    rec = _parse_base(tmp_path, CLIENT_CALL_SRC, "queries.ts")
+    ops = {s.endpoint: s for s in rec.statements if s.semanticType == "api_call"}
+    assert set(ops) == {"information"}
+    assert ops["information"].method == "QUERY"
+    assert ops["information"].handler == "GetInfo"
 
 
 def test_base_extraction_reused(tmp_path) -> None:
