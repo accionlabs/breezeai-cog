@@ -114,6 +114,23 @@ def test_catch_finally_clauses_emitted(tmp_path) -> None:
     assert any(s.nodeType == "expression_statement" and "cleanup" in s.text for s in rec.statements)
 
 
+def test_param_defaults_and_isasync(tmp_path) -> None:
+    p = tmp_path / "f.ts"
+    p.write_text(
+        "export async function connect(port: number = 5432, opts = {}) { return port; }\n"
+        "export function plain(x: string) { return x; }\n"
+    )
+    ctx = ParseContext(path="f.ts", abs_path=p, source=p.read_bytes(),
+                       repo_root=tmp_path, capture_statements=False)
+    rec = TypeScriptParser().parse_file(ctx)
+    connect = next(f for f in rec.functions if f.name == "connect")
+    plain = next(f for f in rec.functions if f.name == "plain")
+    assert connect.isAsync is True
+    assert [(pp.name, pp.default) for pp in connect.params] == [("port", "5432"), ("opts", "{}")]
+    assert plain.isAsync is False
+    assert plain.params[0].default is None  # no default → honest null
+
+
 def test_output_validates(tmp_path) -> None:
     rec = _parse(tmp_path, capture=True)
     schema = FileRecord.model_json_schema(by_alias=True)
