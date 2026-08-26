@@ -30,6 +30,25 @@ DECLARATIONS = {
 
 EMIT_TYPES = CONTROL_FLOW | JUMP | DECLARATIONS
 
+#: JS/TS built-in Array/String prototype methods. A call to one of these (`x.map()`,
+#: `s.split()`) resolves to a runtime built-in, never an in-repo file — so it must not be
+#: attributed to the receiver type's declaring module (fabricates a wrong CALLS edge). Only
+#: low-collision names are listed: domain-ambiguous verbs (`get`/`set`/`has`/`delete`/`add`/
+#: `find`/`create`/`update`/`count`/`index`/`search`) are deliberately excluded — a repo may
+#: genuinely declare a method of that name, and dropping those edges would cost real recall.
+JS_BUILTIN_METHODS = frozenset({
+    # Array.prototype (iteration / query / mutation / transform)
+    "map", "filter", "forEach", "reduce", "reduceRight", "some", "every",
+    "flatMap", "flat", "concat", "slice", "splice", "fill", "copyWithin",
+    "reverse", "sort", "includes", "indexOf", "lastIndexOf", "findIndex",
+    "findLastIndex", "push", "pop", "shift", "unshift", "join", "at",
+    # String.prototype
+    "split", "trim", "trimStart", "trimEnd", "padStart", "padEnd", "repeat",
+    "toLowerCase", "toUpperCase", "startsWith", "endsWith", "charAt",
+    "charCodeAt", "codePointAt", "substring", "substr", "replaceAll",
+    "matchAll", "normalize", "localeCompare",
+})
+
 #: Scopes whose inner statements belong to that nested scope.
 NESTED_SCOPES = {
     "function_declaration",
