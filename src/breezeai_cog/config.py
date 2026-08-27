@@ -103,7 +103,7 @@ class Settings(BaseSettings):
     # failures (network / timeout / HTTP 5xx) retry; a 4xx is fatal. --upload-max-retries.
     upload_max_retries: int = Field(default=1, ge=0)
 
-    infra_provider:Literal["aws"] = "aws"
+    infra_provider: Literal["aws"] = "aws"
     s3_retry_attempts: int = 3
     s3_retry_wait: int = 10
 

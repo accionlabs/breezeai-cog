@@ -14,4 +14,5 @@ class InfraStream(ABC):
 
     @abstractmethod
     def upload(self) -> None:
-        pass 
+        """Uploads the stream data to the configured cloud storage."""
+        raise NotImplementedError

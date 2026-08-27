@@ -58,8 +58,7 @@ def client(captured: _Captured) -> TestClient:
     def notify(path: str, payload: dict) -> None:
         captured.notifications.append((path, payload))
 
-    deps = ServerDeps(settings=Settings(), open_s3=open_stream, notify=notify)
-
+    deps = ServerDeps(settings=Settings(), open_stream=open_stream, notify=notify)
     return TestClient(create_app(Settings(), deps))
 
 
@@ -73,13 +72,14 @@ def test_analyze_sql(client: TestClient, captured: _Captured) -> None:
     out = r.json()
     assert out["fileName"] == "schema_pg.sql" and out["dialect"] == "postgresql"
     assert out["tableCount"] == 1 and out["viewCount"] == 1 and out["indexCount"] == 1
-    assert out["s3Key"].startswith("db-ontology/P1/D1/") and out["s3Key"].endswith(".ndjson.gz")
+    assert out["storage_key"].startswith("db-ontology/P1/D1/") and out["storage_key"].endswith(".ndjson.gz")
+
     rec = captured.records[0]
     assert rec["__type"] == "ddl" and rec["language"] == "sql"
     assert rec["tables"][0]["name"] == "employees" and rec["tables"][0]["hasPrimaryKey"] is True
     path, payload = captured.notifications[0]
     assert path == "/db-ontology/stream-ingest-s3"
-    assert payload["s3Key"] == out["s3Key"] and payload["repositoryName"] == "schema_pg.sql"
+    assert payload["storage_key"] == out["storage_key"] and payload["repositoryName"] == "schema_pg.sql"
 
 
 def test_requires_file(client: TestClient) -> None:

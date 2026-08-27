@@ -97,7 +97,7 @@ async def analyze_diff(request: Request, background_tasks: BackgroundTasks) -> d
             upload = deps.open_stream(storage_key)
             meta = await run_in_threadpool(run_diff_stream, settings, upload, temp_dir, filter_set, repo_name)
         else:
-            upload = deps.open_s3(storage_key)
+            upload = deps.open_stream(storage_key)
             await run_in_threadpool(upload.close)
             meta = empty_meta(repo_name)
     finally:

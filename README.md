@@ -99,9 +99,8 @@ To add a new infra provider to the InfraStream Provider Abstraction:
 3. **Create the provider package**
    - Create a new folder under `infra/` for the provider.
    - Add the provider-specific storage/stream implementation.
-   - Implement the `InfraStream` interface.
-   - Implement the required stream operations, including `write_line()` and `close()`.
-   - Implement `upload()` if the provider supports explicit upload operations.
+   - Implement the `InfraStream` interface in the provider-specific Infra service , such as AzureStreamUpload for Azure.
+   - Implement the required stream operations, including write_line(), close(), and upload() where supported by the provider.
    - Keep provider-specific SDK usage, client initialization, authentication, configuration, and connection handling inside the provider package.
 
 4. **Update `ProviderFactory`**
