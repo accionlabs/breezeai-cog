@@ -121,28 +121,48 @@ To add a new infra provider to the InfraStream Provider Abstraction:
      ```
    - Avoid directly instantiating provider-specific implementations such as `AWSStreamUpload` or `AzureStreamUpload`.
 
+
+
+
+  ```mermaid
    classDiagram
 
-    class ProviderConfig {
-        -ProviderType _provider
-        +ProviderType is_active
-        +from_settings() ProviderConfig
-    }
+    direction TB
+
+    %% =========================
+    %% Configuration
+    %% =========================
 
     class ProviderType {
         <<enumeration>>
         AWS = "aws"
     }
 
-    class provider {
-        <<facade>>
-        +open_stream(key, settings) InfraStream
+    class ProviderConfig {
+        -_provider: ProviderType
+        +is_active: ProviderType
+        +from_settings() ProviderConfig
     }
 
+    ProviderConfig --> ProviderType : uses
+
+
+    %% =========================
+    %% Factory
+    %% =========================
+
     class ProviderFactory {
-        -ProviderType provider
+        -provider: ProviderType
         +create_stream(key, settings) InfraStream
     }
+
+    ProviderFactory --> ProviderType : uses
+    ProviderFactory ..> InfraStream : creates
+
+
+    %% =========================
+    %% Infrastructure Interface
+    %% =========================
 
     class InfraStream {
         <<interface>>
@@ -151,28 +171,48 @@ To add a new infra provider to the InfraStream Provider Abstraction:
         +close() str
     }
 
+
+    %% =========================
+    %% AWS Implementation
+    %% =========================
+
     class AWSStreamUpload {
-        -str _bucket
-        -str _key
-        -Settings _settings
-        -Any _client
-        -IO _reader
-        -IO _writer
-        -GzipFile _gz
-        -BaseException _error
-        -Thread _thread
+        -_bucket: str
+        -_key: str
+        -_settings: Settings
+        -_client: Any
+        -_reader: IO
+        -_writer: IO
+        -_gz: GzipFile
+        -_error: BaseException
+        -_thread: Thread
         +write_line(line: str) None
         +upload() None
         +close() str
-        +execute_with_reconnect(operation: Callable) Any
-        +_default_client(settings: Settings) Any
+        +execute_with_reconnect(operation) Any
+        +_default_client(settings) Any
         +invalidate_client() None
     }
 
-    ProviderConfig --> ProviderType : uses
-    provider --> ProviderConfig : uses
-    provider --> ProviderFactory : initializes
-    provider --> InfraStream : exposes
-    ProviderFactory --> ProviderType : uses
-    ProviderFactory ..> AWSStreamUpload : creates
-    AWSStreamUpload ..|> InfraStream : implements
+
+    %% =========================
+    %% Interface Implementation
+    %% =========================
+
+    InfraStream <|.. AWSStreamUpload
+
+
+    %% =========================
+    %% Provider Facade
+    %% =========================
+
+    class provider.py {
+        <<facade>>
+        +open_stream(key, settings) InfraStream
+    }
+
+    provider.py --> ProviderConfig : uses
+    provider.py --> ProviderFactory : initializes
+    provider.py --> InfraStream : exposes
+
+    
