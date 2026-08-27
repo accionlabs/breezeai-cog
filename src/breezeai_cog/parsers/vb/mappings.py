@@ -15,6 +15,8 @@ CONTROL_FLOW = {
     "select_statement",
     "select_case_statement",
     "try_statement",
+    "catch_block",  # error-handling boundary (bodies already captured; this adds the clause node)
+    "finally_block",
     "using_statement",
     "with_statement",
     "synclock_statement",

@@ -38,6 +38,20 @@ def test_classify_db() -> None:
     assert classify_call("Order.findOne", "findOne") == ("db_method_call", "findOne", "orm")
 
 
+def test_prisma_chain_wins_over_mongo_typeorm_collision() -> None:
+    # deleteMany/updateMany/upsert live in Mongo's/TypeORM's distinctive tables but are also
+    # Prisma verbs. On an explicit `prisma.` chain the vendor is unambiguous — must be prisma.
+    from breezeai_cog.parsers.detection.db_queries import match_db
+
+    assert match_db("prisma.user.deleteMany", "deleteMany") == "prisma"
+    assert match_db("prisma.user.updateMany", "updateMany") == "prisma"
+    assert match_db("this.prisma.user.upsert", "upsert") == "prisma"
+    assert match_db("prisma.user.findMany", "findMany") == "prisma"
+    # No prisma in the chain → genuine Mongo/TypeORM detection is unchanged.
+    assert match_db("collection.deleteMany", "deleteMany") == "mongodb"
+    assert match_db("repo.upsert", "upsert") == "typeorm"
+
+
 def test_query_execute_require_db_receiver() -> None:
     # `query`/`execute` are high-collision in TS/JS — a bare call, or one on a non-DB
     # receiver, must NOT default to `orm` (these are the dominant false positives:

@@ -31,17 +31,6 @@ class _Captured:
         self.notifications: list[tuple[str, dict]] = []
 
 
-# class _FakeS3:
-#     def __init__(self, c: _Captured) -> None:
-#         self._c, self._lines = c, []
-
-#     def write_line(self, line: str) -> None:
-#         self._lines.append(line)
-
-#     def close(self) -> str:
-#         self._c.records.extend(json.loads(x) for x in self._lines)
-#         return "ok"
-
 class _FakeInfra():
     def __init__(self, c: _Captured) -> None:
          self._c, self._lines = c, []
@@ -62,9 +51,6 @@ def captured() -> _Captured:
 
 @pytest.fixture
 def client(captured: _Captured) -> TestClient:
-    # def open_s3(key: str) -> _FakeS3:
-    #     captured.keys.append(key)
-    #     return _FakeS3(captured)
     def open_stream(key: str) -> _FakeInfra:
             captured.keys.append(key)
             return _FakeInfra(captured)
@@ -72,7 +58,6 @@ def client(captured: _Captured) -> TestClient:
     def notify(path: str, payload: dict) -> None:
         captured.notifications.append((path, payload))
 
-    # deps = ServerDeps(settings=Settings(), open_s3=open_s3, notify=notify)
     deps = ServerDeps(settings=Settings(), open_s3=open_stream, notify=notify)
 
     return TestClient(create_app(Settings(), deps))

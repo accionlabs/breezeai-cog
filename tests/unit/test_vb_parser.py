@@ -116,6 +116,18 @@ def test_enum_members_captured_as_statements(tmp_path) -> None:
     assert VbParser().parse_file(ctx2).statements == []
 
 
+def test_catch_finally_clauses_emitted(tmp_path) -> None:
+    src = (b"Class X\n Sub M()\n  Try\n   Save()\n  Catch ex As Exception\n"
+           b"   Log(ex)\n  Finally\n   Cleanup()\n  End Try\n End Sub\nEnd Class\n")
+    p = tmp_path / "e.vb"
+    p.write_bytes(src)
+    ctx = ParseContext(path="e.vb", abs_path=p, source=src, repo_root=tmp_path,
+                       capture_statements=True)
+    rec = VbParser().parse_file(ctx)
+    node_types = {s.nodeType for s in rec.statements}
+    assert {"try_statement", "catch_block", "finally_block"} <= node_types
+
+
 def test_class_constants_and_fields_captured_as_statements(tmp_path) -> None:
     # Class-level Const / Shared ReadOnly / plain fields become flat statements parented
     # to the Class, with the value preserved in `text`. Heritage clauses (Inherits /

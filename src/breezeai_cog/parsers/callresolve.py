@@ -48,6 +48,7 @@ def make_resolver(
     *,
     ext_index: dict[tuple[str, str], str | None] | None = None,
     heritage: dict[str, ClassHeritage | None] | None = None,
+    builtin_methods: frozenset[str] = frozenset(),
 ) -> CallResolver:
     """``(name, receiver, owner=None) -> repo path | None``. ``receiver`` is the callee's
     qualifier (``None`` for a bare call, ``"self"``/``"this"`` for own methods, or an
@@ -88,6 +89,12 @@ def make_resolver(
             return None
         if receiver in bindings:  # `Imported.method()` → Imported's file
             return bindings[receiver]
+        # A built-in prototype method (`Array.map`, `String.split`, …) is never declared in the
+        # receiver type's own file — resolving it there fabricates a wrong CALLS edge (e.g.
+        # `groups.map()` → the type-only module that declares `groups`' type). Leave it
+        # unresolved (honest-null). Empty by default, so non-JS languages are unaffected.
+        if name in builtin_methods:
+            return None
         # Phase 2: `repo.method()` / `this.repo.method()` → type of repo → its file
         var = receiver[len("this."):] if receiver.startswith("this.") else receiver
         if var and "." not in var:

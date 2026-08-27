@@ -8,9 +8,10 @@ import json
 import pytest
 from fastapi.testclient import TestClient
 
-from breezeai_cog.config import Settings
-from breezeai_cog.server.app import create_app
-from breezeai_cog.server.deps import ServerDeps
+# from breezeai_cog.config import Settings
+from src.breezeai_cog.config import Settings
+from src.breezeai_cog.server.app import create_app
+from src.breezeai_cog.server.deps import ServerDeps
 
 MAPPING = json.dumps({
     "products": {
@@ -39,19 +40,6 @@ class _Captured:
         self.notifications: list[tuple[str, dict]] = []
 
 
-# class _FakeS3:
-#     def __init__(self, captured: _Captured) -> None:
-#         self._captured = captured
-#         self._lines: list[str] = []
-
-#     def write_line(self, line: str) -> None:
-#         self._lines.append(line)
-
-#     def close(self) -> str:
-#         for line in self._lines:
-#             self._captured.records.append(json.loads(line))
-#         return "ok"
-
 class _FakeInfra:
     def __init__(self, captured: _Captured) -> None:
         self._captured = captured
@@ -73,10 +61,6 @@ def captured() -> _Captured:
 
 @pytest.fixture
 def client(captured: _Captured) -> TestClient:
-    # def open_s3(key: str) -> _FakeS3:
-    #     captured.keys.append(key)
-    #     return _FakeS3(captured)
-
     def open_stream(key: str) -> _FakeInfra:
             captured.keys.append(key)
             return _FakeInfra(captured)
@@ -84,7 +68,6 @@ def client(captured: _Captured) -> TestClient:
     def notify(path: str, payload: dict) -> None:
         captured.notifications.append((path, payload))
 
-    # deps = ServerDeps(settings=Settings(), open_s3=open_s3, notify=notify)
     deps = ServerDeps(settings=Settings(), open_stream=open_stream, notify=notify)
     return TestClient(create_app(Settings(), deps))
 

@@ -133,8 +133,7 @@ def build_class(
             pending = []
 
     # Enum members become flat statements parented to the enum Class (their `text` — incl.
-    # any `= value` — is queryable). Valued members are `enum_assignment`, bare ones are a
-    # `property_identifier`. Gated by --capture-statements like every other statement.
+    # any `= value` — is queryable). Gated by --capture-statements like every other statement.
     if capture and cnode.type == "enum_declaration":
         ebody = cnode.child_by_field_name("body") or next(
             (c for c in cnode.named_children if c.type == "enum_body"), None

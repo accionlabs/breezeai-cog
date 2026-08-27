@@ -10,6 +10,8 @@ comment node types, the binding rule (bind-ahead across decorators/annotations â
 
 from __future__ import annotations
 
+import pytest
+
 from breezeai_cog.parsers.base import ParseContext
 from breezeai_cog.parsers.cpp.parser import CppParser
 from breezeai_cog.parsers.csharp.parser import CSharpParser
@@ -249,3 +251,71 @@ def test_python_comment_capture(tmp_path) -> None:
 
     # Gating.
     assert not _comments(_parse(tmp_path, PythonParser(), "e.py", src, capture=False))
+
+
+# --- Multi-language "nothing dropped, nothing duplicated" fixture (BREEZEAI-974 AC) --------
+#
+# Every comment carries a unique marker. The invariant across ALL languages: each marker is
+# accounted for exactly once â€” either a standalone comment node OR folded into one
+# statement's text, never both (no duplication), never as two nodes, never missing (no drop).
+
+_CLIKE = (
+    "// k_hdr\n"
+    "class A {{\n"
+    "    // k_body\n"
+    "    {ret} m() {{\n"
+    "        int x = 1; // k_trail\n"
+    "        // k_m1\n"
+    "        // k_m2\n"
+    "        int y = 2;\n"
+    "    }}\n"
+    "}}{tail}\n"
+)
+_CLIKE_MARKERS = ["k_hdr", "k_body", "k_trail", "k_m1", "k_m2"]
+
+_COMMENT_FIXTURES = [
+    (JavaParser(),       "A.java",   _CLIKE.format(ret="void", tail=""), _CLIKE_MARKERS),
+    (CSharpParser(),     "A.cs",     _CLIKE.format(ret="void", tail=""), _CLIKE_MARKERS),
+    (CppParser(),        "a.cpp",    _CLIKE.format(ret="int", tail=";"), _CLIKE_MARKERS),
+    (GroovyParser(),     "A.groovy", _CLIKE.format(ret="void", tail=""), _CLIKE_MARKERS),
+    (
+        TypeScriptParser(), "a.ts",
+        "// k_hdr\nclass A {\n  // k_body\n  m() {\n    let x = 1; // k_trail\n"
+        "    // k_m1\n    // k_m2\n    let y = 2;\n  }\n}\n",
+        _CLIKE_MARKERS,
+    ),
+    (
+        KotlinParser(), "A.kt",
+        "// k_hdr\nclass A {\n  // k_body\n  fun m() {\n    val x = 1 // k_trail\n"
+        "    // k_m1\n    // k_m2\n    val y = 2\n  }\n}\n",
+        _CLIKE_MARKERS,
+    ),
+    (
+        VbParser(), "A.vb",
+        "' k_hdr\nClass A\n    Sub M()\n        Dim x = 1 ' k_trail\n"
+        "        ' k_m1\n        ' k_m2\n        Dim y = 2\n    End Sub\nEnd Class\n",
+        ["k_hdr", "k_trail", "k_m1", "k_m2"],
+    ),
+    (
+        PythonParser(), "a.py",
+        "# k_hdr\nclass A:\n    \"\"\"k_doc.\"\"\"\n    def m(self):\n        x = 1  # k_trail\n"
+        "        # k_m1\n        # k_m2\n        y = 2\n",
+        ["k_hdr", "k_doc", "k_trail", "k_m1", "k_m2"],
+    ),
+]
+
+
+@pytest.mark.parametrize(
+    "parser,filename,src,markers", _COMMENT_FIXTURES,
+    ids=[fx[1] for fx in _COMMENT_FIXTURES],
+)
+def test_no_comment_dropped_or_duplicated(tmp_path, parser, filename, src, markers) -> None:
+    rec = _parse(tmp_path, parser, filename, src)
+    node_texts = [s.text or "" for s in rec.statements if s.semanticType == "comment"]
+    carrier_texts = [s.text or "" for s in rec.statements if s.semanticType != "comment"]
+    for m in markers:
+        node_hits = sum(1 for t in node_texts if m in t)
+        in_carrier = any(m in t for t in carrier_texts)
+        assert node_hits <= 1, f"{filename}: {m} emitted as {node_hits} comment nodes"
+        assert node_hits + int(in_carrier) >= 1, f"{filename}: {m} dropped"
+        assert not (node_hits and in_carrier), f"{filename}: {m} both a node and folded"

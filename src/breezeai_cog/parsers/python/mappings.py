@@ -11,6 +11,8 @@ CONTROL_FLOW = {
     "for_statement",
     "while_statement",
     "try_statement",
+    "except_clause",  # error-handling boundary (bodies already captured; this adds the clause node)
+    "finally_clause",
     "with_statement",
     "match_statement",
 }

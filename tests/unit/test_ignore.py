@@ -59,3 +59,20 @@ def test_per_language_ignore_is_scoped_not_global() -> None:
     # A language's own layer-2 patterns still fire (not a blanket disable).
     assert eng.is_lang_ignored("src/app.d.ts", "typescript")   # typescript ignore.txt
     assert eng.is_lang_ignored("pkg/__pycache__/m.py", "python")
+
+
+def test_env_dir_is_python_scoped_not_global() -> None:
+    """`env/` is a virtualenv name — scoped to Python (layer 2), so it must NOT prune a
+    non-Python `env/` tree at walk time (e.g. Terraform `terraform/env/`)."""
+    discover_builtin()
+    eng = IgnoreEngine.build(registered())
+    # Not a walk-time (universal) ignore anymore.
+    assert not eng.is_ignored_global("terraform/env/prod/api.tf")
+    assert not eng.is_ignored_global("env/prod/api.tf")
+    # A Terraform file under `env/` is kept (its language's layer-2 has no `env/`).
+    assert not eng.is_lang_ignored("terraform/env/prod/api.tf", "terraform")
+    # A Python file under a real virtualenv `env/` is still ignored (Python layer-2).
+    assert eng.is_lang_ignored("env/lib/site-packages/x.py", "python")
+    # `.venv/`/`venv/` stay universal (unambiguous — safe to prune the walk).
+    assert eng.is_ignored_global(".venv/lib/x.py")
+    assert eng.is_ignored_global("venv/lib/x.py")

@@ -1,4 +1,7 @@
 # Python per-language ignore defaults (layer 2).
+# `env/` is scoped here (not the universal walk-time set): it's a virtualenv name that collides
+# with non-Python trees (e.g. Terraform `terraform/env/`), so it must only exclude Python files.
+env/
 *.pyc
 *.pyo
 *.pyd

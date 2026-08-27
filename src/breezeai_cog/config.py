@@ -105,7 +105,7 @@ class Settings(BaseSettings):
 
     infra_provider:Literal["aws"] = "aws"
     s3_retry_attempts: int = 3
-    s3_retry_wait=5
+    s3_retry_wait: int = 10
 
     # ── AWS / S3 (server, conventional unprefixed names) ──────────────────
     aws_access_key: str | None = Field(

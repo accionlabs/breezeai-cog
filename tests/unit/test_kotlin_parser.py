@@ -38,6 +38,17 @@ def _parse(tmp_path) -> FileRecord:
     return parser.parse_file(ctx)
 
 
+def test_catch_finally_clauses_emitted(tmp_path) -> None:
+    src = b"fun m() { try { save() } catch (e: Exception) { log(e) } finally { cleanup() } }\n"
+    p = tmp_path / "e.kt"
+    p.write_text(src.decode())
+    ctx = ParseContext(path="e.kt", abs_path=p, source=src, repo_root=tmp_path,
+                       capture_statements=True)
+    rec = KotlinParser().parse_file(ctx)
+    node_types = {s.nodeType for s in rec.statements}
+    assert {"try_expression", "catch_block", "finally_block"} <= node_types
+
+
 def test_imports_and_basic_structure(tmp_path) -> None:
     rec = _parse(tmp_path)
     assert rec.language == "kotlin"

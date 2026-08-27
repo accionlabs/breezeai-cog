@@ -154,6 +154,49 @@ def test_v7_config_dsl_routes_detected(tmp_path) -> None:
     assert rec.framework == "react"
 
 
+def test_v7_route_path_from_cross_file_const_object(tmp_path) -> None:
+    # A route path built from an imported `{…} as const` object resolves to the real URL
+    # (endpoint = fully-resolved, per spec) — not the raw `paths.discover.root` AST text.
+    (tmp_path / "paths.ts").write_text(
+        "const seg = 'discover';\n"
+        "const tabs = { projects: 'projects' } as const;\n"
+        "export const paths = { discover: { root: `/${seg}`, tabs } } as const;\n"
+    )
+    routes = tmp_path / "routes.ts"
+    routes.write_bytes(
+        b"import { prefix, route } from '@react-router/dev/routes';\n"
+        b"import { paths } from './paths';\n"
+        b"export default [\n"
+        b"  ...prefix(paths.discover.root, [\n"
+        b"    route(`/${paths.discover.tabs.projects}`, 'routes/projects.tsx'),\n"
+        b"    route('/plain', 'routes/plain.tsx'),\n"
+        b"  ]),\n"
+        b"];\n"
+    )
+    parser = ReactParser()
+    index = parser.build_index(tmp_path, list(tmp_path.rglob("*.ts")))
+    ctx = ParseContext(path="routes.ts", abs_path=routes, source=routes.read_bytes(),
+                       repo_root=tmp_path, resolution_index=index, capture_statements=True)
+    rec = parser.parse_file(ctx)
+    endpoints = {s.endpoint for s in rec.statements if s.semanticType == "route"}
+    assert "/discover/projects" in endpoints   # member-expr + template both folded
+    assert "/discover/plain" in endpoints       # plain literal still joins onto the folded prefix
+    assert not any(e and "paths." in e for e in endpoints)  # no raw AST text leaks
+
+
+def test_v7_unresolved_const_path_falls_back_to_raw(tmp_path) -> None:
+    # With no index (or an unresolvable const), the endpoint is the raw text — no worse than
+    # before, never a *different* wrong URL (honest-null).
+    src = (
+        b"import { route } from '@react-router/dev/routes';\n"
+        b"import { paths } from './paths';\n"
+        b"export default [ route(paths.unknown.thing, 'x.tsx') ];\n"
+    )
+    rec = _parse(tmp_path, src, "routes.ts")  # _parse passes no resolution_index
+    endpoints = {s.endpoint for s in rec.statements if s.semanticType == "route"}
+    assert "/paths.unknown.thing" in endpoints
+
+
 def test_v7_detection_is_inert_on_v6_code(tmp_path) -> None:
     # A v6 file (react-router-dom, JSX/object forms) must not trigger any v7 call
     # matching, and its own detection must be unchanged. Guarded by the import gate.

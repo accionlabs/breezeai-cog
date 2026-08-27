@@ -120,9 +120,11 @@ def extract_params(params_node: Node | None, source: bytes) -> list[Parameter]:
             pat = p.child_by_field_name("pattern")
             name = node_text(pat, source) if pat is not None else ""
             decs = extract_decorators([c for c in p.named_children if c.type == "decorator"], source)
+            default = p.child_by_field_name("value")  # `port: number = 5432` → "5432"
             out.append(Parameter(
                 name=name, type=_type_text(p.child_by_field_name("type"), source) or "",
                 decorators=decs,  # e.g. Nest @Body/@Param/@Query, Angular @Inject
+                default=node_text(default, source) if default is not None else None,
             ))
         elif p.type == "rest_pattern":
             ident = next((c for c in p.named_children if c.type == "identifier"), None)
@@ -281,6 +283,7 @@ def build_function(
         type=kind,
         visibility=_visibility(node, source),
         isStatic=any(c.type == "static" for c in node.children),
+        isAsync=any(c.type == "async" for c in node.children),
         generics=_type_text(node.child_by_field_name("type_parameters"), source) or None,
         params=extract_params(node.child_by_field_name("parameters"), source),
         decorators=decorators,

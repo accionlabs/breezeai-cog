@@ -387,7 +387,7 @@ def test_enum_captured_with_member_statements(tmp_path) -> None:
     assert color is not None and color.type == "enum" and color.metadata is None
     members = [s for s in rec.statements if s.parentId == color.id]
     assert [(m.name, m.text) for m in members] == [("RED", "RED"), ("GREEN", "GREEN"), ("BLUE", "BLUE")]
-    assert all(m.nodeType == "enumerator" and m.semanticType is None for m in members)
+    assert all(m.nodeType == "enumerator" and m.semanticType == "enum_member" for m in members)
 
 
 def test_scoped_enum_is_enum(tmp_path) -> None:

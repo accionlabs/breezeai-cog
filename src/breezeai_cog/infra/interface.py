@@ -1,7 +1,4 @@
-# infra/interface.py
-
 from abc import ABC, abstractmethod
-
 
 class InfraStream(ABC):
 
@@ -14,3 +11,7 @@ class InfraStream(ABC):
     def close(self) -> str:
         """Close the stream and return the storage key."""
         raise NotImplementedError
+
+    @abstractmethod
+    def upload(self) -> None:
+        pass 

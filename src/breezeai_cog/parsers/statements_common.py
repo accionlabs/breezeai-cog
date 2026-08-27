@@ -239,6 +239,27 @@ def _calls_in_statement(
     yield from _iter_calls(node, emit_types, call_type, stmt_expr, containers)
 
 
+#: Block/body node types a control-flow statement wraps (empirically verified across
+#: TS/JS, Python, Java, C#, C++, Groovy, Kotlin). Used to take a control statement's **header**
+#: as the text up to its first such child — so a multi-line condition is kept whole while the
+#: body (already captured as its own child statements) is not duplicated into the header.
+_BODY_BLOCK_TYPES = frozenset({
+    "statement_block", "block", "compound_statement", "switch_body", "control_structure_body",
+})
+
+
+def _control_flow_header(node: Node, source: bytes) -> str:
+    """A control-flow statement's header (its condition/clause). When the condition spans
+    multiple lines, keep it whole up to the body block (so it isn't truncated to the first
+    line); the body stays in the child statements, never duplicated here. Single-line headers —
+    and constructs with no distinct block body (a braceless body, or a grammar like VB) — keep
+    the first physical line unchanged, which also preserves a same-line trailing comment."""
+    body = next((c for c in node.named_children if c.type in _BODY_BLOCK_TYPES), None)
+    if body is not None and body.start_point[0] > node.start_point[0]:  # multi-line header only
+        return source[node.start_byte : body.start_byte].decode("utf-8", "replace").rstrip()
+    return first_line(node_text(node, source))
+
+
 def classify_statement(
     node: Node,
     source: bytes,
@@ -264,7 +285,7 @@ def classify_statement(
     # carries any comment on that line), so no separate fold is needed.
     code_text = node_text(node, source)
     if node.type in control_flow:
-        code_text = display_text = first_line(code_text)
+        code_text = display_text = _control_flow_header(node, source)
     else:
         display_text = text_with_trailing_comment(node, source)
     start, col = node.start_point[0] + 1, node.start_point[1]
@@ -376,15 +397,18 @@ def member_statement(
     seen_ids: set[str],
     name: str | None = None,
     decorators: "list[Decorator] | None" = None,
+    semantic_type: str | None = None,
 ) -> Statement:
     """One flat declaration Statement for ``node`` (``nodeType`` = the AST node, ``text`` =
-    its source, ``semanticType`` null). ``name`` defaults to the member's declared name."""
+    its source). ``name`` defaults to the member's declared name; ``semantic_type`` marks the
+    member's role on the same record while ``nodeType`` stays the raw grammar type."""
     start, col = node.start_point[0] + 1, node.start_point[1]
     end = node.end_point[0] + 1
     return Statement(
         id=disambiguate(statement_id(path, start, col), seen_ids),
         parentId=parent_id,
         nodeType=node.type,
+        semanticType=semantic_type,
         # Fold a same-line trailing doc (``kCAPLC09 = 1000, ///< Apply Status``) into the
         # member's text — the high-value constant-doc case.
         text=text_with_trailing_comment(node, source),
@@ -407,9 +431,11 @@ def emit_enum_members(
     seen_ids: set[str],
 ) -> list[Statement]:
     """Emit one Statement per enum member — a direct child of ``body`` whose type is in
-    ``member_types`` — parented to the enum's Class id."""
+    ``member_types`` — parented to the enum's Class id. Each carries ``semanticType`` =
+    ``enum_member`` (the cross-language role) while ``nodeType`` keeps its raw grammar type."""
     return [
-        member_statement(node, source, path, parent_id=parent_id, limit=limit, seen_ids=seen_ids)
+        member_statement(node, source, path, parent_id=parent_id, limit=limit,
+                         seen_ids=seen_ids, semantic_type="enum_member")
         for node in body.named_children
         if node.type in member_types
     ]

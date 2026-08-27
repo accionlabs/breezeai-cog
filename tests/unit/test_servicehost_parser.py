@@ -23,6 +23,12 @@ SVC_FULL = (
 SVC_NO_CODEBEHIND = b'<%@ ServiceHost Service="A.B.OrderService" Factory="X.Y.F" %>\n'
 SVC_MULTILINE = b'<%@ servicehost\n    service="A.B.MultiSvc"\n    codebehind="Multi.svc.cs" %>\n'
 SVC_NO_CLASS = b'<%@ ServiceHost Language="C#" %>\n'
+# ``~/`` app-root-relative CodeBehind + a Factory (the BREEZEAI-966 shape from KinderCare/kendo).
+SVC_VIRTUAL_CODEBEHIND = (
+    b'<%@ ServiceHost Service="Products" '
+    b'Factory="System.Data.Services.DataServiceHostFactory, System.Data.Services, Version=4.0.0.0" '
+    b'CodeBehind="~/App_Code/Products.cs" %>\n'
+)
 
 # --- ASMX .asmx (WebService / Class=) ---
 ASMX_FULL = (
@@ -101,6 +107,53 @@ def test_svc_codebehind_missing_is_honest_null(tmp_path: Path) -> None:
     rec = _parse_repo(tmp_path, "Services/Multi.svc", {"Services/Multi.svc": SVC_MULTILINE})
     assert _routes(rec)[0].handler == "A.B.MultiSvc"  # route still emitted
     assert rec.importFiles == []  # unresolved CodeBehind → honest-null
+
+
+def test_svc_virtual_codebehind_resolves_via_app_root(tmp_path: Path) -> None:
+    # ``~/App_Code/Products.cs`` resolves against the application root (the dir holding
+    # web.config), NOT the host file's own directory — BREEZEAI-966 TC-04.
+    rec = _parse_repo(
+        tmp_path,
+        "grid-wcf-crud/Products.svc",
+        {
+            "grid-wcf-crud/web.config": b"<configuration/>",
+            "grid-wcf-crud/Products.svc": SVC_VIRTUAL_CODEBEHIND,
+            "grid-wcf-crud/App_Code/Products.cs": b"namespace X { public class Products {} }",
+        },
+    )
+    assert rec.importFiles == ["grid-wcf-crud/App_Code/Products.cs"]
+
+
+def test_svc_virtual_codebehind_falls_back_to_repo_root(tmp_path: Path) -> None:
+    # No web.config anywhere → application root is the repo root, so ``~/`` maps there.
+    rec = _parse_repo(
+        tmp_path,
+        "svc/Products.svc",
+        {
+            "svc/Products.svc": SVC_VIRTUAL_CODEBEHIND,
+            "App_Code/Products.cs": b"namespace X { public class Products {} }",
+        },
+    )
+    assert rec.importFiles == ["App_Code/Products.cs"]
+
+
+def test_svc_text_is_full_directive() -> None:
+    # `text` carries the entire original directive — the source of every derived field,
+    # including Factory= (BREEZEAI-966: Factory captured, no new schema field).
+    r = _routes(_parse(SVC_FULL, "Services/OrderService.svc"))[0]
+    assert r.text == (
+        '<%@ ServiceHost Language="C#" Service="Acme.Services.OrderService" '
+        'Factory="System.ServiceModel.Activation.ServiceHostFactory" '
+        'CodeBehind="OrderService.svc.cs" %>'
+    )
+    assert "Factory=" in r.text
+
+
+def test_svc_multiline_text_preserved_verbatim() -> None:
+    # A multi-line directive keeps its newlines verbatim, consistent with startLine/endLine.
+    r = _routes(_parse(SVC_MULTILINE, "Services/Multi.svc"))[0]
+    assert r.text == '<%@ servicehost\n    service="A.B.MultiSvc"\n    codebehind="Multi.svc.cs" %>'
+    assert r.startLine == 1 and r.endLine == 3
 
 
 # --- .asmx (ASMX) ----------------------------------------------------------------
