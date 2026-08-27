@@ -25,7 +25,16 @@ from .imports import ScalaIndex, build_fqcn_index, extract_imports
 from .mappings import COMMENT_TYPES, CONTROL_FLOW, FRAMEWORKS, STATEMENT_TYPES
 from .statements import extract_statements
 
-_CLASS_TYPES = ("class_definition", "object_definition", "trait_definition", "enum_definition")
+_CLASS_TYPES = (
+    "class_definition",
+    "object_definition",
+    "trait_definition",
+    "enum_definition",
+    # `package object X { … }` — Scala's idiom for shared implicits, syntax enrichment
+    # and type aliases. Its own node type, with the same name/body/extend fields as
+    # object_definition; omitting it dropped the object *and every member inside it*.
+    "package_object",
+)
 _FN_TYPES = ("function_definition", "function_declaration")
 
 

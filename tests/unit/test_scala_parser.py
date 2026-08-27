@@ -385,3 +385,42 @@ def test_capabilities_does_not_advertise_undetected_frameworks() -> None:
         assert claimed not in frameworks, (
             f"{claimed!r} advertised but no Scala detection exists (P2/P3)"
         )
+
+
+PACKAGE_OBJECT_SRC = b"""package cats
+
+package object syntax extends AllSyntax {
+  type Alias = Int
+  val zero: Int = 0
+
+  def helper(a: Int): Int = a + 1
+
+  object align extends AlignSyntax
+}
+"""
+
+
+def test_package_object_is_captured(tmp_path: Path) -> None:
+    """F7: `package object` is its own node type and was dropped entirely, taking
+    every member with it. It is the standard Scala idiom for shared implicits."""
+    rec, _ = _parse(tmp_path, PACKAGE_OBJECT_SRC, capture=True)
+    by_name = {c.name: c for c in rec.classes}
+    assert "syntax" in by_name, f"package object missing: {list(by_name)}"
+    assert by_name["syntax"].type == "module"
+    assert by_name["syntax"].extends == "AllSyntax"
+
+
+def test_package_object_members_are_captured_as_statics(tmp_path: Path) -> None:
+    """The damaging half: members were lost with the container. A package object is
+    a static container, so its members are statics like a plain `object`'s."""
+    rec, _ = _parse(tmp_path, PACKAGE_OBJECT_SRC, capture=True)
+    helper = next((f for f in rec.functions if f.name == "helper"), None)
+    assert helper is not None, "member def of a package object was dropped"
+    assert helper.isStatic is True
+
+    # nested object inside the package object comes through too
+    assert "align" in {c.name for c in rec.classes}
+
+    # and its val is attributed to the package object, not the file
+    pkg_id = next(c.id for c in rec.classes if c.name == "syntax")
+    assert any(s.name == "zero" and s.parentId == pkg_id for s in rec.statements)

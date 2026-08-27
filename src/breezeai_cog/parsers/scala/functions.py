@@ -18,6 +18,7 @@ _LOCAL_TYPE_SCOPES = (
     "object_definition",
     "trait_definition",
     "enum_definition",
+    "package_object",
 )
 
 
@@ -188,6 +189,7 @@ def defined_names(root: Node, source: bytes) -> set[str]:
         "trait_definition",
         "object_definition",
         "enum_definition",
+        "package_object",
     }
 
     def walk(n: Node) -> None:

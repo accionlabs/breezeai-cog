@@ -13,7 +13,13 @@ from .functions import build_function, extract_annotations, modifiers_node
 from .statements import extract_statements
 
 _TYPE_NODES = ("type_identifier", "generic_type", "scoped_type_identifier")
-_NESTED_CLASS_TYPES = ("class_definition", "object_definition", "trait_definition", "enum_definition")
+_NESTED_CLASS_TYPES = (
+    "class_definition",
+    "object_definition",
+    "trait_definition",
+    "enum_definition",
+    "package_object",
+)
 
 
 def _is_case(node: Node) -> bool:
@@ -27,7 +33,8 @@ def _class_type(node: Node) -> ClassType:
         return "record" if _is_case(node) else "class"
     if node.type == "trait_definition":
         return "trait"
-    if node.type == "object_definition":
+    # A package object is a static container like a plain object, so it maps the same way.
+    if node.type in ("object_definition", "package_object"):
         return "module"
     if node.type == "enum_definition":
         return "enum"
@@ -101,7 +108,8 @@ def build_class(
     statements: list[Statement] = []
     nested_classes: list[Class] = []
     ctor_params = _constructor_params(node, source)
-    is_object = node.type == "object_definition"
+    # Members of both a plain `object` and a `package object` are statics.
+    is_object = node.type in ("object_definition", "package_object")
 
     body = node.child_by_field_name("body")
     if body is not None:

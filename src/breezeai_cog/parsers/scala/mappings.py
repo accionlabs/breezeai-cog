@@ -22,6 +22,7 @@ NESTED_SCOPES = {
     "function_declaration",
     "given_definition",
     "extension_definition",
+    "package_object",
 }
 
 #: Comment node types for the shared comment pass (§6.9). Verified in §3.3 — Scala uses

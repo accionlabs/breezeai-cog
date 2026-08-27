@@ -23,6 +23,7 @@ _TYPE_DECLS = (
     "object_definition",
     "trait_definition",
     "enum_definition",
+    "package_object",
 )
 
 #: "com.acme.Foo" → repo-relative path, or ``None`` when >1 file declares the same FQCN
