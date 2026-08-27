@@ -290,3 +290,64 @@ def test_schema_validity(tmp_path: Path) -> None:
     validator = Draft202012Validator(schema)
     line = json.loads(to_line(rec))
     validator.validate(line)
+
+
+# --------------------------------------------------------------------------- regressions
+# Each of the four defects below was found by dogfooding, NOT by the suite above:
+# the original fixtures only exercised class and object bodies, so the nested-def and
+# file-scope paths were never executed. Keep these.
+
+NESTED_DEF_SRC = b"""package com.acme
+
+object Outer {
+  def outer(n: Int): Int = {
+    val before = n * 2
+
+    def inner(x: Int): Int = {
+      val secret = 42
+      helper(x + secret)
+    }
+
+    def sibling(): String = {
+      val tag = "s"
+      tag
+    }
+
+    inner(before) + sibling().length
+  }
+}
+"""
+
+
+def test_nested_def_is_captured_as_its_own_function(tmp_path: Path) -> None:
+    """Defect C: a nested `def` was dropped entirely."""
+    rec, _ = _parse(tmp_path, NESTED_DEF_SRC, capture=True)
+    names = {f.name for f in rec.functions}
+    assert {"outer", "inner", "sibling"} <= names, f"nested defs missing: {names}"
+
+
+def test_nested_def_statements_are_not_misattributed(tmp_path: Path) -> None:
+    """Defect C, the damaging half: `secret` belongs to `inner`, never to `outer`.
+
+    This is the wrong-data case — worse than missing data, because a consumer cannot
+    tell it is wrong.
+    """
+    rec, _ = _parse(tmp_path, NESTED_DEF_SRC, capture=True)
+    by_name = {f.name: f.id for f in rec.functions}
+    owner = {s.name: s.parentId for s in rec.statements if s.name}
+
+    assert owner["secret"] == by_name["inner"]
+    assert owner["tag"] == by_name["sibling"]
+    assert owner["before"] == by_name["outer"]
+    # and nothing from a nested def leaked upward
+    outer_stmts = {s.name for s in rec.statements if s.parentId == by_name["outer"] and s.name}
+    assert "secret" not in outer_stmts
+    assert "tag" not in outer_stmts
+
+
+def test_nested_def_calls_are_not_double_counted(tmp_path: Path) -> None:
+    """A call inside a nested def belongs to that def, not to the enclosing one."""
+    rec, _ = _parse(tmp_path, NESTED_DEF_SRC, capture=True)
+    calls = {f.name: {c.name for c in f.calls} for f in rec.functions}
+    assert "helper" in calls["inner"]
+    assert "helper" not in calls["outer"], "enclosing fn folded the nested def's call"

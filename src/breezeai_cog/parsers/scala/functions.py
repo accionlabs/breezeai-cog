@@ -10,6 +10,16 @@ from ..callresolve import CallResolver, noop_resolver
 from ..treesitter import line_span, node_text
 from .statements import extract_statements
 
+#: Local type declarations inside a function body. Their members belong to the type,
+#: not to the enclosing function, and local types are not extracted as Class nodes —
+#: so ``collect_nested_functions`` stops here rather than hoisting their methods.
+_LOCAL_TYPE_SCOPES = (
+    "class_definition",
+    "object_definition",
+    "trait_definition",
+    "enum_definition",
+)
+
 
 def modifiers_node(node: Node) -> Node | None:
     return next((c for c in node.named_children if c.type == "modifiers"), None)
@@ -86,14 +96,24 @@ def extract_params(node: Node, source: bytes) -> list[Parameter]:
     return out
 
 
-def _calls(body: Node | None, source: bytes, resolve: CallResolver = noop_resolver) -> list[Call]:
+def _calls(
+    body: Node | None,
+    source: bytes,
+    resolve: CallResolver = noop_resolver,
+    barriers: frozenset[tuple[int, int]] = frozenset(),
+) -> list[Call]:
     if body is None:
         return []
     calls: list[Call] = []
     seen: set[str] = set()
 
     def visit(n: Node) -> None:
+        # Descend through control flow and lambdas — those calls belong to the nearest
+        # named enclosing function — but stop at ``barriers``: the spans of nested
+        # ``def``s extracted as their own scope (see build_function).
         for child in n.named_children:
+            if _span(child) in barriers:
+                continue
             if child.type == "call_expression":
                 fn = child.child_by_field_name("function")
                 if fn is not None:
@@ -123,6 +143,39 @@ def _calls(body: Node | None, source: bytes, resolve: CallResolver = noop_resolv
 
     visit(body)
     return calls
+
+
+def _span(node: Node) -> tuple[int, int]:
+    return (node.start_byte, node.end_byte)
+
+
+def collect_nested_functions(body: Node | None, source: bytes) -> list[Node]:
+    """Nested ``def``s whose nearest named enclosing function is this one.
+
+    Scala leans on local helper defs far more than Java does, so without this they
+    were dropped entirely *and* their statements were folded into the enclosing
+    function — attributing code to a scope that never declared it.
+
+    Descends through control flow, blocks and lambdas but stops at each nested
+    function (deeper names belong to its own recursion) and at a nested
+    class/object/trait/enum (its members belong to that type, and local types are
+    not extracted here). The returned nodes' spans double as the barrier set.
+    """
+    if body is None:
+        return []
+    out: list[Node] = []
+
+    def visit(n: Node) -> None:
+        for c in n.named_children:
+            if c.type in ("function_definition", "function_declaration"):
+                out.append(c)
+                continue  # barrier: its body belongs to it, not to the enclosing fn
+            if c.type in _LOCAL_TYPE_SCOPES:
+                continue  # local class/object: not extracted here; folding unchanged
+            visit(c)
+
+    visit(body)
+    return out
 
 
 def defined_names(root: Node, source: bytes) -> set[str]:
@@ -187,7 +240,13 @@ def build_function(
     is_static: bool = False,
     fn_type: str = "method",
     resolve: CallResolver = noop_resolver,
-) -> tuple[Function, list[Statement]]:
+) -> tuple[list[Function], list[Statement]]:
+    """This function plus every nested ``def`` inside it, and their statements.
+
+    Returns a list because a Scala ``def`` can declare local helper ``def``s; each is
+    emitted as its own Function parented to this one, and its span is a barrier so its
+    calls and statements are not double-counted here.
+    """
     name_node = node.child_by_field_name("name")
     name = node_text(name_node, source) if name_node is not None else ""
     start, end = line_span(node)
@@ -196,6 +255,8 @@ def build_function(
     ret_node = node.child_by_field_name("return_type")
     body = node.child_by_field_name("body")
     tp = node.child_by_field_name("type_parameters")
+    nested = collect_nested_functions(body, source)
+    barriers = frozenset(_span(f) for f in nested)
 
     fn = Function(
         id=fid,
@@ -211,7 +272,7 @@ def build_function(
         returnType=node_text(ret_node, source) if ret_node is not None else None,
         startLine=start,
         endLine=end,
-        calls=_calls(body, source, resolve) if body is not None else [],
+        calls=_calls(body, source, resolve, barriers) if body is not None else [],
     )
 
     statements = (
@@ -223,9 +284,28 @@ def build_function(
             capture=capture,
             limit=limit,
             seen_ids=seen_ids,
-            descend_all=True,
+            descend_all=True,  # walk control flow / lambdas — their statements land here
+            barriers=barriers,  # …except separately-extracted nested defs
         )
         if body is not None
         else []
     )
-    return fn, statements
+
+    functions = [fn]
+    for nested_node in nested:
+        sub_fns, sub_stmts = build_function(
+            nested_node,
+            source,
+            path,
+            parent_id=fid,
+            class_name=None,
+            seen_ids=seen_ids,
+            capture=capture,
+            limit=limit,
+            is_static=False,
+            fn_type="function",
+            resolve=resolve,
+        )
+        functions.extend(sub_fns)
+        statements.extend(sub_stmts)
+    return functions, statements

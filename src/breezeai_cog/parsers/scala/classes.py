@@ -123,7 +123,7 @@ def build_class(
 
         for member in body_members:
             if member.type in ("function_definition", "function_declaration"):
-                fn, fn_statements = build_function(
+                fns, fn_statements = build_function(
                     member,
                     source,
                     path,
@@ -136,7 +136,7 @@ def build_class(
                     fn_type="method",
                     resolve=resolve,
                 )
-                methods.append(fn)
+                methods.extend(fns)
                 statements.extend(fn_statements)
             elif member.type in _NESTED_CLASS_TYPES:
                 sub_classes, sub_methods, sub_statements = build_class(

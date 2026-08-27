@@ -78,7 +78,7 @@ class ScalaParser(BaseParser):
                 functions.extend(methods)
                 statements.extend(cls_statements)
             elif child.type in _FN_TYPES:
-                fn, fn_statements = build_function(
+                fns, fn_statements = build_function(
                     child,
                     source,
                     path,
@@ -91,12 +91,12 @@ class ScalaParser(BaseParser):
                     fn_type="function",
                     resolve=resolve,
                 )
-                functions.append(fn)
+                functions.extend(fns)
                 statements.extend(fn_statements)
             elif child.type == "extension_definition":
                 for member in child.named_children:
                     if member.type in _FN_TYPES:
-                        fn, fn_statements = build_function(
+                        fns, fn_statements = build_function(
                             member,
                             source,
                             path,
@@ -109,7 +109,7 @@ class ScalaParser(BaseParser):
                             fn_type="function",
                             resolve=resolve,
                         )
-                        functions.append(fn)
+                        functions.extend(fns)
                         statements.extend(fn_statements)
             elif child.type == "package_clause":
                 for sub in child.named_children:
