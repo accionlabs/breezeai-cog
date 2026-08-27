@@ -424,3 +424,63 @@ def test_package_object_members_are_captured_as_statics(tmp_path: Path) -> None:
     # and its val is attributed to the package object, not the file
     pkg_id = next(c.id for c in rec.classes if c.name == "syntax")
     assert any(s.name == "zero" and s.parentId == pkg_id for s in rec.statements)
+
+
+def test_relative_imports_resolve(tmp_path: Path) -> None:
+    """F10: Pekko/Akka import the root package as a value and then use it as a prefix.
+
+    2,492 of pekko's 2,774 files do this; taken literally the relative form matches
+    nothing and the codebase produces almost no IMPORTS edges.
+    """
+    lib = tmp_path / "src/org/apache/pekko/annotation"
+    lib.mkdir(parents=True)
+    (lib / "InternalApi.scala").write_text(
+        "package org.apache.pekko.annotation\nclass InternalApi\n"
+    )
+    root_pkg = tmp_path / "src/org/apache/pekko"
+    (root_pkg / "PekkoException.scala").write_text(
+        "package org.apache.pekko\nclass PekkoException\n"
+    )
+
+    src = (
+        b"package org.apache.pekko.actor\n\n"
+        b"import org.apache.pekko\n"
+        b"import pekko.PekkoException\n"
+        b"import pekko.annotation.InternalApi\n\n"
+        b"class Actor\n"
+    )
+    rel = "src/org/apache/pekko/actor/Actor.scala"
+    p = tmp_path / rel
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_bytes(src)
+
+    parser = ScalaParser()
+    index = parser.build_index(tmp_path, list(tmp_path.rglob("*.scala")))
+    rec = parser.parse_file(
+        ParseContext(path=rel, abs_path=p, source=src, repo_root=tmp_path,
+                     resolution_index=index, capture_statements=False)
+    )
+    assert "src/org/apache/pekko/PekkoException.scala" in rec.importFiles
+    assert "src/org/apache/pekko/annotation/InternalApi.scala" in rec.importFiles
+
+
+def test_relative_import_does_not_invent_edges(tmp_path: Path) -> None:
+    """The prefix expansion must not resolve a name that has no in-repo target."""
+    src = (
+        b"package org.apache.pekko.actor\n\n"
+        b"import org.apache.pekko\n"
+        b"import pekko.NoSuchThing\n\n"
+        b"class Actor\n"
+    )
+    rel = "src/org/apache/pekko/actor/Actor.scala"
+    p = tmp_path / rel
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_bytes(src)
+    parser = ScalaParser()
+    index = parser.build_index(tmp_path, list(tmp_path.rglob("*.scala")))
+    rec = parser.parse_file(
+        ParseContext(path=rel, abs_path=p, source=src, repo_root=tmp_path,
+                     resolution_index=index, capture_statements=False)
+    )
+    assert rec.importFiles == []
+    assert "pekko.NoSuchThing" in rec.externalImports

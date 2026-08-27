@@ -126,6 +126,40 @@ def extract_imports(
     external: dict[str, None] = {}
     bindings: dict[str, str] = {}
 
+    package = _package_of(root, source)
+
+    # --- relative imports -------------------------------------------------------
+    # Scala resolves an import against names already in scope, so a *package* can be
+    # imported as a value and then used as a prefix:
+    #
+    #     import org.apache.pekko          // binds `pekko` -> org.apache.pekko
+    #     import pekko.PekkoException      // relative
+    #
+    # Pekko does this in 2,492 of its 2,774 files, and Akka before it; taken literally
+    # `pekko.PekkoException` matches nothing and the whole codebase loses its IMPORTS
+    # edges. All enclosing package segments are in scope too, which covers the files
+    # that rely on that instead of an explicit import.
+    #
+    # Safety: a wrong prefix guess cannot invent an edge — the expanded name still has
+    # to hit the FQCN index, which is itself honest-null on ambiguity.
+    prefixes: dict[str, str] = {}
+    if package:
+        parts = package.split(".")
+        for i in range(1, len(parts) + 1):
+            prefixes[parts[i - 1]] = ".".join(parts[:i])
+
+    def resolve_maybe_relative(fqcn: str) -> str | None:
+        """Resolve ``fqcn`` as written; failing that, expand a known package prefix."""
+        direct = _resolve(fqcn, index)
+        if direct is not None:
+            return direct
+        head, _, rest = fqcn.partition(".")
+        base = prefixes.get(head)
+        if base is None or not rest:
+            return None
+        expanded = f"{base}.{rest}"
+        return _resolve(expanded, index) if expanded != fqcn else None
+
     for node in root.named_children:
         if node.type != "import_declaration":
             continue
@@ -146,7 +180,7 @@ def extract_imports(
                 elif sel.type == "identifier":
                     name = node_text(sel, source)
                     fqcn = f"{prefix}.{name}" if prefix else name
-                    resolved = _resolve(fqcn, index)
+                    resolved = resolve_maybe_relative(fqcn)
                     (internal if resolved else external).setdefault(resolved or fqcn, None)
                     if resolved:
                         bindings[name] = resolved
@@ -156,14 +190,14 @@ def extract_imports(
                         orig_name = node_text(ids[0], source)
                         alias_name = node_text(ids[1], source)
                         fqcn = f"{prefix}.{orig_name}" if prefix else orig_name
-                        resolved = _resolve(fqcn, index)
+                        resolved = resolve_maybe_relative(fqcn)
                         (internal if resolved else external).setdefault(resolved or fqcn, None)
                         if resolved:
                             bindings[alias_name] = resolved
                     elif ids:
                         name = node_text(ids[0], source)
                         fqcn = f"{prefix}.{name}" if prefix else name
-                        resolved = _resolve(fqcn, index)
+                        resolved = resolve_maybe_relative(fqcn)
                         (internal if resolved else external).setdefault(resolved or fqcn, None)
                         if resolved:
                             bindings[name] = resolved
@@ -171,10 +205,15 @@ def extract_imports(
             ids = [c for c in named if c.type == "identifier"]
             if ids:
                 fqcn = ".".join(node_text(c, source) for c in ids)
-                resolved = _resolve(fqcn, index)
+                resolved = resolve_maybe_relative(fqcn)
                 (internal if resolved else external).setdefault(resolved or fqcn, None)
                 if resolved:
                     bindings[node_text(ids[-1], source)] = resolved
+                else:
+                    # Didn't name a type we know, so it may well name a package —
+                    # register it as a prefix for the imports that follow. Scala's
+                    # later-import-wins shadowing, hence plain assignment.
+                    prefixes[node_text(ids[-1], source)] = fqcn
 
-    seed_same_package(bindings, _package_of(root, source), index)
+    seed_same_package(bindings, package, index)
     return list(internal), list(external), [], bindings
