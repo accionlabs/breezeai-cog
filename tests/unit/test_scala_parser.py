@@ -351,3 +351,37 @@ def test_nested_def_calls_are_not_double_counted(tmp_path: Path) -> None:
     calls = {f.name: {c.name for c in f.calls} for f in rec.functions}
     assert "helper" in calls["inner"]
     assert "helper" not in calls["outer"], "enclosing fn folded the nested def's call"
+
+
+SCRIPT_SRC = b"""val x = 3
+println(x)
+doWork(x, "now")
+"""
+
+
+def test_script_toplevel_calls_are_captured(tmp_path: Path) -> None:
+    """Defect B: bare top-level calls were dropped — most of what a script contains."""
+    rec, _ = _parse(tmp_path, SCRIPT_SRC, capture=True)
+    texts = " ".join(s.text for s in rec.statements)
+    assert "println(x)" in texts
+    assert "doWork(x" in texts
+
+
+def test_mill_extension_is_claimed() -> None:
+    """F1: Mill 0.12 renamed build.sc -> build.mill; 584 such files were dropped in
+    the mill repo during dogfooding."""
+    discover_builtin()
+    assert ".mill" in capabilities()["extensions"]
+    assert ".mill" in ScalaParser().extensions
+
+
+def test_capabilities_does_not_advertise_undetected_frameworks() -> None:
+    """Defect A: capabilities() claimed Play / Akka / http4s / Spark with no
+    detection implemented, so `can cog handle my Play app?` got a wrong yes."""
+    discover_builtin()
+    caps = capabilities()
+    frameworks = caps.get("frameworks") or []
+    for claimed in ("play", "akka-http", "http4s", "spark"):
+        assert claimed not in frameworks, (
+            f"{claimed!r} advertised but no Scala detection exists (P2/P3)"
+        )

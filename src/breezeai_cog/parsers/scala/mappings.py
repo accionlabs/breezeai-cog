@@ -29,4 +29,9 @@ NESTED_SCOPES = {
 COMMENT_TYPES = {"comment", "block_comment"}
 
 STATEMENT_TYPES = sorted(EMIT_TYPES)
-FRAMEWORKS = ["play", "akka-http", "http4s", "spark"]
+
+#: Frameworks with *implemented* detection. Empty for now: P1 is the base language
+#: parser only. Play / Akka / http4s / Spark are planned (P2–P3) but nothing detects
+#: them yet, and this list is surfaced publicly by ``capabilities()`` — advertising
+#: them here answers "can cog handle my Play app?" with a wrong yes.
+FRAMEWORKS: list[str] = []

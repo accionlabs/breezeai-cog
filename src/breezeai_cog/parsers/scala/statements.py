@@ -28,7 +28,16 @@ _CALL_TYPE = "call_expression"
 # Bare expression-statements: Scala puts a statement-position call / infix expression
 # directly under a block or template_body (no expression_statement wrapper).
 _STMT_EXPR = ("call_expression", "infix_expression")
-_CONTAINERS = ("block", "indented_block", "template_body", "with_template_body")
+#: ``compilation_unit`` is the file root: a script (.sc / .mill) or a top-level
+#: statement in a .scala file puts a bare call directly under it, with no enclosing
+#: block. Omitting it drops most of what a script file actually contains.
+_CONTAINERS = (
+    "compilation_unit",
+    "block",
+    "indented_block",
+    "template_body",
+    "with_template_body",
+)
 
 
 def _name_of(node: Node, source: bytes) -> str | None:
