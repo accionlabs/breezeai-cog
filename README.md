@@ -121,9 +121,29 @@ To add a new infra provider to the InfraStream Provider Abstraction:
      ```
    - Avoid directly instantiating provider-specific implementations such as `AWSStreamUpload` or `AzureStreamUpload`.
 
+### Provider Selection Flow
 
+```mermaid
+flowchart TB
 
+    A[config.py]
+    B[ProviderConfig]
+    C[ProviderType]
+    D[ProviderFactory]
+    E[InfraStream]
+    F[AWSStreamUpload]
+    G[S3]
 
+    A -->|Selected provider| B
+    B -->|Validate against| C
+    C -->|Valid provider| D
+
+    D -->|Creates| E
+    E -->|Implemented by| F
+    F -->|write_line / upload / close| G
+```
+
+### Provider Architecture
   ```mermaid
    classDiagram
 
@@ -214,5 +234,4 @@ To add a new infra provider to the InfraStream Provider Abstraction:
     provider.py --> ProviderConfig : uses
     provider.py --> ProviderFactory : initializes
     provider.py --> InfraStream : exposes
-
-    
+    ```
