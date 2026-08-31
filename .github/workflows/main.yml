@@ -1,0 +1,22 @@
+name: PR Title Validation
+
+on:
+  pull_request:
+    types: [opened, edited, reopened, synchronize]
+
+jobs:
+  validate-pr-title:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Validate PR title
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
+        run: |
+          if [[ ! "$PR_TITLE" =~ BREEZEAI-[0-9]+ ]]; then
+            echo "❌ PR title must contain a Jira ID in the format BREEZEAI-XXXX"
+            echo "Example: Fix employee search - BREEZEAI-1234"
+            exit 1
+          fi
+
+          echo "✅ Jira ID found in PR title"
