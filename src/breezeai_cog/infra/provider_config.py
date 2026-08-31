@@ -1,5 +1,5 @@
-from src.breezeai_cog.config import settings
-from src.breezeai_cog.infra.provider_type import ProviderType
+from ..config import Settings
+from .provider_type import ProviderType
 
 
 class ProviderConfig:
@@ -14,11 +14,12 @@ class ProviderConfig:
         return self._provider
 
     @classmethod
-    def from_settings(cls) -> "ProviderConfig":
+    def from_settings(cls, settings: Settings) -> "ProviderConfig":
         """Create provider configuration from application settings."""
         return cls(
             ProviderType(settings.infra_provider)
         )
 
 
-provider_conf = ProviderConfig.from_settings()
+# Create using your application Settings instance
+provider_conf = ProviderConfig.from_settings(Settings())
