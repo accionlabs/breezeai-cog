@@ -38,7 +38,7 @@ def _now_ms() -> int:
 
 
 def _stream_records_to_infra(deps: ServerDeps, key: str, records: list[dict]) -> str:
-    stream = deps.open_stream(key)
+    stream = deps.open_storage(key)
     for record in records:
         stream.write_line(json.dumps(record) + "\n")
     return stream.close()
@@ -94,10 +94,10 @@ async def analyze_diff(request: Request, background_tasks: BackgroundTasks) -> d
     has_changed = filter_set is None or len(filter_set) > 0
     try:
         if has_changed:
-            upload = deps.open_stream(storage_key)
+            upload = deps.open_storage(storage_key)
             meta = await run_in_threadpool(run_diff_stream, settings, upload, temp_dir, filter_set, repo_name)
         else:
-            upload = deps.open_stream(storage_key)
+            upload = deps.open_storage(storage_key)
             await run_in_threadpool(upload.close)
             meta = empty_meta(repo_name)
     finally:

@@ -9,11 +9,14 @@ from typing import Any, Callable
 from breezeai_cog.infra.interface import InfraStream
 from ..config import Settings
 
-
+class InfraStream:
+    def write_line(self, line: str) -> None: ...
+    def close(self) -> str: ...
+           
 @dataclass
 class ServerDeps:
     settings: Settings
-    open_stream: Callable[[str], InfraStream]       # key -> open streaming upload
+    open_storage: Callable[[str], InfraStream]       # key -> open streaming upload
     notify: Callable[[str, dict[str, Any]], Any]  # (backend path, payload) -> response
     # body -> (temp_dir, filter_set | None, deleted_files); None filter = full clone
     acquire_diff: Callable[[Settings, dict[str, Any]], tuple[str, set[str] | None, list[str]]] | None = None
@@ -26,8 +29,7 @@ def default_deps(settings: Settings) -> ServerDeps:
 
     return ServerDeps(
         settings=settings,
-        open_stream=lambda key: provider.open_stream(key,settings),
-        
+        open_storage=lambda key: provider.open_stream(key,settings),
         notify=lambda path, payload: post_notification(settings, path, payload),
         acquire_diff=acquire_diff,
     )

@@ -423,4 +423,4 @@ the **[Developer Guide](DEVELOPER_GUIDE.md)** and the **[Extending Capture skill
 
 
 
-[Infrastructure Documentation](breezeai-cog/docs/infra.md) — Documents the infrastructure provider abstraction, AWS S3 streaming implementation, provider configuration, upload flow, retry handling, and extensibility for additional cloud providers.
+**[Infrastructure Documentation](breezeai-cog/docs/infra.md)** — Documents the infrastructure provider abstraction, AWS S3 streaming implementation, provider configuration, upload flow, retry handling, and extensibility for additional cloud providers.

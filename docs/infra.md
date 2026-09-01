@@ -1,4 +1,3 @@
-````markdown
 # S3 Provider
 
 ## 1. Overview
@@ -7,7 +6,6 @@ The S3 Provider implements the infrastructure storage functionality used by the 
 
 The implementation separates application-level streaming operations from AWS-specific storage logic through an infrastructure abstraction layer. This allows the application to interact with a common stream interface while keeping provider-specific functionality within the corresponding implementation.
 
----
 
 ## 2. Architecture
 
@@ -27,13 +25,11 @@ AWSStreamUpload
     |
     v
 Amazon S3
-````
+```
 
 The application obtains a stream through `open_stream()` rather than directly creating an `AWSStreamUpload` instance.
 
 `ProviderFactory` is responsible for selecting and creating the implementation corresponding to the configured infrastructure provider.
-
----
 
 ## 3. Components
 
@@ -168,10 +164,13 @@ The data is passed through the internal streaming pipeline rather than requiring
 ### 5.3 Closing the Stream
 
 When:
+
 ```text
 close()
 ```
+
 is called, the stream is finalized and the upload process is completed.
+
 The resulting object is stored in the configured S3 bucket using the specified object key.
 
 ---
@@ -482,10 +481,3 @@ The implementation provides:
 * A clear extension point for additional infrastructure providers.
 
 Unit tests validate the implementation logic, while deployment testing validates the complete flow against the configured S3 environment.
-
-````
-
-
-
-
-

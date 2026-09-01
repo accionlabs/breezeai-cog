@@ -66,7 +66,7 @@ def client(captured: _Captured) -> TestClient:
     def notify(path: str, payload: dict) -> None:
         captured.notifications.append((path, payload))
 
-    deps = ServerDeps(settings=Settings(), open_stream=open_stream, notify=notify)
+    deps = ServerDeps(settings=Settings(), open_storage=open_stream, notify=notify)
     return TestClient(create_app(Settings(), deps))
 
 

@@ -124,7 +124,6 @@ To add a new infra provider to the InfraStream Provider Abstraction:
 
 ```mermaid
 flowchart TB
-
     A[config.py]
     B[ProviderConfig]
     C[ProviderType]
@@ -136,7 +135,6 @@ flowchart TB
     A -->|Selected provider| B
     B -->|Validate against| C
     C -->|Valid provider| D
-
     D -->|Creates| E
     E -->|Implemented by| F
     F -->|write_line / upload / close| G
