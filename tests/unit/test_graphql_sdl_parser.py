@@ -97,8 +97,16 @@ def _by_name(rec, name: str, node_type: str):
 def test_language_and_extensions() -> None:
     p = GraphQLParser()
     assert p.name == "graphql"
-    assert p.extensions == (".graphql", ".gql")
+    assert p.extensions == (".graphql", ".gql", ".graphqls")
     assert "graphql" in p.frameworks
+
+
+def test_graphqls_schema_file_parsed(tmp_path) -> None:
+    # .graphqls is the graphql-java / Spring GraphQL schema extension — same SDL grammar.
+    rec = _parse(tmp_path, "schema.graphqls", SDL)
+    assert rec.language == "graphql"
+    assert _by_name(rec, "User", "object_type_definition").semanticType == "graphql_entity"
+    assert _by_name(rec, "user", "field_definition").semanticType == "route"
 
 
 def test_entity_captured_with_full_body(tmp_path) -> None:

@@ -1,4 +1,5 @@
-"""GraphQLParser — a standalone-file **language parser** owning ``.graphql`` / ``.gql``.
+"""GraphQLParser — a standalone-file **language parser** owning ``.graphql`` / ``.gql`` /
+``.graphqls`` (the graphql-java / Spring-for-GraphQL schema extension).
 
 Distinct from the ``typescript-graphql`` framework parser, which handles SDL/operations
 **embedded** in ``.ts`` files (``gql`…`` template strings). A standalone schema or operation
@@ -26,7 +27,9 @@ from .sdl import collect_graphql_statements
 
 class GraphQLParser(BaseParser):
     name = "graphql"
-    extensions: tuple[str, ...] = (".graphql", ".gql")
+    # ``.graphqls`` is the graphql-java / Spring-for-GraphQL convention for a schema (SDL)
+    # file — same SDL grammar as ``.graphql``/``.gql``, just the JVM schema-first extension.
+    extensions: tuple[str, ...] = (".graphql", ".gql", ".graphqls")
     schema_version = SCHEMA_VERSION
     statement_types = STATEMENT_TYPES
     frameworks = FRAMEWORKS
