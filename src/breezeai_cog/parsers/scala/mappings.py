@@ -32,7 +32,7 @@ COMMENT_TYPES = {"comment", "block_comment"}
 STATEMENT_TYPES = sorted(EMIT_TYPES)
 
 #: Frameworks with *implemented* detection on the base parser. Akka/Pekko messaging
-#: (P2) lives in ``ScalaParser.extract`` (see ``events.py``) since it can appear in any
-#: Scala file, not just Play controllers. Play routing is claimed by ``ScalaPlayParser``
-#: instead (its own ``frameworks = ["play"]``). http4s / Spark remain undetected.
-FRAMEWORKS: list[str] = ["akka"]
+#: (P2) and Spark read/write/sql (P3) live in ``ScalaParser.extract`` (see ``events.py``
+#: and ``spark.py``) since they can appear in any Scala file. Play/akka-http/http4s
+#: routes are claimed by their own dedicated parsers.
+FRAMEWORKS: list[str] = ["akka", "spark"]

@@ -24,6 +24,7 @@ from .events import detect_scala_events
 from .functions import build_function, defined_names, type_map
 from .imports import ScalaIndex, build_fqcn_index, extract_imports
 from .mappings import COMMENT_TYPES, CONTROL_FLOW, FRAMEWORKS, STATEMENT_TYPES
+from .spark import detect_spark_calls
 from .statements import extract_statements
 
 _CLASS_TYPES = (
@@ -164,7 +165,7 @@ class ScalaParser(BaseParser):
                 )
             )
 
-        return FileRecord(
+        record = FileRecord(
             id=fid,
             path=path,
             type="code",
@@ -177,3 +178,5 @@ class ScalaParser(BaseParser):
             statements=statements,
             framework="akka" if events else None,
         )
+        detect_spark_calls(root, ctx, record)
+        return record
