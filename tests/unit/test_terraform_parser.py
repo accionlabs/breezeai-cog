@@ -820,3 +820,30 @@ def test_hcl_in_capabilities_languages_and_extensions() -> None:
     finally:
         registry.clear()
         registry.discover_builtin()
+
+
+# ── statement framework (AC2) ─────────────────────────────────────────────────
+
+
+def test_iac_resource_statement_has_framework_terraform() -> None:
+    rec = _parse("main.tf", _TF_SRC, capture_statements=True)
+    resource_stmts = [s for s in rec.statements if s.semanticType == "iac_resource"]
+    assert all(s.framework == "terraform" for s in resource_stmts)
+
+
+def test_iac_data_statement_has_framework_terraform() -> None:
+    rec = _parse("main.tf", _TF_SRC, capture_statements=True)
+    data_stmts = [s for s in rec.statements if s.semanticType == "iac_data"]
+    assert all(s.framework == "terraform" for s in data_stmts)
+
+
+def test_iac_module_statement_has_framework_terraform() -> None:
+    rec = _parse("main.tf", _TF_SRC, capture_statements=True)
+    module_stmts = [s for s in rec.statements if s.semanticType == "iac_module"]
+    assert all(s.framework == "terraform" for s in module_stmts)
+
+
+def test_structure_only_statements_have_framework_terraform() -> None:
+    rec = _parse("main.tf", _TF_SRC, capture_statements=True)
+    structure_stmts = [s for s in rec.statements if s.semanticType is None]
+    assert all(s.framework == "terraform" for s in structure_stmts)
