@@ -7,11 +7,9 @@ import json
 
 import pytest
 from fastapi.testclient import TestClient
-
-# from breezeai_cog.config import Settings
-from src.breezeai_cog.config import Settings
-from src.breezeai_cog.server.app import create_app
-from src.breezeai_cog.server.deps import ServerDeps
+from breezeai_cog.config import Settings
+from breezeai_cog.server.app import create_app
+from breezeai_cog.server.deps import ServerDeps
 
 MAPPING = json.dumps({
     "products": {

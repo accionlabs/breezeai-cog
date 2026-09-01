@@ -5,8 +5,8 @@ so the streaming endpoints are testable without AWS or a live backend."""
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Callable, Protocol
-from src.breezeai_cog.infra.interface import InfraStream
+from typing import Any, Callable
+from ..infra.interface import InfraStream
 from ..config import Settings
 
 
@@ -20,7 +20,7 @@ class ServerDeps:
 
 
 def default_deps(settings: Settings) -> ServerDeps:
-    from src.breezeai_cog.infra import provider
+    from ...breezeai_cog.infra import provider
     from ..services.notify import post_notification
     from .git import acquire_diff
 
