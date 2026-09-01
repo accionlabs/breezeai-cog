@@ -420,3 +420,7 @@ run:
 That's the whole pipeline: **scan → parse → extract → emit**. For the internals — the parser
 selection model, the schema, how to add a new language or framework, and the project layout — see
 the **[Developer Guide](DEVELOPER_GUIDE.md)** and the **[Extending Capture skill](../skills/extend-capture/SKILL.md)** (with the **[Parser Reference](parser-reference.md)**).
+
+
+
+[Infrastructure Documentation](breezeai-cog/docs/infra.md) — Documents the infrastructure provider abstraction, AWS S3 streaming implementation, provider configuration, upload flow, retry handling, and extensibility for additional cloud providers.
