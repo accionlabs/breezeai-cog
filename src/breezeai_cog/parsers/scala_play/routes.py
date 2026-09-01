@@ -26,7 +26,7 @@ def _is_skippable(line: str) -> bool:
     s = line.strip()
     # ``+`` modifier lines (e.g. ``+ nocsrf``) are skipped rather than attributed to the
     # next route — a dropped modifier is a known gap, a misattributed one is wrong data.
-    return not s or s.startswith("#") or s.startswith("+")
+    return not s or s.startswith(("#", "+"))
 
 
 def _handler_text(raw: str) -> str:

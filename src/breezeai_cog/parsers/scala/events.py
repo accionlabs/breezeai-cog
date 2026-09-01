@@ -82,9 +82,10 @@ def detect_scala_events(
                     method = _TELL_OR_ASK.get(node_text(op, source))
                     if method is not None:
                         emit(c, "eventbus_send", method)
-            elif c.type in ("function_definition", "function_declaration") and _is_receive_handler(c, source):
-                emit(c, "eventbus_consumer", None)
-            elif c.type == "call_expression" and _is_receive_message_call(c, source):
+            elif (
+                c.type in ("function_definition", "function_declaration")
+                and _is_receive_handler(c, source)
+            ) or (c.type == "call_expression" and _is_receive_message_call(c, source)):
                 emit(c, "eventbus_consumer", None)
             walk(c)
 

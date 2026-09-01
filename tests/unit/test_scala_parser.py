@@ -377,11 +377,14 @@ def test_mill_extension_is_claimed() -> None:
 
 def test_capabilities_does_not_advertise_undetected_frameworks() -> None:
     """Defect A: capabilities() claimed Play / Akka / http4s / Spark with no
-    detection implemented, so `can cog handle my Play app?` got a wrong yes."""
+    detection implemented, so `can cog handle my Play app?` got a wrong yes.
+
+    Play and Akka messaging are now implemented (BREEZEAI-220 P2); akka-http,
+    http4s and Spark remain undetected (P3, deferred)."""
     discover_builtin()
     caps = capabilities()
     frameworks = caps.get("frameworks") or []
-    for claimed in ("play", "akka-http", "http4s", "spark"):
+    for claimed in ("akka-http", "http4s", "spark"):
         assert claimed not in frameworks, (
             f"{claimed!r} advertised but no Scala detection exists (P2/P3)"
         )
