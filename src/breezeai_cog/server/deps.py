@@ -6,7 +6,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Any, Callable
-from ..infra.interface import InfraStream
+from breezeai_cog.infra.interface import InfraStream
 from ..config import Settings
 
 
