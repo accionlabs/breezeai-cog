@@ -84,8 +84,10 @@ def test_claims_selects_scala_play() -> None:
     registry.clear()
     registry.register(ScalaParser())
     registry.register(ScalaPlayParser())
-    assert registry.select("X.scala", CONTROLLER_SRC).name == "scala-play"
-    assert registry.select("X.scala", PLAIN_SRC).name == "scala"  # plain Scala -> base
+    sel1 = registry.select("X.scala", CONTROLLER_SRC)
+    assert sel1 is not None and sel1.name == "scala-play"
+    sel2 = registry.select("X.scala", PLAIN_SRC)
+    assert sel2 is not None and sel2.name == "scala"  # plain Scala -> base
     registry.clear()
 
 

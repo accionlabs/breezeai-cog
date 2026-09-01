@@ -75,7 +75,7 @@ def detect_play_actions(root: Node, source: bytes, record: FileRecord) -> list[S
         if fn is None:
             continue
         routes.append(Statement(
-            id=disambiguate(statement_id(fn.path, fn.startLine, 0), seen),
+            id=disambiguate(statement_id(record.path, fn.startLine, 0), seen),
             parentId=fn.id,
             nodeType="synthetic",
             semanticType="route",

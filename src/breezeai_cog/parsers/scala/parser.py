@@ -44,7 +44,7 @@ class ScalaParser(BaseParser):
     #: ``.mill`` is Mill's build definition (``build.mill`` / ``package.mill``) — ordinary
     #: Scala source. Mill 0.12 renamed it from ``build.sc``; both spellings are in the wild,
     #: so both are claimed. Without ``.mill`` an entire Mill build is invisible to the graph.
-    extensions = (".scala", ".sc", ".mill")
+    extensions: tuple[str, ...] = (".scala", ".sc", ".mill")
     schema_version = SCHEMA_VERSION
     statement_types = STATEMENT_TYPES
     frameworks = FRAMEWORKS

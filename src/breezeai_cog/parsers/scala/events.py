@@ -16,6 +16,7 @@ from tree_sitter import Node
 
 from ...emit import disambiguate, statement_id
 from ...schemas import Statement
+from ...schemas.enums import SemanticType
 from ..base import ParseContext
 from ..treesitter import node_text
 
@@ -57,7 +58,7 @@ def detect_scala_events(
         return []
     events: list[Statement] = []
 
-    def emit(node: Node, semantic: str, method: str | None) -> None:
+    def emit(node: Node, semantic: SemanticType, method: str | None) -> None:
         start = node.start_point[0] + 1
         events.append(Statement(
             id=disambiguate(statement_id(ctx.path, start, node.start_point[1]), seen_ids),
