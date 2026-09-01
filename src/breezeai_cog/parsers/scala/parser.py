@@ -20,6 +20,7 @@ from ..callresolve import make_resolver
 from ..comments_common import comment_statements_for
 from ..treesitter import parse_source
 from .classes import build_class
+from .events import detect_scala_events
 from .functions import build_function, defined_names, type_map
 from .imports import ScalaIndex, build_fqcn_index, extract_imports
 from .mappings import COMMENT_TYPES, CONTROL_FLOW, FRAMEWORKS, STATEMENT_TYPES
@@ -143,6 +144,9 @@ class ScalaParser(BaseParser):
             )
         )
 
+        events = detect_scala_events(root, ctx, fid, seen_ids)
+        statements.extend(events)
+
         if capture:
             statements.extend(
                 comment_statements_for(
@@ -171,4 +175,5 @@ class ScalaParser(BaseParser):
             functions=functions,
             classes=classes,
             statements=statements,
+            framework="akka" if events else None,
         )
