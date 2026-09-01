@@ -7,7 +7,8 @@ import json
 
 from breezeai_cog.core import registry
 from breezeai_cog.parsers.base import ParseContext
-from breezeai_cog.parsers.terraform.parser import TerraformParser
+from breezeai_cog.parsers.hcl.parser import HclParser
+from breezeai_cog.parsers.hcl_terraform.parser import TerraformParser
 
 # ── fixtures ──────────────────────────────────────────────────────────────────
 
@@ -702,10 +703,12 @@ def test_empty_tf_file() -> None:
 
 def test_ignore_patterns_include_terraform_dir() -> None:
     assert any(".terraform/" in p for p in TerraformParser().ignore_patterns())
+    assert any(".terraform/" in p for p in HclParser().ignore_patterns())
 
 
 def test_ignore_patterns_include_override() -> None:
     assert any("override.tf" in p for p in TerraformParser().ignore_patterns())
+    assert any("override.tf" in p for p in HclParser().ignore_patterns())
 
 
 def test_ignore_patterns_no_dead_entries() -> None:
@@ -760,41 +763,57 @@ def test_endpoint_absent_from_json_for_structure_blocks() -> None:
 # ── registry integration ──────────────────────────────────────────────────────
 
 
-def test_registry_selects_terraform_for_tf() -> None:
+def test_registry_selects_hcl_terraform_for_tf() -> None:
     registry.clear()
     registry.discover_builtin()
     try:
-        assert registry.select("infra/main.tf", b"").name == "terraform"
+        assert registry.select("infra/main.tf", b"").name == "hcl-terraform"
     finally:
         registry.clear()
         registry.discover_builtin()
 
 
-def test_registry_selects_terraform_for_tfvars() -> None:
+def test_registry_selects_hcl_terraform_for_tfvars() -> None:
     registry.clear()
     registry.discover_builtin()
     try:
-        assert registry.select("prod.tfvars", b"region = \"us-east-1\"").name == "terraform"
+        assert registry.select("prod.tfvars", b"region = \"us-east-1\"").name == "hcl-terraform"
     finally:
         registry.clear()
         registry.discover_builtin()
 
 
-def test_registry_selects_terraform_for_hcl() -> None:
+def test_registry_selects_hcl_terraform_for_hcl_with_tf_blocks() -> None:
+    """A .hcl file containing Terraform-signature blocks is claimed by the Terraform parser."""
     registry.clear()
     registry.discover_builtin()
     try:
-        assert registry.select("backend.hcl", b"").name == "terraform"
+        tf_hcl = b'terraform {\n  required_version = ">= 1.0"\n}\n'
+        assert registry.select("backend.hcl", tf_hcl).name == "hcl-terraform"
     finally:
         registry.clear()
         registry.discover_builtin()
 
 
-def test_hcl_in_capabilities_extensions() -> None:
+def test_registry_selects_hcl_for_non_terraform_hcl() -> None:
+    """A .hcl file with no Terraform blocks (e.g. Packer) falls through to the plain hcl parser."""
+    registry.clear()
+    registry.discover_builtin()
+    try:
+        packer_hcl = b'source "amazon-ebs" "ubuntu" {\n  ami_name = "my-ami"\n}\n'
+        assert registry.select("build.pkr.hcl", packer_hcl).name == "hcl"
+    finally:
+        registry.clear()
+        registry.discover_builtin()
+
+
+def test_hcl_in_capabilities_languages_and_extensions() -> None:
     registry.clear()
     registry.discover_builtin()
     try:
         caps = registry.capabilities()
+        assert "hcl" in caps["languages"]
+        assert "hcl-terraform" in caps["languages"]
         assert ".hcl" in caps["extensions"]
         assert ".tf" in caps["extensions"]
         assert ".tfvars" in caps["extensions"]
