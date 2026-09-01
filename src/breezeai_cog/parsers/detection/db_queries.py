@@ -70,6 +70,12 @@ _DB_METHODS: dict[str, tuple[str, ...]] = {
         "get_or_create", "update_or_create", "bulk_update", "values_list",
     ),
     "sqlalchemy": ("filter_by", "session_query", "add_all"),
+    # `.result`/`.to`/`.option`/`.unique` deliberately omitted — they collide with
+    # `Future.result`/collection `.to(List)`/Scala `Option`/generic `.unique` and cannot
+    # be made precise (BREEZEAI-220 P2 audit).
+    "slick": ("forceinsert", "insertorupdate", "tablequery"),
+    "doobie": ("transact", "queryschema"),
+    "quill": ("liftquery",),
 }
 
 # Reverse lookup: method (lowercased) -> DB; first DB in _DB_METHODS wins a collision.
