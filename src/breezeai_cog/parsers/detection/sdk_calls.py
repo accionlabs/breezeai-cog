@@ -505,7 +505,8 @@ def _detect_apollo_calls(
 
 # --- AWS S3 (command pattern) -------------------------------------------------
 # AWS SDK v3 uses ``client.send(new PutObjectCommand({...}))`` — a command-pattern
-# call, not a method chain.  The endpoint is the Command class name.
+# call, not a method chain.  The endpoint is the API operation (``PutObject``), i.e. the
+# Command class name with its ``Command`` suffix stripped.
 _S3_BYTE_GUARD = b"@aws-sdk/client-s3"
 _S3_CLIENT_TYPES = frozenset({"S3Client", "S3"})
 
@@ -569,8 +570,10 @@ def _command_variables(root: Node, source: bytes) -> dict[str, str]:
 def _extract_command_name(
     call: Node, source: bytes, cmd_vars: dict[str, str] | None = None,
 ) -> str | None:
-    """Extract the Command class name from ``client.send(new XxxCommand(…))`` or
-    ``client.send(commandVar)`` where ``commandVar = new XxxCommand(…)``."""
+    """Extract the AWS API operation from ``client.send(new XxxCommand(…))`` or
+    ``client.send(commandVar)`` where ``commandVar = new XxxCommand(…)``. Returns the
+    operation name with the ``Command`` suffix stripped (``PutObjectCommand`` → ``PutObject``)
+    so every AWS SDK detector reports the real API operation, not the SDK class name."""
     args = call.child_by_field_name("arguments")
     if args is None:
         return None
@@ -584,10 +587,11 @@ def _extract_command_name(
         if ctor is None:
             return None
         name = node_text(ctor, source)
-        return name if name.endswith("Command") else None
-    # Variable reference: resolve via pre-scanned command variables
+        return name.removesuffix("Command") if name.endswith("Command") else None
+    # Variable reference: resolve via pre-scanned command variables (already ``…Command``)
     if first_arg.type == "identifier" and cmd_vars:
-        return cmd_vars.get(node_text(first_arg, source))
+        cn = cmd_vars.get(node_text(first_arg, source))
+        return cn.removesuffix("Command") if cn else None
     return None
 
 
@@ -596,7 +600,7 @@ def _detect_aws_s3_calls(
 ) -> bool:
     """Detect AWS S3 ``client.send(new XxxCommand(…))`` calls.  Handles both
     ``this.field.send(…)`` (DI pattern) and ``variable.send(…)`` (free variable).
-    The endpoint is the Command class name."""
+    The endpoint is the API operation (``PutObject``) — see :func:`_extract_command_name`."""
     if _S3_BYTE_GUARD not in source:
         return False
     # DI fields (this.s3) — same pattern as Apollo injected fields

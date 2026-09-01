@@ -468,8 +468,9 @@ def test_s3_command_pattern_detected(tmp_path) -> None:
     assert len(calls) == 2
     assert all(c.framework == "aws-s3" for c in calls)
     endpoints = {c.endpoint for c in calls}
-    assert "PutObjectCommand" in endpoints
-    assert "GetObjectCommand" in endpoints
+    # endpoint is the API operation — the ``Command`` suffix is stripped
+    assert "PutObject" in endpoints
+    assert "GetObject" in endpoints
     assert all(c.method is None for c in calls)
 
 
