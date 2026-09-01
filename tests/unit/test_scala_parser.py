@@ -371,23 +371,22 @@ def test_mill_extension_is_claimed() -> None:
     """F1: Mill 0.12 renamed build.sc -> build.mill; 584 such files were dropped in
     the mill repo during dogfooding."""
     discover_builtin()
-    assert ".mill" in capabilities()["extensions"]
+    exts = capabilities().get("extensions")
+    assert isinstance(exts, list) and ".mill" in exts
     assert ".mill" in ScalaParser().extensions
 
 
-def test_capabilities_does_not_advertise_undetected_frameworks() -> None:
+def test_capabilities_advertises_implemented_frameworks() -> None:
     """Defect A: capabilities() claimed Play / Akka / http4s / Spark with no
-    detection implemented, so `can cog handle my Play app?` got a wrong yes.
-
-    Play and Akka messaging are now implemented (BREEZEAI-220 P2); akka-http,
-    http4s and Spark remain undetected (P3, deferred)."""
+    detection implemented. Now Play, Akka, akka-http, http4s and Spark detection
+    are all implemented (BREEZEAI-220 P1, P2, P3)."""
     discover_builtin()
     caps = capabilities()
-    frameworks = caps.get("frameworks") or []
-    for claimed in ("akka-http", "http4s", "spark"):
-        assert claimed not in frameworks, (
-            f"{claimed!r} advertised but no Scala detection exists (P2/P3)"
-        )
+    raw_fw = caps.get("frameworks")
+    assert isinstance(raw_fw, list)
+    frameworks = set(raw_fw)
+    for implemented in ("play", "akka", "akka-http", "http4s", "spark"):
+        assert implemented in frameworks, f"{implemented!r} should be advertised in capabilities"
 
 
 PACKAGE_OBJECT_SRC = b"""package cats
