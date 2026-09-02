@@ -693,23 +693,41 @@ def _operation_name(command: str) -> str:
     return command.removesuffix("Command")
 
 
-def _detect_aws_cognito_calls(
-    root: Node, source: bytes, path: str, record: FileRecord, seen: set[str]
+# --- AWS Parameter Store / SSM (command pattern) --------------------------------
+# Third instance of the "client.send(new *Command())" shape (S3, Cognito, SSM) — per the
+# Reuse Before Build third-copy rule, extraction happens here rather than a 3rd copy-paste.
+_SSM_BYTE_GUARD = b"@aws-sdk/client-ssm"
+_SSM_CLIENT_TYPES = frozenset({"SSMClient"})
+
+
+def _detect_send_command_calls(
+    root: Node,
+    source: bytes,
+    path: str,
+    record: FileRecord,
+    seen: set[str],
+    *,
+    byte_guard: bytes,
+    client_types: frozenset[str],
+    framework: str,
+    strip_command_suffix: bool = True,
 ) -> bool:
-    """Detect AWS Cognito ``client.send(new XxxCommand(…))`` calls. Handles DI-field,
-    class-field, and free-variable client forms (via :func:`_injected_client_fields` /
-    :func:`_client_identifiers`). The endpoint is the Command class name with its
-    ``Command`` suffix stripped — the honest API operation name."""
-    if _COGNITO_BYTE_GUARD not in source:
+    """Detect ``client.send(new XxxCommand(…))`` calls for one vendor SDK (Cognito, SSM, …).
+    Handles DI-field, class-field, and free-variable client forms (via
+    :func:`_injected_client_fields` / :func:`_client_identifiers`). ``strip_command_suffix``
+    exists only because it is the one axis on which a future S3 migration onto this helper
+    would differ (S3's own detector/tests stay untouched — see the plan's Out-of-Scope
+    decision); delete the flag if that migration is rejected."""
+    if byte_guard not in source:
         return False
-    di_fields = _injected_client_fields(root, source, _COGNITO_CLIENT_TYPES)
-    cognito_sdk = _Sdk(
-        import_marker=_COGNITO_BYTE_GUARD,
-        framework="aws-cognito",
-        client_types=_COGNITO_CLIENT_TYPES,
+    di_fields = _injected_client_fields(root, source, client_types)
+    sdk = _Sdk(
+        import_marker=byte_guard,
+        framework=framework,
+        client_types=client_types,
         operations=frozenset(),
     )
-    free_clients = _client_identifiers(root, source, cognito_sdk)
+    free_clients = _client_identifiers(root, source, sdk)
     if not di_fields and not free_clients:
         return False
     cmd_vars = _command_variables(root, source)
@@ -731,8 +749,9 @@ def _detect_aws_cognito_calls(
                 if receiver in free_clients and tail == "send":
                     command_name = _extract_command_name(call, source, cmd_vars)
         if command_name is not None:
+            endpoint = _operation_name(command_name) if strip_command_suffix else command_name
             _emit_outbound(
-                call, call.start_point[0] + 1, _operation_name(command_name), "aws-cognito",
+                call, call.start_point[0] + 1, endpoint, framework,
                 source, path, record, seen,
             )
             emitted = True
@@ -790,8 +809,21 @@ def detect_sdk_calls(
     if _detect_aws_s3_calls(root, source, path, record, seen):
         file_fw = file_fw or "aws-s3"
 
-    if _detect_aws_cognito_calls(root, source, path, record, seen):
+    if _detect_send_command_calls(
+        root, source, path, record, seen,
+        byte_guard=_COGNITO_BYTE_GUARD,
+        client_types=_COGNITO_CLIENT_TYPES,
+        framework="aws-cognito",
+    ):
         file_fw = file_fw or "aws-cognito"
+
+    if _detect_send_command_calls(
+        root, source, path, record, seen,
+        byte_guard=_SSM_BYTE_GUARD,
+        client_types=_SSM_CLIENT_TYPES,
+        framework="aws-ssm",
+    ):
+        file_fw = file_fw or "aws-ssm"
 
     return file_fw
 
