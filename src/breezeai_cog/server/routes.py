@@ -109,14 +109,14 @@ async def analyze_diff(request: Request, background_tasks: BackgroundTasks) -> d
 
     background_tasks.add_task(
         deps.notify, "/code-ontology/stream-ingest",
-        {"storageKey":storage_key, "projectMetaData": meta, "deletedFiles": deleted_files,
+        {"storage_key":storage_key, "projectMetaData": meta, "deletedFiles": deleted_files,
          "projectUuid": project_uuid, "codeOntologyId": code_ontology_id,
          "repoUrl": repo_url, "gitBranch": git_branch, "commitId": incoming},
     )
 
     return {
         "success": True,
-        "storageKey": storage_key,
+        "storage_key": storage_key,
         "deletedFiles": deleted_files,
         "message": (
             "Code ontology streamed to S3 and notification sent to Breeze API for ingestion."
@@ -173,7 +173,7 @@ async def analyze_sql(
     await run_in_threadpool(_stream_records_to_infra, deps, storage_key, [record])
     background_tasks.add_task(
         deps.notify, "/db-ontology/stream-ingest-s3",
-        { "storageKey":storage_key, "projectUuid": projectUuid, "dataLakeId": dataLakeId,
+        { "storage_key":storage_key, "projectUuid": projectUuid, "dataLakeId": dataLakeId,
          "repositoryName": repositoryName or file_name},
     )
 
@@ -225,7 +225,7 @@ async def analyze_nosql(
     await run_in_threadpool(_stream_records_to_infra, deps, storage_key, build["records"])
     background_tasks.add_task(
         deps.notify, "/db-ontology/stream-ingest-s3",
-        {"storageKey":storage_key, "projectUuid": projectUuid, "dataLakeId": dataLakeId,
+        {"storage_key":storage_key, "projectUuid": projectUuid, "dataLakeId": dataLakeId,
          "repositoryName": repositoryName or primary_name},
     )
 
@@ -238,7 +238,7 @@ async def analyze_nosql(
     )
     return JSONResponse(status_code=202, content={
         "success": True,
-        "storageKey":storage_key,
+        "storage_key":storage_key,
         "collections": build["collections"],
         "recordCount": len(build["records"]),
         "collectionCount": cc,
@@ -302,7 +302,7 @@ async def analyze_es(
 
     return JSONResponse(status_code=202, content={
         "success": True,
-        "storageKey": storage_key,
+        "storage_key": storage_key,
         "mode": build["kind"],
         "mapping": build["mapping"]["name"] if build["mapping"] else None,
         "setting": build["setting"]["name"] if build["setting"] else None,

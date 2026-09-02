@@ -101,7 +101,7 @@ def test_settings_only_upload(client: TestClient, captured: _Captured) -> None:
     )
     assert r.status_code == 202
     out = r.json()
-    assert out["mode"] == "settings-only" and "-settings" in out["s3Key"]
+    assert out["mode"] == "settings-only" and "-settings" in out["storage_key"]
     rec = captured.records[0]
     assert rec["__type"] == "es_settings" and rec["shards"] == 3 and rec["replicas"] == 1
     assert rec["defaultAnalyzer"] == "standard"
