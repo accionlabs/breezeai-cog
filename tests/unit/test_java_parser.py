@@ -236,6 +236,35 @@ def test_nested_member_classes_extracted(tmp_path) -> None:
     assert "handle" in {c.name for f in rec.functions if f.name == "run" for c in f.calls}
 
 
+def test_interface_constant_captured(tmp_path) -> None:
+    # Regression: an interface constant is a `constant_declaration` node (not
+    # `field_declaration`), so it must be in the statement allow-list to be captured —
+    # parented to the interface, with its declarator name and any annotations.
+    src = (
+        "package com.x;\n"
+        "public interface Notifier {\n"
+        '  @Deprecated String CHANNEL = "email";\n'
+        "  boolean send(String message);\n"
+        "}\n"
+    ).encode()
+    p = tmp_path / "Notifier.java"
+    p.write_text(src.decode())
+    ctx = ParseContext(path="Notifier.java", abs_path=p, source=src, repo_root=tmp_path,
+                       capture_statements=True)
+    rec = JavaParser().parse_file(ctx)
+    iface = next(c for c in rec.classes if c.name == "Notifier")
+    consts = [s for s in rec.statements if s.nodeType == "constant_declaration"]
+    assert len(consts) == 1
+    const = consts[0]
+    assert const.name == "CHANNEL"
+    assert const.parentId == iface.id
+    assert [d.name for d in const.decorators] == ["Deprecated"]
+    # capture off → no statements
+    assert JavaParser().parse_file(
+        ParseContext(path="Notifier.java", abs_path=p, source=src, repo_root=tmp_path)
+    ).statements == []
+
+
 def test_control_statement_not_mislabeled(tmp_path) -> None:
     # #4/smear: a db call nested in an if/for body must not tag the enclosing control statements.
     src = ("class C { void m(java.util.List<Order> o){ if(o.size()>0){ for(Order x: o){ repo.save(x); } } } }").encode()
