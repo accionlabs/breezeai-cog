@@ -159,9 +159,9 @@ def test_sdl_operations_detected_with_dtos(tmp_path) -> None:
     assert routes["procurementItems"].responseDTO == "ProcurementItemConnection"
     # trailing directive stripped from the return type.
     assert routes["_byIds"].responseDTO == "ProcurementItem"
-    # Embedded SDL is now walked by the shared collect_graphql_statements (same as a standalone
-    # .graphql file), so a root-type field carries its real GraphQL node type, not "synthetic".
-    assert routes["procurementItem"].nodeType == "field_definition"
+    # Embedded SDL is walked by the shared extract_graphql walker but marked synthetic (no host
+    # AST node), unlike a standalone .graphql file where the real grammar node is kept.
+    assert routes["procurementItem"].nodeType == "synthetic"
 
 
 def test_client_operations_detected_via_base_parser(tmp_path) -> None:
@@ -215,14 +215,18 @@ def test_client_ops_ignore_plain_template_and_server_sdl(tmp_path) -> None:
 
 def test_key_entities_detected(tmp_path) -> None:
     rec = _parse(tmp_path, ENTITY_SRC, "schema.ts")
+    # Every object type (incl. Plain) is a Class node; the root Query is not.
+    cls = {c.name: c.type for c in rec.classes}
+    assert cls.get("ProcurementItem") == "class"
+    assert cls.get("Tenderer") == "class"
+    assert cls.get("Plain") == "class"
+    assert "Query" not in cls
+    # Only @key-bearing types also get a graphql_entity marker, with keyFields restored.
     entities = {s.endpoint: s for s in rec.statements if s.semanticType == "graphql_entity"}
-    # Every object type is now an entity (unified with the standalone .graphql walker), not only
-    # @key-bearing ones — the root Query still becomes routes, not an entity.
-    assert set(entities) == {"ProcurementItem", "Tenderer", "Plain"}
-    assert entities["ProcurementItem"].framework == "graphql"
-    # The @key directive stays visible in the entity's text (key field names are not extracted).
-    assert "@key" in entities["ProcurementItem"].text
-    assert "@key" not in entities["Plain"].text
+    assert set(entities) == {"ProcurementItem", "Tenderer"}
+    assert entities["ProcurementItem"].keyFields == ["id"]  # selectionSet "{ id }"
+    assert entities["Tenderer"].keyFields == ["id", "contactId"]  # fields "id contactId"
+    assert entities["ProcurementItem"].nodeType == "synthetic"  # embedded → synthetic
     # the root Query field still emits its route (entities don't displace routes).
     routes = {s.endpoint for s in rec.statements if s.semanticType == "route"}
     assert "procurementItems" in routes
@@ -240,16 +244,16 @@ export const typeDefs = gql`
 
 
 def test_embedded_sdl_captures_inputs_enums_interfaces(tmp_path) -> None:
-    # A5: embedded SDL now yields the same non-root definitions a standalone .graphql file does
-    # (input/enum/interface), not only root fields + @key entities.
+    # A5: embedded SDL yields the same Class nodes a standalone .graphql file does
+    # (input→record / enum→enum / interface→interface), not only root fields + @key entities.
     rec = _parse(tmp_path, SDL_TYPES_SRC, "schema.ts")
-    by_type = {s.name: s.nodeType for s in rec.statements if s.framework == "graphql"}
-    assert by_type.get("InformationFilter") == "input_object_type_definition"
-    assert by_type.get("Status") == "enum_type_definition"
-    assert by_type.get("Node") == "interface_type_definition"
+    by_type = {c.name: c.type for c in rec.classes}
+    assert by_type.get("InformationFilter") == "record"
+    assert by_type.get("Status") == "enum"
+    assert by_type.get("Node") == "interface"
     # startLine maps back to the host .ts file (row-offset), not the fragment's own line 1:
     # `enum Status` is the 6th line of schema.ts.
-    status = next(s for s in rec.statements if s.name == "Status")
+    status = next(c for c in rec.classes if c.name == "Status")
     assert status.startLine == 6
 
 
