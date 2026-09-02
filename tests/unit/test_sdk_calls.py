@@ -483,6 +483,147 @@ def test_s3_no_false_positive_without_import(tmp_path) -> None:
     assert _api_calls(rec) == []
 
 
+COGNITO_DI_SRC = b"""import { CognitoIdentityProviderClient, AdminCreateUserCommand, AdminGetUserCommand } from '@aws-sdk/client-cognito-identity-provider';
+
+@Injectable()
+export class UserPoolService {
+  constructor(private cognito: CognitoIdentityProviderClient) {}
+
+  async createUser(email: string) {
+    await this.cognito.send(new AdminCreateUserCommand({ UserPoolId: 'us-east-1_example', Username: email }));
+  }
+
+  async getUser(username: string) {
+    return await this.cognito.send(new AdminGetUserCommand({ UserPoolId: 'us-east-1_example', Username: username }));
+  }
+}
+"""
+
+COGNITO_FIELD_SRC = b"""import { CognitoIdentityProviderClient, AdminGetUserCommand } from '@aws-sdk/client-cognito-identity-provider';
+
+export class Svc {
+  private a: CognitoIdentityProviderClient;
+  private readonly b = new CognitoIdentityProviderClient({});
+  private c: CognitoIdentityProviderClient = new CognitoIdentityProviderClient({});
+
+  async fa() { return await this.a.send(new AdminGetUserCommand({})); }
+  async fb() { return await this.b.send(new AdminGetUserCommand({})); }
+  async fc() { return await this.c.send(new AdminGetUserCommand({})); }
+}
+"""
+
+COGNITO_FREEVAR_SRC = b"""import { CognitoIdentityProviderClient, InitiateAuthCommand } from '@aws-sdk/client-cognito-identity-provider';
+
+export async function login(username: string, password: string) {
+  const client = new CognitoIdentityProviderClient({ region: 'us-east-1' });
+  return await client.send(new InitiateAuthCommand({
+    AuthFlow: 'USER_PASSWORD_AUTH',
+    ClientId: 'abc',
+    AuthParameters: { USERNAME: username, PASSWORD: password },
+  }));
+}
+"""
+
+COGNITO_JS_SRC = b"""const { CognitoIdentityProviderClient, SignUpCommand } = require('@aws-sdk/client-cognito-identity-provider');
+const c = new CognitoIdentityProviderClient({});
+exports.f = async () => c.send(new SignUpCommand({}));
+"""
+
+
+def test_cognito_di_field_command_detected(tmp_path) -> None:
+    rec = _parse(tmp_path, COGNITO_DI_SRC, "src/user-pool.service.ts")
+    calls = _api_calls(rec)
+    assert len(calls) == 2
+    assert all(c.framework == "aws-cognito" for c in calls)
+    endpoints = {c.endpoint for c in calls}
+    assert endpoints == {"AdminCreateUser", "AdminGetUser"}
+    assert all(c.method is None for c in calls)
+
+
+def test_cognito_class_field_clients_detected(tmp_path) -> None:
+    rec = _parse(tmp_path, COGNITO_FIELD_SRC, "src/cognito.fields.service.ts")
+    calls = _api_calls(rec)
+    assert len(calls) == 3
+    assert all(c.framework == "aws-cognito" for c in calls)
+    assert all(c.endpoint == "AdminGetUser" for c in calls)
+
+
+def test_cognito_free_variable_client_detected(tmp_path) -> None:
+    rec = _parse(tmp_path, COGNITO_FREEVAR_SRC, "src/cognito.client.ts")
+    calls = _api_calls(rec)
+    assert len(calls) == 1
+    assert calls[0].framework == "aws-cognito"
+    assert calls[0].endpoint == "InitiateAuth"
+    assert calls[0].method is None
+
+
+def test_cognito_js_require_free_variable_detected(tmp_path) -> None:
+    rec = _parse(tmp_path, COGNITO_JS_SRC, "src/cognito.js")
+    calls = _api_calls(rec)
+    assert len(calls) == 1
+    assert calls[0].endpoint == "SignUp"
+
+
+def test_cognito_command_variable_resolved(tmp_path) -> None:
+    src = b"""import { CognitoIdentityProviderClient, SignUpCommand } from '@aws-sdk/client-cognito-identity-provider';
+
+export async function signUp(client: CognitoIdentityProviderClient, email: string, password: string) {
+  const cmd = new SignUpCommand({ ClientId: 'abc', Username: email, Password: password });
+  return await client.send(cmd);
+}
+"""
+    rec = _parse(tmp_path, src, "src/signup.ts")
+    calls = _api_calls(rec)
+    assert len(calls) == 1
+    assert calls[0].endpoint == "SignUp"
+
+
+def test_cognito_endpoint_strips_command_suffix(tmp_path) -> None:
+    rec = _parse(tmp_path, COGNITO_DI_SRC, "src/user-pool.service.ts")
+    endpoints = {c.endpoint for c in _api_calls(rec)}
+    assert "AdminCreateUser" in endpoints
+    assert "AdminCreateUserCommand" not in endpoints
+
+
+def test_cognito_no_false_positive_without_import(tmp_path) -> None:
+    src = b"""export class Svc {
+  constructor(private cognito: CognitoIdentityProviderClient) {}
+  async f() { await this.cognito.send(new AdminCreateUserCommand({})); }
+}
+"""
+    rec = _parse(tmp_path, src, "src/x.ts")
+    assert _api_calls(rec) == []
+
+
+def test_cognito_send_on_non_client_not_tagged(tmp_path) -> None:
+    src = b"""import { CognitoIdentityProviderClient } from '@aws-sdk/client-cognito-identity-provider';
+
+export class Svc {
+  constructor(private repo: MyRepo) {}
+  async f() { await this.repo.send(new AdminCreateUserCommand({})); }
+}
+"""
+    rec = _parse(tmp_path, src, "src/x.ts")
+    assert _api_calls(rec) == []
+
+
+def test_cognito_send_non_command_argument_is_absent(tmp_path) -> None:
+    src = b"""import { CognitoIdentityProviderClient } from '@aws-sdk/client-cognito-identity-provider';
+
+export class Svc {
+  constructor(private cognito: CognitoIdentityProviderClient) {}
+  async f(payload: unknown) { await this.cognito.send(payload); }
+}
+"""
+    rec = _parse(tmp_path, src, "src/x.ts")
+    assert _api_calls(rec) == []
+
+
+def test_cognito_file_framework_rollup(tmp_path) -> None:
+    rec = _parse(tmp_path, COGNITO_DI_SRC, "src/user-pool.service.ts")
+    assert rec.framework == "aws-cognito"
+
+
 def test_output_validates(tmp_path) -> None:
     for src, rel in (
         (HUBSPOT_SRC, "src/hs.ts"),
@@ -493,6 +634,10 @@ def test_output_validates(tmp_path) -> None:
         (APOLLO_ACCESSOR_SRC, "src/user2.service.ts"),
         (APICLIENT_SRC, "src/data.service.ts"),
         (S3_SRC, "src/storage.service.ts"),
+        (COGNITO_DI_SRC, "src/user-pool.service.ts"),
+        (COGNITO_FIELD_SRC, "src/cognito.fields.service.ts"),
+        (COGNITO_FREEVAR_SRC, "src/cognito.client.ts"),
+        (COGNITO_JS_SRC, "src/cognito.js"),
     ):
         rec = _parse(tmp_path, src, rel)
         errors = list(
