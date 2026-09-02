@@ -1,6 +1,6 @@
-from .factory import ProviderFactory
-from .interface import InfraStream
-from .provider_config import provider_conf
+from breezeai_cog.infra.factory import ProviderFactory
+from breezeai_cog.infra.interface import InfraStream
+from breezeai_cog.infra.provider_config import provider_conf
 from ..config import Settings
 
 

@@ -1,5 +1,5 @@
 from ..config import Settings
-from .provider_type import ProviderType
+from breezeai_cog.infra.provider_type import ProviderType
 
 
 class ProviderConfig:

@@ -23,13 +23,13 @@ class ServerDeps:
 
 
 def default_deps(settings: Settings) -> ServerDeps:
-    from ...breezeai_cog.infra import provider
+    from breezeai_cog.infra.provider import open_stream
     from ..services.notify import post_notification
     from .git import acquire_diff
 
     return ServerDeps(
         settings=settings,
-        open_storage=lambda key: provider.open_stream(key,settings),
+        open_storage=lambda key: open_stream(key,settings),
         notify=lambda path, payload: post_notification(settings, path, payload),
         acquire_diff=acquire_diff,
     )
