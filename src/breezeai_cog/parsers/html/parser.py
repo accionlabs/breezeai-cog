@@ -109,6 +109,8 @@ class HtmlParser(BaseParser):
                     parent_id=fid,
                     seen_ids=seen_ids,
                     limit=ctx.statement_text_limit,
+                    framework=framework,
+                    emit_routes=not self.is_fixture_file(ctx.path),  # routes skip fixtures
                 )
             )
             record.statements.extend(

@@ -45,6 +45,9 @@ _RENDERING: dict[str, re.Pattern[str]] = {
 }
 
 #: Behavior libraries — additive enhancement, NOT the rendering framework.
+#: Stimulus keys on ``data-controller`` ONLY — its unambiguous activation attribute. ``data-
+#: action`` / ``data-*-target`` are deliberately excluded: they collide with Bootstrap
+#: (``data-bs-target``) and generic ``data-action`` attributes (a confirmed false positive).
 _BEHAVIOR: dict[str, re.Pattern[str]] = {
     "htmx": re.compile(
         r"\bhx-(get|post|put|delete|patch|trigger|target|swap|boost|on|vals|push-url|select)\b"
@@ -52,18 +55,35 @@ _BEHAVIOR: dict[str, re.Pattern[str]] = {
     "alpine": re.compile(
         r"\bx-(data|on|bind|model|for|if|show|text|html|init|ref|effect|cloak|transition)\b"
     ),
-    "stimulus": re.compile(r"\bdata-controller\s*=|\bdata-action\s*=|\bdata-[\w-]+-target\s*="),
+    "stimulus": re.compile(r"\bdata-controller\s*="),
 }
+
+#: Non-content regions stripped before fingerprinting: framework code shown *as an example*
+#: (inside ``<pre>``/``<code>``), script/style bodies, textarea contents, and comments. A docs
+#: page that merely *displays* ``*ngFor`` or ``v-if`` must not be mislabeled as using it.
+#: Statement parsing still uses the full source — only the framework SNIFF is narrowed.
+_NON_CONTENT = re.compile(
+    r"<!--.*?-->|<(pre|code|script|style|textarea)\b[^>]*>.*?</\1\s*>",
+    re.DOTALL | re.IGNORECASE,
+)
+
+
+def _content(text: str) -> str:
+    """``text`` with example/code/script/comment regions blanked — see :data:`_NON_CONTENT`."""
+    return _NON_CONTENT.sub(" ", text)
 
 
 def detect_rendering_framework(text: str) -> str | None:
     """The rendering framework, from uniquely-identifying markup — or ``None`` when nothing
-    matches or **two** frameworks match (ambiguous → honest-null)."""
-    hits = [fw for fw, rx in _RENDERING.items() if rx.search(text)]
+    matches or **two** frameworks match (ambiguous → honest-null). Framework code shown inside
+    ``<pre>``/``<code>`` is ignored, so a docs page isn't mislabeled as using the framework."""
+    body = _content(text)
+    hits = [fw for fw, rx in _RENDERING.items() if rx.search(body)]
     return hits[0] if len(hits) == 1 else None
 
 
 def detect_behaviors(text: str) -> list[str]:
     """Sorted behavior libraries layered on the markup (htmx / Alpine / Stimulus); ``[]`` if
     none. Independent of the rendering framework — both can be present."""
-    return sorted(fw for fw, rx in _BEHAVIOR.items() if rx.search(text))
+    body = _content(text)
+    return sorted(fw for fw, rx in _BEHAVIOR.items() if rx.search(body))

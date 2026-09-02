@@ -218,6 +218,94 @@ def test_ambiguous_rendering_is_bare(tmp_path) -> None:
     assert rec.uiRole is None
 
 
+_NAV_HTML = """<div>
+  <a routerLink="/orders">Orders</a>
+  <a [routerLink]="['/orders', id]">Detail</a>
+  <a [routerLink]="'/home'">Home</a>
+  <a [routerLink]="target">Dynamic</a>
+  <a routerLink="/x" routerLinkActive="active">Styled</a>
+</div>"""
+
+_NAV_TS = """
+import { Component } from '@angular/core';
+@Component({ templateUrl: './nav.component.html' })
+export class NavComponent {}
+"""
+
+
+def _nav_routes(tmp_path):
+    rec = _parse(
+        tmp_path,
+        {"nav.component.ts": _NAV_TS, "nav.component.html": _NAV_HTML},
+        "nav.component.html",
+    )
+    return rec, [s for s in rec.statements if s.semanticType == "route"]
+
+
+def test_router_link_is_navigation_route(tmp_path) -> None:
+    rec, routes = _nav_routes(tmp_path)
+    assert routes, "routerLink should produce route statements"
+    for r in routes:
+        assert r.routeKind == "navigation" and r.framework == "angular" and r.name == "routerLink"
+    endpoints = {r.endpoint for r in routes}
+    assert "/orders" in endpoints  # plain attr + array base both resolve to /orders
+    assert "/home" in endpoints  # quoted string literal
+
+
+def test_router_link_dynamic_is_honest_null(tmp_path) -> None:
+    _, routes = _nav_routes(tmp_path)
+    # `[routerLink]="target"` is a bare expression → endpoint must be null, never the symbol
+    dynamic = [r for r in routes if r.endpoint is None]
+    assert dynamic and all("target" not in (r.text or "") or r.endpoint is None for r in dynamic)
+    assert not any(r.endpoint == "target" for r in routes)
+
+
+def test_router_link_active_is_not_navigation(tmp_path) -> None:
+    _, routes = _nav_routes(tmp_path)
+    # routerLinkActive is a CSS-class directive, not a link — exactly one nav on that <a>
+    # (its routerLink="/x"), never a second route for routerLinkActive.
+    assert "/x" in {r.endpoint for r in routes}
+    assert all(r.name == "routerLink" for r in routes)  # no routerLinkActive route
+
+
+def test_navigation_skipped_in_fixture(tmp_path) -> None:
+    # Route emitters skip fixture files; a .spec.html template emits no route statements.
+    ts = "import { Component } from '@angular/core';\n@Component({ templateUrl: './x.spec.html' }) export class X {}\n"
+    rec = _parse(tmp_path, {"x.ts": ts, "x.spec.html": '<a routerLink="/o">o</a>'}, "x.spec.html")
+    assert not any(s.semanticType == "route" for s in rec.statements)
+
+
+def test_bootstrap_data_target_not_stimulus(tmp_path) -> None:
+    # Bootstrap's data-bs-target / a generic data-action must NOT be read as Stimulus — only
+    # data-controller activates Stimulus (a confirmed false positive on real repos).
+    rec = _parse(
+        tmp_path,
+        {"b.html": '<button data-bs-target="#nav" data-action="x">Menu</button>'},
+        "b.html",
+    )
+    assert "stimulus" not in (getattr(rec, "behaviors", None) or [])
+
+
+def test_stimulus_detected_via_controller(tmp_path) -> None:
+    rec = _parse(
+        tmp_path, {"s.html": '<div data-controller="hello"><button>x</button></div>'}, "s.html"
+    )
+    assert rec.behaviors == ["stimulus"]
+
+
+def test_framework_code_in_docs_not_claimed(tmp_path) -> None:
+    # A docs page that merely SHOWS framework syntax inside <pre>/<code> must not be tagged as
+    # using that framework (fingerprint ignores example/code regions).
+    for html in (
+        '<h1>Guide</h1><pre><div *ngFor="let x of xs">{{x}}</div></pre>',
+        "<p>Use <code>&lt;div *ngFor=&quot;let x&quot;&gt;</code></p>",
+        '<p>Vue: <code>&lt;div v-if="ok"&gt;</code></p>',
+    ):
+        rec = _parse(tmp_path, {"doc.html": html}, "doc.html")
+        assert rec.framework is None, html
+        assert rec.uiRole is None
+
+
 def test_statements_require_capture(tmp_path) -> None:
     rec = _parse(
         tmp_path,

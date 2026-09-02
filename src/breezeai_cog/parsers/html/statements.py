@@ -13,6 +13,8 @@ by line containment, like every other language.
 
 from __future__ import annotations
 
+import re
+
 from tree_sitter import Node
 
 from ...emit import disambiguate, statement_id
@@ -29,9 +31,48 @@ _CONTROL_FLOW = frozenset(
 )
 _CAPTURED = _BINDINGS | _CONTROL_FLOW | {"interpolation"}
 
+#: Angular's page-navigation directive. Matched EXACTLY so ``routerLinkActive`` (a CSS-class
+#: directive, not navigation) is not treated as a link. Written ``routerLink`` (plain string
+#: target) or ``[routerLink]`` (an expression / commands array).
+_NAV_DIRECTIVE = "routerLink"
+#: The first string literal in a ``routerLink`` value — the static base of the target route.
+_LITERAL_RE = re.compile(r"""['"]([^'"]+)['"]""")
+
 
 def _child(node: Node, kind: str) -> Node | None:
     return next((c for c in node.named_children if c.type == kind), None)
+
+
+def _is_navigation(node: Node, source: bytes) -> bool:
+    """Whether ``node`` is a ``routerLink`` navigation — a plain ``attribute`` named
+    ``routerLink`` (``routerLink="/x"``) or a ``property_binding`` whose target is
+    ``routerLink`` (``[routerLink]="…"``). Exact-name so ``routerLinkActive`` is excluded."""
+    if node.type == "attribute":
+        an = _child(node, "attribute_name")
+        return an is not None and node_text(an, source) == _NAV_DIRECTIVE
+    if node.type == "property_binding":
+        return _binding_name(node, source) == _NAV_DIRECTIVE
+    return False
+
+
+def _nav_endpoint(node: Node, source: bytes) -> str | None:
+    """The target route of a ``routerLink`` — honest-null unless it resolves to a literal.
+    ``routerLink="/orders"`` → ``/orders``; ``[routerLink]="'/home'"`` → ``/home``;
+    ``[routerLink]="['/orders', id]"`` → ``/orders`` (the static base); a bare dynamic
+    expression (``[routerLink]="target"``) → ``None`` (never the symbol name)."""
+    if node.type == "attribute":
+        av = _child(node, "quoted_attribute_value")
+        val = _child(av, "attribute_value") if av is not None else None
+        return node_text(val, source) if val is not None else None
+    expr = _child(node, "expression")
+    if expr is None:
+        return None
+    text = node_text(expr, source).strip()
+    # A pure string literal, or an array/commands literal whose first element is a string.
+    if text.startswith(("'", '"', "[")):
+        m = _LITERAL_RE.search(text)
+        return m.group(1) if m else None
+    return None
 
 
 def _binding_name(node: Node, source: bytes) -> str | None:
@@ -95,22 +136,55 @@ def _name_for(node: Node, source: bytes) -> str | None:
 
 
 def collect_template_statements(
-    root: Node, source: bytes, path: str, parent_id: str, seen_ids: set[str], limit: int
+    root: Node,
+    source: bytes,
+    path: str,
+    parent_id: str,
+    seen_ids: set[str],
+    limit: int,
+    *,
+    framework: str,
+    emit_routes: bool = True,
 ) -> list[Statement]:
-    """Walk the template tree and emit one flat Statement per captured construct."""
+    """Walk the template tree and emit one flat Statement per captured construct.
+
+    ``routerLink`` navigation becomes a ``route`` statement (``routeKind="navigation"``) so the
+    page→page navigation graph is queryable — gated by ``emit_routes`` (off for fixture files,
+    like every other route emitter). ``framework`` stamps that route (the template's framework).
+    """
     out: list[Statement] = []
     stack: list[Node] = [root]
     while stack:
         node = stack.pop()
+        start, col = node.start_point[0] + 1, node.start_point[1]
+        text = node_text(node, source)
+        clip = text if len(text) <= limit else text[:limit]
+
+        if emit_routes and _is_navigation(node, source):
+            out.append(
+                Statement(
+                    id=disambiguate(statement_id(path, start, col), seen_ids),
+                    parentId=parent_id,
+                    nodeType=node.type,  # real grammar node (attribute / property_binding)
+                    semanticType="route",
+                    framework=framework,
+                    routeKind="navigation",
+                    endpoint=_nav_endpoint(node, source),  # honest-null when dynamic
+                    name=_NAV_DIRECTIVE,
+                    text=clip,
+                    startLine=start,
+                    endLine=node.end_point[0] + 1,
+                    path=path,
+                )
+            )
+            continue  # a nav link is one route statement; don't also emit it as a binding
         if node.type in _CAPTURED:
-            start, col = node.start_point[0] + 1, node.start_point[1]
-            text = node_text(node, source)
             out.append(
                 Statement(
                     id=disambiguate(statement_id(path, start, col), seen_ids),
                     parentId=parent_id,
                     nodeType=node.type,  # real angular-grammar node type
-                    text=text if len(text) <= limit else text[:limit],
+                    text=clip,
                     name=_name_for(node, source),
                     handler=_handler(node, source) if node.type == "event_binding" else None,
                     startLine=start,
