@@ -79,7 +79,7 @@ def test_mapping_upload(client: TestClient, captured: _Captured) -> None:
     assert r.status_code == 202
     out = r.json()
     assert out["mode"] == "mapping" and out["indexCount"] == 1 and out["fieldCount"] == 6
-    assert out["s3Key"].startswith("es-ontology/P1/D1/") and out["s3Key"].endswith(".ndjson.gz")
+    assert out["storage_key"].startswith("es-ontology/P1/D1/") and out["storage_key"].endswith(".ndjson.gz")
     rec = captured.records[0]
     assert rec["__type"] == "es_index" and rec["indexName"] == "products"
     assert rec["aliases"][0] == {"name": "all", "filter": None, "isWriteIndex": True}
@@ -89,7 +89,7 @@ def test_mapping_upload(client: TestClient, captured: _Captured) -> None:
     assert next(f for f in rec["fields"] if f["fullPath"] == "title.raw")["isMultiField"] is True
     path, payload = captured.notifications[0]
     assert path == "/db-ontology/stream-ingest-s3"
-    assert payload == {"s3Key": out["s3Key"], "projectUuid": "P1", "dataLakeId": "D1",
+    assert payload == {"storage_key": out["storage_key"], "projectUuid": "P1", "dataLakeId": "D1",
                        "repositoryName": "products.json"}
 
 
