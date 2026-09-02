@@ -624,6 +624,128 @@ def test_cognito_file_framework_rollup(tmp_path) -> None:
     assert rec.framework == "aws-cognito"
 
 
+SSM_DI_SRC = b"""import { SSMClient, GetParameterCommand, PutParameterCommand } from '@aws-sdk/client-ssm';
+
+@Injectable()
+export class ConfigService {
+  constructor(private ssm: SSMClient) {}
+
+  async getDbUrl() {
+    return await this.ssm.send(new GetParameterCommand({ Name: '/app/db/url', WithDecryption: true }));
+  }
+
+  async setFeatureFlag(value: string) {
+    await this.ssm.send(new PutParameterCommand({ Name: '/app/feature-flag', Value: value, Overwrite: true }));
+  }
+}
+"""
+
+SSM_FIELD_SRC = b"""import { SSMClient, GetParametersCommand } from '@aws-sdk/client-ssm';
+
+export class Svc {
+  private readonly ssm = new SSMClient({});
+
+  async f() { return await this.ssm.send(new GetParametersCommand({ Names: ['/app/a', '/app/b'] })); }
+}
+"""
+
+SSM_FREEVAR_SRC = b"""import { SSMClient, GetParametersByPathCommand } from '@aws-sdk/client-ssm';
+
+export async function listParams() {
+  const ssm = new SSMClient({});
+  return await ssm.send(new GetParametersByPathCommand({ Path: '/app' }));
+}
+"""
+
+
+def test_ssm_di_field_command_detected(tmp_path) -> None:
+    rec = _parse(tmp_path, SSM_DI_SRC, "src/config.service.ts")
+    calls = _api_calls(rec)
+    assert len(calls) == 2
+    assert all(c.framework == "aws-ssm" for c in calls)
+    endpoints = {c.endpoint for c in calls}
+    assert endpoints == {"GetParameter", "PutParameter"}
+    assert all(c.method is None for c in calls)
+
+
+def test_ssm_class_field_client_detected(tmp_path) -> None:
+    rec = _parse(tmp_path, SSM_FIELD_SRC, "src/ssm.fields.service.ts")
+    calls = _api_calls(rec)
+    assert len(calls) == 1
+    assert calls[0].framework == "aws-ssm"
+    assert calls[0].endpoint == "GetParameters"
+
+
+def test_ssm_free_variable_client_detected(tmp_path) -> None:
+    rec = _parse(tmp_path, SSM_FREEVAR_SRC, "src/ssm.client.ts")
+    calls = _api_calls(rec)
+    assert len(calls) == 1
+    assert calls[0].endpoint == "GetParametersByPath"
+    assert calls[0].method is None
+
+
+def test_ssm_no_false_positive_without_import(tmp_path) -> None:
+    src = b"""export class Svc {
+  constructor(private ssm: SSMClient) {}
+  async f() { await this.ssm.send(new GetParameterCommand({})); }
+}
+"""
+    rec = _parse(tmp_path, src, "src/x.ts")
+    assert _api_calls(rec) == []
+
+
+def test_ssm_sibling_package_not_misdetected(tmp_path) -> None:
+    src = b"""import { SSMIncidentsClient, StartIncidentCommand } from '@aws-sdk/client-ssm-incidents';
+
+export async function f() {
+  const c = new SSMIncidentsClient({});
+  return await c.send(new StartIncidentCommand({}));
+}
+"""
+    rec = _parse(tmp_path, src, "src/x.ts")
+    assert _api_calls(rec) == []
+
+
+def test_ssm_send_on_non_client_not_tagged(tmp_path) -> None:
+    src = b"""import { SSMClient } from '@aws-sdk/client-ssm';
+
+export class Svc {
+  constructor(private repo: MyRepo) {}
+  async f() { await this.repo.send(new GetParameterCommand({})); }
+}
+"""
+    rec = _parse(tmp_path, src, "src/x.ts")
+    assert _api_calls(rec) == []
+
+
+def test_ssm_file_framework_rollup(tmp_path) -> None:
+    rec = _parse(tmp_path, SSM_DI_SRC, "src/config.service.ts")
+    assert rec.framework == "aws-ssm"
+
+
+def test_cognito_and_ssm_in_same_file_both_detected(tmp_path) -> None:
+    src = b"""import { CognitoIdentityProviderClient, InitiateAuthCommand } from '@aws-sdk/client-cognito-identity-provider';
+import { SSMClient, GetParameterCommand } from '@aws-sdk/client-ssm';
+
+export async function f(username: string, password: string) {
+  const cognito = new CognitoIdentityProviderClient({});
+  const ssm = new SSMClient({});
+  await cognito.send(new InitiateAuthCommand({
+    AuthFlow: 'USER_PASSWORD_AUTH',
+    ClientId: 'abc',
+    AuthParameters: { USERNAME: username, PASSWORD: password },
+  }));
+  await ssm.send(new GetParameterCommand({ Name: '/app/db/url' }));
+}
+"""
+    rec = _parse(tmp_path, src, "src/mixed.ts")
+    calls = _api_calls(rec)
+    assert len(calls) == 2
+    got = {(c.framework, c.endpoint) for c in calls}
+    assert got == {("aws-cognito", "InitiateAuth"), ("aws-ssm", "GetParameter")}
+    assert rec.framework == "aws-cognito"  # first-wins: Cognito is registered before SSM
+
+
 def test_output_validates(tmp_path) -> None:
     for src, rel in (
         (HUBSPOT_SRC, "src/hs.ts"),
@@ -638,6 +760,7 @@ def test_output_validates(tmp_path) -> None:
         (COGNITO_FIELD_SRC, "src/cognito.fields.service.ts"),
         (COGNITO_FREEVAR_SRC, "src/cognito.client.ts"),
         (COGNITO_JS_SRC, "src/cognito.js"),
+        (SSM_DI_SRC, "src/config.service.ts"),
     ):
         rec = _parse(tmp_path, src, rel)
         errors = list(
