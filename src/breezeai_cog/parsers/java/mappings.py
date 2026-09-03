@@ -27,7 +27,6 @@ JUMP = {
 DECLARATIONS = {
     "local_variable_declaration",
     "field_declaration",
-    "constant_declaration",  # interface constant `String X = "y";` (implicitly static final)
     "expression_statement",
 }
 
