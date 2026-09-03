@@ -15,12 +15,11 @@ from __future__ import annotations
 from tree_sitter import Node
 
 from ...emit import disambiguate, statement_id
-from ...schemas import Statement
+from ...schemas import FileRecord, Statement
 from ...schemas.enums import SemanticType
 from ..base import ParseContext
 from ..treesitter import node_text
-
-_TELL_OR_ASK = {"!": "tell", "?": "ask"}
+from .statements import find_enclosing_parent_id
 
 
 def _is_receive_handler(fn_node: Node, source: bytes) -> bool:
@@ -49,18 +48,22 @@ def _is_receive_message_call(call: Node, source: bytes) -> bool:
 
 
 def detect_scala_events(
-    root: Node, ctx: ParseContext, parent_id: str, seen_ids: set[str]
-) -> list[Statement]:
+    root: Node, ctx: ParseContext, record: FileRecord
+) -> None:
     if not ctx.capture_statements:
-        return []
+        return
     source = ctx.source
     if b"akka" not in source and b"pekko" not in source:
-        return []
-    events: list[Statement] = []
+        return
+    seen_ids = {s.id for s in record.statements}
+    found_any = False
 
     def emit(node: Node, semantic: SemanticType, method: str | None) -> None:
+        nonlocal found_any
+        found_any = True
         start = node.start_point[0] + 1
-        events.append(Statement(
+        parent_id = find_enclosing_parent_id(start, record)
+        record.statements.append(Statement(
             id=disambiguate(statement_id(ctx.path, start, node.start_point[1]), seen_ids),
             parentId=parent_id,
             nodeType=node.type,
@@ -80,9 +83,8 @@ def detect_scala_events(
                 left = c.child_by_field_name("left")
                 right = c.child_by_field_name("right")
                 if op is not None and left is not None and right is not None:
-                    method = _TELL_OR_ASK.get(node_text(op, source))
-                    if method is not None:
-                        emit(c, "eventbus_send", method)
+                    if node_text(op, source) in ("!", "?"):
+                        emit(c, "eventbus_send", "SEND")
             elif (
                 c.type in ("function_definition", "function_declaration")
                 and _is_receive_handler(c, source)
@@ -91,4 +93,5 @@ def detect_scala_events(
             walk(c)
 
     walk(root)
-    return events
+    if found_any and not record.framework:
+        record.framework = "akka"

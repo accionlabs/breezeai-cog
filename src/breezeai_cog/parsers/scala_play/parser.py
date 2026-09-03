@@ -49,11 +49,12 @@ class PlayRoutesParser(BaseParser):
 
     def parse_file(self, ctx: ParseContext) -> FileRecord:
         text = ctx.source.decode("utf-8", "replace")
+        statements = extract_routes(text, ctx.path) if ctx.capture_statements else []
         return FileRecord(
             id=file_id(ctx.path),
             path=ctx.path,
             type="config",
             language="scala",
             loc=count_loc(text),
-            statements=extract_routes(text, ctx.path),
+            statements=statements,
         )

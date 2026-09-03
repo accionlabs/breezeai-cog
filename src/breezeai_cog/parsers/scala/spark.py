@@ -18,7 +18,8 @@ from ...schemas import FileRecord, Statement
 from ...schemas.enums import SemanticType
 from ..base import ParseContext
 from ..treesitter import node_text
-from .statements import _call_details
+from ..vertx_common import enclosing_statement
+from .statements import _call_details, find_enclosing_parent_id
 
 # Mapping of Spark terminal operations -> (semanticType, dataAccessHint, method)
 # Currently using D7 fallback: ("db_method_call", "spark", <method>)
@@ -41,32 +42,6 @@ def _spark_op_for_call(callee: str, method: str) -> str | None:
     if m_lower in _WRITE_METHODS:
         if ".write." in callee or callee.startswith("write.") or callee.endswith(".write") or ".write(" in callee:
             return "write"
-    return None
-
-
-def _enclosing_statement(line: int, statements: list[Statement]) -> Statement | None:
-    candidates = [s for s in statements if s.startLine <= line <= s.endLine]
-    if not candidates:
-        return None
-    candidates.sort(key=lambda s: (s.endLine - s.startLine, -s.startLine))
-    return candidates[0]
-
-
-def _find_enclosing_parent_id(start_line: int, record: FileRecord) -> str | None:
-    fn_candidates = [
-        f for f in record.functions
-        if f.startLine <= start_line <= f.endLine
-    ]
-    if fn_candidates:
-        fn_candidates.sort(key=lambda f: (f.endLine - f.startLine, -f.startLine))
-        return fn_candidates[0].id
-    cls_candidates = [
-        c for c in record.classes
-        if c.startLine <= start_line <= c.endLine
-    ]
-    if cls_candidates:
-        cls_candidates.sort(key=lambda c: (c.endLine - c.startLine, -c.startLine))
-        return cls_candidates[0].id
     return None
 
 
@@ -96,7 +71,7 @@ def detect_spark_calls(
                     found_any = True
                     sem_type, hint, op_method = _SPARK_OPS[op]
                     start = node.start_point[0] + 1
-                    stmt = _enclosing_statement(start, record.statements)
+                    stmt = enclosing_statement(start, record.statements)
                     if stmt is not None and stmt.semanticType is None:
                         stmt.semanticType = sem_type
                         stmt.dataAccessHint = hint
@@ -104,7 +79,7 @@ def detect_spark_calls(
                         stmt.endpoint = endpoint
                     elif stmt is None:
                         end = node.end_point[0] + 1
-                        parent_id = _find_enclosing_parent_id(start, record) or record.id
+                        parent_id = find_enclosing_parent_id(start, record)
                         record.statements.append(
                             Statement(
                                 id=disambiguate(statement_id(ctx.path, start, node.start_point[1]), seen_ids),

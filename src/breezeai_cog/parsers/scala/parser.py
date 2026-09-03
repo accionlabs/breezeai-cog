@@ -145,9 +145,6 @@ class ScalaParser(BaseParser):
             )
         )
 
-        events = detect_scala_events(root, ctx, fid, seen_ids)
-        statements.extend(events)
-
         if capture:
             statements.extend(
                 comment_statements_for(
@@ -176,7 +173,8 @@ class ScalaParser(BaseParser):
             functions=functions,
             classes=classes,
             statements=statements,
-            framework="akka" if events else None,
+            framework=None,
         )
+        detect_scala_events(root, ctx, record)
         detect_spark_calls(root, ctx, record)
         return record

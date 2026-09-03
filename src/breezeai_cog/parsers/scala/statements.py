@@ -12,7 +12,7 @@ from collections.abc import Iterator
 
 from tree_sitter import Node
 
-from ...schemas import Statement
+from ...schemas import FileRecord, Statement
 from ..statements_common import (
     classify_statement,
     render_concat,
@@ -160,3 +160,22 @@ def extract_statements(
             )
         )
     return out
+
+
+def find_enclosing_parent_id(start_line: int, record: FileRecord) -> str:
+    """Find the ID of the smallest function or class enclosing start_line, or fallback to record.id."""
+    fn_candidates = [
+        f for f in record.functions
+        if f.startLine <= start_line <= f.endLine
+    ]
+    if fn_candidates:
+        fn_candidates.sort(key=lambda f: (f.endLine - f.startLine, -f.startLine))
+        return fn_candidates[0].id
+    cls_candidates = [
+        c for c in record.classes
+        if c.startLine <= start_line <= c.endLine
+    ]
+    if cls_candidates:
+        cls_candidates.sort(key=lambda c: (c.endLine - c.startLine, -c.startLine))
+        return cls_candidates[0].id
+    return record.id

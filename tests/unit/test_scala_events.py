@@ -77,8 +77,15 @@ def test_tell_and_ask_detected_unary_not_prefix(tmp_path: Path) -> None:
     rec = _parse(tmp_path, AKKA_SRC)
     sends = [s for s in rec.statements if s.semanticType == "eventbus_send"]
     methods = {s.method for s in sends}
-    assert methods == {"tell", "ask"}
+    assert methods == {"SEND"}
     assert all(s.framework == "akka" for s in sends)
+    # parented to the enclosing function run(), not the file
+    run_fn = next(f for f in rec.functions if f.name == "run")
+    assert all(s.parentId == run_fn.id for s in sends)
+    # distinction stays in text
+    texts = {s.text for s in sends}
+    assert "ref ! msg" in texts
+    assert "ref ? msg" in texts
     # unary `!flag` is a prefix_expression, structurally excluded — no extra send
     assert len(sends) == 2
 
@@ -88,6 +95,7 @@ def test_receive_handler_detected_as_consumer(tmp_path: Path) -> None:
     consumers = [s for s in rec.statements if s.semanticType == "eventbus_consumer"]
     assert len(consumers) == 1
     assert rec.framework == "akka"
+    assert consumers[0].parentId != rec.id
 
 
 def test_byte_guard_suppresses_non_akka_files(tmp_path: Path) -> None:
@@ -105,6 +113,10 @@ def test_pekko_only_file_detected_no_akka_substring(tmp_path: Path) -> None:
     semantics = {s.semanticType for s in rec.statements}
     assert "eventbus_send" in semantics
     assert "eventbus_consumer" in semantics  # Behaviors.receiveMessage
+    sends = [s for s in rec.statements if s.semanticType == "eventbus_send"]
+    assert all(s.method == "SEND" for s in sends)
+    run_fn = next(f for f in rec.functions if f.name == "run")
+    assert all(s.parentId == run_fn.id for s in sends)
 
 
 def test_play_controller_emits_route_and_eventbus_send(tmp_path: Path) -> None:

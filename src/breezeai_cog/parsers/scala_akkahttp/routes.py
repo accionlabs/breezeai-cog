@@ -14,6 +14,7 @@ from tree_sitter import Node
 
 from ...emit import disambiguate, statement_id
 from ...schemas import FileRecord, Statement
+from ..scala.statements import find_enclosing_parent_id
 from ..statements_common import url_placeholder
 from ..treesitter import node_text
 
@@ -76,25 +77,6 @@ def _apply_params_to_segments(segments: list[str], params: list[str]) -> list[st
     return res
 
 
-def _find_enclosing_parent_id(start_line: int, record: FileRecord) -> str | None:
-    """Find the innermost enclosing function or class ID for a route statement."""
-    fn_candidates = [
-        f for f in record.functions
-        if f.startLine <= start_line <= f.endLine
-    ]
-    if fn_candidates:
-        fn_candidates.sort(key=lambda f: (f.endLine - f.startLine, -f.startLine))
-        return fn_candidates[0].id
-    cls_candidates = [
-        c for c in record.classes
-        if c.startLine <= start_line <= c.endLine
-    ]
-    if cls_candidates:
-        cls_candidates.sort(key=lambda c: (c.endLine - c.startLine, -c.startLine))
-        return cls_candidates[0].id
-    return None
-
-
 def detect_akkahttp_routes(
     root: Node,
     source: bytes,
@@ -108,7 +90,7 @@ def detect_akkahttp_routes(
     def emit_route(node: Node, method: str | None, endpoint: str) -> None:
         start = node.start_point[0] + 1
         end = node.end_point[0] + 1
-        parent_id = _find_enclosing_parent_id(start, record) or record.id
+        parent_id = find_enclosing_parent_id(start, record)
         routes.append(
             Statement(
                 id=disambiguate(statement_id(path, start, node.start_point[1]), seen_ids),

@@ -13,6 +13,7 @@ from tree_sitter import Node
 
 from ...emit import disambiguate, statement_id
 from ...schemas import FileRecord, Statement
+from ..scala.statements import find_enclosing_parent_id
 from ..statements_common import url_placeholder
 from ..treesitter import node_text
 
@@ -85,24 +86,6 @@ def _extract_http4s_pattern(pat_node: Node | None, source: bytes) -> tuple[str, 
     return None
 
 
-def _find_enclosing_parent_id(start_line: int, record: FileRecord) -> str | None:
-    fn_candidates = [
-        f for f in record.functions
-        if f.startLine <= start_line <= f.endLine
-    ]
-    if fn_candidates:
-        fn_candidates.sort(key=lambda f: (f.endLine - f.startLine, -f.startLine))
-        return fn_candidates[0].id
-    cls_candidates = [
-        c for c in record.classes
-        if c.startLine <= start_line <= c.endLine
-    ]
-    if cls_candidates:
-        cls_candidates.sort(key=lambda c: (c.endLine - c.startLine, -c.startLine))
-        return cls_candidates[0].id
-    return None
-
-
 def detect_http4s_routes(
     root: Node,
     source: bytes,
@@ -132,7 +115,7 @@ def detect_http4s_routes(
                                 endpoint = "/" + "/".join(segs) if segs else "/"
                                 start = clause.start_point[0] + 1
                                 end = clause.end_point[0] + 1
-                                parent_id = _find_enclosing_parent_id(start, record) or record.id
+                                parent_id = find_enclosing_parent_id(start, record)
                                 routes.append(
                                     Statement(
                                         id=disambiguate(statement_id(path, start, clause.start_point[1]), seen_ids),

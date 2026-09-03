@@ -162,6 +162,16 @@ def test_routes_record_is_config_scala(tmp_path: Path) -> None:
     assert rec.language == "scala"
 
 
+def test_routes_requires_capture_statements(tmp_path: Path) -> None:
+    p = tmp_path / "conf/routes"
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text("GET / controllers.HomeController.index\n")
+    ctx = ParseContext(path="conf/routes", abs_path=p, source=p.read_bytes(),
+                        repo_root=tmp_path, capture_statements=False)
+    rec = PlayRoutesParser().parse_file(ctx)
+    assert rec.statements == []
+
+
 def test_routes_output_validates(tmp_path: Path) -> None:
     rec = _parse_routes(tmp_path)
     errors = list(Draft202012Validator(FileRecord.model_json_schema(by_alias=True))
