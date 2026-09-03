@@ -15,6 +15,8 @@ CONTROL_FLOW = {
     "select_statement",
     "select_case_statement",
     "try_statement",
+    "catch_block",  # error-handling boundary (bodies already captured; this adds the clause node)
+    "finally_block",
     "using_statement",
     "with_statement",
     "synclock_statement",
@@ -31,6 +33,7 @@ DECLARATIONS = {
     "dim_statement",
     "call_statement",
     "field_declaration",
+    "const_declaration",
     "local_declaration_statement",
     "assignment_statement",
 }
@@ -46,9 +49,18 @@ NESTED_SCOPES = {
     "module_block",
     "method_declaration",
     "constructor_declaration",
+    # Members with their own bodies — barrier them during class-body statement capture so
+    # their accessor/handler statements aren't pulled up and mis-parented to the class.
+    "property_declaration",
+    "event_declaration",
+    "operator_declaration",
     "lambda_expression",
 }
 
 STATEMENT_TYPES = sorted(EMIT_TYPES)
+
+#: Comment node types the shared comment pass captures (``semanticType="comment"``; each
+#: statement keeps its real tree-sitter ``nodeType``).
+COMMENT_TYPES = {"comment"}
 
 FRAMEWORKS = ["aspnet", "aspnetcore"]

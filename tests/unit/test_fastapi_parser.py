@@ -37,7 +37,7 @@ def _parse(tmp_path, *, capture=True) -> FileRecord:
     p = tmp_path / "main.py"
     p.write_text(SRC.decode())
     ctx = ParseContext(path="main.py", abs_path=p, source=SRC, repo_root=tmp_path,
-                       capture_statements=capture, text_truncation_limit=1000)
+                       capture_statements=capture, statement_text_limit=1000)
     return FastAPIParser().parse_file(ctx)
 
 
@@ -93,7 +93,7 @@ def test_api_route_emits_one_route_per_method(tmp_path) -> None:
     p = tmp_path / "main.py"
     p.write_text(API_ROUTE_SRC.decode())
     ctx = ParseContext(path="main.py", abs_path=p, source=API_ROUTE_SRC, repo_root=tmp_path,
-                       capture_statements=True, text_truncation_limit=1000)
+                       capture_statements=True, statement_text_limit=1000)
     rec = FastAPIParser().parse_file(ctx)
     routes = {(r.method, r.endpoint) for r in rec.statements if r.semanticType == "route"}
     # methods=[...] -> one route per verb; bare api_route defaults to GET

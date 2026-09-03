@@ -54,18 +54,35 @@ class Settings(BaseSettings):
     )
     capture_statements: bool = False  # --capture-statements
     jobs: int | None = None  # --jobs; None = CPU count (resolved in the executor)
-    text_truncation_limit: int = 8000  # max captured statement `text` length (utils/text.py)
+    # Max statement `text` length before it is split into ordered `#partNofN` records at
+    # emit (emit/split.py) so the backend never drops an oversized statement; 0 disables.
+    statement_text_limit: int = 8000
+    # Cap on how many `#partNofN` parts one oversized statement may split into — a backstop
+    # against Statement-node explosion from a pathological blob. Beyond the cap the tail is
+    # dropped and marked inline in the last part's text. 0 = unbounded (fully lossless; the
+    # absolute worst case is already bounded by `max_file_size`). (emit/split.py)
+    max_statement_parts: int = Field(default=0, ge=0)
     max_file_size: int = 2_000_000  # bytes; scanner skips larger files (core/scanner.py)
     parse_timeout: float = 10.0  # seconds; per-file tree-sitter native timeout (0 disables)
+    # --max-concat-depth; max `+` nesting folded into an endpoint before bailing to null.
+    # Guards against RecursionError on generated HTML/JS string builders. Keep modest — a
+    # real URL concat is <10 parts, and very high values can re-trigger the recursion the
+    # cap prevents (those files are then dropped with a warning). (parsers/statements_common)
+    max_concat_depth: int = Field(default=100, ge=1)
 
     # ── Logging ─────────────────────────────────────────────────
     log_level: str = "INFO"
     log_format: Literal["plaintext", "json"] = "plaintext"
     log_to_file: bool = True
-    log_location: Path = Path("./logs")
+    # None = auto: the CLI resolves it to `<repo>/.cog/logs`; the server falls back to
+    # `./logs`. An explicit BREEZEAI_COG_LOG_LOCATION (env/.env) always wins.
+    log_location: Path | None = None
 
     # ── Server ────────────────────────────────────────────────────────────
     port: int = 3000
+
+    # ── Git ───────────────────────────────────────────────────────────────
+    git_clone_timeout: float = 1800.0  # seconds; git clone/fetch/checkout cap (server/git.py)
 
     # ── Backend upload ────────────────────────────────────────────────────
     upload: bool = False  # --upload toggle
@@ -78,6 +95,14 @@ class Settings(BaseSettings):
         default=None,
         validation_alias=AliasChoices("BREEZEAI_COG_USER_API_KEY", "API_KEY"),
     )
+    # Per-repo upload POST cap (seconds); the request fails/retries past this. Default 15 min —
+    # large ontologies stream over a single request (services/upload.py). --upload-timeout.
+    upload_timeout: float = Field(default=900.0, gt=0)
+    # Concurrent uploads in --batch mode. Default 1 (serial). --parallel-uploads.
+    upload_parallelism: int = Field(default=1, ge=1)
+    # Retries after a failed upload (total attempts = upload_max_retries + 1). Only transient
+    # failures (network / timeout / HTTP 5xx) retry; a 4xx is fatal. --upload-max-retries.
+    upload_max_retries: int = Field(default=1, ge=0)
 
     # ── AWS / S3 (server, conventional unprefixed names) ──────────────────
     aws_access_key: str | None = Field(

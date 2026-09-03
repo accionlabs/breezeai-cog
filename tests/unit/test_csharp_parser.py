@@ -446,3 +446,89 @@ def test_same_simple_name_distinct_types_do_not_inherit(tmp_path) -> None:
     }, "B/Widget.cs")
     calls = {c.name: c.path for f in rec.functions for c in f.calls}
     assert calls.get("Helper") is None
+
+
+# --- N4: enum members captured as flat statements (queryable text) ------------
+
+def _cs_enum_members(tmp_path, src: str):
+    p = tmp_path / REL
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(src)
+    ctx = ParseContext(path=REL, abs_path=p, source=src.encode(), repo_root=tmp_path,
+                       capture_statements=True)
+    rec = CSharpParser().parse_file(ctx)
+    enum = next(c for c in rec.classes if c.type == "enum")
+    members = [s for s in rec.statements if s.parentId == enum.id]
+    return rec, enum, members
+
+
+def test_enum_members_captured_as_statements(tmp_path) -> None:
+    # Members become flat statements parented to the enum Class; the value rides inside
+    # the statement text (no more metadata.constants channel).
+    src = ('enum Status {\n'
+           '  OK = 3,\n'
+           '  Fail = 9,\n'
+           '  Unknown\n'
+           '}\n')
+    _, enum, members = _cs_enum_members(tmp_path, src)
+    assert enum.metadata is None
+    assert [(m.name, m.text) for m in members] == [
+        ("OK", "OK = 3"), ("Fail", "Fail = 9"), ("Unknown", "Unknown"),
+    ]
+    assert all(m.nodeType == "enum_member_declaration" and m.semanticType == "enum_member"
+               for m in members)
+
+
+def test_catch_finally_clauses_emitted(tmp_path) -> None:
+    src = ("class X {\n"
+           "  void M() {\n"
+           "    try { Save(); }\n"
+           "    catch (Exception e) { Log(e); }\n"
+           "    finally { Cleanup(); }\n"
+           "  }\n"
+           "}\n")
+    p = tmp_path / REL
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(src)
+    ctx = ParseContext(path=REL, abs_path=p, source=p.read_bytes(),
+                       repo_root=tmp_path, capture_statements=True)
+    rec = CSharpParser().parse_file(ctx)
+    node_types = {s.nodeType for s in rec.statements}
+    assert {"try_statement", "catch_clause", "finally_clause"} <= node_types
+
+
+def test_enum_members_gated_by_capture_flag(tmp_path) -> None:
+    # Enum members are statements now → gated by --capture-statements (absent without it).
+    src = 'enum Flags {\n  A = 1,\n  B = 1 << 2,\n}\n'
+    p = tmp_path / REL
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(src)
+    ctx = ParseContext(path=REL, abs_path=p, source=src.encode(), repo_root=tmp_path,
+                       capture_statements=False)
+    rec = CSharpParser().parse_file(ctx)
+    assert rec.statements == []
+    assert all(c.metadata is None for c in rec.classes)
+
+
+def test_non_enum_class_has_no_constants_metadata(tmp_path) -> None:
+    src = 'public class C { public int X { get; set; } }'
+    p = tmp_path / REL
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(src)
+    ctx = ParseContext(path=REL, abs_path=p, source=src.encode(), repo_root=tmp_path,
+                       capture_statements=True)
+    rec = CSharpParser().parse_file(ctx)
+    assert all(c.metadata is None for c in rec.classes)
+
+
+def test_enum_members_output_validates(tmp_path) -> None:
+    src = 'enum S {\n  A = 1,\n  B = 2\n}\n'
+    p = tmp_path / REL
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(src)
+    ctx = ParseContext(path=REL, abs_path=p, source=src.encode(), repo_root=tmp_path,
+                       capture_statements=True)
+    rec = CSharpParser().parse_file(ctx)
+    errors = list(Draft202012Validator(FileRecord.model_json_schema(by_alias=True))
+                  .iter_errors(json.loads(to_line(rec))))
+    assert not errors, errors

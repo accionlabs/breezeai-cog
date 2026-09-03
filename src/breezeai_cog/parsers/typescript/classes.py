@@ -7,22 +7,32 @@ from tree_sitter import Node
 
 from ...emit import class_id, disambiguate
 from ...schemas import Class, ConstructorParam, Function, Statement
+from ..statements_common import emit_enum_members, member_statement
 from ..treesitter import line_span, node_text
 from ..callresolve import CallResolver, noop_resolver
+from .decorators import extract_decorators
 from .functions import (
     NESTED_FN_VALUE_TYPES,
     build_function,
     collect_nested_functions,
-    extract_decorators,
     extract_params,
 )
-from .statements import extract_statements
+from .statements import collect_typed_db_receivers, extract_statements
 
 _TYPE = {
     "class_declaration": "class",
     "class": "class",
     "interface_declaration": "interface",
     "enum_declaration": "enum",
+}
+
+#: Interface members captured as flat Statements. A `method_signature` is captured as a
+#: Function instead (it is a callable member, resolvable to implementers); these are not.
+_INTERFACE_STMT_MEMBERS = {
+    "property_signature",   # field:     `name: string`
+    "call_signature",       # callable:  `(e: string): void`
+    "construct_signature",  # newable:   `new (id: string): T`
+    "index_signature",      # index:     `[key: string]: unknown`
 }
 
 
@@ -78,11 +88,18 @@ def build_class(
     methods: list[Function] = []
     statements: list[Statement] = []
     ctor_params: list[ConstructorParam] = []
+    is_interface = cnode.type == "interface_declaration"
 
     body = cnode.child_by_field_name("body")
     if body is not None:
+        # Collect ORM-typed field names from the constructor so HIGH_COLLISION verbs
+        # (find/create/save/…) are only tagged as db_method_call when the receiver is
+        # a field typed as Repository/DataSource/EntityManager/etc. — not stateManager,
+        # itemsCollection, or other non-DB names that happen to have a DB-suffix.
+        typed_db_ids = collect_typed_db_receivers(body, source)
         statements.extend(
-            extract_statements(body, source, path, parent_id=cid, capture=capture, limit=limit, seen_ids=seen_ids)
+            extract_statements(body, source, path, parent_id=cid, capture=capture, limit=limit,
+                               seen_ids=seen_ids, typed_db_ids=typed_db_ids)
         )
         pending: list[Node] = []
         for child in body.named_children:
@@ -98,7 +115,7 @@ def build_class(
                     child, name=mname, kind="constructor" if mname == "constructor" else "method",
                     decorators=extract_decorators(pending, source), source=source, path=path,
                     parent_id=cid, class_name=name, seen_ids=seen_ids, capture=capture, limit=limit,
-                    resolve=resolve,
+                    resolve=resolve, typed_db_ids=typed_db_ids,
                 )
                 methods.extend(fns)
                 statements.extend(fn_statements)
@@ -119,10 +136,54 @@ def build_class(
                         kind=value.type, decorators=extract_decorators(pending, source),
                         source=source, path=path, parent_id=cid, class_name=name,
                         seen_ids=seen_ids, capture=capture, limit=limit, resolve=resolve,
+                        typed_db_ids=typed_db_ids,
                     )
                     methods.extend(fns)
                     statements.extend(fn_statements)
+            elif is_interface and child.type == "method_signature":
+                # Interface method signature (no body). Same contract shape as an
+                # abstract method — a callable member with params + return type; emit as
+                # a Function (calls:[]) so callers of the interface method resolve to
+                # implementers via IMPLEMENTS + name match. Other member kinds (field +
+                # call/construct/index signatures) fall to the Statement branch below.
+                # Guarded to interfaces: a class body's `method_signature` is an overload
+                # sig, redundant with its method_definition — never a duplicate Function.
+                mname_node = child.child_by_field_name("name")
+                mname = node_text(mname_node, source) if mname_node is not None else ""
+                fns, fn_statements = build_function(
+                    child, name=mname, kind="method",
+                    decorators=extract_decorators(pending, source), source=source, path=path,
+                    parent_id=cid, class_name=name, seen_ids=seen_ids, capture=capture, limit=limit,
+                    resolve=resolve, typed_db_ids=typed_db_ids,
+                )
+                methods.extend(fns)
+                statements.extend(fn_statements)
+            elif is_interface and capture and child.type in _INTERFACE_STMT_MEMBERS:
+                # Every interface member that isn't a callable method → flat Statement
+                # (raw nodeType + full text), like a class field. Covers the data field
+                # (property_signature) and the type-level contracts (call/construct/index
+                # signatures) — nothing is dropped. The latter three have no member name,
+                # so their Statement carries name=None but keeps the full source text.
+                statements.append(
+                    member_statement(child, source, path, parent_id=cid, limit=limit,
+                                     seen_ids=seen_ids)
+                )
             pending = []
+
+    # Enum members become flat statements parented to the enum Class (their `text` — incl.
+    # any `= value` — is queryable). Gated by --capture-statements like every other statement.
+    if capture and cnode.type == "enum_declaration":
+        ebody = cnode.child_by_field_name("body") or next(
+            (c for c in cnode.named_children if c.type == "enum_body"), None
+        )
+        if ebody is not None:
+            statements.extend(
+                emit_enum_members(
+                    ebody, source, path,
+                    member_types={"enum_assignment", "property_identifier"},
+                    parent_id=cid, limit=limit, seen_ids=seen_ids,
+                )
+            )
 
     # Named functions living inside class-decorator arguments (NestJS `@Module({ …
     # useFactory: () => … })`, TypeORM `forRootAsync`, etc.). These sit outside every

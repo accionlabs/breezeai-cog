@@ -7,9 +7,14 @@ functions, overloads, and same-line statements from colliding.
     Function  -> path#[Class#]name@startLine   (name='<anonymous>' if unnamed)
     Statement -> path:startLine:startCol
 
-The id is capture-only: the backend consumes it to wire containment edges, then
-discards it. It only needs to be unique within a file — :func:`disambiguate` adds a
-deterministic ordinal on the rare residual clash.
+A statement whose ``text`` exceeds the configured cap is split at emit into ordered
+parts, each id gaining a ``#part{i}of{n}`` suffix (``path:startLine:startCol#part1of3``)
+— see :mod:`breezeai_cog.emit.split`.
+
+The backend stores this id verbatim as the Neo4j ``Statement.captureId`` property (its
+unique MERGE key) and also uses ``parentId`` to wire containment edges. It only needs to
+be unique within a file — :func:`disambiguate` adds a deterministic ordinal on the rare
+residual clash (the ``path`` prefix makes it unique across the repo).
 """
 
 from __future__ import annotations

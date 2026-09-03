@@ -35,10 +35,14 @@ def test_scan_filter_chain(tmp_path) -> None:
     except (OSError, NotImplementedError):
         pass
 
-    skips: list[tuple[str, str]] = []
+    skips: list[tuple[str, str, bool, int | None]] = []
+
+    def _on_skip(p: str, r: str, *, is_dir: bool = False, size: int | None = None) -> None:
+        skips.append((p, r, is_dir, size))
+
     entries = list(
         scan(tmp_path, classify, engine=IgnoreEngine.build(), max_file_size=1000,
-             on_skip=lambda p, r: skips.append((p, r)))
+             on_skip=_on_skip)
     )
     found = sorted(e.path for e in entries)
 
@@ -48,8 +52,13 @@ def test_scan_filter_chain(tmp_path) -> None:
     assert "node_modules/x.py" not in found  # dir pruned
     assert "sub/d.py" not in found  # hierarchical .repoignore
     assert "big.py" not in found  # size filter
-    reasons = {(p, r) for p, r in skips}
+    reasons = {(p, r) for p, r, _is_dir, _size in skips}
     assert ("big.py", "oversized") in reasons
     assert ("sub/d.py", "ignored") in reasons  # dropped by hierarchical .repoignore
+    assert ("sub/e.txt", "unsupported") in reasons  # no parser for the extension
+    # pruned directory reported once with is_dir=True (not per contained file)
+    assert ("node_modules", "ignored", True) in {(p, r, d) for p, r, d, _ in skips}
+    # oversized carries the byte size
+    assert any(p == "big.py" and r == "oversized" and s and s > 1000 for p, r, _d, s in skips)
     # symlinked dir never recursed (no duplicate / link-prefixed paths)
     assert not any(p.startswith("link/") for p in found)

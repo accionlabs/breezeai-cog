@@ -32,8 +32,8 @@ src/breezeai_cog/
     base.py       #   BaseParser, ParseContext, the LanguageParser protocol
     treesitter.py #   grammar loading + bounded parse
     detection/    #   shared, language-agnostic API/DB/route classification
-    <lang>/       #   language parser (python, typescript, java)
-    <lang>_<fw>/  #   framework parser (python_fastapi, typescript_nestjs/angular, java_springboot)
+    <lang>/       #   base language parser (python, typescript, java, csharp, vb, kotlin, groovy, cpp, …)
+    <lang>_<fw>/  #   framework parser (e.g. python_fastapi, typescript_nestjs, java_springboot, csharp_wcf) — run `breezeai-cog capabilities` for the live list
   emit/           # id convention · ndjson · gzip · sinks (file/memory) · s3 streaming
   analyzers/      # non-AST: sql (DDL via sqlglot), es (Elasticsearch mappings)
   services/       # analysis · inprocess · diff · notify
@@ -106,7 +106,16 @@ Watch the host-tree qualifier for **embedded DSLs**: SQL in a string, or GraphQL
 the established precedent (a SQL string `const q = "SELECT …"` → `lexical_declaration`, the *host* node
 that wraps it) — surface the wrapping host node, or `synthetic` when there's no distinct one per item;
 **never** the embedded grammar's own node type (e.g. `field_definition`). The page / mount / rpc /
-graphql distinction is carried by `routeKind` + `framework`, **not** by `nodeType`, so nothing is lost.
+`query`/`mutation`/`subscription` (GraphQL) distinction is carried by `routeKind` + `framework`, **not** by `nodeType`, so nothing is lost.
+
+### IaC parsers (`semanticType` + `platform`)
+
+Config parsers for Infrastructure-as-Code tools use a dedicated **`iac_*` `semanticType` family**
+(e.g. `iac_resource`, `iac_provider`, `iac_variable`) instead of the route/db/event family — see
+`schemas/enums.py` for the full list. They also set a **`platform`** field (`"aws"`, `"azure"`,
+`"google"`, `etc.) on each `Statement` (inferred from the resource-type prefix or
+provider name) and on `FileRecord` (dominant platform across statements). Both fields are absent
+when no cloud provider can be inferred, and omit from serialized output via `exclude_none=True`.
 
 ---
 

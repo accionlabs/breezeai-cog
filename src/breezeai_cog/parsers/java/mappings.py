@@ -10,6 +10,8 @@ CONTROL_FLOW = {
     "do_statement",
     "switch_expression",
     "try_statement",
+    "catch_clause",  # error-handling boundary (bodies already captured; this adds the clause node)
+    "finally_clause",
     "try_with_resources_statement",
     "synchronized_statement",
 }
@@ -25,6 +27,7 @@ JUMP = {
 DECLARATIONS = {
     "local_variable_declaration",
     "field_declaration",
+    "constant_declaration",  # interface constant `String X = "y";` (implicitly static final)
     "expression_statement",
 }
 
@@ -41,5 +44,9 @@ NESTED_SCOPES = {
 }
 
 STATEMENT_TYPES = sorted(EMIT_TYPES)
+
+#: Comment node types the shared comment pass captures (``semanticType="comment"``; each
+#: statement keeps its real tree-sitter ``nodeType``).
+COMMENT_TYPES = {"line_comment", "block_comment"}
 
 FRAMEWORKS = ["spring", "springboot", "jaxrs", "quarkus"]

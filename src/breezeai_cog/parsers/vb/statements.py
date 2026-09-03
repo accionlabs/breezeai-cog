@@ -25,14 +25,40 @@ def _unwrap(node: Node) -> Node:
 
 
 def _name_of(node: Node, source: bytes) -> str | None:
-    if node.type == "dim_statement":
+    if node.type in {"dim_statement", "field_declaration"}:
         nm = node.child_by_field_name("name")
         if nm is not None:
             return node_text(nm, source)
         decl = next((c for c in node.named_children if c.type == "variable_declarator"), None)
-        if decl is not None and decl.named_children:
-            return node_text(decl.named_children[0], source)
+        if decl is not None:
+            ident = next((c for c in decl.named_children if c.type == "identifier"), None)
+            if ident is not None:
+                return node_text(ident, source)
+            if decl.named_children:
+                return node_text(decl.named_children[0], source)
+    if node.type == "const_declaration":
+        # `Public Const MaxRetries As Integer = 5` — name is a direct identifier child.
+        nm = node.child_by_field_name("name")
+        if nm is not None:
+            return node_text(nm, source)
+        ident = next((c for c in node.named_children if c.type == "identifier"), None)
+        if ident is not None:
+            return node_text(ident, source)
     return None
+
+
+def _is_real_field(node: Node) -> bool:
+    """Filter out heritage misparses: tree-sitter-vb turns a bare ``Implements IFoo`` into
+    a ``field_declaration`` whose declarator holds only an identifier (no modifiers, no
+    type, no initializer). A genuine field/const always has at least one of those."""
+    if node.type != "field_declaration":
+        return True
+    if any(c.type == "modifiers" for c in node.named_children):
+        return True
+    decl = next((c for c in node.named_children if c.type == "variable_declarator"), None)
+    return decl is not None and any(
+        c.type in {"as_clause", "expression"} for c in decl.named_children
+    )
 
 
 def _call_details(call: Node, source: bytes) -> tuple[str, str, str | None] | None:
@@ -73,9 +99,13 @@ def _iter_in_scope(node: Node, descend_all: bool = False):
     as their own Function/Class."""
     for child in node.named_children:
         real = _unwrap(child)
+        # ERROR nodes wrap malformed parses (e.g. the `Inherits`/`Implements` heritage
+        # clauses) — never emit statements from inside them.
+        if real.type == "ERROR":
+            continue
         if not descend_all and real.type in NESTED_SCOPES:
             continue
-        if real.type in EMIT_TYPES:
+        if real.type in EMIT_TYPES and _is_real_field(real):
             yield real
         yield from _iter_in_scope(real, descend_all)
 

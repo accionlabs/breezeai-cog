@@ -11,6 +11,8 @@ CONTROL_FLOW = {
     "for_statement",
     "while_statement",
     "try_statement",
+    "except_clause",  # error-handling boundary (bodies already captured; this adds the clause node)
+    "finally_clause",
     "with_statement",
     "match_statement",
 }
@@ -38,6 +40,10 @@ EMIT_TYPES = CONTROL_FLOW | JUMP | DECLARATIONS
 
 #: Scopes whose inner statements belong to that nested scope, not the enclosing one.
 NESTED_SCOPES = {"function_definition", "class_definition", "decorated_definition"}
+
+#: Comment node types the shared comment pass captures (``semanticType="comment"``; each
+#: statement keeps its real tree-sitter ``nodeType``).
+COMMENT_TYPES = {"comment"}
 
 STATEMENT_TYPES = sorted(EMIT_TYPES)
 

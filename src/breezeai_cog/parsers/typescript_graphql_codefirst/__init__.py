@@ -1,5 +1,5 @@
 """In-house (local-decorator) TypeScript code-first GraphQL framework parser."""
 
-from .parser import NbsGraphQLParser
+from .parser import GraphQLCodeFirstParser
 
-PARSERS = [NbsGraphQLParser()]
+PARSERS = [GraphQLCodeFirstParser()]

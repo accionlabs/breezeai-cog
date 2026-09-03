@@ -11,7 +11,7 @@ from breezeai_cog.parsers.base import ParseContext
 from breezeai_cog.parsers.typescript.parser import TypeScriptParser
 from breezeai_cog.schemas import FileRecord
 
-SRC = b'''import { Foo } from './foo';
+SRC = b"""import { Foo } from './foo';
 import axios from 'axios';
 export { Bar };
 
@@ -32,15 +32,21 @@ export function top(a: number, b = 'x'): string {
 }
 
 const arrow = (x: number): number => x + 1;
-'''
+"""
 
 
 def _parse(tmp_path, *, capture=False) -> FileRecord:
     (tmp_path / "foo.ts").write_text("export const Foo = 1;\n")  # makes './foo' resolvable
     p = tmp_path / "order.controller.ts"
     p.write_text(SRC.decode())
-    ctx = ParseContext(path="order.controller.ts", abs_path=p, source=SRC, repo_root=tmp_path,
-                       capture_statements=capture, text_truncation_limit=1000)
+    ctx = ParseContext(
+        path="order.controller.ts",
+        abs_path=p,
+        source=SRC,
+        repo_root=tmp_path,
+        capture_statements=capture,
+        statement_text_limit=1000,
+    )
     return TypeScriptParser().parse_file(ctx)
 
 
@@ -59,7 +65,9 @@ def test_class(tmp_path) -> None:
     assert cls.implements == ["IFoo", "IBar"]
     assert [d.name for d in cls.decorators] == ["Controller"]
     assert cls.constructorParams == [
-        __import__("breezeai_cog.schemas", fromlist=["ConstructorParam"]).ConstructorParam(name="repo", type="OrderRepo")
+        __import__("breezeai_cog.schemas", fromlist=["ConstructorParam"]).ConstructorParam(
+            name="repo", type="OrderRepo"
+        )
     ]
 
 
@@ -87,6 +95,67 @@ def test_statements_flat_and_gated(tmp_path) -> None:
     assert "if_statement" in node_types and "return_statement" in node_types
 
 
+def test_catch_finally_clauses_emitted(tmp_path) -> None:
+    p = tmp_path / "e.ts"
+    p.write_text(
+        "async function run() {\n"
+        "  try { await save(); }\n"
+        "  catch (e) { log(e); }\n"
+        "  finally { cleanup(); }\n"
+        "}\n"
+    )
+    ctx = ParseContext(
+        path="e.ts", abs_path=p, source=p.read_bytes(), repo_root=tmp_path, capture_statements=True
+    )
+    rec = TypeScriptParser().parse_file(ctx)
+    node_types = {s.nodeType for s in rec.statements}
+    assert {"try_statement", "catch_clause", "finally_clause"} <= node_types
+    # bodies inside the clauses are still captured (not swallowed by the boundary node).
+    assert any(s.nodeType == "expression_statement" and "cleanup" in s.text for s in rec.statements)
+
+
+def test_param_defaults_and_isasync(tmp_path) -> None:
+    p = tmp_path / "f.ts"
+    p.write_text(
+        "export async function connect(port: number = 5432, opts = {}) { return port; }\n"
+        "export function plain(x: string) { return x; }\n"
+    )
+    ctx = ParseContext(path="f.ts", abs_path=p, source=p.read_bytes(),
+                       repo_root=tmp_path, capture_statements=False)
+    rec = TypeScriptParser().parse_file(ctx)
+    connect = next(f for f in rec.functions if f.name == "connect")
+    plain = next(f for f in rec.functions if f.name == "plain")
+    assert connect.isAsync is True
+    assert [(pp.name, pp.default) for pp in connect.params] == [("port", "5432"), ("opts", "{}")]
+    assert plain.isAsync is False
+    assert plain.params[0].default is None  # no default → honest null
+
+
+def test_multiline_control_flow_header_kept_whole(tmp_path) -> None:
+    p = tmp_path / "h.ts"
+    p.write_text(
+        "function f(o) {\n"
+        "  if (o.total > 100 &&\n"
+        '      o.currency === "USD") {\n'
+        "    apply(o);\n"
+        "  }\n"
+        "  if (o.ok) { done(o); }\n"  # single-line: unchanged (first line, incl. body)
+        "}\n"
+    )
+    ctx = ParseContext(path="h.ts", abs_path=p, source=p.read_bytes(),
+                       repo_root=tmp_path, capture_statements=True)
+    rec = TypeScriptParser().parse_file(ctx)
+    ifs = [s for s in rec.statements if s.nodeType == "if_statement"]
+    multi = next(s for s in ifs if s.startLine == 2)
+    single = next(s for s in ifs if s.startLine == 6)
+    # multi-line condition captured whole (not truncated to the first line), body excluded.
+    assert "o.currency" in multi.text and "apply(o)" not in multi.text
+    # single-line header is unchanged (first physical line).
+    assert single.text == "if (o.ok) { done(o); }"
+    # the body statement is still its own node (searchable by line containment).
+    assert any(s.nodeType == "expression_statement" and "apply(o)" in s.text for s in rec.statements)
+
+
 def test_output_validates(tmp_path) -> None:
     rec = _parse(tmp_path, capture=True)
     schema = FileRecord.model_json_schema(by_alias=True)
@@ -97,8 +166,9 @@ def test_output_validates(tmp_path) -> None:
 def test_type_alias_captured(tmp_path) -> None:
     p = tmp_path / "t.ts"
     p.write_text("type UserId = string;\ntype Point = { x: number };\nconst z = 1;\n")
-    ctx = ParseContext(path="t.ts", abs_path=p, source=p.read_bytes(),
-                       repo_root=tmp_path, capture_statements=True)
+    ctx = ParseContext(
+        path="t.ts", abs_path=p, source=p.read_bytes(), repo_root=tmp_path, capture_statements=True
+    )
     rec = TypeScriptParser().parse_file(ctx)
     aliases = [s.name for s in rec.statements if s.nodeType == "type_alias_declaration"]
     assert aliases == ["UserId", "Point"]
@@ -106,17 +176,24 @@ def test_type_alias_captured(tmp_path) -> None:
 
 def test_class_fields_captured(tmp_path) -> None:
     p = tmp_path / "c.ts"
-    p.write_text("class C { count: number = 0; private label = 'x';\n  greet(): number { return this.count; } }\n")
-    ctx = ParseContext(path="c.ts", abs_path=p, source=p.read_bytes(),
-                       repo_root=tmp_path, capture_statements=True)
+    p.write_text(
+        "class C { count: number = 0; private label = 'x';\n  greet(): number { return this.count; } }\n"
+    )
+    ctx = ParseContext(
+        path="c.ts", abs_path=p, source=p.read_bytes(), repo_root=tmp_path, capture_statements=True
+    )
     rec = TypeScriptParser().parse_file(ctx)
-    fields = [s.name for s in rec.statements if s.nodeType in ("public_field_definition", "field_definition")]
+    fields = [
+        s.name
+        for s in rec.statements
+        if s.nodeType in ("public_field_definition", "field_definition")
+    ]
     assert fields == ["count", "label"]
 
 
 # G2: arrow functions attached as object-literal properties (resolver maps, service
 # objects) are lifted into the function inventory, named by their key-trail.
-OBJ_FN_SRC = b'''const DENOM = { PI: 3.14 };                 // pure data: NOT descended
+OBJ_FN_SRC = b"""const DENOM = { PI: 3.14 };                 // pure data: NOT descended
 
 export const api = {                          // depth-1 service object
   getUser: async (id) => { return fetch(id); },
@@ -134,14 +211,19 @@ export const resolvers = {
 };
 
 function plain() { return 1; }
-'''
+"""
 
 
 def test_object_property_functions_captured(tmp_path) -> None:
     p = tmp_path / "resolvers.ts"
     p.write_bytes(OBJ_FN_SRC)
-    ctx = ParseContext(path="resolvers.ts", abs_path=p, source=OBJ_FN_SRC,
-                       repo_root=tmp_path, capture_statements=True)
+    ctx = ParseContext(
+        path="resolvers.ts",
+        abs_path=p,
+        source=OBJ_FN_SRC,
+        repo_root=tmp_path,
+        capture_statements=True,
+    )
     rec = TypeScriptParser().parse_file(ctx)
     names = {f.name for f in rec.functions}
     # depth-1 service arrows, named by key-trail.
@@ -162,14 +244,19 @@ def test_object_property_functions_captured(tmp_path) -> None:
 def test_object_function_ids_are_unique(tmp_path) -> None:
     p = tmp_path / "resolvers.ts"
     p.write_bytes(OBJ_FN_SRC)
-    ctx = ParseContext(path="resolvers.ts", abs_path=p, source=OBJ_FN_SRC,
-                       repo_root=tmp_path, capture_statements=True)
+    ctx = ParseContext(
+        path="resolvers.ts",
+        abs_path=p,
+        source=OBJ_FN_SRC,
+        repo_root=tmp_path,
+        capture_statements=True,
+    )
     rec = TypeScriptParser().parse_file(ctx)
     ids = [f.id for f in rec.functions]
     assert len(ids) == len(set(ids))  # deterministic, disambiguated ids
 
 
-WRAPPED_FN_SRC = b'''import { create } from "zustand";
+WRAPPED_FN_SRC = b"""import { create } from "zustand";
 import { persist } from "zustand/middleware";
 
 export const useStore = create((set) => ({          // call-wrapped object members
@@ -192,7 +279,7 @@ export default React.memo(function Panel() {         // export default: named fn
   const handleClick = () => save();                  // nested handler in the component
   return null;
 });
-'''
+"""
 
 
 def test_wrapped_and_field_functions_captured(tmp_path) -> None:
@@ -201,21 +288,29 @@ def test_wrapped_and_field_functions_captured(tmp_path) -> None:
     # named functions (plus their nested handlers). Anonymous callbacks stay uncaptured.
     p = tmp_path / "store.tsx"
     p.write_bytes(WRAPPED_FN_SRC)
-    ctx = ParseContext(path="store.tsx", abs_path=p, source=WRAPPED_FN_SRC,
-                       repo_root=tmp_path, capture_statements=True)
+    ctx = ParseContext(
+        path="store.tsx",
+        abs_path=p,
+        source=WRAPPED_FN_SRC,
+        repo_root=tmp_path,
+        capture_statements=True,
+    )
     rec = TypeScriptParser().parse_file(ctx)
     names = {f.name for f in rec.functions}
-    assert {"openDialog", "closeDialog"} <= names          # call-wrapper (create)
-    assert "reset" in names                                # nested create(persist(...))
+    assert {"openDialog", "closeDialog"} <= names  # call-wrapper (create)
+    assert "reset" in names  # nested create(persist(...))
     assert "obj.shorthand" in names and "obj.arrow" in names  # shorthand method + arrow prop
-    assert "onClick" in names                              # arrow class field
-    assert "Panel" in names                                # export default React.memo(function Panel)
-    assert "handleClick" in names                          # nested handler inside Panel
+    assert "onClick" in names  # arrow class field
+    assert "Panel" in names  # export default React.memo(function Panel)
+    assert "handleClick" in names  # nested handler inside Panel
     onclick = next(f for f in rec.functions if f.name == "onClick")
     assert onclick.type == "arrow_function"
     # emitted record still validates against the capture schema
-    errors = list(Draft202012Validator(FileRecord.model_json_schema(by_alias=True))
-                  .iter_errors(json.loads(to_line(rec))))
+    errors = list(
+        Draft202012Validator(FileRecord.model_json_schema(by_alias=True)).iter_errors(
+            json.loads(to_line(rec))
+        )
+    )
     assert not errors, "\n".join(str(e) for e in errors)
 
 
@@ -239,8 +334,9 @@ def test_inline_callback_body_captured(tmp_path) -> None:
         "  });\n"
         "}\n"
     )
-    ctx = ParseContext(path="cb.ts", abs_path=p, source=p.read_bytes(),
-                       repo_root=tmp_path, capture_statements=True)
+    ctx = ParseContext(
+        path="cb.ts", abs_path=p, source=p.read_bytes(), repo_root=tmp_path, capture_statements=True
+    )
     rec = TypeScriptParser().parse_file(ctx)
     fn = next(f for f in rec.functions if f.name == "processOrder")
     # calls inside the callback now land on the enclosing function
@@ -255,14 +351,15 @@ def test_top_level_arrow_not_double_emitted(tmp_path) -> None:
     # already extracted as its own Function).
     p = tmp_path / "d.ts"
     p.write_text("const topFn = (x) => { return doTop(x); };\n")
-    ctx = ParseContext(path="d.ts", abs_path=p, source=p.read_bytes(),
-                       repo_root=tmp_path, capture_statements=True)
+    ctx = ParseContext(
+        path="d.ts", abs_path=p, source=p.read_bytes(), repo_root=tmp_path, capture_statements=True
+    )
     rec = TypeScriptParser().parse_file(ctx)
     returns = [s for s in rec.statements if s.nodeType == "return_statement" and "doTop" in s.text]
     assert len(returns) == 1
 
 
-NESTED_FN_SRC = b'''export default function OpportunityDetail(props) {
+NESTED_FN_SRC = b"""export default function OpportunityDetail(props) {
   const onClose = () => { closeDialog(); };
 
   const handleSubmit = () => {
@@ -278,7 +375,7 @@ NESTED_FN_SRC = b'''export default function OpportunityDetail(props) {
   fetchInitial();
   return null;
 }
-'''
+"""
 
 
 def test_nested_named_functions_extracted(tmp_path) -> None:
@@ -288,8 +385,13 @@ def test_nested_named_functions_extracted(tmp_path) -> None:
     # this is the dominant React functional-component pattern.
     p = tmp_path / "OpportunityDetail.jsx"
     p.write_bytes(NESTED_FN_SRC)
-    ctx = ParseContext(path="OpportunityDetail.jsx", abs_path=p, source=NESTED_FN_SRC,
-                       repo_root=tmp_path, capture_statements=True)
+    ctx = ParseContext(
+        path="OpportunityDetail.jsx",
+        abs_path=p,
+        source=NESTED_FN_SRC,
+        repo_root=tmp_path,
+        capture_statements=True,
+    )
     rec = TypeScriptParser().parse_file(ctx)
     by_name = {f.name: f for f in rec.functions}
     # the component plus all three nested handlers are present
@@ -307,7 +409,7 @@ def test_nested_named_functions_extracted(tmp_path) -> None:
     assert "addEventListener" in {c.name for c in parent.calls}
 
 
-OBJECT_PROPERTY_FN_SRC = b'''export class SyncWorker {
+OBJECT_PROPERTY_FN_SRC = b"""export class SyncWorker {
   async connectConsumer() {
     this.setup();
     await this.consumer.run({
@@ -318,7 +420,7 @@ OBJECT_PROPERTY_FN_SRC = b'''export class SyncWorker {
     items.forEach(function step(i) { visitStep(i); });
   }
 }
-'''
+"""
 
 
 def test_object_property_and_named_expression_functions_extracted(tmp_path) -> None:
@@ -330,8 +432,13 @@ def test_object_property_and_named_expression_functions_extracted(tmp_path) -> N
     # these callback handlers were silently dropped from class code.
     p = tmp_path / "sync-worker.ts"
     p.write_bytes(OBJECT_PROPERTY_FN_SRC)
-    ctx = ParseContext(path="sync-worker.ts", abs_path=p, source=OBJECT_PROPERTY_FN_SRC,
-                       repo_root=tmp_path, capture_statements=True)
+    ctx = ParseContext(
+        path="sync-worker.ts",
+        abs_path=p,
+        source=OBJECT_PROPERTY_FN_SRC,
+        repo_root=tmp_path,
+        capture_statements=True,
+    )
     rec = TypeScriptParser().parse_file(ctx)
     by_name = {f.name: f for f in rec.functions}
     assert {"connectConsumer", "eachMessage", "step"} <= set(by_name)
@@ -347,7 +454,7 @@ def test_object_property_and_named_expression_functions_extracted(tmp_path) -> N
     assert {"setup", "run"} <= {c.name for c in by_name["connectConsumer"].calls}
 
 
-DECORATOR_ARG_FN_SRC = b'''import { Module } from '@nestjs/common';
+DECORATOR_ARG_FN_SRC = b"""import { Module } from '@nestjs/common';
 
 @Module({
   imports: [
@@ -360,7 +467,7 @@ DECORATOR_ARG_FN_SRC = b'''import { Module } from '@nestjs/common';
   ],
 })
 export class DatabaseModule {}
-'''
+"""
 
 
 def test_decorator_argument_functions_extracted(tmp_path) -> None:
@@ -370,8 +477,13 @@ def test_decorator_argument_functions_extracted(tmp_path) -> None:
     # Function, parented to the class.
     p = tmp_path / "database.module.ts"
     p.write_bytes(DECORATOR_ARG_FN_SRC)
-    ctx = ParseContext(path="database.module.ts", abs_path=p, source=DECORATOR_ARG_FN_SRC,
-                       repo_root=tmp_path, capture_statements=True)
+    ctx = ParseContext(
+        path="database.module.ts",
+        abs_path=p,
+        source=DECORATOR_ARG_FN_SRC,
+        repo_root=tmp_path,
+        capture_statements=True,
+    )
     rec = TypeScriptParser().parse_file(ctx)
     by_name = {f.name: f for f in rec.functions}
     cls = next(c for c in rec.classes if c.name == "DatabaseModule")
@@ -383,9 +495,16 @@ def test_decorator_argument_functions_extracted(tmp_path) -> None:
 def test_chain_inner_call_classified(tmp_path) -> None:
     # #4: a db method that is NOT the outermost call in a chain must still be detected.
     p = tmp_path / "chain.ts"
-    p.write_text("function f(repo){ const rows = repo.createQueryBuilder('o').where('x').getMany(); }")
-    ctx = ParseContext(path="chain.ts", abs_path=p, source=p.read_bytes(),
-                       repo_root=tmp_path, capture_statements=True)
+    p.write_text(
+        "function f(repo){ const rows = repo.createQueryBuilder('o').where('x').getMany(); }"
+    )
+    ctx = ParseContext(
+        path="chain.ts",
+        abs_path=p,
+        source=p.read_bytes(),
+        repo_root=tmp_path,
+        capture_statements=True,
+    )
     rec = TypeScriptParser().parse_file(ctx)
     db = [s for s in rec.statements if s.semanticType == "db_method_call"]
     assert any(s.method == "createQueryBuilder" and s.dataAccessHint == "typeorm" for s in db)
@@ -396,8 +515,13 @@ def test_multi_hit_emits_synthetic(tmp_path) -> None:
     # each single-valued, at the same span.
     p = tmp_path / "multi.ts"
     p.write_text("function f(){ const d = http.get('/a').then(r => auditRepo.save(r)); }")
-    ctx = ParseContext(path="multi.ts", abs_path=p, source=p.read_bytes(),
-                       repo_root=tmp_path, capture_statements=True)
+    ctx = ParseContext(
+        path="multi.ts",
+        abs_path=p,
+        source=p.read_bytes(),
+        repo_root=tmp_path,
+        capture_statements=True,
+    )
     rec = TypeScriptParser().parse_file(ctx)
     kinds = {s.semanticType for s in rec.statements if s.semanticType}
     assert {"api_call", "db_method_call"} <= kinds
@@ -407,10 +531,19 @@ def test_control_statement_not_mislabeled(tmp_path) -> None:
     # #4/smear: a db call nested in an if/for body must not tag the if/for themselves.
     p = tmp_path / "smear.ts"
     p.write_text("function h(o){ if(o.length>0){ for(const x of o){ repo.save(x); } } }")
-    ctx = ParseContext(path="smear.ts", abs_path=p, source=p.read_bytes(),
-                       repo_root=tmp_path, capture_statements=True)
+    ctx = ParseContext(
+        path="smear.ts",
+        abs_path=p,
+        source=p.read_bytes(),
+        repo_root=tmp_path,
+        capture_statements=True,
+    )
     rec = TypeScriptParser().parse_file(ctx)
-    control = [s for s in rec.statements if s.nodeType in ("if_statement", "for_in_statement", "for_statement")]
+    control = [
+        s
+        for s in rec.statements
+        if s.nodeType in ("if_statement", "for_in_statement", "for_statement")
+    ]
     assert control and all(s.semanticType is None for s in control)
     assert any(s.semanticType == "db_method_call" for s in rec.statements)
 
@@ -418,28 +551,33 @@ def test_control_statement_not_mislabeled(tmp_path) -> None:
 def _api(tmp_path, body):
     p = tmp_path / "u.ts"
     p.write_text(body)
-    ctx = ParseContext(path="u.ts", abs_path=p, source=p.read_bytes(),
-                       repo_root=tmp_path, capture_statements=True)
+    ctx = ParseContext(
+        path="u.ts", abs_path=p, source=p.read_bytes(), repo_root=tmp_path, capture_statements=True
+    )
     rec = TypeScriptParser().parse_file(ctx)
     return [(s.method, s.endpoint) for s in rec.statements if s.semanticType == "api_call"]
 
 
 def test_endpoint_template_string(tmp_path) -> None:
     # #3: template literal -> path with {param}; leading base/host var dropped.
-    assert _api(tmp_path, "function f(baseURL,id){ axios.get(`${baseURL}/users/${id}`); }") \
-        == [("GET", "/users/{id}")]
+    assert _api(tmp_path, "function f(baseURL,id){ axios.get(`${baseURL}/users/${id}`); }") == [
+        ("GET", "/users/{id}")
+    ]
     assert _api(tmp_path, "function f(id){ axios.get(`/api/${id}`); }") == [("GET", "/api/{id}")]
 
 
 def test_endpoint_concatenation(tmp_path) -> None:
     # #3: string concatenation -> path with {param}.
-    assert _api(tmp_path, "function f(id){ axios.get('/a/' + id + '/b'); }") == [("GET", "/a/{id}/b")]
+    assert _api(tmp_path, "function f(id){ axios.get('/a/' + id + '/b'); }") == [
+        ("GET", "/a/{id}/b")
+    ]
 
 
 def test_endpoint_config_object(tmp_path) -> None:
     # #3: axios({ url, method }) — both were missed before.
-    assert _api(tmp_path, "function f(){ axios({ url: '/orders', method: 'get' }); }") \
-        == [("GET", "/orders")]
+    assert _api(tmp_path, "function f(){ axios({ url: '/orders', method: 'get' }); }") == [
+        ("GET", "/orders")
+    ]
 
 
 def test_endpoint_verb_first_arg(tmp_path) -> None:
@@ -451,6 +589,7 @@ def test_endpoint_verb_first_arg(tmp_path) -> None:
 
 # --- inherited base-class call resolution (this.M() → base file) ----------------------
 
+
 def _parse_repo(tmp_path, files: dict[str, str], target: str) -> FileRecord:
     """Write a multi-file TS repo, run build_index, parse `target` with the index."""
     for rel, text in files.items():
@@ -460,32 +599,44 @@ def _parse_repo(tmp_path, files: dict[str, str], target: str) -> FileRecord:
     parser = TypeScriptParser()
     index = parser.build_index(tmp_path, list(tmp_path.rglob("*.ts")))
     p = tmp_path / target
-    ctx = ParseContext(path=target, abs_path=p, source=p.read_bytes(),
-                       repo_root=tmp_path, capture_statements=True, resolution_index=index)
+    ctx = ParseContext(
+        path=target,
+        abs_path=p,
+        source=p.read_bytes(),
+        repo_root=tmp_path,
+        capture_statements=True,
+        resolution_index=index,
+    )
     return parser.parse_file(ctx)
 
 
 def test_inherited_this_call_resolves(tmp_path) -> None:
     # `this.M()` where M is declared on an in-repo base class → the base's file.
-    rec = _parse_repo(tmp_path, {
-        "base.service.ts": "export class BaseService { protected log(m: string){ console.log(m); } }\n",
-        "order.service.ts":
-            "import { BaseService } from './base.service';\n"
+    rec = _parse_repo(
+        tmp_path,
+        {
+            "base.service.ts": "export class BaseService { protected log(m: string){ console.log(m); } }\n",
+            "order.service.ts": "import { BaseService } from './base.service';\n"
             "export class OrderService extends BaseService {\n"
             "  create(){ this.log('created'); }\n}\n",
-    }, "order.service.ts")
+        },
+        "order.service.ts",
+    )
     calls = {c.name: c.path for f in rec.functions for c in f.calls}
     assert calls.get("log") == "base.service.ts"
 
 
 def test_explicit_super_call_resolves(tmp_path) -> None:
     # `super.M()` → the base class's file.
-    rec = _parse_repo(tmp_path, {
-        "parent.ts": "export class Parent { setup(){} }\n",
-        "child.ts":
-            "import { Parent } from './parent';\n"
+    rec = _parse_repo(
+        tmp_path,
+        {
+            "parent.ts": "export class Parent { setup(){} }\n",
+            "child.ts": "import { Parent } from './parent';\n"
             "export class Child extends Parent { init(){ super.setup(); } }\n",
-    }, "child.ts")
+        },
+        "child.ts",
+    )
     calls = {c.name: c.path for f in rec.functions for c in f.calls}
     assert calls.get("setup") == "parent.ts"
 
@@ -493,10 +644,548 @@ def test_explicit_super_call_resolves(tmp_path) -> None:
 def test_same_name_class_does_not_inherit(tmp_path) -> None:
     # Two distinct `Base` classes (different files) → ambiguous → the subclass must not
     # mis-inherit; the inherited call stays unresolved (honest-null).
-    rec = _parse_repo(tmp_path, {
-        "a/base.ts": "export class Base { helper(){} }\n",
-        "b/base.ts": "export class Base { other(){} }\n",
-        "sub.ts": "import { Base } from './a/base';\nexport class Sub extends Base { go(){ this.helper(); } }\n",
-    }, "sub.ts")
+    rec = _parse_repo(
+        tmp_path,
+        {
+            "a/base.ts": "export class Base { helper(){} }\n",
+            "b/base.ts": "export class Base { other(){} }\n",
+            "sub.ts": "import { Base } from './a/base';\nexport class Sub extends Base { go(){ this.helper(); } }\n",
+        },
+        "sub.ts",
+    )
     calls = {c.name: c.path for f in rec.functions for c in f.calls}
     assert calls.get("helper") is None
+
+
+# --- `.vue` import target resolution -------------------------------------------------------
+# Vue imports components by explicit `.vue` extension, usually behind a tsconfig `@/*` alias.
+# The resolver must resolve those to the real File node the Vue parser emits — otherwise the
+# component-composition edge is lost (parked in externalImports).
+
+
+def _mk(root, rel: str) -> None:
+    p = root / rel
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text("")
+
+
+def test_vue_import_targets_resolve(tmp_path) -> None:
+    from breezeai_cog.parsers.typescript.imports import build_alias_index, _resolve
+
+    (tmp_path / "tsconfig.json").write_text(
+        '{ "compilerOptions": { "baseUrl": ".", "paths": { "@/*": ["src/*"] } } }'
+    )
+    for rel in (
+        "src/components/Avatar.vue",
+        "src/views/UserList.vue",
+        "src/widgets/index.vue",
+        "src/util.ts",
+        "src/components/Button.ts",
+        "src/components/Button.vue",
+    ):
+        _mk(tmp_path, rel)
+    idx = build_alias_index(tmp_path)
+
+    def r(mod: str) -> str | None:
+        return _resolve(mod, "src/App.vue", tmp_path, idx)
+
+    # explicit `.vue`, via alias and relative, plus extensionless and directory-index forms
+    assert r("@/components/Avatar.vue") == "src/components/Avatar.vue"
+    assert r("./components/Avatar.vue") == "src/components/Avatar.vue"
+    assert r("@/views/UserList") == "src/views/UserList.vue"  # extensionless → .vue
+    assert r("@/widgets") == "src/widgets/index.vue"  # directory → index.vue
+    # precedence: an extensionless import next to both must still pick the JS/TS file
+    assert r("@/components/Button") == "src/components/Button.ts"
+    # control: a `.ts` target is unchanged
+    assert r("@/util") == "src/util.ts"
+
+
+def test_vue_import_edge_in_record(tmp_path) -> None:
+    # End-to-end: an explicit `.vue` import lands in importFiles, not externalImports.
+    (tmp_path / "Avatar.vue").write_text("<template><div/></template>\n")
+    p = tmp_path / "Home.ts"
+    p.write_text("import Avatar from './Avatar.vue';\nexport const Home = Avatar;\n")
+    ctx = ParseContext(
+        path="Home.ts",
+        abs_path=p,
+        source=p.read_bytes(),
+        repo_root=tmp_path,
+        capture_statements=False,
+        statement_text_limit=1000,
+    )
+    rec = TypeScriptParser().parse_file(ctx)
+    assert "Avatar.vue" in rec.importFiles
+    assert "./Avatar.vue" not in rec.externalImports
+
+
+# --- barrel files (re-export indirection) -------------------------------------------------
+# A barrel re-exports symbols from sibling modules. The re-export source must become an edge
+# so the barrel is a real waypoint (consumer → barrel → definition), and `default as X` must
+# be recorded under the exported name X, not `default`.
+
+BARREL_FILES = {
+    "tsconfig.json": '{ "compilerOptions": { "baseUrl": ".", "paths": { "@/*": ["src/*"] } } }',
+    "src/components/Avatar.vue": "",
+    "src/components/UserCard.vue": "",
+    "src/components/Button.ts": "export const Button = 1;\n",
+    "src/components/index.ts":
+        "export { default as Avatar } from './Avatar.vue';\n"
+        "export { UserCard } from './UserCard.vue';\n"
+        "export * from './Button';\n"
+        "export { fmt } from 'some-lib';\n"      # external re-export
+        "const localOnly = 'hello';\nexport { localOnly };\n",  # NOT a re-export (no `from`)
+    "src/views/Home.ts": "import { Avatar, UserCard } from '@/components';\nexport const Home = 1;\n",
+}
+
+
+def test_barrel_reexport_sources_become_edges(tmp_path) -> None:
+    rec = _parse_repo(tmp_path, BARREL_FILES, "src/components/index.ts")
+    # every re-export SOURCE that resolves in-repo is an edge...
+    assert set(rec.importFiles) == {
+        "src/components/Avatar.vue",
+        "src/components/UserCard.vue",
+        "src/components/Button.ts",
+    }
+    # ...an external re-export source goes external, like a static import
+    assert "some-lib" in rec.externalImports
+    # `default as Avatar` is recorded as `Avatar`, not `default`
+    assert "Avatar" in rec.exports and "default" not in rec.exports
+    # a plain `export { localOnly }` (no `from`) must NOT create a phantom edge
+    assert not any("localOnly" in f for f in rec.importFiles + rec.externalImports)
+
+
+def test_barrel_consumer_reaches_definition(tmp_path) -> None:
+    # The consumer links to the barrel; combined with the barrel's edges that is a connected
+    # path Home.ts → index.ts → Avatar.vue (the graph is no longer a dead end).
+    consumer = _parse_repo(tmp_path, BARREL_FILES, "src/views/Home.ts")
+    assert "src/components/index.ts" in consumer.importFiles
+    barrel = _parse_repo(tmp_path, BARREL_FILES, "src/components/index.ts")
+    assert "src/components/Avatar.vue" in barrel.importFiles
+
+
+# --- wrapped client→backend API calls -----------------------------------------------------
+# The HTTP-client hint test keys off the callee NAME, so a wrapped axios instance
+# (arbitrary name) or a config-object wrapper call slips past it. Both should be recognised.
+
+def _api_calls(tmp_path, body: str) -> set[tuple[str, str]]:
+    p = tmp_path / "api.ts"
+    p.write_text(body)
+    ctx = ParseContext(
+        path="api.ts", abs_path=p, source=p.read_bytes(), repo_root=tmp_path,
+        capture_statements=True,
+    )
+    rec = TypeScriptParser().parse_file(ctx)
+    return {(s.method, s.endpoint) for s in rec.statements if s.semanticType == "api_call"}
+
+
+def test_wrapped_axios_instance_method_form(tmp_path) -> None:
+    # `const service = axios.create(...)` → calls on `service` are HTTP even though `service`
+    # is not a client-hint substring.
+    calls = _api_calls(
+        tmp_path,
+        "const service = axios.create({ baseURL: '/api' });\n"
+        "export const getUser = (id) => service.get(`/users/${id}`);\n",
+    )
+    assert ("GET", "/users/{id}") in calls
+
+
+def test_wrapped_config_object_form(tmp_path) -> None:
+    # `request({ url, method })` — the config-object shape is HTTP regardless of the callee.
+    calls = _api_calls(
+        tmp_path,
+        "import request from '@/utils/request';\n"
+        "export const login = (d) => request({ url: '/login', method: 'post', data: d });\n",
+    )
+    assert ("POST", "/login") in calls
+
+
+def test_direct_axios_still_detected(tmp_path) -> None:
+    # No regression: hinted callees keep matching.
+    assert ("GET", "/direct") in _api_calls(tmp_path, "export const raw = () => axios.get('/direct');\n")
+
+
+def test_wrapper_detection_no_false_positives(tmp_path) -> None:
+    # A router `{ path, component }` config is not an API call, and an interceptor
+    # registration (`.use`) is not an HTTP verb.
+    calls = _api_calls(
+        tmp_path,
+        "const service = axios.create({});\n"
+        "const routes = [{ path: '/home', component: Home }];\n"
+        "service.interceptors.request.use((c) => c);\n",
+    )
+    assert calls == set()
+
+
+# --- lazy / dynamic import() targets ------------------------------------------------------
+# A dynamic import() (lazy route page, defineAsyncComponent, await import) is a nested call,
+# not a top-level statement, so the static extractor never saw it. Its target should resolve
+# into the same file-level importFiles edge as a static import.
+
+DYNAMIC_IMPORT_FILES = {
+    "tsconfig.json": '{ "compilerOptions": { "baseUrl": ".", "paths": { "@/*": ["src/*"] } } }',
+    "views/UserDetail.vue": "",
+    "src/views/Reports.vue": "",
+    "chunks/Heavy.ts": "export const Heavy = 1;\n",
+    "app.ts":
+        "const UserDetail = defineAsyncComponent(() => import('./views/UserDetail.vue'));\n"
+        "const routes = [{ path: '/x', component: () => import('@/views/Reports.vue') }];\n"
+        "async function load() { return await import('./chunks/Heavy.ts'); }\n"
+        "const computed = (n) => import('./views/' + n);\n"   # computed → unresolved
+        "const ext = () => import('lodash-es');\n",           # external package
+}
+
+
+def test_dynamic_imports_resolve_to_import_files(tmp_path) -> None:
+    rec = _parse_repo(tmp_path, DYNAMIC_IMPORT_FILES, "app.ts")
+    # relative .vue (defineAsyncComponent), aliased .vue (lazy route), relative .ts (await)
+    assert "views/UserDetail.vue" in rec.importFiles
+    assert "src/views/Reports.vue" in rec.importFiles      # @/ alias resolved
+    assert "chunks/Heavy.ts" in rec.importFiles
+    # an external package dynamic import goes external, like a static one
+    assert "lodash-es" in rec.externalImports
+    # a computed specifier ('./views/' + n) can't resolve → left out entirely (honest-null)
+    assert not any("computed" in f or f.endswith("/views/") for f in rec.importFiles)
+
+
+# --- export-name capture for const / default forms ----------------------------------------
+# `export const X = …` and `export default …` were missing from `exports` (only
+# function/class declarations and `export { … }` specifiers were captured).
+
+def test_exports_capture_const_and_default(tmp_path) -> None:
+    p = tmp_path / "e.ts"
+    p.write_text(
+        "export const X = defineComponent({ setup(){ const nested = 1 } });\n"  # nested local
+        "export const plain = 1;\n"                            # const = literal
+        "export const arrowFn = () => {};\n"                   # const = arrow (a captured fn)
+        "export function decl() {}\n"                          # function decl (already worked)
+        "export class C {}\n"                                  # class decl (already worked)
+        "export default foo;\n"                                # default export
+        "const a = 1, b = 2;\nexport { a, b };\n"              # specifier list (already worked)
+        "export const { p, q } = obj;\n"                       # destructuring → skipped
+    )
+    ctx = ParseContext(
+        path="e.ts", abs_path=p, source=p.read_bytes(), repo_root=tmp_path,
+        capture_statements=False, statement_text_limit=1000,
+    )
+    exports = set(TypeScriptParser().parse_file(ctx).exports)
+    # newly captured
+    assert {"X", "plain", "arrowFn", "default"} <= exports
+    # still captured
+    assert {"decl", "C", "a", "b"} <= exports
+    # destructuring pattern names are not emitted (honest-null, no pattern text)
+    assert "p" not in exports and "q" not in exports
+    # a local const inside the exported value's body must NOT leak into exports
+    assert "nested" not in exports
+
+
+def test_enum_members_captured_as_statements(tmp_path) -> None:
+    # Every enum member is a flat statement parented to the enum Class. nodeType stays the raw
+    # grammar type (valued → enum_assignment, bare → property_identifier) and text stays literal
+    # source; semanticType="enum_member" is the uniform, cross-language role marker.
+    src = b"enum Cat { Internal = -1, Unhandled = 0, GraphQL, Network }\n"
+    p = tmp_path / "r.ts"
+    p.write_bytes(src)
+    ctx = ParseContext(path="r.ts", abs_path=p, source=src, repo_root=tmp_path,
+                       capture_statements=True)
+    rec = TypeScriptParser().parse_file(ctx)
+    cat = next(c for c in rec.classes if c.type == "enum")
+    members = [(s.name, s.text, s.nodeType, s.semanticType) for s in rec.statements
+               if s.parentId == cat.id]
+    assert members == [
+        ("Internal", "Internal = -1", "enum_assignment", "enum_member"),
+        ("Unhandled", "Unhandled = 0", "enum_assignment", "enum_member"),
+        ("GraphQL", "GraphQL", "property_identifier", "enum_member"),  # bare: honest raw type + text
+        ("Network", "Network", "property_identifier", "enum_member"),
+    ]
+    # A single semanticType filter finds every member regardless of the split nodeType.
+    assert len([s for s in rec.statements if s.semanticType == "enum_member"]) == 4
+    ctx2 = ParseContext(path="r.ts", abs_path=p, source=src, repo_root=tmp_path,
+                        capture_statements=False)
+    assert TypeScriptParser().parse_file(ctx2).statements == []
+
+
+def test_interface_members_captured(tmp_path) -> None:
+    # An interface's members mirror an implementing class: a method signature becomes a
+    # Function (no body → calls:[]) so callers resolve to implementers via IMPLEMENTS +
+    # name match. Every other member — the data field and the type-level call/construct/
+    # index signatures — becomes a flat Statement (raw nodeType + full text), gated by
+    # --capture-statements. Nothing is dropped; the nameless signatures carry name=None.
+    src = (
+        b"export interface Notifier {\n"
+        b"  channel: string;\n"
+        b"  readonly retries: number;\n"
+        b"  send(message: string): Promise<boolean>;\n"
+        b"  (x: number): void;\n"
+        b"  new (id: string): Notifier;\n"
+        b"  [key: string]: unknown;\n"
+        b"}\n"
+    )
+    p = tmp_path / "n.ts"
+    p.write_bytes(src)
+    ctx = ParseContext(path="n.ts", abs_path=p, source=src, repo_root=tmp_path,
+                       capture_statements=True)
+    rec = TypeScriptParser().parse_file(ctx)
+    iface = next(c for c in rec.classes if c.type == "interface")
+    fns = [f for f in rec.functions if f.parentId == iface.id]
+    assert len(fns) == 1
+    send = fns[0]
+    assert send.name == "send" and send.type == "method"
+    assert [(p_.name, p_.type) for p_ in send.params] == [("message", "string")]
+    assert send.returnType == "Promise<boolean>"
+    assert send.calls == []  # signature has no body
+    members = [(s.nodeType, s.name, s.text) for s in rec.statements
+               if s.parentId == iface.id and s.nodeType != "comment"]
+    assert members == [
+        ("property_signature", "channel", "channel: string"),
+        ("property_signature", "retries", "readonly retries: number"),
+        ("call_signature", None, "(x: number): void"),
+        ("construct_signature", None, "new (id: string): Notifier"),
+        ("index_signature", "key", "[key: string]: unknown"),
+    ]
+    # capture off → no member statements, but the method Function is still emitted
+    off = TypeScriptParser().parse_file(
+        ParseContext(path="n.ts", abs_path=p, source=src, repo_root=tmp_path)
+    )
+    assert off.statements == []
+    assert any(f.name == "send" for f in off.functions)
+
+
+def test_class_method_overloads_not_duplicated(tmp_path) -> None:
+    # Regression guard for the interface change: a class body's overload signatures are
+    # `method_signature` nodes too, but they are redundant with the implementation's
+    # method_definition and must NOT each spawn a duplicate Function.
+    src = (
+        b"export class C {\n"
+        b"  foo(a: string): void;\n"
+        b"  foo(a: number): void;\n"
+        b"  foo(a: unknown): void { return; }\n"
+        b"}\n"
+    )
+    p = tmp_path / "c.ts"
+    p.write_bytes(src)
+    rec = TypeScriptParser().parse_file(
+        ParseContext(path="c.ts", abs_path=p, source=src, repo_root=tmp_path,
+                     capture_statements=True)
+    )
+    assert [f.name for f in rec.functions] == ["foo"]  # only the implementation
+
+
+# --- Express router-factory mount join ------------------------------------------------------
+# A factory (`() => { const r = Router(); r.get('/:id'); return r }`) is mounted elsewhere with
+# `app.use('/users', factory())`. The base path and the routes live in different files, so the
+# join resolves through the repo index (TsAliasIndex.express_mounts): the factory's own routes
+# are recorded at their real served URL, not the bare router-local path.
+
+def _express_routes(rec) -> dict:
+    return {s.endpoint: s for s in rec.statements if s.semanticType == "route"}
+
+
+def _factory_default(local: str, verb: str = "get") -> str:
+    return (
+        "import { Router, Request, Response } from 'express';\n"
+        "const factory = () => {\n"
+        "  const route = Router();\n"
+        f"  route.{verb}('{local}', (req: Request, res: Response) => res.end());\n"
+        "  return route;\n"
+        "};\n"
+        "export default factory;\n"
+    )
+
+
+def _factory_named(name: str, local: str, verb: str = "post") -> str:
+    return (
+        "import { Router, Request, Response } from 'express';\n"
+        f"export const {name} = () => {{\n"
+        "  const route = Router();\n"
+        f"  route.{verb}('{local}', (req: Request, res: Response) => res.end());\n"
+        "  return route;\n"
+        "};\n"
+    )
+
+
+def test_express_mount_join_default_export(tmp_path) -> None:
+    # `app.use('/users', usersRouter())` where usersRouter is a DEFAULT export in another file →
+    # the factory's `route.get('/:id')` is recorded as GET /users/:id.
+    rec = _parse_repo(
+        tmp_path,
+        {
+            "server.ts": "import express from 'express';\n"
+            "import usersRouter from './routes/users-router';\n"
+            "const app = express();\n"
+            "app.use('/users', usersRouter());\n",
+            "routes/users-router.ts": _factory_default("/:id"),
+        },
+        "routes/users-router.ts",
+    )
+    routes = _express_routes(rec)
+    assert "/users/:id" in routes, routes.keys()
+    assert "/:id" not in routes  # the bare local path is replaced, not duplicated
+    assert routes["/users/:id"].method == "GET"
+    assert routes["/users/:id"].framework == "express"
+    assert routes["/users/:id"].routeKind == "route"
+
+
+def test_express_mount_join_named_export_and_middleware(tmp_path) -> None:
+    # Named-export factory, mounted with auth/rate-limit middleware around it (the real-world
+    # form): `app.use('/orders', auth.check(), ordersRouter(), rateLimit)`. Only the bare
+    # imported factory call is the mount target — the member call and the bare reference are not.
+    rec = _parse_repo(
+        tmp_path,
+        {
+            "server.ts": "import express from 'express';\n"
+            "import { auth } from './auth';\n"
+            "import { ordersRouter } from './routes/orders-router';\n"
+            "import { rateLimit } from './mw';\n"
+            "const app = express();\n"
+            "app.use('/orders', auth.check(), ordersRouter(), rateLimit);\n",
+            "routes/orders-router.ts": _factory_named("ordersRouter", "/"),
+        },
+        "routes/orders-router.ts",
+    )
+    routes = _express_routes(rec)
+    # base '/orders' + local '/' → '/orders'
+    assert "/orders" in routes, routes.keys()
+    assert routes["/orders"].method == "POST"
+
+
+def test_express_mount_join_root_base_and_root_local(tmp_path) -> None:
+    # `app.use('/', homeRouter())` + `route.get('/')` → '/' (no doubled slash).
+    rec = _parse_repo(
+        tmp_path,
+        {
+            "server.ts": "import express from 'express';\n"
+            "import homeRouter from './home-router';\n"
+            "const app = express();\n"
+            "app.use('/', homeRouter());\n",
+            "home-router.ts": _factory_default("/"),
+        },
+        "home-router.ts",
+    )
+    routes = _express_routes(rec)
+    assert set(routes) == {"/"}
+
+
+def test_express_mount_join_ambiguous_is_honest_null(tmp_path) -> None:
+    # Same factory mounted at two DIFFERENT bases in two non-fixture files → ambiguous → the
+    # factory keeps its own bare path (never wrongly attributed to one base).
+    rec = _parse_repo(
+        tmp_path,
+        {
+            "server-a.ts": "import express from 'express';\n"
+            "import shared from './shared-router';\n"
+            "const app = express();\napp.use('/a', shared());\n",
+            "server-b.ts": "import express from 'express';\n"
+            "import shared from './shared-router';\n"
+            "const app = express();\napp.use('/b', shared());\n",
+            "shared-router.ts": _factory_default("/x"),
+        },
+        "shared-router.ts",
+    )
+    routes = _express_routes(rec)
+    assert "/x" in routes
+    assert "/a/x" not in routes and "/b/x" not in routes
+
+
+def test_express_mount_join_ignores_fixture_mount(tmp_path) -> None:
+    # A test/spec that mounts the factory at a throwaway base must NOT make the real prefix
+    # ambiguous: server.ts mounts at '/orders', the .spec mounts at '/', and '/orders' wins.
+    rec = _parse_repo(
+        tmp_path,
+        {
+            "server.ts": "import express from 'express';\n"
+            "import { ordersRouter } from './routes/orders-router';\n"
+            "const app = express();\napp.use('/orders', ordersRouter());\n",
+            "routes/orders-router.spec.ts": "import express from 'express';\n"
+            "import { ordersRouter } from './orders-router';\n"
+            "const app = express();\napp.use('/', ordersRouter());\n",
+            "routes/orders-router.ts": _factory_named("ordersRouter", "/y"),
+        },
+        "routes/orders-router.ts",
+    )
+    routes = _express_routes(rec)
+    assert "/orders/y" in routes, routes.keys()
+    assert "/y" not in routes
+
+
+def test_express_no_index_leaves_local_path(tmp_path) -> None:
+    # Backstop: a factory file parsed with no repo index (resolution_index=None) keeps its bare
+    # local path — the join is purely additive and never fabricates a base.
+    p = tmp_path / "solo-router.ts"
+    p.write_text(_factory_default("/list"))
+    ctx = ParseContext(
+        path="solo-router.ts", abs_path=p, source=p.read_bytes(), repo_root=tmp_path,
+        capture_statements=True, resolution_index=None,
+    )
+    rec = TypeScriptParser().parse_file(ctx)
+    routes = _express_routes(rec)
+    assert "/list" in routes
+
+
+# --- Express guards + handler on the mount chain --------------------------------------------
+# `app.use('/orders', Auth.check(), ordersRouter(), rateLimit)` — the mounted router is the
+# handler; the surrounding auth/rate-limit middleware are guards (so a "protected route" query
+# no longer sees an empty `guards` and reports it as open).
+
+def test_express_mount_guards_and_handler(tmp_path) -> None:
+    rec = _parse_repo(
+        tmp_path,
+        {
+            "server.ts": "import express from 'express';\n"
+            "import { Auth } from './auth';\n"
+            "import { ordersRouter } from './routes/orders-router';\n"
+            "import { rateLimit } from './mw';\n"
+            "const app = express();\n"
+            "app.use('/orders', Auth.check(), ordersRouter(), rateLimit);\n",
+            "routes/orders-router.ts": _factory_named("ordersRouter", "/"),
+            "auth.ts": "export const Auth = { check: () => (q: any,s: any,n: any)=>n() };\n",
+            "mw.ts": "export const rateLimit = (q: any,s: any,n: any)=>n();\n",
+        },
+        "server.ts",
+    )
+    mount = next(s for s in rec.statements
+                 if s.semanticType == "route" and s.routeKind == "mount" and s.endpoint == "/orders")
+    assert mount.handler == "ordersRouter"  # the mounted router, not the trailing guard
+    assert mount.guards == ["Auth.check", "rateLimit"]
+    assert mount.authRequired is True
+
+
+def test_express_verb_route_guards(tmp_path) -> None:
+    # `router.get('/items/:id', requireAuth, getItem)` — the last arg is the handler, the
+    # middleware before it are guards.
+    rec = _parse_repo(
+        tmp_path,
+        {
+            "r.ts": "import { Router } from 'express';\n"
+            "import { requireAuth } from './auth';\n"
+            "import { getItem } from './h';\n"
+            "const router = Router();\n"
+            "router.get('/items/:id', requireAuth, getItem);\n",
+            "auth.ts": "export const requireAuth = (q: any,s: any,n: any)=>n();\n",
+            "h.ts": "export const getItem = (q: any,s: any)=>s.end();\n",
+        },
+        "r.ts",
+    )
+    route = next(s for s in rec.statements if s.semanticType == "route" and s.endpoint == "/items/:id")
+    assert route.handler == "getItem"
+    assert route.guards == ["requireAuth"]
+    assert route.authRequired is True
+
+
+def test_express_route_no_guards_is_unknown_not_open(tmp_path) -> None:
+    # No route-level middleware → guards None and authRequired None (unknown), never False —
+    # app-level auth may still protect it (honest-null). Handler still resolves.
+    rec = _parse_repo(
+        tmp_path,
+        {
+            "server.ts": "import express from 'express';\n"
+            "import healthRouter from './routes/health-router';\n"
+            "const app = express();\napp.use('/health', healthRouter());\n",
+            "routes/health-router.ts": _factory_default("/"),
+        },
+        "server.ts",
+    )
+    mount = next(s for s in rec.statements
+                 if s.semanticType == "route" and s.routeKind == "mount" and s.endpoint == "/health")
+    assert mount.handler == "healthRouter"  # resolved handler
+    assert mount.guards is None
+    assert mount.authRequired is None  # not False

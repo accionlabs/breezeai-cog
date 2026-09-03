@@ -18,16 +18,20 @@ Python reimplementation of `breezeai-code-ontology-generator`.
 
 | Language | Extensions | Framework / detector support |
 |---|---|---|
-| TypeScript / JavaScript | `.ts .tsx .mts .cts .js .jsx .mjs .cjs` | NestJS, Angular, Express, React, Next.js (App + Pages Router API routes), LoopBack, GraphQL; AWS SNS/SQS/EventBridge/Lambda (additive) |
+| TypeScript / JavaScript | `.ts .tsx .mts .cts .js .jsx .mjs .cjs` | NestJS (& routing-controllers), Angular, Express, React, Vue, Next.js (App + Pages Router API routes), LoopBack, GraphQL (schema-first + code-first + an in-house resolver framework, server + client ops); AWS SNS/SQS/EventBridge/Lambda/S3/SES/CloudFront/Kinesis/DynamoDB/API Gateway (additive); HubSpot/Chargebee/Salesforce SDKs (additive) |
 | Python | `.py` | FastAPI |
 | Java | `.java` | Spring Boot, JAX-RS, Vert.x |
-| C# | `.cs` | ASP.NET, GraphQL (graphql-dotnet) |
+| C# | `.cs .asmx .svc` | ASP.NET (MVC / Web API / Minimal API / Web Forms), WCF / ASMX (SOAP), .NET ServiceHost, GraphQL (graphql-dotnet) |
 | VB.NET | `.vb` | ASP.NET |
-| Groovy † | `.groovy` | — |
-| Config | `package.json`, `tsconfig`, `Dockerfile`, `docker-compose`, `pom.xml`, `requirements.txt`, `build.gradle`, … | — |
+| Kotlin | `.kt` | Ktor |
+| C++ | `.cpp .cc .cxx .c++ .hpp .h .hh .hxx .inl .ipp` | — |
+| Groovy † | `.groovy` | Vert.x |
+| Prisma | `.prisma` | Prisma Schema Language — `model` → `data_model` entity, `enum` / `datasource` / `generator` blocks (full body on `text`) |
+| Structured JSON / data | `.json` (+ YAML/TOML config) | Whole-document capture as a TOON `structured_data` statement |
+| Config | `package.json`, `tsconfig`, `Dockerfile`, `docker-compose`, `pom.xml`, `requirements.txt`, `build.gradle`, `.csproj` / `.vbproj` / `.sln`, `Makefile`, … | — |
 
 † **Groovy is best-effort / second-tier.** It reliably captures the package / import /
-class / method / field / enum skeleton, but the grammar
+class / interface / enum / trait / method / field skeleton, but the grammar
 ([dekobon-tree-sitter-groovy](https://pypi.org/project/dekobon-tree-sitter-groovy/)) degrades
 on some expression bodies (named-argument commas, parenthesised enum constants) and does not
 parse **nested type declarations** (a `class`/`enum` inside a class body). Degradation is

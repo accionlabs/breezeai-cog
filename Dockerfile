@@ -4,6 +4,16 @@ FROM python:3.13-slim AS builder
 # Install uv for dependency management
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
 
+# Build-time system deps for `uv sync`:
+#  - git + ca-certificates: dekobon-tree-sitter-groovy is a git+https direct
+#    reference (see pyproject.toml), which uv fetches via `git clone`.
+#  - build-essential: that grammar is a tree-sitter C binding compiled from
+#    source (gcc/make), not a pure-Python wheel.
+# All of this stays in the builder stage — none lands in the production image.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends git ca-certificates build-essential \
+    && rm -rf /var/lib/apt/lists/*
+
 WORKDIR /app
 
 # Copy only dependency files first for better caching

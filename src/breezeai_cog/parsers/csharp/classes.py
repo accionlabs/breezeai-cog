@@ -8,8 +8,10 @@ from tree_sitter import Node
 from ...emit import class_id, disambiguate
 from ...schemas import Class, ConstructorParam, Function, Statement
 from ..callresolve import CallResolver, noop_resolver
+from ..statements_common import emit_enum_members
 from ..treesitter import line_span, node_text
-from .functions import build_method, extract_attributes, extract_params, flags
+from .attributes import extract_attributes
+from .functions import build_method, extract_params, flags
 from .statements import extract_statements
 
 _TYPE = {
@@ -94,6 +96,18 @@ def build_class(
                         ConstructorParam(name=p.name, type=p.type)
                         for p in extract_params(member.child_by_field_name("parameters"), source)
                     ]
+
+    # Enum members become flat statements parented to the enum Class (their `text` is
+    # queryable); `enum_member_declaration` is otherwise captured nowhere (it is not a
+    # field_declaration). Gated by --capture-statements like every other statement.
+    if capture and node.type == "enum_declaration" and body is not None:
+        statements.extend(
+            emit_enum_members(
+                body, source, path,
+                member_types={"enum_member_declaration"}, parent_id=cid, limit=limit,
+                seen_ids=seen_ids,
+            )
+        )
 
     cls = Class(
         id=cid,

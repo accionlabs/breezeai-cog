@@ -23,16 +23,24 @@ from ..callresolve import make_resolver
 from .aws_events import detect_aws_events
 from ..detection.sdk_calls import detect_sdk_calls
 from ..typescript_express.routes import detect_express
+from .decorators import extract_decorators
 from .functions import (
     build_function,
     collect_nested_functions,
     defined_names,
-    extract_decorators,
     type_map,
 )
+from ..statements_common import reset_http_client_ids, set_http_client_ids
 from .imports import TsAliasIndex, build_ts_index, extract_imports
-from .mappings import FRAMEWORKS, STATEMENT_TYPES
-from .statements import extract_statements
+from ..comments_common import comment_statements_for
+from .mappings import (
+    COMMENT_TYPES,
+    CONTROL_FLOW,
+    FRAMEWORKS,
+    JS_BUILTIN_METHODS,
+    STATEMENT_TYPES,
+)
+from .statements import collect_http_client_ids, extract_statements
 
 _DECLS = (
     "class_declaration",
@@ -53,7 +61,7 @@ _TSX_EXT = (".tsx", ".jsx")
 _JS_EXT = (".js", ".jsx", ".mjs", ".cjs")
 #: JS/TS route-only fixture markers, layered on top of the global set (base.py). Storybook
 #: stories (not covered by the universal test-file ignores) + Cypress/Playwright specs.
-_TS_FIXTURE_MARKERS = (".stories.", ".cy.", ".e2e.")
+_TS_FIXTURE_MARKERS = (".stories.", ".cy.", ".e2e.", ".mock.")
 
 
 _FUNC_VALUES = ("arrow_function", "function_expression")
@@ -93,7 +101,7 @@ def _member_name(key: Node, source: bytes) -> str:
 
 class TypeScriptParser(BaseParser):
     name = "typescript"
-    extensions = (".ts", ".tsx", ".mts", ".cts", ".js", ".jsx", ".mjs", ".cjs")
+    extensions: tuple[str, ...] = (".ts", ".tsx", ".mts", ".cts", ".js", ".jsx", ".mjs", ".cjs")
     schema_version = SCHEMA_VERSION
     statement_types = STATEMENT_TYPES
     frameworks = FRAMEWORKS
@@ -116,10 +124,21 @@ class TypeScriptParser(BaseParser):
         return self.extract(root, ctx)
 
     def extract(self, root: Node, ctx: ParseContext) -> FileRecord:
+        # Collect the per-file wrapped-HTTP-client names and make them available to the shared
+        # statement classifier for the duration of this file's extraction, resetting in a
+        # finally so the value never leaks into the next file a reused worker handles.
+        ids = collect_http_client_ids(root, ctx.source) if ctx.capture_statements else frozenset()
+        token = set_http_client_ids(ids)
+        try:
+            return self._extract(root, ctx)
+        finally:
+            reset_http_client_ids(token)
+
+    def _extract(self, root: Node, ctx: ParseContext) -> FileRecord:
         source, path = ctx.source, ctx.path
         fid = file_id(path)
         seen_ids: set[str] = set()
-        capture, limit = ctx.capture_statements, ctx.text_truncation_limit
+        capture, limit = ctx.capture_statements, ctx.statement_text_limit
 
         internal, external, exports, bindings = extract_imports(
             root, source, path, ctx.repo_root, ctx.resolution_index
@@ -130,6 +149,7 @@ class TypeScriptParser(BaseParser):
             path,
             type_map(root, source),
             heritage=getattr(ctx.resolution_index, "class_heritage", None),
+            builtin_methods=JS_BUILTIN_METHODS,
         )
         functions: list[Function] = []
         classes = []
@@ -193,6 +213,15 @@ class TypeScriptParser(BaseParser):
             )
         )
 
+        if capture:
+            statements.extend(
+                comment_statements_for(
+                    root, source, path, file_id=fid, functions=functions, classes=classes,
+                    statements=statements, control_flow=CONTROL_FLOW,
+                    comment_types=COMMENT_TYPES, limit=limit, seen_ids=seen_ids,
+                )
+            )
+
         record = FileRecord(
             id=fid,
             path=path,
@@ -211,10 +240,14 @@ class TypeScriptParser(BaseParser):
         # it also fires in files owned by another framework). Each detector self-guards on a
         # cheap marker. A more-specific framework label set by a subclass afterwards wins.
         if capture:
-            if not self.is_fixture_file(path) and detect_express(root, source, path, record):
+            if not self.is_fixture_file(path) and detect_express(
+                root, source, path, record, ctx.resolution_index, bindings
+            ):
                 if record.framework is None:
                     record.framework = "express"
-            aws_fw = detect_aws_events(root, source, path, record)
+            aws_fw = detect_aws_events(
+                root, source, path, record, is_fixture=self.is_fixture_file(path)
+            )
             if aws_fw and record.framework is None:
                 record.framework = aws_fw
             sdk_fw = detect_sdk_calls(
@@ -235,6 +268,22 @@ class TypeScriptParser(BaseParser):
             ):
                 if record.framework is None:
                     record.framework = "graphql"
+            # Vue route configs are plain-data {path, component} arrays that often live in a
+            # file importing nothing from vue-router (a default-export array, a router/modules/*
+            # fragment), so — unlike React/Angular — they can't be caught by a claims-gated
+            # parser and must be detected additively here. Self-guards structurally on the array
+            # shape; defers to Angular/React. Deferred import: typescript_vue subclasses this
+            # module (would cycle at import time).
+            from ..typescript_vue.routes import detect_vue_routes
+
+            if not self.is_fixture_file(path):
+                vue_routes = detect_vue_routes(
+                    root, source, path, seen_ids={s.id for s in record.statements}
+                )
+                if vue_routes:
+                    record.statements.extend(vue_routes)
+                    if record.framework is None:
+                        record.framework = "vue"
         return record
 
     def _handle(

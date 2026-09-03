@@ -1,12 +1,19 @@
 """VertxParser — a Java framework parser. Selected (one parser per file) over JavaParser
-when ``claims`` finds an ``io.vertx`` import; reuses ``JavaParser.extract`` (single parse),
+when ``claims`` finds a Vert.x import; reuses ``JavaParser.extract`` (single parse),
 then detects Vert.x event/messaging/route statements. Like all route/event detection,
-gated by ``--capture-statements``."""
+gated by ``--capture-statements``.
+
+Both Vert.x package roots are recognised: ``io.vertx`` (Vert.x 3.x+) and ``org.vertx.java``
+(Vert.x 2.x). Without the 2.x root a 2.x verticle fell through to the plain ``JavaParser``
+and its EventBus wiring was never detected (``framework=null``)."""
 
 from __future__ import annotations
 
 from ...schemas import FileRecord
 from ..base import ParseContext
+from ..constfold import resolve_all
+from ..java.constants import collect_constants
+from ..java.imports import JavaIndex
 from ..java.parser import JavaParser
 from ..treesitter import parse_source
 from .events import detect_vertx
@@ -18,12 +25,15 @@ class VertxParser(JavaParser):
     frameworks = ["vertx"]
 
     def claims(self, path: str, source: bytes) -> bool:
-        return b"io.vertx" in source
+        return b"io.vertx" in source or b"org.vertx" in source
 
     def parse_file(self, ctx: ParseContext) -> FileRecord:
         root = parse_source("java", ctx.source, ctx.parse_timeout_micros).root_node
         record = self.extract(root, ctx)  # inherited Java extraction (one parse)
         if ctx.capture_statements:  # events/routes are statements — gated by --capture-statements
-            if detect_vertx(root, ctx.source, ctx.path, record):
+            idx = ctx.resolution_index
+            cross = idx.consts if isinstance(idx, JavaIndex) else {}  # repo-wide constants
+            consts = resolve_all(collect_constants(root, ctx.source), base=cross)
+            if detect_vertx(root, ctx.source, ctx.path, record, consts):
                 record.framework = "vertx"
         return record

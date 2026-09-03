@@ -9,15 +9,19 @@ That structured map is called a **code ontology**. `breezeai-cog` is the first s
 system: it generates the ontology, a separate Breeze backend loads it into a graph database, and
 tools query it. This guide only covers the generator — the part you run against your code.
 
-**What it understands today:**
-- **Languages:** Python, TypeScript/JavaScript, Java.
-- **Frameworks** (route detection on top of those languages): FastAPI (Python), NestJS & Angular
-  (TypeScript), Spring Boot (Java).
+**What it understands today** (run `breezeai-cog capabilities` for the authoritative, live list):
+- **Languages:** TypeScript/JavaScript, Python, Java, C#, VB.NET, Kotlin, Groovy, and C++.
+- **Frameworks** (route/event detection on top of those languages): FastAPI (Python); NestJS,
+  Angular, Express, React, Vue, Next.js, LoopBack, and GraphQL (TypeScript); Spring Boot, JAX-RS,
+  and Vert.x (Java); ASP.NET, Web Forms, WCF/ASMX, and GraphQL (C#); ASP.NET (VB.NET); Ktor
+  (Kotlin); Vert.x (Groovy). Cross-cutting SDK detectors (AWS messaging, HubSpot, Chargebee,
+  Salesforce) layer on top additively.
 - **Database/search schemas:** SQL DDL files and Elasticsearch mappings (via the HTTP service).
-- **Config files:** `package.json`, `tsconfig.json`, `Dockerfile`, `docker-compose.yml`, `pom.xml`,
-  `build.gradle`, `pyproject.toml`, `requirements.txt`, `Pipfile`, `.ini`/`.toml`/`.xml`/`.yaml`, and
-  more — parsed into structured `metadata` (dependencies, scripts, images/ports, …) and summarized in
-  `projectMetaData.configs`.
+- **Config & structured data:** `package.json`, `tsconfig.json`, `Dockerfile`, `docker-compose.yml`,
+  `pom.xml`, `build.gradle`, `pyproject.toml`, `requirements.txt`, `Pipfile`, `.csproj`/`.vbproj`/`.sln`,
+  `.ini`/`.toml`/`.xml`/`.yaml`, and more — parsed into structured `metadata` (dependencies, scripts,
+  images/ports, …) and summarized in `projectMetaData.configs`. Standalone JSON/data documents are
+  also captured whole as a compact `structured_data` statement.
 
 It does **not** run or execute your code — it only reads and parses the source text, so it's safe to
 point at any repository.
@@ -115,13 +119,31 @@ uvx --from git+https://github.com/accionlabs/breezeai-cog breezeai-cog repo-to-j
 ```
 
 - `--repo .` — the directory to analyze (`.` means "here").
-- `--out ./out` — the **output directory**. The tool creates a file inside it named
-  `<repo-name>-project-analysis.ndjson.gz`.
+- `--out ./out` — the **output directory** for the export. The tool creates a file inside it named
+  `<repo-name>-project-analysis.ndjson.gz`. Optional — see *Where artifacts go* below.
 
 While it runs in an interactive terminal, a live progress bar shows files parsed out of the total,
 with elapsed time. (The bar is automatically suppressed when output is piped or redirected, and when
 `--verbose` is on.) When it finishes, it prints a one-line summary (files / functions / classes
 found) and the path to the output file.
+
+### Where artifacts go
+
+By default every artifact a run produces lands in a single **`.cog/` directory at the repo root**:
+
+```
+<repo>/.cog/
+├── <repo>-project-analysis.ndjson.gz   # the export
+├── <repo>-skipped-report.json          # what was skipped and why
+└── logs/                               # dated run logs
+```
+
+`--out <dir>` redirects **only** the `.ndjson.gz` export; the skip report and logs always stay in
+`<repo>/.cog/`. In `--batch` mode each sub-project gets its own `<sub>/.cog/`.
+
+`.cog/` holds generated output you normally don't want to commit — if the repo has a `.gitignore`
+that doesn't already ignore it, the run prints a one-line reminder to add `.cog/`. (The tool never
+edits your `.gitignore` itself, and it always skips a `.cog/` directory when scanning.)
 
 ---
 
@@ -142,14 +164,20 @@ found) and the path to the output file.
 | Option | Default | Description |
 |---|---|---|
 | `--repo <dir>` | *(required)* | The folder to analyze. |
-| `--out <dir>` | the repo's parent folder | Output **directory** (not a filename). The file is named `<repo>-project-analysis.ndjson.gz`. |
+| `--out <dir>` | `<repo>/.cog` | Output **directory** for the export only (not a filename). The file is named `<repo>-project-analysis.ndjson.gz`. The skip report and logs always go to `<repo>/.cog`. |
 | `--language <name>` | all (auto-detected) | Only analyze this language. Repeat the flag for several (e.g. `--language python --language java`). |
 | `--capture-statements` | off | Also record statements *inside* functions — needed to detect API calls, DB queries, and routes. Off by default because it produces more data. |
+| `--batch` | off | Treat `--repo` as a **workspace folder** and analyze each immediate subdirectory as its own project (one `.ndjson.gz` per subdir). See *Batch mode* below. |
+| `--repo-list <file>` | all subdirs | With `--batch`: a file of immediate-subdirectory **names** (one per line; `#` comments and blank lines ignored) to restrict the run to. |
 | `--jobs <n>` | number of CPU cores | How many files to parse in parallel. |
 | `--upload` | off | After analysis, upload the `.ndjson.gz` to the Breeze backend (`POST /code-ontology/generate`). Requires `--baseurl`, `--uuid`, and `--user-api-key` (each also readable from the environment). |
 | `--baseurl <url>` | env `BREEZE_API_URL` | Breeze backend base URL (used with `--upload`). |
 | `--uuid <uuid>` | — | Project UUID to upload into (used with `--upload`). |
 | `--user-api-key <key>` | env `API_KEY` | Backend API key, sent as the `api-key` header (used with `--upload`). |
+| `--upload-timeout <secs>` | `900` (15 min) | Per-repo timeout — caps **both** the upload request **and** the wait for the backend to finish processing (reach `active`); the repo fails past this. Env `BREEZEAI_COG_UPLOAD_TIMEOUT`. |
+| `--parallel-uploads <n>` | `1` | How many repos to upload concurrently in `--batch`. Env `BREEZEAI_COG_UPLOAD_PARALLELISM`. |
+| `--upload-max-retries <n>` | `1` | Retries after a failed upload (total attempts = retries + 1). Only transient failures — network / timeout / HTTP 5xx — retry; a 4xx is fatal. Env `BREEZEAI_COG_UPLOAD_MAX_RETRIES`. |
+| `--force` | off | With `--batch --upload`: ignore any saved resume state and re-upload every selected project from scratch. |
 | `--verbose` | off | Print detailed (debug) logs: per-file parse results, each skipped file with its reason (`ignored` / `unsupported` / `oversized`), and index-build timing. |
 
 Every run — even without `--verbose` — ends with a one-line summary showing files **found** vs
@@ -186,12 +214,78 @@ breezeai-cog repo-to-json-tree --repo . --capture-statements \
 
 With `--upload`, the run analyzes as usual, writes the `.ndjson.gz`, then POSTs it as
 `multipart/form-data` to `POST /code-ontology/generate` (the backend streams it to S3 and
-starts ingestion). Transient network / 5xx failures get a bounded retry; a 4xx or exhausted
-retries exits non-zero. `--baseurl` and `--user-api-key` fall back to the `BREEZE_API_URL`
-and `API_KEY` environment variables (or `.env`), so you can keep secrets out of the command line.
+starts ingestion). Each upload is capped at `--upload-timeout` seconds (default 15 min);
+transient network / timeout / 5xx failures retry up to `--upload-max-retries` times (default
+1); a 4xx or exhausted retries exits non-zero. Progress shows one overall bar
+(`uploaded/total` + total elapsed) with a line per concurrently-uploading repo below it:
+
+```
+Uploading  ━━━━━━━━━━╺━━━━━━━━━  1/12 [01:12:59]
+  repo-1 [05:12] . attempt 1
+  repo-2 [08:11] . attempt 2
+```
+
+The raw backend response is written to the `.cog/logs` log file instead of the console.
+`--baseurl` and
+`--user-api-key` fall back to the `BREEZE_API_URL` and `API_KEY` environment variables (or
+`.env`), so you can keep secrets out of the command line.
 
 > This command only reads **local** folders. To analyze a remote repository by cloning or diffing
 > commits, use the HTTP service's `/api/analyze-diff` endpoint (below).
+
+### Batch mode
+
+When you have several repositories side by side under one **workspace folder**, `--batch` analyzes
+them all in a single command instead of one run each. Point `--repo` at the workspace and the tool
+treats **each immediate subdirectory as its own project**, writing one `.ndjson.gz` per subdirectory.
+
+```
+workspace/            ← point --repo here, with --batch
+├── service-a/        → service-a-project-analysis.ndjson.gz
+├── service-b/        → service-b-project-analysis.ndjson.gz
+└── shared-lib/       → shared-lib-project-analysis.ndjson.gz
+```
+
+```bash
+breezeai-cog repo-to-json-tree --repo ./workspace --batch --capture-statements --out ./out
+```
+
+- Only **immediate** subdirectories are analyzed — the tool does not recurse into deeper nesting.
+- **Dot-directories** (e.g. `.git`) and any **loose files** sitting directly in the workspace are
+  skipped; only real subfolders become projects.
+- Each subdirectory is analyzed independently and prints its own summary under a `[name]` heading.
+- If the workspace has no subdirectories to analyze, the command exits with an error.
+
+Batch mode combines with all the other flags (`--language`, `--capture-statements`, `--jobs`, and
+the `--upload` group), applying them to every project in the run.
+
+**Uploading a subset.** Pass `--repo-list <file>` to restrict the run to specific subdirectories.
+The file lists **subdirectory names**, one per line (`#` comments and blank lines are ignored); a
+name with no matching subdirectory is an error.
+
+```bash
+breezeai-cog repo-to-json-tree --repo ./workspace --batch --repo-list ./to-upload.txt \
+    --upload --baseurl … --uuid … --user-api-key "$API_KEY"
+```
+
+**Two phases + resume (with `--upload`).** Batch upload runs in two phases: it first **analyzes**
+every selected project (each writing to its own `<subdir>/.cog/`), then runs a single **upload
+phase** that uploads them — up to `--parallel-uploads` at a time — showing the status summary
+above one progress bar. Completed uploads are tracked in `<workspace>/.cog/batch-upload-state.json`
+(a repo is recorded only once the backend confirms it is `active`). If the run is interrupted,
+**rerun the exact same command** — already-uploaded projects are skipped and only the remaining
+ones are retried. Once every selected project is uploaded, the state file is deleted automatically.
+Pass `--force` to discard that state and re-upload everything from scratch.
+
+Each per-repo `--upload-timeout` bounds **both** the upload request and the subsequent wait for the
+backend to finish processing — if a repo hasn't reached `active` within the timeout it is marked
+failed (and the run continues / exits non-zero), rather than polling forever.
+
+> ⚠️ **Uploading in batch:** `--upload` uses a single `--uuid`, so **every** subdirectory is uploaded
+> into that **same** Breeze project. To land each repository in its own project, run them separately
+> with their own `--uuid` instead of using `--batch`. If any project's upload fails, the remaining
+> projects still run and the command exits non-zero, listing which ones failed (rerun to retry only
+> those).
 
 ---
 
@@ -212,12 +306,17 @@ the tool version.
 | `externalImports` | Imports of third-party/external packages. |
 | `functions[]` | Each function/method: name, parameters, return type, decorators, visibility, the calls it makes. |
 | `classes[]` | Each class/interface/enum: name, what it extends/implements, its methods. |
-| `statements[]` | *(only with `--capture-statements`)* notable in-body statements — including detected API calls, DB queries, and framework routes. |
-| `framework` | Set when a framework is detected in the file (e.g. `fastapi`, `nestjs`, `angular`, `spring`). |
+| `statements[]` | *(only with `--capture-statements`)* notable in-body statements — including detected API calls, DB queries, framework routes, event-bus/messaging operations, GraphQL entities, source comments, and captured structured data. |
+| `framework` | Set when a framework is detected in the file (e.g. `fastapi`, `nestjs`, `angular`, `spring`, `vertx`, `aspnet`, `wcf`). |
 
 **How things link together:** every function, class, and statement carries an `id`, and a
 `parentId` pointing to its container (a method's `parentId` is its class; a statement's `parentId`
 is the function it lives in). That parent/child linking is what lets the data form a graph.
+
+**Very large statements** (e.g. a whole captured data document, a generated blob) are **split**
+into ordered parts rather than dropped: each part's `id` gains a `#partNofN` suffix, carries
+`"isPartial": true`, and concatenating the parts in order rebuilds the original text. See the
+`statement text limit` / `max statement parts` settings below to tune the threshold and the cap.
 
 To see the precise shape of every field, generate the schema:
 
@@ -255,12 +354,17 @@ Most-used settings:
 | Languages | `BREEZEAI_COG_LANGUAGE` | all |
 | Capture statements | `BREEZEAI_COG_CAPTURE_STATEMENTS` | `false` |
 | Worker processes | `BREEZEAI_COG_JOBS` | CPU count |
+| Statement text limit (chars; longer → split into `#partNofN` parts, `0` off) | `BREEZEAI_COG_STATEMENT_TEXT_LIMIT` | `8000` |
+| Max statement parts (cap; over it the tail is dropped + logged, `0` = unbounded) | `BREEZEAI_COG_MAX_STATEMENT_PARTS` | `0` |
 | Max file size (bytes) | `BREEZEAI_COG_MAX_FILE_SIZE` | `2000000` |
 | Parse timeout (seconds, per file) | `BREEZEAI_COG_PARSE_TIMEOUT` | `10` |
 | Log level / format | `BREEZEAI_COG_LOG_LEVEL` · `BREEZEAI_COG_LOG_FORMAT` | `INFO` · `plaintext` |
 | Server port | `BREEZEAI_COG_PORT` | `3000` |
 | Backend URL (for upload) | `BREEZE_API_URL` | — |
 | Backend API key | `API_KEY` | — |
+| Upload timeout (seconds, per repo) | `BREEZEAI_COG_UPLOAD_TIMEOUT` | `900` |
+| Parallel uploads (batch) | `BREEZEAI_COG_UPLOAD_PARALLELISM` | `1` |
+| Upload retries (after a failure) | `BREEZEAI_COG_UPLOAD_MAX_RETRIES` | `1` |
 | AWS S3 (server) | `AWS_ACCESS_KEY` · `AWS_SECRET_KEY` · `AWS_REGION` · `AWS_S3_BUCKET` | region `us-west-2` |
 
 ### Choosing which files are analyzed

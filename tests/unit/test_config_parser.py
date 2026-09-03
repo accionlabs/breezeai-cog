@@ -38,6 +38,30 @@ def test_package_json() -> None:
     assert md["dependencyCount"] == 2 and md["devDependencyCount"] == 1
 
 
+def test_package_json_keeps_specifiers_and_workspace_deps() -> None:
+    md = _meta("package.json", json.dumps({
+        "dependencies": {"@acme/ui": "workspace:*", "axios": "^1.6"},
+        "devDependencies": {"internal-lib": "file:../lib"},
+    }))
+    # Specifiers retained (not just names) → workspace:/file: deps are distinguishable.
+    assert md["packageInfo"]["dependencies"]["@acme/ui"] == "workspace:*"
+    assert md["packageInfo"]["dependencies"]["axios"] == "^1.6"
+    assert md["workspaceDependencies"] == ["@acme/ui", "internal-lib"]
+
+
+def test_project_json_and_pnpm_workspace_retained() -> None:
+    pj = _meta("project.json", json.dumps({
+        "name": "web", "tags": ["type:app"], "implicitDependencies": ["gateway"],
+        "targets": {"build": {}, "test": {}},
+    }))
+    assert pj["buildTool"] == "nx"
+    assert pj["projectInfo"]["implicitDependencies"] == ["gateway"]
+    assert pj["projectInfo"]["tags"] == ["type:app"]
+    assert set(pj["projectInfo"]["targets"]) == {"build", "test"}
+    ws = _meta("pnpm-workspace.yaml", "packages:\n  - apps/*\n  - packages/*\n")
+    assert ws["buildTool"] == "pnpm" and ws["workspaceGlobs"] == ["apps/*", "packages/*"]
+
+
 def test_pyproject_deps_extracted() -> None:
     # Improvement over the JS analyzer, which only line-counted pyproject.toml.
     md = _meta(
@@ -179,7 +203,8 @@ def test_requirements_and_tsconfig_and_generic() -> None:
             }
         ),
     )
-    assert ts["buildTool"] == "typescript" and ts["compilerConfig"]["paths"] == ["@app/*"]
+    assert ts["buildTool"] == "typescript"
+    assert ts["compilerConfig"]["paths"] == {"@app/*": ["src/*"]}  # alias → targets, not keys only
     gj = _meta("data.json", json.dumps({"a": 1, "b": 2}))
     assert gj["category"] == "json" and set(gj["topLevelKeys"]) == {"a", "b"}
 
@@ -199,7 +224,8 @@ def test_multi_document_yaml() -> None:
 
 def test_matches_patterns() -> None:
     p = ConfigParser()
-    assert p.matches("package.json") and p.matches("x/Dockerfile") and p.matches("a.yml")
+    assert p.matches("x/Dockerfile") and p.matches("a.yml")
+    assert not p.matches("package.json") and not p.matches("data.json")  # .json → JsonParser
     assert p.matches("Dockerfile.dev") and p.matches(".env.local")  # glob-style
     assert p.matches("src/Svc.csproj") and p.matches("App.sln")  # .NET manifests
     assert not p.matches("main.py") and not p.matches("app.ts")
@@ -320,4 +346,31 @@ def test_config_registered_and_selected() -> None:
 
     discover_builtin()
     assert "config" in registry.capabilities()["languages"]
-    assert registry.select("package.json", b'{"name":"x"}').name == "config"
+    assert registry.select("package.json", b'{"name":"x"}').name == "json"  # JsonParser owns .json
+
+
+def test_mod_json_verticle_main() -> None:
+    # Vert.x module descriptor is JSONC (has // comments) — strict json rejects it; we strip
+    # comments and surface `main` as verticleMain (groovy: language prefix removed).
+    md = _meta(
+        "mod.json",
+        '{\n'
+        '  // Compiled Groovy verticle\n'
+        '  "main":"groovy:jp.co.payroll.p3.async.Main",\n'
+        '  "homepage": "http://example/page",  // url must survive comment stripping\n'
+        '  "auto-redeploy": true\n'
+        '}\n',
+    )
+    assert md["kind"] == "mod.json"
+    assert md["verticleMain"] == "jp.co.payroll.p3.async.Main"  # groovy: prefix stripped
+    assert "parseError" not in md
+
+
+def test_mod_json_java_verticle_no_prefix() -> None:
+    md = _meta("mod.json", '{ "main": "com.example.ServiceServer", "auto-redeploy": true }')
+    assert md["verticleMain"] == "com.example.ServiceServer"
+
+
+def test_mod_json_missing_main_is_honest_null() -> None:
+    md = _meta("mod.json", '{ "description": "x" }')
+    assert "verticleMain" not in md and md["kind"] == "mod.json"

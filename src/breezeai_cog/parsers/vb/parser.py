@@ -21,7 +21,8 @@ from ..treesitter import parse_source
 from .classes import build_class
 from .functions import defined_names, type_map
 from .imports import VbIndex, build_vb_index, extract_imports
-from .mappings import FRAMEWORKS, STATEMENT_TYPES
+from ..comments_common import comment_statements_for
+from .mappings import COMMENT_TYPES, CONTROL_FLOW, FRAMEWORKS, STATEMENT_TYPES
 
 _CLASS_TYPES = (
     "class_block", "interface_block", "enum_block",
@@ -70,7 +71,7 @@ class VbParser(BaseParser):
         source, path = ctx.source, ctx.path
         fid = file_id(path)
         seen_ids: set[str] = set()
-        capture, limit = ctx.capture_statements, ctx.text_truncation_limit
+        capture, limit = ctx.capture_statements, ctx.statement_text_limit
 
         internal, external, _, bindings = extract_imports(root, source)
         resolve = make_resolver(
@@ -89,6 +90,15 @@ class VbParser(BaseParser):
             classes.append(cls)
             functions.extend(methods)
             statements.extend(cls_statements)
+
+        if capture:
+            statements.extend(
+                comment_statements_for(
+                    root, source, path, file_id=fid, functions=functions, classes=classes,
+                    statements=statements, control_flow=CONTROL_FLOW,
+                    comment_types=COMMENT_TYPES, limit=limit, seen_ids=seen_ids,
+                )
+            )
 
         return FileRecord(
             id=fid,

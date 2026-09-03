@@ -1,0 +1,31 @@
+# C++ per-language ignore defaults (layer 2) — vendored/third-party headers that must
+# never be parsed as first-party source. Language-scoped, applied post-scan.
+thirdparty/
+third_party/
+vendor/
+vendored/
+external/
+extern/
+deps/
+.deps/
+*.pb.h
+*.pb.cc
+moc_*.cpp
+
+# Common vendored third-party C/C++ libraries (directory names are universal to the library,
+# never a project's own code) — same rationale as the build-dir excludes above.
+boost/
+openssl/
+log4cpp/
+log4cxx/
+log4cplus/
+curl/
+curlpp/
+gmp/
+icu/
+poco/
+jsoncpp/
+rapidjson/
+pugixml/
+xercesc/
+zlib/

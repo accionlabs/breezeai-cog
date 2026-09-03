@@ -24,6 +24,24 @@ def test_resolver_tiers() -> None:
     assert r("m", "someLocalObj") is None          # unknown, untyped receiver → null
 
 
+def test_builtin_method_not_resolved_to_receiver_type_file() -> None:
+    # `groups.map()` where `groups: Groups` (imported from a type-only module) must NOT resolve
+    # to that module — `map` is Array.prototype, declared nowhere in it (honest-null).
+    r = make_resolver(bindings={"Groups": "types.ts"}, local_defs=set(), path="mapper.ts",
+                      types={"groups": "Groups", "repo": "Repo"},
+                      builtin_methods=frozenset({"map", "includes"}))
+    assert r("map", "groups") is None          # built-in → no fabricated edge
+    assert r("includes", "groups") is None     # built-in → no fabricated edge
+    # A non-built-in method on the same receiver still resolves via Phase 2 (unchanged).
+    r2 = make_resolver(bindings={"Repo": "repo.ts"}, local_defs=set(), path="svc.ts",
+                       types={"repo": "Repo"}, builtin_methods=frozenset({"map"}))
+    assert r2("findById", "repo") == "repo.ts"
+    # Default (no builtin set) keeps prior behavior — other languages are unaffected.
+    r3 = make_resolver(bindings={"Groups": "types.ts"}, local_defs=set(), path="mapper.ts",
+                       types={"groups": "Groups"})
+    assert r3("map", "groups") == "types.ts"
+
+
 def _calls_of(rec, fn_name):
     fn = next(f for f in rec.functions if f.name == fn_name)
     return {c.name: c.path for c in fn.calls}

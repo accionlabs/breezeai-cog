@@ -74,6 +74,17 @@ class Statement(BaseModel):
     semanticType: SemanticType | None = None
     path: str | None = None
     name: str | None = None  # declared name (declaration node types)
+    decorators: list[Decorator] = Field(default_factory=list)
+    # see FileRecord.uiRole — used when a component is a bare declaration
+    # (e.g. `export const X = defineComponent({…})`)
+    uiRole: str | None = None
+    #: True on each record of a statement whose ``text`` exceeded the cap and was split into
+    #: ordered ``#part{i}of{n}`` parts at emit (see ``emit.split``). The reader reassembles the
+    #: full text by concatenating siblings (same ``captureId`` base, ordered by the ``#partNofN``
+    #: suffix). Absent on unsplit statements. Distinct from a *lossy* truncation: parts are
+    #: lossless unless a ``max_statement_parts`` cap dropped the tail (marked inline in the last
+    #: part's text).
+    isPartial: bool | None = None
     # route-only
     framework: str | None = None
     method: str | None = None  # HTTP verb (route/api_call) or db method (db_method_call)
@@ -93,6 +104,8 @@ class Statement(BaseModel):
     # graphql_entity-only: the key field(s) that identify a federated/stitched entity
     # (from a ``@key(selectionSet: "{ id }")`` / ``@key(fields: "id")`` directive).
     keyFields: list[str] | None = None
+    # iac-only: cloud provider inferred from resource type prefix or provider name
+    platform: str | None = None
 
 
 class Function(BaseModel):
@@ -107,10 +120,18 @@ class Function(BaseModel):
     path: str | None = None
     visibility: str | None = None
     isStatic: bool | None = None
+    # async / coroutine boundary — language-neutral (Kotlin `suspend`, and the
+    # analogue for TS/C#/Python `async`). Present (True) only when async.
+    isAsync: bool | None = None
     generics: str | None = None
     params: list[Parameter] = Field(default_factory=list)
     decorators: list[Decorator] = Field(default_factory=list)
     returnType: str | None = None
+    # extension-function receiver type, e.g. "String" for `fun String.slugify()`
+    # (Kotlin; C# `this`-parameter extension methods are the analogue). Base type only.
+    receiverType: str | None = None
+    # see FileRecord.uiRole (a function-anchored component / composable / hook)
+    uiRole: str | None = None
     metadata: dict[str, Any] | None = None
     calls: list[Call] = Field(default_factory=list)
     # Statements are NOT nested here — they live flat on FileRecord.statements and
@@ -131,8 +152,13 @@ class Class(BaseModel):
     path: str | None = None
     visibility: str | None = None
     isAbstract: bool | None = None
+    # closed hierarchy — Kotlin `sealed` (C#/Java `sealed` are the analogue).
+    # Sibling of isAbstract; present (True) only when sealed.
+    isSealed: bool | None = None
     generics: str | None = None
     extends: str | None = None  # parent class name → builds EXTENDS
+    # see FileRecord.uiRole (a class-anchored component, e.g. an Angular @Component)
+    uiRole: str | None = None
     implements: list[str] = Field(default_factory=list)
     constructorParams: list[ConstructorParam] = Field(default_factory=list)
     decorators: list[Decorator] = Field(default_factory=list)
@@ -153,6 +179,14 @@ class FileRecord(BaseModel):
     loc: int
     # optional
     framework: str | None = None
+    # iac-only: dominant cloud provider across this file's statements
+    platform: str | None = None
+    #: UI role of the node when it is a frontend component or state unit — one of
+    #: ``component`` / ``page`` / ``layout`` / ``store`` / ``composable`` / ``hook`` /
+    #: ``directive`` (open string). Set by the parser on the node that *is* the component
+    #: (File for an SFC, Class/Function/Statement for other declaration forms); absent
+    #: otherwise. Framework-neutral marker so "list components" is one query across parsers.
+    uiRole: str | None = None
     importFiles: list[str] = Field(default_factory=list)  # in-repo paths → builds IMPORTS
     externalImports: list[str] = Field(default_factory=list)
     exports: list[str] = Field(default_factory=list)
@@ -184,20 +218,30 @@ class ProjectMetaData(BaseModel):
     toolVersion: str
     # optional
     repositoryPath: str | None = None
-    configs: dict[str, Any] | None = None  # {totalConfigFiles, byType, packageManagers}
+    configs: dict[str, Any] | None = None  # {totalConfigFiles, capturedDataDocuments, byType, ...}
 
     def has_content(self) -> bool:
         """True if the analysis captured anything worth persisting.
 
         Source code (any detected language, function, or class) always counts. A
-        config-only result counts only when it carries real signal — dependencies,
-        a package manager / build tool, or docker. A folder whose sole file is a
-        trivial config (e.g. a lone README or empty JSON) yields ``False`` so no
-        empty ontology is written.
+        config-only result counts only when it carries real signal — a captured data
+        document, dependencies, a package manager / build tool, or docker. A folder whose
+        sole file is a trivial config (a lone README, or an empty / scalar JSON that
+        captured no content) yields ``False`` so no empty ontology is written.
         """
         if self.analyzedLanguages or self.totalFunctions or self.totalClasses:
             return True
         cfg = self.configs or {}
+        # Any data document captured in full (e.g. an n8n workflow or a lookup table in a
+        # repo with no code) is real content worth persisting. Counts actual captures, not
+        # file types — an empty ``{}`` is a JSON file but captures nothing, so it does not
+        # count. Format-neutral: covers every full-capture parser, not just JSON.
+        if (cfg.get("capturedDataDocuments") or 0) > 0:
+            return True
+        # IaC repos (Terraform, etc.) have no code language or functions but are real
+        # content — detected via the "iac" category set in FileRecord.metadata.
+        if "iac" in (cfg.get("byType") or {}):
+            return True
         if (cfg.get("dependencies") or {}).get("total", 0):
             return True
         docker = cfg.get("docker") or {}

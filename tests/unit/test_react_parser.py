@@ -50,7 +50,9 @@ def _parse(tmp_path, src: bytes, name: str, *, capture=True) -> FileRecord:
 def test_routes_require_capture_statements(tmp_path) -> None:
     rec = _parse(tmp_path, JSX_SRC, "App.tsx", capture=False)
     assert [s for s in rec.statements if s.semanticType == "route"] == []
-    assert rec.framework is None
+    # framework is the parser's identity (set unconditionally), not a route-detection
+    # by-product — a React file is "react" even with statements/routes disabled.
+    assert rec.framework == "react"
 
 
 def test_jsx_routes_detected_and_nested(tmp_path) -> None:
@@ -152,6 +154,49 @@ def test_v7_config_dsl_routes_detected(tmp_path) -> None:
     assert rec.framework == "react"
 
 
+def test_v7_route_path_from_cross_file_const_object(tmp_path) -> None:
+    # A route path built from an imported `{…} as const` object resolves to the real URL
+    # (endpoint = fully-resolved, per spec) — not the raw `paths.discover.root` AST text.
+    (tmp_path / "paths.ts").write_text(
+        "const seg = 'discover';\n"
+        "const tabs = { projects: 'projects' } as const;\n"
+        "export const paths = { discover: { root: `/${seg}`, tabs } } as const;\n"
+    )
+    routes = tmp_path / "routes.ts"
+    routes.write_bytes(
+        b"import { prefix, route } from '@react-router/dev/routes';\n"
+        b"import { paths } from './paths';\n"
+        b"export default [\n"
+        b"  ...prefix(paths.discover.root, [\n"
+        b"    route(`/${paths.discover.tabs.projects}`, 'routes/projects.tsx'),\n"
+        b"    route('/plain', 'routes/plain.tsx'),\n"
+        b"  ]),\n"
+        b"];\n"
+    )
+    parser = ReactParser()
+    index = parser.build_index(tmp_path, list(tmp_path.rglob("*.ts")))
+    ctx = ParseContext(path="routes.ts", abs_path=routes, source=routes.read_bytes(),
+                       repo_root=tmp_path, resolution_index=index, capture_statements=True)
+    rec = parser.parse_file(ctx)
+    endpoints = {s.endpoint for s in rec.statements if s.semanticType == "route"}
+    assert "/discover/projects" in endpoints   # member-expr + template both folded
+    assert "/discover/plain" in endpoints       # plain literal still joins onto the folded prefix
+    assert not any(e and "paths." in e for e in endpoints)  # no raw AST text leaks
+
+
+def test_v7_unresolved_const_path_falls_back_to_raw(tmp_path) -> None:
+    # With no index (or an unresolvable const), the endpoint is the raw text — no worse than
+    # before, never a *different* wrong URL (honest-null).
+    src = (
+        b"import { route } from '@react-router/dev/routes';\n"
+        b"import { paths } from './paths';\n"
+        b"export default [ route(paths.unknown.thing, 'x.tsx') ];\n"
+    )
+    rec = _parse(tmp_path, src, "routes.ts")  # _parse passes no resolution_index
+    endpoints = {s.endpoint for s in rec.statements if s.semanticType == "route"}
+    assert "/paths.unknown.thing" in endpoints
+
+
 def test_v7_detection_is_inert_on_v6_code(tmp_path) -> None:
     # A v6 file (react-router-dom, JSX/object forms) must not trigger any v7 call
     # matching, and its own detection must be unchanged. Guarded by the import gate.
@@ -224,8 +269,9 @@ def test_story_file_emits_no_routes_but_keeps_structure(tmp_path) -> None:
     # decorator router must NOT produce routes.
     rec = _parse(tmp_path, STORY_SRC, "company-card.stories.tsx")
     assert [s for s in rec.statements if s.semanticType == "route"] == []
-    assert rec.framework is None
-    # still parsed for structure (imports captured) — exclusion is route-only.
+    # still parsed for structure — exclusion is route-only. framework is the file's identity
+    # (a story is still a React file), so it's stamped; language stays typescript (.tsx).
+    assert rec.framework == "react"
     assert rec.language == "typescript"
 
 
@@ -236,5 +282,123 @@ def test_claims_selects_react() -> None:
     registry.register(TypeScriptParser())
     registry.register(ReactParser())
     assert registry.select("App.tsx", b"import { Route } from 'react-router-dom';").name == "typescript-react"
-    assert registry.select("App.tsx", b"const x = 1;").name == "typescript"  # plain TS/React -> base
+    # A bare `react` import (a plain component file, no router) is now claimed too.
+    assert registry.select("Button.tsx", b"import React from 'react';").name == "typescript-react"
+    assert registry.select("App.tsx", b"const x = 1;").name == "typescript"  # non-React -> base
     registry.clear()
+
+
+# ---- uiRole: class / function components -----------------------------------
+
+COMPONENTS_SRC = b'''import React from 'react';
+
+export class Panel extends React.Component {
+  render() { return <div>{this.props.title}</div>; }
+}
+
+class Badge extends PureComponent {
+  render() { return <span/>; }
+}
+
+export function Header() {
+  return <header><h1>Hi</h1></header>;
+}
+
+const Card = ({ items }) => (
+  <ul>{items.map((i) => <li key={i}>{i}</li>)}</ul>
+);
+
+export function formatDate(d) {
+  return d.toISOString();
+}
+
+function Compute() {
+  return 2 + 2;
+}
+
+const useThing = () => {
+  return <div/>;
+};
+'''
+
+
+def test_component_ui_roles(tmp_path) -> None:
+    rec = _parse(tmp_path, COMPONENTS_SRC, "components.tsx")
+    # Three orthogonal axes: framework identity, source language, per-node uiRole.
+    assert rec.framework == "react" and rec.language == "typescript"
+    class_roles = {c.name: c.uiRole for c in rec.classes}
+    fn_roles = {f.name: f.uiRole for f in rec.functions}
+    # Class components via `extends`.
+    assert class_roles["Panel"] == "component"      # React.Component
+    assert class_roles["Badge"] == "component"       # bare PureComponent
+    # Function components: PascalCase + renders JSX (declaration + arrow, incl. .map JSX).
+    assert fn_roles["Header"] == "component"
+    assert fn_roles["Card"] == "component"
+    # PascalCase utils with no JSX -> not marked; lowercase util -> not marked.
+    assert fn_roles["Compute"] is None
+    assert fn_roles["formatDate"] is None
+    # `useThing` is camelCase (not a component) AND calls no React hook primitive (the file
+    # only does a default `import React`, no named hook import) -> not a hook either.
+    assert fn_roles["useThing"] is None
+
+
+def test_component_ui_roles_without_capture_statements(tmp_path) -> None:
+    rec = _parse(tmp_path, COMPONENTS_SRC, "components.tsx", capture=False)
+    assert {c.name: c.uiRole for c in rec.classes}["Panel"] == "component"
+    assert {f.name: f.uiRole for f in rec.functions}["Header"] == "component"
+
+
+# ---- uiRole: custom hooks (useX + a React hook primitive) -------------------
+
+HOOKS_SRC = b'''import { useState, useEffect, useContext as useCtx } from 'react';
+import { useAuth } from './auth';
+
+export function useCounter(initial) {
+  const [n, setN] = useState(initial);
+  useEffect(() => { document.title = `${n}`; }, [n]);
+  return { n, inc: () => setN(n + 1) };
+}
+
+const useTheme = () => {
+  const theme = useCtx(ThemeContext);   // aliased react import still resolves
+  return theme;
+};
+
+export function useCache(key) {          // useX name, but touches no React primitive
+  return cacheStore.get(key);
+}
+
+export function useCurrentUser() {       // real hook, but only wraps a *custom* hook
+  const { user } = useAuth();            // -> honest null (recoverable via calls[])
+  return user;
+}
+'''
+
+
+def test_hook_ui_roles(tmp_path) -> None:
+    rec = _parse(tmp_path, HOOKS_SRC, "hooks.tsx")
+    roles = {f.name: f.uiRole for f in rec.functions}
+    # useX + a React hook primitive (direct, and via an aliased import) -> hook.
+    assert roles["useCounter"] == "hook"
+    assert roles["useTheme"] == "hook"
+    # useX name but no primitive call -> not a hook (the false positive we avoid).
+    assert roles["useCache"] is None
+    # A hook that only wraps another custom hook -> honest null (recoverable, not guessed).
+    assert roles["useCurrentUser"] is None
+
+
+def test_hooks_and_components_dont_collide(tmp_path) -> None:
+    # The useX vs PascalCase name split keeps the two roles disjoint: a PascalCase component
+    # that calls useState is a component, never a hook.
+    src = b"import { useState } from 'react';\nexport function Panel() { const [x] = useState(0); return <div>{x}</div>; }\n"
+    rec = _parse(tmp_path, src, "Panel.tsx")
+    assert {f.name: f.uiRole for f in rec.functions}["Panel"] == "component"
+
+
+def test_jsx_file_is_javascript_language(tmp_path) -> None:
+    # The JS/TS distinction lives on the `language` axis, orthogonal to framework: a .jsx
+    # React file is (framework=react, language=javascript); a .tsx is (react, typescript).
+    src = b"import React from 'react';\nexport function Widget() { return <div/>; }\n"
+    rec = _parse(tmp_path, src, "Widget.jsx")
+    assert rec.framework == "react" and rec.language == "javascript"
+    assert {f.name: f.uiRole for f in rec.functions}["Widget"] == "component"

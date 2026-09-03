@@ -7,13 +7,17 @@ file's ``package.ClassName`` → repo-relative path). Wildcard imports stay exte
 
 from __future__ import annotations
 
+from collections.abc import Sequence
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from tree_sitter import Node
 
 from ...utils import repo_relative
-from ..index_common import parallel_map, record_distinct
+from ..constfold import Token, resolve_all
+from ..index_common import parallel_map, record_distinct, seed_same_package
 from ..treesitter import node_text, parse_source
+from .constants import collect_constants
 
 _TYPE_DECLS = (
     "class_declaration", "interface_declaration", "enum_declaration",
@@ -25,10 +29,24 @@ _TYPE_DECLS = (
 FqcnIndex = dict[str, str | None]
 
 
-def _fqcn_index_one(args: tuple[str, str]) -> dict[str, str] | None:
-    """Parse one Java file → ``{package.TypeName: rel}`` for its top-level types, reading the
-    package **and** type names from the AST (reliable — no header-size limit, comment-safe).
-    Pure, picklable worker for :func:`parallel_map`; ``None`` on read failure."""
+@dataclass(frozen=True)
+class JavaIndex:
+    """Repo-level pre-pass result: the FQCN → path map (import resolution) plus a
+    ``Class.FIELD → value`` map of resolved ``static final String`` constants (address
+    folding). Both are built from a single parse of each file."""
+
+    fqcn: FqcnIndex = field(default_factory=dict)
+    consts: dict[str, str] = field(default_factory=dict)
+
+
+#: One file's contribution: ``{package.TypeName: rel}`` and ``{Class.FIELD: tokens}``.
+_IndexFrag = tuple[dict[str, str], dict[str, list[Token]]]
+
+
+def _fqcn_index_one(args: tuple[str, str]) -> _IndexFrag | None:
+    """Parse one Java file (once) → its ``{package.TypeName: rel}`` FQCN entries **and** its
+    ``static final String`` constants as ``{Class.FIELD: tokens}`` (qualified only — a bare
+    field name is meaningless cross-file). Pure, picklable worker; ``None`` on read failure."""
     file_s, rel = args
     try:
         source = Path(file_s).read_bytes()
@@ -43,14 +61,16 @@ def _fqcn_index_one(args: tuple[str, str]) -> dict[str, str] | None:
                            if c.type in ("scoped_identifier", "identifier")), None)
                 package = node_text(nm, source) if nm is not None else ""
                 break
-        frag: dict[str, str] = {}
+        fqcn_frag: dict[str, str] = {}
         for node in root.named_children:
             if node.type in _TYPE_DECLS:
                 nm = node.child_by_field_name("name")
                 if nm is not None:
                     name = node_text(nm, source)
-                    frag[f"{package}.{name}" if package else name] = rel
-        return frag
+                    fqcn_frag[f"{package}.{name}" if package else name] = rel
+        # Qualified `Class.FIELD` keys only (drop bare names — they collide across files).
+        const_frag = {k: v for k, v in collect_constants(root, source).items() if "." in k}
+        return fqcn_frag, const_frag
     except Exception as exc:  # parse OR a pathologically deep AST walk (RecursionError) — skip this file
         from ...logging import get_logger
         get_logger("breezeai_cog.index").warning(
@@ -60,17 +80,32 @@ def _fqcn_index_one(args: tuple[str, str]) -> dict[str, str] | None:
         return None
 
 
-def build_fqcn_index(repo_root: Path, files, jobs: int = 1) -> FqcnIndex:
-    """Repo-level pre-pass: map each top-level type's fully-qualified name (package + type
-    name, both from the AST) → repo path. A FQCN declared in >1 file collapses to ``None``
-    (ambiguous → honest-null). Parses each file across ``jobs`` processes."""
+def build_fqcn_index(repo_root: Path, files: Sequence[Path], jobs: int = 1) -> JavaIndex:
+    """Repo-level pre-pass (one parse per file): the FQCN → path map for import resolution,
+    plus the repo-wide ``Class.FIELD → value`` constant map for address folding. A name
+    declared in >1 file with a differing value collapses to ``None`` (ambiguous → honest-null;
+    the constant is then simply not folded)."""
     args = [(str(f), repo_relative(f, repo_root)) for f in files]
-    index: FqcnIndex = {}
+    fqcn: FqcnIndex = {}
+    raw_consts: dict[str, list[Token] | None] = {}
     for frag in parallel_map(args, _fqcn_index_one, jobs):
-        if frag:
-            for fqcn, rel in frag.items():
-                record_distinct(index, fqcn, rel)
-    return index
+        if frag is None:
+            continue
+        fqcn_frag, const_frag = frag
+        for name, rel in fqcn_frag.items():
+            record_distinct(fqcn, name, rel)
+        for name, tokens in const_frag.items():
+            record_distinct(raw_consts, name, tokens)
+    return JavaIndex(fqcn=fqcn, consts=resolve_all(raw_consts))
+
+
+def _package_of(root: Node, source: bytes) -> str:
+    for node in root.named_children:
+        if node.type == "package_declaration":
+            nm = next((c for c in node.named_children
+                       if c.type in ("scoped_identifier", "identifier")), None)
+            return node_text(nm, source) if nm is not None else ""
+    return ""
 
 
 def _resolve(fqcn: str, is_static: bool, index: FqcnIndex | None) -> str | None:
@@ -108,4 +143,5 @@ def extract_imports(
         if resolved:  # `import a.b.Foo` → receiver "Foo"; `import static a.b.U.f` → "f"
             bindings[fqcn.rsplit(".", 1)[-1]] = resolved
 
+    seed_same_package(bindings, _package_of(root, source), index)  # same-package: no import needed
     return list(internal), list(external), [], bindings  # Java has no explicit exports

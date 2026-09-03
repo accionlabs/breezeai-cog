@@ -98,3 +98,71 @@ def test_output_validates(tmp_path) -> None:
     errors = list(Draft202012Validator(FileRecord.model_json_schema(by_alias=True))
                   .iter_errors(json.loads(to_line(rec))))
     assert not errors, errors
+
+
+def test_enum_members_captured_as_statements(tmp_path) -> None:
+    # Enum members become flat statements parented to the enum Class (queryable text).
+    src = b"Enum Status\n  Active = 1\n  Closed\nEnd Enum\n"
+    p = tmp_path / "s.vb"
+    p.write_bytes(src)
+    ctx = ParseContext(path="s.vb", abs_path=p, source=src, repo_root=tmp_path,
+                       capture_statements=True)
+    rec = VbParser().parse_file(ctx)
+    st = next(c for c in rec.classes if c.type == "enum")
+    members = [(s.name, s.nodeType) for s in rec.statements if s.parentId == st.id]
+    assert members == [("Active", "enum_member"), ("Closed", "enum_member")]
+    ctx2 = ParseContext(path="s.vb", abs_path=p, source=src, repo_root=tmp_path,
+                        capture_statements=False)
+    assert VbParser().parse_file(ctx2).statements == []
+
+
+def test_catch_finally_clauses_emitted(tmp_path) -> None:
+    src = (b"Class X\n Sub M()\n  Try\n   Save()\n  Catch ex As Exception\n"
+           b"   Log(ex)\n  Finally\n   Cleanup()\n  End Try\n End Sub\nEnd Class\n")
+    p = tmp_path / "e.vb"
+    p.write_bytes(src)
+    ctx = ParseContext(path="e.vb", abs_path=p, source=src, repo_root=tmp_path,
+                       capture_statements=True)
+    rec = VbParser().parse_file(ctx)
+    node_types = {s.nodeType for s in rec.statements}
+    assert {"try_statement", "catch_block", "finally_block"} <= node_types
+
+
+def test_class_constants_and_fields_captured_as_statements(tmp_path) -> None:
+    # Class-level Const / Shared ReadOnly / plain fields become flat statements parented
+    # to the Class, with the value preserved in `text`. Heritage clauses (Inherits /
+    # Implements), which tree-sitter-vb misparses as field_declaration / ERROR, must NOT
+    # leak in as spurious member statements.
+    src = (
+        b"Public Class Config\n"
+        b"    Inherits BaseConfig\n"
+        b"    Implements IConfig\n"
+        b"    Public Const MaxRetries As Integer = 5\n"
+        b"    Public Shared ReadOnly Name As String = \"x\"\n"
+        b"    Private counter As Integer\n"
+        b"    Public Property Size As Integer\n"
+        b"        Get\n"
+        b"            Return 42\n"
+        b"        End Get\n"
+        b"    End Property\n"
+        b"End Class\n"
+    )
+    p = tmp_path / "c.vb"
+    p.write_bytes(src)
+    ctx = ParseContext(path="c.vb", abs_path=p, source=src, repo_root=tmp_path,
+                       capture_statements=True)
+    rec = VbParser().parse_file(ctx)
+    cls = next(c for c in rec.classes if c.name == "Config")
+    members = {s.name: (s.nodeType, (s.text or "").strip()) for s in rec.statements if s.parentId == cls.id}
+    assert members["MaxRetries"] == ("const_declaration", "Public Const MaxRetries As Integer = 5")
+    assert "Name" in members and members["Name"][0] == "field_declaration"
+    assert "counter" in members
+    # Heritage misparses must not appear as statements.
+    assert "IConfig" not in members and "BaseConfig" not in members
+    # Property accessor bodies must NOT be pulled up and mis-parented to the class.
+    class_texts = [t for _, t in members.values()]
+    assert not any("Return 42" in t for t in class_texts), "property body leaked into class"
+    # Nothing captured without the flag.
+    ctx2 = ParseContext(path="c.vb", abs_path=p, source=src, repo_root=tmp_path,
+                        capture_statements=False)
+    assert VbParser().parse_file(ctx2).statements == []

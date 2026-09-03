@@ -15,14 +15,18 @@ from pathlib import Path
 from typing import Callable, Iterator
 
 from .._version import __version__
-from ..logging import get_logger
+from ..emit import split_oversized_statements
+from ..logging import DETAIL_LOGGER, get_logger
 from ..schemas import FileRecord, ProjectMetaData
 from . import executor
 from .ignore import IgnoreEngine
 from .registry import base_parser_for, discover_builtin, registered
 from .scanner import ScanEntry, scan
+from .skips import SkipReport
 
 log = get_logger("breezeai_cog.pipeline")
+# File-only sink for per-file skip rows — captured in the log, never echoed to the console.
+detail_log = get_logger(DETAIL_LOGGER)
 
 
 def _classifier(languages: set[str] | None) -> Callable[[str], str | None]:
@@ -38,18 +42,18 @@ def _classifier(languages: set[str] | None) -> Callable[[str], str | None]:
 
 
 def _scan_entries(
-    repo_root: Path, settings, skips: dict[str, int] | None = None
+    repo_root: Path, settings, report: SkipReport | None = None
 ) -> Iterator[ScanEntry]:
     discover_builtin()
     engine = IgnoreEngine.build(registered())
     languages = set(settings.languages) if settings.languages else None
     debug_on = settings.log_level == "DEBUG"
 
-    def on_skip(path: str, reason: str) -> None:
-        if skips is not None:  # cheap tally for the run summary (ignored/unsupported/oversized)
-            skips[reason] = skips.get(reason, 0) + 1
+    def on_skip(path: str, reason: str, *, is_dir: bool = False, size: int | None = None) -> None:
+        if report is not None:  # tally + detail for the run summary and the sidecar report
+            report.record(path, reason, is_dir=is_dir, size=size)
         if debug_on:  # gated so structlog never renders below DEBUG
-            log.debug("scan.file.skipped", path=path, reason=reason)
+            log.debug("scan.file.skipped", path=path, reason=reason, is_dir=is_dir)
 
     for entry in scan(
         repo_root, _classifier(languages),
@@ -129,9 +133,15 @@ class _ConfigSummary:
         self.ports: set[str] = set()
         self.has_dockerfile = self.has_compose = False
         self.dep_total = self.dep_prod = self.dep_dev = 0
+        self.captured_documents = 0
 
     def add(self, md: dict) -> None:
         self.by_type[md.get("category", "other")] = self.by_type.get(md.get("category", "other"), 0) + 1
+        # A ``format`` marks a data document captured in full (its content serialized, e.g. as
+        # TOON) rather than reduced to a summary. Format-neutral: any full-capture parser sets
+        # it, so this counts real captured content regardless of the source file type.
+        if md.get("format"):
+            self.captured_documents += 1
         if md.get("packageManager"):
             self.package_managers.add(md["packageManager"])
         if md.get("buildTool"):
@@ -151,6 +161,7 @@ class _ConfigSummary:
     def result(self, total: int) -> dict:
         return {
             "totalConfigFiles": total,
+            "capturedDataDocuments": self.captured_documents,
             "byType": self.by_type,
             "packageManagers": sorted(self.package_managers),
             "buildTools": sorted(self.build_tools),
@@ -168,20 +179,23 @@ def _assemble(
     records: Iterator[tuple[str, FileRecord]],
     sink,
     *,
+    statement_text_limit: int = 0,
+    max_statement_parts: int = 0,
     candidates: int | None = None,
     skips: dict[str, int] | None = None,
     debug_on: bool = False,
     progress: Callable[[int, int], None] | None = None,
     summary_out: dict | None = None,
-    log_summary: bool = True,
 ) -> ProjectMetaData:
     """Stream (language, record) pairs to the sink and accumulate projectMetaData.
 
-    Logs an ``analysis.complete`` summary (candidate files, parsed, failed, skipped +
-    cumulative totals) at INFO, or DEBUG when ``log_summary`` is False (the caller will
-    present it itself, e.g. as a table). If ``summary_out`` is given it's filled with the
-    same numbers. ``progress(done, total)`` — if given — is called as records arrive.
-    Under ``--verbose`` a per-file ``parse.file.done`` is also logged.
+    Always logs an ``analysis.complete`` summary at INFO (candidate files, parsed, failed,
+    skipped + cumulative totals) — so it lands in the log file regardless of console mode.
+    A CLI showing a Rich table quiets it on the *console* (see ``logging.quiet_console``),
+    not in the file. Per-file ``file.skipped`` WARNINGs are emitted by :func:`run` at scan
+    time. If ``summary_out`` is given it's filled with the same numbers. ``progress(done,
+    total)`` — if given — is called as records arrive. Under ``--verbose`` a per-file
+    ``parse.file.done`` is also logged.
     """
     total_files = total_functions = total_classes = total_loc = config_files = 0
     total_statements = 0
@@ -192,6 +206,11 @@ def _assemble(
         progress(0, candidates)  # establish the total up front
 
     for language, record in records:
+        # Split any statement whose text exceeds the cap into ordered `#partNofN`
+        # records (lossless) so the backend never drops an oversized statement whole.
+        record.statements = split_oversized_statements(
+            record.statements, statement_text_limit, max_statement_parts
+        )
         sink.write(record)
         total_files += 1
         total_functions += len(record.functions)
@@ -237,8 +256,7 @@ def _assemble(
             scanned=scanned, parsed=parsed, failed=failed,
             skipped=skipped_total, skips=dict(skips), statements=total_statements,
         )
-    emit = log.info if log_summary else log.debug
-    emit(
+    log.info(
         "analysis.complete",
         scanned=scanned,                   # files walked = parsed + failed + skipped
         parsed=parsed,                     # records produced
@@ -257,25 +275,37 @@ def run(
     *,
     progress: Callable[[int, int], None] | None = None,
     summary_out: dict | None = None,
-    log_summary: bool = True,
 ) -> ProjectMetaData:
     """Full analysis to a sink (parallel) → assembled projectMetaData.
 
     ``progress(done, total)`` — if given — receives live counts as files complete.
-    ``summary_out`` / ``log_summary`` — see :func:`_assemble`.
+    ``summary_out`` — see :func:`_assemble`.
     """
     repo_root = Path(repo_root)
     debug_on = settings.log_level == "DEBUG"
-    skips: dict[str, int] = {}
-    entries = list(_scan_entries(repo_root, settings, skips))
+    report = SkipReport()
+    entries = list(_scan_entries(repo_root, settings, report))
+    # One row per skipped file (with its reason) to the file-only detail log — individually
+    # recorded on disk, without polluting the console summary.
+    for skipped in report.files:
+        detail_log.warning(
+            "file.skipped",
+            path=skipped["path"],
+            reason=skipped["reason"],
+            **({"size": skipped["size"]} if "size" in skipped else {}),
+        )
     jobs = settings.jobs if settings.jobs and settings.jobs > 0 else (os.cpu_count() or 1)
     indexes = _build_indexes(repo_root, entries, jobs, debug_on=debug_on)
     records = executor.parse_entries(entries, repo_root, settings, indexes)
-    return _assemble(
-        repo_root, records, sink, candidates=len(entries), skips=skips,
-        debug_on=debug_on, progress=progress,
-        summary_out=summary_out, log_summary=log_summary,
+    meta = _assemble(
+        repo_root, records, sink, statement_text_limit=settings.statement_text_limit,
+        max_statement_parts=settings.max_statement_parts,
+        candidates=len(entries), skips=report.counts,
+        debug_on=debug_on, progress=progress, summary_out=summary_out,
     )
+    if summary_out is not None:  # full detail for the CLI console summary + sidecar report
+        summary_out["skip_report"] = report
+    return meta
 
 
 def run_inprocess(repo_root: str | Path, settings, sink) -> ProjectMetaData:
@@ -284,8 +314,8 @@ def run_inprocess(repo_root: str | Path, settings, sink) -> ProjectMetaData:
     startup would dominate."""
     repo_root = Path(repo_root)
     debug_on = settings.log_level == "DEBUG"
-    skips: dict[str, int] = {}
-    entries = list(_scan_entries(repo_root, settings, skips))
+    report = SkipReport()
+    entries = list(_scan_entries(repo_root, settings, report))
     options = executor._options(settings)
     options["indexes"] = _build_indexes(repo_root, entries, debug_on=debug_on)
 
@@ -296,5 +326,7 @@ def run_inprocess(repo_root: str | Path, settings, sink) -> ProjectMetaData:
                 yield record.language, record
 
     return _assemble(
-        repo_root, gen(), sink, candidates=len(entries), skips=skips, debug_on=debug_on
+        repo_root, gen(), sink, statement_text_limit=settings.statement_text_limit,
+        max_statement_parts=settings.max_statement_parts,
+        candidates=len(entries), skips=report.counts, debug_on=debug_on,
     )

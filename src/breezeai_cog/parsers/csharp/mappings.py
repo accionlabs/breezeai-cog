@@ -12,6 +12,8 @@ CONTROL_FLOW = {
     "switch_statement",
     "switch_expression",
     "try_statement",
+    "catch_clause",  # error-handling boundary (bodies already captured; this adds the clause node)
+    "finally_clause",
     "using_statement",
     "lock_statement",
     "checked_statement",
@@ -53,6 +55,10 @@ NESTED_SCOPES = {
 }
 
 STATEMENT_TYPES = sorted(EMIT_TYPES)
+
+#: Comment node types the shared comment pass captures (``semanticType="comment"``; each
+#: statement keeps its real tree-sitter ``nodeType``).
+COMMENT_TYPES = {"comment"}
 
 FRAMEWORKS = [
     "aspnet", "aspnetcore",

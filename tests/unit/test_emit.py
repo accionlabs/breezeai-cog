@@ -69,3 +69,24 @@ def test_file_sink_metadata_first(tmp_path) -> None:
     assert records[0]["__type"] == "projectMetaData"  # FIRST line
     assert [r["path"] for r in records[1:]] == ["a.py", "b.py"]
     assert records[1]["functions"][0]["id"] == "a.py#f@1"
+
+
+def test_file_sink_concurrent_runs_use_isolated_temp_files(tmp_path) -> None:
+    """Two sinks on the SAME out_path (simulating concurrent CLI runs against one repo)
+    must not collide on a shared temp file — regression for the deterministic-tmp-name
+    FileNotFoundError crash."""
+    out = tmp_path / "repo-project-analysis.ndjson.gz"
+    a = FileSink(out)
+    b = FileSink(out)
+    assert a._tmp != b._tmp  # randomized per-run, not a shared deterministic name
+    assert a._tmp.exists() and b._tmp.exists()
+
+    a.write(FileRecord(id="a.py", path="a.py", type="code", language="python", loc=1))
+    b.write(FileRecord(id="a.py", path="a.py", type="code", language="python", loc=1))
+
+    a.finalize(_meta())  # first run finalizing must not remove the second run's temp
+    assert b._tmp.exists()
+    b.finalize(_meta())  # second run still succeeds (no FileNotFoundError)
+
+    assert out.exists()
+    assert not list(tmp_path.glob("*.body.tmp"))  # every temp cleaned up

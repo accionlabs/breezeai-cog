@@ -100,6 +100,86 @@ def test_output_validates(tmp_path) -> None:
     assert not errors, errors
 
 
+def test_same_package_call_resolves_without_import(tmp_path) -> None:
+    # A same-package class needs no import, so `Helper.go()` must still resolve cross-file
+    # via the FQCN index (seeded into the call-resolution bindings).
+    (tmp_path / "Helper.java").write_text(
+        "package a.b;\npublic class Helper { public static String go() { return \"x\"; } }\n"
+    )
+    main = tmp_path / "Main.java"
+    main.write_text("package a.b;\npublic class Main { void run() { Helper.go(); } }\n")
+    parser = JavaParser()
+    idx = parser.build_index(tmp_path, list(tmp_path.rglob("*.java")))
+    rec = parser.parse_file(ParseContext(path="Main.java", abs_path=main,
+                                         source=main.read_bytes(), repo_root=tmp_path,
+                                         resolution_index=idx, capture_statements=True))
+    go = next(c for f in rec.functions for c in f.calls if c.name == "go")
+    assert go.path == "Helper.java"
+
+
+def test_deep_string_concat_does_not_recurse(tmp_path) -> None:
+    # Regression: a statement with a very deep `+` chain (e.g. a generated HTML/JS builder
+    # with hundreds of concats) is a left-nested binary_expression tree that folding recurses
+    # through → RecursionError. render_concat must bail past its depth cap.
+    import sys
+
+    body = " + ".join(['"a"'] * 800)  # 800-deep concat — over the 100 cap, near the 1000 limit
+    # must be a CALL ARGUMENT — that's what triggers endpoint rendering (render_concat)
+    src = ("class C { void m() { sink(" + body + "); } }").encode()
+    p = tmp_path / "C.java"
+    p.write_text(src.decode())
+    ctx = ParseContext(path="C.java", abs_path=p, source=src, repo_root=tmp_path,
+                       capture_statements=True)
+    old = sys.getrecursionlimit()
+    sys.setrecursionlimit(1000)  # ensure the default limit is in force for the assertion
+    try:
+        rec = JavaParser().parse_file(ctx)  # must NOT raise RecursionError
+    finally:
+        sys.setrecursionlimit(old)
+    assert rec.functions  # the method is still captured; the concat just yields no endpoint
+
+
+def test_short_concat_still_renders_endpoint() -> None:
+    # The depth cap must not regress normal URL/path concatenation rendering.
+    from breezeai_cog.parsers.java.statements import _render_url
+    from breezeai_cog.parsers.treesitter import parse_source
+
+    src = b'class C { void m() { String u = "http://api/" + id + "/x"; } }'
+    root = parse_source("java", src, 0).root_node
+    concat = next(n for n in _walk(root) if n.type == "binary_expression")
+    assert _render_url(concat, src) == "http://api/{id}/x"
+
+
+def _walk(node):
+    yield node
+    for c in node.named_children:
+        yield from _walk(c)
+
+
+def test_deep_concat_tracked_and_summarized(tmp_path) -> None:
+    # Deep concats are collected per file and rendered as ONE human-readable summary line.
+    import breezeai_cog.parsers.statements_common as sc
+
+    body = " + ".join(['"a"'] * 400)
+    src = ("class C { void m() { sink(" + body + "); } }").encode()  # call arg triggers render
+    p = tmp_path / "C.java"
+    p.write_text(src.decode())
+    ctx = ParseContext(path="C.java", abs_path=p, source=src, repo_root=tmp_path,
+                       capture_statements=True)
+
+    sc.begin_concat_tracking()
+    JavaParser().parse_file(ctx)
+    summary = sc.summarize_skipped_concats("app/C.java")
+
+    assert summary is not None
+    assert summary.startswith("app/C.java:")
+    assert "1 deeply-nested string concatenation" in summary  # count + phrasing
+    assert "still\n captured" not in summary  # sanity: it's one readable line
+    assert "Line: 1" in summary
+    # collector is cleared after summarizing
+    assert sc.summarize_skipped_concats("app/C.java") is None
+
+
 def test_inline_lambda_body_captured(tmp_path) -> None:
     # Regression (#1): statements & calls inside a lambda are attributed to the
     # nearest named enclosing method, not dropped.
@@ -156,6 +236,35 @@ def test_nested_member_classes_extracted(tmp_path) -> None:
     assert "handle" in {c.name for f in rec.functions if f.name == "run" for c in f.calls}
 
 
+def test_interface_constant_captured(tmp_path) -> None:
+    # Regression: an interface constant is a `constant_declaration` node (not
+    # `field_declaration`), so it must be in the statement allow-list to be captured —
+    # parented to the interface, with its declarator name and any annotations.
+    src = (
+        "package com.x;\n"
+        "public interface Notifier {\n"
+        '  @Deprecated String CHANNEL = "email";\n'
+        "  boolean send(String message);\n"
+        "}\n"
+    ).encode()
+    p = tmp_path / "Notifier.java"
+    p.write_text(src.decode())
+    ctx = ParseContext(path="Notifier.java", abs_path=p, source=src, repo_root=tmp_path,
+                       capture_statements=True)
+    rec = JavaParser().parse_file(ctx)
+    iface = next(c for c in rec.classes if c.name == "Notifier")
+    consts = [s for s in rec.statements if s.nodeType == "constant_declaration"]
+    assert len(consts) == 1
+    const = consts[0]
+    assert const.name == "CHANNEL"
+    assert const.parentId == iface.id
+    assert [d.name for d in const.decorators] == ["Deprecated"]
+    # capture off → no statements
+    assert JavaParser().parse_file(
+        ParseContext(path="Notifier.java", abs_path=p, source=src, repo_root=tmp_path)
+    ).statements == []
+
+
 def test_control_statement_not_mislabeled(tmp_path) -> None:
     # #4/smear: a db call nested in an if/for body must not tag the enclosing control statements.
     src = ("class C { void m(java.util.List<Order> o){ if(o.size()>0){ for(Order x: o){ repo.save(x); } } } }").encode()
@@ -177,3 +286,90 @@ def test_endpoint_concatenation(tmp_path) -> None:
                        capture_statements=True)
     rec = JavaParser().parse_file(ctx)
     assert any(s.semanticType == "api_call" and s.endpoint == "/users/{id}" for s in rec.statements)
+
+
+# --- N1: enum members captured as flat statements (queryable text) ------------
+
+def _enum_members(tmp_path, src: str):
+    p = tmp_path / "E.java"
+    p.write_text(src)
+    ctx = ParseContext(path="E.java", abs_path=p, source=src.encode(), repo_root=tmp_path,
+                       capture_statements=True)
+    rec = JavaParser().parse_file(ctx)
+    enum = next(c for c in rec.classes if c.type == "enum")
+    # Exclude comment statements: the enum members' doc-comments (``/** … */``) are now
+    # captured as their own ``semanticType="comment"`` statements parented to the enum.
+    members = [s for s in rec.statements if s.parentId == enum.id and s.semanticType != "comment"]
+    return rec, enum, members
+
+
+def test_enum_members_captured_as_statements(tmp_path) -> None:
+    # NAME("value") members become flat statements parented to the enum Class; the value
+    # rides inside the statement text (no more metadata.constants channel).
+    src = ('enum Priority {\n'
+           '  /** high urgency */\n'
+           '  HIGH("3"),\n'
+           '  /** low urgency */\n'
+           '  LOW("1");\n}\n')
+    _, enum, members = _enum_members(tmp_path, src)
+    assert enum.metadata is None
+    assert [(m.name, m.text) for m in members] == [("HIGH", 'HIGH("3")'), ("LOW", 'LOW("1")')]
+    assert all(m.nodeType == "enum_constant" and m.semanticType == "enum_member" for m in members)
+
+
+def test_enum_bare_and_valued_members(tmp_path) -> None:
+    # Bare (no-arg) and valued constants both captured; each member's own text is its span.
+    src = 'enum Color {\n  RED("f00"),\n  GREEN("0f0"),\n  BLUE;\n}\n'
+    _, _, members = _enum_members(tmp_path, src)
+    assert [(m.name, m.text) for m in members] == [
+        ("RED", 'RED("f00")'), ("GREEN", 'GREEN("0f0")'), ("BLUE", "BLUE"),
+    ]
+
+
+def test_enum_members_gated_by_capture_flag(tmp_path) -> None:
+    # Enum members are statements now → gated by --capture-statements (absent without it).
+    src = 'enum S { A("1"), B("2"); }'
+    p = tmp_path / "E.java"
+    p.write_text(src)
+    ctx = ParseContext(path="E.java", abs_path=p, source=src.encode(), repo_root=tmp_path,
+                       capture_statements=False)
+    rec = JavaParser().parse_file(ctx)
+    assert rec.statements == []
+    assert all(c.metadata is None for c in rec.classes)
+
+
+def test_plain_class_metadata_stays_none(tmp_path) -> None:
+    # A `NAME = "value"` field lands as a statement; the class carries no constants metadata.
+    src = 'class A { private static final String NAME = "value"; }'
+    p = tmp_path / "A.java"
+    p.write_text(src)
+    ctx = ParseContext(path="A.java", abs_path=p, source=src.encode(), repo_root=tmp_path,
+                       capture_statements=True)
+    rec = JavaParser().parse_file(ctx)
+    assert all(c.metadata is None for c in rec.classes)
+    assert any((s.text or "").find("NAME") >= 0 for s in rec.statements)
+
+
+def test_enum_members_output_validates(tmp_path) -> None:
+    src = 'enum S {\n  A("1"),\n  B("2");\n}\n'
+    p = tmp_path / "E.java"
+    p.write_text(src)
+    ctx = ParseContext(path="E.java", abs_path=p, source=src.encode(), repo_root=tmp_path,
+                       capture_statements=True)
+    rec = JavaParser().parse_file(ctx)
+    errors = list(Draft202012Validator(FileRecord.model_json_schema(by_alias=True))
+                  .iter_errors(json.loads(to_line(rec))))
+    assert not errors, errors
+
+
+def test_field_annotations_captured_on_statements(tmp_path) -> None:
+    # A decorated field declaration is flattened into a Statement; its annotations
+    # must be structured (not left only in raw text).
+    src = "class User {\n  @Column(nullable = false)\n  @Id\n  private String email;\n}\n"
+    p = tmp_path / "User.java"
+    p.write_text(src)
+    ctx = ParseContext(path="User.java", abs_path=p, source=src.encode(), repo_root=tmp_path,
+                       capture_statements=True)
+    rec = JavaParser().parse_file(ctx)
+    field = next(s for s in rec.statements if s.name == "email")
+    assert [(d.name, d.args) for d in field.decorators] == [("Column", ["nullable = false"]), ("Id", [])]

@@ -6,6 +6,7 @@ from tree_sitter import Node
 
 from ...emit import class_id, disambiguate
 from ...schemas import Class, ConstructorParam, Function, Statement
+from ..statements_common import emit_enum_members
 from ..treesitter import line_span, node_text
 from ..callresolve import CallResolver, noop_resolver
 from .functions import build_method, extract_annotations, extract_params, modifiers_node
@@ -99,6 +100,17 @@ def build_class(
                 nested_classes.extend(sub_classes)
                 methods.extend(sub_methods)
                 statements.extend(sub_statements)
+
+    # Enum members become flat statements parented to the enum Class (their `text` is
+    # queryable). `NAME("value")` (constructor syntax) carries its value in the text;
+    # gated by --capture-statements like every other statement.
+    if capture and node.type == "enum_declaration" and body is not None:
+        statements.extend(
+            emit_enum_members(
+                body, source, path,
+                member_types={"enum_constant"}, parent_id=cid, limit=limit, seen_ids=seen_ids,
+            )
+        )
 
     cls = Class(
         id=cid,

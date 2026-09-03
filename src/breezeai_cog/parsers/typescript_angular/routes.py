@@ -157,8 +157,30 @@ def _join(base: str, sub: str) -> str:
     return "/" + "/".join(parts) if parts else "/"
 
 
+# Keys that only appear in Angular route config objects, never in breadcrumb/nav helpers.
+_ROUTE_ONLY_KEYS = frozenset({
+    "component", "loadChildren", "loadComponent",
+    "canActivate", "canActivateChild", "canDeactivate", "canLoad", "canMatch",
+    "outlet", "resolve", "pathMatch", "redirectTo",
+    "children",  # breadcrumbs use 'children' too, but NEVER alongside component/load*
+})
+# A route array element must have 'path' PLUS at least one router-exclusive key so that
+# plain {name, path, children} breadcrumb/nav objects are never captured.
+_ROUTE_DISCRIMINATING_KEYS = frozenset({
+    "component", "loadChildren", "loadComponent",
+    "canActivate", "canActivateChild", "canDeactivate", "canLoad", "canMatch",
+    "outlet", "resolve", "pathMatch", "redirectTo",
+})
+
+
 def _is_route_array(arr: Node, source: bytes) -> bool:
-    return any(e.type == "object" and "path" in _pairs(e, source) for e in arr.named_children)
+    for e in arr.named_children:
+        if e.type != "object":
+            continue
+        keys = _pairs(e, source).keys()
+        if "path" in keys and keys & _ROUTE_DISCRIMINATING_KEYS:
+            return True
+    return False
 
 
 def _is_children_value(arr: Node, source: bytes) -> bool:
@@ -173,6 +195,13 @@ def _process(arr: Node, prefix: str | None, source: bytes, path: str, seen: set[
             continue
         pairs = _pairs(elem, source)
         if "path" not in pairs:
+            continue
+        if "redirectTo" in pairs:
+            continue
+        # Breadcrumb / nav-tree objects always carry a "name" key alongside "path" and
+        # optional "children"; real Angular route config objects never have a top-level
+        # "name" property — skip to avoid false-positive page nodes.
+        if "name" in pairs:
             continue
         full = _compose(prefix, _resolve_path(pairs["path"], source, index))
         load = pairs.get("loadChildren")  # lazy route group -> mount
@@ -207,6 +236,9 @@ def _process(arr: Node, prefix: str | None, source: bytes, path: str, seen: set[
             _process(children, full, source, path, seen, routes, index)
 
 
+_CLASS_NODE_TYPES = ("class_declaration", "class", "abstract_class_declaration")
+
+
 def _mount_prefix(root: Node, source: bytes, index: object) -> str:
     """The lazy-mount prefix this file's routes hang under, from the repo mount index — the
     fully-composed parent prefix keyed by a class this file declares (a lazy child module is
@@ -215,17 +247,27 @@ def _mount_prefix(root: Node, source: bytes, index: object) -> str:
     mounts = getattr(index, "route_mounts", None) or {}
     if not mounts:
         return ""
-    for cls in _all(root, "class_declaration"):
-        name = cls.child_by_field_name("name")
-        if name is not None:
-            prefix = mounts.get(node_text(name, source))
-            if prefix is not None:
-                return prefix
+    # Search all class node shapes (grammar may emit "class" or "class_declaration" depending
+    # on context — cover both to avoid missing a module class in an export_statement).
+    for cls_type in _CLASS_NODE_TYPES:
+        for cls in _all(root, cls_type):
+            name = cls.child_by_field_name("name")
+            if name is not None:
+                prefix = mounts.get(node_text(name, source))
+                if prefix is not None:
+                    return prefix
     return ""
+
+
+_ROUTER_BYTE_GUARDS = (b"@angular/router", b"RouterModule", b"Routes")
 
 
 def detect_angular_routes(root: Node, source: bytes, path: str, *, seen_ids: set[str],
                           index: object = None) -> list[Statement]:
+    # Fast-path: files that don't import @angular/router (breadcrumb services, nav helpers,
+    # etc.) can't contain Angular route arrays — skip the entire AST walk.
+    if not any(guard in source for guard in _ROUTER_BYTE_GUARDS):
+        return []
     routes: list[Statement] = []
     prefix = _mount_prefix(root, source, index)  # parent mount prefix (cross-file), else ""
     for arr in _all(root, "array"):

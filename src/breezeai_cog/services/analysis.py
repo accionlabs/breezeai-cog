@@ -10,6 +10,7 @@ from ..config import Settings
 from ..core import pipeline
 from ..emit.sinks import FileSink, Sink
 from ..schemas import FileRecord, ProjectMetaData
+from ..utils.paths import cog_dir
 
 
 @dataclass(frozen=True, slots=True)
@@ -26,10 +27,11 @@ class AnalysisService:
         self.settings = settings
 
     def _default_out(self, repo: Path) -> Path:
-        """Resolve the output file inside the output **directory** (`--out`, default the
-        repo's parent): `<out_dir>/<repo-name>-project-analysis.ndjson.gz`."""
+        """Resolve the export file inside the output **directory**: `--out` when given,
+        otherwise the repo's `.cog/` artifact dir. File:
+        `<out_dir>/<repo-name>-project-analysis.ndjson.gz`."""
         repo = repo.resolve()
-        out_dir = Path(self.settings.out) if self.settings.out is not None else repo.parent
+        out_dir = Path(self.settings.out) if self.settings.out is not None else cog_dir(repo)
         return out_dir / f"{repo.name}-project-analysis.ndjson.gz"
 
     def analyze_repo(
@@ -39,15 +41,13 @@ class AnalysisService:
         sink: Sink | None = None,
         progress: Callable[[int, int], None] | None = None,
         summary_out: dict | None = None,
-        log_summary: bool = True,
     ) -> AnalysisResult:
         repo = Path(repo)
         owns_sink = sink is None
         out_path = self._default_out(repo) if owns_sink else None
         sink = sink or FileSink(out_path)  # type: ignore[arg-type]
         meta = pipeline.run(
-            repo, self.settings, sink,
-            progress=progress, summary_out=summary_out, log_summary=log_summary,
+            repo, self.settings, sink, progress=progress, summary_out=summary_out,
         )
         # A FileSink skips emitting a file when nothing was parsed; caller-supplied sinks
         # own their own semantics, so assume they always "wrote".

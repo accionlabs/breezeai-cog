@@ -8,7 +8,9 @@ assert the skeleton + resolution the graph depends on.
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
+import pytest
 from jsonschema import Draft202012Validator
 
 from breezeai_cog.emit import to_line
@@ -60,6 +62,29 @@ def _parse(tmp_path, *, capture=False) -> FileRecord:
     return parser.parse_file(ctx)
 
 
+def _parse_src(tmp_path, src: bytes, *, capture=False) -> FileRecord:
+    p = tmp_path / "T.groovy"
+    p.write_bytes(src)
+    ctx = ParseContext(path="T.groovy", abs_path=p, source=src, repo_root=tmp_path,
+                       capture_statements=capture)
+    return GroovyParser().parse_file(ctx)
+
+
+def _grammar_supports_nested() -> bool:
+    """True when the loaded Groovy grammar captures nested (inner) types — i.e. the patched
+    fork is installed. Stock dekobon cannot, so nesting-dependent tests skip there."""
+    src = b"class A { class B {} }"
+    ctx = ParseContext(path="A.groovy", abs_path=Path("A.groovy"), source=src, repo_root=Path("."))
+    rec = GroovyParser().parse_file(ctx)
+    return "B" in {c.name for c in rec.classes}
+
+
+requires_patched_grammar = pytest.mark.skipif(
+    not _grammar_supports_nested(),
+    reason="requires the patched Groovy grammar (nested types / modifier enums); stock dekobon lacks it",
+)
+
+
 def test_imports_and_fqcn_resolution(tmp_path) -> None:
     rec = _parse(tmp_path)
     assert rec.language == "groovy"
@@ -108,6 +133,31 @@ def test_statements_and_detection(tmp_path) -> None:
     assert db and db[0].dataAccessHint  # repo.findById(...) detected as a DB call
 
 
+def test_file_scope_script_statements_captured(tmp_path) -> None:
+    # Groovy allows top-level script code outside any class/method — module-level
+    # declarations and bare calls are captured and parented to the file, not dropped.
+    src = b'''\
+def cfg = loadConfig()
+println "booting"
+
+class Holder {
+    def run() { doWork() }
+}
+'''
+    assert _parse_src(tmp_path, src, capture=False).statements == []  # gating preserved
+    rec = _parse_src(tmp_path, src, capture=True)
+
+    file_stmts = [s for s in rec.statements if s.parentId == rec.id]
+    assert file_stmts  # top-level `def cfg = ...` / `println ...` attributed to the file
+
+    # Statements inside Holder.run stay parented to the function, never hoisted to the
+    # file — guards against the NESTED_SCOPES barrier regressing / double-capture.
+    run = next(f for f in rec.functions if f.name == "run")
+    run_stmts = [s for s in rec.statements if s.parentId == run.id]
+    assert run_stmts
+    assert all(s.parentId != rec.id for s in run_stmts)
+
+
 def test_trait_mapped_to_trait_type(tmp_path) -> None:
     # A trait gets its own `trait` ClassType; a class still uses it via `implements`.
     src = b"trait Reversible { def reverse() {} }\nclass Sentence implements Reversible {}\n"
@@ -136,24 +186,45 @@ def test_closure_calls_fold_into_enclosing_method(tmp_path) -> None:
     assert "handle" in {c.name for f in rec.functions if f.name == "run" for c in f.calls}
 
 
-def test_nested_type_is_a_blind_spot_not_fabricated(tmp_path) -> None:
-    # The dekobon grammar cannot parse a nested type declaration — `class Inner {}` inside
-    # a class body misparses as a field. This is a documented best-effort limitation. The
-    # guarantee: the parser NEVER fabricates a class node from that misparse (no keyword-named
-    # or bogus class), and the outer class is still captured. Absent > wrong.
+def test_nested_type_no_fabrication(tmp_path) -> None:
+    # Invariant that holds under BOTH grammars: the outer class is captured and the parser
+    # NEVER fabricates a class node from a misparse (no keyword-named or bogus class).
+    # Absent > wrong. (The positive nested-capture assertion lives in the gated test below.)
     src = (
         "class Outer {\n"
         "  static class Inner { void innerMethod() {} }\n"
         "  void run() {}\n"
         "}\n"
     ).encode()
-    p = tmp_path / "Outer.groovy"
-    p.write_bytes(src)
-    ctx = ParseContext(path="Outer.groovy", abs_path=p, source=src, repo_root=tmp_path)
-    rec = GroovyParser().parse_file(ctx)
+    rec = _parse_src(tmp_path, src)
     names = {c.name for c in rec.classes}
     assert "Outer" in names
     assert not (names & {"class", "enum", "interface", "trait"})  # no fabricated keyword-class
+
+
+@requires_patched_grammar
+def test_nested_type_captured(tmp_path) -> None:
+    # With the patched grammar the inner type is a real Class parented to the outer, the
+    # outer's members before/after it are correctly attributed, and the outer span reaches
+    # its true closing brace (no truncation).
+    src = (
+        "class Outer {\n"                       # line 1
+        "  void run() {}\n"                     # 2
+        "  static class Inner {\n"              # 3
+        "    void innerMethod() {}\n"           # 4
+        "  }\n"                                 # 5
+        "  void after() {}\n"                   # 6
+        "}\n"                                   # 7
+    ).encode()
+    rec = _parse_src(tmp_path, src)
+    outer = next(c for c in rec.classes if c.name == "Outer")
+    inner = next(c for c in rec.classes if c.name == "Inner")
+    assert inner.parentId == outer.id  # nested, not hoisted to the file
+    assert outer.endLine == 7  # outer span not truncated at the nested type
+    innerm = next(f for f in rec.functions if f.name == "innerMethod")
+    assert innerm.parentId == inner.id  # inner method parented to Inner, not Outer
+    after = next(f for f in rec.functions if f.name == "after")
+    assert after.parentId == outer.id  # member after the nested type still on Outer, not orphaned
 
 
 def test_endpoint_concatenation(tmp_path) -> None:
@@ -240,3 +311,83 @@ def test_degraded_file_keeps_class_skeleton(tmp_path) -> None:
     assert "isPrelims" in {f.name for f in rec.functions}
     # No fabricated keyword-named class from the misparsed enum.
     assert not ({c.name for c in rec.classes} & {"class", "enum", "interface", "trait"})
+
+
+def test_same_package_call_resolves_without_import(tmp_path) -> None:
+    # A same-package class needs no import; `RestCommon.dataGet()` must still resolve
+    # cross-file via the FQCN index (seeded into the call-resolution bindings).
+    (tmp_path / "RestCommon.groovy").write_text(
+        "package a.b\nclass RestCommon { static Map dataGet(String u) { return [:] } }\n"
+    )
+    main = tmp_path / "Action.groovy"
+    main.write_text("package a.b\nclass Action { def run() { RestCommon.dataGet('/x') } }\n")
+    parser = GroovyParser()
+    idx = parser.build_index(tmp_path, list(tmp_path.rglob("*.groovy")))
+    rec = parser.parse_file(ParseContext(path="Action.groovy", abs_path=main,
+                                         source=main.read_bytes(), repo_root=tmp_path,
+                                         resolution_index=idx, capture_statements=True))
+    call = next(c for f in rec.functions for c in f.calls if c.name == "dataGet")
+    assert call.path == "RestCommon.groovy"
+
+
+# --- enum members captured as flat statements (queryable text) ---
+
+def test_enum_constants_captured_as_statements(tmp_path) -> None:
+    # Enum constants become flat statements parented to the enum Class (best-effort; the
+    # Groovy grammar drops parenthesised constants). The value rides inside the text.
+    src = b"enum Status { ACTIVE, CLOSED }\n"
+    p = tmp_path / "s.groovy"
+    p.write_bytes(src)
+    ctx = ParseContext(path="s.groovy", abs_path=p, source=src, repo_root=tmp_path,
+                       capture_statements=True)
+    rec = GroovyParser().parse_file(ctx)
+    st = next(c for c in rec.classes if c.type == "enum")
+    assert st.metadata is None
+    members = [(s.name, s.text, s.nodeType) for s in rec.statements if s.parentId == st.id]
+    assert members == [("ACTIVE", "ACTIVE", "enum_constant"), ("CLOSED", "CLOSED", "enum_constant")]
+    ctx2 = ParseContext(path="s.groovy", abs_path=p, source=src, repo_root=tmp_path,
+                        capture_statements=False)
+    assert GroovyParser().parse_file(ctx2).statements == []
+
+
+def test_plain_class_metadata_stays_none(tmp_path) -> None:
+    rec = _parse_src(tmp_path, b"class C { int x }")
+    assert next(c for c in rec.classes if c.name == "C").metadata is None
+
+
+@requires_patched_grammar
+def test_modifier_and_nested_enum_constants(tmp_path) -> None:
+    # The load-bearing real-world shape: a modifier-prefixed enum nested in a class, whose
+    # members follow the constants without a `;`. Grammar fix + capture together recover the
+    # parenthesised constants (their VALUE rides inside the statement text) that previously
+    # landed nowhere.
+    src = (
+        "class Holder {\n"
+        "  public enum Entry {\n"
+        "    APPLY_STATUS('CAPLC09'),\n"
+        "    APPLY_DATE('CAPLC11')\n"
+        "    private final String col\n"
+        "    Entry(String col) { this.col = col }\n"
+        "  }\n"
+        "  def use() {}\n"
+        "}\n"
+    ).encode()
+    rec = _parse_src(tmp_path, src, capture=True)
+    holder = next(c for c in rec.classes if c.name == "Holder")
+    entry = next(c for c in rec.classes if c.name == "Entry")
+    assert entry.type == "enum" and entry.parentId == holder.id and entry.metadata is None
+    members = [(s.name, s.text) for s in rec.statements
+               if s.parentId == entry.id and s.nodeType == "enum_constant"]
+    assert members == [
+        ("APPLY_STATUS", "APPLY_STATUS('CAPLC09')"),
+        ("APPLY_DATE", "APPLY_DATE('CAPLC11')"),
+    ]
+
+
+def test_field_annotations_captured_on_statements(tmp_path) -> None:
+    # A decorated field declaration is flattened into a Statement; its annotations
+    # must be structured (not left only in raw text).
+    src = b"class Svc {\n  @Autowired\n  UserService userService\n}\n"
+    rec = _parse_src(tmp_path, src, capture=True)
+    field = next(s for s in rec.statements if s.name == "userService")
+    assert [(d.name, d.args) for d in field.decorators] == [("Autowired", [])]

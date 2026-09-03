@@ -9,9 +9,10 @@ from __future__ import annotations
 from tree_sitter import Node
 
 from ...emit import disambiguate, function_id
-from ...schemas import Call, Decorator, Function, Parameter, Statement
+from ...schemas import Call, Function, Parameter, Statement
 from ..callresolve import CallResolver, noop_resolver
 from ..treesitter import line_span, node_text
+from .attributes import extract_attributes
 from .statements import extract_statements, method_name
 
 _VISIBILITY = {"public", "private", "protected", "internal", "file"}
@@ -31,32 +32,6 @@ def flags(node: Node, source: bytes) -> tuple[str, bool]:
             elif m == "static":
                 is_static = True
     return visibility, is_static
-
-
-def _attribute(node: Node, source: bytes) -> Decorator:
-    name_node = node.child_by_field_name("name")
-    name = node_text(name_node, source).rsplit(".", 1)[-1] if name_node is not None else ""
-    args: list[str] = []
-    arglist = next((c for c in node.named_children if c.type == "attribute_argument_list"), None)
-    if arglist is not None:
-        for arg in arglist.named_children:
-            if arg.type != "attribute_argument":
-                continue
-            text = node_text(arg, source)
-            inner = next((c for c in arg.named_children if c.type == "string_literal"), None)
-            if inner is not None:
-                text = node_text(inner, source).strip('"')
-            args.append(text)
-    return Decorator(name=name, args=args)
-
-
-def extract_attributes(node: Node, source: bytes) -> list[Decorator]:
-    """Attributes declared on a node (its ``attribute_list`` children)."""
-    out: list[Decorator] = []
-    for child in node.children:
-        if child.type == "attribute_list":
-            out.extend(_attribute(a, source) for a in child.named_children if a.type == "attribute")
-    return out
 
 
 def extract_params(params_node: Node | None, source: bytes) -> list[Parameter]:

@@ -3,8 +3,10 @@
 Groovy structurally mirrors Java (package/import/class/method/field/enum), so this
 parser follows the Java parser's model: imports + classes (with flat methods and
 statements), a repo-level FQCN ``build_index`` for import resolution, and the same
-receiver-type call resolver. Unlike Java, Groovy also allows **top-level (script)
-methods** outside any class, which are extracted as functions parented to the file.
+receiver-type call resolver. Unlike Java, Groovy also allows **top-level (script) code**
+outside any class: top-level *methods* are extracted as functions parented to the file,
+and top-level *statements* (module-level declarations, bare calls, control flow) are
+captured and parented to the file — mirroring the Python/TypeScript parsers.
 
 Groovy is a **best-effort / second-tier** language: the dekobon grammar recovers the
 package/class/method/field/enum skeleton reliably, but degrades expression bodies with
@@ -27,8 +29,10 @@ from ..callresolve import make_resolver
 from ..treesitter import parse_source
 from .classes import build_class
 from .functions import build_function, defined_names, has_declaration_error, type_map
-from .imports import FqcnIndex, build_fqcn_index, extract_imports
-from .mappings import FRAMEWORKS, STATEMENT_TYPES
+from .imports import GroovyIndex, build_fqcn_index, extract_imports
+from ..comments_common import comment_statements_for
+from .mappings import COMMENT_TYPES, CONTROL_FLOW, FRAMEWORKS, STATEMENT_TYPES
+from .statements import extract_statements
 
 _CLASS_TYPES = (
     "class_declaration", "interface_declaration", "enum_declaration", "trait_declaration",
@@ -42,8 +46,9 @@ class GroovyParser(BaseParser):
     statement_types = STATEMENT_TYPES
     frameworks = FRAMEWORKS
 
-    def build_index(self, repo_root: Path, files: Sequence[Path], jobs: int = 1) -> FqcnIndex:
-        """Repo-level pre-pass: map each file's package.TypeName → repo path (FQCN)."""
+    def build_index(self, repo_root: Path, files: Sequence[Path], jobs: int = 1) -> GroovyIndex:
+        """Repo-level pre-pass (one parse per file): FQCN → path map for imports + a
+        ``Class.FIELD → value`` constant map for address folding."""
         return build_fqcn_index(Path(repo_root), files, jobs)
 
     def parse_file(self, ctx: ParseContext) -> FileRecord:
@@ -54,10 +59,12 @@ class GroovyParser(BaseParser):
         source, path = ctx.source, ctx.path
         fid = file_id(path)
         seen_ids: set[str] = set()
-        capture, limit = ctx.capture_statements, ctx.text_truncation_limit
+        capture, limit = ctx.capture_statements, ctx.statement_text_limit
 
+        idx = ctx.resolution_index
+        fqcn = idx.fqcn if isinstance(idx, GroovyIndex) else idx  # bare FqcnIndex/None still ok
         internal, external, _, bindings = extract_imports(
-            root, source, path, ctx.repo_root, ctx.resolution_index
+            root, source, path, ctx.repo_root, fqcn
         )
         resolve = make_resolver(
             bindings, defined_names(root, source), path, type_map(root, source)
@@ -84,6 +91,22 @@ class GroovyParser(BaseParser):
                 )
                 functions.append(fn)
                 statements.extend(fn_statements)
+
+        # file-scope (script-body) statements — parented to the file, like Python/TypeScript.
+        # descend_all defaults to False, so class/method/closure bodies are barriers here
+        # (their statements are captured by build_class / build_method) — no double capture.
+        statements.extend(
+            extract_statements(root, source, path, parent_id=fid, capture=capture, limit=limit, seen_ids=seen_ids)
+        )
+
+        if capture:
+            statements.extend(
+                comment_statements_for(
+                    root, source, path, file_id=fid, functions=functions, classes=classes,
+                    statements=statements, control_flow=CONTROL_FLOW,
+                    comment_types=COMMENT_TYPES, limit=limit, seen_ids=seen_ids,
+                )
+            )
 
         return FileRecord(
             id=fid,

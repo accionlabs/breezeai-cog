@@ -12,7 +12,10 @@ import json
 from typing import Any
 
 # Capture contract version (semver). Bump on schema change.
-SCHEMA_VERSION = "2.0"
+# 2.1: additive optional `Statement.isPartial` (oversized-statement split parts).
+# 2.2: Statement.platform (IaC cloud provider) and Statement.endpoint (Terraform address);
+#      iac_data semantic type; module blocks yield Class records.
+SCHEMA_VERSION = "2.2"
 
 
 def export_json_schema() -> dict[str, Any]:

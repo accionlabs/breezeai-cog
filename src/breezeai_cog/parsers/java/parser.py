@@ -18,8 +18,9 @@ from ..treesitter import parse_source
 from ..callresolve import make_resolver
 from .classes import build_class
 from .functions import defined_names, type_map
-from .imports import FqcnIndex, build_fqcn_index, extract_imports
-from .mappings import FRAMEWORKS, STATEMENT_TYPES
+from .imports import JavaIndex, build_fqcn_index, extract_imports
+from ..comments_common import comment_statements_for
+from .mappings import COMMENT_TYPES, CONTROL_FLOW, FRAMEWORKS, STATEMENT_TYPES
 
 _CLASS_TYPES = ("class_declaration", "interface_declaration", "enum_declaration", "record_declaration")
 
@@ -31,8 +32,9 @@ class JavaParser(BaseParser):
     statement_types = STATEMENT_TYPES
     frameworks = FRAMEWORKS
 
-    def build_index(self, repo_root: Path, files: Sequence[Path], jobs: int = 1) -> FqcnIndex:
-        """Repo-level pre-pass: map each file's package.ClassName → repo path (FQCN)."""
+    def build_index(self, repo_root: Path, files: Sequence[Path], jobs: int = 1) -> JavaIndex:
+        """Repo-level pre-pass (one parse per file): FQCN → path map for imports + a
+        ``Class.FIELD → value`` constant map for address folding."""
         return build_fqcn_index(Path(repo_root), files, jobs)
 
     def parse_file(self, ctx: ParseContext) -> FileRecord:
@@ -43,10 +45,12 @@ class JavaParser(BaseParser):
         source, path = ctx.source, ctx.path
         fid = file_id(path)
         seen_ids: set[str] = set()
-        capture, limit = ctx.capture_statements, ctx.text_truncation_limit
+        capture, limit = ctx.capture_statements, ctx.statement_text_limit
 
+        idx = ctx.resolution_index
+        fqcn = idx.fqcn if isinstance(idx, JavaIndex) else idx  # bare FqcnIndex/None still ok
         internal, external, _, bindings = extract_imports(
-            root, source, path, ctx.repo_root, ctx.resolution_index
+            root, source, path, ctx.repo_root, fqcn
         )
         resolve = make_resolver(  # calls[].path (Tiers 1+2 + receiver-type Phase 2)
             bindings, defined_names(root, source), path, type_map(root, source)
@@ -64,6 +68,15 @@ class JavaParser(BaseParser):
                 classes.extend(cls_list)
                 functions.extend(methods)
                 statements.extend(cls_statements)
+
+        if capture:
+            statements.extend(
+                comment_statements_for(
+                    root, source, path, file_id=fid, functions=functions, classes=classes,
+                    statements=statements, control_flow=CONTROL_FLOW,
+                    comment_types=COMMENT_TYPES, limit=limit, seen_ids=seen_ids,
+                )
+            )
 
         return FileRecord(
             id=fid,

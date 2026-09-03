@@ -14,13 +14,13 @@ from breezeai_cog.emit import to_line
 from breezeai_cog.parsers.base import ParseContext
 from breezeai_cog.parsers.typescript.parser import TypeScriptParser
 from breezeai_cog.parsers.typescript_graphql.parser import GraphQLParser
-from breezeai_cog.parsers.typescript_nbs_graphql.parser import NbsGraphQLParser
+from breezeai_cog.parsers.typescript_graphql_codefirst.parser import GraphQLCodeFirstParser
 from breezeai_cog.schemas import FileRecord
 
 # Grounded on the real bespoke framework: @Service class (no @Resolver), operation
 # decorators imported from a project-relative decorators module, SDL-string + bare forms,
 # a @FieldResolver (field resolver, not an op), and @RequireScopes auth.
-RESOLVER = b'''import { Service } from '@nbs/typedi';
+RESOLVER = b'''import { Service } from '@app/typedi';
 import { Arg, Ctx, Query, Mutation, Subscription, FieldResolver, RequireScopes, resolversFromService } from '../decorators';
 import { GraphQLTypes } from '../decorators';
 
@@ -47,7 +47,7 @@ export class ConsolidateResolver {
 
 # The framework's OWN decorators module: DEFINES the decorators (export const Query = …),
 # never APPLIES them, and does not import them from a relative decorators module.
-DECORATORS_MODULE = b'''import { Container } from '@nbs/typedi';
+DECORATORS_MODULE = b'''import { Container } from '@app/typedi';
 export const Query = (gqlType?: string) => (t, k, d) => {};
 export const Mutation = (gqlType?: string) => (t, k, d) => {};
 export function resolversFromService(x) { return x; }
@@ -56,7 +56,7 @@ export function resolversFromService(x) { return x; }
 
 def _parse(src, name, *, capture=True) -> FileRecord:
     ctx = ParseContext(path=name, abs_path=None, source=src, repo_root=".", capture_statements=capture)
-    return NbsGraphQLParser().parse_file(ctx)
+    return GraphQLCodeFirstParser().parse_file(ctx)
 
 
 def _routes(rec: FileRecord):
@@ -102,7 +102,7 @@ def test_routes_require_capture() -> None:
 
 
 def test_claims_signature() -> None:
-    p = NbsGraphQLParser()
+    p = GraphQLCodeFirstParser()
     assert p.claims("r.ts", RESOLVER) is True
     # the framework's own decorators.ts must NOT be claimed (defines, never applies)
     assert p.claims("decorators.ts", DECORATORS_MODULE) is False
@@ -113,9 +113,9 @@ def test_claims_signature() -> None:
 
 def test_selection() -> None:
     registry.clear()
-    for parser in (TypeScriptParser(), GraphQLParser(), NbsGraphQLParser()):
+    for parser in (TypeScriptParser(), GraphQLParser(), GraphQLCodeFirstParser()):
         registry.register(parser)
-    assert registry.select("consolidate.resolver.ts", RESOLVER).name == "typescript-nbs-graphql"
+    assert registry.select("consolidate.resolver.ts", RESOLVER).name == "typescript-graphql-codefirst"
     assert registry.select("decorators.ts", DECORATORS_MODULE).name == "typescript"  # base fallback
     registry.clear()
 
@@ -125,3 +125,54 @@ def test_output_validates() -> None:
     errors = list(Draft202012Validator(FileRecord.model_json_schema(by_alias=True))
                   .iter_errors(json.loads(to_line(rec))))
     assert not errors, errors
+
+
+def test_request_response_dto_from_sdl() -> None:
+    # DTOs are parsed from the decorator's SDL fragment via the GraphQL grammar: requestDTO =
+    # the input/data (else first) arg's base type; responseDTO = the return base type, with
+    # `!`/`[]` stripped and built-in scalars dropped.
+    rec = _parse(RESOLVER, "consolidate.resolver.ts")
+    ops = {s.endpoint: s for s in _routes(rec)}
+    assert ops["consolidate"].requestDTO == "ConsolidateInput"
+    assert ops["consolidate"].responseDTO is None        # `: ID` is a built-in scalar → None
+    assert ops["products"].requestDTO == "ProductsInput"
+    assert ops["products"].responseDTO == "Product"       # `[Product!]!` → Product
+    assert ops["watchLocks"].requestDTO is None           # `keys: [String!]!` → scalar → None
+    assert ops["watchLocks"].responseDTO == "Lockout"
+    assert ops["availableModels"].requestDTO is None      # bare `@Query()`, no SDL, no @Arg
+    assert ops["availableModels"].responseDTO is None
+
+
+def test_request_dto_from_arg_fallback() -> None:
+    # No SDL fragment on the decorator → requestDTO falls back to the @Arg('input') param type
+    # (the SDL contract takes precedence when present; this is the fallback).
+    src = b'''import { Service } from '@app/typedi';
+import { Arg, Mutation } from '../decorators';
+
+@Service()
+export class ThingResolver {
+  @Mutation()
+  async createThing(@Arg('input') input: CreateThingInput) { return ''; }
+}
+'''
+    rec = _parse(src, "thing.resolver.ts")
+    op = next(s for s in _routes(rec) if s.endpoint == "createThing")
+    assert op.requestDTO == "CreateThingInput"
+    assert op.responseDTO is None
+
+
+def test_malformed_sdl_fragment_is_honest_null() -> None:
+    # A decorator string that is not parseable SDL must never abort capture — the route is still
+    # emitted (endpoint from the leading identifier), just without DTOs.
+    src = b'''import { Service } from '@app/typedi';
+import { Query } from '../decorators';
+
+@Service()
+export class BrokenResolver {
+  @Query('brokenOp(bad not valid sdl')
+  broken() { return null; }
+}
+'''
+    rec = _parse(src, "broken.resolver.ts")
+    op = next(s for s in _routes(rec) if s.endpoint == "brokenOp")
+    assert op.requestDTO is None and op.responseDTO is None

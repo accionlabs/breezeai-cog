@@ -14,6 +14,42 @@ from ..callresolve import CallResolver, noop_resolver
 from .functions import _visibility, build_function, extract_decorators
 from .statements import extract_statements
 
+#: Standard-library enum base classes. A class deriving (directly) from one of these is an enum,
+#: whose class-body value assignments are its members.
+_ENUM_BASES = frozenset({"Enum", "IntEnum", "IntFlag", "Flag", "StrEnum", "ReprEnum"})
+
+
+def _is_enum_class(bases: list[str]) -> bool:
+    """Whether any base is a known enum base (matched by last dotted segment, so ``enum.Enum``
+    works). An aliased import (``Enum as E``) or a custom/transitive enum base is not resolved
+    here — honest miss rather than a wrong tag."""
+    return any(b.rsplit(".", 1)[-1] in _ENUM_BASES for b in bases)
+
+
+def _is_enum_member_name(name: str) -> bool:
+    """A member name is a normal identifier — not a ``__dunder__`` (ignored by enum) nor a
+    ``_sunder_`` (reserved by the enum machinery)."""
+    if name.startswith("__") and name.endswith("__"):
+        return False
+    if len(name) >= 2 and name.startswith("_") and name.endswith("_"):
+        return False  # _sunder_ (single leading+trailing underscore)
+    return True
+
+
+def _enum_member_lines(body: Node, source: bytes) -> set[int]:
+    """Start lines of class-body assignments that are enum members: ``NAME = value`` (a value
+    is required, so a bare ``x: int`` annotation is excluded), the target a single identifier
+    with a non-dunder/non-sunder name."""
+    lines: set[int] = set()
+    for child in body.named_children:
+        node = child.named_children[0] if child.type == "expression_statement" and child.named_children else child
+        if node.type != "assignment" or node.child_by_field_name("right") is None:
+            continue
+        left = node.child_by_field_name("left")
+        if left is not None and left.type == "identifier" and _is_enum_member_name(node_text(left, source)):
+            lines.add(node.start_point[0] + 1)
+    return lines
+
 
 def _unwrap(node: Node) -> tuple[Node, list[Node]]:
     """Return (definition, decorator_nodes) for a (maybe) decorated_definition."""
@@ -85,6 +121,15 @@ def build_class(
         statements.extend(
             extract_statements(body, source, path, parent_id=cid, capture=capture, limit=limit, seen_ids=seen_ids)
         )
+        # An `enum.Enum` subclass has no native enum grammar — its members are class-body value
+        # assignments. Tag them with semanticType=enum_member (the cross-language role marker),
+        # leaving nodeType/text as the raw source. Only the statements just added above (this
+        # class's own body, before methods/nested classes) are considered.
+        if capture and _is_enum_class(bases):
+            member_lines = _enum_member_lines(body, source)
+            for s in statements:
+                if s.nodeType == "assignment" and s.startLine in member_lines:
+                    s.semanticType = "enum_member"
         for defn, decs in iter_definitions(body):
             if defn.type == "function_definition":
                 fns, fn_statements = build_function(
