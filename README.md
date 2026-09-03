@@ -26,6 +26,7 @@ Python reimplementation of `breezeai-code-ontology-generator`.
 | Kotlin | `.kt` | Ktor |
 | C++ | `.cpp .cc .cxx .c++ .hpp .h .hh .hxx .inl .ipp` | — |
 | Groovy † | `.groovy` | Vert.x |
+| Prisma | `.prisma` | Prisma Schema Language — `model` → `data_model` entity, `enum` / `datasource` / `generator` blocks (full body on `text`) |
 | Structured JSON / data | `.json` (+ YAML/TOML config) | Whole-document capture as a TOON `structured_data` statement |
 | Config | `package.json`, `tsconfig`, `Dockerfile`, `docker-compose`, `pom.xml`, `requirements.txt`, `build.gradle`, `.csproj` / `.vbproj` / `.sln`, `Makefile`, … | — |
 
