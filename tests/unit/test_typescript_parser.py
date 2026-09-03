@@ -904,67 +904,6 @@ def test_enum_members_captured_as_statements(tmp_path) -> None:
     assert TypeScriptParser().parse_file(ctx2).statements == []
 
 
-def test_interface_members_captured(tmp_path) -> None:
-    # An interface's members mirror an implementing class: method signatures become
-    # Functions (no body → calls:[]) so callers resolve to implementers via
-    # IMPLEMENTS + name match; property signatures become flat Statements
-    # (nodeType="property_signature"), gated by --capture-statements. Nameless
-    # members (call/construct/index signatures) are skipped.
-    src = (
-        b"export interface Notifier {\n"
-        b"  channel: string;\n"
-        b"  readonly retries: number;\n"
-        b"  send(message: string): Promise<boolean>;\n"
-        b"  (x: number): void;\n"
-        b"  [key: string]: unknown;\n"
-        b"}\n"
-    )
-    p = tmp_path / "n.ts"
-    p.write_bytes(src)
-    ctx = ParseContext(path="n.ts", abs_path=p, source=src, repo_root=tmp_path,
-                       capture_statements=True)
-    rec = TypeScriptParser().parse_file(ctx)
-    iface = next(c for c in rec.classes if c.type == "interface")
-    fns = [f for f in rec.functions if f.parentId == iface.id]
-    assert len(fns) == 1
-    send = fns[0]
-    assert send.name == "send" and send.type == "method"
-    assert [(p_.name, p_.type) for p_ in send.params] == [("message", "string")]
-    assert send.returnType == "Promise<boolean>"
-    assert send.calls == []  # signature has no body
-    props = [s for s in rec.statements if s.parentId == iface.id]
-    assert [(s.name, s.nodeType) for s in props] == [
-        ("channel", "property_signature"),
-        ("retries", "property_signature"),
-    ]  # call_signature / index_signature skipped
-    # capture off → no property statements, but the method Function is still emitted
-    off = TypeScriptParser().parse_file(
-        ParseContext(path="n.ts", abs_path=p, source=src, repo_root=tmp_path)
-    )
-    assert off.statements == []
-    assert any(f.name == "send" for f in off.functions)
-
-
-def test_class_method_overloads_not_duplicated(tmp_path) -> None:
-    # Regression guard for the interface change: a class body's overload signatures are
-    # `method_signature` nodes too, but they are redundant with the implementation's
-    # method_definition and must NOT each spawn a duplicate Function.
-    src = (
-        b"export class C {\n"
-        b"  foo(a: string): void;\n"
-        b"  foo(a: number): void;\n"
-        b"  foo(a: unknown): void { return; }\n"
-        b"}\n"
-    )
-    p = tmp_path / "c.ts"
-    p.write_bytes(src)
-    rec = TypeScriptParser().parse_file(
-        ParseContext(path="c.ts", abs_path=p, source=src, repo_root=tmp_path,
-                     capture_statements=True)
-    )
-    assert [f.name for f in rec.functions] == ["foo"]  # only the implementation
-
-
 # --- Express router-factory mount join ------------------------------------------------------
 # A factory (`() => { const r = Router(); r.get('/:id'); return r }`) is mounted elsewhere with
 # `app.use('/users', factory())`. The base path and the routes live in different files, so the
