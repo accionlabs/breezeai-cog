@@ -1,4 +1,5 @@
-"""GraphQLParser — a standalone-file **language parser** owning ``.graphql`` / ``.gql``.
+"""GraphQLParser — a standalone-file **language parser** owning ``.graphql`` / ``.gql`` /
+``.graphqls`` (the graphql-java / Spring-for-GraphQL schema extension).
 
 Distinct from the ``typescript-graphql`` framework parser, which handles SDL/operations
 **embedded** in ``.ts`` files (``gql`…`` template strings). A standalone schema or operation
@@ -12,21 +13,23 @@ semantic); the shared comment pass adds ``# …`` comments when capture is on.
 
 from __future__ import annotations
 
-from ...emit import file_id
-from ...schemas import SCHEMA_VERSION, FileRecord, Statement
-from ...utils import count_loc
 from tree_sitter import Node
 
+from ...emit import file_id
+from ...schemas import SCHEMA_VERSION, Class, FileRecord, Statement
+from ...utils import count_loc
 from ..base import BaseParser, ParseContext
 from ..comments_common import comment_statements_for
 from ..treesitter import parse_source
 from .mappings import COMMENT_TYPES, FRAMEWORKS, STATEMENT_TYPES
-from .sdl import collect_graphql_statements
+from .sdl import extract_graphql
 
 
 class GraphQLParser(BaseParser):
     name = "graphql"
-    extensions: tuple[str, ...] = (".graphql", ".gql")
+    # ``.graphqls`` is the graphql-java / Spring-for-GraphQL convention for a schema (SDL)
+    # file — same SDL grammar as ``.graphql``/``.gql``, just the JVM schema-first extension.
+    extensions: tuple[str, ...] = (".graphql", ".gql", ".graphqls")
     schema_version = SCHEMA_VERSION
     statement_types = STATEMENT_TYPES
     frameworks = FRAMEWORKS
@@ -39,13 +42,15 @@ class GraphQLParser(BaseParser):
         source, path = ctx.source, ctx.path
         fid = file_id(path)
         seen_ids: set[str] = set()
+        classes: list[Class] = []
         statements: list[Statement] = []
 
-        # The GraphQL surface is entirely semantic (entities/routes/api_calls), so gate it on
-        # --capture-statements like every other route/db/event emitter; skip fixture dirs.
+        # The GraphQL surface is entirely semantic (types → Class nodes, operations →
+        # statements), so gate it on --capture-statements like every route/db/event emitter;
+        # skip fixture dirs.
         if ctx.capture_statements and not self.is_fixture_file(path):
-            statements.extend(
-                collect_graphql_statements(root, source, path, seen_ids, ctx.statement_text_limit)
+            classes, statements = extract_graphql(
+                root, source, path, seen_ids=seen_ids, limit=ctx.statement_text_limit
             )
 
         record = FileRecord(
@@ -54,8 +59,9 @@ class GraphQLParser(BaseParser):
             type="code",
             language="graphql",
             loc=count_loc(source.decode("utf-8", "replace")),
+            classes=classes,
             statements=statements,
-            framework="graphql" if statements else None,
+            framework="graphql" if (classes or statements) else None,
         )
 
         if ctx.capture_statements:
@@ -66,7 +72,7 @@ class GraphQLParser(BaseParser):
                     path,
                     file_id=fid,
                     functions=[],
-                    classes=[],
+                    classes=classes,
                     statements=record.statements,
                     control_flow=frozenset(),
                     comment_types=COMMENT_TYPES,

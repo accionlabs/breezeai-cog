@@ -9,19 +9,20 @@ GraphQL AST, so each record keeps its genuine grammar node type.
 
 from __future__ import annotations
 
-#: GraphQL grammar node types emitted as Statement.nodeType (discovered empirically).
+#: GraphQL grammar node types emitted as Statement.nodeType (discovered empirically). The
+#: type system (type/interface/enum/union/input) is emitted as Class nodes, not statements —
+#: only ``object_type_definition`` appears here, as the nodeType of the ``graphql_entity``
+#: statement carried by a ``@key`` type. Members and operations are the rest.
 STATEMENT_TYPES: list[str] = [
-    "object_type_definition",
-    "object_type_extension",
-    "interface_type_definition",
-    "union_type_definition",
-    "enum_type_definition",
-    "input_object_type_definition",
+    "object_type_definition",  # @key federation-entity marker statement
+    "field_definition",  # object/interface field (member) + root-type route
+    "input_value_definition",  # input-object field (member)
+    "enum_value_definition",  # enum value (member)
+    "named_type",  # union member
     "scalar_type_definition",
     "directive_definition",
     "schema_definition",
-    "field_definition",
-    "field",
+    "field",  # invoked field of a client operation (api_call)
     "operation_definition",
     "fragment_definition",
 ]
@@ -29,7 +30,8 @@ STATEMENT_TYPES: list[str] = [
 #: Frameworks this parser reports (single-purpose — the SDL/operation surface).
 FRAMEWORKS: list[str] = ["graphql"]
 
-#: Comment node types for the shared whole-file comment pass. The GraphQL grammar uses a
-#: single ``comment`` node for ``# …``; ``"""…"""`` descriptions live inside their construct's
-#: span and are absorbed into that construct's ``text`` (so they need no separate capture).
-COMMENT_TYPES: frozenset[str] = frozenset({"comment"})
+#: Comment node types for the shared whole-file comment pass. ``comment`` = ``# …`` lines;
+#: ``description`` = ``"""…"""`` SDL docstrings on types/fields/values (captured as ``comment``
+#: statements like Python docstrings — deduped by the pass where already inside a member
+#: statement's ``text``).
+COMMENT_TYPES: frozenset[str] = frozenset({"comment", "description"})

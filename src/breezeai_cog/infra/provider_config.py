@@ -19,7 +19,3 @@ class ProviderConfig:
         return cls(
             ProviderType(settings.infra_provider)
         )
-
-
-# Create using your application Settings instance
-provider_conf = ProviderConfig.from_settings(Settings())

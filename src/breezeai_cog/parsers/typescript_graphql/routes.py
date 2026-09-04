@@ -45,8 +45,8 @@ import re
 from tree_sitter import Node
 
 from ...emit import disambiguate, file_id, statement_id
-from ...schemas import FileRecord, Statement
-from ..graphql.sdl import collect_graphql_statements
+from ...schemas import Class, FileRecord, Statement
+from ..graphql.sdl import extract_graphql
 from ..treesitter import first_line, node_text, parse_source
 
 # The three root operation types. Everything else keyed in a resolver map
@@ -181,38 +181,49 @@ def _parse_sdl_fragment(
     source: bytes,
     path: str,
     seen: set[str],
+    classes: list[Class],
     routes: list[Statement],
     timeout_micros: int,
     limit: int,
 ) -> None:
     """Re-parse one ``string_fragment``'s bytes with the ``graphql`` grammar and emit the SAME
-    full statement set a standalone ``.graphql`` file gets — root-type fields as ``route``,
-    every object/interface/union as ``graphql_entity``, and inputs/enums/scalars as plain
-    statements — via the shared :func:`collect_graphql_statements` walker, with ``row_offset``
-    mapping each line back to the host TS file (one walker, one behaviour for embedded vs
-    standalone SDL)."""
+    nodes a standalone ``.graphql`` file gets — type system as ``Class`` nodes, root-type
+    fields as ``route``, ``@key`` types as ``graphql_entity``, members/inputs/enums as
+    statements — via the shared :func:`extract_graphql` walker. ``row_offset``/``col_offset`` map
+    each line/col back to the host TS file, and ``synthetic=True`` marks the emitted statements
+    as having no backing host-AST node (one walker, one behaviour for embedded vs standalone)."""
     sdl = source[frag.start_byte : frag.end_byte]
     gql_root = parse_source("graphql", sdl, timeout_micros).root_node
-    routes.extend(
-        collect_graphql_statements(gql_root, sdl, path, seen, limit, row_offset=frag.start_point[0])
+    frag_classes, frag_stmts = extract_graphql(
+        gql_root,
+        sdl,
+        path,
+        seen_ids=seen,
+        limit=limit,
+        row_offset=frag.start_point[0],
+        col_offset=frag.start_point[1],
+        synthetic=True,
     )
+    classes.extend(frag_classes)
+    routes.extend(frag_stmts)
 
 
 def _detect_sdl(
     root: Node, source: bytes, path: str, seen: set[str], timeout_micros: int, limit: int
-) -> list[Statement]:
+) -> tuple[list[Class], list[Statement]]:
+    classes: list[Class] = []
     routes: list[Statement] = []
 
     def walk(n: Node) -> None:
         if n.type == "string_fragment":
             frag = source[n.start_byte : n.end_byte]
             if any(m in frag for m in _SDL_MARKERS):
-                _parse_sdl_fragment(n, source, path, seen, routes, timeout_micros, limit)
+                _parse_sdl_fragment(n, source, path, seen, classes, routes, timeout_micros, limit)
         for c in n.named_children:
             walk(c)
 
     walk(root)
-    return routes
+    return classes, routes
 
 
 # ---- client-operation form --------------------------------------------------
@@ -407,18 +418,22 @@ def _detect_client_ops(
 
 
 def detect_graphql(
-    root: Node, source: bytes, path: str, *, seen_ids: set[str],
-    timeout_micros: int = 0, limit: int = 8000,
-) -> list[Statement]:
-    """Server-side GraphQL routes — resolver-map operations (with handlers) and SDL operations
-    (with DTOs). ``timeout_micros`` bounds the secondary ``graphql`` parse of embedded SDL,
-    threaded from ``ctx.parse_timeout_micros`` like every other ``parse_source`` call; ``limit``
-    bounds statement ``text`` like ``ctx.statement_text_limit``. Returns statements to append to
-    the record. (Client operations are handled additively for every TS file by
-    :func:`detect_graphql_client`, not here — GraphQLParser owns only server files.)"""
+    root: Node,
+    source: bytes,
+    path: str,
+    *,
+    seen_ids: set[str],
+    timeout_micros: int = 0,
+    limit: int = 8000,
+) -> tuple[list[Class], list[Statement]]:
+    """Server-side GraphQL — resolver-map operations (statements, with handlers) and embedded
+    SDL (the type system as ``Class`` nodes plus route/entity/member statements). ``timeout_micros``
+    bounds the secondary ``graphql`` parse of embedded SDL; ``limit`` bounds statement ``text``.
+    Returns ``(classes, statements)`` to append to the record. (Client operations are handled
+    additively for every TS file by :func:`detect_graphql_client`, not here.)"""
     routes = _detect_resolver_maps(root, source, path, seen_ids)
-    routes += _detect_sdl(root, source, path, seen_ids, timeout_micros, limit)
-    return routes
+    classes, sdl_stmts = _detect_sdl(root, source, path, seen_ids, timeout_micros, limit)
+    return classes, routes + sdl_stmts
 
 
 # Client ops appear in ANY TS file that imports a gql tag — most of which are owned by the

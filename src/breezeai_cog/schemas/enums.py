@@ -58,6 +58,14 @@ SemanticType = Literal[
     # grammar-coupled ``nodeType`` cannot. Persisted verbatim by the backend (no enum check);
     # adding it to the Confluence spec's §2.4 list is a documentation step.
     "enum_member",
+    # data model / entity (not a behaviour) — a declared persistent record type in a schema
+    # definition language, e.g. a Prisma ``model`` block (a database table / collection). Marks
+    # the *whole* declaration (fields + relations carried on ``text``) so "list every data
+    # entity" is one filter, independent of the defining language. The parallel to GraphQL's
+    # ``graphql_entity``, kept separate because the vocabulary is IDL-specific; persisted
+    # verbatim by the backend (no enum check), so it ingests + filters with no backend change —
+    # adding it to the Confluence spec's §2.4 semanticType list is a documentation step.
+    "data_model",
     # IaC block types (HCL/Terraform family) — behaviour-only:
     #   resource  = declares/owns infrastructure
     #   data      = reads existing infrastructure owned elsewhere
