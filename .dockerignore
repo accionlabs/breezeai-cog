@@ -29,3 +29,4 @@ out/
 .claude
 .idea
 .vscode
+.cache

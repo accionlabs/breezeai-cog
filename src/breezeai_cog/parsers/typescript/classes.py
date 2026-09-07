@@ -7,7 +7,7 @@ from tree_sitter import Node
 
 from ...emit import class_id, disambiguate
 from ...schemas import Class, ConstructorParam, Function, Statement
-from ..statements_common import emit_enum_members
+from ..statements_common import emit_enum_members, member_statement
 from ..treesitter import line_span, node_text
 from ..callresolve import CallResolver, noop_resolver
 from .decorators import extract_decorators
@@ -24,6 +24,15 @@ _TYPE = {
     "class": "class",
     "interface_declaration": "interface",
     "enum_declaration": "enum",
+}
+
+#: Interface members captured as flat Statements. A `method_signature` is captured as a
+#: Function instead (it is a callable member, resolvable to implementers); these are not.
+_INTERFACE_STMT_MEMBERS = {
+    "property_signature",   # field:     `name: string`
+    "call_signature",       # callable:  `(e: string): void`
+    "construct_signature",  # newable:   `new (id: string): T`
+    "index_signature",      # index:     `[key: string]: unknown`
 }
 
 
@@ -79,6 +88,7 @@ def build_class(
     methods: list[Function] = []
     statements: list[Statement] = []
     ctor_params: list[ConstructorParam] = []
+    is_interface = cnode.type == "interface_declaration"
 
     body = cnode.child_by_field_name("body")
     if body is not None:
@@ -130,6 +140,34 @@ def build_class(
                     )
                     methods.extend(fns)
                     statements.extend(fn_statements)
+            elif is_interface and child.type == "method_signature":
+                # Interface method signature (no body). Same contract shape as an
+                # abstract method — a callable member with params + return type; emit as
+                # a Function (calls:[]) so callers of the interface method resolve to
+                # implementers via IMPLEMENTS + name match. Other member kinds (field +
+                # call/construct/index signatures) fall to the Statement branch below.
+                # Guarded to interfaces: a class body's `method_signature` is an overload
+                # sig, redundant with its method_definition — never a duplicate Function.
+                mname_node = child.child_by_field_name("name")
+                mname = node_text(mname_node, source) if mname_node is not None else ""
+                fns, fn_statements = build_function(
+                    child, name=mname, kind="method",
+                    decorators=extract_decorators(pending, source), source=source, path=path,
+                    parent_id=cid, class_name=name, seen_ids=seen_ids, capture=capture, limit=limit,
+                    resolve=resolve, typed_db_ids=typed_db_ids,
+                )
+                methods.extend(fns)
+                statements.extend(fn_statements)
+            elif is_interface and capture and child.type in _INTERFACE_STMT_MEMBERS:
+                # Every interface member that isn't a callable method → flat Statement
+                # (raw nodeType + full text), like a class field. Covers the data field
+                # (property_signature) and the type-level contracts (call/construct/index
+                # signatures) — nothing is dropped. The latter three have no member name,
+                # so their Statement carries name=None but keeps the full source text.
+                statements.append(
+                    member_statement(child, source, path, parent_id=cid, limit=limit,
+                                     seen_ids=seen_ids)
+                )
             pending = []
 
     # Enum members become flat statements parented to the enum Class (their `text` — incl.

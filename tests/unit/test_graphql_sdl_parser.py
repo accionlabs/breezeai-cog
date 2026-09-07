@@ -1,11 +1,12 @@
 """Standalone GraphQL SDL/operation capture (BREEZEAI-528).
 
-The ``graphql`` language parser owns ``.graphql`` / ``.gql`` files (distinct from the
-``typescript-graphql`` framework parser, which handles ``gql`…`` embedded in ``.ts``). It
-emits one flat ``Statement`` per construct — composite types as ``graphql_entity`` (with the
-full body, including any ``@key`` directive, on ``text``), root-type fields as ``route``,
-value types (enum/input/scalar/directive/schema) as plain statements, client operations as
-``api_call`` per invoked field, and fragments — each carrying its declared ``name``.
+The `graphql` language parser owns `.graphql` / `.gql` / `.graphqls`. The type **system** is
+emitted as `Class` nodes (type→class, interface→interface, enum→enum, union→union,
+input→record — same as every other language); a `@key` type additionally gets a
+`graphql_entity` statement with `keyFields`. Members (object/input fields, enum values, union
+members) are child statements parented to their Class. Root operation fields → `route`;
+client operations → `api_call`. `scalar`/`directive`/`schema` → plain statements;
+descriptions → `comment`.
 """
 
 from __future__ import annotations
@@ -58,22 +59,39 @@ mutation Make($input: CreateUserInput!) { createUser(input: $input) { id } }
 fragment UserFields on User { id name }
 """
 
-# A multi-line operation whose invoked field carries a nested selection set — the full
-# field body must be captured, not just the first line up to the opening brace.
+# A multi-line operation whose invoked field carries a nested selection set.
 MULTILINE_OP = """\
 query GetProjects($filter: ProjectFilter!, $pagination: PaginationInput!) {
   projects(filter: $filter, pagination: $pagination) {
-    items {
-      id
-      name
-    }
-    pageInfo {
-      totalCount
-      hasNextPage
-    }
+    items { id  name }
+    pageInfo { totalCount  hasNextPage }
   }
 }
 """
+
+# Custom-named roots declared via schema{} — their fields must still be routes.
+SCHEMA_ROOTS = """\
+schema { query: RootQuery  mutation: RootMutation }
+type RootQuery { me: User }
+type RootMutation { save(input: SaveInput!): User }
+"""
+
+# Extensions of non-object kinds.
+EXTENDS = """\
+interface Node { id: ID! }
+extend interface Node { createdAt: String }
+enum Role { ADMIN }
+extend enum Role { GUEST }
+union Search = User
+extend union Search = Post
+input Filter { term: String }
+extend input Filter { limit: Int }
+"""
+
+DESCRIBED = '''\
+"""A registered customer."""
+type Customer { id: ID! }
+'''
 
 
 def _parse(tmp_path, filename: str, src: str, *, capture: bool = True) -> FileRecord:
@@ -90,100 +108,143 @@ def _parse(tmp_path, filename: str, src: str, *, capture: bool = True) -> FileRe
     return GraphQLParser().parse_file(ctx)
 
 
-def _by_name(rec, name: str, node_type: str):
+def _classes(rec) -> dict:
+    return {c.name: c for c in rec.classes}
+
+
+def _by(rec, name: str, node_type: str):
     return next(s for s in rec.statements if s.name == name and s.nodeType == node_type)
 
 
 def test_language_and_extensions() -> None:
     p = GraphQLParser()
     assert p.name == "graphql"
-    assert p.extensions == (".graphql", ".gql")
+    assert p.extensions == (".graphql", ".gql", ".graphqls")
     assert "graphql" in p.frameworks
 
 
-def test_entity_captured_with_full_body(tmp_path) -> None:
-    rec = _parse(tmp_path, "schema.graphql", SDL)
+def test_graphqls_schema_file_parsed(tmp_path) -> None:
+    rec = _parse(tmp_path, "schema.graphqls", SDL)  # graphql-java / Spring extension
     assert rec.language == "graphql"
-    user = _by_name(rec, "User", "object_type_definition")
-    assert user.semanticType == "graphql_entity"
-    assert user.endpoint == "User"
-    # keyFields is dropped; the @key directive stays visible in the full-body text
-    assert user.keyFields is None
-    assert "@key" in user.text
-    # full body carries columns AND relations as text (Tier-1 contents capture)
-    assert "company: Company" in user.text
-    assert "posts: [Post!]!" in user.text
+    assert _classes(rec)["User"].type == "class"
+    assert _by(rec, "user", "field_definition").semanticType == "route"
 
 
-def test_interface_union_are_entities(tmp_path) -> None:
-    rec = _parse(tmp_path, "schema.gql", SDL)
-    assert _by_name(rec, "Node", "interface_type_definition").semanticType == "graphql_entity"
-    assert _by_name(rec, "SearchResult", "union_type_definition").semanticType == "graphql_entity"
-
-
-def test_type_extension_is_entity(tmp_path) -> None:
+def test_type_system_becomes_class_nodes(tmp_path) -> None:
     rec = _parse(tmp_path, "schema.graphql", SDL)
-    ext = _by_name(rec, "User", "object_type_extension")
-    assert ext.semanticType == "graphql_entity"
-    assert ext.endpoint == "User"
+    cls = _classes(rec)
+    assert cls["User"].type == "class"
+    assert cls["Node"].type == "interface"
+    assert cls["SearchResult"].type == "union"
+    assert cls["Status"].type == "enum"
+    assert cls["CreateUserInput"].type == "record"
+    # root operation types are NOT classes
+    assert "Query" not in cls and "Mutation" not in cls
 
 
-def test_value_types_have_no_entity_marker(tmp_path) -> None:
+def test_key_type_has_class_and_entity(tmp_path) -> None:
     rec = _parse(tmp_path, "schema.graphql", SDL)
-    for name, nt in [
-        ("DateTime", "scalar_type_definition"),
-        ("auth", "directive_definition"),
-        ("Status", "enum_type_definition"),
-        ("CreateUserInput", "input_object_type_definition"),
-    ]:
-        s = _by_name(rec, name, nt)
-        assert s.semanticType is None
-        assert s.endpoint == name  # name is the join key (e.g. requestDTO -> input)
+    assert "User" in _classes(rec)  # structure
+    entity = _by(rec, "User", "object_type_definition")  # federation marker
+    assert entity.semanticType == "graphql_entity"
+    assert entity.keyFields == ["id"]
+    assert entity.parentId == _classes(rec)["User"].id  # marker is a child of the Class
 
 
-def test_root_type_fields_become_routes(tmp_path) -> None:
+def test_implements_captured(tmp_path) -> None:
     rec = _parse(tmp_path, "schema.graphql", SDL)
-    q = _by_name(rec, "user", "field_definition")
-    assert q.semanticType == "route"
-    assert (q.method, q.routeKind, q.endpoint) == ("QUERY", "query", "user")
+    assert _classes(rec)["User"].implements == ["Node"]
+
+
+def test_fields_are_child_statements(tmp_path) -> None:
+    rec = _parse(tmp_path, "schema.graphql", SDL)
+    user_id = _classes(rec)["User"].id
+    fields = [
+        s for s in rec.statements if s.nodeType == "field_definition" and s.parentId == user_id
+    ]
+    assert {s.name for s in fields} == {"id", "name", "company", "posts", "archived"}
+    # relation target survives in text (structuring it is deferred)
+    assert "company: Company" in _by(rec, "company", "field_definition").text
+
+
+def test_enum_values_are_child_statements(tmp_path) -> None:
+    rec = _parse(tmp_path, "schema.graphql", SDL)
+    status_id = _classes(rec)["Status"].id
+    vals = [s for s in rec.statements if s.nodeType == "enum_value_definition"]
+    assert {s.name for s in vals} == {"ACTIVE", "INACTIVE"}
+    assert all(s.parentId == status_id for s in vals)
+
+
+def test_union_members_are_child_statements(tmp_path) -> None:
+    rec = _parse(tmp_path, "schema.graphql", SDL)
+    search_id = _classes(rec)["SearchResult"].id
+    members = [s for s in rec.statements if s.nodeType == "named_type" and s.parentId == search_id]
+    assert {s.name for s in members} == {"User", "Company"}
+
+
+def test_root_fields_are_routes(tmp_path) -> None:
+    rec = _parse(tmp_path, "schema.graphql", SDL)
+    q = _by(rec, "user", "field_definition")
+    assert (q.semanticType, q.method, q.routeKind) == ("route", "QUERY", "query")
     assert q.responseDTO == "User"
-    m = _by_name(rec, "createUser", "field_definition")
+    m = _by(rec, "createUser", "field_definition")
     assert (m.method, m.routeKind) == ("MUTATION", "mutation")
     assert m.requestDTO == "CreateUserInput"
-    assert m.responseDTO == "User"
-    # no entity emitted for the root operation types themselves
-    assert not any(
-        s.name in ("Query", "Mutation") and s.semanticType == "graphql_entity"
-        for s in rec.statements
-    )
+
+
+def test_scalar_directive_are_plain_statements(tmp_path) -> None:
+    rec = _parse(tmp_path, "schema.graphql", SDL)
+    assert _by(rec, "DateTime", "scalar_type_definition").semanticType is None
+    assert _by(rec, "auth", "directive_definition").semanticType is None
+
+
+def test_schema_custom_roots_become_routes(tmp_path) -> None:
+    rec = _parse(tmp_path, "s.graphql", SCHEMA_ROOTS)
+    # RootQuery/RootMutation are roots (via schema{}), so NOT classes; their fields are routes
+    assert "RootQuery" not in _classes(rec) and "RootMutation" not in _classes(rec)
+    assert _by(rec, "me", "field_definition").semanticType == "route"
+    assert _by(rec, "save", "field_definition").method == "MUTATION"
+
+
+def test_extend_kinds_are_handled(tmp_path) -> None:
+    rec = _parse(tmp_path, "e.graphql", EXTENDS)
+    cls = _classes(rec)
+    # one Class per name (def + extend merge); ClassType matches the kind
+    assert cls["Node"].type == "interface"
+    assert cls["Role"].type == "enum"
+    assert cls["Search"].type == "union"
+    assert cls["Filter"].type == "record"
+    # the extension's members are attached to that same Class
+    assert any(s.name == "createdAt" and s.parentId == cls["Node"].id for s in rec.statements)
+    assert any(s.name == "GUEST" for s in rec.statements)  # extended enum value
+
+
+def test_descriptions_captured_as_comments(tmp_path) -> None:
+    rec = _parse(tmp_path, "d.graphql", DESCRIBED)
+    assert _classes(rec)["Customer"].type == "class"
+    descs = [s for s in rec.statements if s.semanticType == "comment"]
+    assert any("A registered customer" in s.text for s in descs)
 
 
 def test_operations_and_fragment(tmp_path) -> None:
     rec = _parse(tmp_path, "ops.graphql", OPERATIONS)
-    get = _by_name(rec, "GetUser", "field")
-    assert get.semanticType == "api_call"
-    assert (get.method, get.endpoint) == ("QUERY", "user")  # invoked server field
+    get = _by(rec, "GetUser", "field")
+    assert (get.semanticType, get.method, get.endpoint) == ("api_call", "QUERY", "user")
     frag = next(s for s in rec.statements if s.nodeType == "fragment_definition")
-    assert frag.name == "UserFields"
-    assert frag.endpoint == "User"
+    assert frag.name == "UserFields" and frag.endpoint == "User"
 
 
 def test_multiline_operation_captured_in_full(tmp_path) -> None:
     rec = _parse(tmp_path, "projects.graphql", MULTILINE_OP)
-    op = _by_name(rec, "GetProjects", "field")
-    assert op.semanticType == "api_call"
+    op = _by(rec, "GetProjects", "field")
     assert op.endpoint == "projects"
-    # the entire invoked field — nested selection set included — is captured, not truncated
-    # at the opening brace of `projects(...) {`
-    assert "items {" in op.text
-    assert "pageInfo {" in op.text
-    assert "totalCount" in op.text
+    assert "items {" in op.text and "pageInfo {" in op.text
     assert op.text.rstrip().endswith("}")
 
 
 def test_capture_gate(tmp_path) -> None:
     rec = _parse(tmp_path, "schema.graphql", SDL, capture=False)
-    assert rec.statements == []
+    assert rec.statements == [] and rec.classes == []
     assert rec.language == "graphql"
 
 
@@ -192,4 +253,4 @@ def test_records_validate_against_schema(tmp_path) -> None:
     validator = Draft202012Validator(FileRecord.model_json_schema(by_alias=True))
     errors = list(validator.iter_errors(json.loads(to_line(rec))))
     assert not errors, errors
-    assert rec.statements  # non-empty
+    assert rec.classes and rec.statements

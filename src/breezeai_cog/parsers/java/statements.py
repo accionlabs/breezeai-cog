@@ -13,11 +13,11 @@ from .mappings import CONTROL_FLOW, EMIT_TYPES, NESTED_SCOPES
 _CALL_TYPE = "method_invocation"
 
 # Declaration node types that may carry annotations (@Column, @Autowired, @NotNull, ...).
-_ANNOTATED_DECL_TYPES = {"field_declaration"}
+_ANNOTATED_DECL_TYPES = {"field_declaration", "constant_declaration"}
 
 
 def _name_of(node: Node, source: bytes) -> str | None:
-    if node.type in ("local_variable_declaration", "field_declaration"):
+    if node.type in ("local_variable_declaration", "field_declaration", "constant_declaration"):
         decl = node.child_by_field_name("declarator")
         if decl is not None:
             name = decl.child_by_field_name("name")
