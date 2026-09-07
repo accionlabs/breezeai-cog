@@ -63,6 +63,12 @@ class WebFormsParser(CSharpParser):
         mounts = resolve_control_mounts(ctx.source, ctx.path, ctx.repo_root)
         import_files = [codebehind] if codebehind is not None else []
         import_files.extend(c for c, _ in mounts if c not in import_files)
+        # Master-page composition: the <%@ Page MasterPageFile %> directive lives in this markup,
+        # so link the markup file to its .master layout (markup→master IMPORTS edge), mirroring
+        # the .ascx mount edges. resolve_master returns "/repo/rel/X.master" (or None).
+        master = resolve_master(ctx.source, ctx.path, ctx.repo_root)
+        if master is not None and master.lstrip("/") not in import_files:
+            import_files.append(master.lstrip("/"))
         record = FileRecord(
             id=fid,
             path=ctx.path,

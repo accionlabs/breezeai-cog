@@ -768,3 +768,42 @@ def test_expression_binding_not_a_field(tmp_path) -> None:
     names = {s.name for s in rec.statements if s.nodeType == "attribute" and s.handler is None}
     assert "Real" in names  # the Eval field is captured
     assert not any(n and "PrintView" in n for n in names)  # the expression binding is not
+
+
+# ── Step 4: markup → master-page composition edge ─────────────────────────────
+
+
+def test_markup_links_to_master(tmp_path) -> None:
+    (tmp_path / "DefaultView.master").write_bytes(b"<%@ Master %>")
+    (tmp_path / "Enrollment.aspx.cs").write_text("using System.Web.UI; class X {}")
+    aspx = (
+        b'<%@ Page MasterPageFile="~/DefaultView.master" CodeBehind="Enrollment.aspx.cs" %>\n'
+        b'<asp:Label runat="server" />'
+    )
+    (tmp_path / "Enrollment.aspx").write_bytes(aspx)
+    ctx = ParseContext(
+        path="Enrollment.aspx",
+        abs_path=tmp_path / "Enrollment.aspx",
+        source=aspx,
+        repo_root=tmp_path,
+        capture_statements=True,
+    )
+    rec = WebFormsParser().parse_file(ctx)
+    assert "DefaultView.master" in rec.importFiles  # markup → master layout edge
+    assert "Enrollment.aspx.cs" in rec.importFiles
+
+
+def test_markup_master_missing_is_dropped(tmp_path) -> None:
+    # MasterPageFile to a file that doesn't exist → no dangling edge.
+    (tmp_path / "Enrollment.aspx.cs").write_text("using System.Web.UI; class X {}")
+    aspx = b'<%@ Page MasterPageFile="~/Ghost.master" CodeBehind="Enrollment.aspx.cs" %>\n<div/>'
+    (tmp_path / "Enrollment.aspx").write_bytes(aspx)
+    ctx = ParseContext(
+        path="Enrollment.aspx",
+        abs_path=tmp_path / "Enrollment.aspx",
+        source=aspx,
+        repo_root=tmp_path,
+        capture_statements=True,
+    )
+    rec = WebFormsParser().parse_file(ctx)
+    assert not any("Ghost.master" in i for i in rec.importFiles)
