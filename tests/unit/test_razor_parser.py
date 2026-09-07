@@ -94,3 +94,36 @@ def test_output_validates(tmp_path) -> None:
         )
     )
     assert not errors, errors
+
+
+# ── Step 2: @code { } methods → Functions ─────────────────────────────────────
+
+_BLAZOR = b"""@page "/counter"
+<button @onclick="Remove">X</button>
+@code {
+  private int count = 0;
+  void Remove(int id) { count--; }
+  public async Task Load() { await Fetch(); }
+}"""
+
+
+def test_code_methods_are_functions(tmp_path) -> None:
+    rec = _parse(tmp_path, "Counter.razor", _BLAZOR)
+    fns = {f.name: f for f in rec.functions}
+    assert {"Remove", "Load"} <= set(fns)
+    assert fns["Remove"].type == "method"
+    assert [(p.name, p.type) for p in fns["Remove"].params] == [("id", "int")]
+    assert fns["Load"].returnType == "Task"
+
+
+def test_handler_resolves_to_code_method(tmp_path) -> None:
+    # @onclick="Remove" (a statement handler) matches a Function declared in @code — the join.
+    rec = _parse(tmp_path, "Counter.razor", _BLAZOR)
+    handlers = {s.handler for s in rec.statements if s.nodeType == "razor_html_attribute"}
+    assert "Remove" in handlers
+    assert "Remove" in {f.name for f in rec.functions}
+
+
+def test_code_functions_require_capture(tmp_path) -> None:
+    rec = _parse(tmp_path, "Counter.razor", _BLAZOR, capture=False)
+    assert rec.functions == []
