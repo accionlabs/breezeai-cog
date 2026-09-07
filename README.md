@@ -203,13 +203,21 @@ flowchart TB
         -_writer: IO
         -_gz: GzipFile
         -_error: BaseException
+        -_error_lock: Lock
+        -_closed: bool
+        -_close_lock: Lock
         -_thread: Thread
+
+        +__enter__() AWSStreamUpload
+        +__exit__(exc_type, exc, tb) None
         +write_line(line: str) None
         +upload() None
         +close() str
-        +execute_with_reconnect(operation) Any
-        +_default_client(settings) Any
-        +invalidate_client() None
+
+        -_run_upload() None
+        -_set_error(exc: Exception) None
+        -_get_error() Exception
+        -_abort() None
     }
 
 

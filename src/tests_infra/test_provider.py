@@ -1,10 +1,14 @@
 from unittest.mock import Mock, patch
 
 from breezeai_cog.infra.provider import open_stream
+from breezeai_cog.infra.provider_type import ProviderType
 
 
 def test_open_stream_routes_to_factory():
     mock_stream = Mock()
+
+    mock_settings = Mock()
+    mock_settings.infra_provider = ProviderType.AWS
 
     with patch(
         "breezeai_cog.infra.provider.ProviderFactory"
@@ -12,7 +16,7 @@ def test_open_stream_routes_to_factory():
 
         mock_factory.return_value.create_stream.return_value = mock_stream
 
-        result = open_stream("test.json", Mock())
+        result = open_stream("test.json", mock_settings)
 
         mock_factory.assert_called_once()
         mock_factory.return_value.create_stream.assert_called_once()

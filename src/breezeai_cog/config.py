@@ -105,7 +105,8 @@ class Settings(BaseSettings):
 
     infra_provider: Literal["aws"] = "aws"
     s3_retry_attempts: int = 3
-    s3_retry_wait: int = 10
+    s3_connect_timeout: int = 10
+    s3_read_timeout: int = 60
 
     # ── AWS / S3 (server, conventional unprefixed names) ──────────────────
     aws_access_key: str | None = Field(

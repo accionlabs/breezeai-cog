@@ -424,22 +424,25 @@ This allows provider-specific implementation details to remain isolated from the
 
 ## 15. Error Handling
 
-The S3 implementation handles supported connection-related failures during the upload process.
+The S3 implementation uses Botocore's built-in retry mechanism to handle supported connection-related failures during the upload process.
 
-For retryable connection failures, the implementation:
-
-```text
 Upload Failure
-     |
-     v
-Invalidate Existing Client
-     |
-     v
-Create New Client
-     |
-     v
-Retry Upload
-```
+      |
+      v
+Botocore Retry Mechanism
+      |
+      v
+Retry Request
+      |
+      v
+Retry Attempts Exhausted?
+      |
+   +--+--+
+   |     |
+  No    Yes
+   |     |
+   v     v
+Retry   Propagate Error
 
 If the configured retry attempts are exhausted, the upload operation fails and the error is propagated to the caller.
 
@@ -475,7 +478,7 @@ The implementation provides:
 * A common infrastructure stream interface.
 * Centralized provider selection.
 * AWS-specific S3 streaming functionality.
-* Retry and reconnection handling.
+* Built-in retry handling through Botocore.
 * Unit-testable components.
 * Separation between application logic and cloud-provider-specific implementation.
 * A clear extension point for additional infrastructure providers.
