@@ -325,6 +325,48 @@ def test_component_and_store_in_one_file(tmp_path) -> None:
     assert _stmt_roles(_parse("src/m.ts", src, tmp_path)) == {"C": "component", "useS": "store"}
 
 
+# ── Pinia-only files are claimed (no `vue` import needed) — BREEZEAI-967 ──────────
+# A Pinia store module often imports only `pinia`, never `vue`, yet is still Vue: it must be
+# claimed by this parser (→ framework="vue" + the defineStore uiRole), not fall to the base TS
+# parser. (The other store tests call VueParser directly, so they never exercise `claims`.)
+
+
+def test_pinia_only_file_is_claimed(tmp_path) -> None:
+    src = b"import { defineStore } from 'pinia'\nexport const useX = defineStore('x', { state: () => ({}) })\n"
+    assert VueParser().claims("src/stores/x.ts", src) is True
+
+
+def test_pinia_word_in_comment_not_claimed() -> None:
+    # "pinia" outside a quoted import specifier must NOT trigger the claim (no false positive).
+    assert VueParser().claims("src/util.ts", b"// TODO: add pinia later\nexport const x = 1\n") is False
+
+
+def test_pinia_only_selected_over_base_ts_and_framework_is_vue(tmp_path) -> None:
+    from breezeai_cog.parsers.typescript.parser import TypeScriptParser
+
+    registry.clear()
+    registry.register(TypeScriptParser())
+    registry.register(VueParser())
+    try:
+        src = b"import { defineStore } from 'pinia'\nexport const useX = defineStore('x', {})\n"
+        selected = registry.select("src/stores/x.ts", src)
+        assert selected.name == "typescript-vue"  # Vue wins over base TS on a pinia-only file
+        assert registry.select("src/plain.ts", b"export const y = 1\n").name == "typescript"
+        rec = selected.parse_file(
+            ParseContext(
+                path="src/stores/x.ts",
+                abs_path=tmp_path / "x.ts",
+                source=src,
+                repo_root=tmp_path,
+                capture_statements=True,
+            )
+        )
+        assert rec.framework == "vue"  # the "Additional Issue": pinia-only now tagged vue
+        assert _stmt_roles(rec) == {"useX": "store"}
+    finally:
+        registry.clear()
+
+
 # ── composables ──────────────────────────────────────────────────────────────────
 
 

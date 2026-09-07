@@ -28,9 +28,12 @@ from .components import mark_composables, mark_factory_ui_roles
 from .sfc import script_grammar, script_language, script_ranges, shadow_source
 from .template import collect_vue_template_statements
 
-# Byte guards for a vue import in a .ts/.js file: ``from 'vue'`` / ``from "vue"`` (the app
-# and store modules) or any ``vue-router`` reference (the router config).
-_VUE_IMPORT_GUARDS = (b"'vue'", b'"vue"', b"vue-router")
+# Byte guards for a Vue-ecosystem import in a .ts/.js file: ``from 'vue'`` / ``from "vue"`` (the
+# app and store modules), any ``vue-router`` reference (the router config), or ``'pinia'`` /
+# ``"pinia"`` (the store lib — a Pinia store module often imports only pinia, not vue, yet is
+# still Vue and must be tagged framework="vue" + get its defineStore uiRole). Quoted so the
+# match is an import specifier, not the word appearing in a comment/string.
+_VUE_IMPORT_GUARDS = (b"'vue'", b'"vue"', b"vue-router", b"'pinia'", b'"pinia"')
 
 
 class VueParser(TypeScriptParser):
