@@ -31,18 +31,31 @@ _SQL_RE = re.compile(
 )
 
 # Builders that execute a raw query even when the SQL isn't a captured literal
-# (e.g. `em.createNativeQuery(sql)`, `prisma.$queryRaw`...).
+# (e.g. `em.createNativeQuery(sql)`, `prisma.$queryRaw`, `$wpdb->get_results`...).
 _STRONG_QUERY_METHODS = {
     "$queryraw", "$queryrawunsafe", "$executeraw", "$executerawunsafe",
     "createnativequery", "createquery", "executequery", "executeupdate",
     "preparestatement", "nativequery", "rawquery",
+    "get_results", "get_row", "get_col", "get_var",
 }
 
+# Callee substrings that positively signal a database connection or raw driver handle
+_QUERY_CALLEE_HINTS = ("pdo", "wpdb", "connection", "conn", "db")
 
-def is_query(method: str, arg: str | None) -> bool:
+
+def is_query(method: str, arg: str | None, callee: str | None = None) -> bool:
     if arg and _SQL_RE.match(arg):
         return True
-    return method.lower() in _STRONG_QUERY_METHODS
+    m = method.lower()
+    if m in _STRONG_QUERY_METHODS:
+        return True
+    if callee is not None:
+        low_callee = callee.lower()
+        if "pdo" in low_callee and m in ("query", "prepare", "exec", "execute"):
+            return True
+        if "wpdb" in low_callee and m in ("get_results", "get_row", "get_col", "get_var", "query"):
+            return True
+    return False
 
 
 # A quoted (string-literal) SQL query embedded anywhere in a statement's source —

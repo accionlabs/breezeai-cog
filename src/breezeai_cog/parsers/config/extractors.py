@@ -68,13 +68,15 @@ def extract_config(path: str, text: str) -> dict[str, Any]:
 #: captures every OTHER non-empty ``.json`` in full, but routes these to their rich extraction
 #: even though they are non-empty. Keep in step with the ``.json`` name-cases in ``_dispatch``.
 RICH_JSON_NAMES: frozenset[str] = frozenset(
-    {"package.json", "tsconfig.json", "jsconfig.json", "mod.json"}
+    {"package.json", "tsconfig.json", "jsconfig.json", "mod.json", "composer.json"}
 )
 
 
 def _dispatch(name: str, suffix: str, text: str) -> dict[str, Any]:
     if name == "package.json":
         return _package_json(text)
+    if name == "composer.json":
+        return _composer_json(text)
     if name in ("tsconfig.json", "jsconfig.json"):
         return _tsconfig(name, text)
     if name == "project.json":
@@ -139,7 +141,8 @@ def _package_json(text: str) -> dict[str, Any]:
     deps = dict(d.get("dependencies") or {})
     dev = dict(d.get("devDependencies") or {})
     workspace_deps = sorted(
-        name for name, spec in {**deps, **dev}.items()
+        name
+        for name, spec in {**deps, **dev}.items()
         if isinstance(spec, str) and spec.startswith(("workspace:", "file:", "link:"))
     )
     return {
@@ -161,6 +164,28 @@ def _package_json(text: str) -> dict[str, Any]:
     }
 
 
+def _composer_json(text: str) -> dict[str, Any]:
+    d = json.loads(text)
+    require = dict(d.get("require") or {})
+    require_dev = dict(d.get("require-dev") or {})
+    return {
+        "kind": "composer",
+        "category": "json",
+        "packageManager": "composer",
+        "packageInfo": {
+            "name": d.get("name"),
+            "description": d.get("description"),
+            "type": d.get("type"),
+            "dependencies": require,
+            "devDependencies": require_dev,
+            "autoload": d.get("autoload"),
+            "autoloadDev": d.get("autoload-dev"),
+        },
+        "dependencyCount": len(require),
+        "devDependencyCount": len(require_dev),
+    }
+
+
 def _tsconfig(name: str, text: str) -> dict[str, Any]:
     d = json.loads(text)
     co = d.get("compilerOptions") or {}
@@ -174,7 +199,9 @@ def _tsconfig(name: str, text: str) -> dict[str, Any]:
             "outDir": co.get("outDir"),
             "rootDir": co.get("rootDir"),
             "strict": co.get("strict"),
-            "paths": dict(co.get("paths") or {}),  # alias → targets (targets are what a resolver needs)
+            "paths": dict(
+                co.get("paths") or {}
+            ),  # alias → targets (targets are what a resolver needs)
             "baseUrl": co.get("baseUrl"),
             "extends": d.get("extends"),
             "include": d.get("include"),

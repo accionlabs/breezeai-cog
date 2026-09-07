@@ -17,7 +17,7 @@ _HTTP_VERBS = {"get", "post", "put", "patch", "delete", "head", "options", "requ
 # substrings — precision-preserving deviation).
 _CLIENT_HINTS = (
     "axios", "http", "httpclient", "httpservice", "httpx", "requests", "session", "fetch",
-    "restclient", "apiclient", "resttemplate", "webclient", "$http", "superagent",
+    "restclient", "apiclient", "resttemplate", "webclient", "$http", "$client", "superagent",
     "got", "ky", "urllib", "aiohttp", "guzzle", "ofetch",
 )
 
@@ -32,7 +32,7 @@ _DB_CHAIN_MARKERS = ("query(", ".filter", ".where", "query.")
 
 
 def match_api(
-    callee: str, method: str, http_client_ids: "frozenset[str] | None" = None
+    callee: str, method: str, http_client_ids: frozenset[str] | None = None
 ) -> str | None:
     """Return the HTTP verb (uppercased) if ``callee.method(...)`` is an HTTP call.
 

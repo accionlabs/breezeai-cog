@@ -33,7 +33,7 @@ from .treesitter import first_line, node_text
 # Per-file collector for concatenations skipped by the fold cap. ``render_concat`` records
 # the line of each; the executor resets it around each file and emits ONE human-readable
 # summary — far cleaner than a machine log line per concat shredding the progress display.
-_skipped_concat_lines: contextvars.ContextVar["list[int] | None"] = contextvars.ContextVar(
+_skipped_concat_lines: contextvars.ContextVar[list[int] | None] = contextvars.ContextVar(
     "skipped_concat_lines", default=None
 )
 
@@ -49,13 +49,13 @@ _http_client_ids: contextvars.ContextVar[frozenset[str]] = contextvars.ContextVa
 )
 
 
-def set_http_client_ids(ids: frozenset[str]) -> "contextvars.Token[frozenset[str]]":
+def set_http_client_ids(ids: frozenset[str]) -> contextvars.Token[frozenset[str]]:
     """Set the per-file HTTP-client name set; returns a token to pass to
     :func:`reset_http_client_ids` (in a ``finally``)."""
     return _http_client_ids.set(ids)
 
 
-def reset_http_client_ids(token: "contextvars.Token[frozenset[str]]") -> None:
+def reset_http_client_ids(token: contextvars.Token[frozenset[str]]) -> None:
     _http_client_ids.reset(token)
 
 
@@ -80,6 +80,7 @@ def summarize_skipped_concats(path: str) -> str | None:
         f"HTML/JS builders); the statement{plural} {'are' if plural else 'is'} still "
         f"captured, only the endpoint is omitted. Line{plural}: {shown}{more}"
     )
+
 
 # (callee, method, first_string_arg) or None for a single call node.
 CallDetails = Callable[[Node, bytes], "tuple[str, str, str | None] | None"]
@@ -116,6 +117,7 @@ def text_with_trailing_comment(node: Node, source: bytes) -> str:
     """``node``'s source text, extended to include a same-line trailing comment (see
     :func:`_trailing_comment_end`)."""
     return source[node.start_byte : _trailing_comment_end(node, source)].decode("utf-8", "replace")
+
 
 # --- Endpoint resolution, shared across languages -------------------
 # HTTP verbs that may appear as the *first argument* (``request('GET', url)``).
@@ -208,10 +210,14 @@ def resolve_endpoint(
     return render(first, source), None
 
 
+def _is_call_node(node_type: str, call_type: str | Collection[str]) -> bool:
+    return node_type == call_type if isinstance(call_type, str) else node_type in call_type
+
+
 def _iter_calls(
     node: Node,
     emit_types: Collection[str],
-    call_type: str,
+    call_type: str | Collection[str],
     stmt_expr: Collection[str],
     containers: Collection[str],
 ) -> Iterator[Node]:
@@ -220,7 +226,7 @@ def _iter_calls(
             continue  # a nested statement — classified on its own
         if child.type in stmt_expr and node.type in containers:
             continue  # a bare statement-position expression (its own statement — Python)
-        if child.type == call_type:
+        if _is_call_node(child.type, call_type):
             yield child
         yield from _iter_calls(child, emit_types, call_type, stmt_expr, containers)
 
@@ -228,13 +234,13 @@ def _iter_calls(
 def _calls_in_statement(
     node: Node,
     emit_types: Collection[str],
-    call_type: str,
+    call_type: str | Collection[str],
     stmt_expr: Collection[str],
     containers: Collection[str],
 ) -> Iterator[Node]:
     # The statement node may itself be a call — a bare Python call-statement
     # (``session.add(x)``) has no expression-statement wrapper.
-    if node.type == call_type:
+    if _is_call_node(node.type, call_type):
         yield node
     yield from _iter_calls(node, emit_types, call_type, stmt_expr, containers)
 
@@ -243,9 +249,15 @@ def _calls_in_statement(
 #: TS/JS, Python, Java, C#, C++, Groovy, Kotlin). Used to take a control statement's **header**
 #: as the text up to its first such child — so a multi-line condition is kept whole while the
 #: body (already captured as its own child statements) is not duplicated into the header.
-_BODY_BLOCK_TYPES = frozenset({
-    "statement_block", "block", "compound_statement", "switch_body", "control_structure_body",
-})
+_BODY_BLOCK_TYPES = frozenset(
+    {
+        "statement_block",
+        "block",
+        "compound_statement",
+        "switch_body",
+        "control_structure_body",
+    }
+)
 
 
 def _control_flow_header(node: Node, source: bytes) -> str:
@@ -270,14 +282,14 @@ def classify_statement(
     seen_ids: set[str],
     emit_types: Collection[str],
     control_flow: Collection[str],
-    call_type: str,
+    call_type: str | Collection[str],
     name_of: NameOf,
     call_details: CallDetails,
     stmt_expr: Collection[str] = (),
     container_types: Collection[str] = (),
     language: str | None = None,
-    typed_db_ids: "frozenset[str] | None" = None,
-    decorators: "list[Decorator] | None" = None,
+    typed_db_ids: frozenset[str] | None = None,
+    decorators: list[Decorator] | None = None,
 ) -> list[Statement]:
     # ``code_text`` (comment-free) drives query/semantic detection; ``display_text`` is what
     # lands on the record — for a normal statement it folds in a same-line trailing comment
@@ -396,7 +408,7 @@ def member_statement(
     limit: int,
     seen_ids: set[str],
     name: str | None = None,
-    decorators: "list[Decorator] | None" = None,
+    decorators: list[Decorator] | None = None,
     semantic_type: str | None = None,
 ) -> Statement:
     """One flat declaration Statement for ``node`` (``nodeType`` = the AST node, ``text`` =
@@ -434,8 +446,15 @@ def emit_enum_members(
     ``member_types`` — parented to the enum's Class id. Each carries ``semanticType`` =
     ``enum_member`` (the cross-language role) while ``nodeType`` keeps its raw grammar type."""
     return [
-        member_statement(node, source, path, parent_id=parent_id, limit=limit,
-                         seen_ids=seen_ids, semantic_type="enum_member")
+        member_statement(
+            node,
+            source,
+            path,
+            parent_id=parent_id,
+            limit=limit,
+            seen_ids=seen_ids,
+            semantic_type="enum_member",
+        )
         for node in body.named_children
         if node.type in member_types
     ]

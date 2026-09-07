@@ -27,38 +27,89 @@ _DB_METHODS: dict[str, tuple[str, ...]] = {
     "prisma": ("findfirst", "findunique", "findmany"),
     "typeorm": ("createquerybuilder", "getrepository", "upsert", "findandcount"),
     "mongodb": (
-        "aggregate", "insertone", "insertmany", "updateone", "updatemany",
-        "deleteone", "deletemany", "replaceone", "bulkwrite",
-        "findoneandupdate", "findbyidandupdate", "findoneanddelete", "findoneandreplace",
-        "countdocuments", "estimateddocumentcount",
+        "aggregate",
+        "insertone",
+        "insertmany",
+        "updateone",
+        "updatemany",
+        "deleteone",
+        "deletemany",
+        "replaceone",
+        "bulkwrite",
+        "findoneandupdate",
+        "findbyidandupdate",
+        "findoneanddelete",
+        "findoneandreplace",
+        "countdocuments",
+        "estimateddocumentcount",
     ),
     "neo4j": ("readtransaction", "writetransaction", "executeread", "executewrite"),
     "couchdb": ("alldocs", "bulkdocs", "getindexes"),
     "redis": (
-        "hget", "hset", "hgetall", "hdel", "hmset", "hmget",
-        "lpush", "rpush", "lpop", "rpop", "lrange",
-        "sadd", "srem", "smembers", "sismember",
-        "zadd", "zrem", "zrange", "zrangebyscore",
-        "mset", "mget",
+        "hget",
+        "hset",
+        "hgetall",
+        "hdel",
+        "hmset",
+        "hmget",
+        "lpush",
+        "rpush",
+        "lpop",
+        "rpop",
+        "lrange",
+        "sadd",
+        "srem",
+        "smembers",
+        "sismember",
+        "zadd",
+        "zrem",
+        "zrange",
+        "zrangebyscore",
+        "mset",
+        "mget",
     ),
     "dynamodb": (
-        "putitem", "deleteitem", "updateitem",
-        "batchgetitem", "batchwriteitem", "transactgetitems", "transactwriteitems",
+        "putitem",
+        "deleteitem",
+        "updateitem",
+        "batchgetitem",
+        "batchwriteitem",
+        "transactgetitems",
+        "transactwriteitems",
     ),
     "elasticsearch": ("msearch",),
     "firebase": ("getdocs", "getdoc", "setdoc", "updatedoc", "deletedoc", "adddoc", "onsnapshot"),
     "entity_framework": (
         # Async LINQ has no in-memory-collection equivalent, so `*Async` is EF on sight.
-        "tolistasync", "toarrayasync",
-        "firstordefaultasync", "firstasync",
-        "singleordefaultasync", "singleasync",
+        "tolistasync",
+        "toarrayasync",
+        "firstordefaultasync",
+        "firstasync",
+        "singleordefaultasync",
+        "singleasync",
         "lastordefaultasync",
-        "countasync", "longcountasync", "anyasync", "allasync",
-        "minasync", "maxasync", "sumasync", "averageasync",
-        "findasync", "addasync", "addrangeasync", "savechangesasync", "savechanges",
+        "countasync",
+        "longcountasync",
+        "anyasync",
+        "allasync",
+        "minasync",
+        "maxasync",
+        "sumasync",
+        "averageasync",
+        "findasync",
+        "addasync",
+        "addrangeasync",
+        "savechangesasync",
+        "savechanges",
         # EF-distinctive operators (no LINQ-to-Objects collision).
-        "include", "theninclude", "asnotracking", "astracking",
-        "fromsqlraw", "fromsqlinterpolated", "executesqlraw", "executesqlinterpolated",
+        "include",
+        "theninclude",
+        "asnotracking",
+        "astracking",
+        "fromsqlraw",
+        "fromsqlinterpolated",
+        "executesqlraw",
+        "executesqlinterpolated",
     ),
     # NOTE: the synchronous LINQ terminals `tolist`/`toarray`/`firstordefault`/
     # `singleordefault`/`lastordefault` are deliberately NOT here — they collide with
@@ -66,8 +117,12 @@ _DB_METHODS: dict[str, tuple[str, ...]] = {
     # in `match_db` via `_EF_LINQ_VERBS`, gated on a positive EF/queryable source in the
     # call chain, else dropped (precision-first, like `_HIGH_COLLISION`).
     "django": (
-        "select_related", "prefetch_related",
-        "get_or_create", "update_or_create", "bulk_update", "values_list",
+        "select_related",
+        "prefetch_related",
+        "get_or_create",
+        "update_or_create",
+        "bulk_update",
+        "values_list",
     ),
     "sqlalchemy": ("filter_by", "session_query", "add_all"),
 }
@@ -80,8 +135,18 @@ for _db, _methods in _DB_METHODS.items():
 
 # Ambiguous ORM verbs -> generic hint, refined by receiver below.
 _GENERIC = {
-    "findone", "findbyid", "find", "save", "create", "update", "delete", "remove",
-    "persist", "merge", "query", "execute",
+    "findone",
+    "findbyid",
+    "find",
+    "save",
+    "create",
+    "update",
+    "delete",
+    "remove",
+    "persist",
+    "merge",
+    "query",
+    "execute",
 }
 
 # Receiver substring -> hint (refines _GENERIC).
@@ -90,9 +155,15 @@ _GENERIC = {
 # identifiers like ``sessionFactory`` / ``productObjects``; others are distinctive enough
 # (``prisma``, ``sequelize``, ``mongoose``, ``repository``) that substring is fine.
 _RECEIVER_HINTS = (
-    ("prisma", "prisma"), ("sequelize", "sequelize"), ("mongoose", "mongodb"),
-    ("repository", "typeorm"), ("repo", "typeorm"), ("entitymanager", "typeorm"),
-    ("session", "sqlalchemy"), ("queryset", "django"), ("objects", "django"),
+    ("prisma", "prisma"),
+    ("sequelize", "sequelize"),
+    ("mongoose", "mongodb"),
+    ("repository", "typeorm"),
+    ("repo", "typeorm"),
+    ("entitymanager", "typeorm"),
+    ("session", "sqlalchemy"),
+    ("queryset", "django"),
+    ("objects", "django"),
 )
 # Needles that must appear as a whole dot-segment (not as a prefix/suffix of a longer name).
 # e.g. "session" must match "db.session.query" but NOT "sessionFactory.create".
@@ -106,10 +177,24 @@ _ANCHORED_HINTS: frozenset[str] = frozenset({"session", "objects"})
 # overrides this. (Write verbs like ``save``/``delete``/``create`` are opt-in via
 # ``_HIGH_COLLISION`` and never reach this fallback.)
 _NON_DB_RECEIVERS = (
-    "cache", "logger", "emitter", "eventbus", "eventemitter", "state",
-    "buffer", "console", "clipboard", "factory", "list", "items", "queue", "stack",
+    "cache",
+    "logger",
+    "emitter",
+    "eventbus",
+    "eventemitter",
+    "state",
+    "buffer",
+    "console",
+    "clipboard",
+    "factory",
+    "list",
+    "items",
+    "queue",
+    "stack",
     # HTML Canvas / 2D rendering context — ctx.save()/restore() are draw-state calls, not DB.
-    "ctx", "canvas", "context2d",
+    "ctx",
+    "canvas",
+    "context2d",
 )
 
 # Django queryset verbs (ambiguous alone -> require a queryset-ish receiver).
@@ -129,6 +214,30 @@ _DOTNET = frozenset({"csharp", "vb"})
 # Django is Python-only; suppress Django-queryset verbs in known non-Python files so that
 # TypeScript ``response.objects.filter()`` is not mislabelled as Django (mirrors the EF gate).
 _PYTHON = frozenset({"python"})
+
+# PHP language gate: Eloquent and Doctrine are PHP-only.
+_PHP = frozenset({"php"})
+
+# Eloquent ORM operations recognized for PHP.
+_ELOQUENT_VERBS = frozenset(
+    {
+        "find",
+        "where",
+        "first",
+        "create",
+        "save",
+        "all",
+        "findorfail",
+        "firstorfail",
+        "updateorcreate",
+        "firstorcreate",
+        "update",
+        "delete",
+        "destroy",
+        "count",
+        "paginate",
+    }
+)
 
 # Generic verbs that collide heavily with ordinary (non-DB) code: ``find`` is
 # ``Array.prototype.find``, ``update`` is ``dict.update``/``Map.set``-adjacent, ``create``
@@ -159,8 +268,18 @@ _HIGH_COLLISION = frozenset(
 # ``conn.query``); ``pool``/``client`` are deliberately excluded — they collide with worker
 # pools (``workerPool.execute``) and non-DB clients (Apollo ``client.query``).
 _DB_RECEIVER_SUFFIXES = (
-    "repository", "repo", "model", "models", "dao", "collection",
-    "datasource", "queryrunner", "database", "manager", "connection", "conn",
+    "repository",
+    "repo",
+    "model",
+    "models",
+    "dao",
+    "collection",
+    "datasource",
+    "queryrunner",
+    "database",
+    "manager",
+    "connection",
+    "conn",
 )
 
 # Synchronous LINQ terminal operators that are AMBIGUOUS: identical method names run over
@@ -169,9 +288,15 @@ _DB_RECEIVER_SUFFIXES = (
 # have no `*Async`). We tag these `entity_framework` only when the call chain shows a
 # positive EF/queryable source (`_has_ef_source`), else drop — precision-first, mirroring
 # `_HIGH_COLLISION`. Only .NET files reach this branch (gated on `language in _DOTNET`).
-_EF_LINQ_VERBS = frozenset({
-    "tolist", "toarray", "firstordefault", "singleordefault", "lastordefault",
-})
+_EF_LINQ_VERBS = frozenset(
+    {
+        "tolist",
+        "toarray",
+        "firstordefault",
+        "singleordefault",
+        "lastordefault",
+    }
+)
 
 # Substrings in the FULL callee chain that positively mark an EF/queryable source, so a sync
 # LINQ terminal on it is a DB query, not LINQ-to-Objects. Scanned across the whole (lowercased)
@@ -183,6 +308,7 @@ _EF_SOURCE_MARKERS = ("dbcontext", "dbset", "iqueryable", "queryable", "context.
 
 def _has_ef_source(low_callee: str) -> bool:
     return any(mk in low_callee for mk in _EF_SOURCE_MARKERS)
+
 
 # ElasticSearch / OpenSearch client verbs. These collide with ordinary code (``search`` is
 # ``String.prototype.search``; app repos/services expose ``.search()`` too — 270+ in one repo)
@@ -198,18 +324,33 @@ _ES_COLLISION_VERBS = frozenset({"count", "index"})
 # Cache/Redis service verbs — too generic alone (Map.get, Set.set), so gated on a
 # cache-specific receiver, mirroring the ES verb/receiver pattern.
 _CACHE_VERBS = frozenset({"get", "set", "del", "reset", "store"})
-_CACHE_RECEIVERS = frozenset({
-    "cache", "cachemanager", "cacheservice",
-    "redisservice", "redis", "redisclient",
-})
+_CACHE_RECEIVERS = frozenset(
+    {
+        "cache",
+        "cachemanager",
+        "cacheservice",
+        "redisservice",
+        "redis",
+        "redisclient",
+    }
+)
 # Terminal receiver segment that identifies an ES client (``this.client`` / ``esClient`` /
 # ``osClient``). Anything ending in ``client`` plus the explicit ES names — but NOT the DB
 # receivers above, so ``xxxCustomRepository.search`` / ``xService.search`` are excluded.
-_ES_RECEIVERS = frozenset({
-    "client", "esclient", "es", "elastic", "elasticsearch",
-    "opensearch", "osclient",
-    "searchservice", "searchclient", "opensearchservice",  # service-wrapper patterns
-})
+_ES_RECEIVERS = frozenset(
+    {
+        "client",
+        "esclient",
+        "es",
+        "elastic",
+        "elasticsearch",
+        "opensearch",
+        "osclient",
+        "searchservice",
+        "searchclient",
+        "opensearchservice",  # service-wrapper patterns
+    }
+)
 
 
 # Prisma client API verbs. Several (`deleteMany`/`updateMany`/`upsert`/`aggregate`) collide
@@ -217,11 +358,25 @@ _ES_RECEIVERS = frozenset({
 # that other store. When the call chain is an explicit Prisma-client access (`prisma.x.op()` /
 # `this.prisma.x.op()`), the vendor is unambiguous — this positive signal wins. It only ADDS
 # precision: a genuine Mongo/TypeORM call has no `prisma.` in its chain, so nothing regresses.
-_PRISMA_VERBS = frozenset({
-    "findfirst", "findunique", "findmany", "finduniqueorthrow", "findfirstorthrow",
-    "create", "createmany", "update", "updatemany", "delete", "deletemany",
-    "upsert", "count", "aggregate", "groupby",
-})
+_PRISMA_VERBS = frozenset(
+    {
+        "findfirst",
+        "findunique",
+        "findmany",
+        "finduniqueorthrow",
+        "findfirstorthrow",
+        "create",
+        "createmany",
+        "update",
+        "updatemany",
+        "delete",
+        "deletemany",
+        "upsert",
+        "count",
+        "aggregate",
+        "groupby",
+    }
+)
 
 
 def _is_prisma_chain(low: str) -> bool:
@@ -230,16 +385,44 @@ def _is_prisma_chain(low: str) -> bool:
     return low.startswith("prisma.") or ".prisma." in low
 
 
-def match_db(callee: str, method: str, language: str | None = None,
-             typed_db_ids: "frozenset[str] | None" = None) -> str | None:
+def match_db(
+    callee: str,
+    method: str,
+    language: str | None = None,
+    typed_db_ids: frozenset[str] | None = None,
+) -> str | None:
     m = method.lower()
     low = callee.lower()
     if m in _PRISMA_VERBS and _is_prisma_chain(low):
         return "prisma"
+
+    # PHP-specific ORM handling (gated on language in _PHP)
+    if language in _PHP:
+        # Doctrine: EntityManager / getRepository / doctrine
+        if (
+            any(h in low for h in ("entitymanager", "getrepository", "doctrine"))
+            or m == "getrepository"
+        ):
+            return "doctrine"
+        # Eloquent: static model calls (User::find, User::where, User::create) or model instance calls ($user->save)
+        if m in _ELOQUENT_VERBS:
+            if "::" in callee or "::" in low:
+                return "eloquent"
+            receiver = (
+                low.rsplit(".", 1)[0].rsplit(".", 1)[-1]
+                if "." in low
+                else (low.rsplit("->", 1)[0].rsplit("->", 1)[-1] if "->" in low else "")
+            )
+            if not (receiver and any(receiver.endswith(s) for s in _NON_DB_RECEIVERS)):
+                return "eloquent"
+
     if m in _DISTINCTIVE:
         db = _DISTINCTIVE[m]
         # EF verbs are .NET-only; suppress them in a known non-.NET file (name collision).
         if not (db == "entity_framework" and language is not None and language not in _DOTNET):
+            # In PHP, getrepository/typeorm maps to doctrine or falls through
+            if db == "typeorm" and language in _PHP:
+                return "doctrine" if m == "getrepository" else None
             return db
     # Ambiguous sync LINQ terminals (ToList/FirstOrDefault/…): EF only in a .NET file AND when
     # the call chain shows a queryable/DbContext source; else LINQ-to-Objects — drop, don't tag.
@@ -264,18 +447,20 @@ def match_db(callee: str, method: str, language: str | None = None,
     # Residual: an in-memory object named exactly ``cache``/``cacheService`` still matches, and the
     # NestJS ``Cache`` abstraction may be memory-backed — resolving those needs type resolution
     # (see typed_db_ids) plus a cache-vs-redis vocabulary decision; left for a follow-up.
-    if receiver and (receiver in _CACHE_RECEIVERS or receiver.endswith("redis")):
-        if m in _CACHE_VERBS or m in ("delete", "remove"):
-            return "redis"
+    if receiver and (receiver in _CACHE_RECEIVERS or receiver.endswith("redis")) and (
+        m in _CACHE_VERBS or m in ("delete", "remove")
+    ):
+        return "redis"
     if m in _GENERIC:
         for needle, hint in _RECEIVER_HINTS:  # positive vendor hint wins
             if needle not in low:
                 continue
             # Anchored needles must appear as a dot-segment, not embedded in a longer name
             # (e.g. "session" must match "db.session.query" but NOT "sessionFactory.create").
-            if needle in _ANCHORED_HINTS:
-                if not (f".{needle}." in low or low.startswith(f"{needle}.")):
-                    continue
+            if needle in _ANCHORED_HINTS and not (f".{needle}." in low or low.startswith(f"{needle}.")):
+                continue
+            if language in _PHP and hint == "typeorm":
+                return "doctrine"
             return hint
         if m in _HIGH_COLLISION:
             # Non-DB receivers (canvas ctx, logger, cache, …) are never data access — bail
@@ -293,8 +478,10 @@ def match_db(callee: str, method: str, language: str | None = None,
         if receiver and any(receiver.endswith(s) for s in _NON_DB_RECEIVERS):
             return None  # a cache/collection/UI-state/etc. receiver — not data access
         return "orm"
-    if m in _DJANGO_VERBS and (language is None or language in _PYTHON) and (
-        ".objects." in low or low.startswith("objects.") or "queryset" in low
+    if (
+        m in _DJANGO_VERBS
+        and (language is None or language in _PYTHON)
+        and (".objects." in low or low.startswith("objects.") or "queryset" in low)
     ):
         return "django"
     if m == "run" and "." in low:

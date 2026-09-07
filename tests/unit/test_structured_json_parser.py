@@ -60,9 +60,9 @@ def test_named_rich_configs_stay_config() -> None:
     assert _language("mod.json", {"main": "Verticle"}) == "config"
 
 
-def test_composer_json_is_captured_not_named_rich() -> None:
-    # composer.json has no dedicated extractor → captured in full (only RICH_JSON_NAMES are config)
-    assert _language("composer.json", {"name": "v/p", "authors": [{"name": "X"}]}) == "structured-json"
+def test_composer_json_is_named_rich_config() -> None:
+    # composer.json has dedicated extractor in RICH_JSON_NAMES -> routed to config
+    assert _language("composer.json", {"name": "v/p", "authors": [{"name": "X"}]}) == "config"
 
 
 def test_empty_and_scalar_are_config() -> None:

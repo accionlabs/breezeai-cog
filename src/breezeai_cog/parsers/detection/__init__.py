@@ -15,8 +15,8 @@ def classify_call(
     method: str,
     arg: str | None = None,
     language: str | None = None,
-    typed_db_ids: "frozenset[str] | None" = None,
-    http_client_ids: "frozenset[str] | None" = None,
+    typed_db_ids: frozenset[str] | None = None,
+    http_client_ids: frozenset[str] | None = None,
 ) -> tuple[str, str, str | None] | None:
     """Classify a normalized call into ``(semanticType, method, dataAccessHint)``.
 
@@ -33,7 +33,7 @@ def classify_call(
     verb = match_api(callee, method, http_client_ids=http_client_ids)
     if verb is not None:
         return "api_call", verb, None
-    if is_query(method, arg):
+    if is_query(method, arg, callee=callee):
         return "query_statement", method, None
     hint = match_db(callee, method, language, typed_db_ids=typed_db_ids)
     if hint is not None:
@@ -41,4 +41,4 @@ def classify_call(
     return None
 
 
-__all__ = ["classify_call", "match_api", "match_db", "is_query", "text_has_query"]
+__all__ = ["classify_call", "is_query", "match_api", "match_db", "text_has_query"]

@@ -1,0 +1,3 @@
+# PHP per-language ignore defaults (layer 2).
+vendor/
+.phpunit.cache/
