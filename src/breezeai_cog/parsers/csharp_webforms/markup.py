@@ -39,6 +39,9 @@ _SPACE = 0x20
 _ISLAND = re.compile(rb"<%.*?%>", re.DOTALL)
 #: A server-control event attribute: ``On`` + PascalCase event, value = the handler method.
 _EVENT_ATTR = re.compile(r"^On[A-Z]\w*$")
+#: The bound field of a data-binding expression: ``Eval("Title")`` / ``Bind("Name")`` /
+#: ``XPath("…")`` → the field literal. The high-value signal ("which field this screen shows").
+_BOUND_FIELD = re.compile(r"""\b(?:Eval|Bind|XPath)\s*\(\s*["']([^"']+)["']""")
 #: ``<%@ Page CodeBehind="X.aspx.cs" %>`` / ``CodeFile="X.aspx.cs"`` — the code-behind ref.
 _CODEBEHIND = re.compile(
     rb"<%@\s*(?:Page|Control|Master)\b[^%]*?\b(?:CodeBehind|CodeFile)\s*=\s*[\"']([^\"']+)[\"']",
@@ -135,6 +138,16 @@ def _attr(node: Node, source: bytes) -> tuple[str, str]:
     return name, value
 
 
+def _databind_field(value: str) -> str | None:
+    """The bound **data field** of a data-binding attribute value ``'<%# Eval("Title") %>'`` →
+    ``Title`` (``Eval``/``Bind``/``XPath``). ``None`` for a data binding that names no field —
+    a visibility/expression binding (``<%# !PrintView %>``, ``<%# L10n.Term("…") %>``) is view
+    logic, not a screen field, so we capture only the field bindings (honest, no expression
+    noise in ``name``)."""
+    field = _BOUND_FIELD.search(value)
+    return field.group(1) if field is not None else None
+
+
 def collect_markup_statements(
     root: Node, source: bytes, path: str, parent_id: str, seen_ids: set[str], limit: int
 ) -> list[Statement]:
@@ -163,15 +176,20 @@ def collect_markup_statements(
             start = _start_tag(node)
             if start is not None:
                 tag = _tag_name(start, source)
-                is_control = _is_server_control(tag, start, source)
-                if is_control:
-                    _emit(start, nodeType="element", name=tag)
-                # Event wiring lives on the control's attributes (On<Event>="Method").
+                if _is_server_control(tag, start, source):
+                    # nodeType is the captured node's real type (the `element`), never hardcoded.
+                    _emit(node, nodeType=node.type, name=tag)
+                # On the control's attributes: event wiring (On<Event>="Method") and data
+                # bindings (Text='<%# Eval("Field") %>'). Both anchor to the real `attribute`
+                # node (nodeType = attr.type, never synthetic); a binding carries no
+                # semanticType — like Angular/Vue interpolations — its bound field rides on `name`.
                 for attr in start.named_children:
                     if attr.type != "attribute":
                         continue
                     name, value = _attr(attr, source)
                     if _EVENT_ATTR.match(name) and value:
-                        _emit(attr, nodeType="attribute", name=name, handler=value)
+                        _emit(attr, nodeType=attr.type, name=name, handler=value)
+                    elif "<%#" in value and (field := _databind_field(value)) is not None:
+                        _emit(attr, nodeType=attr.type, name=field)
         stack.extend(reversed(node.named_children))
     return out

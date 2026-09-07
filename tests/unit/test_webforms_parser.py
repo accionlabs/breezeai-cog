@@ -702,3 +702,69 @@ def test_mount_to_missing_control_is_dropped(tmp_path) -> None:
     rec = WebFormsParser().parse_file(ctx)
     assert not any("Ghost.ascx" in i for i in rec.importFiles)
     assert not any(s.routeKind == "mount" for s in rec.statements)
+
+
+# ── Step 3: <%# Eval/Bind %> data-binding fields ──────────────────────────────
+
+
+def _parse_databind(tmp_path, aspx: bytes):
+    (tmp_path / "List.ascx.cs").write_text("using System.Web.UI; class X {}")
+    (tmp_path / "List.ascx").write_bytes(aspx)
+    ctx = ParseContext(
+        path="List.ascx",
+        abs_path=tmp_path / "List.ascx",
+        source=aspx,
+        repo_root=tmp_path,
+        capture_statements=True,
+    )
+    return WebFormsParser().parse_file(ctx)
+
+
+def test_databind_field_captured(tmp_path) -> None:
+    aspx = (
+        b'<%@ Control CodeBehind="List.ascx.cs" %>\n'
+        b'<asp:Label runat="server" Text=\'<%# Eval("Title") %>\' />\n'
+        b'<asp:TextBox runat="server" Text=\'<%# Bind("CustomerName") %>\' />'
+    )
+    rec = _parse_databind(tmp_path, aspx)
+    binds = {s.name for s in rec.statements if s.nodeType == "attribute" and s.handler is None}
+    assert "Title" in binds and "CustomerName" in binds
+    # data bindings are ordinary markup — no semanticType (like Angular/Vue interpolations),
+    # and a real captured node (attribute), never synthetic.
+    for s in rec.statements:
+        if s.name in {"Title", "CustomerName"}:
+            assert s.semanticType is None and s.nodeType == "attribute"
+
+
+def test_standalone_island_not_captured(tmp_path) -> None:
+    # A <%# %> in a plain (non-server) element body has no clean node → not captured
+    # (we don't emit synthetic+null). Honest-null gap.
+    aspx = b'<%@ Control CodeBehind="List.ascx.cs" %>\n<td><%# Eval("Standalone") %></td>'
+    rec = _parse_databind(tmp_path, aspx)
+    assert not any(s.name == "Standalone" for s in rec.statements)
+
+
+def test_databind_and_event_wiring_distinct(tmp_path) -> None:
+    # Event wiring (handler set) and data binding (handler None) are both attribute nodes.
+    aspx = (
+        b'<%@ Control CodeBehind="List.ascx.cs" %>\n'
+        b'<asp:Button runat="server" Text=\'<%# Eval("Caption") %>\' OnClick="Go" />'
+    )
+    rec = _parse_databind(tmp_path, aspx)
+    attrs = {s.name: s.handler for s in rec.statements if s.nodeType == "attribute"}
+    assert attrs.get("OnClick") == "Go"  # event wiring
+    assert "Caption" in attrs and attrs["Caption"] is None  # data binding
+
+
+def test_expression_binding_not_a_field(tmp_path) -> None:
+    # A <%# %> binding that names no data field (visibility/localization expression) is view
+    # logic, not a screen field → not captured as a data binding (no expression noise in name).
+    aspx = (
+        b'<%@ Control CodeBehind="List.ascx.cs" %>\n'
+        b"<asp:Panel runat=\"server\" Visible='<%# !PrintView %>' />\n"
+        b'<asp:Label runat="server" Text=\'<%# Eval("Real") %>\' />'
+    )
+    rec = _parse_databind(tmp_path, aspx)
+    names = {s.name for s in rec.statements if s.nodeType == "attribute" and s.handler is None}
+    assert "Real" in names  # the Eval field is captured
+    assert not any(n and "PrintView" in n for n in names)  # the expression binding is not
