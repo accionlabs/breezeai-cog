@@ -91,6 +91,30 @@ def test_redirect_routes_skipped(tmp_path) -> None:
     assert not any(s.semanticType == "route" and s.endpoint == "/old" for s in rec.statements)
 
 
+# ── Param routes: dynamic segments are kept verbatim in the endpoint (BREEZEAI-926 AC2) ──
+
+_PARAM_ROUTER = b"""import { createRouter, createWebHistory } from 'vue-router'
+import User from '../views/User.vue'
+
+const routes = [
+  { path: '/users/:id', component: User },
+  { path: '/optional/:id?', component: () => import('../views/Optional.vue') },
+  { path: '/multiple/:a/:b', component: () => import('../views/Multiple.vue') },
+]
+export default createRouter({ history: createWebHistory(), routes })
+"""
+
+
+def test_param_routes_preserve_dynamic_segments(tmp_path) -> None:
+    # A route path with dynamic segments (`:id`, optional `:id?`, multi `:a/:b`) is captured
+    # verbatim — the params are part of the endpoint string, not stripped or rewritten.
+    rec = _parse("src/router/index.ts", _PARAM_ROUTER, tmp_path)
+    routes = {s.endpoint: s for s in rec.statements if s.semanticType == "route"}
+    assert {"/users/:id", "/optional/:id?", "/multiple/:a/:b"} <= set(routes)
+    assert routes["/users/:id"].handler == "User" and routes["/users/:id"].routeKind == "page"
+    assert routes["/multiple/:a/:b"].handler == "../views/Multiple.vue"
+
+
 # ── Gap B: layout route with component + redirect + children ───────────────────
 
 _LAYOUT_ROUTER = b"""import { createRouter, createWebHistory } from 'vue-router'
