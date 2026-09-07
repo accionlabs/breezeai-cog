@@ -91,6 +91,30 @@ def test_redirect_routes_skipped(tmp_path) -> None:
     assert not any(s.semanticType == "route" and s.endpoint == "/old" for s in rec.statements)
 
 
+# ── Param routes: dynamic segments are kept verbatim in the endpoint (BREEZEAI-926 AC2) ──
+
+_PARAM_ROUTER = b"""import { createRouter, createWebHistory } from 'vue-router'
+import User from '../views/User.vue'
+
+const routes = [
+  { path: '/users/:id', component: User },
+  { path: '/optional/:id?', component: () => import('../views/Optional.vue') },
+  { path: '/multiple/:a/:b', component: () => import('../views/Multiple.vue') },
+]
+export default createRouter({ history: createWebHistory(), routes })
+"""
+
+
+def test_param_routes_preserve_dynamic_segments(tmp_path) -> None:
+    # A route path with dynamic segments (`:id`, optional `:id?`, multi `:a/:b`) is captured
+    # verbatim — the params are part of the endpoint string, not stripped or rewritten.
+    rec = _parse("src/router/index.ts", _PARAM_ROUTER, tmp_path)
+    routes = {s.endpoint: s for s in rec.statements if s.semanticType == "route"}
+    assert {"/users/:id", "/optional/:id?", "/multiple/:a/:b"} <= set(routes)
+    assert routes["/users/:id"].handler == "User" and routes["/users/:id"].routeKind == "page"
+    assert routes["/multiple/:a/:b"].handler == "../views/Multiple.vue"
+
+
 # ── Gap B: layout route with component + redirect + children ───────────────────
 
 _LAYOUT_ROUTER = b"""import { createRouter, createWebHistory } from 'vue-router'
@@ -323,6 +347,48 @@ def test_component_and_store_in_one_file(tmp_path) -> None:
         b"export const useS = defineStore('s', {})\n"
     )
     assert _stmt_roles(_parse("src/m.ts", src, tmp_path)) == {"C": "component", "useS": "store"}
+
+
+# ── Pinia-only files are claimed (no `vue` import needed) — BREEZEAI-967 ──────────
+# A Pinia store module often imports only `pinia`, never `vue`, yet is still Vue: it must be
+# claimed by this parser (→ framework="vue" + the defineStore uiRole), not fall to the base TS
+# parser. (The other store tests call VueParser directly, so they never exercise `claims`.)
+
+
+def test_pinia_only_file_is_claimed(tmp_path) -> None:
+    src = b"import { defineStore } from 'pinia'\nexport const useX = defineStore('x', { state: () => ({}) })\n"
+    assert VueParser().claims("src/stores/x.ts", src) is True
+
+
+def test_pinia_word_in_comment_not_claimed() -> None:
+    # "pinia" outside a quoted import specifier must NOT trigger the claim (no false positive).
+    assert VueParser().claims("src/util.ts", b"// TODO: add pinia later\nexport const x = 1\n") is False
+
+
+def test_pinia_only_selected_over_base_ts_and_framework_is_vue(tmp_path) -> None:
+    from breezeai_cog.parsers.typescript.parser import TypeScriptParser
+
+    registry.clear()
+    registry.register(TypeScriptParser())
+    registry.register(VueParser())
+    try:
+        src = b"import { defineStore } from 'pinia'\nexport const useX = defineStore('x', {})\n"
+        selected = registry.select("src/stores/x.ts", src)
+        assert selected.name == "typescript-vue"  # Vue wins over base TS on a pinia-only file
+        assert registry.select("src/plain.ts", b"export const y = 1\n").name == "typescript"
+        rec = selected.parse_file(
+            ParseContext(
+                path="src/stores/x.ts",
+                abs_path=tmp_path / "x.ts",
+                source=src,
+                repo_root=tmp_path,
+                capture_statements=True,
+            )
+        )
+        assert rec.framework == "vue"  # the "Additional Issue": pinia-only now tagged vue
+        assert _stmt_roles(rec) == {"useX": "store"}
+    finally:
+        registry.clear()
 
 
 # ── composables ──────────────────────────────────────────────────────────────────
