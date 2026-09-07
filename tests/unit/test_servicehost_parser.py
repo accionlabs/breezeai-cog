@@ -156,6 +156,48 @@ def test_svc_multiline_text_preserved_verbatim() -> None:
     assert r.startLine == 1 and r.endLine == 3
 
 
+# --- Factory= → protocol reclassification (BREEZEAI-966) -------------------------
+# A recognised host factory changes the endpoint's real protocol away from SOAP. The signal
+# rides the existing framework/routeKind vocabulary (no new field); unknown/absent → SOAP.
+
+# WCF REST (WebHttpBinding) host — the AJAX/WebScript factory maps the same way.
+SVC_WEBHTTP_FACTORY = (
+    b'<%@ ServiceHost Service="Acme.Api.CatalogService" '
+    b'Factory="System.ServiceModel.Activation.WebServiceHostFactory" %>\n'
+)
+
+
+def test_svc_dataservice_factory_reclassifies_to_odata_rest() -> None:
+    # DataServiceHostFactory → the .svc is actually an OData REST endpoint, not SOAP RPC.
+    r = _routes(_parse(SVC_VIRTUAL_CODEBEHIND, "grid-odata-crud/Products.svc"))[0]
+    assert (r.framework, r.routeKind) == ("odata", "rest")
+    assert r.handler == "Products"  # handler/text unchanged by reclassification
+    assert "Factory=" in r.text
+
+
+def test_svc_webservicehost_factory_reclassifies_to_wcf_rest() -> None:
+    r = _routes(_parse(SVC_WEBHTTP_FACTORY, "Api/CatalogService.svc"))[0]
+    assert (r.framework, r.routeKind) == ("wcf-rest", "rest")
+
+
+def test_svc_unknown_factory_stays_soap() -> None:
+    # An unrecognised/custom (e.g. DI) factory must NOT be reclassified — honest-null.
+    # SVC_NO_CODEBEHIND carries Factory="X.Y.F".
+    r = _routes(_parse(SVC_NO_CODEBEHIND, "Services/Order.svc"))[0]
+    assert (r.framework, r.routeKind) == ("wcf", "rpc")
+
+
+def test_svc_default_soap_factory_stays_soap() -> None:
+    # The plain ServiceHostFactory (SOAP) is a no-op for reclassification.
+    r = _routes(_parse(SVC_FULL, "Services/OrderService.svc"))[0]
+    assert (r.framework, r.routeKind) == ("wcf", "rpc")
+
+
+def test_svc_no_factory_stays_soap() -> None:
+    r = _routes(_parse(SVC_MULTILINE, "Services/Multi.svc"))[0]
+    assert (r.framework, r.routeKind) == ("wcf", "rpc")
+
+
 # --- .asmx (ASMX) ----------------------------------------------------------------
 
 
