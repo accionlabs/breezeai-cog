@@ -46,7 +46,7 @@ def iter_type_declarations(root: Node):
 
 class CSharpParser(BaseParser):
     name = "csharp"
-    extensions = (".cs",)
+    extensions: tuple[str, ...] = (".cs",)  # widened by WebFormsParser (adds .aspx/.ascx/.master)
     schema_version = SCHEMA_VERSION
     statement_types = STATEMENT_TYPES
     frameworks = FRAMEWORKS
