@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-from typing import ClassVar
-
 from ...schemas import FileRecord
 from ..base import ParseContext
 from ..php.parser import PhpParser
@@ -14,7 +12,7 @@ from .routes import detect_laravel_routes
 class LaravelParser(PhpParser):
     name = "php-laravel"
     priority = 10
-    frameworks: ClassVar[list[str]] = ["laravel"]
+    frameworks = ["laravel"]
 
     def claims(self, path: str, source: bytes) -> bool:
         return (

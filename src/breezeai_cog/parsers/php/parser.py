@@ -13,7 +13,7 @@ from ...utils import count_loc
 from ..base import BaseParser, ParseContext
 from ..callresolve import make_resolver
 from ..comments_common import comment_statements_for
-from ..treesitter import parse_source
+from ..treesitter import node_text, parse_source
 from .classes import build_class
 from .functions import build_function, defined_names, type_map
 from .imports import PhpIndex, build_php_index, extract_imports
@@ -77,7 +77,7 @@ class PhpParser(BaseParser):
                 statements.extend(cls_statements)
             elif child.type == "function_definition":
                 name_node = child.child_by_field_name("name")
-                name = name_node.text.decode("utf-8") if name_node is not None else ""
+                name = node_text(name_node, source) if name_node is not None else ""
                 fns, fn_stmts = build_function(
                     child,
                     name=name,

@@ -10,6 +10,7 @@ from jsonschema import Draft202012Validator
 from breezeai_cog.emit import to_line
 from breezeai_cog.parsers.base import ParseContext
 from breezeai_cog.parsers.php.parser import PhpParser
+from breezeai_cog.parsers.php_codeigniter.parser import CodeIgniterParser
 from breezeai_cog.parsers.php_laravel.parser import LaravelParser
 from breezeai_cog.parsers.php_slim.parser import SlimParser
 from breezeai_cog.parsers.php_symfony.parser import SymfonyParser
@@ -107,6 +108,69 @@ class UserController
     endpoints = {r.endpoint for r in routes}
     assert "/api/users" in endpoints
     assert "/api/users/{id}" in endpoints
+
+
+def test_codeigniter4_routes(tmp_path: Path) -> None:
+    src = b"""<?php
+namespace Config;
+
+use CodeIgniter\\Config\\BaseService;
+
+$routes->get('/users', 'UserController::index');
+$routes->post('/users', 'UserController::store');
+$routes->match(['get', 'post'], '/profile', 'ProfileController::show');
+$routes->resource('photos');
+$routes->group('admin', function ($routes) {
+    $routes->get('dashboard', 'AdminController::dashboard');
+});
+"""
+    parser = CodeIgniterParser()
+    assert parser.claims("app/Config/Routes.php", src) is True
+
+    rec = _parse(CodeIgniterParser, tmp_path, src, "app/Config/Routes.php")
+    assert rec.framework == "codeigniter"
+
+    routes = [s for s in rec.statements if s.semanticType == "route"]
+    assert len(routes) >= 5
+
+    endpoints = {r.endpoint: r for r in routes}
+    assert "/users" in endpoints
+    assert "/profile" in endpoints
+    assert "photos" in endpoints
+    assert "/admin/dashboard" in endpoints
+
+
+def test_codeigniter3_routes(tmp_path: Path) -> None:
+    src = b"""<?php
+defined('BASEPATH') OR exit('No direct script access allowed');
+
+$route['default_controller'] = 'welcome';
+$route['404_override'] = '';
+$route['translate_uri_dashes'] = FALSE;
+
+$route['journals'] = 'blogs';
+$route['product/(:any)'] = 'catalog/product_lookup';
+$route['products']['get'] = 'catalog/index';
+$route['products']['post'] = 'catalog/create';
+"""
+    parser = CodeIgniterParser()
+    assert parser.claims("application/config/routes.php", src) is True
+
+    rec = _parse(CodeIgniterParser, tmp_path, src, "application/config/routes.php")
+    assert rec.framework == "codeigniter"
+
+    routes = [s for s in rec.statements if s.semanticType == "route"]
+    endpoints = {r.endpoint: r for r in routes}
+
+    assert "default_controller" not in endpoints
+    assert "404_override" not in endpoints
+    assert "journals" in endpoints
+    assert endpoints["journals"].method == "ALL"
+    assert "product/(:any)" in endpoints
+    assert "products" in endpoints
+    assert any(r.endpoint == "products" and r.method == "GET" for r in routes)
+    assert any(r.endpoint == "products" and r.method == "POST" for r in routes)
+
 
 
 def test_wordpress_hooks(tmp_path: Path) -> None:

@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-from typing import ClassVar
-
 from ...schemas import FileRecord
 from ..base import ParseContext
 from ..php.parser import PhpParser
@@ -14,7 +12,7 @@ from .routes import detect_symfony_routes
 class SymfonyParser(PhpParser):
     name = "php-symfony"
     priority = 10
-    frameworks: ClassVar[list[str]] = ["symfony"]
+    frameworks = ["symfony"]
 
     def claims(self, path: str, source: bytes) -> bool:
         return b"Symfony\\" in source or b"#[Route(" in source or b"#[AsController" in source
