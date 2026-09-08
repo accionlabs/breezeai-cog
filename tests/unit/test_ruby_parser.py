@@ -41,3 +41,56 @@ def test_ruby_class_and_methods(tmp_path: Path) -> None:
     assert any("lib/service.rb" in item for item in rec.importFiles)
     assert any(c.name == "greet" for c in rec.functions)
     assert any(c.name == "start" for c in rec.functions)
+
+
+def test_ruby_statements_are_owned_by_the_most_specific_scope(tmp_path: Path) -> None:
+    source = b'''class User
+  def greet(name)
+    if name
+      puts name
+    end
+  end
+end
+'''
+    path = tmp_path / "app.rb"
+    path.write_bytes(source)
+    ctx = ParseContext(
+        path="app.rb",
+        abs_path=path,
+        source=source,
+        repo_root=tmp_path,
+        capture_statements=True,
+    )
+
+    rec = RubyParser().parse_file(ctx)
+
+    if_statements = [statement for statement in rec.statements if statement.nodeType == "if"]
+    greet = next(function for function in rec.functions if function.name == "greet")
+    assert len(if_statements) == 1
+    assert if_statements[0].parentId == greet.id
+
+
+def test_ruby_statements_use_shared_semantic_detection(tmp_path: Path) -> None:
+    source = b'''class Data
+  def load(id)
+    User.find(id)
+    Net::HTTP.get(uri)
+    "SELECT * FROM users"
+  end
+end
+'''
+    path = tmp_path / "data.rb"
+    path.write_bytes(source)
+    ctx = ParseContext(
+        path="data.rb",
+        abs_path=path,
+        source=source,
+        repo_root=tmp_path,
+        capture_statements=True,
+    )
+
+    rec = RubyParser().parse_file(ctx)
+
+    assert any(statement.semanticType == "db_method_call" for statement in rec.statements)
+    assert any(statement.semanticType == "api_call" for statement in rec.statements)
+    assert any(statement.semanticType == "query_statement" for statement in rec.statements)

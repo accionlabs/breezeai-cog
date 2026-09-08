@@ -23,6 +23,7 @@ JUMP = {
 DECLARATIONS = {
     "assignment", 
     "call", 
+    "string",
     "class", 
     "module", 
     "method", 
