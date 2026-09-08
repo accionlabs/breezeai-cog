@@ -1,4 +1,4 @@
-"""Terraform parser constants."""
+"""HCL parser constants."""
 
 from __future__ import annotations
 
