@@ -122,6 +122,43 @@ def test_run_missing_id_is_failure(tmp_path, monkeypatch):
     assert failed == ["x"]
 
 
+def test_raw_responses_logged_on_file_only_logger(tmp_path, monkeypatch):
+    # DEF-998-01: the raw backend JSON (`upload.response` / `upload.poll`) must be logged on the
+    # file-only detail logger, never the app logger (whose console handler would leak it to the
+    # terminal in piped/CI mode). Warnings still go to the app logger so they surface.
+    from breezeai_cog.logging import APP_LOGGER, DETAIL_LOGGER
+
+    events: list[tuple[str, str]] = []  # (logger_name, event)
+
+    class _Rec:
+        def __init__(self, name: str) -> None:
+            self.name = name
+
+        def _record(self, event: str, **_: object) -> None:
+            events.append((self.name, event))
+
+        info = warning = error = _record
+
+    monkeypatch.setattr(bu, "get_logger", lambda name=None: _Rec(name or APP_LOGGER))
+    monkeypatch.setattr(bu, "upload_ontology",
+                        lambda s, p, *, repository_name, on_attempt=None: {"_id": f"id-{repository_name}"})
+
+    def fake_poll(s, oid, *, overall_timeout=None, on_response=None, on_waiting=None):
+        if on_response:
+            on_response({"status": "active", "raw": "..."})
+        return "active"
+
+    monkeypatch.setattr(bu, "poll_ontology_status", fake_poll)
+
+    run_batch_uploads(_tasks(["proj-a"], tmp_path), _settings(), UploadTracker(1), state=None)
+
+    raw = {"upload.response", "upload.poll"}
+    detail_events = {e for (n, e) in events if n == DETAIL_LOGGER}
+    app_events = {e for (n, e) in events if n == APP_LOGGER}
+    assert raw <= detail_events, f"raw responses must use the detail logger; saw {events}"
+    assert not (raw & app_events), f"raw responses leaked to the app/console logger: {events}"
+
+
 def test_run_respects_parallelism(tmp_path, monkeypatch):
     import threading
     import time

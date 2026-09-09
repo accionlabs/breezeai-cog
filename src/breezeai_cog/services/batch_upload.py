@@ -24,7 +24,7 @@ from pathlib import Path
 
 from ..config import Settings
 from ..errors import UploadError
-from ..logging import get_logger
+from ..logging import DETAIL_LOGGER, get_logger
 from ..utils.paths import cog_dir
 from .upload import extract_ontology_id, poll_ontology_status, upload_ontology
 
@@ -201,7 +201,11 @@ def run_batch_uploads(
 
     Returns the list of repo names that failed (empty when all succeeded).
     """
-    log = get_logger()
+    log = get_logger()  # app logger — actionable warnings/errors reach the console
+    # Raw upload/poll responses are file-only (DEF-998-01): the detail logger has a file handler
+    # but no console handler and does not propagate, so full backend JSON never hits the terminal
+    # in any mode (TTY, piped/CI, or --verbose) — unlike the app logger's console handler.
+    detail = get_logger(DETAIL_LOGGER)
     total = len(tasks)
 
     def _worker(task: UploadTask) -> None:
@@ -214,7 +218,7 @@ def run_batch_uploads(
                 repository_name=name,
                 on_attempt=lambda n: tracker.set_attempt(name, n),
             )
-            log.info("upload.response", repo=name, response=resp)
+            detail.info("upload.response", repo=name, response=resp)
 
             ontology_id = extract_ontology_id(resp)
             if not ontology_id:
@@ -226,8 +230,8 @@ def run_batch_uploads(
                 settings,
                 ontology_id,
                 overall_timeout=settings.upload_timeout,  # bound the processing wait, not just the POST
-                on_response=lambda p: log.info("upload.poll", repo=name, response=p),
-                on_waiting=lambda s: log.info(
+                on_response=lambda p: detail.info("upload.poll", repo=name, response=p),
+                on_waiting=lambda s: detail.info(
                     "upload.poll.waiting", repo=name, status=s or "pending"
                 ),
             )
