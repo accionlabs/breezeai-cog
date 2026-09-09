@@ -278,6 +278,9 @@ def match_db(callee: str, method: str, language: str | None = None,
                     continue
             return hint
         if m in _HIGH_COLLISION:
+            receiver_name = callee.rsplit(".", 1)[0].rsplit(".", 1)[-1] if "." in callee else ""
+            if language == "ruby" and receiver_name and receiver_name[0].isupper():
+                return "orm"
             # Non-DB receivers (canvas ctx, logger, cache, …) are never data access — bail
             # early before the suffix heuristic can misfire (e.g. ``ctx.save()``).
             if receiver and any(receiver.endswith(s) for s in _NON_DB_RECEIVERS):
