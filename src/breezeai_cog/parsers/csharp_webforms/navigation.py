@@ -75,7 +75,11 @@ def _codebehind_navs(root: Node, source: bytes) -> list[tuple[str, Node]]:
 
 
 def detect_navigation(
-    record: FileRecord, path: str, root: Node, source: bytes, markup: bytes,
+    record: FileRecord,
+    path: str,
+    root: Node,
+    source: bytes,
+    markup: bytes,
     repo_root: Path | None,
 ) -> list[Statement]:
     """``routeKind=navigation`` route statements for this page's outgoing navigation (item 4).
@@ -97,7 +101,9 @@ def detect_navigation(
             return
         dedup.add(key)
         stmt = Statement(
-            id=disambiguate(statement_id(path, start, 2), seen),  # col 2 → distinct from page(0)/layout(1)
+            id=disambiguate(
+                statement_id(path, start, 2), seen
+            ),  # col 2 → distinct from page(0)/layout(1)
             parentId=file_id(path),
             nodeType=node_type,
             semanticType="route",

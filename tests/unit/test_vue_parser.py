@@ -91,6 +91,30 @@ def test_redirect_routes_skipped(tmp_path) -> None:
     assert not any(s.semanticType == "route" and s.endpoint == "/old" for s in rec.statements)
 
 
+# ── Param routes: dynamic segments are kept verbatim in the endpoint (BREEZEAI-926 AC2) ──
+
+_PARAM_ROUTER = b"""import { createRouter, createWebHistory } from 'vue-router'
+import User from '../views/User.vue'
+
+const routes = [
+  { path: '/users/:id', component: User },
+  { path: '/optional/:id?', component: () => import('../views/Optional.vue') },
+  { path: '/multiple/:a/:b', component: () => import('../views/Multiple.vue') },
+]
+export default createRouter({ history: createWebHistory(), routes })
+"""
+
+
+def test_param_routes_preserve_dynamic_segments(tmp_path) -> None:
+    # A route path with dynamic segments (`:id`, optional `:id?`, multi `:a/:b`) is captured
+    # verbatim — the params are part of the endpoint string, not stripped or rewritten.
+    rec = _parse("src/router/index.ts", _PARAM_ROUTER, tmp_path)
+    routes = {s.endpoint: s for s in rec.statements if s.semanticType == "route"}
+    assert {"/users/:id", "/optional/:id?", "/multiple/:a/:b"} <= set(routes)
+    assert routes["/users/:id"].handler == "User" and routes["/users/:id"].routeKind == "page"
+    assert routes["/multiple/:a/:b"].handler == "../views/Multiple.vue"
+
+
 # ── Gap B: layout route with component + redirect + children ───────────────────
 
 _LAYOUT_ROUTER = b"""import { createRouter, createWebHistory } from 'vue-router'
@@ -325,6 +349,48 @@ def test_component_and_store_in_one_file(tmp_path) -> None:
     assert _stmt_roles(_parse("src/m.ts", src, tmp_path)) == {"C": "component", "useS": "store"}
 
 
+# ── Pinia-only files are claimed (no `vue` import needed) — BREEZEAI-967 ──────────
+# A Pinia store module often imports only `pinia`, never `vue`, yet is still Vue: it must be
+# claimed by this parser (→ framework="vue" + the defineStore uiRole), not fall to the base TS
+# parser. (The other store tests call VueParser directly, so they never exercise `claims`.)
+
+
+def test_pinia_only_file_is_claimed(tmp_path) -> None:
+    src = b"import { defineStore } from 'pinia'\nexport const useX = defineStore('x', { state: () => ({}) })\n"
+    assert VueParser().claims("src/stores/x.ts", src) is True
+
+
+def test_pinia_word_in_comment_not_claimed() -> None:
+    # "pinia" outside a quoted import specifier must NOT trigger the claim (no false positive).
+    assert VueParser().claims("src/util.ts", b"// TODO: add pinia later\nexport const x = 1\n") is False
+
+
+def test_pinia_only_selected_over_base_ts_and_framework_is_vue(tmp_path) -> None:
+    from breezeai_cog.parsers.typescript.parser import TypeScriptParser
+
+    registry.clear()
+    registry.register(TypeScriptParser())
+    registry.register(VueParser())
+    try:
+        src = b"import { defineStore } from 'pinia'\nexport const useX = defineStore('x', {})\n"
+        selected = registry.select("src/stores/x.ts", src)
+        assert selected.name == "typescript-vue"  # Vue wins over base TS on a pinia-only file
+        assert registry.select("src/plain.ts", b"export const y = 1\n").name == "typescript"
+        rec = selected.parse_file(
+            ParseContext(
+                path="src/stores/x.ts",
+                abs_path=tmp_path / "x.ts",
+                source=src,
+                repo_root=tmp_path,
+                capture_statements=True,
+            )
+        )
+        assert rec.framework == "vue"  # the "Additional Issue": pinia-only now tagged vue
+        assert _stmt_roles(rec) == {"useX": "store"}
+    finally:
+        registry.clear()
+
+
 # ── composables ──────────────────────────────────────────────────────────────────
 
 
@@ -344,14 +410,16 @@ def test_composable_marked_by_reactivity_call(tmp_path) -> None:
     )
     roles = _fn_roles(_parse("src/c.ts", src, tmp_path))
     assert roles.get("useAuth") == "composable"
-    assert roles.get("useLegacyConfig") is None      # useX but no reactive state
-    assert roles.get("setup") is None                # reactivity, but not a useX composable
+    assert roles.get("useLegacyConfig") is None  # useX but no reactive state
+    assert roles.get("setup") is None  # reactivity, but not a useX composable
 
 
 def test_composable_arrow_and_alias(tmp_path) -> None:
     arrow = b"import { reactive } from 'vue'\nexport const useStore2 = () => { const s = reactive({}); return s }\n"
     assert _fn_roles(_parse("src/a.ts", arrow, tmp_path)).get("useStore2") == "composable"
-    aliased = b"import { ref as r } from 'vue'\nexport function useThing(){ const v = r(0); return v }\n"
+    aliased = (
+        b"import { ref as r } from 'vue'\nexport function useThing(){ const v = r(0); return v }\n"
+    )
     assert _fn_roles(_parse("src/b.ts", aliased, tmp_path)).get("useThing") == "composable"
 
 
@@ -553,3 +621,63 @@ def test_output_validates(tmp_path) -> None:
         rec = _parse(path, src, tmp_path)
         errors = list(validator.iter_errors(json.loads(to_line(rec))))
         assert not errors, (path, errors)
+
+
+# ── <template> block capture (P2 — closes the sfc.py gap) ──────────────────────
+
+_SFC_TEMPLATE = b"""<template>
+  <div v-for="o in orders" @click="load">
+    {{ o.name }}
+    <button v-on:click="remove(o)" :disabled="busy" v-model="q">X</button>
+    <router-link :to="'/orders/' + o.id">view</router-link>
+    <OrderRow :order="o" @selected="onSel" />
+  </div>
+</template>
+<script lang="ts">
+export default { methods: { load() {}, remove(o) {}, onSel() {} } }
+</script>"""
+
+
+def test_template_bindings_captured(tmp_path) -> None:
+    rec = _parse("Order.vue", _SFC_TEMPLATE, tmp_path)
+    tmpl = [s for s in rec.statements if s.nodeType in ("directive_attribute", "interpolation")]
+    assert tmpl, "template bindings should be captured (sfc.py gap closed)"
+    # event bindings carry the referenced handler
+    handlers = {s.handler for s in tmpl if s.handler}
+    assert {"load", "remove", "onSel"} <= handlers
+    # interpolation + directive names, all with no semanticType (ordinary markup)
+    kinds = {(s.nodeType, s.name) for s in tmpl}
+    assert ("interpolation", "o.name") in kinds
+    assert ("directive_attribute", "for") in kinds and ("directive_attribute", "model") in kinds
+    assert all(s.semanticType is None for s in tmpl if s.name != "to")
+
+
+def test_template_router_link_is_navigation(tmp_path) -> None:
+    rec = _parse("Order.vue", _SFC_TEMPLATE, tmp_path)
+    nav = [s for s in rec.statements if s.semanticType == "route"]
+    assert nav and all(s.routeKind == "navigation" and s.framework == "vue" for s in nav)
+    assert nav[0].endpoint == "/orders/"  # first string literal of the :to expression
+
+
+def test_template_only_sfc_captured(tmp_path) -> None:
+    # A .vue with no <script> still yields a component File AND its template bindings.
+    src = b'<template><button @click="save">{{ title }}</button></template>'
+    rec = _parse("Banner.vue", src, tmp_path)
+    assert rec.uiRole == "component" and rec.framework == "vue"
+    assert any(s.nodeType == "interpolation" and s.name == "title" for s in rec.statements)
+    assert any(s.handler == "save" for s in rec.statements)
+
+
+def test_template_capture_requires_flag(tmp_path) -> None:
+    rec = _parse("Order.vue", _SFC_TEMPLATE, tmp_path, capture=False)
+    assert not [s for s in rec.statements if s.nodeType in ("directive_attribute", "interpolation")]
+
+
+def test_template_output_validates(tmp_path) -> None:
+    rec = _parse("Order.vue", _SFC_TEMPLATE, tmp_path)
+    errors = list(
+        Draft202012Validator(FileRecord.model_json_schema(by_alias=True)).iter_errors(
+            json.loads(to_line(rec))
+        )
+    )
+    assert not errors, errors
