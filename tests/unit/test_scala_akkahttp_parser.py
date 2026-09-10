@@ -127,6 +127,23 @@ class Simple {
     assert routes[0].method == "GET"
 
 
+def test_akkahttp_explicit_method_and_bare_verb_guard(tmp_path: Path) -> None:
+    src = b'''package com.example
+import akka.http.scaladsl.server.Directives._
+class Explicit {
+  val route = path("legacy") {
+    method(HttpMethods.GET) { complete("ok") }
+  }
+  val notRoute = get { loadConfig() }
+  val alsoNotRoute = options { defaultOptions }
+  val safe = repo.delete { row => row }
+}
+'''
+    rec = _parse_akka_http(tmp_path, src, "Explicit.scala")
+    routes = [s for s in rec.statements if s.semanticType == "route"]
+    assert [(s.method, s.endpoint) for s in routes] == [("GET", "/legacy")]
+
+
 def test_akkahttp_schema_validation(tmp_path: Path) -> None:
     rec = _parse_akka_http(tmp_path)
     errors = list(Draft202012Validator(FileRecord.model_json_schema(by_alias=True))

@@ -22,6 +22,7 @@ class SparkJob {
     val df2 = spark.read.parquet("data/input.parquet")
     df1.write.format("parquet").mode("overwrite").save("data/out.parquet")
     df2.write.csv("data/output.csv")
+    resp.write.json(payload)
     val res = spark.sql("SELECT id, name FROM users WHERE active = true")
   }
 }
@@ -75,6 +76,7 @@ def test_spark_read_write_detection(tmp_path: Path) -> None:
     assert len(write_calls) == 2
     assert any(s.endpoint == "data/out.parquet" for s in write_calls)
     assert any(s.endpoint == "data/output.csv" for s in write_calls)
+    assert not any("resp.write.json" in s.text for s in stmts if s.dataAccessHint == "spark")
 
     # Case 10: spark.sql("SELECT ...") -> query_statement
     sql_stmts = [s for s in stmts if s.semanticType == "query_statement"]

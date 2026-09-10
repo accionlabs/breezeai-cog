@@ -16,24 +16,27 @@ from breezeai_cog.parsers.scala_play.parser import ScalaPlayParser
 from breezeai_cog.schemas import FileRecord
 
 AKKA_SRC = b'''package workers
-import akka.actor.Actor
+import akka.actor.ActorRef
 
-class Worker extends Actor {
+class Worker(ref: ActorRef) {
   def receive: Receive = {
     case x => println(x)
   }
   def run(): Unit = {
     ref ! msg
     ref ? msg
+    val c = a ! b
+    val d = cond ? a
     if (!flag) println("no")
   }
 }
 '''
 
 PEKKO_SRC = b'''package workers
+import org.apache.pekko.actor.typed.ActorRef
 import org.apache.pekko.actor.typed.scaladsl.Behaviors
 
-class Worker {
+class Worker(ref: ActorRef[Cmd]) {
   val b = Behaviors.receiveMessage[Cmd] { case x => Behaviors.same }
   def run(): Unit = {
     ref ! msg

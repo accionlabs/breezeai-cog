@@ -20,6 +20,7 @@ from ..treesitter import node_text
 
 _HTTP_VERBS = frozenset({"get", "post", "put", "delete", "patch", "head", "options"})
 _PATH_DIRECTIVES = frozenset({"path", "pathprefix", "pathsuffix", "rawpathprefix", "rawpath"})
+_HTTP_METHOD_NAMES = frozenset(name.upper() for name in _HTTP_VERBS)
 
 
 def _extract_segments(node: Node | None, source: bytes) -> list[str]:
@@ -77,6 +78,18 @@ def _apply_params_to_segments(segments: list[str], params: list[str]) -> list[st
     return res
 
 
+def _explicit_method(node: Node, source: bytes) -> str | None:
+    """Extract ``GET`` from an explicit ``method(HttpMethods.GET)`` directive."""
+    args = node.child_by_field_name("arguments")
+    if args is None:
+        return None
+    first = next(iter(args.named_children), None)
+    if first is None:
+        return None
+    name = node_text(first, source).rsplit(".", 1)[-1].upper()
+    return name if name in _HTTP_METHOD_NAMES else None
+
+
 def detect_akkahttp_routes(
     root: Node,
     source: bytes,
@@ -111,7 +124,7 @@ def detect_akkahttp_routes(
         )
 
     def walk_directives(
-        node: Node, current_path: list[str]
+        node: Node, current_path: list[str], in_route_context: bool = False
     ) -> bool:
         """Walk AST to find path and verb directives. Returns True if any route was emitted in this subtree."""
         found_any = False
@@ -146,7 +159,7 @@ def detect_akkahttp_routes(
                         new_path = current_path + segs
                         sub_emitted = False
                         if args_child is not None:
-                            sub_emitted = walk_block_or_expr(args_child, new_path)
+                            sub_emitted = walk_block_or_expr(args_child, new_path, True)
 
                         if not sub_emitted:
                             # Path block with no nested HTTP verb / sub-route: emit with method=None
@@ -154,8 +167,25 @@ def detect_akkahttp_routes(
                             emit_route(node, None, ep)
                         return True
 
-            # Case 2: HTTP verb directive: get { ... } / post { ... }
-            if fn_child is not None and fn_child.type == "identifier":
+            # Case 2: explicit method directive: method(HttpMethods.GET) { ... }
+            if fn_child is not None and fn_child.type == "call_expression":
+                inner_fn = fn_child.child_by_field_name("function")
+                if (
+                    inner_fn is not None
+                    and inner_fn.type == "identifier"
+                    and node_text(inner_fn, source).lower() == "method"
+                    and in_route_context
+                ):
+                    method = _explicit_method(fn_child, source)
+                    if method is not None:
+                        ep = "/" + "/".join(current_path) if current_path else "/"
+                        emit_route(node, method, ep)
+                        return True
+
+            # Case 3: HTTP verb directive: get { ... } / post { ... }
+            # A bare verb is ambiguous with an ordinary function. Only accept it
+            # after a path/route directive has established route context.
+            if fn_child is not None and fn_child.type == "identifier" and in_route_context:
                 fn_name = node_text(fn_child, source).lower()
                 if fn_name in _HTTP_VERBS:
                     verb = fn_name.upper()
@@ -164,18 +194,20 @@ def detect_akkahttp_routes(
                     return True
 
         for c in node.named_children:
-            if walk_directives(c, current_path):
+            if walk_directives(c, current_path, in_route_context):
                 found_any = True
         return found_any
 
-    def walk_block_or_expr(node: Node, current_path: list[str]) -> bool:
+    def walk_block_or_expr(
+        node: Node, current_path: list[str], in_route_context: bool
+    ) -> bool:
         found_any = False
         if node.type in ("block", "lambda_expression", "indented_block"):
             for c in node.named_children:
-                if walk_directives(c, current_path):
+                if walk_directives(c, current_path, in_route_context):
                     found_any = True
         else:
-            if walk_directives(node, current_path):
+            if walk_directives(node, current_path, in_route_context):
                 found_any = True
         return found_any
 

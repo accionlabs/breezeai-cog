@@ -38,6 +38,11 @@ class UserRoutes {
     case GET -> Root / "me" as user =>
       Ok(user.name)
   }
+
+  val searchRoutes = HttpRoutes.of[IO] {
+    case GET -> Root / "search" :? Q(q) +& L(n) => Ok(q)
+  }
+  val api = Router("/v1" -> searchRoutes)
 }
 """
 
@@ -79,7 +84,7 @@ def test_http4s_route_extraction(tmp_path: Path) -> None:
     rec = _parse_http4s(tmp_path)
     assert rec.framework == "http4s"
     routes = [s for s in rec.statements if s.semanticType == "route"]
-    assert len(routes) == 5
+    assert len(routes) == 6
 
     by_ep_verb = {(r.endpoint, r.method): r for r in routes}
 
@@ -107,6 +112,10 @@ def test_http4s_route_extraction(tmp_path: Path) -> None:
     r_me = by_ep_verb.get(("/me", "GET"))
     assert r_me is not None
 
+    # Multi-query matcher is still the same route, and Router's mount prefix is joined.
+    r_search = by_ep_verb.get(("/v1/search", "GET"))
+    assert r_search is not None
+
     # Case 7: case _ => NotFound() is skipped (not a route)
     for r in routes:
         assert r.method in ("GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS")
@@ -117,3 +126,15 @@ def test_http4s_schema_validation(tmp_path: Path) -> None:
     errors = list(Draft202012Validator(FileRecord.model_json_schema(by_alias=True))
                   .iter_errors(json.loads(to_line(rec))))
     assert not errors, errors
+
+
+def test_http4s_unresolved_mount_prefix_is_honest_null(tmp_path: Path) -> None:
+    src = b'''import org.http4s._
+import org.http4s.dsl.io._
+val routes = HttpRoutes.of[IO] { case GET -> Root / "users" => Ok() }
+val api = Router(prefix -> routes)
+'''
+    rec = _parse_http4s(tmp_path, src, "Mounted.scala")
+    routes = [s for s in rec.statements if s.semanticType == "route"]
+    assert len(routes) == 1
+    assert routes[0].endpoint is None

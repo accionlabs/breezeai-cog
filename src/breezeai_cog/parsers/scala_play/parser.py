@@ -17,7 +17,7 @@ from ...utils import count_loc
 from ..base import BaseParser, ParseContext
 from ..scala.parser import ScalaParser
 from ..treesitter import parse_source
-from .actions import detect_play_actions
+from .actions import detect_play_actions, detect_play_sird_routes
 from .routes import extract_routes
 
 
@@ -34,6 +34,7 @@ class ScalaPlayParser(ScalaParser):
         record = self.extract(root, ctx)  # inherited Scala extraction (one parse)
         if ctx.capture_statements and not self.is_fixture_file(ctx.path):
             routes = detect_play_actions(root, ctx.source, record)
+            routes.extend(detect_play_sird_routes(root, ctx.source, record))
             if routes:
                 record.statements.extend(routes)
                 record.framework = "play"

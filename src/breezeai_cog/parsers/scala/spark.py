@@ -19,6 +19,7 @@ from ...schemas.enums import SemanticType
 from ..base import ParseContext
 from ..treesitter import node_text
 from ..vertx_common import enclosing_statement
+from .functions import type_map
 from .statements import _call_details, find_enclosing_parent_id
 
 # Mapping of Spark terminal operations -> (semanticType, dataAccessHint, method)
@@ -33,14 +34,68 @@ _READ_METHODS = frozenset({"load", "csv", "parquet", "json", "orc", "table", "te
 _WRITE_METHODS = frozenset({"save", "csv", "parquet", "json", "orc", "saveastable", "insertinto", "text"})
 
 
-def _spark_op_for_call(callee: str, method: str) -> str | None:
-    """Check if callee + method represent a Spark DataFrame read or write."""
+def _spark_receiver(callee: str, operation: str) -> str | None:
+    marker = f".{operation}"
+    if marker not in callee:
+        return None
+    receiver = callee.split(marker, 1)[0]
+    return receiver if receiver and "." not in receiver else None
+
+
+def _type_base(type_text: str | None) -> str:
+    if not type_text:
+        return ""
+    return type_text.split("<", 1)[0].strip().rstrip("[]").rsplit(".", 1)[-1]
+
+
+def _spark_receiver_is_valid(receiver: str | None, operation: str, types: dict[str, str]) -> bool:
+    if receiver is None:
+        return False
+    base = _type_base(types.get(receiver))
+    if operation == "read":
+        return base in {"SparkSession", "DataFrameReader"}
+    return base in {"DataFrame", "Dataset", "DataFrameWriter"}
+
+
+def _spark_types(root: Node, source: bytes) -> dict[str, str]:
+    """Combine declared types with the small set of inferable Spark chain types."""
+    types = type_map(root, source)
+    assignments: list[tuple[str, str]] = []
+
+    def walk(node: Node) -> None:
+        if node.type in ("val_definition", "var_definition"):
+            pattern = node.child_by_field_name("pattern")
+            value = node.child_by_field_name("value")
+            if pattern is not None and pattern.type == "identifier" and value is not None:
+                assignments.append((node_text(pattern, source), node_text(value, source)))
+        for child in node.named_children:
+            walk(child)
+
+    walk(root)
+    for _ in range(len(assignments) + 1):
+        changed = False
+        for name, value in assignments:
+            for operation, inferred in (("read", "DataFrame"), ("write", "DataFrameWriter")):
+                receiver = _spark_receiver(value, operation)
+                if _spark_receiver_is_valid(receiver, operation, types) and types.get(name) != inferred:
+                    types[name] = inferred
+                    changed = True
+        if not changed:
+            break
+    return types
+
+
+def _spark_op_for_call(
+    callee: str, method: str, types: dict[str, str] | None = None
+) -> str | None:
+    """Check whether a typed Spark receiver owns this read or write chain."""
+    types = types or {}
     m_lower = method.lower()
     if m_lower in _READ_METHODS:
-        if ".read." in callee or callee.startswith("read.") or callee.endswith(".read") or ".read(" in callee:
+        if _spark_receiver_is_valid(_spark_receiver(callee, "read"), "read", types):
             return "read"
     if m_lower in _WRITE_METHODS:
-        if ".write." in callee or callee.startswith("write.") or callee.endswith(".write") or ".write(" in callee:
+        if _spark_receiver_is_valid(_spark_receiver(callee, "write"), "write", types):
             return "write"
     return None
 
@@ -58,6 +113,7 @@ def detect_spark_calls(
         return
 
     seen_ids = {s.id for s in record.statements}
+    types = _spark_types(root, source)
     found_any = False
 
     def walk(node: Node) -> None:
@@ -66,7 +122,7 @@ def detect_spark_calls(
             details = _call_details(node, source)
             if details is not None:
                 callee, method, endpoint = details
-                op = _spark_op_for_call(callee, method)
+                op = _spark_op_for_call(callee, method, types)
                 if op is not None:
                     found_any = True
                     sem_type, hint, op_method = _SPARK_OPS[op]

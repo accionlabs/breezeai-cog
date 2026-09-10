@@ -68,6 +68,44 @@ def test_action_route_has_honest_null_method_and_endpoint(tmp_path: Path) -> Non
         assert r.endpoint is None
 
 
+def test_action_return_type_does_not_match_action_helpers(tmp_path: Path) -> None:
+    src = b'''package controllers
+import play.api.mvc._
+class Helpers {
+  def build(): ActionBuilder[Request, AnyContent] = ???
+  def factory(): ActionFunction[Request, Request] = ???
+  def result(): ActionResult = ???
+  def real(): Action = ???
+}
+'''
+    rec = _parse(tmp_path, src, "Helpers.scala")
+    routes = {s.handler for s in rec.statements if s.semanticType == "route"}
+    assert routes == {"real"}
+
+
+def test_sird_routes_are_captured(tmp_path: Path) -> None:
+    src = b'''package routers
+import play.api.routing.Router.Routes
+import play.api.routing.SimpleRouter
+import play.api.routing.sird._
+class SimpleRouterImpl extends SimpleRouter {
+  override def routes: Routes = {
+    case GET(p"/") => controller.index
+    case GET(p"/users/$id") => controller.show(id)
+    case GET(p"/items/$id<[0-9]+>") => controller.item(id)
+  }
+}
+'''
+    rec = _parse(tmp_path, src, "SimpleRouter.scala")
+    routes = [s for s in rec.statements if s.semanticType == "route"]
+    assert {(s.method, s.endpoint) for s in routes} == {
+        ("GET", "/"),
+        ("GET", "/users/$id"),
+        ("GET", "/items/$id<[0-9]+>"),
+    }
+    assert sum(s.isRegex is True for s in routes) == 1
+
+
 def test_fixture_controller_emits_no_routes(tmp_path: Path) -> None:
     rec = _parse(tmp_path, CONTROLLER_SRC, "HomeController.test.scala")
     assert [s for s in rec.statements if s.semanticType == "route"] == []

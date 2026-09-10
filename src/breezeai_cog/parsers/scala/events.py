@@ -19,6 +19,7 @@ from ...schemas import FileRecord, Statement
 from ...schemas.enums import SemanticType
 from ..base import ParseContext
 from ..treesitter import node_text
+from .functions import type_map
 from .statements import find_enclosing_parent_id
 
 
@@ -56,7 +57,15 @@ def detect_scala_events(
     if b"akka" not in source and b"pekko" not in source:
         return
     seen_ids = {s.id for s in record.statements}
+    declared_types = type_map(root, source)
     found_any = False
+
+    def is_actor_ref(left: Node) -> bool:
+        if left.type != "identifier":
+            return False
+        declared = declared_types.get(node_text(left, source), "")
+        base = declared.split("<", 1)[0].strip().rstrip("[]").rsplit(".", 1)[-1]
+        return base == "ActorRef"
 
     def emit(node: Node, semantic: SemanticType, method: str | None) -> None:
         nonlocal found_any
@@ -83,7 +92,7 @@ def detect_scala_events(
                 left = c.child_by_field_name("left")
                 right = c.child_by_field_name("right")
                 if op is not None and left is not None and right is not None:
-                    if node_text(op, source) in ("!", "?"):
+                    if node_text(op, source) in ("!", "?") and is_actor_ref(left):
                         emit(c, "eventbus_send", "SEND")
             elif (
                 c.type in ("function_definition", "function_declaration")

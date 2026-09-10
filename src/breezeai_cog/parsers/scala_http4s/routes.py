@@ -77,8 +77,8 @@ def _extract_http4s_pattern(pat_node: Node | None, source: bytes) -> tuple[str, 
                 segments.reverse()
                 return (verb, segments)
             return None
-        elif op_text == ":?":
-            # Query param matcher: ``GET -> Root / "users" :? QueryParam(q)``
+        elif op_text in (":?", "+&"):
+            # Query param matchers: ``:?`` and the multi-param ``+&`` combinator.
             curr = curr.child_by_field_name("left")
         else:
             return None
@@ -95,6 +95,24 @@ def detect_http4s_routes(
     """Find all HttpRoutes.of / AuthedRoutes.of blocks and emit route statements for their case clauses."""
     seen_ids = {s.id for s in record.statements}
     routes: list[Statement] = []
+    route_bindings: dict[str, list[Statement]] = {}
+    call_bindings: dict[int, str] = {}
+    string_bindings: dict[str, str] = {}
+
+    def collect_bindings(node: Node) -> None:
+        if node.type == "val_definition":
+            name = node.child_by_field_name("pattern")
+            value = node.child_by_field_name("value")
+            if name is not None and name.type == "identifier" and value is not None:
+                binding = node_text(name, source)
+                if value.type == "string":
+                    string_bindings[binding] = node_text(value, source).strip('"\'')
+                if value.type == "call_expression":
+                    call_bindings[value.start_byte] = binding
+        for child in node.named_children:
+            collect_bindings(child)
+
+    collect_bindings(root)
 
     def walk(node: Node) -> None:
         if node.type == "call_expression":
@@ -104,6 +122,7 @@ def detect_http4s_routes(
 
             fn_text = node_text(fn_node, source) if fn_node is not None else ""
             if fn_text.endswith(".of") and "Routes" in fn_text:
+                route_binding = call_bindings.get(node.start_byte)
                 args = node.child_by_field_name("arguments")
                 if args is not None and args.type == "case_block":
                     for clause in args.named_children:
@@ -116,8 +135,7 @@ def detect_http4s_routes(
                                 start = clause.start_point[0] + 1
                                 end = clause.end_point[0] + 1
                                 parent_id = find_enclosing_parent_id(start, record)
-                                routes.append(
-                                    Statement(
+                                route = Statement(
                                         id=disambiguate(statement_id(path, start, clause.start_point[1]), seen_ids),
                                         parentId=parent_id,
                                         nodeType="synthetic",
@@ -133,10 +151,52 @@ def detect_http4s_routes(
                                         endLine=end,
                                         path=path,
                                     )
-                                )
+                                routes.append(route)
+                                if route_binding is not None:
+                                    route_bindings.setdefault(route_binding, []).append(route)
 
         for c in node.named_children:
             walk(c)
 
+    def resolve_prefix(node: Node | None) -> str | None:
+        if node is None:
+            return None
+        if node.type == "string":
+            return node_text(node, source).strip('"\'')
+        if node.type == "identifier":
+            return string_bindings.get(node_text(node, source))
+        return None
+
+    def join_paths(prefix: str | None, endpoint: str | None) -> str | None:
+        if prefix is None or endpoint is None:
+            return None
+        left = prefix.rstrip("/")
+        right = endpoint.lstrip("/")
+        if not left:
+            return "/" + right if right else "/"
+        return left + ("/" + right if right else "")
+
+    def apply_router_mounts(node: Node) -> None:
+        if node.type == "call_expression":
+            fn = node.child_by_field_name("function")
+            if fn is not None and node_text(fn, source).rsplit(".", 1)[-1] == "Router":
+                args = node.child_by_field_name("arguments")
+                arrow = None
+                if args is not None:
+                    arrow = next(
+                        (child for child in args.named_children if child.type == "infix_expression"),
+                        None,
+                    )
+                if arrow is not None:
+                    op = arrow.child_by_field_name("operator")
+                    target = arrow.child_by_field_name("right")
+                    if op is not None and node_text(op, source) == "->" and target is not None:
+                        prefix = resolve_prefix(arrow.child_by_field_name("left"))
+                        for route in route_bindings.get(node_text(target, source), []):
+                            route.endpoint = join_paths(prefix, route.endpoint)
+        for child in node.named_children:
+            apply_router_mounts(child)
+
     walk(root)
+    apply_router_mounts(root)
     return routes
