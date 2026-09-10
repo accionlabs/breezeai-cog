@@ -12,6 +12,7 @@ functions identified by their ``aws-lambda`` handler *type annotation*.
 
 Producers (SDK v3 command objects and v2 methods):
   ``client.send(new PublishCommand({TopicArn}))``     → eventbus_publish  (aws-sns)
+  ``client.send(new PublishCommand({PhoneNumber}))``  → eventbus_publish  (aws-sms)
   ``client.send(new SendMessageCommand({QueueUrl}))`` → eventbus_send     (aws-sqs)
   ``client.send(new PutEventsCommand({...}))``        → eventbus_publish  (aws-eventbridge)
   ``sqs.sendMessage({QueueUrl})`` / ``sendMessageBatch`` → eventbus_send  (aws-sqs)
@@ -69,7 +70,7 @@ _CONSUMER_HANDLERS = {
 # HTTP-facing Lambda handler types → route (not an event consumer).
 _ROUTE_HANDLERS = {"APIGatewayProxyHandler", "APIGatewayProxyHandlerV2", "ALBHandler"}
 # Keys in an SDK argument object that name the destination address.
-_ADDRESS_KEYS = {"TopicArn", "TargetArn", "QueueUrl", "EventBusName"}
+_ADDRESS_KEYS = {"TopicArn", "TargetArn", "QueueUrl", "EventBusName", "PhoneNumber"}
 
 # AWS Lambda *event* parameter types → framework. Used to recognise an UNTYPED handler
 # (``export const handler = async (event: S3Event) => …`` / ``exports.handler = …``) — the
@@ -126,12 +127,13 @@ def _walk(root: Node, types: frozenset[str]) -> list[Node]:
     return out
 
 
-def _address(args: Node | None, source: bytes) -> tuple[str | None, bool]:
-    """(literal endpoint, has-address-key) from an SDK call's first object argument.
+def _address(args: Node | None, source: bytes) -> tuple[str | None, str | None]:
+    """(literal endpoint, matched address key) from an SDK call's first object argument.
     Endpoint is set only from a plain string literal — a symbol (``this.topicArn``) stays
-    ``None`` (honest); ``has_key`` reports whether an address key was present at all."""
+    ``None`` (honest); the second element is the address key that matched (e.g.
+    ``"PhoneNumber"``), else ``None`` when no address key is present."""
     if args is None:
-        return None, False
+        return None, None
     for a in args.named_children:
         if a.type != "object":
             continue
@@ -141,12 +143,13 @@ def _address(args: Node | None, source: bytes) -> tuple[str | None, bool]:
             key = pair.child_by_field_name("key")
             if key is None or node_text(key, source) not in _ADDRESS_KEYS:
                 continue
+            matched_key = node_text(key, source)
             value = pair.child_by_field_name("value")
             if value is not None and value.type == "string":
                 frag = next((c for c in value.named_children if c.type == "string_fragment"), None)
-                return (node_text(frag, source) if frag is not None else ""), True
-            return None, True  # address present but an unresolved symbol
-    return None, False
+                return (node_text(frag, source) if frag is not None else ""), matched_key
+            return None, matched_key  # address present but an unresolved symbol
+    return None, None
 
 
 def _producer(call: Node, source: bytes) -> tuple[SemanticType, str, str | None, str] | None:
@@ -168,14 +171,16 @@ def _producer(call: Node, source: bytes) -> tuple[SemanticType, str, str | None,
         if info is None:
             return None
         sem, fw = info
-        endpoint, _ = _address(first.child_by_field_name("arguments"), source)
+        endpoint, key = _address(first.child_by_field_name("arguments"), source)
+        if cname == "PublishCommand" and key == "PhoneNumber":
+            fw = "aws-sms"
         return sem, cname, endpoint, fw
 
     info2 = _V2_METHODS.get(method)
     if info2 is not None:
         sem, fw, needs_hint = info2
-        endpoint, has_key = _address(args, source)
-        if needs_hint and not has_key and "sns" not in receiver:
+        endpoint, key = _address(args, source)
+        if needs_hint and key is None and "sns" not in receiver:
             return None
         return sem, method, endpoint, fw
     return None
