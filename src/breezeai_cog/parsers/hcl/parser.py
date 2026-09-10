@@ -1,4 +1,4 @@
-"""TerraformParser — parses ``.tf``, ``.tfvars``, and ``.hcl`` files into FileRecords.
+"""HclParser — parses ``.tf``, ``.tfvars``, and ``.hcl`` files into FileRecords.
 
 Each top-level HCL block becomes a Statement (gated by ``--capture-statements``) whose
 ``text`` is the verbatim block source.  This makes blocks directly filterable via the MCP
@@ -260,12 +260,13 @@ def _required_provider_sources(terraform_body: Node, source: bytes) -> list[str]
 # ── parser ────────────────────────────────────────────────────────────────────
 
 
-class TerraformParser(BaseParser):
-    name = "terraform"
+class HclParser(BaseParser):
+    name = "hcl"
     extensions = (".tf", ".tfvars", ".hcl")
     schema_version = SCHEMA_VERSION
     statement_types = STATEMENT_TYPES
     frameworks = FRAMEWORKS
+    _framework: str | None = None
 
     def build_index(
         self, repo_root: Path, files: Sequence[Path], jobs: int = 1
@@ -391,6 +392,7 @@ class TerraformParser(BaseParser):
                         parentId=fid,
                         nodeType="block",
                         semanticType=_SEMANTIC_TYPE.get(keyword),
+                        framework=self._framework,
                         text=node_text(block, source),
                         startLine=start,
                         endLine=end,
@@ -412,7 +414,7 @@ class TerraformParser(BaseParser):
             path=path,
             type="config",
             language="hcl",
-            framework="terraform",
+            framework=self._framework,
             loc=count_loc(source.decode("utf-8", "replace")),
             externalImports=sorted(external_imports),
             importFiles=sorted(import_files),
