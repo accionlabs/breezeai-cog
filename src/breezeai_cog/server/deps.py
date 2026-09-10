@@ -7,10 +7,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Callable
 from ..config import Settings
-
-class InfraStream:
-    def write_line(self, line: str) -> None: ...
-    def close(self) -> str: ...
+from breezeai_cog.infra.interface import InfraStream
            
 @dataclass
 class ServerDeps:

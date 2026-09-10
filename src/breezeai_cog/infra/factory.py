@@ -1,7 +1,7 @@
 from breezeai_cog.infra.interface import InfraStream
 from breezeai_cog.infra.provider_type import ProviderType
 from breezeai_cog.infra.aws.s3 import AWSStreamUpload
-from ..config import Settings
+from breezeai_cog.config import Settings
 
 class ProviderFactory:
     """Factory for creating cloud-specific infrastructure stream implementations."""

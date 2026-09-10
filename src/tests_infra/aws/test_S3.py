@@ -1,6 +1,5 @@
 import pytest
 from unittest.mock import Mock
-
 from breezeai_cog.config import Settings
 from breezeai_cog.infra.aws.s3 import AWSStreamUpload
 
@@ -9,7 +8,6 @@ def create_test_settings():
     return Settings(
         aws_s3_bucket="test-bucket",
         aws_region="us-east-1",
-        aws_credentials_kwargs={},
     )
 
 
@@ -24,11 +22,9 @@ def test_write_line():
     )
 
     stream.write_line('{"name": "test"}')
-
-    assert stream._writer is not None
-
     stream.close()
 
+    mock_client.upload_fileobj.assert_called_once()
 
 def test_close():
     settings = create_test_settings()

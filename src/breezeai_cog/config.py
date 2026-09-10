@@ -104,7 +104,7 @@ class Settings(BaseSettings):
     upload_max_retries: int = Field(default=1, ge=0)
 
     infra_provider: Literal["aws"] = "aws"
-    s3_retry_attempts: int = 3
+    s3_retry_attempts: int = Field(default=3, ge=1)
     s3_connect_timeout: int = 10
     s3_read_timeout: int = 60
 

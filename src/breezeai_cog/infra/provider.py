@@ -1,7 +1,7 @@
 from breezeai_cog.infra.factory import ProviderFactory
 from breezeai_cog.infra.interface import InfraStream
 from breezeai_cog.infra.provider_config import ProviderConfig
-from ..config import Settings
+from breezeai_cog.config import Settings
 
 
 def open_stream(key: str, settings: Settings) -> InfraStream:

@@ -1,4 +1,4 @@
-from ..config import Settings
+from breezeai_cog.config import Settings
 from breezeai_cog.infra.provider_type import ProviderType
 
 

@@ -1,8 +1,10 @@
-"""Streaming S3 upload: writes NDJSON lines through gzip to an S3 object, concurrently
-with production (PassThrough → gzip → multipart), mirroring the JS ``createS3UploadStream``
-(``s3-upload.js``). A background thread runs ``upload_fileobj`` reading the pipe while the
-caller writes; memory stays bounded. ``ContentType=application/x-ndjson``,
-``ContentEncoding=gzip``."""
+"""Streaming S3 upload: writes NDJSON lines through gzip to an S3 object
+while a background thread uploads the stream using upload_fileobj.
+The pipe-based design keeps memory usage bounded.
+
+ContentType=application/x-ndjson and ContentEncoding=gzip are set
+for the uploaded S3 object.
+"""
 
 from __future__ import annotations
 
@@ -14,8 +16,8 @@ from typing import Any
 
 from botocore.config import Config
 
-from ...config import Settings
-from ..interface import InfraStream
+from breezeai_cog.config import Settings
+from breezeai_cog.infra.interface import InfraStream
 
 _client: Any | None = None
 _client_lock = Lock()
