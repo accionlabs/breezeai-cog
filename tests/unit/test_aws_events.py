@@ -255,10 +255,11 @@ def test_sms_file_framework_rollup(tmp_path) -> None:
     assert rec.framework == "aws-sms"
 
 
-def test_v2_publish_with_phone_number_endpoint_now_resolved(tmp_path) -> None:
-    # Accepted side-effect of widening _ADDRESS_KEYS: the v2 `.publish()` method is
-    # deliberately NOT branched to aws-sms (issue #77 scopes Task 3 to PublishCommand), but
-    # the endpoint is now resolved instead of honest-null — strictly more informative.
+def test_v2_publish_to_phone_number_admitted_by_receiver_name(tmp_path) -> None:
+    # The v2 `.publish()` guard needs positive evidence of AWS. Here it is the receiver name
+    # (`this.sns`), NOT the PhoneNumber key — see test_v2_publish_phone_number_alone_is_not_aws.
+    # PhoneNumber is still a valid *address*, so the endpoint resolves. The v2 path stays on
+    # aws-sns; only the v3 PublishCommand branches to aws-sms.
     src = b"""import { SNS } from 'aws-sdk';
 
 export class Notifier {
@@ -273,6 +274,26 @@ export class Notifier {
     pub = sem["eventbus_publish"][0]
     assert pub.framework == "aws-sns"
     assert pub.endpoint == "+14155550100"
+
+
+def test_v2_publish_phone_number_alone_is_not_aws(tmp_path) -> None:
+    # PhoneNumber names a destination but does not identify AWS — every SMS vendor uses the
+    # same field name. With no AWS-specific address key and no receiver hint, a `.publish()`
+    # stays unclassified rather than being claimed as SNS (absent beats wrong).
+    src = b"""import { SQS } from 'aws-sdk';
+
+export class Notifier {
+  constructor(private smsGateway: TwilioGateway) {}
+  async sendCode(phone: string) {
+    await this.smsGateway.publish({ PhoneNumber: phone, Message: 'm' });
+  }
+}
+"""
+    rec = _parse(tmp_path, "notifier.ts", src)
+    assert _by_semantic(rec) == {}
+    assert rec.framework is None
+    # the statement itself is still captured — just with no semantic claim
+    assert any("smsGateway.publish" in (s.text or "") for s in rec.statements)
 
 
 def test_output_validates(tmp_path) -> None:
