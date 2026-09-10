@@ -20,7 +20,6 @@ from __future__ import annotations
 
 from pathlib import Path
 from typing import Literal
-
 from pydantic import (
     AliasChoices,
     Field,
@@ -104,6 +103,11 @@ class Settings(BaseSettings):
     # failures (network / timeout / HTTP 5xx) retry; a 4xx is fatal. --upload-max-retries.
     upload_max_retries: int = Field(default=1, ge=0)
 
+    infra_provider: Literal["aws"] = "aws"
+    s3_retry_attempts: int = Field(default=3, ge=1)
+    s3_connect_timeout: int = 10
+    s3_read_timeout: int = 60
+
     # ── AWS / S3 (server, conventional unprefixed names) ──────────────────
     aws_access_key: str | None = Field(
         default=None,
@@ -173,3 +177,4 @@ class Settings(BaseSettings):
                     "--upload requires " + ", ".join(missing) + " to be set"
                 )
         return self
+
