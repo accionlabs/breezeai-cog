@@ -40,29 +40,16 @@ _CALLABLE_NODE_TYPES = {
 
 _STRING_NODE_TYPES = {"string", "template_string"}
 
-# Tree-sitter's node type for `{ prefix }` object-literal shorthand, where
-# the key and the value are the same identifier (`{ prefix }` means
-# `{ prefix: prefix }`). Grammar versions vary slightly on the exact name,
-# so both are checked.
 _SHORTHAND_PROPERTY_TYPES = {
     "shorthand_property_identifier",
     "shorthand_property_identifier_pattern",
 }
 
-# A bare identifier and an object-literal shorthand key are both "just a
-# name" as far as value resolution is concerned -- but tree-sitter gives
-# them different node types, so both must be checked explicitly.
 _IDENTIFIER_LIKE_TYPES = {"identifier"} | _SHORTHAND_PROPERTY_TYPES
 
-# Block types that introduce a new variable scope: the whole file, and any
-# function body. Used to walk "nearest scope outward" when resolving an
-# identifier to a `const` declaration actually in scope at that point.
 _SCOPE_NODE_TYPES = {"program", "statement_block"}
 
-
-# Names Fastify's factory function is conventionally imported/called as.
 _FASTIFY_FACTORY_NAMES = {"fastify", "Fastify"}
-
 
 def detect_fastify_routes(
     root: Node,
@@ -72,36 +59,12 @@ def detect_fastify_routes(
     *,
     seen_ids: set[str],
 ) -> list[Statement]:
-    """Find every Fastify route in a parsed file and return them as Statements.
-
-    Walks the whole file looking for three patterns: `.get()/.post()/...`
-    shorthand calls, `.route({...})` config objects, and `.register()`
-    plugin mounts. Prefixes from nested `register()` calls are combined
-    together, and values written as variables are looked up where
-    possible instead of being treated as missing.
-
-    Args:
-        root (Node): Root node of the parsed file's syntax tree.
-        source (bytes): Raw file contents, used to read text from nodes.
-        path (str): File path, used to build ids and file-level lookups.
-        record (FileRecord): Already-extracted file record, used to look
-            up known top-level functions for handler resolution.
-        seen_ids (set[str]): Ids already used elsewhere; updated in place
-            so no two Statements ever get the same id.
-
-    Returns:
-        list[Statement]: One Statement per route or plugin mount found.
-    """
+    """Find Fastify routes and return them as Statements.
+    Detects shorthand routes, `route()` configurations, and `register()`
+    mounts, including inherited prefixes and resolvable variable values."""
     fid = file_id(path)
-    # Authoritative handler ids from the base extraction (top-level
-    # functions only) -- same lookup shape as the Next.js detector's
-    # `fn_by_name`.
     fn_by_name = {f.name: f for f in record.functions if f.parentId == fid}
-    # Identifiers we can positively confirm are bound to a Fastify
-    # instance, used to gate the `.get/.post/...` shorthand check against
-    # unrelated objects with a similarly-shaped API (see `_dispatch_call`).
     fastify_instance_names = _collect_fastify_instance_names(root, source)
-
     statements: list[Statement] = []
     _walk(
         root,
@@ -117,13 +80,9 @@ def detect_fastify_routes(
     return statements
 
 def _first_param_name(fn_node: Node, source: bytes) -> Optional[str]:
-    """Get the name of a function's first parameter, if it's a plain name.
-    Args:
-        fn_node (Node): The function node to check.
-        source (bytes): Raw file contents.
-    Returns:
-        Optional[str]: The parameter's name, or None if there is no
-            first parameter or it isn't a plain name (e.g. destructured).
+    """Get the name of a function's first parameter.
+    Returns the parameter name when it is a simple identifier, otherwise
+    returns None for missing or destructured parameters.
     """
     params = fn_node.child_by_field_name("parameters")
     if params is None:
@@ -135,13 +94,8 @@ def _first_param_name(fn_node: Node, source: bytes) -> Optional[str]:
     return None
 
 def _is_fastify_factory_call(value_node: Node, source: bytes) -> bool:
-    """Check whether a value comes from calling the Fastify factory.
-    Matches `Fastify(...)`, `fastify(...)`, and `require('fastify')(...)`.
-    Args:
-        value_node (Node): The node being assigned to a variable.
-        source (bytes): Raw file contents.
-    Returns:
-        bool: True if this value is a Fastify factory call.
+    """Check whether a value is created by a Fastify factory call.
+    Supports direct and `require("fastify")` factory calls.
     """
     if value_node.type != "call_expression":
         return False
@@ -164,16 +118,8 @@ def _is_fastify_factory_call(value_node: Node, source: bytes) -> bool:
     return False
 
 def _collect_fastify_instance_names(root: Node, source: bytes) -> set[str]:
-    """Find every variable name known to hold a Fastify instance.
-    Looks for two patterns: a variable set to a Fastify factory call, and
-    the first parameter of the file's exported plugin function. Anything
-    that can't be confirmed this way is simply left out, not guessed at.
-    Args:
-        root (Node): Root node of the parsed file's syntax tree.
-        source (bytes): Raw file contents.
-    Returns:
-        set[str]: Names confirmed to refer to a Fastify instance.
-    """
+    """Find variable names confirmed to refer to a Fastify instance.
+    Checks Fastify factory assignments and exported plugin parameters."""
     names: set[str] = set()
 
     def walk(node: Node) -> None:
@@ -217,31 +163,9 @@ def _collect_fastify_instance_names(root: Node, source: bytes) -> set[str]:
 def _walk(node: Node,*,source: bytes,path: str,fid: str,fn_by_name: dict,fastify_instance_names: set[str],
     seen_ids: set[str],
     out: list[Statement],
-    prefix: str,
-) -> None:
-    """Go through every node in the file looking for Fastify route calls.
-
-    Recurses into the whole tree. When a call matches one of the three
-    known route shapes, hands it to the matching handler and stops
-    recursing into that call's own arguments, so a route's handler body
-    isn't re-scanned as if it contained more top-level routes.
-
-    Args:
-        node (Node): The current node being checked.
-        source (bytes): Raw file contents.
-        path (str): File path.
-        fid (str): This file's id, used as a fallback parent id.
-        fn_by_name (dict): Known top-level functions, by name.
-        fastify_instance_names (set[str]): Variable names confirmed to be
-            Fastify instances.
-        seen_ids (set[str]): Ids already used; updated in place.
-        out (list[Statement]): Growing list of results; added to in place.
-        prefix (str): URL prefix inherited from any enclosing
-            `register()` call.
-
-    Returns:
-        None: Results are added to `out` instead of being returned.
-    """
+    prefix: str) -> None:
+    """Recursively scan the syntax tree for Fastify route calls.
+    Handles route methods, route configurations, and register prefixes."""
     if node.type == "call_expression":
         dispatch = _dispatch_call(node, source, fastify_instance_names)
         if dispatch is not None:
@@ -325,17 +249,9 @@ def _dispatch_call(
     return None
 
 def _find_handler_arg(trailing_args: list[Node]) -> Optional[Node]:
-    """Find whichever argument after the url looks like the actual handler.
-
-    Checks from the end of the list backwards, since the handler is
-    usually last, but doesn't assume it's always in that exact position.
-
-    Args:
-        trailing_args (list[Node]): All arguments after the url.
-
-    Returns:
-        Optional[Node]: The handler node, or None if nothing looks callable.
-    """
+    """Find the most likely route handler from the arguments after the URL.
+    Checks the arguments from right to left, since the handler is usually
+    the last argument, without assuming it is always in that position."""
     for candidate in reversed(trailing_args):
         if candidate.type in _CALLABLE_NODE_TYPES:
             return candidate
@@ -355,30 +271,12 @@ def _http_method_route(
     seen_ids: set[str],
     out: list[Statement],
 ) -> None:
-    """Handle a `.get()/.post()/.put()/...` style route call.
+    """Handle shorthand Fastify route calls and add their Statements.
 
-    Reads the url and handler out of the call's arguments, applies any
-    inherited prefix, and adds one Statement per HTTP method to `out`.
-
-    Args:
-        node (Node): The call expression node.
-        member_name (str): The method name used in the call, e.g. "get".
-        args (list[Node]): The call's arguments.
-        prefix (str): URL prefix inherited from any enclosing
-            `register()` call.
-        source (bytes): Raw file contents.
-        path (str): File path.
-        fid (str): This file's id, used as a fallback parent id.
-        fn_by_name (dict): Known top-level functions, by name.
-        seen_ids (set[str]): Ids already used; updated in place.
-        out (list[Statement]): Growing list of results; added to in place.
-
-    Returns:
-        None: Results are added to `out` instead of being returned.
-    """
+    Extracts the URL and handler, applies any inherited prefix, and
+    creates a Statement for each HTTP method."""
     if len(args) < 2:
         return
-
     url = _resolve_static_string(args[0], source)
     if url is None or not url.startswith("/"):
         return
@@ -427,31 +325,12 @@ def _app_route(
     seen_ids: set[str],
     out: list[Statement],
 ) -> None:
-    """Handle a `fastify.route({ method, url, handler })` style call.
+    """Handle `fastify.route({ method, url, handler })` calls.
 
-    Reads the method, url (or its alias `path`), and handler out of the
-    config object, applies any inherited prefix, and adds one Statement
-    per HTTP method to `out`. A method that can't be resolved to a real
-    value is still recorded as "UNKNOWN" instead of being dropped.
-
-    Args:
-        node (Node): The call expression node.
-        args (list[Node]): The call's arguments.
-        prefix (str): URL prefix inherited from any enclosing
-            `register()` call.
-        source (bytes): Raw file contents.
-        path (str): File path.
-        fid (str): This file's id, used as a fallback parent id.
-        fn_by_name (dict): Known top-level functions, by name.
-        seen_ids (set[str]): Ids already used; updated in place.
-        out (list[Statement]): Growing list of results; added to in place.
-
-    Returns:
-        None: Results are added to `out` instead of being returned.
-    """
+    Extracts the method, URL, and handler, applies any inherited prefix,
+    and creates a Statement for each HTTP method."""
     if not args or args[0].type != "object":
         return
-
     pairs = _object_pairs(args[0], source)
     method_node = pairs.get("method")
     url_node = pairs.get("url") or pairs.get("path")
@@ -504,20 +383,9 @@ def _app_route(
         )
 
 def _method_values(method_node: Node, source: bytes) -> tuple[list[str], bool]:
-    """Work out the actual HTTP method(s) for a `.route()` call.
-
-    Handles a single string, a list of strings, or a variable. If any
-    value in the list can't be resolved, that's flagged so the caller
-    can still record the route instead of silently dropping it.
-
-    Args:
-        method_node (Node): The `method` field's value node.
-        source (bytes): Raw file contents.
-
-    Returns:
-        tuple[list[str], bool]: The resolved method names, and whether
-            any value could not be resolved.
-    """
+    """Resolve the HTTP method(s) used by a `.route()` call.
+    Supports single methods, method lists, and variables. Unresolved
+    values are flagged so the route is not silently dropped."""
     if method_node.type in _STRING_NODE_TYPES:
         value = _string_literal(method_node, source)
         return ([value.upper()] if value else []), False
@@ -533,8 +401,6 @@ def _method_values(method_node: Node, source: bytes) -> tuple[list[str], bool]:
                 dynamic = True
         return methods, dynamic
 
-    # identifier, shorthand property, member_expression, call_expression,
-    # conditional, etc.
     resolved = _resolve_static_string(method_node, source)
     if resolved:
         return [resolved.upper()], False
@@ -553,31 +419,9 @@ def _fastify_register(
     seen_ids: set[str],
     out: list[Statement],
 ) -> None:
-    """Handle a `fastify.register(plugin, { prefix })` style call.
-
-    Records a mount Statement for the plugin, and if the plugin is
-    written inline in the same file, walks into it so any routes inside
-    inherit the combined prefix. If the prefix itself can't be resolved,
-    that's flagged in the endpoint and a warning is logged instead of
-    silently dropping the prefix.
-
-    Args:
-        node (Node): The call expression node.
-        args (list[Node]): The call's arguments.
-        prefix (str): URL prefix inherited from any enclosing
-            `register()` call.
-        source (bytes): Raw file contents.
-        path (str): File path.
-        fid (str): This file's id, used as a fallback parent id.
-        fn_by_name (dict): Known top-level functions, by name.
-        fastify_instance_names (set[str]): Variable names confirmed to be
-            Fastify instances.
-        seen_ids (set[str]): Ids already used; updated in place.
-        out (list[Statement]): Growing list of results; added to in place.
-
-    Returns:
-        None: Results are added to `out` instead of being returned.
-    """
+    """Handle `fastify.register(plugin, { prefix })` calls.
+    Records the plugin mount, applies the prefix to nested routes, and
+    flags unresolved prefixes instead of silently dropping them."""
     if not args:
         return
 
@@ -637,8 +481,6 @@ def _fastify_register(
             seen_ids=seen_ids, out=out, prefix=child_prefix,
         )
 
-    # Still walk the options object at the *outer* prefix in case it hides
-    # unrelated nested calls (rare, but cheap to cover).
     if opts_node is not None:
         _walk(
             opts_node, source=source, path=path, fid=fid, fn_by_name=fn_by_name,
@@ -647,18 +489,8 @@ def _fastify_register(
         )
 
 def _join_prefix(prefix: str, suffix: str) -> str:
-    """Combine a prefix and a url into one clean path.
-
-    Makes sure there's exactly one slash between the two parts, no
-    matter how the prefix or suffix are themselves written.
-
-    Args:
-        prefix (str): The existing prefix, may be empty.
-        suffix (str): The url or next prefix segment to add.
-
-    Returns:
-        str: The combined path.
-    """
+    """Combine a prefix and URL into a clean path.
+    Ensures there is exactly one slash between the two parts."""
     prefix = prefix.rstrip("/")
     if not suffix or suffix == "/":
         return prefix or "/"
@@ -669,22 +501,9 @@ def _join_prefix(prefix: str, suffix: str) -> str:
 def _resolve_handler(
     node: Optional[Node], source: bytes, *, fid: str, fn_by_name: dict
 ) -> tuple[str, str, Optional[int]]:
-    """Work out which function is actually handling a route.
-
-    Only a plain name that matches an already-known top-level function
-    gets a real function id; anything else (an inline function, an
-    unresolved name) falls back to the file's own id instead of guessing.
-
-    Args:
-        node (Optional[Node]): The handler node, or None if there wasn't one.
-        source (bytes): Raw file contents.
-        fid (str): This file's id, used as a fallback parent id.
-        fn_by_name (dict): Known top-level functions, by name.
-
-    Returns:
-        tuple[str, str, Optional[int]]: The parent id, display name, and
-            line number for this handler.
-    """
+    """Resolve the function handling a route.
+    Uses known top-level functions when possible and falls back to the
+    file id for inline or unresolved handlers."""
     if node is None:
         return fid, "<unknown>", None
 
@@ -717,24 +536,9 @@ def _make_statement(
     source: bytes,
     seen_ids: set[str],
 ) -> Statement:
-    """Build one finished route or mount record.
-
-    Args:
-        node (Node): The call expression this record is based on.
-        method (str): The HTTP method, or "MOUNT" for a register() call.
-        endpoint (str): The full url, including any prefix.
-        parent_id (str): Id of the function or file this belongs to.
-        handler (str): Display name of the handler.
-        handler_line (Optional[int]): Line number of the handler, if known.
-        semantic_type (str): Either "route" or "mount".
-        route_kind (str): Either "route" or "mount".
-        path (str): File path.
-        source (bytes): Raw file contents.
-        seen_ids (set[str]): Ids already used; updated in place.
-
-    Returns:
-        Statement: The finished record.
-    """
+    """Create a completed Statement for a route or plugin mount.
+    Builds the record with its method, endpoint, handler, type, and
+    parent information."""
     sl, sc = node.start_point[0] + 1, node.start_point[1]
     return Statement(
         id=disambiguate(statement_id(path, sl, sc), seen_ids),
@@ -757,18 +561,8 @@ def _make_statement(
     )
 
 def _object_pairs(obj_node: Node, source: bytes) -> dict[str, Node]:
-    """Turn a `{ key: value, ... }` object into a simple lookup table.
-
-    Also understands shorthand properties like `{ prefix }`, which mean
-    the same as `{ prefix: prefix }`.
-
-    Args:
-        obj_node (Node): The object literal node.
-        source (bytes): Raw file contents.
-
-    Returns:
-        dict[str, Node]: Each key mapped to its value node.
-    """
+    """Convert an object literal into a key-to-value lookup table.
+    Supports both normal and shorthand properties."""
     pairs: dict[str, Node] = {}
     for child in obj_node.named_children:
         if child.type == "pair":
@@ -784,19 +578,9 @@ def _object_pairs(obj_node: Node, source: bytes) -> dict[str, Node]:
     return pairs
 
 def _resolve_static_string(node: Node, source: bytes) -> Optional[str]:
-    """Try to turn a piece of code into an actual string value.
-
-    Works for a plain string, a template literal with no `${...}` parts,
-    or a variable name that can be traced back to a `const` declaration.
-
-    Args:
-        node (Node): The node to resolve.
-        source (bytes): Raw file contents.
-
-    Returns:
-        Optional[str]: The resolved string, or None if it can't be
-            worked out.
-    """
+    """Resolve a node into a string value.
+    Supports plain strings, static template literals, and variables
+    that can be traced back to a declaration."""
     literal = _string_literal(node, source)
     if literal is not None:
         return literal
@@ -805,19 +589,8 @@ def _resolve_static_string(node: Node, source: bytes) -> Optional[str]:
     return None
 
 def _resolve_in_enclosing_scope(node: Node, name: str, source: bytes) -> Optional[str]:
-    """Look up a variable's value by checking each surrounding function.
-
-    Starts at the variable's own position and walks outward one scope
-    at a time until a matching `const/let/var` declaration is found.
-
-    Args:
-        node (Node): The identifier being looked up.
-        name (str): The variable's name.
-        source (bytes): Raw file contents.
-
-    Returns:
-        Optional[str]: The value found, or None if no declaration matches.
-    """
+    """Look up a variable's value through its surrounding function scopes.
+    Checks each scope outward until a matching variable declaration is found."""
     scope = node.parent
     while scope is not None:
         if scope.type in _SCOPE_NODE_TYPES:
@@ -828,19 +601,8 @@ def _resolve_in_enclosing_scope(node: Node, name: str, source: bytes) -> Optiona
     return None
 
 def _lookup_const_in_block(block: Node, name: str, source: bytes) -> Optional[str]:
-    """Check one block of code for a `const/let/var NAME = 'value'` line.
-
-    Only looks directly in this block, not inside any blocks nested
-    further inside it.
-
-    Args:
-        block (Node): The block to search.
-        name (str): The variable name to look for.
-        source (bytes): Raw file contents.
-
-    Returns:
-        Optional[str]: The value found, or None if not declared here.
-    """
+    """Find a variable's value declared directly in a code block.
+    Only checks the current block, not nested blocks."""
     for child in block.named_children:
         if child.type not in ("lexical_declaration", "variable_declaration"):
             continue
@@ -861,16 +623,8 @@ def _lookup_const_in_block(block: Node, name: str, source: bytes) -> Optional[st
     return None
 
 def _string_literal(node: Node, source: bytes) -> Optional[str]:
-    """Read the plain text out of a string or template literal.
-
-    Args:
-        node (Node): The string or template-string node.
-        source (bytes): Raw file contents.
-
-    Returns:
-        Optional[str]: The literal text, or None if it isn't a plain
-            string (e.g. a template with `${...}` inside it).
-    """
+    """Read plain text from a string or template literal.
+    Returns None for dynamic template literals.    """
     if node.type == "string":
         text = node_text(node, source)
         return text[1:-1] if len(text) >= 2 else None
