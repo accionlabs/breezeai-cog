@@ -68,3 +68,30 @@ def test_php_hints_for_php() -> None:
 
     res5 = match_db("$entityManager.getRepository.find", "find", language="php")
     assert res5 == "doctrine"
+
+    # User::create() and $user->save() should still classify as eloquent
+    assert match_db("User::create()", "create", language="php") == "eloquent"
+    assert match_db("User::create", "create", language="php") == "eloquent"
+    assert match_db("$user->save()", "save", language="php") == "eloquent"
+
+    # False positives: non-DB receivers must not classify as eloquent
+    assert match_db("$request->all()", "all", language="php") is None
+    assert match_db("$request->all", "all", language="php") is None
+    assert match_db("collect()->first()", "first", language="php") is None
+    assert match_db("collect()->first", "first", language="php") is None
+    assert match_db("collect($data)->first()", "first", language="php") is None
+    assert match_db("Storage::delete()", "delete", language="php") is None
+    assert match_db("Storage::delete", "delete", language="php") is None
+    assert match_db("Route::delete()", "delete", language="php") is None
+    assert match_db("Route::delete", "delete", language="php") is None
+    assert match_db("Route::delete('/test')", "delete", language="php") is None
+    assert match_db("$this->validator->all()", "all", language="php") is None
+    assert match_db("$this->validator->all", "all", language="php") is None
+
+    # End-to-end classify_call checks
+    assert classify_call("$request->all()", "all", language="php") is None
+    assert classify_call("collect()->first()", "first", language="php") is None
+    assert classify_call("Storage::delete()", "delete", language="php") is None
+    assert classify_call("Route::delete('/test')", "delete", language="php") is None
+    assert classify_call("User::create()", "create", language="php") == ("db_method_call", "create", "eloquent")
+    assert classify_call("$user->save()", "save", language="php") == ("db_method_call", "save", "eloquent")

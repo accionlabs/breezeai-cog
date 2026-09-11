@@ -195,6 +195,12 @@ _NON_DB_RECEIVERS = (
     "ctx",
     "canvas",
     "context2d",
+    # Common non-DB framework receivers (PHP/Laravel request, validation, collections, storage, routing)
+    "request",
+    "validator",
+    "collect",
+    "route",
+    "storage",
 )
 
 # Django queryset verbs (ambiguous alone -> require a queryset-ish receiver).
@@ -406,15 +412,48 @@ def match_db(
             return "doctrine"
         # Eloquent: static model calls (User::find, User::where, User::create) or model instance calls ($user->save)
         if m in _ELOQUENT_VERBS:
-            if "::" in callee or "::" in low:
-                return "eloquent"
-            receiver = (
-                low.rsplit(".", 1)[0].rsplit(".", 1)[-1]
-                if "." in low
-                else (low.rsplit("->", 1)[0].rsplit("->", 1)[-1] if "->" in low else "")
+            has_static = "::" in callee
+            raw_class = callee.split("::", 1)[0].strip() if has_static else ""
+            static_class = raw_class.rsplit("\\", 1)[-1].rsplit("/", 1)[-1].strip() if raw_class else ""
+
+            raw_receiver = (
+                callee.rsplit(".", 1)[0].rsplit(".", 1)[-1]
+                if "." in callee
+                else (callee.rsplit("->", 1)[0].rsplit("->", 1)[-1] if "->" in callee else "")
             )
-            if not (receiver and any(receiver.endswith(s) for s in _NON_DB_RECEIVERS)):
-                return "eloquent"
+            receiver = raw_receiver.split("(", 1)[0].strip().lstrip("$").lower()
+
+            if (static_class and any(static_class.lower().endswith(s) for s in _NON_DB_RECEIVERS)) or (
+                receiver and any(receiver.endswith(s) for s in _NON_DB_RECEIVERS)
+            ):
+                return None
+
+            if m in _HIGH_COLLISION:
+                if "db::" in low:
+                    return "eloquent"
+                if (
+                    "->query(" in low
+                    or "->query->" in low
+                    or "->query()" in low
+                    or "->newquery(" in low
+                    or "->newquery->" in low
+                    or "->newquery()" in low
+                    or low.startswith(("$query->", "query->", "$newquery->", "newquery->"))
+                ):
+                    return "eloquent"
+                if has_static and static_class and static_class[0].isupper():
+                    return "eloquent"
+                if typed_db_ids is not None:
+                    return (
+                        "eloquent"
+                        if (receiver in typed_db_ids or raw_receiver.lstrip("$") in typed_db_ids)
+                        else None
+                    )
+                if raw_receiver.startswith("$") or "->" in low:
+                    return "eloquent"
+                return None
+
+            return "eloquent"
 
     if m in _DISTINCTIVE:
         db = _DISTINCTIVE[m]
