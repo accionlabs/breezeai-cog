@@ -7,6 +7,7 @@ from pathlib import Path
 
 from jsonschema import Draft202012Validator
 
+from breezeai_cog.core import registry
 from breezeai_cog.emit import to_line
 from breezeai_cog.parsers.base import ParseContext
 from breezeai_cog.parsers.php.parser import PhpParser
@@ -57,6 +58,9 @@ Route::resource('photos', 'PhotoController');
     assert endpoints["/users"].method in ("GET", "POST")
     assert "/profile" in endpoints
     assert "photos" in endpoints
+    profile_routes = [r for r in routes if r.endpoint == "/profile"]
+    assert len(profile_routes) == 2
+    assert {r.method for r in profile_routes} == {"GET", "POST"}
 
 
 def test_slim_routes(tmp_path: Path) -> None:
@@ -79,6 +83,9 @@ $app->map(['GET', 'POST'], '/api/items', function ($req, $res) { return $res; })
     endpoints = {r.endpoint: r for r in routes}
     assert "/api/users" in endpoints
     assert "/api/items" in endpoints
+    item_routes = [r for r in routes if r.endpoint == "/api/items"]
+    assert len(item_routes) == 2
+    assert {r.method for r in item_routes} == {"GET", "POST"}
 
 
 def test_symfony_routes(tmp_path: Path) -> None:
@@ -138,6 +145,9 @@ $routes->group('admin', function ($routes) {
     assert "/profile" in endpoints
     assert "photos" in endpoints
     assert "/admin/dashboard" in endpoints
+    profile_routes = [r for r in routes if r.endpoint == "/profile"]
+    assert len(profile_routes) == 2
+    assert {r.method for r in profile_routes} == {"GET", "POST"}
 
 
 def test_codeigniter3_routes(tmp_path: Path) -> None:
@@ -290,3 +300,93 @@ Route::get('/users', function ($client) {
     validator = Draft202012Validator(FileRecord.model_json_schema(by_alias=True))
     errors = list(validator.iter_errors(data))
     assert not errors, [e.message for e in errors]
+
+
+def test_controller_claims_priority_laravel_over_codeigniter() -> None:
+    registry.discover_builtin()
+    src = b"""<?php
+namespace App\\Http\\Controllers;
+
+use Illuminate\\Http\\Request;
+use Symfony\\Component\\HttpFoundation\\Response;
+
+class UserController extends BaseController
+{
+    public function index(Request $request): Response
+    {
+        return new Response("ok");
+    }
+}
+"""
+    path = "app/Http/Controllers/UserController.php"
+    laravel = LaravelParser()
+    codeigniter = CodeIgniterParser()
+    symfony = SymfonyParser()
+    slim = SlimParser()
+
+    assert laravel.claims(path, src) is True
+    assert codeigniter.claims(path, src) is False
+    assert symfony.claims(path, src) is False
+    assert slim.claims(path, src) is False
+
+    # Selection via registry must select php-laravel, never php-codeigniter
+    selected = registry.select(path, src)
+    assert selected is not None
+    assert selected.name == "php-laravel"
+    assert selected.name != "php-codeigniter"
+
+
+def test_framework_claims_via_composer_json(tmp_path: Path) -> None:
+    registry.discover_builtin()
+    # A controller without explicit Illuminate\\ import inside a Laravel repo
+    composer = tmp_path / "composer.json"
+    composer.write_text(json.dumps({"require": {"laravel/framework": "^10.0"}}))
+
+    controller = tmp_path / "app/Http/Controllers/HomeController.php"
+    controller.parent.mkdir(parents=True, exist_ok=True)
+    src = b"""<?php
+namespace App\\Http\\Controllers;
+
+class HomeController
+{
+    public function index() { return "home"; }
+}
+"""
+    controller.write_bytes(src)
+
+    laravel = LaravelParser()
+    codeigniter = CodeIgniterParser()
+    assert laravel.claims(str(controller), src) is True
+    assert codeigniter.claims(str(controller), src) is False
+
+    selected = registry.select(str(controller), src)
+    assert selected is not None
+    assert selected.name == "php-laravel"
+
+
+def test_route_match_multi_verb_capture(tmp_path: Path) -> None:
+    src = b"""<?php
+namespace App\\Routes;
+
+use Illuminate\\Support\\Facades\\Route;
+
+Route::match(['GET', 'POST'], '/profile', 'ProfileController@handle');
+"""
+    rec = _parse(LaravelParser, tmp_path, src, "routes/web.php")
+    routes = [s for s in rec.statements if s.semanticType == "route" and s.endpoint == "/profile"]
+    assert len(routes) == 2
+    assert {r.method for r in routes} == {"GET", "POST"}
+
+    # Plain single-string case in match
+    src_single = b"""<?php
+namespace App\\Routes;
+
+use Illuminate\\Support\\Facades\\Route;
+
+Route::match('GET', '/single', 'ProfileController@single');
+"""
+    rec_single = _parse(LaravelParser, tmp_path, src_single, "routes/single.php")
+    routes_single = [s for s in rec_single.statements if s.semanticType == "route" and s.endpoint == "/single"]
+    assert len(routes_single) == 1
+    assert routes_single[0].method == "GET"
+

@@ -210,6 +210,71 @@ def resolve_endpoint(
     return render(first, source), None
 
 
+def _extract_verbs(methods_node: Node | None, source: bytes | None = None) -> list[str]:
+    """Extract HTTP verb strings from a route methods argument (e.g. ``['GET', 'POST']`` or ``'GET'``).
+
+    Handles ``array_creation_expression -> array_element_initializer -> string`` as well
+    as plain single-string cases. Returns a list of uppercased verbs.
+    """
+    if methods_node is None:
+        return []
+
+    curr = methods_node
+    if curr.type == "argument" and curr.named_children:
+        curr = curr.named_children[0]
+
+    def _get_string(node: Node) -> str | None:
+        if node.type == "string":
+            frag = next((c for c in node.named_children if c.type == "string_content"), None)
+            if frag is not None:
+                return node_text(frag, source) if source is not None else frag.text.decode("utf-8", "replace")
+            text = node_text(node, source) if source is not None else node.text.decode("utf-8", "replace")
+            return text.strip("'\"")
+        if node.type == "encapsed_string":
+            text = node_text(node, source) if source is not None else node.text.decode("utf-8", "replace")
+            return text.strip("'\"")
+        return None
+
+    # Plain single-string case: 'GET', "POST"
+    single = _get_string(curr)
+    if single is not None:
+        v = single.strip()
+        return [v.upper()] if v else []
+
+    verbs: list[str] = []
+    # Array case: ['GET', 'POST'], array('GET', 'POST')
+    if curr.type == "array_creation_expression":
+        for elem in curr.named_children:
+            target = elem
+            if elem.type == "array_element_initializer":
+                val_node = elem.child_by_field_name("value")
+                target = (
+                    val_node
+                    if val_node is not None
+                    else (elem.named_children[-1] if elem.named_children else elem)
+                )
+            s = _get_string(target)
+            if s and s.strip():
+                verbs.append(s.strip().upper())
+        return verbs
+
+    # General fallback for any other wrapping structure
+    for c in curr.named_children:
+        target = c
+        if c.type == "array_element_initializer":
+            val_node = c.child_by_field_name("value")
+            target = (
+                val_node
+                if val_node is not None
+                else (c.named_children[-1] if c.named_children else c)
+            )
+        s = _get_string(target)
+        if s and s.strip():
+            verbs.append(s.strip().upper())
+
+    return verbs
+
+
 def _is_call_node(node_type: str, call_type: str | Collection[str]) -> bool:
     return node_type == call_type if isinstance(call_type, str) else node_type in call_type
 

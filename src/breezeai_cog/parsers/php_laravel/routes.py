@@ -6,7 +6,7 @@ from tree_sitter import Node
 
 from ...emit import disambiguate, file_id, statement_id
 from ...schemas import Statement
-from ..statements_common import render_concat, strip_leading_base, url_placeholder
+from ..statements_common import _extract_verbs, render_concat, strip_leading_base, url_placeholder
 from ..treesitter import node_text
 
 _ROUTE_METHODS = frozenset(
@@ -79,13 +79,7 @@ def detect_laravel_routes(
                             # Route::match(['GET', 'POST'], '/path', handler)
                             endpoint = _render_url(args[1], source)
                             handler = _handler_text(args[2] if len(args) > 2 else None, source)
-                            methods_node = args[0]
-                            http_verbs: list[str] = []
-                            for c in methods_node.named_children:
-                                if c.type == "string":
-                                    http_verbs.append(_render_url(c, source) or "GET")
-                            if not http_verbs:
-                                http_verbs = ["GET"]
+                            http_verbs = _extract_verbs(args[0], source) or ["GET"]
                             for verb in http_verbs:
                                 sid = disambiguate(statement_id(path, start, col), seen_ids)
                                 routes.append(
