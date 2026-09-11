@@ -390,3 +390,19 @@ Route::match('GET', '/single', 'ProfileController@single');
     assert len(routes_single) == 1
     assert routes_single[0].method == "GET"
 
+
+def test_codeigniter4_group_with_options(tmp_path: Path) -> None:
+    src = b"""<?php
+namespace Config;
+
+$routes->group('admin', ['filter' => 'auth'], function ($routes) {
+    $routes->get('users', 'Admin\\Users::index');
+});
+"""
+    rec = _parse(CodeIgniterParser, tmp_path, src, "app/Config/Routes.php")
+    routes = [s for s in rec.statements if s.semanticType == "route"]
+    assert len(routes) == 1
+    assert routes[0].endpoint == "/admin/users"
+    assert routes[0].method == "GET"
+    assert "Admin\\Users::index" in (routes[0].handler or "")
+

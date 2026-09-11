@@ -110,9 +110,26 @@ def detect_codeigniter_routes(
                                 else group_prefix_raw
                             )
                             # Traverse children with new prefix
-                            closure_node = args[1]
-                            for child in closure_node.named_children:
-                                visit(child, prefix=new_prefix)
+                            closure_types = (
+                                "anonymous_function_creation_expression",
+                                "anonymous_function",
+                                "arrow_function",
+                            )
+                            closure_node = next(
+                                (
+                                    a
+                                    for a in args
+                                    if a.type in closure_types
+                                    or (
+                                        a.type == "argument"
+                                        and any(c.type in closure_types for c in a.named_children)
+                                    )
+                                ),
+                                None,
+                            )
+                            if closure_node is not None:
+                                for child in closure_node.named_children:
+                                    visit(child, prefix=new_prefix)
                             return
 
                         elif method_name == "match" and len(args) >= 2:
