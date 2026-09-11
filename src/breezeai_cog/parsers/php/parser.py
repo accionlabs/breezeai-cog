@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import json
 from collections.abc import Sequence
+from functools import lru_cache
 from pathlib import Path
 
 from tree_sitter import Node
@@ -27,6 +29,48 @@ _CLASS_TYPES = (
     "trait_declaration",
     "enum_declaration",
 )
+
+
+@lru_cache(maxsize=128)
+def _read_composer_requirements(composer_path: Path) -> frozenset[str] | None:
+    try:
+        if not composer_path.is_file():
+            return None
+        data = json.loads(composer_path.read_bytes())
+        reqs = set()
+        if isinstance(data, dict):
+            for section in ("require", "require-dev"):
+                sec = data.get(section)
+                if isinstance(sec, dict):
+                    reqs.update(sec.keys())
+        return frozenset(reqs)
+    except Exception:
+        try:
+            content = composer_path.read_bytes()
+            return frozenset({pkg.decode("utf-8", errors="ignore") for pkg in (
+                b"laravel/framework", b"symfony/framework-bundle", b"slim/slim", b"codeigniter4/framework"
+            ) if pkg in content})
+        except Exception:
+            return None
+
+
+def composer_requires(path: str | Path, package: bytes | str) -> bool:
+    """Walk up parent directories from ``path`` looking for a composer.json requiring ``package``."""
+    try:
+        pkg_str = package.decode("utf-8") if isinstance(package, bytes) else package
+        p = Path(path)
+        paths_to_try = [p]
+        if not p.is_absolute():
+            paths_to_try.append(p.resolve())
+        for pt in paths_to_try:
+            start = pt.parent if pt.is_file() or pt.suffix else pt
+            for d in [start, *start.parents]:
+                reqs = _read_composer_requirements(d / "composer.json")
+                if reqs is not None and pkg_str in reqs:
+                    return True
+    except Exception:
+        pass
+    return False
 
 
 class PhpParser(BaseParser):

@@ -4,18 +4,23 @@ from __future__ import annotations
 
 from ...schemas import FileRecord
 from ..base import ParseContext
-from ..php.parser import PhpParser
+from ..php.parser import PhpParser, composer_requires
 from ..treesitter import parse_source
 from .routes import detect_symfony_routes
 
 
 class SymfonyParser(PhpParser):
     name = "php-symfony"
-    priority = 10
+    priority = 20
     frameworks = ["symfony"]
 
     def claims(self, path: str, source: bytes) -> bool:
-        return b"Symfony\\" in source or b"#[Route(" in source or b"#[AsController" in source
+        return (
+            b"Symfony\\Component\\Routing\\Attribute\\Route" in source
+            or b"Symfony\\Component\\Routing\\Annotation\\Route" in source
+            or b"#[AsController" in source
+            or composer_requires(path, b"symfony/framework-bundle")
+        )
 
     def parse_file(self, ctx: ParseContext) -> FileRecord:
         root = parse_source("php", ctx.source, ctx.parse_timeout_micros).root_node
