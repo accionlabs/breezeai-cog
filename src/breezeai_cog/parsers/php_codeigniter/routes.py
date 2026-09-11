@@ -6,7 +6,13 @@ from tree_sitter import Node
 
 from ...emit import disambiguate, file_id, statement_id
 from ...schemas import Statement
-from ..statements_common import _extract_verbs, render_concat, strip_leading_base, url_placeholder
+from ..statements_common import (
+    _extract_verbs,
+    _resolve_handler,
+    render_concat,
+    strip_leading_base,
+    url_placeholder,
+)
 from ..treesitter import node_text
 
 _CI4_VERBS = frozenset(
@@ -55,13 +61,11 @@ def _render_url(node: Node | None, source: bytes) -> str | None:
         return strip_leading_base("".join(parts))
     if node.type == "binary_expression":
         return render_concat(node, source, _render_url)
-    return node_text(node, source).strip("'\"")
+    return None
 
 
 def _handler_text(arg_node: Node | None, source: bytes) -> str | None:
-    if arg_node is None:
-        return None
-    return node_text(arg_node, source)
+    return _resolve_handler(arg_node, source)
 
 
 def _combine_paths(prefix: str, path: str | None) -> str | None:

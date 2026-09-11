@@ -404,5 +404,47 @@ $routes->group('admin', ['filter' => 'auth'], function ($routes) {
     assert len(routes) == 1
     assert routes[0].endpoint == "/admin/users"
     assert routes[0].method == "GET"
-    assert "Admin\\Users::index" in (routes[0].handler or "")
+    assert routes[0].handler is None
+
+
+def test_php_route_handler_resolution(tmp_path: Path) -> None:
+    src = b"""<?php
+namespace App\\Routes;
+
+use App\\Http\\Controllers\\UserController;
+use Illuminate\\Support\\Facades\\Route;
+
+Route::get('/array-handler', [UserController::class, 'index']);
+Route::get('/string-handler', 'WebhookController@handle');
+Route::get('/closure-handler', function ($c) { return $c; });
+Route::get('/var-handler', $dynamicHook);
+"""
+    rec = _parse(LaravelParser, tmp_path, src, "routes/web.php")
+    routes = {s.endpoint: s for s in rec.statements if s.semanticType == "route"}
+
+    # [UserController::class, 'index'] -> "UserController@index"
+    assert routes["/array-handler"].handler == "UserController@index"
+
+    # 'WebhookController@handle' -> unchanged ("WebhookController@handle")
+    assert routes["/string-handler"].handler == "WebhookController@handle"
+
+    # a closure argument -> null
+    assert routes["/closure-handler"].handler is None
+
+    # bare variable argument ($dynamicHook) -> null
+    assert routes["/var-handler"].handler is None
+
+
+def test_codeigniter_render_url_non_literal_returns_none(tmp_path: Path) -> None:
+    src = b"""<?php
+namespace Config;
+
+$routes->get($dynamicPath, 'WebhookController@handle');
+"""
+    rec = _parse(CodeIgniterParser, tmp_path, src, "app/Config/Routes.php")
+    routes = [s for s in rec.statements if s.semanticType == "route"]
+    assert len(routes) == 1
+    assert routes[0].endpoint is None
+    assert routes[0].handler == "WebhookController@handle"
+
 

@@ -6,7 +6,13 @@ from tree_sitter import Node
 
 from ...emit import disambiguate, file_id, statement_id
 from ...schemas import Statement
-from ..statements_common import _extract_verbs, render_concat, strip_leading_base, url_placeholder
+from ..statements_common import (
+    _extract_verbs,
+    _resolve_handler,
+    render_concat,
+    strip_leading_base,
+    url_placeholder,
+)
 from ..treesitter import node_text
 
 _SLIM_VERBS = frozenset({"get", "post", "put", "delete", "patch", "options", "any", "map"})
@@ -33,9 +39,7 @@ def _render_url(node: Node, source: bytes) -> str | None:
 
 
 def _handler_text(arg_node: Node | None, source: bytes) -> str | None:
-    if arg_node is None:
-        return None
-    return node_text(arg_node, source)
+    return _resolve_handler(arg_node, source)
 
 
 def detect_slim_routes(
