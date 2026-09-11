@@ -166,7 +166,7 @@ export class Notifier {
 
 
 def test_sns_topic_publish_characterization(tmp_path) -> None:
-    # Locks in pre-change SNS behavior before Task 3 touches _producer/_address.
+    # Pins the baseline SNS topic-publish shape that the PhoneNumber/SMS branch must not disturb.
     src = b"""import { SNSClient, PublishCommand } from '@aws-sdk/client-sns';
 
 export async function notify(sns: SNSClient) {

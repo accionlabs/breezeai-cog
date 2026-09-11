@@ -25,13 +25,12 @@ Three call-shape families are handled, each verified against real code:
 * **Client-chain SDKs** (``client.<resource>.<op>(...)``) — HubSpot (``@hubspot/api-client``)
   and Chargebee (``chargebee``). The receiver must resolve to the SDK *client type* and the
   tail must be a known operation; endpoint = the call chain. See ``_SDKS`` / ``_client_identifiers``.
-* **AWS command-pattern SDKs** (``client.send(new XxxCommand(...))``) — S3, Cognito. Not a
-  method chain: the receiver resolves to the client type (DI field, class field, or free
-  variable) and the first ``send()`` argument must be a ``new *Command(…)`` (or a variable
-  bound to one). Endpoint = the Command class name; Cognito additionally strips the trailing
-  ``Command`` suffix to the bare API operation (``GetParameterCommand`` → ``GetParameter``) —
-  S3's existing, separately-tested output stays unstripped. See ``_s3_injected_fields`` /
-  ``_injected_client_fields`` / ``_extract_command_name`` / ``_operation_name``.
+* **AWS SDK v3 command-pattern clients** (``client.send(new XxxCommand(...))``) — S3,
+  Cognito, SSM. Not a method chain: the receiver resolves to the client type (DI field,
+  class field, or free variable) and the first ``send()`` argument must be a
+  ``new *Command(…)`` (or a variable bound to one). Endpoint = the Command class name
+  verbatim, the same for all three. One shared detector, one entry per SDK — see
+  ``_detect_send_command_calls`` / ``_injected_client_fields`` / ``_extract_command_name``.
 * **ts-force (Salesforce)** — a SOQL ORM, NOT a client chain: reads go through
   ``RestObject.query<SObject>(...)`` / ``Entity.retrieve(...)``, writes are instance methods.
   The endpoint is the **SObject type** (from the generic ``<T>`` or an ``extends RestObject``
@@ -39,11 +38,11 @@ Three call-shape families are handled, each verified against real code:
   SOQL query is an outbound call to Salesforce (not local data access), these are reclassified
   from the generic ``db_method_call``/``orm`` tag to ``api_call``. See ``_detect_tsforce``.
 
-**Pending ratification:** the ``framework`` vendor values (``hubspot``/``chargebee``/
-``salesforce``) are NOT yet in the Code Ontology Parser Target Spec's ``framework`` enum
-(§4.1) — same status as ``nextjs``. The backend may drop the value at ingestion until the spec
-enum + allow-list are updated. The parser emits the honest label deliberately; adding the
-vendors to the enum is the tracked follow-up with the spec owner. Spec:
+**Pending ratification:** ``aws-cognito`` and ``aws-ssm`` are not yet in the Code Ontology
+Parser Target Spec's ``framework`` enum (§2.4), which does now list the vendor values
+``hubspot``/``chargebee``/``salesforce``. ``framework`` is an open string, so the values
+survive ingestion — but a consumer filtering on the documented enum will not see these
+statements until the spec is updated. The parser emits the honest label deliberately. Spec:
 https://accionlabs.atlassian.net/wiki/x/BIAGl
 
 The registry (``_SDKS``) is one entry per client-chain SDK, so adding another is a small,
@@ -510,45 +509,12 @@ def _detect_apollo_calls(
     return emitted
 
 
-# --- AWS S3 (command pattern) -------------------------------------------------
-# AWS SDK v3 uses ``client.send(new PutObjectCommand({...}))`` — a command-pattern
-# call, not a method chain.  The endpoint is the Command class name.
+# --- AWS SDK v3 command-pattern clients ---------------------------------------
+# ``client.send(new PutObjectCommand({...}))`` — a command-pattern call, not a method
+# chain. One shared detector (:func:`_detect_send_command_calls`) serves all three; each
+# SDK contributes only its package guard, client type and framework label.
 _S3_BYTE_GUARD = b"@aws-sdk/client-s3"
 _S3_CLIENT_TYPES = frozenset({"S3Client", "S3"})
-
-
-def _s3_injected_fields(root: Node, source: bytes) -> set[str]:
-    """Field names on ``this`` typed as an S3 client (constructor DI pattern)."""
-    fields: set[str] = set()
-
-    def walk(n: Node) -> None:
-        if n.type == "required_parameter":
-            if _annotation_type(n, source) in _S3_CLIENT_TYPES:
-                name_node = (
-                    n.child_by_field_name("pattern")
-                    or n.child_by_field_name("name")
-                    or next((c for c in n.named_children if c.type == "identifier"), None)
-                )
-                if name_node is not None:
-                    fields.add(node_text(name_node, source))
-        elif n.type == "variable_declarator":
-            name = n.child_by_field_name("name")
-            if name is not None and name.type == "identifier":
-                if _annotation_type(n, source) in _S3_CLIENT_TYPES:
-                    fields.add(node_text(name, source))
-                else:
-                    v = n.child_by_field_name("value")
-                    while v is not None and v.type in ("await_expression", "parenthesized_expression"):
-                        v = v.named_children[0] if v.named_children else None
-                    if v is not None and v.type == "new_expression":
-                        ctor = v.child_by_field_name("constructor")
-                        if ctor is not None and node_text(ctor, source) in _S3_CLIENT_TYPES:
-                            fields.add(node_text(name, source))
-        for c in n.named_children:
-            walk(c)
-
-    walk(root)
-    return fields
 
 
 def _command_variables(root: Node, source: bytes) -> dict[str, str]:
@@ -598,53 +564,6 @@ def _extract_command_name(
     return None
 
 
-def _detect_aws_s3_calls(
-    root: Node, source: bytes, path: str, record: FileRecord, seen: set[str]
-) -> bool:
-    """Detect AWS S3 ``client.send(new XxxCommand(…))`` calls.  Handles both
-    ``this.field.send(…)`` (DI pattern) and ``variable.send(…)`` (free variable).
-    The endpoint is the Command class name."""
-    if _S3_BYTE_GUARD not in source:
-        return False
-    # DI fields (this.s3) — same pattern as Apollo injected fields
-    di_fields = _s3_injected_fields(root, source)
-    # Free-variable clients — reuse _client_identifiers
-    s3_sdk = _Sdk(
-        import_marker=_S3_BYTE_GUARD,
-        framework="aws-s3",
-        client_types=_S3_CLIENT_TYPES,
-        operations=frozenset(),
-    )
-    free_clients = _client_identifiers(root, source, s3_sdk)
-    if not di_fields and not free_clients:
-        return False
-    cmd_vars = _command_variables(root, source)
-    emitted = False
-    for call in _walk_calls(root):
-        command_name: str | None = None
-        # Pattern A: this.field.send(new Cmd(…)) or this.field.send(cmdVar) — DI
-        if di_fields:
-            result = _this_member_call(call, source)
-            if result is not None:
-                field, method = result
-                if field in di_fields and method == "send":
-                    command_name = _extract_command_name(call, source, cmd_vars)
-        # Pattern B: variable.send(new Cmd(…)) or variable.send(cmdVar) — free variable
-        if command_name is None and free_clients:
-            chain = _callee_chain(call, source)
-            if chain is not None:
-                _callee_text, receiver, tail = chain
-                if receiver in free_clients and tail == "send":
-                    command_name = _extract_command_name(call, source, cmd_vars)
-        if command_name is not None:
-            _emit_outbound(
-                call, call.start_point[0] + 1, command_name, "aws-s3",
-                source, path, record, seen,
-            )
-            emitted = True
-    return emitted
-
-
 # --- AWS Cognito (command pattern) --------------------------------------------
 _COGNITO_BYTE_GUARD = b"@aws-sdk/client-cognito-identity-provider"
 _COGNITO_CLIENT_TYPES = frozenset({"CognitoIdentityProviderClient"})
@@ -654,9 +573,8 @@ def _injected_client_fields(root: Node, source: bytes, types: frozenset[str]) ->
     """Field/variable names bound to a client of one of ``types`` — constructor DI
     (``constructor(private c: T) {}``), a class field (``private c: T;`` /
     ``private readonly c = new T({})`` / ``private c: T = new T({})``), a typed local
-    (``const c: T = …``), or a local ``new T(…)`` initializer. Parametrized sibling of
-    :func:`_s3_injected_fields`, which keeps its own bespoke copy — S3 stays out of scope
-    for this generalization (see the plan's Out-of-Scope decision)."""
+    (``const c: T = …``), or a local ``new T(…)`` initializer. Shared by every
+    command-pattern SDK; ``types`` is the caller's set of client type names."""
     fields: set[str] = set()
 
     def walk(n: Node) -> None:
@@ -687,15 +605,7 @@ def _injected_client_fields(root: Node, source: bytes, types: frozenset[str]) ->
     return fields
 
 
-def _operation_name(command: str) -> str:
-    """``GetParameterCommand`` → ``GetParameter``. AWS SDK v3 command classes are the API
-    operation plus a ``Command`` suffix; the operation is the honest endpoint."""
-    return command.removesuffix("Command")
-
-
 # --- AWS Parameter Store / SSM (command pattern) --------------------------------
-# Third instance of the "client.send(new *Command())" shape (S3, Cognito, SSM) — per the
-# Reuse Before Build third-copy rule, extraction happens here rather than a 3rd copy-paste.
 _SSM_BYTE_GUARD = b"@aws-sdk/client-ssm"
 _SSM_CLIENT_TYPES = frozenset({"SSMClient"})
 
@@ -710,14 +620,12 @@ def _detect_send_command_calls(
     byte_guard: bytes,
     client_types: frozenset[str],
     framework: str,
-    strip_command_suffix: bool = True,
 ) -> bool:
-    """Detect ``client.send(new XxxCommand(…))`` calls for one vendor SDK (Cognito, SSM, …).
-    Handles DI-field, class-field, and free-variable client forms (via
-    :func:`_injected_client_fields` / :func:`_client_identifiers`). ``strip_command_suffix``
-    exists only because it is the one axis on which a future S3 migration onto this helper
-    would differ (S3's own detector/tests stay untouched — see the plan's Out-of-Scope
-    decision); delete the flag if that migration is rejected."""
+    """Detect ``client.send(new XxxCommand(…))`` calls for one AWS SDK v3 client (S3, Cognito,
+    SSM, …). Handles DI-field, class-field, and free-variable client forms (via
+    :func:`_injected_client_fields` / :func:`_client_identifiers`). The endpoint is the
+    Command class name verbatim — the token the code actually contains, not a derived
+    operation name."""
     if byte_guard not in source:
         return False
     di_fields = _injected_client_fields(root, source, client_types)
@@ -749,9 +657,8 @@ def _detect_send_command_calls(
                 if receiver in free_clients and tail == "send":
                     command_name = _extract_command_name(call, source, cmd_vars)
         if command_name is not None:
-            endpoint = _operation_name(command_name) if strip_command_suffix else command_name
             _emit_outbound(
-                call, call.start_point[0] + 1, endpoint, framework,
+                call, call.start_point[0] + 1, command_name, framework,
                 source, path, record, seen,
             )
             emitted = True
@@ -806,7 +713,12 @@ def detect_sdk_calls(
     if _detect_apollo_calls(root, source, path, record, seen):
         file_fw = file_fw or "graphql"
 
-    if _detect_aws_s3_calls(root, source, path, record, seen):
+    if _detect_send_command_calls(
+        root, source, path, record, seen,
+        byte_guard=_S3_BYTE_GUARD,
+        client_types=_S3_CLIENT_TYPES,
+        framework="aws-s3",
+    ):
         file_fw = file_fw or "aws-s3"
 
     if _detect_send_command_calls(
