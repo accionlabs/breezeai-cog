@@ -6,8 +6,8 @@ from ..treesitter import parse_source
 import re
 
 
-_FASTIFY_ROUTE_SIG = re.compile(
-    rb"\bfastify\s*\.\s*(get|post|put|delete|patch|head|options|route)\s*\("
+_FASTIFY_IMPORT_SIG = re.compile(
+    rb"(?:\bfrom\s*[\"']fastify[\"']|\brequire\s*\(\s*[\"']fastify[\"']\s*\))"
 )
 
 
@@ -16,8 +16,8 @@ class FastifyParser(TypeScriptParser):
     priority = 10
     frameworks = ["fastify"]
 
-    def claim(self, path: str, source: bytes) -> bool:
-        return bool(_FASTIFY_ROUTE_SIG.search(source))
+    def claims(self, path: str, source: bytes) -> bool:
+        return bool(_FASTIFY_IMPORT_SIG.search(source))
 
     def parse_file(self, ctx: ParseContext) -> FileRecord:
         grammar = (
