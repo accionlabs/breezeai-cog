@@ -225,11 +225,13 @@ export async function fanout(sns: SNSClient) {
 
 
 def test_sms_publish_phone_number_literal_detected(tmp_path) -> None:
+    # An SMS send is an SNS publish with a PhoneNumber destination — same client, same
+    # command — so it carries framework=aws-sns and stays in the SNS result set.
     rec = _parse(tmp_path, "sms.ts", SMS_LITERAL)
     sem = _by_semantic(rec)
     assert len(sem["eventbus_publish"]) == 1
     pub = sem["eventbus_publish"][0]
-    assert pub.framework == "aws-sms"
+    assert pub.framework == "aws-sns"
     assert pub.method == "PublishCommand"
     assert pub.endpoint == "+14155550100"
 
@@ -238,28 +240,29 @@ def test_sms_publish_phone_number_variable_is_honest_null(tmp_path) -> None:
     rec = _parse(tmp_path, "sms.ts", SMS_VARIABLE)
     sem = _by_semantic(rec)
     pub = sem["eventbus_publish"][0]
-    assert pub.framework == "aws-sms"
+    assert pub.framework == "aws-sns"
     assert pub.endpoint is None  # PhoneNumber is a symbol, never the symbol text
 
 
-def test_sms_and_sns_in_same_file_split_correctly(tmp_path) -> None:
+def test_sms_and_sns_in_same_file_share_the_sns_framework(tmp_path) -> None:
+    # Phone and topic destinations differ in `endpoint`, not in `framework`.
     rec = _parse(tmp_path, "fanout.ts", SMS_AND_SNS)
     sem = _by_semantic(rec)
     got = {(s.framework, s.endpoint) for s in sem["eventbus_publish"]}
-    assert got == {("aws-sms", "+14155550100"), ("aws-sns", "arn:aws:sns:x")}
+    assert got == {("aws-sns", "+14155550100"), ("aws-sns", "arn:aws:sns:x")}
     assert all(s.method == "PublishCommand" for s in sem["eventbus_publish"])
 
 
 def test_sms_file_framework_rollup(tmp_path) -> None:
     rec = _parse(tmp_path, "sms.ts", SMS_LITERAL)
-    assert rec.framework == "aws-sms"
+    assert rec.framework == "aws-sns"
 
 
 def test_v2_publish_to_phone_number_admitted_by_receiver_name(tmp_path) -> None:
     # The v2 `.publish()` guard needs positive evidence of AWS. Here it is the receiver name
     # (`this.sns`), NOT the PhoneNumber key — see test_v2_publish_phone_number_alone_is_not_aws.
     # PhoneNumber is still a valid *address*, so the endpoint resolves. The v2 path stays on
-    # aws-sns; only the v3 PublishCommand branches to aws-sms.
+    # aws-sns, the same label the v3 PublishCommand path uses for a PhoneNumber send.
     src = b"""import { SNS } from 'aws-sdk';
 
 export class Notifier {

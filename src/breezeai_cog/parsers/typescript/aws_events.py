@@ -12,7 +12,7 @@ functions identified by their ``aws-lambda`` handler *type annotation*.
 
 Producers (SDK v3 command objects and v2 methods):
   ``client.send(new PublishCommand({TopicArn}))``     → eventbus_publish  (aws-sns)
-  ``client.send(new PublishCommand({PhoneNumber}))``  → eventbus_publish  (aws-sms)
+  ``client.send(new PublishCommand({PhoneNumber}))``  → eventbus_publish  (aws-sns, SMS)
   ``client.send(new SendMessageCommand({QueueUrl}))`` → eventbus_send     (aws-sqs)
   ``client.send(new PutEventsCommand({...}))``        → eventbus_publish  (aws-eventbridge)
   ``sqs.sendMessage({QueueUrl})`` / ``sendMessageBatch`` → eventbus_send  (aws-sqs)
@@ -180,9 +180,10 @@ def _producer(call: Node, source: bytes) -> tuple[SemanticType, str, str | None,
         if info is None:
             return None
         sem, fw = info
-        endpoint, key = _address(first.child_by_field_name("arguments"), source)
-        if cname == "PublishCommand" and key == "PhoneNumber":
-            fw = "aws-sms"
+        # A PublishCommand carrying PhoneNumber is an SMS send, but the transport is still
+        # SNS — same client, same package, same command — so it keeps framework=aws-sns and
+        # stays visible to "what publishes to SNS?". The SMS-ness is in the statement text.
+        endpoint, _key = _address(first.child_by_field_name("arguments"), source)
         return sem, cname, endpoint, fw
 
     info2 = _V2_METHODS.get(method)
