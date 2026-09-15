@@ -84,15 +84,48 @@ _GENERIC = {
     "persist", "merge", "query", "execute",
 }
 
-# Receiver substring -> hint (refines _GENERIC).
+# ── language families ─────────────────────────────────────────────────────────
+# Used to keep a product-specific hint out of files where that product cannot exist.
+# In every gate below, an unknown language (``None``) stays permissive: the gates only
+# ever fire on a language we positively know, so behaviour is unchanged for callers that
+# don't pass one.
+
+# Languages whose files may legitimately use Entity Framework verbs. EF method names
+# (``ToListAsync``/``Include``/…) collide with unrelated code in other stacks — most
+# painfully ``.include()``, which is TypeORM/array/RxJS in JS but EF in C#. When we KNOW
+# the file is a non-.NET language we treat the EF match as a collision and fall through.
+_DOTNET = frozenset({"csharp", "vb"})
+
+# Django is Python-only; suppress Django-queryset verbs in known non-Python files so that
+# TypeScript ``response.objects.filter()`` is not mislabelled as Django (mirrors the EF gate).
+# Also scopes SQLAlchemy, whose ``session`` receiver is a Hibernate ``Session`` on the JVM.
+_PYTHON = frozenset({"python"})
+
+# Node-only ORMs (TypeORM, Sequelize, Prisma, Mongoose). Their receiver names
+# (``…repository``, ``entityManager``) are equally idiomatic in Java/C#/Python, so the
+# receiver alone cannot pick the product — only the language can rule it out.
+_JSTS = frozenset({"typescript", "javascript"})
+
+# Receiver substring -> (hint, languages the vendor can appear in) — refines _GENERIC.
 # Needles checked via `needle in low` (full lowercased callee). Ambiguous short tokens
 # ("session", "objects") require a dot-anchored match so they don't fire on *containing*
 # identifiers like ``sessionFactory`` / ``productObjects``; others are distinctive enough
 # (``prisma``, ``sequelize``, ``mongoose``, ``repository``) that substring is fine.
-_RECEIVER_HINTS = (
-    ("prisma", "prisma"), ("sequelize", "sequelize"), ("mongoose", "mongodb"),
-    ("repository", "typeorm"), ("repo", "typeorm"), ("entitymanager", "typeorm"),
-    ("session", "sqlalchemy"), ("queryset", "django"), ("objects", "django"),
+#
+# Every hint here names a *product*, so it is only reachable from the languages that product
+# ships for: TypeORM/Sequelize/Prisma/Mongoose are Node, SQLAlchemy/Django are Python. Without
+# the language column a Java ``orderRepository.findById`` was tagged ``typeorm`` and a Hibernate
+# ``session.save`` ``sqlalchemy`` — products that cannot exist in that file. The receiver still
+# tells us this IS data access, so a language mismatch degrades to the generic ``orm`` rather
+# than dropping the detection (same convention as the ``typed_db_ids`` gate in ``match_db``).
+# ``None`` = language-neutral; an unknown language stays permissive.
+_RECEIVER_HINTS: tuple[tuple[str, str, frozenset[str] | None], ...] = (
+    ("prisma", "prisma", _JSTS), ("sequelize", "sequelize", _JSTS),
+    ("mongoose", "mongodb", _JSTS),
+    ("repository", "typeorm", _JSTS), ("repo", "typeorm", _JSTS),
+    ("entitymanager", "typeorm", _JSTS),
+    ("session", "sqlalchemy", _PYTHON), ("queryset", "django", _PYTHON),
+    ("objects", "django", _PYTHON),
 )
 # Needles that must appear as a whole dot-segment (not as a prefix/suffix of a longer name).
 # e.g. "session" must match "db.session.query" but NOT "sessionFactory.create".
@@ -118,17 +151,6 @@ _DJANGO_VERBS = {"filter", "get", "all", "exclude", "annotate", "values"}
 # Neo4j runs Cypher via ``session.run(...)`` / ``tx.run(...)``. ``run`` is too generic to
 # list as a distinctive method, so require a driver/session/transaction-ish receiver.
 _NEO4J_RUN_RECEIVERS = ("session", "tx", "transaction", "driver", "neo4j")
-
-# Languages whose files may legitimately use Entity Framework verbs. EF method names
-# (``ToListAsync``/``Include``/…) collide with unrelated code in other stacks — most
-# painfully ``.include()``, which is TypeORM/array/RxJS in JS but EF in C#. When we KNOW
-# the file is a non-.NET language we treat the EF match as a collision and fall through;
-# an unknown language (``None``) stays permissive for backward compatibility.
-_DOTNET = frozenset({"csharp", "vb"})
-
-# Django is Python-only; suppress Django-queryset verbs in known non-Python files so that
-# TypeScript ``response.objects.filter()`` is not mislabelled as Django (mirrors the EF gate).
-_PYTHON = frozenset({"python"})
 
 # Generic verbs that collide heavily with ordinary (non-DB) code: ``find`` is
 # ``Array.prototype.find``, ``update`` is ``dict.update``/``Map.set``-adjacent, ``create``
@@ -268,7 +290,7 @@ def match_db(callee: str, method: str, language: str | None = None,
         if m in _CACHE_VERBS or m in ("delete", "remove"):
             return "redis"
     if m in _GENERIC:
-        for needle, hint in _RECEIVER_HINTS:  # positive vendor hint wins
+        for needle, hint, langs in _RECEIVER_HINTS:  # positive vendor hint wins
             if needle not in low:
                 continue
             # Anchored needles must appear as a dot-segment, not embedded in a longer name
@@ -276,6 +298,11 @@ def match_db(callee: str, method: str, language: str | None = None,
             if needle in _ANCHORED_HINTS:
                 if not (f".{needle}." in low or low.startswith(f"{needle}.")):
                     continue
+            # The receiver established data access; the language decides whether this
+            # PRODUCT is reachable. A known-mismatched language degrades to the generic
+            # ``orm`` instead of naming an impossible one (Java repo != TypeORM).
+            if langs is not None and language is not None and language not in langs:
+                return "orm"
             return hint
         if m in _HIGH_COLLISION:
             # Non-DB receivers (canvas ctx, logger, cache, …) are never data access — bail

@@ -475,3 +475,37 @@ export class TaskService {
     db_stmts = [s for s in rec.statements if s.semanticType == "db_method_call"]
     assert len(db_stmts) == 1
     assert db_stmts[0].dataAccessHint in ("typeorm", "orm")
+
+
+def test_receiver_hint_never_names_an_impossible_orm() -> None:
+    # BREEZEAI-1216. The receiver-name rule maps to PRODUCTS (TypeORM/Sequelize/Prisma are
+    # Node; SQLAlchemy/Django are Python), but `…repository` / `entityManager` / `session`
+    # are equally idiomatic on the JVM and in .NET. Without a language gate a Java
+    # `orderRepository.findById` was tagged `typeorm` and a Hibernate `session.save`
+    # `sqlalchemy` — products that cannot exist in that file.
+    #
+    # The receiver still establishes that this IS data access, so a language mismatch
+    # degrades to the generic `orm` rather than dropping the detection.
+    for lang in ("java", "kotlin", "groovy", "csharp", "vb", "cpp"):
+        assert classify_call("orderRepository.findById", "findById", None, lang) == \
+            ("db_method_call", "findById", "orm"), lang
+        assert classify_call("entityManager.persist", "persist", None, lang) == \
+            ("db_method_call", "persist", "orm"), lang
+        # Hibernate's Session — never SQLAlchemy outside Python
+        assert classify_call("session.save", "save", None, lang) == \
+            ("db_method_call", "save", "orm"), lang
+
+    # The vendor IS named where the product actually ships.
+    assert classify_call("this.orderRepository.findOne", "findOne", None, "typescript") == \
+        ("db_method_call", "findOne", "typeorm")
+    assert classify_call("this.repo.findOne", "findOne", None, "javascript") == \
+        ("db_method_call", "findOne", "typeorm")
+    assert classify_call("db.session.query", "query", None, "python") == \
+        ("db_method_call", "query", "sqlalchemy")
+    assert classify_call("MyModel.objects.filter", "filter", None, "python") == \
+        ("db_method_call", "filter", "django")
+
+    # An unknown language stays permissive — the gate only fires on a language we know,
+    # so every caller that passes none keeps its pre-gate result.
+    assert classify_call("orderRepo.save", "save") == ("db_method_call", "save", "typeorm")
+    assert classify_call("db.session.query", "query") == ("db_method_call", "query", "sqlalchemy")
