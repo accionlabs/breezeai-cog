@@ -12,7 +12,8 @@ functions identified by their ``aws-lambda`` handler *type annotation*.
 
 Producers (SDK v3 command objects and v2 methods):
   ``client.send(new PublishCommand({TopicArn}))``     → eventbus_publish  (aws-sns)
-  ``client.send(new PublishCommand({PhoneNumber}))``  → eventbus_publish  (aws-sns, SMS)
+  ``client.send(new PublishCommand({PhoneNumber}))``  → eventbus_send     (aws-sns, SMS)
+  ``client.send(new PublishCommand({TargetArn}))``    → eventbus_send     (aws-sns, 1 device)
   ``client.send(new SendMessageCommand({QueueUrl}))`` → eventbus_send     (aws-sqs)
   ``client.send(new PutEventsCommand({...}))``        → eventbus_publish  (aws-eventbridge)
   ``sqs.sendMessage({QueueUrl})`` / ``sendMessageBatch`` → eventbus_send  (aws-sqs)
@@ -76,6 +77,12 @@ _ADDRESS_KEYS = {"TopicArn", "TargetArn", "QueueUrl", "EventBusName", "PhoneNumb
 # that field the same way, so it identifies a destination but not a provider. The remaining
 # keys are AWS-specific strings, so for them naming a destination and proving AWS coincide.
 _AWS_EVIDENCE_KEYS = _ADDRESS_KEYS - {"PhoneNumber"}
+# Address keys that reach exactly one recipient — an SMS handset, or a single mobile-push
+# device endpoint. SNS names its API ``Publish`` for every destination, but only a *topic*
+# fans out; these are point-to-point, the same distinction Vert.x draws between
+# ``publish()`` and ``send()``. Nothing can subscribe to a phone or a device endpoint, so
+# calling them a publish would assert a one-to-many relationship that cannot exist.
+_DIRECT_ADDRESS_KEYS = {"PhoneNumber", "TargetArn"}
 
 # AWS Lambda *event* parameter types → framework. Used to recognise an UNTYPED handler
 # (``export const handler = async (event: S3Event) => …`` / ``exports.handler = …``) — the
@@ -180,10 +187,11 @@ def _producer(call: Node, source: bytes) -> tuple[SemanticType, str, str | None,
         if info is None:
             return None
         sem, fw = info
-        # A PublishCommand carrying PhoneNumber is an SMS send, but the transport is still
-        # SNS — same client, same package, same command — so it keeps framework=aws-sns and
-        # stays visible to "what publishes to SNS?". The SMS-ness is in the statement text.
-        endpoint, _key = _address(first.child_by_field_name("arguments"), source)
+        endpoint, key = _address(first.child_by_field_name("arguments"), source)
+        # framework stays aws-sns either way — the transport is unchanged, and an SMS send
+        # must remain visible to "what talks to SNS?"; only the delivery shape differs.
+        if cname == "PublishCommand" and key in _DIRECT_ADDRESS_KEYS:
+            sem = "eventbus_send"
         return sem, cname, endpoint, fw
 
     info2 = _V2_METHODS.get(method)
@@ -192,6 +200,8 @@ def _producer(call: Node, source: bytes) -> tuple[SemanticType, str, str | None,
         endpoint, key = _address(args, source)
         if needs_hint and key not in _AWS_EVIDENCE_KEYS and "sns" not in receiver:
             return None
+        if method == "publish" and key in _DIRECT_ADDRESS_KEYS:
+            sem = "eventbus_send"
         return sem, method, endpoint, fw
     return None
 
