@@ -72,7 +72,7 @@ def detect_symfony_routes(
                 mpath, methods, rname = _parse_route_attr(dec.args)
                 cls_prefix = class_prefixes.get(fn.parentId)
                 full_path = _combine_paths(cls_prefix, mpath)
-                verbs = methods if methods else ["GET"]
+                verbs = methods if methods else ["ANY"]
 
                 cls_name = class_map[fn.parentId].name if fn.parentId in class_map else ""
                 handler = f"{cls_name}@{fn.name}" if cls_name else fn.name
@@ -83,7 +83,7 @@ def detect_symfony_routes(
                         Statement(
                             id=sid,
                             parentId=fn.id,
-                            nodeType="attribute",
+                            nodeType="synthetic",
                             semanticType="route",
                             routeKind="route",
                             method=verb,

@@ -116,6 +116,7 @@ class UserController
     routes = [s for s in rec.statements if s.semanticType == "route"]
     assert len(routes) >= 2
     assert all(r.routeKind == "route" for r in routes)
+    assert all(r.nodeType == "synthetic" for r in routes)
     endpoints = {r.endpoint: r for r in routes}
     assert "/api/users" in endpoints
     assert "/api/users/{id}" in endpoints
@@ -486,6 +487,26 @@ $routes->add('/all-verbs', 'TestController::index');
     assert len(routes_c) == 1
     assert routes_c[0].method == "ANY"
     assert routes_c[0].routeKind == "route"
+
+    # Symfony #[Route('/health')]
+    symfony_src = b"""<?php
+namespace App\\Controller;
+
+use Symfony\\Component\\Routing\\Attribute\\Route;
+
+class HealthController
+{
+    #[Route('/health')]
+    public function health() {}
+}
+"""
+    rec_sym = _parse(SymfonyParser, tmp_path, symfony_src, "src/Controller/HealthController.php")
+    routes_sym = [s for s in rec_sym.statements if s.semanticType == "route"]
+    assert len(routes_sym) == 1
+    assert routes_sym[0].endpoint == "/health"
+    assert routes_sym[0].method == "ANY"
+    assert routes_sym[0].routeKind == "route"
+    assert routes_sym[0].nodeType == "synthetic"
 
 
 def test_codeigniter4_cli_route(tmp_path: Path) -> None:
