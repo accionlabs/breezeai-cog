@@ -7,6 +7,7 @@ from __future__ import annotations
 
 from .api_calls import match_api
 from .db_queries import match_db, vendor_from_imports
+from .manifests import scan_repo_orm
 from .queries import is_query, text_has_query
 
 
@@ -44,6 +45,6 @@ def classify_call(
 
 
 __all__ = [
-    "classify_call", "match_api", "match_db", "vendor_from_imports",
+    "classify_call", "match_api", "match_db", "vendor_from_imports", "scan_repo_orm",
     "is_query", "text_has_query",
 ]

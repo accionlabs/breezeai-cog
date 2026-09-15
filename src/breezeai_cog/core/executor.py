@@ -40,6 +40,28 @@ def _options(settings) -> dict:
     }
 
 
+def _repo_orm_fallback(repo_root: str) -> str | None:
+    """The ORM this repo's build manifests declare (Layer 3), cached per worker process.
+
+    Scanning a handful of small manifests once per process is negligible; doing it per file
+    would not be. Cached as a 1-tuple so a legitimate ``None`` result is cached too and the
+    scan does not repeat for every file in an ORM-less repo.
+    """
+    if _WORKER.get("repo_orm_root") == repo_root:
+        cached = _WORKER.get("repo_orm")
+        if isinstance(cached, tuple):
+            return cached[0]
+    from ..parsers.detection import scan_repo_orm
+
+    try:
+        vendor = scan_repo_orm(Path(repo_root))
+    except Exception:  # a fallback is never worth failing a parse over
+        vendor = None
+    _WORKER["repo_orm"] = (vendor,)
+    _WORKER["repo_orm_root"] = repo_root
+    return vendor
+
+
 def _parse_entry(path: str, repo_root: str, options: dict) -> FileRecord | None:
     from ..parsers.base import ParseContext
     from .registry import base_parser_for, select
@@ -58,14 +80,18 @@ def _parse_entry(path: str, repo_root: str, options: dict) -> FileRecord | None:
     index = options.get("indexes", {}).get(base.name if base is not None else "")
     from ..parsers.statements_common import (
         begin_concat_tracking,
-        clear_datastore_vendor,
+        seed_datastore_vendor,
         set_concat_depth,
         summarize_skipped_concats,
     )
 
     set_concat_depth(options.get("max_concat_depth"))  # apply configured cap in this process
     begin_concat_tracking()  # collect concats the fold cap skips, for one per-file summary
-    clear_datastore_vendor()  # a parser sets it from this file's imports; never inherit
+    # Seed the datastore vendor from the repo's build manifests (Layer 3), so a file that
+    # imports no ORM itself still resolves; the parser refines it from this file's own
+    # imports (Layer 2). Reseeding per file is also what stops one file's vendor leaking
+    # into the next on a reused worker.
+    seed_datastore_vendor(_repo_orm_fallback(repo_root))
     try:
         ctx = ParseContext(
             path=path,

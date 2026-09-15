@@ -74,14 +74,26 @@ _datastore_vendor: contextvars.ContextVar[str | None] = contextvars.ContextVar(
 )
 
 
-def set_datastore_vendor(vendor: str | None) -> None:
-    """Record the datastore product named by the current file's imports."""
+def seed_datastore_vendor(vendor: str | None) -> None:
+    """Reset the vendor to the repo-level fallback for a new file.
+
+    Called once per file by the worker, before parsing (``core.executor``). ``vendor`` is
+    the ORM the repo's build manifests declare (Layer 3), or ``None`` when that is not
+    establishable. Seeding rather than clearing is what lets a file with no datastore
+    import of its own still resolve — the dependency-injected repository case.
+    """
     _datastore_vendor.set(vendor)
 
 
-def clear_datastore_vendor() -> None:
-    """Drop any per-file vendor. Called once per file by the worker, before parsing."""
-    _datastore_vendor.set(None)
+def set_datastore_vendor(vendor: str | None) -> None:
+    """Refine the vendor with what the current file's own imports name (Layer 2).
+
+    A ``None`` is ignored on purpose: the file simply imported no datastore package, which
+    must not erase the repo-level fallback seeded for this file. File evidence is stronger
+    than repo evidence, so a non-``None`` value always wins.
+    """
+    if vendor is not None:
+        _datastore_vendor.set(vendor)
 
 
 def begin_concat_tracking() -> None:

@@ -554,3 +554,69 @@ def test_import_vendor_replaces_only_the_generic_orm() -> None:
     # And a non-DB receiver stays a non-detection — a vendor never manufactures a hit.
     assert match_db("layers.find", "find", "java", datastore_vendor="hibernate") is None
     assert match_db("ctx.save", "save", "java", datastore_vendor="hibernate") is None
+
+
+def _manifest_repo(tmp_path, files: dict) -> "Path":
+    for rel, body in files.items():
+        p = tmp_path / rel
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(body)
+    return tmp_path
+
+
+def test_scan_repo_orm_only_when_unambiguous(tmp_path) -> None:
+    # BREEZEAI-1216 Layer 3. Layer 2 cannot see a dependency-injected ORM: the calling file
+    # imports only an internal repository interface, and the ORM is declared in the build
+    # file. Repo evidence fills that gap — but only when it is unambiguous.
+    from breezeai_cog.parsers.detection import scan_repo_orm
+
+    POM = "<project><dependencies>%s</dependencies></project>"
+    dep = lambda a: f"<dependency><artifactId>{a}</artifactId></dependency>"
+
+    # single ORM -> named
+    assert scan_repo_orm(_manifest_repo(tmp_path / "a", {"pom.xml": POM % dep("hibernate-core")})) \
+        == "hibernate"
+    assert scan_repo_orm(_manifest_repo(tmp_path / "b", {
+        "package.json": '{"dependencies":{"typeorm":"^0.3.0"}}'})) == "typeorm"
+    assert scan_repo_orm(_manifest_repo(tmp_path / "c", {
+        "requirements.txt": "SQLAlchemy==2.0.0\n"})) == "sqlalchemy"
+    # Hibernate + JPA is ONE stack (Spring Data JPA's provider is Hibernate), not ambiguity.
+    assert scan_repo_orm(_manifest_repo(tmp_path / "d", {
+        "pom.xml": POM % (dep("spring-boot-starter-data-jpa") + dep("hibernate-core"))})) \
+        == "hibernate"
+    # a module one level down is found (monorepo layout)
+    assert scan_repo_orm(_manifest_repo(tmp_path / "e", {
+        "api/pom.xml": POM % dep("hibernate-core")})) == "hibernate"
+
+    # two distinct ORMs -> no fallback, stay generic
+    assert scan_repo_orm(_manifest_repo(tmp_path / "f", {
+        "package.json": '{"dependencies":{"typeorm":"1"}}',
+        "api/pom.xml": POM % dep("hibernate-core")})) is None
+    # an ORM the vocabulary cannot name still counts toward ambiguity, so a Hibernate +
+    # MyBatis repo is NOT reported as Hibernate.
+    assert scan_repo_orm(_manifest_repo(tmp_path / "g", {
+        "pom.xml": POM % (dep("hibernate-core") + dep("mybatis-spring"))})) is None
+    # ...and alone it adds nothing over the generic hint.
+    assert scan_repo_orm(_manifest_repo(tmp_path / "h", {
+        "pom.xml": POM % dep("mybatis-spring")})) is None
+    # no ORM at all, and no manifest at all
+    assert scan_repo_orm(_manifest_repo(tmp_path / "i", {
+        "pom.xml": POM % dep("slf4j-api")})) is None
+    assert scan_repo_orm(_manifest_repo(tmp_path / "j", {"README.md": "hi"})) is None
+
+
+def test_file_import_beats_repo_fallback() -> None:
+    # Precedence: the file's own import (Layer 2) is stronger evidence than the repo's
+    # build manifest (Layer 3), so set_datastore_vendor overrides the seed — but a None
+    # (this file imports no datastore) must NOT erase the seed.
+    from breezeai_cog.parsers.statements_common import (
+        _datastore_vendor, seed_datastore_vendor, set_datastore_vendor,
+    )
+
+    seed_datastore_vendor("hibernate")          # repo says Hibernate
+    set_datastore_vendor(None)                  # file imports no datastore
+    assert _datastore_vendor.get() == "hibernate"
+    set_datastore_vendor("jpa")                 # file imports jakarta.persistence
+    assert _datastore_vendor.get() == "jpa"
+    seed_datastore_vendor(None)                 # next file, ORM-less repo
+    assert _datastore_vendor.get() is None
