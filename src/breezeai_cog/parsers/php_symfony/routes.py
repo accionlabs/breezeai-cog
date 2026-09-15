@@ -85,6 +85,7 @@ def detect_symfony_routes(
                             parentId=fn.id,
                             nodeType="attribute",
                             semanticType="route",
+                            routeKind="route",
                             method=verb,
                             endpoint=full_path,
                             handler=handler,

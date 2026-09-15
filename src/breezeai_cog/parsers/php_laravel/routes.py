@@ -92,6 +92,7 @@ def detect_laravel_routes(
                                         parentId=fid,
                                         nodeType=node.type,
                                         semanticType="route",
+                                        routeKind="route",
                                         method=verb.upper(),
                                         endpoint=endpoint,
                                         handler=handler,
@@ -112,7 +113,8 @@ def detect_laravel_routes(
                                     parentId=fid,
                                     nodeType=node.type,
                                     semanticType="route",
-                                    method="ALL",
+                                    routeKind="route",
+                                    method="ANY",
                                     endpoint=endpoint,
                                     handler=handler,
                                     text=node_text(node, source),
@@ -126,7 +128,7 @@ def detect_laravel_routes(
                             # Route::get, Route::post, Route::any, etc.
                             endpoint = _render_url(args[0], source)
                             handler = _handler_text(args[1] if len(args) > 1 else None, source)
-                            verb = "ALL" if method_name == "any" else method_name.upper()
+                            verb = "ANY" if method_name == "any" else method_name.upper()
                             sid = disambiguate(statement_id(path, start, col), seen_ids)
                             routes.append(
                                 Statement(
@@ -134,6 +136,7 @@ def detect_laravel_routes(
                                     parentId=fid,
                                     nodeType=node.type,
                                     semanticType="route",
+                                    routeKind="route",
                                     method=verb,
                                     endpoint=endpoint,
                                     handler=handler,

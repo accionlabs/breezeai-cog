@@ -52,12 +52,14 @@ Route::resource('photos', 'PhotoController');
 
     routes = [s for s in rec.statements if s.semanticType == "route"]
     assert len(routes) >= 4
+    assert all(r.routeKind == "route" for r in routes)
 
     endpoints = {r.endpoint: r for r in routes}
     assert "/users" in endpoints
     assert endpoints["/users"].method in ("GET", "POST")
     assert "/profile" in endpoints
     assert "photos" in endpoints
+    assert endpoints["photos"].method == "ANY"
     profile_routes = [r for r in routes if r.endpoint == "/profile"]
     assert len(profile_routes) == 2
     assert {r.method for r in profile_routes} == {"GET", "POST"}
@@ -80,6 +82,7 @@ $app->map(['GET', 'POST'], '/api/items', function ($req, $res) { return $res; })
 
     routes = [s for s in rec.statements if s.semanticType == "route"]
     assert len(routes) >= 3
+    assert all(r.routeKind == "route" for r in routes)
     endpoints = {r.endpoint: r for r in routes}
     assert "/api/users" in endpoints
     assert "/api/items" in endpoints
@@ -112,7 +115,8 @@ class UserController
 
     routes = [s for s in rec.statements if s.semanticType == "route"]
     assert len(routes) >= 2
-    endpoints = {r.endpoint for r in routes}
+    assert all(r.routeKind == "route" for r in routes)
+    endpoints = {r.endpoint: r for r in routes}
     assert "/api/users" in endpoints
     assert "/api/users/{id}" in endpoints
 
@@ -139,11 +143,13 @@ $routes->group('admin', function ($routes) {
 
     routes = [s for s in rec.statements if s.semanticType == "route"]
     assert len(routes) >= 5
+    assert all(r.routeKind == "route" for r in routes)
 
     endpoints = {r.endpoint: r for r in routes}
     assert "/users" in endpoints
     assert "/profile" in endpoints
     assert "photos" in endpoints
+    assert endpoints["photos"].method == "ANY"
     assert "/admin/dashboard" in endpoints
     profile_routes = [r for r in routes if r.endpoint == "/profile"]
     assert len(profile_routes) == 2
@@ -170,12 +176,13 @@ $route['products']['post'] = 'catalog/create';
     assert rec.framework == "codeigniter"
 
     routes = [s for s in rec.statements if s.semanticType == "route"]
+    assert all(r.routeKind == "route" for r in routes)
     endpoints = {r.endpoint: r for r in routes}
 
     assert "default_controller" not in endpoints
     assert "404_override" not in endpoints
     assert "journals" in endpoints
-    assert endpoints["journals"].method == "ALL"
+    assert endpoints["journals"].method == "ANY"
     assert "product/(:any)" in endpoints
     assert "products" in endpoints
     assert any(r.endpoint == "products" and r.method == "GET" for r in routes)
@@ -191,11 +198,12 @@ add_filter('the_content', function ($content) {
 });
 """
     rec = _parse(PhpParser, tmp_path, src, "wp-content/plugins/my-plugin.php")
-    hooks = [s for s in rec.statements if s.semanticType == "route" and s.routeKind == "hook"]
+    hooks = [s for s in rec.statements if s.semanticType == "route" and s.routeKind == "eventbus_consumer"]
     assert len(hooks) == 2
     tags = {h.endpoint for h in hooks}
     assert "init" in tags
     assert "the_content" in tags
+    assert all(h.method == "CONSUMER" for h in hooks)
 
 
 def test_eloquent_detection(tmp_path: Path) -> None:
@@ -446,5 +454,53 @@ $routes->get($dynamicPath, 'WebhookController@handle');
     assert len(routes) == 1
     assert routes[0].endpoint is None
     assert routes[0].handler == "WebhookController@handle"
+
+
+def test_any_route_method_across_frameworks(tmp_path: Path) -> None:
+    # Laravel Route::any
+    laravel_src = b"""<?php
+Route::any('/all-verbs', 'TestController@handle');
+"""
+    rec_l = _parse(LaravelParser, tmp_path, laravel_src, "routes/web.php")
+    routes_l = [s for s in rec_l.statements if s.semanticType == "route"]
+    assert len(routes_l) == 1
+    assert routes_l[0].method == "ANY"
+    assert routes_l[0].routeKind == "route"
+
+    # Slim $app->any
+    slim_src = b"""<?php
+$app->any('/all-verbs', function($req, $res) { return $res; });
+"""
+    rec_s = _parse(SlimParser, tmp_path, slim_src, "src/routes.php")
+    routes_s = [s for s in rec_s.statements if s.semanticType == "route"]
+    assert len(routes_s) == 1
+    assert routes_s[0].method == "ANY"
+    assert routes_s[0].routeKind == "route"
+
+    # CodeIgniter $routes->add
+    ci_src = b"""<?php
+$routes->add('/all-verbs', 'TestController::index');
+"""
+    rec_c = _parse(CodeIgniterParser, tmp_path, ci_src, "app/Config/Routes.php")
+    routes_c = [s for s in rec_c.statements if s.semanticType == "route"]
+    assert len(routes_c) == 1
+    assert routes_c[0].method == "ANY"
+    assert routes_c[0].routeKind == "route"
+
+
+def test_codeigniter4_cli_route(tmp_path: Path) -> None:
+    src = b"""<?php
+namespace Config;
+
+$routes->cli('cron/run', 'CronController::run');
+"""
+    rec = _parse(CodeIgniterParser, tmp_path, src, "app/Config/Routes.php")
+    routes = [s for s in rec.statements if s.semanticType == "route"]
+    assert len(routes) == 1
+    assert routes[0].endpoint == "cron/run"
+    assert routes[0].method == "RPC"
+    assert routes[0].routeKind == "route"
+
+
 
 

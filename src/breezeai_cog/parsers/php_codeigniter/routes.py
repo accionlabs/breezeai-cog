@@ -149,6 +149,7 @@ def detect_codeigniter_routes(
                                         parentId=fid,
                                         nodeType=node.type,
                                         semanticType="route",
+                                        routeKind="route",
                                         method=verb,
                                         endpoint=endpoint,
                                         handler=handler,
@@ -170,7 +171,8 @@ def detect_codeigniter_routes(
                                     parentId=fid,
                                     nodeType=node.type,
                                     semanticType="route",
-                                    method="ALL",
+                                    routeKind="route",
+                                    method="ANY",
                                     endpoint=endpoint,
                                     handler=handler,
                                     text=node_text(node, source),
@@ -184,7 +186,12 @@ def detect_codeigniter_routes(
                             # $routes->get, $routes->post, $routes->add, etc.
                             endpoint = _combine_paths(prefix, _render_url(args[0], source))
                             handler = _handler_text(args[1] if len(args) > 1 else None, source)
-                            verb = "ALL" if method_name == "add" else method_name.upper()
+                            if method_name == "add":
+                                verb = "ANY"
+                            elif method_name == "cli":
+                                verb = "RPC"
+                            else:
+                                verb = method_name.upper()
                             sid = disambiguate(statement_id(path, start, col), seen_ids)
                             routes.append(
                                 Statement(
@@ -192,6 +199,7 @@ def detect_codeigniter_routes(
                                     parentId=fid,
                                     nodeType=node.type,
                                     semanticType="route",
+                                    routeKind="route",
                                     method=verb,
                                     endpoint=endpoint,
                                     handler=handler,
@@ -229,7 +237,8 @@ def detect_codeigniter_routes(
                                 parentId=fid,
                                 nodeType=node.type,
                                 semanticType="route",
-                                method="ALL",
+                                routeKind="route",
+                                method="ANY",
                                 endpoint=key,
                                 handler=node_text(right, source).strip("'\""),
                                 text=node_text(node, source),
@@ -266,6 +275,7 @@ def detect_codeigniter_routes(
                                     parentId=fid,
                                     nodeType=node.type,
                                     semanticType="route",
+                                    routeKind="route",
                                     method=verb_str.upper(),
                                     endpoint=endpoint,
                                     handler=node_text(right, source).strip("'\""),
