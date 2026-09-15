@@ -111,6 +111,21 @@ _PYTHON = frozenset({"python"})
 # receiver alone cannot pick the product — only the language can rule it out.
 _JSTS = frozenset({"typescript", "javascript"})
 
+#: Product -> the languages it ships for, for products named by the DISTINCTIVE **verb** table.
+#: Same idea as the language column on ``_RECEIVER_HINTS``, but keyed by method name, which is
+#: the riskier axis: these verbs are ordinary words. ``findFirst`` is core ``java.util.stream``,
+#: ``findAll`` is a Groovy ``Collection`` method and a Spring Data repository method — so
+#: without this gate a Java stream pipeline was reported as a Prisma database call.
+#: Absent from this map = portable: Mongo/Redis/DynamoDB/ES/Neo4j driver verbs and the EF verbs
+#: (which have their own ``_DOTNET`` gate) legitimately appear across many languages.
+_PRODUCT_LANGUAGES: dict[str, frozenset[str]] = {
+    "sequelize": _JSTS,
+    "prisma": _JSTS,
+    "typeorm": _JSTS,
+    "django": _PYTHON,
+    "sqlalchemy": _PYTHON,
+}
+
 # ── Layer 2: the product named by the file's own imports ──────────────────────
 # Import-prefix -> hint. Where the language gate (Layer 1) can only say "some ORM", an
 # import is direct evidence of *which* one: a file that imports ``org.hibernate.Session``
@@ -345,10 +360,21 @@ def match_db(callee: str, method: str, language: str | None = None,
     generic = datastore_vendor or "orm"
     if m in _PRISMA_VERBS and _is_prisma_chain(low):
         return "prisma"
+    # A distinctive verb whose product cannot exist in this language is NOT evidence of that
+    # product — and often not of data access at all (Java `stream().findFirst()` is not Prisma;
+    # Groovy `nums.findAll(pred)` is a list filter). Such a hit falls through to the receiver
+    # evidence below rather than returning: `logRepository.findAll()` is still data access and
+    # keeps a hint, while `names.stream().filter(x).findFirst()` correctly drops out entirely.
+    # Returning None here instead would delete the genuine repository calls along with the
+    # phantoms.
+    gated_distinctive = False
     if m in _DISTINCTIVE:
         db = _DISTINCTIVE[m]
+        langs = _PRODUCT_LANGUAGES.get(db)
+        if langs is not None and language is not None and language not in langs:
+            gated_distinctive = True
         # EF verbs are .NET-only; suppress them in a known non-.NET file (name collision).
-        if not (db == "entity_framework" and language is not None and language not in _DOTNET):
+        elif not (db == "entity_framework" and language is not None and language not in _DOTNET):
             return db
     # Ambiguous sync LINQ terminals (ToList/FirstOrDefault/…): EF only in a .NET file AND when
     # the call chain shows a queryable/DbContext source; else LINQ-to-Objects — drop, don't tag.
@@ -376,7 +402,9 @@ def match_db(callee: str, method: str, language: str | None = None,
     if receiver and (receiver in _CACHE_RECEIVERS or receiver.endswith("redis")):
         if m in _CACHE_VERBS or m in ("delete", "remove"):
             return "redis"
-    if m in _GENERIC:
+    # ``gated_distinctive``: a language-impossible distinctive verb is demoted to exactly this
+    # branch — the receiver, not the verb, now has to prove data access.
+    if m in _GENERIC or gated_distinctive:
         for needle, hint, langs in _RECEIVER_HINTS:  # positive vendor hint wins
             if needle not in low:
                 continue
@@ -391,7 +419,10 @@ def match_db(callee: str, method: str, language: str | None = None,
             if langs is not None and language is not None and language not in langs:
                 return generic
             return hint
-        if m in _HIGH_COLLISION:
+        # A gated distinctive verb is treated as high-collision: `findAll`/`findFirst` are
+        # Stream/Collection methods as often as repository methods, so they need a positive DB
+        # receiver rather than the permissive `return generic` at the end of this branch.
+        if m in _HIGH_COLLISION or gated_distinctive:
             # Non-DB receivers (canvas ctx, logger, cache, …) are never data access — bail
             # early before the suffix heuristic can misfire (e.g. ``ctx.save()``).
             if receiver and any(receiver.endswith(s) for s in _NON_DB_RECEIVERS):

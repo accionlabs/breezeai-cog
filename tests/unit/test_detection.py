@@ -620,3 +620,40 @@ def test_file_import_beats_repo_fallback() -> None:
     assert _datastore_vendor.get() == "jpa"
     seed_datastore_vendor(None)                 # next file, ORM-less repo
     assert _datastore_vendor.get() is None
+
+
+def test_distinctive_verb_gated_by_language_falls_through_to_receiver() -> None:
+    # BREEZEAI-1216 Layer 1b. The DISTINCTIVE table names products by METHOD name, and those
+    # verbs are ordinary words: `findFirst` is core java.util.stream, `findAll` is both a Groovy
+    # Collection method and a Spring Data repository method. Un-gated, a Java stream pipeline
+    # was reported as a Prisma *database call* — a fabricated db_method_call, not just a bad
+    # label (measured at 22 of 35 Java hits on the `halo` repo).
+    #
+    # A language-impossible distinctive verb therefore falls through to receiver evidence: the
+    # receiver, not the verb, decides. Returning None outright would delete the genuine
+    # repository calls along with the phantoms.
+    from breezeai_cog.parsers.detection.db_queries import match_db
+
+    # phantom removed — the receiver of a stream chain proves nothing
+    assert match_db("names.stream().filter(n).findFirst", "findFirst", "java") is None
+    assert match_db("items.stream().findFirst", "findFirst", "kotlin") is None
+    # Groovy list filter, paren form (the closure form never reaches the classifier)
+    assert match_db("nums.findAll", "findAll", "groovy") is None
+    # real repository call survives, and gains the resolved product when one is known
+    assert match_db("logRepository.findAll", "findAll", "java") == "orm"
+    assert match_db("logRepository.findAll", "findAll", "java",
+                    datastore_vendor="jpa") == "jpa"
+    assert match_db("repo.findAll", "findAll", "java") == "orm"
+
+    # In its own language the product is still named — the gate must not cost recall there.
+    assert match_db("userModel.findAll", "findAll", "typescript") == "sequelize"
+    assert match_db("db.user.findFirst", "findFirst", "typescript") == "prisma"
+    assert match_db("conn.createQueryBuilder", "createQueryBuilder", "typescript") == "typeorm"
+    assert match_db("q.filter_by", "filter_by", "python") == "sqlalchemy"
+    assert match_db("qs.select_related", "select_related", "python") == "django"
+    # Portable driver verbs are NOT gated — these APIs exist in every language.
+    assert match_db("col.insertOne", "insertOne", "java") == "mongodb"
+    assert match_db("client.hget", "hget", "java") == "redis"
+    assert match_db("ctx.Users.ToListAsync", "ToListAsync", "csharp") == "entity_framework"
+    # Unknown language stays permissive, as with every other gate.
+    assert match_db("names.stream().findFirst", "findFirst") == "prisma"
