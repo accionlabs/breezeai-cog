@@ -33,6 +33,8 @@ from .imports import GroovyIndex, build_fqcn_index, extract_imports
 from ..comments_common import comment_statements_for
 from .mappings import COMMENT_TYPES, CONTROL_FLOW, FRAMEWORKS, STATEMENT_TYPES
 from .statements import extract_statements
+from ..detection import vendor_from_imports
+from ..statements_common import set_datastore_vendor
 
 _CLASS_TYPES = (
     "class_declaration", "interface_declaration", "enum_declaration", "trait_declaration",
@@ -66,6 +68,9 @@ class GroovyParser(BaseParser):
         internal, external, _, bindings = extract_imports(
             root, source, path, ctx.repo_root, fqcn
         )
+        # Datastore product named by this file's imports (Layer 2); the worker clears
+        # this per file, so no reset is needed here.
+        set_datastore_vendor(vendor_from_imports(external))
         resolve = make_resolver(
             bindings, defined_names(root, source), path, type_map(root, source)
         )

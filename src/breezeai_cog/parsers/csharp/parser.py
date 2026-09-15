@@ -26,6 +26,8 @@ from .imports import CSharpIndex, build_csharp_index, extract_imports
 from .lambda_events import detect_lambda_handlers
 from ..comments_common import comment_statements_for
 from .mappings import COMMENT_TYPES, CONTROL_FLOW, FRAMEWORKS, STATEMENT_TYPES
+from ..detection import vendor_from_imports
+from ..statements_common import set_datastore_vendor
 
 _CLASS_TYPES = (
     "class_declaration", "interface_declaration", "enum_declaration",
@@ -68,6 +70,9 @@ class CSharpParser(BaseParser):
         internal, external, _, bindings = extract_imports(
             root, source, path, ctx.resolution_index
         )
+        # Datastore product named by this file's imports (Layer 2); the worker clears
+        # this per file, so no reset is needed here.
+        set_datastore_vendor(vendor_from_imports(external))
         resolve = make_resolver(
             bindings, defined_names(root, source), path, type_map(root, source),
             ext_index=getattr(ctx.resolution_index, "ext_methods", None),

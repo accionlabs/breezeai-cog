@@ -19,6 +19,11 @@ classified as ``query_statement`` before this runs.
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from collections.abc import Iterable
+
 # DB/ORM -> distinctive method names (lowercased). Order matters: on a name collision
 # the first DB wins (mirrors the legacy reverse-map "first one wins").
 _DB_METHODS: dict[str, tuple[str, ...]] = {
@@ -105,6 +110,82 @@ _PYTHON = frozenset({"python"})
 # (``…repository``, ``entityManager``) are equally idiomatic in Java/C#/Python, so the
 # receiver alone cannot pick the product — only the language can rule it out.
 _JSTS = frozenset({"typescript", "javascript"})
+
+# ── Layer 2: the product named by the file's own imports ──────────────────────
+# Import-prefix -> hint. Where the language gate (Layer 1) can only say "some ORM", an
+# import is direct evidence of *which* one: a file that imports ``org.hibernate.Session``
+# is doing Hibernate, not "generic orm". Matched case-insensitively against each entry of
+# ``FileRecord.externalImports``, which every language emits as a dotted namespace
+# (``org.hibernate.Session``, ``Microsoft.EntityFrameworkCore``, ``sqlalchemy.orm``) or a
+# bare module (``typeorm``, ``@prisma/client``).
+#
+# Ordered: the first needle that matches any import wins, so a more specific namespace must
+# precede its parent (spring-data-mongodb before spring-data-jpa). Deliberately conservative
+# — an ambiguous package is omitted rather than guessed, leaving the generic ``orm``.
+_VENDOR_BY_IMPORT: tuple[tuple[str, str], ...] = (
+    # JVM — Spring Data's per-store modules are more specific than the JPA/Hibernate pair
+    ("org.springframework.data.mongodb", "mongodb"),
+    ("org.springframework.data.redis", "redis"),
+    ("org.springframework.data.elasticsearch", "elasticsearch"),
+    ("org.springframework.data.cassandra", "sql"),
+    ("org.springframework.data.jpa", "jpa"),
+    ("org.hibernate", "hibernate"),
+    ("jakarta.persistence", "jpa"),
+    ("javax.persistence", "jpa"),
+    ("redis.clients", "redis"),          # Jedis
+    ("com.mongodb", "mongodb"),
+    ("org.neo4j", "neo4j"),
+    ("com.amazonaws.services.dynamodbv2", "dynamodb"),
+    ("software.amazon.awssdk.services.dynamodb", "dynamodb"),
+    # .NET
+    ("microsoft.entityframeworkcore", "entity_framework"),
+    ("system.data.entity", "entity_framework"),
+    ("nhibernate", "hibernate"),
+    ("mongodb.driver", "mongodb"),
+    ("stackexchange.redis", "redis"),
+    ("amazon.dynamodbv2", "dynamodb"),
+    # Python
+    ("sqlalchemy", "sqlalchemy"),
+    ("django", "django"),
+    ("pymongo", "mongodb"),
+    ("motor", "mongodb"),
+    # Node
+    ("typeorm", "typeorm"),
+    ("sequelize", "sequelize"),
+    ("@prisma", "prisma"),
+    ("mongoose", "mongodb"),
+    ("@aws-sdk/client-dynamodb", "dynamodb"),
+    # cross-language clients
+    ("mongodb", "mongodb"),
+    ("ioredis", "redis"),
+    ("redis", "redis"),
+    ("@elastic", "elasticsearch"),
+    ("elasticsearch", "elasticsearch"),
+    ("neo4j", "neo4j"),
+    ("@firebase", "firebase"),
+    ("firebase", "firebase"),
+    ("couchdb", "couchdb"),
+    ("nano", "couchdb"),
+)
+
+
+def vendor_from_imports(external_imports: "Iterable[str] | None") -> str | None:
+    """The datastore product named by a file's external imports, else ``None``.
+
+    Layer 2 of the datastore gate: consulted only where the call shape establishes data
+    access but not *which* product (see :func:`match_db`). Returns at most one vendor —
+    the first ``_VENDOR_BY_IMPORT`` entry matching any import — so the result is stable
+    regardless of the order imports appear in the source.
+    """
+    if not external_imports:
+        return None
+    lows = [i.lower() for i in external_imports]
+    for needle, hint in _VENDOR_BY_IMPORT:
+        for low in lows:
+            if low == needle or low.startswith(f"{needle}.") or low.startswith(f"{needle}/"):
+                return hint
+    return None
+
 
 # Receiver substring -> (hint, languages the vendor can appear in) — refines _GENERIC.
 # Needles checked via `needle in low` (full lowercased callee). Ambiguous short tokens
@@ -253,9 +334,15 @@ def _is_prisma_chain(low: str) -> bool:
 
 
 def match_db(callee: str, method: str, language: str | None = None,
-             typed_db_ids: "frozenset[str] | None" = None) -> str | None:
+             typed_db_ids: "frozenset[str] | None" = None,
+             datastore_vendor: str | None = None) -> str | None:
     m = method.lower()
     low = callee.lower()
+    # Layer 2: the product this file's imports name (``vendor_from_imports``), used at every
+    # point where the call shape proves data access but not which product — instead of the
+    # generic ``orm``. A distinctive method or an in-language receiver hint is more local
+    # evidence and still wins, so this only ever replaces a would-be ``orm``.
+    generic = datastore_vendor or "orm"
     if m in _PRISMA_VERBS and _is_prisma_chain(low):
         return "prisma"
     if m in _DISTINCTIVE:
@@ -302,7 +389,7 @@ def match_db(callee: str, method: str, language: str | None = None,
             # PRODUCT is reachable. A known-mismatched language degrades to the generic
             # ``orm`` instead of naming an impossible one (Java repo != TypeORM).
             if langs is not None and language is not None and language not in langs:
-                return "orm"
+                return generic
             return hint
         if m in _HIGH_COLLISION:
             # Non-DB receivers (canvas ctx, logger, cache, …) are never data access — bail
@@ -312,14 +399,14 @@ def match_db(callee: str, method: str, language: str | None = None,
             if typed_db_ids is not None:
                 # Type-resolved gate (TypeScript class context): only match when the receiver
                 # is a field explicitly typed as an ORM client — avoids name-suffix guessing.
-                return "orm" if receiver in typed_db_ids else None
+                return generic if receiver in typed_db_ids else None
             # Opt-in heuristic (Python, non-class TS, etc.): positive DB suffix wins.
             if receiver and any(receiver.endswith(s) for s in _DB_RECEIVER_SUFFIXES):
-                return "orm"
+                return generic
             return None
         if receiver and any(receiver.endswith(s) for s in _NON_DB_RECEIVERS):
             return None  # a cache/collection/UI-state/etc. receiver — not data access
-        return "orm"
+        return generic
     if m in _DJANGO_VERBS and (language is None or language in _PYTHON) and (
         ".objects." in low or low.startswith("objects.") or "queryset" in low
     ):

@@ -59,6 +59,31 @@ def reset_http_client_ids(token: "contextvars.Token[frozenset[str]]") -> None:
     _http_client_ids.reset(token)
 
 
+# Per-file datastore product resolved from the file's external imports (Layer 2 of the
+# datastore gate — see detection.vendor_from_imports). A parser sets it once it has the
+# file's imports, so the shared classifier can use it without threading a value through
+# every build_function/build_class call. Defaults to None, so a parser that doesn't opt in
+# keeps the generic ``orm`` fallback.
+#
+# Unlike _http_client_ids there is no token/reset dance: the worker clears it once per file
+# (``core.executor`` before ``parse_file``, alongside ``begin_concat_tracking``). That is a
+# single choke point, so a vendor can never leak into the next file on a reused worker even
+# for the parsers that never set one.
+_datastore_vendor: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+    "datastore_vendor", default=None
+)
+
+
+def set_datastore_vendor(vendor: str | None) -> None:
+    """Record the datastore product named by the current file's imports."""
+    _datastore_vendor.set(vendor)
+
+
+def clear_datastore_vendor() -> None:
+    """Drop any per-file vendor. Called once per file by the worker, before parsing."""
+    _datastore_vendor.set(None)
+
+
 def begin_concat_tracking() -> None:
     """Start collecting skipped-concat lines for the current file (call before parsing)."""
     _skipped_concat_lines.set([])
@@ -305,6 +330,7 @@ def classify_statement(
             language,
             typed_db_ids=typed_db_ids,
             http_client_ids=_http_client_ids.get() or None,
+            datastore_vendor=_datastore_vendor.get(),
         )
         if classified is None:
             continue

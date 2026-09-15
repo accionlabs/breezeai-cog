@@ -509,3 +509,48 @@ def test_receiver_hint_never_names_an_impossible_orm() -> None:
     # so every caller that passes none keeps its pre-gate result.
     assert classify_call("orderRepo.save", "save") == ("db_method_call", "save", "typeorm")
     assert classify_call("db.session.query", "query") == ("db_method_call", "query", "sqlalchemy")
+
+
+def test_vendor_from_imports_resolves_the_product() -> None:
+    # BREEZEAI-1216 Layer 2. Where the call shape proves data access but not WHICH product,
+    # the file's own imports do: `org.hibernate.Session` is Hibernate, not "generic orm".
+    from breezeai_cog.parsers.detection import vendor_from_imports
+
+    assert vendor_from_imports(["org.springframework.stereotype.Service",
+                                "org.hibernate.Session"]) == "hibernate"
+    assert vendor_from_imports(["jakarta.persistence.EntityManager"]) == "jpa"
+    assert vendor_from_imports(["javax.persistence.EntityManager"]) == "jpa"
+    assert vendor_from_imports(["Microsoft.EntityFrameworkCore"]) == "entity_framework"
+    assert vendor_from_imports(["sqlalchemy.orm"]) == "sqlalchemy"
+    assert vendor_from_imports(["typeorm"]) == "typeorm"
+    assert vendor_from_imports(["@prisma/client"]) == "prisma"
+    assert vendor_from_imports(["redis.clients.jedis"]) == "redis"      # Jedis
+    assert vendor_from_imports(["MongoDB.Driver"]) == "mongodb"
+    # A more specific Spring Data module beats the generic JPA entry regardless of order.
+    assert vendor_from_imports(["org.springframework.data.jpa.repository.JpaRepository",
+                                "org.springframework.data.mongodb.core.MongoTemplate"]) == "mongodb"
+    # No datastore import, or none at all -> no vendor (Layer 3 territory: the ORM
+    # dependency is in the build file, not this file).
+    assert vendor_from_imports(["com.acme.OrderRepository"]) is None
+    assert vendor_from_imports([]) is None
+    assert vendor_from_imports(None) is None
+
+
+def test_import_vendor_replaces_only_the_generic_orm() -> None:
+    from breezeai_cog.parsers.detection.db_queries import match_db
+
+    # Language gate would say "orm"; the import says which product.
+    assert match_db("orderRepository.findById", "findById", "java",
+                    datastore_vendor="hibernate") == "hibernate"
+    assert match_db("session.save", "save", "java", datastore_vendor="jpa") == "jpa"
+    # Without a vendor it stays honest rather than guessing.
+    assert match_db("orderRepository.findById", "findById", "java") == "orm"
+
+    # A distinctive method is stronger, local evidence and is NOT overridden.
+    assert match_db("col.insertOne", "insertOne", "java", datastore_vendor="hibernate") == "mongodb"
+    # Nor is an in-language receiver hint.
+    assert match_db("this.repo.findOne", "findOne", "typescript",
+                    datastore_vendor="hibernate") == "typeorm"
+    # And a non-DB receiver stays a non-detection — a vendor never manufactures a hit.
+    assert match_db("layers.find", "find", "java", datastore_vendor="hibernate") is None
+    assert match_db("ctx.save", "save", "java", datastore_vendor="hibernate") is None

@@ -20,6 +20,8 @@ from .classes import build_class
 from .functions import defined_names, type_map
 from .imports import JavaIndex, build_fqcn_index, extract_imports
 from ..comments_common import comment_statements_for
+from ..detection import vendor_from_imports
+from ..statements_common import set_datastore_vendor
 from .mappings import COMMENT_TYPES, CONTROL_FLOW, FRAMEWORKS, STATEMENT_TYPES
 
 _CLASS_TYPES = ("class_declaration", "interface_declaration", "enum_declaration", "record_declaration")
@@ -58,6 +60,11 @@ class JavaParser(BaseParser):
         functions: list[Function] = []
         classes = []
         statements: list[Statement] = []
+
+        # Datastore product named by this file's imports (org.hibernate.* -> hibernate), so an
+        # ambiguous ORM verb resolves to the real product instead of the generic "orm". The
+        # worker clears this per file, so no reset is needed here.
+        set_datastore_vendor(vendor_from_imports(external))
 
         for child in root.named_children:
             if child.type in _CLASS_TYPES:

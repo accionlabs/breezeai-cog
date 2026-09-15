@@ -58,12 +58,14 @@ def _parse_entry(path: str, repo_root: str, options: dict) -> FileRecord | None:
     index = options.get("indexes", {}).get(base.name if base is not None else "")
     from ..parsers.statements_common import (
         begin_concat_tracking,
+        clear_datastore_vendor,
         set_concat_depth,
         summarize_skipped_concats,
     )
 
     set_concat_depth(options.get("max_concat_depth"))  # apply configured cap in this process
     begin_concat_tracking()  # collect concats the fold cap skips, for one per-file summary
+    clear_datastore_vendor()  # a parser sets it from this file's imports; never inherit
     try:
         ctx = ParseContext(
             path=path,

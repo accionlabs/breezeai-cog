@@ -6,7 +6,7 @@ classify it — so API/DB detection isn't reimplemented per language.
 from __future__ import annotations
 
 from .api_calls import match_api
-from .db_queries import match_db
+from .db_queries import match_db, vendor_from_imports
 from .queries import is_query, text_has_query
 
 
@@ -17,6 +17,7 @@ def classify_call(
     language: str | None = None,
     typed_db_ids: "frozenset[str] | None" = None,
     http_client_ids: "frozenset[str] | None" = None,
+    datastore_vendor: str | None = None,
 ) -> tuple[str, str, str | None] | None:
     """Classify a normalized call into ``(semanticType, method, dataAccessHint)``.
 
@@ -35,10 +36,14 @@ def classify_call(
         return "api_call", verb, None
     if is_query(method, arg):
         return "query_statement", method, None
-    hint = match_db(callee, method, language, typed_db_ids=typed_db_ids)
+    hint = match_db(callee, method, language, typed_db_ids=typed_db_ids,
+                    datastore_vendor=datastore_vendor)
     if hint is not None:
         return "db_method_call", method, hint
     return None
 
 
-__all__ = ["classify_call", "match_api", "match_db", "is_query", "text_has_query"]
+__all__ = [
+    "classify_call", "match_api", "match_db", "vendor_from_imports",
+    "is_query", "text_has_query",
+]

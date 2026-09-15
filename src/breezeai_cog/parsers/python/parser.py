@@ -16,6 +16,8 @@ from .functions import build_function, defined_names, extract_decorators
 from .imports import extract_imports
 from .mappings import COMMENT_TYPES, CONTROL_FLOW, FRAMEWORKS, STATEMENT_TYPES
 from .statements import extract_statements
+from ..detection import vendor_from_imports
+from ..statements_common import set_datastore_vendor
 
 
 class PythonParser(BaseParser):
@@ -40,6 +42,9 @@ class PythonParser(BaseParser):
         capture, limit = ctx.capture_statements, ctx.statement_text_limit
 
         internal, external, exports, bindings = extract_imports(root, source, path, ctx.repo_root)
+        # Datastore product named by this file's imports (Layer 2); the worker clears
+        # this per file, so no reset is needed here.
+        set_datastore_vendor(vendor_from_imports(external))
         resolve = make_resolver(bindings, defined_names(root, source), path)  # calls[].path
 
         functions: list[Function] = []

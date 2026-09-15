@@ -30,7 +30,11 @@ from .functions import (
     defined_names,
     type_map,
 )
-from ..statements_common import reset_http_client_ids, set_http_client_ids
+from ..statements_common import (
+    reset_http_client_ids,
+    set_datastore_vendor,
+    set_http_client_ids,
+)
 from .imports import TsAliasIndex, build_ts_index, extract_imports
 from ..comments_common import comment_statements_for
 from .mappings import (
@@ -41,6 +45,7 @@ from .mappings import (
     STATEMENT_TYPES,
 )
 from .statements import collect_http_client_ids, extract_statements
+from ..detection import vendor_from_imports
 
 _DECLS = (
     "class_declaration",
@@ -143,6 +148,9 @@ class TypeScriptParser(BaseParser):
         internal, external, exports, bindings = extract_imports(
             root, source, path, ctx.repo_root, ctx.resolution_index
         )
+        # Datastore product named by this file's imports (Layer 2); the worker clears
+        # this per file, so no reset is needed here.
+        set_datastore_vendor(vendor_from_imports(external))
         resolve = make_resolver(  # calls[].path (Tiers 1+2 + Phase 2 + inherited this.M())
             bindings,
             defined_names(root, source),
