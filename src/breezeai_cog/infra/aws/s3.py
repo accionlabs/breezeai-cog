@@ -91,18 +91,6 @@ class AWSStreamUpload(InfraStream):
         )
         self._thread.start()
  
-    def __enter__(self) -> "AWSStreamUpload":
-            return self
-    
-    def __exit__(self, exc_type: Any, exc: Any, tb: Any) -> None:
-            if exc_type is not None:
-                # Caller failed before finishing the stream (e.g. mid-batch of
-                # write_line calls). Don't try to complete the upload — abort
-                # the pipe so the background thread unblocks and exits cleanly.
-                self._abort()
-                return
-            self.close()
-    
     def _set_error(self, exc: Exception) -> None:
             with self._error_lock:
                 if self._error is None:
@@ -192,19 +180,4 @@ class AWSStreamUpload(InfraStream):
         # Wait for the background upload to finish.
         self._wait_for_upload()
 
-        return self._key     
-    
-    def _abort(self) -> None:
-            """Best-effort cleanup when the stream is abandoned without close()."""
-            with self._close_lock:
-                if self._closed:
-                    return
-    
-                self._closed = True
-    
-                try:
-                    self._writer.close()
-                except OSError:
-                    pass
-    
-            self._thread.join()
+        return self._key
