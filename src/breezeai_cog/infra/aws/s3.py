@@ -133,10 +133,13 @@ class AWSStreamUpload(InfraStream):
                 pass
 
 
-    def upload(self) -> None:
+    def _wait_for_upload(self) -> None:
         """
         Wait for the background upload to finish and raise
         any error that occurred during the upload.
+
+        The caller MUST have closed self._writer first; otherwise the
+        background thread never sees EOF and this blocks forever.
         """
         self._thread.join()
 
@@ -187,7 +190,7 @@ class AWSStreamUpload(InfraStream):
                     pass
 
         # Wait for the background upload to finish.
-        self.upload()
+        self._wait_for_upload()
 
         return self._key     
     

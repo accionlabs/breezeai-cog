@@ -11,8 +11,3 @@ class InfraStream(ABC):
     def close(self) -> str:
         """Close the stream and return the storage key."""
         raise NotImplementedError
-
-    @abstractmethod
-    def upload(self) -> None:
-        """Uploads the stream data to the configured cloud storage."""
-        raise NotImplementedError
