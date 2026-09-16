@@ -203,6 +203,54 @@ class Example
     assert fn.decorators[0].args == ["/orders"]
 
 
+def test_class_constants_and_typed_properties_emit_statements(tmp_path: Path) -> None:
+    src = b"""<?php
+class Example
+{
+    public const VERSION = '1.0';
+    private ?string $name;
+    protected array $items;
+}
+"""
+    rec = _parse_php(tmp_path, src=src, rel="src/Example.php", capture=True)
+    fields = [
+        statement
+        for statement in rec.statements
+        if statement.nodeType in {"const_declaration", "property_declaration"}
+    ]
+    assert len(fields) == 3
+    assert {(field.name, field.nodeType) for field in fields} == {
+        ("VERSION", "const_declaration"),
+        ("name", "property_declaration"),
+        ("items", "property_declaration"),
+    }
+    assert any("?string $name" in field.text for field in fields)
+    assert any("array $items" in field.text for field in fields)
+
+
+def test_closures_and_arrow_functions_own_their_statements(tmp_path: Path) -> None:
+    src = b"""<?php
+Route::get('/x', function () {
+    $client->get('/inside-closure');
+});
+$callback = fn () => $client->get('/inside-arrow');
+"""
+    rec = _parse_php(tmp_path, src=src, rel="routes/web.php", capture=True)
+    closures = [fn for fn in rec.functions if fn.type in {"function_expression", "arrow_function"}]
+    assert {fn.type for fn in closures} == {"function_expression", "arrow_function"}
+    closure_by_type = {fn.type: fn for fn in closures}
+    assert any(
+        statement.parentId == closure_by_type["function_expression"].id
+        and "/inside-closure" in statement.text
+        for statement in rec.statements
+    )
+    assert any(
+        statement.parentId == closure_by_type["arrow_function"].id
+        and "/inside-arrow" in statement.text
+        for statement in rec.statements
+    )
+
+
 def test_grouped_use_imports_resolve_each_type(tmp_path: Path) -> None:
     src = b"""<?php
 use App\\Models\\{User, Post};

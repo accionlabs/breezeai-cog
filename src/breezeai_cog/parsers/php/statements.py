@@ -25,6 +25,7 @@ _CALL_TYPES = (
     "function_call_expression",
     "nullsafe_member_call_expression",
 )
+_CLOSURE_TYPES = ("anonymous_function", "anonymous_function_creation_expression", "arrow_function")
 
 
 def _name_of(node: Node, source: bytes) -> str | None:
@@ -34,6 +35,14 @@ def _name_of(node: Node, source: bytes) -> str | None:
                 nm = child.child_by_field_name("name")
                 if nm is not None:
                     return node_text(nm, source).lstrip("$")
+    elif node.type == "const_declaration":
+        element = next((child for child in node.named_children if child.type == "const_element"), None)
+        if element is not None:
+            nm = element.child_by_field_name("name") or next(
+                (child for child in element.named_children if child.type == "name"), None
+            )
+            if nm is not None:
+                return node_text(nm, source)
     elif node.type == "global_declaration":
         first_var = next((c for c in node.named_children if c.type == "variable_name"), None)
         if first_var is not None:
@@ -142,6 +151,7 @@ def extract_statements(
             call_details=_call_details,
             language="php",
             decorators=extract_attributes(node, source),
+            call_barrier_types=_CLOSURE_TYPES,
         )
         out.extend(stmts)
         if stmts:
@@ -153,3 +163,30 @@ def extract_statements(
                         register_statement_span(seen_ids, fid, child.start_byte, child.end_byte, stmt)
                         break
     return out
+
+
+def extract_arrow_expression(
+    node: Node,
+    source: bytes,
+    path: str,
+    *,
+    parent_id: str,
+    limit: int,
+    seen_ids: set[str],
+) -> list[Statement]:
+    """Capture an arrow function expression body, which PHP does not wrap in a statement."""
+    return classify_statement(
+        node,
+        source,
+        path,
+        parent_id=parent_id,
+        limit=limit,
+        seen_ids=seen_ids,
+        emit_types=EMIT_TYPES,
+        control_flow=CONTROL_FLOW,
+        call_type=_CALL_TYPES,
+        name_of=_name_of,
+        call_details=_call_details,
+        language="php",
+        call_barrier_types=_CLOSURE_TYPES,
+    )

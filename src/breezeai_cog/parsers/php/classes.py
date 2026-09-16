@@ -10,7 +10,7 @@ from ..callresolve import CallResolver, noop_resolver
 from ..statements_common import emit_enum_members
 from ..treesitter import line_span, node_text
 from .attributes import extract_attributes
-from .functions import build_function, extract_params
+from .functions import build_function, collect_closures, extract_params
 from .statements import extract_statements
 
 
@@ -140,6 +140,9 @@ def build_class(
                 for m in body.named_children
                 if m.type == "method_declaration"
             )
+            closure_spans = frozenset(
+                (closure.start_byte, closure.end_byte) for closure in collect_closures(body)
+            )
             cls_statements.extend(
                 extract_statements(
                     body,
@@ -150,9 +153,30 @@ def build_class(
                     limit=limit,
                     seen_ids=seen_ids,
                     descend_all=False,
-                    barriers=method_spans,
+                    barriers=method_spans | closure_spans,
                 )
             )
+
+        # Closures stored in class properties belong to the class; closures in methods
+        # are extracted by the method's own build_function call above.
+        for closure in collect_closures(body):
+            closure_kind = "arrow_function" if closure.type == "arrow_function" else "function_expression"
+            fns, fn_stmts = build_function(
+                closure,
+                name="<anonymous>",
+                kind=closure_kind,
+                decorators=[],
+                source=source,
+                path=path,
+                parent_id=cid,
+                class_name=name,
+                seen_ids=seen_ids,
+                capture=capture,
+                limit=limit,
+                resolve=resolve,
+            )
+            methods.extend(fns)
+            cls_statements.extend(fn_stmts)
 
     cls = Class(
         id=cid,

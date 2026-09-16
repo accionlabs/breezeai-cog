@@ -9,7 +9,7 @@ from ...schemas import Call, Decorator, Function, Parameter, Statement
 from ..callresolve import CallResolver, noop_resolver
 from ..treesitter import line_span, node_text
 from .attributes import extract_attributes
-from .statements import extract_statements
+from .statements import extract_arrow_expression, extract_statements
 
 _CALL_TYPES = (
     "member_call_expression",
@@ -17,6 +17,35 @@ _CALL_TYPES = (
     "function_call_expression",
     "nullsafe_member_call_expression",
 )
+
+_CLOSURE_TYPES = ("anonymous_function", "anonymous_function_creation_expression", "arrow_function")
+
+
+def _span(node: Node) -> tuple[int, int]:
+    return node.start_byte, node.end_byte
+
+
+def collect_closures(node: Node | None) -> list[Node]:
+    """Collect closures whose nearest function/class owner is ``node``.
+
+    Each discovered closure is a traversal barrier: nested closures are owned by the
+    generated closure Function, and named declarations retain their existing owners.
+    """
+    if node is None:
+        return []
+    closures: list[Node] = []
+
+    def visit(parent: Node) -> None:
+        for child in parent.named_children:
+            if child.type in _CLOSURE_TYPES:
+                closures.append(child)
+                continue
+            if child.type in ("function_definition", "method_declaration", "class_declaration"):
+                continue
+            visit(child)
+
+    visit(node)
+    return closures
 
 
 def _flags(node: Node, source: bytes) -> tuple[str | None, bool | None]:
@@ -96,6 +125,7 @@ def _calls(
     source: bytes,
     class_name: str | None = None,
     resolve: CallResolver = noop_resolver,
+    barriers: frozenset[tuple[int, int]] = frozenset(),
 ) -> list[Call]:
     if body is None:
         return []
@@ -104,6 +134,8 @@ def _calls(
 
     def visit(node: Node) -> None:
         for child in node.named_children:
+            if _span(child) in barriers:
+                continue
             if child.type in _CALL_TYPES:
                 name_node = child.child_by_field_name("name") or child.child_by_field_name(
                     "function"
@@ -152,7 +184,15 @@ def build_function(
     fn_id = disambiguate(function_id(path, name, start, class_name=class_name), seen_ids)
 
     body = node.child_by_field_name("body")
-    calls = _calls(body, source, class_name=class_name, resolve=resolve)
+    nested_closures = collect_closures(body)
+    closure_barriers = frozenset(_span(closure) for closure in nested_closures)
+    calls = _calls(
+        body,
+        source,
+        class_name=class_name,
+        resolve=resolve,
+        barriers=closure_barriers,
+    )
 
     # All attributes on the function/method
     all_decs = list(decorators) + extract_attributes(node, source)
@@ -174,6 +214,7 @@ def build_function(
     )
 
     fn_statements: list[Statement] = []
+    nested_function_nodes: list[Function] = []
     if capture and body is not None:
         fn_statements = extract_statements(
             body,
@@ -184,9 +225,42 @@ def build_function(
             limit=limit,
             seen_ids=seen_ids,
             descend_all=True,
+            barriers=closure_barriers,
         )
+        if node.type == "arrow_function":
+            fn_statements.extend(
+                extract_arrow_expression(
+                    node,
+                    source,
+                    path,
+                    parent_id=fn_id,
+                    limit=limit,
+                    seen_ids=seen_ids,
+                )
+            )
 
-    return [fn], fn_statements
+    for closure in nested_closures:
+        closure_kind = "arrow_function" if closure.type == "arrow_function" else "function_expression"
+        nested_functions, nested_statements = build_function(
+            closure,
+            name="<anonymous>",
+            kind=closure_kind,
+            decorators=[],
+            source=source,
+            path=path,
+            parent_id=fn_id,
+            class_name=class_name,
+            seen_ids=seen_ids,
+            capture=capture,
+            limit=limit,
+            resolve=resolve,
+        )
+        fn_statements.extend(nested_statements)
+        # The current function is returned first; its nested closures follow it.
+        # This maintains parent-before-child ordering in the flat record.
+        nested_function_nodes.extend(nested_functions)
+
+    return [fn, *nested_function_nodes], fn_statements
 
 
 def defined_names(root: Node, source: bytes) -> set[str]:

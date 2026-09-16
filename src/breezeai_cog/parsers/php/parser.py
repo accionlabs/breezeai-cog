@@ -18,7 +18,7 @@ from ..callresolve import make_resolver
 from ..comments_common import comment_statements_for
 from ..treesitter import node_text, parse_source
 from .classes import build_class
-from .functions import build_function, defined_names, type_map
+from .functions import build_function, collect_closures, defined_names, type_map
 from .imports import PhpIndex, build_php_index, extract_imports
 from .mappings import COMMENT_TYPES, CONTROL_FLOW, FRAMEWORKS, STATEMENT_TYPES
 from .statements import extract_statements
@@ -141,12 +141,36 @@ class PhpParser(BaseParser):
                 functions.extend(fns)
                 statements.extend(fn_stmts)
 
+        # Top-level closures have no named declaration to discover them.  Build a
+        # Function node for each direct closure; nested closures are handled recursively.
+        for closure in collect_closures(root):
+            closure_kind = "arrow_function" if closure.type == "arrow_function" else "function_expression"
+            fns, fn_stmts = build_function(
+                closure,
+                name="<anonymous>",
+                kind=closure_kind,
+                decorators=[],
+                source=source,
+                path=path,
+                parent_id=fid,
+                class_name=None,
+                seen_ids=seen_ids,
+                capture=capture,
+                limit=limit,
+                resolve=resolve,
+            )
+            functions.extend(fns)
+            statements.extend(fn_stmts)
+
         # File-root procedural statements (excluding extracted classes and functions)
         if capture:
             declared_spans = frozenset(
                 (c.start_byte, c.end_byte)
                 for c in root.named_children
                 if c.type in _CLASS_TYPES or c.type == "function_definition"
+            )
+            closure_spans = frozenset(
+                (closure.start_byte, closure.end_byte) for closure in collect_closures(root)
             )
             root_stmts = extract_statements(
                 root,
@@ -157,7 +181,7 @@ class PhpParser(BaseParser):
                 limit=limit,
                 seen_ids=seen_ids,
                 descend_all=False,
-                barriers=declared_spans,
+                barriers=declared_spans | closure_spans,
             )
             statements.extend(root_stmts)
 

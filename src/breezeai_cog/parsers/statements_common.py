@@ -352,15 +352,20 @@ def _iter_calls(
     call_type: str | Collection[str],
     stmt_expr: Collection[str],
     containers: Collection[str],
+    call_barrier_types: Collection[str] = (),
 ) -> Iterator[Node]:
     for child in node.named_children:
+        if child.type in call_barrier_types:
+            continue
         if child.type in emit_types:
             continue  # a nested statement — classified on its own
         if child.type in stmt_expr and node.type in containers:
             continue  # a bare statement-position expression (its own statement — Python)
         if _is_call_node(child.type, call_type):
             yield child
-        yield from _iter_calls(child, emit_types, call_type, stmt_expr, containers)
+        yield from _iter_calls(
+            child, emit_types, call_type, stmt_expr, containers, call_barrier_types
+        )
 
 
 def _calls_in_statement(
@@ -369,12 +374,13 @@ def _calls_in_statement(
     call_type: str | Collection[str],
     stmt_expr: Collection[str],
     containers: Collection[str],
+    call_barrier_types: Collection[str] = (),
 ) -> Iterator[Node]:
     # The statement node may itself be a call — a bare Python call-statement
     # (``session.add(x)``) has no expression-statement wrapper.
     if _is_call_node(node.type, call_type):
         yield node
-    yield from _iter_calls(node, emit_types, call_type, stmt_expr, containers)
+    yield from _iter_calls(node, emit_types, call_type, stmt_expr, containers, call_barrier_types)
 
 
 #: Block/body node types a control-flow statement wraps (empirically verified across
@@ -422,6 +428,7 @@ def classify_statement(
     language: str | None = None,
     typed_db_ids: frozenset[str] | None = None,
     decorators: list[Decorator] | None = None,
+    call_barrier_types: Collection[str] = (),
 ) -> list[Statement]:
     # ``code_text`` (comment-free) drives query/semantic detection; ``display_text`` is what
     # lands on the record — for a normal statement it folds in a same-line trailing comment
@@ -438,7 +445,9 @@ def classify_statement(
     # All api/db/query hits in this statement's own expression, deduped by (kind, method).
     hits: list[tuple[str, str, str | None, str | None, Node]] = []
     seen_hit: set[tuple[str, str]] = set()
-    for call in _calls_in_statement(node, emit_types, call_type, stmt_expr, container_types):
+    for call in _calls_in_statement(
+        node, emit_types, call_type, stmt_expr, container_types, call_barrier_types
+    ):
         det = call_details(call, source)
         if det is None:
             continue

@@ -16,6 +16,8 @@ EMIT_TYPES: frozenset[str] = frozenset(
         "return_statement",
         "throw_statement",
         "echo_statement",
+        "const_declaration",
+        "property_declaration",
         "global_declaration",
         "goto_statement",
         "break_statement",
