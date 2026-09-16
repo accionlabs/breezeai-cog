@@ -79,7 +79,7 @@ infra/
 ├── provider_config.py    # ProviderConfig
 ├── factory.py             # ProviderFactory
 └── aws/
-    └── s3.py              # AWSStreamUpload + S3 client/reconnect logic
+    └── s3.py              # AWSStreamUpload + shared S3 client (SDK-level retries)
 
 ```
 

@@ -48,6 +48,7 @@ def test_write_line():
 
     mock_client.upload_fileobj.assert_called_once()
 
+
 def test_close():
     settings = create_test_settings()
     mock_client = Mock()
@@ -185,6 +186,7 @@ def test_close_twice_does_not_upload_twice():
 
     mock_client.upload_fileobj.assert_called_once()
 
+
 # ── Tests using the reading fake (real pipe semantics) ────────────────────────
 
 
@@ -216,7 +218,7 @@ def test_payload_larger_than_pipe_buffer_does_not_block():
     settings = create_test_settings()
     client = ReadingS3Client()
 
-    line = ('{"payload": "' + "x" * 500 + '"}\n')
+    line = '{"payload": "' + "x" * 500 + '"}\n'
     count = 400  # ~200KB uncompressed, well past the pipe buffer
 
     stream = AWSStreamUpload("big.json", settings, client=client)

@@ -16,28 +16,28 @@ from typing import Any
 
 from botocore.config import Config
 
-from breezeai_cog.config import Settings
-from breezeai_cog.infra.interface import InfraStream
+from ...config import Settings
+from ..interface import InfraStream
 
 _client: Any | None = None
 _client_lock = Lock()
- 
- 
+
+
 def _default_client(settings: Settings) -> Any:
     """
     Creates and returns the shared AWS S3 client.
- 
+
     Args:
         settings (Settings): AWS configuration and credentials.
     Returns:
         Any: The configured AWS S3 client.
     """
     global _client
- 
+
     with _client_lock:
         if _client is None:
             import boto3
- 
+
             config = Config(
                 retries={
                     "max_attempts": settings.storage_retry_attempts,
@@ -46,59 +46,58 @@ def _default_client(settings: Settings) -> Any:
                 connect_timeout=settings.storage_connect_timeout,
                 read_timeout=settings.storage_read_timeout,
             )
- 
+
             _client = boto3.client(
                 "s3",
                 region_name=settings.aws_region,
                 config=config,
                 **settings.aws_credentials_kwargs,
             )
- 
+
         return _client
- 
 
 
 class AWSStreamUpload(InfraStream):
-    def __init__(self,key: str,settings: Settings,*,client: Any | None = None) -> None:
+    def __init__(self, key: str, settings: Settings, *, client: Any | None = None) -> None:
         bucket = settings.aws_s3_bucket
- 
+
         if not bucket:
             raise ValueError("AWS_S3_BUCKET is not configured")
- 
+
         if settings.storage_retry_attempts < 1:
             raise ValueError("storage_retry_attempts must be at least 1")
- 
+
         self._bucket = bucket
         self._key = key
         self._settings = settings
         self._client = client if client is not None else _default_client(settings)
- 
+
         read_fd, write_fd = os.pipe()
         self._reader = os.fdopen(read_fd, "rb")
         self._writer = os.fdopen(write_fd, "wb")
         self._gz = gzip.GzipFile(fileobj=self._writer, mode="wb")
- 
+
         self._error: BaseException | None = None
         self._error_lock = Lock()
- 
+
         self._closed = False
         self._close_lock = Lock()
- 
+
         self._thread = threading.Thread(
             target=self._run_upload,
             name=f"s3-upload-{key}",
             daemon=True,
         )
         self._thread.start()
- 
+
     def _set_error(self, exc: BaseException) -> None:
-            with self._error_lock:
-                if self._error is None:
-                    self._error = exc
+        with self._error_lock:
+            if self._error is None:
+                self._error = exc
 
     def _get_error(self) -> BaseException | None:
-            with self._error_lock:
-                return self._error
+        with self._error_lock:
+            return self._error
 
     def _run_upload(self) -> None:
         """Background worker. The only thing that reads self._reader."""
@@ -120,7 +119,6 @@ class AWSStreamUpload(InfraStream):
             except OSError:
                 pass
 
-
     def _wait_for_upload(self) -> None:
         """
         Wait for the background upload to finish and raise
@@ -134,7 +132,6 @@ class AWSStreamUpload(InfraStream):
         error = self._get_error()
         if error is not None:
             raise error
-
 
     def write_line(self, line: str) -> None:
         """Write one line to the streaming upload."""
@@ -151,7 +148,7 @@ class AWSStreamUpload(InfraStream):
             error = self._get_error()
             if error is not None:
                 raise error from exc
-            raise   
+            raise
 
     def close(self) -> str:
         """Finish the upload and return the S3 key."""

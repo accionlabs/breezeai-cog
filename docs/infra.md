@@ -104,7 +104,7 @@ The implementation provides the following functionality:
 * Uploading the stream to S3.
 * Closing the stream.
 * Configuring S3 object metadata.
-* Handling supported connection-related upload failures through retry and reconnection logic.
+* Surfacing upload failures on close, after the AWS SDK's own retries are exhausted.
 
 ---
 
@@ -190,18 +190,17 @@ The content type identifies the data as newline-delimited JSON, while the conten
 
 ---
 
-## 7. Retry and Reconnection
+## 7. Retry and Failure Handling
 
-The S3 upload implementation includes retry and reconnection handling for supported connection-related errors.
+Retries are performed by the AWS SDK, not by this code. The upload streams from an OS pipe, which cannot be rewound — retrying the whole upload would re-send only the unconsumed tail and store a truncated object. botocore instead retries an individual multipart part, which it can replay from its own buffer.
 
-When an upload fails due to a supported connection error:
+The client is configured with:
 
-1. The existing S3 client is invalidated.
-2. A new S3 client is created.
-3. The upload operation is retried.
-4. The configured retry count and retry wait are applied.
+1. `storage_retry_attempts` — retries per request, in `adaptive` mode (adds client-side rate limiting). botocore counts *retries*, so 3 allows up to 4 total attempts.
+2. `storage_connect_timeout` — seconds to establish a connection.
+3. `storage_read_timeout` — seconds to wait for a response.
 
-This allows the upload operation to recover from temporary connection failures.
+If the SDK's retries are exhausted, the error is recorded and re-raised by `close()`. `close()` never returns a storage key for an incomplete object, so neither the caller nor the backend notification is pointed at a corrupt upload.
 
 ---
 
