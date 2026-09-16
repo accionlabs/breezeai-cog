@@ -103,13 +103,13 @@ def test_upload_uses_correct_s3_arguments():
 
 def test_zero_retry_attempts_raises_error():
     settings = create_test_settings()
-    settings.s3_retry_attempts = 0
+    settings.storage_retry_attempts = 0
 
     mock_client = Mock()
 
     with pytest.raises(
         ValueError,
-        match="s3_retry_attempts must be at least 1",
+        match="storage_retry_attempts must be at least 1",
     ):
         AWSStreamUpload(
             "test.json",

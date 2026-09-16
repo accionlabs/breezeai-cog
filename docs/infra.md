@@ -216,7 +216,9 @@ Relevant configuration includes:
 | `aws_s3_bucket`          | S3 bucket used for uploads               |
 | `aws_region`             | AWS region used by the S3 client         |
 | `aws_credentials_kwargs` | AWS credential configuration             |
-| S3 retry settings        | Controls retry and reconnection behavior |
+| `storage_retry_attempts` | Retries per request, applied by the SDK  |
+| `storage_connect_timeout`| Connection timeout in seconds            |
+| `storage_read_timeout`   | Response timeout in seconds              |
 
 Configuration values should be provided through the application's configuration mechanism rather than being hardcoded in the implementation.
 

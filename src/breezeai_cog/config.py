@@ -103,10 +103,14 @@ class Settings(BaseSettings):
     # failures (network / timeout / HTTP 5xx) retry; a 4xx is fatal. --upload-max-retries.
     upload_max_retries: int = Field(default=1, ge=0)
 
+    # ── Infra / object storage (provider-agnostic; see infra/interface.py) ──
     infra_provider: Literal["aws"] = "aws"
-    s3_retry_attempts: int = Field(default=3, ge=1)
-    s3_connect_timeout: int = 10
-    s3_read_timeout: int = 60
+    # Retries are performed by the provider SDK, which owns the mechanism (the
+    # stream source is not replayable). Note botocore's max_attempts counts
+    # RETRIES, so N here yields N+1 total tries.
+    storage_retry_attempts: int = Field(default=3, ge=1)
+    storage_connect_timeout: int = Field(default=10, ge=1)
+    storage_read_timeout: int = Field(default=60, ge=1)
 
     # ── AWS / S3 (server, conventional unprefixed names) ──────────────────
     aws_access_key: str | None = Field(

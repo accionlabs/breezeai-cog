@@ -40,11 +40,11 @@ def _default_client(settings: Settings) -> Any:
  
             config = Config(
                 retries={
-                    "max_attempts": settings.s3_retry_attempts,
+                    "max_attempts": settings.storage_retry_attempts,
                     "mode": "adaptive",
                 },
-                connect_timeout=settings.s3_connect_timeout,
-                read_timeout=settings.s3_read_timeout,
+                connect_timeout=settings.storage_connect_timeout,
+                read_timeout=settings.storage_read_timeout,
             )
  
             _client = boto3.client(
@@ -65,8 +65,8 @@ class AWSStreamUpload(InfraStream):
         if not bucket:
             raise ValueError("AWS_S3_BUCKET is not configured")
  
-        if settings.s3_retry_attempts < 1:
-            raise ValueError("s3_retry_attempts must be at least 1")
+        if settings.storage_retry_attempts < 1:
+            raise ValueError("storage_retry_attempts must be at least 1")
  
         self._bucket = bucket
         self._key = key
@@ -78,7 +78,7 @@ class AWSStreamUpload(InfraStream):
         self._writer = os.fdopen(write_fd, "wb")
         self._gz = gzip.GzipFile(fileobj=self._writer, mode="wb")
  
-        self._error: Exception | None = None
+        self._error: BaseException | None = None
         self._error_lock = Lock()
  
         self._closed = False
@@ -91,12 +91,12 @@ class AWSStreamUpload(InfraStream):
         )
         self._thread.start()
  
-    def _set_error(self, exc: Exception) -> None:
+    def _set_error(self, exc: BaseException) -> None:
             with self._error_lock:
                 if self._error is None:
                     self._error = exc
-    
-    def _get_error(self) -> Exception | None:
+
+    def _get_error(self) -> BaseException | None:
             with self._error_lock:
                 return self._error
 
