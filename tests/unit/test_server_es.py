@@ -7,7 +7,6 @@ import json
 
 import pytest
 from fastapi.testclient import TestClient
-
 from breezeai_cog.config import Settings
 from breezeai_cog.server.app import create_app
 from breezeai_cog.server.deps import ServerDeps
@@ -39,7 +38,7 @@ class _Captured:
         self.notifications: list[tuple[str, dict]] = []
 
 
-class _FakeS3:
+class _FakeInfra:
     def __init__(self, captured: _Captured) -> None:
         self._captured = captured
         self._lines: list[str] = []
@@ -60,14 +59,14 @@ def captured() -> _Captured:
 
 @pytest.fixture
 def client(captured: _Captured) -> TestClient:
-    def open_s3(key: str) -> _FakeS3:
-        captured.keys.append(key)
-        return _FakeS3(captured)
+    def open_stream(key: str) -> _FakeInfra:
+            captured.keys.append(key)
+            return _FakeInfra(captured)
 
     def notify(path: str, payload: dict) -> None:
         captured.notifications.append((path, payload))
 
-    deps = ServerDeps(settings=Settings(), open_s3=open_s3, notify=notify)
+    deps = ServerDeps(settings=Settings(), open_storage=open_stream, notify=notify)
     return TestClient(create_app(Settings(), deps))
 
 
@@ -80,7 +79,7 @@ def test_mapping_upload(client: TestClient, captured: _Captured) -> None:
     assert r.status_code == 202
     out = r.json()
     assert out["mode"] == "mapping" and out["indexCount"] == 1 and out["fieldCount"] == 6
-    assert out["s3Key"].startswith("es-ontology/P1/D1/") and out["s3Key"].endswith(".ndjson.gz")
+    assert out["storage_key"].startswith("es-ontology/P1/D1/") and out["storage_key"].endswith(".ndjson.gz")
     rec = captured.records[0]
     assert rec["__type"] == "es_index" and rec["indexName"] == "products"
     assert rec["aliases"][0] == {"name": "all", "filter": None, "isWriteIndex": True}
@@ -90,7 +89,7 @@ def test_mapping_upload(client: TestClient, captured: _Captured) -> None:
     assert next(f for f in rec["fields"] if f["fullPath"] == "title.raw")["isMultiField"] is True
     path, payload = captured.notifications[0]
     assert path == "/db-ontology/stream-ingest-s3"
-    assert payload == {"s3Key": out["s3Key"], "projectUuid": "P1", "dataLakeId": "D1",
+    assert payload == {"storage_key": out["storage_key"], "projectUuid": "P1", "dataLakeId": "D1",
                        "repositoryName": "products.json"}
 
 
@@ -102,7 +101,7 @@ def test_settings_only_upload(client: TestClient, captured: _Captured) -> None:
     )
     assert r.status_code == 202
     out = r.json()
-    assert out["mode"] == "settings-only" and "-settings" in out["s3Key"]
+    assert out["mode"] == "settings-only" and "-settings" in out["storage_key"]
     rec = captured.records[0]
     assert rec["__type"] == "es_settings" and rec["shards"] == 3 and rec["replicas"] == 1
     assert rec["defaultAnalyzer"] == "standard"
