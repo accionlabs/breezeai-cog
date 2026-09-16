@@ -54,3 +54,190 @@ uv run ruff check . && uv run mypy
 ```
 
 See the [Developer Guide](docs/DEVELOPER_GUIDE.md) for the project layout and how to add a parser.
+
+## InfraStream Provider Abstraction
+
+The **InfraStream Provider Abstraction** provides a common interface for streaming data to cloud-based storage services without exposing provider-specific implementations to the application.
+
+The application uses the generic `InfraStream` interface, while `ProviderFactory` selects the provider-specific implementation based on the configured cloud provider.
+
+### Components
+
+- **Provider Configuration** – Resolves the active cloud provider.
+- **Provider Type** – Defines supported cloud providers.
+- **Provider Factory** – Creates the provider-specific stream implementation.
+- **Generic Interface** – `InfraStream` defines the common streaming contract.
+- **Provider Implementation** – Implements provider-specific streaming and storage operations.
+
+### Structure
+
+```text
+infra/
+├── interface.py          # InfraStream
+├── provider.py           # open_stream()
+├── provider_type.py      # ProviderType
+├── provider_config.py    # ProviderConfig
+├── factory.py             # ProviderFactory
+└── aws/
+    └── s3.py              # AWSStreamUpload + S3 client/reconnect logic
+
+```
+
+### Adding a New Infra Provider
+
+To add a new infra provider to the InfraStream Provider Abstraction:
+
+1. **Add the provider type**
+   - Add the new provider to the `ProviderType` Enum class in `provider_type.py`.
+
+2. **Update the configuration**
+   - Add the new provider name to the `Literal` in `config.py`.
+   - Example, if you want to add Azure:
+     ```python
+     infra_provider: Literal["aws", "azure"] = "azure"
+     ```
+
+3. **Create the provider package**
+   - Create a new folder under `infra/` for the provider.
+   - Add the provider-specific storage/stream implementation.
+   - Implement the `InfraStream` interface in the provider-specific Infra service , such as AzureStreamUpload for Azure.
+   - Implement the required stream operations, including write_line(), close(), and upload() where supported by the provider.
+   - Keep provider-specific SDK usage, client initialization, authentication, configuration, and connection handling inside the provider package.
+
+4. **Update `ProviderFactory`**
+   - Add the provider to the `create_stream()` method.
+   - Example:
+     ```python
+     case ProviderType.AZURE:
+         return AzureStreamUpload(key, settings)
+     ```
+
+5. **Keep application code provider-agnostic**
+   - Application code should continue to use the generic `open_stream()` interface:
+     ```python
+     stream = provider.open_stream(key, settings)
+     stream.write_line(data)
+     stream.close()
+     ```
+   - Avoid directly instantiating provider-specific implementations such as `AWSStreamUpload` or `AzureStreamUpload`.
+
+### Provider Selection Flow
+
+```mermaid
+flowchart TB
+    A[config.py]
+    B[ProviderConfig]
+    C[ProviderType]
+    D[ProviderFactory]
+    E[InfraStream]
+    F[AWSStreamUpload]
+    G[S3]
+
+    A -->|Selected provider| B
+    B -->|Validate against| C
+    C -->|Valid provider| D
+    D -->|Creates| E
+    E -->|Implemented by| F
+    F -->|write_line / upload / close| G
+```
+
+### Provider Architecture
+  ```mermaid
+   classDiagram
+
+    direction TB
+
+    %% =========================
+    %% Configuration
+    %% =========================
+
+    class ProviderType {
+        <<enumeration>>
+        AWS = "aws"
+    }
+
+    class ProviderConfig {
+        -_provider: ProviderType
+        +is_active: ProviderType
+        +from_settings() ProviderConfig
+    }
+
+    ProviderConfig --> ProviderType : uses
+
+
+    %% =========================
+    %% Factory
+    %% =========================
+
+    class ProviderFactory {
+        -provider: ProviderType
+        +create_stream(key, settings) InfraStream
+    }
+
+    ProviderFactory --> ProviderType : uses
+    ProviderFactory ..> InfraStream : creates
+
+
+    %% =========================
+    %% Infrastructure Interface
+    %% =========================
+
+    class InfraStream {
+        <<interface>>
+        +write_line(line: str) None
+        +upload() None
+        +close() str
+    }
+
+
+    %% =========================
+    %% AWS Implementation
+    %% =========================
+
+    class AWSStreamUpload {
+        -_bucket: str
+        -_key: str
+        -_settings: Settings
+        -_client: Any
+        -_reader: IO
+        -_writer: IO
+        -_gz: GzipFile
+        -_error: BaseException
+        -_error_lock: Lock
+        -_closed: bool
+        -_close_lock: Lock
+        -_thread: Thread
+
+        +__enter__() AWSStreamUpload
+        +__exit__(exc_type, exc, tb) None
+        +write_line(line: str) None
+        +upload() None
+        +close() str
+
+        -_run_upload() None
+        -_set_error(exc: Exception) None
+        -_get_error() Exception
+        -_abort() None
+    }
+
+
+    %% =========================
+    %% Interface Implementation
+    %% =========================
+
+    InfraStream <|.. AWSStreamUpload
+
+
+    %% =========================
+    %% Provider Facade
+    %% =========================
+
+    class provider.py {
+        <<facade>>
+        +open_stream(key, settings) InfraStream
+    }
+
+    provider.py --> ProviderConfig : uses
+    provider.py --> ProviderFactory : initializes
+    provider.py --> InfraStream : exposes
+    ```
