@@ -62,6 +62,48 @@ def _handler_text(arg_node: Node | None, source: bytes) -> str | None:
     return _resolve_handler(arg_node, source)
 
 
+def _combine_paths(prefix: str, path: str | None) -> str | None:
+    """Join route-group prefixes using CodeIgniter's route path semantics."""
+    if not path:
+        return f"/{prefix.strip('/')}" if prefix else None
+    if not prefix:
+        return path
+    return f"/{prefix.strip('/')}/{path.lstrip('/')}"
+
+
+def _enclosing_group_prefix(node: Node, source: bytes) -> str:
+    """Return Laravel ``prefix()`` values from enclosing ``group()`` calls."""
+    prefixes: list[str] = []
+    current = node.parent
+    while current is not None:
+        if current.type in ("anonymous_function", "anonymous_function_creation_expression", "arrow_function"):
+            argument = current.parent
+            arguments = argument.parent if argument is not None else None
+            group_call = arguments.parent if arguments is not None else None
+            if (
+                argument is not None
+                and arguments is not None
+                and arguments.type == "arguments"
+                and group_call is not None
+                and group_call.type in ("member_call_expression", "nullsafe_member_call_expression")
+                and (name := group_call.child_by_field_name("name")) is not None
+                and node_text(name, source).lower() == "group"
+            ):
+                call = group_call.child_by_field_name("object")
+                group_prefixes: list[str] = []
+                while call is not None:
+                    name = call.child_by_field_name("name")
+                    if name is not None and node_text(name, source).lower() == "prefix":
+                        args_node = call.child_by_field_name("arguments")
+                        args = list(args_node.named_children) if args_node is not None else []
+                        if args and (prefix := _render_url(args[0], source)):
+                            group_prefixes.append(prefix)
+                    call = call.child_by_field_name("object")
+                prefixes.extend(reversed(group_prefixes))
+        current = current.parent
+    return "/".join(prefix.strip("/") for prefix in reversed(prefixes) if prefix)
+
+
 def detect_laravel_routes(
     root: Node,
     source: bytes,
@@ -86,10 +128,11 @@ def detect_laravel_routes(
                         start, col = node.start_point[0] + 1, node.start_point[1]
                         end = node.end_point[0] + 1
                         owner_id = owner_id_for_node(node, source, path)
+                        prefix = _enclosing_group_prefix(node, source)
 
                         if method_name == "match" and len(args) >= 2:
                             # Route::match(['GET', 'POST'], '/path', handler)
-                            endpoint = _render_url(args[1], source)
+                            endpoint = _combine_paths(prefix, _render_url(args[1], source))
                             handler = _handler_text(args[2] if len(args) > 2 else None, source)
                             http_verbs = _extract_verbs(args[0], source) or ["GET"]
                             for verb in http_verbs:
@@ -124,7 +167,7 @@ def detect_laravel_routes(
                                     register_statement_span(seen_ids, fid, node.start_byte, node.end_byte, stmt)
                                     routes.append(stmt)
                         elif method_name in ("resource", "apiresource"):
-                            endpoint = _render_url(args[0], source)
+                            endpoint = _combine_paths(prefix, _render_url(args[0], source))
                             handler = _handler_text(args[1] if len(args) > 1 else None, source)
                             existing = find_statement_by_span(
                                 seen_ids, fid, node.start_byte, node.end_byte, node=node
@@ -158,7 +201,7 @@ def detect_laravel_routes(
                                 routes.append(stmt)
                         else:
                             # Route::get, Route::post, Route::any, etc.
-                            endpoint = _render_url(args[0], source)
+                            endpoint = _combine_paths(prefix, _render_url(args[0], source))
                             handler = _handler_text(args[1] if len(args) > 1 else None, source)
                             verb = "ANY" if method_name == "any" else method_name.upper()
                             existing = find_statement_by_span(

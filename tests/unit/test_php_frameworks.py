@@ -400,6 +400,37 @@ Route::match('GET', '/single', 'ProfileController@single');
     assert routes_single[0].method == "GET"
 
 
+def test_laravel_prefix_group_resolves_route_endpoint(tmp_path: Path) -> None:
+    src = b"""<?php
+use Illuminate\\Support\\Facades\\Route;
+
+Route::prefix('admin')->group(function () {
+    Route::get('dashboard', 'AdminController@dashboard');
+});
+"""
+    rec = _parse(LaravelParser, tmp_path, src, "routes/web.php")
+    routes = [s for s in rec.statements if s.semanticType == "route"]
+    assert len(routes) == 1
+    assert routes[0].endpoint == "/admin/dashboard"
+
+
+def test_slim_nested_groups_resolve_route_endpoint(tmp_path: Path) -> None:
+    src = b"""<?php
+use Slim\\Factory\\AppFactory;
+
+$app = AppFactory::create();
+$app->group('/api', function ($group) {
+    $group->group('/v1', function ($group) {
+        $group->get('/users', function ($req, $res) { return $res; });
+    });
+});
+"""
+    rec = _parse(SlimParser, tmp_path, src, "src/index.php")
+    routes = [s for s in rec.statements if s.semanticType == "route"]
+    assert len(routes) == 1
+    assert routes[0].endpoint == "/api/v1/users"
+
+
 def test_codeigniter4_group_with_options(tmp_path: Path) -> None:
     src = b"""<?php
 namespace Config;
