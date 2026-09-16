@@ -49,6 +49,10 @@ def _combine_paths(prefix: str | None, path: str | None) -> str:
     return f"{pfx}/{sub}"
 
 
+def _is_route_decorator(name: str) -> bool:
+    return name == "Route" or name.endswith("\\Route")
+
+
 def detect_symfony_routes(
     record: FileRecord,
     seen_ids: set[str],
@@ -61,14 +65,14 @@ def detect_symfony_routes(
     class_map = {c.id: c for c in record.classes}
     for cls in record.classes:
         for dec in cls.decorators:
-            if dec.name == "Route" or dec.name.endswith("\\Route"):
+            if _is_route_decorator(dec.name):
                 cpath, _, _ = _parse_route_attr(dec.args)
                 if cpath:
                     class_prefixes[cls.id] = cpath
 
     for fn in record.functions:
         for dec in fn.decorators:
-            if dec.name == "Route" or dec.name.endswith("\\Route"):
+            if _is_route_decorator(dec.name):
                 mpath, methods, rname = _parse_route_attr(dec.args)
                 cls_prefix = class_prefixes.get(fn.parentId)
                 full_path = _combine_paths(cls_prefix, mpath)
@@ -97,5 +101,8 @@ def detect_symfony_routes(
                             framework="symfony",
                         )
                     )
+        # ``Route`` attributes are fully represented by the emitted route statements.
+        # Preserve non-routing PHP attributes on the function.
+        fn.decorators = [dec for dec in fn.decorators if not _is_route_decorator(dec.name)]
 
     return routes

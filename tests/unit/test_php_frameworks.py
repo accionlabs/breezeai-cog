@@ -122,6 +122,26 @@ class UserController
     assert "/api/users/{id}" in endpoints
 
 
+def test_symfony_route_attribute_is_not_retained_as_decorator(tmp_path: Path) -> None:
+    src = b"""<?php
+namespace App\\Controller;
+
+use Symfony\\Component\\Routing\\Attribute\\Route;
+
+class ExampleController
+{
+    #[Route('/x')]
+    #[Audit]
+    public function show() {}
+}
+"""
+    rec = _parse(SymfonyParser, tmp_path, src, "src/Controller/ExampleController.php")
+    route = next(s for s in rec.statements if s.semanticType == "route")
+    assert route.endpoint == "/x"
+    fn = next(fn for fn in rec.functions if fn.name == "show")
+    assert [decorator.name for decorator in fn.decorators] == ["Audit"]
+
+
 def test_codeigniter4_routes(tmp_path: Path) -> None:
     src = b"""<?php
 namespace Config;
