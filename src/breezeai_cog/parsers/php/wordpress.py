@@ -4,8 +4,9 @@ from __future__ import annotations
 
 from tree_sitter import Node
 
-from ...emit import disambiguate, statement_id
+from ...emit import disambiguate, file_id, find_statement_by_span, register_statement_span, statement_id
 from ...schemas import Statement
+from .owner import owner_id_for_node
 from ..treesitter import node_text
 
 _HOOK_FUNCTIONS = frozenset({"add_action", "add_filter"})
@@ -19,6 +20,7 @@ def detect_wordpress_hooks(
     seen_ids: set[str],
 ) -> list[Statement]:
     """Detect WordPress add_action / add_filter hook registrations."""
+    fid = file_id(path)
     out: list[Statement] = []
 
     def visit(node: Node) -> None:
@@ -39,14 +41,27 @@ def detect_wordpress_hooks(
                             handler_node = args.named_children[1]
                             handler = node_text(handler_node, source)
 
-                        start, col = node.start_point[0] + 1, node.start_point[1]
-                        end = node.end_point[0] + 1
-                        sid = disambiguate(statement_id(path, start, col), seen_ids)
+                        owner_id = owner_id_for_node(node, source, path)
 
-                        out.append(
-                            Statement(
+                        existing = find_statement_by_span(
+                            seen_ids, fid, node.start_byte, node.end_byte, node=node
+                        )
+                        if existing is not None and existing.semanticType is None:
+                            existing.semanticType = "route"
+                            existing.routeKind = "eventbus_consumer"
+                            existing.method = "CONSUMER"
+                            existing.endpoint = hook_tag
+                            existing.handler = handler
+                            existing.framework = "wordpress"
+                            existing.parentId = owner_id
+                        else:
+                            start, col = node.start_point[0] + 1, node.start_point[1]
+                            end = node.end_point[0] + 1
+                            sid = disambiguate(statement_id(path, start, col), seen_ids)
+
+                            stmt = Statement(
                                 id=sid,
-                                parentId=parent_id,
+                                parentId=owner_id,
                                 nodeType=node.type,
                                 semanticType="route",
                                 routeKind="eventbus_consumer",
@@ -59,7 +74,8 @@ def detect_wordpress_hooks(
                                 path=path,
                                 framework="wordpress",
                             )
-                        )
+                            register_statement_span(seen_ids, fid, node.start_byte, node.end_byte, stmt)
+                            out.append(stmt)
         for child in node.named_children:
             visit(child)
 

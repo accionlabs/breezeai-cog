@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from ...emit import SeenIds
 from ...schemas import FileRecord
 from ..base import ParseContext
 from ..php.parser import PhpParser, composer_requires
@@ -24,10 +25,12 @@ class SymfonyParser(PhpParser):
 
     def parse_file(self, ctx: ParseContext) -> FileRecord:
         root = parse_source("php", ctx.source, ctx.parse_timeout_micros).root_node
-        record = self.extract(root, ctx)  # inherited base extraction, ONE parse
+        seen_ids = SeenIds()
+        record = self.extract(root, ctx, seen_ids=seen_ids)  # inherited base extraction, ONE parse
         if ctx.capture_statements and not self.is_fixture_file(ctx.path):
-            routes = detect_symfony_routes(record, seen_ids={s.id for s in record.statements})
+            routes = detect_symfony_routes(record, seen_ids=seen_ids)
             if routes:
                 record.statements.extend(routes)
+            if any(s.semanticType == "route" and s.framework == "symfony" for s in record.statements):
                 record.framework = "symfony"
         return record

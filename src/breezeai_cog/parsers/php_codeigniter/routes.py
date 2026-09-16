@@ -4,8 +4,15 @@ from __future__ import annotations
 
 from tree_sitter import Node
 
-from ...emit import disambiguate, file_id, statement_id
+from ...emit import (
+    disambiguate,
+    file_id,
+    find_statement_by_span,
+    register_statement_span,
+    statement_id,
+)
 from ...schemas import Statement
+from ..php.owner import owner_id_for_node
 from ..statements_common import (
     _extract_verbs,
     _resolve_handler,
@@ -104,6 +111,7 @@ def detect_codeigniter_routes(
                     if args:
                         start, col = node.start_point[0] + 1, node.start_point[1]
                         end = node.end_point[0] + 1
+                        owner_id = owner_id_for_node(node, source, path)
 
                         if method_name == "group" and len(args) >= 2:
                             # $routes->group('admin', function($routes) { ... })
@@ -142,11 +150,22 @@ def detect_codeigniter_routes(
                             handler = _handler_text(args[2] if len(args) > 2 else None, source)
                             http_verbs = _extract_verbs(args[0], source) or ["GET"]
                             for verb in http_verbs:
-                                sid = disambiguate(statement_id(path, start, col), seen_ids)
-                                routes.append(
-                                    Statement(
+                                existing = find_statement_by_span(
+                                    seen_ids, fid, node.start_byte, node.end_byte, node=node
+                                )
+                                if existing is not None and existing.semanticType is None:
+                                    existing.semanticType = "route"
+                                    existing.routeKind = "route"
+                                    existing.method = verb
+                                    existing.endpoint = endpoint
+                                    existing.handler = handler
+                                    existing.framework = "codeigniter"
+                                    existing.parentId = owner_id
+                                else:
+                                    sid = disambiguate(statement_id(path, start, col), seen_ids)
+                                    stmt = Statement(
                                         id=sid,
-                                        parentId=fid,
+                                        parentId=owner_id,
                                         nodeType=node.type,
                                         semanticType="route",
                                         routeKind="route",
@@ -159,16 +178,28 @@ def detect_codeigniter_routes(
                                         path=path,
                                         framework="codeigniter",
                                     )
-                                )
+                                    register_statement_span(seen_ids, fid, node.start_byte, node.end_byte, stmt)
+                                    routes.append(stmt)
                         elif method_name in ("resource", "presenter"):
                             # $routes->resource('photos')
                             endpoint = _combine_paths(prefix, _render_url(args[0], source))
                             handler = _handler_text(args[1] if len(args) > 1 else None, source)
-                            sid = disambiguate(statement_id(path, start, col), seen_ids)
-                            routes.append(
-                                Statement(
+                            existing = find_statement_by_span(
+                                seen_ids, fid, node.start_byte, node.end_byte, node=node
+                            )
+                            if existing is not None and existing.semanticType is None:
+                                existing.semanticType = "route"
+                                existing.routeKind = "route"
+                                existing.method = "ANY"
+                                existing.endpoint = endpoint
+                                existing.handler = handler
+                                existing.framework = "codeigniter"
+                                existing.parentId = owner_id
+                            else:
+                                sid = disambiguate(statement_id(path, start, col), seen_ids)
+                                stmt = Statement(
                                     id=sid,
-                                    parentId=fid,
+                                    parentId=owner_id,
                                     nodeType=node.type,
                                     semanticType="route",
                                     routeKind="route",
@@ -181,7 +212,8 @@ def detect_codeigniter_routes(
                                     path=path,
                                     framework="codeigniter",
                                 )
-                            )
+                                register_statement_span(seen_ids, fid, node.start_byte, node.end_byte, stmt)
+                                routes.append(stmt)
                         else:
                             # $routes->get, $routes->post, $routes->add, etc.
                             endpoint = _combine_paths(prefix, _render_url(args[0], source))
@@ -192,11 +224,22 @@ def detect_codeigniter_routes(
                                 verb = "RPC"
                             else:
                                 verb = method_name.upper()
-                            sid = disambiguate(statement_id(path, start, col), seen_ids)
-                            routes.append(
-                                Statement(
+                            existing = find_statement_by_span(
+                                seen_ids, fid, node.start_byte, node.end_byte, node=node
+                            )
+                            if existing is not None and existing.semanticType is None:
+                                existing.semanticType = "route"
+                                existing.routeKind = "route"
+                                existing.method = verb
+                                existing.endpoint = endpoint
+                                existing.handler = handler
+                                existing.framework = "codeigniter"
+                                existing.parentId = owner_id
+                            else:
+                                sid = disambiguate(statement_id(path, start, col), seen_ids)
+                                stmt = Statement(
                                     id=sid,
-                                    parentId=fid,
+                                    parentId=owner_id,
                                     nodeType=node.type,
                                     semanticType="route",
                                     routeKind="route",
@@ -209,7 +252,8 @@ def detect_codeigniter_routes(
                                     path=path,
                                     framework="codeigniter",
                                 )
-                            )
+                                register_statement_span(seen_ids, fid, node.start_byte, node.end_byte, stmt)
+                                routes.append(stmt)
 
         # CI3: $route['key'] = 'val' or $route['key']['verb'] = 'val'
         elif node.type == "assignment_expression":
@@ -218,6 +262,7 @@ def detect_codeigniter_routes(
             if left is not None and right is not None and left.type == "subscript_expression":
                 c0 = left.named_children[0] if left.named_children else None
                 c1 = left.named_children[1] if len(left.named_children) > 1 else None
+                owner_id = owner_id_for_node(node, source, path)
 
                 # Pattern A: $route['journals'] = 'blogs'
                 if (
@@ -228,13 +273,24 @@ def detect_codeigniter_routes(
                 ):
                     key = _render_url(c1, source)
                     if key and key not in _CI3_IGNORED_KEYS:
-                        start, col = node.start_point[0] + 1, node.start_point[1]
-                        end = node.end_point[0] + 1
-                        sid = disambiguate(statement_id(path, start, col), seen_ids)
-                        routes.append(
-                            Statement(
+                        existing = find_statement_by_span(
+                            seen_ids, fid, node.start_byte, node.end_byte, node=node
+                        )
+                        if existing is not None and existing.semanticType is None:
+                            existing.semanticType = "route"
+                            existing.routeKind = "route"
+                            existing.method = "ANY"
+                            existing.endpoint = key
+                            existing.handler = node_text(right, source).strip("'\"")
+                            existing.framework = "codeigniter"
+                            existing.parentId = owner_id
+                        else:
+                            start, col = node.start_point[0] + 1, node.start_point[1]
+                            end = node.end_point[0] + 1
+                            sid = disambiguate(statement_id(path, start, col), seen_ids)
+                            stmt = Statement(
                                 id=sid,
-                                parentId=fid,
+                                parentId=owner_id,
                                 nodeType=node.type,
                                 semanticType="route",
                                 routeKind="route",
@@ -247,7 +303,8 @@ def detect_codeigniter_routes(
                                 path=path,
                                 framework="codeigniter",
                             )
-                        )
+                            register_statement_span(seen_ids, fid, node.start_byte, node.end_byte, stmt)
+                            routes.append(stmt)
 
                 # Pattern B: $route['products']['get'] = 'catalog/index'
                 elif (
@@ -266,13 +323,24 @@ def detect_codeigniter_routes(
                         endpoint = _render_url(inner_c1, source)
                         verb_str = _render_url(c1, source) or "GET"
                         if endpoint and endpoint not in _CI3_IGNORED_KEYS:
-                            start, col = node.start_point[0] + 1, node.start_point[1]
-                            end = node.end_point[0] + 1
-                            sid = disambiguate(statement_id(path, start, col), seen_ids)
-                            routes.append(
-                                Statement(
+                            existing = find_statement_by_span(
+                                seen_ids, fid, node.start_byte, node.end_byte, node=node
+                            )
+                            if existing is not None and existing.semanticType is None:
+                                existing.semanticType = "route"
+                                existing.routeKind = "route"
+                                existing.method = verb_str.upper()
+                                existing.endpoint = endpoint
+                                existing.handler = node_text(right, source).strip("'\"")
+                                existing.framework = "codeigniter"
+                                existing.parentId = owner_id
+                            else:
+                                start, col = node.start_point[0] + 1, node.start_point[1]
+                                end = node.end_point[0] + 1
+                                sid = disambiguate(statement_id(path, start, col), seen_ids)
+                                stmt = Statement(
                                     id=sid,
-                                    parentId=fid,
+                                    parentId=owner_id,
                                     nodeType=node.type,
                                     semanticType="route",
                                     routeKind="route",
@@ -285,7 +353,8 @@ def detect_codeigniter_routes(
                                     path=path,
                                     framework="codeigniter",
                                 )
-                            )
+                                register_statement_span(seen_ids, fid, node.start_byte, node.end_byte, stmt)
+                                routes.append(stmt)
 
         for child in node.named_children:
             visit(child, prefix=prefix)

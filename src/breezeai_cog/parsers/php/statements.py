@@ -6,6 +6,7 @@ from collections.abc import Iterator
 
 from tree_sitter import Node
 
+from ...emit import file_id, register_statement_span
 from ...schemas import Statement
 from ..statements_common import (
     classify_statement,
@@ -125,22 +126,30 @@ def extract_statements(
     if not capture or body is None:
         return []
     out: list[Statement] = []
+    fid = file_id(path)
     for node in _iter_in_scope(body, descend_all, barriers):
-        out.extend(
-            classify_statement(
-                node,
-                source,
-                path,
-                parent_id=parent_id,
-                limit=limit,
-                seen_ids=seen_ids,
-                emit_types=EMIT_TYPES,
-                control_flow=CONTROL_FLOW,
-                call_type=_CALL_TYPES,
-                name_of=_name_of,
-                call_details=_call_details,
-                language="php",
-                decorators=extract_attributes(node, source),
-            )
+        stmts = classify_statement(
+            node,
+            source,
+            path,
+            parent_id=parent_id,
+            limit=limit,
+            seen_ids=seen_ids,
+            emit_types=EMIT_TYPES,
+            control_flow=CONTROL_FLOW,
+            call_type=_CALL_TYPES,
+            name_of=_name_of,
+            call_details=_call_details,
+            language="php",
+            decorators=extract_attributes(node, source),
         )
+        out.extend(stmts)
+        if stmts:
+            stmt = stmts[0]
+            register_statement_span(seen_ids, fid, node.start_byte, node.end_byte, stmt)
+            if node.type == "expression_statement":
+                for child in node.children:
+                    if child.type != ";":
+                        register_statement_span(seen_ids, fid, child.start_byte, child.end_byte, stmt)
+                        break
     return out

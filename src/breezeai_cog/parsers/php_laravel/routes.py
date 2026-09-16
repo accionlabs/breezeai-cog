@@ -4,8 +4,15 @@ from __future__ import annotations
 
 from tree_sitter import Node
 
-from ...emit import disambiguate, file_id, statement_id
+from ...emit import (
+    disambiguate,
+    file_id,
+    find_statement_by_span,
+    register_statement_span,
+    statement_id,
+)
 from ...schemas import Statement
+from ..php.owner import owner_id_for_node
 from ..statements_common import (
     _extract_verbs,
     _resolve_handler,
@@ -78,6 +85,7 @@ def detect_laravel_routes(
                     if args:
                         start, col = node.start_point[0] + 1, node.start_point[1]
                         end = node.end_point[0] + 1
+                        owner_id = owner_id_for_node(node, source, path)
 
                         if method_name == "match" and len(args) >= 2:
                             # Route::match(['GET', 'POST'], '/path', handler)
@@ -85,11 +93,22 @@ def detect_laravel_routes(
                             handler = _handler_text(args[2] if len(args) > 2 else None, source)
                             http_verbs = _extract_verbs(args[0], source) or ["GET"]
                             for verb in http_verbs:
-                                sid = disambiguate(statement_id(path, start, col), seen_ids)
-                                routes.append(
-                                    Statement(
+                                existing = find_statement_by_span(
+                                    seen_ids, fid, node.start_byte, node.end_byte, node=node
+                                )
+                                if existing is not None and existing.semanticType is None:
+                                    existing.semanticType = "route"
+                                    existing.routeKind = "route"
+                                    existing.method = verb.upper()
+                                    existing.endpoint = endpoint
+                                    existing.handler = handler
+                                    existing.framework = "laravel"
+                                    existing.parentId = owner_id
+                                else:
+                                    sid = disambiguate(statement_id(path, start, col), seen_ids)
+                                    stmt = Statement(
                                         id=sid,
-                                        parentId=fid,
+                                        parentId=owner_id,
                                         nodeType=node.type,
                                         semanticType="route",
                                         routeKind="route",
@@ -102,15 +121,27 @@ def detect_laravel_routes(
                                         path=path,
                                         framework="laravel",
                                     )
-                                )
+                                    register_statement_span(seen_ids, fid, node.start_byte, node.end_byte, stmt)
+                                    routes.append(stmt)
                         elif method_name in ("resource", "apiresource"):
                             endpoint = _render_url(args[0], source)
                             handler = _handler_text(args[1] if len(args) > 1 else None, source)
-                            sid = disambiguate(statement_id(path, start, col), seen_ids)
-                            routes.append(
-                                Statement(
+                            existing = find_statement_by_span(
+                                seen_ids, fid, node.start_byte, node.end_byte, node=node
+                            )
+                            if existing is not None and existing.semanticType is None:
+                                existing.semanticType = "route"
+                                existing.routeKind = "route"
+                                existing.method = "ANY"
+                                existing.endpoint = endpoint
+                                existing.handler = handler
+                                existing.framework = "laravel"
+                                existing.parentId = owner_id
+                            else:
+                                sid = disambiguate(statement_id(path, start, col), seen_ids)
+                                stmt = Statement(
                                     id=sid,
-                                    parentId=fid,
+                                    parentId=owner_id,
                                     nodeType=node.type,
                                     semanticType="route",
                                     routeKind="route",
@@ -123,17 +154,29 @@ def detect_laravel_routes(
                                     path=path,
                                     framework="laravel",
                                 )
-                            )
+                                register_statement_span(seen_ids, fid, node.start_byte, node.end_byte, stmt)
+                                routes.append(stmt)
                         else:
                             # Route::get, Route::post, Route::any, etc.
                             endpoint = _render_url(args[0], source)
                             handler = _handler_text(args[1] if len(args) > 1 else None, source)
                             verb = "ANY" if method_name == "any" else method_name.upper()
-                            sid = disambiguate(statement_id(path, start, col), seen_ids)
-                            routes.append(
-                                Statement(
+                            existing = find_statement_by_span(
+                                seen_ids, fid, node.start_byte, node.end_byte, node=node
+                            )
+                            if existing is not None and existing.semanticType is None:
+                                existing.semanticType = "route"
+                                existing.routeKind = "route"
+                                existing.method = verb
+                                existing.endpoint = endpoint
+                                existing.handler = handler
+                                existing.framework = "laravel"
+                                existing.parentId = owner_id
+                            else:
+                                sid = disambiguate(statement_id(path, start, col), seen_ids)
+                                stmt = Statement(
                                     id=sid,
-                                    parentId=fid,
+                                    parentId=owner_id,
                                     nodeType=node.type,
                                     semanticType="route",
                                     routeKind="route",
@@ -146,7 +189,8 @@ def detect_laravel_routes(
                                     path=path,
                                     framework="laravel",
                                 )
-                            )
+                                register_statement_span(seen_ids, fid, node.start_byte, node.end_byte, stmt)
+                                routes.append(stmt)
         for child in node.named_children:
             visit(child)
 

@@ -6,10 +6,11 @@ import json
 from collections.abc import Sequence
 from functools import lru_cache
 from pathlib import Path
+from typing import Any
 
 from tree_sitter import Node
 
-from ...emit import file_id
+from ...emit import SeenIds, file_id
 from ...schemas import SCHEMA_VERSION, FileRecord, Function, Statement
 from ...utils import count_loc
 from ..base import BaseParser, ParseContext
@@ -88,10 +89,11 @@ class PhpParser(BaseParser):
         root = parse_source("php", ctx.source, ctx.parse_timeout_micros).root_node
         return self.extract(root, ctx)
 
-    def extract(self, root: Node, ctx: ParseContext) -> FileRecord:
+    def extract(self, root: Node, ctx: ParseContext, seen_ids: Any | None = None) -> FileRecord:
         source, path = ctx.source, ctx.path
         fid = file_id(path)
-        seen_ids: set[str] = set()
+        if seen_ids is None:
+            seen_ids = SeenIds()
         capture, limit = ctx.capture_statements, ctx.statement_text_limit
 
         internal, external, exports, bindings = extract_imports(
@@ -186,7 +188,7 @@ class PhpParser(BaseParser):
                 )
             )
 
-        return FileRecord(
+        rec = FileRecord(
             id=fid,
             path=path,
             type="code",
@@ -199,3 +201,5 @@ class PhpParser(BaseParser):
             classes=classes,
             statements=statements,
         )
+        rec._seen_ids = seen_ids
+        return rec

@@ -8,7 +8,7 @@ from pathlib import Path
 from jsonschema import Draft202012Validator
 
 from breezeai_cog.core import registry
-from breezeai_cog.emit import to_line
+from breezeai_cog.emit import function_id, to_line
 from breezeai_cog.parsers.base import ParseContext
 from breezeai_cog.parsers.php.parser import PhpParser
 from breezeai_cog.parsers.php_codeigniter.parser import CodeIgniterParser
@@ -523,5 +523,182 @@ $routes->cli('cron/run', 'CronController::run');
     assert routes[0].routeKind == "route"
 
 
+def test_no_duplicate_statements_wordpress_hook(tmp_path: Path) -> None:
+    """§2.4 regression: add_action() must produce exactly ONE Statement per call.
+
+    Before the fix, the base PHP parser emitted an ``expression_statement``
+    node and the WordPress detector emitted a second ``function_call_expression``
+    node for the same source span — two records, only one with semanticType set.
+    After the fix the detector mutates the existing record in place, leaving
+    exactly one Statement with semanticType='route'.
+    """
+    src = b"<?php\nadd_action('init', 'my_custom_init');\n"
+    rec = _parse(PhpParser, tmp_path, src, "wp-content/plugins/test.php")
+
+    # Exactly ONE statement total (not two for the same span).
+    assert len(rec.statements) == 1, (
+        f"Expected 1 Statement, got {len(rec.statements)}: "
+        + str([s.model_dump(include={"nodeType", "semanticType", "endpoint"}) for s in rec.statements])
+    )
+    stmt = rec.statements[0]
+    assert stmt.nodeType == "expression_statement"
+    assert stmt.semanticType == "route"
+    assert stmt.routeKind == "eventbus_consumer"
+    assert stmt.endpoint == "init"
+    assert stmt.method == "CONSUMER"
 
 
+def test_no_duplicate_statements_laravel_route(tmp_path: Path) -> None:
+    """§2.4 regression: Route::get() must produce exactly ONE Statement per call."""
+    src = b"<?php\nuse Illuminate\\Support\\Facades\\Route;\nRoute::get('/ping', 'PingController@index');\n"
+    rec = _parse(LaravelParser, tmp_path, src, "routes/web.php")
+
+    ping_stmts = [
+        s for s in rec.statements if s.semanticType == "route" and s.endpoint == "/ping"
+    ]
+    assert len(ping_stmts) == 1, (
+        f"Expected 1 Statement for /ping, got {len(ping_stmts)}: "
+        + str([s.model_dump(include={"nodeType", "semanticType", "endpoint"}) for s in ping_stmts])
+    )
+    stmt = ping_stmts[0]
+    assert stmt.nodeType == "expression_statement"
+    assert stmt.method == "GET"
+
+
+def test_no_duplicate_statements_slim_route(tmp_path: Path) -> None:
+    """§2.4 regression: $app->get() must produce exactly ONE Statement per call."""
+    src = b"<?php\nuse Slim\\Factory\\AppFactory;\n$app = AppFactory::create();\n$app->get('/ping', function ($req, $res) { return $res; });\n"
+    rec = _parse(SlimParser, tmp_path, src, "src/index.php")
+
+    ping_stmts = [
+        s for s in rec.statements if s.semanticType == "route" and s.endpoint == "/ping"
+    ]
+    assert len(ping_stmts) == 1, (
+        f"Expected 1 Statement for /ping, got {len(ping_stmts)}: "
+        + str([s.model_dump(include={"nodeType", "semanticType", "endpoint"}) for s in ping_stmts])
+    )
+    stmt = ping_stmts[0]
+    assert stmt.nodeType == "expression_statement"
+    assert stmt.method == "GET"
+
+
+def test_no_duplicate_statements_codeigniter_route(tmp_path: Path) -> None:
+    """§2.4 regression: $routes->get() must produce exactly ONE Statement per call."""
+    src = b"<?php\n$routes->get('/ping', 'PingController::index');\n"
+    rec = _parse(CodeIgniterParser, tmp_path, src, "app/Config/Routes.php")
+
+    ping_stmts = [
+        s for s in rec.statements if s.semanticType == "route" and s.endpoint == "/ping"
+    ]
+    assert len(ping_stmts) == 1, (
+        f"Expected 1 Statement for /ping, got {len(ping_stmts)}: "
+        + str([s.model_dump(include={"nodeType", "semanticType", "endpoint"}) for s in ping_stmts])
+    )
+    stmt = ping_stmts[0]
+    assert stmt.nodeType == "expression_statement"
+    assert stmt.method == "GET"
+
+
+
+# ---------------------------------------------------------------------------
+# parentId fixture tests -- route inside named method -> parentId = method id
+# ---------------------------------------------------------------------------
+
+def test_laravel_route_parentid_inside_method(tmp_path):
+    """Route::get() inside a class method must have parentId = method's function_id, not file_id."""
+    src = (
+        b'<?php\n'
+        b'namespace App\\Providers;\n'
+        b'\n'
+        b'use Illuminate\\Support\\Facades\\Route;\n'
+        b'\n'
+        b'class RouteServiceProvider\n'
+        b'{\n'
+        b'    public function map()\n'
+        b'    {\n'
+        b"        Route::get('/users', 'UserController@index');\n"
+        b'    }\n'
+        b'}\n'
+    )
+    path = "app/Providers/RouteServiceProvider.php"
+    rec = _parse(LaravelParser, tmp_path, src, path)
+
+    route = next((s for s in rec.statements if s.semanticType == "route" and s.endpoint == "/users"), None)
+    assert route is not None, "Expected a route statement for /users"
+
+    # Route::get() is inside map() which starts at line 8 inside RouteServiceProvider.
+    expected_parent = function_id(path, "map", 8, class_name="RouteServiceProvider")
+    assert route.parentId == expected_parent, (
+        f"Expected parentId={expected_parent!r}, got {route.parentId!r}"
+    )
+
+
+def test_slim_route_parentid_inside_function(tmp_path):
+    """$app->get() inside a named top-level function must have parentId = that function's id."""
+    src = (
+        b'<?php\n'
+        b'use Slim\\Factory\\AppFactory;\n'
+        b'\n'
+        b'function register_routes($app) {\n'
+        b"    $app->get('/ping', function ($req, $res) { return $res; });\n"
+        b'}\n'
+    )
+    path = "src/routes.php"
+    rec = _parse(SlimParser, tmp_path, src, path)
+
+    route = next((s for s in rec.statements if s.semanticType == "route" and s.endpoint == "/ping"), None)
+    assert route is not None, "Expected a route statement for /ping"
+
+    # register_routes() is a top-level function starting at line 4 (no class_name).
+    expected_parent = function_id(path, "register_routes", 4)
+    assert route.parentId == expected_parent, (
+        f"Expected parentId={expected_parent!r}, got {route.parentId!r}"
+    )
+
+
+def test_codeigniter_route_parentid_inside_function(tmp_path):
+    """$routes->get() inside a named function must have parentId = that function's id."""
+    src = (
+        b'<?php\n'
+        b'namespace Config;\n'
+        b'\n'
+        b'function load_routes($routes) {\n'
+        b"    $routes->get('/api/users', 'UserController::index');\n"
+        b'}\n'
+    )
+    path = "app/Config/Routes.php"
+    rec = _parse(CodeIgniterParser, tmp_path, src, path)
+
+    route = next((s for s in rec.statements if s.semanticType == "route" and s.endpoint == "/api/users"), None)
+    assert route is not None, "Expected a route statement for /api/users"
+
+    # load_routes() starts at line 4.
+    expected_parent = function_id(path, "load_routes", 4)
+    assert route.parentId == expected_parent, (
+        f"Expected parentId={expected_parent!r}, got {route.parentId!r}"
+    )
+
+
+def test_wordpress_hook_parentid_inside_method(tmp_path):
+    """add_action() inside a class method must have parentId = that method's id."""
+    src = (
+        b'<?php\n'
+        b'class MyPlugin\n'
+        b'{\n'
+        b'    public function register()\n'
+        b'    {\n'
+        b"        add_action('init', 'my_custom_init');\n"
+        b'    }\n'
+        b'}\n'
+    )
+    path = "wp-content/plugins/my-plugin/my-plugin.php"
+    rec = _parse(PhpParser, tmp_path, src, path)
+
+    hook = next((s for s in rec.statements if s.semanticType == "route" and s.endpoint == "init"), None)
+    assert hook is not None, "Expected a route/hook statement for 'init'"
+
+    # register() method in MyPlugin starts at line 4.
+    expected_parent = function_id(path, "register", 4, class_name="MyPlugin")
+    assert hook.parentId == expected_parent, (
+        f"Expected parentId={expected_parent!r}, got {hook.parentId!r}"
+    )

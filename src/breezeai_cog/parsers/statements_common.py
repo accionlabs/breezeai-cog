@@ -418,7 +418,7 @@ def classify_statement(
     name_of: NameOf,
     call_details: CallDetails,
     stmt_expr: Collection[str] = (),
-    container_types: Collection[str] = (),
+    container_types: Collection[str] = (), 
     language: str | None = None,
     typed_db_ids: frozenset[str] | None = None,
     decorators: list[Decorator] | None = None,
