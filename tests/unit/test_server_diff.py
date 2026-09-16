@@ -31,7 +31,7 @@ class _Captured:
         self.notifications: list[tuple[str, dict]] = []
 
 
-class _FakeS3:
+class _FakeInfra:
     def __init__(self, c: _Captured) -> None:
         self._c, self._lines = c, []
 
@@ -52,7 +52,7 @@ def _make_client(captured: _Captured, filter_set, deleted) -> TestClient:
 
     deps = ServerDeps(
         settings=Settings(),
-        open_s3=lambda key: _FakeS3(captured),
+        open_storage=lambda key: _FakeInfra(captured),
         notify=lambda path, payload: captured.notifications.append((path, payload)),
         acquire_diff=acquire,
     )
@@ -69,7 +69,7 @@ def test_full_clone(captured: _Captured) -> None:
     r = client.post("/api/analyze-diff", json=BODY)
     assert r.status_code == 200
     out = r.json()
-    assert out["success"] and out["s3Key"] == "code-ontology/P1/abc123.ndjson.gz"
+    assert out["success"] and out["storage_key"] == "code-ontology/P1/abc123.ndjson.gz"
     assert out["deletedFiles"] == []
     assert {rec["path"] for rec in captured.records} == {"a.py", "b.py"}  # all files streamed
     path, payload = captured.notifications[0]
@@ -78,7 +78,7 @@ def test_full_clone(captured: _Captured) -> None:
     meta = payload["projectMetaData"]
     assert meta["repoUrl"] == BODY["repoUrl"] and meta["commitId"] == "abc123"
     assert meta["gitBranch"] == "main" and meta["totalFiles"] == 2
-    assert payload["codeOntologyId"] == "C1" and payload["s3Key"] == out["s3Key"]
+    assert payload["codeOntologyId"] == "C1" and payload["storage_key"] == out["storage_key"]
 
 
 def test_incremental_diff_filters_to_changed(captured: _Captured) -> None:

@@ -366,6 +366,9 @@ Most-used settings:
 | Parallel uploads (batch) | `BREEZEAI_COG_UPLOAD_PARALLELISM` | `1` |
 | Upload retries (after a failure) | `BREEZEAI_COG_UPLOAD_MAX_RETRIES` | `1` |
 | AWS S3 (server) | `AWS_ACCESS_KEY` · `AWS_SECRET_KEY` · `AWS_REGION` · `AWS_S3_BUCKET` | region `us-west-2` |
+| Object-storage provider (server) | `BREEZEAI_COG_INFRA_PROVIDER` | `aws` |
+| Storage retries (per request; the SDK retries, so `3` allows 4 tries) | `BREEZEAI_COG_STORAGE_RETRY_ATTEMPTS` | `3` |
+| Storage connect / read timeout (seconds) | `BREEZEAI_COG_STORAGE_CONNECT_TIMEOUT` · `BREEZEAI_COG_STORAGE_READ_TIMEOUT` | `10` · `60` |
 
 ### Choosing which files are analyzed
 

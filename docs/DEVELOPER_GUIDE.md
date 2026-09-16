@@ -34,7 +34,12 @@ src/breezeai_cog/
     detection/    #   shared, language-agnostic API/DB/route classification
     <lang>/       #   base language parser (python, typescript, java, csharp, vb, kotlin, groovy, cpp, …)
     <lang>_<fw>/  #   framework parser (e.g. python_fastapi, typescript_nestjs, java_springboot, csharp_wcf) — run `breezeai-cog capabilities` for the live list
-  emit/           # id convention · ndjson · gzip · sinks (file/memory) · s3 streaming
+  emit/           # id convention · ndjson · gzip · sinks (file/memory)
+  infra/          # object-storage providers behind the InfraStream interface
+    interface.py  #   InfraStream — the provider-agnostic contract
+    provider.py   #   open_stream(key, settings) — the entry point callers use
+    factory.py    #   ProviderFactory maps ProviderType -> implementation
+    aws/s3.py     #   AWSStreamUpload — streaming gzip upload to S3
   analyzers/      # non-AST: sql (DDL via sqlglot), es (Elasticsearch mappings)
   services/       # analysis · inprocess · diff · notify
   server/         # FastAPI app · routes · deps · git acquisition · errors
@@ -83,6 +88,46 @@ In short:
   parser, sets `priority` + `claims`, and adds only its detection (single parse, no duplication).
 - Register by exporting `PARSERS = [...]` from the subpackage's `__init__.py` (auto-discovered).
 - Cross-language API/DB call recognition is shared in `parsers/detection/` — feed it, don't fork it.
+
+---
+
+## Object storage providers
+
+The server streams NDJSON.gz to object storage, then notifies the backend with only the
+**storage key** — the backend downloads and ingests that object later. Callers never touch a
+cloud SDK; they use the provider-agnostic `InfraStream`:
+
+```python
+stream = open_stream(key, settings)   # infra/provider.py
+for record in records:
+    stream.write_line(json.dumps(record) + "\n")
+storage_key = stream.close()          # the key is proof the object is complete
+```
+
+`open_stream` resolves `settings.infra_provider` through `ProviderConfig`, and `ProviderFactory`
+returns the implementation for that `ProviderType`.
+
+**Two rules any implementation must honour** (see the contract on `InfraStream`):
+
+1. **Retries belong to the provider SDK.** The upload streams from an OS pipe, which cannot be
+   rewound — retrying a whole upload would re-send only the unconsumed tail and store a truncated
+   object. Configure the SDK to retry at a granularity where it buffers the bytes itself (botocore
+   replays an individual multipart part), and never wrap the upload in a retry loop.
+2. **`close()` must raise if the object is incomplete, and must not return a key.** Callers treat a
+   returned key as proof the object is readable, so swallowing an upload error would point the
+   backend at corrupt data. Failing loudly means the route returns 500 *before* the notification
+   fires.
+
+### Adding a provider
+
+1. Add the member to `ProviderType` (`infra/provider_type.py`).
+2. Widen the `Literal` on `infra_provider` in `config.py` (e.g. `Literal["aws", "azure"]`).
+3. Create `infra/<provider>/` implementing `InfraStream` (`write_line` + `close`). Keep the SDK,
+   client construction, auth, and retry configuration inside that package.
+4. Add the `case` to `ProviderFactory.create_stream()` — the `case _` guard exists so a forgotten
+   case raises instead of silently returning `None`.
+5. Reuse the generic `storage_*` settings for retries and timeouts rather than adding
+   provider-prefixed twins.
 
 ---
 
