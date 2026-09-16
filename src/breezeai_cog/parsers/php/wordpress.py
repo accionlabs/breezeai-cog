@@ -12,6 +12,17 @@ from ..treesitter import node_text
 _HOOK_FUNCTIONS = frozenset({"add_action", "add_filter"})
 
 
+def _literal_hook_tag(node: Node, source: bytes) -> str | None:
+    """Resolve only a literal hook-tag string; dynamic tags have no static endpoint."""
+    if node.type == "argument":
+        inner = node.named_children[0] if node.named_children else None
+        return _literal_hook_tag(inner, source) if inner is not None else None
+    if node.type != "string":
+        return None
+    content = next((child for child in node.named_children if child.type == "string_content"), None)
+    return node_text(content, source) if content is not None else ""
+
+
 def detect_wordpress_hooks(
     root: Node,
     source: bytes,
@@ -33,7 +44,7 @@ def detect_wordpress_hooks(
                     if args is not None and args.named_children:
                         # First arg is the hook tag
                         first_arg = args.named_children[0]
-                        hook_tag = node_text(first_arg, source).strip("'\"")
+                        hook_tag = _literal_hook_tag(first_arg, source)
 
                         # Second arg is handler if present
                         handler = None

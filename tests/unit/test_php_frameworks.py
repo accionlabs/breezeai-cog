@@ -488,6 +488,14 @@ $routes->get($dynamicPath, 'WebhookController@handle');
     assert routes[0].handler == "WebhookController@handle"
 
 
+def test_wordpress_dynamic_hook_name_has_no_endpoint(tmp_path: Path) -> None:
+    src = b"<?php\nadd_action($dynamicHook, 'register_dynamic_hook');\n"
+    rec = _parse(PhpParser, tmp_path, src, "wp-content/plugins/test.php")
+    hooks = [s for s in rec.statements if s.semanticType == "route"]
+    assert len(hooks) == 1
+    assert hooks[0].endpoint is None
+
+
 def test_any_route_method_across_frameworks(tmp_path: Path) -> None:
     # Laravel Route::any
     laravel_src = b"""<?php

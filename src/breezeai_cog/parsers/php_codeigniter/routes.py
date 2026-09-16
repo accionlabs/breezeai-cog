@@ -57,7 +57,7 @@ def _render_url(node: Node | None, source: bytes) -> str | None:
         return _render_url(inner, source) if inner is not None else None
     if node.type == "string":
         frag = next((c for c in node.named_children if c.type == "string_content"), None)
-        return node_text(frag, source) if frag is not None else node_text(node, source).strip("'\"")
+        return node_text(frag, source) if frag is not None else ""
     if node.type == "encapsed_string":
         parts: list[str] = []
         for c in node.named_children:
