@@ -8,6 +8,14 @@ from ...schemas import Decorator
 from ..treesitter import node_text
 
 
+def _attribute_arg_text(arg: Node, source: bytes) -> str:
+    """Render a decorator argument, unquoting a standalone PHP string literal."""
+    children = arg.named_children
+    if len(children) == 1 and children[0].type in ("string", "encapsed_string"):
+        return node_text(children[0], source).strip("'\"")
+    return node_text(arg, source)
+
+
 def _extract_decorator_from_attribute(attr: Node, source: bytes) -> Decorator | None:
     # First child is the attribute name
     name_node = attr.child_by_field_name("name")
@@ -16,17 +24,14 @@ def _extract_decorator_from_attribute(attr: Node, source: bytes) -> Decorator | 
             name_node = attr.named_children[0]
         else:
             return None
-    name = node_text(name_node, source).lstrip("\\")
+    name = node_text(name_node, source).lstrip("\\").rsplit("\\", 1)[-1]
     args: list[str] = []
     args_node = attr.child_by_field_name("parameters")
     if args_node is None:
         args_node = next((c for c in attr.named_children if c.type == "arguments"), None)
     if args_node is not None:
         for arg in args_node.named_children:
-            if arg.type == "argument":
-                args.append(node_text(arg, source))
-            else:
-                args.append(node_text(arg, source))
+            args.append(_attribute_arg_text(arg, source))
     return Decorator(name=name, args=args)
 
 

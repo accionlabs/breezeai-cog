@@ -50,7 +50,7 @@ def _combine_paths(prefix: str | None, path: str | None) -> str:
 
 
 def _is_route_decorator(name: str) -> bool:
-    return name == "Route" or name.endswith("\\Route")
+    return name == "Route"
 
 
 def detect_symfony_routes(

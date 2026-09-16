@@ -177,6 +177,32 @@ def test_imports_and_psr4_resolution(tmp_path: Path) -> None:
     assert rec.exports == []
 
 
+def test_fully_qualified_attribute_uses_simple_decorator_name(tmp_path: Path) -> None:
+    src = b"""<?php
+class Example
+{
+    #[\\Symfony\\Component\\Routing\\Attribute\\Route('/x')]
+    public function show() {}
+}
+"""
+    rec = _parse_php(tmp_path, src=src, rel="src/Example.php")
+    fn = next(fn for fn in rec.functions if fn.name == "show")
+    assert [decorator.name for decorator in fn.decorators] == ["Route"]
+
+
+def test_php_attribute_literal_argument_is_unquoted(tmp_path: Path) -> None:
+    src = b"""<?php
+class Example
+{
+    #[Endpoint('/orders')]
+    public function list() {}
+}
+"""
+    rec = _parse_php(tmp_path, src=src, rel="src/Example.php")
+    fn = next(fn for fn in rec.functions if fn.name == "list")
+    assert fn.decorators[0].args == ["/orders"]
+
+
 def test_grouped_use_imports_resolve_each_type(tmp_path: Path) -> None:
     src = b"""<?php
 use App\\Models\\{User, Post};
