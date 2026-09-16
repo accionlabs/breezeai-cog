@@ -86,6 +86,49 @@ def _seed_same_namespace(
                 bindings.setdefault(suffix, rel)
 
 
+def _literal_include_path(node: Node | None, source: bytes) -> str | None:
+    """Return a statically-known PHP include path, without evaluating variables."""
+    if node is None:
+        return None
+    if node.type == "parenthesized_expression":
+        inner = node.named_children[0] if node.named_children else None
+        return _literal_include_path(inner, source)
+    if node.type in ("string", "encapsed_string"):
+        parts: list[str] = []
+        for child in node.named_children:
+            if child.type != "string_content":
+                return None
+            parts.append(node_text(child, source))
+        return "".join(parts)
+    return None
+
+
+def _include_target(node: Node, source: bytes, current_dir: Path) -> tuple[Path, str] | None:
+    """Resolve a literal include, including the common ``__DIR__ . '/file.php'`` form."""
+    literal = _literal_include_path(node, source)
+    if literal is not None:
+        target = Path(literal)
+        return (target if target.is_absolute() else current_dir / target), literal
+
+    if node.type == "parenthesized_expression" and node.named_children:
+        return _include_target(node.named_children[0], source, current_dir)
+    if node.type != "binary_expression" or len(node.named_children) != 2:
+        return None
+    left, right = node.named_children
+    if left.type == "name" and node_text(left, source) == "__DIR__":
+        suffix = _literal_include_path(right, source)
+        if suffix is not None:
+            return current_dir / suffix.lstrip("/\\"), suffix
+    return None
+
+
+def _walk_nodes(node: Node):
+    """Yield every named descendant, including nested require/include expressions."""
+    for child in node.named_children:
+        yield child
+        yield from _walk_nodes(child)
+
+
 def extract_imports(
     root: Node,
     source: bytes,
@@ -93,7 +136,7 @@ def extract_imports(
     repo_root: Path,
     index: PhpIndex | dict[str, str | None] | None,
 ) -> tuple[list[str], list[str], list[str], dict[str, str]]:
-    """Extract `use` imports from a PHP AST into internal, external, exports, bindings."""
+    """Extract PHP ``use``, ``require``, and ``include`` imports."""
     fqcn_map: dict[str, str | None] = index.fqcn if isinstance(index, PhpIndex) else (index or {})
 
     namespace = ""
@@ -108,9 +151,41 @@ def extract_imports(
     internal: list[str] = []
     external: list[str] = []
 
+    def add_fqcn(raw_target: str, alias_node: Node | None = None) -> None:
+        simple_name = (
+            node_text(alias_node, source)
+            if alias_node is not None
+            else raw_target.rsplit("\\", 1)[-1]
+        )
+        resolved_rel = fqcn_map.get(raw_target)
+        if resolved_rel is not None:
+            if resolved_rel not in internal:
+                internal.append(resolved_rel)
+            bindings[simple_name] = resolved_rel
+        elif raw_target not in external:
+            external.append(raw_target)
+
     # Process all namespace_use_declaration nodes
     for child in root.named_children:
         if child.type != "namespace_use_declaration":
+            continue
+        group = next((node for node in child.named_children if node.type == "namespace_use_group"), None)
+        group_prefix_node = next(
+            (node for node in child.named_children if node.type == "namespace_name"), None
+        )
+        if group is not None and group_prefix_node is not None:
+            group_prefix = node_text(group_prefix_node, source).strip("\\")
+            body = group.child_by_field_name("body")
+            for clause in (body.named_children if body is not None else group.named_children):
+                if clause.type != "namespace_use_clause":
+                    continue
+                target_node = next(
+                    (node for node in clause.named_children if node.type in ("qualified_name", "name")),
+                    None,
+                )
+                if target_node is not None:
+                    target = node_text(target_node, source).strip("\\")
+                    add_fqcn(f"{group_prefix}\\{target}", clause.child_by_field_name("alias"))
             continue
         for clause in child.named_children:
             if clause.type != "namespace_use_clause":
@@ -128,22 +203,29 @@ def extract_imports(
                 continue
             raw_target = node_text(target_node, source).strip("\\")
 
-            # Extract alias or simple name
-            alias_node = clause.child_by_field_name("alias")
-            if alias_node is not None:
-                simple_name = node_text(alias_node, source)
-            else:
-                simple_name = raw_target.rsplit("\\", 1)[-1]
+            add_fqcn(raw_target, clause.child_by_field_name("alias"))
 
-            # In-repo PSR-4 resolution
-            resolved_rel = fqcn_map.get(raw_target)
-            if resolved_rel is not None:
-                if resolved_rel not in internal:
-                    internal.append(resolved_rel)
-                bindings[simple_name] = resolved_rel
-            else:
-                if raw_target not in external:
-                    external.append(raw_target)
+    current_dir = (repo_root / path).parent
+    root_dir = repo_root.resolve()
+    include_types = frozenset(
+        {"require_expression", "require_once_expression", "include_expression", "include_once_expression"}
+    )
+    for node in _walk_nodes(root):
+        if node.type not in include_types or not node.named_children:
+            continue
+        resolved = _include_target(node.named_children[0], source, current_dir)
+        if resolved is None:
+            continue
+        target_path, target_text = resolved
+        try:
+            rel = repo_relative(target_path.resolve(), root_dir)
+        except (OSError, ValueError):
+            rel = None
+        if rel is not None and not rel.startswith("../") and (root_dir / rel).is_file():
+            if rel not in internal:
+                internal.append(rel)
+        elif target_text not in external:
+            external.append(target_text)
 
     _seed_same_namespace(bindings, namespace, fqcn_map)
 

@@ -177,6 +177,54 @@ def test_imports_and_psr4_resolution(tmp_path: Path) -> None:
     assert rec.exports == []
 
 
+def test_grouped_use_imports_resolve_each_type(tmp_path: Path) -> None:
+    src = b"""<?php
+use App\\Models\\{User, Post};
+"""
+    models = tmp_path / "app/Models"
+    models.mkdir(parents=True)
+    (models / "User.php").write_text("<?php\nnamespace App\\Models; class User {}\n")
+    (models / "Post.php").write_text("<?php\nnamespace App\\Models; class Post {}\n")
+
+    entry = tmp_path / "routes/web.php"
+    entry.parent.mkdir(parents=True)
+    entry.write_bytes(src)
+    parser = PhpParser()
+    index = parser.build_index(tmp_path, list(tmp_path.rglob("*.php")))
+    rec = parser.parse_file(
+        ParseContext(
+            path="routes/web.php",
+            abs_path=entry,
+            source=src,
+            repo_root=tmp_path,
+            resolution_index=index,
+        )
+    )
+
+    assert set(rec.importFiles) == {"app/Models/User.php", "app/Models/Post.php"}
+    assert "App\\Models\\User" not in rec.externalImports
+    assert "App\\Models\\Post" not in rec.externalImports
+
+
+def test_require_and_include_add_static_local_imports(tmp_path: Path) -> None:
+    src = b"""<?php
+require '../bootstrap.php';
+include __DIR__ . '/partials/header.php';
+"""
+    entry = tmp_path / "app/routes/web.php"
+    entry.parent.mkdir(parents=True)
+    entry.write_bytes(src)
+    (tmp_path / "app/bootstrap.php").write_text("<?php\n")
+    partials = entry.parent / "partials"
+    partials.mkdir()
+    (partials / "header.php").write_text("<?php\n")
+
+    rec = PhpParser().parse_file(
+        ParseContext(path="app/routes/web.php", abs_path=entry, source=src, repo_root=tmp_path)
+    )
+    assert set(rec.importFiles) == {"app/bootstrap.php", "app/routes/partials/header.php"}
+
+
 def test_comments_capture(tmp_path: Path) -> None:
     src_with_comments = b"""<?php
 // Single line comment
@@ -255,4 +303,3 @@ final class OrderService
     fn_names = {f.name for f in rec.functions}
     assert "__construct" in fn_names
     assert "processOrders" in fn_names
-
