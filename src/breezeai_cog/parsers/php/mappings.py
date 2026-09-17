@@ -70,4 +70,4 @@ STATEMENT_TYPES: list[str] = sorted(
     }
 )
 
-FRAMEWORKS: list[str] = []
+FRAMEWORKS: list[str] = ["laravel", "symfony", "slim", "codeigniter", "wordpress"]

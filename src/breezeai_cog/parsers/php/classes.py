@@ -30,15 +30,19 @@ def _is_abstract(node: Node) -> bool:
     return any(c.type == "abstract_modifier" for c in node.children)
 
 
-def _extends(node: Node, source: bytes) -> str | None:
+def _extends(node: Node, source: bytes) -> tuple[str | None, list[str]]:
     base = next((c for c in node.named_children if c.type == "base_clause"), None)
-    if base is not None:
-        target = next(
-            (c for c in base.named_children if c.type in ("name", "qualified_name")), None
-        )
-        if target is not None:
-            return node_text(target, source)
-    return None
+    if base is None:
+        return None, []
+    names = [
+        node_text(c, source)
+        for c in base.named_children
+        if c.type in ("name", "qualified_name")
+    ]
+    if not names:
+        return None, []
+    extends_name, *inherited_interfaces = names
+    return extends_name, inherited_interfaces
 
 
 def _implements(node: Node, source: bytes) -> list[str]:
@@ -85,8 +89,8 @@ def build_class(
     ctype = _class_type(node)
     cid = disambiguate(class_id(path, name), seen_ids)
 
-    extends_name = _extends(node, source)
-    implements_names = _implements(node, source)
+    extends_name, inherited_interfaces = _extends(node, source)
+    implements_names = inherited_interfaces + _implements(node, source)
     is_abs = _is_abstract(node)
     all_decs = list(decorators) + extract_attributes(node, source)
 

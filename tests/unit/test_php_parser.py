@@ -125,6 +125,18 @@ def test_php_classes_and_types(tmp_path: Path) -> None:
     assert enum_cls.type == "enum"
 
 
+def test_interface_extending_two_interfaces(tmp_path: Path) -> None:
+    rec = _parse_php(
+        tmp_path,
+        src=b"<?php\ninterface Combined extends FirstContract, SecondContract {}\n",
+        rel="src/Contracts/Combined.php",
+    )
+    combined = next(c for c in rec.classes if c.name == "Combined")
+
+    assert combined.extends == "FirstContract"
+    assert combined.implements == ["SecondContract"]
+
+
 def test_constructor_property_promotion(tmp_path: Path) -> None:
     rec = _parse_php(tmp_path)
     user = next(c for c in rec.classes if c.name == "User")
