@@ -16,10 +16,28 @@ _HTTP_VERBS = {"get", "post", "put", "patch", "delete", "head", "options", "requ
 # minus a bare ``client`` which would over-match s3Client/dbClient/graphqlClient as
 # substrings — precision-preserving deviation).
 _CLIENT_HINTS = (
-    "axios", "http", "httpclient", "httpservice", "httpx", "requests", "session", "fetch",
-    "restclient", "apiclient", "resttemplate", "webclient", "$http", "$client", "->client->",
+    "axios",
+    "http",
+    "httpclient",
+    "httpservice",
+    "httpx",
+    "requests",
+    "session",
+    "fetch",
+    "restclient",
+    "apiclient",
+    "resttemplate",
+    "webclient",
+    "$http",
+    "$client",
+    "->client->",
     "superagent",
-    "got", "ky", "urllib", "aiohttp", "guzzle", "ofetch",
+    "got",
+    "ky",
+    "urllib",
+    "aiohttp",
+    "guzzle",
+    "ofetch",
 )
 
 # Bare (receiver-less) function calls that are HTTP requests → default GET.

@@ -414,7 +414,9 @@ def match_db(
         if m in _ELOQUENT_VERBS:
             has_static = "::" in callee
             raw_class = callee.split("::", 1)[0].strip() if has_static else ""
-            static_class = raw_class.rsplit("\\", 1)[-1].rsplit("/", 1)[-1].strip() if raw_class else ""
+            static_class = (
+                raw_class.rsplit("\\", 1)[-1].rsplit("/", 1)[-1].strip() if raw_class else ""
+            )
 
             raw_receiver = (
                 callee.rsplit(".", 1)[0].rsplit(".", 1)[-1]
@@ -423,9 +425,9 @@ def match_db(
             )
             receiver = raw_receiver.split("(", 1)[0].strip().lstrip("$").lower()
 
-            if (static_class and any(static_class.lower().endswith(s) for s in _NON_DB_RECEIVERS)) or (
-                receiver and any(receiver.endswith(s) for s in _NON_DB_RECEIVERS)
-            ):
+            if (
+                static_class and any(static_class.lower().endswith(s) for s in _NON_DB_RECEIVERS)
+            ) or (receiver and any(receiver.endswith(s) for s in _NON_DB_RECEIVERS)):
                 return None
 
             if m in _HIGH_COLLISION:
@@ -486,8 +488,10 @@ def match_db(
     # Residual: an in-memory object named exactly ``cache``/``cacheService`` still matches, and the
     # NestJS ``Cache`` abstraction may be memory-backed — resolving those needs type resolution
     # (see typed_db_ids) plus a cache-vs-redis vocabulary decision; left for a follow-up.
-    if receiver and (receiver in _CACHE_RECEIVERS or receiver.endswith("redis")) and (
-        m in _CACHE_VERBS or m in ("delete", "remove")
+    if (
+        receiver
+        and (receiver in _CACHE_RECEIVERS or receiver.endswith("redis"))
+        and (m in _CACHE_VERBS or m in ("delete", "remove"))
     ):
         return "redis"
     if m in _GENERIC:
@@ -496,7 +500,9 @@ def match_db(
                 continue
             # Anchored needles must appear as a dot-segment, not embedded in a longer name
             # (e.g. "session" must match "db.session.query" but NOT "sessionFactory.create").
-            if needle in _ANCHORED_HINTS and not (f".{needle}." in low or low.startswith(f"{needle}.")):
+            if needle in _ANCHORED_HINTS and not (
+                f".{needle}." in low or low.startswith(f"{needle}.")
+            ):
                 continue
             if language in _PHP and hint == "typeorm":
                 return "doctrine"

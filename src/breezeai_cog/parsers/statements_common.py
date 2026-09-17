@@ -228,11 +228,23 @@ def _extract_verbs(methods_node: Node | None, source: bytes | None = None) -> li
         if node.type == "string":
             frag = next((c for c in node.named_children if c.type == "string_content"), None)
             if frag is not None:
-                return node_text(frag, source) if source is not None else frag.text.decode("utf-8", "replace")
-            text = node_text(node, source) if source is not None else node.text.decode("utf-8", "replace")
+                return (
+                    node_text(frag, source)
+                    if source is not None
+                    else frag.text.decode("utf-8", "replace")
+                )
+            text = (
+                node_text(node, source)
+                if source is not None
+                else node.text.decode("utf-8", "replace")
+            )
             return text.strip("'\"")
         if node.type == "encapsed_string":
-            text = node_text(node, source) if source is not None else node.text.decode("utf-8", "replace")
+            text = (
+                node_text(node, source)
+                if source is not None
+                else node.text.decode("utf-8", "replace")
+            )
             return text.strip("'\"")
         return None
 
@@ -300,11 +312,23 @@ def _resolve_handler(arg_node: Node | None, source: bytes | None = None) -> str 
         if node.type == "string":
             frag = next((c for c in node.named_children if c.type == "string_content"), None)
             if frag is not None:
-                return node_text(frag, source) if source is not None else frag.text.decode("utf-8", "replace")
-            text = node_text(node, source) if source is not None else node.text.decode("utf-8", "replace")
+                return (
+                    node_text(frag, source)
+                    if source is not None
+                    else frag.text.decode("utf-8", "replace")
+                )
+            text = (
+                node_text(node, source)
+                if source is not None
+                else node.text.decode("utf-8", "replace")
+            )
             return text.strip("'\"")
         if node.type == "encapsed_string":
-            text = node_text(node, source) if source is not None else node.text.decode("utf-8", "replace")
+            text = (
+                node_text(node, source)
+                if source is not None
+                else node.text.decode("utf-8", "replace")
+            )
             return text.strip("'\"")
         return None
 
@@ -319,17 +343,26 @@ def _resolve_handler(arg_node: Node | None, source: bytes | None = None) -> str 
     if curr.type == "array_creation_expression":
         elems = curr.named_children
         if len(elems) == 2:
+
             def _unwrap_elem(e: Node) -> Node:
                 if e.type == "array_element_initializer":
                     val = e.child_by_field_name("value")
-                    return val if val is not None else (e.named_children[-1] if e.named_children else e)
+                    return (
+                        val
+                        if val is not None
+                        else (e.named_children[-1] if e.named_children else e)
+                    )
                 return e
 
             e0 = _unwrap_elem(elems[0])
             e1 = _unwrap_elem(elems[1])
 
             if e0.type == "class_constant_access_expression":
-                e0_text = node_text(e0, source) if source is not None else e0.text.decode("utf-8", "replace")
+                e0_text = (
+                    node_text(e0, source)
+                    if source is not None
+                    else e0.text.decode("utf-8", "replace")
+                )
                 if "::" in e0_text:
                     lhs, rhs = e0_text.rsplit("::", 1)
                     if rhs.strip().lower() == "class":
@@ -339,7 +372,6 @@ def _resolve_handler(arg_node: Node | None, source: bytes | None = None) -> str 
                             return f"{class_name}@{method_name}"
 
     return None
-
 
 
 def _is_call_node(node_type: str, call_type: str | Collection[str]) -> bool:
@@ -424,7 +456,7 @@ def classify_statement(
     name_of: NameOf,
     call_details: CallDetails,
     stmt_expr: Collection[str] = (),
-    container_types: Collection[str] = (), 
+    container_types: Collection[str] = (),
     language: str | None = None,
     typed_db_ids: frozenset[str] | None = None,
     decorators: list[Decorator] | None = None,
