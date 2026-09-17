@@ -475,3 +475,34 @@ export class TaskService {
     db_stmts = [s for s in rec.statements if s.semanticType == "db_method_call"]
     assert len(db_stmts) == 1
     assert db_stmts[0].dataAccessHint in ("typeorm", "orm")
+
+
+def test_scala_false_positive_gates() -> None:
+    from breezeai_cog.parsers.detection.db_queries import match_db
+    from breezeai_cog.parsers.detection.api_calls import match_api
+
+    # B1: in-memory Map named cache is not Redis in Scala
+    assert match_db("cache.get", "get", language="scala") is None
+    assert match_db("cache.get", "get", language="javascript") == "redis"
+
+    # B2: bare aggregate is not MongoDB
+    assert match_db("aggregate", "aggregate", language="scala") is None
+    assert match_db("aggregate", "aggregate", language="javascript") is None
+    assert match_db("collection.aggregate", "aggregate") == "mongodb"
+
+    # B3: Scala HTTP client named client is not Elasticsearch
+    assert match_db("client.search", "search", language="scala") is None
+    assert match_db("client.index", "index", language="scala") is None
+    assert match_db("esClient.search", "search", language="scala") == "elasticsearch"
+
+    # B4: ctx.run in Scala is Quill, not Neo4j
+    assert match_db("ctx.run", "run", language="scala") == "quill"
+    assert match_db("context.run", "run", language="scala") == "quill"
+    assert match_db("session.run", "run") == "neo4j"
+    assert match_db("driver.run", "run") == "neo4j"
+
+    # B5: Capitalized Request constructor is not an outbound api_call
+    assert match_api("http4s.Request", "Request") is None
+    assert match_api("Request", "Request") is None
+    assert match_api("axios.request", "request") == "REQUEST"
+
