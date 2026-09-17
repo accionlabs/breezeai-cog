@@ -167,7 +167,8 @@ def _method_templates(http_tmpl: str, method_route: str | None) -> list[str]:
 
 def _response_dto(return_type: str | None) -> str | None:
     """Unwrap ``Task<…>`` / ``ActionResult<…>`` / ``Task(Of …)`` to the payload type;
-    bare action results (``IActionResult``/``ActionResult``/``void``) → None."""
+    bare action results (``IActionResult``/``ActionResult``/``void``) → None. A trailing ``?``
+    (nullable reference annotation) is dropped so the result names a real type."""
     if not return_type:
         return None
     t = return_type.strip()
@@ -179,7 +180,9 @@ def _response_dto(return_type: str | None) -> str | None:
         t = t[t.index("(Of ") + 4: -1].strip()
     if t in ("IActionResult", "ActionResult", "void", "Void", "Task", "ValueTask", ""):
         return None
-    return t
+    # `Task<Track?>` unwraps to `Track?`; the nullable annotation is not part of the type name,
+    # and keeping it means responseDTO names no captured class (a dead reference).
+    return t.rstrip("?").strip() or None
 
 
 def _request_dto(fn: Function) -> str | None:
