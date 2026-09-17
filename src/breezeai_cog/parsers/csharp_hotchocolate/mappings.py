@@ -29,6 +29,18 @@ PARENT_ATTR = "Parent"
 #: are called Query/Mutation/Subscription there by default — enforced, unlike a CLR class name.
 ROOT_SCHEMA_NAMES = {"Query": "query", "Mutation": "mutation", "Subscription": "subscription"}
 
+#: Fluent style: a schema type declared by subclassing ``ObjectType<T>`` and building fields
+#: inside ``Configure(IObjectTypeDescriptor<T>)``. Both name the described type T.
+DESCRIPTOR_BASES = ("ObjectType", "ObjectTypeExtension")
+DESCRIPTOR_PARAM_TYPES = ("IObjectTypeDescriptor", "IObjectTypeExtensionDescriptor")
+CONFIGURE_METHOD = "Configure"
+
+#: Builder calls inside ``Configure``: ``Field`` declares one, ``Ignore`` removes it from the
+#: schema, ``Name`` renames it.
+FIELD_CALL = "Field"
+IGNORE_CALL = "Ignore"
+NAME_CALL = "Name"
+
 #: Declarative subscription: the method resolves an event pushed to a topic.
 SUBSCRIBE_ATTR = "Subscribe"
 
@@ -88,4 +100,5 @@ MARKERS: tuple[bytes, ...] = (
     b"[QueryType]", b"[MutationType]", b"[SubscriptionType]",
     b"[ExtendObjectType",
     b"[Subscribe]",
+    b"IObjectTypeDescriptor",
 )

@@ -24,7 +24,7 @@ from ...emit import disambiguate, statement_id
 from ...logging import get_logger
 from ...schemas import Class, Decorator, FileRecord, Function, Statement
 from ..csharp_aspnet.routes import _response_dto, simple_attr_name
-from ..treesitter import node_text
+from ..treesitter import first_line, node_text
 from .mappings import (
     ARG_MARKER_ATTRS,
     AUTHORIZE_ATTR,
@@ -40,6 +40,7 @@ from .mappings import (
     ROOT_SCHEMA_NAMES,
     TOPIC_ATTR,
 )
+from .descriptor import configure_method, descriptor_target, field_declarations
 from .naming import field_name
 
 
@@ -211,7 +212,28 @@ def _attribute_position(method: Node, source: bytes, wanted: str) -> Anchor | No
     return None
 
 
-def topic_anchors(root: Node, source: bytes) -> dict[tuple[str, int], Anchor]:
+def method_nodes(root: Node, source: bytes) -> dict[tuple[str, int], Node]:
+    """``(method name, declaration start line)`` → its ``method_declaration`` node.
+
+    One walk shared by the two things that need the tree: the topic anchors below, and the
+    fluent-descriptor bodies (whose field declarations are statements, not declarations, so they
+    cannot be read off the ``FileRecord``).
+    """
+    nodes: dict[tuple[str, int], Node] = {}
+    stack = [root]
+    while stack:
+        node = stack.pop()
+        if node.type == "method_declaration":
+            name = node.child_by_field_name("name")
+            if name is not None:
+                nodes[(node_text(name, source), node.start_point[0] + 1)] = node
+        stack.extend(node.named_children)
+    return nodes
+
+
+def topic_anchors(
+    nodes: dict[tuple[str, int], Node], source: bytes
+) -> dict[tuple[str, int], Anchor]:
     """Map each method to the position of the attribute that declares what it consumes.
 
     A ``Decorator`` on the record carries no position, but the consumer record is emitted
@@ -221,17 +243,11 @@ def topic_anchors(root: Node, source: bytes) -> dict[tuple[str, int], Anchor]:
     reuse the route's position and its id would depend on the route existing.
     """
     anchors: dict[tuple[str, int], Anchor] = {}
-    stack = [root]
-    while stack:
-        node = stack.pop()
-        if node.type == "method_declaration":
-            name = node.child_by_field_name("name")
-            if name is not None:
-                pos = (_attribute_position(node, source, TOPIC_ATTR)
-                       or _attribute_position(node, source, SUBSCRIBE_ATTR))
-                if pos is not None:
-                    anchors[(node_text(name, source), node.start_point[0] + 1)] = pos
-        stack.extend(node.named_children)
+    for key, node in nodes.items():
+        pos = (_attribute_position(node, source, TOPIC_ATTR)
+               or _attribute_position(node, source, SUBSCRIBE_ATTR))
+        if pos is not None:
+            anchors[key] = pos
     return anchors
 
 
@@ -348,6 +364,61 @@ def _extension_routes(
             for fn in resolvers]
 
 
+def descriptor_field_statement(
+    configure: Function, kind: str, name: str, call: Node, source: bytes, seen: set[str]
+) -> Statement:
+    """One field declared fluently inside ``Configure``. Unlike the attribute-derived routes this
+    has a real backing node — the ``d.Field(...)`` call — so it keeps that ``nodeType``, matching
+    how ``csharp_graphql`` records its builder calls."""
+    line, col = call.start_point[0] + 1, call.start_point[1]
+    return Statement(
+        id=disambiguate(statement_id(configure.path or "", line, col), seen),
+        parentId=configure.id,
+        nodeType="invocation_expression",
+        semanticType="route",
+        text=first_line(node_text(call, source))[:120],
+        method=kind.upper(),
+        endpoint=name,
+        framework="graphql",
+        handler=name,
+        handlerLine=line,
+        routeKind=kind,
+        isRegex=False,
+        startLine=line,
+        endLine=call.end_point[0] + 1,
+        path=configure.path,
+    )
+
+
+def _descriptor_routes(
+    cls: Class, record: FileRecord, nodes: dict[tuple[str, int], Node], source: bytes,
+    heritage: dict[str, object], seen: set[str],
+) -> list[Statement]:
+    """Fields declared fluently by ``cls``, when the type it describes is a resolved root.
+
+    A non-root descriptor declares that type's *shape*: those fields are not endpoints, and
+    emitting them is the over-capture the sibling graphql-dotnet parser measured.
+    """
+    configure = configure_method(record.functions, cls)
+    if configure is None:
+        return []
+    target = descriptor_target(cls, configure)
+    if target is None:
+        return []
+    kind = _root_kind_of_name(target, record, heritage)
+    if kind is None:
+        return []
+    node = nodes.get((configure.name, configure.startLine))
+    body = node.child_by_field_name("body") if node is not None else None
+    if body is None:
+        return []
+    receiver = configure.params[0].name if configure.params else None
+    if receiver is None:
+        return []
+    return [descriptor_field_statement(configure, kind, name, call, source, seen)
+            for name, call in field_declarations(body, source, receiver)]
+
+
 def detect_hotchocolate_routes(
     record: FileRecord, root: Node, source: bytes, seen: set[str], index: Any = None
 ) -> list[Statement]:
@@ -358,21 +429,18 @@ def detect_hotchocolate_routes(
     another file still resolves.
     """
     heritage: dict[str, object] = getattr(index, "class_heritage", None) or {}
-    anchors = topic_anchors(root, source)
+    nodes = method_nodes(root, source)
+    anchors = topic_anchors(nodes, source)
     methods: dict[str, list[Function]] = {}
     for fn in record.functions:
         if is_operation(fn):
             methods.setdefault(fn.parentId, []).append(fn)
-    if not methods:
-        return []
 
     routes: list[Statement] = []
     for cls in record.classes:
-        own = methods.get(cls.id)
-        if not own:
-            continue
+        own = methods.get(cls.id, [])
         kind = root_kind(cls)
-        if kind is not None:
+        if kind is not None and own:
             attr = next(name for name, k in ROOT_ATTRS.items() if k == kind)
             routes.extend(s for fn in own
                           for s in _operation_records(
@@ -380,6 +448,9 @@ def detect_hotchocolate_routes(
             continue
         target = extend_target(cls)
         if target is not None:
-            routes.extend(_extension_routes(
-                cls, target, own, record, heritage, record.path, seen, anchors))
+            if own:
+                routes.extend(_extension_routes(
+                    cls, target, own, record, heritage, record.path, seen, anchors))
+            continue
+        routes.extend(_descriptor_routes(cls, record, nodes, source, heritage, seen))
     return routes

@@ -29,7 +29,7 @@ def _override(decorators: list[Decorator]) -> str | None:
     return None
 
 
-def _camel(name: str) -> str:
+def camel_case(name: str) -> str:
     """Lower-case the first character, as ``DefaultNamingConventions`` does."""
     return name[:1].lower() + name[1:] if name else name
 
@@ -48,4 +48,4 @@ def field_name(method_name: str, decorators: list[Decorator]) -> str:
         name = name[len(_GET):]
     if name.endswith(_ASYNC) and len(name) > len(_ASYNC):
         name = name[: -len(_ASYNC)]
-    return _camel(name)
+    return camel_case(name)

@@ -404,3 +404,93 @@ def test_consumer_ids_are_independent_of_the_route() -> None:
     ids = [s.id for s in rec.statements]
     assert len(ids) == len(set(ids))
     assert not [i for i in ids if "#" in i]
+
+
+# ---- fluent descriptor style ---------------------------------------------------------------
+
+# A root descriptor (string form, property form, a fluent rename, an ignored field) and a data
+# descriptor whose fields are shape, not endpoints.
+DESCRIPTORS = b'''
+using HotChocolate.Types;
+namespace Catalog {
+  public class QueryType : ObjectType<Query> {
+    protected override void Configure(IObjectTypeDescriptor<Query> d) {
+      d.Field("books").Resolve(ctx => ctx.Service<CatalogDb>().Books);
+      d.Field(f => f.Stats).Type<StatsType>();
+      d.Field("legacySearch").Name("search");
+      d.Field("internalOnly").Ignore();
+    }
+  }
+
+  public class BookType : ObjectType<Book> {
+    protected override void Configure(IObjectTypeDescriptor<Book> d) {
+      d.Field(f => f.Title).Type<StringType>();
+      d.Field(f => f.Isbn).Ignore();
+    }
+  }
+}
+'''
+
+# The described root is named only by the Configure parameter type (no generic base).
+DESCRIPTOR_VIA_PARAM = b'''
+using HotChocolate.Types;
+namespace Catalog {
+  public class MutationType : ObjectType {
+    protected override void Configure(IObjectTypeDescriptor<Mutation> d) {
+      d.Field("addBook").Resolve(ctx => null);
+    }
+  }
+}
+'''
+
+
+def test_root_descriptor_fields_are_operations() -> None:
+    rec = _parse(CSharpHotChocolateParser(), DESCRIPTORS, "Types.cs")
+    ops = _by_endpoint(rec)
+    assert set(ops) == {"books", "stats", "search"}
+    for s in ops.values():
+        assert s.routeKind == "query" and s.method == "QUERY"
+        # A fluent field has a real backing node, unlike the attribute-derived routes.
+        assert s.nodeType == "invocation_expression"
+
+
+def test_property_expression_field_takes_the_framework_casing() -> None:
+    rec = _parse(CSharpHotChocolateParser(), DESCRIPTORS, "Types.cs")
+    assert "stats" in _by_endpoint(rec)   # Field(f => f.Stats)
+
+
+def test_fluent_rename_wins_over_the_declared_name() -> None:
+    rec = _parse(CSharpHotChocolateParser(), DESCRIPTORS, "Types.cs")
+    ops = _by_endpoint(rec)
+    assert "search" in ops and "legacySearch" not in ops
+
+
+def test_ignored_field_is_not_an_operation() -> None:
+    rec = _parse(CSharpHotChocolateParser(), DESCRIPTORS, "Types.cs")
+    assert "internalOnly" not in _by_endpoint(rec)
+
+
+def test_data_descriptor_fields_are_not_operations() -> None:
+    # BookType describes Book's shape; title/isbn are fields of a type, not endpoints. Emitting
+    # them is the over-capture the sibling graphql-dotnet parser measured.
+    rec = _parse(CSharpHotChocolateParser(), DESCRIPTORS, "Types.cs")
+    endpoints = set(_by_endpoint(rec))
+    assert "title" not in endpoints and "isbn" not in endpoints
+
+
+def test_descriptor_target_from_the_configure_parameter() -> None:
+    rec = _parse(CSharpHotChocolateParser(), DESCRIPTOR_VIA_PARAM, "MutationType.cs")
+    op = _by_endpoint(rec)["addBook"]
+    assert op.routeKind == "mutation" and op.method == "MUTATION"
+
+
+def test_descriptor_fields_are_emitted_in_source_order() -> None:
+    rec = _parse(CSharpHotChocolateParser(), DESCRIPTORS, "Types.cs")
+    lines = [s.startLine for s in _routes(rec)]
+    assert lines == sorted(lines)
+
+
+def test_descriptor_routes_parented_to_configure() -> None:
+    rec = _parse(CSharpHotChocolateParser(), DESCRIPTORS, "Types.cs")
+    configure_ids = {f.id for f in rec.functions if f.name == "Configure"}
+    assert {s.parentId for s in _routes(rec)} <= configure_ids
