@@ -78,11 +78,11 @@ class CSharpParser(BaseParser):
         statements: list[Statement] = []
 
         for decl in iter_type_declarations(root):
-            cls, methods, cls_statements = build_class(
+            cls_list, methods, cls_statements = build_class(
                 decl, source, path,
                 parent_id=fid, seen_ids=seen_ids, capture=capture, limit=limit, resolve=resolve,
             )
-            classes.append(cls)
+            classes.extend(cls_list)
             functions.extend(methods)
             statements.extend(cls_statements)
 

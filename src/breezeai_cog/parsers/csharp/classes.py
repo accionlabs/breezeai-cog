@@ -55,7 +55,10 @@ def build_class(
     capture: bool,
     limit: int,
     resolve: CallResolver = noop_resolver,
-) -> tuple[Class, list[Function], list[Statement]]:
+) -> tuple[list[Class], list[Function], list[Statement]]:
+    """Return (classes, methods, statements) — all flat, linked by parentId. The class list is
+    this type plus any nested (member) types, each parented to its enclosing type, mirroring the
+    Java and C++ parsers."""
     name_node = node.child_by_field_name("name")
     name = node_text(name_node, source) if name_node is not None else "<anonymous>"
     start, end = line_span(node)
@@ -68,6 +71,7 @@ def build_class(
 
     methods: list[Function] = []
     statements: list[Statement] = []
+    nested_classes: list[Class] = []
     ctor_params: list[ConstructorParam] = []
 
     # record positional parameters (``record Money(decimal Amount)``) → constructorParams
@@ -96,6 +100,16 @@ def build_class(
                         ConstructorParam(name=p.name, type=p.type)
                         for p in extract_params(member.child_by_field_name("parameters"), source)
                     ]
+            elif member.type in _NESTED_CLASS_TYPES:
+                # Member (nested) class / struct / record / interface / enum — its own Class
+                # parented to this one, recursing for arbitrarily deep nesting.
+                sub_classes, sub_methods, sub_statements = build_class(
+                    member, source, path,
+                    parent_id=cid, seen_ids=seen_ids, capture=capture, limit=limit, resolve=resolve,
+                )
+                nested_classes.extend(sub_classes)
+                methods.extend(sub_methods)
+                statements.extend(sub_statements)
 
     # Enum members become flat statements parented to the enum Class (their `text` is
     # queryable); `enum_member_declaration` is otherwise captured nowhere (it is not a
@@ -124,4 +138,4 @@ def build_class(
         startLine=start,
         endLine=end,
     )
-    return cls, methods, statements
+    return [cls, *nested_classes], methods, statements
