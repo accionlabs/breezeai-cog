@@ -1,0 +1,71 @@
+"""HotChocolate vocabulary — attribute and type names the framework itself reads.
+
+Every entry here is **framework-enforced**: an attribute HotChocolate binds, or a type its
+resolver compiler injects. Team naming conventions (a class called ``…Queries``, a parameter
+type called ``…Input``) are deliberately absent — renaming those changes nothing at runtime,
+so treating them as signals would fabricate routes. See the decision notes in
+``.todo/hotchocolate-parser-decisions.md``.
+"""
+
+from __future__ import annotations
+
+#: Root-declaring attributes → operation kind. The only in-file *enforced* statement that a
+#: class is a schema root (the other is ``AddQueryType<T>()`` at the registration site).
+ROOT_ATTRS = {
+    "QueryType": "query",
+    "MutationType": "mutation",
+    "SubscriptionType": "subscription",
+}
+
+#: Removes a member from the schema entirely.
+IGNORE_ATTR = "GraphQLIgnore"
+
+#: Renames a field / marks a parameter as a GraphQL argument.
+NAME_ATTR = "GraphQLName"
+
+#: Authorization, class- or method-level → guards + authRequired.
+AUTHORIZE_ATTR = "Authorize"
+
+#: Parameter attributes that mark an injected dependency rather than a client argument.
+INFRA_PARAM_ATTRS = frozenset({
+    "Parent", "Service", "ScopedService",
+    "EventMessage",
+    "LocalState", "ScopedState", "GlobalState",
+})
+
+#: Parameter *types* the resolver compiler binds itself — never client arguments.
+INFRA_PARAM_TYPES = frozenset({
+    "CancellationToken", "IResolverContext", "ClaimsPrincipal",
+    "ITopicEventReceiver", "ITopicEventSender",
+})
+
+#: Batching-loader types, matched on a parameter's **declared generic base** —
+#: ``IDataLoader<int, Author>`` / ``BatchDataLoader<int, Author>``. A named subclass
+#: (``AuthorDataLoader loader``) is *not* matched on its ``…DataLoader`` suffix: that is a team
+#: convention, and the enforced fact lives in the subclass's base type, in another file.
+#: Resolving those needs the repo heritage index — a known narrow case for now.
+DATALOADER_TYPES = ("IDataLoader", "BatchDataLoader", "GroupedDataLoader", "CacheDataLoader")
+
+#: Parameter attributes that positively identify a GraphQL *argument*. Since ``[Service]`` is
+#: optional from v13 on, a bare ``CatalogDb db`` parameter is indistinguishable from a client
+#: argument without knowing the DI registrations — so requestDTO is set only from these, and
+#: left null otherwise (a documented gap, never a guessed type).
+ARG_MARKER_ATTRS = frozenset({"GraphQLName", "GraphQLType", "DefaultValue"})
+
+#: Request-pipeline attributes that reshape the wire type. Recorded on the statement's
+#: ``decorators`` so the rewrite is visible without inventing a generated type name.
+MIDDLEWARE_ATTRS = frozenset({
+    "UsePaging", "UseOffsetPaging", "UseCursorPaging",
+    "UseFiltering", "UseSorting", "UseProjection",
+    "UseMutationConvention",
+})
+
+#: Cheap byte guard for ``claims``. Deliberately disjoint from ``csharp-graphql``'s
+#: ``ObjectGraphType`` so the two parsers never contend for one file, and deliberately
+#: excludes ``AddGraphQLServer`` / ``MapGraphQL`` so ``Program.cs`` stays with
+#: ``csharp-aspnet`` and keeps its REST routes.
+MARKERS: tuple[bytes, ...] = (
+    b"HotChocolate",
+    b"[QueryType]", b"[MutationType]", b"[SubscriptionType]",
+    b"[ExtendObjectType",
+)
