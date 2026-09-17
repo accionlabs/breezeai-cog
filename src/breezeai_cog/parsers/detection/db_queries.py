@@ -70,6 +70,12 @@ _DB_METHODS: dict[str, tuple[str, ...]] = {
         "get_or_create", "update_or_create", "bulk_update", "values_list",
     ),
     "sqlalchemy": ("filter_by", "session_query", "add_all"),
+    # `.result`/`.to`/`.option`/`.unique` deliberately omitted — they collide with
+    # `Future.result`/collection `.to(List)`/Scala `Option`/generic `.unique` and cannot
+    # be made precise (BREEZEAI-220 P2 audit).
+    "slick": ("forceinsert", "insertorupdate", "tablequery"),
+    "doobie": ("transact", "queryschema"),
+    "quill": ("liftquery",),
 }
 
 # Reverse lookup: method (lowercased) -> DB; first DB in _DB_METHODS wins a collision.
@@ -238,8 +244,11 @@ def match_db(callee: str, method: str, language: str | None = None,
         return "prisma"
     if m in _DISTINCTIVE:
         db = _DISTINCTIVE[m]
+        # MongoDB aggregate is never a bare receiverless call; a bare aggregate() is a local or helper function.
+        if m == "aggregate" and ("." not in callee or callee == method):
+            pass
         # EF verbs are .NET-only; suppress them in a known non-.NET file (name collision).
-        if not (db == "entity_framework" and language is not None and language not in _DOTNET):
+        elif not (db == "entity_framework" and language is not None and language not in _DOTNET):
             return db
     # Ambiguous sync LINQ terminals (ToList/FirstOrDefault/…): EF only in a .NET file AND when
     # the call chain shows a queryable/DbContext source; else LINQ-to-Objects — drop, don't tag.
@@ -250,7 +259,13 @@ def match_db(callee: str, method: str, language: str | None = None,
     # never a deeper chain segment, so a bare ``…client`` further up (``prismaClient``,
     # ``apiClient``) can't hijack the call: ``this.prismaClient.user.count()`` stays out of ES.
     if m in _ES_VERBS and receiver:
-        if m in _ES_COLLISION_VERBS:
+        if language == "scala":
+            # In Scala, ``client`` is canonical for HTTP clients (org.http4s.client.Client, WSClient);
+            # do not treat bare "client" or HTTP clients as ES.
+            es_names = _ES_RECEIVERS - {"client"}
+            if receiver in es_names:
+                return "elasticsearch"
+        elif m in _ES_COLLISION_VERBS:
             # count/index also mean ORM/array ops — demand an explicit ES receiver name,
             # a bare ``…client`` (httpClient) is not enough.
             if receiver in _ES_RECEIVERS:
@@ -261,10 +276,10 @@ def match_db(callee: str, method: str, language: str | None = None,
     # explicit cache/redis receiver NAME. A bare ``endswith("cache")`` is deliberately NOT used:
     # in-memory ``Map``/``LRUCache`` fields are routinely named ``…Cache`` (e.g. a DataLoader
     # ``dataLoaderCache: Map<K,V>``), and their ``.get()``/``.set()`` are memory ops, not Redis.
-    # Residual: an in-memory object named exactly ``cache``/``cacheService`` still matches, and the
-    # NestJS ``Cache`` abstraction may be memory-backed — resolving those needs type resolution
-    # (see typed_db_ids) plus a cache-vs-redis vocabulary decision; left for a follow-up.
-    if receiver and (receiver in _CACHE_RECEIVERS or receiver.endswith("redis")):
+    cache_receivers = _CACHE_RECEIVERS
+    if language == "scala":
+        cache_receivers = _CACHE_RECEIVERS - {"cache"}
+    if receiver and (receiver in cache_receivers or receiver.endswith("redis")):
         if m in _CACHE_VERBS or m in ("delete", "remove"):
             return "redis"
     if m in _GENERIC:
@@ -301,6 +316,9 @@ def match_db(callee: str, method: str, language: str | None = None,
         # callee includes the method (``session.run``); the receiver is everything before
         # it, and we match on the receiver's final segment (``this.session`` -> ``session``).
         receiver_last = low.rsplit(".", 1)[0].rsplit(".", 1)[-1]
-        if any(receiver_last == r or receiver_last.endswith(r) for r in _NEO4J_RUN_RECEIVERS):
+        if receiver_last in ("ctx", "context"):
+            if language == "scala":
+                return "quill"
+        if receiver_last in _NEO4J_RUN_RECEIVERS:
             return "neo4j"
     return None

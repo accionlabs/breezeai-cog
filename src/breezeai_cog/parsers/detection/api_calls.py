@@ -53,6 +53,9 @@ def match_api(
         m = m[: -len("async")]
     if m not in _HTTP_VERBS:
         return None
+    if m == "request" and method != "request":
+        # Capitalized Request (...) is a constructor or model type, not an outbound HTTP request call
+        return None
     is_client = any(hint in low for hint in _CLIENT_HINTS)
     if not is_client and http_client_ids:
         # names are original-case identifiers; the receiver is the segment before the first dot

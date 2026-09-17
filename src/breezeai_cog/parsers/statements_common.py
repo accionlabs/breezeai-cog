@@ -278,6 +278,7 @@ def classify_statement(
     language: str | None = None,
     typed_db_ids: "frozenset[str] | None" = None,
     decorators: "list[Decorator] | None" = None,
+    local_names: Collection[str] = (),
 ) -> list[Statement]:
     # ``code_text`` (comment-free) drives query/semantic detection; ``display_text`` is what
     # lands on the record — for a normal statement it folds in a same-line trailing comment
@@ -298,6 +299,8 @@ def classify_statement(
         det = call_details(call, source)
         if det is None:
             continue
+        if local_names and "." not in det[0] and det[0] in local_names:
+            continue
         classified = classify_call(
             det[0],
             det[1],
@@ -317,6 +320,44 @@ def classify_statement(
         hits.append((sem, meth, ep, dh, call))
 
     records: list[Statement] = []
+    if node.type in control_flow:
+        # Spec §4.2: Control-flow statements must always carry semanticType = None.
+        # Inner calls carrying semantic types are emitted at their own call span.
+        records.append(
+            Statement(
+                id=disambiguate(statement_id(path, start, col), seen_ids),
+                parentId=parent_id,
+                nodeType=node.type,
+                semanticType=None,
+                text=display_text,
+                name=name_of(node, source),
+                method=None,
+                endpoint=None,
+                dataAccessHint=None,
+                decorators=decorators or [],
+                startLine=start,
+                endLine=end,
+                path=path,
+            )
+        )
+        for semantic, method_value, endpoint, hint, call in hits:
+            cs, ccol = call.start_point[0] + 1, call.start_point[1]
+            records.append(
+                Statement(
+                    id=disambiguate(statement_id(path, cs, ccol), seen_ids),
+                    parentId=parent_id,
+                    nodeType=call.type,
+                    semanticType=semantic,
+                    text=node_text(call, source),
+                    method=method_value,
+                    endpoint=endpoint,
+                    dataAccessHint=hint,
+                    startLine=cs,
+                    endLine=call.end_point[0] + 1,
+                    path=path,
+                )
+            )
+        return records
     if hits:
         semantic, method_value, endpoint, hint, _ = hits[0]
     else:
