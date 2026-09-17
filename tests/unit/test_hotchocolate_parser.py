@@ -588,3 +588,36 @@ namespace Catalog {
     rec = _parse(CSharpHotChocolateParser(), src, "BookMutations.cs")
     names = {d.name for d in _by_endpoint(rec)["addBook"].decorators}
     assert names == {"Error<TitleEmptyException>", "Error<NoSpeakerException>", "UseMutationConvention"}
+
+
+def test_named_attribute_argument_resolves_the_target() -> None:
+    # HotChocolate's own tests write the target as a named argument, with a comment inside the
+    # attribute. Missing that put the whole argument text into the endpoint.
+    src = b'''using HotChocolate.Types;
+namespace Catalog {
+  [ExtendObjectType(
+      // extends every type inheriting this one
+      extendsType: typeof(Book))]
+  public class Extensions {
+    public string Any([Parent] Book parent) => null;
+  }
+}
+'''
+    rec = _parse(CSharpHotChocolateParser(), src, "Extensions.cs")
+    op = _by_endpoint(rec)["Book.any"]
+    assert op.routeKind == "field_resolver"
+
+
+def test_multi_argument_generic_return_keeps_the_outer_type() -> None:
+    # FieldResult<T, TError> has no single payload type; the concatenation "string, FooException"
+    # is not a type name, so the declared outer type is recorded instead.
+    src = b'''using HotChocolate;
+namespace Catalog {
+  [MutationType]
+  public class M {
+    public FieldResult<string, FooException> DoSomething(string s) => null;
+  }
+}
+'''
+    rec = _parse(CSharpHotChocolateParser(), src, "M.cs")
+    assert _by_endpoint(rec)["doSomething"].responseDTO == "FieldResult"

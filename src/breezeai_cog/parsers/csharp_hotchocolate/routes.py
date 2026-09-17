@@ -302,12 +302,18 @@ def _operation_records(
 
 def extend_target(cls: Class) -> str | None:
     """The type an ``[ExtendObjectType(...)]`` class extends, or None if it carries no such
-    attribute. Handles all three argument forms — ``typeof(Book)``, ``"Query"`` and
-    ``OperationTypeNames.Query`` — returning the bare type name."""
+    attribute.
+
+    Handles the argument forms real code uses: ``typeof(Book)``, ``"Query"``,
+    ``OperationTypeNames.Query``, and any of those written as a **named** argument
+    (``extendsType: typeof(IMarker)``), which the framework's own test suite does.
+    """
     for dec in cls.decorators:
         if simple_attr_name(dec.name) != EXTEND_ATTR or not dec.args:
             continue
         arg = dec.args[0].strip()
+        if ":" in arg and not arg.startswith(('"', "typeof(")):
+            arg = arg.split(":", 1)[1].strip()  # named argument → keep the value
         if arg.startswith("typeof(") and arg.endswith(")"):
             arg = arg[len("typeof("): -1]
         return arg.strip().strip('"').rsplit(".", 1)[-1] or None
