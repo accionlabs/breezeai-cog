@@ -138,3 +138,39 @@ val api = Router(prefix -> routes)
     routes = [s for s in rec.statements if s.semanticType == "route"]
     assert len(routes) == 1
     assert routes[0].endpoint is None
+
+
+MULTI_MOUNT_SRC = b"""import org.http4s._
+import org.http4s.dsl.io._
+import org.http4s.server.Router
+
+val userRoutes = HttpRoutes.of[IO] { case GET -> Root / "users" => Ok() }
+val adminRoutes = HttpRoutes.of[IO] { case GET -> Root / "stats" => Ok() }
+val app = Router("/v1" -> userRoutes, "/admin" -> adminRoutes)
+"""
+
+REPEATED_MOUNT_SRC = b"""import org.http4s._
+import org.http4s.dsl.io._
+import org.http4s.server.Router
+
+val r = HttpRoutes.of[IO] { case GET -> Root / "users" => Ok() }
+val a = Router("/v1" -> r)
+val b = Router("/v2" -> r)
+"""
+
+
+def test_http4s_multi_mount(tmp_path: Path) -> None:
+    rec = _parse_http4s(tmp_path, MULTI_MOUNT_SRC, "MultiMounted.scala")
+    routes = [s for s in rec.statements if s.semanticType == "route"]
+    endpoints = {r.endpoint for r in routes}
+    assert endpoints == {"/v1/users", "/admin/stats"}
+
+
+def test_http4s_repeated_mount_no_stacking(tmp_path: Path) -> None:
+    rec = _parse_http4s(tmp_path, REPEATED_MOUNT_SRC, "Repeated.scala")
+    routes = [s for s in rec.statements if s.semanticType == "route"]
+    endpoints = {r.endpoint for r in routes}
+    assert "/v2/v1/users" not in endpoints
+    assert "/v1/users" in endpoints
+    assert "/v2/users" in endpoints
+

@@ -93,6 +93,15 @@ def detect_http4s_routes(
     record: FileRecord,
 ) -> list[Statement]:
     """Find all HttpRoutes.of / AuthedRoutes.of blocks and emit route statements for their case clauses."""
+    # D2: cheap byte guard
+    if (
+        b".of" not in source
+        and b"HttpRoutes" not in source
+        and b"AuthedRoutes" not in source
+        and b"Router" not in source
+    ):
+        return []
+
     seen_ids = {s.id for s in record.statements}
     routes: list[Statement] = []
     route_bindings: dict[str, list[Statement]] = {}
@@ -176,27 +185,57 @@ def detect_http4s_routes(
             return "/" + right if right else "/"
         return left + ("/" + right if right else "")
 
-    def apply_router_mounts(node: Node) -> None:
-        if node.type == "call_expression":
-            fn = node.child_by_field_name("function")
-            if fn is not None and node_text(fn, source).rsplit(".", 1)[-1] == "Router":
-                args = node.child_by_field_name("arguments")
-                arrow = None
-                if args is not None:
-                    arrow = next(
-                        (child for child in args.named_children if child.type == "infix_expression"),
-                        None,
-                    )
-                if arrow is not None:
-                    op = arrow.child_by_field_name("operator")
-                    target = arrow.child_by_field_name("right")
-                    if op is not None and node_text(op, source) == "->" and target is not None:
-                        prefix = resolve_prefix(arrow.child_by_field_name("left"))
-                        for route in route_bindings.get(node_text(target, source), []):
-                            route.endpoint = join_paths(prefix, route.endpoint)
-        for child in node.named_children:
-            apply_router_mounts(child)
-
     walk(root)
-    apply_router_mounts(root)
+
+    # D2/E3: Only walk for Router mounts if Router is present and there are route bindings
+    if b"Router" in source and route_bindings:
+        base_endpoints = {r.id: r.endpoint for r in routes}
+        mounted_routes: set[str] = set()
+
+        def apply_router_mounts(node: Node) -> None:
+            if node.type == "call_expression":
+                fn = node.child_by_field_name("function")
+                if fn is not None and node_text(fn, source).rsplit(".", 1)[-1] == "Router":
+                    args = node.child_by_field_name("arguments")
+                    if args is not None:
+                        # C2: Multi-mount handles all infix expressions with '->'
+                        arrows = [child for child in args.named_children if child.type == "infix_expression"]
+                        for arrow in arrows:
+                            op = arrow.child_by_field_name("operator")
+                            target = arrow.child_by_field_name("right")
+                            if op is not None and node_text(op, source) == "->" and target is not None:
+                                prefix = resolve_prefix(arrow.child_by_field_name("left"))
+                                target_name = node_text(target, source)
+                                for route in route_bindings.get(target_name, []):
+                                    base_ep = base_endpoints.get(route.id, route.endpoint)
+                                    new_ep = join_paths(prefix, base_ep)
+                                    # B7: Prevent iterative prefix stacking
+                                    if route.id not in mounted_routes:
+                                        route.endpoint = new_ep
+                                        mounted_routes.add(route.id)
+                                    else:
+                                        # Secondary mount of the same route under another prefix
+                                        sid = disambiguate(statement_id(path, route.startLine, 0), seen_ids)
+                                        cloned = Statement(
+                                            id=sid,
+                                            parentId=route.parentId,
+                                            nodeType=route.nodeType,
+                                            semanticType=route.semanticType,
+                                            text=route.text,
+                                            framework=route.framework,
+                                            handler=route.handler,
+                                            method=route.method,
+                                            endpoint=new_ep,
+                                            routeKind=route.routeKind,
+                                            isRegex=route.isRegex,
+                                            startLine=route.startLine,
+                                            endLine=route.endLine,
+                                            path=route.path,
+                                        )
+                                        routes.append(cloned)
+            for child in node.named_children:
+                apply_router_mounts(child)
+
+        apply_router_mounts(root)
+
     return routes
