@@ -83,6 +83,11 @@ DATALOADER_TYPES = ("IDataLoader", "BatchDataLoader", "GroupedDataLoader", "Cach
 #: left null otherwise (a documented gap, never a guessed type).
 ARG_MARKER_ATTRS = frozenset({"GraphQLName", "GraphQLType", "DefaultValue"})
 
+#: Declared failure modes: ``[Error<TitleEmptyException>]`` states an error a mutation can return,
+#: so it is part of what a client receives back. The C# attribute extractor reports the whole
+#: generic name (``Error<TitleEmptyException>``), so match on the prefix.
+ERROR_ATTR_PREFIX = "Error<"
+
 #: Request-pipeline attributes that reshape the wire type. Recorded on the statement's
 #: ``decorators`` so the rewrite is visible without inventing a generated type name.
 MIDDLEWARE_ATTRS = frozenset({

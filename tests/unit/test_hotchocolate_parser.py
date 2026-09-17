@@ -570,3 +570,21 @@ def test_subscribe_and_resolve_is_claimed_and_captured() -> None:
     assert op.routeKind == "subscription"
     # The topic is built from the receiver inside the body, so no consumer record.
     assert _consumers(rec) == []
+
+
+def test_declared_error_types_are_kept() -> None:
+    # [Error<T>] states a failure a mutation can return, so it belongs with the operation.
+    src = b'''using HotChocolate;
+namespace Catalog {
+  [MutationType]
+  public class BookMutations {
+    [Error<TitleEmptyException>]
+    [Error<NoSpeakerException>]
+    [UseMutationConvention]
+    public Book AddBook(Book book) => book;
+  }
+}
+'''
+    rec = _parse(CSharpHotChocolateParser(), src, "BookMutations.cs")
+    names = {d.name for d in _by_endpoint(rec)["addBook"].decorators}
+    assert names == {"Error<TitleEmptyException>", "Error<NoSpeakerException>", "UseMutationConvention"}

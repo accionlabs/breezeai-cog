@@ -29,6 +29,7 @@ from .mappings import (
     ARG_MARKER_ATTRS,
     AUTHORIZE_ATTR,
     DATALOADER_TYPES,
+    ERROR_ATTR_PREFIX,
     EXTEND_ATTR,
     IGNORE_ATTR,
     INFRA_PARAM_ATTRS,
@@ -114,8 +115,11 @@ def guards_of(cls: Class, fn: Function) -> list[str]:
 
 
 def middleware(fn: Function) -> list[Decorator]:
-    """Request-pipeline attributes, kept so a rewritten wire shape stays visible."""
-    return [d for d in fn.decorators if simple_attr_name(d.name) in MIDDLEWARE_ATTRS]
+    """Attributes worth keeping on the statement: the request-pipeline ones, so a rewritten wire
+    shape stays visible, and the declared error types, which are part of the client's contract."""
+    return [d for d in fn.decorators
+            if simple_attr_name(d.name) in MIDDLEWARE_ATTRS
+            or simple_attr_name(d.name).startswith(ERROR_ATTR_PREFIX)]
 
 
 def _statement(
