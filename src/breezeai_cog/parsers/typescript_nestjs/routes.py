@@ -154,7 +154,7 @@ def _field_resolver_return_dto(dec: Decorator) -> str | None:
     return _dto_from_type(m.group(1))
 
 
-def _resolver_grouping_type(decs: list[Node], source: bytes) -> str | None:
+def _resolver_type_arg(decs: list[Node], source: bytes) -> str | None:
     """The explicit type arg of ``@Resolver(() => T)`` → ``T``, else ``None`` for plain
     ``@Resolver()`` / ``@Resolver('field')`` (standard entity resolvers)."""
     for dec in decs:
@@ -284,7 +284,7 @@ def detect_nest_routes(
         # returns a singleton T — @ResolveField methods inherit the parent op's identity.
         parent_op_info: tuple[str, str] | None = None
         if is_resolver:
-            grouping_type = _resolver_grouping_type(decs, source)
+            grouping_type = _resolver_type_arg(decs, source)
             if grouping_type:
                 parent_op_info = _parent_op_for_grouping(body, source, grouping_type)
         pending: list[Node] = []
@@ -365,11 +365,15 @@ def detect_nest_routes(
                                 responseDTO=_field_resolver_return_dto(d) or _return_dto(member, source),
                             ))
                         else:
+                            # `Parent.field` when @Resolver(() => T) names the parent type, else
+                            # the bare field name: a bare `author` does not say which type it
+                            # hangs off, and many types have one. Same form csharp-hotchocolate
+                            # emits. `method` is left unset -- a field resolver has no verb.
+                            parent_type = _resolver_type_arg(decs, source)
                             routes.append(Statement(
                                 **{**common, "framework": "graphql"},
                                 semanticType="route",
-                                method="QUERY",
-                                endpoint=mname,
+                                endpoint=f"{parent_type}.{mname}" if parent_type else mname,
                                 routeKind="field_resolver",
                                 requestDTO=_args_dto(member, source),
                                 responseDTO=_field_resolver_return_dto(d) or _return_dto(member, source),

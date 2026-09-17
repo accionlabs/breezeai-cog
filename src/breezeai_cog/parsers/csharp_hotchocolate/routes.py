@@ -182,10 +182,10 @@ def field_resolver_statement(
 ) -> Statement:
     """A resolver for one field of a data type. Not client-callable — it runs once per parent
     object when that field is selected — so it carries its own ``routeKind`` and an address that
-    names the edge it resolves (``Book.author``). ``method`` has no real meaning here (a field
-    resolver has no verb); ``QUERY`` matches ``typescript_nestjs/routes.py:373``."""
+    names the edge it resolves (``Book.author``). ``method`` is left unset: a field resolver has
+    no verb, and the NestJS detector now omits it too."""
     return _statement(
-        cls, fn, kind="field_resolver", method="QUERY",
+        cls, fn, kind="field_resolver", method=None,
         endpoint=f"{target}.{field_name(fn.name, fn.decorators)}", text=text, seen=seen,
         generated_loaders=generated_loaders,
     )

@@ -270,7 +270,7 @@ def test_data_type_extension_yields_field_resolvers() -> None:
     ops = _by_endpoint(rec)
     for endpoint in ("Book.author", "Book.reviews"):
         assert ops[endpoint].routeKind == "field_resolver"
-        assert ops[endpoint].method == "QUERY"
+        assert ops[endpoint].method is None  # a field resolver has no verb
     assert ops["Book.author"].dataLoaders == ["IDataLoader<int, Author>"]
     assert ops["Book.reviews"].responseDTO == "Review"
 
