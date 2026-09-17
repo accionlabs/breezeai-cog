@@ -154,7 +154,7 @@ def detect_symfony_routes(
                             endpoint=full_path,
                             handler=handler,
                             name=rname,
-                            text=f"#[Route('{full_path}')]",
+                            text=dec.text or f"#[Route('{full_path}')]",
                             startLine=fn.startLine,
                             endLine=fn.endLine,
                             path=record.path,

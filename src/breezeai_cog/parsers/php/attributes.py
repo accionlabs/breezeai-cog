@@ -32,7 +32,32 @@ def _extract_decorator_from_attribute(attr: Node, source: bytes) -> Decorator | 
     if args_node is not None:
         for arg in args_node.named_children:
             args.append(_attribute_arg_text(arg, source))
-    return Decorator(name=name, args=args)
+
+    # Capture the real source text of the attribute (including #[...] delimiters).
+    # Walk up to the attribute_list node which includes the ``#[`` and ``]`` tokens.
+    attr_text: str | None = None
+    parent = attr.parent
+    while parent is not None:
+        if parent.type == "attribute_list":
+            # If this attribute_list contains only one attribute, use its full text.
+            attrs_in_list = [
+                d
+                for grp in parent.named_children
+                for d in (
+                    grp.named_children if grp.type == "attribute_group" else [grp]
+                )
+                if d.type == "attribute"
+            ]
+            if len(attrs_in_list) <= 1:
+                attr_text = node_text(parent, source)
+            else:
+                attr_text = f"#[{node_text(attr, source)}]"
+            break
+        parent = parent.parent
+    if attr_text is None:
+        attr_text = f"#[{node_text(attr, source)}]"
+
+    return Decorator(name=name, args=args, text=attr_text)
 
 
 def extract_attributes(node: Node | list[Node] | None, source: bytes) -> list[Decorator]:

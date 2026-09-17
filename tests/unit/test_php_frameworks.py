@@ -903,3 +903,29 @@ Route::put('/profile', [ProfileController::class, 'update']);
     assert routes[0].requestDTO == "App\\Http\\Requests\\UpdateProfileRequest"
     assert routes[0].responseDTO == "App\\Http\\Resources\\UserResource"
 
+
+def test_symfony_route_text_is_actual_source(tmp_path: Path) -> None:
+    """Statement.text must be the actual attribute source, not a synthesized subset."""
+    src = b"""\
+<?php
+namespace App\\Controller;
+
+use Symfony\\Component\\Routing\\Attribute\\Route;
+
+class DemoController
+{
+    #[Route('/x', methods: ['GET', 'POST'], name: 'x_route')]
+    public function handle() {}
+}
+"""
+    rec = _parse(SymfonyParser, tmp_path, src, "src/Controller/DemoController.php")
+    routes = [s for s in rec.statements if s.semanticType == "route"]
+    assert len(routes) >= 1
+    # Every emitted route's text must contain the full attribute source
+    for route in routes:
+        assert "methods:" in route.text, f"Expected real source with methods:, got: {route.text}"
+        assert "name:" in route.text, f"Expected real source with name:, got: {route.text}"
+        assert "x_route" in route.text, f"Expected real source with x_route, got: {route.text}"
+        # Must NOT be the old synthesized form that only had the path
+        assert route.text != "#[Route('/x')]", "text must not be the synthesized path-only form"
+
