@@ -73,9 +73,19 @@ def _base_type(type_name: str | None) -> str:
     return type_name.split("<", 1)[0].strip().rsplit(".", 1)[-1]
 
 
-def data_loaders(fn: Function) -> list[str] | None:
-    """Declared batching-loader parameter types, in declaration order."""
-    loaders = [p.type for p in fn.params if _base_type(p.type).startswith(DATALOADER_TYPES)]
+def data_loaders(fn: Function, generated: dict[str, str | None] | None = None) -> list[str] | None:
+    """Batching-loader parameter types, in declaration order.
+
+    Two ways a parameter is known to be a loader, both backed by a declaration rather than a name
+    pattern: its type *is* a loader type (``IDataLoader<int, Author>``), or its type is one the
+    source generator emits for a ``[DataLoader]`` method found elsewhere in the repo
+    (``ISessionByIdDataLoader``). The generated interface exists nowhere in the source, so the
+    second case needs the repo index — without it the field is empty on real code, since named
+    loaders are the norm.
+    """
+    known = generated or {}
+    loaders = [p.type for p in fn.params
+               if _base_type(p.type).startswith(DATALOADER_TYPES) or _base_type(p.type) in known]
     return loaders or None
 
 
@@ -124,7 +134,7 @@ def middleware(fn: Function) -> list[Decorator]:
 
 def _statement(
     cls: Class, fn: Function, *, kind: str, method: str, endpoint: str, text: str,
-    seen: set[str],
+    seen: set[str], generated_loaders: dict[str, str | None] | None = None,
 ) -> Statement:
     """One route record for a resolver method. ``endpoint`` is the field address the framework
     serves; ``handler`` keeps the C# method name."""
@@ -146,7 +156,7 @@ def _statement(
         guards=guards or None,
         requestDTO=request_dto(fn),
         responseDTO=_response_dto(fn.returnType),
-        dataLoaders=data_loaders(fn),
+        dataLoaders=data_loaders(fn, generated_loaders),
         decorators=middleware(fn),
         startLine=fn.startLine,
         endLine=fn.endLine,
@@ -155,17 +165,20 @@ def _statement(
 
 
 def operation_statement(
-    cls: Class, fn: Function, kind: str, text: str, seen: set[str]
+    cls: Class, fn: Function, kind: str, text: str, seen: set[str],
+    generated_loaders: dict[str, str | None] | None = None,
 ) -> Statement:
     """A client-callable operation on a schema root."""
     return _statement(
         cls, fn, kind=kind, method=kind.upper(),
         endpoint=field_name(fn.name, fn.decorators), text=text, seen=seen,
+        generated_loaders=generated_loaders,
     )
 
 
 def field_resolver_statement(
-    cls: Class, fn: Function, target: str, text: str, seen: set[str]
+    cls: Class, fn: Function, target: str, text: str, seen: set[str],
+    generated_loaders: dict[str, str | None] | None = None,
 ) -> Statement:
     """A resolver for one field of a data type. Not client-callable — it runs once per parent
     object when that field is selected — so it carries its own ``routeKind`` and an address that
@@ -174,6 +187,7 @@ def field_resolver_statement(
     return _statement(
         cls, fn, kind="field_resolver", method="QUERY",
         endpoint=f"{target}.{field_name(fn.name, fn.decorators)}", text=text, seen=seen,
+        generated_loaders=generated_loaders,
     )
 
 
@@ -288,9 +302,10 @@ def topic_consumer_statement(
 def _operation_records(
     cls: Class, fn: Function, kind: str, text: str, seen: set[str],
     anchors: dict[tuple[str, int], Anchor],
+    generated_loaders: dict[str, str | None] | None = None,
 ) -> list[Statement]:
     """The route for one operation, plus a topic consumer when it is a resolvable subscription."""
-    route = operation_statement(cls, fn, kind, text, seen)
+    route = operation_statement(cls, fn, kind, text, seen, generated_loaders)
     if kind != "subscription":
         return [route]
     topic = subscription_topic(fn)
@@ -357,6 +372,7 @@ def _extension_routes(
     cls: Class, target: str, methods: list[Function], record: FileRecord,
     heritage: dict[str, object], path: str, seen: set[str],
     anchors: dict[tuple[str, int], Anchor],
+    generated_loaders: dict[str, str | None] | None = None,
 ) -> list[Statement]:
     """Routes for one ``[ExtendObjectType(target)]`` class: operations when the target is a
     resolved root, field resolvers when it is a data type whose parent binding is visible, and
@@ -365,7 +381,8 @@ def _extension_routes(
     if kind is not None:
         return [s for fn in methods
                 for s in _operation_records(
-                    cls, fn, kind, f"[{EXTEND_ATTR}] {fn.name}", seen, anchors)]
+                    cls, fn, kind, f"[{EXTEND_ATTR}] {fn.name}", seen, anchors,
+                    generated_loaders)]
     resolvers = [fn for fn in methods if resolves_parent(fn, target)]
     if not resolvers:
         get_logger("breezeai_cog.parsers").debug(
@@ -373,7 +390,8 @@ def _extension_routes(
             reason="target is neither a resolved root nor a visible parent binding",
         )
         return []
-    return [field_resolver_statement(cls, fn, target, f"[{EXTEND_ATTR}({target})] {fn.name}", seen)
+    return [field_resolver_statement(
+                cls, fn, target, f"[{EXTEND_ATTR}({target})] {fn.name}", seen, generated_loaders)
             for fn in resolvers]
 
 
@@ -442,6 +460,7 @@ def detect_hotchocolate_routes(
     another file still resolves.
     """
     heritage: dict[str, object] = getattr(index, "class_heritage", None) or {}
+    generated_loaders: dict[str, str | None] = getattr(index, "data_loaders", None) or {}
     nodes = method_nodes(root, source)
     anchors = topic_anchors(nodes, source)
     methods: dict[str, list[Function]] = {}
@@ -457,7 +476,8 @@ def detect_hotchocolate_routes(
             attr = next(name for name, k in ROOT_ATTRS.items() if k == kind)
             routes.extend(s for fn in own
                           for s in _operation_records(
-                              cls, fn, kind, f"[{attr}] {fn.name}", seen, anchors))
+                              cls, fn, kind, f"[{attr}] {fn.name}", seen, anchors,
+                              generated_loaders))
             continue
         target = extend_target(cls)
         if target is not None:

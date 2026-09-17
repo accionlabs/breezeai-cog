@@ -621,3 +621,48 @@ namespace Catalog {
 '''
     rec = _parse(CSharpHotChocolateParser(), src, "M.cs")
     assert _by_endpoint(rec)["doSomething"].responseDTO == "FieldResult"
+
+
+# ---- generated DataLoader types -------------------------------------------------------------
+
+# A resolver taking the interface HotChocolate's generator emits for a [DataLoader] method that
+# lives in another file. The interface itself exists nowhere in the source.
+GENERATED_LOADER_USE = b'''using HotChocolate;
+namespace Catalog {
+  [QueryType]
+  public class SessionQueries {
+    public Task<Session> GetSessionByIdAsync(
+        int id, ISessionByIdDataLoader sessionById, CatalogDb db) => null;
+  }
+}
+'''
+
+LOADER_DECLARATION = b'''namespace Catalog {
+  public static class SessionDataLoaders {
+    [DataLoader]
+    public static async Task<IReadOnlyDictionary<int, Session>> SessionByIdAsync(
+        IReadOnlyList<int> ids, CatalogDb db) => null;
+  }
+}
+'''
+
+
+def test_generated_loader_is_recognised_via_the_index() -> None:
+    from breezeai_cog.parsers.csharp.imports import _index_data_loaders
+    from breezeai_cog.parsers.treesitter import parse_source
+
+    # Build the index entry the repo pre-pass would produce from the declaring file.
+    index = CSharpIndex()
+    root = parse_source("csharp", LOADER_DECLARATION, 0).root_node
+    _index_data_loaders(root, LOADER_DECLARATION, "SessionDataLoaders.cs", index)
+    assert "ISessionByIdDataLoader" in index.data_loaders
+
+    rec = _parse_with_index(GENERATED_LOADER_USE, "SessionQueries.cs", index)
+    assert _by_endpoint(rec)["sessionById"].dataLoaders == ["ISessionByIdDataLoader"]
+
+
+def test_named_loader_stays_unrecognised_without_the_index() -> None:
+    # No index entry means no evidence the type is a loader -- the `…DataLoader` name alone is a
+    # convention, so the field stays empty rather than matching on the suffix.
+    rec = _parse(CSharpHotChocolateParser(), GENERATED_LOADER_USE, "SessionQueries.cs")
+    assert _by_endpoint(rec)["sessionById"].dataLoaders is None
