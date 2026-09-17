@@ -18,10 +18,13 @@ from __future__ import annotations
 
 from typing import Any
 
+from tree_sitter import Node
+
 from ...emit import disambiguate, statement_id
 from ...logging import get_logger
 from ...schemas import Class, Decorator, FileRecord, Function, Statement
 from ..csharp_aspnet.routes import _response_dto, simple_attr_name
+from ..treesitter import node_text
 from .mappings import (
     ARG_MARKER_ATTRS,
     AUTHORIZE_ATTR,
@@ -188,7 +191,53 @@ def subscription_topic(fn: Function, endpoint: str) -> str | None:
     return endpoint
 
 
-def topic_consumer_statement(fn: Function, topic: str, seen: set[str]) -> Statement:
+#: Key of the anchor map: (method name, its declaration's start line).
+Anchor = tuple[int, int]
+
+
+def _attribute_position(method: Node, source: bytes, wanted: str) -> Anchor | None:
+    """``(line, col)`` of the ``wanted`` attribute on ``method``'s declaration, else None."""
+    for lst in method.named_children:
+        if lst.type != "attribute_list":
+            continue
+        for attr in lst.named_children:
+            if attr.type != "attribute":
+                continue
+            name = attr.child_by_field_name("name")
+            if name is None:
+                continue
+            if simple_attr_name(node_text(name, source).rsplit(".", 1)[-1]) == wanted:
+                return attr.start_point[0] + 1, attr.start_point[1]
+    return None
+
+
+def topic_anchors(root: Node, source: bytes) -> dict[tuple[str, int], Anchor]:
+    """Map each method to the position of the attribute that declares what it consumes.
+
+    A ``Decorator`` on the record carries no position, but the consumer record is emitted
+    *because of* one specific attribute — ``[Topic("x")]``, or ``[Subscribe]`` when the topic
+    falls back to the field name — so its span should point there rather than at the whole
+    member. This one pass over the tree supplies that position; without it the consumer would
+    reuse the route's position and its id would depend on the route existing.
+    """
+    anchors: dict[tuple[str, int], Anchor] = {}
+    stack = [root]
+    while stack:
+        node = stack.pop()
+        if node.type == "method_declaration":
+            name = node.child_by_field_name("name")
+            if name is not None:
+                pos = (_attribute_position(node, source, TOPIC_ATTR)
+                       or _attribute_position(node, source, SUBSCRIBE_ATTR))
+                if pos is not None:
+                    anchors[(node_text(name, source), node.start_point[0] + 1)] = pos
+        stack.extend(node.named_children)
+    return anchors
+
+
+def topic_consumer_statement(
+    fn: Function, topic: str, seen: set[str], anchor: Anchor | None = None
+) -> Statement:
     """The server-side half of a subscription: it consumes ``topic`` to push to subscribers.
 
     A subscription has two addresses — clients name the *field*, the server reads a *topic* — so
@@ -196,8 +245,9 @@ def topic_consumer_statement(fn: Function, topic: str, seen: set[str]) -> Statem
     topic" respectively. Both hang off the same method (``parentId``), and a route inventory and
     an event inventory each see exactly one of them, so nothing is double-counted.
     """
+    line, col = anchor if anchor is not None else (fn.startLine, 0)
     return Statement(
-        id=disambiguate(statement_id(fn.path or "", fn.startLine, 0), seen),
+        id=disambiguate(statement_id(fn.path or "", line, col), seen),
         parentId=fn.id,
         nodeType="synthetic",
         semanticType="eventbus_consumer",
@@ -206,14 +256,15 @@ def topic_consumer_statement(fn: Function, topic: str, seen: set[str]) -> Statem
         framework="graphql",
         handler=fn.name,
         handlerLine=fn.startLine,
-        startLine=fn.startLine,
-        endLine=fn.endLine,
+        startLine=line,
+        endLine=line,
         path=fn.path,
     )
 
 
 def _operation_records(
-    cls: Class, fn: Function, kind: str, text: str, seen: set[str]
+    cls: Class, fn: Function, kind: str, text: str, seen: set[str],
+    anchors: dict[tuple[str, int], Anchor],
 ) -> list[Statement]:
     """The route for one operation, plus a topic consumer when it is a resolvable subscription."""
     route = operation_statement(cls, fn, kind, text, seen)
@@ -222,7 +273,8 @@ def _operation_records(
     topic = subscription_topic(fn, route.endpoint or fn.name)
     if topic is None:
         return [route]
-    return [route, topic_consumer_statement(fn, topic, seen)]
+    anchor = anchors.get((fn.name, fn.startLine))
+    return [route, topic_consumer_statement(fn, topic, seen, anchor)]
 
 
 def extend_target(cls: Class) -> str | None:
@@ -275,6 +327,7 @@ def resolves_parent(fn: Function, target: str) -> bool:
 def _extension_routes(
     cls: Class, target: str, methods: list[Function], record: FileRecord,
     heritage: dict[str, object], path: str, seen: set[str],
+    anchors: dict[tuple[str, int], Anchor],
 ) -> list[Statement]:
     """Routes for one ``[ExtendObjectType(target)]`` class: operations when the target is a
     resolved root, field resolvers when it is a data type whose parent binding is visible, and
@@ -282,7 +335,8 @@ def _extension_routes(
     kind = _root_kind_of_name(target, record, heritage)
     if kind is not None:
         return [s for fn in methods
-                for s in _operation_records(cls, fn, kind, f"[{EXTEND_ATTR}] {fn.name}", seen)]
+                for s in _operation_records(
+                    cls, fn, kind, f"[{EXTEND_ATTR}] {fn.name}", seen, anchors)]
     resolvers = [fn for fn in methods if resolves_parent(fn, target)]
     if not resolvers:
         get_logger("breezeai_cog.parsers").debug(
@@ -295,7 +349,7 @@ def _extension_routes(
 
 
 def detect_hotchocolate_routes(
-    record: FileRecord, seen: set[str], index: Any = None
+    record: FileRecord, root: Node, source: bytes, seen: set[str], index: Any = None
 ) -> list[Statement]:
     """Every operation and field resolver declared in this file.
 
@@ -304,6 +358,7 @@ def detect_hotchocolate_routes(
     another file still resolves.
     """
     heritage: dict[str, object] = getattr(index, "class_heritage", None) or {}
+    anchors = topic_anchors(root, source)
     methods: dict[str, list[Function]] = {}
     for fn in record.functions:
         if is_operation(fn):
@@ -320,10 +375,11 @@ def detect_hotchocolate_routes(
         if kind is not None:
             attr = next(name for name, k in ROOT_ATTRS.items() if k == kind)
             routes.extend(s for fn in own
-                          for s in _operation_records(cls, fn, kind, f"[{attr}] {fn.name}", seen))
+                          for s in _operation_records(
+                              cls, fn, kind, f"[{attr}] {fn.name}", seen, anchors))
             continue
         target = extend_target(cls)
         if target is not None:
             routes.extend(_extension_routes(
-                cls, target, own, record, heritage, record.path, seen))
+                cls, target, own, record, heritage, record.path, seen, anchors))
     return routes

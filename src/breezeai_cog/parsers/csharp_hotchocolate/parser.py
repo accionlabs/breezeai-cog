@@ -40,7 +40,8 @@ class CSharpHotChocolateParser(CSharpParser):
         record = self.extract(root, ctx)  # inherited C# extraction (one parse)
         if ctx.capture_statements and not self.is_fixture_file(ctx.path):
             seen = {s.id for s in record.statements}
-            routes = detect_hotchocolate_routes(record, seen, ctx.resolution_index)
+            routes = detect_hotchocolate_routes(
+                record, root, ctx.source, seen, ctx.resolution_index)
             if routes:
                 record.statements.extend(routes)
                 record.framework = "graphql"

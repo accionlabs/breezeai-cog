@@ -375,3 +375,32 @@ def test_consumers_do_not_inflate_the_route_inventory() -> None:
 def test_non_subscription_operations_emit_no_consumer() -> None:
     rec = _parse(CSharpHotChocolateParser(), QUERIES, "BookQueries.cs")
     assert _consumers(rec) == []
+
+
+def test_consumer_anchors_at_the_topic_attribute() -> None:
+    # The consumer record exists because of [Topic("bookAdded")], so its span points there —
+    # not at the whole member, which is what the route covers.
+    rec = _parse(CSharpHotChocolateParser(), SUBSCRIPTIONS, "BookSubscriptions.cs")
+    route = _by_endpoint(rec)["onBookAdded"]
+    consumer = next(s for s in _consumers(rec) if s.endpoint == "bookAdded")
+    topic_line = next(i for i, line in enumerate(SUBSCRIPTIONS.decode().splitlines(), 1)
+                      if '[Topic("bookAdded")]' in line)
+    assert consumer.startLine == consumer.endLine == topic_line
+    assert route.startLine < consumer.startLine <= route.endLine  # inside the member's span
+
+
+def test_consumer_falls_back_to_the_subscribe_attribute() -> None:
+    # No [Topic] at all: the declaring syntax is [Subscribe], so anchor there.
+    rec = _parse(CSharpHotChocolateParser(), SUBSCRIPTIONS, "BookSubscriptions.cs")
+    consumer = next(s for s in _consumers(rec) if s.endpoint == "onBookRemoved")
+    line = consumer.startLine
+    assert '[Subscribe]' in SUBSCRIPTIONS.decode().splitlines()[line - 1]
+
+
+def test_consumer_ids_are_independent_of_the_route() -> None:
+    # Each id comes from the position of the syntax that produced it, so no consumer id is a
+    # disambiguated duplicate of its route's — ids are the backend's unique key.
+    rec = _parse(CSharpHotChocolateParser(), SUBSCRIPTIONS, "BookSubscriptions.cs")
+    ids = [s.id for s in rec.statements]
+    assert len(ids) == len(set(ids))
+    assert not [i for i in ids if "#" in i]
