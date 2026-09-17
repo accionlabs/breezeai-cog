@@ -107,7 +107,10 @@ def detect_slim_routes(
             obj_node = node.child_by_field_name("object")
             if name_node is not None and obj_node is not None:
                 method_name = node_text(name_node, source).lower()
-                obj_name = node_text(obj_node, source).lower().lstrip("$")
+                # Member access through an injected/app property is common in classes:
+                # `$this->app->get(...)`. Match the trailing receiver segment rather
+                # than only stripping a leading `$` from the whole object expression.
+                obj_name = node_text(obj_node, source).lower().rsplit("->", 1)[-1].lstrip("$")
                 if method_name in _SLIM_VERBS and obj_name in ("app", "router", "group"):
                     args_node = node.child_by_field_name("arguments")
                     args = list(args_node.named_children) if args_node is not None else []

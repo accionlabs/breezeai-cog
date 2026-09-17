@@ -113,6 +113,28 @@ $service = $app->get(SomeService::class);
     assert [s for s in rec.statements if s.semanticType == "route"] == []
 
 
+def test_slim_route_on_this_app_property(tmp_path: Path) -> None:
+    src = b"""<?php
+use Slim\Factory\AppFactory;
+
+class Routes
+{
+    private $app;
+
+    public function register()
+    {
+        $this->app->get('/x', function ($req, $res) { return $res; });
+    }
+}
+"""
+    rec = _parse(SlimParser, tmp_path, src, "src/index.php")
+    routes = [s for s in rec.statements if s.semanticType == "route"]
+
+    assert len(routes) == 1
+    assert routes[0].endpoint == "/x"
+    assert routes[0].method == "GET"
+
+
 def test_symfony_routes(tmp_path: Path) -> None:
     src = b"""<?php
 namespace App\\Controller;
