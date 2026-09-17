@@ -55,14 +55,23 @@ def build_class(
     capture: bool,
     limit: int,
     resolve: CallResolver = noop_resolver,
+    owner: str | None = None,
 ) -> tuple[list[Class], list[Function], list[Statement]]:
-    """Return (classes, methods, statements) — all flat, linked by parentId. The class list is
-    this type plus any nested (member) types, each parented to its enclosing type, mirroring the
-    Java and C++ parsers."""
+    """Return (classes, methods, statements) — all flat, linked by parentId.
+
+    The class list is this type plus any nested (member) types. A nested type's **identity**
+    carries the nesting (``path#Outer.Inner``) while its ``parentId`` stays the owning **file**:
+    the graph has one containment edge for classes, File→Class, so a class parented to another
+    class would never be attached. The dotted identity is also what keeps re-ingest idempotent —
+    two nested types sharing a simple name (a ``Result`` inside each of two services) would
+    otherwise take turns holding the same id depending on their order in the file, and each
+    re-capture would overwrite one with the other.
+    """
     name_node = node.child_by_field_name("name")
     name = node_text(name_node, source) if name_node is not None else "<anonymous>"
+    qualified = f"{owner}.{name}" if owner else name
     start, end = line_span(node)
-    cid = disambiguate(class_id(path, name), seen_ids)
+    cid = disambiguate(class_id(path, qualified), seen_ids)
     extends, implements = _heritage(node, source)
 
     visibility, _ = flags(node, source)
@@ -105,7 +114,8 @@ def build_class(
                 # parented to this one, recursing for arbitrarily deep nesting.
                 sub_classes, sub_methods, sub_statements = build_class(
                     member, source, path,
-                    parent_id=cid, seen_ids=seen_ids, capture=capture, limit=limit, resolve=resolve,
+                    parent_id=parent_id, seen_ids=seen_ids, capture=capture, limit=limit,
+                    resolve=resolve, owner=qualified,
                 )
                 nested_classes.extend(sub_classes)
                 methods.extend(sub_methods)
