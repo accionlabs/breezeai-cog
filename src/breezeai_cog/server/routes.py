@@ -144,15 +144,18 @@ async def analyze_diff(request: Request, background_tasks: BackgroundTasks) -> d
          "repoUrl": repo_url, "gitBranch": git_branch, "commitId": incoming},
     )
 
+    if has_changed:
+        message = "Code ontology streamed to S3 and notification sent to Breeze API for ingestion."
+    elif deleted_files:
+        message = "Deletion-only commit — notification sent to Breeze API with deleted files."
+    else:
+        message = "No file changes between commits — commit recorded, ontology left unchanged."
+
     return {
         "success": True,
         "storage_key": storage_key,
         "deletedFiles": deleted_files,
-        "message": (
-            "Code ontology streamed to S3 and notification sent to Breeze API for ingestion."
-            if has_changed else
-            "Deletion-only commit — notification sent to Breeze API with deleted files."
-        ),
+        "message": message,
     }
 
 

@@ -103,6 +103,19 @@ def test_deletion_only_commit(captured: _Captured) -> None:
     assert captured.notifications[0][1]["projectMetaData"]["totalFiles"] == 0
 
 
+def test_no_op_commit_reports_no_file_changes(captured: _Captured) -> None:
+    """A merge commit whose compare touches nothing: not a deletion-only commit."""
+    client = _make_client(captured, filter_set=set(), deleted=[])
+    r = client.post("/api/analyze-diff", json=BODY)
+    assert r.status_code == 200
+    out = r.json()
+    assert out["deletedFiles"] == []
+    assert "No file changes" in out["message"]
+    assert "Deletion-only" not in out["message"]
+    assert captured.records == []
+    assert captured.notifications[0][1]["projectMetaData"]["totalFiles"] == 0
+
+
 def test_missing_fields(captured: _Captured) -> None:
     client = _make_client(captured, filter_set=None, deleted=[])
     r = client.post("/api/analyze-diff", json={"repoUrl": "https://github.com/a/b"})
