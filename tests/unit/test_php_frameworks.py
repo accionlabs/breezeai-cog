@@ -33,6 +33,10 @@ def _parse(parser_cls, tmp_path: Path, src: bytes, rel: str) -> FileRecord:
     return parser.parse_file(ctx)
 
 
+def _route_shape(route) -> tuple[str | None, str | None, str | None, str | None, str]:
+    return route.method, route.endpoint, route.handler, route.routeKind, route.parentId
+
+
 def test_laravel_routes(tmp_path: Path) -> None:
     src = b"""<?php
 namespace App\\Routes;
@@ -51,18 +55,13 @@ Route::resource('photos', 'PhotoController');
     assert rec.framework == "laravel"
 
     routes = [s for s in rec.statements if s.semanticType == "route"]
-    assert len(routes) >= 4
-    assert all(r.routeKind == "route" for r in routes)
-
-    endpoints = {r.endpoint: r for r in routes}
-    assert "/users" in endpoints
-    assert endpoints["/users"].method in ("GET", "POST")
-    assert "/profile" in endpoints
-    assert "photos" in endpoints
-    assert endpoints["photos"].method == "ANY"
-    profile_routes = [r for r in routes if r.endpoint == "/profile"]
-    assert len(profile_routes) == 2
-    assert {r.method for r in profile_routes} == {"GET", "POST"}
+    assert [_route_shape(route) for route in routes] == [
+        ("GET", "/users", "UserController@index", "route", rec.id),
+        ("POST", "/users", "UserController@store", "route", rec.id),
+        ("GET", "/profile", "ProfileController@handle", "route", rec.id),
+        ("POST", "/profile", "ProfileController@handle", "route", rec.id),
+        ("ANY", "/photos", None, "route", rec.id),
+    ]
 
 
 def test_laravel_middleware_guards(tmp_path: Path) -> None:
@@ -91,14 +90,12 @@ $app->map(['GET', 'POST'], '/api/items', function ($req, $res) { return $res; })
     assert rec.framework == "slim"
 
     routes = [s for s in rec.statements if s.semanticType == "route"]
-    assert len(routes) >= 3
-    assert all(r.routeKind == "route" for r in routes)
-    endpoints = {r.endpoint: r for r in routes}
-    assert "/api/users" in endpoints
-    assert "/api/items" in endpoints
-    item_routes = [r for r in routes if r.endpoint == "/api/items"]
-    assert len(item_routes) == 2
-    assert {r.method for r in item_routes} == {"GET", "POST"}
+    assert [_route_shape(route) for route in routes] == [
+        ("GET", "/api/users", None, "route", rec.id),
+        ("POST", "/api/users", None, "route", rec.id),
+        ("GET", "/api/items", None, "route", rec.id),
+        ("POST", "/api/items", None, "route", rec.id),
+    ]
 
 
 def test_slim_container_get_is_not_a_route(tmp_path: Path) -> None:
@@ -158,12 +155,13 @@ class UserController
     assert rec.framework == "symfony"
 
     routes = [s for s in rec.statements if s.semanticType == "route"]
-    assert len(routes) >= 2
-    assert all(r.routeKind == "route" for r in routes)
-    assert all(r.nodeType == "synthetic" for r in routes)
-    endpoints = {r.endpoint: r for r in routes}
-    assert "/api/users" in endpoints
-    assert "/api/users/{id}" in endpoints
+    list_fn = next(fn for fn in rec.functions if fn.name == "list")
+    update_fn = next(fn for fn in rec.functions if fn.name == "update")
+    assert [_route_shape(route) for route in routes] == [
+        ("GET", "/api/users", "UserController@list", "route", list_fn.id),
+        ("HEAD", "/api/users", "UserController@list", "route", list_fn.id),
+        ("POST", "/api/users/{id}", "UserController@update", "route", update_fn.id),
+    ]
 
 
 def test_symfony_docblock_route_annotation(tmp_path: Path) -> None:
@@ -278,18 +276,15 @@ $routes->group('admin', function ($routes) {
     assert rec.framework == "codeigniter"
 
     routes = [s for s in rec.statements if s.semanticType == "route"]
-    assert len(routes) >= 5
-    assert all(r.routeKind == "route" for r in routes)
-
-    endpoints = {r.endpoint: r for r in routes}
-    assert "/users" in endpoints
-    assert "/profile" in endpoints
-    assert "photos" in endpoints
-    assert endpoints["photos"].method == "ANY"
-    assert "/admin/dashboard" in endpoints
-    profile_routes = [r for r in routes if r.endpoint == "/profile"]
-    assert len(profile_routes) == 2
-    assert {r.method for r in profile_routes} == {"GET", "POST"}
+    group_fn = next(fn for fn in rec.functions if fn.type == "function_expression")
+    assert [_route_shape(route) for route in routes] == [
+        ("GET", "/users", None, "route", rec.id),
+        ("POST", "/users", None, "route", rec.id),
+        ("GET", "/profile", None, "route", rec.id),
+        ("POST", "/profile", None, "route", rec.id),
+        ("ANY", "/photos", None, "route", rec.id),
+        ("GET", "/admin/dashboard", None, "route", group_fn.id),
+    ]
 
 
 def test_codeigniter3_routes(tmp_path: Path) -> None:
