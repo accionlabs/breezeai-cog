@@ -165,6 +165,20 @@ def _method_templates(http_tmpl: str, method_route: str | None) -> list[str]:
     return [""]
 
 
+def _has_top_level_comma(type_args: str) -> bool:
+    """Whether ``type_args`` lists more than one type at its own nesting level —
+    ``"string, int"`` yes, ``"Dictionary<string, int>"`` no."""
+    depth = 0
+    for ch in type_args:
+        if ch == "<":
+            depth += 1
+        elif ch == ">":
+            depth -= 1
+        elif ch == "," and depth == 0:
+            return True
+    return False
+
+
 def _response_dto(return_type: str | None) -> str | None:
     """Unwrap ``Task<…>`` / ``ActionResult<…>`` / ``Task(Of …)`` to the payload type;
     bare action results (``IActionResult``/``ActionResult``/``void``) → None. A trailing ``?``
@@ -172,9 +186,16 @@ def _response_dto(return_type: str | None) -> str | None:
     if not return_type:
         return None
     t = return_type.strip()
-    # C# generic: Foo<Bar> → Bar
+    # C# generic: Foo<Bar> → Bar. A generic with several type arguments has no single payload
+    # (`FieldResult<string, MyException>`, `Dictionary<string, int>`), so unwrapping stops there
+    # and the declared outer type is kept — joining `Dictionary` to nothing is a clean miss,
+    # whereas the concatenation `string, int` is not a type name at all.
     while "<" in t and t.endswith(">"):
-        t = t[t.index("<") + 1: -1].strip()
+        inner = t[t.index("<") + 1: -1].strip()
+        if _has_top_level_comma(inner):
+            t = t[: t.index("<")].strip()
+            break
+        t = inner
     # VB generic: Foo(Of Bar) → Bar
     while t.startswith(("Task(Of ", "ValueTask(Of ", "ActionResult(Of ")) and t.endswith(")"):
         t = t[t.index("(Of ") + 4: -1].strip()
