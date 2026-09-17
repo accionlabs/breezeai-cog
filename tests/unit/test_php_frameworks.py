@@ -101,6 +101,18 @@ $app->map(['GET', 'POST'], '/api/items', function ($req, $res) { return $res; })
     assert {r.method for r in item_routes} == {"GET", "POST"}
 
 
+def test_slim_container_get_is_not_a_route(tmp_path: Path) -> None:
+    src = b"""<?php
+use Slim\Factory\AppFactory;
+
+$app = AppFactory::create();
+$service = $app->get(SomeService::class);
+"""
+    rec = _parse(SlimParser, tmp_path, src, "src/index.php")
+
+    assert [s for s in rec.statements if s.semanticType == "route"] == []
+
+
 def test_symfony_routes(tmp_path: Path) -> None:
     src = b"""<?php
 namespace App\\Controller;

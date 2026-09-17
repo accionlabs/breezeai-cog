@@ -45,6 +45,14 @@ def _render_url(node: Node, source: bytes) -> str | None:
     return None
 
 
+def _is_string_literal(node: Node) -> bool:
+    """Whether an argument is a PHP string literal, after its argument wrapper."""
+    if node.type == "argument":
+        inner = node.named_children[0] if node.named_children else None
+        return inner is not None and _is_string_literal(inner)
+    return node.type in ("string", "encapsed_string")
+
+
 def _handler_text(arg_node: Node | None, source: bytes) -> str | None:
     return _resolve_handler(arg_node, source)
 
@@ -146,6 +154,13 @@ def detect_slim_routes(
                                     register_statement_span(seen_ids, fid, node.start_byte, node.end_byte, stmt)
                                     routes.append(stmt)
                         else:
+                            # `$app->get(SomeService::class)` is PSR-11 container access,
+                            # not a route registration. A Slim route's first argument must
+                            # be a string path; unknown expressions are skipped entirely.
+                            if not _is_string_literal(args[0]):
+                                for child in node.named_children:
+                                    visit(child)
+                                return
                             endpoint = _combine_paths(prefix, _render_url(args[0], source))
                             handler = _handler_text(args[1] if len(args) > 1 else None, source)
                             verb = "ANY" if method_name == "any" else method_name.upper()
