@@ -70,7 +70,8 @@ def run_diff_stream(
 
 
 def empty_meta(repo_name: str) -> dict[str, Any]:
-    """Fully-shaped projectMetaData for a deletion-only commit (no files parsed)."""
+    """Fully-shaped projectMetaData for a commit with no files parsed (deletion-only, or
+    no file changes at all)."""
     return {
         "repositoryPath": repo_name,
         "repositoryName": repo_name,
