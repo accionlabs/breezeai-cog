@@ -149,3 +149,38 @@ def test_akkahttp_schema_validation(tmp_path: Path) -> None:
     errors = list(Draft202012Validator(FileRecord.model_json_schema(by_alias=True))
                   .iter_errors(json.loads(to_line(rec))))
     assert not errors, errors
+
+
+CONJUNCTION_SRC = b"""package com.example
+import akka.http.scaladsl.server.Directives._
+import akka.http.scaladsl.server.Route
+
+class Microservice {
+  val route: Route =
+    pathPrefix("ip") {
+      (get & path(Segment)) { ip =>
+        complete(ip)
+      } ~
+      (post & entity(as[String])) { body =>
+        complete(body)
+      }
+    } ~
+    pathSingleSlash {
+      get {
+        complete("root")
+      }
+    }
+}
+"""
+
+
+def test_akkahttp_conjunction_and_single_slash(tmp_path: Path) -> None:
+    rec = _parse_akka_http(tmp_path, CONJUNCTION_SRC, "Microservice.scala")
+    routes = [s for s in rec.statements if s.semanticType == "route"]
+    assert len(routes) == 3
+    by_ep = {(r.method, r.endpoint) for r in routes}
+    assert by_ep == {
+        ("GET", "/ip/{ip}"),
+        ("POST", "/ip"),
+        ("GET", "/"),
+    }

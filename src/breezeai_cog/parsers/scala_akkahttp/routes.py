@@ -1,10 +1,12 @@
 """Akka HTTP directive-DSL route detection.
 
 Akka HTTP routes are built using nested directive call expressions:
-- Path directives (``path``, ``pathPrefix``, ``pathSuffix``, ``rawPathPrefix``) accumulate
-  URL path segments from string literals and path matchers (``Segment``, ``IntNumber``, etc.).
+- Path directives (``path``, ``pathPrefix``, ``pathSuffix``, ``rawPathPrefix``,
+  ``pathSingleSlash``, ``pathEnd``) accumulate URL path segments from string literals
+  and path matchers (``Segment``, ``IntNumber``, etc.).
 - Verb directives (``get``, ``post``, ``put``, ``delete``, ``patch``, ``head``, ``options``)
   provide the HTTP method.
+- Conjunctions with ``&`` combine directives: ``(get & path(Segment)) { ip => ... }``.
 - Directive blocks with no HTTP method directive emit routes with ``method=None`` (honest null).
 """
 
@@ -19,7 +21,10 @@ from ..statements_common import url_placeholder
 from ..treesitter import node_text
 
 _HTTP_VERBS = frozenset({"get", "post", "put", "delete", "patch", "head", "options"})
-_PATH_DIRECTIVES = frozenset({"path", "pathprefix", "pathsuffix", "rawpathprefix", "rawpath"})
+_PATH_DIRECTIVES = frozenset({
+    "path", "pathprefix", "pathsuffix", "rawpathprefix", "rawpath",
+    "pathsingleslash", "pathend",
+})
 _HTTP_METHOD_NAMES = frozenset(name.upper() for name in _HTTP_VERBS)
 
 
@@ -90,6 +95,41 @@ def _explicit_method(node: Node, source: bytes) -> str | None:
     return name if name in _HTTP_METHOD_NAMES else None
 
 
+def _unwrap_parens(n: Node) -> Node:
+    while n.type == "parenthesized_expression" and n.named_children:
+        n = n.named_children[0]
+    return n
+
+
+def _collect_conjunction(n: Node, source: bytes) -> list[Node]:
+    unwrapped = _unwrap_parens(n)
+    if unwrapped.type == "infix_expression":
+        op = unwrapped.child_by_field_name("operator")
+        if op is not None and node_text(op, source) == "&":
+            left = unwrapped.child_by_field_name("left")
+            right = unwrapped.child_by_field_name("right")
+            res: list[Node] = []
+            if left is not None:
+                res.extend(_collect_conjunction(left, source))
+            if right is not None:
+                res.extend(_collect_conjunction(right, source))
+            return res
+    return [unwrapped]
+
+
+def _has_route_signature(node: Node, source: bytes) -> bool:
+    """Check if node is in a Route val declaration or contains complete(...)."""
+    curr = node.parent
+    while curr is not None:
+        if curr.type in ("val_definition", "var_definition"):
+            t_node = curr.child_by_field_name("type")
+            if t_node is not None and "Route" in node_text(t_node, source):
+                return True
+        curr = curr.parent
+    txt = node_text(node, source)
+    return "complete(" in txt or "complete (" in txt
+
+
 def detect_akkahttp_routes(
     root: Node,
     source: bytes,
@@ -133,16 +173,37 @@ def detect_akkahttp_routes(
             fn_child = node.child_by_field_name("function")
             args_child = node.child_by_field_name("arguments")
 
-            # Case 1: path("...") { ... } / pathPrefix("...") { ... }
-            if fn_child is not None and fn_child.type == "call_expression":
-                inner_fn = fn_child.child_by_field_name("function")
-                if inner_fn is not None and inner_fn.type == "identifier":
-                    dir_name = node_text(inner_fn, source).lower()
-                    if dir_name in _PATH_DIRECTIVES:
-                        path_args = fn_child.child_by_field_name("arguments")
-                        segs = _extract_segments(path_args, source)
+            if fn_child is not None:
+                # C1: Check for conjunction with & (e.g. (get & path(Segment)) { ip => ... })
+                conj = _collect_conjunction(fn_child, source)
+                if len(conj) > 1:
+                    found_verb: str | None = None
+                    conj_segs: list[str] = []
+                    establishes_route = False
 
-                        # Check for lambda parameter names in block
+                    for part in conj:
+                        p_unwrapped = _unwrap_parens(part)
+                        if p_unwrapped.type == "identifier":
+                            nm = node_text(p_unwrapped, source).lower()
+                            if nm in _HTTP_VERBS:
+                                found_verb = nm.upper()
+                            elif nm in ("pathsingleslash", "pathend"):
+                                establishes_route = True
+                        elif p_unwrapped.type == "call_expression":
+                            p_fn = p_unwrapped.child_by_field_name("function")
+                            if p_fn is not None and p_fn.type == "identifier":
+                                dir_name = node_text(p_fn, source).lower()
+                                if dir_name in _PATH_DIRECTIVES:
+                                    p_args = p_unwrapped.child_by_field_name("arguments")
+                                    conj_segs.extend(_extract_segments(p_args, source))
+                                    establishes_route = True
+                                elif dir_name == "method":
+                                    m = _explicit_method(p_unwrapped, source)
+                                    if m is not None:
+                                        found_verb = m
+
+                    if found_verb is not None or conj_segs or establishes_route:
+                        # Check lambda params
                         if args_child is not None:
                             lambda_node = None
                             if args_child.type == "lambda_expression":
@@ -154,44 +215,88 @@ def detect_akkahttp_routes(
                                         break
                             if lambda_node is not None:
                                 params = _extract_lambda_params(lambda_node, source)
-                                segs = _apply_params_to_segments(segs, params)
+                                conj_segs = _apply_params_to_segments(conj_segs, params)
 
-                        new_path = current_path + segs
+                        new_path = current_path + conj_segs
                         sub_emitted = False
                         if args_child is not None:
                             sub_emitted = walk_block_or_expr(args_child, new_path, True)
 
                         if not sub_emitted:
-                            # Path block with no nested HTTP verb / sub-route: emit with method=None
                             ep = "/" + "/".join(new_path) if new_path else "/"
+                            emit_route(node, found_verb, ep)
+                        return True
+
+                # Case 1: path("...") { ... } / pathPrefix("...") { ... }
+                if fn_child.type == "call_expression":
+                    inner_fn = fn_child.child_by_field_name("function")
+                    if inner_fn is not None and inner_fn.type == "identifier":
+                        dir_name = node_text(inner_fn, source).lower()
+                        if dir_name in _PATH_DIRECTIVES:
+                            path_args = fn_child.child_by_field_name("arguments")
+                            segs = _extract_segments(path_args, source)
+
+                            # Check for lambda parameter names in block
+                            if args_child is not None:
+                                lambda_node = None
+                                if args_child.type == "lambda_expression":
+                                    lambda_node = args_child
+                                elif args_child.type == "block":
+                                    for c in args_child.named_children:
+                                        if c.type == "lambda_expression":
+                                            lambda_node = c
+                                            break
+                                if lambda_node is not None:
+                                    params = _extract_lambda_params(lambda_node, source)
+                                    segs = _apply_params_to_segments(segs, params)
+
+                            new_path = current_path + segs
+                            sub_emitted = False
+                            if args_child is not None:
+                                sub_emitted = walk_block_or_expr(args_child, new_path, True)
+
+                            if not sub_emitted:
+                                # Path block with no nested HTTP verb / sub-route: emit with method=None
+                                ep = "/" + "/".join(new_path) if new_path else "/"
+                                emit_route(node, None, ep)
+                            return True
+
+                # Case 1b: C7: bare path directives without arguments (pathSingleSlash { ... } / pathEnd { ... })
+                if fn_child.type == "identifier":
+                    dir_name = node_text(fn_child, source).lower()
+                    if dir_name in ("pathsingleslash", "pathend"):
+                        sub_emitted = False
+                        if args_child is not None:
+                            sub_emitted = walk_block_or_expr(args_child, current_path, True)
+                        if not sub_emitted:
+                            ep = "/" + "/".join(current_path) if current_path else "/"
                             emit_route(node, None, ep)
                         return True
 
-            # Case 2: explicit method directive: method(HttpMethods.GET) { ... }
-            if fn_child is not None and fn_child.type == "call_expression":
-                inner_fn = fn_child.child_by_field_name("function")
-                if (
-                    inner_fn is not None
-                    and inner_fn.type == "identifier"
-                    and node_text(inner_fn, source).lower() == "method"
-                    and in_route_context
-                ):
-                    method = _explicit_method(fn_child, source)
-                    if method is not None:
-                        ep = "/" + "/".join(current_path) if current_path else "/"
-                        emit_route(node, method, ep)
-                        return True
+                # Case 2: explicit method directive: method(HttpMethods.GET) { ... }
+                if fn_child.type == "call_expression":
+                    inner_fn = fn_child.child_by_field_name("function")
+                    if (
+                        inner_fn is not None
+                        and inner_fn.type == "identifier"
+                        and node_text(inner_fn, source).lower() == "method"
+                        and (in_route_context or _has_route_signature(node, source))
+                    ):
+                        method = _explicit_method(fn_child, source)
+                        if method is not None:
+                            ep = "/" + "/".join(current_path) if current_path else "/"
+                            emit_route(node, method, ep)
+                            return True
 
-            # Case 3: HTTP verb directive: get { ... } / post { ... }
-            # A bare verb is ambiguous with an ordinary function. Only accept it
-            # after a path/route directive has established route context.
-            if fn_child is not None and fn_child.type == "identifier" and in_route_context:
-                fn_name = node_text(fn_child, source).lower()
-                if fn_name in _HTTP_VERBS:
-                    verb = fn_name.upper()
-                    ep = "/" + "/".join(current_path) if current_path else "/"
-                    emit_route(node, verb, ep)
-                    return True
+                # Case 3: HTTP verb directive: get { ... } / post { ... }
+                # Accepted after a route directive establishes context or in a Route context
+                if fn_child.type == "identifier":
+                    fn_name = node_text(fn_child, source).lower()
+                    if fn_name in _HTTP_VERBS and (in_route_context or _has_route_signature(node, source)):
+                        verb = fn_name.upper()
+                        ep = "/" + "/".join(current_path) if current_path else "/"
+                        emit_route(node, verb, ep)
+                        return True
 
         for c in node.named_children:
             if walk_directives(c, current_path, in_route_context):
