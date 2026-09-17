@@ -2,7 +2,18 @@
 
 from __future__ import annotations
 
-from breezeai_cog.parsers.detection import classify_call, match_db
+from breezeai_cog.parsers.detection import classify_call, is_query, match_db
+
+
+def test_php_raw_query_helpers_are_language_gated() -> None:
+    assert is_query("get_row", None, language="csharp") is False
+    assert is_query("get_row", None, language="python") is False
+    assert is_query("get_row", None, language="java") is False
+    assert is_query("get_row", None, language="typescript") is False
+    assert is_query("get_row", None, language="php") is True
+
+    assert is_query("query", None, callee="pdo", language="csharp") is False
+    assert is_query("query", None, callee="pdo", language="php") is True
 
 
 def test_no_php_hints_in_typescript() -> None:

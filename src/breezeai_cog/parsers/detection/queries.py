@@ -11,6 +11,9 @@ from __future__ import annotations
 
 import re
 
+# PHP-specific query helpers must not leak into other language parsers.
+_PHP = frozenset({"php"})
+
 # Require structure, not just a leading verb, to avoid natural-language false positives.
 _SQL_RE = re.compile(
     r"^\s*\(?\s*("
@@ -36,20 +39,22 @@ _STRONG_QUERY_METHODS = {
     "$queryraw", "$queryrawunsafe", "$executeraw", "$executerawunsafe",
     "createnativequery", "createquery", "executequery", "executeupdate",
     "preparestatement", "nativequery", "rawquery",
-    "get_results", "get_row", "get_col", "get_var",
 }
-
-# Callee substrings that positively signal a database connection or raw driver handle
-_QUERY_CALLEE_HINTS = ("pdo", "wpdb", "connection", "conn", "db")
+_PHP_QUERY_METHODS = {"get_results", "get_row", "get_col", "get_var"}
 
 
-def is_query(method: str, arg: str | None, callee: str | None = None) -> bool:
+def is_query(
+    method: str,
+    arg: str | None,
+    callee: str | None = None,
+    language: str | None = None,
+) -> bool:
     if arg and _SQL_RE.match(arg):
         return True
     m = method.lower()
-    if m in _STRONG_QUERY_METHODS:
+    if m in _STRONG_QUERY_METHODS or (language in _PHP and m in _PHP_QUERY_METHODS):
         return True
-    if callee is not None:
+    if callee is not None and language in _PHP:
         low_callee = callee.lower()
         if "pdo" in low_callee and m in ("query", "prepare", "exec", "execute"):
             return True

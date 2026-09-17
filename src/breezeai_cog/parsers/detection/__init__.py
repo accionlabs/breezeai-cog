@@ -33,7 +33,7 @@ def classify_call(
     verb = match_api(callee, method, http_client_ids=http_client_ids)
     if verb is not None:
         return "api_call", verb, None
-    if is_query(method, arg, callee=callee):
+    if is_query(method, arg, callee=callee, language=language):
         return "query_statement", method, None
     hint = match_db(callee, method, language, typed_db_ids=typed_db_ids)
     if hint is not None:
