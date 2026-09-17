@@ -368,11 +368,12 @@ def detect_nest_routes(
                             # `Parent.field` when @Resolver(() => T) names the parent type, else
                             # the bare field name: a bare `author` does not say which type it
                             # hangs off, and many types have one. Same form csharp-hotchocolate
-                            # emits. `method` is left unset -- a field resolver has no verb.
+                            # emits. RESOLVE_FIELD is the spec's verb for this (not QUERY).
                             parent_type = _resolver_type_arg(decs, source)
                             routes.append(Statement(
                                 **{**common, "framework": "graphql"},
                                 semanticType="route",
+                                method="RESOLVE_FIELD",
                                 endpoint=f"{parent_type}.{mname}" if parent_type else mname,
                                 routeKind="field_resolver",
                                 requestDTO=_args_dto(member, source),

@@ -29,12 +29,10 @@ from .mappings import (
     ARG_MARKER_ATTRS,
     AUTHORIZE_ATTR,
     DATALOADER_TYPES,
-    ERROR_ATTR_PREFIX,
     EXTEND_ATTR,
     IGNORE_ATTR,
     INFRA_PARAM_ATTRS,
     INFRA_PARAM_TYPES,
-    MIDDLEWARE_ATTRS,
     PARENT_ATTR,
     ROOT_ATTRS,
     SUBSCRIBE_ATTR,
@@ -124,13 +122,6 @@ def guards_of(cls: Class, fn: Function) -> list[str]:
     return out
 
 
-def middleware(fn: Function) -> list[Decorator]:
-    """Attributes worth keeping on the statement: the request-pipeline ones, so a rewritten wire
-    shape stays visible, and the declared error types, which are part of the client's contract."""
-    return [d for d in fn.decorators
-            if simple_attr_name(d.name) in MIDDLEWARE_ATTRS
-            or simple_attr_name(d.name).startswith(ERROR_ATTR_PREFIX)]
-
 
 def _statement(
     cls: Class, fn: Function, *, kind: str, method: str, endpoint: str, text: str,
@@ -157,7 +148,6 @@ def _statement(
         requestDTO=request_dto(fn),
         responseDTO=_response_dto(fn.returnType),
         dataLoaders=data_loaders(fn, generated_loaders),
-        decorators=middleware(fn),
         startLine=fn.startLine,
         endLine=fn.endLine,
         path=fn.path,
@@ -182,10 +172,10 @@ def field_resolver_statement(
 ) -> Statement:
     """A resolver for one field of a data type. Not client-callable — it runs once per parent
     object when that field is selected — so it carries its own ``routeKind`` and an address that
-    names the edge it resolves (``Book.author``). ``method`` is left unset: a field resolver has
-    no verb, and the NestJS detector now omits it too."""
+    names the edge it resolves (``Book.author``). ``method`` is ``RESOLVE_FIELD`` — the spec's
+    documented GraphQL verb for this case (§2.4), rather than the ``QUERY`` it is not."""
     return _statement(
-        cls, fn, kind="field_resolver", method=None,
+        cls, fn, kind="field_resolver", method="RESOLVE_FIELD",
         endpoint=f"{target}.{field_name(fn.name, fn.decorators)}", text=text, seen=seen,
         generated_loaders=generated_loaders,
     )
@@ -289,6 +279,7 @@ def topic_consumer_statement(
         nodeType="synthetic",
         semanticType="eventbus_consumer",
         text=f"[{TOPIC_ATTR}] {topic}",
+        method="CONSUMER",
         endpoint=topic,
         framework="graphql",
         handler=fn.name,

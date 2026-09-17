@@ -152,11 +152,11 @@ def test_graphql_code_first_operations(tmp_path) -> None:
     assert ops[("SUBSCRIPTION", "chatEvents")].routeKind == "subscription"
     # @ResolveField is captured as a field_resolver route, addressed <ParentType>.<field> from
     # @Resolver(() => Conversation), and with no method — a field resolver has no verb.
-    assert (None, "Conversation.title") in ops
-    assert ops[(None, "Conversation.title")].routeKind == "field_resolver"
-    assert ops[(None, "Conversation.title")].framework == "graphql"
+    assert ("RESOLVE_FIELD", "Conversation.title") in ops
+    assert ops[("RESOLVE_FIELD", "Conversation.title")].routeKind == "field_resolver"
+    assert ops[("RESOLVE_FIELD", "Conversation.title")].framework == "graphql"
     # @ResolveField(() => String) — String is a scalar → responseDTO is None
-    assert ops[(None, "Conversation.title")].responseDTO is None
+    assert ops[("RESOLVE_FIELD", "Conversation.title")].responseDTO is None
     # the @Query PARAM decorator on SearchResolver.search must NOT produce a route
     assert "search" not in {s.endpoint for s in ops.values()}
     # ops parent to their handler methods
@@ -193,7 +193,7 @@ def test_resolve_field_captured(tmp_path) -> None:
     fields = {s.endpoint: s for s in rec.statements
               if s.semanticType == "route" and s.routeKind == "field_resolver"}
     assert set(fields) == {"Brand.byObjectIds", "Brand.count"}
-    assert all(s.method is None for s in fields.values())  # no verb on a field resolver
+    assert all(s.method == "RESOLVE_FIELD" for s in fields.values())  # the spec's verb
     # return type from @ResolveField(() => BrandResult) → responseDTO
     assert fields["Brand.byObjectIds"].responseDTO == "BrandResult"
     # @ResolveField(() => Number) → Number is a scalar → responseDTO None
@@ -478,7 +478,7 @@ def test_grouping_resolver_resolve_fields_inherit_parent_op(tmp_path) -> None:
     # addressed <ParentType>.<field> with no method.
     assert "Brand.all" in by_ep
     assert by_ep["Brand.all"].routeKind == "field_resolver"
-    assert by_ep["Brand.all"].method is None
+    assert by_ep["Brand.all"].method == "RESOLVE_FIELD"
 
 
 def test_gql_op_response_dto_from_decorator_arg(tmp_path) -> None:

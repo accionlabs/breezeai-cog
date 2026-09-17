@@ -129,10 +129,14 @@ def test_response_dto_is_the_declared_type_not_the_generated_wrapper() -> None:
     assert ops["bookById"].responseDTO == "Book"
 
 
-def test_middleware_attributes_kept_on_decorators() -> None:
+def test_route_records_carry_no_operation_annotations() -> None:
+    # The spec reserves a statement's `decorators` for field/property annotations on a
+    # declaration; an operation annotation is decomposed into method/endpoint/routeKind. The
+    # attributes stay on the owning Function, where the base parser records them.
     rec = _parse(CSharpHotChocolateParser(), QUERIES, "BookQueries.cs")
-    names = {d.name for d in _by_endpoint(rec)["books"].decorators}
-    assert names == {"UsePaging", "UseFiltering"}
+    assert _by_endpoint(rec)["books"].decorators == []
+    owner = next(f for f in rec.functions if f.name == "GetBooks")
+    assert {"UsePaging", "UseFiltering"} <= {d.name for d in owner.decorators}
 
 
 def test_request_dto_only_from_an_argument_marker() -> None:
@@ -270,7 +274,7 @@ def test_data_type_extension_yields_field_resolvers() -> None:
     ops = _by_endpoint(rec)
     for endpoint in ("Book.author", "Book.reviews"):
         assert ops[endpoint].routeKind == "field_resolver"
-        assert ops[endpoint].method is None  # a field resolver has no verb
+        assert ops[endpoint].method == "RESOLVE_FIELD"  # the spec's verb for a field resolver
     assert ops["Book.author"].dataLoaders == ["IDataLoader<int, Author>"]
     assert ops["Book.reviews"].responseDTO == "Review"
 
@@ -572,22 +576,23 @@ def test_subscribe_and_resolve_is_claimed_and_captured() -> None:
     assert _consumers(rec) == []
 
 
-def test_declared_error_types_are_kept() -> None:
-    # [Error<T>] states a failure a mutation can return, so it belongs with the operation.
+def test_declared_error_types_stay_on_the_function() -> None:
+    # [Error<T>] annotates the operation, so it is not repeated on the route record -- but it is
+    # still in the graph, on the method that declares it.
     src = b'''using HotChocolate;
 namespace Catalog {
   [MutationType]
   public class BookMutations {
     [Error<TitleEmptyException>]
     [Error<NoSpeakerException>]
-    [UseMutationConvention]
     public Book AddBook(Book book) => book;
   }
 }
 '''
     rec = _parse(CSharpHotChocolateParser(), src, "BookMutations.cs")
-    names = {d.name for d in _by_endpoint(rec)["addBook"].decorators}
-    assert names == {"Error<TitleEmptyException>", "Error<NoSpeakerException>", "UseMutationConvention"}
+    assert _by_endpoint(rec)["addBook"].decorators == []
+    owner = next(f for f in rec.functions if f.name == "AddBook")
+    assert {"Error<TitleEmptyException>", "Error<NoSpeakerException>"} == {d.name for d in owner.decorators}
 
 
 def test_named_attribute_argument_resolves_the_target() -> None:

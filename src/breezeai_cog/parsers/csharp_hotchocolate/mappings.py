@@ -1,5 +1,11 @@
 """HotChocolate vocabulary — attribute and type names the framework itself reads.
 
+Operation annotations (``[UsePaging]``, ``[UseFiltering]``, ``[Error<T>]``) are deliberately
+absent: the spec decomposes an operation annotation into ``method``/``endpoint``/``routeKind``
+and reserves a statement's ``decorators`` for field/property annotations on a declaration, so
+there is nowhere on a route record for them. They remain on the owning Function's decorators,
+captured by the base parser.
+
 Every entry here is **framework-enforced**: an attribute HotChocolate binds, or a type its
 resolver compiler injects. Team naming conventions (a class called ``…Queries``, a parameter
 type called ``…Input``) are deliberately absent — renaming those changes nothing at runtime,
@@ -82,19 +88,6 @@ DATALOADER_TYPES = ("IDataLoader", "BatchDataLoader", "GroupedDataLoader", "Cach
 #: argument without knowing the DI registrations — so requestDTO is set only from these, and
 #: left null otherwise (a documented gap, never a guessed type).
 ARG_MARKER_ATTRS = frozenset({"GraphQLName", "GraphQLType", "DefaultValue"})
-
-#: Declared failure modes: ``[Error<TitleEmptyException>]`` states an error a mutation can return,
-#: so it is part of what a client receives back. The C# attribute extractor reports the whole
-#: generic name (``Error<TitleEmptyException>``), so match on the prefix.
-ERROR_ATTR_PREFIX = "Error<"
-
-#: Request-pipeline attributes that reshape the wire type. Recorded on the statement's
-#: ``decorators`` so the rewrite is visible without inventing a generated type name.
-MIDDLEWARE_ATTRS = frozenset({
-    "UsePaging", "UseOffsetPaging", "UseCursorPaging",
-    "UseFiltering", "UseSorting", "UseProjection",
-    "UseMutationConvention",
-})
 
 #: Cheap byte guard for ``claims`` — each marker is a **schema declaration**, never a mention of
 #: the library. A bare ``using HotChocolate…`` is deliberately absent: the composition root
