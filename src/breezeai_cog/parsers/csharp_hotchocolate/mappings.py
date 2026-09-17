@@ -91,14 +91,21 @@ MIDDLEWARE_ATTRS = frozenset({
     "UseMutationConvention",
 })
 
-#: Cheap byte guard for ``claims``. Deliberately disjoint from ``csharp-graphql``'s
-#: ``ObjectGraphType`` so the two parsers never contend for one file, and deliberately
-#: excludes ``AddGraphQLServer`` / ``MapGraphQL`` so ``Program.cs`` stays with
-#: ``csharp-aspnet`` and keeps its REST routes.
+#: Cheap byte guard for ``claims`` — each marker is a **schema declaration**, never a mention of
+#: the library. A bare ``using HotChocolate…`` is deliberately absent: the composition root
+#: imports it too, and claiming that file would take it from ``csharp-aspnet`` and drop every
+#: route the application registers.
 MARKERS: tuple[bytes, ...] = (
-    b"HotChocolate",
     b"[QueryType]", b"[MutationType]", b"[SubscriptionType]",
     b"[ExtendObjectType",
-    b"[Subscribe]",
+    b"[Subscribe",              # covers [Subscribe] and [SubscribeAndResolve]
     b"IObjectTypeDescriptor",
+)
+
+#: Server-registration calls. A file wiring up the GraphQL server is the application's
+#: composition root: ``csharp-aspnet`` owns it, captures its REST endpoints, and already emits the
+#: GraphQL HTTP mount (``_GRAPHQL_MOUNTS`` in ``csharp_aspnet/routes.py``). Never claim it — the
+#: cost of being wrong is the whole application's route inventory.
+COMPOSITION_ROOT_MARKERS: tuple[bytes, ...] = (
+    b"AddGraphQLServer", b"MapGraphQL", b"UseGraphQL",
 )

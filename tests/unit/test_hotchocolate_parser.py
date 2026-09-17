@@ -494,3 +494,70 @@ def test_descriptor_routes_parented_to_configure() -> None:
     rec = _parse(CSharpHotChocolateParser(), DESCRIPTORS, "Types.cs")
     configure_ids = {f.id for f in rec.functions if f.name == "Configure"}
     assert {s.parentId for s in _routes(rec)} <= configure_ids
+
+
+# ---- parser selection: the composition root ------------------------------------------------
+
+# The application's composition root: it registers the GraphQL server *and* maps REST endpoints.
+# csharp-aspnet owns it and already emits the GraphQL HTTP mount itself.
+PROGRAM = b'''using Microsoft.AspNetCore.Builder;
+using HotChocolate.AspNetCore;
+var builder = WebApplication.CreateBuilder(args);
+builder.Services.AddGraphQLServer().AddQueryType<BookQueries>();
+var app = builder.Build();
+app.MapGet("/health", () => "ok");
+app.MapPost("/webhook/{id}", (string id) => Results.Ok());
+app.MapGraphQL("/graphql");
+app.Run();
+'''
+
+# Mentions the library but declares no schema — nothing here for this parser to find.
+MENTION_ONLY = b'''using HotChocolate;
+namespace Catalog {
+  public class BookMapper {
+    public Book Map(BookDto dto) => new Book { Title = dto.Title };
+  }
+}
+'''
+
+# A subscription extension using [SubscribeAndResolve] rather than [Subscribe].
+SUBSCRIBE_AND_RESOLVE = b'''using HotChocolate;
+namespace Catalog {
+  [ExtendObjectType(OperationTypeNames.Subscription)]
+  public class LiveFeed {
+    [SubscribeAndResolve]
+    public async IAsyncEnumerable<Book> OnFeed(ITopicEventReceiver receiver) { yield break; }
+  }
+}
+'''
+
+
+def test_composition_root_is_not_claimed() -> None:
+    # Claiming Program.cs would trade the whole application's route inventory for nothing.
+    assert not CSharpHotChocolateParser().claims("Program.cs", PROGRAM)
+
+
+def test_composition_root_keeps_its_routes() -> None:
+    registry.discover_builtin()
+    assert registry.select("Program.cs", PROGRAM).name == "csharp-aspnet"
+    rec = _parse(registry.select("Program.cs", PROGRAM), PROGRAM, "Program.cs")
+    routes = {(s.method, s.endpoint, s.framework) for s in _routes(rec)}
+    assert ("GET", "/health", "aspnet") in routes
+    assert ("POST", "/webhook/{id}", "aspnet") in routes
+    # The GraphQL mount is captured there too, so nothing is lost by declining the file.
+    assert ("POST", "/graphql", "graphql") in routes
+
+
+def test_library_mention_alone_does_not_claim() -> None:
+    # The guard is positive on schema *declarations*, not on a using directive — the composition
+    # root imports the library as well.
+    assert not CSharpHotChocolateParser().claims("BookMapper.cs", MENTION_ONLY)
+
+
+def test_subscribe_and_resolve_is_claimed_and_captured() -> None:
+    assert CSharpHotChocolateParser().claims("LiveFeed.cs", SUBSCRIBE_AND_RESOLVE)
+    rec = _parse(CSharpHotChocolateParser(), SUBSCRIBE_AND_RESOLVE, "LiveFeed.cs")
+    op = _by_endpoint(rec)["onFeed"]
+    assert op.routeKind == "subscription"
+    # The topic is built from the receiver inside the body, so no consumer record.
+    assert _consumers(rec) == []

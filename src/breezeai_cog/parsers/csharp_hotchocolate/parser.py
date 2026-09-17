@@ -7,9 +7,14 @@ deriving from ``ObjectGraphType``, HotChocolate by attributes — so their byte 
 disjoint *and* the priorities differ, because ``registry.select`` breaks a priority tie by
 registration order, which would make selection arbitrary.
 
-``Program.cs`` is deliberately **not** claimed: ``AddGraphQLServer()`` / ``MapGraphQL()`` live in
-a file owned by ``csharp-aspnet``, and taking it would drop the application's REST routes. The
-GraphQL endpoint mount belongs there as additive detection instead.
+``Program.cs`` is deliberately **not** claimed: ``AddGraphQLServer()`` / ``MapGraphQL()`` live in a
+file owned by ``csharp-aspnet``, which captures the application's REST endpoints and already emits
+the GraphQL HTTP mount itself. Claiming it would trade the whole route inventory for nothing, so
+the guard is positive on *schema declarations* and negative on the registration calls.
+
+Residual gap: a root type declared **inside** the composition root yields no operations. A file
+that both wires up the server and declares a schema root is a single-file demo shape; losing an
+application's route inventory is the worse of the two failures.
 """
 
 from __future__ import annotations
@@ -18,7 +23,7 @@ from ...schemas import FileRecord
 from ..base import ParseContext
 from ..csharp.parser import CSharpParser
 from ..treesitter import parse_source
-from .mappings import MARKERS
+from .mappings import COMPOSITION_ROOT_MARKERS, MARKERS
 from .routes import detect_hotchocolate_routes
 
 #: graphql-dotnet's marker. A file declaring one is that library's, not this one's.
@@ -33,6 +38,8 @@ class CSharpHotChocolateParser(CSharpParser):
     def claims(self, path: str, source: bytes) -> bool:
         if _GRAPHQL_DOTNET_MARKER in source:
             return False  # graphql-dotnet owns it; keep the two guards mutually exclusive
+        if any(m in source for m in COMPOSITION_ROOT_MARKERS):
+            return False  # the composition root stays with csharp-aspnet (see mappings)
         return any(m in source for m in MARKERS)
 
     def parse_file(self, ctx: ParseContext) -> FileRecord:
