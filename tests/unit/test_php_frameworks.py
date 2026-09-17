@@ -65,6 +65,16 @@ Route::resource('photos', 'PhotoController');
     assert {r.method for r in profile_routes} == {"GET", "POST"}
 
 
+def test_laravel_middleware_guards(tmp_path: Path) -> None:
+    src = b"""<?php
+use Illuminate\\Support\\Facades\\Route;
+Route::get('/admin', 'AdminController@index')->middleware(['auth', 'verified']);
+"""
+    rec = _parse(LaravelParser, tmp_path, src, "routes/web.php")
+    route = next(s for s in rec.statements if s.semanticType == "route")
+    assert route.guards == ["auth", "verified"]
+
+
 def test_slim_routes(tmp_path: Path) -> None:
     src = b"""<?php
 use Slim\\Factory\\AppFactory;
@@ -120,6 +130,23 @@ class UserController
     endpoints = {r.endpoint: r for r in routes}
     assert "/api/users" in endpoints
     assert "/api/users/{id}" in endpoints
+
+
+def test_symfony_is_granted_guard(tmp_path: Path) -> None:
+    src = b"""<?php
+namespace App\\Controller;
+use Symfony\\Component\\Routing\\Attribute\\Route;
+use Symfony\\Component\\Security\\Http\\Attribute\\IsGranted;
+class AdminController
+{
+    #[Route('/admin')]
+    #[IsGranted('ROLE_ADMIN')]
+    public function index() {}
+}
+"""
+    rec = _parse(SymfonyParser, tmp_path, src, "src/Controller/AdminController.php")
+    route = next(s for s in rec.statements if s.semanticType == "route")
+    assert route.guards == ["ROLE_ADMIN"]
 
 
 def test_symfony_route_attribute_is_not_retained_as_decorator(tmp_path: Path) -> None:
@@ -465,6 +492,20 @@ $routes->group('admin', ['filter' => 'auth'], function ($routes) {
     assert routes[0].endpoint == "/admin/users"
     assert routes[0].method == "GET"
     assert routes[0].handler is None
+    assert routes[0].guards == ["auth"]
+
+
+def test_codeigniter4_route_filter_option(tmp_path: Path) -> None:
+    src = b"""<?php
+namespace Config;
+
+$routes->get('dashboard', 'Admin\\Dashboard::index', ['filter' => 'auth']);
+"""
+    rec = _parse(CodeIgniterParser, tmp_path, src, "app/Config/Routes.php")
+    routes = [s for s in rec.statements if s.semanticType == "route"]
+    assert len(routes) == 1
+    assert routes[0].endpoint == "dashboard"
+    assert routes[0].guards == ["auth"]
 
 
 def test_php_route_handler_resolution(tmp_path: Path) -> None:
@@ -761,3 +802,104 @@ def test_wordpress_hook_parentid_inside_method(tmp_path):
     assert hook.parentId == expected_parent, (
         f"Expected parentId={expected_parent!r}, got {hook.parentId!r}"
     )
+
+# ---------------------------------------------------------------------------
+# requestDTO / responseDTO fixture tests (spec §2.5)
+# ---------------------------------------------------------------------------
+
+def test_symfony_map_request_payload_and_return_dto(tmp_path: Path) -> None:
+    """Symfony #[MapRequestPayload] and typed return resolve to FQCN requestDTO/responseDTO."""
+    src = b"""<?php
+namespace App\\Controller;
+
+use App\\DTO\\CreateUserDTO;
+use App\\DTO\\UserResponse;
+use Symfony\\Component\\Routing\\Attribute\\Route;
+use Symfony\\Component\\HttpKernel\\Attribute\\MapRequestPayload;
+
+class UserController
+{
+    #[Route('/api/users', methods: ['POST'])]
+    public function create(#[MapRequestPayload] CreateUserDTO $dto): UserResponse
+    {
+        return new UserResponse();
+    }
+}
+"""
+    rec = _parse(SymfonyParser, tmp_path, src, "src/Controller/UserController.php")
+    routes = [s for s in rec.statements if s.semanticType == "route" and s.endpoint == "/api/users"]
+    assert len(routes) == 1
+    assert routes[0].requestDTO == "App\\DTO\\CreateUserDTO"
+    assert routes[0].responseDTO == "App\\DTO\\UserResponse"
+
+
+def test_symfony_form_request_convention_dto(tmp_path: Path) -> None:
+    """Symfony DTO/Request parameter convention resolves to FQCN requestDTO."""
+    src = b"""<?php
+namespace App\\Controller;
+
+use App\\Request\\RegisterUserRequest;
+use Symfony\\Component\\HttpFoundation\\JsonResponse;
+use Symfony\\Component\\Routing\\Attribute\\Route;
+
+class AuthController
+{
+    #[Route('/auth/register', methods: ['POST'])]
+    public function register(RegisterUserRequest $request): JsonResponse
+    {
+        return new JsonResponse();
+    }
+}
+"""
+    rec = _parse(SymfonyParser, tmp_path, src, "src/Controller/AuthController.php")
+    routes = [s for s in rec.statements if s.semanticType == "route" and s.endpoint == "/auth/register"]
+    assert len(routes) == 1
+    assert routes[0].requestDTO == "App\\Request\\RegisterUserRequest"
+    assert routes[0].responseDTO == "Symfony\\Component\\HttpFoundation\\JsonResponse"
+
+
+def test_laravel_form_request_closure_route_dto(tmp_path: Path) -> None:
+    """Laravel FormRequest closure parameter and return type resolve to FQCN requestDTO/responseDTO."""
+    src = b"""<?php
+namespace App\\Routes;
+
+use App\\Http\\Requests\\StorePostRequest;
+use App\\Http\\Resources\\PostResource;
+use Illuminate\\Support\\Facades\\Route;
+
+Route::post('/posts', function (StorePostRequest $request): PostResource {
+    return new PostResource();
+});
+"""
+    rec = _parse(LaravelParser, tmp_path, src, "routes/web.php")
+    routes = [s for s in rec.statements if s.semanticType == "route" and s.endpoint == "/posts"]
+    assert len(routes) == 1
+    assert routes[0].requestDTO == "App\\Http\\Requests\\StorePostRequest"
+    assert routes[0].responseDTO == "App\\Http\\Resources\\PostResource"
+
+
+def test_laravel_form_request_controller_route_dto(tmp_path: Path) -> None:
+    """Laravel controller action type-hinted with FormRequest resolves to FQCN requestDTO/responseDTO."""
+    src = b"""<?php
+namespace App\\Http\\Controllers;
+
+use App\\Http\\Requests\\UpdateProfileRequest;
+use App\\Http\\Resources\\UserResource;
+use Illuminate\\Support\\Facades\\Route;
+
+class ProfileController
+{
+    public function update(UpdateProfileRequest $request): UserResource
+    {
+        return new UserResource();
+    }
+}
+
+Route::put('/profile', [ProfileController::class, 'update']);
+"""
+    rec = _parse(LaravelParser, tmp_path, src, "routes/web.php")
+    routes = [s for s in rec.statements if s.semanticType == "route" and s.endpoint == "/profile"]
+    assert len(routes) == 1
+    assert routes[0].requestDTO == "App\\Http\\Requests\\UpdateProfileRequest"
+    assert routes[0].responseDTO == "App\\Http\\Resources\\UserResource"
+

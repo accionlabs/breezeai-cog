@@ -85,6 +85,41 @@ def _combine_paths(prefix: str, path: str | None) -> str | None:
     return f"/{pfx}/{sub}"
 
 
+def _option_guards(node: Node | None, source: bytes) -> list[str]:
+    """Extract CodeIgniter filter values from a route/group options array."""
+    if node is None:
+        return []
+    if node.type == "argument":
+        return _option_guards(node.named_children[0], source) if node.named_children else []
+    if node.type != "array_creation_expression":
+        return []
+    guards: list[str] = []
+    for element in node.named_children:
+        if element.type != "array_element_initializer":
+            continue
+        key = element.child_by_field_name("key")
+        value = element.child_by_field_name("value")
+        if (key is None or value is None) and len(element.named_children) >= 2:
+            key, value = element.named_children[0], element.named_children[-1]
+        if key is None or value is None:
+            continue
+        key_text = node_text(key, source).strip("'\"").lower()
+        if key_text != "filter":
+            continue
+        values = [value]
+        if value.type == "array_creation_expression":
+            values = list(value.named_children)
+        for item in values:
+            if item.type == "argument" and item.named_children:
+                item = item.named_children[0]
+            if item.type in ("string", "encapsed_string"):
+                content = next((c for c in item.named_children if c.type == "string_content"), None)
+                guard = node_text(content, source) if content is not None else ""
+                if guard and guard not in guards:
+                    guards.append(guard)
+    return guards
+
+
 def detect_codeigniter_routes(
     root: Node,
     source: bytes,
@@ -95,7 +130,8 @@ def detect_codeigniter_routes(
     fid = file_id(path)
     routes: list[Statement] = []
 
-    def visit(node: Node, prefix: str = "") -> None:
+    def visit(node: Node, prefix: str = "", guards: list[str] | None = None) -> None:
+        guards = guards or []
         # CI4: $routes->verb(...)
         if node.type in ("member_call_expression", "nullsafe_member_call_expression"):
             name_node = node.child_by_field_name("name")
@@ -121,6 +157,11 @@ def detect_codeigniter_routes(
                                 if prefix
                                 else group_prefix_raw
                             )
+                            group_guards = list(guards)
+                            if len(args) >= 3:
+                                for guard in _option_guards(args[1], source):
+                                    if guard not in group_guards:
+                                        group_guards.append(guard)
                             # Traverse children with new prefix
                             closure_types = (
                                 "anonymous_function_creation_expression",
@@ -141,12 +182,17 @@ def detect_codeigniter_routes(
                             )
                             if closure_node is not None:
                                 for child in closure_node.named_children:
-                                    visit(child, prefix=new_prefix)
+                                    visit(child, prefix=new_prefix, guards=group_guards)
                             return
 
                         elif method_name == "match" and len(args) >= 2:
                             # $routes->match(['get', 'post'], 'profile', 'Profile::show')
                             endpoint = _combine_paths(prefix, _render_url(args[1], source))
+                            route_guards = list(guards)
+                            if len(args) >= 4:
+                                route_guards.extend(
+                                    guard for guard in _option_guards(args[3], source) if guard not in route_guards
+                                )
                             handler = _handler_text(args[2] if len(args) > 2 else None, source)
                             http_verbs = _extract_verbs(args[0], source) or ["GET"]
                             for verb in http_verbs:
@@ -160,6 +206,7 @@ def detect_codeigniter_routes(
                                     existing.endpoint = endpoint
                                     existing.handler = handler
                                     existing.framework = "codeigniter"
+                                    existing.guards = route_guards or None
                                     existing.parentId = owner_id
                                 else:
                                     sid = disambiguate(statement_id(path, start, col), seen_ids)
@@ -177,12 +224,18 @@ def detect_codeigniter_routes(
                                         endLine=end,
                                         path=path,
                                         framework="codeigniter",
+                                        guards=route_guards or None,
                                     )
                                     register_statement_span(seen_ids, fid, node.start_byte, node.end_byte, stmt)
                                     routes.append(stmt)
                         elif method_name in ("resource", "presenter"):
                             # $routes->resource('photos')
                             endpoint = _combine_paths(prefix, _render_url(args[0], source))
+                            route_guards = list(guards)
+                            if len(args) >= 3:
+                                route_guards.extend(
+                                    guard for guard in _option_guards(args[2], source) if guard not in route_guards
+                                )
                             handler = _handler_text(args[1] if len(args) > 1 else None, source)
                             existing = find_statement_by_span(
                                 seen_ids, fid, node.start_byte, node.end_byte, node=node
@@ -194,6 +247,7 @@ def detect_codeigniter_routes(
                                 existing.endpoint = endpoint
                                 existing.handler = handler
                                 existing.framework = "codeigniter"
+                                existing.guards = route_guards or None
                                 existing.parentId = owner_id
                             else:
                                 sid = disambiguate(statement_id(path, start, col), seen_ids)
@@ -211,12 +265,18 @@ def detect_codeigniter_routes(
                                     endLine=end,
                                     path=path,
                                     framework="codeigniter",
+                                    guards=route_guards or None,
                                 )
                                 register_statement_span(seen_ids, fid, node.start_byte, node.end_byte, stmt)
                                 routes.append(stmt)
                         else:
                             # $routes->get, $routes->post, $routes->add, etc.
                             endpoint = _combine_paths(prefix, _render_url(args[0], source))
+                            route_guards = list(guards)
+                            if len(args) >= 3:
+                                route_guards.extend(
+                                    guard for guard in _option_guards(args[2], source) if guard not in route_guards
+                                )
                             handler = _handler_text(args[1] if len(args) > 1 else None, source)
                             if method_name == "add":
                                 verb = "ANY"
@@ -234,6 +294,7 @@ def detect_codeigniter_routes(
                                 existing.endpoint = endpoint
                                 existing.handler = handler
                                 existing.framework = "codeigniter"
+                                existing.guards = route_guards or None
                                 existing.parentId = owner_id
                             else:
                                 sid = disambiguate(statement_id(path, start, col), seen_ids)
@@ -251,6 +312,7 @@ def detect_codeigniter_routes(
                                     endLine=end,
                                     path=path,
                                     framework="codeigniter",
+                                    guards=route_guards or None,
                                 )
                                 register_statement_span(seen_ids, fid, node.start_byte, node.end_byte, stmt)
                                 routes.append(stmt)
@@ -357,7 +419,7 @@ def detect_codeigniter_routes(
                                 routes.append(stmt)
 
         for child in node.named_children:
-            visit(child, prefix=prefix)
+            visit(child, prefix=prefix, guards=guards)
 
     visit(root)
     return routes
