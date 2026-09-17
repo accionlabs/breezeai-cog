@@ -100,9 +100,10 @@ class SimpleRouterImpl extends SimpleRouter {
     routes = [s for s in rec.statements if s.semanticType == "route"]
     assert {(s.method, s.endpoint) for s in routes} == {
         ("GET", "/"),
-        ("GET", "/users/$id"),
-        ("GET", "/items/$id<[0-9]+>"),
+        ("GET", "/users/{id}"),
+        ("GET", "/items/{id}"),
     }
+    assert {s.handler for s in routes} == {"index", "show", "item"}
     assert sum(s.isRegex is True for s in routes) == 1
 
 
@@ -209,7 +210,6 @@ def test_routes_requires_capture_statements(tmp_path: Path) -> None:
     rec = PlayRoutesParser().parse_file(ctx)
     assert rec.statements == []
 
-
 def test_routes_output_validates(tmp_path: Path) -> None:
     rec = _parse_routes(tmp_path)
     errors = list(Draft202012Validator(FileRecord.model_json_schema(by_alias=True))
@@ -232,3 +232,44 @@ def test_false_positive_guard_result_and_to() -> None:
     # deliberately excluded from the Slick vocabulary — precision over recall.
     assert match_db("future.result", "result") is None
     assert match_db("xs.to", "to") is None
+
+
+NON_P_SIRD_SRC = b'''package routers
+import play.api.routing.SimpleRouter
+import play.api.routing.sird._
+class FakeRouter extends SimpleRouter {
+  override def routes = {
+    case GET(s"/interp/$x") => controller.a
+    case GET(q"/other") => controller.b
+  }
+}
+'''
+
+PREFIX_ROUTER_SRC = b'''package routers
+import play.api.routing.SimpleRouter
+import play.api.routing.sird._
+class PostRouter extends SimpleRouter {
+  val prefix = "/v1/posts"
+  override def routes = {
+    case GET(p"/") => controller.index
+    case GET(p"/$id") => controller.show(id)
+  }
+}
+'''
+
+
+def test_non_p_interpolators_rejected(tmp_path: Path) -> None:
+    rec = _parse(tmp_path, NON_P_SIRD_SRC, "FakeRouter.scala")
+    routes = [s for s in rec.statements if s.semanticType == "route"]
+    assert len(routes) == 0
+
+
+def test_sird_inferred_routes_and_mount_prefix(tmp_path: Path) -> None:
+    rec = _parse(tmp_path, PREFIX_ROUTER_SRC, "PostRouter.scala")
+    routes = [s for s in rec.statements if s.semanticType == "route"]
+    assert len(routes) == 2
+    endpoints = {(r.method, r.endpoint, r.handler) for r in routes}
+    assert endpoints == {
+        ("GET", "/v1/posts/", "index"),
+        ("GET", "/v1/posts/{id}", "show"),
+    }

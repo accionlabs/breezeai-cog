@@ -33,8 +33,13 @@ class ScalaPlayParser(ScalaParser):
         root = parse_source("scala", ctx.source, ctx.parse_timeout_micros).root_node
         record = self.extract(root, ctx)  # inherited Scala extraction (one parse)
         if ctx.capture_statements and not self.is_fixture_file(ctx.path):
-            routes = detect_play_actions(root, ctx.source, record)
-            routes.extend(detect_play_sird_routes(root, ctx.source, record))
+            seen_ids = {s.id for s in record.statements}
+            sird_routes = detect_play_sird_routes(root, ctx.source, record, seen_ids)
+            sird_handlers = {r.handler for r in sird_routes if r.handler}
+            action_routes = detect_play_actions(
+                root, ctx.source, record, seen_ids, exclude_handlers=sird_handlers
+            )
+            routes = sird_routes + action_routes
             if routes:
                 record.statements.extend(routes)
                 record.framework = "play"
