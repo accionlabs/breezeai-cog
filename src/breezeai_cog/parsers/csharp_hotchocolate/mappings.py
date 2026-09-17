@@ -29,6 +29,13 @@ PARENT_ATTR = "Parent"
 #: are called Query/Mutation/Subscription there by default — enforced, unlike a CLR class name.
 ROOT_SCHEMA_NAMES = {"Query": "query", "Mutation": "mutation", "Subscription": "subscription"}
 
+#: Declarative subscription: the method resolves an event pushed to a topic.
+SUBSCRIBE_ATTR = "Subscribe"
+
+#: Names the pub/sub topic a subscription consumes. Bare (no argument) means "the field name",
+#: which is HotChocolate's own default — enforced, so it resolves rather than guesses.
+TOPIC_ATTR = "Topic"
+
 #: Removes a member from the schema entirely.
 IGNORE_ATTR = "GraphQLIgnore"
 
@@ -80,4 +87,5 @@ MARKERS: tuple[bytes, ...] = (
     b"HotChocolate",
     b"[QueryType]", b"[MutationType]", b"[SubscriptionType]",
     b"[ExtendObjectType",
+    b"[Subscribe]",
 )

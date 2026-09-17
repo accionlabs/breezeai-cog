@@ -304,3 +304,74 @@ def test_ambiguous_heritage_entry_is_not_resolved() -> None:
     # extension stays unresolved instead of picking one.
     rec = _parse_with_index(CROSS_FILE_EXTENSION, "ArchiveMutations.cs", _index({"BookMutations": None}))
     assert _routes(rec) == []
+
+
+# ---- subscriptions -------------------------------------------------------------------------
+
+# Four subscription forms: a literal topic, a bare [Topic] (defaults to the field name), no
+# [Topic] at all (same default), and the receiver-driven form whose topic is built in the body.
+SUBSCRIPTIONS = b'''
+using HotChocolate;
+using HotChocolate.Subscriptions;
+using HotChocolate.Types;
+namespace Catalog.Books {
+  [SubscriptionType]
+  public class BookSubscriptions {
+    [Subscribe]
+    [Topic("bookAdded")]
+    public Book OnBookAdded([EventMessage] Book book) => book;
+
+    [Subscribe]
+    [Topic]
+    public Review OnReviewPosted([EventMessage] Review review) => review;
+
+    [Subscribe]
+    public Book OnBookRemoved([EventMessage] Book book) => book;
+
+    [SubscribeAndResolve]
+    public async IAsyncEnumerable<Book> OnBookUpdated(int bookId, ITopicEventReceiver receiver) {
+      var stream = await receiver.SubscribeAsync<Book>($"bookUpdated_{bookId}");
+    }
+  }
+}
+'''
+
+
+def _consumers(rec: FileRecord):
+    return [s for s in rec.statements if s.semanticType == "eventbus_consumer"]
+
+
+def test_subscription_emits_route_and_topic_consumer() -> None:
+    rec = _parse(CSharpHotChocolateParser(), SUBSCRIPTIONS, "BookSubscriptions.cs")
+    route = _by_endpoint(rec)["onBookAdded"]
+    assert route.routeKind == "subscription" and route.method == "SUBSCRIPTION"
+    consumer = next(s for s in _consumers(rec) if s.endpoint == "bookAdded")
+    # Two addresses, one method: the client names the field, the server reads the topic.
+    assert consumer.parentId == route.parentId and consumer.id != route.id
+    assert consumer.framework == "graphql" and consumer.handler == "OnBookAdded"
+
+
+def test_bare_and_absent_topic_default_to_the_field_name() -> None:
+    rec = _parse(CSharpHotChocolateParser(), SUBSCRIPTIONS, "BookSubscriptions.cs")
+    topics = {s.endpoint for s in _consumers(rec)}
+    assert "onReviewPosted" in topics   # [Topic] with no argument
+    assert "onBookRemoved" in topics    # no [Topic] at all — same framework default
+
+
+def test_runtime_built_topic_emits_the_route_only() -> None:
+    # The topic is interpolated inside SubscribeAsync, so there is no address to record. The
+    # subscription field is still captured; only the consumer half is withheld.
+    rec = _parse(CSharpHotChocolateParser(), SUBSCRIPTIONS, "BookSubscriptions.cs")
+    assert "onBookUpdated" in _by_endpoint(rec)
+    assert not [s for s in _consumers(rec) if "bookUpdated" in (s.endpoint or "")]
+
+
+def test_consumers_do_not_inflate_the_route_inventory() -> None:
+    rec = _parse(CSharpHotChocolateParser(), SUBSCRIPTIONS, "BookSubscriptions.cs")
+    assert len(_routes(rec)) == 4       # one per subscription field
+    assert len(_consumers(rec)) == 3    # the resolvable topics only
+
+
+def test_non_subscription_operations_emit_no_consumer() -> None:
+    rec = _parse(CSharpHotChocolateParser(), QUERIES, "BookQueries.cs")
+    assert _consumers(rec) == []

@@ -33,7 +33,9 @@ from .mappings import (
     MIDDLEWARE_ATTRS,
     PARENT_ATTR,
     ROOT_ATTRS,
+    SUBSCRIBE_ATTR,
     ROOT_SCHEMA_NAMES,
+    TOPIC_ATTR,
 )
 from .naming import field_name
 
@@ -167,6 +169,62 @@ def field_resolver_statement(
     )
 
 
+def subscription_topic(fn: Function, endpoint: str) -> str | None:
+    """The pub/sub topic a subscription consumes, or None when it cannot be resolved.
+
+    Only the declarative form is resolvable from the declaration: ``[Subscribe]`` plus an
+    optional ``[Topic("x")]``, whose default when bare (or absent) is the field name — that
+    default is HotChocolate's own, so it is a fact rather than a convention. An attribute
+    argument must be a compile-time constant, so an interpolated topic can only appear in a
+    ``receiver.SubscribeAsync($"...")`` call inside the body; those carry no ``[Subscribe]`` and
+    return None here, because an event address we cannot read is better absent than fabricated.
+    """
+    if SUBSCRIBE_ATTR not in _attr_names(fn.decorators):
+        return None
+    for dec in fn.decorators:
+        if simple_attr_name(dec.name) == TOPIC_ATTR:
+            topic = dec.args[0].strip().strip('"') if dec.args else ""
+            return topic or endpoint
+    return endpoint
+
+
+def topic_consumer_statement(fn: Function, topic: str, seen: set[str]) -> Statement:
+    """The server-side half of a subscription: it consumes ``topic`` to push to subscribers.
+
+    A subscription has two addresses — clients name the *field*, the server reads a *topic* — so
+    each gets its own record, answering "what can a client subscribe to" and "who consumes this
+    topic" respectively. Both hang off the same method (``parentId``), and a route inventory and
+    an event inventory each see exactly one of them, so nothing is double-counted.
+    """
+    return Statement(
+        id=disambiguate(statement_id(fn.path or "", fn.startLine, 0), seen),
+        parentId=fn.id,
+        nodeType="synthetic",
+        semanticType="eventbus_consumer",
+        text=f"[{TOPIC_ATTR}] {topic}",
+        endpoint=topic,
+        framework="graphql",
+        handler=fn.name,
+        handlerLine=fn.startLine,
+        startLine=fn.startLine,
+        endLine=fn.endLine,
+        path=fn.path,
+    )
+
+
+def _operation_records(
+    cls: Class, fn: Function, kind: str, text: str, seen: set[str]
+) -> list[Statement]:
+    """The route for one operation, plus a topic consumer when it is a resolvable subscription."""
+    route = operation_statement(cls, fn, kind, text, seen)
+    if kind != "subscription":
+        return [route]
+    topic = subscription_topic(fn, route.endpoint or fn.name)
+    if topic is None:
+        return [route]
+    return [route, topic_consumer_statement(fn, topic, seen)]
+
+
 def extend_target(cls: Class) -> str | None:
     """The type an ``[ExtendObjectType(...)]`` class extends, or None if it carries no such
     attribute. Handles all three argument forms — ``typeof(Book)``, ``"Query"`` and
@@ -223,8 +281,8 @@ def _extension_routes(
     nothing at all when the target cannot be classified."""
     kind = _root_kind_of_name(target, record, heritage)
     if kind is not None:
-        return [operation_statement(cls, fn, kind, f"[{EXTEND_ATTR}] {fn.name}", seen)
-                for fn in methods]
+        return [s for fn in methods
+                for s in _operation_records(cls, fn, kind, f"[{EXTEND_ATTR}] {fn.name}", seen)]
     resolvers = [fn for fn in methods if resolves_parent(fn, target)]
     if not resolvers:
         get_logger("breezeai_cog.parsers").debug(
@@ -261,8 +319,8 @@ def detect_hotchocolate_routes(
         kind = root_kind(cls)
         if kind is not None:
             attr = next(name for name, k in ROOT_ATTRS.items() if k == kind)
-            routes.extend(operation_statement(cls, fn, kind, f"[{attr}] {fn.name}", seen)
-                          for fn in own)
+            routes.extend(s for fn in own
+                          for s in _operation_records(cls, fn, kind, f"[{attr}] {fn.name}", seen))
             continue
         target = extend_target(cls)
         if target is not None:
