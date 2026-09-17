@@ -16,18 +16,24 @@ second AST walk is needed for the attribute-declared style.
 
 from __future__ import annotations
 
+from typing import Any
+
 from ...emit import disambiguate, statement_id
+from ...logging import get_logger
 from ...schemas import Class, Decorator, FileRecord, Function, Statement
 from ..csharp_aspnet.routes import _response_dto, simple_attr_name
 from .mappings import (
     ARG_MARKER_ATTRS,
     AUTHORIZE_ATTR,
     DATALOADER_TYPES,
+    EXTEND_ATTR,
     IGNORE_ATTR,
     INFRA_PARAM_ATTRS,
     INFRA_PARAM_TYPES,
     MIDDLEWARE_ATTRS,
+    PARENT_ATTR,
     ROOT_ATTRS,
+    ROOT_SCHEMA_NAMES,
 )
 from .naming import field_name
 
@@ -106,11 +112,12 @@ def middleware(fn: Function) -> list[Decorator]:
     return [d for d in fn.decorators if simple_attr_name(d.name) in MIDDLEWARE_ATTRS]
 
 
-def operation_statement(
-    cls: Class, fn: Function, kind: str, text: str, seen: set[str]
+def _statement(
+    cls: Class, fn: Function, *, kind: str, method: str, endpoint: str, text: str,
+    seen: set[str],
 ) -> Statement:
-    """One client-callable operation. ``endpoint`` is the field name the framework computes;
-    ``handler`` keeps the C# method name."""
+    """One route record for a resolver method. ``endpoint`` is the field address the framework
+    serves; ``handler`` keeps the C# method name."""
     guards = guards_of(cls, fn)
     return Statement(
         id=disambiguate(statement_id(fn.path or "", fn.startLine, 0), seen),
@@ -118,8 +125,8 @@ def operation_statement(
         nodeType="synthetic",
         semanticType="route",
         text=text,
-        method=kind.upper(),
-        endpoint=field_name(fn.name, fn.decorators),
+        method=method,
+        endpoint=endpoint,
         framework="graphql",
         handler=fn.name,
         handlerLine=fn.startLine,
@@ -137,20 +144,128 @@ def operation_statement(
     )
 
 
-def detect_hotchocolate_routes(record: FileRecord, seen: set[str]) -> list[Statement]:
-    """Every operation declared by an attribute-marked root class in this file."""
-    roots = {cls.id: (cls, kind) for cls in record.classes if (kind := root_kind(cls)) is not None}
-    if not roots:
+def operation_statement(
+    cls: Class, fn: Function, kind: str, text: str, seen: set[str]
+) -> Statement:
+    """A client-callable operation on a schema root."""
+    return _statement(
+        cls, fn, kind=kind, method=kind.upper(),
+        endpoint=field_name(fn.name, fn.decorators), text=text, seen=seen,
+    )
+
+
+def field_resolver_statement(
+    cls: Class, fn: Function, target: str, text: str, seen: set[str]
+) -> Statement:
+    """A resolver for one field of a data type. Not client-callable — it runs once per parent
+    object when that field is selected — so it carries its own ``routeKind`` and an address that
+    names the edge it resolves (``Book.author``). ``method`` has no real meaning here (a field
+    resolver has no verb); ``QUERY`` matches ``typescript_nestjs/routes.py:373``."""
+    return _statement(
+        cls, fn, kind="field_resolver", method="QUERY",
+        endpoint=f"{target}.{field_name(fn.name, fn.decorators)}", text=text, seen=seen,
+    )
+
+
+def extend_target(cls: Class) -> str | None:
+    """The type an ``[ExtendObjectType(...)]`` class extends, or None if it carries no such
+    attribute. Handles all three argument forms — ``typeof(Book)``, ``"Query"`` and
+    ``OperationTypeNames.Query`` — returning the bare type name."""
+    for dec in cls.decorators:
+        if simple_attr_name(dec.name) != EXTEND_ATTR or not dec.args:
+            continue
+        arg = dec.args[0].strip()
+        if arg.startswith("typeof(") and arg.endswith(")"):
+            arg = arg[len("typeof("): -1]
+        return arg.strip().strip('"').rsplit(".", 1)[-1] or None
+    return None
+
+
+def _root_kind_of_name(name: str, record: FileRecord, heritage: dict[str, object]) -> str | None:
+    """Operation kind for a *named* type, from enforced signals only.
+
+    The schema name (``"Query"`` / ``OperationTypeNames.Query``) names the root directly. A CLR
+    class name only counts when that class is seen carrying a root attribute — in this file, or
+    via the repo heritage index. A class named ``Query`` that is registered in ``Program.cs`` and
+    attributed nowhere stays unresolved: root-ness is declared at the registration site, which
+    this parser does not read.
+    """
+    kind = ROOT_SCHEMA_NAMES.get(name)
+    if kind is not None:
+        return kind
+    for cls in record.classes:
+        if cls.name == name and (kind := root_kind(cls)) is not None:
+            return kind
+    entry = heritage.get(name)  # None means "declared by >1 class, ambiguous" — honest-null
+    decorators = getattr(entry, "decorators", None) if entry is not None else None
+    for attr in _attr_names(decorators or []):
+        if attr in ROOT_ATTRS:
+            return ROOT_ATTRS[attr]
+    return None
+
+
+def resolves_parent(fn: Function, target: str) -> bool:
+    """Whether ``fn`` binds the object being resolved — the enforced signals being an explicit
+    ``[Parent]`` parameter, or a first parameter typed as the extended type (which the resolver
+    compiler binds as the parent)."""
+    if any(PARENT_ATTR in _attr_names(p.decorators) for p in fn.params):
+        return True
+    first = fn.params[0] if fn.params else None
+    return first is not None and _base_type(first.type) == target
+
+
+def _extension_routes(
+    cls: Class, target: str, methods: list[Function], record: FileRecord,
+    heritage: dict[str, object], path: str, seen: set[str],
+) -> list[Statement]:
+    """Routes for one ``[ExtendObjectType(target)]`` class: operations when the target is a
+    resolved root, field resolvers when it is a data type whose parent binding is visible, and
+    nothing at all when the target cannot be classified."""
+    kind = _root_kind_of_name(target, record, heritage)
+    if kind is not None:
+        return [operation_statement(cls, fn, kind, f"[{EXTEND_ATTR}] {fn.name}", seen)
+                for fn in methods]
+    resolvers = [fn for fn in methods if resolves_parent(fn, target)]
+    if not resolvers:
+        get_logger("breezeai_cog.parsers").debug(
+            "hotchocolate.extend.unresolved", path=path, target=target, cls=cls.name,
+            reason="target is neither a resolved root nor a visible parent binding",
+        )
+        return []
+    return [field_resolver_statement(cls, fn, target, f"[{EXTEND_ATTR}({target})] {fn.name}", seen)
+            for fn in resolvers]
+
+
+def detect_hotchocolate_routes(
+    record: FileRecord, seen: set[str], index: Any = None
+) -> list[Statement]:
+    """Every operation and field resolver declared in this file.
+
+    Two declaration sites: a class carrying a root attribute, and a class extending another type
+    with ``[ExtendObjectType]``. ``index`` supplies the repo heritage map so a root attributed in
+    another file still resolves.
+    """
+    heritage: dict[str, object] = getattr(index, "class_heritage", None) or {}
+    methods: dict[str, list[Function]] = {}
+    for fn in record.functions:
+        if is_operation(fn):
+            methods.setdefault(fn.parentId, []).append(fn)
+    if not methods:
         return []
 
     routes: list[Statement] = []
-    for fn in record.functions:
-        entry = roots.get(fn.parentId)
-        if entry is None:
+    for cls in record.classes:
+        own = methods.get(cls.id)
+        if not own:
             continue
-        cls, kind = entry
-        if not is_operation(fn):
+        kind = root_kind(cls)
+        if kind is not None:
+            attr = next(name for name, k in ROOT_ATTRS.items() if k == kind)
+            routes.extend(operation_statement(cls, fn, kind, f"[{attr}] {fn.name}", seen)
+                          for fn in own)
             continue
-        attr = next(name for name, k in ROOT_ATTRS.items() if k == kind)
-        routes.append(operation_statement(cls, fn, kind, f"[{attr}] {fn.name}", seen))
+        target = extend_target(cls)
+        if target is not None:
+            routes.extend(_extension_routes(
+                cls, target, own, record, heritage, record.path, seen))
     return routes

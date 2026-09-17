@@ -17,6 +17,18 @@ ROOT_ATTRS = {
     "SubscriptionType": "subscription",
 }
 
+#: Adds this class's methods as fields of another type — the root (real operations) or a data
+#: type (field resolvers). The argument decides which; see ``extend_target`` in routes.py.
+EXTEND_ATTR = "ExtendObjectType"
+
+#: Marks the parameter that carries the object being resolved — only meaningful on a data type.
+PARENT_ATTR = "Parent"
+
+#: Root operation types by their **schema** name. ``[ExtendObjectType("Query")]`` and
+#: ``[ExtendObjectType(OperationTypeNames.Query)]`` name the schema type directly, and the roots
+#: are called Query/Mutation/Subscription there by default — enforced, unlike a CLR class name.
+ROOT_SCHEMA_NAMES = {"Query": "query", "Mutation": "mutation", "Subscription": "subscription"}
+
 #: Removes a member from the schema entirely.
 IGNORE_ATTR = "GraphQLIgnore"
 

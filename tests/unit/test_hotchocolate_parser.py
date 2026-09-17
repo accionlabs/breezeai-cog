@@ -11,7 +11,9 @@ from jsonschema import Draft202012Validator
 from breezeai_cog.core import registry
 from breezeai_cog.emit import to_line
 from breezeai_cog.parsers.base import ParseContext
+from breezeai_cog.parsers.csharp.imports import CSharpIndex
 from breezeai_cog.parsers.csharp.parser import CSharpParser
+from breezeai_cog.parsers.index_common import ClassHeritage
 from breezeai_cog.parsers.csharp_hotchocolate.parser import CSharpHotChocolateParser
 from breezeai_cog.schemas import FileRecord
 
@@ -202,3 +204,103 @@ def test_records_validate_against_the_schema() -> None:
         rec = _parse(CSharpHotChocolateParser(), src, name)
         errors = list(validator.iter_errors(json.loads(to_line(rec))))
         assert not errors, errors
+
+
+# ---- [ExtendObjectType] --------------------------------------------------------------------
+
+# Three extension classes: one extending the root by schema name, one extending a data type
+# (with and without an explicit [Parent]), and one whose target cannot be classified here.
+EXTENSIONS = b'''
+using HotChocolate;
+using HotChocolate.Types;
+namespace Catalog.Books {
+  [ExtendObjectType(OperationTypeNames.Query)]
+  public class ReportQueries {
+    public Report GetSalesReport(int year) => null;
+  }
+
+  [ExtendObjectType(typeof(Book))]
+  public class BookFields {
+    public Task<Author> GetAuthor([Parent] Book book, IDataLoader<int, Author> loader) => null;
+    public IEnumerable<Review> GetReviews(Book book, CatalogDb db) => null;
+  }
+
+  [ExtendObjectType(typeof(CatalogApi))]
+  public class CatalogFields {
+    public Report GetSummary(int year) => null;
+  }
+}
+'''
+
+# The root lives in another file and carries [MutationType]; the extension targets it by CLR
+# name, so it only resolves through the repo heritage index.
+CROSS_FILE_EXTENSION = b'''
+using HotChocolate;
+namespace Catalog.Books {
+  [ExtendObjectType(typeof(BookMutations))]
+  public class ArchiveMutations {
+    public Book ArchiveBook(int id) => null;
+  }
+}
+'''
+
+
+def _index(heritage):
+    """A real CSharpIndex carrying only the heritage entries a test needs."""
+    return CSharpIndex(class_heritage=heritage)
+
+
+def _parse_with_index(src, name, index):
+    ctx = ParseContext(
+        path=name, abs_path=None, source=src, repo_root=None,
+        capture_statements=True, resolution_index=index,
+    )
+    return CSharpHotChocolateParser().parse_file(ctx)
+
+
+def test_root_extension_yields_operations() -> None:
+    # [ExtendObjectType(OperationTypeNames.Query)] names the root by its schema name.
+    rec = _parse(CSharpHotChocolateParser(), EXTENSIONS, "Extensions.cs")
+    op = _by_endpoint(rec)["salesReport"]
+    assert op.routeKind == "query" and op.method == "QUERY" and op.handler == "GetSalesReport"
+
+
+def test_data_type_extension_yields_field_resolvers() -> None:
+    rec = _parse(CSharpHotChocolateParser(), EXTENSIONS, "Extensions.cs")
+    ops = _by_endpoint(rec)
+    for endpoint in ("Book.author", "Book.reviews"):
+        assert ops[endpoint].routeKind == "field_resolver"
+        assert ops[endpoint].method == "QUERY"
+    assert ops["Book.author"].dataLoaders == ["IDataLoader<int, Author>"]
+    assert ops["Book.reviews"].responseDTO == "Review"
+
+
+def test_parent_binding_by_convention_is_honoured() -> None:
+    # GetReviews has no [Parent]; its first parameter is typed as the extended type, which the
+    # resolver compiler binds as the parent — an enforced signal, so it is not dropped.
+    rec = _parse(CSharpHotChocolateParser(), EXTENSIONS, "Extensions.cs")
+    assert "Book.reviews" in _by_endpoint(rec)
+
+
+def test_unclassifiable_target_emits_nothing() -> None:
+    # CatalogApi is a root only because Program.cs registers it; this parser does not read that,
+    # and no method binds a CatalogApi parent — so the class is skipped rather than guessed at.
+    rec = _parse(CSharpHotChocolateParser(), EXTENSIONS, "Extensions.cs")
+    assert "summary" not in _by_endpoint(rec)
+    assert "CatalogApi.summary" not in _by_endpoint(rec)
+
+
+def test_root_attributed_in_another_file_resolves_via_heritage() -> None:
+    from breezeai_cog.schemas import Decorator
+
+    index = _index({"BookMutations": ClassHeritage(extends=None, decorators=[Decorator(name="MutationType")])})
+    rec = _parse_with_index(CROSS_FILE_EXTENSION, "ArchiveMutations.cs", index)
+    op = _by_endpoint(rec)["archiveBook"]
+    assert op.routeKind == "mutation" and op.method == "MUTATION"
+
+
+def test_ambiguous_heritage_entry_is_not_resolved() -> None:
+    # A None entry means the name is declared by more than one class — honest-null, so the
+    # extension stays unresolved instead of picking one.
+    rec = _parse_with_index(CROSS_FILE_EXTENSION, "ArchiveMutations.cs", _index({"BookMutations": None}))
+    assert _routes(rec) == []
