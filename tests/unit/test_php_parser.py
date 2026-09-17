@@ -189,6 +189,14 @@ def test_imports_and_psr4_resolution(tmp_path: Path) -> None:
     assert rec.exports == []
 
 
+def test_function_use_is_not_class_import(tmp_path: Path) -> None:
+    src = b"<?php\nuse function App\\helper;\n"
+    rec = _parse_php(tmp_path, src=src, rel="src/helpers.php")
+
+    assert "App\\helper" not in rec.externalImports
+    assert rec.importFiles == []
+
+
 def test_fully_qualified_attribute_uses_simple_decorator_name(tmp_path: Path) -> None:
     src = b"""<?php
 class Example

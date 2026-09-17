@@ -165,6 +165,9 @@ def extract_imports(
         elif raw_target not in external:
             external.append(raw_target)
 
+    def is_function_import(node: Node) -> bool:
+        return any(child.type == "function" for child in node.children)
+
     # Process all namespace_use_declaration nodes
     for child in root.named_children:
         if child.type != "namespace_use_declaration":
@@ -174,6 +177,8 @@ def extract_imports(
             (node for node in child.named_children if node.type == "namespace_name"), None
         )
         if group is not None and group_prefix_node is not None:
+            if is_function_import(child):
+                continue
             group_prefix = node_text(group_prefix_node, source).strip("\\")
             body = group.child_by_field_name("body")
             for clause in (body.named_children if body is not None else group.named_children):
@@ -189,6 +194,8 @@ def extract_imports(
             continue
         for clause in child.named_children:
             if clause.type != "namespace_use_clause":
+                continue
+            if is_function_import(clause):
                 continue
             # Extract target FQCN
             target_node = next(
