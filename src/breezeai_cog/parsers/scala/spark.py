@@ -45,7 +45,7 @@ def _spark_receiver(callee: str, operation: str) -> str | None:
 def _type_base(type_text: str | None) -> str:
     if not type_text:
         return ""
-    return type_text.split("<", 1)[0].strip().rstrip("[]").rsplit(".", 1)[-1]
+    return type_text.split("<", 1)[0].split("[", 1)[0].strip().rstrip("[]").rsplit(".", 1)[-1]
 
 
 def _spark_receiver_is_valid(receiver: str | None, operation: str, types: dict[str, str]) -> bool:
@@ -57,9 +57,9 @@ def _spark_receiver_is_valid(receiver: str | None, operation: str, types: dict[s
     return base in {"DataFrame", "Dataset", "DataFrameWriter"}
 
 
-def _spark_types(root: Node, source: bytes) -> dict[str, str]:
+def _spark_types(root: Node, source: bytes, base_types: dict[str, str] | None = None) -> dict[str, str]:
     """Combine declared types with the small set of inferable Spark chain types."""
-    types = type_map(root, source)
+    types = dict(base_types) if base_types is not None else type_map(root, source)
     assignments: list[tuple[str, str]] = []
 
     def walk(node: Node) -> None:
@@ -75,6 +75,15 @@ def _spark_types(root: Node, source: bytes) -> dict[str, str]:
     for _ in range(len(assignments) + 1):
         changed = False
         for name, value in assignments:
+            if (
+                "SparkSession.builder" in value
+                or value.startswith("SparkSession.")
+                or "new SparkSession" in value
+                or (name == "spark" and ("builder" in value or "getOrCreate" in value))
+            ):
+                if types.get(name) != "SparkSession":
+                    types[name] = "SparkSession"
+                    changed = True
             for operation, inferred in (("read", "DataFrame"), ("write", "DataFrameWriter")):
                 receiver = _spark_receiver(value, operation)
                 if _spark_receiver_is_valid(receiver, operation, types) and types.get(name) != inferred:
@@ -104,6 +113,7 @@ def detect_spark_calls(
     root: Node,
     ctx: ParseContext,
     record: FileRecord,
+    types: dict[str, str] | None = None,
 ) -> None:
     """Detect Spark .read/.write calls and enrich or append statements."""
     if not ctx.capture_statements:
@@ -113,7 +123,7 @@ def detect_spark_calls(
         return
 
     seen_ids = {s.id for s in record.statements}
-    types = _spark_types(root, source)
+    spark_types = _spark_types(root, source, base_types=types)
     found_any = False
 
     def walk(node: Node) -> None:
@@ -122,7 +132,7 @@ def detect_spark_calls(
             details = _call_details(node, source)
             if details is not None:
                 callee, method, endpoint = details
-                op = _spark_op_for_call(callee, method, types)
+                op = _spark_op_for_call(callee, method, spark_types)
                 if op is not None:
                     found_any = True
                     sem_type, hint, op_method = _SPARK_OPS[op]
@@ -133,7 +143,7 @@ def detect_spark_calls(
                         stmt.dataAccessHint = hint
                         stmt.method = op_method
                         stmt.endpoint = endpoint
-                    elif stmt is None:
+                    else:
                         end = node.end_point[0] + 1
                         parent_id = find_enclosing_parent_id(start, record)
                         record.statements.append(

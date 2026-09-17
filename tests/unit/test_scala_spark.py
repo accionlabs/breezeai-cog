@@ -98,3 +98,44 @@ def test_spark_schema_validation(tmp_path: Path) -> None:
     errors = list(Draft202012Validator(FileRecord.model_json_schema(by_alias=True))
                   .iter_errors(json.loads(to_line(rec))))
     assert not errors, errors
+
+
+UNANNOTATED_BUILDER_SRC = b"""package com.example.jobs
+import org.apache.spark.sql.SparkSession
+
+object Job {
+  def main(args: Array[String]): Unit = {
+    val spark = SparkSession.builder().appName("j").getOrCreate()
+    val df = spark.read.parquet("in.parquet")
+    df.write.csv("out.csv")
+  }
+}
+"""
+
+
+def test_spark_unannotated_builder_session(tmp_path: Path) -> None:
+    rec = _parse_spark(tmp_path, UNANNOTATED_BUILDER_SRC, "Job.scala")
+    assert rec.framework == "spark"
+    read_calls = [s for s in rec.statements if s.semanticType == "db_method_call" and s.method == "read"]
+    write_calls = [s for s in rec.statements if s.semanticType == "db_method_call" and s.method == "write"]
+    assert len(read_calls) == 1
+    assert len(write_calls) == 1
+
+
+MULTI_ACCESS_LINE_SRC = b"""package com.example.jobs
+import org.apache.spark.sql.SparkSession
+
+class MultiAccessJob {
+  def process(spark: SparkSession): Unit = {
+    val d = spark.read.parquet("i"); d.write.csv("o")
+  }
+}
+"""
+
+
+def test_spark_multi_access_same_line(tmp_path: Path) -> None:
+    rec = _parse_spark(tmp_path, MULTI_ACCESS_LINE_SRC, "Multi.scala")
+    spark_calls = [s for s in rec.statements if s.dataAccessHint == "spark"]
+    assert len(spark_calls) == 2
+    methods = {s.method for s in spark_calls}
+    assert methods == {"read", "write"}

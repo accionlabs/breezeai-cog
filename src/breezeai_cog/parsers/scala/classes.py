@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Collection
 from tree_sitter import Node
 
 from ...emit import class_id, disambiguate
@@ -84,6 +85,7 @@ def build_class(
     capture: bool,
     limit: int,
     resolve: CallResolver = noop_resolver,
+    local_names: Collection[str] = (),
 ) -> tuple[list[Class], list[Function], list[Statement]]:
     name_node = node.child_by_field_name("name")
     name = node_text(name_node, source) if name_node is not None else ""
@@ -122,6 +124,7 @@ def build_class(
                 capture=capture,
                 limit=limit,
                 seen_ids=seen_ids,
+                local_names=local_names,
             )
         )
         # Walk body members (handling template_body or indented_block inside template_body)
@@ -143,6 +146,7 @@ def build_class(
                     is_static=is_object,
                     fn_type="method",
                     resolve=resolve,
+                    local_names=local_names,
                 )
                 methods.extend(fns)
                 statements.extend(fn_statements)
@@ -156,6 +160,7 @@ def build_class(
                     capture=capture,
                     limit=limit,
                     resolve=resolve,
+                    local_names=local_names,
                 )
                 nested_classes.extend(sub_classes)
                 methods.extend(sub_methods)

@@ -8,7 +8,7 @@ statement that contains a call is run through the shared detectors
 
 from __future__ import annotations
 
-from collections.abc import Iterator
+from collections.abc import Collection, Iterator
 
 from tree_sitter import Node
 
@@ -136,6 +136,7 @@ def extract_statements(
     seen_ids: set[str],
     descend_all: bool = False,
     barriers: frozenset[tuple[int, int]] = frozenset(),
+    local_names: Collection[str] = (),
 ) -> list[Statement]:
     if not capture or body is None:
         return []
@@ -157,6 +158,7 @@ def extract_statements(
                 stmt_expr=_STMT_EXPR,
                 container_types=_CONTAINERS,
                 language="scala",
+                local_names=local_names,
             )
         )
     return out

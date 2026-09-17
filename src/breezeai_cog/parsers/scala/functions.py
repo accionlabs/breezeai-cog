@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Collection
 from tree_sitter import Node
 
 from ...emit import disambiguate, function_id
@@ -242,6 +243,7 @@ def build_function(
     is_static: bool = False,
     fn_type: str = "method",
     resolve: CallResolver = noop_resolver,
+    local_names: Collection[str] = (),
 ) -> tuple[list[Function], list[Statement]]:
     """This function plus every nested ``def`` inside it, and their statements.
 
@@ -288,6 +290,7 @@ def build_function(
             seen_ids=seen_ids,
             descend_all=True,  # walk control flow / lambdas — their statements land here
             barriers=barriers,  # …except separately-extracted nested defs
+            local_names=local_names,
         )
         if body is not None
         else []
@@ -307,6 +310,7 @@ def build_function(
             is_static=False,
             fn_type="function",
             resolve=resolve,
+            local_names=local_names,
         )
         functions.extend(sub_fns)
         statements.extend(sub_stmts)

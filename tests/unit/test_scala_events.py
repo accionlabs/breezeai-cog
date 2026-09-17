@@ -138,3 +138,29 @@ def test_events_output_validates(tmp_path: Path) -> None:
     errors = list(Draft202012Validator(FileRecord.model_json_schema(by_alias=True))
                   .iter_errors(json.loads(to_line(rec))))
     assert not errors, errors
+
+
+IDIOMATIC_AKKA_SRC = b"""package com.example
+import akka.actor._
+
+class MyActor extends Actor {
+  def receive: Receive = {
+    case "start" =>
+      val child = context.actorOf(Props[Worker])
+      child ! "work"
+      sender() ! "done"
+      self ! "loop"
+  }
+}
+"""
+
+
+def test_idiomatic_akka_receivers(tmp_path: Path) -> None:
+    rec = _parse(tmp_path, IDIOMATIC_AKKA_SRC, "MyActor.scala")
+    sends = [s for s in rec.statements if s.semanticType == "eventbus_send"]
+    assert len(sends) == 3
+    texts = {s.text for s in sends}
+    assert 'child ! "work"' in texts
+    assert 'sender() ! "done"' in texts
+    assert 'self ! "loop"' in texts
+

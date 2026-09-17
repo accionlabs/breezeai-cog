@@ -69,9 +69,9 @@ class ScalaParser(BaseParser):
         internal, external, _, bindings = extract_imports(
             root, source, path, ctx.repo_root, fqcn
         )
-        resolve = make_resolver(
-            bindings, defined_names(root, source), path, type_map(root, source)
-        )
+        local_defs = defined_names(root, source)
+        types = type_map(root, source)
+        resolve = make_resolver(bindings, local_defs, path, types)
         functions: list[Function] = []
         classes = []
         statements: list[Statement] = []
@@ -87,6 +87,7 @@ class ScalaParser(BaseParser):
                     capture=capture,
                     limit=limit,
                     resolve=resolve,
+                    local_names=local_defs,
                 )
                 classes.extend(cls_list)
                 functions.extend(methods)
@@ -104,6 +105,7 @@ class ScalaParser(BaseParser):
                     is_static=False,
                     fn_type="function",
                     resolve=resolve,
+                    local_names=local_defs,
                 )
                 functions.extend(fns)
                 statements.extend(fn_statements)
@@ -122,6 +124,7 @@ class ScalaParser(BaseParser):
                             is_static=False,
                             fn_type="function",
                             resolve=resolve,
+                            local_names=local_defs,
                         )
                         functions.extend(fns)
                         statements.extend(fn_statements)
@@ -142,6 +145,7 @@ class ScalaParser(BaseParser):
                 capture=capture,
                 limit=limit,
                 seen_ids=seen_ids,
+                local_names=local_defs,
             )
         )
 
@@ -175,6 +179,6 @@ class ScalaParser(BaseParser):
             statements=statements,
             framework=None,
         )
-        detect_scala_events(root, ctx, record)
-        detect_spark_calls(root, ctx, record)
+        detect_scala_events(root, ctx, record, types=types)
+        detect_spark_calls(root, ctx, record, types=types)
         return record

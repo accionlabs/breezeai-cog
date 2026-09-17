@@ -49,7 +49,7 @@ def _is_receive_message_call(call: Node, source: bytes) -> bool:
 
 
 def detect_scala_events(
-    root: Node, ctx: ParseContext, record: FileRecord
+    root: Node, ctx: ParseContext, record: FileRecord, types: dict[str, str] | None = None
 ) -> None:
     if not ctx.capture_statements:
         return
@@ -57,15 +57,52 @@ def detect_scala_events(
     if b"akka" not in source and b"pekko" not in source:
         return
     seen_ids = {s.id for s in record.statements}
-    declared_types = type_map(root, source)
+    declared_types = dict(types) if types is not None else type_map(root, source)
+
+    def collect_actor_assignments(node: Node) -> None:
+        if node.type in ("val_definition", "var_definition"):
+            pat = node.child_by_field_name("pattern")
+            val = node.child_by_field_name("value")
+            if pat is not None and pat.type == "identifier" and val is not None:
+                v_txt = node_text(val, source)
+                name = node_text(pat, source)
+                if (
+                    "actorOf" in v_txt
+                    or ".spawn(" in v_txt
+                    or "Behaviors." in v_txt
+                    or "Props[" in v_txt
+                    or "Props(" in v_txt
+                ):
+                    declared_types[name] = "ActorRef"
+        for c in node.named_children:
+            collect_actor_assignments(c)
+
+    collect_actor_assignments(root)
     found_any = False
 
     def is_actor_ref(left: Node) -> bool:
-        if left.type != "identifier":
-            return False
-        declared = declared_types.get(node_text(left, source), "")
-        base = declared.split("<", 1)[0].strip().rstrip("[]").rsplit(".", 1)[-1]
-        return base == "ActorRef"
+        curr = left
+        while curr.type == "parenthesized_expression" and curr.named_children:
+            curr = curr.named_children[0]
+        if curr.type == "identifier":
+            name = node_text(curr, source)
+            if name in ("self", "sender"):
+                return True
+            declared = declared_types.get(name, "")
+            base = declared.split("<", 1)[0].split("[", 1)[0].strip().rstrip("[]").rsplit(".", 1)[-1]
+            return base == "ActorRef"
+        if curr.type == "call_expression":
+            txt = node_text(curr, source).replace(" ", "")
+            if txt in ("sender()", "context.sender()", "self()", "context.self()"):
+                return True
+            if txt.startswith(("context.actorOf(", "system.actorOf(", "context.spawn(", "system.spawn(")):
+                return True
+            fn = curr.child_by_field_name("function")
+            if fn is not None:
+                fn_txt = node_text(fn, source)
+                if fn_txt in ("sender", "context.sender", "self", "context.self"):
+                    return True
+        return False
 
     def emit(node: Node, semantic: SemanticType, method: str | None) -> None:
         nonlocal found_any
