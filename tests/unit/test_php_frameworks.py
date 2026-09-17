@@ -166,6 +166,27 @@ class UserController
     assert "/api/users/{id}" in endpoints
 
 
+def test_symfony_docblock_route_annotation(tmp_path: Path) -> None:
+    src = b"""<?php
+namespace App\\Controller;
+
+use Symfony\\Component\\Routing\\Annotation\\Route;
+
+class LegacyController
+{
+    /** @Route("/legacy", methods={"GET", "POST"}) */
+    public function index() {}
+}
+"""
+    rec = _parse(SymfonyParser, tmp_path, src, "src/Controller/LegacyController.php")
+    routes = [s for s in rec.statements if s.semanticType == "route"]
+
+    assert {(route.method, route.endpoint) for route in routes} == {
+        ("GET", "/legacy"),
+        ("POST", "/legacy"),
+    }
+
+
 def test_symfony_is_granted_guard(tmp_path: Path) -> None:
     src = b"""<?php
 namespace App\\Controller;
