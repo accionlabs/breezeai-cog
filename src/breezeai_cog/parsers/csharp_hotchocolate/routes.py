@@ -173,23 +173,26 @@ def field_resolver_statement(
     )
 
 
-def subscription_topic(fn: Function, endpoint: str) -> str | None:
+def subscription_topic(fn: Function) -> str | None:
     """The pub/sub topic a subscription consumes, or None when it cannot be resolved.
 
-    Only the declarative form is resolvable from the declaration: ``[Subscribe]`` plus an
-    optional ``[Topic("x")]``, whose default when bare (or absent) is the field name — that
-    default is HotChocolate's own, so it is a fact rather than a convention. An attribute
-    argument must be a compile-time constant, so an interpolated topic can only appear in a
-    ``receiver.SubscribeAsync($"...")`` call inside the body; those carry no ``[Subscribe]`` and
-    return None here, because an event address we cannot read is better absent than fabricated.
+    Only a **literal** ``[Topic("x")]`` is resolvable. Everything else is left alone, evidenced
+    by ChilliCream's own ConferencePlanner workshop:
+
+    * ``[Topic]`` with no argument defaults to the *member* name, not the GraphQL field name —
+      its publisher sends to ``nameof(OnSessionScheduledAsync)``, so recording the field name
+      ``onSessionScheduled`` would be a fabricated address.
+    * ``[Subscribe(With = nameof(SubscribeToX))]`` moves the topic into that method's body,
+      where the workshop builds it by interpolation (``$"OnAttendeeCheckedIn_{sessionId}"``).
+
+    Both cases return None: an event address we cannot read is better absent than invented.
     """
     if SUBSCRIBE_ATTR not in _attr_names(fn.decorators):
         return None
     for dec in fn.decorators:
-        if simple_attr_name(dec.name) == TOPIC_ATTR:
-            topic = dec.args[0].strip().strip('"') if dec.args else ""
-            return topic or endpoint
-    return endpoint
+        if simple_attr_name(dec.name) == TOPIC_ATTR and dec.args:
+            return dec.args[0].strip().strip('"') or None
+    return None
 
 
 #: Key of the anchor map: (method name, its declaration's start line).
@@ -286,7 +289,7 @@ def _operation_records(
     route = operation_statement(cls, fn, kind, text, seen)
     if kind != "subscription":
         return [route]
-    topic = subscription_topic(fn, route.endpoint or fn.name)
+    topic = subscription_topic(fn)
     if topic is None:
         return [route]
     anchor = anchors.get((fn.name, fn.startLine))

@@ -325,7 +325,7 @@ namespace Catalog.Books {
     [Topic]
     public Review OnReviewPosted([EventMessage] Review review) => review;
 
-    [Subscribe]
+    [Subscribe(With = nameof(SubscribeToRemoved))]
     public Book OnBookRemoved([EventMessage] Book book) => book;
 
     [SubscribeAndResolve]
@@ -351,11 +351,20 @@ def test_subscription_emits_route_and_topic_consumer() -> None:
     assert consumer.framework == "graphql" and consumer.handler == "OnBookAdded"
 
 
-def test_bare_and_absent_topic_default_to_the_field_name() -> None:
+def test_bare_topic_emits_no_consumer() -> None:
+    # [Topic] with no argument defaults to the *member* name, not the GraphQL field name --
+    # ChilliCream's own workshop pairs it with a publisher sending to nameof(TheMethodAsync).
+    # Recording the field name would be a fabricated address, so nothing is emitted.
     rec = _parse(CSharpHotChocolateParser(), SUBSCRIPTIONS, "BookSubscriptions.cs")
     topics = {s.endpoint for s in _consumers(rec)}
-    assert "onReviewPosted" in topics   # [Topic] with no argument
-    assert "onBookRemoved" in topics    # no [Topic] at all — same framework default
+    assert "onReviewPosted" not in topics
+
+
+def test_subscribe_with_stream_method_emits_no_consumer() -> None:
+    # [Subscribe(With = nameof(...))] moves the topic into that method's body, where it is
+    # commonly interpolated -- unreadable from the declaration.
+    rec = _parse(CSharpHotChocolateParser(), SUBSCRIPTIONS, "BookSubscriptions.cs")
+    assert "onBookRemoved" not in {s.endpoint for s in _consumers(rec)}
 
 
 def test_runtime_built_topic_emits_the_route_only() -> None:
@@ -369,7 +378,7 @@ def test_runtime_built_topic_emits_the_route_only() -> None:
 def test_consumers_do_not_inflate_the_route_inventory() -> None:
     rec = _parse(CSharpHotChocolateParser(), SUBSCRIPTIONS, "BookSubscriptions.cs")
     assert len(_routes(rec)) == 4       # one per subscription field
-    assert len(_consumers(rec)) == 3    # the resolvable topics only
+    assert len(_consumers(rec)) == 1    # only the literal [Topic("bookAdded")]
 
 
 def test_non_subscription_operations_emit_no_consumer() -> None:
@@ -389,12 +398,12 @@ def test_consumer_anchors_at_the_topic_attribute() -> None:
     assert route.startLine < consumer.startLine <= route.endLine  # inside the member's span
 
 
-def test_consumer_falls_back_to_the_subscribe_attribute() -> None:
-    # No [Topic] at all: the declaring syntax is [Subscribe], so anchor there.
-    rec = _parse(CSharpHotChocolateParser(), SUBSCRIPTIONS, "BookSubscriptions.cs")
-    consumer = next(s for s in _consumers(rec) if s.endpoint == "onBookRemoved")
-    line = consumer.startLine
-    assert '[Subscribe]' in SUBSCRIPTIONS.decode().splitlines()[line - 1]
+def test_nullable_return_type_is_not_recorded_as_the_dto() -> None:
+    # Task<Book?> unwraps to Book, not "Book?" -- the annotation is not part of the type name and
+    # would name no captured class.
+    src = SUBSCRIPTIONS.replace(b"public Book OnBookAdded", b"public Book? OnBookAdded")
+    rec = _parse(CSharpHotChocolateParser(), src, "BookSubscriptions.cs")
+    assert _by_endpoint(rec)["onBookAdded"].responseDTO == "Book"
 
 
 def test_consumer_ids_are_independent_of_the_route() -> None:
