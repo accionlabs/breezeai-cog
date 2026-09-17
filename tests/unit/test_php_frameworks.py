@@ -187,6 +187,39 @@ class LegacyController
     }
 
 
+def test_symfony_route_path_colon_is_preserved(tmp_path: Path) -> None:
+    src = b"""<?php
+use Symfony\\Component\\Routing\\Attribute\\Route;
+
+class LegacyController
+{
+    #[Route('legacy:format', methods: ['GET'])]
+    public function index() {}
+}
+"""
+    rec = _parse(SymfonyParser, tmp_path, src, "src/Controller/LegacyController.php")
+    route = next(s for s in rec.statements if s.semanticType == "route")
+
+    assert route.endpoint == "/legacy:format"
+
+
+def test_symfony_route_priority_without_path_is_not_path(tmp_path: Path) -> None:
+    src = b"""<?php
+use Symfony\\Component\\Routing\\Attribute\\Route;
+
+class LegacyController
+{
+    #[Route(priority: 10, methods: ['GET'])]
+    public function index() {}
+}
+"""
+    rec = _parse(SymfonyParser, tmp_path, src, "src/Controller/LegacyController.php")
+    route = next(s for s in rec.statements if s.semanticType == "route")
+
+    assert route.endpoint == "/"
+    assert route.endpoint != "/10"
+
+
 def test_symfony_is_granted_guard(tmp_path: Path) -> None:
     src = b"""<?php
 namespace App\\Controller;

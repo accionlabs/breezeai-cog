@@ -40,6 +40,77 @@ def _parse_route_attr(args: list[str]) -> tuple[str | None, list[str], str | Non
     return path, methods, name
 
 
+def _string_literal(node, source: bytes) -> str | None:
+    if node is None:
+        return None
+    if node.type == "string":
+        return node_text(node, source).strip("'\"")
+    if node.type == "encapsed_string":
+        return node_text(node, source).strip("'\"")
+    return None
+
+
+def _string_literals(node, source: bytes):
+    literal = _string_literal(node, source)
+    if literal is not None:
+        yield literal
+        return
+    for child in node.named_children if node is not None else []:
+        yield from _string_literals(child, source)
+
+
+def _parse_route_attr_nodes(args_node, source: bytes) -> tuple[str | None, list[str], str | None]:
+    """Parse a Route attribute from its argument AST, preserving literal values verbatim."""
+    path = None
+    methods: list[str] = []
+    name = None
+    for arg in args_node.named_children if args_node is not None else []:
+        key_node = arg.child_by_field_name("name")
+        value_node = arg.child_by_field_name("value")
+        if key_node is not None:
+            key = node_text(key_node, source)
+            if value_node is None and arg.named_children:
+                value_node = arg.named_children[-1]
+            if key == "methods" and value_node is not None:
+                methods.extend(literal.upper() for literal in _string_literals(value_node, source))
+            elif key == "name":
+                name = _string_literal(value_node, source)
+            continue
+        value = arg.named_children[0] if arg.named_children else None
+        if path is None:
+            path = _string_literal(value, source)
+    return path, methods, name
+
+
+def _parse_route_decorator(dec, root, source: bytes) -> tuple[str | None, list[str], str | None]:
+    """Parse a Route decorator using its source-matching attribute AST node."""
+    if root is not None and source is not None and dec.text:
+        found: list = []
+
+        def walk(node) -> None:
+            if node.type == "attribute":
+                name_node = node.child_by_field_name("name")
+                if (
+                    name_node is not None
+                    and node_text(name_node, source).rsplit("\\", 1)[-1] == "Route"
+                    and node_text(node, source) in dec.text
+                ):
+                    found.append(node)
+            for child in node.named_children:
+                walk(child)
+
+        walk(root)
+        if found:
+            args_node = found[0].child_by_field_name("parameters")
+            if args_node is None:
+                args_node = next(
+                    (child for child in found[0].named_children if child.type == "arguments"),
+                    None,
+                )
+            return _parse_route_attr_nodes(args_node, source)
+    return _parse_route_attr(dec.args)
+
+
 def _combine_paths(prefix: str | None, path: str | None) -> str:
     pfx = (prefix or "").rstrip("/")
     sub = (path or "").lstrip("/")
@@ -188,15 +259,15 @@ def detect_symfony_routes(
     for cls in record.classes:
         for dec in cls.decorators:
             if _is_route_decorator(dec.name):
-                cpath, _, _ = _parse_route_attr(dec.args)
+                cpath, _, _ = _parse_route_decorator(dec, root, source)
                 if cpath:
                     class_prefixes[cls.id] = cpath
 
     for fn in record.functions:
         route_specs = [
             (
-                dec.args,
-                dec.text or f"#[Route('{_parse_route_attr(dec.args)[0] or ''}')]",
+                _parse_route_decorator(dec, root, source),
+                dec.text or "#[Route]",
             )
             for dec in fn.decorators
             if _is_route_decorator(dec.name)
@@ -204,7 +275,10 @@ def detect_symfony_routes(
         if root is not None and source is not None:
             route_specs.extend(_docblock_route_specs(fn, root, source))
         for route_args, route_text in route_specs:
-            mpath, methods, rname = _parse_route_attr(route_args)
+            if isinstance(route_args, tuple):
+                mpath, methods, rname = route_args
+            else:
+                mpath, methods, rname = _parse_route_attr(route_args)
             cls_prefix = class_prefixes.get(fn.parentId)
             full_path = _combine_paths(cls_prefix, mpath)
             verbs = methods if methods else ["ANY"]
