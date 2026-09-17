@@ -459,9 +459,9 @@ def match_db(
         db = _DISTINCTIVE[m]
         # EF verbs are .NET-only; suppress them in a known non-.NET file (name collision).
         if not (db == "entity_framework" and language is not None and language not in _DOTNET):
-            # In PHP, getrepository/typeorm maps to doctrine or falls through
+            # In PHP, TypeORM's colliding distinctive methods are Doctrine methods.
             if db == "typeorm" and language in _PHP:
-                return "doctrine" if m == "getrepository" else None
+                return "doctrine" if m in ("getrepository", "createquerybuilder") else None
             return db
     # Ambiguous sync LINQ terminals (ToList/FirstOrDefault/…): EF only in a .NET file AND when
     # the call chain shows a queryable/DbContext source; else LINQ-to-Objects — drop, don't tag.

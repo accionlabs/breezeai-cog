@@ -296,6 +296,23 @@ class UserService
     assert any(c.dataAccessHint == "doctrine" for c in db_calls)
 
 
+def test_doctrine_query_builder_detection(tmp_path: Path) -> None:
+    src = b"""<?php
+class UserService
+{
+    public function findUsers($repo)
+    {
+        return $repo->createQueryBuilder('u');
+    }
+}
+"""
+    rec = _parse(PhpParser, tmp_path, src, "src/Service/UserService.php")
+    db_calls = [s for s in rec.statements if s.semanticType == "db_method_call"]
+
+    query_builder = next(s for s in db_calls if s.method == "createQueryBuilder")
+    assert query_builder.dataAccessHint == "doctrine"
+
+
 def test_pdo_queries(tmp_path: Path) -> None:
     src = b"""<?php
 function queryData($pdo, $sql)

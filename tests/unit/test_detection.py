@@ -12,6 +12,8 @@ from breezeai_cog.parsers.typescript.parser import TypeScriptParser
 
 def test_classify_api() -> None:
     assert classify_call("axios.get", "get") == ("api_call", "GET", None)
+    assert classify_call("$client->get", "get") == ("api_call", "GET", None)
+    assert classify_call("$this->client->get", "get") == ("api_call", "GET", None)
     assert classify_call("fetch", "fetch") == ("api_call", "GET", None)
     assert classify_call("this.http.post", "post") == ("api_call", "POST", None)
     assert classify_call("requests.get", "get") == ("api_call", "GET", None)
