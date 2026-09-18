@@ -7,7 +7,6 @@ from __future__ import annotations
 
 from pathlib import Path
 from typing import Sequence
-
 from tree_sitter import Node
 
 from ...emit import file_id

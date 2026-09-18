@@ -307,7 +307,11 @@ the tool version.
 | `functions[]` | Each function/method: name, parameters, return type, decorators, visibility, the calls it makes. |
 | `classes[]` | Each class/interface/enum: name, what it extends/implements, its methods. |
 | `statements[]` | *(only with `--capture-statements`)* notable in-body statements — including detected API calls, DB queries, framework routes, event-bus/messaging operations, GraphQL entities, source comments, and captured structured data. |
-| `framework` | Set when a framework is detected in the file (e.g. `fastapi`, `nestjs`, `angular`, `spring`, `vertx`, `aspnet`, `wcf`). |
+| `framework` | Set when a framework is detected in the file (e.g. `fastapi`, `nestjs`, `angular`, `spring`, `vertx`, `aspnet`, `wcf`, `rails`, `sinatra`, `grape`). |
+
+`rails`, `sinatra`, and `grape` are **NEW in the Python target** (Target Spec §2.4). The local
+schema accepts framework strings, but the external backend framework allow-list must include these
+values for them to survive ingestion.
 
 **How things link together:** every function, class, and statement carries an `id`, and a
 `parentId` pointing to its container (a method's `parentId` is its class; a statement's `parentId`
