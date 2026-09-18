@@ -708,3 +708,25 @@ def test_field_resolver_resolves_a_generated_loader() -> None:
     op = _by_endpoint(rec)["Order.customer"]
     assert op.routeKind == "field_resolver"
     assert op.dataLoaders == ["ICustomerByIdDataLoader"]
+
+
+def test_fluent_chain_with_an_intermediate_builder_call() -> None:
+    # Real fluent code chains several builders before the resolver; the Field call must still be
+    # found, and a later .Name() must still win over the declared name.
+    src = b'''using HotChocolate.Types;
+namespace Shop {
+  public class ReportingQueryType : ObjectType<Query> {
+    protected override void Configure(IObjectTypeDescriptor<Query> descriptor) {
+      descriptor
+          .Field("dailyRevenue")
+          .Argument("day", a => a.Type<NonNullType<DateType>>())
+          .Resolve(ctx => ctx.Service<ReportingService>().DailyRevenue());
+
+      descriptor.Field("legacyTotals").Name("totals").Resolve(ctx => null);
+      descriptor.Field("internalDebug").Ignore();
+    }
+  }
+}
+'''
+    rec = _parse(CSharpHotChocolateParser(), src, "ReportingTypes.cs")
+    assert set(_by_endpoint(rec)) == {"dailyRevenue", "totals"}
