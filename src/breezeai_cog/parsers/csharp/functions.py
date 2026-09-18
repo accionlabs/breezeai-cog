@@ -186,6 +186,7 @@ def build_method(
     *,
     parent_id: str,
     class_name: str | None,
+    id_owner: str | None = None,
     seen_ids: set[str],
     capture: bool,
     limit: int,
@@ -197,7 +198,10 @@ def build_method(
     name_node = node.child_by_field_name("name")
     name = node_text(name_node, source) if name_node is not None else "<anonymous>"
     start, end = line_span(node)
-    fid = disambiguate(function_id(path, name, start, class_name=class_name), seen_ids)
+    # The id carries the qualified owner (`Outer.Inner`) so a nested type's methods are
+    # identified unambiguously; `class_name` stays simple for call resolution.
+    fid = disambiguate(
+        function_id(path, name, start, class_name=id_owner or class_name), seen_ids)
     visibility, is_static = flags(node, source)
     ret = node.child_by_field_name("returns")
     body = node.child_by_field_name("body")

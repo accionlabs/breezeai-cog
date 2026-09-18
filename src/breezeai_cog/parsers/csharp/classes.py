@@ -99,7 +99,8 @@ def build_class(
             if member.type in _METHOD_MEMBERS:
                 fns, fn_statements = build_method(
                     member, source, path,
-                    parent_id=cid, class_name=name, seen_ids=seen_ids, capture=capture, limit=limit,
+                    parent_id=cid, class_name=name, id_owner=qualified, seen_ids=seen_ids,
+                    capture=capture, limit=limit,
                     resolve=resolve,
                 )
                 methods.extend(fns)

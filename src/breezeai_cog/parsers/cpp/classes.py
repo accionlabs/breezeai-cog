@@ -113,6 +113,7 @@ def build_class(
     capture: bool,
     limit: int,
     resolve: CallResolver = noop_resolver,
+    owner: str | None = None,
 ) -> tuple[list[Class], list[Function], list[Statement]]:
     """Return (classes, methods, statements) — all flat, linked by parentId. The class
     list is this class plus any nested (member) classes/structs parented to it."""
@@ -123,7 +124,8 @@ def build_class(
         return [], [], []                          # definition; emitting it fabricates a hollow node
     name = node_text(name_node, source)
     start, end = line_span(node)
-    cid = disambiguate(class_id(path, name), seen_ids)
+    qualified = f"{owner}.{name}" if owner else name
+    cid = disambiguate(class_id(path, qualified), seen_ids)
     extends, implements = _heritage(node, source)
     is_public_default = node.type in ("struct_specifier", "union_specifier")  # both default public
 
@@ -157,7 +159,8 @@ def build_class(
                 else:
                     sub_classes, sub_methods, sub_statements = build_class(
                         spec, source, path,
-                        parent_id=parent_id, seen_ids=seen_ids, capture=capture, limit=limit, resolve=resolve,
+                        parent_id=parent_id, seen_ids=seen_ids, capture=capture, limit=limit,
+                        resolve=resolve, owner=qualified,
                     )
                     nested_classes.extend(sub_classes)
                     methods.extend(sub_methods)
@@ -177,7 +180,8 @@ def build_class(
                     continue
                 fn, fn_statements = build_member_function(
                     member, source, path,
-                    parent_id=cid, class_name=name, visibility=visibility, seen_ids=seen_ids,
+                    parent_id=cid, class_name=name, id_owner=qualified, visibility=visibility,
+                    seen_ids=seen_ids,
                     capture=capture, limit=limit, resolve=resolve,
                 )
                 methods.append(fn)
