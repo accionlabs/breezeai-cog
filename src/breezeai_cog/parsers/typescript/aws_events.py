@@ -13,7 +13,6 @@ functions identified by their ``aws-lambda`` handler *type annotation*.
 Producers (SDK v3 command objects and v2 methods):
   ``client.send(new PublishCommand({TopicArn}))``     → eventbus_publish  (aws-sns)
   ``client.send(new PublishCommand({PhoneNumber}))``  → eventbus_send     (aws-sns, SMS)
-  ``client.send(new PublishCommand({TargetArn}))``    → eventbus_send     (aws-sns, 1 device)
   ``client.send(new SendMessageCommand({QueueUrl}))`` → eventbus_send     (aws-sqs)
   ``client.send(new PutEventsCommand({...}))``        → eventbus_publish  (aws-eventbridge)
   ``sqs.sendMessage({QueueUrl})`` / ``sendMessageBatch`` → eventbus_send  (aws-sqs)
@@ -77,12 +76,16 @@ _ADDRESS_KEYS = {"TopicArn", "TargetArn", "QueueUrl", "EventBusName", "PhoneNumb
 # that field the same way, so it identifies a destination but not a provider. The remaining
 # keys are AWS-specific strings, so for them naming a destination and proving AWS coincide.
 _AWS_EVIDENCE_KEYS = _ADDRESS_KEYS - {"PhoneNumber"}
-# Address keys that reach exactly one recipient — an SMS handset, or a single mobile-push
-# device endpoint. SNS names its API ``Publish`` for every destination, but only a *topic*
-# fans out; these are point-to-point, the same distinction Vert.x draws between
-# ``publish()`` and ``send()``. Nothing can subscribe to a phone or a device endpoint, so
-# calling them a publish would assert a one-to-many relationship that cannot exist.
-_DIRECT_ADDRESS_KEYS = {"PhoneNumber", "TargetArn"}
+# Address keys that reach exactly one recipient. SNS names its API ``Publish`` for every
+# destination, but only a *topic* fans out, so an SMS is point-to-point — the distinction
+# Vert.x draws between ``publish()`` and ``send()``. Nothing can subscribe to a phone
+# number, so calling it a publish would assert a one-to-many relationship that cannot exist.
+#
+# ``TargetArn`` is deliberately absent: the Publish API accepts *either* a platform-endpoint
+# ARN (one device) *or* a topic ARN (fan-out) there, and the value is usually an injected
+# symbol, so its cardinality is not knowable from the call site. It keeps the fan-out
+# default rather than being guessed — a coarse classification beats a wrong one.
+_DIRECT_ADDRESS_KEYS = {"PhoneNumber"}
 
 # AWS Lambda *event* parameter types → framework. Used to recognise an UNTYPED handler
 # (``export const handler = async (event: S3Event) => …`` / ``exports.handler = …``) — the

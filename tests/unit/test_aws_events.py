@@ -257,21 +257,22 @@ def test_sms_and_topic_publish_split_by_delivery_not_framework(tmp_path) -> None
     }
 
 
-def test_target_arn_publish_is_point_to_point(tmp_path) -> None:
-    # A TargetArn is one mobile-push device endpoint — single recipient, no subscribers,
-    # so it takes the same send classification as an SMS.
+def test_target_arn_publish_keeps_the_fanout_default(tmp_path) -> None:
+    # The Publish API accepts either a platform-endpoint ARN (one device) or a topic ARN
+    # (fan-out) in TargetArn, and the value is usually injected — so cardinality is not
+    # knowable here. It stays eventbus_publish rather than being guessed.
     src = b"""import { SNSClient, PublishCommand } from '@aws-sdk/client-sns';
 
-export async function push(sns: SNSClient) {
-  await sns.send(new PublishCommand({ TargetArn: 'arn:aws:sns:us-east-1:1:app/GCM/x', Message: 'm' }));
+export async function push(sns: SNSClient, targetArn: string) {
+  await sns.send(new PublishCommand({ TargetArn: targetArn, Message: 'm' }));
 }
 """
     rec = _parse(tmp_path, "push.ts", src)
     sem = _by_semantic(rec)
-    assert "eventbus_publish" not in sem
-    push_stmt = sem["eventbus_send"][0]
-    assert push_stmt.framework == "aws-sns"
-    assert push_stmt.endpoint == "arn:aws:sns:us-east-1:1:app/GCM/x"
+    assert "eventbus_send" not in sem
+    pub = sem["eventbus_publish"][0]
+    assert pub.framework == "aws-sns"
+    assert pub.endpoint is None  # injected symbol → honest-null
 
 
 def test_sms_file_framework_rollup(tmp_path) -> None:
