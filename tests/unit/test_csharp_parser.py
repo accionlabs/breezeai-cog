@@ -192,8 +192,11 @@ def test_local_function_extracted(tmp_path) -> None:
     by_name = {f.name: f for f in rec.functions}
     assert {"Connect", "EachMessage"} <= set(by_name)
     assert by_name["EachMessage"].type == "function"
-    # local function is parented to the enclosing method
-    assert by_name["EachMessage"].parentId == by_name["Connect"].id
+    # A function parents to a class or the file -- never to another function. "Local to
+    # Connect" is read from line containment.
+    assert by_name["EachMessage"].parentId == rec.id
+    outer = by_name["Connect"]
+    assert outer.startLine <= by_name["EachMessage"].startLine <= outer.endLine
     # barrier: the local function's own call stays on it, not on the method
     assert "Handle" in {c.name for c in by_name["EachMessage"].calls}
     assert "Handle" not in {c.name for c in by_name["Connect"].calls}

@@ -228,8 +228,12 @@ def test_nested_member_classes_extracted(tmp_path) -> None:
     by_cls = {c.name: c for c in rec.classes}
     assert {"Outer", "Inner", "DeepInner", "Callback", "Status"} <= set(by_cls)
     assert by_cls["Callback"].type == "interface" and by_cls["Status"].type == "enum"
-    assert by_cls["Inner"].parentId == by_cls["Outer"].id
-    assert by_cls["DeepInner"].parentId == by_cls["Inner"].id
+    # A class is parented to its owning FILE (the model's only class edge is File->Class);
+    # the enclosing type is recoverable from line containment.
+    assert by_cls["Inner"].parentId == rec.id
+    assert by_cls["DeepInner"].parentId == rec.id
+    outer, inner = by_cls["Outer"], by_cls["Inner"]
+    assert outer.startLine <= inner.startLine and inner.endLine <= outer.endLine
     fn_names = {f.name for f in rec.functions}
     assert {"innerMethod", "deep", "onDone"} <= fn_names
     # the lambda in run() still folds into run (anonymous scope)

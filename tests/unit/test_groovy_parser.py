@@ -219,7 +219,8 @@ def test_nested_type_captured(tmp_path) -> None:
     rec = _parse_src(tmp_path, src)
     outer = next(c for c in rec.classes if c.name == "Outer")
     inner = next(c for c in rec.classes if c.name == "Inner")
-    assert inner.parentId == outer.id  # nested, not hoisted to the file
+    assert inner.parentId == rec.id  # classes parent to the file; nesting from line spans
+    assert outer.startLine <= inner.startLine and inner.endLine <= outer.endLine
     assert outer.endLine == 7  # outer span not truncated at the nested type
     innerm = next(f for f in rec.functions if f.name == "innerMethod")
     assert innerm.parentId == inner.id  # inner method parented to Inner, not Outer
@@ -375,7 +376,9 @@ def test_modifier_and_nested_enum_constants(tmp_path) -> None:
     rec = _parse_src(tmp_path, src, capture=True)
     holder = next(c for c in rec.classes if c.name == "Holder")
     entry = next(c for c in rec.classes if c.name == "Entry")
-    assert entry.type == "enum" and entry.parentId == holder.id and entry.metadata is None
+    # a nested enum is a Class parented to the FILE; nesting comes from line containment
+    assert entry.type == "enum" and entry.parentId == rec.id and entry.metadata is None
+    assert holder.startLine <= entry.startLine and entry.endLine <= holder.endLine
     members = [(s.name, s.text) for s in rec.statements
                if s.parentId == entry.id and s.nodeType == "enum_constant"]
     assert members == [

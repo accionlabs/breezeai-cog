@@ -361,9 +361,11 @@ class KotlinParser(BaseParser):
                     methods.extend(comp_methods)
                     statements.extend(comp_stmts)
                 elif member.type in _CLASS_TYPES:
-                    # Nested inner class/object — returned flat, parented to this class.
+                    # Nested inner class/object — returned flat, parented to the owning FILE
+                    # (the model's only class containment edge is File→Class; the enclosing
+                    # type is recoverable from line containment).
                     sub_cls, sub_methods, sub_stmts = self._build_class(
-                        member, source, path, parent_id=cid, seen_ids=seen_ids,
+                        member, source, path, parent_id=parent_id, seen_ids=seen_ids,
                         capture=capture, limit=limit, resolve=resolve,
                     )
                     nested_classes.extend(sub_cls)

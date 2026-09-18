@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from tree_sitter import Node
 
-from ...emit import disambiguate, function_id
+from ...emit import disambiguate, file_id, function_id
 from ...schemas import Call, Function, Parameter, Statement
 from ..callresolve import CallResolver, noop_resolver
 from ..treesitter import line_span, node_text
@@ -232,7 +232,7 @@ def build_method(
     functions = [fn]
     for nested_node in nested:
         sub_fns, sub_stmts = build_method(
-            nested_node, source, path, parent_id=fid, class_name=None, seen_ids=seen_ids,
+            nested_node, source, path, parent_id=file_id(path), class_name=None, seen_ids=seen_ids,
             capture=capture, limit=limit, resolve=resolve,
         )
         functions.extend(sub_fns)

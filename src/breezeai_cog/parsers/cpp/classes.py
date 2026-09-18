@@ -157,7 +157,7 @@ def build_class(
                 else:
                     sub_classes, sub_methods, sub_statements = build_class(
                         spec, source, path,
-                        parent_id=cid, seen_ids=seen_ids, capture=capture, limit=limit, resolve=resolve,
+                        parent_id=parent_id, seen_ids=seen_ids, capture=capture, limit=limit, resolve=resolve,
                     )
                     nested_classes.extend(sub_classes)
                     methods.extend(sub_methods)

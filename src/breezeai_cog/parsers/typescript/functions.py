@@ -6,7 +6,7 @@ import re
 
 from tree_sitter import Node
 
-from ...emit import disambiguate, function_id
+from ...emit import disambiguate, file_id, function_id
 from ...schemas import Call, Decorator, Function, Parameter, Statement
 from ..callresolve import CallResolver, noop_resolver
 from ..treesitter import line_span, node_text
@@ -302,7 +302,7 @@ def build_function(
     for value_node, nested_name, nested_kind in nested:
         sub_fns, sub_stmts = build_function(
             value_node, name=nested_name, kind=nested_kind, decorators=[], source=source,
-            path=path, parent_id=fid, class_name=class_name, seen_ids=seen_ids,
+            path=path, parent_id=file_id(path), class_name=class_name, seen_ids=seen_ids,
             capture=capture, limit=limit, resolve=resolve, typed_db_ids=typed_db_ids,
         )
         functions.extend(sub_fns)
