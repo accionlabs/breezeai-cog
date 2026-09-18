@@ -211,6 +211,18 @@ def test_high_collision_verbs_require_db_receiver() -> None:
         ("user.save", "save"),              # bare active-record save, no DB receiver → ambiguous, drop
     ]:
         assert classify_call(callee, method) is None, callee
+    # Ruby class constants are not enough to establish an ActiveRecord receiver.
+    for callee, method in [
+        ("File.delete", "delete"),
+        ("Hash.merge", "merge"),
+        ("Logger.create", "create"),
+        ("Process.execute", "execute"),
+        ("Digest.update", "update"),
+        ("Set.merge", "merge"),
+        ("Marshal.save", "save"),
+        ("ENV.delete", "delete"),
+    ]:
+        assert classify_call(callee, method, language="ruby") is None, callee
     # real ORM on these verbs still matches via a positive DB receiver / vendor hint:
     assert classify_call("userRepository.find", "find") == ("db_method_call", "find", "typeorm")
     assert classify_call("this.repo.delete", "delete") == ("db_method_call", "delete", "typeorm")

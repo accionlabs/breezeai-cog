@@ -6,20 +6,20 @@ from ...schemas import FileRecord
 from ..base import ParseContext
 from ..ruby.parser import RubyParser
 from ..treesitter import parse_source
+from ..ruby.claims import has_require, has_superclass
 from .routes import detect_grape_routes
 
 
 class GrapeParser(RubyParser):
     name = "ruby-grape"
-    priority = 10
+    priority = 20
     frameworks = ["grape"]
 
     def claims(self, path: str, source: bytes) -> bool:
+        root = parse_source("ruby", source).root_node
         return (
-            b"require \"grape\"" in source
-            or b"require 'grape'" in source
-            or b"Grape::API" in source
-            or b"Grape::Endpoint" in source
+            has_require(root, source, {"grape"})
+            or has_superclass(root, source, {"Grape::API", "Grape::Endpoint"})
         )
 
     def parse_file(self, ctx: ParseContext) -> FileRecord:

@@ -64,7 +64,6 @@ def extract_imports(
             resolved = _resolve_require(arg, file_path, repo_root) if name == "require_relative" else None
             if resolved is not None:
                 internal.setdefault(resolved, None)
-                bindings[arg.rsplit("/", 1)[-1].rsplit(".", 1)[0]] = resolved
             else:
                 # bare require strings are treated as external unless they resolve to repo files.
                 external.setdefault(arg, None)

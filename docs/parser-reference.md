@@ -295,6 +295,12 @@ this is why deterministic ids matter. **Route/event/query detection MUST be gate
 Live examples of each idiom are in the framework parser packages under `parsers/` — browse
 there rather than relying on a list here.
 
+#### Framework enum additions
+The Ruby framework values `rails`, `sinatra`, and `grape` are **NEW in the Python target** and
+must be added to the Target Spec §2.4 `framework` enum and the backend allow-list. The local
+`Statement.framework` field is intentionally an open string, so parser output remains honest
+while the external ingestion contract is updated.
+
 - **AST-walk**: the detector walks `root` to find call/decorator patterns. Use when the
   signal isn't already on the extracted record (call-based routing, event bus, JSX) — pass
   `root`, `source`, `path`, and the current `seen_ids`.
@@ -304,6 +310,9 @@ there rather than relying on a list here.
   frameworks; it's simpler and can't drift from the base extraction. Route attributes
   (`guards`/`requestDTO`/`responseDTO`/`isRegex`/`authRequired`) are populated here from the
   captured decorators/params/`returnType`.
+  Ruby visibility is currently emitted as `public` for classes and methods. Ruby `private` /
+  `protected` section markers and `private :name` declarations are not yet mapped, so consumers
+  should treat those values as the parser default rather than a verified visibility signal.
   ```python
   def parse_file(self, ctx):
       root = parse_source("java", ctx.source, ctx.parse_timeout_micros).root_node

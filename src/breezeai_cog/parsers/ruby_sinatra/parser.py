@@ -6,6 +6,7 @@ from ...schemas import FileRecord
 from ..base import ParseContext
 from ..ruby.parser import RubyParser
 from ..treesitter import parse_source
+from ..ruby.claims import has_require, has_superclass
 from .routes import detect_sinatra_routes
 
 
@@ -15,11 +16,10 @@ class SinatraParser(RubyParser):
     frameworks = ["sinatra"]
 
     def claims(self, path: str, source: bytes) -> bool:
+        root = parse_source("ruby", source).root_node
         return (
-            b"require \"sinatra\"" in source
-            or b"require 'sinatra'" in source
-            or b"Sinatra::Base" in source
-            or b"Sinatra::Application" in source
+            has_require(root, source, {"sinatra"})
+            or has_superclass(root, source, {"Sinatra::Base", "Sinatra::Application"})
         )
 
     def parse_file(self, ctx: ParseContext) -> FileRecord:

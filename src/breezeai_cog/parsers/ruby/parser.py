@@ -35,7 +35,11 @@ class RubyParser(BaseParser):
         capture, limit = ctx.capture_statements, ctx.statement_text_limit
 
         internal, external, exports, bindings = extract_imports(root, source, path, ctx.repo_root)
-        resolve = make_resolver(bindings, defined_names(root, source), path)
+
+        def resolve_for_scope(scope: Node):
+            return make_resolver(bindings, defined_names(scope, source), path)
+
+        resolve = resolve_for_scope(root)
 
         functions: list[Function] = []
         classes = []
@@ -51,7 +55,7 @@ class RubyParser(BaseParser):
                     seen_ids=seen_ids,
                     capture=capture,
                     limit=limit,
-                    resolve=resolve,
+                    resolve_for_scope=resolve_for_scope,
                 )
                 classes.extend(cls_list)
                 functions.extend(methods)
