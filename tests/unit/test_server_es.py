@@ -89,7 +89,7 @@ def test_mapping_upload(client: TestClient, captured: _Captured) -> None:
     assert next(f for f in rec["fields"] if f["fullPath"] == "title.raw")["isMultiField"] is True
     path, payload = captured.notifications[0]
     assert path == "/db-ontology/stream-ingest-s3"
-    assert payload == {"storage_key": out["storage_key"], "projectUuid": "P1", "dataLakeId": "D1",
+    assert payload == {"s3Key": out["storage_key"], "projectUuid": "P1", "dataLakeId": "D1",
                        "repositoryName": "products.json"}
 
 
