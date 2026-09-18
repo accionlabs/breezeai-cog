@@ -30,6 +30,8 @@ def test_sinatra_routes_and_base_extraction(tmp_path: Path) -> None:
         ("GET", "/users/:id"),
         ("POST", "/users"),
     }
+    api = next(item for item in record.classes if item.name == "API")
+    assert next(item for item in routes if item.endpoint == "/users").parentId == api.id
     assert {item.name for item in record.classes} >= {"API"}
 
 
@@ -42,9 +44,46 @@ def test_sinatra_routes_require_literal_paths_and_capture(tmp_path: Path) -> Non
     assert not any(item.semanticType == "route" for item in with_capture.statements)
 
 
+def test_sinatra_routes_ignore_receiver_qualified_http_calls(tmp_path: Path) -> None:
+    source = b'''require "sinatra"
+get "/users" do
+  "ok"
+end
+cache.delete "/cache" do
+  "ignored"
+end
+http_pool.post "/upstream" do
+  "ignored"
+end
+'''
+    record = SinatraParser().parse_file(_context(tmp_path, "app.rb", source))
+
+    routes = [item for item in record.statements if item.semanticType == "route"]
+    assert [(item.method, item.endpoint) for item in routes] == [("GET", "/users")]
+
+
+def test_sinatra_routes_prefer_enclosing_function_owner(tmp_path: Path) -> None:
+        source = b'''require "sinatra"
+class API < Sinatra::Base
+    def register
+        get "/users" do
+            "ok"
+        end
+    end
+end
+'''
+        record = SinatraParser().parse_file(_context(tmp_path, "app.rb", source))
+
+        route = next(item for item in record.statements if item.semanticType == "route")
+        register = next(item for item in record.functions if item.name == "register")
+        assert route.parentId == register.id
+
+
 def test_sinatra_parser_claims_only_sinatra_sources(tmp_path: Path) -> None:
     parser = SinatraParser()
     assert parser.claims("app.rb", b"require 'sinatra'\nget '/' do\nend")
     assert parser.claims("app.rb", b"class API < Sinatra::Base\nend")
     assert not parser.claims("app.rb", b"class PlainRuby\nend")
+    assert not parser.claims("app.rb", b'DOC = "see Sinatra::Base for details"')
+    assert not parser.claims("app.rb", b"# Sinatra::Application is mentioned here\nclass PlainRuby; end")
     assert parser.frameworks == ["sinatra"]

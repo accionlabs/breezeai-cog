@@ -12,10 +12,10 @@ from .statement import extract_statements
 
 
 def defined_names(root: Node, source: bytes) -> set[str]:
-    """Return names defined in this file for same-file call resolution."""
+    """Return names defined directly in a Ruby file/class/module scope."""
     names: set[str] = set()
 
-    def visit(node: Node) -> None:
+    def add_name(node: Node) -> None:
         if node.type == "method":
             name = next((c for c in node.named_children if c.type == "identifier"), None)
             if name is not None:
@@ -24,10 +24,10 @@ def defined_names(root: Node, source: bytes) -> set[str]:
             name = next((c for c in node.named_children if c.type == "constant"), None)
             if name is not None:
                 names.add(node_text(name, source))
-        for child in node.named_children:
-            visit(child)
 
-    visit(root)
+    body = next((c for c in root.named_children if c.type == "body_statement"), None)
+    for node in (body.named_children if body is not None else root.named_children):
+        add_name(node)
     return names
 
 

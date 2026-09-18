@@ -31,9 +31,10 @@ def build_class(
     seen_ids: set[str],
     capture: bool,
     limit: int,
-    resolve,
+    resolve_for_scope,
 ):
     name = _name_of_class(node, source)
+    resolve = resolve_for_scope(node)
     start, end = line_span(node)
     cid = disambiguate(class_id(path, name), seen_ids)
     body = _body_of(node)
@@ -67,7 +68,7 @@ def build_class(
                     seen_ids=seen_ids,
                     capture=capture,
                     limit=limit,
-                    resolve=resolve,
+                    resolve_for_scope=resolve_for_scope,
                 )
                 nested_classes.extend(sub_classes)
                 methods.extend(sub_methods)

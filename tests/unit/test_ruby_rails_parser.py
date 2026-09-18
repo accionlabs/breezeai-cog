@@ -42,9 +42,42 @@ def test_rails_routes_are_gated_and_dynamic_paths_are_honest_null(tmp_path: Path
     assert route.endpoint is None
 
 
+def test_rails_routes_ignore_non_application_route_draws(tmp_path: Path) -> None:
+    source = b'''require "rails"
+chart.axes.routes.draw do
+  get "/not-a-route", to: "nope#nope"
+end
+Rails.application.routes.draw do
+  get "/users", to: "users#index"
+end
+'''
+    record = RailsParser().parse_file(_context(tmp_path, "config/routes.rb", source))
+
+    routes = [item for item in record.statements if item.semanticType == "route"]
+    assert [(item.method, item.endpoint) for item in routes] == [("GET", "/users")]
+
+
+def test_rails_routes_attach_to_enclosing_class(tmp_path: Path) -> None:
+        source = b'''require "rails"
+class RouteConfig
+    Rails.application.routes.draw do
+        get "/health", to: "health#show"
+    end
+end
+'''
+        record = RailsParser().parse_file(_context(tmp_path, "config/routes.rb", source))
+
+        route = next(item for item in record.statements if item.semanticType == "route")
+        route_config = next(item for item in record.classes if item.name == "RouteConfig")
+        assert route.parentId == route_config.id
+
+
 def test_rails_parser_claims_only_rails_sources(tmp_path: Path) -> None:
     parser = RailsParser()
     assert parser.claims("config/routes.rb", b"Rails.application.routes.draw do\nend")
     assert not parser.claims("app.rb", b"class PlainRuby\nend")
+    assert not parser.claims("lib/calc.rb", b"# Nothing to do with ApplicationController.\nclass Calculator; end")
+    assert not parser.claims("lib/calc.rb", b'DOC = "ApplicationController"\nclass Calculator; end')
+    assert not parser.claims("lib/chart.rb", b"chart.axes.routes.draw do\nend")
     assert parser.priority > 0
     assert parser.frameworks == ["rails"]

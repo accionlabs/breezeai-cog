@@ -30,6 +30,8 @@ def test_grape_routes_and_nested_prefixes(tmp_path: Path) -> None:
         ("POST", "/users/bulk"),
         ("GET", "/health"),
     }
+    api = next(item for item in record.classes if item.name == "API")
+    assert all(item.parentId == api.id for item in routes)
     assert {item.name for item in record.classes} >= {"API"}
 
 
@@ -40,6 +42,26 @@ def test_grape_dynamic_prefix_is_not_guessed(tmp_path: Path) -> None:
     assert not any(item.semanticType == "route" for item in record.statements)
 
 
+def test_grape_routes_ignore_receiver_qualified_http_calls(tmp_path: Path) -> None:
+        source = b'''require "grape"
+class API < Grape::API
+    helpers do
+        def cached
+            store.get "users:all" do
+                "ignored"
+            end
+        end
+    end
+    get "/users" do
+    end
+end
+'''
+        record = GrapeParser().parse_file(_context(tmp_path, "api.rb", source))
+
+        routes = [item for item in record.statements if item.semanticType == "route"]
+        assert [(item.method, item.endpoint) for item in routes] == [("GET", "/users")]
+
+
 def test_grape_routes_are_gated_and_claims_are_specific(tmp_path: Path) -> None:
     source = b'''require "grape"\nclass API < Grape::API\n  get "/health" do\n  end\nend\n'''
     record = GrapeParser().parse_file(_context(tmp_path, "api.rb", source, False))
@@ -48,4 +70,6 @@ def test_grape_routes_are_gated_and_claims_are_specific(tmp_path: Path) -> None:
     assert not any(item.semanticType == "route" for item in record.statements)
     assert parser.claims("api.rb", source)
     assert not parser.claims("plain.rb", b"class API\nend")
+    assert not parser.claims("plain.rb", b'DOC = "Grape::API is documented here"')
+    assert not parser.claims("plain.rb", b"# Grape::Endpoint is mentioned here\nclass PlainRuby; end")
     assert parser.frameworks == ["grape"]

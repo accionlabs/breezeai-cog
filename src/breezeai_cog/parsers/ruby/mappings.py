@@ -22,11 +22,8 @@ JUMP = {
 
 DECLARATIONS = {
     "assignment", 
-    "call", 
-    "string",
-    "class", 
-    "module", 
-    "method", 
+    "call",
+    "binary",
     "alias"}
 
 EMIT_TYPES = CONTROL_FLOW | JUMP | DECLARATIONS

@@ -6,6 +6,7 @@ from tree_sitter import Node
 
 from ...emit import disambiguate, file_id, statement_id
 from ...schemas import FileRecord, Statement
+from ..ruby.ownership import owner_id
 from ..treesitter import first_line, node_text
 
 _HTTP_METHODS = {"get", "post", "put", "patch", "delete", "head", "options"}
@@ -20,6 +21,8 @@ def _calls(root: Node):
 
 
 def _method(call: Node, source: bytes) -> str | None:
+    if call.child_by_field_name("receiver") is not None:
+        return None
     node = call.child_by_field_name("method")
     return node_text(node, source) if node is not None and node.type == "identifier" else None
 
@@ -110,7 +113,7 @@ def detect_grape_routes(root: Node, source: bytes, path: str, record: FileRecord
         record.statements.append(
             Statement(
                 id=disambiguate(statement_id(path, line, call.start_point[1]), seen),
-                parentId=fallback,
+                parentId=owner_id(line, record.functions, record.classes, fallback),
                 nodeType="call",
                 semanticType="route",
                 text=first_line(node_text(call, source)),

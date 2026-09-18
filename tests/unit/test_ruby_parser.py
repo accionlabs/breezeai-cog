@@ -94,3 +94,53 @@ end
     assert any(statement.semanticType == "db_method_call" for statement in rec.statements)
     assert any(statement.semanticType == "api_call" for statement in rec.statements)
     assert any(statement.semanticType == "query_statement" for statement in rec.statements)
+    assert not any(statement.nodeType in {"class", "module", "method"} for statement in rec.statements)
+
+
+def test_ruby_calls_do_not_resolve_across_classes(tmp_path: Path) -> None:
+    source = b'''class Alpha
+  def process(value)
+    value
+  end
+end
+
+class Beta
+  def run
+    process(3)
+  end
+end
+'''
+    path = tmp_path / "app.rb"
+    path.write_bytes(source)
+    rec = RubyParser().parse_file(ParseContext(
+        path="app.rb", abs_path=path, source=source, repo_root=tmp_path,
+    ))
+
+    run = next(function for function in rec.functions if function.name == "run")
+    process_call = next(call for call in run.calls if call.name == "process")
+    assert process_call.path is None
+
+
+def test_ruby_require_relative_does_not_bind_lowercase_basename(tmp_path: Path) -> None:
+    service_path = tmp_path / "lib" / "service.rb"
+    service_path.parent.mkdir(parents=True, exist_ok=True)
+    service_path.write_text("class Service\n  def call(value)\n    value\n  end\nend\n")
+
+    source = b'''require_relative "lib/service"
+class Worker
+  def run
+    service = ThirdParty::Client.new
+    service.call(1)
+  end
+end
+'''
+    path = tmp_path / "app.rb"
+    path.write_bytes(source)
+    rec = RubyParser().parse_file(ParseContext(
+        path="app.rb", abs_path=path, source=source, repo_root=tmp_path,
+    ))
+
+    run = next(function for function in rec.functions if function.name == "run")
+    call = next(call for call in run.calls if call.name == "call")
+    assert call.path is None
+    assert any(item.endswith("lib/service.rb") for item in rec.importFiles)
