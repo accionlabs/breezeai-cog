@@ -165,8 +165,123 @@ export class Notifier {
     assert sem["eventbus_publish"][0].framework == "aws-sns"
 
 
+def test_sns_topic_publish_characterization(tmp_path) -> None:
+    # Locks in pre-change SNS behavior before Task 3 touches _producer/_address.
+    src = b"""import { SNSClient, PublishCommand } from '@aws-sdk/client-sns';
+
+export async function notify(sns: SNSClient) {
+  await sns.send(new PublishCommand({ TopicArn: 'arn:aws:sns:x', Message: 'm' }));
+}
+"""
+    rec = _parse(tmp_path, "notify.ts", src)
+    sem = _by_semantic(rec)
+    assert len(sem["eventbus_publish"]) == 1
+    pub = sem["eventbus_publish"][0]
+    assert pub.framework == "aws-sns"
+    assert pub.method == "PublishCommand"
+    assert pub.endpoint == "arn:aws:sns:x"
+
+
+def test_publish_command_without_address_key_stays_sns(tmp_path) -> None:
+    # Locks in the no-address-key default: today _producer discards _address's presence
+    # flag on the v3 branch, so a keyless PublishCommand still resolves aws-sns/null, not
+    # "undetected". Both ends of the address-key spectrum: this test is the empty end,
+    # test_sns_topic_publish_characterization above is the present end.
+    src = b"""import { SNSClient, PublishCommand } from '@aws-sdk/client-sns';
+
+export async function notify(sns: SNSClient) {
+  await sns.send(new PublishCommand({ Message: 'm' }));
+}
+"""
+    rec = _parse(tmp_path, "notify.ts", src)
+    sem = _by_semantic(rec)
+    assert len(sem["eventbus_publish"]) == 1
+    pub = sem["eventbus_publish"][0]
+    assert pub.framework == "aws-sns"
+    assert pub.endpoint is None
+
+
+SMS_LITERAL = b"""import { SNSClient, PublishCommand } from '@aws-sdk/client-sns';
+
+export async function sendCode(sns: SNSClient, code: string) {
+  await sns.send(new PublishCommand({ PhoneNumber: '+14155550100', Message: code }));
+}
+"""
+
+SMS_VARIABLE = b"""import { SNSClient, PublishCommand } from '@aws-sdk/client-sns';
+
+export async function sendCode(sns: SNSClient, phone: string, code: string) {
+  await sns.send(new PublishCommand({ PhoneNumber: phone, Message: code }));
+}
+"""
+
+SMS_AND_SNS = b"""import { SNSClient, PublishCommand } from '@aws-sdk/client-sns';
+
+export async function fanout(sns: SNSClient) {
+  await sns.send(new PublishCommand({ PhoneNumber: '+14155550100', Message: 'm' }));
+  await sns.send(new PublishCommand({ TopicArn: 'arn:aws:sns:x', Message: 'm' }));
+}
+"""
+
+
+def test_sms_publish_phone_number_literal_detected(tmp_path) -> None:
+    rec = _parse(tmp_path, "sms.ts", SMS_LITERAL)
+    sem = _by_semantic(rec)
+    assert len(sem["eventbus_publish"]) == 1
+    pub = sem["eventbus_publish"][0]
+    assert pub.framework == "aws-sms"
+    assert pub.method == "PublishCommand"
+    assert pub.endpoint == "+14155550100"
+
+
+def test_sms_publish_phone_number_variable_is_honest_null(tmp_path) -> None:
+    rec = _parse(tmp_path, "sms.ts", SMS_VARIABLE)
+    sem = _by_semantic(rec)
+    pub = sem["eventbus_publish"][0]
+    assert pub.framework == "aws-sms"
+    assert pub.endpoint is None  # PhoneNumber is a symbol, never the symbol text
+
+
+def test_sms_and_sns_in_same_file_split_correctly(tmp_path) -> None:
+    rec = _parse(tmp_path, "fanout.ts", SMS_AND_SNS)
+    sem = _by_semantic(rec)
+    got = {(s.framework, s.endpoint) for s in sem["eventbus_publish"]}
+    assert got == {("aws-sms", "+14155550100"), ("aws-sns", "arn:aws:sns:x")}
+    assert all(s.method == "PublishCommand" for s in sem["eventbus_publish"])
+
+
+def test_sms_file_framework_rollup(tmp_path) -> None:
+    rec = _parse(tmp_path, "sms.ts", SMS_LITERAL)
+    assert rec.framework == "aws-sms"
+
+
+def test_v2_publish_with_phone_number_endpoint_now_resolved(tmp_path) -> None:
+    # Accepted side-effect of widening _ADDRESS_KEYS: the v2 `.publish()` method is
+    # deliberately NOT branched to aws-sms (issue #77 scopes Task 3 to PublishCommand), but
+    # the endpoint is now resolved instead of honest-null — strictly more informative.
+    src = b"""import { SNS } from 'aws-sdk';
+
+export class Notifier {
+  private sns: SNS;
+  async sendCode() {
+    await this.sns.publish({ PhoneNumber: '+14155550100', Message: 'm' });
+  }
+}
+"""
+    rec = _parse(tmp_path, "notifier.ts", src)
+    sem = _by_semantic(rec)
+    pub = sem["eventbus_publish"][0]
+    assert pub.framework == "aws-sns"
+    assert pub.endpoint == "+14155550100"
+
+
 def test_output_validates(tmp_path) -> None:
     rec = _parse(tmp_path, "dispatch.service.ts", PRODUCER)
+    errors = list(Draft202012Validator(FileRecord.model_json_schema(by_alias=True))
+                  .iter_errors(json.loads(to_line(rec))))
+    assert not errors, errors
+
+    rec = _parse(tmp_path, "sms.ts", SMS_LITERAL)
     errors = list(Draft202012Validator(FileRecord.model_json_schema(by_alias=True))
                   .iter_errors(json.loads(to_line(rec))))
     assert not errors, errors
