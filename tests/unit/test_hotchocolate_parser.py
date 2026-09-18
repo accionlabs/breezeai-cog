@@ -671,3 +671,40 @@ def test_named_loader_stays_unrecognised_without_the_index() -> None:
     # convention, so the field stays empty rather than matching on the suffix.
     rec = _parse(CSharpHotChocolateParser(), GENERATED_LOADER_USE, "SessionQueries.cs")
     assert _by_endpoint(rec)["sessionById"].dataLoaders is None
+
+
+# A field resolver on an [ExtendObjectType] class taking a source-generated loader. The wiring
+# for this path was missed once: the loader map reached root operations but not extensions.
+EXTENSION_WITH_LOADER = b'''using HotChocolate;
+using HotChocolate.Types;
+namespace Shop {
+  [ExtendObjectType(typeof(Order))]
+  public static class OrderTypeExtensions {
+    public static Task<Customer> GetCustomerAsync(
+        [Parent] Order order, ICustomerByIdDataLoader customerById) => null;
+  }
+}
+'''
+
+LOADER_FOR_EXTENSION = b'''namespace Shop {
+  public static class OrderDataLoaders {
+    [DataLoader]
+    public static Task<IReadOnlyDictionary<int, Customer>> CustomerByIdAsync(
+        IReadOnlyList<int> ids, OrdersDbContext db) => null;
+  }
+}
+'''
+
+
+def test_field_resolver_resolves_a_generated_loader() -> None:
+    from breezeai_cog.parsers.csharp.imports import _index_data_loaders
+    from breezeai_cog.parsers.treesitter import parse_source
+
+    index = CSharpIndex()
+    root = parse_source("csharp", LOADER_FOR_EXTENSION, 0).root_node
+    _index_data_loaders(root, LOADER_FOR_EXTENSION, "OrderDataLoaders.cs", index)
+
+    rec = _parse_with_index(EXTENSION_WITH_LOADER, "OrderTypeExtensions.cs", index)
+    op = _by_endpoint(rec)["Order.customer"]
+    assert op.routeKind == "field_resolver"
+    assert op.dataLoaders == ["ICustomerByIdDataLoader"]

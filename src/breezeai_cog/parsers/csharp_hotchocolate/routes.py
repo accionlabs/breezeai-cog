@@ -474,7 +474,8 @@ def detect_hotchocolate_routes(
         if target is not None:
             if own:
                 routes.extend(_extension_routes(
-                    cls, target, own, record, heritage, record.path, seen, anchors))
+                    cls, target, own, record, heritage, record.path, seen, anchors,
+                    generated_loaders))
             continue
         routes.extend(_descriptor_routes(cls, record, nodes, source, heritage, seen))
     return routes
