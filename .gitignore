@@ -24,6 +24,3 @@ logs/
 
 # breezeai-cog run artifacts (export / skip report / logs)
 .cog/
-test/
-docs/
-context/

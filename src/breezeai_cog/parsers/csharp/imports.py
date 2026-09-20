@@ -57,6 +57,11 @@ class CSharpIndex:
     #: repo-relative dirs containing a ``.csproj`` (an assembly boundary), sorted
     #: longest-first so the nearest ancestor of a file is its owning project.
     project_roots: list[str] = field(default_factory=list)
+    #: Source-generated DataLoader type name → the file declaring the ``[DataLoader]`` method it
+    #: is generated from, or ``None`` when two files generate the same name (ambiguous). The
+    #: generated types do not exist in the repo, so a parameter typed ``ISessionByIdDataLoader``
+    #: can only be recognised as a loader through this map.
+    data_loaders: dict[str, str | None] = field(default_factory=dict)
     #: simple class name → its heritage (base + decorators + method→file), for cross-file
     #: base-class resolution. Value is ``None`` when the name is declared by >1 class with
     #: differing bases (ambiguous → callers must not resolve through it: honest-null).
@@ -268,6 +273,8 @@ def _index_file(
                 index.global_usings.add(name)
     if b"MapPageRoute" in source:  # cheap gate — full-tree scan only where it can match
         _index_map_page_routes(root, source, index)
+    if b"[DataLoader" in source:  # same idiom: only scan a file that can declare one
+        _index_data_loaders(root, source, rel, index)
 
     def walk(node: Node, ns: str) -> None:
         local_ns = ns
@@ -292,6 +299,33 @@ def _index_file(
                     walk(body, local_ns)  # nested types share the enclosing namespace
 
     walk(root, "")
+
+
+def _index_data_loaders(root: Node, source: bytes, rel: str, index: CSharpIndex) -> None:
+    """Record the DataLoader types HotChocolate's source generator will emit for this file.
+
+    A ``[DataLoader]`` method produces a loader named after it — ``SessionByIdAsync`` becomes
+    ``ISessionByIdDataLoader`` (and the concrete ``SessionByIdDataLoader``). Consumers declare the
+    generated *interface* as a parameter type, and that interface exists nowhere in the source, so
+    without this map a loader parameter is indistinguishable from any other service. Attribute
+    arguments only ever carry options (``MaxBatchSize``, ``ServiceScope``), never a rename.
+    """
+    stack = [root]
+    while stack:
+        node = stack.pop()
+        stack.extend(node.named_children)
+        if node.type != "method_declaration":
+            continue
+        if not any(d.name.split("<", 1)[0] == "DataLoader" for d in extract_attributes(node, source)):
+            continue
+        name_node = node.child_by_field_name("name")
+        if name_node is None:
+            continue
+        base = node_text(name_node, source)
+        if base.endswith("Async") and len(base) > len("Async"):
+            base = base[: -len("Async")]
+        for generated in (f"I{base}DataLoader", f"{base}DataLoader"):
+            record_distinct(index.data_loaders, generated, rel)
 
 
 def _discover_project_roots(repo_root: Path, live_dirs: set[str]) -> list[str]:
@@ -359,6 +393,8 @@ def _merge_fragment(
         dst.extend(u for u in purls if u not in dst)
     for ekey, efile in fidx.ext_methods.items():
         record_distinct(index.ext_methods, ekey, efile)
+    for lname, lfile in fidx.data_loaders.items():
+        record_distinct(index.data_loaders, lname, lfile)
     for mkey, mfile in fmf.items():
         record_distinct(method_files, mkey, mfile)
     for fqn, ch in fby.items():

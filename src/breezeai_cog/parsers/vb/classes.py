@@ -1,13 +1,18 @@
 """VB.NET class / interface / enum / struct / module extraction → Class + flat methods
 + statements.
 
-Two VB grammar quirks handled here:
+Three VB grammar quirks handled here:
 * Leading attributes (``<ApiController>``) detach from the type and sit as sibling
   ``attribute_block`` nodes *before* the ``type_declaration`` — the caller collects them
   and passes them in as ``pending_attrs``.
 * ``Inherits`` / ``Implements`` don't parse into clean fields (they surface as ``ERROR`` /
   ``field_declaration``), so heritage is recovered best-effort by scanning the block's
   own source lines.
+* **Nested types are not parsed at all.** A ``Public Class Result`` inside a class surfaces
+  as a ``field_declaration``, the enclosing ``class_block`` ends at the *nested* ``End
+  Class``, the nested type's own members become siblings of the outer type's, and whatever
+  follows lands in an ``ERROR`` node. Members after a nested type are therefore untrustworthy
+  and are dropped — see :func:`_nested_type_marker`.
 """
 
 from __future__ import annotations
@@ -15,6 +20,7 @@ from __future__ import annotations
 from tree_sitter import Node
 
 from ...emit import class_id, disambiguate
+from ...logging import get_logger
 from ...schemas import Class, ConstructorParam, Function, Statement
 from ..callresolve import CallResolver, noop_resolver
 from ..statements_common import emit_enum_members
@@ -30,6 +36,36 @@ _TYPE = {
     "module_block": "module",
 }
 _METHOD_MEMBERS = ("method_declaration", "constructor_declaration")
+
+#: Type keywords that may open a nested type declaration.
+_TYPE_KEYWORDS = ("Class", "Structure", "Interface", "Enum", "Module", "Delegate")
+#: Modifiers that may precede one.
+_TYPE_MODIFIERS = frozenset({
+    "Public", "Private", "Protected", "Friend", "Shared", "Partial", "NotInheritable",
+    "MustInherit", "Overloads", "Shadows",
+})
+
+
+def _nested_type_marker(member: Node, source: bytes) -> str | None:
+    """The type name if ``member`` is really a **nested type declaration** the grammar failed
+    to parse, else None.
+
+    The grammar has no rule for a type inside a type: it emits the declaration line as a
+    ``field_declaration`` and closes the enclosing ``class_block`` at the nested ``End Class``.
+    Everything the grammar reports after that point is misplaced — the nested type's members
+    appear as the outer type's, and the outer type's remaining members fall outside the block
+    into an ``ERROR`` node. Detection reads the real declaration tokens, not a guess: a
+    ``field_declaration`` whose leading words are optional modifiers followed by a type keyword.
+    """
+    if member.type != "field_declaration":
+        return None
+    words = node_text(member, source).strip().split()
+    i = 0
+    while i < len(words) and words[i] in _TYPE_MODIFIERS:
+        i += 1
+    if i < len(words) - 1 and words[i] in _TYPE_KEYWORDS:
+        return words[i + 1]
+    return None
 
 
 def _heritage(node: Node, source: bytes) -> tuple[str | None, list[str]]:
@@ -71,6 +107,17 @@ def build_class(
     ctor_params: list[ConstructorParam] = []
 
     for member in node.named_children:
+        nested = _nested_type_marker(member, source)
+        if nested is not None:
+            # The grammar mis-parses from here on: the following members belong to the nested
+            # type, not to this one. Attributing them here would assert a method this class
+            # does not declare, so stop — a known gap beats a wrong edge.
+            get_logger("breezeai_cog.parsers").debug(
+                "vb.nested_type.unsupported", path=path, cls=name, nested=nested,
+                line=member.start_point[0] + 1,
+                reason="grammar has no nested-type rule; members after it are dropped",
+            )
+            break
         if member.type in _METHOD_MEMBERS:
             fn, fn_statements = build_method(
                 member, source, path,

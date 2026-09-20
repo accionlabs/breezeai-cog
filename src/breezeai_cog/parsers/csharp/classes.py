@@ -55,11 +55,23 @@ def build_class(
     capture: bool,
     limit: int,
     resolve: CallResolver = noop_resolver,
-) -> tuple[Class, list[Function], list[Statement]]:
+    owner: str | None = None,
+) -> tuple[list[Class], list[Function], list[Statement]]:
+    """Return (classes, methods, statements) — all flat, linked by parentId.
+
+    The class list is this type plus any nested (member) types. A nested type's **identity**
+    carries the nesting (``path#Outer.Inner``) while its ``parentId`` stays the owning **file**:
+    the graph has one containment edge for classes, File→Class, so a class parented to another
+    class would never be attached. The dotted identity is also what keeps re-ingest idempotent —
+    two nested types sharing a simple name (a ``Result`` inside each of two services) would
+    otherwise take turns holding the same id depending on their order in the file, and each
+    re-capture would overwrite one with the other.
+    """
     name_node = node.child_by_field_name("name")
     name = node_text(name_node, source) if name_node is not None else "<anonymous>"
+    qualified = f"{owner}.{name}" if owner else name
     start, end = line_span(node)
-    cid = disambiguate(class_id(path, name), seen_ids)
+    cid = disambiguate(class_id(path, qualified), seen_ids)
     extends, implements = _heritage(node, source)
 
     visibility, _ = flags(node, source)
@@ -68,6 +80,7 @@ def build_class(
 
     methods: list[Function] = []
     statements: list[Statement] = []
+    nested_classes: list[Class] = []
     ctor_params: list[ConstructorParam] = []
 
     # record positional parameters (``record Money(decimal Amount)``) → constructorParams
@@ -86,7 +99,8 @@ def build_class(
             if member.type in _METHOD_MEMBERS:
                 fns, fn_statements = build_method(
                     member, source, path,
-                    parent_id=cid, class_name=name, seen_ids=seen_ids, capture=capture, limit=limit,
+                    parent_id=cid, class_name=name, id_owner=qualified, seen_ids=seen_ids,
+                    capture=capture, limit=limit,
                     resolve=resolve,
                 )
                 methods.extend(fns)
@@ -96,6 +110,17 @@ def build_class(
                         ConstructorParam(name=p.name, type=p.type)
                         for p in extract_params(member.child_by_field_name("parameters"), source)
                     ]
+            elif member.type in _NESTED_CLASS_TYPES:
+                # Member (nested) class / struct / record / interface / enum — its own Class
+                # parented to this one, recursing for arbitrarily deep nesting.
+                sub_classes, sub_methods, sub_statements = build_class(
+                    member, source, path,
+                    parent_id=parent_id, seen_ids=seen_ids, capture=capture, limit=limit,
+                    resolve=resolve, owner=qualified,
+                )
+                nested_classes.extend(sub_classes)
+                methods.extend(sub_methods)
+                statements.extend(sub_statements)
 
     # Enum members become flat statements parented to the enum Class (their `text` is
     # queryable); `enum_member_declaration` is otherwise captured nowhere (it is not a
@@ -124,4 +149,4 @@ def build_class(
         startLine=start,
         endLine=end,
     )
-    return cls, methods, statements
+    return [cls, *nested_classes], methods, statements
