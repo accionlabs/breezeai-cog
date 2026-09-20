@@ -32,8 +32,9 @@ _MESSAGING_DECORATORS = {"EventPattern": "EVENT", "MessagePattern": "MESSAGE"}
 # @nestjs/graphql code-first operations. Gated on the class being an @Resolver — @Query is
 # also a @nestjs/common *param* decorator, but that lives on a parameter, not in the method's
 # decorator list, so a method-level @Query on a resolver is unambiguously the GraphQL one.
-# @ResolveField/@ResolveProperty are field resolvers, not client-callable operations, so
-# they are NOT emitted as routes (matching the TypeScript resolver-map/SDL detector).
+# @ResolveField/@ResolveProperty are field resolvers — not client-callable, but real API
+# surface, so they ARE emitted, with routeKind="field_resolver" and method="RESOLVE_FIELD"
+# to keep them separable from entry points (see _FIELD_RESOLVERS below).
 _RESOLVER_DECORATORS = {"Resolver"}
 _GRAPHQL_OPS = {"Query": "query", "Mutation": "mutation", "Subscription": "subscription"}
 # @ResolveField/@ResolveProperty — field-resolver methods on a @Resolver class.
