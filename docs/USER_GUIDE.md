@@ -225,7 +225,8 @@ Uploading  ━━━━━━━━━━╺━━━━━━━━━  1/12 [0
   repo-2 [08:11] . attempt 2
 ```
 
-The raw backend response is written to the `.cog/logs` log file instead of the console.
+The raw backend response is written to the `.cog/logs` log file instead of the console
+(`--verbose` also prints it to the console).
 `--baseurl` and
 `--user-api-key` fall back to the `BREEZE_API_URL` and `API_KEY` environment variables (or
 `.env`), so you can keep secrets out of the command line.
