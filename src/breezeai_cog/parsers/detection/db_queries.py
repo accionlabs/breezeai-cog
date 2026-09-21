@@ -118,6 +118,11 @@ _ACTIVE_RECORD_METHODS = (
 )
 _RUBY_CONSTANT_RECEIVER = re.compile(r"[A-Z][A-Za-z0-9_]*(?:::[A-Z][A-Za-z0-9_]*)*")
 
+# Go ORM/database libraries are only valid DB-method matches in a Go file; a generic
+# method name such as ``First``/``Where``/``Exec`` in another language should not be
+# promoted into a DB call by name alone. This is the language gate the spec calls for.
+_GO_DB_METHODS = frozenset({"where", "first", "last", "take", "exec", "query", "raw", "scan", "scanrow", "pluck"})
+
 # Receiver substring -> hint (refines _GENERIC).
 # Needles checked via `needle in low` (full lowercased callee). Ambiguous short tokens
 # ("session", "objects") require a dot-anchored match so they don't fire on *containing*
@@ -315,6 +320,8 @@ def match_db(callee: str, method: str, language: str | None = None,
     low = callee.lower()
     if m in _PRISMA_VERBS and _is_prisma_chain(low):
         return "prisma"
+    if m in _GO_DB_METHODS and language is not None and language != "go":
+        return None
     if m in _DISTINCTIVE:
         db = _DISTINCTIVE[m]
         # A receiverless distinctive verb is a local/helper call, not a database access.
