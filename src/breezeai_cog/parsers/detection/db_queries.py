@@ -92,31 +92,10 @@ _GENERIC = {
     "persist", "merge", "query", "execute",
 }
 
-# ActiveRecord verbs, split by how much they prove on their own. Every Ruby class name is
-# capitalized, so a constant receiver is NOT evidence of a model — the receiver has to be
-# identified from the declarations (``typed_db_ids``, built by ruby/models.py) or the verb
-# has to be one that effectively only exists in ActiveRecord.
-#
-# DISTINCTIVE verbs are safe without an identified receiver: no stdlib or common gem API
-# uses them. GENERIC verbs collide with ordinary Ruby (``Tempfile.create``, ``Date.first``,
-# ``Settings.all``) and are therefore only honoured on an identified model receiver.
-_ACTIVE_RECORD_DISTINCTIVE = frozenset({
-    "find_by", "find_by!", "find_each", "find_in_batches", "where", "where_not",
-    "joins", "includes", "pluck", "destroy_all", "update_all", "left_outer_joins", "take",
-})
-_ACTIVE_RECORD_GENERIC = frozenset({
-    "find", "all", "create", "create!", "first", "last", "exists",
-})
-#: Verbs that write through a model *instance* (``user.save``), where the receiver is
-#: conventionally lowercase. Always require an identified receiver — ``config.save`` and
-#: ``image.update`` are ordinary Ruby.
-_ACTIVE_RECORD_INSTANCE_METHODS = frozenset({
-    "save", "save!", "update", "update!", "destroy", "destroy!", "update_attributes",
-})
-_ACTIVE_RECORD_METHODS = (
-    _ACTIVE_RECORD_DISTINCTIVE | _ACTIVE_RECORD_GENERIC | _ACTIVE_RECORD_INSTANCE_METHODS
-)
-_RUBY_CONSTANT_RECEIVER = re.compile(r"[A-Z][A-Za-z0-9_]*(?:::[A-Z][A-Za-z0-9_]*)*")
+# Go ORM/database libraries are only valid DB-method matches in a Go file; a generic
+# method name such as ``First``/``Where``/``Exec`` in another language should not be
+# promoted into a DB call by name alone. This is the language gate the spec calls for.
+_GO_DB_METHODS = frozenset({"where", "first", "last", "take", "exec", "query", "raw", "scan", "scanrow", "pluck"})
 
 # Receiver substring -> hint (refines _GENERIC).
 # Needles checked via `needle in low` (full lowercased callee). Ambiguous short tokens
@@ -311,6 +290,8 @@ def match_db(callee: str, method: str, language: str | None = None,
     low = callee.lower()
     if m in _PRISMA_VERBS and _is_prisma_chain(low):
         return "prisma"
+    if m in _GO_DB_METHODS and language is not None and language != "go":
+        return None
     if m in _DISTINCTIVE:
         db = _DISTINCTIVE[m]
         # A receiverless distinctive verb is a local/helper call, not a database access.
