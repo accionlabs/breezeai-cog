@@ -21,7 +21,7 @@ Python reimplementation of `breezeai-code-ontology-generator`.
 | TypeScript / JavaScript | `.ts .tsx .mts .cts .js .jsx .mjs .cjs` | NestJS (& routing-controllers), Angular, Express, React, Vue, Next.js (App + Pages Router API routes), LoopBack, GraphQL (schema-first + code-first + an in-house resolver framework, server + client ops); AWS SNS/SQS/EventBridge/Lambda/S3/SES/CloudFront/Kinesis/DynamoDB/API Gateway/Cognito/SSM Parameter Store (additive); HubSpot/Chargebee/Salesforce SDKs (additive) |
 | Python | `.py` | FastAPI |
 | Java | `.java` | Spring Boot, JAX-RS, Vert.x |
-| C# | `.cs .asmx .svc` | ASP.NET (MVC / Web API / Minimal API / Web Forms), WCF / ASMX (SOAP), .NET ServiceHost, GraphQL (graphql-dotnet + HotChocolate — attribute, type-extension and fluent-descriptor styles, incl. field resolvers and subscription topics) |
+| C# | `.cs .asmx .svc` | ASP.NET (MVC / Web API / Minimal API / Web Forms), WCF / ASMX (SOAP), .NET ServiceHost, GraphQL (graphql-dotnet + HotChocolate — attribute, type-extension and fluent-descriptor styles, incl. field resolvers and subscription topics); Lucene.NET index reads/writes (additive) |
 | VB.NET | `.vb` | ASP.NET |
 | Kotlin | `.kt` | Ktor |
 | C++ | `.cpp .cc .cxx .c++ .hpp .h .hh .hxx .inl .ipp` | — |

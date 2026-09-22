@@ -24,6 +24,7 @@ from .classes import build_class
 from .functions import defined_names, type_map
 from .imports import CSharpIndex, build_csharp_index, extract_imports
 from .lambda_events import detect_lambda_handlers
+from .lucene import detect_lucene_access
 from ..comments_common import comment_statements_for
 from .mappings import COMMENT_TYPES, CONTROL_FLOW, FRAMEWORKS, STATEMENT_TYPES
 
@@ -114,4 +115,8 @@ class CSharpParser(BaseParser):
         if capture and not self.is_fixture_file(path):  # entry-point emitter → skip fixtures/tests
             if detect_lambda_handlers(root, source, path, record) and record.framework is None:
                 record.framework = "aws-lambda"
+        if capture:
+            # Index access is data access, not an entry point, so it is not fixture-gated: a
+            # statement inside a test file is still a real read of the index.
+            detect_lucene_access(root, source, path, record)
         return record
