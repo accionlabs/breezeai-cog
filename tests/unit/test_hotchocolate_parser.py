@@ -730,3 +730,103 @@ namespace Shop {
 '''
     rec = _parse(CSharpHotChocolateParser(), src, "ReportingTypes.cs")
     assert set(_by_endpoint(rec)) == {"dailyRevenue", "totals"}
+
+
+# ---- registration-only roots (AddQueryType<T>() with no attribute on the class) ----------------
+
+# A plain class with no HotChocolate attributes — only registered via AddQueryType<T>() in
+# Program.cs. Older (v11/v12) codebases used this pattern before source-generated attributes.
+REGISTRATION_ONLY_QUERY = b'''namespace Catalog {
+  public class BookQueries {
+    public Task<Book> GetBookByIdAsync(int id) => null;
+    public IQueryable<Book> GetBooks() => null;
+    private Book Hidden() => null;
+  }
+}
+'''
+
+REGISTRATION_ONLY_MUTATION = b'''namespace Catalog {
+  public class BookMutations {
+    public Task<Book> AddBook(string title) => null;
+  }
+}
+'''
+
+
+def _parser_with_root_types(root_types: dict) -> CSharpHotChocolateParser:
+    """Return a parser instance with ``_hc_root_types`` pre-seeded (simulates build_index)."""
+    p = CSharpHotChocolateParser()
+    p._hc_root_types = root_types
+    return p
+
+
+def test_scan_root_registrations_extracts_type_names(tmp_path) -> None:
+    from breezeai_cog.parsers.csharp_hotchocolate.parser import _scan_root_registrations
+
+    program = tmp_path / "Program.cs"
+    program.write_bytes(PROGRAM)  # already contains AddQueryType<BookQueries>
+    result = _scan_root_registrations([program])
+    assert result == {"BookQueries": "query"}
+
+
+def test_scan_root_registrations_all_root_kinds(tmp_path) -> None:
+    from breezeai_cog.parsers.csharp_hotchocolate.parser import _scan_root_registrations
+
+    src = b"""
+builder.Services.AddGraphQLServer()
+    .AddQueryType<MyQuery>()
+    .AddMutationType<MyMutation>()
+    .AddSubscriptionType<MySubs>();
+"""
+    f = tmp_path / "Program.cs"
+    f.write_bytes(src)
+    result = _scan_root_registrations([f])
+    assert result == {"MyQuery": "query", "MyMutation": "mutation", "MySubs": "subscription"}
+
+
+def test_scan_skips_files_without_addgraphqlserver(tmp_path) -> None:
+    from breezeai_cog.parsers.csharp_hotchocolate.parser import _scan_root_registrations
+
+    f = tmp_path / "Other.cs"
+    f.write_bytes(b"services.AddQueryType<MyQuery>();")  # no AddGraphQLServer
+    assert _scan_root_registrations([f]) == {}
+
+
+def test_registration_only_root_is_claimed() -> None:
+    # Without the index, a file with no HotChocolate token is not claimed.
+    assert not CSharpHotChocolateParser().claims("BookQueries.cs", REGISTRATION_ONLY_QUERY)
+    # With _hc_root_types populated from build_index, the declaring file is claimed.
+    p = _parser_with_root_types({"BookQueries": "query"})
+    assert p.claims("BookQueries.cs", REGISTRATION_ONLY_QUERY)
+
+
+def test_registration_only_root_does_not_claim_unrelated_file() -> None:
+    # A file that references BookQueries as a type but does not declare it is not claimed.
+    ref_src = b"public class BookService { public BookQueries Queries { get; } }"
+    p = _parser_with_root_types({"BookQueries": "query"})
+    assert not p.claims("BookService.cs", ref_src)
+
+
+def test_registration_only_root_emits_operations() -> None:
+    p = _parser_with_root_types({"BookQueries": "query"})
+    rec = _parse(p, REGISTRATION_ONLY_QUERY, "BookQueries.cs")
+    ops = _by_endpoint(rec)
+    assert set(ops) == {"bookById", "books"}
+    assert ops["bookById"].routeKind == "query" and ops["bookById"].method == "QUERY"
+    assert ops["books"].routeKind == "query"
+    # private methods are never exposed
+    assert "hidden" not in ops
+
+
+def test_registration_only_mutation_emits_operations() -> None:
+    p = _parser_with_root_types({"BookMutations": "mutation"})
+    rec = _parse(p, REGISTRATION_ONLY_MUTATION, "BookMutations.cs")
+    ops = _by_endpoint(rec)
+    assert "addBook" in ops
+    assert ops["addBook"].routeKind == "mutation" and ops["addBook"].method == "MUTATION"
+
+
+def test_registration_only_root_sets_framework() -> None:
+    p = _parser_with_root_types({"BookQueries": "query"})
+    rec = _parse(p, REGISTRATION_ONLY_QUERY, "BookQueries.cs")
+    assert rec.framework == "graphql"
