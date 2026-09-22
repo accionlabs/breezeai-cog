@@ -81,9 +81,9 @@ def test_github_compare_maps_counts_and_patch(client, captured) -> None:
     assert resp.status_code == 200
     body = resp.json()
     assert body == {
-        "baseSha": BASE, "headSha": HEAD, "totalFiles": 1,
-        "files": [{"filename": "src/app.ts", "status": "modified",
-                   "additions": 12, "deletions": 4, "patch": "@@ -1 +1 @@"}],
+        "baseSha": BASE, "headSha": HEAD, "totalFiles": 1, "truncated": False,
+        "files": [{"filename": "src/app.ts", "status": "modified", "additions": 12,
+                   "deletions": 4, "patch": "@@ -1 +1 @@", "previousFilename": None}],
     }
     assert captured[0]["url"] == f"https://api.github.com/repos/acme/widgets/compare/{BASE}...{HEAD}"
 
@@ -132,8 +132,8 @@ def test_azure_compare_returns_null_counts_and_keeps_leading_slash(client, captu
     body = _post(client, repoUrl="https://dev.azure.com/org/proj/_git/repo",
                  baseCommitId=BASE, gitToken="pat").json()
     f = body["files"][0]
-    assert f == {"filename": "/src/Program.cs", "status": "edit",
-                 "additions": None, "deletions": None, "patch": None}
+    assert f == {"filename": "/src/Program.cs", "status": "edit", "additions": None,
+                 "deletions": None, "patch": None, "previousFilename": None}
     # Azure PAT auth is Basic with a BLANK username.
     import base64
     assert captured[0]["headers"]["Authorization"] == "Basic " + base64.b64encode(b":pat").decode()
@@ -147,8 +147,8 @@ def test_azure_without_base_lists_the_tree_and_drops_the_byte_count(client, capt
     ]}))
     body = _post(client, repoUrl="https://dev.azure.com/org/proj/_git/repo").json()
     assert body["baseSha"] == ""
-    assert body["files"] == [{"filename": "src/a.cs", "status": "added",
-                              "additions": None, "deletions": None, "patch": None}]
+    assert body["files"] == [{"filename": "src/a.cs", "status": "added", "additions": None,
+                              "deletions": None, "patch": None, "previousFilename": None}]
 
 
 # ── Bitbucket: raw-diff parsing and the head..base spec order ─────────────────
@@ -161,8 +161,9 @@ def test_bitbucket_single_commit_parses_raw_diff_text(client, captured) -> None:
     )
     captured.queue.append(_FakeResponse(raw))
     body = _post(client, repoUrl="https://bitbucket.org/team/repo", gitToken="user:key").json()
-    assert body["files"] == [{"filename": "src/a.py", "status": "modified",
-                              "additions": 2, "deletions": 1, "patch": raw.split("diff --git ", 1)[1]}]
+    assert body["files"] == [{"filename": "src/a.py", "status": "modified", "additions": 2,
+                              "deletions": 1, "patch": raw.split("diff --git ", 1)[1],
+                              "previousFilename": None}]
 
 
 def test_bitbucket_compare_uses_head_dotdot_base(client, captured) -> None:
@@ -218,3 +219,29 @@ def test_unused_fields_are_accepted_for_payload_symmetry(client, captured) -> No
     resp = _post(client, baseCommitId=BASE, gitBranch="main",
                  projectUuid="37cb793f-1c61-4c6e-a0eb-85ff2631488e", codeOntologyId=42)
     assert resp.status_code == 200
+
+
+# ── Rename tracking + truncation (added for sdlc's FileChange contract) ───────
+
+def test_rename_reports_the_previous_filename(client, captured) -> None:
+    """sdlc's `FileChange.previous_filename` needs this to follow a file across a
+    move; without it a rename looks like an unrelated add plus delete."""
+    captured.queue.append(_FakeResponse({"files": [
+        {"filename": "new.ts", "status": "renamed", "previous_filename": "old.ts"},
+    ]}))
+    assert _post(client, baseCommitId=BASE).json()["files"][0]["previousFilename"] == "old.ts"
+
+
+def test_gitlab_rename_reports_old_path(client, captured) -> None:
+    captured.queue.append(_FakeResponse({"diffs": [
+        {"new_path": "new.py", "old_path": "old.py", "renamed_file": True},
+    ]}))
+    body = _post(client, repoUrl="https://gitlab.com/grp/proj", baseCommitId=BASE).json()
+    assert body["files"][0]["previousFilename"] == "old.py"
+    assert body["files"][0]["status"] == "renamed"
+
+
+def test_diff_envelope_always_carries_truncated(client, captured) -> None:
+    """sdlc's meta-tests require a paginator to ANNOUNCE truncation, not just cap."""
+    captured.queue.append(_FakeResponse({"files": []}))
+    assert _post(client, baseCommitId=BASE).json()["truncated"] is False

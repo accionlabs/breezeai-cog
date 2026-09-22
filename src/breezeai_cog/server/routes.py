@@ -24,12 +24,15 @@ from ..services.inprocess import analyze_in_memory
 from .deps import ServerDeps
 from .errors import ApiError
 from .git import (
+    fetch_commit,
     fetch_directory_tree,
     fetch_git_diff,
     fetch_latest_commit,
     fetch_pull_request,
     parse_repo_url,
+    post_commit_comment,
     post_pull_request_comment,
+    update_commit_status,
 )
 
 router = APIRouter()
@@ -326,6 +329,79 @@ async def directory_tree(request: Request) -> dict:
 
     branch = body.get("gitBranch") or "main"
     return await run_in_threadpool(fetch_directory_tree, repo_url, branch, body.get("gitToken"))
+
+
+@router.post("/api/commit")
+async def commit(request: Request) -> dict:
+    """A single commit with its file changes (BREEZEAI-1228 follow-up).
+
+    Covers `AbstractSCMClient.get_commit` for sdlc-autonomous-agents.
+
+    Body: `repoUrl` + `sha` required; `gitToken` optional.
+
+    Returns `{sha, message, author, authoredAt, url, branch, files[], truncated}`.
+    `truncated` is true when the provider capped the file list — GitHub's
+    single-commit endpoint stops at 300 files and cannot be paginated, so a
+    consumer that ignores this flag will act on partial data.
+
+    `jiraTicketKeys` is deliberately NOT returned: callers extract those from
+    `message` with their own configured pattern.
+    """
+    body = await request.json()
+    repo_url, sha = body.get("repoUrl"), body.get("sha")
+    if not repo_url or not sha:
+        raise ApiError("All fields required: repoUrl, sha", 400)
+    return await run_in_threadpool(fetch_commit, repo_url, sha, body.get("gitToken"))
+
+
+@router.post("/api/commit-comment")
+async def commit_comment(request: Request) -> dict:
+    """Comment on a commit (BREEZEAI-1228 follow-up).
+
+    Covers `AbstractSCMClient.post_commit_comment`.
+
+    Body: `repoUrl`, `sha`, `body` required; `gitToken` optional.
+
+    Returns `{posted, provider}`. ⚠️ **Azure DevOps has no commit-comment API**, so
+    it returns `posted: false` with a `reason` instead of raising. Treat
+    `posted: false` as a real outcome — do not report a comment that does not exist.
+    """
+    payload = await request.json()
+    repo_url, sha, text = payload.get("repoUrl"), payload.get("sha"), payload.get("body")
+    if not repo_url or not sha or not text:
+        raise ApiError("All fields required: repoUrl, sha, body", 400)
+    return await run_in_threadpool(post_commit_comment, repo_url, sha, text, payload.get("gitToken"))
+
+
+@router.post("/api/commit-status")
+async def commit_status(request: Request) -> dict:
+    """Post or update a commit status check (BREEZEAI-1228 follow-up).
+
+    Covers `AbstractSCMClient.update_commit_status` — the call that gates a PR.
+
+    Body:
+        repoUrl      str  required
+        sha          str  required
+        state        str  required — pending | success | failure | error
+        description  str? truncated per provider (GitHub 140, GitLab 250,
+                          Bitbucket 255, Azure 4000)
+        context      str? status name; Azure splits it on "/" into genre/name
+        targetUrl    str? link shown next to the check
+        buildKey     str? REQUIRED for Bitbucket, ignored elsewhere
+        gitToken     str?
+
+    Returns `{posted, provider, state}` with the provider's own spelling of the
+    state. Bitbucket without `buildKey` returns `posted: false` and a reason.
+    """
+    payload = await request.json()
+    repo_url, sha, state = payload.get("repoUrl"), payload.get("sha"), payload.get("state")
+    if not repo_url or not sha or not state:
+        raise ApiError("All fields required: repoUrl, sha, state", 400)
+    return await run_in_threadpool(
+        update_commit_status, repo_url, sha, state, payload.get("description") or "",
+        payload.get("context") or "breezeai", payload.get("targetUrl") or "",
+        payload.get("gitToken"), payload.get("buildKey"),
+    )
 
 
 @router.post("/api/analyze-sql")

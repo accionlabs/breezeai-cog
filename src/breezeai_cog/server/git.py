@@ -402,18 +402,34 @@ _DIFF_TIMEOUT = 60.0
 
 
 def _diff_file(filename: str, status: str, additions: int | None = None,
-               deletions: int | None = None, patch: str | None = None) -> dict[str, Any]:
+               deletions: int | None = None, patch: str | None = None,
+               previous_filename: str | None = None) -> dict[str, Any]:
+    """One changed file.
+
+    `previousFilename` is populated only on a rename and only where the provider
+    reports it; consumers that track renames (sdlc-autonomous-agents' `FileChange`)
+    need it to follow a file across a move.
+    """
     return {
         "filename": filename,
         "status": status,
         "additions": additions,
         "deletions": deletions,
         "patch": patch,
+        "previousFilename": previous_filename,
     }
 
 
-def _diff_result(base_sha: str, head_sha: str, files: list[dict[str, Any]]) -> dict[str, Any]:
-    return {"baseSha": base_sha, "headSha": head_sha, "totalFiles": len(files), "files": files}
+def _diff_result(base_sha: str, head_sha: str, files: list[dict[str, Any]],
+                 truncated: bool = False) -> dict[str, Any]:
+    """`truncated` is the provider saying "this list is incomplete".
+
+    GitHub caps `/commits/{sha}` at 300 files and cannot paginate it. A consumer
+    that cannot distinguish a capped list from a complete one will silently act on
+    partial data, so it is surfaced rather than logged and dropped.
+    """
+    return {"baseSha": base_sha, "headSha": head_sha, "totalFiles": len(files),
+            "files": files, "truncated": truncated}
 
 
 def _diff_headers(provider: str, token: str | None) -> dict[str, str]:
@@ -468,6 +484,24 @@ def _base_api_url(repo_url: str, parsed: dict[str, str]) -> str:
     raise ApiError(f"Unsupported git provider: {provider}", 400)
 
 
+_UNSUPPORTED_HOST = ("Invalid repo URL (supported hosts: github.com, bitbucket.org, "
+                    "gitlab.com, dev.azure.com, *.visualstudio.com)")
+
+
+def _resolve(repo_url: str, token: str | None) -> tuple[dict[str, str], str, str, dict[str, str]]:
+    """Parse a repo URL into (parsed, provider, base API url, auth headers).
+
+    Every git endpoint starts here, so an unsupported host is rejected BEFORE any
+    request goes out — the fix for the old behaviour where an unrecognised host
+    silently fell through to GitHub.
+    """
+    parsed = parse_repo_url(repo_url)
+    if parsed is None:
+        raise ApiError(_UNSUPPORTED_HOST, 400)
+    provider = parsed["provider"]
+    return parsed, provider, _base_api_url(repo_url, parsed), _diff_headers(provider, token)
+
+
 def _diff_get(url: str, headers: dict[str, str], params: dict[str, Any] | None = None):
     import httpx
 
@@ -505,7 +539,8 @@ def parse_raw_diff(raw_diff: str) -> list[dict[str, Any]]:
 def _github_diff(base_api: str, headers: dict[str, str], head: str, base: str | None) -> dict[str, Any]:
     def _map(files: list[dict]) -> list[dict[str, Any]]:
         return [_diff_file(f.get("filename", ""), f.get("status", ""),
-                           f.get("additions"), f.get("deletions"), f.get("patch")) for f in files]
+                           f.get("additions"), f.get("deletions"), f.get("patch"),
+                           f.get("previous_filename")) for f in files]
 
     if not base:
         # Single commit — GitHub diffs it against its first parent for us.
@@ -530,7 +565,8 @@ def _gitlab_diff(base_api: str, headers: dict[str, str], head: str, base: str | 
     def _map(diffs: list[dict]) -> list[dict[str, Any]]:
         # GitLab reports no line counts on either endpoint — only the diff text.
         return [_diff_file(f.get("new_path") or f.get("old_path") or "", _gitlab_status(f),
-                           None, None, f.get("diff")) for f in diffs]
+                           None, None, f.get("diff"),
+                           f.get("old_path") if f.get("renamed_file") else None) for f in diffs]
 
     if not base:
         data = _diff_get(f"{base_api}/repository/commits/{head}/diff", headers).json()
@@ -572,9 +608,13 @@ def _bitbucket_diff(base_api: str, headers: dict[str, str], head: str, base: str
     # `diffstat/{spec}` reads as "rev1 relative to rev2", so head..base is
     # correct here even though GitHub/GitLab spell the comparison base-first.
     data = _diff_get(f"{base_api}/diffstat/{head}..{base}", headers).json()
-    files = [_diff_file((f.get("new") or {}).get("path") or (f.get("old") or {}).get("path") or "",
-                        f.get("status", ""), f.get("lines_added"), f.get("lines_removed"))
-             for f in (data.get("values") or [])]
+    files = []
+    for f in (data.get("values") or []):
+        new_path = (f.get("new") or {}).get("path")
+        old_path = (f.get("old") or {}).get("path")
+        files.append(_diff_file(new_path or old_path or "", f.get("status", ""),
+                                f.get("lines_added"), f.get("lines_removed"), None,
+                                old_path if f.get("status") == "renamed" and old_path != new_path else None))
     return _diff_result(base, head, files)
 
 
@@ -600,18 +640,10 @@ def fetch_git_diff(repo_url: str, head_commit: str, base_commit: str | None,
             GitHub and produced 404s against the wrong API.
         ApiError 502: the provider call itself failed.
     """
-    parsed = parse_repo_url(repo_url)
-    if parsed is None:
-        raise ApiError(
-            "Invalid repo URL (supported hosts: github.com, bitbucket.org, gitlab.com, "
-            "dev.azure.com, *.visualstudio.com)", 400,
-        )
-    provider = parsed["provider"]
+    parsed, provider, base_api, headers = _resolve(repo_url, token)
     handler = _DIFF_DISPATCH.get(provider)
     if handler is None:
         raise ApiError(f"Unsupported git provider: {provider}", 400)
-    base_api = _base_api_url(repo_url, parsed)
-    headers = _diff_headers(provider, token)
     try:
         return handler(base_api, headers, head_commit, base_commit)
     except ApiError:
@@ -812,18 +844,10 @@ def fetch_pull_request(repo_url: str, pull_request_id: Any, token: str | None,
         ApiError 400: unsupported host or bad credential shape.
         ApiError 502: the provider call failed.
     """
-    parsed = parse_repo_url(repo_url)
-    if parsed is None:
-        raise ApiError(
-            "Invalid repo URL (supported hosts: github.com, bitbucket.org, gitlab.com, "
-            "dev.azure.com, *.visualstudio.com)", 400,
-        )
-    provider = parsed["provider"]
+    parsed, provider, base_api, headers = _resolve(repo_url, token)
     handler = _PR_DISPATCH.get(provider)
     if handler is None:
         raise ApiError(f"Unsupported git provider: {provider}", 400)
-    base_api = _base_api_url(repo_url, parsed)
-    headers = _diff_headers(provider, token)
     try:
         return handler(base_api, headers, pull_request_id, include_commits)
     except ApiError:
@@ -906,18 +930,12 @@ _LATEST_DISPATCH = {
 
 def fetch_latest_commit(repo_url: str, branch: str, token: str | None) -> dict[str, Any]:
     """Tip commit of *branch*. Blocking (httpx) — call it off the event loop."""
-    parsed = parse_repo_url(repo_url)
-    if parsed is None:
-        raise ApiError(
-            "Invalid repo URL (supported hosts: github.com, bitbucket.org, gitlab.com, "
-            "dev.azure.com, *.visualstudio.com)", 400,
-        )
-    provider = parsed["provider"]
+    parsed, provider, base_api, headers = _resolve(repo_url, token)
     handler = _LATEST_DISPATCH.get(provider)
     if handler is None:
         raise ApiError(f"Unsupported git provider: {provider}", 400)
     try:
-        return handler(_base_api_url(repo_url, parsed), _diff_headers(provider, token), branch)
+        return handler(base_api, headers, branch)
     except ApiError:
         raise
     except Exception as exc:
@@ -940,15 +958,7 @@ def post_pull_request_comment(repo_url: str, pull_request_id: Any, body: str,
        caller, so Azure skip-comments silently never appeared. Building the URL
        here means using Azure's actual threads API and payload.
     """
-    parsed = parse_repo_url(repo_url)
-    if parsed is None:
-        raise ApiError(
-            "Invalid repo URL (supported hosts: github.com, bitbucket.org, gitlab.com, "
-            "dev.azure.com, *.visualstudio.com)", 400,
-        )
-    provider = parsed["provider"]
-    base_api = _base_api_url(repo_url, parsed)
-    headers = _diff_headers(provider, token)
+    parsed, provider, base_api, headers = _resolve(repo_url, token)
     headers["Content-Type"] = "application/json"
 
     try:
@@ -1058,19 +1068,252 @@ def fetch_directory_tree(repo_url: str, branch: str, token: str | None) -> dict[
 
     Blocking (httpx) — call it off the event loop.
     """
-    parsed = parse_repo_url(repo_url)
-    if parsed is None:
-        raise ApiError(
-            "Invalid repo URL (supported hosts: github.com, bitbucket.org, gitlab.com, "
-            "dev.azure.com, *.visualstudio.com)", 400,
-        )
-    provider = parsed["provider"]
+    parsed, provider, base_api, headers = _resolve(repo_url, token)
     handler = _TREE_DISPATCH.get(provider)
     if handler is None:
         raise ApiError(f"Unsupported git provider: {provider}", 400)
     try:
-        return handler(_base_api_url(repo_url, parsed), _diff_headers(provider, token), branch)
+        return handler(base_api, headers, branch)
     except ApiError:
         raise
     except Exception as exc:
         raise ApiError(f"Failed to fetch directory tree from {provider}: {_scrub(str(exc))}", 502) from None
+
+
+# ── Commit detail, commit comment, commit status ──────────────────────────────
+#
+# BREEZEAI-1228 (follow-up 4). The three `AbstractSCMClient` methods COG did not
+# cover, blocking sdlc-autonomous-agents from retiring its own `scm/` layer:
+# `get_commit`, `post_commit_comment`, `update_commit_status`.
+
+
+def _commit_detail(sha: str, message: str, author: str, authored_at: str, url: str,
+                   files: list[dict[str, Any]], branch: str | None = None,
+                   truncated: bool = False) -> dict[str, Any]:
+    """Mirrors sdlc's `CommitDetails`. `jiraTicketKeys` is deliberately absent —
+    it is derived from `message` by the caller's own configured pattern."""
+    return {"sha": sha or "", "message": message or "", "author": author or "",
+            "authoredAt": authored_at or "", "url": url or "", "branch": branch,
+            "files": files, "truncated": truncated}
+
+
+# GitHub returns at most this many files on the single-commit endpoint and the
+# endpoint cannot be paginated. Reaching it means the list is incomplete.
+_GH_COMMIT_FILES_CAP = 300
+
+
+def _github_commit(base_api: str, headers: dict[str, str], sha: str) -> dict[str, Any]:
+    data = _diff_get(f"{base_api}/commits/{sha}", headers).json()
+    c = data.get("commit") or {}
+    author = c.get("author") or {}
+    files = [_diff_file(f.get("filename", ""), f.get("status", ""), f.get("additions"),
+                        f.get("deletions"), f.get("patch"), f.get("previous_filename"))
+             for f in (data.get("files") or [])]
+    return _commit_detail(data.get("sha") or sha, c.get("message"), author.get("name"),
+                          author.get("date"), data.get("html_url"), files,
+                          truncated=len(files) >= _GH_COMMIT_FILES_CAP)
+
+
+def _gitlab_commit(base_api: str, headers: dict[str, str], sha: str) -> dict[str, Any]:
+    data = _diff_get(f"{base_api}/repository/commits/{sha}", headers).json()
+    # GitLab's commit-diff endpoint pages at 20 by default, so it MUST be paged —
+    # a large commit otherwise silently reports only its first 20 files.
+    diffs = _paged_commits(
+        f"{base_api}/repository/commits/{sha}/diff", headers,
+        lambda f: _diff_file(f.get("new_path") or f.get("old_path") or "", _gitlab_status(f),
+                             None, None, f.get("diff"),
+                             f.get("old_path") if f.get("renamed_file") else None),
+    )
+    return _commit_detail(data.get("id") or sha, data.get("message"), data.get("author_name"),
+                          data.get("committed_date"), data.get("web_url"), diffs)
+
+
+def _bitbucket_commit(base_api: str, headers: dict[str, str], sha: str) -> dict[str, Any]:
+    data = _diff_get(f"{base_api}/commit/{sha}", headers).json()
+    # diffstat carries counts but no patch text; the raw diff carries patches but
+    # no counts. Fetch both and join them by filename.
+    stats = _cursor_commits(f"{base_api}/commit/{sha}/diffstat?pagelen=100", headers, lambda f: f)
+    patches = {f["filename"]: f.get("patch") for f in parse_raw_diff(
+        _diff_get(f"{base_api}/commit/{sha}/diff", headers).text)}
+    files = []
+    for f in stats:
+        new_path = (f.get("new") or {}).get("path")
+        old_path = (f.get("old") or {}).get("path")
+        name = new_path or old_path or ""
+        files.append(_diff_file(name, f.get("status", ""), f.get("lines_added"),
+                                f.get("lines_removed"), patches.get(name),
+                                old_path if f.get("status") == "renamed" and old_path != new_path else None))
+    author = data.get("author") or {}
+    return _commit_detail(data.get("hash") or sha, data.get("message"),
+                          author.get("raw") or (author.get("user") or {}).get("display_name"),
+                          data.get("date"), ((data.get("links") or {}).get("html") or {}).get("href"),
+                          files)
+
+
+def _azure_render_patch(base_api: str, headers: dict[str, str],
+                        before_id: str | None, after_id: str | None, path: str) -> str | None:
+    """Azure exposes NO diff endpoint, so a patch has to be rendered locally from
+    the before/after blobs. Returns None for binary or unreadable content."""
+    import difflib
+
+    def blob(object_id: str | None) -> str | None:
+        if not object_id:
+            return ""
+        try:
+            text = _diff_get(f"{base_api}/blobs/{object_id}", headers, {"$format": "text"}).text
+        except Exception:
+            return None
+        return None if "\x00" in text[:8192] else text  # NUL byte ⇒ binary
+
+    before, after = blob(before_id), blob(after_id)
+    if before is None or after is None:
+        return None
+    return "".join(difflib.unified_diff(before.splitlines(keepends=True),
+                                        after.splitlines(keepends=True),
+                                        fromfile=f"a/{path}", tofile=f"b/{path}")) or None
+
+
+_AZ_CHANGE_STATUS = {"add": "added", "edit": "modified", "delete": "deleted", "rename": "renamed"}
+
+
+def _azure_commit(base_api: str, headers: dict[str, str], sha: str) -> dict[str, Any]:
+    params = {"api-version": "6.0"}
+    data = _diff_get(f"{base_api}/commits/{sha}", headers, params).json()
+    changes = _azure_paged(f"{base_api}/commits/{sha}/changes", headers, params, lambda c: c)
+    files = []
+    for ch in changes:
+        item = ch.get("item") or {}
+        if item.get("isFolder"):
+            continue
+        path = (item.get("path") or "").lstrip("/")
+        change_type = (ch.get("changeType") or "edit").split(",")[0].strip()
+        patch = _azure_render_patch(base_api, headers, (ch.get("originalObjectId")
+                                                        or item.get("originalObjectId")),
+                                    item.get("objectId"), path)
+        adds = dels = None
+        if patch:
+            adds = len(re.findall(r"(?m)^\+[^+]", patch))
+            dels = len(re.findall(r"(?m)^-[^-]", patch))
+        files.append(_diff_file(path, _AZ_CHANGE_STATUS.get(change_type, change_type),
+                                adds, dels, patch,
+                                (ch.get("sourceServerItem") or "").lstrip("/") or None
+                                if change_type == "rename" else None))
+    author = data.get("author") or {}
+    return _commit_detail(data.get("commitId") or sha, data.get("comment"), author.get("name"),
+                          author.get("date"), data.get("remoteUrl"), files)
+
+
+_COMMIT_DISPATCH = {
+    "github": _github_commit,
+    "gitlab": _gitlab_commit,
+    "bitbucket": _bitbucket_commit,
+    "azure_devops": _azure_commit,
+}
+
+
+def fetch_commit(repo_url: str, sha: str, token: str | None) -> dict[str, Any]:
+    """A single commit with its file changes. Blocking — call off the event loop."""
+    parsed, provider, base_api, headers = _resolve(repo_url, token)
+    handler = _COMMIT_DISPATCH.get(provider)
+    if handler is None:
+        raise ApiError(f"Unsupported git provider: {provider}", 400)
+    try:
+        return handler(base_api, headers, sha)
+    except ApiError:
+        raise
+    except Exception as exc:
+        raise ApiError(f"Failed to fetch commit from {provider}: {_scrub(str(exc))}", 502) from None
+
+
+def post_commit_comment(repo_url: str, sha: str, body: str, token: str | None) -> dict[str, Any]:
+    """Comment on a commit.
+
+    Azure DevOps has **no commit-comment API**. It returns `{"posted": false}` with
+    a reason rather than raising — callers must treat "not posted" as a real
+    outcome, not assume success (the same contract sdlc's `AbstractSCMClient`
+    documents for its `{}` return).
+    """
+    parsed, provider, base_api, headers = _resolve(repo_url, token)
+    headers["Content-Type"] = "application/json"
+    try:
+        if provider == "github":
+            _diff_post(f"{base_api}/commits/{sha}/comments", headers, {"body": body})
+        elif provider == "gitlab":
+            # GitLab names this field `note`, not `body`.
+            _diff_post(f"{base_api}/repository/commits/{sha}/comments", headers, {"note": body})
+        elif provider == "bitbucket":
+            _diff_post(f"{base_api}/commit/{sha}/comments", headers, {"content": {"raw": body}})
+        elif provider == "azure_devops":
+            return {"posted": False, "provider": provider,
+                    "reason": "Azure DevOps has no commit-comment API"}
+        else:
+            raise ApiError(f"Unsupported git provider: {provider}", 400)
+    except ApiError:
+        raise
+    except Exception as exc:
+        raise ApiError(f"Failed to post commit comment to {provider}: {_scrub(str(exc))}", 502) from None
+    return {"posted": True, "provider": provider}
+
+
+_VALID_STATES = ("pending", "success", "failure", "error")
+# Each provider spells the same four states differently, and each truncates the
+# description at a different length. Getting either wrong is a 400 from the API.
+_STATE_MAP = {
+    "github": {s: s for s in _VALID_STATES},
+    "gitlab": {"pending": "pending", "success": "success", "failure": "failed", "error": "failed"},
+    "bitbucket": {"pending": "INPROGRESS", "success": "SUCCESSFUL",
+                  "failure": "FAILED", "error": "FAILED"},
+    "azure_devops": {"pending": "pending", "success": "succeeded",
+                     "failure": "failed", "error": "error"},
+}
+_DESC_CAP = {"github": 140, "gitlab": 250, "bitbucket": 255, "azure_devops": 4000}
+
+
+def update_commit_status(repo_url: str, sha: str, state: str, description: str,
+                         context: str, target_url: str, token: str | None,
+                         build_key: str | None = None) -> dict[str, Any]:
+    """Post or update a commit status check.
+
+    `state` is one of pending | success | failure | error; each provider's own
+    vocabulary is applied internally. An unrecognised state is coerced to
+    `pending` rather than rejected, matching the behaviour this replaces.
+
+    Bitbucket requires a build key and has no sane default — without one it
+    returns `{"posted": false}` rather than silently doing nothing.
+    """
+    parsed, provider, base_api, headers = _resolve(repo_url, token)
+    headers["Content-Type"] = "application/json"
+    mapped = _STATE_MAP[provider].get((state or "").lower(), _STATE_MAP[provider]["pending"])
+    desc = (description or "")[:_DESC_CAP[provider]]
+
+    try:
+        if provider == "github":
+            _diff_post(f"{base_api}/statuses/{sha}", headers,
+                       {"state": mapped, "description": desc, "context": context,
+                        "target_url": target_url})
+        elif provider == "gitlab":
+            _diff_post(f"{base_api}/statuses/{sha}", headers,
+                       {"state": mapped, "description": desc, "name": context,
+                        "target_url": target_url})
+        elif provider == "bitbucket":
+            if not build_key:
+                return {"posted": False, "provider": provider,
+                        "reason": "buildKey is required for Bitbucket build statuses"}
+            _diff_post(f"{base_api}/commit/{sha}/statuses/build", headers,
+                       {"key": build_key, "state": mapped, "name": context,
+                        "description": desc, "url": target_url})
+        elif provider == "azure_devops":
+            # Azure splits the context into genre/name on "/".
+            genre, _, name = context.rpartition("/")
+            _diff_post(f"{base_api}/commits/{sha}/statuses", headers,
+                       {"state": mapped, "description": desc,
+                        "context": {"genre": genre or "breezeai", "name": name or context},
+                        "targetUrl": target_url},
+                       {"api-version": "6.0"})
+        else:
+            raise ApiError(f"Unsupported git provider: {provider}", 400)
+    except ApiError:
+        raise
+    except Exception as exc:
+        raise ApiError(f"Failed to post commit status to {provider}: {_scrub(str(exc))}", 502) from None
+    return {"posted": True, "provider": provider, "state": mapped}
