@@ -502,13 +502,70 @@ def _resolve(repo_url: str, token: str | None) -> tuple[dict[str, str], str, str
     return parsed, provider, _base_api_url(repo_url, parsed), _diff_headers(provider, token)
 
 
+#: Statuses worth another attempt: a rate limit and the three transient 5xx a
+#: provider returns while shedding load. Everything else (401/403/404/422) is a
+#: decision, not a hiccup, and retrying it only delays the error.
+_RETRY_STATUSES = frozenset({429, 502, 503, 504})
+_RETRY_MAX = 3
+_RETRY_BACKOFF_SECONDS = 2.0
+
+
+def _send_with_retry(send, what: str):
+    """Call *send*, retrying the transient statuses with jittered backoff.
+
+    Jitter is multiplicative on the doubling base: without it every caller that
+    hit the same rate limit retries in lockstep and re-trips it together.
+
+    Args:
+        send: Zero-arg callable performing one HTTP attempt.
+        what: Short description used in the logs.
+
+    Returns:
+        The first response that is not a retryable status.
+
+    Raises:
+        ApiError: 502 once the budget is exhausted or on a non-retryable status.
+    """
+    import random
+    import time
+
+    last = None
+    for attempt in range(_RETRY_MAX + 1):
+        resp = send()
+        if resp.status_code not in _RETRY_STATUSES:
+            return resp
+        last = resp
+        if attempt == _RETRY_MAX:
+            break
+        delay = _RETRY_BACKOFF_SECONDS * (2**attempt) * (0.5 + random.random())
+        logger.warning(
+            "Retrying %s after HTTP %s (attempt %d/%d, sleeping %.1fs)",
+            what, resp.status_code, attempt + 1, _RETRY_MAX, delay,
+        )
+        time.sleep(delay)
+    logger.error("Gave up on %s after %d retries; last status %s",
+                 what, _RETRY_MAX, last.status_code if last else "?")
+    return last
+
+
+def _check(resp, what: str):
+    if resp.status_code >= 400:
+        raise ApiError(
+            f"Git provider returned {resp.status_code} for {what}: {_scrub(resp.text)[:500]}", 502
+        )
+    return resp
+
+
 def _diff_get(url: str, headers: dict[str, str], params: dict[str, Any] | None = None):
     import httpx
 
-    resp = httpx.get(url, headers=headers, params=params, timeout=_DIFF_TIMEOUT)
-    if resp.status_code >= 400:
-        raise ApiError(f"Git provider returned {resp.status_code}: {_scrub(resp.text)[:500]}", 502)
-    return resp
+    return _check(
+        _send_with_retry(
+            lambda: httpx.get(url, headers=headers, params=params, timeout=_DIFF_TIMEOUT),
+            f"GET {url}",
+        ),
+        f"GET {url}",
+    )
 
 
 def parse_raw_diff(raw_diff: str) -> list[dict[str, Any]]:
@@ -969,10 +1026,17 @@ def _diff_post(url: str, headers: dict[str, str], payload: dict[str, Any],
                params: dict[str, Any] | None = None):
     import httpx
 
-    resp = httpx.post(url, headers=headers, json=payload, params=params, timeout=_DIFF_TIMEOUT)
-    if resp.status_code >= 400:
-        raise ApiError(f"Git provider returned {resp.status_code}: {_scrub(resp.text)[:500]}", 502)
-    return resp
+    # Writes are retried on the same transient statuses. Every POST here is
+    # idempotent in effect — a duplicate comment or a repeated status update is
+    # strictly better than losing the PR gate to one 503.
+    return _check(
+        _send_with_retry(
+            lambda: httpx.post(url, headers=headers, json=payload, params=params,
+                               timeout=_DIFF_TIMEOUT),
+            f"POST {url}",
+        ),
+        f"POST {url}",
+    )
 
 
 def _github_latest(base_api: str, headers: dict[str, str], branch: str) -> dict[str, Any]:

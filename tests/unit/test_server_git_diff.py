@@ -245,3 +245,42 @@ def test_diff_envelope_always_carries_truncated(client, captured) -> None:
     """sdlc's meta-tests require a paginator to ANNOUNCE truncation, not just cap."""
     captured.queue.append(_FakeResponse({"files": []}))
     assert _post(client, baseCommitId=BASE).json()["truncated"] is False
+
+
+# ── Transient-failure retry (restored from the deleted scm/retry.py) ──────────
+
+def test_a_rate_limit_is_retried_then_succeeds(client, captured, monkeypatch) -> None:
+    """429 is a hiccup, not an answer. Deleting sdlc's scm/retry.py removed this
+    behaviour; COG must carry it or every SCM call lost its resilience."""
+    monkeypatch.setattr("time.sleep", lambda _: None)
+    captured.queue.append(_FakeResponse({"message": "rate limited"}, status_code=429))
+    captured.queue.append(_FakeResponse({"files": [{"filename": "a.ts", "status": "modified"}]}))
+    body = _post(client, baseCommitId=BASE).json()
+    assert body["totalFiles"] == 1
+    assert len(captured) == 2  # retried once, then succeeded
+
+
+@pytest.mark.parametrize("status", [429, 502, 503, 504])
+def test_every_transient_status_is_retried(client, captured, monkeypatch, status) -> None:
+    monkeypatch.setattr("time.sleep", lambda _: None)
+    captured.queue.append(_FakeResponse({}, status_code=status))
+    captured.queue.append(_FakeResponse({"files": []}))
+    assert _post(client, baseCommitId=BASE).status_code == 200
+    assert len(captured) == 2
+
+
+@pytest.mark.parametrize("status", [401, 403, 404, 422])
+def test_a_decision_is_not_retried(client, captured, monkeypatch, status) -> None:
+    """401/403/404/422 are answers. Retrying them only delays the error."""
+    monkeypatch.setattr("time.sleep", lambda _: None)
+    captured.queue.append(_FakeResponse({"message": "no"}, status_code=status))
+    assert _post(client, baseCommitId=BASE).status_code == 502
+    assert len(captured) == 1  # no retry
+
+
+def test_the_retry_budget_is_bounded(client, captured, monkeypatch) -> None:
+    monkeypatch.setattr("time.sleep", lambda _: None)
+    for _ in range(6):
+        captured.queue.append(_FakeResponse({}, status_code=503))
+    assert _post(client, baseCommitId=BASE).status_code == 502
+    assert len(captured) == 4  # initial attempt + 3 retries, then give up
