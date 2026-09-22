@@ -396,6 +396,14 @@ def acquire_diff(settings: Settings, body: dict[str, Any]) -> tuple[str, set[str
 
 _DIFF_TIMEOUT = 60.0
 
+#: Azure DevOps versions its payload shapes, so every request must name one.
+#: 7.1 is the current GA version; the backend's Azure calls were pinned at 6.0
+#: and sdlc-autonomous-agents was already on 7.1, so 6.0 was the outlier.
+#: ONE constant: this was duplicated across nine call sites, which is how the
+#: two services drifted apart unnoticed.
+_ADO_API_VERSION = "7.1"
+_ADO_PARAMS: dict[str, Any] = {"api-version": _ADO_API_VERSION}
+
 # Azure's no-base fallback used to return the file's SIZE IN BYTES in
 # `additions`. That was never a line count; it is now `None` like every other
 # value Azure cannot supply.
@@ -635,7 +643,7 @@ def _gitlab_diff(base_api: str, headers: dict[str, str], head: str, base: str | 
 def _azure_diff(base_api: str, headers: dict[str, str], head: str, base: str | None) -> dict[str, Any]:
     if base:
         data = _diff_get(f"{base_api}/diffs/commits", headers, {
-            "api-version": "6.0",
+            "api-version": _ADO_API_VERSION,
             "baseVersion": base, "baseVersionType": "Commit",
             "targetVersion": head, "targetVersionType": "Commit",
         }).json()
@@ -648,12 +656,12 @@ def _azure_diff(base_api: str, headers: dict[str, str], head: str, base: str | N
     # No base: `diffs/commits` rejects a missing baseVersion ("first" is not a
     # valid versionType), so enumerate the tree at head and report it all as added.
     data = _diff_get(f"{base_api}/items", headers, {
-        "api-version": "6.0",
+        "api-version": _ADO_API_VERSION,
         "versionDescriptor": json.dumps({"version": head, "versionType": "Commit"}),
         "recursionLevel": "Full",
     }).json()
     files = [_diff_file((item.get("path") or "").lstrip("/"), "added")
-             for item in (data.get("value") or []) if not item.get("isFolder")]
+             for item in _azure_page_items(data) if not item.get("isFolder")]
     return _diff_result("", head, files)
 
 
@@ -906,7 +914,7 @@ def _gitlab_pr(base_api: str, headers: dict[str, str], pr_id: Any, include_commi
 
 
 def _azure_pr(base_api: str, headers: dict[str, str], pr_id: Any, include_commits: bool) -> dict[str, Any]:
-    params = {"api-version": "6.0"}
+    params = dict(_ADO_PARAMS)
     pr = _diff_get(f"{base_api}/pullrequests/{pr_id}", headers, params).json()
     commits: list[dict[str, Any]] = []
     if include_commits:
@@ -1072,10 +1080,11 @@ def _bitbucket_latest(base_api: str, headers: dict[str, str], branch: str) -> di
 def _azure_latest(base_api: str, headers: dict[str, str], branch: str) -> dict[str, Any]:
     from urllib.parse import quote
 
-    params = {"api-version": "6.0"}
+    params = dict(_ADO_PARAMS)
     refs = _diff_get(f"{base_api}/refs", headers,
                      {**params, "filter": f"heads/{quote(branch, safe='')}"}).json()
-    ref = (refs.get("value") or [None])[0]
+    items = _azure_page_items(refs)
+    ref = items[0] if items else None
     if not ref:
         # 404 rather than the backend's generic Error (which surfaced as a 500):
         # a missing branch is a client-correctable condition, not a server fault.
@@ -1142,7 +1151,7 @@ def post_pull_request_comment(repo_url: str, pull_request_id: Any, body: str,
             _diff_post(f"{base_api}/pullRequests/{pull_request_id}/threads", headers,
                        {"comments": [{"parentCommentId": 0, "content": body, "commentType": 1}],
                         "status": 1},
-                       {"api-version": "6.0"})
+                       dict(_ADO_PARAMS))
         else:
             raise ApiError(f"Unsupported git provider: {provider}", 400)
     except ApiError:
@@ -1194,13 +1203,13 @@ def _gitlab_tree(base_api: str, headers: dict[str, str], branch: str) -> dict[st
 
 def _azure_tree(base_api: str, headers: dict[str, str], branch: str) -> dict[str, Any]:
     data = _diff_get(f"{base_api}/items", headers, {
-        "api-version": "6.0",
+        "api-version": _ADO_API_VERSION,
         "versionDescriptor": json.dumps({"version": branch, "versionType": "Branch"}),
         "recursionLevel": "Full",
     }).json()
     # `versionType` is PascalCase-strict on Azure; "branch" resolves wrong.
     entries = [_tree_entry((i.get("path") or "").lstrip("/"), bool(i.get("isFolder")), i.get("size"))
-               for i in (data.get("value") or [])]
+               for i in _azure_page_items(data)]
     return {"entries": entries, "truncated": False}
 
 
@@ -1326,7 +1335,8 @@ def _azure_render_patch(base_api: str, headers: dict[str, str],
         if not object_id:
             return ""
         try:
-            text = _diff_get(f"{base_api}/blobs/{object_id}", headers, {"$format": "text"}).text
+            text = _diff_get(f"{base_api}/blobs/{object_id}", headers,
+                             {**_ADO_PARAMS, "$format": "text"}).text
         except Exception:
             return None
         return None if "\x00" in text[:8192] else text  # NUL byte ⇒ binary
@@ -1343,7 +1353,7 @@ _AZ_CHANGE_STATUS = {"add": "added", "edit": "modified", "delete": "deleted", "r
 
 
 def _azure_commit(base_api: str, headers: dict[str, str], sha: str) -> dict[str, Any]:
-    params = {"api-version": "6.0"}
+    params = dict(_ADO_PARAMS)
     data = _diff_get(f"{base_api}/commits/{sha}", headers, params).json()
     changes = _azure_paged(f"{base_api}/commits/{sha}/changes", headers, params, lambda c: c)
     files = []
@@ -1475,7 +1485,7 @@ def update_commit_status(repo_url: str, sha: str, state: str, description: str,
                        {"state": mapped, "description": desc,
                         "context": {"genre": genre or "breezeai", "name": name or context},
                         "targetUrl": target_url},
-                       {"api-version": "6.0"})
+                       dict(_ADO_PARAMS))
         else:
             raise ApiError(f"Unsupported git provider: {provider}", 400)
     except ApiError:

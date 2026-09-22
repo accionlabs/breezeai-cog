@@ -226,3 +226,40 @@ def test_unknown_state_is_coerced_to_pending(client, captured) -> None:
 def test_commit_status_requires_state(client) -> None:
     assert client.post("/api/commit-status",
                        json={"repoUrl": GH, "sha": SHA}).status_code == 400
+
+
+# ── Azure API version is pinned once ──────────────────────────────────────────
+
+def test_every_azure_call_names_the_same_api_version(client, captured) -> None:
+    """Azure versions its payload shapes, so an unversioned or drifting call can
+    change shape under us with no code change. This caught a real drift: the
+    backend was on 6.0 while sdlc-autonomous-agents was on 7.1."""
+    from breezeai_cog.server import git as git_mod
+
+    captured.queue.append(_FakeResponse({"commitId": SHA, "author": {}}))
+    captured.queue.append(_FakeResponse({"changes": [
+        {"item": {"path": "/a.cs", "objectId": "A"}, "changeType": "edit"},
+    ]}))
+    captured.queue.append(_FakeResponse(""))
+    captured.queue.append(_FakeResponse("x\n"))
+    client.post("/api/commit", json={"repoUrl": AZ, "sha": SHA, "gitToken": "pat"})
+
+    versioned = [c for c in captured if "api-version" in c["params"]]
+    assert versioned, "no Azure call named an api-version"
+    assert {c["params"]["api-version"] for c in versioned} == {git_mod._ADO_API_VERSION}
+    # Including the blob fetch, which previously carried no version at all.
+    assert any("/blobs/" in c["url"] for c in versioned), (
+        "the blob fetch is unversioned; Azure would apply a default that can "
+        "shift without a code change"
+    )
+
+
+def test_the_version_is_pinned_in_exactly_one_place() -> None:
+    """Nine copies is how the drift happened; one constant is the fix."""
+    import pathlib
+
+    src = pathlib.Path(
+        "src/breezeai_cog/server/git.py"
+    ).read_text()
+    assert '"6.0"' not in src, "a hardcoded Azure api-version survived the bump"
+    assert src.count('_ADO_API_VERSION = ') == 1

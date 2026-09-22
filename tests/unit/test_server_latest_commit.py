@@ -148,7 +148,7 @@ def test_azure_uses_the_threads_api_not_a_github_shaped_body(client, captured) -
     client.post("/api/pr-comment", json={
         "repoUrl": AZ, "pullRequestId": 5, "body": "hi", "gitToken": "pat"})
     assert captured[0]["url"].endswith("/pullRequests/5/threads")
-    assert captured[0]["params"]["api-version"] == "6.0"
+    assert captured[0]["params"]["api-version"] == "7.1"
     assert captured[0]["json"] == {
         "comments": [{"parentCommentId": 0, "content": "hi", "commentType": 1}], "status": 1}
 
