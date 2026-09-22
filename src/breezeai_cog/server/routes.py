@@ -23,7 +23,14 @@ from ..services.diff import empty_meta, run_diff_stream
 from ..services.inprocess import analyze_in_memory
 from .deps import ServerDeps
 from .errors import ApiError
-from .git import parse_repo_url
+from .git import (
+    fetch_directory_tree,
+    fetch_git_diff,
+    fetch_latest_commit,
+    fetch_pull_request,
+    parse_repo_url,
+    post_pull_request_comment,
+)
 
 router = APIRouter()
 
@@ -157,6 +164,168 @@ async def analyze_diff(request: Request, background_tasks: BackgroundTasks) -> d
         "deletedFiles": deleted_files,
         "message": message,
     }
+
+
+@router.post("/api/git-diff")
+async def git_diff(request: Request) -> dict:
+    """Provider-agnostic file-level diff between two commits (BREEZEAI-1228).
+
+    The single place any Breeze service asks a git host "what changed?". Replaces
+    the four private `get*Diff` helpers in BreezeAI_Backend's `GitService`, the
+    `scm/` diff paths in sdlc-autonomous-agents, and the N8N `Get_PR_Diff_*` nodes.
+
+    Body — `repoUrl` and `incomingCommitId` are required; everything else is
+    optional. `gitBranch`, `projectUuid` and `codeOntologyId` are ACCEPTED for
+    payload symmetry with `/api/analyze-diff` but are not needed to compute a
+    diff and are not read (same accepted deviation as `llmPlatform`).
+
+        repoUrl          str   required — provider inferred from the host
+        incomingCommitId str   required — head commit SHA
+        baseCommitId     str?  omit/null for a single-commit diff
+        gitToken         str?  provider credential; omit for a public repo
+        gitBranch        str?  accepted, unused
+        projectUuid      str?  accepted, unused
+        codeOntologyId   any?  accepted, unused
+
+    Returns `{baseSha, headSha, totalFiles, files[]}`. `files[].additions`,
+    `.deletions` and `.patch` are **nullable** — `null` means "this provider does
+    not report it", which `0` could not distinguish from a genuine zero. See the
+    provider capability table in `server/git.py`.
+    """
+    body = await request.json()
+
+    repo_url = body.get("repoUrl")
+    incoming = body.get("incomingCommitId")
+    if not repo_url or not incoming:
+        raise ApiError("All fields required: repoUrl, incomingCommitId", 400)
+
+    base = body.get("baseCommitId")
+    # The backend sends JSON null, but a stringified "null"/"undefined" has
+    # historically reached these endpoints too — treat every one as "no base".
+    if base in (None, "", "null", "undefined"):
+        base = None
+
+    # Blocking httpx calls — keep them off the event loop.
+    return await run_in_threadpool(fetch_git_diff, repo_url, incoming, base, body.get("gitToken"))
+
+
+@router.post("/api/pull-request")
+async def pull_request(request: Request) -> dict:
+    """Provider-agnostic pull-request lookup (BREEZEAI-1228 follow-up).
+
+    Replaces `GitService.getPullRequestInfo` AND `getPullRequestBaseBranch` in
+    BreezeAI_Backend. Both are the same call: the "lightweight" variant is just
+    `includeCommits: false`, since skipping the paginated commit listing was the
+    only thing that made it cheap.
+
+    Body:
+        repoUrl         str      required — provider inferred from the host
+        pullRequestId   str|int  required — PR / MR / pullRequest id
+        gitToken        str?     provider credential; omit for a public repo
+        includeCommits  bool?    default true; false skips the commits fetch
+
+    Returns `{id, title, state, baseBranch, sourceBranch, baseCommitSha,
+    headCommitSha, commits[]}`. `commits` is `[]` when `includeCommits` is false
+    — NOT an indication that the PR has no commits.
+
+    "Pull request" is canonical: GitLab merge requests and Azure pullRequests are
+    translated internally, so the caller never branches on provider.
+    """
+    body = await request.json()
+
+    repo_url = body.get("repoUrl")
+    pr_id = body.get("pullRequestId")
+    # 0 is not a valid PR id on any provider, so a plain falsy check is safe here.
+    if not repo_url or not pr_id:
+        raise ApiError("All fields required: repoUrl, pullRequestId", 400)
+
+    include_commits = body.get("includeCommits")
+    include_commits = True if include_commits is None else bool(include_commits)
+
+    return await run_in_threadpool(
+        fetch_pull_request, repo_url, pr_id, body.get("gitToken"), include_commits
+    )
+
+
+@router.post("/api/latest-commit")
+async def latest_commit(request: Request) -> dict:
+    """Tip commit of a branch (BREEZEAI-1228 follow-up).
+
+    Replaces `GitService.getLatestCommit` in BreezeAI_Backend.
+
+    Body:
+        repoUrl    str   required — provider inferred from the host
+        gitBranch  str?  defaults to "main", as the backend did
+        gitToken   str?  provider credential; omit for a public repo
+
+    Returns `{sha, message, author, date}`. 404 when the branch does not exist
+    (Azure reports this explicitly; the others surface it as a provider 404).
+    """
+    body = await request.json()
+
+    repo_url = body.get("repoUrl")
+    if not repo_url:
+        raise ApiError("All fields required: repoUrl", 400)
+
+    branch = body.get("gitBranch") or "main"
+    return await run_in_threadpool(fetch_latest_commit, repo_url, branch, body.get("gitToken"))
+
+
+@router.post("/api/pr-comment")
+async def pr_comment(request: Request) -> dict:
+    """Post a comment on a pull request (BREEZEAI-1228 follow-up).
+
+    Replaces `GitService.postPrComment`. ⚠️ It takes `repoUrl` + `pullRequestId`
+    rather than the backend's pre-built `commentUrl`: COG builds the provider URL
+    itself, so this endpoint cannot be used to POST to an arbitrary address, and
+    Azure gets its real threads API instead of a GitHub-shaped payload sent to
+    the wrong URL. See `post_pull_request_comment` in `server/git.py`.
+
+    Body:
+        repoUrl        str      required
+        pullRequestId  str|int  required
+        body           str      required — the comment text (Markdown on most providers)
+        gitToken       str?     omit only if the repo accepts anonymous comments (none do)
+
+    Returns `{posted: true, provider: "<provider>"}`.
+    """
+    payload = await request.json()
+
+    repo_url = payload.get("repoUrl")
+    pr_id = payload.get("pullRequestId")
+    comment = payload.get("body")
+    if not repo_url or not pr_id or not comment:
+        raise ApiError("All fields required: repoUrl, pullRequestId, body", 400)
+
+    return await run_in_threadpool(
+        post_pull_request_comment, repo_url, pr_id, comment, payload.get("gitToken")
+    )
+
+
+@router.post("/api/directory-tree")
+async def directory_tree(request: Request) -> dict:
+    """Recursive file listing for a branch (BREEZEAI-1228 follow-up).
+
+    Replaces `GitService.getDirectoryTree` in BreezeAI_Backend.
+
+    Body:
+        repoUrl    str   required — provider inferred from the host
+        gitBranch  str?  defaults to "main"
+        gitToken   str?  provider credential; omit for a public repo
+
+    Returns `{entries: [{path, type, size}], truncated}`. `type` is "tree" or
+    "blob"; `size` is null where the provider does not report it. `truncated` is
+    true only on GitHub, whose tree endpoint caps its response rather than
+    paginating — treat the listing as incomplete when you see it.
+    """
+    body = await request.json()
+
+    repo_url = body.get("repoUrl")
+    if not repo_url:
+        raise ApiError("All fields required: repoUrl", 400)
+
+    branch = body.get("gitBranch") or "main"
+    return await run_in_threadpool(fetch_directory_tree, repo_url, branch, body.get("gitToken"))
 
 
 @router.post("/api/analyze-sql")
