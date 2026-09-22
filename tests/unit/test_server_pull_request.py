@@ -85,14 +85,17 @@ def test_github_maps_pr_and_pages_commits(client, captured) -> None:
     assert body["baseCommitSha"] == "BASE" and body["headCommitSha"] == "HEAD"
     assert len(body["commits"]) == 101
     assert body["commits"][-1] == {"sha": "tail", "message": "m2", "author": "b", "date": "d2"}
-    assert [c["params"].get("page") for c in captured[1:]] == [1, 2]
+    commit_pages = [c for c in captured if c["url"].endswith("/commits")]
+    assert [c["params"].get("page") for c in commit_pages] == [1, 2]
+    assert captured[-1]["url"].endswith("/reviews")  # approvals, fetched last
 
 
 def test_github_stops_paging_on_an_empty_page(client, captured) -> None:
     captured.queue.append(_FakeResponse({"base": {}, "head": {}}))
     captured.queue.append(_FakeResponse([]))
+    captured.queue.append(_FakeResponse([]))  # reviews
     assert _post(client).json()["commits"] == []
-    assert len(captured) == 2  # PR + one commits page, no more
+    assert [c["url"].rsplit("/", 1)[-1] for c in captured] == ["42", "commits", "reviews"]
 
 
 # ── includeCommits=false — the getPullRequestBaseBranch replacement ───────────
@@ -110,8 +113,9 @@ def test_include_commits_false_skips_the_commits_request(client, captured) -> No
 def test_include_commits_defaults_to_true(client, captured) -> None:
     captured.queue.append(_FakeResponse({"base": {}, "head": {}}))
     captured.queue.append(_FakeResponse([]))
+    captured.queue.append(_FakeResponse([]))  # reviews
     _post(client)
-    assert len(captured) == 2
+    assert len(captured) == 3  # PR + commits + reviews
 
 
 # ── GitLab ────────────────────────────────────────────────────────────────────
@@ -258,3 +262,97 @@ def test_azure_paged_safety_stop_prevents_an_infinite_loop(monkeypatch) -> None:
     out = git_mod._azure_paged("u", {}, {}, lambda c: c, page_size=10, max_pages=5)
     assert calls["n"] == 5      # stopped at the cap, did not spin
     assert len(out) == 5        # and kept what it had rather than failing
+
+
+# ── PRDetails enrichment for Merge Validation ─────────────────────────────────
+
+def test_github_reports_approvals_labels_and_reviewers(client, captured) -> None:
+    captured.queue.append(_FakeResponse({
+        "number": 1, "state": "closed", "merged_at": "2026-01-02", "body": "desc",
+        "user": {"login": "ada"}, "html_url": "u", "created_at": "2026-01-01",
+        "labels": [{"name": "bug"}], "requested_reviewers": [{"login": "bo"}],
+        "base": {"ref": "main", "sha": "B"}, "head": {"ref": "f", "sha": "H"},
+    }))
+    captured.queue.append(_FakeResponse([]))  # commits
+    captured.queue.append(_FakeResponse([
+        {"state": "APPROVED", "user": {"login": "cy"}},
+        {"state": "COMMENTED", "user": {"login": "dee"}},
+    ]))
+    body = _post(client).json()
+    assert body["state"] == "merged"          # closed + merged_at
+    assert body["approvals"] == ["cy"]        # COMMENTED is not an approval
+    assert body["labels"] == ["bug"] and body["reviewers"] == ["bo"]
+    assert body["author"] == "ada" and body["description"] == "desc"
+
+
+def test_github_review_failure_degrades_to_empty_approvals(client, captured) -> None:
+    """A reviews outage must not fail the whole PR fetch."""
+    captured.queue.append(_FakeResponse({"base": {}, "head": {}}))
+    captured.queue.append(_FakeResponse([]))
+    captured.queue.append(_FakeResponse({"message": "boom"}, status_code=500))
+    assert _post(client).json()["approvals"] == []
+
+
+def test_lightweight_fetch_skips_the_approvals_round_trip(client, captured) -> None:
+    """`includeCommits=false` exists to avoid extra calls — approvals cost one."""
+    captured.queue.append(_FakeResponse({"base": {"ref": "main"}, "head": {}}))
+    body = _post(client, includeCommits=False).json()
+    assert body["approvals"] == []   # "not fetched", not "nobody approved"
+    assert len(captured) == 1
+
+
+def test_azure_approval_is_vote_ten(client, captured) -> None:
+    captured.queue.append(_FakeResponse({
+        "pullRequestId": 5, "status": "completed",
+        "reviewers": [{"displayName": "Ada", "vote": 10}, {"displayName": "Bo", "vote": -5}],
+    }))
+    body = _post(client, repoUrl=AZ, includeCommits=False).json()
+    assert body["approvals"] == ["Ada"]
+    assert body["reviewers"] == ["Ada", "Bo"]
+    assert body["state"] == "merged"   # Azure says "completed"
+
+
+def test_bitbucket_approval_comes_from_participants(client, captured) -> None:
+    captured.queue.append(_FakeResponse({
+        "id": 3, "state": "MERGED",
+        "participants": [{"approved": True, "user": {"display_name": "Ada"}},
+                         {"approved": False, "user": {"display_name": "Bo"}}],
+        "destination": {"branch": {"name": "main"}}, "source": {"branch": {"name": "f"}},
+    }))
+    body = _post(client, repoUrl=BB, gitToken="u:k", includeCommits=False).json()
+    assert body["approvals"] == ["Ada"]
+    assert body["state"] == "merged"
+    assert body["labels"] == []   # Bitbucket Cloud has no PR labels
+
+
+# ── Azure page envelopes ──────────────────────────────────────────────────────
+
+@pytest.mark.parametrize(("body", "expected"), [
+    ({"value": [1, 2]}, [1, 2]),
+    ({"changes": [1, 2, 3]}, [1, 2, 3]),        # commit changes
+    ({"changeEntries": [1]}, [1]),              # PR iteration changes
+    ([1, 2], [1, 2]),
+    ({}, []),
+    ({"unexpected": "shape"}, []),
+    (None, []),
+])
+def test_azure_page_items_reads_every_envelope(body, expected) -> None:
+    """Azure wraps change endpoints differently from everything else. Reading
+    only `value` yields an empty list — no error, no files, and a caller that
+    validates nothing and passes vacuously."""
+    from breezeai_cog.server import git as git_mod
+
+    assert git_mod._azure_page_items(body) == expected
+
+
+def test_azure_commit_changes_use_the_changes_envelope(client, captured) -> None:
+    """Regression: `/commits/{sha}/changes` returns {"changes": [...]}, so a
+    value-only reader reports a commit with no files changed."""
+    captured.queue.append(_FakeResponse({"commitId": "abc", "author": {}}))
+    captured.queue.append(_FakeResponse({"changes": [
+        {"item": {"path": "/a.cs", "objectId": "A"}, "changeType": "add"},
+    ]}))
+    captured.queue.append(_FakeResponse(""))       # before blob (add → empty)
+    captured.queue.append(_FakeResponse("new\n"))  # after blob
+    body = client.post("/api/commit", json={"repoUrl": AZ, "sha": "abc"}).json()
+    assert [f["filename"] for f in body["files"]] == ["a.cs"]

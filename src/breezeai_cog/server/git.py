@@ -664,6 +664,17 @@ def fetch_git_diff(repo_url: str, head_commit: str, base_commit: str | None,
 # request, Bitbucket `pullrequests`, Azure `pullRequests`) is translated
 # internally so callers never branch on provider.
 
+class _SkipApprovals(Exception):
+    """Internal sentinel: the caller asked for the cheap metadata-only fetch.
+
+    GitHub and GitLab expose approvals on a SEPARATE endpoint, so reading them
+    costs a second round-trip. `includeCommits=false` exists precisely to avoid
+    extra round-trips, so it suppresses approvals too — `approvals` comes back
+    `[]`, which means "not fetched", not "nobody approved". Azure and Bitbucket
+    carry approvals on the PR payload itself, so they are always populated.
+    """
+
+
 _REFS_HEADS = "refs/heads/"
 
 
@@ -692,6 +703,27 @@ def _paged_commits(url: str, headers: dict[str, str], extract, page_size: int = 
     return commits
 
 
+#: Azure does NOT wrap every endpoint the same way. Most return {"value": [...]},
+#: but the change endpoints do not: commit changes come back under "changes" and
+#: PR iteration changes under "changeEntries". Reading only "value" yields an
+#: empty list — no error, no files, and a caller that validates nothing and
+#: passes vacuously.
+_AZ_PAGE_KEYS = ("value", "changes", "changeEntries")
+
+
+def _azure_page_items(body: Any) -> list[Any]:
+    """Items from one Azure page, whichever envelope it used."""
+    if isinstance(body, list):
+        return body
+    if not isinstance(body, dict):
+        return []
+    for key in _AZ_PAGE_KEYS:
+        items = body.get(key)
+        if isinstance(items, list):
+            return items
+    return []
+
+
 def _azure_paged(url: str, headers: dict[str, str], params: dict[str, Any], extract,
                  page_size: int = 100, max_pages: int = 100) -> list[dict[str, Any]]:
     """Continuation-token pagination (Azure DevOps).
@@ -711,7 +743,7 @@ def _azure_paged(url: str, headers: dict[str, str], params: dict[str, Any], extr
         if token:
             page_params["continuationToken"] = token
         resp = _diff_get(url, headers, page_params)
-        values = (resp.json() or {}).get("value") or []
+        values = _azure_page_items(resp.json())
         out.extend(extract(v) for v in values)
         token = (getattr(resp, "headers", None) or {}).get("x-ms-continuationtoken")
         if not token or not values:
@@ -741,8 +773,32 @@ def _github_pr(base_api: str, headers: dict[str, str], pr_id: Any, include_commi
                           ((c.get("commit") or {}).get("author") or {}).get("date")),
     ) if include_commits else []
     base, head = pr.get("base") or {}, pr.get("head") or {}
+    # Approvals are a separate endpoint. Merge Validation gates on them, but a
+    # reviews failure must not fail the whole PR fetch — degrade to [].
+    approvals: list[str] = []
+    try:
+        if not include_commits:
+            raise _SkipApprovals
+        reviews = _diff_get(f"{base_api}/pulls/{pr_id}/reviews", headers, {"per_page": 100}).json()
+        approvals = [(r.get("user") or {}).get("login") for r in (reviews or [])
+                     if r.get("state") == "APPROVED"]
+        approvals = [a for a in approvals if a]
+    except _SkipApprovals:
+        pass
+    except Exception:
+        logger.warning("Could not read reviews for GitHub PR %s; approvals reported empty", pr_id)
+    # GitHub's PR state is open|closed; "merged" is closed + merged_at.
+    state = pr.get("state") or ""
+    if state == "closed" and pr.get("merged_at"):
+        state = "merged"
     return {
-        "id": pr.get("number"), "title": pr.get("title"), "state": pr.get("state"),
+        "id": pr.get("number"), "title": pr.get("title"), "state": state,
+        "description": pr.get("body") or "", "author": (pr.get("user") or {}).get("login") or "",
+        "url": pr.get("html_url") or "", "createdAt": pr.get("created_at") or "",
+        "mergedAt": pr.get("merged_at"),
+        "labels": [l.get("name") for l in (pr.get("labels") or []) if l.get("name")],
+        "reviewers": [r.get("login") for r in (pr.get("requested_reviewers") or []) if r.get("login")],
+        "approvals": approvals,
         "baseBranch": base.get("ref") or "", "sourceBranch": head.get("ref") or "",
         "baseCommitSha": base.get("sha") or "", "headCommitSha": head.get("sha") or "",
         "commits": commits,
@@ -756,8 +812,27 @@ def _gitlab_pr(base_api: str, headers: dict[str, str], pr_id: Any, include_commi
         lambda c: _commit(c.get("id"), c.get("message"), c.get("author_name"), c.get("committed_date")),
     ) if include_commits else []
     diff_refs = mr.get("diff_refs") or {}
+    approvals: list[str] = []
+    try:
+        if not include_commits:
+            raise _SkipApprovals
+        appr = _diff_get(f"{base_api}/merge_requests/{pr_id}/approvals", headers).json()
+        approvals = [((a.get("user") or {}).get("username")) for a in (appr.get("approved_by") or [])]
+        approvals = [a for a in approvals if a]
+    except _SkipApprovals:
+        pass
+    except Exception:
+        logger.warning("Could not read approvals for GitLab MR %s; reported empty", pr_id)
+    state = {"opened": "open", "locked": "closed"}.get(mr.get("state") or "", mr.get("state") or "")
     return {
-        "id": mr.get("iid"), "title": mr.get("title"), "state": mr.get("state"),
+        "id": mr.get("iid"), "title": mr.get("title"), "state": state,
+        "description": mr.get("description") or "",
+        "author": (mr.get("author") or {}).get("username") or "",
+        "url": mr.get("web_url") or "", "createdAt": mr.get("created_at") or "",
+        "mergedAt": mr.get("merged_at"),
+        "labels": list(mr.get("labels") or []),
+        "reviewers": [r.get("username") for r in (mr.get("reviewers") or []) if r.get("username")],
+        "approvals": approvals,
         "baseBranch": mr.get("target_branch") or "", "sourceBranch": mr.get("source_branch") or "",
         # FIXED (BREEZEAI-1228): this used to fall back to `target_branch` when
         # GitLab omits `diff_refs` (it does on some MR states). `target_branch` is
@@ -787,8 +862,20 @@ def _azure_pr(base_api: str, headers: dict[str, str], pr_id: Any, include_commit
                               (c.get("author") or {}).get("name"),
                               (c.get("author") or {}).get("date")),
         )
+    reviewers = pr.get("reviewers") or []
+    state = {"active": "open", "completed": "merged", "abandoned": "closed"}.get(
+        pr.get("status") or "", pr.get("status") or "")
     return {
-        "id": pr.get("pullRequestId"), "title": pr.get("title"), "state": pr.get("status"),
+        "id": pr.get("pullRequestId"), "title": pr.get("title"), "state": state,
+        "description": pr.get("description") or "",
+        "author": (pr.get("createdBy") or {}).get("displayName") or "",
+        "url": pr.get("url") or "", "createdAt": pr.get("creationDate") or "",
+        "mergedAt": pr.get("closedDate"),
+        "labels": [l.get("name") for l in (pr.get("labels") or []) if l.get("name")],
+        "reviewers": [r.get("displayName") for r in reviewers if r.get("displayName")],
+        # Azure encodes approval as a numeric vote; 10 == "approved".
+        "approvals": [r.get("displayName") for r in reviewers
+                      if r.get("vote") == 10 and r.get("displayName")],
         "baseBranch": _strip_ref(pr.get("targetRefName")), "sourceBranch": _strip_ref(pr.get("sourceRefName")),
         # Azure's SOURCE commit is the PR head and its TARGET commit is the base.
         # The backend had these two swapped, so every Azure PR sync analysed a
@@ -812,8 +899,23 @@ def _bitbucket_pr(base_api: str, headers: dict[str, str], pr_id: Any, include_co
                           c.get("date")),
     ) if include_commits else []
     dest, src = pr.get("destination") or {}, pr.get("source") or {}
+    participants = pr.get("participants") or []
+    def _name(u: dict) -> str:
+        return (u or {}).get("display_name") or (u or {}).get("nickname") or ""
+    state = {"OPEN": "open", "MERGED": "merged",
+             "DECLINED": "closed", "SUPERSEDED": "closed"}.get(pr.get("state") or "",
+                                                               (pr.get("state") or "").lower())
     return {
-        "id": pr.get("id"), "title": pr.get("title"), "state": pr.get("state"),
+        "id": pr.get("id"), "title": pr.get("title"), "state": state,
+        "description": (pr.get("summary") or {}).get("raw") or pr.get("description") or "",
+        "author": _name(pr.get("author")), "createdAt": pr.get("created_on") or "",
+        "url": ((pr.get("links") or {}).get("html") or {}).get("href") or "",
+        "mergedAt": pr.get("updated_on") if (pr.get("state") == "MERGED") else None,
+        # Bitbucket Cloud has no PR labels at all.
+        "labels": [],
+        "reviewers": [_name(r) for r in (pr.get("reviewers") or []) if _name(r)],
+        "approvals": [_name(p.get("user")) for p in participants
+                      if p.get("approved") and _name(p.get("user"))],
         "baseBranch": (dest.get("branch") or {}).get("name") or "",
         "sourceBranch": (src.get("branch") or {}).get("name") or "",
         "baseCommitSha": (dest.get("commit") or {}).get("hash") or "",
