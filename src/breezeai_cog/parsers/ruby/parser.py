@@ -8,7 +8,7 @@ from ...emit import file_id
 from ...schemas import SCHEMA_VERSION, FileRecord, Function, Statement
 from ...utils import count_loc
 from ..base import BaseParser, ParseContext
-from ..callresolve import make_resolver
+from ..callresolve import CallResolver, make_resolver
 from ..treesitter import parse_source
 from .classes import build_class, iter_definitions
 from .functions import build_function, defined_names
@@ -20,9 +20,13 @@ from .statement import extract_statements
 class RubyParser(BaseParser):
     name = "ruby"
     extensions = (".rb",)
+    claims_accepts_timeout = True
     schema_version = SCHEMA_VERSION
     statement_types = STATEMENT_TYPES
     frameworks = FRAMEWORKS
+
+    def claims(self, path: str, source: bytes, parse_timeout_micros: int = 0) -> bool:
+        return True
 
     def parse_file(self, ctx: ParseContext) -> FileRecord:
         root = parse_source("ruby", ctx.source, ctx.parse_timeout_micros).root_node
@@ -36,7 +40,7 @@ class RubyParser(BaseParser):
 
         internal, external, exports, bindings = extract_imports(root, source, path, ctx.repo_root)
 
-        def resolve_for_scope(scope: Node):
+        def resolve_for_scope(scope: Node) -> CallResolver:
             return make_resolver(bindings, defined_names(scope, source), path)
 
         resolve = resolve_for_scope(root)

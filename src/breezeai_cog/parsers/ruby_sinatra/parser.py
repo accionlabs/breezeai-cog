@@ -15,8 +15,10 @@ class SinatraParser(RubyParser):
     priority = 10
     frameworks = ["sinatra"]
 
-    def claims(self, path: str, source: bytes) -> bool:
-        root = parse_source("ruby", source).root_node
+    def claims(self, path: str, source: bytes, parse_timeout_micros: int = 0) -> bool:
+        if b"sinatra" not in source.lower():
+            return False
+        root = parse_source("ruby", source, parse_timeout_micros).root_node
         return (
             has_require(root, source, {"sinatra"})
             or has_superclass(root, source, {"Sinatra::Base", "Sinatra::Application"})

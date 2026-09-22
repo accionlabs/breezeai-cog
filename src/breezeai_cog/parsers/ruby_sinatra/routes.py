@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterator
+
 from tree_sitter import Node
 
 from ...emit import disambiguate, file_id, statement_id
@@ -22,7 +24,7 @@ _HTTP_METHODS = {
 }
 
 
-def _calls(root: Node):
+def _calls(root: Node) -> Iterator[Node]:
     if root.type == "call":
         yield root
     for child in root.named_children:

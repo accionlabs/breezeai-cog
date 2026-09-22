@@ -2,23 +2,29 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterator
+
 from tree_sitter import Node
 
 from ...schemas import Statement
 from ..statements_common import classify_statement, render_concat, resolve_endpoint
+from ..detection import text_has_query
 from ..treesitter import node_text
-from .mappings import CONTROL_FLOW, DECLARATIONS, EMIT_TYPES, JUMP
+from .mappings import CONTROL_FLOW, EMIT_TYPES
 
 _SCOPE_TYPES = {"class", "module", "method"}
 
 
-def _iter_statements(node: Node):
+def _iter_statements(node: Node, source: bytes) -> Iterator[Node]:
     for child in node.named_children:
         if child.type in EMIT_TYPES:
             yield child
+        elif child.type == "string" and node.type in {"program", "body_statement"}:
+            if text_has_query(node_text(child, source)):
+                yield child
         if child.type in _SCOPE_TYPES:
             continue
-        yield from _iter_statements(child)
+        yield from _iter_statements(child, source)
 
 
 def _name_of(node: Node, source: bytes) -> str | None:
@@ -72,8 +78,10 @@ def extract_statements(
     if not capture or body is None:
         return []
     out: list[Statement] = []
-    for node in _iter_statements(body):
-        if node.type not in EMIT_TYPES:
+    for node in _iter_statements(body, source):
+        if node.type not in EMIT_TYPES and not (
+            node.type == "string" and text_has_query(node_text(node, source))
+        ):
             continue
         out.extend(
             classify_statement(

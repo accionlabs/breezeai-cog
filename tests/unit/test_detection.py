@@ -234,6 +234,22 @@ def test_high_collision_verbs_require_db_receiver() -> None:
     assert classify_call("this.entityManager.merge", "merge") == ("db_method_call", "merge", "typeorm")
 
 
+def test_ruby_active_record_shapes_are_detected() -> None:
+    for callee, method in [
+        ("User.find", "find"), ("User.create", "create"), ("User.find_by", "find_by"),
+        ("user.save", "save"), ("User.where", "where"), ("user.update", "update"),
+        ("User.all", "all"), ("User.destroy_all", "destroy_all"), ("Post.joins", "joins"),
+        ("User.includes", "includes"), ("User.pluck", "pluck"), ("User.first", "first"),
+        ("User.last", "last"),
+    ]:
+        assert classify_call(callee, method, language="ruby") == (
+            "db_method_call", method, "activerecord"
+        )
+
+    assert classify_call("File.delete", "delete", language="ruby") is None
+    assert classify_call("Hash.merge", "merge", language="ruby") is None
+
+
 def test_elasticsearch_client_verbs_gated() -> None:
     # G1: ES client verbs (search/bulk/index/scroll/count) are data access ONLY on an
     # ES-client receiver — so String.search, app repo/service .search(), etc. are excluded.

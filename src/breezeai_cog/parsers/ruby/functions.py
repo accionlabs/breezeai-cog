@@ -10,6 +10,8 @@ from ..callresolve import CallResolver, noop_resolver
 from ..treesitter import line_span, node_text
 from .statement import extract_statements
 
+_VISIBILITY_MARKERS = {"public", "protected", "private"}
+
 
 def defined_names(root: Node, source: bytes) -> set[str]:
     """Return names defined directly in a Ruby file/class/module scope."""
@@ -57,6 +59,31 @@ def extract_params(params_node: Node | None, source: bytes) -> list[Parameter]:
                 default=node_text(default, source) if default is not None else None,
             ))
     return out
+
+
+def _visibility(node: Node, source: bytes) -> str:
+    visibility = "public"
+    parent = node.parent
+    if parent is None:
+        return visibility
+    for sibling in parent.named_children:
+        if sibling == node:
+            break
+        if sibling.type == "identifier":
+            marker = node_text(sibling, source)
+            if marker in _VISIBILITY_MARKERS:
+                visibility = marker
+            continue
+        if sibling.type != "call" or sibling.child_by_field_name("receiver") is not None:
+            continue
+        if sibling.child_by_field_name("arguments") is not None:
+            continue
+        method = sibling.child_by_field_name("method")
+        if method is not None:
+            marker = node_text(method, source)
+            if marker in _VISIBILITY_MARKERS:
+                visibility = marker
+    return visibility
 
 
 def _calls_in_block(body: Node | None, source: bytes, resolve: CallResolver = noop_resolver) -> list[Call]:
@@ -110,7 +137,7 @@ def build_function(
         path=path,
         name=name,
         type="method",
-        visibility="public",
+        visibility=_visibility(node, source),
         params=extract_params(params_node, source),
         startLine=start,
         endLine=end,
