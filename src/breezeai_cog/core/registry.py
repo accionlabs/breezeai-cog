@@ -51,11 +51,21 @@ def base_parser_for(path: str | Path) -> LanguageParser | None:
     return min(candidates, key=lambda p: p.priority) if candidates else None
 
 
-def select(path: str | Path, source: bytes) -> LanguageParser | None:
+def select(
+    path: str | Path, source: bytes, parse_timeout_micros: int = 0
+) -> LanguageParser | None:
     """The single parser that handles this file: the highest-priority candidate whose
     ``claims(path, source)`` is True (the base language parser is the priority-0 fallback)."""
     candidates = parsers_for(path)
-    claiming = [p for p in candidates if p.claims(str(path), source)]
+    claiming = [
+        p
+        for p in candidates
+        if (
+            p.claims(str(path), source, parse_timeout_micros)
+            if getattr(p, "claims_accepts_timeout", False)
+            else p.claims(str(path), source)
+        )
+    ]
     if not claiming:
         return None
     return max(claiming, key=lambda p: p.priority)

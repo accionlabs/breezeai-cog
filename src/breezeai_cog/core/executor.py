@@ -51,7 +51,9 @@ def _parse_entry(path: str, repo_root: str, options: dict) -> FileRecord | None:
     except OSError:
         return None
 
-    parser = select(path, source)  # exactly one parser per file (claims + priority)
+    parser = select(
+        path, source, options["parse_timeout_micros"]
+    )  # exactly one parser per file (claims + priority)
     if parser is None:  # pragma: no cover - classify already filtered
         return None
     base = base_parser_for(path)

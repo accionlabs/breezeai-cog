@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from pathlib import Path
 
 from tree_sitter import Node
@@ -10,7 +11,7 @@ from ...utils import repo_relative
 from ..treesitter import node_text
 
 
-def _iter(node: Node):
+def _iter(node: Node) -> Iterator[Node]:
     yield node
     for child in node.named_children:
         yield from _iter(child)

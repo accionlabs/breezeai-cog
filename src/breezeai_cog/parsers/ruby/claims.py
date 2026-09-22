@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterator
+
 from tree_sitter import Node
 
 from ..treesitter import node_text
 
 
-def _nodes(root: Node):
+def _nodes(root: Node) -> Iterator[Node]:
     yield root
     for child in root.named_children:
         yield from _nodes(child)
@@ -31,7 +33,7 @@ def has_superclass(root: Node, source: bytes, required: set[str]) -> bool:
     return any(
         node.type == "class"
         and (superclass := node.child_by_field_name("superclass")) is not None
-        and node_text(superclass, source) in required
+        and node_text(superclass, source).lstrip("<").strip() in required
         for node in _nodes(root)
     )
 

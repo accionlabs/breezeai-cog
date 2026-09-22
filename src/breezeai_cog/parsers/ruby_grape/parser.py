@@ -15,8 +15,10 @@ class GrapeParser(RubyParser):
     priority = 20
     frameworks = ["grape"]
 
-    def claims(self, path: str, source: bytes) -> bool:
-        root = parse_source("ruby", source).root_node
+    def claims(self, path: str, source: bytes, parse_timeout_micros: int = 0) -> bool:
+        if b"grape" not in source.lower():
+            return False
+        root = parse_source("ruby", source, parse_timeout_micros).root_node
         return (
             has_require(root, source, {"grape"})
             or has_superclass(root, source, {"Grape::API", "Grape::Endpoint"})

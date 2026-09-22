@@ -97,6 +97,57 @@ end
     assert not any(statement.nodeType in {"class", "module", "method"} for statement in rec.statements)
 
 
+def test_ruby_binary_expressions_are_not_standalone_statements(tmp_path: Path) -> None:
+    source = b'''def render
+  msg = "n=" + a.to_s + " of " + total.to_s
+  if a > b && total != 0
+    msg
+  end
+end
+'''
+    path = tmp_path / "render.rb"
+    path.write_bytes(source)
+    rec = RubyParser().parse_file(ParseContext(
+        path="render.rb", abs_path=path, source=source, repo_root=tmp_path,
+        capture_statements=True,
+    ))
+
+    assert not any(statement.nodeType == "binary" for statement in rec.statements)
+
+
+def test_ruby_method_visibility_follows_section_markers(tmp_path: Path) -> None:
+    source = b'''class Account
+  def open
+  end
+
+  protected
+  def audit
+  end
+
+  private
+  def balance
+  end
+
+  public
+  def close
+  end
+end
+'''
+    path = tmp_path / "account.rb"
+    path.write_bytes(source)
+    rec = RubyParser().parse_file(ParseContext(
+        path="account.rb", abs_path=path, source=source, repo_root=tmp_path,
+    ))
+
+    visibility = {function.name: function.visibility for function in rec.functions}
+    assert visibility == {
+        "open": "public",
+        "audit": "protected",
+        "balance": "private",
+        "close": "public",
+    }
+
+
 def test_ruby_calls_do_not_resolve_across_classes(tmp_path: Path) -> None:
     source = b'''class Alpha
   def process(value)

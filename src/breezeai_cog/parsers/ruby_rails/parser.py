@@ -15,8 +15,12 @@ class RailsParser(RubyParser):
     priority = 30
     frameworks = ["rails"]
 
-    def claims(self, path: str, source: bytes) -> bool:
-        root = parse_source("ruby", source).root_node
+    def claims(self, path: str, source: bytes, parse_timeout_micros: int = 0) -> bool:
+        if not any(marker in source for marker in (
+            b"rails", b"Rails", b"ApplicationController", b"Rails.application.routes",
+        )):
+            return False
+        root = parse_source("ruby", source, parse_timeout_micros).root_node
         return (
             has_require(root, source, {"rails", "action_controller/railtie"})
             or has_superclass(root, source, {"ApplicationController"})
