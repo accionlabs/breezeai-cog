@@ -326,20 +326,28 @@ def extend_target(cls: Class) -> str | None:
     return None
 
 
-def _root_kind_of_name(name: str, record: FileRecord, heritage: dict[str, object]) -> str | None:
+def _root_kind_of_name(
+    name: str,
+    record: FileRecord,
+    heritage: dict[str, object],
+    hc_root_types: dict[str, str] | None = None,
+) -> str | None:
     """Operation kind for a *named* type, from enforced signals only.
 
     The schema name (``"Query"`` / ``OperationTypeNames.Query``) names the root directly. A CLR
-    class name only counts when that class is seen carrying a root attribute — in this file, or
-    via the repo heritage index. A class named ``Query`` that is registered in ``Program.cs`` and
-    attributed nowhere stays unresolved: root-ness is declared at the registration site, which
-    this parser does not read.
+    class name only counts when that class carries a root attribute (in this file or via the repo
+    heritage index), or when it is registered via ``AddQueryType<T>()`` in the composition root
+    (supplied via ``hc_root_types`` from the repo index built by :func:`build_index`).
     """
     kind = ROOT_SCHEMA_NAMES.get(name)
     if kind is not None:
         return kind
     for cls in record.classes:
         if cls.name == name and (kind := root_kind(cls)) is not None:
+            return kind
+    if hc_root_types is not None:
+        kind = hc_root_types.get(name)
+        if kind is not None:
             return kind
     entry = heritage.get(name)  # None means "declared by >1 class, ambiguous" — honest-null
     decorators = getattr(entry, "decorators", None) if entry is not None else None
@@ -364,11 +372,12 @@ def _extension_routes(
     heritage: dict[str, object], path: str, seen: set[str],
     anchors: dict[tuple[str, int], Anchor],
     generated_loaders: dict[str, str | None] | None = None,
+    hc_root_types: dict[str, str] | None = None,
 ) -> list[Statement]:
     """Routes for one ``[ExtendObjectType(target)]`` class: operations when the target is a
     resolved root, field resolvers when it is a data type whose parent binding is visible, and
     nothing at all when the target cannot be classified."""
-    kind = _root_kind_of_name(target, record, heritage)
+    kind = _root_kind_of_name(target, record, heritage, hc_root_types)
     if kind is not None:
         return [s for fn in methods
                 for s in _operation_records(
@@ -442,13 +451,15 @@ def _descriptor_routes(
 
 
 def detect_hotchocolate_routes(
-    record: FileRecord, root: Node, source: bytes, seen: set[str], index: Any = None
+    record: FileRecord, root: Node, source: bytes, seen: set[str], index: Any = None,
+    hc_root_types: dict[str, str] | None = None,
 ) -> list[Statement]:
     """Every operation and field resolver declared in this file.
 
     Two declaration sites: a class carrying a root attribute, and a class extending another type
     with ``[ExtendObjectType]``. ``index`` supplies the repo heritage map so a root attributed in
-    another file still resolves.
+    another file still resolves. ``hc_root_types`` supplies registration-only roots: classes
+    registered via ``AddQueryType<T>()`` in the composition root but carrying no root attribute.
     """
     heritage: dict[str, object] = getattr(index, "class_heritage", None) or {}
     generated_loaders: dict[str, str | None] = getattr(index, "data_loaders", None) or {}
@@ -463,8 +474,10 @@ def detect_hotchocolate_routes(
     for cls in record.classes:
         own = methods.get(cls.id, [])
         kind = root_kind(cls)
+        if kind is None and hc_root_types is not None:
+            kind = hc_root_types.get(cls.name)
         if kind is not None and own:
-            attr = next(name for name, k in ROOT_ATTRS.items() if k == kind)
+            attr = next((name for name, k in ROOT_ATTRS.items() if k == kind), kind.capitalize() + "Type")
             routes.extend(s for fn in own
                           for s in _operation_records(
                               cls, fn, kind, f"[{attr}] {fn.name}", seen, anchors,
@@ -475,7 +488,7 @@ def detect_hotchocolate_routes(
             if own:
                 routes.extend(_extension_routes(
                     cls, target, own, record, heritage, record.path, seen, anchors,
-                    generated_loaders))
+                    generated_loaders, hc_root_types=hc_root_types))
             continue
         routes.extend(_descriptor_routes(cls, record, nodes, source, heritage, seen))
     return routes
