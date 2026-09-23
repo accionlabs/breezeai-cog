@@ -61,6 +61,11 @@ def reset_http_client_ids(token: "contextvars.Token[frozenset[str]]") -> None:
     _http_client_ids.reset(token)
 
 
+def current_http_client_ids() -> frozenset[str]:
+    """Return the HTTP-client names active for the file being extracted."""
+    return _http_client_ids.get()
+
+
 def begin_concat_tracking() -> None:
     """Start collecting skipped-concat lines for the current file (call before parsing)."""
     _skipped_concat_lines.set([])
@@ -210,19 +215,30 @@ def resolve_endpoint(
     return render(first, source), None
 
 
+def _call_type_set(call_type: str | Collection[str]) -> Collection[str]:
+    return (call_type,) if isinstance(call_type, str) else call_type
+
+
 def _iter_calls(
     node: Node,
     emit_types: Collection[str],
-    call_type: str,
+    call_type: str | Collection[str],
     stmt_expr: Collection[str],
     containers: Collection[str],
 ) -> Iterator[Node]:
+    call_types = _call_type_set(call_type)
     for child in node.named_children:
         if child.type in emit_types:
             continue  # a nested statement — classified on its own
         if child.type in stmt_expr and node.type in containers:
             continue  # a bare statement-position expression (its own statement — Python)
-        if child.type == call_type:
+        # Scala uses a field_expression as the function portion of a call
+        # (``client.get(...)``). When field expressions are enabled as statement
+        # roots, do not emit that internal function node as a second call; still
+        # recurse so nested call arguments remain visible.
+        if child.type in call_types and not (
+            child.type == "field_expression" and node.type == "call_expression"
+        ):
             yield child
         yield from _iter_calls(child, emit_types, call_type, stmt_expr, containers)
 
@@ -230,13 +246,14 @@ def _iter_calls(
 def _calls_in_statement(
     node: Node,
     emit_types: Collection[str],
-    call_type: str,
+    call_type: str | Collection[str],
     stmt_expr: Collection[str],
     containers: Collection[str],
 ) -> Iterator[Node]:
+    call_types = _call_type_set(call_type)
     # The statement node may itself be a call — a bare Python call-statement
     # (``session.add(x)``) has no expression-statement wrapper.
-    if node.type == call_type:
+    if node.type in call_types:
         yield node
     yield from _iter_calls(node, emit_types, call_type, stmt_expr, containers)
 
@@ -272,7 +289,7 @@ def classify_statement(
     seen_ids: set[str],
     emit_types: Collection[str],
     control_flow: Collection[str],
-    call_type: str,
+    call_type: str | Collection[str],
     name_of: NameOf,
     call_details: CallDetails,
     stmt_expr: Collection[str] = (),
@@ -309,7 +326,7 @@ def classify_statement(
             det[2],
             language,
             typed_db_ids=typed_db_ids,
-            http_client_ids=_http_client_ids.get() or None,
+            http_client_ids=current_http_client_ids() or None,
         )
         if classified is None:
             continue
