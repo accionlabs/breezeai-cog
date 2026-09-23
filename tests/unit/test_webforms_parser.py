@@ -251,6 +251,39 @@ def test_mappageroute_index_extracts_literal() -> None:
     assert pr == {"CMS/Enrollment.aspx": ["enroll/{id}"]}
 
 
+def test_mappageroute_subdir_app_root() -> None:
+    # When the web app lives in a subdirectory of the repo (e.g. SplendidCRM-CE/SplendidCRM/),
+    # ~/CMS/Enrollment.aspx must resolve to the full repo-relative key so that
+    # detect_webforms_pages can match it against the code-behind file's path.
+    import tempfile
+    from breezeai_cog.parsers.csharp.imports import build_csharp_index
+
+    src = b"""
+using System.Web.Routing;
+namespace Acme {
+  public static class RouteConfig {
+    public static void Register(RouteCollection routes) {
+      routes.MapPageRoute("enroll", "enroll/{id}", "~/CMS/Enrollment.aspx");
+    }
+  }
+}
+"""
+    with tempfile.TemporaryDirectory() as d:
+        root = Path(d)
+        # App lives under "SplendidCRM-CE/App" — place web.config there so _aspx_app_root
+        # identifies it as the app root.
+        app = root / "SplendidCRM-CE" / "App"
+        app.mkdir(parents=True)
+        (app / "web.config").write_bytes(b"<configuration/>")
+        cfg = app / "App_Start" / "RouteConfig.cs"
+        cfg.parent.mkdir(parents=True)
+        cfg.write_bytes(src)
+        pr = build_csharp_index(root, [cfg]).page_routes
+    # Key must include the full subdir prefix so it matches
+    # "SplendidCRM-CE/App/CMS/Enrollment.aspx.cs"[:-len(".cs")]
+    assert pr == {"SplendidCRM-CE/App/CMS/Enrollment.aspx": ["enroll/{id}"]}
+
+
 def test_mappageroute_ast_only_ignores_comment_and_string() -> None:
     # A MapPageRoute in a comment or string must NOT be picked up (AST extraction, not regex).
     src = b"""
@@ -280,6 +313,38 @@ def test_page_route_uses_friendly_url() -> None:
     assert len(routes) == 1
     assert routes[0].endpoint == "/enroll/{id}"  # friendly, not /CMS/Enrollment.aspx
     assert routes[0].routeKind == "page"
+
+
+def test_page_route_subdir_app_end_to_end(tmp_path: Path) -> None:
+    # Full pipeline: RouteConfig.cs in a subdir app produces a key that matches the
+    # code-behind's full repo-relative path, so the page gets the friendly endpoint.
+    import tempfile
+    from breezeai_cog.parsers.csharp.imports import build_csharp_index
+
+    route_src = b"""
+using System.Web.Routing;
+namespace Acme {
+  public static class RouteConfig {
+    public static void Register(RouteCollection routes) {
+      routes.MapPageRoute("enroll", "enroll/{id}", "~/CMS/Enrollment.aspx");
+    }
+  }
+}
+"""
+    app = tmp_path / "SplendidCRM-CE" / "App"
+    app.mkdir(parents=True)
+    (app / "web.config").write_bytes(b"<configuration/>")
+    cfg = app / "App_Start" / "RouteConfig.cs"
+    cfg.parent.mkdir(parents=True)
+    cfg.write_bytes(route_src)
+    pr = build_csharp_index(tmp_path, [cfg]).page_routes
+
+    # Now simulate detect_webforms_pages for the code-behind at the full repo-relative path.
+    page_path = "SplendidCRM-CE/App/CMS/Enrollment.aspx.cs"
+    rec = _parse(WebFormsParser(), PAGE, page_path)
+    routes = detect_webforms_pages(rec, page_path, pr)
+    assert len(routes) == 1
+    assert routes[0].endpoint == "/enroll/{id}"
 
 
 def test_page_route_multiple_friendly_urls() -> None:
