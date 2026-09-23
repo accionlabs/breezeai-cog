@@ -50,6 +50,7 @@ _IDENTIFIER_LIKE_TYPES = {"identifier"} | _SHORTHAND_PROPERTY_TYPES
 _SCOPE_NODE_TYPES = {"program", "statement_block"}
 
 _FASTIFY_FACTORY_NAMES = {"fastify", "Fastify"}
+_MAX_WALK_DEPTH = 900
 
 def detect_fastify_routes(
     root: Node,
@@ -64,7 +65,8 @@ def detect_fastify_routes(
     mounts, including inherited prefixes and resolvable variable values."""
     fid = file_id(path)
     fn_by_name = {f.name: f for f in record.functions if f.parentId == fid}
-    fastify_instance_names = _collect_fastify_instance_names(root, source)
+    fastify_instance_names: set[str] = set()
+    resolution_cache: dict[tuple[int, str], Optional[str]] = {}
     statements: list[Statement] = []
     _walk(
         root,
@@ -76,6 +78,7 @@ def detect_fastify_routes(
         seen_ids=seen_ids,
         out=statements,
         prefix="",
+        resolution_cache=resolution_cache,
     )
     return statements
 
@@ -90,8 +93,27 @@ def _first_param_name(fn_node: Node, source: bytes) -> Optional[str]:
     for child in params.named_children:
         if child.type == "identifier":
             return node_text(child, source)
+        if child.type == "required_parameter":
+            name = child.child_by_field_name("pattern")
+            if name is not None and name.type == "identifier":
+                return node_text(name, source)
         return None  # first param exists but isn't a plain name
     return None
+
+def _is_fastify_plugin(fn_node: Node, source: bytes) -> bool:
+    params = fn_node.child_by_field_name("parameters")
+    if params is None or not params.named_children:
+        return False
+    first_param = params.named_children[0]
+    name = _first_param_name(fn_node, source)
+    if name is None:
+        return False
+    return name.lower() == "fastify" or _has_fastify_instance_type(first_param, source)
+
+def _has_fastify_instance_type(node: Node, source: bytes) -> bool:
+    if node.type == "type_identifier":
+        return node_text(node, source) == "FastifyInstance"
+    return any(_has_fastify_instance_type(child, source) for child in node.children)
 
 def _is_fastify_factory_call(value_node: Node, source: bytes) -> bool:
     """Check whether a value is created by a Fastify factory call.
@@ -117,55 +139,48 @@ def _is_fastify_factory_call(value_node: Node, source: bytes) -> bool:
                 return True
     return False
 
-def _collect_fastify_instance_names(root: Node, source: bytes) -> set[str]:
-    """Find variable names confirmed to refer to a Fastify instance.
-    Checks Fastify factory assignments and exported plugin parameters."""
-    names: set[str] = set()
-
-    def walk(node: Node) -> None:
-        if node.type == "variable_declarator":
-            name_node = node.child_by_field_name("name")
-            value_node = node.child_by_field_name("value")
-            if (
-                name_node is not None
-                and name_node.type == "identifier"
-                and value_node is not None
-                and _is_fastify_factory_call(value_node, source)
-            ):
-                names.add(node_text(name_node, source))
-
-        if node.type == "assignment_expression":
-            left = node.child_by_field_name("left")
-            right = node.child_by_field_name("right")
-            if (
-                left is not None
-                and node_text(left, source) == "module.exports"
-                and right is not None
-                and right.type in ("function_expression", "function", "arrow_function")
-            ):
-                p = _first_param_name(right, source)
-                if p:
-                    names.add(p)
-
-        if node.type == "export_statement":
-            for child in node.named_children:
-                if child.type in ("function_declaration", "function"):
-                    p = _first_param_name(child, source)
-                    if p:
-                        names.add(p)
-
-        for child in node.children:
-            walk(child)
-
-    walk(root)
-    return names
+def _add_fastify_instance_name(node: Node, source: bytes, names: set[str]) -> None:
+    if node.type == "variable_declarator":
+        name_node = node.child_by_field_name("name")
+        value_node = node.child_by_field_name("value")
+        if (
+            name_node is not None
+            and name_node.type == "identifier"
+            and value_node is not None
+            and _is_fastify_factory_call(value_node, source)
+        ):
+            names.add(node_text(name_node, source))
 
 def _walk(node: Node,*,source: bytes,path: str,fid: str,fn_by_name: dict,fastify_instance_names: set[str],
     seen_ids: set[str],
     out: list[Statement],
-    prefix: str) -> None:
+    prefix: str,
+    depth: int = 0,
+    resolution_cache: dict[tuple[int, str], Optional[str]] | None = None) -> None:
     """Recursively scan the syntax tree for Fastify route calls.
     Handles route methods, route configurations, and register prefixes."""
+    if depth >= _MAX_WALK_DEPTH:
+        return
+    if resolution_cache is None:
+        resolution_cache = {}
+
+    if node.type in ("function_declaration", "function_expression", "arrow_function"):
+        fastify_instance_names = set(fastify_instance_names)
+        parent = node.parent
+        is_exported = parent is not None and parent.type == "export_statement"
+        is_module_export = (
+            parent is not None
+            and parent.type == "assignment_expression"
+            and parent.child_by_field_name("left") is not None
+            and node_text(parent.child_by_field_name("left"), source) == "module.exports"
+        )
+        if (is_exported or is_module_export) and _is_fastify_plugin(node, source):
+            plugin_param = _first_param_name(node, source)
+            if plugin_param:
+                fastify_instance_names.add(plugin_param)
+
+    _add_fastify_instance_name(node, source, fastify_instance_names)
+
     if node.type == "call_expression":
         dispatch = _dispatch_call(node, source, fastify_instance_names)
         if dispatch is not None:
@@ -175,7 +190,7 @@ def _walk(node: Node,*,source: bytes,path: str,fid: str,fn_by_name: dict,fastify
                 _http_method_route(
                     node, member_name, args, prefix,
                     source=source, path=path, fid=fid, fn_by_name=fn_by_name,
-                    seen_ids=seen_ids, out=out,
+                    seen_ids=seen_ids, out=out, resolution_cache=resolution_cache,
                 )
                 return
 
@@ -183,7 +198,7 @@ def _walk(node: Node,*,source: bytes,path: str,fid: str,fn_by_name: dict,fastify
                 _app_route(
                     node, args, prefix,
                     source=source, path=path, fid=fid, fn_by_name=fn_by_name,
-                    seen_ids=seen_ids, out=out,
+                    seen_ids=seen_ids, out=out, resolution_cache=resolution_cache,
                 )
                 return  # same reasoning as the "method" branch above.
 
@@ -192,7 +207,8 @@ def _walk(node: Node,*,source: bytes,path: str,fid: str,fn_by_name: dict,fastify
                     node, args, prefix,
                     source=source, path=path, fid=fid, fn_by_name=fn_by_name,
                     fastify_instance_names=fastify_instance_names,
-                    seen_ids=seen_ids, out=out,
+                    seen_ids=seen_ids, out=out, depth=depth,
+                    resolution_cache=resolution_cache,
                 )
                 return
 
@@ -200,7 +216,8 @@ def _walk(node: Node,*,source: bytes,path: str,fid: str,fn_by_name: dict,fastify
         _walk(
             child, source=source, path=path, fid=fid, fn_by_name=fn_by_name,
             fastify_instance_names=fastify_instance_names,
-            seen_ids=seen_ids, out=out, prefix=prefix,
+            seen_ids=seen_ids, out=out, prefix=prefix, depth=depth + 1,
+            resolution_cache=resolution_cache,
         )
 
 
@@ -227,17 +244,15 @@ def _dispatch_call(
 
     args = list(args_node.named_children)
 
+    receiver = callee.child_by_field_name("object")
+    if receiver is None or receiver.type != "identifier":
+        return None
+
+    receiver_name = node_text(receiver, source)
+    if receiver_name not in fastify_instance_names:
+        return None
+
     if member_name in _HTTP_METHODS:
-        receiver = callee.child_by_field_name("object")
-
-        if receiver is None or receiver.type != "identifier":
-            return None
-
-        receiver_name = node_text(receiver, source)
-
-        if receiver_name not in fastify_instance_names:
-            return None
-
         return "method", member_name, args
 
     if member_name == "route":
@@ -270,6 +285,7 @@ def _http_method_route(
     fn_by_name: dict,
     seen_ids: set[str],
     out: list[Statement],
+    resolution_cache: dict[tuple[int, str], Optional[str]],
 ) -> None:
     """Handle shorthand Fastify route calls and add their Statements.
 
@@ -277,7 +293,7 @@ def _http_method_route(
     creates a Statement for each HTTP method."""
     if len(args) < 2:
         return
-    url = _resolve_static_string(args[0], source)
+    url = _resolve_static_string(args[0], source, resolution_cache)
     if url is None or not url.startswith("/"):
         return
 
@@ -324,6 +340,7 @@ def _app_route(
     fn_by_name: dict,
     seen_ids: set[str],
     out: list[Statement],
+    resolution_cache: dict[tuple[int, str], Optional[str]],
 ) -> None:
     """Handle `fastify.route({ method, url, handler })` calls.
 
@@ -338,14 +355,14 @@ def _app_route(
 
     if url_node is None:
         return
-    url = _resolve_static_string(url_node, source)
+    url = _resolve_static_string(url_node, source, resolution_cache)
     if url is None or not url.startswith("/"):
         return
 
     if method_node is None:
         methods, dynamic = ["GET"], False
     else:
-        methods, dynamic = _method_values(method_node, source)
+        methods, dynamic = _method_values(method_node, source, resolution_cache)
 
     if dynamic:
         logger.warning(
@@ -382,7 +399,11 @@ def _app_route(
             )
         )
 
-def _method_values(method_node: Node, source: bytes) -> tuple[list[str], bool]:
+def _method_values(
+    method_node: Node,
+    source: bytes,
+    resolution_cache: dict[tuple[int, str], Optional[str]],
+) -> tuple[list[str], bool]:
     """Resolve the HTTP method(s) used by a `.route()` call.
     Supports single methods, method lists, and variables. Unresolved
     values are flagged so the route is not silently dropped."""
@@ -394,14 +415,14 @@ def _method_values(method_node: Node, source: bytes) -> tuple[list[str], bool]:
         methods: list[str] = []
         dynamic = False
         for child in method_node.named_children:
-            v = _resolve_static_string(child, source)
+            v = _resolve_static_string(child, source, resolution_cache)
             if v:
                 methods.append(v.upper())
             else:
                 dynamic = True
         return methods, dynamic
 
-    resolved = _resolve_static_string(method_node, source)
+    resolved = _resolve_static_string(method_node, source, resolution_cache)
     if resolved:
         return [resolved.upper()], False
     return [], True
@@ -418,6 +439,8 @@ def _fastify_register(
     fastify_instance_names: set[str],
     seen_ids: set[str],
     out: list[Statement],
+    depth: int,
+    resolution_cache: dict[tuple[int, str], Optional[str]],
 ) -> None:
     """Handle `fastify.register(plugin, { prefix })` calls.
     Records the plugin mount, applies the prefix to nested routes, and
@@ -434,7 +457,7 @@ def _fastify_register(
         pairs = _object_pairs(opts_node, source)
         prefix_node = pairs.get("prefix")
         if prefix_node is not None:
-            declared = _resolve_static_string(prefix_node, source)
+            declared = _resolve_static_string(prefix_node, source, resolution_cache)
             if declared:
                 child_prefix = _join_prefix(prefix, declared)
                 mount_endpoint = child_prefix
@@ -455,12 +478,12 @@ def _fastify_register(
     out.append(
         _make_statement(
             node,
-            method="MOUNT",
+            method=None,
             endpoint=mount_endpoint,
             parent_id=parent_id,
             handler=handler_name,
             handler_line=handler_line,
-            semantic_type="mount",
+            semantic_type="route",
             route_kind="mount",
             path=path,
             source=source,
@@ -478,14 +501,16 @@ def _fastify_register(
         _walk(
             plugin_node, source=source, path=path, fid=fid, fn_by_name=fn_by_name,
             fastify_instance_names=child_instance_names,
-            seen_ids=seen_ids, out=out, prefix=child_prefix,
+            seen_ids=seen_ids, out=out, prefix=child_prefix, depth=depth + 1,
+            resolution_cache=resolution_cache,
         )
 
     if opts_node is not None:
         _walk(
             opts_node, source=source, path=path, fid=fid, fn_by_name=fn_by_name,
             fastify_instance_names=fastify_instance_names,
-            seen_ids=seen_ids, out=out, prefix=prefix,
+            seen_ids=seen_ids, out=out, prefix=prefix, depth=depth + 1,
+            resolution_cache=resolution_cache,
         )
 
 def _join_prefix(prefix: str, suffix: str) -> str:
@@ -525,7 +550,7 @@ def _resolve_handler(
 def _make_statement(
     node: Node,
     *,
-    method: str,
+    method: Optional[str],
     endpoint: str,
     parent_id: str,
     handler: str,
@@ -553,7 +578,7 @@ def _make_statement(
         handler=handler,
         handlerLine=handler_line,
         isRegex=False,
-        authRequired=False,  # Fastify has no decorator/guard concept to inspect here
+        authRequired=None,  # Fastify has no decorator/guard concept to inspect here
         guards=None,
         startLine=sl,
         endLine=node.end_point[0] + 1,
@@ -577,7 +602,11 @@ def _object_pairs(obj_node: Node, source: bytes) -> dict[str, Node]:
             pairs[node_text(child, source)] = child
     return pairs
 
-def _resolve_static_string(node: Node, source: bytes) -> Optional[str]:
+def _resolve_static_string(
+    node: Node,
+    source: bytes,
+    resolution_cache: dict[tuple[int, str], Optional[str]],
+) -> Optional[str]:
     """Resolve a node into a string value.
     Supports plain strings, static template literals, and variables
     that can be traced back to a declaration."""
@@ -585,7 +614,14 @@ def _resolve_static_string(node: Node, source: bytes) -> Optional[str]:
     if literal is not None:
         return literal
     if node.type in _IDENTIFIER_LIKE_TYPES:
-        return _resolve_in_enclosing_scope(node, node_text(node, source), source)
+        name = node_text(node, source)
+        scope = node.parent
+        while scope is not None and scope.type not in _SCOPE_NODE_TYPES:
+            scope = scope.parent
+        key = ((scope.start_byte if scope is not None else -1), name)
+        if key not in resolution_cache:
+            resolution_cache[key] = _resolve_in_enclosing_scope(node, name, source)
+        return resolution_cache[key]
     return None
 
 def _resolve_in_enclosing_scope(node: Node, name: str, source: bytes) -> Optional[str]:

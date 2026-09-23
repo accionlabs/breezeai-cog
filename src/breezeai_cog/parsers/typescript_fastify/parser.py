@@ -3,21 +3,49 @@ from .routes import detect_fastify_routes
 from ..base import ParseContext
 from ...schemas import FileRecord
 from ..treesitter import parse_source
-import re
+
+_CLAIMS_PARSE_TIMEOUT_MICROS = 1_000_000
 
 
-_FASTIFY_IMPORT_SIG = re.compile(
-    rb"(?:\bfrom\s*[\"']fastify[\"']|\brequire\s*\(\s*[\"']fastify[\"']\s*\))"
-)
+def _is_fastify_string(node, source: bytes) -> bool:
+    return node.type == "string" and source[node.start_byte:node.end_byte][1:-1] == b"fastify"
+
+
+def _has_runtime_fastify_import(node, source: bytes) -> bool:
+    if node.type == "import_statement":
+        return (
+            not any(child.type == "type" for child in node.children)
+            and any(_is_fastify_string(child, source) for child in node.children)
+        )
+
+    if node.type == "call_expression":
+        function = node.child_by_field_name("function")
+        arguments = node.child_by_field_name("arguments")
+        return (
+            function is not None
+            and function.type == "identifier"
+            and source[function.start_byte:function.end_byte] == b"require"
+            and arguments is not None
+            and any(_is_fastify_string(child, source) for child in arguments.children)
+        )
+
+    return any(_has_runtime_fastify_import(child, source) for child in node.children)
 
 
 class FastifyParser(TypeScriptParser):
     name = "typescript-fastify"
-    priority = 10
+    # Keep framework-specific parsing above base TypeScript, but below the other
+    # priority-10 TypeScript framework parsers when claims overlap.
+    priority = 9
     frameworks = ["fastify"]
 
     def claims(self, path: str, source: bytes) -> bool:
-        return bool(_FASTIFY_IMPORT_SIG.search(source))
+        grammar = "tsx" if path.endswith((".tsx", ".jsx")) else "typescript"
+        try:
+            root = parse_source(grammar, source, _CLAIMS_PARSE_TIMEOUT_MICROS).root_node
+        except ValueError:
+            return False
+        return _has_runtime_fastify_import(root, source)
 
     def parse_file(self, ctx: ParseContext) -> FileRecord:
         grammar = (
