@@ -228,8 +228,12 @@ def test_nested_member_classes_extracted(tmp_path) -> None:
     by_cls = {c.name: c for c in rec.classes}
     assert {"Outer", "Inner", "DeepInner", "Callback", "Status"} <= set(by_cls)
     assert by_cls["Callback"].type == "interface" and by_cls["Status"].type == "enum"
-    assert by_cls["Inner"].parentId == by_cls["Outer"].id
-    assert by_cls["DeepInner"].parentId == by_cls["Inner"].id
+    # A class is parented to its owning FILE (the model's only class edge is File->Class);
+    # the enclosing type is recoverable from line containment.
+    assert by_cls["Inner"].parentId == rec.id
+    assert by_cls["DeepInner"].parentId == rec.id
+    outer, inner = by_cls["Outer"], by_cls["Inner"]
+    assert outer.startLine <= inner.startLine and inner.endLine <= outer.endLine
     fn_names = {f.name for f in rec.functions}
     assert {"innerMethod", "deep", "onDone"} <= fn_names
     # the lambda in run() still folds into run (anonymous scope)
@@ -373,3 +377,54 @@ def test_field_annotations_captured_on_statements(tmp_path) -> None:
     rec = JavaParser().parse_file(ctx)
     field = next(s for s in rec.statements if s.name == "email")
     assert [(d.name, d.args) for d in field.decorators] == [("Column", ["nullable = false"]), ("Id", [])]
+
+
+NESTED_ID_SRC = b'''package shop;
+
+class OrderService {
+    class Result { int code() { return 1; } }
+}
+
+class InvoiceService {
+    class Result { int code() { return 2; } }
+}
+'''
+
+
+def test_nested_class_identity_is_qualified_and_order_independent(tmp_path) -> None:
+    # `id` is the merge key, so two nested types sharing a simple name must stay distinct and
+    # keep the same id when unrelated classes move. Without the owner prefix they would take
+    # turns holding `path#Result` / `path#Result#2` depending on file order.
+    def ids(src: bytes) -> set[str]:
+        p = tmp_path / "Shop.java"
+        p.write_bytes(src)
+        ctx = ParseContext(path="Shop.java", abs_path=p, source=src, repo_root=tmp_path,
+                           capture_statements=True)
+        rec = JavaParser().parse_file(ctx)
+        return {c.id for c in rec.classes}
+
+    reordered = b'''package shop;
+
+class InvoiceService {
+    class Result { int code() { return 2; } }
+}
+
+class OrderService {
+    class Result { int code() { return 1; } }
+}
+'''
+    original = ids(NESTED_ID_SRC)
+    assert "Shop.java#OrderService.Result" in original
+    assert "Shop.java#InvoiceService.Result" in original
+    assert not any("#2" in i for i in original)      # no positional disambiguation left
+    assert original == ids(reordered)                 # stable when the file is reordered
+
+
+def test_nested_class_method_id_carries_the_qualified_owner(tmp_path) -> None:
+    p = tmp_path / "Shop.java"
+    p.write_bytes(NESTED_ID_SRC)
+    ctx = ParseContext(path="Shop.java", abs_path=p, source=NESTED_ID_SRC, repo_root=tmp_path,
+                       capture_statements=True)
+    rec = JavaParser().parse_file(ctx)
+    owners = {f.id.split("#")[1] for f in rec.functions if f.name == "code"}
+    assert owners == {"OrderService.Result", "InvoiceService.Result"}

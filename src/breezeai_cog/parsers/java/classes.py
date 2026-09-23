@@ -46,13 +46,15 @@ def build_class(
     capture: bool,
     limit: int,
     resolve: CallResolver = noop_resolver,
+    owner: str | None = None,
 ) -> tuple[list[Class], list[Function], list[Statement]]:
     """Return (classes, methods, statements) — all flat, linked by parentId. The
     class list is this class plus any nested (inner) member types, each parented to
     its enclosing class."""
     name = node_text(node.child_by_field_name("name"), source)
     start, end = line_span(node)
-    cid = disambiguate(class_id(path, name), seen_ids)
+    qualified = f"{owner}.{name}" if owner else name
+    cid = disambiguate(class_id(path, qualified), seen_ids)
     extends, implements = _heritage(node, source)
 
     modifiers = modifiers_node(node)
@@ -80,7 +82,7 @@ def build_class(
             if member.type in ("method_declaration", "constructor_declaration"):
                 fn, fn_statements = build_method(
                     member, source, path,
-                    parent_id=cid, class_name=name, seen_ids=seen_ids, capture=capture, limit=limit,
+                    parent_id=cid, class_name=name, id_owner=qualified, seen_ids=seen_ids, capture=capture, limit=limit,
                     resolve=resolve,
                 )
                 methods.append(fn)
@@ -95,7 +97,8 @@ def build_class(
                 # own Class parented to this one (recursing for arbitrarily deep nesting).
                 sub_classes, sub_methods, sub_statements = build_class(
                     member, source, path,
-                    parent_id=cid, seen_ids=seen_ids, capture=capture, limit=limit, resolve=resolve,
+                    parent_id=parent_id, seen_ids=seen_ids, capture=capture, limit=limit,
+                    resolve=resolve, owner=qualified,
                 )
                 nested_classes.extend(sub_classes)
                 methods.extend(sub_methods)

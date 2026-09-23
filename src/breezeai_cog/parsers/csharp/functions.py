@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from tree_sitter import Node
 
-from ...emit import disambiguate, function_id
+from ...emit import disambiguate, file_id, function_id
 from ...schemas import Call, Function, Parameter, Statement
 from ..callresolve import CallResolver, noop_resolver
 from ..treesitter import line_span, node_text
@@ -186,6 +186,7 @@ def build_method(
     *,
     parent_id: str,
     class_name: str | None,
+    id_owner: str | None = None,
     seen_ids: set[str],
     capture: bool,
     limit: int,
@@ -197,7 +198,10 @@ def build_method(
     name_node = node.child_by_field_name("name")
     name = node_text(name_node, source) if name_node is not None else "<anonymous>"
     start, end = line_span(node)
-    fid = disambiguate(function_id(path, name, start, class_name=class_name), seen_ids)
+    # The id carries the qualified owner (`Outer.Inner`) so a nested type's methods are
+    # identified unambiguously; `class_name` stays simple for call resolution.
+    fid = disambiguate(
+        function_id(path, name, start, class_name=id_owner or class_name), seen_ids)
     visibility, is_static = flags(node, source)
     ret = node.child_by_field_name("returns")
     body = node.child_by_field_name("body")
@@ -232,7 +236,7 @@ def build_method(
     functions = [fn]
     for nested_node in nested:
         sub_fns, sub_stmts = build_method(
-            nested_node, source, path, parent_id=fid, class_name=None, seen_ids=seen_ids,
+            nested_node, source, path, parent_id=file_id(path), class_name=None, seen_ids=seen_ids,
             capture=capture, limit=limit, resolve=resolve,
         )
         functions.extend(sub_fns)

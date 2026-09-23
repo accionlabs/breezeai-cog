@@ -79,7 +79,7 @@ def test_analyze_sql(client: TestClient, captured: _Captured) -> None:
     assert rec["tables"][0]["name"] == "employees" and rec["tables"][0]["hasPrimaryKey"] is True
     path, payload = captured.notifications[0]
     assert path == "/db-ontology/stream-ingest-s3"
-    assert payload["storage_key"] == out["storage_key"] and payload["repositoryName"] == "schema_pg.sql"
+    assert payload["s3Key"] == out["storage_key"] and payload["repositoryName"] == "schema_pg.sql"
 
 
 def test_requires_file(client: TestClient) -> None:

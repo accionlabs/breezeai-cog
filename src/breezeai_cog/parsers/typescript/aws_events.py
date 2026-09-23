@@ -12,7 +12,7 @@ functions identified by their ``aws-lambda`` handler *type annotation*.
 
 Producers (SDK v3 command objects and v2 methods):
   ``client.send(new PublishCommand({TopicArn}))``     → eventbus_publish  (aws-sns)
-  ``client.send(new PublishCommand({PhoneNumber}))``  → eventbus_publish  (aws-sms)
+  ``client.send(new PublishCommand({PhoneNumber}))``  → eventbus_send     (aws-sns, SMS)
   ``client.send(new SendMessageCommand({QueueUrl}))`` → eventbus_send     (aws-sqs)
   ``client.send(new PutEventsCommand({...}))``        → eventbus_publish  (aws-eventbridge)
   ``sqs.sendMessage({QueueUrl})`` / ``sendMessageBatch`` → eventbus_send  (aws-sqs)
@@ -71,6 +71,21 @@ _CONSUMER_HANDLERS = {
 _ROUTE_HANDLERS = {"APIGatewayProxyHandler", "APIGatewayProxyHandlerV2", "ALBHandler"}
 # Keys in an SDK argument object that name the destination address.
 _ADDRESS_KEYS = {"TopicArn", "TargetArn", "QueueUrl", "EventBusName", "PhoneNumber"}
+# Subset of the above that also *proves* the call is AWS — needed by the ``publish`` guard
+# below. ``PhoneNumber`` is excluded: every SMS vendor (Twilio, Vonage, MessageBird) names
+# that field the same way, so it identifies a destination but not a provider. The remaining
+# keys are AWS-specific strings, so for them naming a destination and proving AWS coincide.
+_AWS_EVIDENCE_KEYS = _ADDRESS_KEYS - {"PhoneNumber"}
+# Address keys that reach exactly one recipient. SNS names its API ``Publish`` for every
+# destination, but only a *topic* fans out, so an SMS is point-to-point — the distinction
+# Vert.x draws between ``publish()`` and ``send()``. Nothing can subscribe to a phone
+# number, so calling it a publish would assert a one-to-many relationship that cannot exist.
+#
+# ``TargetArn`` is deliberately absent: the Publish API accepts *either* a platform-endpoint
+# ARN (one device) *or* a topic ARN (fan-out) there, and the value is usually an injected
+# symbol, so its cardinality is not knowable from the call site. It keeps the fan-out
+# default rather than being guessed — a coarse classification beats a wrong one.
+_DIRECT_ADDRESS_KEYS = {"PhoneNumber"}
 
 # AWS Lambda *event* parameter types → framework. Used to recognise an UNTYPED handler
 # (``export const handler = async (event: S3Event) => …`` / ``exports.handler = …``) — the
@@ -131,7 +146,11 @@ def _address(args: Node | None, source: bytes) -> tuple[str | None, str | None]:
     """(literal endpoint, matched address key) from an SDK call's first object argument.
     Endpoint is set only from a plain string literal — a symbol (``this.topicArn``) stays
     ``None`` (honest); the second element is the address key that matched (e.g.
-    ``"PhoneNumber"``), else ``None`` when no address key is present."""
+    ``"PhoneNumber"``), else ``None`` when no address key is present.
+
+    Only ``pair`` nodes are inspected, so a shorthand property (``{ PhoneNumber, Message }``)
+    is not seen and yields ``(None, None)`` — conservative, and the same answer the caller
+    would reach for an unresolved symbol."""
     if args is None:
         return None, None
     for a in args.named_children:
@@ -172,16 +191,20 @@ def _producer(call: Node, source: bytes) -> tuple[SemanticType, str, str | None,
             return None
         sem, fw = info
         endpoint, key = _address(first.child_by_field_name("arguments"), source)
-        if cname == "PublishCommand" and key == "PhoneNumber":
-            fw = "aws-sms"
+        # framework stays aws-sns either way — the transport is unchanged, and an SMS send
+        # must remain visible to "what talks to SNS?"; only the delivery shape differs.
+        if cname == "PublishCommand" and key in _DIRECT_ADDRESS_KEYS:
+            sem = "eventbus_send"
         return sem, cname, endpoint, fw
 
     info2 = _V2_METHODS.get(method)
     if info2 is not None:
         sem, fw, needs_hint = info2
         endpoint, key = _address(args, source)
-        if needs_hint and key is None and "sns" not in receiver:
+        if needs_hint and key not in _AWS_EVIDENCE_KEYS and "sns" not in receiver:
             return None
+        if method == "publish" and key in _DIRECT_ADDRESS_KEYS:
+            sem = "eventbus_send"
         return sem, method, endpoint, fw
     return None
 

@@ -18,6 +18,7 @@ from ..analyzers.es import BuildError, build_es_records
 from ..analyzers.nosql import BuildError as NoSqlBuildError
 from ..analyzers.nosql import build_nosql_records
 from ..analyzers.sql import parse_ddl
+from ..core.ignore import append_repo_ignore_patterns
 from ..services.diff import empty_meta, run_diff_stream
 from ..services.inprocess import analyze_in_memory
 from .deps import ServerDeps
@@ -35,6 +36,27 @@ def _safe_name(name: str) -> str:
 
 def _now_ms() -> int:
     return int(time.time() * 1000)
+
+
+def _normalize_ignore_patterns(raw: object) -> list[str]:
+    """``ignorePatterns`` (optional) — a newline-separated string or a list of strings.
+
+    Absent/blank means "no extra patterns": the scan then behaves exactly as before,
+    honouring only the built-in defaults and the repo's own ignore files.
+    """
+    if raw is None:
+        return []
+    if isinstance(raw, str):
+        return [ln for ln in (line.strip() for line in raw.splitlines()) if ln]
+    if isinstance(raw, list):
+        out: list[str] = []
+        for i, item in enumerate(raw):
+            if not isinstance(item, str):
+                raise ApiError(f"ignorePatterns[{i}] must be a string", 400)
+            if item.strip():
+                out.append(item.strip())
+        return out
+    raise ApiError("ignorePatterns must be a string or an array of strings", 400)
 
 
 def _stream_records_to_infra(deps: ServerDeps, key: str, records: list[dict]) -> str:
@@ -88,11 +110,19 @@ async def analyze_diff(request: Request, background_tasks: BackgroundTasks) -> d
     if parsed is None:
         raise ApiError("Invalid repo URL (supported hosts: github.com, bitbucket.org, gitlab.com, dev.azure.com)", 400)
     repo_name = parsed["repo"]
+    ignore_patterns = _normalize_ignore_patterns(body.get("ignorePatterns"))
 
     temp_dir, filter_set, deleted_files = await run_in_threadpool(deps.acquire_diff, settings, body)
     storage_key= f"code-ontology/{project_uuid}/{incoming}.ndjson.gz"
     has_changed = filter_set is None or len(filter_set) > 0
     try:
+        if ignore_patterns:
+            # Fail loudly: a silent write failure would ship files the caller
+            # explicitly asked to exclude into the ontology.
+            try:
+                append_repo_ignore_patterns(temp_dir, ignore_patterns)
+            except OSError as exc:
+                raise ApiError(f"Failed to apply ignorePatterns: {exc}", 500) from exc
         if has_changed:
             upload = deps.open_storage(storage_key)
             meta = await run_in_threadpool(run_diff_stream, settings, upload, temp_dir, filter_set, repo_name)
@@ -109,7 +139,7 @@ async def analyze_diff(request: Request, background_tasks: BackgroundTasks) -> d
 
     background_tasks.add_task(
         deps.notify, "/code-ontology/stream-ingest",
-        {"storage_key":storage_key, "projectMetaData": meta, "deletedFiles": deleted_files,
+        {"s3Key": storage_key, "projectMetaData": meta, "deletedFiles": deleted_files,
          "projectUuid": project_uuid, "codeOntologyId": code_ontology_id,
          "repoUrl": repo_url, "gitBranch": git_branch, "commitId": incoming},
     )
@@ -176,7 +206,7 @@ async def analyze_sql(
     await run_in_threadpool(_stream_records_to_infra, deps, storage_key, [record])
     background_tasks.add_task(
         deps.notify, "/db-ontology/stream-ingest-s3",
-        { "storage_key":storage_key, "projectUuid": projectUuid, "dataLakeId": dataLakeId,
+        {"s3Key": storage_key, "projectUuid": projectUuid, "dataLakeId": dataLakeId,
          "repositoryName": repositoryName or file_name},
     )
 
@@ -228,7 +258,7 @@ async def analyze_nosql(
     await run_in_threadpool(_stream_records_to_infra, deps, storage_key, build["records"])
     background_tasks.add_task(
         deps.notify, "/db-ontology/stream-ingest-s3",
-        {"storage_key":storage_key, "projectUuid": projectUuid, "dataLakeId": dataLakeId,
+        {"s3Key": storage_key, "projectUuid": projectUuid, "dataLakeId": dataLakeId,
          "repositoryName": repositoryName or primary_name},
     )
 
@@ -286,7 +316,7 @@ async def analyze_es(
     await run_in_threadpool(_stream_records_to_infra, deps, storage_key, build["records"])
     background_tasks.add_task(
         deps.notify, "/db-ontology/stream-ingest-s3",
-        {"storage_key":storage_key, "projectUuid": projectUuid, "dataLakeId": dataLakeId,
+        {"s3Key": storage_key, "projectUuid": projectUuid, "dataLakeId": dataLakeId,
          "repositoryName": repositoryName or primary_name},
     )
 
