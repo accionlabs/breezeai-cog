@@ -1,0 +1,92 @@
+"""Conservative Go event-bus and timer statement detection."""
+
+from __future__ import annotations
+
+from tree_sitter import Node
+
+from ...emit import disambiguate, statement_id
+from ...schemas import Statement
+from ..treesitter import node_text
+
+
+def _call_parts(call: Node, source: bytes) -> tuple[str, str] | None:
+    function = call.child_by_field_name("function")
+    if function is None or function.type != "selector_expression":
+        return None
+    operand = function.child_by_field_name("operand")
+    field = function.child_by_field_name("field")
+    if operand is None or field is None:
+        return None
+    return node_text(operand, source), node_text(field, source)
+
+
+def _first_string(call: Node, source: bytes) -> str | None:
+    arguments = call.child_by_field_name("arguments")
+    if arguments is None or not arguments.named_children:
+        return None
+    first = arguments.named_children[0]
+    if first.type in {"interpreted_string_literal", "raw_string_literal"}:
+        return node_text(first, source).strip('"`')
+    return None
+
+
+def _classify(receiver: str, method: str, source_text: str) -> tuple[str, str] | None:
+    lower_source = source_text.lower()
+    receiver_name = receiver.rsplit(".", 1)[-1].lower()
+    if "nats-io" in lower_source and method in {"Publish", "Request"}:
+        return "eventbus_send", "nats"
+    if "nats-io" in lower_source and method in {"Subscribe", "QueueSubscribe"}:
+        return "eventbus_consumer", "nats"
+    if "kafka" in lower_source and method in {"SendMessage", "WriteMessages"}:
+        return "eventbus_send", "kafka"
+    if "kafka" in lower_source and method in {"ReadMessage", "FetchMessage"}:
+        return "eventbus_consumer", "kafka"
+    if receiver_name == "time" and method in {"NewTicker", "AfterFunc", "Tick"}:
+        return "timer", "time"
+    return None
+
+
+def detect_events(
+    root: Node,
+    source: bytes,
+    path: str,
+    *,
+    seen_ids: set[str],
+    parent_id: str,
+    owners: list[tuple[int, int, str]] | None = None,
+) -> list[Statement]:
+    source_text = source.decode("utf-8", "replace")
+    out: list[Statement] = []
+
+    def walk(node: Node) -> None:
+        if node.type == "call_expression":
+            parts = _call_parts(node, source)
+            if parts is not None:
+                receiver, method = parts
+                classified = _classify(receiver, method, source_text)
+                if classified is not None:
+                    semantic, framework = classified
+                    line = node.start_point[0] + 1
+                    owner_id = parent_id
+                    for start, end, candidate_id in owners or []:
+                        if start <= line <= end:
+                            owner_id = candidate_id
+                            break
+                    out.append(Statement(
+                        id=disambiguate(statement_id(path, line, node.start_point[1]), seen_ids),
+                        parentId=owner_id,
+                        nodeType=node.type,
+                        semanticType=semantic,
+                        text=node_text(node, source),
+                        method=method,
+                        endpoint=_first_string(node, source),
+                        framework=framework,
+                        startLine=line,
+                        endLine=node.end_point[0] + 1,
+                        path=path,
+                    ))
+        for child in node.named_children:
+            walk(child)
+
+    walk(root)
+    return out

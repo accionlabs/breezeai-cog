@@ -11,18 +11,17 @@ from ..treesitter import line_span, node_text
 from .statements import extract_statements
 
 
-def _receiver_type(node: Node, source: bytes) -> str | None:
+def _receiver_info(node: Node, source: bytes) -> tuple[str | None, str | None]:
     receiver = node.child_by_field_name("receiver")
     if receiver is None:
-        return None
+        return None, None
     text = node_text(receiver, source).strip()
     if text.startswith("(") and text.endswith(")"):
         text = text[1:-1].strip()
-    if text:
-        if text.startswith("*"):
-            return text[1:]
-        return text
-    return None
+    parts = text.split()
+    type_text = parts[-1] if parts else ""
+    receiver_kind = "pointer" if type_text.startswith("*") else "value"
+    return type_text.lstrip("*").rsplit(".", 1)[-1] or None, receiver_kind
 
 
 def _extract_params(params_node: Node | None, source: bytes) -> list[Parameter]:
@@ -122,13 +121,34 @@ def type_map(root: Node, source: bytes) -> dict[str, str]:
                 lhs = child.child_by_field_name("left")
                 rhs = child.child_by_field_name("right")
                 if lhs is not None and rhs is not None:
-                    for l in lhs.named_children:
-                        if l.type == "identifier":
-                            idx[node_text(l, source)] = node_text(rhs, source)
+                    for target in lhs.named_children:
+                        if target.type == "identifier":
+                            idx[node_text(target, source)] = node_text(rhs, source)
             walk(child)
 
     walk(root)
     return idx
+
+
+def _constructor_target_name(func_name: str, result_type: str | None) -> str | None:
+    if not func_name.startswith("New") or not result_type:
+        return None
+    stripped = result_type.strip()
+    candidate = stripped
+    if candidate.startswith("(") and ")" in candidate:
+        inner = candidate[1:candidate.rfind(")")]
+        for part in inner.split(","):
+            t = part.strip()
+            if not t:
+                continue
+            candidate = t
+            break
+    if candidate.startswith("*"):
+        candidate = candidate[1:]
+    candidate = candidate.rsplit(".", 1)[-1]
+    if candidate == "error":
+        return None
+    return candidate or None
 
 
 def build_function(
@@ -146,20 +166,22 @@ def build_function(
     func_name = node_text(name, source) if name is not None else ""
     start, end = line_span(node)
     body = node.child_by_field_name("body")
-    receiver = _receiver_type(node, source)
+    receiver, receiver_kind = _receiver_info(node, source)
     params = _extract_params(node.child_by_field_name("parameters"), source)
     result_type = _result_type(node, source)
     type_parameters = node.child_by_field_name("type_parameters")
+    constructor_target = _constructor_target_name(func_name, result_type)
 
     fn = Function(
         id=disambiguate(function_id(path, func_name, start), seen_ids),
         parentId=parent_id,
         path=path,
         name=func_name,
-        type=("constructor" if not receiver and func_name.startswith("New") and result_type and result_type.lstrip("(").lstrip("*").split(",", 1)[0].strip().rsplit(".", 1)[-1] == func_name[3:] else "method" if receiver else "function"),
+        type=("constructor" if not receiver and constructor_target and (func_name == "New" or func_name.startswith("New")) else "method" if receiver else "function"),
         startLine=start,
         endLine=end,
         receiverType=receiver,
+        metadata={"receiverKind": receiver_kind} if receiver_kind else None,
         visibility="public" if func_name[:1].isupper() else "package",
         generics=node_text(type_parameters, source) if type_parameters is not None else None,
         params=params,
@@ -168,3 +190,27 @@ def build_function(
     )
     statements = extract_statements(body, source, path, parent_id=fn.id, capture=capture, limit=limit, seen_ids=seen_ids, descend_all=True) if body is not None else []
     return fn, statements
+
+
+def build_anonymous_function(
+    node: Node,
+    source: bytes,
+    path: str,
+    *,
+    parent_id: str,
+    seen_ids: set[str],
+) -> Function:
+    """Build a record for a Go function literal without re-emitting its body."""
+    start, end = line_span(node)
+    return Function(
+        id=disambiguate(function_id(path, "<anonymous>", start), seen_ids),
+        parentId=parent_id,
+        path=path,
+        name="<anonymous>",
+        type="anonymous",
+        startLine=start,
+        endLine=end,
+        params=_extract_params(node.child_by_field_name("parameters"), source),
+        calls=_collect_calls(node.child_by_field_name("body"), source)
+        if node.child_by_field_name("body") is not None else [],
+    )

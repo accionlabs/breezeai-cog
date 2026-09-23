@@ -8,7 +8,7 @@ from typing import Sequence
 
 from tree_sitter import Node
 
-from ..treesitter import node_text, parse_source
+from ..treesitter import node_text
 
 
 @dataclass(frozen=True)
@@ -39,30 +39,19 @@ def build_fqcn_index(repo_root: Path, files: Sequence[Path], jobs: int = 1) -> G
             except ValueError:
                 continue
             import_path = module + ("/" + str(Path(relative).parent).replace("\\", "/") if str(Path(relative).parent) != "." else "")
-            modules[import_path] = relative
+            current = modules.get(import_path)
+            modules[import_path] = relative if current is None and import_path not in modules else None
     return GoIndex(modules=modules)
-
-
-def _package_name(root: Node, source: bytes) -> str:
-    for child in root.named_children:
-        if child.type == "package_clause":
-            name = child.child_by_field_name("name")
-            if name is not None:
-                return node_text(name, source)
-    return ""
 
 
 def extract_imports(
     root: Node,
     source: bytes,
-    file_path: str,
-    repo_root: str | Path,
     index: GoIndex | None = None,
 ) -> tuple[list[str], list[str], list[str], dict[str, str]]:
     internal: set[str] = set()
     external: set[str] = set()
     bindings: dict[str, str] = {}
-    package_name = _package_name(root, source)
 
     for child in root.named_children:
         if child.type != "import_declaration":
@@ -79,16 +68,12 @@ def extract_imports(
             if alias:
                 bindings[alias] = module
             if index is not None and module in index.modules:
-                internal.add(index.modules[module] or module)
+                target = index.modules[module]
+                if target is not None:
+                    internal.add(target)
             elif module.startswith(".") or module.startswith("/"):
                 internal.add(module)
             else:
                 external.add(module)
-
-    if package_name:
-        # same-package aliasing should be possible without import edges, but a concrete
-        # repo-local path is not inferable from the Go grammar alone. Keep the binding map
-        # honest: a same-package import is not an in-repo path, only an external module.
-        pass
 
     return sorted(internal), sorted(external), [], bindings
