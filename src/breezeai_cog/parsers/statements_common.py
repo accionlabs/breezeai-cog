@@ -22,11 +22,13 @@ from __future__ import annotations
 
 import contextvars
 from collections.abc import Callable, Collection, Iterator
+from typing import cast
 
 from tree_sitter import Node
 
 from ..emit import disambiguate, statement_id
 from ..schemas import Decorator, Statement
+from ..schemas.enums import SemanticType
 from .detection import classify_call, text_has_query
 from .treesitter import first_line, node_text
 
@@ -347,7 +349,7 @@ def classify_statement(
                     id=disambiguate(statement_id(path, cs, ccol), seen_ids),
                     parentId=parent_id,
                     nodeType=call.type,
-                    semanticType=semantic,
+                    semanticType=cast(SemanticType, semantic),
                     text=node_text(call, source),
                     method=method_value,
                     endpoint=endpoint,
