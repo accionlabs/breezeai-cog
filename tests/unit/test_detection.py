@@ -506,3 +506,14 @@ def test_scala_false_positive_gates() -> None:
     assert match_api("Request", "Request") is None
     assert match_api("axios.request", "request") == "REQUEST"
 
+
+def test_api_hints_ignore_call_arguments() -> None:
+    from breezeai_cog.parsers.detection.api_calls import match_api
+
+    # A URL literal must not turn an arbitrary receiver into an HTTP client.
+    assert match_api('ws.url("https://api.example/users").get', "get") is None
+    assert match_api('builder.run("https://api.example/users")', "run") is None
+    # Receiver hints still work through ordinary member chains.
+    assert match_api("this.http.post", "post") == "POST"
+    assert match_api("axios.get", "get") == "GET"
+
