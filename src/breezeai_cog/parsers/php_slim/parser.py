@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 from ...emit import SeenIds
 from ...schemas import FileRecord
 from ..base import ParseContext
@@ -15,11 +17,11 @@ class SlimParser(PhpParser):
     priority = 15
     frameworks = ["slim"]
 
-    def claims(self, path: str, source: bytes) -> bool:
+    def claims(self, path: str, source: bytes, repo_root: Path | str | None = None) -> bool:
         return (
             b"Slim\\App" in source
             or b"Slim\\Factory\\AppFactory" in source
-            or composer_requires(path, b"slim/slim")
+            or composer_requires(path, b"slim/slim", repo_root=repo_root)
         )
 
     def parse_file(self, ctx: ParseContext) -> FileRecord:

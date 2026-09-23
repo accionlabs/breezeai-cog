@@ -96,7 +96,7 @@ class BaseParser:
         p = Path(path)
         return p.suffix in self.extensions or p.name in self.extensions
 
-    def claims(self, path: str, source: bytes) -> bool:
+    def claims(self, path: str, source: bytes, repo_root: Path | str | None = None) -> bool:
         """Whether this parser should handle ``path``. The base language parser claims
         everything of its extension (fallback); framework parsers override this to sniff
         their framework's signature in ``source`` (e.g. ``b"@nestjs/" in source``)."""

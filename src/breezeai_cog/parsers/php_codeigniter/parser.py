@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 from ...emit import SeenIds
 from ...schemas import FileRecord
 from ..base import ParseContext
@@ -15,7 +17,7 @@ class CodeIgniterParser(PhpParser):
     priority = 10
     frameworks = ["codeigniter"]
 
-    def claims(self, path: str, source: bytes) -> bool:
+    def claims(self, path: str, source: bytes, repo_root: Path | str | None = None) -> bool:
         path_lower = path.lower().replace("\\", "/")
         return (
             b"CodeIgniter\\Controller" in source
@@ -28,7 +30,7 @@ class CodeIgniterParser(PhpParser):
                 b"$route[" in source
                 and ("routes.php" in path_lower or "config" in path_lower)
             )
-            or composer_requires(path, b"codeigniter4/framework")
+            or composer_requires(path, b"codeigniter4/framework", repo_root=repo_root)
         )
 
     def parse_file(self, ctx: ParseContext) -> FileRecord:

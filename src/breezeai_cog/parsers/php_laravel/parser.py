@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 from ...emit import SeenIds
 from ...schemas import FileRecord
 from ..base import ParseContext
@@ -15,11 +17,11 @@ class LaravelParser(PhpParser):
     priority = 20
     frameworks = ["laravel"]
 
-    def claims(self, path: str, source: bytes) -> bool:
+    def claims(self, path: str, source: bytes, repo_root: Path | str | None = None) -> bool:
         return (
             b"Illuminate\\" in source
             or b"Route::" in source
-            or composer_requires(path, b"laravel/framework")
+            or composer_requires(path, b"laravel/framework", repo_root=repo_root)
         )
 
     def parse_file(self, ctx: ParseContext) -> FileRecord:

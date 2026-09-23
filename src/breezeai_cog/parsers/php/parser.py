@@ -34,43 +34,74 @@ _CLASS_TYPES = (
 
 @lru_cache(maxsize=128)
 def _read_composer_requirements(composer_path: Path) -> frozenset[str] | None:
+    if not composer_path.is_file():
+        return None
     try:
-        if not composer_path.is_file():
-            return None
-        data = json.loads(composer_path.read_bytes())
-        reqs = set()
+        content = composer_path.read_bytes()
+    except (FileNotFoundError, OSError) as err:
+        from ...logging import get_logger
+
+        get_logger("breezeai_cog.parsers.php").debug(
+            "Could not read composer.json", path=str(composer_path), error=str(err)
+        )
+        return None
+
+    try:
+        data = json.loads(content)
+        reqs: set[str] = set()
         if isinstance(data, dict):
             for section in ("require", "require-dev"):
                 sec = data.get(section)
                 if isinstance(sec, dict):
                     reqs.update(sec.keys())
         return frozenset(reqs)
-    except Exception:
-        try:
-            content = composer_path.read_bytes()
-            return frozenset({pkg.decode("utf-8", errors="ignore") for pkg in (
-                b"laravel/framework", b"symfony/framework-bundle", b"slim/slim", b"codeigniter4/framework"
-            ) if pkg in content})
-        except Exception:
-            return None
+    except (json.JSONDecodeError, UnicodeDecodeError) as err:
+        from ...logging import get_logger
+
+        get_logger("breezeai_cog.parsers.php").warning(
+            "Unparseable composer.json, falling back to raw byte scan",
+            path=str(composer_path),
+            error=str(err),
+        )
+        return frozenset(
+            pkg.decode("utf-8", errors="ignore")
+            for pkg in (
+                b"laravel/framework",
+                b"symfony/framework-bundle",
+                b"slim/slim",
+                b"codeigniter4/framework",
+            )
+            if pkg in content
+        )
 
 
-def composer_requires(path: str | Path, package: bytes | str) -> bool:
-    """Walk up parent directories from ``path`` looking for a composer.json requiring ``package``."""
-    try:
-        pkg_str = package.decode("utf-8") if isinstance(package, bytes) else package
-        p = Path(path)
-        paths_to_try = [p]
+def composer_requires(
+    path: str | Path,
+    package: bytes | str,
+    repo_root: Path | str | None = None,
+) -> bool:
+    """Walk up parent directories from ``path`` (resolved against ``repo_root``) looking for a composer.json requiring ``package``."""
+    pkg_str = package.decode("utf-8") if isinstance(package, bytes) else package
+    p = Path(path)
+    paths_to_try: list[Path] = []
+    if repo_root is not None:
+        root_path = Path(repo_root)
+        paths_to_try.append(root_path / p if not p.is_absolute() else p)
+    else:
+        paths_to_try.append(p)
         if not p.is_absolute():
             paths_to_try.append(p.resolve())
-        for pt in paths_to_try:
+
+    for pt in paths_to_try:
+        try:
             start = pt.parent if pt.is_file() or pt.suffix else pt
-            for d in [start, *start.parents]:
-                reqs = _read_composer_requirements(d / "composer.json")
-                if reqs is not None and pkg_str in reqs:
-                    return True
-    except Exception:
-        pass
+            d_list = [start, *start.parents]
+        except (FileNotFoundError, OSError):
+            continue
+        for d in d_list:
+            reqs = _read_composer_requirements(d / "composer.json")
+            if reqs is not None and pkg_str in reqs:
+                return True
     return False
 
 

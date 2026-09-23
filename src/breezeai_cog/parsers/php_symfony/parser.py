@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 from ...emit import SeenIds
 from ...schemas import FileRecord
 from ..base import ParseContext
@@ -15,12 +17,12 @@ class SymfonyParser(PhpParser):
     priority = 20
     frameworks = ["symfony"]
 
-    def claims(self, path: str, source: bytes) -> bool:
+    def claims(self, path: str, source: bytes, repo_root: Path | str | None = None) -> bool:
         return (
             b"Symfony\\Component\\Routing\\Attribute\\Route" in source
             or b"Symfony\\Component\\Routing\\Annotation\\Route" in source
             or b"#[AsController" in source
-            or composer_requires(path, b"symfony/framework-bundle")
+            or composer_requires(path, b"symfony/framework-bundle", repo_root=repo_root)
         )
 
     def parse_file(self, ctx: ParseContext) -> FileRecord:

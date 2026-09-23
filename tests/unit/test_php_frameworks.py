@@ -1029,3 +1029,49 @@ class DemoController
         # Must NOT be the old synthesized form that only had the path
         assert route.text != "#[Route('/x')]", "text must not be the synthesized path-only form"
 
+
+
+def test_slim_claims_via_composer_json_outside_cwd(tmp_path: Path, monkeypatch) -> None:
+    """Slim app with composer.json declaring slim/slim and route registrations referencing $app
+    without literal 'Slim\\App' string, run with CWD outside the repo root, MUST claim slim and capture routes.
+    """
+    repo = tmp_path / "app_repo"
+    repo.mkdir()
+    (repo / "composer.json").write_text(json.dumps({"require": {"slim/slim": "^4.0"}}))
+
+    src = b"""<?php
+$app->get('/api/users', function ($req, $res) { return $res; });
+$app->post('/api/users', function ($req, $res) { return $res; });
+"""
+    rel_path = "public/index.php"
+    abs_file = repo / rel_path
+    abs_file.parent.mkdir(parents=True, exist_ok=True)
+    abs_file.write_bytes(src)
+
+    # Change working directory to a separate dir outside repo root
+    outside_dir = tmp_path / "outside_cwd"
+    outside_dir.mkdir()
+    monkeypatch.chdir(outside_dir)
+
+    slim_parser = SlimParser()
+    assert slim_parser.claims(rel_path, src, repo_root=repo) is True
+
+    registry.discover_builtin()
+    selected = registry.select(rel_path, src, repo_root=repo)
+    assert selected is not None
+    assert selected.name == "php-slim"
+
+    ctx = ParseContext(
+        path=rel_path,
+        abs_path=abs_file,
+        source=src,
+        repo_root=repo,
+        capture_statements=True,
+    )
+    rec = selected.parse_file(ctx)
+    assert rec.framework == "slim"
+
+    routes = [s for s in rec.statements if s.semanticType == "route"]
+    assert len(routes) == 2
+    endpoints = {r.endpoint: r for r in routes}
+    assert "/api/users" in endpoints
