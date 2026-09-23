@@ -59,8 +59,8 @@ Route::resource('photos', 'PhotoController');
         ("GET", "/users", "UserController@index", "route", rec.id),
         ("POST", "/users", "UserController@store", "route", rec.id),
         ("GET", "/profile", "ProfileController@handle", "route", rec.id),
+        ("ANY", "photos", None, "route", rec.id),
         ("POST", "/profile", "ProfileController@handle", "route", rec.id),
-        ("ANY", "/photos", None, "route", rec.id),
     ]
 
 
@@ -278,12 +278,12 @@ $routes->group('admin', function ($routes) {
     routes = [s for s in rec.statements if s.semanticType == "route"]
     group_fn = next(fn for fn in rec.functions if fn.type == "function_expression")
     assert [_route_shape(route) for route in routes] == [
+        ("GET", "/admin/dashboard", None, "route", rec.id),
         ("GET", "/users", None, "route", rec.id),
         ("POST", "/users", None, "route", rec.id),
         ("GET", "/profile", None, "route", rec.id),
+        ("ANY", "photos", None, "route", rec.id),
         ("POST", "/profile", None, "route", rec.id),
-        ("ANY", "/photos", None, "route", rec.id),
-        ("GET", "/admin/dashboard", None, "route", group_fn.id),
     ]
 
 

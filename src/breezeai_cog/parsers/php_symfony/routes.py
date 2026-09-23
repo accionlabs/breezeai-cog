@@ -3,44 +3,18 @@
 from __future__ import annotations
 
 import re
+from typing import TYPE_CHECKING, Any, Iterator
 
 from ...emit import disambiguate, statement_id
 from ...schemas import FileRecord, Statement
 from ..php.dto import _GENERIC_FRAMEWORK_TYPES, extract_use_map, resolve_type_to_fqcn
+from ..treesitter import node_text
+
+if TYPE_CHECKING:
+    from ...schemas import Decorator
 
 
-def _parse_route_attr(args: list[str]) -> tuple[str | None, list[str], str | None]:
-    """Parse route path, methods list, and route name from attribute arguments."""
-    path = None
-    methods: list[str] = []
-    name = None
-
-    for arg in args:
-        arg_str = arg.strip()
-        if arg_str.startswith(("methods:", "methods=")):
-            # Parse array of methods: methods: ['GET', 'POST'] or methods: 'GET'
-            raw = arg_str.split(":", 1)[-1] if ":" in arg_str else arg_str.split("=", 1)[-1]
-            found = re.findall(r"['\"]([A-Z_]+)['\"]", raw, re.IGNORECASE)
-            methods.extend(m.upper() for m in found)
-        elif arg_str.startswith(("name:", "name=")):
-            raw = arg_str.split(":", 1)[-1] if ":" in arg_str else arg_str.split("=", 1)[-1]
-            name = raw.strip("'\" ")
-        elif not arg_str.startswith(
-            ("requirements:", "defaults:", "options:", "schemes:", "host:", "condition:")
-        ):
-            if path is None:
-                # Positional path argument or path: '...'
-                raw = (
-                    arg_str.split(":", 1)[-1]
-                    if ":" in arg_str and not arg_str.startswith("/")
-                    else arg_str
-                )
-                path = raw.strip("'\" ")
-
-    return path, methods, name
-
-
-def _string_literal(node, source: bytes) -> str | None:
+def _string_literal(node: Any, source: bytes) -> str | None:
     if node is None:
         return None
     if node.type == "string":
@@ -50,7 +24,7 @@ def _string_literal(node, source: bytes) -> str | None:
     return None
 
 
-def _string_literals(node, source: bytes):
+def _string_literals(node: Any, source: bytes) -> Iterator[str]:
     literal = _string_literal(node, source)
     if literal is not None:
         yield literal
@@ -59,40 +33,77 @@ def _string_literals(node, source: bytes):
         yield from _string_literals(child, source)
 
 
-def _parse_route_attr_nodes(args_node, source: bytes) -> tuple[str | None, list[str], str | None]:
-    """Parse a Route attribute from its argument AST, preserving literal values verbatim."""
+def _parse_route_attr_nodes(
+    args: Any, source: bytes | None = None
+) -> tuple[str | None, list[str], str | None]:
+    """Parse a Route attribute from its argument AST node or string list, preserving literal values verbatim."""
     path = None
     methods: list[str] = []
     name = None
-    for arg in args_node.named_children if args_node is not None else []:
-        key_node = arg.child_by_field_name("name")
-        value_node = arg.child_by_field_name("value")
-        if key_node is not None:
-            key = node_text(key_node, source)
-            if value_node is None and arg.named_children:
-                value_node = arg.named_children[-1]
-            if key == "methods" and value_node is not None:
-                methods.extend(literal.upper() for literal in _string_literals(value_node, source))
-            elif key == "name":
-                name = _string_literal(value_node, source)
+
+    if args is None:
+        return path, methods, name
+
+    if not isinstance(args, list) and source is not None:
+        for arg in args.named_children:
+            key_node = arg.child_by_field_name("name")
+            value_node = arg.child_by_field_name("value")
+            if key_node is not None:
+                key = node_text(key_node, source)
+                if value_node is None and arg.named_children:
+                    value_node = arg.named_children[-1]
+                if key == "methods" and value_node is not None:
+                    methods.extend(literal.upper() for literal in _string_literals(value_node, source))
+                elif key == "name" and value_node is not None:
+                    name = _string_literal(value_node, source)
+                elif key == "path" and value_node is not None:
+                    path = _string_literal(value_node, source)
+                continue
+            value = arg.named_children[0] if arg.named_children else None
+            if path is None and value is not None:
+                path = _string_literal(value, source)
+        return path, methods, name
+
+    str_list = args if isinstance(args, list) else []
+    for arg_str in str_list:
+        arg_str = arg_str.strip()
+        if not arg_str:
             continue
-        value = arg.named_children[0] if arg.named_children else None
-        if path is None:
-            path = _string_literal(value, source)
+        if ":" in arg_str or "=" in arg_str:
+            sep = ":" if ":" in arg_str else "="
+            k, v = arg_str.split(sep, 1)
+            k = k.strip()
+            v = v.strip()
+            if k == "methods":
+                found = re.findall(r"['\"]([A-Z_]+)['\"]", v, re.IGNORECASE)
+                methods.extend(m.upper() for m in found)
+            elif k == "name":
+                name = v.strip("'\" ")
+            elif k == "path":
+                path = v.strip("'\" ")
+        else:
+            if path is None:
+                path = arg_str.strip("'\" ")
+
     return path, methods, name
 
 
-def _parse_route_decorator(dec, root, source: bytes) -> tuple[str | None, list[str], str | None]:
+def _parse_route_decorator(
+    dec: Decorator, root: Any, source: bytes | None
+) -> tuple[str | None, list[str], str | None]:
     """Parse a Route decorator using its source-matching attribute AST node."""
     if root is not None and source is not None and dec.text:
-        found: list = []
+        found: list[Any] = []
 
-        def walk(node) -> None:
+        def walk(node: Any) -> None:
             if node.type == "attribute":
-                name_node = node.child_by_field_name("name")
+                name_node = node.child_by_field_name("name") or (
+                    node.named_children[0] if node.named_children else None
+                )
                 if (
                     name_node is not None
                     and node_text(name_node, source).rsplit("\\", 1)[-1] == "Route"
+                    and dec.text is not None
                     and node_text(node, source) in dec.text
                 ):
                     found.append(node)
@@ -108,7 +119,7 @@ def _parse_route_decorator(dec, root, source: bytes) -> tuple[str | None, list[s
                     None,
                 )
             return _parse_route_attr_nodes(args_node, source)
-    return _parse_route_attr(dec.args)
+    return _parse_route_attr_nodes(dec.args)
 
 
 def _combine_paths(prefix: str | None, path: str | None) -> str:
@@ -155,7 +166,9 @@ def _split_annotation_args(raw: str) -> list[str]:
     return args
 
 
-def _docblock_route_specs(fn, root, source: bytes) -> list[tuple[list[str], str]]:
+def _docblock_route_specs(
+    fn: Any, root: Any, source: bytes
+) -> list[tuple[tuple[str | None, list[str], str | None], str]]:
     """Extract method-level ``@Route(...)`` annotations from the preceding PHPDoc block."""
     line_starts = [0]
     for match in re.finditer(b"\n", source):
@@ -163,9 +176,9 @@ def _docblock_route_specs(fn, root, source: bytes) -> list[tuple[list[str], str]
     if fn.startLine < 1 or fn.startLine > len(line_starts):
         return []
     method_start = line_starts[fn.startLine - 1]
-    comments = []
+    comments: list[Any] = []
 
-    def walk(node) -> None:
+    def walk(node: Any) -> None:
         if node.type == "comment" and node.end_byte <= method_start:
             text = node.text.decode("utf-8", "replace")
             if text.lstrip().startswith("/**") and re.search(
@@ -185,12 +198,12 @@ def _docblock_route_specs(fn, root, source: bytes) -> list[tuple[list[str], str]
     doc = max(preceding, key=lambda node: node.end_byte)
     text = doc.text.decode("utf-8", "replace")
     return [
-        (_split_annotation_args(match.group(1)), match.group(0))
+        (_parse_route_attr_nodes(_split_annotation_args(match.group(1))), match.group(0))
         for match in re.finditer(r"@Route\s*\((.*?)\)", text, re.IGNORECASE | re.DOTALL)
     ]
 
 
-def _function_guards(fn) -> list[str] | None:
+def _function_guards(fn: Any) -> list[str] | None:
     guards: list[str] = []
     for dec in fn.decorators:
         if dec.name == "IsGranted" and dec.args:
@@ -200,7 +213,7 @@ def _function_guards(fn) -> list[str] | None:
     return guards or None
 
 
-def _symfony_request_dto(fn, use_map: dict[str, str], namespace: str) -> str | None:
+def _symfony_request_dto(fn: Any, use_map: dict[str, str], namespace: str) -> str | None:
     # 1. Parameter with #[MapRequestPayload] attribute
     for p in fn.params:
         if any(
@@ -228,7 +241,7 @@ def _symfony_request_dto(fn, use_map: dict[str, str], namespace: str) -> str | N
     return None
 
 
-def _symfony_response_dto(fn, use_map: dict[str, str], namespace: str) -> str | None:
+def _symfony_response_dto(fn: Any, use_map: dict[str, str], namespace: str) -> str | None:
     if fn.returnType:
         return resolve_type_to_fqcn(fn.returnType, use_map, namespace)
     return None
@@ -264,7 +277,7 @@ def detect_symfony_routes(
                     class_prefixes[cls.id] = cpath
 
     for fn in record.functions:
-        route_specs = [
+        route_specs: list[tuple[tuple[str | None, list[str], str | None], str]] = [
             (
                 _parse_route_decorator(dec, root, source),
                 dec.text or "#[Route]",
@@ -274,11 +287,7 @@ def detect_symfony_routes(
         ]
         if root is not None and source is not None:
             route_specs.extend(_docblock_route_specs(fn, root, source))
-        for route_args, route_text in route_specs:
-            if isinstance(route_args, tuple):
-                mpath, methods, rname = route_args
-            else:
-                mpath, methods, rname = _parse_route_attr(route_args)
+        for (mpath, methods, rname), route_text in route_specs:
             cls_prefix = class_prefixes.get(fn.parentId)
             full_path = _combine_paths(cls_prefix, mpath)
             verbs = methods if methods else ["ANY"]
