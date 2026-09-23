@@ -11,6 +11,7 @@ CONTROL_FLOW = {
     "select_statement",
     "go_statement",
     "defer_statement",
+    "range_clause",
 }
 
 JUMP = {
@@ -27,6 +28,7 @@ DECLARATIONS = {
     "var_declaration",
     "const_declaration",
     "call_expression",
+    "send_statement",
 }
 
 EMIT_TYPES = CONTROL_FLOW | JUMP | DECLARATIONS
@@ -46,4 +48,4 @@ NESTED_SCOPES = {
 
 STATEMENT_TYPES = sorted(EMIT_TYPES)
 COMMENT_TYPES = {"line_comment", "block_comment"}
-FRAMEWORKS = ["net_http", "gin", "echo", "fiber", "chi", "gorilla_mux", "grpc"]
+FRAMEWORKS = ["net-http", "gin", "echo", "fiber", "chi", "gorilla-mux", "grpc"]

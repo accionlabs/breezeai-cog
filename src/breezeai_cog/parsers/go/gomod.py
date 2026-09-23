@@ -30,5 +30,4 @@ def parse_gomod(path: str | Path, text: str) -> dict:
         "module": module,
         "goVersion": go_version,
         "dependencies": require,
-        "require": [{"name": item} for item in require],
     }

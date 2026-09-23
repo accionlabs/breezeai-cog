@@ -5,7 +5,7 @@ from __future__ import annotations
 from tree_sitter import Node
 
 from ...emit import class_id, disambiguate
-from ...schemas import Class, ConstructorParam, Function, Statement
+from ...schemas import Class, Function, Statement
 from ..callresolve import CallResolver, noop_resolver
 from ..treesitter import line_span, node_text
 
@@ -22,14 +22,23 @@ def _kind(node: Node, source: bytes) -> str:
     return "class"
 
 
-def _type_name(node: Node, source: bytes) -> str | None:
-    type_node = node.child_by_field_name("type")
-    if type_node is None:
+def _embedded_type(spec: Node, source: bytes) -> str | None:
+    type_node = spec.child_by_field_name("type")
+    if type_node is None or type_node.type != "struct_type":
         return None
-    text = node_text(type_node, source).strip()
-    if text.startswith("*"):
-        text = text[1:].strip()
-    return text.rsplit(".", 1)[-1]
+    field_list = next(
+        (child for child in type_node.named_children if child.type == "field_declaration_list"),
+        None,
+    )
+    fields = [child for child in field_list.named_children if child.type == "field_declaration"] if field_list else []
+    embedded: list[str] = []
+    for field in fields:
+        names = field.child_by_field_name("name")
+        field_type = field.child_by_field_name("type")
+        if names is None and field_type is not None and field_type.type in {"type_identifier", "selector_type", "pointer_type"}:
+            text = node_text(field_type, source).lstrip("*").rsplit(".", 1)[-1]
+            embedded.append(text)
+    return embedded[0] if len(embedded) == 1 else None
 
 
 def _generics(spec: Node, source: bytes) -> str | None:
@@ -68,7 +77,7 @@ def build_class(
         type=kind,
         visibility="public" if name[:1].isupper() else "package",
         generics=_generics(spec, source),
-        extends=_type_name(spec, source) if kind == "class" else None,
+        extends=_embedded_type(spec, source),
         implements=[],
         constructorParams=[],
         startLine=start,

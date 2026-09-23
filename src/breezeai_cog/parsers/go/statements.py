@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from tree_sitter import Node
 
-from ...schemas import Decorator, Statement
+from ...schemas import Statement
 from ..statements_common import classify_statement, render_concat, resolve_endpoint
 from ..treesitter import node_text
 from .mappings import CONTROL_FLOW, EMIT_TYPES, NESTED_SCOPES

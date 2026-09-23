@@ -14,10 +14,11 @@ from ..base import BaseParser, ParseContext
 from ..comments_common import comment_statements_for
 from ..treesitter import parse_source
 from .classes import build_class
-from .functions import build_function, defined_names, type_map
+from .functions import build_anonymous_function, build_function
 from .imports import GoIndex, build_fqcn_index, extract_imports
 from .mappings import COMMENT_TYPES, CONTROL_FLOW, FRAMEWORKS, STATEMENT_TYPES
 from .routes import detect_framework, detect_routes
+from .events import detect_events
 from .gomod import parse_gomod
 from .gosum import parse_gosum
 
@@ -69,7 +70,9 @@ class GoParser(BaseParser):
         capture, limit = ctx.capture_statements, ctx.statement_text_limit
 
         idx = ctx.resolution_index
-        internal, external, _, bindings = extract_imports(root, source, path, ctx.repo_root, idx if isinstance(idx, GoIndex) else None)
+        internal, external, _, bindings = extract_imports(
+            root, source, idx if isinstance(idx, GoIndex) else None
+        )
 
         functions: list[Function] = []
         classes = []
@@ -113,12 +116,45 @@ class GoParser(BaseParser):
                 if owner is not None:
                     owner.metadata = {**(owner.metadata or {}), "hasMethods": True}
                 if fn.type == "constructor":
-                    target = class_by_name.get(fn.name[3:])
+                    target_name = fn.name if fn.name == "New" else fn.name[3:]
+                    if target_name and target_name.startswith("New"):
+                        target_name = target_name[3:]
+                    target = class_by_name.get(target_name)
                     if target is not None:
                         target.constructorParams = [ConstructorParam(name=p.name, type=p.type) for p in fn.params]
 
-        if capture:
-            statements.extend(detect_routes(root, source, path, seen_ids=seen_ids, parent_id=fid))
+        named_owners = [(fn.startLine, fn.endLine, fn.id) for fn in functions]
+        anonymous_nodes: list[Node] = []
+
+        def collect_anonymous(node: Node) -> None:
+            if node.type == "func_literal":
+                anonymous_nodes.append(node)
+            for child in node.named_children:
+                collect_anonymous(child)
+
+        collect_anonymous(root)
+        anonymous_nodes.sort(key=lambda node: (node.start_point[0], -node.end_point[0]))
+        anonymous_owners: list[tuple[int, int, str]] = []
+        for node in anonymous_nodes:
+            start, end = node.start_point[0] + 1, node.end_point[0] + 1
+            candidates = named_owners + anonymous_owners
+            enclosing = [item for item in candidates if item[0] <= start and end <= item[1]]
+            owner_id = min(enclosing, key=lambda item: item[1] - item[0])[2] if enclosing else fid
+            functions.append(
+                build_anonymous_function(
+                    node, source, path, parent_id=owner_id, seen_ids=seen_ids
+                )
+            )
+            anonymous_owners.append((start, end, functions[-1].id))
+
+        if capture and not self.is_fixture_file(path):
+            owners = [(fn.startLine, fn.endLine, fn.id) for fn in functions]
+            statements.extend(
+                detect_routes(root, source, path, seen_ids=seen_ids, parent_id=fid, owners=owners)
+            )
+            statements.extend(
+                detect_events(root, source, path, seen_ids=seen_ids, parent_id=fid, owners=owners)
+            )
 
         if capture:
             statements.extend(
