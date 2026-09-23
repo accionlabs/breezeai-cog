@@ -244,11 +244,11 @@ def match_db(callee: str, method: str, language: str | None = None,
         return "prisma"
     if m in _DISTINCTIVE:
         db = _DISTINCTIVE[m]
-        # MongoDB aggregate is never a bare receiverless call; a bare aggregate() is a local or helper function.
-        if m == "aggregate" and ("." not in callee or callee == method):
-            pass
-        # EF verbs are .NET-only; suppress them in a known non-.NET file (name collision).
-        elif not (db == "entity_framework" and language is not None and language not in _DOTNET):
+        # A receiverless distinctive verb is a local/helper call, not a database access.
+        # This is defense-in-depth for callers that do not provide local_names.
+        if callee != method and not (
+            db == "entity_framework" and language is not None and language not in _DOTNET
+        ):
             return db
     # Ambiguous sync LINQ terminals (ToList/FirstOrDefault/…): EF only in a .NET file AND when
     # the call chain shows a queryable/DbContext source; else LINQ-to-Objects — drop, don't tag.
