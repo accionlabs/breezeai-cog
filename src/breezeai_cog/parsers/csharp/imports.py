@@ -226,24 +226,56 @@ def _string_literal(node: Node | None, source: bytes) -> str | None:
     return None
 
 
-def _physical_aspx_key(physical: str) -> str | None:
-    """A ``MapPageRoute`` physical arg → repo-relative ``.aspx`` key (``~/CMS/E.aspx`` →
-    ``CMS/E.aspx``). Assumes app-root = repo-root: a subdir app is a false-negative (page
-    keeps its physical endpoint), never a wrong match."""
+_WEB_CONFIG = ("web.config", "Web.config")
+
+
+def _aspx_app_root(rel: str, repo_root: Path | None) -> str:
+    """Application root for a file in a Web Forms repo: the shallowest ancestor directory
+    (repo-root downward) containing ``web.config``. Falls back to ``""`` (repo root) when
+    ``repo_root`` is absent or no ``web.config`` is found. Mirrors ``mounts._app_root``."""
+    if repo_root is None:
+        return ""
+    dirname = posixpath.dirname(rel)
+    parts = dirname.split("/") if dirname else []
+    for i in range(len(parts) + 1):
+        d = "/".join(parts[:i])
+        if any((repo_root / d / c).is_file() for c in _WEB_CONFIG):
+            return d
+    return ""
+
+
+def _physical_aspx_key(physical: str, app_root: str = "") -> str | None:
+    """A ``MapPageRoute`` physical arg → repo-relative ``.aspx`` key.
+
+    ``~/CMS/E.aspx`` with ``app_root="SubDir/App"`` → ``SubDir/App/CMS/E.aspx``.
+    When ``app_root`` is ``""`` (repo root = app root, or unknown), the result is just the
+    ``~/``-stripped path — matching the pre-existing behaviour for flat repos."""
     p = physical.strip().replace("\\", "/")
     if p.startswith("~/"):
         p = p[2:]
     elif p.startswith("/"):
         p = p[1:]
     p = posixpath.normpath(p)
-    return p if p.lower().endswith(".aspx") and not p.startswith("..") else None
+    if not p.lower().endswith(".aspx") or p.startswith(".."):
+        return None
+    return posixpath.join(app_root, p) if app_root else p
 
 
-def _index_map_page_routes(root: Node, source: bytes, index: CSharpIndex) -> None:
+def _index_map_page_routes(
+    root: Node, source: bytes, rel: str, repo_root: Path | None, index: CSharpIndex
+) -> None:
     """Collect ``routes.MapPageRoute(name, url, "~/physical.aspx")`` mappings from the AST
     (not raw text — so matches in comments/strings are excluded). Only string-literal
     ``url``/``physical`` args are recorded; the physical ``.aspx`` keys the friendly url.
+
+    ``rel`` + ``repo_root`` resolve ``~/`` relative to the **app root** (the shallowest
+    ancestor directory that holds a ``web.config``), producing a full repo-relative key that
+    matches the path used by ``detect_webforms_pages``. For repos where the app root equals
+    the repo root (or when ``repo_root`` is absent), the key reduces to the bare ``.aspx``
+    path — identical to the previous behaviour.
+
     Iterative walk (no recursion — deep ASTs can't blow the stack)."""
+    app_root = _aspx_app_root(rel, repo_root)
     stack = [root]
     while stack:
         n = stack.pop()
@@ -251,7 +283,7 @@ def _index_map_page_routes(root: Node, source: bytes, index: CSharpIndex) -> Non
             args = _positional_args(n)
             if len(args) >= 3:
                 url = _string_literal(args[1], source)
-                key = _physical_aspx_key(_string_literal(args[2], source) or "")
+                key = _physical_aspx_key(_string_literal(args[2], source) or "", app_root)
                 if url is not None and key is not None:
                     urls = index.page_routes.setdefault(key, [])
                     if url not in urls:
@@ -263,6 +295,7 @@ def _index_file(
     root: Node, source: bytes, rel: str, index: CSharpIndex,
     by_fqn: dict[str, ClassHeritage | None],
     method_files: dict[tuple[str, str], str | None],
+    repo_root: Path | None = None,
 ) -> None:
     """Add one file's ``global using`` namespaces + declared types + members to ``index``.
     Heritage is accumulated into ``by_fqn`` (fully-qualified names) for later projection."""
@@ -272,7 +305,7 @@ def _index_file(
             if kind == "global" and name:
                 index.global_usings.add(name)
     if b"MapPageRoute" in source:  # cheap gate — full-tree scan only where it can match
-        _index_map_page_routes(root, source, index)
+        _index_map_page_routes(root, source, rel, repo_root, index)
     if b"[DataLoader" in source:  # same idiom: only scan a file that can declare one
         _index_data_loaders(root, source, rel, index)
 
@@ -356,6 +389,11 @@ def _index_one(args: tuple[str, str]) -> _Fragment | None:
     safe to run in a worker process (module-level + picklable, for :func:`parallel_map`).
     Returns ``None`` on read error."""
     file_s, rel = args
+    # Derive repo_root from the absolute path and the repo-relative path so that
+    # _index_map_page_routes can resolve ~/… against the correct app-root directory.
+    repo_root: Path | None = None
+    if file_s.endswith("/" + rel):
+        repo_root = Path(file_s[: -len(rel) - 1])
     try:
         source = Path(file_s).read_bytes()
     except OSError:
@@ -365,7 +403,7 @@ def _index_one(args: tuple[str, str]) -> _Fragment | None:
         frag = CSharpIndex()
         by_fqn: dict[str, ClassHeritage | None] = {}
         method_files: dict[tuple[str, str], str | None] = {}
-        _index_file(root, source, rel, frag, by_fqn, method_files)
+        _index_file(root, source, rel, frag, by_fqn, method_files, repo_root)
         return frag, by_fqn, method_files
     except Exception as exc:  # parse OR a pathologically deep AST walk (RecursionError) — skip this file
         from ...logging import get_logger
