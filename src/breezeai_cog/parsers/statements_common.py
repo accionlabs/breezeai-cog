@@ -22,11 +22,13 @@ from __future__ import annotations
 
 import contextvars
 from collections.abc import Callable, Collection, Iterator
+from typing import cast
 
 from tree_sitter import Node
 
 from ..emit import disambiguate, statement_id
 from ..schemas import Decorator, Statement
+from ..schemas.enums import SemanticType
 from .detection import classify_call, text_has_query
 from .treesitter import first_line, node_text
 
@@ -57,6 +59,11 @@ def set_http_client_ids(ids: frozenset[str]) -> "contextvars.Token[frozenset[str
 
 def reset_http_client_ids(token: "contextvars.Token[frozenset[str]]") -> None:
     _http_client_ids.reset(token)
+
+
+def current_http_client_ids() -> frozenset[str]:
+    """Return the HTTP-client names active for the file being extracted."""
+    return _http_client_ids.get()
 
 
 def begin_concat_tracking() -> None:
@@ -208,19 +215,30 @@ def resolve_endpoint(
     return render(first, source), None
 
 
+def _call_type_set(call_type: str | Collection[str]) -> Collection[str]:
+    return (call_type,) if isinstance(call_type, str) else call_type
+
+
 def _iter_calls(
     node: Node,
     emit_types: Collection[str],
-    call_type: str,
+    call_type: str | Collection[str],
     stmt_expr: Collection[str],
     containers: Collection[str],
 ) -> Iterator[Node]:
+    call_types = _call_type_set(call_type)
     for child in node.named_children:
         if child.type in emit_types:
             continue  # a nested statement — classified on its own
         if child.type in stmt_expr and node.type in containers:
             continue  # a bare statement-position expression (its own statement — Python)
-        if child.type == call_type:
+        # Scala uses a field_expression as the function portion of a call
+        # (``client.get(...)``). When field expressions are enabled as statement
+        # roots, do not emit that internal function node as a second call; still
+        # recurse so nested call arguments remain visible.
+        if child.type in call_types and not (
+            child.type == "field_expression" and node.type == "call_expression"
+        ):
             yield child
         yield from _iter_calls(child, emit_types, call_type, stmt_expr, containers)
 
@@ -228,13 +246,14 @@ def _iter_calls(
 def _calls_in_statement(
     node: Node,
     emit_types: Collection[str],
-    call_type: str,
+    call_type: str | Collection[str],
     stmt_expr: Collection[str],
     containers: Collection[str],
 ) -> Iterator[Node]:
+    call_types = _call_type_set(call_type)
     # The statement node may itself be a call — a bare Python call-statement
     # (``session.add(x)``) has no expression-statement wrapper.
-    if node.type == call_type:
+    if node.type in call_types:
         yield node
     yield from _iter_calls(node, emit_types, call_type, stmt_expr, containers)
 
@@ -270,7 +289,7 @@ def classify_statement(
     seen_ids: set[str],
     emit_types: Collection[str],
     control_flow: Collection[str],
-    call_type: str,
+    call_type: str | Collection[str],
     name_of: NameOf,
     call_details: CallDetails,
     stmt_expr: Collection[str] = (),
@@ -278,6 +297,7 @@ def classify_statement(
     language: str | None = None,
     typed_db_ids: "frozenset[str] | None" = None,
     decorators: "list[Decorator] | None" = None,
+    local_names: Collection[str] = (),
 ) -> list[Statement]:
     # ``code_text`` (comment-free) drives query/semantic detection; ``display_text`` is what
     # lands on the record — for a normal statement it folds in a same-line trailing comment
@@ -298,13 +318,15 @@ def classify_statement(
         det = call_details(call, source)
         if det is None:
             continue
+        if local_names and "." not in det[0] and det[0] in local_names:
+            continue
         classified = classify_call(
             det[0],
             det[1],
             det[2],
             language,
             typed_db_ids=typed_db_ids,
-            http_client_ids=_http_client_ids.get() or None,
+            http_client_ids=current_http_client_ids() or None,
         )
         if classified is None:
             continue
@@ -317,6 +339,44 @@ def classify_statement(
         hits.append((sem, meth, ep, dh, call))
 
     records: list[Statement] = []
+    if node.type in control_flow:
+        # Spec §4.2: Control-flow statements must always carry semanticType = None.
+        # Inner calls carrying semantic types are emitted at their own call span.
+        records.append(
+            Statement(
+                id=disambiguate(statement_id(path, start, col), seen_ids),
+                parentId=parent_id,
+                nodeType=node.type,
+                semanticType=None,
+                text=display_text,
+                name=name_of(node, source),
+                method=None,
+                endpoint=None,
+                dataAccessHint=None,
+                decorators=decorators or [],
+                startLine=start,
+                endLine=end,
+                path=path,
+            )
+        )
+        for semantic, method_value, endpoint, hint, call in hits:
+            cs, ccol = call.start_point[0] + 1, call.start_point[1]
+            records.append(
+                Statement(
+                    id=disambiguate(statement_id(path, cs, ccol), seen_ids),
+                    parentId=parent_id,
+                    nodeType=call.type,
+                    semanticType=cast(SemanticType, semantic),
+                    text=node_text(call, source),
+                    method=method_value,
+                    endpoint=endpoint,
+                    dataAccessHint=hint,
+                    startLine=cs,
+                    endLine=call.end_point[0] + 1,
+                    path=path,
+                )
+            )
+        return records
     if hits:
         semantic, method_value, endpoint, hint, _ = hits[0]
     else:
