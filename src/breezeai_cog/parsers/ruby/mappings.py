@@ -3,19 +3,19 @@
 from __future__ import annotations
 
 CONTROL_FLOW ={
-    "if", 
-    "unless", 
-    "while", 
-    "until", 
-    "for", 
-    "case", 
+    "if_statement", 
+    "unless_statement", 
+    "while_statement", 
+    "until_statement", 
+    "for_statement", 
+    "case_statement", 
     "begin"
     }
 
 JUMP = {
-    "return",
-     "break", 
-     "next", 
+    "return_statement",
+     "break_statement", 
+     "next",
      "redo", 
      "retry"
      }
@@ -31,11 +31,11 @@ NESTED_SCOPES = {
     "class", 
     "module", 
     "method", 
-    "if", 
-    "while", 
-    "until", 
-    "for", 
-    "case", 
+    "if_statement", 
+    "while_statement", 
+    "until_statement", 
+    "for_statement", 
+    "case_statement", 
     "begin"}
 
 COMMENT_TYPES = {
