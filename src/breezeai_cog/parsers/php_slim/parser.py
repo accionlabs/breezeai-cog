@@ -8,6 +8,7 @@ from ...emit import SeenIds
 from ...schemas import FileRecord
 from ..base import ParseContext
 from ..php.parser import PhpParser, composer_requires
+from ..statements_common import normalize_route_endpoints
 from ..treesitter import parse_source
 from .routes import detect_slim_routes
 
@@ -34,6 +35,7 @@ class SlimParser(PhpParser):
             )
             if routes:
                 record.statements.extend(routes)
+            normalize_route_endpoints(record.statements)
             if any(s.semanticType == "route" and s.framework == "slim" for s in record.statements):
                 record.framework = "slim"
         return record

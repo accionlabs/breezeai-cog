@@ -142,6 +142,16 @@ def strip_leading_base(url: str) -> str:
     return url
 
 
+def normalize_route_endpoints(routes: list[Statement]) -> list[Statement]:
+    """Normalize emitted route endpoints to one leading slash and no trailing slash."""
+    for route in routes:
+        if route.semanticType != "route" or route.endpoint is None:
+            continue
+        endpoint = f"/{route.endpoint.lstrip('/')}".rstrip("/")
+        route.endpoint = endpoint or "/"
+    return routes
+
+
 #: Max binary-expression nesting ``render_concat`` will fold. String concatenation is
 #: left-associative, so ``a + b + … + z`` is a deeply *nested* tree; folding it recurses
 #: once per ``+`` (``render_concat`` ↔ the language ``_render_url``). Generated HTML/JS

@@ -76,7 +76,7 @@ Route::resource('photos', 'PhotoController');
         ("GET", "/users", "UserController@index", "route", rec.id),
         ("POST", "/users", "UserController@store", "route", rec.id),
         ("GET", "/profile", "ProfileController@handle", "route", rec.id),
-        ("ANY", "photos", None, "route", rec.id),
+        ("ANY", "/photos", None, "route", rec.id),
         ("POST", "/profile", "ProfileController@handle", "route", rec.id),
     ]
 
@@ -179,6 +179,22 @@ class UserController
         ("HEAD", "/api/users", "UserController@list", "route", list_fn.id),
         ("POST", "/api/users/{id}", "UserController@update", "route", update_fn.id),
     ]
+
+
+def test_symfony_empty_route_under_prefix_has_no_trailing_slash(tmp_path: Path) -> None:
+    src = b"""<?php
+use Symfony\\Component\\Routing\\Attribute\\Route;
+
+#[Route('/orders/')]
+class OrderController
+{
+    #[Route('')]
+    public function index() {}
+}
+"""
+    rec = _parse(SymfonyParser, tmp_path, src, "src/Controller/OrderController.php")
+    route = next(s for s in rec.statements if s.semanticType == "route")
+    assert route.endpoint == "/orders"
 
 
 def test_symfony_docblock_route_annotation(tmp_path: Path) -> None:
@@ -298,7 +314,7 @@ $routes->group('admin', function ($routes) {
         ("GET", "/users", None, "route", rec.id),
         ("POST", "/users", None, "route", rec.id),
         ("GET", "/profile", None, "route", rec.id),
-        ("ANY", "photos", None, "route", rec.id),
+        ("ANY", "/photos", None, "route", rec.id),
         ("POST", "/profile", None, "route", rec.id),
     ]
 
@@ -328,12 +344,12 @@ $route['products']['post'] = 'catalog/create';
 
     assert "default_controller" not in endpoints
     assert "404_override" not in endpoints
-    assert "journals" in endpoints
-    assert endpoints["journals"].method == "ANY"
-    assert "product/(:any)" in endpoints
-    assert "products" in endpoints
-    assert any(r.endpoint == "products" and r.method == "GET" for r in routes)
-    assert any(r.endpoint == "products" and r.method == "POST" for r in routes)
+    assert "/journals" in endpoints
+    assert endpoints["/journals"].method == "ANY"
+    assert "/product/(:any)" in endpoints
+    assert "/products" in endpoints
+    assert any(r.endpoint == "/products" and r.method == "GET" for r in routes)
+    assert any(r.endpoint == "/products" and r.method == "POST" for r in routes)
 
 
 
@@ -622,7 +638,7 @@ $routes->get('dashboard', 'Admin\\Dashboard::index', ['filter' => 'auth']);
     rec = _parse(CodeIgniterParser, tmp_path, src, "app/Config/Routes.php")
     routes = [s for s in rec.statements if s.semanticType == "route"]
     assert len(routes) == 1
-    assert routes[0].endpoint == "dashboard"
+    assert routes[0].endpoint == "/dashboard"
     assert routes[0].guards == ["auth"]
 
 
@@ -738,7 +754,7 @@ $routes->cli('cron/run', 'CronController::run');
     rec = _parse(CodeIgniterParser, tmp_path, src, "app/Config/Routes.php")
     routes = [s for s in rec.statements if s.semanticType == "route"]
     assert len(routes) == 1
-    assert routes[0].endpoint == "cron/run"
+    assert routes[0].endpoint == "/cron/run"
     assert routes[0].method == "RPC"
     assert routes[0].routeKind == "route"
 
