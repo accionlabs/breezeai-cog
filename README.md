@@ -27,6 +27,9 @@ Python reimplementation of `breezeai-code-ontology-generator`.
 | C++ | `.cpp .cc .cxx .c++ .hpp .h .hh .hxx .inl .ipp` | — |
 | Groovy † | `.groovy` | Vert.x |
 | Prisma | `.prisma` | Prisma Schema Language — `model` → `data_model` entity, `enum` / `datasource` / `generator` blocks (full body on `text`) |
+| XSD | `.xsd` | XML Schema — global `element` / `complexType` / `simpleType` / `group` / `attributeGroup` → `data_model` entity (full body on `text`); `import` / `include` recorded, not resolved |
+| WSDL | `.wsdl` | WSDL 1.1 (SOAP) — `message` → `data_model` entity; `portType` + `binding` operations merged into a `route` (`routeKind=rpc`, SOAP action as `method`); reuses the XSD walker for embedded `<types>` schemas |
+| JSLT | `.jslt` | JSON query/transform language — hand-rolled structural scan (no tree-sitter grammar): `import` / `def` / `let` declarations plus the trailing module expression |
 | Structured JSON / data | `.json` (+ YAML/TOML config) | Whole-document capture as a TOON `structured_data` statement |
 | Config | `package.json`, `tsconfig`, `Dockerfile`, `docker-compose`, `pom.xml`, `requirements.txt`, `build.gradle`, `.csproj` / `.vbproj` / `.sln`, `Makefile`, … | — |
 
