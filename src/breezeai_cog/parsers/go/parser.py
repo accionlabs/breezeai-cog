@@ -92,7 +92,6 @@ class GoParser(BaseParser):
             if child.type == "type_declaration":
                 cls_list, _, cls_statements = build_class(
                     child, source, path, parent_id=fid, seen_ids=seen_ids,
-                    capture=capture, limit=limit, resolve=resolve,
                 )
                 classes.extend(cls_list)
                 statements.extend(cls_statements)
