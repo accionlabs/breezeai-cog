@@ -859,6 +859,21 @@ export async function f(ssm: SSMClient) {
     assert _api_calls(rec) == []
 
 
+def test_cognito_command_via_barrel_reexport_is_a_known_gap(tmp_path) -> None:
+    # The provenance check is in the shared detector, so the gap is the same for every
+    # command-pattern SDK. Pinned per service too: a registration that got the byte guard
+    # or client type wrong could otherwise pass the SSM case and silently skip this one.
+    src = b"""import { CognitoIdentityProviderClient } from '@aws-sdk/client-cognito-identity-provider';
+import { AdminCreateUserCommand } from '@app/aws';
+
+export async function f(cognito: CognitoIdentityProviderClient) {
+  return await cognito.send(new AdminCreateUserCommand({ UserPoolId: 'us-east-1_example', Username: 'a@b.c' }));
+}
+"""
+    rec = _parse(tmp_path, src, "src/cognito.barrel.ts")
+    assert _api_calls(rec) == []
+
+
 def test_output_validates(tmp_path) -> None:
     for src, rel in (
         (HUBSPOT_SRC, "src/hs.ts"),
