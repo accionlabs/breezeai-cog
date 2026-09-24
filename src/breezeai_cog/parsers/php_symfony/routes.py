@@ -89,10 +89,10 @@ def _parse_route_attr_nodes(
 
 
 def _parse_route_decorator(
-    dec: Decorator, root: Any, source: bytes | None
+    dec: Decorator, root: Any, source: bytes | None, target_line: int | None = None
 ) -> tuple[str | None, list[str], str | None]:
-    """Parse a Route decorator using its source-matching attribute AST node."""
-    if root is not None and source is not None and dec.text:
+    """Parse a Route decorator from its AST when source context is available."""
+    if root is not None and source is not None:
         found: list[Any] = []
 
         def walk(node: Any) -> None:
@@ -103,23 +103,43 @@ def _parse_route_decorator(
                 if (
                     name_node is not None
                     and node_text(name_node, source).rsplit("\\", 1)[-1] == "Route"
-                    and dec.text is not None
-                    and node_text(node, source) in dec.text
                 ):
-                    found.append(node)
+                    if target_line is None or node.start_point[0] + 1 <= target_line:
+                        found.append(node)
             for child in node.named_children:
                 walk(child)
 
         walk(root)
         if found:
-            args_node = found[0].child_by_field_name("parameters")
+            route_attr = max(found, key=lambda node: node.end_byte)
+            args_node = route_attr.child_by_field_name("parameters")
             if args_node is None:
                 args_node = next(
-                    (child for child in found[0].named_children if child.type == "arguments"),
+                    (child for child in route_attr.named_children if child.type == "arguments"),
                     None,
                 )
             return _parse_route_attr_nodes(args_node, source)
     return _parse_route_attr_nodes(dec.args)
+
+
+def _route_source_text(
+    dec: Decorator, root: Any, source: bytes, target_line: int
+) -> str | None:
+    found: list[Any] = []
+
+    def walk(node: Any) -> None:
+        if node.type == "attribute":
+            name_node = node.child_by_field_name("name") or (
+                node.named_children[0] if node.named_children else None
+            )
+            if name_node is not None and node_text(name_node, source).rsplit("\\", 1)[-1] == "Route":
+                if node.start_point[0] + 1 <= target_line:
+                    found.append(node)
+        for child in node.named_children:
+            walk(child)
+
+    walk(root)
+    return node_text(max(found, key=lambda node: node.end_byte), source) if found else None
 
 
 def _combine_paths(prefix: str | None, path: str | None) -> str:
@@ -281,15 +301,15 @@ def detect_symfony_routes(
     for cls in record.classes:
         for dec in cls.decorators:
             if _is_route_decorator(dec.name):
-                cpath, _, _ = _parse_route_decorator(dec, root, source)
+                cpath, _, _ = _parse_route_decorator(dec, root, source, cls.startLine)
                 if cpath:
                     class_prefixes[cls.id] = cpath
 
     for fn in record.functions:
         route_specs: list[tuple[tuple[str | None, list[str], str | None], str]] = [
             (
-                _parse_route_decorator(dec, root, source),
-                dec.text or "#[Route]",
+                _parse_route_decorator(dec, root, source, fn.startLine),
+                _route_source_text(dec, root, source, fn.startLine) or "#[Route]",
             )
             for dec in fn.decorators
             if _is_route_decorator(dec.name)

@@ -6,7 +6,7 @@ from collections.abc import Iterator
 
 from tree_sitter import Node
 
-from ...emit import file_id, register_statement_span
+from ...emit import file_id
 from ...schemas import Statement
 from ..statements_common import (
     classify_statement,
@@ -16,6 +16,7 @@ from ..statements_common import (
     url_placeholder,
 )
 from ..treesitter import node_text
+from .ids import register_statement_span
 from .attributes import extract_attributes
 from .mappings import CONTROL_FLOW, EMIT_TYPES, NESTED_SCOPES
 

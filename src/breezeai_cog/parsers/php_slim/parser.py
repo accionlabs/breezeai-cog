@@ -4,10 +4,10 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from ...emit import SeenIds
 from ...schemas import FileRecord
 from ..base import ParseContext
 from ..php.parser import PhpParser, composer_requires
+from ..php.ids import SeenIds
 from ..statements_common import normalize_route_endpoints
 from ..treesitter import parse_source
 from .routes import detect_slim_routes

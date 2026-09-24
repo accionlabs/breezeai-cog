@@ -30,7 +30,7 @@ def classify_call(
     permissive). API is tried first (so ``objects.get`` is a Django query, not an HTTP GET);
     raw queries before ORM (so ``createNativeQuery("SELECT …")`` is a ``query_statement``).
     """
-    verb = match_api(callee, method, http_client_ids=http_client_ids)
+    verb = match_api(callee, method, language=language, http_client_ids=http_client_ids)
     if verb is not None:
         return "api_call", verb, None
     if is_query(method, arg, callee=callee, language=language):

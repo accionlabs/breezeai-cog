@@ -37,7 +37,6 @@ class Decorator(BaseModel):
 
     name: str
     args: list[str] = Field(default_factory=list)
-    text: str | None = None
 
 
 class Parameter(BaseModel):

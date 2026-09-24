@@ -4,18 +4,12 @@ from __future__ import annotations
 
 from tree_sitter import Node
 
-from ...emit import (
-    disambiguate,
-    file_id,
-    find_statement_by_span,
-    register_statement_span,
-    statement_id,
-)
+from ...emit import disambiguate, file_id, statement_id
 from ...schemas import Statement
 from ..php.owner import owner_id_for_node
+from ..php.ids import SeenIds, register_statement_span
+from ..php.routes import extract_verbs, resolve_handler
 from ..statements_common import (
-    _extract_verbs,
-    _resolve_handler,
     render_concat,
     strip_leading_base,
     url_placeholder,
@@ -54,7 +48,7 @@ def _is_string_literal(node: Node) -> bool:
 
 
 def _handler_text(arg_node: Node | None, source: bytes) -> str | None:
-    return _resolve_handler(arg_node, source)
+    return resolve_handler(arg_node, source)
 
 
 def _combine_paths(prefix: str, path: str | None) -> str | None:
@@ -95,7 +89,7 @@ def detect_slim_routes(
     root: Node,
     source: bytes,
     path: str,
-    seen_ids: set[str],
+    seen_ids: SeenIds,
 ) -> list[Statement]:
     """Detect Slim $app->verb() route declarations."""
     fid = file_id(path)
@@ -124,10 +118,10 @@ def detect_slim_routes(
                             # $app->map(['GET', 'POST'], '/path', handler)
                             endpoint = _combine_paths(prefix, _render_url(args[1], source))
                             handler = _handler_text(args[2] if len(args) > 2 else None, source)
-                            http_verbs = _extract_verbs(args[0], source) or ["GET"]
+                            http_verbs = extract_verbs(args[0], source) or ["GET"]
                             for verb in http_verbs:
-                                existing = find_statement_by_span(
-                                    seen_ids, fid, node.start_byte, node.end_byte, node=node
+                                existing = seen_ids.find_by_span(
+                                    fid, node.start_byte, node.end_byte, node=node
                                 )
                                 if existing is not None and existing.semanticType is None:
                                     existing.semanticType = "route"
@@ -167,8 +161,8 @@ def detect_slim_routes(
                             endpoint = _combine_paths(prefix, _render_url(args[0], source))
                             handler = _handler_text(args[1] if len(args) > 1 else None, source)
                             verb = "ANY" if method_name == "any" else method_name.upper()
-                            existing = find_statement_by_span(
-                                seen_ids, fid, node.start_byte, node.end_byte, node=node
+                            existing = seen_ids.find_by_span(
+                                fid, node.start_byte, node.end_byte, node=node
                             )
                             if existing is not None and existing.semanticType is None:
                                 existing.semanticType = "route"

@@ -10,7 +10,7 @@ from typing import Any
 
 from tree_sitter import Node
 
-from ...emit import SeenIds, file_id
+from ...emit import file_id
 from ...schemas import SCHEMA_VERSION, FileRecord, Function, Statement
 from ...utils import count_loc
 from ..base import BaseParser, ParseContext
@@ -19,6 +19,7 @@ from ..comments_common import comment_statements_for
 from ..treesitter import node_text, parse_source
 from .classes import build_class
 from .functions import build_function, collect_closures, defined_names, type_map
+from .ids import SeenIds
 from .imports import PhpIndex, build_php_index, extract_imports
 from .mappings import COMMENT_TYPES, CONTROL_FLOW, FRAMEWORKS, STATEMENT_TYPES
 from .statements import extract_statements

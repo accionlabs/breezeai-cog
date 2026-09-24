@@ -11,6 +11,7 @@ from __future__ import annotations
 # it only counts when the callee also carries a client hint (below), so it can't match a
 # bare ``foo.request()``.
 _HTTP_VERBS = {"get", "post", "put", "patch", "delete", "head", "options", "request"}
+_PHP = frozenset({"php"})
 
 # Substrings in the callee that signal an HTTP client (matches JS ``API_CLIENT_NAMES``,
 # minus a bare ``client`` which would over-match s3Client/dbClient/graphqlClient as
@@ -51,7 +52,10 @@ _DB_CHAIN_MARKERS = ("query(", ".filter", ".where", "query.")
 
 
 def match_api(
-    callee: str, method: str, http_client_ids: frozenset[str] | None = None
+    callee: str,
+    method: str,
+    language: str | None = None,
+    http_client_ids: frozenset[str] | None = None,
 ) -> str | None:
     """Return the HTTP verb (uppercased) if ``callee.method(...)`` is an HTTP call.
 
@@ -72,7 +76,10 @@ def match_api(
         m = m[: -len("async")]
     if m not in _HTTP_VERBS:
         return None
-    is_client = any(hint in low for hint in _CLIENT_HINTS)
+    is_client = any(
+        hint in low and (hint != "->client->" or language in _PHP)
+        for hint in _CLIENT_HINTS
+    )
     if not is_client and http_client_ids:
         # names are original-case identifiers; the receiver is the segment before the first dot
         # (``service.get`` → ``service``), or the whole callee for a bare call (``request``).

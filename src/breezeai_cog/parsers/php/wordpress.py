@@ -4,10 +4,11 @@ from __future__ import annotations
 
 from tree_sitter import Node
 
-from ...emit import disambiguate, file_id, find_statement_by_span, register_statement_span, statement_id
+from ...emit import disambiguate, file_id, statement_id
 from ...schemas import Statement
 from .owner import owner_id_for_node
-from ..statements_common import _resolve_handler
+from .routes import resolve_handler
+from .ids import SeenIds, register_statement_span
 from ..treesitter import node_text
 
 _HOOK_FUNCTIONS = frozenset({"add_action", "add_filter"})
@@ -29,7 +30,7 @@ def detect_wordpress_hooks(
     source: bytes,
     path: str,
     parent_id: str,
-    seen_ids: set[str],
+    seen_ids: SeenIds,
 ) -> list[Statement]:
     """Detect WordPress add_action / add_filter hook registrations."""
     fid = file_id(path)
@@ -51,12 +52,12 @@ def detect_wordpress_hooks(
                         handler = None
                         if len(args.named_children) > 1:
                             handler_node = args.named_children[1]
-                            handler = _resolve_handler(handler_node, source)
+                            handler = resolve_handler(handler_node, source)
 
                         owner_id = owner_id_for_node(node, source, path)
 
-                        existing = find_statement_by_span(
-                            seen_ids, fid, node.start_byte, node.end_byte, node=node
+                        existing = seen_ids.find_by_span(
+                            fid, node.start_byte, node.end_byte, node=node
                         )
                         if existing is not None and existing.semanticType is None:
                             existing.semanticType = "eventbus_consumer"

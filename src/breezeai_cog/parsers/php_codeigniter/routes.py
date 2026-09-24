@@ -4,18 +4,12 @@ from __future__ import annotations
 
 from tree_sitter import Node
 
-from ...emit import (
-    disambiguate,
-    file_id,
-    find_statement_by_span,
-    register_statement_span,
-    statement_id,
-)
+from ...emit import disambiguate, file_id, statement_id
 from ...schemas import Statement
 from ..php.owner import owner_id_for_node
+from ..php.ids import SeenIds, register_statement_span
+from ..php.routes import extract_verbs, resolve_handler
 from ..statements_common import (
-    _extract_verbs,
-    _resolve_handler,
     render_concat,
     strip_leading_base,
     url_placeholder,
@@ -72,7 +66,7 @@ def _render_url(node: Node | None, source: bytes) -> str | None:
 
 
 def _handler_text(arg_node: Node | None, source: bytes) -> str | None:
-    return _resolve_handler(arg_node, source)
+    return resolve_handler(arg_node, source)
 
 
 def _combine_paths(prefix: str, path: str | None) -> str | None:
@@ -124,7 +118,7 @@ def detect_codeigniter_routes(
     root: Node,
     source: bytes,
     path: str,
-    seen_ids: set[str],
+    seen_ids: SeenIds,
 ) -> list[Statement]:
     """Detect CodeIgniter 4 ($routes->verb()) and CodeIgniter 3 ($route['...']) route declarations."""
     fid = file_id(path)
@@ -194,10 +188,10 @@ def detect_codeigniter_routes(
                                     guard for guard in _option_guards(args[3], source) if guard not in route_guards
                                 )
                             handler = _handler_text(args[2] if len(args) > 2 else None, source)
-                            http_verbs = _extract_verbs(args[0], source) or ["GET"]
+                            http_verbs = extract_verbs(args[0], source) or ["GET"]
                             for verb in http_verbs:
-                                existing = find_statement_by_span(
-                                    seen_ids, fid, node.start_byte, node.end_byte, node=node
+                                existing = seen_ids.find_by_span(
+                                    fid, node.start_byte, node.end_byte, node=node
                                 )
                                 if existing is not None and existing.semanticType is None:
                                     existing.semanticType = "route"
@@ -237,8 +231,8 @@ def detect_codeigniter_routes(
                                     guard for guard in _option_guards(args[2], source) if guard not in route_guards
                                 )
                             handler = _handler_text(args[1] if len(args) > 1 else None, source)
-                            existing = find_statement_by_span(
-                                seen_ids, fid, node.start_byte, node.end_byte, node=node
+                            existing = seen_ids.find_by_span(
+                                fid, node.start_byte, node.end_byte, node=node
                             )
                             if existing is not None and existing.semanticType is None:
                                 existing.semanticType = "route"
@@ -284,8 +278,8 @@ def detect_codeigniter_routes(
                                 verb = "RPC"
                             else:
                                 verb = method_name.upper()
-                            existing = find_statement_by_span(
-                                seen_ids, fid, node.start_byte, node.end_byte, node=node
+                            existing = seen_ids.find_by_span(
+                                fid, node.start_byte, node.end_byte, node=node
                             )
                             if existing is not None and existing.semanticType is None:
                                 existing.semanticType = "route"
@@ -335,8 +329,8 @@ def detect_codeigniter_routes(
                 ):
                     key = _render_url(c1, source)
                     if key and key not in _CI3_IGNORED_KEYS:
-                        existing = find_statement_by_span(
-                            seen_ids, fid, node.start_byte, node.end_byte, node=node
+                        existing = seen_ids.find_by_span(
+                            fid, node.start_byte, node.end_byte, node=node
                         )
                         if existing is not None and existing.semanticType is None:
                             existing.semanticType = "route"
@@ -385,8 +379,8 @@ def detect_codeigniter_routes(
                         endpoint = _render_url(inner_c1, source)
                         verb_str = _render_url(c1, source) or "GET"
                         if endpoint and endpoint not in _CI3_IGNORED_KEYS:
-                            existing = find_statement_by_span(
-                                seen_ids, fid, node.start_byte, node.end_byte, node=node
+                            existing = seen_ids.find_by_span(
+                                fid, node.start_byte, node.end_byte, node=node
                             )
                             if existing is not None and existing.semanticType is None:
                                 existing.semanticType = "route"
