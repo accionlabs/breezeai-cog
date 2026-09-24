@@ -93,6 +93,8 @@ _GO_DB_METHODS = frozenset({
     "scanrow", "pluck", "only", "all", "edges",
 })
 
+_GO_ONLY_DB_METHODS = frozenset({"findone", "remove"})
+
 _GO_DB_HINTS: dict[str, str] = {
     "where": "gorm",
     "first": "gorm",
@@ -290,6 +292,8 @@ def match_db(callee: str, method: str, language: str | None = None,
         go_hint = _go_db_hint(callee, m)
         if go_hint is not None:
             return go_hint
+        if m in _GO_DB_METHODS or m in _GO_ONLY_DB_METHODS:
+            return None
     if m in _DISTINCTIVE:
         db = _DISTINCTIVE[m]
         # EF verbs are .NET-only; suppress them in a known non-.NET file (name collision).

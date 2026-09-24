@@ -2,10 +2,157 @@ from __future__ import annotations
 
 import gzip
 import json
-
+from textwrap import dedent
 from breezeai_cog import analyze_repo, capabilities
 from breezeai_cog.parsers.base import ParseContext
 from breezeai_cog.parsers.go.parser import GoParser
+
+
+def test_go_index_keeps_a_deterministic_target_for_multi_file_packages(tmp_path) -> None:
+    package_dir = tmp_path / "pkg"
+    package_dir.mkdir()
+    first = package_dir / "a.go"
+    second = package_dir / "b.go"
+    first.write_text("package pkg\n")
+    second.write_text("package pkg\n")
+    (tmp_path / "go.mod").write_text("module example.com/demo\n")
+
+    index = GoParser().build_index(tmp_path, [second, first])
+
+    assert index.modules["example.com/demo/pkg"] == "pkg/a.go"
+
+
+def test_go_resolves_calls_in_named_and_anonymous_functions(tmp_path) -> None:
+    src = b'''\
+package demo
+
+func helper() {}
+
+func main() {
+    helper()
+    func() { helper() }()
+}
+'''
+    path = tmp_path / "main.go"
+    path.write_bytes(src)
+
+    record = GoParser().parse_file(
+        ParseContext(
+            path="main.go",
+            abs_path=path,
+            source=src,
+            repo_root=tmp_path,
+        )
+    )
+
+    assert record.functions[0].name == "helper"
+    assert [call.path for call in record.functions[1].calls] == ["main.go"]
+    anonymous = next(function for function in record.functions if function.type == "anonymous")
+    assert [call.path for call in anonymous.calls] == ["main.go"]
+
+
+# def test_go_grouped_type_declaration_emits_each_type_with_its_span(tmp_path) -> None:
+#     src = b'''\
+# package demo
+
+# type (
+#     First struct{}
+#     Second interface{}
+# )
+# '''
+#     path = tmp_path / "types.go"
+#     path.write_bytes(src)
+
+#     record = GoParser().parse_file(
+#         ParseContext(path="types.go", abs_path=path, source=src, repo_root=tmp_path)
+#     )
+
+#     classes = {item.name: item for item in record.classes}
+#     assert set(classes) == {"First", "Second"}
+#     assert classes["First"].type == "struct"
+#     assert classes["Second"].type == "interface"
+#     assert (classes["First"].startLine, classes["First"].endLine) == (4, 4)
+#     assert (classes["Second"].startLine, classes["Second"].endLine) == (5, 5)
+
+
+def test_go_grouped_type_declaration_emits_each_type_with_its_span(tmp_path) -> None:
+    source = dedent(
+        """
+        package demo
+
+        type (
+            First struct{}
+            Second interface{}
+        )
+        """
+    ).encode()
+
+    path = tmp_path / "types.go"
+    path.write_bytes(source)
+
+    record = GoParser().parse_file(
+        ParseContext(
+            path="types.go",
+            abs_path=path,
+            source=source,
+            repo_root=tmp_path,
+        )
+    )
+
+    classes = {item.name: item for item in record.classes}
+
+    assert set(classes) == {"First", "Second"}
+
+    first = classes["First"]
+    second = classes["Second"]
+
+    assert first.type == "struct"
+    assert second.type == "interface"
+
+    assert (first.startLine, first.endLine) == (4, 4)
+    assert (second.startLine, second.endLine) == (5, 5)
+
+
+def test_go_generic_receiver_is_parented_to_base_type(tmp_path) -> None:
+    src = b'''\
+package demo
+
+type List[T any] struct{}
+
+func (l *List[T]) Add(value T) {}
+'''
+    path = tmp_path / "list.go"
+    path.write_bytes(src)
+
+    record = GoParser().parse_file(
+        ParseContext(path="list.go", abs_path=path, source=src, repo_root=tmp_path)
+    )
+
+    classes = {item.name: item for item in record.classes}
+    functions = {item.name: item for item in record.functions}
+    assert functions["Add"].parentId == classes["List"].id
+    assert functions["Add"].receiverType == "List"
+
+
+def test_go_constructor_target_uses_return_type(tmp_path) -> None:
+    src = b'''\
+package demo
+
+type Config struct{}
+
+func NewFromEnv(host string) *Config {
+    return &Config{}
+}
+'''
+    path = tmp_path / "config.go"
+    path.write_bytes(src)
+
+    record = GoParser().parse_file(
+        ParseContext(path="config.go", abs_path=path, source=src, repo_root=tmp_path)
+    )
+
+    config = next(item for item in record.classes if item.name == "Config")
+    assert [param.name for param in config.constructorParams] == ["host"]
 
 
 def test_go_code_and_config_parsing(tmp_path) -> None:
@@ -244,6 +391,38 @@ func run(nc *nats.Conn, ch chan int) {
         and statement.framework == "time"
         for statement in record.statements
     )
+
+
+def test_go_event_detection_requires_typed_bus_receiver(tmp_path) -> None:
+    src = b'''\
+package demo
+
+import "github.com/nats-io/nats.go"
+
+type Client struct{}
+
+func run(nc *nats.Conn, client *Client) {
+    nc.Publish("orders.created", nil)
+    client.Publish("not-an-event", nil)
+    client.Request("not-an-event", nil)
+}
+'''
+    path = tmp_path / "events.go"
+    path.write_bytes(src)
+
+    record = GoParser().parse_file(
+        ParseContext(
+            path="events.go",
+            abs_path=path,
+            source=src,
+            repo_root=tmp_path,
+            capture_statements=True,
+        )
+    )
+
+    events = [statement for statement in record.statements if statement.semanticType == "eventbus_send"]
+    assert len(events) == 1
+    assert events[0].endpoint == "orders.created"
 
 
 def test_go_captures_fiber_grpc_and_kafka(tmp_path) -> None:

@@ -19,9 +19,10 @@ def _receiver_info(node: Node, source: bytes) -> tuple[str | None, str | None]:
     if text.startswith("(") and text.endswith(")"):
         text = text[1:-1].strip()
     parts = text.split()
-    type_text = parts[-1] if parts else ""
-    receiver_kind = "pointer" if type_text.startswith("*") else "value"
-    return type_text.lstrip("*").rsplit(".", 1)[-1] or None, receiver_kind
+    raw_type = parts[-1] if parts else ""
+    receiver_kind = "pointer" if raw_type.startswith("*") else "value"
+    type_text = raw_type.lstrip("*").rsplit(".", 1)[-1].split("[", 1)[0]
+    return type_text or None, receiver_kind
 
 
 def _extract_params(params_node: Node | None, source: bytes) -> list[Parameter]:
@@ -199,6 +200,7 @@ def build_anonymous_function(
     *,
     parent_id: str,
     seen_ids: set[str],
+    resolve: CallResolver = noop_resolver,
 ) -> Function:
     """Build a record for a Go function literal without re-emitting its body."""
     start, end = line_span(node)
@@ -211,6 +213,6 @@ def build_anonymous_function(
         startLine=start,
         endLine=end,
         params=_extract_params(node.child_by_field_name("parameters"), source),
-        calls=_collect_calls(node.child_by_field_name("body"), source)
+        calls=_collect_calls(node.child_by_field_name("body"), source, resolve)
         if node.child_by_field_name("body") is not None else [],
     )
