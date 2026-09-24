@@ -6,7 +6,6 @@ from tree_sitter import Node
 
 from ...emit import class_id, disambiguate
 from ...schemas import Class, Function, Statement
-from ..callresolve import CallResolver, noop_resolver
 from ..treesitter import line_span, node_text
 
 
@@ -48,9 +47,6 @@ def build_class(
     *,
     parent_id: str,
     seen_ids: set[str],
-    capture: bool,
-    limit: int,
-    resolve: CallResolver = noop_resolver,
 ) -> tuple[list[Class], list[Function], list[Statement]]:
     if node.type != "type_declaration":
         return [], [], []
@@ -58,12 +54,10 @@ def build_class(
     if not specs:
         return [], [], []
     classes: list[Class] = []
-    base_start = line_span(node)[0]
-    for index, spec in enumerate(specs):
+    for spec in specs:
         name_node = spec.child_by_field_name("name")
         name = node_text(name_node, source) if name_node is not None else ""
-        start = base_start + index
-        end = start
+        start, end = line_span(spec)
         cid = disambiguate(class_id(path, name), seen_ids)
         classes.append(
             Class(
