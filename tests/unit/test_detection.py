@@ -38,6 +38,15 @@ def test_classify_db() -> None:
     assert classify_call("Order.findOne", "findOne") == ("db_method_call", "findOne", "orm")
 
 
+def test_go_db_verbs_do_not_fall_through_to_non_go_orms() -> None:
+    from breezeai_cog.parsers.detection.db_queries import match_db
+
+    assert match_db("repo.FindOne", "FindOne", language="go") is None
+    assert match_db("repo.Remove", "Remove", language="go") is None
+    assert match_db("repo.FindOne", "FindOne", language="typescript") == "typeorm"
+    assert match_db("repo.Remove", "Remove", language="typescript") == "typeorm"
+
+
 def test_prisma_chain_wins_over_mongo_typeorm_collision() -> None:
     # deleteMany/updateMany/upsert live in Mongo's/TypeORM's distinctive tables but are also
     # Prisma verbs. On an explicit `prisma.` chain the vendor is unambiguous — must be prisma.
