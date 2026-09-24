@@ -30,16 +30,61 @@ def _first_string(call: Node, source: bytes) -> str | None:
     return None
 
 
-def _classify(receiver: str, method: str, source_text: str) -> tuple[str, str] | None:
+def _receiver_types(root: Node, source: bytes) -> dict[str, str]:
+    types: dict[str, str] = {}
+
+    def walk(node: Node) -> None:
+        if node.type == "parameter_declaration":
+            name = node.child_by_field_name("name")
+            type_node = node.child_by_field_name("type")
+            if name is not None and type_node is not None:
+                types[node_text(name, source)] = node_text(type_node, source)
+        for child in node.named_children:
+            walk(child)
+
+    walk(root)
+    return types
+
+
+def _is_package_receiver(receiver: str, receiver_types: dict[str, str], package: str) -> bool:
+    receiver_name = receiver.rsplit(".", 1)[-1].lower()
+    if receiver_name == package:
+        return True
+    type_text = receiver_types.get(receiver, "").lstrip("*").split("[", 1)[0]
+    return type_text.rsplit(".", 1)[-2].lower() == package if "." in type_text else False
+
+
+def _classify(
+    receiver: str,
+    method: str,
+    source_text: str,
+    receiver_types: dict[str, str],
+) -> tuple[str, str] | None:
     lower_source = source_text.lower()
     receiver_name = receiver.rsplit(".", 1)[-1].lower()
-    if "nats-io" in lower_source and method in {"Publish", "Request"}:
+    if (
+        "nats-io" in lower_source
+        and _is_package_receiver(receiver, receiver_types, "nats")
+        and method in {"Publish", "Request"}
+    ):
         return "eventbus_send", "nats"
-    if "nats-io" in lower_source and method in {"Subscribe", "QueueSubscribe"}:
+    if (
+        "nats-io" in lower_source
+        and _is_package_receiver(receiver, receiver_types, "nats")
+        and method in {"Subscribe", "QueueSubscribe"}
+    ):
         return "eventbus_consumer", "nats"
-    if "kafka" in lower_source and method in {"SendMessage", "WriteMessages"}:
+    if (
+        "kafka" in lower_source
+        and _is_package_receiver(receiver, receiver_types, "kafka")
+        and method in {"SendMessage", "WriteMessages"}
+    ):
         return "eventbus_send", "kafka"
-    if "kafka" in lower_source and method in {"ReadMessage", "FetchMessage"}:
+    if (
+        "kafka" in lower_source
+        and _is_package_receiver(receiver, receiver_types, "kafka")
+        and method in {"ReadMessage", "FetchMessage"}
+    ):
         return "eventbus_consumer", "kafka"
     if receiver_name == "time" and method in {"NewTicker", "AfterFunc", "Tick"}:
         return "timer", "time"
@@ -56,6 +101,7 @@ def detect_events(
     owners: list[tuple[int, int, str]] | None = None,
 ) -> list[Statement]:
     source_text = source.decode("utf-8", "replace")
+    receiver_types = _receiver_types(root, source)
     out: list[Statement] = []
 
     def walk(node: Node) -> None:
@@ -63,7 +109,7 @@ def detect_events(
             parts = _call_parts(node, source)
             if parts is not None:
                 receiver, method = parts
-                classified = _classify(receiver, method, source_text)
+                classified = _classify(receiver, method, source_text, receiver_types)
                 if classified is not None:
                     semantic, framework = classified
                     line = node.start_point[0] + 1

@@ -21,7 +21,7 @@ def parse_gomod(path: str | Path, text: str) -> dict:
             require.append(line.split()[1])
         elif line.startswith(")"):
             continue
-        elif " " in line and not line.startswith("replace ") and not line.startswith("exclude "):
+        elif " " in line and line.split()[0] not in {"replace", "exclude", "toolchain", "retract"}:
             parts = line.split()
             if len(parts) >= 2 and parts[0] not in {"replace", "exclude"}:
                 require.append(parts[0])

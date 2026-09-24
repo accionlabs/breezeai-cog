@@ -30,7 +30,7 @@ def build_fqcn_index(repo_root: Path, files: Sequence[Path], jobs: int = 1) -> G
                 break
     modules: dict[str, str | None] = {}
     if module:
-        for file_path in files:
+        for file_path in sorted(files, key=lambda item: Path(item).as_posix()):
             path = Path(file_path)
             if path.suffix != ".go":
                 continue
@@ -39,8 +39,7 @@ def build_fqcn_index(repo_root: Path, files: Sequence[Path], jobs: int = 1) -> G
             except ValueError:
                 continue
             import_path = module + ("/" + str(Path(relative).parent).replace("\\", "/") if str(Path(relative).parent) != "." else "")
-            current = modules.get(import_path)
-            modules[import_path] = relative if current is None and import_path not in modules else None
+            modules.setdefault(import_path, relative)
     return GoIndex(modules=modules)
 
 

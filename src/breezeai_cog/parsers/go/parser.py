@@ -11,10 +11,17 @@ from ...emit import file_id
 from ...schemas import SCHEMA_VERSION, ConstructorParam, FileRecord, Function, Statement
 from ...utils import count_loc
 from ..base import BaseParser, ParseContext
+from ..callresolve import make_resolver
 from ..comments_common import comment_statements_for
 from ..treesitter import parse_source
 from .classes import build_class
-from .functions import build_anonymous_function, build_function
+from .functions import (
+    _constructor_target_name,
+    build_anonymous_function,
+    build_function,
+    defined_names,
+    type_map,
+)
 from .imports import GoIndex, build_fqcn_index, extract_imports
 from .mappings import COMMENT_TYPES, CONTROL_FLOW, FRAMEWORKS, STATEMENT_TYPES
 from .routes import detect_framework, detect_routes
@@ -73,6 +80,7 @@ class GoParser(BaseParser):
         internal, external, _, bindings = extract_imports(
             root, source, idx if isinstance(idx, GoIndex) else None
         )
+        resolve = make_resolver(bindings, defined_names(root, source), path, type_map(root, source))
 
         functions: list[Function] = []
         classes = []
@@ -84,7 +92,7 @@ class GoParser(BaseParser):
             if child.type == "type_declaration":
                 cls_list, _, cls_statements = build_class(
                     child, source, path, parent_id=fid, seen_ids=seen_ids,
-                    capture=capture, limit=limit, resolve=lambda name, receiver=None: None,
+                    capture=capture, limit=limit, resolve=resolve,
                 )
                 classes.extend(cls_list)
                 statements.extend(cls_statements)
@@ -99,7 +107,7 @@ class GoParser(BaseParser):
                 receiver_name = None
                 if receiver is not None:
                     text = receiver.text.decode("utf-8", "replace").strip("() ")
-                    receiver_name = text.split()[-1].lstrip("*").rsplit(".", 1)[-1]
+                    receiver_name = text.split()[-1].lstrip("*").rsplit(".", 1)[-1].split("[", 1)[0]
                 owner = class_by_name.get(receiver_name)
                 fn, fn_statements = build_function(
                     child, source, path,
@@ -107,7 +115,7 @@ class GoParser(BaseParser):
                     seen_ids=seen_ids,
                     capture=capture,
                     limit=limit,
-                    resolve=lambda name, receiver=None: None,
+                    resolve=resolve,
                 )
                 functions.append(fn)
                 statements.extend(fn_statements)
@@ -116,9 +124,7 @@ class GoParser(BaseParser):
                 if owner is not None:
                     owner.metadata = {**(owner.metadata or {}), "hasMethods": True}
                 if fn.type == "constructor":
-                    target_name = fn.name if fn.name == "New" else fn.name[3:]
-                    if target_name and target_name.startswith("New"):
-                        target_name = target_name[3:]
+                    target_name = _constructor_target_name(fn.name, fn.returnType)
                     target = class_by_name.get(target_name)
                     if target is not None:
                         target.constructorParams = [ConstructorParam(name=p.name, type=p.type) for p in fn.params]
@@ -142,7 +148,7 @@ class GoParser(BaseParser):
             owner_id = min(enclosing, key=lambda item: item[1] - item[0])[2] if enclosing else fid
             functions.append(
                 build_anonymous_function(
-                    node, source, path, parent_id=owner_id, seen_ids=seen_ids
+                    node, source, path, parent_id=owner_id, seen_ids=seen_ids, resolve=resolve
                 )
             )
             anonymous_owners.append((start, end, functions[-1].id))
