@@ -39,11 +39,10 @@ Three call-shape families are handled, each verified against real code:
   SOQL query is an outbound call to Salesforce (not local data access), these are reclassified
   from the generic ``db_method_call``/``orm`` tag to ``api_call``. See ``_detect_tsforce``.
 
-**Pending ratification:** ``aws-cognito`` and ``aws-ssm`` are not yet in the Code Ontology
-Parser Target Spec's ``framework`` enum (§2.4), which does now list the vendor values
-``hubspot``/``chargebee``/``salesforce``. ``framework`` is an open string, so the values
-survive ingestion — but a consumer filtering on the documented enum will not see these
-statements until the spec is updated. The parser emits the honest label deliberately. Spec:
+Every label this module emits — ``aws-s3``/``aws-cognito``/``aws-ssm`` and the vendor values
+``hubspot``/``chargebee``/``salesforce`` — is in the Code Ontology Parser Target Spec's
+``framework`` enum (§2.4), so a consumer filtering on the documented enum sees these
+statements. Adding a new label means updating the spec in the same change. Spec:
 https://accionlabs.atlassian.net/wiki/x/BIAGl
 
 The registry (``_SDKS``) is one entry per client-chain SDK, so adding another is a small,
