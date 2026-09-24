@@ -33,7 +33,7 @@ class FakeFramework(FakeLang):
     priority = 10
     frameworks = ["fw"]
 
-    def claims(self, path: str, source: bytes) -> bool:
+    def claims(self, path: str, source: bytes, *args: Any, **kwargs: Any) -> bool:
         return b"FRAMEWORK" in source
 
 

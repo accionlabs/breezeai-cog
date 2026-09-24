@@ -30,7 +30,10 @@ class SymfonyParser(PhpParser):
         seen_ids = SeenIds()
         record = self.extract(root, ctx, seen_ids=seen_ids)  # inherited base extraction, ONE parse
         if ctx.capture_statements and not self.is_fixture_file(ctx.path):
-            routes = detect_symfony_routes(record, seen_ids=seen_ids, root=root, source=ctx.source)
+            index = getattr(ctx.resolution_index, "fqcn", ctx.resolution_index)
+            routes = detect_symfony_routes(
+                record, seen_ids=seen_ids, root=root, source=ctx.source, fqcn_index=index
+            )
             if routes:
                 record.statements.extend(routes)
             if any(s.semanticType == "route" and s.framework == "symfony" for s in record.statements):

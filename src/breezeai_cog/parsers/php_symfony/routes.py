@@ -213,7 +213,9 @@ def _function_guards(fn: Any) -> list[str] | None:
     return guards or None
 
 
-def _symfony_request_dto(fn: Any, use_map: dict[str, str], namespace: str) -> str | None:
+def _symfony_request_dto(
+    fn: Any, use_map: dict[str, str], namespace: str, fqcn_index: dict[str, str | None] | None
+) -> str | None:
     # 1. Parameter with #[MapRequestPayload] attribute
     for p in fn.params:
         if any(
@@ -221,7 +223,7 @@ def _symfony_request_dto(fn: Any, use_map: dict[str, str], namespace: str) -> st
             for d in p.decorators
         ):
             if p.type:
-                return resolve_type_to_fqcn(p.type, use_map, namespace)
+                return resolve_type_to_fqcn(p.type, use_map, namespace, fqcn_index=fqcn_index)
 
     # 2. FormRequest-equivalent convention: custom DTO/Request type
     for p in fn.params:
@@ -236,14 +238,20 @@ def _symfony_request_dto(fn: Any, use_map: dict[str, str], namespace: str) -> st
             or "DTO" in simple
             or "Dto" in simple
         ):
-            return resolve_type_to_fqcn(p.type, use_map, namespace)
+            return resolve_type_to_fqcn(p.type, use_map, namespace, fqcn_index=fqcn_index)
 
     return None
 
 
-def _symfony_response_dto(fn: Any, use_map: dict[str, str], namespace: str) -> str | None:
+def _symfony_response_dto(
+    fn: Any, use_map: dict[str, str], namespace: str, fqcn_index: dict[str, str | None] | None
+) -> str | None:
     if fn.returnType:
-        return resolve_type_to_fqcn(fn.returnType, use_map, namespace)
+        resolved = resolve_type_to_fqcn(fn.returnType, use_map, namespace, fqcn_index=fqcn_index)
+        if resolved:
+            simple = resolved.rsplit("\\", 1)[-1]
+            if simple not in _GENERIC_FRAMEWORK_TYPES:
+                return resolved
     return None
 
 
@@ -252,6 +260,7 @@ def detect_symfony_routes(
     seen_ids: set[str],
     root: Any | None = None,
     source: bytes | None = None,
+    fqcn_index: dict[str, str | None] | None = None,
 ) -> list[Statement]:
     """Detect Symfony #[Route(...)] attributes on classes and methods (off the record)."""
     routes: list[Statement] = []
@@ -292,8 +301,8 @@ def detect_symfony_routes(
             full_path = _combine_paths(cls_prefix, mpath)
             verbs = methods if methods else ["ANY"]
             guards = _function_guards(fn)
-            request_dto = _symfony_request_dto(fn, use_map, namespace)
-            response_dto = _symfony_response_dto(fn, use_map, namespace)
+            request_dto = _symfony_request_dto(fn, use_map, namespace, fqcn_index)
+            response_dto = _symfony_response_dto(fn, use_map, namespace, fqcn_index)
 
             cls_name = class_map[fn.parentId].name if fn.parentId in class_map else ""
             handler = f"{cls_name}@{fn.name}" if cls_name else fn.name

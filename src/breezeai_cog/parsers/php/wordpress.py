@@ -1,4 +1,4 @@
-"""WordPress hook detection (add_action / add_filter) -> route statements."""
+"""WordPress hook detection (add_action / add_filter) -> eventbus_consumer statements."""
 
 from __future__ import annotations
 
@@ -7,6 +7,7 @@ from tree_sitter import Node
 from ...emit import disambiguate, file_id, find_statement_by_span, register_statement_span, statement_id
 from ...schemas import Statement
 from .owner import owner_id_for_node
+from ..statements_common import _resolve_handler
 from ..treesitter import node_text
 
 _HOOK_FUNCTIONS = frozenset({"add_action", "add_filter"})
@@ -50,7 +51,7 @@ def detect_wordpress_hooks(
                         handler = None
                         if len(args.named_children) > 1:
                             handler_node = args.named_children[1]
-                            handler = node_text(handler_node, source)
+                            handler = _resolve_handler(handler_node, source)
 
                         owner_id = owner_id_for_node(node, source, path)
 
@@ -58,8 +59,8 @@ def detect_wordpress_hooks(
                             seen_ids, fid, node.start_byte, node.end_byte, node=node
                         )
                         if existing is not None and existing.semanticType is None:
-                            existing.semanticType = "route"
-                            existing.routeKind = "eventbus_consumer"
+                            existing.semanticType = "eventbus_consumer"
+                            existing.routeKind = None
                             existing.method = "CONSUMER"
                             existing.endpoint = hook_tag
                             existing.handler = handler
@@ -74,8 +75,8 @@ def detect_wordpress_hooks(
                                 id=sid,
                                 parentId=owner_id,
                                 nodeType=node.type,
-                                semanticType="route",
-                                routeKind="eventbus_consumer",
+                                semanticType="eventbus_consumer",
+                                routeKind=None,
                                 method="CONSUMER",
                                 endpoint=hook_tag,
                                 handler=handler,

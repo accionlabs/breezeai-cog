@@ -10,6 +10,8 @@ Supports:
 
 from __future__ import annotations
 
+from collections.abc import Mapping
+
 from tree_sitter import Node
 
 from ..treesitter import node_text
@@ -123,8 +125,9 @@ def resolve_type_to_fqcn(
     use_map: dict[str, str],
     namespace: str = "",
     allow_primitives: bool = False,
+    fqcn_index: Mapping[str, str | None] | None = None,
 ) -> str | None:
-    """Resolve a PHP type-hint string to its FQCN."""
+    """Resolve a PHP type-hint, falling back to its simple name when unindexed."""
     if not type_name:
         return None
     cleaned = type_name.strip().lstrip(":").strip().lstrip("?")
@@ -132,19 +135,26 @@ def resolve_type_to_fqcn(
         return None
     if not allow_primitives and cleaned.lower() in _PRIMITIVE_TYPES:
         return None
+    simple = cleaned.lstrip("\\").rsplit("\\", 1)[-1]
+
+    def verified(candidate: str) -> str:
+        if fqcn_index is None or fqcn_index.get(candidate):
+            return candidate
+        return simple
+
     if cleaned.startswith("\\"):
-        return cleaned.lstrip("\\")
+        return verified(cleaned.lstrip("\\"))
     if cleaned in use_map:
-        return use_map[cleaned]
+        return verified(use_map[cleaned])
     if "\\" in cleaned:
         first, rest = cleaned.split("\\", 1)
         if first in use_map:
-            return f"{use_map[first]}\\{rest}"
+            return verified(f"{use_map[first]}\\{rest}")
         if namespace:
-            return f"{namespace}\\{cleaned}"
-        return cleaned
+            return verified(f"{namespace}\\{cleaned}")
+        return simple
     if namespace:
-        return f"{namespace}\\{cleaned}"
+        return verified(f"{namespace}\\{cleaned}")
     return cleaned
 
 
@@ -212,6 +222,7 @@ def extract_callable_dtos(
     use_map: dict[str, str],
     namespace: str,
     form_request_classes: set[str] | None = None,
+    fqcn_index: Mapping[str, str | None] | None = None,
 ) -> tuple[str | None, str | None]:
     """Extract (requestDTO, responseDTO) from a closure, arrow function, or method AST node."""
     request_dto: str | None = None
@@ -233,12 +244,12 @@ def extract_callable_dtos(
 
                 # 1. MapRequestPayload attribute (Symfony)
                 if _param_has_attr(p, source, "MapRequestPayload"):
-                    request_dto = resolve_type_to_fqcn(ptype, use_map, namespace)
+                    request_dto = resolve_type_to_fqcn(ptype, use_map, namespace, fqcn_index=fqcn_index)
                     break
 
                 # 2. FormRequest parameter (Laravel) or DTO convention (Symfony)
                 if _is_laravel_form_request(ptype, form_request_classes):
-                    request_dto = resolve_type_to_fqcn(ptype, use_map, namespace)
+                    request_dto = resolve_type_to_fqcn(ptype, use_map, namespace, fqcn_index=fqcn_index)
                     break
 
                 clean = ptype.lstrip("?\\").strip()
@@ -248,11 +259,15 @@ def extract_callable_dtos(
                     or "DTO" in simple
                     or "Dto" in simple
                 ):
-                    request_dto = resolve_type_to_fqcn(ptype, use_map, namespace)
+                    request_dto = resolve_type_to_fqcn(ptype, use_map, namespace, fqcn_index=fqcn_index)
                     break
 
     rt = _extract_return_type_from_node(callable_node, source)
     if rt:
-        response_dto = resolve_type_to_fqcn(rt, use_map, namespace)
+        resolved = resolve_type_to_fqcn(rt, use_map, namespace, fqcn_index=fqcn_index)
+        if resolved:
+            simple = resolved.rsplit("\\", 1)[-1]
+            if simple not in _GENERIC_FRAMEWORK_TYPES:
+                response_dto = resolved
 
     return request_dto, response_dto

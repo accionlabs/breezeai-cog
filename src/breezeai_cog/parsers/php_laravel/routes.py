@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
+
 from tree_sitter import Node
 
 from ...emit import (
@@ -177,6 +179,7 @@ def _resolve_handler_dtos(
     namespace: str,
     form_requests: set[str],
     methods: dict[tuple[str, str], Node],
+    fqcn_index: Mapping[str, str | None] | None,
 ) -> tuple[str | None, str | None]:
     if handler_arg is None:
         return None, None
@@ -184,7 +187,7 @@ def _resolve_handler_dtos(
     inner = handler_arg.named_children[0] if handler_arg.type == "argument" and handler_arg.named_children else handler_arg
 
     if inner.type in ("anonymous_function_creation_expression", "anonymous_function", "arrow_function"):
-        return extract_callable_dtos(inner, source, use_map, namespace, form_requests)
+        return extract_callable_dtos(inner, source, use_map, namespace, form_requests, fqcn_index)
 
     if inner.type == "array_creation_expression":
         items: list[Node] = []
@@ -208,7 +211,9 @@ def _resolve_handler_dtos(
 
             mname = node_text(elem1, source).strip("'\"") if elem1.type == "string" else None
             if cname and mname and (cname, mname) in methods:
-                return extract_callable_dtos(methods[(cname, mname)], source, use_map, namespace, form_requests)
+                return extract_callable_dtos(
+                    methods[(cname, mname)], source, use_map, namespace, form_requests, fqcn_index
+                )
 
     if inner.type == "string":
         val = node_text(inner, source).strip("'\"")
@@ -216,7 +221,9 @@ def _resolve_handler_dtos(
             cname, mname = val.split("@", 1)
             cname = cname.rsplit("\\", 1)[-1]
             if (cname, mname) in methods:
-                return extract_callable_dtos(methods[(cname, mname)], source, use_map, namespace, form_requests)
+                return extract_callable_dtos(
+                    methods[(cname, mname)], source, use_map, namespace, form_requests, fqcn_index
+                )
 
     return None, None
 
@@ -226,6 +233,7 @@ def detect_laravel_routes(
     source: bytes,
     path: str,
     seen_ids: set[str],
+    fqcn_index: Mapping[str, str | None] | None = None,
 ) -> list[Statement]:
     """Detect Laravel Route::verb() declarations in a PHP AST."""
     fid = file_id(path)
@@ -256,7 +264,7 @@ def detect_laravel_routes(
                             handler_arg = args[2] if len(args) > 2 else None
                             handler = _handler_text(handler_arg, source)
                             request_dto, response_dto = _resolve_handler_dtos(
-                                handler_arg, source, use_map, namespace, form_requests, methods
+                                handler_arg, source, use_map, namespace, form_requests, methods, fqcn_index
                             )
                             http_verbs = _extract_verbs(args[0], source) or ["GET"]
                             for verb in http_verbs:
@@ -301,7 +309,7 @@ def detect_laravel_routes(
                             handler_arg = args[1] if len(args) > 1 else None
                             handler = _handler_text(handler_arg, source)
                             request_dto, response_dto = _resolve_handler_dtos(
-                                handler_arg, source, use_map, namespace, form_requests, methods
+                                handler_arg, source, use_map, namespace, form_requests, methods, fqcn_index
                             )
                             existing = find_statement_by_span(
                                 seen_ids, fid, node.start_byte, node.end_byte, node=node
@@ -345,7 +353,7 @@ def detect_laravel_routes(
                             handler_arg = args[1] if len(args) > 1 else None
                             handler = _handler_text(handler_arg, source)
                             request_dto, response_dto = _resolve_handler_dtos(
-                                handler_arg, source, use_map, namespace, form_requests, methods
+                                handler_arg, source, use_map, namespace, form_requests, methods, fqcn_index
                             )
                             verb = "ANY" if method_name == "any" else method_name.upper()
                             existing = find_statement_by_span(

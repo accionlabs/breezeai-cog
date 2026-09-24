@@ -33,6 +33,23 @@ def _parse(parser_cls, tmp_path: Path, src: bytes, rel: str) -> FileRecord:
     return parser.parse_file(ctx)
 
 
+def _parse_with_php_index(parser_cls, tmp_path: Path, src: bytes, rel: str) -> FileRecord:
+    p = tmp_path / rel
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_bytes(src)
+    parser = parser_cls()
+    index = parser.build_index(tmp_path, list(tmp_path.rglob("*.php")))
+    ctx = ParseContext(
+        path=rel,
+        abs_path=p,
+        source=src,
+        repo_root=tmp_path,
+        capture_statements=True,
+        resolution_index=index,
+    )
+    return parser.parse_file(ctx)
+
+
 def _route_shape(route) -> tuple[str | None, str | None, str | None, str | None, str]:
     return route.method, route.endpoint, route.handler, route.routeKind, route.parentId
 
@@ -276,7 +293,6 @@ $routes->group('admin', function ($routes) {
     assert rec.framework == "codeigniter"
 
     routes = [s for s in rec.statements if s.semanticType == "route"]
-    group_fn = next(fn for fn in rec.functions if fn.type == "function_expression")
     assert [_route_shape(route) for route in routes] == [
         ("GET", "/admin/dashboard", None, "route", rec.id),
         ("GET", "/users", None, "route", rec.id),
@@ -323,18 +339,20 @@ $route['products']['post'] = 'catalog/create';
 
 def test_wordpress_hooks(tmp_path: Path) -> None:
     src = b"""<?php
-add_action('init', 'my_custom_init');
-add_filter('the_content', function ($content) {
-    return $content . '<p>Footer</p>';
+add_action('init', [$this, 'boot']);
+add_filter('the_content', function ($c) {
+    return $c;
 });
 """
     rec = _parse(PhpParser, tmp_path, src, "wp-content/plugins/my-plugin.php")
-    hooks = [s for s in rec.statements if s.semanticType == "route" and s.routeKind == "eventbus_consumer"]
+    hooks = [s for s in rec.statements if s.semanticType == "eventbus_consumer"]
     assert len(hooks) == 2
     tags = {h.endpoint for h in hooks}
     assert "init" in tags
     assert "the_content" in tags
     assert all(h.method == "CONSUMER" for h in hooks)
+    assert all(h.routeKind is None for h in hooks)
+    assert all(h.handler is None for h in hooks)
 
 
 def test_eloquent_detection(tmp_path: Path) -> None:
@@ -652,9 +670,11 @@ $routes->get($dynamicPath, 'WebhookController@handle');
 def test_wordpress_dynamic_hook_name_has_no_endpoint(tmp_path: Path) -> None:
     src = b"<?php\nadd_action($dynamicHook, 'register_dynamic_hook');\n"
     rec = _parse(PhpParser, tmp_path, src, "wp-content/plugins/test.php")
-    hooks = [s for s in rec.statements if s.semanticType == "route"]
+    hooks = [s for s in rec.statements if s.semanticType == "eventbus_consumer"]
     assert len(hooks) == 1
     assert hooks[0].endpoint is None
+    assert hooks[0].routeKind is None
+    assert hooks[0].method == "CONSUMER"
 
 
 def test_any_route_method_across_frameworks(tmp_path: Path) -> None:
@@ -742,8 +762,8 @@ def test_no_duplicate_statements_wordpress_hook(tmp_path: Path) -> None:
     )
     stmt = rec.statements[0]
     assert stmt.nodeType == "expression_statement"
-    assert stmt.semanticType == "route"
-    assert stmt.routeKind == "eventbus_consumer"
+    assert stmt.semanticType == "eventbus_consumer"
+    assert stmt.routeKind is None
     assert stmt.endpoint == "init"
     assert stmt.method == "CONSUMER"
 
@@ -894,7 +914,7 @@ def test_wordpress_hook_parentid_inside_method(tmp_path):
     path = "wp-content/plugins/my-plugin/my-plugin.php"
     rec = _parse(PhpParser, tmp_path, src, path)
 
-    hook = next((s for s in rec.statements if s.semanticType == "route" and s.endpoint == "init"), None)
+    hook = next((s for s in rec.statements if s.semanticType == "eventbus_consumer" and s.endpoint == "init"), None)
     assert hook is not None, "Expected a route/hook statement for 'init'"
 
     # register() method in MyPlugin starts at line 4.
@@ -955,7 +975,74 @@ class AuthController
     routes = [s for s in rec.statements if s.semanticType == "route" and s.endpoint == "/auth/register"]
     assert len(routes) == 1
     assert routes[0].requestDTO == "App\\Request\\RegisterUserRequest"
-    assert routes[0].responseDTO == "Symfony\\Component\\HttpFoundation\\JsonResponse"
+    assert routes[0].responseDTO is None
+
+
+def test_response_dto_generic_framework_types_filtered(tmp_path: Path) -> None:
+    """Bare Response/JsonResponse type hints set responseDTO to None, app DTOs set FQCN."""
+    symfony_src = b"""<?php
+namespace App\\Controller;
+
+use Symfony\\Component\\HttpFoundation\\Response;
+use Symfony\\Component\\Routing\\Attribute\\Route;
+
+class TestController
+{
+    #[Route('/test', methods: ['GET'])]
+    public function index(): Response
+    {
+        return new Response();
+    }
+}
+"""
+    rec_s = _parse(SymfonyParser, tmp_path, symfony_src, "src/Controller/TestController.php")
+    routes_s = [s for s in rec_s.statements if s.semanticType == "route" and s.endpoint == "/test"]
+    assert len(routes_s) == 1
+    assert routes_s[0].responseDTO is None
+
+    laravel_src = b"""<?php
+namespace App\\Routes;
+
+use Illuminate\\Http\\Response;
+use Illuminate\\Support\\Facades\\Route;
+
+Route::get('/ping', function (): Response {
+    return new Response();
+});
+"""
+    rec_l = _parse(LaravelParser, tmp_path, laravel_src, "routes/web.php")
+    routes_l = [s for s in rec_l.statements if s.semanticType == "route" and s.endpoint == "/ping"]
+    assert len(routes_l) == 1
+    assert routes_l[0].responseDTO is None
+
+
+def test_dto_resolution_verifies_repo_fqcn(tmp_path: Path) -> None:
+    dto_path = tmp_path / "src/DTO/ExistingOrderDto.php"
+    dto_path.parent.mkdir(parents=True, exist_ok=True)
+    dto_path.write_bytes(b"<?php namespace App\\DTO; class ExistingOrderDto {}")
+    src = b"""<?php
+namespace App\\Controller;
+
+use App\\DTO\\ExistingOrderDto;
+use Symfony\\Component\\Routing\\Attribute\\Route;
+
+class OrderController
+{
+    #[Route('/existing')]
+    public function existing(ExistingOrderDto $dto): ExistingOrderDto { return $dto; }
+
+    #[Route('/missing')]
+    public function missing(MissingOrderDto $dto): MissingOrderDto { return $dto; }
+}
+"""
+    rec = _parse_with_php_index(
+        SymfonyParser, tmp_path, src, "src/Controller/OrderController.php"
+    )
+    routes = {s.endpoint: s for s in rec.statements if s.semanticType == "route"}
+    assert routes["/existing"].requestDTO == "App\\DTO\\ExistingOrderDto"
+    assert routes["/existing"].responseDTO == "App\\DTO\\ExistingOrderDto"
+    assert routes["/missing"].requestDTO == "MissingOrderDto"
+    assert routes["/missing"].responseDTO == "MissingOrderDto"
 
 
 def test_laravel_form_request_closure_route_dto(tmp_path: Path) -> None:
