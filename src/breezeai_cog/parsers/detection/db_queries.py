@@ -84,6 +84,56 @@ _GENERIC = {
     "persist", "merge", "query", "execute",
 }
 
+# Go ORM/database libraries are only valid DB-method matches in a Go file; a generic
+# method name such as ``First``/``Where``/``Exec`` in another language should not be
+# promoted into a DB call by name alone. This is the language gate the spec calls for.
+_GO_DB_METHODS = frozenset({
+    "where", "first", "find", "create", "save", "updates", "update", "delete",
+    "select", "get", "namedexec", "exec", "query", "queryrow", "raw", "scan",
+    "scanrow", "pluck", "only", "all", "edges",
+})
+
+_GO_ONLY_DB_METHODS = frozenset({"findone", "remove"})
+
+_GO_DB_HINTS: dict[str, str] = {
+    "where": "gorm",
+    "first": "gorm",
+    "find": "gorm",
+    "create": "gorm",
+    "save": "gorm",
+    "updates": "gorm",
+    "update": "gorm",
+    "delete": "gorm",
+    "select": "sqlx",
+    "get": "sqlx",
+    "namedexec": "sqlx",
+    "only": "ent",
+    "all": "ent",
+    "edges": "ent",
+    "scan": "pgx",
+    "scanrow": "pgx",
+}
+
+_GO_DB_RECEIVER_HINTS: dict[str, tuple[str, ...]] = {
+    "gorm": ("db", "gorm", "tx", "model", "repo", "repository"),
+    "sqlx": ("db", "sqlx", "tx", "conn", "connection", "query"),
+    "ent": ("ent", "client", "query", "selector"),
+    "pgx": ("pgx", "row", "rows", "conn", "connection", "tx"),
+}
+
+
+def _go_db_hint(callee: str, method: str) -> str | None:
+    hint = _GO_DB_HINTS.get(method.lower())
+    if hint is None:
+        return None
+    receiver = callee.lower().rsplit(".", 1)[0].rsplit(".", 1)[-1] if "." in callee else ""
+    if receiver and any(
+        receiver == candidate or receiver.endswith(candidate)
+        for candidate in _GO_DB_RECEIVER_HINTS[hint]
+    ):
+        return hint
+    return None
+
 # Receiver substring -> hint (refines _GENERIC).
 # Needles checked via `needle in low` (full lowercased callee). Ambiguous short tokens
 # ("session", "objects") require a dot-anchored match so they don't fire on *containing*
@@ -236,6 +286,14 @@ def match_db(callee: str, method: str, language: str | None = None,
     low = callee.lower()
     if m in _PRISMA_VERBS and _is_prisma_chain(low):
         return "prisma"
+    if m in _GO_DB_METHODS and language is not None and language != "go":
+        return None
+    if language == "go":
+        go_hint = _go_db_hint(callee, m)
+        if go_hint is not None:
+            return go_hint
+        if m in _GO_DB_METHODS or m in _GO_ONLY_DB_METHODS:
+            return None
     if m in _DISTINCTIVE:
         db = _DISTINCTIVE[m]
         # EF verbs are .NET-only; suppress them in a known non-.NET file (name collision).
