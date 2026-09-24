@@ -34,11 +34,25 @@ def detect_es_kind(text: str) -> str:
         return "setting"
     if not isinstance(parsed, dict):
         return "unknown"
+    # A bare single-index body (e.g. a `PUT /<index>` create-index request
+    # body) carries `mappings`/`settings` directly at the top level instead
+    # of being keyed by index name.
+    if isinstance(parsed.get("mappings"), dict):
+        return "mapping"
+    if isinstance(parsed.get("settings"), dict):
+        return "setting"
     if any(isinstance(v, dict) and "mappings" in v for v in parsed.values()):
         return "mapping"
     if any(isinstance(v, dict) and "settings" in v for v in parsed.values()):
         return "setting"
     return "unknown"
+
+
+def _index_name_from_path(filepath: str) -> str:
+    """Best-effort index name for a bare (unwrapped) single-index upload,
+    which carries no index name of its own."""
+    base = filepath.replace("\\", "/").rsplit("/", 1)[-1]
+    return base.rsplit(".", 1)[0] if "." in base else base
 
 
 def _field(name: str, defn: dict, parent_full: str | None, *, is_multi: bool = False) -> dict:
@@ -99,6 +113,19 @@ def _parse_mapping(text: str, filepath: str) -> list[dict]:
     obj = json.loads(text)
     if not isinstance(obj, dict):
         raise BuildError(f"[es/mapping] {filepath}: expected an object keyed by index name")
+
+    # Bare single-index body: `mappings` sits directly at the top level
+    # rather than under an index-name key. The file carries no index name,
+    # so one is derived from the filename.
+    if isinstance(obj.get("mappings"), dict):
+        props = obj["mappings"].get("properties", {})
+        return [{
+            "indexName": _index_name_from_path(filepath),
+            "sourcePath": filepath,
+            "aliases": _aliases(obj.get("aliases")),
+            "fields": _flatten(props),
+        }]
+
     indices = []
     for index_name, body in obj.items():
         if not isinstance(body, dict):
@@ -114,30 +141,44 @@ def _parse_mapping(text: str, filepath: str) -> list[dict]:
     return indices
 
 
+def _pick_index_settings(body: dict) -> dict | None:
+    settings = body.get("settings")
+    idx = settings.get("index") if isinstance(settings, dict) else None
+    if not isinstance(idx, dict):
+        idx = body.get("index") if isinstance(body.get("index"), dict) else None
+    if idx is None:
+        return None
+    analysis = idx.get("analysis") if isinstance(idx.get("analysis"), dict) else {}
+    default = (analysis.get("analyzer") or {}).get("default") or {}
+    return {
+        "shards": _to_int(idx.get("number_of_shards")),
+        "replicas": _to_int(idx.get("number_of_replicas")),
+        "defaultAnalyzer": default.get("type") if isinstance(default, dict) else None,
+    }
+
+
 def _parse_settings(text: str, filepath: str) -> dict[str, dict]:
     obj = json.loads(text)
     if isinstance(obj, str):  # double-encoded
         obj = json.loads(obj)
     if not isinstance(obj, dict):
         raise BuildError(f"[es/setting] {filepath}: expected an object keyed by index name")
+
+    # Bare single-index body: `settings` sits directly at the top level
+    # rather than under an index-name key. The file carries no index name,
+    # so one is derived from the filename.
+    if isinstance(obj.get("settings"), dict) or isinstance(obj.get("index"), dict):
+        picked = _pick_index_settings(obj)
+        return {_index_name_from_path(filepath): {**picked, "sourcePath": filepath}} if picked else {}
+
     result: dict[str, dict] = {}
     for index_name, body in obj.items():
         if not isinstance(body, dict):
             continue
-        settings = body.get("settings")
-        idx = settings.get("index") if isinstance(settings, dict) else None
-        if not isinstance(idx, dict):
-            idx = body.get("index") if isinstance(body.get("index"), dict) else None
-        if idx is None:
+        picked = _pick_index_settings(body)
+        if picked is None:
             continue
-        analysis = idx.get("analysis") if isinstance(idx.get("analysis"), dict) else {}
-        default = (analysis.get("analyzer") or {}).get("default") or {}
-        result[index_name] = {
-            "shards": _to_int(idx.get("number_of_shards")),
-            "replicas": _to_int(idx.get("number_of_replicas")),
-            "defaultAnalyzer": default.get("type") if isinstance(default, dict) else None,
-            "sourcePath": filepath,
-        }
+        result[index_name] = {**picked, "sourcePath": filepath}
     return result
 
 
