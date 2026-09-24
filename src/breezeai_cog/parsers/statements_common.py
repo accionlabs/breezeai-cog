@@ -298,7 +298,7 @@ def _extract_verbs(methods_node: Node | None, source: bytes | None = None) -> li
     return verbs
 
 
-_HANDLER_STRING_RE = re.compile(r"^[\w\\]+@\w+$")
+_HANDLER_STRING_RE = re.compile(r"^[\w\\]+(?:@|::)\w+$")
 _METHOD_RE = re.compile(r"^\w+$")
 
 
@@ -307,8 +307,8 @@ def _resolve_handler(arg_node: Node | None, source: bytes | None = None) -> str 
 
     - If arg_node is an array_creation_expression matching [Controller::class, 'method'],
       resolves to 'Controller@method'.
-    - If arg_node is a string matching ^[\w\\]+@\w+$ (e.g. 'WebhookController@handle'),
-      keeps it as-is.
+        - If arg_node is a string matching ^[\w\\]+(?:@|::)\w+$, normalizes it to
+            'Controller@method'.
     - For anything else (closures, variables, other expressions), returns None.
     """
     if arg_node is None:
@@ -346,7 +346,7 @@ def _resolve_handler(arg_node: Node | None, source: bytes | None = None) -> str 
     s = _get_string(curr)
     if s is not None:
         if _HANDLER_STRING_RE.match(s):
-            return s
+            return s.replace("::", "@", 1)
         return None
 
     # Array matching [Controller::class, 'method']

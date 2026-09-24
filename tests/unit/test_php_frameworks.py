@@ -310,13 +310,22 @@ $routes->group('admin', function ($routes) {
 
     routes = [s for s in rec.statements if s.semanticType == "route"]
     assert [_route_shape(route) for route in routes] == [
-        ("GET", "/admin/dashboard", None, "route", rec.id),
-        ("GET", "/users", None, "route", rec.id),
-        ("POST", "/users", None, "route", rec.id),
-        ("GET", "/profile", None, "route", rec.id),
+        ("GET", "/admin/dashboard", "AdminController@dashboard", "route", rec.id),
+        ("GET", "/users", "UserController@index", "route", rec.id),
+        ("POST", "/users", "UserController@store", "route", rec.id),
+        ("GET", "/profile", "ProfileController@show", "route", rec.id),
         ("ANY", "/photos", None, "route", rec.id),
-        ("POST", "/profile", None, "route", rec.id),
+        ("POST", "/profile", "ProfileController@show", "route", rec.id),
     ]
+
+
+def test_codeigniter_double_colon_string_handler_is_normalized(tmp_path: Path) -> None:
+    src = b"""<?php
+$routes->get('profile', 'Profile::show');
+"""
+    rec = _parse(CodeIgniterParser, tmp_path, src, "app/Config/Routes.php")
+    route = next(s for s in rec.statements if s.semanticType == "route")
+    assert route.handler == "Profile@show"
 
 
 def test_codeigniter3_routes(tmp_path: Path) -> None:
@@ -625,7 +634,7 @@ $routes->group('admin', ['filter' => 'auth'], function ($routes) {
     assert len(routes) == 1
     assert routes[0].endpoint == "/admin/users"
     assert routes[0].method == "GET"
-    assert routes[0].handler is None
+    assert routes[0].handler == "Admin\\Users@index"
     assert routes[0].guards == ["auth"]
 
 
