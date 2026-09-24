@@ -123,8 +123,10 @@ def _parse_route_decorator(
 
 
 def _route_source_text(
-    dec: Decorator, root: Any, source: bytes, target_line: int
+    dec: Decorator, root: Any, source: bytes | None, target_line: int
 ) -> str | None:
+    if source is None:
+        return None
     found: list[Any] = []
 
     def walk(node: Any) -> None:

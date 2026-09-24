@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -122,7 +122,7 @@ def _include_target(node: Node, source: bytes, current_dir: Path) -> tuple[Path,
     return None
 
 
-def _walk_nodes(node: Node):
+def _walk_nodes(node: Node) -> Iterator[Node]:
     """Yield every named descendant, including nested require/include expressions."""
     for child in node.named_children:
         yield child

@@ -187,9 +187,11 @@ def _resolve_handler_dtos(
         items: list[Node] = []
         for c in inner.named_children:
             if c.type == "array_element_initializer":
-                val = c.child_by_field_name("value") or (c.named_children[-1] if c.named_children else None)
-                if val is not None:
-                    items.append(val)
+                value_node = c.child_by_field_name("value") or (
+                    c.named_children[-1] if c.named_children else None
+                )
+                if value_node is not None:
+                    items.append(value_node)
             else:
                 items.append(c)
         if len(items) >= 2:
@@ -210,9 +212,9 @@ def _resolve_handler_dtos(
                 )
 
     if inner.type == "string":
-        val = node_text(inner, source).strip("'\"")
-        if "@" in val:
-            cname, mname = val.split("@", 1)
+        route_value = node_text(inner, source).strip("'\"")
+        if "@" in route_value:
+            cname, mname = route_value.split("@", 1)
             cname = cname.rsplit("\\", 1)[-1]
             if (cname, mname) in methods:
                 return extract_callable_dtos(

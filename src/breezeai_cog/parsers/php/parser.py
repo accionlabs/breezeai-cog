@@ -257,5 +257,4 @@ class PhpParser(BaseParser):
             classes=classes,
             statements=statements,
         )
-        rec._seen_ids = seen_ids
         return rec

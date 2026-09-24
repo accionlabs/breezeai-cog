@@ -3,6 +3,8 @@ capabilities, the schema-version gate, and filename matching for config files.""
 
 from __future__ import annotations
 
+from typing import Any
+
 import pytest
 
 from breezeai_cog.core import registry
