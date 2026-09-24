@@ -81,8 +81,12 @@ def test_go_grouped_type_declaration_emits_each_type_with_its_span(tmp_path) -> 
         package demo
 
         type (
-            First struct{}
-            Second interface{}
+            First struct {
+                Value int
+            }
+            Second interface {
+                Read() error
+            }
         )
         """
     ).encode()
@@ -109,8 +113,8 @@ def test_go_grouped_type_declaration_emits_each_type_with_its_span(tmp_path) -> 
     assert first.type == "struct"
     assert second.type == "interface"
 
-    assert (first.startLine, first.endLine) == (4, 4)
-    assert (second.startLine, second.endLine) == (5, 5)
+    assert (first.startLine, first.endLine) == (5, 7)
+    assert (second.startLine, second.endLine) == (8, 10)
 
 
 def test_go_generic_receiver_is_parented_to_base_type(tmp_path) -> None:
