@@ -20,16 +20,20 @@ from __future__ import annotations
 from dataclasses import replace
 
 from ...emit import file_id
-from ...schemas import FileRecord
+from ...schemas import FileRecord, Statement
 from ..base import ParseContext
 from ..treesitter import parse_source
 from ..typescript.parser import TypeScriptParser
 from .components import mark_composables, mark_factory_ui_roles
 from .sfc import script_grammar, script_language, script_ranges, shadow_source
+from .template import collect_vue_template_statements
 
-# Byte guards for a vue import in a .ts/.js file: ``from 'vue'`` / ``from "vue"`` (the app
-# and store modules) or any ``vue-router`` reference (the router config).
-_VUE_IMPORT_GUARDS = (b"'vue'", b'"vue"', b"vue-router")
+# Byte guards for a Vue-ecosystem import in a .ts/.js file: ``from 'vue'`` / ``from "vue"`` (the
+# app and store modules), any ``vue-router`` reference (the router config), or ``'pinia'`` /
+# ``"pinia"`` (the store lib — a Pinia store module often imports only pinia, not vue, yet is
+# still Vue and must be tagged framework="vue" + get its defineStore uiRole). Quoted so the
+# match is an import specifier, not the word appearing in a comment/string.
+_VUE_IMPORT_GUARDS = (b"'vue'", b'"vue"', b"vue-router", b"'pinia'", b'"pinia"')
 
 
 class VueParser(TypeScriptParser):
@@ -39,18 +43,38 @@ class VueParser(TypeScriptParser):
     extensions: tuple[str, ...] = (*TypeScriptParser.extensions, ".vue")
     priority = 10  # above the base TS parser; coexists per-file with other TS frameworks
     frameworks = ["vue"]
+    # TS statement types + the ``<template>`` nodes this parser emits (capabilities honesty).
+    statement_types = [*TypeScriptParser.statement_types, "directive_attribute", "interpolation"]
 
     def claims(self, path: str, source: bytes) -> bool:
         # A .vue SFC is always ours. A .ts/.js file is ours only when it imports vue /
         # vue-router (router configs, app bootstrap) — byte guard keeps it off unrelated TS.
         return path.endswith(".vue") or any(g in source for g in _VUE_IMPORT_GUARDS)
 
+    def _template_statements(
+        self, ctx: ParseContext, fid: str, seen_ids: set[str]
+    ) -> list[Statement]:
+        """Parse the SFC with the ``vue`` grammar and capture ``<template>`` bindings — the
+        script capture uses the shadow source (which blanks the template), so this is the only
+        pass that sees the markup. Closes the documented ``sfc.py`` gap."""
+        vroot = parse_source("vue", ctx.source, ctx.parse_timeout_micros).root_node
+        return collect_vue_template_statements(
+            vroot,
+            ctx.source,
+            ctx.path,
+            parent_id=fid,
+            seen_ids=seen_ids,
+            limit=ctx.statement_text_limit,
+            emit_routes=not self.is_fixture_file(ctx.path),
+        )
+
     def parse_file(self, ctx: ParseContext) -> FileRecord:
         if ctx.path.endswith(".vue"):
             ranges = script_ranges(ctx.source)
-            if not ranges:  # a template/style-only SFC has no code to capture
-                return FileRecord(
-                    id=file_id(ctx.path),
+            if not ranges:  # a template/style-only SFC has no code — still capture the template
+                fid = file_id(ctx.path)
+                rec = FileRecord(
+                    id=fid,
                     path=ctx.path,
                     type="code",
                     # language = the JS/TS axis (from <script lang>); a template-only SFC has
@@ -60,6 +84,9 @@ class VueParser(TypeScriptParser):
                     loc=0,
                     uiRole="component",  # a .vue SFC is a component even with no <script>
                 )
+                if ctx.capture_statements:
+                    rec.statements.extend(self._template_statements(ctx, fid, set()))
+                return rec
             grammar = script_grammar(ctx.source)
             # Parse the shadow (script bytes at their real offsets, everything else blanked);
             # feed the SAME shadow to extract()/route detection, since node byte offsets index
@@ -89,4 +116,10 @@ class VueParser(TypeScriptParser):
         mark_factory_ui_roles(root, parsed_source, record)
         # Composables — a `useX` function that calls a Vue reactivity primitive.
         mark_composables(root, parsed_source, record)
+        # <template> bindings — parsed from the ORIGINAL source with the vue grammar (the
+        # shadow blanked the template). Closes the sfc.py gap; script statements keep their ids.
+        if ctx.path.endswith(".vue") and ctx.capture_statements:
+            record.statements.extend(
+                self._template_statements(ctx, file_id(ctx.path), {s.id for s in record.statements})
+            )
         return record

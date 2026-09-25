@@ -18,6 +18,7 @@ from ..analyzers.es import BuildError, build_es_records
 from ..analyzers.nosql import BuildError as NoSqlBuildError
 from ..analyzers.nosql import build_nosql_records
 from ..analyzers.sql import parse_ddl
+from ..core.ignore import append_repo_ignore_patterns
 from ..services.diff import empty_meta, run_diff_stream
 from ..services.inprocess import analyze_in_memory
 from .deps import ServerDeps
@@ -37,12 +38,32 @@ def _now_ms() -> int:
     return int(time.time() * 1000)
 
 
-def _stream_records_to_s3(deps: ServerDeps, key: str, records: list[dict]) -> str:
-    stream = deps.open_s3(key)
+def _normalize_ignore_patterns(raw: object) -> list[str]:
+    """``ignorePatterns`` (optional) — a newline-separated string or a list of strings.
+
+    Absent/blank means "no extra patterns": the scan then behaves exactly as before,
+    honouring only the built-in defaults and the repo's own ignore files.
+    """
+    if raw is None:
+        return []
+    if isinstance(raw, str):
+        return [ln for ln in (line.strip() for line in raw.splitlines()) if ln]
+    if isinstance(raw, list):
+        out: list[str] = []
+        for i, item in enumerate(raw):
+            if not isinstance(item, str):
+                raise ApiError(f"ignorePatterns[{i}] must be a string", 400)
+            if item.strip():
+                out.append(item.strip())
+        return out
+    raise ApiError("ignorePatterns must be a string or an array of strings", 400)
+
+
+def _stream_records_to_infra(deps: ServerDeps, key: str, records: list[dict]) -> str:
+    stream = deps.open_storage(key)
     for record in records:
         stream.write_line(json.dumps(record) + "\n")
     return stream.close()
-
 
 @router.get("/health")
 async def health() -> dict[str, str]:
@@ -89,16 +110,24 @@ async def analyze_diff(request: Request, background_tasks: BackgroundTasks) -> d
     if parsed is None:
         raise ApiError("Invalid repo URL (supported hosts: github.com, bitbucket.org, gitlab.com, dev.azure.com)", 400)
     repo_name = parsed["repo"]
+    ignore_patterns = _normalize_ignore_patterns(body.get("ignorePatterns"))
 
     temp_dir, filter_set, deleted_files = await run_in_threadpool(deps.acquire_diff, settings, body)
-    s3_key = f"code-ontology/{project_uuid}/{incoming}.ndjson.gz"
+    storage_key= f"code-ontology/{project_uuid}/{incoming}.ndjson.gz"
     has_changed = filter_set is None or len(filter_set) > 0
     try:
+        if ignore_patterns:
+            # Fail loudly: a silent write failure would ship files the caller
+            # explicitly asked to exclude into the ontology.
+            try:
+                append_repo_ignore_patterns(temp_dir, ignore_patterns)
+            except OSError as exc:
+                raise ApiError(f"Failed to apply ignorePatterns: {exc}", 500) from exc
         if has_changed:
-            upload = deps.open_s3(s3_key)
+            upload = deps.open_storage(storage_key)
             meta = await run_in_threadpool(run_diff_stream, settings, upload, temp_dir, filter_set, repo_name)
         else:
-            upload = deps.open_s3(s3_key)
+            upload = deps.open_storage(storage_key)
             await run_in_threadpool(upload.close)
             meta = empty_meta(repo_name)
     finally:
@@ -110,20 +139,23 @@ async def analyze_diff(request: Request, background_tasks: BackgroundTasks) -> d
 
     background_tasks.add_task(
         deps.notify, "/code-ontology/stream-ingest",
-        {"s3Key": s3_key, "projectMetaData": meta, "deletedFiles": deleted_files,
+        {"s3Key": storage_key, "projectMetaData": meta, "deletedFiles": deleted_files,
          "projectUuid": project_uuid, "codeOntologyId": code_ontology_id,
          "repoUrl": repo_url, "gitBranch": git_branch, "commitId": incoming},
     )
 
+    if has_changed:
+        message = "Code ontology streamed to S3 and notification sent to Breeze API for ingestion."
+    elif deleted_files:
+        message = "Deletion-only commit — notification sent to Breeze API with deleted files."
+    else:
+        message = "No file changes between commits — commit recorded, ontology left unchanged."
+
     return {
         "success": True,
-        "s3Key": s3_key,
+        "storage_key": storage_key,
         "deletedFiles": deleted_files,
-        "message": (
-            "Code ontology streamed to S3 and notification sent to Breeze API for ingestion."
-            if has_changed else
-            "Deletion-only commit — notification sent to Breeze API with deleted files."
-        ),
+        "message": message,
     }
 
 
@@ -170,17 +202,17 @@ async def analyze_sql(
     if parsed.get("parseReport"):
         record["parseReport"] = parsed["parseReport"]
 
-    s3_key = f"db-ontology/{projectUuid}/{dataLakeId}/{_now_ms()}-{_safe_name(file_name)}.ndjson.gz"
-    await run_in_threadpool(_stream_records_to_s3, deps, s3_key, [record])
+    storage_key = f"db-ontology/{projectUuid}/{dataLakeId}/{_now_ms()}-{_safe_name(file_name)}.ndjson.gz"
+    await run_in_threadpool(_stream_records_to_infra, deps, storage_key, [record])
     background_tasks.add_task(
         deps.notify, "/db-ontology/stream-ingest-s3",
-        {"s3Key": s3_key, "projectUuid": projectUuid, "dataLakeId": dataLakeId,
+        {"s3Key": storage_key, "projectUuid": projectUuid, "dataLakeId": dataLakeId,
          "repositoryName": repositoryName or file_name},
     )
 
     return JSONResponse(status_code=202, content={
         "success": True,
-        "s3Key": s3_key,
+        "storage_key":storage_key,
         "fileName": file_name,
         "dialect": parsed["dialect"],
         "tableCount": len(parsed["tables"]),
@@ -221,11 +253,12 @@ async def analyze_nosql(
         raise ApiError(str(exc), exc.status_code)
 
     primary_name = build["collections"][0]
-    s3_key = f"nosql-ontology/{projectUuid}/{dataLakeId}/{_now_ms()}-{_safe_name(primary_name)}.ndjson.gz"
-    await run_in_threadpool(_stream_records_to_s3, deps, s3_key, build["records"])
+    storage_key = f"nosql-ontology/{projectUuid}/{dataLakeId}/{_now_ms()}-{_safe_name(primary_name)}.ndjson.gz"
+
+    await run_in_threadpool(_stream_records_to_infra, deps, storage_key, build["records"])
     background_tasks.add_task(
         deps.notify, "/db-ontology/stream-ingest-s3",
-        {"s3Key": s3_key, "projectUuid": projectUuid, "dataLakeId": dataLakeId,
+        {"s3Key": storage_key, "projectUuid": projectUuid, "dataLakeId": dataLakeId,
          "repositoryName": repositoryName or primary_name},
     )
 
@@ -238,7 +271,7 @@ async def analyze_nosql(
     )
     return JSONResponse(status_code=202, content={
         "success": True,
-        "s3Key": s3_key,
+        "storage_key":storage_key,
         "collections": build["collections"],
         "recordCount": len(build["records"]),
         "collectionCount": cc,
@@ -278,12 +311,12 @@ async def analyze_es(
 
     primary_name = (build["mapping"] or build["setting"])["name"]
     suffix = "-settings" if build["kind"] == "settings-only" else ""
-    s3_key = f"es-ontology/{projectUuid}/{dataLakeId}/{_now_ms()}-{_safe_name(primary_name)}{suffix}.ndjson.gz"
+    storage_key = f"es-ontology/{projectUuid}/{dataLakeId}/{_now_ms()}-{_safe_name(primary_name)}{suffix}.ndjson.gz"
 
-    await run_in_threadpool(_stream_records_to_s3, deps, s3_key, build["records"])
+    await run_in_threadpool(_stream_records_to_infra, deps, storage_key, build["records"])
     background_tasks.add_task(
         deps.notify, "/db-ontology/stream-ingest-s3",
-        {"s3Key": s3_key, "projectUuid": projectUuid, "dataLakeId": dataLakeId,
+        {"s3Key": storage_key, "projectUuid": projectUuid, "dataLakeId": dataLakeId,
          "repositoryName": repositoryName or primary_name},
     )
 
@@ -302,7 +335,7 @@ async def analyze_es(
 
     return JSONResponse(status_code=202, content={
         "success": True,
-        "s3Key": s3_key,
+        "storage_key": storage_key,
         "mode": build["kind"],
         "mapping": build["mapping"]["name"] if build["mapping"] else None,
         "setting": build["setting"]["name"] if build["setting"] else None,

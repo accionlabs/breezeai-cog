@@ -20,7 +20,7 @@ def _now() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-class _S3StreamSink:
+class _InfraStreamSink:
     """Streams (optionally filtered) FileRecords to an open S3 upload and tallies
     projectMetaData over the records actually written. The meta is delivered
     out-of-band, so ``finalize`` writes nothing to the stream."""
@@ -52,7 +52,7 @@ class _S3StreamSink:
 def run_diff_stream(
     settings: Settings, upload: Any, temp_dir: str | Path, filter_set: set[str] | None, repo_name: str
 ) -> dict[str, Any]:
-    sink = _S3StreamSink(upload, filter_set)
+    sink = _InfraStreamSink(upload, filter_set)
     pipeline.run_inprocess(temp_dir, settings, sink)
     upload.close()
     return {
@@ -70,7 +70,8 @@ def run_diff_stream(
 
 
 def empty_meta(repo_name: str) -> dict[str, Any]:
-    """Fully-shaped projectMetaData for a deletion-only commit (no files parsed)."""
+    """Fully-shaped projectMetaData for a commit with no files parsed (deletion-only, or
+    no file changes at all)."""
     return {
         "repositoryPath": repo_name,
         "repositoryName": repo_name,

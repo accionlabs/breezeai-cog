@@ -63,12 +63,11 @@ def ci_resolve(repo_root: Path, rel: str) -> str | None:
         cur = cur / actual
     return "/".join(real) if real else None
 
+
 # ``<%@ Register … Src="~/Controls/Nav.ascx" … %>``. TagPrefix/Namespace/Assembly Register
 # variants carry no ``Src`` and are skipped (they register assembly controls, not a file).
 # ``[^%]`` keeps the match inside a single directive (``%`` only starts the closing ``%>``).
-_REGISTER_SRC = re.compile(
-    rb"<%@\s*Register\b[^%]*?\bSrc\s*=\s*[\"']([^\"']+)[\"']", re.IGNORECASE
-)
+_REGISTER_SRC = re.compile(rb"<%@\s*Register\b[^%]*?\bSrc\s*=\s*[\"']([^\"']+)[\"']", re.IGNORECASE)
 # ``LoadControl("~/Controls/Cart.ascx")`` — literal string arg only. ``LoadControl(var)`` /
 # ``LoadControl(typeof(T))`` have no leading quote → unmatched (dynamic, unresolved).
 _LOADCONTROL = re.compile(rb"LoadControl\s*\(\s*[\"']([^\"']+)[\"']")
@@ -167,7 +166,8 @@ def resolve_master(markup: bytes, rel_path: str, repo_root: Path | None) -> str 
     if m is None:
         return None
     rel = _to_repo_path(
-        m.group(1).decode("utf-8", "replace"), posixpath.dirname(rel_path),
+        m.group(1).decode("utf-8", "replace"),
+        posixpath.dirname(rel_path),
         _app_root(rel_path, repo_root),
     )
     if rel is None or not rel.lower().endswith(".master"):

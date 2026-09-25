@@ -69,25 +69,29 @@ def detect_webforms_pages(
 
     out: list[Statement] = []
     for endpoint in endpoints:
-        out.append(Statement(
-            id=disambiguate(statement_id(path, start, 0), seen),
-            parentId=file_id(path),
-            nodeType=node_type,
-            semanticType="route",
-            text=path.rsplit("/", 1)[-1],
-            method="GET",
-            endpoint=endpoint,
-            framework="aspnet-webforms",
-            routeKind=route_kind,
-            handler=cls.name if cls is not None else None,
-            startLine=start,
-            endLine=end,
-            path=path,
-        ))
+        out.append(
+            Statement(
+                id=disambiguate(statement_id(path, start, 0), seen),
+                parentId=file_id(path),
+                nodeType=node_type,
+                semanticType="route",
+                text=path.rsplit("/", 1)[-1],
+                method="GET",
+                endpoint=endpoint,
+                framework="aspnet-webforms",
+                routeKind=route_kind,
+                handler=cls.name if cls is not None else None,
+                startLine=start,
+                endLine=end,
+                path=path,
+            )
+        )
     return out
 
 
-def detect_master_layout(record: FileRecord, path: str, master_endpoint: str | None) -> list[Statement]:
+def detect_master_layout(
+    record: FileRecord, path: str, master_endpoint: str | None
+) -> list[Statement]:
     """A ``routeKind=layout`` route statement recording that this page/control/master composes
     into ``master_endpoint`` (its ``MasterPageFile``). Returns ``[]`` when there is no master
     (BREEZEAI-765 item 3). No HTTP ``method`` — a layout is a composition, not a served verb;
@@ -98,17 +102,21 @@ def detect_master_layout(record: FileRecord, path: str, master_endpoint: str | N
     start = cls.startLine if cls is not None else 1
     end = cls.endLine if cls is not None else 1
     seen = {s.id for s in record.statements}
-    return [Statement(
-        id=disambiguate(statement_id(path, start, 1), seen),  # col 1 → distinct from the page route (col 0)
-        parentId=file_id(path),
-        nodeType="synthetic",
-        semanticType="route",
-        text=master_endpoint,
-        endpoint=master_endpoint,
-        framework="aspnet-webforms",
-        routeKind="layout",
-        handler=cls.name if cls is not None else None,
-        startLine=start,
-        endLine=end,
-        path=path,
-    )]
+    return [
+        Statement(
+            id=disambiguate(
+                statement_id(path, start, 1), seen
+            ),  # col 1 → distinct from the page route (col 0)
+            parentId=file_id(path),
+            nodeType="synthetic",
+            semanticType="route",
+            text=master_endpoint,
+            endpoint=master_endpoint,
+            framework="aspnet-webforms",
+            routeKind="layout",
+            handler=cls.name if cls is not None else None,
+            startLine=start,
+            endLine=end,
+            path=path,
+        )
+    ]

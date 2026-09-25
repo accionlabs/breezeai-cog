@@ -24,6 +24,7 @@ from .classes import build_class
 from .functions import defined_names, type_map
 from .imports import CSharpIndex, build_csharp_index, extract_imports
 from .lambda_events import detect_lambda_handlers
+from .lucene import detect_lucene_access
 from ..comments_common import comment_statements_for
 from .mappings import COMMENT_TYPES, CONTROL_FLOW, FRAMEWORKS, STATEMENT_TYPES
 
@@ -46,7 +47,7 @@ def iter_type_declarations(root: Node):
 
 class CSharpParser(BaseParser):
     name = "csharp"
-    extensions = (".cs",)
+    extensions: tuple[str, ...] = (".cs",)  # widened by WebFormsParser (adds .aspx/.ascx/.master)
     schema_version = SCHEMA_VERSION
     statement_types = STATEMENT_TYPES
     frameworks = FRAMEWORKS
@@ -78,11 +79,11 @@ class CSharpParser(BaseParser):
         statements: list[Statement] = []
 
         for decl in iter_type_declarations(root):
-            cls, methods, cls_statements = build_class(
+            cls_list, methods, cls_statements = build_class(
                 decl, source, path,
                 parent_id=fid, seen_ids=seen_ids, capture=capture, limit=limit, resolve=resolve,
             )
-            classes.append(cls)
+            classes.extend(cls_list)
             functions.extend(methods)
             statements.extend(cls_statements)
 
@@ -114,4 +115,8 @@ class CSharpParser(BaseParser):
         if capture and not self.is_fixture_file(path):  # entry-point emitter → skip fixtures/tests
             if detect_lambda_handlers(root, source, path, record) and record.framework is None:
                 record.framework = "aws-lambda"
+        if capture:
+            # Index access is data access, not an entry point, so it is not fixture-gated: a
+            # statement inside a test file is still a real read of the index.
+            detect_lucene_access(root, source, path, record)
         return record
