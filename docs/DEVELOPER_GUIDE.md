@@ -40,9 +40,17 @@ src/breezeai_cog/
     provider.py   #   open_stream(key, settings) — the entry point callers use
     factory.py    #   ProviderFactory maps ProviderType -> implementation
     aws/s3.py     #   AWSStreamUpload — streaming gzip upload to S3
+  integrations/   # external services (server-only)
+    scm/          #   git-hosting providers behind the AbstractSCMClient interface
+      base.py     #     AbstractSCMClient · RepoRef · ChangeSet · SUPPORTED_PROVIDERS
+      factory.py  #     SCMClientFactory.for_repo(ref, settings, token) — the entry point
+      http.py     #     SCMHttpClient — shared httpx wrapper: retry, page cap, error mapping
+      retry.py    #     request_with_retry (429/502/503/504 + transport errors, jittered backoff)
+      repository.py #   parse_repo_url → RepoRef (public clouds + configured self-hosted hosts)
+      github.py · bitbucket.py · gitlab.py · azure_devops.py   # one class per provider
   analyzers/      # non-AST: sql (DDL via sqlglot), es (Elasticsearch mappings)
   services/       # analysis · inprocess · diff · notify
-  server/         # FastAPI app · routes · deps · git acquisition · errors
+  server/         # FastAPI app · routes · git_routes (/api/git/* for the backend) · deps · git orchestration (clone / REST diff) · errors
   cli.py          # Typer CLI
 ```
 
@@ -128,6 +136,61 @@ returns the implementation for that `ProviderType`.
    case raises instead of silently returning `None`.
 5. Reuse the generic `storage_*` settings for retries and timeouts rather than adding
    provider-prefixed twins.
+
+---
+
+## Git providers (`/api/analyze-diff`)
+
+`server/git.py` is orchestration only: it decides between a shallow **clone** and an
+**incremental REST diff**, materialises the temp tree, and maps errors. Everything
+provider-specific lives in `integrations/scm/` behind one contract:
+
+```python
+ref = parse_repo_url(body["repoUrl"], settings.scm_instances)        # -> RepoRef | None
+client = SCMClientFactory.for_repo(ref, settings, request_token=body.get("gitToken"))
+with client:
+    client.branch_head(ref, branch)          # CommitInfo(sha, message, author, date) at the tip
+    client.tree(ref, commit)                 # every blob path at a commit
+    client.pull_request(ref, number)         # PullRequestInfo: normalised state, full base/head SHAs
+    client.post_pr_comment(ref, number, body) # PrComment(id, url) — the only write; not retried
+    client.compare(ref, base, head)          # ChangeSet(changed, deleted)
+    client.file_content(ref, path, commit)   # UTF-8 text; SCMAPIError for binary/unreadable
+    client.clone_url(ref)                    # https URL with the credential embedded
+```
+
+Rules every provider honours:
+
+1. **Go through `SCMHttpClient`.** It owns the `httpx.Client`, the retry policy, the pagination
+   ceiling (`scm_max_pages`) and error conversion. Reads use `get*` (retried); the single write uses
+   `post_json`, which is **never retried** because a repeated POST can create a duplicate. Never raise with a response body in the
+   message — bodies can echo the credential; the wrapper logs them at DEBUG only.
+2. **Return repo-relative paths without a leading slash** (Azure DevOps sends `/src/a.cs`).
+3. **A rename marks the old path deleted** and the new path changed.
+4. **Decode file content strictly.** `get_text` raises on non-UTF-8 so a binary is skipped by the
+   orchestration rather than written as replacement characters and handed to a parser.
+5. **Build URLs from `RepoRef.host`**, never from a hard-coded public host, so self-hosted
+   instances work. The REST base comes from the factory (`scm_instance_base_url_mapping`, else
+   `<provider>_api_base_url`).
+6. **`supports_incremental`** is the gate `acquire_diff` reads. Set it `False` only for a provider
+   whose tree / compare / content calls are not implemented.
+
+Credential order in `resolve_scm_token`: request `gitToken` → `scm_token_<provider>` → anonymous
+(allowed; public repos work and the client logs a warning).
+
+### Adding a git provider
+
+1. Create `integrations/scm/<provider>.py` with a class deriving `AbstractSCMClient`; set
+   `provider` and `supports_incremental`; take `(token, settings, api_base_url=None, *,
+   transport=None, sleep=time.sleep)` so tests can inject `httpx.MockTransport`.
+2. Register its dotted path in `_PROVIDER_CLASSES` (`factory.py`) and add the slug to
+   `SUPPORTED_PROVIDERS` (`base.py`) — the module asserts the two agree.
+3. Add `<provider>_api_base_url` and `scm_token_<provider>` to `Settings`, `.env.example` and the
+   user guide table.
+4. Teach `repository.py` its URL grammar: a public-host pattern in `_public`, and the
+   self-hosted path grammar in `_instance`.
+5. Add `tests/unit/integrations/test_scm_<provider>.py` using the `router` fixture; pin the
+   request shapes (path, query, headers), the change mapping incl. renames, binary rejection,
+   and the clone URL for public and self-hosted hosts.
 
 ---
 
