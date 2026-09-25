@@ -105,7 +105,9 @@ def collect_definitions_statements(
         tag = element_tag(node, source)
         if tag == _MESSAGE_TAG:
             name = element_attr(node, source, "name")
-            out.append(_plain_statement(node, source, path, fid, tag, name, "data_model", limit, seen_ids))
+            out.append(
+                _plain_statement(node, source, path, fid, tag, name, "data_model", limit, seen_ids)
+            )
         elif tag == _IMPORT_TAG:
             name = element_attr(node, source, "namespace") or element_attr(node, source, "location")
             out.append(_plain_statement(node, source, path, fid, tag, name, None, limit, seen_ids))
