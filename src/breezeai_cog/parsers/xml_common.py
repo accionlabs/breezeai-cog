@@ -39,7 +39,7 @@ def element_tag(node: Node, source: bytes) -> str | None:
 
 def element_attr(node: Node, source: bytes, attr: str) -> str | None:
     """The value of ``attr`` (matched by local name, prefix-insensitive) on ``node``'s open
-    tag, quotes stripped. ``None`` if ``node`` has no such attribute."""
+    tag, its delimiting quote pair removed. ``None`` if ``node`` has no such attribute."""
     open_tag = _child(node, "STag") or _child(node, "EmptyElemTag")
     if open_tag is None:
         return None
@@ -49,7 +49,11 @@ def element_attr(node: Node, source: bytes, attr: str) -> str | None:
         name = _child(a, "Name")
         if name is not None and local_name(node_text(name, source)) == attr:
             value = _child(a, "AttValue")
-            return node_text(value, source).strip("'\"") if value is not None else None
+            # AttValue's text always includes exactly the delimiting `"…"`/`'…'` pair (the
+            # grammar requires one), so slicing them off is correct where `.strip("'\"")`
+            # was not — that strips *every* leading/trailing quote character, corrupting a
+            # value that legitimately starts or ends with one (e.g. `O'Brien'`).
+            return node_text(value, source)[1:-1] if value is not None else None
     return None
 
 
