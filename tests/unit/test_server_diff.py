@@ -14,7 +14,7 @@ from fastapi.testclient import TestClient
 from breezeai_cog.config import Settings
 from breezeai_cog.server.app import create_app
 from breezeai_cog.server.deps import ServerDeps
-from breezeai_cog.server.git import parse_repo_url
+from breezeai_cog.server.git import INVALID_REPO_URL_MESSAGE, parse_repo_url
 
 BODY = {
     "repoUrl": "https://github.com/acme/widgets.git",
@@ -127,16 +127,18 @@ def test_invalid_repo_url(captured: _Captured) -> None:
     client = _make_client(captured, filter_set=None, deleted=[])
     r = client.post("/api/analyze-diff", json={**BODY, "repoUrl": "https://unsupported-host.com/a/b"})
     assert r.status_code == 400
-    assert r.json() == {"error": "Invalid repo URL (supported hosts: github.com, bitbucket.org, gitlab.com, dev.azure.com)"}
+    assert r.json() == {"error": INVALID_REPO_URL_MESSAGE}
 
 
 def test_azure_devops_repo_url() -> None:
+    # `project` became its own key in 36ed49f (was packed into repo as "project/repo").
+    # Full URL-grammar coverage lives in tests/unit/integrations/test_scm_repository.py.
     url = "https://dev.azure.com/my-org/my-project/_git/my-repo"
-    res = parse_repo_url(url)
-    assert res == {
+    assert parse_repo_url(url) == {
         "provider": "azure_devops",
         "owner": "my-org",
-        "repo": "my-project/my-repo"
+        "project": "my-project",
+        "repo": "my-repo",
     }
 
 

@@ -118,3 +118,45 @@ def test_secret_not_leaked(env) -> None:
     assert isinstance(s.user_api_key, SecretStr)
     assert "topsecret" not in repr(s)
     assert s.user_api_key.get_secret_value() == "topsecret"
+
+
+# --- SCM provider settings (integrations/scm/) ---
+
+
+def test_scm_defaults(env) -> None:
+    s = _settings()
+    assert s.github_api_base_url == "https://api.github.com"
+    assert s.gitlab_api_base_url == "https://gitlab.com/api/v4"
+    assert s.bitbucket_api_base_url == "https://api.bitbucket.org/2.0"
+    assert s.azure_devops_api_base_url == "https://dev.azure.com"
+    assert (s.scm_api_timeout, s.scm_api_retry_max, s.scm_api_retry_backoff_seconds) == (60.0, 3, 2.0)
+    assert s.scm_max_pages == 100
+    assert s.scm_token_github is None and s.scm_token_azure_devops is None
+    assert s.scm_instances == {} and s.scm_instance_base_url_mapping == {}
+
+
+def test_scm_env_json_maps_and_secret_tokens(env) -> None:
+    env.setenv("BREEZEAI_COG_SCM_INSTANCES", '{"Git.Acme.COM/": "GitLab"}')
+    env.setenv("BREEZEAI_COG_SCM_INSTANCE_BASE_URL_MAPPING", '{"git.acme.com": "https://git.acme.com/api/v4"}')
+    env.setenv("BREEZEAI_COG_SCM_TOKEN_GITHUB", "ghp_secret")
+    env.setenv("BREEZEAI_COG_SCM_API_RETRY_MAX", "0")
+    s = _settings()
+    assert s.scm_instances == {"git.acme.com": "gitlab"}  # normalised host + slug
+    assert s.scm_instance_base_url_mapping == {"git.acme.com": "https://git.acme.com/api/v4"}
+    assert isinstance(s.scm_token_github, SecretStr)
+    assert "ghp_secret" not in repr(s)
+    assert s.scm_api_retry_max == 0
+
+
+def test_scm_instances_rejects_unknown_provider(env) -> None:
+    with pytest.raises(ValidationError, match="unknown provider"):
+        _settings(scm_instances={"git.acme.com": "svn"})
+
+
+@pytest.mark.parametrize("field, bad", [
+    ("scm_api_timeout", 0), ("scm_api_retry_max", -1),
+    ("scm_api_retry_backoff_seconds", -0.5), ("scm_max_pages", 0),
+])
+def test_scm_bounds(env, field, bad) -> None:
+    with pytest.raises(ValidationError):
+        _settings(**{field: bad})
