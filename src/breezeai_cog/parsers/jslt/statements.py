@@ -82,11 +82,12 @@ def collect_jslt_statements(
         if line[:1] not in ("", " ", "\t") and not _is_blank_or_comment(line)
     ]
 
-    decl_starts: list[int] = []
+    decl_starts: list[tuple[int, str]] = []
     module_start: int | None = None
     for ln in boundaries:
-        if _DECL_RE.match(_strip_line_comment(lines[ln - 1])):
-            decl_starts.append(ln)
+        m = _DECL_RE.match(_strip_line_comment(lines[ln - 1]))
+        if m:
+            decl_starts.append((ln, m.group(1)))
         else:
             module_start = ln
             break
@@ -107,13 +108,12 @@ def collect_jslt_statements(
         )
 
     decl_end_limit = (module_start - 1) if module_start is not None else n
-    for idx, start in enumerate(decl_starts):
-        raw_end = decl_starts[idx + 1] - 1 if idx + 1 < len(decl_starts) else decl_end_limit
+    for idx, (start, keyword) in enumerate(decl_starts):
+        raw_end = decl_starts[idx + 1][0] - 1 if idx + 1 < len(decl_starts) else decl_end_limit
         end = raw_end
         while end > start and _is_blank_or_comment(lines[end - 1]):
             end -= 1
         first = _strip_line_comment(lines[start - 1])
-        keyword = _DECL_RE.match(first).group(1)  # type: ignore[union-attr]
         emit(_NODE_TYPES[keyword], _declared_name(keyword, first), start, end)
 
     if module_start is not None:
