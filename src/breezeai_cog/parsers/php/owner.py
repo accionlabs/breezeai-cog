@@ -20,6 +20,81 @@ _CLASS_TYPES = frozenset(
 _SCOPE_TYPES = _FUNCTION_TYPES | _CLASS_TYPES
 
 
+def _class_id_for_scope(scope: Node, source: bytes, path: str) -> str:
+    """Reconstruct the extraction ID for a class, including duplicate suffixes."""
+    name_node = scope.child_by_field_name("name")
+    name = node_text(name_node, source) if name_node is not None else ""
+    candidate = class_id(path, name)
+    root = scope
+    while getattr(root, "parent", None) is not None:
+        root = root.parent
+
+    ordinal = 1
+    stack = [root]
+    while stack:
+        current = stack.pop()
+        if (
+            current.type == scope.type
+            and current.start_byte == scope.start_byte
+            and current.end_byte == scope.end_byte
+        ):
+            break
+        if current.type in _CLASS_TYPES:
+            current_name = current.child_by_field_name("name")
+            if (
+                current_name is not None
+                and node_text(current_name, source) == name
+                and current.start_byte < scope.start_byte
+            ):
+                ordinal += 1
+        stack.extend(reversed(current.named_children))
+
+    return candidate if ordinal == 1 else f"{candidate}#{ordinal}"
+
+
+def _function_id_for_scope(
+    scope: Node, source: bytes, path: str, name: str, class_name: str | None
+) -> str:
+    """Reconstruct the extraction ID for a function, including duplicate suffixes."""
+    start_line = scope.start_point[0] + 1
+    candidate = function_id(path, name or None, start_line, class_name=class_name)
+    root = scope
+    while getattr(root, "parent", None) is not None:
+        root = root.parent
+
+    ordinal = 1
+    stack = [root]
+    while stack:
+        current = stack.pop()
+        if (
+            current.type == scope.type
+            and current.start_byte == scope.start_byte
+            and current.end_byte == scope.end_byte
+        ):
+            break
+        if current.type in _FUNCTION_TYPES:
+            current_name = current.child_by_field_name("name")
+            current_class: str | None = None
+            parent = getattr(current, "parent", None)
+            while parent is not None:
+                if parent.type in _CLASS_TYPES:
+                    class_node = parent.child_by_field_name("name")
+                    current_class = node_text(class_node, source) if class_node is not None else None
+                    break
+                parent = getattr(parent, "parent", None)
+            current_line = current.start_point[0] + 1
+            if (
+                current_name is not None
+                and node_text(current_name, source) == name
+                and current_line == start_line
+                and current_class == class_name
+            ):
+                ordinal += 1
+        stack.extend(reversed(current.named_children))
+
+    return candidate if ordinal == 1 else f"{candidate}#{ordinal}"
+
+
 def owner_id_for_node(node: Node, source: bytes, path: str) -> str:
     """Return the ``id`` of the nearest enclosing function/method/class for *node*.
 
@@ -52,7 +127,6 @@ def _id_for_scope(scope: Node, source: bytes, path: str, fid: str) -> str:
     """Reconstruct the canonical ID for a function/method/class AST node."""
     name_node = scope.child_by_field_name("name")
     name = node_text(name_node, source) if name_node is not None else ""
-    start_line = scope.start_point[0] + 1  # tree-sitter is 0-indexed; our IDs are 1-indexed
 
     if scope.type in _FUNCTION_TYPES:
         # Determine class_name by walking up to an enclosing class node.
@@ -67,11 +141,7 @@ def _id_for_scope(scope: Node, source: bytes, path: str, fid: str) -> str:
                 # Nested function inside another function — no class context.
                 break
             p = getattr(p, "parent", None)
-        # NOTE: We do NOT call disambiguate() here because we are reconstructing an ID
-        # that was already registered by build_function with disambiguate.  The vast
-        # majority of files have no disambiguated suffixes; in the rare collision case
-        # the parentId will point to the first definition which is the intended behaviour.
-        return function_id(path, name or None, start_line, class_name=class_name)
+        return _function_id_for_scope(scope, source, path, name, class_name)
 
     # class_declaration / interface_declaration / trait_declaration / enum_declaration
-    return class_id(path, name)
+    return _class_id_for_scope(scope, source, path)

@@ -8,6 +8,7 @@ from pathlib import Path
 
 from tree_sitter import Node
 
+from ...logging import get_logger
 from ...utils import repo_relative
 from ..index_common import parallel_map, record_distinct
 from ..treesitter import node_text, parse_source
@@ -35,7 +36,14 @@ def _php_index_one(args: tuple[str, str]) -> dict[str, str] | None:
     file_s, rel = args
     try:
         source = Path(file_s).read_bytes()
-    except OSError:
+    except OSError as exc:
+        get_logger("breezeai_cog.index").warning(
+            "index.file.skipped",
+            path=file_s,
+            language="php",
+            error_type=type(exc).__name__,
+            error=str(exc),
+        )
         return None
     try:
         root = parse_source("php", source, 0).root_node
@@ -56,7 +64,14 @@ def _php_index_one(args: tuple[str, str]) -> dict[str, str] | None:
                     fqcn = f"{namespace}\\{name}" if namespace else name
                     frag[fqcn] = rel
         return frag
-    except (ValueError, TypeError, KeyError, OSError, RuntimeError):
+    except (ValueError, TypeError, KeyError, OSError, RuntimeError) as exc:
+        get_logger("breezeai_cog.index").warning(
+            "index.file.skipped",
+            path=file_s,
+            language="php",
+            error_type=type(exc).__name__,
+            error=str(exc),
+        )
         return None
 
 

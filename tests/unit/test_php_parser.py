@@ -9,7 +9,9 @@ from jsonschema import Draft202012Validator
 
 from breezeai_cog.emit import to_line
 from breezeai_cog.parsers.base import ParseContext
+from breezeai_cog.parsers.php.owner import owner_id_for_node
 from breezeai_cog.parsers.php.parser import PhpParser
+from breezeai_cog.parsers.treesitter import parse_source
 from breezeai_cog.schemas import ConstructorParam, FileRecord
 
 SRC = b"""<?php
@@ -123,6 +125,54 @@ def test_php_classes_and_types(tmp_path: Path) -> None:
 
     enum_cls = by_name["Status"]
     assert enum_cls.type == "enum"
+
+
+def test_duplicate_class_owner_id_matches_disambiguated_class(tmp_path: Path) -> None:
+    src = b"""<?php
+class Duplicate { public $first; }
+class Duplicate { public $second; }
+"""
+    rec = _parse_php(tmp_path, src=src, rel="src/Duplicate.php")
+    assert [cls.id for cls in rec.classes] == [
+        "src/Duplicate.php#Duplicate",
+        "src/Duplicate.php#Duplicate#2",
+    ]
+
+    root = parse_source("php", src, 0).root_node
+    class_nodes = [node for node in root.named_children if node.type == "class_declaration"]
+    body = next(node for node in class_nodes[1].named_children if node.type == "declaration_list")
+    property_node = next(
+        node for node in body.named_children
+        if node.type == "property_declaration"
+    )
+    assert owner_id_for_node(property_node, src, "src/Duplicate.php") == (
+        "src/Duplicate.php#Duplicate#2"
+    )
+
+
+def test_duplicate_class_method_owner_id_matches_disambiguated_function(
+    tmp_path: Path,
+) -> None:
+    src = b'''<?php
+class Duplicate { public function run() { Route::get('/first'); } } class Duplicate { public function run() { Route::get('/second'); } }
+'''
+    rec = _parse_php(tmp_path, src=src, rel="src/Duplicate.php")
+    assert [fn.id for fn in rec.functions] == [
+        "src/Duplicate.php#Duplicate#run@2",
+        "src/Duplicate.php#Duplicate#run@2#2",
+    ]
+
+    root = parse_source("php", src, 0).root_node
+    class_nodes = [node for node in root.named_children if node.type == "class_declaration"]
+    second_method = next(
+        node
+        for node in class_nodes[1].named_children[1].named_children
+        if node.type == "method_declaration"
+    )
+    route_statement = second_method.child_by_field_name("body").named_children[0]
+    assert owner_id_for_node(route_statement, src, "src/Duplicate.php") == (
+        "src/Duplicate.php#Duplicate#run@2#2"
+    )
 
 
 def test_interface_extending_two_interfaces(tmp_path: Path) -> None:
