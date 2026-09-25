@@ -10,18 +10,31 @@ system: it generates the ontology, a separate Breeze backend loads it into a gra
 tools query it. This guide only covers the generator — the part you run against your code.
 
 **What it understands today** (run `breezeai-cog capabilities` for the authoritative, live list):
-- **Languages:** TypeScript/JavaScript, Python, Java, C#, VB.NET, Kotlin, Groovy, and C++.
+- **Languages:** TypeScript/JavaScript, Python, Ruby, Java, C#, VB.NET, Kotlin, Groovy, and C++.
 - **Frameworks** (route/event detection on top of those languages): FastAPI (Python); NestJS,
   Angular, Express, React, Vue, Next.js, LoopBack, and GraphQL (TypeScript); Spring Boot, JAX-RS,
   and Vert.x (Java); ASP.NET, Web Forms, WCF/ASMX, and GraphQL (C#); ASP.NET (VB.NET); Ktor
-  (Kotlin); Vert.x (Groovy). Cross-cutting SDK detectors (AWS messaging, HubSpot, Chargebee,
-  Salesforce) layer on top additively.
+  (Kotlin); Rails, Sinatra, and Grape (Ruby); Vert.x (Groovy). Cross-cutting SDK detectors (AWS
+  messaging, HubSpot, Chargebee, Salesforce) layer on top additively.
 - **Database/search schemas:** SQL DDL files and Elasticsearch mappings (via the HTTP service).
 - **Config & structured data:** `package.json`, `tsconfig.json`, `Dockerfile`, `docker-compose.yml`,
   `pom.xml`, `build.gradle`, `pyproject.toml`, `requirements.txt`, `Pipfile`, `.csproj`/`.vbproj`/`.sln`,
   `.ini`/`.toml`/`.xml`/`.yaml`, and more — parsed into structured `metadata` (dependencies, scripts,
   images/ports, …) and summarized in `projectMetaData.configs`. Standalone JSON/data documents are
   also captured whole as a compact `structured_data` statement.
+
+### Ruby routes and data access
+
+Ruby framework parsers recognize these route stacks when statement capture is enabled:
+
+| Stack | Route shapes | File framework value |
+|---|---|---|
+| Rails | `Rails.application.routes.draw`, controller classes such as `UsersController < ApplicationController` | `rails` |
+| Sinatra | top-level DSL routes and modular classes such as `class API < Sinatra::Base` | `sinatra` |
+| Grape | API classes such as `class API < Grape::API` and their HTTP verb blocks | `grape` |
+
+Rails-style ActiveRecord calls such as `User.find`, `User.where`, and `user.save` are emitted
+as `db_method_call` statements with `dataAccessHint: "activerecord"`.
 
 It does **not** run or execute your code — it only reads and parses the source text, so it's safe to
 point at any repository.
@@ -308,7 +321,11 @@ the tool version.
 | `functions[]` | Each function/method: name, parameters, return type, decorators, visibility, the calls it makes. |
 | `classes[]` | Each class/interface/enum: name, what it extends/implements, its methods. |
 | `statements[]` | *(only with `--capture-statements`)* notable in-body statements — including detected API calls, DB queries, framework routes, event-bus/messaging operations, GraphQL entities, source comments, and captured structured data. |
-| `framework` | Set when a framework is detected in the file (e.g. `fastapi`, `nestjs`, `angular`, `spring`, `vertx`, `aspnet`, `wcf`). |
+| `framework` | Set when a framework is detected in the file (e.g. `fastapi`, `nestjs`, `angular`, `spring`, `vertx`, `aspnet`, `wcf`, `rails`, `sinatra`, `grape`). |
+
+`rails`, `sinatra`, and `grape` are **NEW in the Python target** (Target Spec §2.4). The local
+schema accepts framework strings, but the external backend framework allow-list must include these
+values for them to survive ingestion.
 
 **How things link together:** every function, class, and statement carries an `id`, and a
 `parentId` pointing to its container (a method's `parentId` is its class; a statement's `parentId`

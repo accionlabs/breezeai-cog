@@ -19,6 +19,8 @@ classified as ``query_statement`` before this runs.
 
 from __future__ import annotations
 
+import re
+
 # DB/ORM -> distinctive method names (lowercased). Order matters: on a name collision
 # the first DB wins (mirrors the legacy reverse-map "first one wins").
 _DB_METHODS: dict[str, tuple[str, ...]] = {
@@ -83,6 +85,19 @@ _GENERIC = {
     "findone", "findbyid", "find", "save", "create", "update", "delete", "remove",
     "persist", "merge", "query", "execute",
 }
+
+# ActiveRecord methods that are distinctive when called on a Ruby model or record. Class
+# methods use a constant receiver (``User.find``); instance writes are included separately
+# because the receiver is conventionally lowercase (``user.save``).
+_ACTIVE_RECORD_METHODS = frozenset({
+    "find", "find_by", "where", "all", "create", "save", "update", "destroy",
+    "destroy_all", "joins", "includes", "pluck", "first", "last",
+})
+_ACTIVE_RECORD_INSTANCE_METHODS = frozenset({"save", "update", "destroy", "destroy_all"})
+_RUBY_CONSTANT_RECEIVER = re.compile(r"[A-Z][A-Za-z0-9_]*(?:::[A-Z][A-Za-z0-9_]*)*")
+_RUBY_NON_AR_CONSTANTS = frozenset({
+    "Digest", "ENV", "File", "Hash", "Logger", "Marshal", "Process", "Set",
+})
 
 # Receiver substring -> hint (refines _GENERIC).
 # Needles checked via `needle in low` (full lowercased callee). Ambiguous short tokens
@@ -184,6 +199,20 @@ _EF_SOURCE_MARKERS = ("dbcontext", "dbset", "iqueryable", "queryable", "context.
 def _has_ef_source(low_callee: str) -> bool:
     return any(mk in low_callee for mk in _EF_SOURCE_MARKERS)
 
+
+def _is_active_record_call(callee: str, method: str, language: str | None) -> bool:
+    if language != "ruby" or method.lower() not in _ACTIVE_RECORD_METHODS:
+        return False
+    receiver = callee.rsplit(".", 1)[0] if "." in callee else ""
+    terminal = receiver.rsplit(".", 1)[-1]
+    if _RUBY_CONSTANT_RECEIVER.fullmatch(terminal) and terminal not in _RUBY_NON_AR_CONSTANTS:
+        return True
+    return (
+        method.lower() in _ACTIVE_RECORD_INSTANCE_METHODS
+        and terminal.isidentifier()
+        and _RUBY_CONSTANT_RECEIVER.fullmatch(terminal) is None
+    )
+
 # ElasticSearch / OpenSearch client verbs. These collide with ordinary code (``search`` is
 # ``String.prototype.search``; app repos/services expose ``.search()`` too — 270+ in one repo)
 # and with HTTP (``get``/``delete``), so they are gated on an ES-*client* receiver and the
@@ -245,6 +274,8 @@ def match_db(callee: str, method: str, language: str | None = None,
     # the call chain shows a queryable/DbContext source; else LINQ-to-Objects — drop, don't tag.
     if m in _EF_LINQ_VERBS and language in _DOTNET:
         return "entity_framework" if _has_ef_source(low) else None
+    if _is_active_record_call(callee, method, language):
+        return "activerecord"
     receiver = low.rsplit(".", 1)[0].rsplit(".", 1)[-1] if "." in low else ""
     # ES match is gated on the TERMINAL receiver only (the segment the verb is invoked on) —
     # never a deeper chain segment, so a bare ``…client`` further up (``prismaClient``,

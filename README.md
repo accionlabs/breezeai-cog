@@ -20,6 +20,7 @@ Python reimplementation of `breezeai-code-ontology-generator`.
 |---|---|---|
 | TypeScript / JavaScript | `.ts .tsx .mts .cts .js .jsx .mjs .cjs` | NestJS (& routing-controllers), Angular, Express, React, Vue, Next.js (App + Pages Router API routes), LoopBack, GraphQL (schema-first + code-first + an in-house resolver framework, server + client ops); AWS SNS/SQS/EventBridge/Lambda/S3/SES/CloudFront/Kinesis/DynamoDB/API Gateway/Cognito/SSM Parameter Store (additive); HubSpot/Chargebee/Salesforce SDKs (additive) |
 | Python | `.py` | FastAPI |
+| Ruby | `.rb` | Rails (**NEW in the Python target**), Sinatra (**NEW in the Python target**), Grape (**NEW in the Python target**) |
 | Java | `.java` | Spring Boot, JAX-RS, Vert.x |
 | C# | `.cs .asmx .svc .cshtml .razor` | ASP.NET (MVC / Web API / Minimal API / Web Forms), Razor Pages (`.cshtml`), Blazor (`.razor`), WCF / ASMX (SOAP), .NET ServiceHost, GraphQL (graphql-dotnet + HotChocolate — attribute, type-extension and fluent-descriptor styles, incl. field resolvers and subscription topics); Lucene.NET index reads/writes (additive) |
 | VB.NET | `.vb` | ASP.NET |
@@ -38,6 +39,10 @@ class / interface / enum / trait / method / field skeleton, but the grammar
 on some expression bodies (named-argument commas, parenthesised enum constants) and does not
 parse **nested type declarations** (a `class`/`enum` inside a class body). Degradation is
 always to *missing* nodes, never wrong ones — the parser fabricates nothing it cannot verify.
+
+**Target Spec §2.4 note:** `rails`, `sinatra`, and `grape` are emitted framework values and are
+new in the Python target. The local capture schema accepts open framework strings; the external
+backend allow-list must add these values before ingestion can rely on them being retained.
 
 ## Layout
 
