@@ -130,6 +130,26 @@ def test_nested_let_inside_def_stays_on_def_text_not_split(tmp_path) -> None:
     assert "let last = p.lastName" in fn.text
 
 
+def test_multiline_value_closing_brace_at_column_zero_not_a_new_boundary(tmp_path) -> None:
+    # Regression: a `let`'s JSON-style object literal closing `}` flush at column 0 is
+    # ordinary JSLT formatting, not a new top-level construct -- bracket-depth tracking must
+    # keep it part of the `let`'s own span, not truncate it and corrupt the module expression
+    # that follows.
+    src = (
+        "let config = {\n"
+        '  "a": 1,\n'
+        '  "b": 2\n'
+        "}\n"
+        "\n"
+        '{ "result": config }\n'
+    )
+    rec = _parse(tmp_path, "transform.jslt", src)
+    binding = _by_name(rec, "config", "let_binding")
+    assert binding.text == 'let config = {\n  "a": 1,\n  "b": 2\n}'
+    module = next(s for s in rec.statements if s.nodeType == "module_expression")
+    assert module.text == '{ "result": config }'
+
+
 def test_capture_gate(tmp_path) -> None:
     rec = _parse(tmp_path, "transform.jslt", SOURCE, capture=False)
     assert rec.statements == []

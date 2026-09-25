@@ -107,6 +107,20 @@ def test_nested_elements_not_split_into_own_records(tmp_path) -> None:
     assert names == {"Person"}
 
 
+def test_attribute_value_ending_in_quote_character_preserved(tmp_path) -> None:
+    # Regression: `element_attr` used to strip attribute values with `.strip("'\"")`, which
+    # removes *every* leading/trailing quote character, not just the delimiter pair -- a
+    # `name` that legitimately ends with an apostrophe lost it, corrupting the join key.
+    src = (
+        '<?xml version="1.0"?>\n'
+        '<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema">\n'
+        "  <xs:element name=\"Editors'\"/>\n"
+        "</xs:schema>\n"
+    )
+    rec = _parse(tmp_path, "schema.xsd", src)
+    assert any(s.name == "Editors'" for s in rec.statements)
+
+
 def test_import_recorded_not_resolved(tmp_path) -> None:
     rec = _parse(tmp_path, "schema.xsd", SCHEMA)
     imp = next(s for s in rec.statements if s.nodeType == "import")
