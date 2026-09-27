@@ -514,6 +514,52 @@ def test_enum_values_captured_as_statements(tmp_path) -> None:
     assert members == [("OK", "OK = 3"), ("FAIL", "FAIL = 9"), ("UNKNOWN", "UNKNOWN")]
 
 
+def test_file_and_namespace_scope_constants_captured(tmp_path) -> None:
+    # C++ keeps much of its vocabulary outside any class. A file-scope or namespace-scope
+    # declaration becomes a flat statement parented to the FILE (namespaces are flattened),
+    # with the value — and any trailing doc gloss — preserved in `text`.
+    src = (b'const int kFileMax = 5;\n'
+           b'static const char* kFileName = "top";\n'
+           b'const int kDoc = 1;  ///< upper bound\n'
+           b'namespace acme {\n'
+           b'  constexpr char kNsName[] = "acme";\n'
+           b'}\n'
+           b'#ifndef GUARD_H\n'
+           b'const int kInGuard = 4;\n'
+           b'#endif\n')
+    rec = _parse_src(tmp_path, src, "k.h", capture=True)
+    at_file = [(s.name, s.nodeType, s.text, s.semanticType)
+               for s in rec.statements if s.parentId == rec.id]
+    assert at_file == [
+        ("kFileMax", "declaration", "const int kFileMax = 5;", None),
+        ("kFileName", "declaration", 'static const char* kFileName = "top";', None),
+        ("kDoc", "declaration", "const int kDoc = 1;  ///< upper bound", None),
+        ("kNsName", "declaration", 'constexpr char kNsName[] = "acme";', None),
+        ("kInGuard", "declaration", "const int kInGuard = 4;", None),
+    ]
+    assert _parse_src(tmp_path, src, "k.h", capture=False).statements == []
+
+
+def test_file_scope_prototypes_and_forward_decls_not_constants(tmp_path) -> None:
+    # The grammar spells a function prototype with the same `declaration` node as a
+    # constant, so only declarations without a function_declarator are values. Forward
+    # declarations and `typedef`/`using` are other node types and stay out entirely.
+    src = (b'void proto(int a);\n'
+           b'static void sproto();\n'
+           b'class Fwd;\n'
+           b'typedef int Handle;\n'
+           b'using Alias = int;\n'
+           b'Foo bar(Baz);\n'
+           b'Foo baz(1, 2);\n'
+           b'namespace acme { void nsProto(); }\n'
+           b'int definedFn(int a) { return a; }\n')
+    rec = _parse_src(tmp_path, src, "p.h", capture=True)
+    # `Foo baz(1, 2);` is a variable definition; `Foo bar(Baz);` really is a function
+    # declaration in C++ (the most vexing parse), so only `baz` is a value.
+    assert [s.name for s in rec.statements if s.parentId == rec.id] == ["baz"]
+    assert "definedFn" in [f.name for f in rec.functions]
+
+
 def test_class_members_gated_by_capture_flag(tmp_path) -> None:
     # Member/enumerator statements are gated by --capture-statements (absent without it).
     src = b'class C { public:\n constexpr static const char* k = "v";\n };\nenum E { A = 1 };\n'
