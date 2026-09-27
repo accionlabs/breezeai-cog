@@ -272,6 +272,19 @@ class KotlinParser(BaseParser):
                 if obj_name:
                     classes.append(self._synthetic_object(obj_name, child, source, path, fid, seen_ids))
 
+        # File-scope declarations — Kotlin allows constants and type aliases outside any class
+        # (`const val APP_NAME = "x"`, `typealias H = (Int) -> Unit`), and a .kts script is
+        # almost entirely top-level code. `_iter_in_scope` skips NESTED_SCOPES, so this walks
+        # only the top-level nodes: class/function bodies are already covered by their own
+        # passes above and are not re-walked. Runs before the comment pass so these statements
+        # register their absorbing spans — a same-line trailing comment rides on the
+        # statement's `text` instead of also becoming its own comment node.
+        from .statements import extract_statements as _extract_stmts
+        statements.extend(
+            _extract_stmts(root, source, path, parent_id=fid, capture=capture,
+                           limit=limit, seen_ids=seen_ids)
+        )
+
         if capture:
             statements.extend(
                 comment_statements_for(
