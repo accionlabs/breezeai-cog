@@ -267,6 +267,14 @@ def _span(node: Node) -> tuple[int, int]:
     return (node.start_byte, node.end_byte)
 
 
+def _wraps_module(node: Node) -> bool:
+    """True for an ``expression_statement`` that is only a ``namespace X {…}`` / ``module
+    X {…}`` wrapper (the grammar has no dedicated statement node for a bare namespace)."""
+    return node.type == "expression_statement" and any(
+        c.type in ("internal_module", "module") for c in node.named_children
+    )
+
+
 def _iter_in_scope(node: Node, descend_all: bool = False, barriers: frozenset[tuple[int, int]] = frozenset()):
     """Yield EMIT_TYPES statement nodes. When ``descend_all`` is False (file-root /
     class-body scope) nested scopes remain barriers — they are extracted as their own
@@ -279,6 +287,12 @@ def _iter_in_scope(node: Node, descend_all: bool = False, barriers: frozenset[tu
         if _span(child) in barriers:
             continue
         if not descend_all and child.type in NESTED_SCOPES:
+            continue
+        if _wraps_module(child):
+            # `namespace X {…}` parses as an expression_statement around an internal_module.
+            # The namespace is a declaration scope, not a value: its members are dispatched
+            # (and their statements collected) by the parser's own walk, so emitting the
+            # wrapper here would carry the whole body again as one nameless statement.
             continue
         if child.type in EMIT_TYPES:
             yield child
