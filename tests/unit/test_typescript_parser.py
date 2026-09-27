@@ -909,6 +909,30 @@ def test_enum_members_captured_as_statements(tmp_path) -> None:
     assert TypeScriptParser().parse_file(ctx2).statements == []
 
 
+def test_var_declarations_carry_their_name(tmp_path) -> None:
+    # `var` (variable_declaration) and `let`/`const` (lexical_declaration) share one shape,
+    # so both name the same way — otherwise every pre-ES6 constant is reachable only by
+    # text search. A destructuring bind has no single declared name and stays nameless.
+    src = (b'var APP_NAME = "BreezeAI";\n'
+           b"var a = 1, b = 2;\n"
+           b"var { x, y } = pt;\n"
+           b"var noInit;\n"
+           b"const KA = 4;\n")
+    p = tmp_path / "legacy.js"
+    p.write_bytes(src)
+    ctx = ParseContext(path="legacy.js", abs_path=p, source=src, repo_root=tmp_path,
+                       capture_statements=True)
+    rec = TypeScriptParser().parse_file(ctx)
+    assert [(s.name, s.nodeType) for s in rec.statements] == [
+        ("APP_NAME", "variable_declaration"),
+        ("a", "variable_declaration"),          # multi-declarator: first name, all in text
+        (None, "variable_declaration"),         # `var {x, y} = pt` — no single name
+        ("noInit", "variable_declaration"),
+        ("KA", "lexical_declaration"),
+    ]
+    assert next(s for s in rec.statements if s.name == "a").text == "var a = 1, b = 2;"
+
+
 def test_namespace_members_extracted_flat(tmp_path) -> None:
     # A namespace is a declaration scope, not a value: its members are extracted as if they
     # were top-level and parent to the FILE (the model's only class containment edge is

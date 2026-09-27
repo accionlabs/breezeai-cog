@@ -192,7 +192,11 @@ def collect_http_client_ids(root: Node, source: bytes) -> frozenset[str]:
 
 
 def _name_of(node: Node, source: bytes) -> str | None:
-    if node.type == "lexical_declaration":
+    if node.type in ("lexical_declaration", "variable_declaration"):
+        # `let`/`const` and the pre-ES6 `var` share one shape — a list of
+        # variable_declarator children — so both name the same way (parser._handle already
+        # pairs them). A destructuring bind (`var {x} = pt`) has an object/array_pattern
+        # instead of an identifier, and stays honestly nameless.
         decl = next((c for c in node.named_children if c.type == "variable_declarator"), None)
         if decl is not None:
             name = decl.child_by_field_name("name")
