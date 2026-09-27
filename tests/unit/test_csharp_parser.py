@@ -591,3 +591,44 @@ def test_enum_members_output_validates(tmp_path) -> None:
     errors = list(Draft202012Validator(FileRecord.model_json_schema(by_alias=True))
                   .iter_errors(json.loads(to_line(rec))))
     assert not errors, errors
+
+
+# --- operators: neither form carries a `name` field in the grammar --------------------
+
+OPERATORS = '''namespace Demo
+{
+    public class Money
+    {
+        public decimal Amount { get; set; }
+
+        public static Money operator +(Money a, Money b)
+        {
+            return new Money { Amount = a.Amount + b.Amount };
+        }
+
+        public static implicit operator decimal(Money m)
+        {
+            return m.Amount;
+        }
+
+        public static explicit operator Money(decimal d)
+        {
+            return new Money { Amount = d };
+        }
+    }
+}
+'''
+
+
+def test_operator_overload_and_conversions_are_captured_and_named(tmp_path) -> None:
+    p = tmp_path / "Money.cs"
+    p.write_text(OPERATORS)
+    ctx = ParseContext(path="Money.cs", abs_path=p, source=p.read_bytes(), repo_root=tmp_path)
+    rec = CSharpParser().parse_file(ctx)
+    # an overload keeps its token, a conversion names its direction and target type; none
+    # of them falls through to <anonymous>, and all three are static members of the class
+    by_name = {f.name: f for f in rec.functions}
+    assert set(by_name) == {"operator +", "implicit operator decimal", "explicit operator Money"}
+    assert all(f.isStatic and f.visibility == "public" for f in by_name.values())
+    assert all(f.parentId == rec.classes[0].id for f in by_name.values())
+    assert by_name["implicit operator decimal"].startLine == 12

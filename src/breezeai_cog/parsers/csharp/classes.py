@@ -21,8 +21,8 @@ _TYPE = {
     "struct_declaration": "struct",
     "record_declaration": "record",
 }
-_METHOD_MEMBERS = ("method_declaration", "constructor_declaration",
-                   "destructor_declaration", "operator_declaration")
+_METHOD_MEMBERS = ("method_declaration", "constructor_declaration", "destructor_declaration",
+                   "operator_declaration", "conversion_operator_declaration")
 _NESTED_CLASS_TYPES = tuple(_TYPE)  # member (nested) types declared in a type body
 
 
