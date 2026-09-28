@@ -129,6 +129,46 @@ def test_operation_without_soap_action_falls_back_to_rpc(tmp_path) -> None:
     assert op.method == "RPC"
 
 
+def test_second_binding_for_same_operation_not_duplicated(tmp_path) -> None:
+    # Regression: real-world WSDLs (verified against an ASP.NET-generated example)
+    # routinely declare two bindings for the same portType -- a SOAP 1.1 `soap:binding` and
+    # a SOAP 1.2 `soap12:binding` -- purely for wire-protocol compatibility. Without
+    # dedup, every operation was emitted once per binding.
+    src = """\
+<?xml version="1.0"?>
+<wsdl:definitions
+    xmlns:tns="http://example.com/calc"
+    xmlns:wsdl="http://schemas.xmlsoap.org/wsdl/"
+    xmlns:soap="http://schemas.xmlsoap.org/wsdl/soap/"
+    xmlns:soap12="http://schemas.xmlsoap.org/wsdl/soap12/">
+  <wsdl:message name="AddRequest"/>
+  <wsdl:message name="AddResponse"/>
+  <wsdl:portType name="CalculatorSoap">
+    <wsdl:operation name="Add">
+      <wsdl:input message="tns:AddRequest"/>
+      <wsdl:output message="tns:AddResponse"/>
+    </wsdl:operation>
+  </wsdl:portType>
+  <wsdl:binding name="CalculatorSoap" type="tns:CalculatorSoap">
+    <soap:binding transport="http://schemas.xmlsoap.org/soap/http"/>
+    <wsdl:operation name="Add">
+      <soap:operation soapAction="http://tempuri.org/Add"/>
+    </wsdl:operation>
+  </wsdl:binding>
+  <wsdl:binding name="CalculatorSoap12" type="tns:CalculatorSoap">
+    <soap12:binding transport="http://schemas.xmlsoap.org/soap/http"/>
+    <wsdl:operation name="Add">
+      <soap12:operation soapAction="http://tempuri.org/Add"/>
+    </wsdl:operation>
+  </wsdl:binding>
+</wsdl:definitions>
+"""
+    rec = _parse(tmp_path, "service.wsdl", src)
+    routes = [s for s in rec.statements if s.nodeType == "synthetic"]
+    assert len(routes) == 1
+    assert routes[0].endpoint == "CalculatorSoap/Add"
+
+
 def test_binding_operation_scoped_to_its_own_port_type(tmp_path) -> None:
     # Two portTypes each declare an operation named "Ping" with different messages; the
     # binding references only PortA. A bare name match would risk merging PortB's messages
