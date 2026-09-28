@@ -20,6 +20,14 @@ operations declared under two different ``portType``s; this two-hop correlation 
 A ``binding/operation`` with no matching ``portType/operation`` (malformed WSDL) is skipped,
 not guessed — same "absent beats wrong" rule ``prisma/schema.py`` applies to its own
 grammar gaps.
+
+Real-world WSDLs (verified against an ASP.NET-generated example) routinely declare **two**
+bindings for the same ``portType`` — one ``soap:binding`` (SOAP 1.1) and one
+``soap12:binding`` (SOAP 1.2), purely for wire-protocol compatibility, not two distinct
+operations. Without deduplication this doubles every operation. Each ``(portType,
+operation)`` pair is therefore emitted **once**, from the first binding that implements it
+(SOAP 1.1 conventionally precedes SOAP 1.2 in these files) — a second binding's differing
+``soapAction`` is not separately captured in this v1.
 """
 
 from __future__ import annotations
@@ -113,6 +121,7 @@ def collect_definitions_statements(
             out.append(_plain_statement(node, source, path, fid, tag, name, None, limit, seen_ids))
 
     port_types = _named_children(definitions, source, "portType")
+    emitted: set[tuple[str, str]] = set()
 
     for binding in child_elements(definitions):
         if element_tag(binding, source) != "binding":
@@ -130,9 +139,14 @@ def collect_definitions_statements(
             if element_tag(binding_op, source) != "operation":
                 continue
             op_name = element_attr(binding_op, source, "name")
-            port_op = operations.get(op_name) if op_name else None
+            if not op_name:
+                continue
+            port_op = operations.get(op_name)
             if port_op is None:
                 continue  # binding references an operation the portType never declared
+            if (pt_name, op_name) in emitted:
+                continue  # a second binding (e.g. SOAP 1.2) for the same operation
+            emitted.add((pt_name, op_name))
 
             start, end = line_span(port_op)
             out.append(
