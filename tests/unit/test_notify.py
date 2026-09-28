@@ -1,4 +1,4 @@
-"""`services/notify.py`: the s3Key compatibility shim and error-body surfacing."""
+"""`services/notify.py`: storage-key payloads and error-body surfacing."""
 
 from __future__ import annotations
 
@@ -25,22 +25,12 @@ def _stub(monkeypatch: pytest.MonkeyPatch, status: int, body: str) -> list[dict]
     return sent
 
 
-def test_storage_key_is_mirrored_to_s3key(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A backend predating the rename validates s3Key and 400s without it."""
+def test_storage_key_is_sent_without_legacy_alias(monkeypatch: pytest.MonkeyPatch) -> None:
     sent = _stub(monkeypatch, 200, "")
 
     post_notification(_settings(), "/code-ontology/stream-ingest", {"storage_key": "a/b.gz"})
 
-    assert sent[0]["s3Key"] == "a/b.gz"
-    assert sent[0]["storage_key"] == "a/b.gz"
-
-
-def test_explicit_s3key_is_not_overwritten(monkeypatch: pytest.MonkeyPatch) -> None:
-    sent = _stub(monkeypatch, 200, "")
-
-    post_notification(_settings(), "/p", {"storage_key": "new", "s3Key": "explicit"})
-
-    assert sent[0]["s3Key"] == "explicit"
+    assert sent[0] == {"storage_key": "a/b.gz"}
 
 
 def test_payload_without_storage_key_is_untouched(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -53,7 +43,7 @@ def test_payload_without_storage_key_is_untouched(monkeypatch: pytest.MonkeyPatc
 
 def test_error_body_is_surfaced(monkeypatch: pytest.MonkeyPatch) -> None:
     """The 400 body says why; raise_for_status() used to throw it away."""
-    _stub(monkeypatch, 400, '{"message":"s3Key should not be empty"}')
+    _stub(monkeypatch, 400, '{"message":"storage_key should not be empty"}')
 
-    with pytest.raises(RuntimeError, match="s3Key should not be empty"):
+    with pytest.raises(RuntimeError, match="storage_key should not be empty"):
         post_notification(_settings(), "/p", {"storage_key": "a/b.gz"})

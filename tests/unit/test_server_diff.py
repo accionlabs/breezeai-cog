@@ -80,7 +80,7 @@ def test_full_clone(captured: _Captured) -> None:
     meta = payload["projectMetaData"]
     assert meta["repoUrl"] == BODY["repoUrl"] and meta["commitId"] == "abc123"
     assert meta["gitBranch"] == "main" and meta["totalFiles"] == 2
-    assert payload["codeOntologyId"] == "C1" and payload["s3Key"] == out["storage_key"]
+    assert payload["codeOntologyId"] == "C1" and payload["storage_key"] == out["storage_key"]
 
 
 def test_incremental_diff_filters_to_changed(captured: _Captured) -> None:
@@ -227,12 +227,3 @@ def test_ignore_patterns_reject_wrong_type(captured: _Captured) -> None:
     assert r.json()["error"] == "ignorePatterns must be a string or an array of strings"
 
 
-def test_notification_uses_s3Key_the_backend_dto_requires(captured: _Captured) -> None:
-    """Regression for 4cf6484, which renamed this key to `storage_key` and made the
-    backend's StreamIngestDto (`s3Key`, @IsNotEmpty) reject every callback with 400."""
-    client = _make_client(captured, filter_set=None, deleted=[])
-    r = client.post("/api/analyze-diff", json=BODY)
-    assert r.status_code == 200
-    _, payload = captured.notifications[0]
-    assert payload["s3Key"] == "code-ontology/P1/abc123.ndjson.gz"
-    assert "storage_key" not in payload
