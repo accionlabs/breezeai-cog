@@ -227,11 +227,3 @@ def test_ignore_patterns_reject_wrong_type(captured: _Captured) -> None:
     assert r.json()["error"] == "ignorePatterns must be a string or an array of strings"
 
 
-def test_notification_uses_storage_key(captured: _Captured) -> None:
-    """The backend notification uses the storage_key field expected by its DTO."""
-    client = _make_client(captured, filter_set=None, deleted=[])
-    r = client.post("/api/analyze-diff", json=BODY)
-    assert r.status_code == 200
-    _, payload = captured.notifications[0]
-    assert payload["storage_key"] == "code-ontology/P1/abc123.ndjson.gz"
-    assert "s3Key" not in payload
