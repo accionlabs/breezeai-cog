@@ -180,6 +180,7 @@ edits your `.gitignore` itself, and it always skips a `.cog/` directory when sca
 | `--out <dir>` | `<repo>/.cog` | Output **directory** for the export only (not a filename). The file is named `<repo>-project-analysis.ndjson.gz`. The skip report and logs always go to `<repo>/.cog`. |
 | `--language <name>` | all (auto-detected) | Only analyze this language. Repeat the flag for several (e.g. `--language python --language java`). |
 | `--capture-statements` | off | Also record statements *inside* functions — needed to detect API calls, DB queries, and routes. Off by default because it produces more data. |
+| `--capture-templates` | off | Also analyze markup/view **template** files — `.html` `.htm` `.cshtml` `.razor` `.aspx` `.ascx` `.master` `.vue`. Off by default: markup produces a large number of low-value nodes that bury the business logic when reading the graph. Turn it **on** for Razor Pages / Blazor (`@page` routes and `@code` methods live in the markup) and for Vue SFC `<script>` blocks. Env `BREEZEAI_COG_CAPTURE_TEMPLATES`. |
 | `--batch` | off | Treat `--repo` as a **workspace folder** and analyze each immediate subdirectory as its own project (one `.ndjson.gz` per subdir). See *Batch mode* below. |
 | `--repo-list <file>` | all subdirs | With `--batch`: a file of immediate-subdirectory **names** (one per line; `#` comments and blank lines ignored) to restrict the run to. |
 | `--jobs <n>` | number of CPU cores | How many files to parse in parallel. |
@@ -191,21 +192,22 @@ edits your `.gitignore` itself, and it always skips a `.cog/` directory when sca
 | `--parallel-uploads <n>` | `1` | How many repos to upload concurrently in `--batch`. Env `BREEZEAI_COG_UPLOAD_PARALLELISM`. |
 | `--upload-max-retries <n>` | `1` | Retries after a failed upload (total attempts = retries + 1). Only transient failures — network / timeout / HTTP 5xx — retry; a 4xx is fatal. Env `BREEZEAI_COG_UPLOAD_MAX_RETRIES`. |
 | `--force` | off | With `--batch --upload`: ignore any saved resume state and re-upload every selected project from scratch. |
-| `--verbose` | off | Print detailed (debug) logs: per-file parse results, each skipped file with its reason (`ignored` / `unsupported` / `oversized`), and index-build timing. |
+| `--verbose` | off | Print detailed (debug) logs: per-file parse results, each skipped file with its reason (`ignored` / `template` / `unsupported` / `oversized`), and index-build timing. |
 
 Every run — even without `--verbose` — ends with a one-line summary showing files **found** vs
 **parsed**, how many **failed** or were **skipped** (and why), plus cumulative totals:
 
 ```
 analysis.complete scanned=182 parsed=118 failed=0 skipped=64 \
-  skips={"unsupported":51,"ignored":12,"oversized":1} \
+  skips={"unsupported":51,"ignored":12,"template":8,"oversized":1} \
   functions=940 classes=210 statements=0 loc=18324 languages=["python","typescript"]
 ```
 
 - **scanned** — total files the scanner walked; equals **parsed** + **failed** + **skipped**.
 - **parsed** — records produced. **failed** — candidate source files that errored during parsing.
 - **skipped** — files dropped during scanning, by reason: `ignored` (by `.gitignore`/`.repoignore`),
-  `unsupported` (no parser for that type), `oversized` (over the size limit).
+  `template` (markup/view file, and `--capture-templates` is off), `unsupported` (no parser for
+  that type), `oversized` (over the size limit).
 - **statements** — captured in-body statements **plus** detected framework routes. With
   `--capture-statements` off (the default) this is **routes only**, so it's normally far smaller
   than the function count; turn the flag on to capture all in-body statements.
@@ -371,6 +373,7 @@ Most-used settings:
 |---|---|---|
 | Languages | `BREEZEAI_COG_LANGUAGE` | all |
 | Capture statements | `BREEZEAI_COG_CAPTURE_STATEMENTS` | `false` |
+| Capture templates (markup/view files) | `BREEZEAI_COG_CAPTURE_TEMPLATES` | `false` |
 | Worker processes | `BREEZEAI_COG_JOBS` | CPU count |
 | Statement text limit (chars; longer → split into `#partNofN` parts, `0` off) | `BREEZEAI_COG_STATEMENT_TEXT_LIMIT` | `8000` |
 | Max statement parts (cap; over it the tail is dropped + logged, `0` = unbounded) | `BREEZEAI_COG_MAX_STATEMENT_PARTS` | `0` |
@@ -395,6 +398,17 @@ binaries). It also honors **`.gitignore`** and a tool-specific **`.repoignore`**
 standard gitignore syntax. To force-include something that would otherwise be ignored, add it to a
 **`.repoinclude`** file (same syntax). These files are read per-directory, so rules can be scoped to
 subfolders.
+
+**Template files are a separate axis.** Markup/view files (`.html` `.htm` `.cshtml` `.razor`
+`.aspx` `.ascx` `.master` `.vue`) are skipped by default and reported under their own `template`
+skip reason — not `ignored`. This is a capture-scope choice rather than an ignore rule, so the two
+layers do not interact the way you might expect:
+
+- `.repoinclude` does **not** bring templates back. Only `--capture-templates` does.
+- `.repoignore` still wins over `--capture-templates`: the template gate runs *after* the ignore
+  layers, so an ignored template stays ignored.
+- The gate matches on the file extension case-insensitively, so `Site.Master` and `Default.ASPX`
+  are recognised as templates even though the parsers themselves match case-sensitively.
 
 ---
 

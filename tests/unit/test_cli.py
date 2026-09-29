@@ -586,3 +586,44 @@ def test_upload_tuning_flags_plumb_into_settings(tmp_path, monkeypatch) -> None:
     )
     assert result.exit_code == 0, result.output
     assert captured == {"timeout": 30.0, "parallelism": 2, "retries": 0}
+
+
+def _markup_repo(tmp_path):
+    repo = tmp_path / "markup"
+    repo.mkdir()
+    (repo / "a.py").write_text("def f():\n    return 1\n")
+    (repo / "page.html").write_text("<div *ngIf='x'>{{ x }}</div>\n")
+    return repo
+
+
+def test_capabilities_reports_template_extensions() -> None:
+    result = runner.invoke(app, ["capabilities"])
+    assert result.exit_code == 0
+    assert ".vue" in json.loads(result.stdout)["templateExtensions"]
+
+
+def test_template_skips_appear_in_the_console_breakdown(tmp_path) -> None:
+    """Regression: the breakdown iterates a fixed reason tuple, so a new reason is easy
+    to count in the header and then never print."""
+    repo = _markup_repo(tmp_path)
+    result = runner.invoke(
+        app, ["repo-to-json-tree", "--repo", str(repo), "--out", str(tmp_path / "out")]
+    )
+    assert result.exit_code == 0
+    assert "template" in result.stdout
+
+
+def test_capture_templates_flag_includes_markup(tmp_path) -> None:
+    repo = _markup_repo(tmp_path)
+    out_dir = tmp_path / "out"
+    result = runner.invoke(
+        app, ["repo-to-json-tree", "--repo", str(repo), "--out", str(out_dir),
+              "--capture-templates"]
+    )
+    assert result.exit_code == 0
+    export = out_dir / "markup-project-analysis.ndjson.gz"
+    paths = {
+        json.loads(line).get("path")
+        for line in gzip.open(export, "rt", encoding="utf-8").read().splitlines()
+    }
+    assert "page.html" in paths

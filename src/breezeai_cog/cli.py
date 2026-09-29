@@ -77,6 +77,14 @@ def repo_to_json_tree(
     ),
     language: Optional[list[str]] = typer.Option(None, "--language", help="Restrict to languages (repeatable)."),
     capture_statements: bool = typer.Option(False, "--capture-statements", help="Capture in-body statements."),
+    capture_templates: bool = typer.Option(
+        False, "--capture-templates",
+        help="Capture markup/view template files (.html .htm .cshtml .razor .aspx .ascx .master .vue). "
+             "Off by default — markup floods the graph with nodes that bury the business logic. "
+             "Needed for Razor Pages / Blazor (@page routes and @code methods live in the markup) "
+             "and for Vue SFC script blocks. Independent of --language; .repoinclude does not "
+             "re-include templates. Env: BREEZEAI_COG_CAPTURE_TEMPLATES.",
+    ),
     batch: bool = typer.Option(
         False, "--batch",
         help="Treat --repo as a workspace folder: analyze each immediate subdirectory as its own project "
@@ -151,6 +159,11 @@ def repo_to_json_tree(
         overrides["upload_max_retries"] = upload_max_retries
     if max_concat_depth is not None:
         overrides["max_concat_depth"] = max_concat_depth
+    # Forwarded only when the flag is actually given: a bool Typer option has no "unset"
+    # state, and init kwargs outrank env in pydantic-settings — passing False
+    # unconditionally would clobber BREEZEAI_COG_CAPTURE_TEMPLATES.
+    if capture_templates:
+        overrides["capture_templates"] = True
 
     from pydantic import ValidationError
 
@@ -617,7 +630,8 @@ def _report_skips(report: SkipReport | None, out_dir: Path, repo_name: str) -> P
     (so the caller can list it in the artifacts footer), else ``None``.
 
     Covers the files/folders the scanner dropped and why (unsupported extension, ignore
-    rule, or oversized). The console view is truncated; the sidecar holds the full list.
+    rule, markup template, or oversized). The console view is truncated; the sidecar holds
+    the full list.
     """
     if report is None:
         return None
@@ -629,7 +643,7 @@ def _report_skips(report: SkipReport | None, out_dir: Path, repo_name: str) -> P
         f"Skipped {report.total_files:,} file(s), {len(report.dirs):,} folder(s):",
         fg=typer.colors.CYAN,
     )
-    for reason in ("unsupported", "ignored", "oversized"):
+    for reason in ("unsupported", "ignored", "template", "oversized"):
         count = report.counts.get(reason, 0)
         if not count:
             continue

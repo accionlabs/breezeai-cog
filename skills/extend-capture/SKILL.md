@@ -124,6 +124,14 @@ split, imports/functions/classes/statements, ids, registration, tests) is in
 apply throughout: resolve imports to real repo-relative paths (or leave them external), and
 never invent a call target you cannot resolve.
 
+If the file type you are adding is **markup/view** (a template: `.hbs`, `.jsp`, `.svelte`,
+`.twig`, …), also declare `template_extensions` on the parser — the subset of `extensions`
+that is markup rather than code. Those files are skipped at scan time unless the caller
+passes `--capture-templates`, which is what keeps markup from flooding the graph. Declare
+only the markup half: a parser owning both (WebForms: `.cs` + `.aspx`; Vue: `.ts` + `.vue`)
+must keep capturing its code half. Skip this and your new template type silently
+re-pollutes every graph.
+
 ### 3B. Server-framework parser (one per file)
 Subclass the base language parser, sniff the framework cheaply in `claims`, set a
 `priority` above the base, reuse `extract` (one parse), then add route/handler detection —
