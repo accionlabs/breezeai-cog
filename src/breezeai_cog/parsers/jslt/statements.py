@@ -130,10 +130,10 @@ def _trim_trailing_blank(lines: list[str], start: int, end: int) -> int:
 
 
 def _build_statement(
-    fid: str, path: str, lines: list[str], seen_ids: set[str], limit: int,
+    fid: str, path: str, lines: list[str], seen_ids: set[str],
     node_type: str, name: str | None, start: int, end: int,
 ) -> Statement:
-    text = "\n".join(lines[start - 1 : end])[:limit]
+    text = "\n".join(lines[start - 1 : end])
     return Statement(
         id=disambiguate(statement_id(path, start, 0), seen_ids),
         parentId=fid,
@@ -146,9 +146,7 @@ def _build_statement(
     )
 
 
-def collect_jslt_statements(
-    source: str, path: str, seen_ids: set[str], limit: int
-) -> list[Statement]:
+def collect_jslt_statements(source: str, path: str, seen_ids: set[str]) -> list[Statement]:
     """Line-scan a JSLT document and emit one flat ``Statement`` per top-level (column-0,
     depth-0) ``import``/``def``/``let`` declaration, plus one trailing ``module_expression``
     for the output expression after the last declaration (empty file → no statements)."""
@@ -158,7 +156,7 @@ def collect_jslt_statements(
     out: list[Statement] = []
 
     def build(node_type: str, name: str | None, start: int, end: int) -> Statement:
-        return _build_statement(fid, path, lines, seen_ids, limit, node_type, name, start, end)
+        return _build_statement(fid, path, lines, seen_ids, node_type, name, start, end)
 
     decl_starts, module_start = _split_declarations(lines, _boundaries(lines))
     decl_end_limit = (module_start - 1) if module_start is not None else n

@@ -7,7 +7,7 @@ from __future__ import annotations
 STATEMENT_TYPES: list[str] = [
     "message",
     "import",
-    "synthetic",  # merged portType/operation + binding/operation -> route
+    "operation",  # portType/operation -> route
     "element",
     "complexType",
     "simpleType",

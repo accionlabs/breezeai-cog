@@ -1,11 +1,12 @@
 """Standalone WSDL 1.1 (SOAP service contract) capture.
 
 The ``wsdl`` language parser owns ``.wsdl`` files. It emits one ``data_model`` statement per
-``message``, one ``route`` statement per operation — ``portType/operation`` correlated with
-``binding/operation`` via the binding's ``type=`` QName (not a bare operation-name match, to
-avoid merging same-named operations under two different ``portType``s), one ``import``
-statement per ``wsdl:import`` (never resolved), and reuses the ``xsd`` walker for every
-``<xsd:schema>`` embedded in ``<wsdl:types>``. Capture is gated on ``--capture-statements``.
+``message``, one ``route`` statement per operation declared under any ``portType`` —
+regardless of whether a same-file ``binding`` implements it (real-world WSDLs commonly
+separate the interface from its wiring across files, or omit a binding entirely) — one
+``import`` statement per ``wsdl:import`` (never resolved), and reuses the ``xsd`` walker for
+every ``<xsd:schema>`` embedded in ``<wsdl:types>``. Capture is gated on
+``--capture-statements``.
 """
 
 from __future__ import annotations
@@ -110,30 +111,58 @@ def test_message_is_data_model_entity(tmp_path) -> None:
     assert 'name="id"' in req.text
 
 
-def test_operation_is_rpc_route_with_soap_action(tmp_path) -> None:
+def test_operation_is_rpc_route(tmp_path) -> None:
+    # method is always "RPC" -- a binding's SOAP action is wire-protocol detail, not the
+    # HTTP/messaging verb the schema's `method` field documents (matches csharp_wcf/ASMX).
     rec = _parse(tmp_path, "service.wsdl", WSDL)
-    op = _by_name(rec, "GetUser", "synthetic")
+    op = _by_name(rec, "GetUser", "operation")
     assert op.semanticType == "route"
     assert op.framework == "wsdl"
     assert op.routeKind == "rpc"
-    assert op.method == "http://example.com/user/GetUser"
+    assert op.isRegex is False
+    assert op.method == "RPC"
     assert op.endpoint == "UserServicePortType/GetUser"
     assert op.requestDTO == "GetUserRequest"
     assert op.responseDTO == "GetUserResponse"
 
 
-def test_operation_without_soap_action_falls_back_to_rpc(tmp_path) -> None:
-    src = WSDL.replace('<soap:operation soapAction="http://example.com/user/GetUser"/>', "<soap:operation/>")
-    rec = _parse(tmp_path, "service.wsdl", src)
-    op = _by_name(rec, "GetUser", "synthetic")
+def test_abstract_only_wsdl_without_binding_still_produces_routes(tmp_path) -> None:
+    # Regression: real-world WSDLs commonly declare only the abstract interface (portType),
+    # with the concrete binding either absent or living in a separate file (the
+    # WS-I-recommended split-interface layout). Gating route emission on finding a same-file
+    # binding silently dropped ~1,100 of 2,728 operations in a real-world corpus (Apache
+    # CXF). Routes must come directly from portType/operation, with no binding needed at all.
+    src = """\
+<?xml version="1.0"?>
+<wsdl:definitions
+    xmlns:tns="http://example.com/x"
+    xmlns:wsdl="http://schemas.xmlsoap.org/wsdl/">
+  <wsdl:message name="PingRequest"/>
+  <wsdl:message name="PingResponse"/>
+  <wsdl:portType name="PingPortType">
+    <wsdl:operation name="Ping">
+      <wsdl:input message="tns:PingRequest"/>
+      <wsdl:output message="tns:PingResponse"/>
+    </wsdl:operation>
+  </wsdl:portType>
+</wsdl:definitions>
+"""
+    rec = _parse(tmp_path, "abstract.wsdl", src)
+    op = _by_name(rec, "Ping", "operation")
+    assert op.semanticType == "route"
     assert op.method == "RPC"
+    assert op.endpoint == "PingPortType/Ping"
+    assert op.requestDTO == "PingRequest"
+    assert op.responseDTO == "PingResponse"
 
 
-def test_second_binding_for_same_operation_not_duplicated(tmp_path) -> None:
-    # Regression: real-world WSDLs (verified against an ASP.NET-generated example)
-    # routinely declare two bindings for the same portType -- a SOAP 1.1 `soap:binding` and
-    # a SOAP 1.2 `soap12:binding` -- purely for wire-protocol compatibility. Without
-    # dedup, every operation was emitted once per binding.
+def test_multiple_bindings_for_same_operation_not_duplicated(tmp_path) -> None:
+    # Real-world WSDLs (verified against an ASP.NET-generated example) routinely declare two
+    # bindings for the same portType -- a SOAP 1.1 `soap:binding` and a SOAP 1.2
+    # `soap12:binding` -- purely for wire-protocol compatibility. Since routes are emitted
+    # directly from portType/operation and bindings are never consulted, this is no longer
+    # even a special case -- exactly one route per operation regardless of how many bindings
+    # (zero, one, or many) reference its portType.
     src = """\
 <?xml version="1.0"?>
 <wsdl:definitions
@@ -164,15 +193,15 @@ def test_second_binding_for_same_operation_not_duplicated(tmp_path) -> None:
 </wsdl:definitions>
 """
     rec = _parse(tmp_path, "service.wsdl", src)
-    routes = [s for s in rec.statements if s.nodeType == "synthetic"]
+    routes = [s for s in rec.statements if s.nodeType == "operation"]
     assert len(routes) == 1
     assert routes[0].endpoint == "CalculatorSoap/Add"
 
 
-def test_binding_operation_scoped_to_its_own_port_type(tmp_path) -> None:
-    # Two portTypes each declare an operation named "Ping" with different messages; the
-    # binding references only PortA. A bare name match would risk merging PortB's messages
-    # in — the binding's `type=` QName must scope the correlation to PortA only.
+def test_operations_in_different_port_types_not_merged(tmp_path) -> None:
+    # Two portTypes each declare an operation named "Ping" with different messages. Each
+    # must produce its own route, scoped by its own portType name in `endpoint` -- never
+    # merged or cross-attributed, even though only one of the two has a binding at all.
     src = """\
 <?xml version="1.0"?>
 <wsdl:definitions
@@ -203,11 +232,29 @@ def test_binding_operation_scoped_to_its_own_port_type(tmp_path) -> None:
 </wsdl:definitions>
 """
     rec = _parse(tmp_path, "service.wsdl", src)
-    routes = [s for s in rec.statements if s.nodeType == "synthetic"]
-    assert len(routes) == 1
-    assert routes[0].endpoint == "PortA/Ping"
-    assert routes[0].requestDTO == "PingARequest"
-    assert routes[0].responseDTO == "PingAResponse"
+    routes = [s for s in rec.statements if s.nodeType == "operation"]
+    assert len(routes) == 2
+    by_endpoint = {r.endpoint: r for r in routes}
+    assert by_endpoint["PortA/Ping"].requestDTO == "PingARequest"
+    assert by_endpoint["PortB/Ping"].requestDTO == "PingBRequest"
+
+
+def test_port_type_and_operation_missing_name_skipped(tmp_path) -> None:
+    # A `portType`/`operation` with no `name=` attribute is malformed WSDL -- skipped, not
+    # guessed, same "absent beats wrong" rule as everywhere else in this parser.
+    src = """\
+<?xml version="1.0"?>
+<wsdl:definitions xmlns:wsdl="http://schemas.xmlsoap.org/wsdl/">
+  <wsdl:portType>
+    <wsdl:operation name="Orphan"/>
+  </wsdl:portType>
+  <wsdl:portType name="Named">
+    <wsdl:operation/>
+  </wsdl:portType>
+</wsdl:definitions>
+"""
+    rec = _parse(tmp_path, "service.wsdl", src)
+    assert [s for s in rec.statements if s.nodeType == "operation"] == []
 
 
 def test_embedded_xsd_schema_reuses_xsd_walker(tmp_path) -> None:

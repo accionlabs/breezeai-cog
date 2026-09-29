@@ -150,6 +150,51 @@ def test_multiline_value_closing_brace_at_column_zero_not_a_new_boundary(tmp_pat
     assert module.text == '{ "result": config }'
 
 
+def test_escaped_quote_before_comment_marker_not_treated_as_comment(tmp_path) -> None:
+    # The `\"`-escape branch in `_strip_line_comment`: an escaped quote inside a string
+    # must not toggle "in a string" early, or a later `//` in the same string would be
+    # mis-read as a real comment marker and truncate the captured declaration.
+    src = 'let x = "quote: \\" then // not a comment"\n\nx\n'
+    rec = _parse(tmp_path, "t.jslt", src)
+    binding = _by_name(rec, "x", "let_binding")
+    assert binding.text == 'let x = "quote: \\" then // not a comment"'
+
+
+def test_escaped_quote_inside_string_not_miscounted_as_bracket(tmp_path) -> None:
+    # The same `\"`-escape branch in `_bracket_delta`: if it were missing, the escaped quote
+    # would prematurely end the "in a string" state, letting the subsequent literal `{`
+    # (still inside the JSLT string value) be miscounted as a real, unclosed bracket -- which
+    # would push every later line's nesting depth to 1 forever, so the trailing module
+    # expression would never be recognized as a boundary at all.
+    src = 'let cfg = "esc \\" opens { a brace"\n\ncfg\n'
+    rec = _parse(tmp_path, "t.jslt", src)
+    modules = [s for s in rec.statements if s.nodeType == "module_expression"]
+    assert len(modules) == 1
+    assert modules[0].text == "cfg"
+
+
+def test_utf8_bom_stripped_before_scanning(tmp_path) -> None:
+    # Regression: decoding with plain "utf-8" leaves a leading BOM on line 1 as a
+    # non-declaration column-0 character, which `_split_declarations` reads as
+    # "declarations are over" immediately -- collapsing the whole file into a single
+    # module_expression. "utf-8-sig" strips it before the scanner ever sees it.
+    text = 'import "common.jslt" as common\n\nlet x = 1\n\ndef f(a) a\n\n{"r": f(x)}\n'
+    p = tmp_path / "bom.jslt"
+    src_bytes = text.encode("utf-8-sig")
+    p.write_bytes(src_bytes)
+    ctx = ParseContext(
+        path="bom.jslt",
+        abs_path=p,
+        source=src_bytes,
+        repo_root=tmp_path,
+        capture_statements=True,
+        statement_text_limit=1000,
+    )
+    rec = JsltParser().parse_file(ctx)
+    node_types = [s.nodeType for s in rec.statements]
+    assert node_types == ["import", "let_binding", "function_def", "module_expression"]
+
+
 def test_capture_gate(tmp_path) -> None:
     rec = _parse(tmp_path, "transform.jslt", SOURCE, capture=False)
     assert rec.statements == []

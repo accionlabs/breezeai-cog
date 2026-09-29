@@ -34,12 +34,16 @@ class JsltParser(BaseParser):
 
     def parse_file(self, ctx: ParseContext) -> FileRecord:
         source, path = ctx.source, ctx.path
-        text = source.decode("utf-8", "replace")
+        # utf-8-sig strips a leading BOM if present (a no-op otherwise) — without it, a
+        # BOM lands on line 1 as a non-declaration column-0 character and the boundary
+        # scan reads "declarations are over" immediately, collapsing the whole file into
+        # one module_expression.
+        text = source.decode("utf-8-sig", "replace")
         fid = file_id(path)
         seen_ids: set[str] = set()
 
         statements = (
-            collect_jslt_statements(text, path, seen_ids, ctx.statement_text_limit)
+            collect_jslt_statements(text, path, seen_ids)
             if ctx.capture_statements and not self.is_fixture_file(path)
             else []
         )
