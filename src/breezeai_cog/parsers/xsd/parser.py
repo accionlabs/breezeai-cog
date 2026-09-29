@@ -51,11 +51,7 @@ class XsdParser(BaseParser):
             and element_tag(schema_node, source) == "schema"
             and not self.is_fixture_file(path)
         ):
-            statements.extend(
-                collect_schema_statements(
-                    schema_node, source, path, seen_ids, ctx.statement_text_limit
-                )
-            )
+            statements.extend(collect_schema_statements(schema_node, source, path, seen_ids))
 
         record = FileRecord(
             id=fid,

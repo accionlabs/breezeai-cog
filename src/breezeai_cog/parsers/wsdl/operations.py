@@ -1,33 +1,29 @@
 """Walk a ``<definitions>`` element (a standalone ``.wsdl`` document's root) and emit one
-flat ``Statement`` per ``message`` declaration plus one merged ``route`` statement per
-operation — correlating ``portType/operation`` (the operation's declared input/output
-messages) with ``binding/operation`` (the SOAP action actually wired to it) via the
-binding's own ``type=`` attribute, which references a *specific* ``portType`` by QName. A
-bare operation-name match across the whole document would wrongly merge same-named
-operations declared under two different ``portType``s; this two-hop correlation avoids that.
+flat ``Statement`` per ``message`` declaration plus one ``route`` statement per operation
+declared under any ``portType`` — regardless of whether a same-file ``binding`` implements
+it.
+
+Real-world WSDLs commonly separate the abstract interface (``portType``) from its concrete
+wiring (``binding``) across files (the WS-I-recommended layout), or omit a binding entirely
+(an abstract-only interface WSDL). An earlier version of this parser only emitted a route
+when a same-file ``binding`` referenced the ``portType``, which silently dropped those
+operations — verified against Apache CXF's real corpus: ~1,100 of 2,728 operations had no
+same-file binding. ``method`` is always ``"RPC"``, matching every other SOAP/RPC emitter in
+this repo (``csharp_wcf``, ASMX, ``dotnet_servicehost``) — a binding's SOAP action is
+wire-protocol detail, not the messaging verb the schema's ``method`` field documents, and
+there is no dedicated field for it in this v1.
 
 * ``message`` (global) → a ``data_model`` entity, same shape as an XSD global ``element``.
-* ``portType/operation`` + ``binding/operation`` (merged) → a ``route`` statement,
-  ``nodeType="synthetic"`` (this record isn't one literal grammar node — same reasoning
-  ``csharp_wcf/routes.py`` documents for its own two-source-merged SOAP route),
-  ``framework="wsdl"``, ``method`` = the ``soap:operation soapAction=`` value when the
-  binding declares one, else ``"RPC"`` (the same fallback ``csharp_wcf``/ASMX detection
-  uses), ``routeKind="rpc"``, ``endpoint`` = ``f"{portType}/{operation}"``,
-  ``requestDTO``/``responseDTO`` = the operation's declared input/output message local names.
+* ``portType/operation`` → a ``route`` statement, the operation's own real grammar node
+  (``nodeType="operation"``), ``framework="wsdl"``, ``method="RPC"``, ``routeKind="rpc"``,
+  ``endpoint`` = ``f"{portType}/{operation}"``, ``requestDTO``/``responseDTO`` = the
+  operation's declared input/output message local names.
 * ``import`` → a plain statement recording the referenced namespace/location — never
   resolved (same v1 scope decision as XSD's ``import``/``include``).
 
-A ``binding/operation`` with no matching ``portType/operation`` (malformed WSDL) is skipped,
-not guessed — same "absent beats wrong" rule ``prisma/schema.py`` applies to its own
-grammar gaps.
-
-Real-world WSDLs (verified against an ASP.NET-generated example) routinely declare **two**
-bindings for the same ``portType`` — one ``soap:binding`` (SOAP 1.1) and one
-``soap12:binding`` (SOAP 1.2), purely for wire-protocol compatibility, not two distinct
-operations. Without deduplication this doubles every operation. Each ``(portType,
-operation)`` pair is therefore emitted **once**, from the first binding that implements it
-(SOAP 1.1 conventionally precedes SOAP 1.2 in these files) — a second binding's differing
-``soapAction`` is not separately captured in this v1.
+``binding``/``service``/``port`` elements are not modeled — not a declaration this parser
+captures (absent beats wrong, same rule ``prisma/schema.py`` applies to its own grammar
+gaps).
 """
 
 from __future__ import annotations
@@ -51,7 +47,6 @@ def _plain_statement(
     tag: str,
     name: str | None,
     semantic: SemanticType | None,
-    limit: int,
     seen_ids: set[str],
 ) -> Statement:
     start, end = line_span(node)
@@ -62,23 +57,10 @@ def _plain_statement(
         nodeType=tag,
         semanticType=semantic,
         name=name,
-        text=node_text(node, source)[:limit],
+        text=node_text(node, source),
         startLine=start,
         endLine=end,
     )
-
-
-def _named_children(parent: Node, source: bytes, tag: str) -> dict[str, Node]:
-    """Direct child elements of ``parent`` whose local tag == ``tag``, keyed by their
-    declared ``name`` (children with no ``name`` attribute are skipped)."""
-    out: dict[str, Node] = {}
-    for child in child_elements(parent):
-        if element_tag(child, source) != tag:
-            continue
-        name = element_attr(child, source, "name")
-        if name:
-            out[name] = child
-    return out
 
 
 def _message_local(op: Node, source: bytes, tag: str) -> str | None:
@@ -91,81 +73,71 @@ def _message_local(op: Node, source: bytes, tag: str) -> str | None:
     return local_name(ref) if ref else None
 
 
-def _soap_action(binding_op: Node, source: bytes) -> str | None:
-    """The ``soapAction=`` value of the ``soap:operation``/``soap12:operation`` nested
-    directly under a binding's ``operation`` (both reduce to local tag ``operation`` — the
-    grammar is namespace-unaware), if present."""
-    soap_op = next(
-        (c for c in child_elements(binding_op) if element_tag(c, source) == "operation"), None
-    )
-    return element_attr(soap_op, source, "soapAction") if soap_op is not None else None
-
-
-def collect_definitions_statements(
-    definitions: Node, source: bytes, path: str, seen_ids: set[str], limit: int
+def _collect_messages(
+    definitions: Node, source: bytes, path: str, fid: str, seen_ids: set[str]
 ) -> list[Statement]:
-    """Walk a ``<definitions>`` element's direct children and emit ``message``/``route``/
-    ``import`` statements, parented to the file."""
-    fid = file_id(path)
     out: list[Statement] = []
-
     for node in child_elements(definitions):
         tag = element_tag(node, source)
         if tag == _MESSAGE_TAG:
             name = element_attr(node, source, "name")
-            out.append(
-                _plain_statement(node, source, path, fid, tag, name, "data_model", limit, seen_ids)
-            )
+            out.append(_plain_statement(node, source, path, fid, tag, name, "data_model", seen_ids))
         elif tag == _IMPORT_TAG:
             name = element_attr(node, source, "namespace") or element_attr(node, source, "location")
-            out.append(_plain_statement(node, source, path, fid, tag, name, None, limit, seen_ids))
+            out.append(_plain_statement(node, source, path, fid, tag, name, None, seen_ids))
+    return out
 
-    port_types = _named_children(definitions, source, "portType")
-    emitted: set[tuple[str, str]] = set()
 
-    for binding in child_elements(definitions):
-        if element_tag(binding, source) != "binding":
-            continue
-        type_ref = element_attr(binding, source, "type")
-        if type_ref is None:
-            continue
-        pt_name = local_name(type_ref)
-        port_type = port_types.get(pt_name)
-        if port_type is None:
-            continue
-        operations = _named_children(port_type, source, "operation")
+def _route_statement(
+    op: Node, source: bytes, path: str, fid: str, pt_name: str, op_name: str, seen_ids: set[str]
+) -> Statement:
+    start, end = line_span(op)
+    return Statement(
+        id=disambiguate(statement_id(path, start, op.start_point[1]), seen_ids),
+        parentId=fid,
+        path=path,
+        nodeType="operation",
+        semanticType="route",
+        name=op_name,
+        text=node_text(op, source),
+        framework="wsdl",
+        method="RPC",
+        endpoint=f"{pt_name}/{op_name}",
+        routeKind="rpc",
+        isRegex=False,
+        requestDTO=_message_local(op, source, "input"),
+        responseDTO=_message_local(op, source, "output"),
+        startLine=start,
+        endLine=end,
+    )
 
-        for binding_op in child_elements(binding):
-            if element_tag(binding_op, source) != "operation":
+
+def _collect_routes(
+    definitions: Node, source: bytes, path: str, fid: str, seen_ids: set[str]
+) -> list[Statement]:
+    out: list[Statement] = []
+    for port_type in child_elements(definitions):
+        if element_tag(port_type, source) != "portType":
+            continue
+        pt_name = element_attr(port_type, source, "name")
+        if not pt_name:
+            continue
+        for op in child_elements(port_type):
+            if element_tag(op, source) != "operation":
                 continue
-            op_name = element_attr(binding_op, source, "name")
+            op_name = element_attr(op, source, "name")
             if not op_name:
                 continue
-            port_op = operations.get(op_name)
-            if port_op is None:
-                continue  # binding references an operation the portType never declared
-            if (pt_name, op_name) in emitted:
-                continue  # a second binding (e.g. SOAP 1.2) for the same operation
-            emitted.add((pt_name, op_name))
-
-            start, end = line_span(port_op)
-            out.append(
-                Statement(
-                    id=disambiguate(statement_id(path, start, port_op.start_point[1]), seen_ids),
-                    parentId=fid,
-                    path=path,
-                    nodeType="synthetic",
-                    semanticType="route",
-                    name=op_name,
-                    text=node_text(port_op, source)[:limit],
-                    framework="wsdl",
-                    method=_soap_action(binding_op, source) or "RPC",
-                    endpoint=f"{pt_name}/{op_name}",
-                    routeKind="rpc",
-                    requestDTO=_message_local(port_op, source, "input"),
-                    responseDTO=_message_local(port_op, source, "output"),
-                    startLine=start,
-                    endLine=end,
-                )
-            )
+            out.append(_route_statement(op, source, path, fid, pt_name, op_name, seen_ids))
     return out
+
+
+def collect_definitions_statements(
+    definitions: Node, source: bytes, path: str, seen_ids: set[str]
+) -> list[Statement]:
+    """Walk a ``<definitions>`` element's direct children and emit ``message``/``route``/
+    ``import`` statements, parented to the file."""
+    fid = file_id(path)
+    return _collect_messages(definitions, source, path, fid, seen_ids) + _collect_routes(
+        definitions, source, path, fid, seen_ids
+    )

@@ -30,7 +30,7 @@ _IMPORT_TAGS = ("import", "include")
 
 
 def collect_schema_statements(
-    schema_node: Node, source: bytes, path: str, seen_ids: set[str], limit: int
+    schema_node: Node, source: bytes, path: str, seen_ids: set[str]
 ) -> list[Statement]:
     """Walk a ``<schema>`` element's direct children and emit one flat ``Statement`` per
     global declaration, parented to the file."""
@@ -58,7 +58,7 @@ def collect_schema_statements(
                 nodeType=tag,
                 semanticType="data_model" if tag in _ENTITY_TAGS else None,
                 name=name,
-                text=node_text(node, source)[:limit],
+                text=node_text(node, source),
                 startLine=start,
                 endLine=end,
             )

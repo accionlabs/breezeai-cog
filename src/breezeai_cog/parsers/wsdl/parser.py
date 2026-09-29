@@ -3,11 +3,11 @@
 Parses a WSDL 1.1 SOAP service-contract document with the generic tree-sitter ``xml``
 grammar (same grammar and ``parsers/xml_common.py`` namespace-stripping as
 ``xsd/parser.py``) and emits: one ``data_model`` statement per ``message``, one ``route``
-statement per operation (``portType/operation`` correlated with ``binding/operation`` — see
-:mod:`.operations`), one ``import`` statement per ``wsdl:import``, and reuses
-``xsd/schema.py``'s walker for every ``<xsd:schema>`` embedded in ``<wsdl:types>`` (the
-common case — most real WSDLs declare their message types inline rather than only importing
-external ``.xsd`` files).
+statement per operation declared under any ``portType`` (see :mod:`.operations` — routes
+are emitted directly from the abstract interface, not gated on a same-file ``binding``),
+one ``import`` statement per ``wsdl:import``, and reuses ``xsd/schema.py``'s walker for
+every ``<xsd:schema>`` embedded in ``<wsdl:types>`` (the common case — most real WSDLs
+declare their message types inline rather than only importing external ``.xsd`` files).
 
 WSDL 2.0 (``interface``, no ``portType``) is out of scope — this parser targets WSDL 1.1,
 the version this repo's existing SOAP support (``csharp_wcf``, ASMX) already targets.
@@ -56,19 +56,13 @@ class WsdlParser(BaseParser):
             and element_tag(definitions, source) == "definitions"
             and not self.is_fixture_file(path)
         ):
-            statements.extend(
-                collect_definitions_statements(
-                    definitions, source, path, seen_ids, ctx.statement_text_limit
-                )
-            )
+            statements.extend(collect_definitions_statements(definitions, source, path, seen_ids))
             types = find_child(definitions, source, "types")
             if types is not None:
                 for schema_node in child_elements(types):
                     if element_tag(schema_node, source) == "schema":
                         statements.extend(
-                            collect_schema_statements(
-                                schema_node, source, path, seen_ids, ctx.statement_text_limit
-                            )
+                            collect_schema_statements(schema_node, source, path, seen_ids)
                         )
 
         record = FileRecord(
