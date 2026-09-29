@@ -38,7 +38,7 @@ let greeting = "Hello"
 """
 
 
-def _parse(tmp_path, filename: str, src: str, *, capture: bool = True) -> FileRecord:
+def _parse(tmp_path, filename: str, src: str, *, capture: bool = True, limit: int = 1000) -> FileRecord:
     p = tmp_path / filename
     p.write_text(src)
     ctx = ParseContext(
@@ -47,7 +47,7 @@ def _parse(tmp_path, filename: str, src: str, *, capture: bool = True) -> FileRe
         source=src.encode(),
         repo_root=tmp_path,
         capture_statements=capture,
-        statement_text_limit=1000,
+        statement_text_limit=limit,
     )
     return JsltParser().parse_file(ctx)
 
@@ -77,6 +77,29 @@ def test_def_captures_full_multiline_body(tmp_path) -> None:
     fn = _by_name(rec, "full-name", "function_def")
     assert "def full-name(p)" in fn.text
     assert 'p.firstName + " " + p.lastName' in fn.text
+
+
+def test_text_not_truncated_by_statement_text_limit(tmp_path) -> None:
+    # Regression: this parser used to slice `[:limit]` itself, which fed the emit-time
+    # lossless splitter (emit/split.py) pre-cut text and silently lost the tail. Truncation
+    # now happens only at emit time -- the parser must capture the full def body regardless
+    # of how small `limit` is.
+    body_lines = "\n".join(f"    .field{i}" for i in range(50))
+    src = f"def big(x)\n  x +\n{body_lines}\n\nbig(.)\n"
+    rec = _parse(tmp_path, "transform.jslt", src, limit=20)
+    fn = _by_name(rec, "big", "function_def")
+    assert ".field0" in fn.text
+    assert ".field49" in fn.text
+    assert len(fn.text) > 20
+
+
+def test_text_not_emptied_when_statement_text_limit_is_zero(tmp_path) -> None:
+    # `statement_text_limit=0` is documented as "0 disables" -- it must not mean "empty
+    # every statement's text", which is what the old `text[:0]` slicing did.
+    rec = _parse(tmp_path, "transform.jslt", SOURCE, limit=0)
+    binding = _by_name(rec, "greeting", "let_binding")
+    assert binding.text != ""
+    assert binding.text == 'let greeting = "Hello"'
 
 
 def test_let_is_captured(tmp_path) -> None:

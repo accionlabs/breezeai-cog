@@ -76,7 +76,7 @@ WSDL = """\
 """
 
 
-def _parse(tmp_path, filename: str, src: str, *, capture: bool = True) -> FileRecord:
+def _parse(tmp_path, filename: str, src: str, *, capture: bool = True, limit: int = 1000) -> FileRecord:
     p = tmp_path / filename
     p.write_text(src)
     ctx = ParseContext(
@@ -85,7 +85,7 @@ def _parse(tmp_path, filename: str, src: str, *, capture: bool = True) -> FileRe
         source=src.encode(),
         repo_root=tmp_path,
         capture_statements=capture,
-        statement_text_limit=1000,
+        statement_text_limit=limit,
     )
     return WsdlParser().parse_file(ctx)
 
@@ -109,6 +109,34 @@ def test_message_is_data_model_entity(tmp_path) -> None:
     assert req.semanticType == "data_model"
     assert req.parentId == rec.id
     assert 'name="id"' in req.text
+
+
+def test_text_not_truncated_by_statement_text_limit(tmp_path) -> None:
+    # Regression: this parser used to slice `node_text(...)[:limit]` itself, which fed the
+    # emit-time lossless splitter (emit/split.py) pre-cut text and silently lost the tail.
+    # Truncation now happens only at emit time -- the parser must capture the full message
+    # regardless of how small `limit` is.
+    parts = "".join(f'    <wsdl:part name="p{i}" type="xs:string"/>\n' for i in range(50))
+    src = (
+        '<?xml version="1.0"?>\n'
+        '<wsdl:definitions xmlns:wsdl="http://schemas.xmlsoap.org/wsdl/">\n'
+        '  <wsdl:message name="BigRequest">\n' + parts + "  </wsdl:message>\n"
+        "</wsdl:definitions>\n"
+    )
+    rec = _parse(tmp_path, "service.wsdl", src, limit=20)
+    big = _by_name(rec, "BigRequest", "message")
+    assert 'name="p0"' in big.text
+    assert 'name="p49"' in big.text
+    assert len(big.text) > 20
+
+
+def test_text_not_emptied_when_statement_text_limit_is_zero(tmp_path) -> None:
+    # `statement_text_limit=0` is documented as "0 disables" -- it must not mean "empty
+    # every statement's text", which is what the old `text[:0]` slicing did.
+    rec = _parse(tmp_path, "service.wsdl", WSDL, limit=0)
+    op = _by_name(rec, "GetUser", "operation")
+    assert op.text != ""
+    assert 'name="GetUser"' in op.text
 
 
 def test_operation_is_rpc_route(tmp_path) -> None:
