@@ -111,3 +111,25 @@ class IgnoreEngine:
         """Whether ``rel`` is force-included by its own ``language``'s layer-2 patterns."""
         spec = self._lang.get(language)
         return spec is not None and spec[1].match_file(rel)
+
+
+_PUSHED_HEADER = "# --- patterns supplied with the analyze-diff request ---"
+
+
+def append_repo_ignore_patterns(repo_root: str | Path, patterns: Iterable[str]) -> int:
+    """Append caller-supplied patterns to ``<repo_root>/.repoignore``.
+
+    Appends rather than overwrites: a repo that ships its own ``.repoignore`` keeps
+    it, and the pushed patterns simply join the existing stack (built-in defaults →
+    ``.gitignore``/``.repoignore`` → ``.repoinclude`` overrides) instead of replacing
+    any layer. Written at the repo root, so patterns apply tree-wide like a root
+    ``.gitignore``. Blank entries are dropped. Returns the number of patterns written.
+    """
+    lines = [p.strip() for p in patterns]
+    lines = [p for p in lines if p]
+    if not lines:
+        return 0
+    target = Path(repo_root) / _REPO_IGNORE_FILES[0]
+    existing = _read_lines(target) if target.is_file() else []
+    target.write_text("\n".join([*existing, _PUSHED_HEADER, *lines]) + "\n", "utf-8")
+    return len(lines)

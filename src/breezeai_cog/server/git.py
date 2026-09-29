@@ -286,10 +286,10 @@ def clone_repo_full(provider: str, owner: str, project: str, repo: str, incoming
                 subprocess.run(["git", "-C", temp_dir, "checkout", "--quiet", incoming],
                                check=True, capture_output=True, timeout=timeout)
     except subprocess.TimeoutExpired as exc:
-        raise RuntimeError(f"git clone timed out: {_scrub(str(exc))}")
+        raise RuntimeError(f"git clone timed out: {_scrub(str(exc))}") from None
     except subprocess.CalledProcessError as exc:
         stderr = exc.stderr.decode() if exc.stderr else str(exc)
-        raise RuntimeError(f"git clone failed: {_scrub(stderr)}")
+        raise RuntimeError(f"git clone failed: {_scrub(stderr)}") from None
     import shutil
 
     shutil.rmtree(Path(temp_dir) / ".git", ignore_errors=True)
@@ -297,15 +297,25 @@ def clone_repo_full(provider: str, owner: str, project: str, repo: str, incoming
 
 
 def resolve_git_diff(provider: str, owner: str, project: str, repo: str, current: str, incoming: str,
-                     token: str | None, timeout: float = 1800.0) -> tuple[str, set[str], list[str]]:
+                     branch: str, token: str | None, timeout: float = 1800.0) -> tuple[str, set[str], list[str]]:
     api = _provider(provider)
     skeleton = api["tree"](owner, repo, incoming, token)
     diff = api["compare"](owner, repo, current, incoming, token)
     changed, deleted = diff["changed"], diff["deleted"]
-    if provider in ("gitlab", "azure_devops") or (not changed and not deleted):
+    if provider in ("gitlab", "azure_devops"):
         # Fallback to full clone for providers where diff APIs are bypassed
-        temp_dir = clone_repo_full(provider, owner, project, repo, incoming, incoming, token, timeout)
+        temp_dir = clone_repo_full(provider, owner, project, repo, incoming, branch, token, timeout)
         return temp_dir, None, []  # type: ignore
+
+    if not changed and not deleted:
+        # The commit range touches no files at all — the usual cause is a merge commit
+        # whose branch brought in no net change, so GitHub's three-dot compare reports
+        # commits but an empty file list. The tree is identical to `current`, so the
+        # stored graph is already correct: return an empty diff (not a full clone) and
+        # let the caller write empty meta and advance the commit pointer. Distinct from
+        # the `changed and not filter_set` case below, which means "changes exist but we
+        # could not read them" and must fail loudly.
+        return tempfile.mkdtemp(prefix="ontology-"), set(), []
 
     temp_dir = tempfile.mkdtemp(prefix="ontology-")
     for sp in skeleton:
@@ -353,6 +363,7 @@ def acquire_diff(settings: Settings, body: dict[str, Any]) -> tuple[str, set[str
     has_current = current not in (None, "", "null", "undefined")
 
     if has_current and provider in ("github", "bitbucket"):
-        return resolve_git_diff(provider, owner, project, repo, current, incoming, token, settings.git_clone_timeout)
+        return resolve_git_diff(provider, owner, project, repo, current, incoming, body["gitBranch"], token,
+                                settings.git_clone_timeout)
     temp_dir = clone_repo_full(provider, owner, project, repo, incoming, body["gitBranch"], token, settings.git_clone_timeout)
     return temp_dir, None, []  # full clone → process every file

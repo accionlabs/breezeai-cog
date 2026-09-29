@@ -397,9 +397,11 @@ def test_nested_named_functions_extracted(tmp_path) -> None:
     # the component plus all three nested handlers are present
     assert {"OpportunityDetail", "onClose", "handleSubmit", "onKey"} <= set(by_name)
     parent = by_name["OpportunityDetail"]
-    # nested handlers are parented to the enclosing function, not the file
+    # A function parents to a class or the file -- never to another function. "Nested inside
+    # OpportunityDetail" is read from line containment.
     for h in ("onClose", "handleSubmit", "onKey"):
-        assert by_name[h].parentId == parent.id, h
+        assert by_name[h].parentId == rec.id, h
+        assert parent.startLine <= by_name[h].startLine <= parent.endLine, h
     # a handler's OWN calls stay on the handler (barrier), NOT folded into the parent
     assert {"validateForm", "saveOpportunity"} <= {c.name for c in by_name["handleSubmit"].calls}
     assert "validateForm" not in {c.name for c in parent.calls}
@@ -442,9 +444,12 @@ def test_object_property_and_named_expression_functions_extracted(tmp_path) -> N
     rec = TypeScriptParser().parse_file(ctx)
     by_name = {f.name: f for f in rec.functions}
     assert {"connectConsumer", "eachMessage", "step"} <= set(by_name)
-    # object-property arrow and named FE are parented to the enclosing method
-    assert by_name["eachMessage"].parentId == by_name["connectConsumer"].id
-    assert by_name["step"].parentId == by_name["connectConsumer"].id
+    # An object-property arrow and a named function expression parent to a class or the file --
+    # never to another function; "declared inside connectConsumer" comes from line containment.
+    enclosing = by_name["connectConsumer"]
+    for nested in ("eachMessage", "step"):
+        assert by_name[nested].parentId == rec.id, nested
+        assert enclosing.startLine <= by_name[nested].startLine <= enclosing.endLine, nested
     # barrier: each callback's own calls stay on it, not folded into the method
     assert "handleRecord" in {c.name for c in by_name["eachMessage"].calls}
     assert "visitStep" in {c.name for c in by_name["step"].calls}

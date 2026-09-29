@@ -150,12 +150,13 @@ def test_graphql_code_first_operations(tmp_path) -> None:
         assert s.framework == "graphql"
     assert ops[("QUERY", "getConversations")].routeKind == "query"
     assert ops[("SUBSCRIPTION", "chatEvents")].routeKind == "subscription"
-    # @ResolveField is now captured as a field_resolver route (Gap 1)
-    assert ("QUERY", "title") in ops
-    assert ops[("QUERY", "title")].routeKind == "field_resolver"
-    assert ops[("QUERY", "title")].framework == "graphql"
+    # @ResolveField is captured as a field_resolver route, addressed <ParentType>.<field> from
+    # @Resolver(() => Conversation), and with no method — a field resolver has no verb.
+    assert ("RESOLVE_FIELD", "Conversation.title") in ops
+    assert ops[("RESOLVE_FIELD", "Conversation.title")].routeKind == "field_resolver"
+    assert ops[("RESOLVE_FIELD", "Conversation.title")].framework == "graphql"
     # @ResolveField(() => String) — String is a scalar → responseDTO is None
-    assert ops[("QUERY", "title")].responseDTO is None
+    assert ops[("RESOLVE_FIELD", "Conversation.title")].responseDTO is None
     # the @Query PARAM decorator on SearchResolver.search must NOT produce a route
     assert "search" not in {s.endpoint for s in ops.values()}
     # ops parent to their handler methods
@@ -191,11 +192,12 @@ def test_resolve_field_captured(tmp_path) -> None:
     rec = NestJSParser().parse_file(ctx)
     fields = {s.endpoint: s for s in rec.statements
               if s.semanticType == "route" and s.routeKind == "field_resolver"}
-    assert set(fields) == {"byObjectIds", "count"}
+    assert set(fields) == {"Brand.byObjectIds", "Brand.count"}
+    assert all(s.method == "RESOLVE_FIELD" for s in fields.values())  # the spec's verb
     # return type from @ResolveField(() => BrandResult) → responseDTO
-    assert fields["byObjectIds"].responseDTO == "BrandResult"
+    assert fields["Brand.byObjectIds"].responseDTO == "BrandResult"
     # @ResolveField(() => Number) → Number is a scalar → responseDTO None
-    assert fields["count"].responseDTO is None
+    assert fields["Brand.count"].responseDTO is None
     # framework is graphql
     assert all(s.framework == "graphql" for s in fields.values())
 
@@ -210,9 +212,9 @@ def test_resolve_field_args_dto(tmp_path) -> None:
     by_endpoint = {s.endpoint: s for s in rec.statements
                    if s.semanticType == "route" and s.routeKind == "field_resolver"}
     # GetBrandsArgs is the first class-typed @Args param (objectIds is scalar string[])
-    assert by_endpoint["byObjectIds"].requestDTO == "GetBrandsArgs"
+    assert by_endpoint["Brand.byObjectIds"].requestDTO == "GetBrandsArgs"
     # RegionArgs is the @Args() type for count
-    assert by_endpoint["count"].requestDTO == "RegionArgs"
+    assert by_endpoint["Brand.count"].requestDTO == "RegionArgs"
 
 
 def test_output_validates(tmp_path) -> None:
@@ -472,10 +474,11 @@ def test_grouping_resolver_resolve_fields_inherit_parent_op(tmp_path) -> None:
     assert by_ep["notifications.create"].responseDTO == "NotificationDto"
     assert by_ep["notifications.create"].requestDTO == "CreateNotificationInput"
     assert by_ep["notifications.markAsRead"].method == "MUTATION"
-    # Entity resolver (@Query returning array): @ResolveField keeps field_resolver behavior
-    assert "all" in by_ep
-    assert by_ep["all"].routeKind == "field_resolver"
-    assert by_ep["all"].method == "QUERY"
+    # Entity resolver (@Query returning an array): @ResolveField stays a field_resolver,
+    # addressed <ParentType>.<field> with no method.
+    assert "Brand.all" in by_ep
+    assert by_ep["Brand.all"].routeKind == "field_resolver"
+    assert by_ep["Brand.all"].method == "RESOLVE_FIELD"
 
 
 def test_gql_op_response_dto_from_decorator_arg(tmp_path) -> None:

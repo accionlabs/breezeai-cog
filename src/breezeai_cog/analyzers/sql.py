@@ -298,7 +298,7 @@ def _view(create: exp.Create, dialect: str) -> dict[str, Any]:
     schema = (table.db or None) if table is not None else None
     full = f"{schema}.{name}" if schema else name
     query = create.expression
-    definition = query.sql(dialect=_SQLGLOT.get(dialect, "postgres"))[:1000] if query is not None else None
+    definition = query.sql(dialect=_SQLGLOT.get(dialect, "postgres")) if query is not None else None
     return {
         "name": name,
         "schema": schema,
@@ -1681,7 +1681,7 @@ def _parse_create_view(stmt: str) -> dict[str, Any] | None:
     full = f"{schema}.{name}" if schema else name
     col_list_m = re.match(r"^\s*\(([^)]*)\)", m.group(3) or "")
     column_list = _split_col_list(col_list_m.group(1)) if col_list_m else []
-    definition = m.group(4).strip()[:1000] if m.group(4) else None
+    definition = m.group(4).strip() if m.group(4) else None
     is_mat = bool(re.search(r"MATERIALIZED\s+VIEW", stmt, re.IGNORECASE))
     return {
         "name": name,

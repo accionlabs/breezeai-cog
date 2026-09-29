@@ -32,8 +32,9 @@ _MESSAGING_DECORATORS = {"EventPattern": "EVENT", "MessagePattern": "MESSAGE"}
 # @nestjs/graphql code-first operations. Gated on the class being an @Resolver — @Query is
 # also a @nestjs/common *param* decorator, but that lives on a parameter, not in the method's
 # decorator list, so a method-level @Query on a resolver is unambiguously the GraphQL one.
-# @ResolveField/@ResolveProperty are field resolvers, not client-callable operations, so
-# they are NOT emitted as routes (matching the TypeScript resolver-map/SDL detector).
+# @ResolveField/@ResolveProperty are field resolvers — not client-callable, but real API
+# surface, so they ARE emitted, with routeKind="field_resolver" and method="RESOLVE_FIELD"
+# to keep them separable from entry points (see _FIELD_RESOLVERS below).
 _RESOLVER_DECORATORS = {"Resolver"}
 _GRAPHQL_OPS = {"Query": "query", "Mutation": "mutation", "Subscription": "subscription"}
 # @ResolveField/@ResolveProperty — field-resolver methods on a @Resolver class.
@@ -154,7 +155,7 @@ def _field_resolver_return_dto(dec: Decorator) -> str | None:
     return _dto_from_type(m.group(1))
 
 
-def _resolver_grouping_type(decs: list[Node], source: bytes) -> str | None:
+def _resolver_type_arg(decs: list[Node], source: bytes) -> str | None:
     """The explicit type arg of ``@Resolver(() => T)`` → ``T``, else ``None`` for plain
     ``@Resolver()`` / ``@Resolver('field')`` (standard entity resolvers)."""
     for dec in decs:
@@ -284,7 +285,7 @@ def detect_nest_routes(
         # returns a singleton T — @ResolveField methods inherit the parent op's identity.
         parent_op_info: tuple[str, str] | None = None
         if is_resolver:
-            grouping_type = _resolver_grouping_type(decs, source)
+            grouping_type = _resolver_type_arg(decs, source)
             if grouping_type:
                 parent_op_info = _parent_op_for_grouping(body, source, grouping_type)
         pending: list[Node] = []
@@ -365,11 +366,16 @@ def detect_nest_routes(
                                 responseDTO=_field_resolver_return_dto(d) or _return_dto(member, source),
                             ))
                         else:
+                            # `Parent.field` when @Resolver(() => T) names the parent type, else
+                            # the bare field name: a bare `author` does not say which type it
+                            # hangs off, and many types have one. Same form csharp-hotchocolate
+                            # emits. RESOLVE_FIELD is the spec's verb for this (not QUERY).
+                            parent_type = _resolver_type_arg(decs, source)
                             routes.append(Statement(
                                 **{**common, "framework": "graphql"},
                                 semanticType="route",
-                                method="QUERY",
-                                endpoint=mname,
+                                method="RESOLVE_FIELD",
+                                endpoint=f"{parent_type}.{mname}" if parent_type else mname,
                                 routeKind="field_resolver",
                                 requestDTO=_args_dto(member, source),
                                 responseDTO=_field_resolver_return_dto(d) or _return_dto(member, source),

@@ -21,5 +21,9 @@ def post_notification(settings: Settings, path: str, payload: dict[str, Any]) ->
     if settings.user_api_key is not None:
         headers["api-key"] = settings.user_api_key.get_secret_value()
     resp = httpx.post(url, json=payload, headers=headers, timeout=30.0)
-    resp.raise_for_status()
+    if resp.status_code >= 400:
+        # raise_for_status() discards the body, which is where the backend says *why* it
+        # refused. This runs in a BackgroundTask after the 200 has gone out, so the log
+        # line is the only signal anyone gets.
+        raise RuntimeError(f"Breeze API {resp.status_code} for {path}: {resp.text[:500]}")
     return resp.json() if resp.content else None

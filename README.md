@@ -18,14 +18,16 @@ Python reimplementation of `breezeai-code-ontology-generator`.
 
 | Language | Extensions | Framework / detector support |
 |---|---|---|
-| TypeScript / JavaScript | `.ts .tsx .mts .cts .js .jsx .mjs .cjs` | NestJS (& routing-controllers), Angular, Express, React, Vue, Next.js (App + Pages Router API routes), LoopBack, GraphQL (schema-first + code-first + an in-house resolver framework, server + client ops); AWS SNS/SQS/EventBridge/Lambda/S3/SES/CloudFront/Kinesis/DynamoDB/API Gateway (additive); HubSpot/Chargebee/Salesforce SDKs (additive) |
+| TypeScript / JavaScript | `.ts .tsx .mts .cts .js .jsx .mjs .cjs` | NestJS (& routing-controllers), Angular, Express, React, Vue, Next.js (App + Pages Router API routes), LoopBack, GraphQL (schema-first + code-first + an in-house resolver framework, server + client ops); AWS SNS/SQS/EventBridge/Lambda/S3/SES/CloudFront/Kinesis/DynamoDB/API Gateway/Cognito/SSM Parameter Store (additive); HubSpot/Chargebee/Salesforce SDKs (additive) |
 | Python | `.py` | FastAPI |
 | Java | `.java` | Spring Boot, JAX-RS, Vert.x |
-| C# | `.cs .asmx .svc` | ASP.NET (MVC / Web API / Minimal API / Web Forms), WCF / ASMX (SOAP), .NET ServiceHost, GraphQL (graphql-dotnet) |
+| C# | `.cs .asmx .svc .cshtml .razor` | ASP.NET (MVC / Web API / Minimal API / Web Forms), Razor Pages (`.cshtml`), Blazor (`.razor`), WCF / ASMX (SOAP), .NET ServiceHost, GraphQL (graphql-dotnet + HotChocolate — attribute, type-extension and fluent-descriptor styles, incl. field resolvers and subscription topics); Lucene.NET index reads/writes (additive) |
 | VB.NET | `.vb` | ASP.NET |
 | Kotlin | `.kt` | Ktor |
 | C++ | `.cpp .cc .cxx .c++ .hpp .h .hh .hxx .inl .ipp` | — |
 | Groovy † | `.groovy` | Vert.x |
+| HTML | `.html .htm` | Framework-neutral template parser — detects Angular 2+ (grammar-parsed), AngularJS, Vue, Thymeleaf from `templateUrl` resolution or markup fingerprints; htmx / Alpine.js / Stimulus carried as `behaviors` |
+| HCL / Terraform | `.tf .tfvars .hcl` | HCL (HashiCorp Configuration Language) — top-level blocks as statements; `module` blocks as Classes (with `constructorParams` for input variables); module and provider sources as `externalImports`; Terraform-specific detection via `hcl_terraform` |
 | Prisma | `.prisma` | Prisma Schema Language — `model` → `data_model` entity, `enum` / `datasource` / `generator` blocks (full body on `text`) |
 | XSD | `.xsd` | XML Schema — global `element` / `complexType` / `simpleType` / `group` / `attributeGroup` → `data_model` entity (full body on `text`); `import` / `include` recorded, not resolved |
 | WSDL | `.wsdl` | WSDL 1.1 (SOAP) — `message` → `data_model` entity; every `portType` operation → a `route` (`routeKind=rpc`, `method=RPC`), independent of whether a `binding` implements it; reuses the XSD walker for embedded `<types>` schemas |

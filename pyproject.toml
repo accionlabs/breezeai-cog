@@ -56,7 +56,7 @@ all = [
 # Dev tooling (PEP 735). Installed by `uv sync` (the `dev` group is on by default),
 # unlike optional-dependencies extras which require `uv sync --extra <name>`.
 [dependency-groups]
-dev = ["pytest>=8", "jsonschema>=4.21", "ruff>=0.5", "mypy>=1.10"]
+dev = ["pytest>=8", "pytest-timeout>=2.3", "jsonschema>=4.21", "ruff>=0.5", "mypy>=1.10"]
 
 [project.scripts]
 breezeai-cog = "breezeai_cog.cli:main"

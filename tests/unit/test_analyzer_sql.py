@@ -608,3 +608,30 @@ def test_oracle_unrecognized_statement_counted_in_stats() -> None:
     assert r["parseStats"]["ok"] == 1
     assert r["parseStats"]["failed"] == 1
     assert any("GRANT" in s for s in r["parseStats"]["sampleErrors"])
+
+
+def _long_view_body(n_cols: int) -> str:
+    cols = ",\n  ".join(f"c{i} AS alias_column_number_{i}" for i in range(n_cols))
+    return f"SELECT\n  {cols}\nFROM app.wide_table\nWHERE c0 IS NOT NULL"
+
+
+def test_view_definition_not_truncated_sqlglot_path() -> None:
+    body = _long_view_body(120)
+    assert len(body) > 1000
+    r = parse_ddl(f"CREATE VIEW app.wide_view AS\n{body};\n", "schema.sql")
+    (view,) = r["views"]
+    definition = view["definition"]
+    assert len(definition) > 1000
+    # every projected alias survives, including the last one
+    assert "alias_column_number_119" in definition
+    assert "wide_table" in definition
+
+
+def test_view_definition_not_truncated_oracle_path() -> None:
+    body = _long_view_body(120)
+    assert len(body) > 1000
+    ddl = f"CREATE OR REPLACE FORCE VIEW app.wide_view AS\n{body};\n"
+    r = parse_ddl(ddl, "oracle/wide_view.sql")  # Oracle filename hint → regex path
+    assert r["dialect"] == "oracle"
+    (view,) = r["views"]
+    assert view["definition"] == body

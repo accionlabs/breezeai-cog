@@ -21,7 +21,9 @@ Three input shapes are accepted (per uploaded file):
                {"name": "email", "fullPath": "email", "dataType": "String",
                 "nullable": false, "attributes": {"unique": true}},
                {"name": "firstName", "fullPath": "profile.firstName",
-                "dataType": "String", "parentPath": "profile"}
+                "dataType": "String", "parentPath": "profile"},
+               {"name": "tags", "type": "Array"},  # "type" accepted as a dataType alias
+               {"name": "metadata"}   # dataType/type optional -> "Unknown" if omitted
              ],
              "indexes": [
                {"name": "email_idx", "fields": ["email"], "unique": true}
@@ -72,7 +74,11 @@ def _field(raw: Any, coll_name: str) -> dict[str, Any]:
         raise BuildError(f"[nosql/{coll_name}] a field is missing a non-empty 'name'")
     data_type = raw.get("dataType")
     if not isinstance(data_type, str) or not data_type.strip():
-        raise BuildError(f"[nosql/{coll_name}] field '{name}' is missing a non-empty 'dataType'")
+        data_type = raw.get("type")
+    if not isinstance(data_type, str) or not data_type.strip():
+        # Flexible/schemaless NoSQL fields (Mixed types, undeclared attributes)
+        # legitimately have no fixed type — don't reject the upload for it.
+        data_type = "Unknown"
     full_path = raw.get("fullPath")
     if not isinstance(full_path, str) or not full_path.strip():
         full_path = name
