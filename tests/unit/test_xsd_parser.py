@@ -46,7 +46,7 @@ SCHEMA = """\
 """
 
 
-def _parse(tmp_path, filename: str, src: str, *, capture: bool = True) -> FileRecord:
+def _parse(tmp_path, filename: str, src: str, *, capture: bool = True, limit: int = 1000) -> FileRecord:
     p = tmp_path / filename
     p.write_text(src)
     ctx = ParseContext(
@@ -55,7 +55,7 @@ def _parse(tmp_path, filename: str, src: str, *, capture: bool = True) -> FileRe
         source=src.encode(),
         repo_root=tmp_path,
         capture_statements=capture,
-        statement_text_limit=1000,
+        statement_text_limit=limit,
     )
     return XsdParser().parse_file(ctx)
 
@@ -81,6 +81,37 @@ def test_complex_type_is_data_model_entity_with_full_body(tmp_path) -> None:
     # full body carries nested elements as text (contents capture)
     assert 'name="street"' in addr.text
     assert 'name="zip"' in addr.text
+
+
+def test_text_not_truncated_by_statement_text_limit(tmp_path) -> None:
+    # Regression: this parser used to slice `node_text(...)[:limit]` itself, which fed the
+    # emit-time lossless splitter (emit/split.py) pre-cut text and silently lost the tail.
+    # Truncation now happens only at emit time, on the whole pipeline's statements -- the
+    # parser must capture the full declaration regardless of how small `limit` is.
+    src = (
+        '<?xml version="1.0"?>\n'
+        '<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema">\n'
+        '  <xs:complexType name="Big">\n'
+        "    <xs:sequence>\n"
+        + "".join(f'      <xs:element name="f{i}" type="xs:string"/>\n' for i in range(50))
+        + "    </xs:sequence>\n"
+        "  </xs:complexType>\n"
+        "</xs:schema>\n"
+    )
+    rec = _parse(tmp_path, "schema.xsd", src, limit=20)
+    big = _by_name(rec, "Big", "complexType")
+    assert 'name="f0"' in big.text
+    assert 'name="f49"' in big.text
+    assert len(big.text) > 20
+
+
+def test_text_not_emptied_when_statement_text_limit_is_zero(tmp_path) -> None:
+    # `statement_text_limit=0` is documented as "0 disables" -- it must not mean "empty
+    # every statement's text", which is what the old `text[:0]` slicing did.
+    rec = _parse(tmp_path, "schema.xsd", SCHEMA, limit=0)
+    person = _by_name(rec, "Person", "element")
+    assert person.text != ""
+    assert 'name="Person"' in person.text
 
 
 def test_simple_type_restriction_carried_on_text_not_as_edge(tmp_path) -> None:
