@@ -305,10 +305,14 @@ class KotlinParser(BaseParser):
         capture: bool,
         limit: int,
         resolve: CallResolver = noop_resolver,
+        owner: str | None = None,
     ) -> tuple[list[Class], list[Function], list[Statement]]:
         name = self._decl_name(node, source)
         start, end = line_span(node)
-        cid = disambiguate(class_id(path, name), seen_ids)
+        # A nested type's identity carries the nesting (`path#Outer.Inner`) so two nested types
+        # sharing a simple name stay distinct and keep their id when the file is reordered.
+        qualified = f"{owner}.{name}" if owner else name
+        cid = disambiguate(class_id(path, qualified), seen_ids)
 
         mods = _modifiers(node)
         visibility = _visibility(mods, source)
@@ -344,7 +348,7 @@ class KotlinParser(BaseParser):
                     fn, sub_fns, sub_cls, fn_stmts = self._build_function(
                         member, source, path, parent_id=cid, seen_ids=seen_ids,
                         capture=capture, limit=limit, resolve=resolve,
-                        func_type="method", is_static=member_static,
+                        func_type="method", is_static=member_static, class_name=qualified,
                     )
                     methods.append(fn)
                     methods.extend(sub_fns)
@@ -355,16 +359,18 @@ class KotlinParser(BaseParser):
                     # attach to the enclosing class, not a separate node (BREEZEAI-839).
                     comp_cls, comp_methods, comp_stmts = self._build_companion(
                         member, source, path, parent_id=cid, seen_ids=seen_ids,
-                        capture=capture, limit=limit, resolve=resolve,
+                        capture=capture, limit=limit, resolve=resolve, owner_name=qualified,
                     )
                     nested_classes.extend(comp_cls)
                     methods.extend(comp_methods)
                     statements.extend(comp_stmts)
                 elif member.type in _CLASS_TYPES:
-                    # Nested inner class/object — returned flat, parented to this class.
+                    # Nested inner class/object — returned flat, parented to the owning FILE
+                    # (the model's only class containment edge is File→Class; the enclosing
+                    # type is recoverable from line containment).
                     sub_cls, sub_methods, sub_stmts = self._build_class(
-                        member, source, path, parent_id=cid, seen_ids=seen_ids,
-                        capture=capture, limit=limit, resolve=resolve,
+                        member, source, path, parent_id=parent_id, seen_ids=seen_ids,
+                        capture=capture, limit=limit, resolve=resolve, owner=qualified,
                     )
                     nested_classes.extend(sub_cls)
                     methods.extend(sub_methods)
@@ -410,6 +416,7 @@ class KotlinParser(BaseParser):
         capture: bool,
         limit: int,
         resolve: CallResolver = noop_resolver,
+        owner_name: str | None = None,
     ) -> tuple[list[Class], list[Function], list[Statement]]:
         """Extract a `companion object`'s members, attached to the enclosing class.
 
@@ -434,7 +441,7 @@ class KotlinParser(BaseParser):
                 fn, sub_fns, sub_cls, fn_stmts = self._build_function(
                     member, source, path, parent_id=parent_id, seen_ids=seen_ids,
                     capture=capture, limit=limit, resolve=resolve,
-                    func_type="method", is_static=True,
+                    func_type="method", is_static=True, class_name=owner_name,
                 )
                 methods.append(fn)
                 methods.extend(sub_fns)
@@ -507,10 +514,13 @@ class KotlinParser(BaseParser):
         resolve: CallResolver = noop_resolver,
         func_type: str = "function",
         is_static: bool | None = None,
+        class_name: str | None = None,
     ) -> tuple[Function, list[Function], list[Class], list[Statement]]:
         name = self._decl_name(node, source)
         start, end = line_span(node)
-        fid = disambiguate(function_id(path, name, start, class_name=None), seen_ids)
+        # A method's id carries its owning type (qualified for a nested one), matching every
+        # other language; a top-level function passes None.
+        fid = disambiguate(function_id(path, name, start, class_name=class_name), seen_ids)
 
         mods = _modifiers(node)
         visibility = _visibility(mods, source)

@@ -166,7 +166,7 @@ export class Notifier {
 
 
 def test_sns_topic_publish_characterization(tmp_path) -> None:
-    # Locks in pre-change SNS behavior before Task 3 touches _producer/_address.
+    # Pins the baseline SNS topic-publish shape that the PhoneNumber/SMS branch must not disturb.
     src = b"""import { SNSClient, PublishCommand } from '@aws-sdk/client-sns';
 
 export async function notify(sns: SNSClient) {
@@ -224,41 +224,67 @@ export async function fanout(sns: SNSClient) {
 """
 
 
-def test_sms_publish_phone_number_literal_detected(tmp_path) -> None:
+def test_sms_publish_phone_number_is_point_to_point(tmp_path) -> None:
+    # SNS calls its API `Publish` for every destination, but an SMS reaches exactly one
+    # handset and nothing can subscribe to it — so the delivery is a send, not a fan-out.
+    # framework stays aws-sns: the transport is unchanged.
     rec = _parse(tmp_path, "sms.ts", SMS_LITERAL)
     sem = _by_semantic(rec)
-    assert len(sem["eventbus_publish"]) == 1
-    pub = sem["eventbus_publish"][0]
-    assert pub.framework == "aws-sms"
-    assert pub.method == "PublishCommand"
-    assert pub.endpoint == "+14155550100"
+    assert "eventbus_publish" not in sem
+    assert len(sem["eventbus_send"]) == 1
+    sms = sem["eventbus_send"][0]
+    assert sms.framework == "aws-sns"
+    assert sms.method == "PublishCommand"
+    assert sms.endpoint == "+14155550100"
 
 
 def test_sms_publish_phone_number_variable_is_honest_null(tmp_path) -> None:
     rec = _parse(tmp_path, "sms.ts", SMS_VARIABLE)
     sem = _by_semantic(rec)
-    pub = sem["eventbus_publish"][0]
-    assert pub.framework == "aws-sms"
-    assert pub.endpoint is None  # PhoneNumber is a symbol, never the symbol text
+    sms = sem["eventbus_send"][0]
+    assert sms.framework == "aws-sns"
+    assert sms.endpoint is None  # PhoneNumber is a symbol, never the symbol text
 
 
-def test_sms_and_sns_in_same_file_split_correctly(tmp_path) -> None:
+def test_sms_and_topic_publish_split_by_delivery_not_framework(tmp_path) -> None:
+    # Both are aws-sns PublishCommands; they differ in semanticType, because only the
+    # topic fans out.
     rec = _parse(tmp_path, "fanout.ts", SMS_AND_SNS)
+    got = {(s.semanticType, s.framework, s.endpoint) for s in rec.statements if s.semanticType}
+    assert got == {
+        ("eventbus_send", "aws-sns", "+14155550100"),
+        ("eventbus_publish", "aws-sns", "arn:aws:sns:x"),
+    }
+
+
+def test_target_arn_publish_keeps_the_fanout_default(tmp_path) -> None:
+    # The Publish API accepts either a platform-endpoint ARN (one device) or a topic ARN
+    # (fan-out) in TargetArn, and the value is usually injected — so cardinality is not
+    # knowable here. It stays eventbus_publish rather than being guessed.
+    src = b"""import { SNSClient, PublishCommand } from '@aws-sdk/client-sns';
+
+export async function push(sns: SNSClient, targetArn: string) {
+  await sns.send(new PublishCommand({ TargetArn: targetArn, Message: 'm' }));
+}
+"""
+    rec = _parse(tmp_path, "push.ts", src)
     sem = _by_semantic(rec)
-    got = {(s.framework, s.endpoint) for s in sem["eventbus_publish"]}
-    assert got == {("aws-sms", "+14155550100"), ("aws-sns", "arn:aws:sns:x")}
-    assert all(s.method == "PublishCommand" for s in sem["eventbus_publish"])
+    assert "eventbus_send" not in sem
+    pub = sem["eventbus_publish"][0]
+    assert pub.framework == "aws-sns"
+    assert pub.endpoint is None  # injected symbol → honest-null
 
 
 def test_sms_file_framework_rollup(tmp_path) -> None:
     rec = _parse(tmp_path, "sms.ts", SMS_LITERAL)
-    assert rec.framework == "aws-sms"
+    assert rec.framework == "aws-sns"
 
 
-def test_v2_publish_with_phone_number_endpoint_now_resolved(tmp_path) -> None:
-    # Accepted side-effect of widening _ADDRESS_KEYS: the v2 `.publish()` method is
-    # deliberately NOT branched to aws-sms (issue #77 scopes Task 3 to PublishCommand), but
-    # the endpoint is now resolved instead of honest-null — strictly more informative.
+def test_v2_publish_to_phone_number_admitted_by_receiver_name(tmp_path) -> None:
+    # The v2 `.publish()` guard needs positive evidence of AWS. Here it is the receiver name
+    # (`this.sns`), NOT the PhoneNumber key — see test_v2_publish_phone_number_alone_is_not_aws.
+    # PhoneNumber is still a valid *address*, so the endpoint resolves — and the v2 path
+    # applies the same point-to-point rule as v3, so the two SDK versions agree.
     src = b"""import { SNS } from 'aws-sdk';
 
 export class Notifier {
@@ -270,9 +296,30 @@ export class Notifier {
 """
     rec = _parse(tmp_path, "notifier.ts", src)
     sem = _by_semantic(rec)
-    pub = sem["eventbus_publish"][0]
-    assert pub.framework == "aws-sns"
-    assert pub.endpoint == "+14155550100"
+    assert "eventbus_publish" not in sem
+    sms = sem["eventbus_send"][0]
+    assert sms.framework == "aws-sns"
+    assert sms.endpoint == "+14155550100"
+
+
+def test_v2_publish_phone_number_alone_is_not_aws(tmp_path) -> None:
+    # PhoneNumber names a destination but does not identify AWS — every SMS vendor uses the
+    # same field name. With no AWS-specific address key and no receiver hint, a `.publish()`
+    # stays unclassified rather than being claimed as SNS (absent beats wrong).
+    src = b"""import { SQS } from 'aws-sdk';
+
+export class Notifier {
+  constructor(private smsGateway: TwilioGateway) {}
+  async sendCode(phone: string) {
+    await this.smsGateway.publish({ PhoneNumber: phone, Message: 'm' });
+  }
+}
+"""
+    rec = _parse(tmp_path, "notifier.ts", src)
+    assert _by_semantic(rec) == {}
+    assert rec.framework is None
+    # the statement itself is still captured — just with no semantic claim
+    assert any("smsGateway.publish" in (s.text or "") for s in rec.statements)
 
 
 def test_output_validates(tmp_path) -> None:

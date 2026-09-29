@@ -128,8 +128,12 @@ def test_nested_defs_extracted(tmp_path) -> None:
     rec = PythonParser().parse_file(ctx)
     by_name = {f.name: f for f in rec.functions}
     assert {"outer", "helper", "method", "inner"} <= set(by_name)
-    assert by_name["helper"].parentId == by_name["outer"].id
-    assert by_name["inner"].parentId == by_name["method"].id
+    # A function parents to a class or the file -- never to another function; the nesting is
+    # read from line containment.
+    for nested, enclosing in (("helper", "outer"), ("inner", "method")):
+        assert by_name[nested].parentId == rec.id, nested
+        host = by_name[enclosing]
+        assert host.startLine <= by_name[nested].startLine <= host.endLine, nested
     # nested-def call lands on the nested def; the anonymous lambda's call stays on the parent
     assert "compute" in {c.name for c in by_name["helper"].calls}
     assert "compute" not in {c.name for c in by_name["outer"].calls}

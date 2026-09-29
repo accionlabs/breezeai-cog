@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from tree_sitter import Node
 
-from ...emit import disambiguate, function_id
+from ...emit import disambiguate, file_id, function_id
 from ...schemas import Call, Decorator, Function, Parameter, Statement
 from ..callresolve import CallResolver, noop_resolver
 from ..treesitter import line_span, node_text
@@ -155,6 +155,7 @@ def build_function(
     *,
     parent_id: str,
     class_name: str | None,
+    id_owner: str | None = None,
     seen_ids: set[str],
     capture: bool = False,
     limit: int,
@@ -166,7 +167,10 @@ def build_function(
     extracted as their own Functions parented to this one."""
     name = node_text(fnode.child_by_field_name("name"), source)
     start, end = line_span(fnode)
-    fid = disambiguate(function_id(path, name, start, class_name=class_name), seen_ids)
+    # The id carries the qualified owner (`Outer.Inner`) so a nested type's methods are
+    # identified unambiguously; `class_name` stays simple for call resolution.
+    fid = disambiguate(
+        function_id(path, name, start, class_name=id_owner or class_name), seen_ids)
     ret = fnode.child_by_field_name("return_type")
     body = fnode.child_by_field_name("body")
     nested = collect_nested_functions(body, source)
@@ -197,7 +201,7 @@ def build_function(
     for nested_fnode, nested_decs in nested:
         sub_fns, sub_stmts = build_function(
             nested_fnode, extract_decorators(nested_decs, source), source, path,
-            parent_id=fid, class_name=None, seen_ids=seen_ids,
+            parent_id=file_id(path), class_name=None, seen_ids=seen_ids,
             capture=capture, limit=limit, resolve=resolve,
         )
         functions.extend(sub_fns)

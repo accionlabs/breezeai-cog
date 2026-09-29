@@ -1,0 +1,109 @@
+"""HotChocolate vocabulary — attribute and type names the framework itself reads.
+
+Operation annotations (``[UsePaging]``, ``[UseFiltering]``, ``[Error<T>]``) are deliberately
+absent: the spec decomposes an operation annotation into ``method``/``endpoint``/``routeKind``
+and reserves a statement's ``decorators`` for field/property annotations on a declaration, so
+there is nowhere on a route record for them. They remain on the owning Function's decorators,
+captured by the base parser.
+
+Every entry here is **framework-enforced**: an attribute HotChocolate binds, or a type its
+resolver compiler injects. Team naming conventions (a class called ``…Queries``, a parameter
+type called ``…Input``) are deliberately absent — renaming those changes nothing at runtime,
+so treating them as signals would fabricate routes. See the decision notes in
+``.todo/hotchocolate-parser-decisions.md``.
+"""
+
+from __future__ import annotations
+
+#: Root-declaring attributes → operation kind. The only in-file *enforced* statement that a
+#: class is a schema root (the other is ``AddQueryType<T>()`` at the registration site).
+ROOT_ATTRS = {
+    "QueryType": "query",
+    "MutationType": "mutation",
+    "SubscriptionType": "subscription",
+}
+
+#: Adds this class's methods as fields of another type — the root (real operations) or a data
+#: type (field resolvers). The argument decides which; see ``extend_target`` in routes.py.
+EXTEND_ATTR = "ExtendObjectType"
+
+#: Marks the parameter that carries the object being resolved — only meaningful on a data type.
+PARENT_ATTR = "Parent"
+
+#: Root operation types by their **schema** name. ``[ExtendObjectType("Query")]`` and
+#: ``[ExtendObjectType(OperationTypeNames.Query)]`` name the schema type directly, and the roots
+#: are called Query/Mutation/Subscription there by default — enforced, unlike a CLR class name.
+ROOT_SCHEMA_NAMES = {"Query": "query", "Mutation": "mutation", "Subscription": "subscription"}
+
+#: Fluent style: a schema type declared by subclassing ``ObjectType<T>`` and building fields
+#: inside ``Configure(IObjectTypeDescriptor<T>)``. Both name the described type T.
+DESCRIPTOR_BASES = ("ObjectType", "ObjectTypeExtension")
+DESCRIPTOR_PARAM_TYPES = ("IObjectTypeDescriptor", "IObjectTypeExtensionDescriptor")
+CONFIGURE_METHOD = "Configure"
+
+#: Builder calls inside ``Configure``: ``Field`` declares one, ``Ignore`` removes it from the
+#: schema, ``Name`` renames it.
+FIELD_CALL = "Field"
+IGNORE_CALL = "Ignore"
+NAME_CALL = "Name"
+
+#: Declarative subscription: the method resolves an event pushed to a topic.
+SUBSCRIBE_ATTR = "Subscribe"
+
+#: Names the pub/sub topic a subscription consumes. Bare (no argument) means "the field name",
+#: which is HotChocolate's own default — enforced, so it resolves rather than guesses.
+TOPIC_ATTR = "Topic"
+
+#: Removes a member from the schema entirely.
+IGNORE_ATTR = "GraphQLIgnore"
+
+#: Renames a field / marks a parameter as a GraphQL argument.
+NAME_ATTR = "GraphQLName"
+
+#: Authorization, class- or method-level → guards + authRequired.
+AUTHORIZE_ATTR = "Authorize"
+
+#: Parameter attributes that mark an injected dependency rather than a client argument.
+INFRA_PARAM_ATTRS = frozenset({
+    "Parent", "Service", "ScopedService",
+    "EventMessage",
+    "LocalState", "ScopedState", "GlobalState",
+})
+
+#: Parameter *types* the resolver compiler binds itself — never client arguments.
+INFRA_PARAM_TYPES = frozenset({
+    "CancellationToken", "IResolverContext", "ClaimsPrincipal",
+    "ITopicEventReceiver", "ITopicEventSender",
+})
+
+#: Batching-loader types, matched on a parameter's **declared generic base** —
+#: ``IDataLoader<int, Author>`` / ``BatchDataLoader<int, Author>``. A named subclass
+#: (``AuthorDataLoader loader``) is *not* matched on its ``…DataLoader`` suffix: that is a team
+#: convention, and the enforced fact lives in the subclass's base type, in another file.
+#: Resolving those needs the repo heritage index — a known narrow case for now.
+DATALOADER_TYPES = ("IDataLoader", "BatchDataLoader", "GroupedDataLoader", "CacheDataLoader")
+
+#: Parameter attributes that positively identify a GraphQL *argument*. Since ``[Service]`` is
+#: optional from v13 on, a bare ``CatalogDb db`` parameter is indistinguishable from a client
+#: argument without knowing the DI registrations — so requestDTO is set only from these, and
+#: left null otherwise (a documented gap, never a guessed type).
+ARG_MARKER_ATTRS = frozenset({"GraphQLName", "GraphQLType", "DefaultValue"})
+
+#: Cheap byte guard for ``claims`` — each marker is a **schema declaration**, never a mention of
+#: the library. A bare ``using HotChocolate…`` is deliberately absent: the composition root
+#: imports it too, and claiming that file would take it from ``csharp-aspnet`` and drop every
+#: route the application registers.
+MARKERS: tuple[bytes, ...] = (
+    b"[QueryType]", b"[MutationType]", b"[SubscriptionType]",
+    b"[ExtendObjectType",
+    b"[Subscribe",              # covers [Subscribe] and [SubscribeAndResolve]
+    b"IObjectTypeDescriptor",
+)
+
+#: Server-registration calls. A file wiring up the GraphQL server is the application's
+#: composition root: ``csharp-aspnet`` owns it, captures its REST endpoints, and already emits the
+#: GraphQL HTTP mount (``_GRAPHQL_MOUNTS`` in ``csharp_aspnet/routes.py``). Never claim it — the
+#: cost of being wrong is the whole application's route inventory.
+COMPOSITION_ROOT_MARKERS: tuple[bytes, ...] = (
+    b"AddGraphQLServer", b"MapGraphQL", b"UseGraphQL",
+)

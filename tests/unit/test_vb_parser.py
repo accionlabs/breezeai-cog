@@ -166,3 +166,59 @@ def test_class_constants_and_fields_captured_as_statements(tmp_path) -> None:
     ctx2 = ParseContext(path="c.vb", abs_path=p, source=src, repo_root=tmp_path,
                         capture_statements=False)
     assert VbParser().parse_file(ctx2).statements == []
+
+
+# The grammar has no rule for a nested type: `Public Class Result` inside a class surfaces as a
+# field_declaration, the enclosing class_block ends at the *nested* End Class, and the nested
+# type's members become siblings of the outer type's.
+NESTED_TYPE = b'''Namespace Shop
+  Public Class OrderService
+    Public Sub Validate()
+    End Sub
+
+    Public Class Result
+      Public Sub Describe()
+      End Sub
+    End Class
+
+    Public Sub Save()
+    End Sub
+  End Class
+End Namespace
+'''
+
+
+def _parse_source(tmp_path, src: bytes) -> FileRecord:
+    p = tmp_path / REL
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_bytes(src)
+    ctx = ParseContext(path=REL, abs_path=p, source=src, repo_root=tmp_path, capture_statements=True)
+    return VbParser().parse_file(ctx)
+
+
+def test_members_after_an_unparsed_nested_type_are_dropped(tmp_path) -> None:
+    # Describe belongs to Result, not to OrderService. Emitting it here would assert a
+    # HAS_METHOD edge the code does not have, so capture stops at the nested type: a known gap
+    # beats a wrong edge. Result and Save stay uncaptured -- a grammar limitation.
+    rec = _parse_source(tmp_path, NESTED_TYPE)
+    assert [c.name for c in rec.classes] == ["OrderService"]
+    names = {f.name for f in rec.functions}
+    assert "Validate" in names                 # declared before the nested type
+    assert "Describe" not in names             # would have been mis-parented to OrderService
+    for fn in rec.functions:
+        assert fn.parentId.endswith("#OrderService")
+
+
+def test_a_class_without_a_nested_type_is_unaffected(tmp_path) -> None:
+    src = b'''Namespace Shop
+  Public Class OrderService
+    Public Sub Validate()
+    End Sub
+    Public Function Total() As Integer
+      Return 1
+    End Function
+  End Class
+End Namespace
+'''
+    rec = _parse_source(tmp_path, src)
+    assert {f.name for f in rec.functions} == {"Validate", "Total"}
