@@ -1,5 +1,5 @@
 from __future__ import annotations
 
-from .parser import FastifyParser
+from ..base import LanguageParser
 
-PARSERS = [FastifyParser()]
+PARSERS: list[LanguageParser] = []
