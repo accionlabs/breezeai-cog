@@ -31,6 +31,38 @@ _BARE_FUNCTIONS = {"fetch", "$fetch", "usefetch", "apifetch", "authfetch", "cust
 _DB_CHAIN_MARKERS = ("query(", ".filter", ".where", "query.")
 
 
+def _receiver_text(callee: str) -> str:
+    """Return the receiver portion of a normalized callee, without call arguments.
+
+    The old detector searched the entire callee, which let an inline URL such as
+    ``ws.url("https://example.test")`` make a Play WS call look like an HTTP client.
+    Keeping only receiver text preserves hints in ``this.http.post`` while excluding
+    strings and argument expressions from the signal.
+    """
+    visible: list[str] = []
+    depth = 0
+    quote: str | None = None
+    escaped = False
+    for char in callee:
+        if quote is not None:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == quote:
+                quote = None
+            continue
+        if char in ('"', "'"):
+            quote = char
+        elif char == "(":
+            depth += 1
+        elif char == ")" and depth:
+            depth -= 1
+        elif depth == 0:
+            visible.append(char)
+    return "".join(visible).rsplit(".", 1)[0]
+
+
 def match_api(
     callee: str, method: str, http_client_ids: "frozenset[str] | None" = None
 ) -> str | None:
@@ -53,7 +85,10 @@ def match_api(
         m = m[: -len("async")]
     if m not in _HTTP_VERBS:
         return None
-    is_client = any(hint in low for hint in _CLIENT_HINTS)
+    if m == "request" and method != "request":
+        # Capitalized Request (...) is a constructor or model type, not an outbound HTTP request call
+        return None
+    is_client = any(hint in _receiver_text(low) for hint in _CLIENT_HINTS)
     if not is_client and http_client_ids:
         # names are original-case identifiers; the receiver is the segment before the first dot
         # (``service.get`` → ``service``), or the whole callee for a bare call (``request``).
