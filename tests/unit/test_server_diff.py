@@ -229,17 +229,41 @@ def test_ignore_patterns_reject_wrong_type(captured: _Captured) -> None:
 
 # --- failure reporting (BREEZEAI-520 / BREEZEAI-681) -------------------------------
 
-def _make_failing_client(captured: _Captured, *, acquire_exc=None, storage_exc=None) -> TestClient:
+class _BrokenInfra(_FakeInfra):
+    """Storage that fails on the first part write or on close — the two places an
+    S3 multipart upload can break after ``open_storage`` succeeded."""
+
+    def __init__(self, c: _Captured, *, write_exc=None, close_exc=None) -> None:
+        super().__init__(c)
+        self._write_exc, self._close_exc = write_exc, close_exc
+
+    def write_line(self, line: str) -> None:
+        if self._write_exc is not None:
+            raise self._write_exc
+        super().write_line(line)
+
+    def close(self) -> str:
+        if self._close_exc is not None:
+            raise self._close_exc
+        return super().close()
+
+
+def _make_failing_client(
+    captured: _Captured, *, acquire_exc=None, storage_exc=None, write_exc=None, close_exc=None,
+    changed: set[str] | None = None,
+) -> TestClient:
     def acquire(settings, body):
         if acquire_exc is not None:
             raise acquire_exc
         d = Path(tempfile.mkdtemp(prefix="difftest-"))
         (d / "a.py").write_text("def f():\n    return 1\n")
-        return str(d), None, []
+        return str(d), changed, []
 
     def open_storage(key):
         if storage_exc is not None:
             raise storage_exc
+        if write_exc is not None or close_exc is not None:
+            return _BrokenInfra(captured, write_exc=write_exc, close_exc=close_exc)
         return _FakeInfra(captured)
 
     deps = ServerDeps(
@@ -289,3 +313,75 @@ def test_storage_failure_reports_upload_step(captured: _Captured) -> None:
     assert r.status_code == 500
     assert r.json() == {"error": "Storage open failed: bucket not configured", "failedStep": "upload"}
     assert captured.notifications == []
+
+
+def test_unexpected_git_error_is_500_not_502(captured: _Captured) -> None:
+    """Only provider-side failures (RuntimeError / httpx) are the provider's fault. A
+    local bug or disk failure keeps the step but is not reported as a bad gateway."""
+    client = _make_failing_client(captured, acquire_exc=KeyError("incomingCommitId"))
+    r = client.post("/api/analyze-diff", json=BODY)
+    assert r.status_code == 500
+    assert r.json() == {
+        "error": "Git acquisition failed unexpectedly: 'incomingCommitId'",
+        "failedStep": "git_acquire",
+    }
+
+
+def test_provider_transport_error_is_502(captured: _Captured) -> None:
+    import httpx
+
+    req = httpx.Request("GET", "https://api.github.com/x")
+    client = _make_failing_client(captured, acquire_exc=httpx.ConnectError("dns", request=req))
+    r = client.post("/api/analyze-diff", json=BODY)
+    assert r.status_code == 502
+    assert r.json()["failedStep"] == "git_acquire"
+
+
+def test_storage_failure_during_streaming_reports_upload_step(captured: _Captured) -> None:
+    """An S3 part upload that breaks inside write_line() used to be reported as
+    parse_stream because run_diff_stream wrapped both. The sink now tags it."""
+    client = _make_failing_client(
+        captured, write_exc=OSError("multipart upload part 3 failed: SlowDown")
+    )
+    r = client.post("/api/analyze-diff", json=BODY)
+    assert r.status_code == 500
+    assert r.json() == {
+        "error": "Upload failed: multipart upload part 3 failed: SlowDown",
+        "failedStep": "upload",
+    }
+    assert captured.notifications == []
+
+
+def test_close_failure_after_streaming_reports_upload_step(captured: _Captured) -> None:
+    """close() finalises the multipart upload; it now runs in the route, not inside
+    run_diff_stream, so its failure is the upload step too."""
+    client = _make_failing_client(captured, close_exc=RuntimeError("CompleteMultipartUpload 500"))
+    r = client.post("/api/analyze-diff", json=BODY)
+    assert r.status_code == 500
+    assert r.json() == {"error": "Upload failed: CompleteMultipartUpload 500", "failedStep": "upload"}
+    assert captured.notifications == []
+
+
+def test_close_failure_on_no_change_commit_reports_upload_step(captured: _Captured) -> None:
+    client = _make_failing_client(
+        captured, close_exc=RuntimeError("CompleteMultipartUpload 500"), changed=set()
+    )
+    r = client.post("/api/analyze-diff", json=BODY)
+    assert r.status_code == 500
+    assert r.json()["failedStep"] == "upload"
+
+
+def test_parser_failure_still_reports_parse_stream(captured: _Captured, monkeypatch: pytest.MonkeyPatch) -> None:
+    from breezeai_cog.server import routes as routes_mod
+
+    def boom(*args, **kwargs):
+        raise ValueError("tree-sitter grammar missing")
+
+    monkeypatch.setattr(routes_mod, "run_diff_stream", boom)
+    client = _make_failing_client(captured)
+    r = client.post("/api/analyze-diff", json=BODY)
+    assert r.status_code == 500
+    assert r.json() == {
+        "error": "Parse/stream failed: tree-sitter grammar missing",
+        "failedStep": "parse_stream",
+    }

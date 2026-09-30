@@ -10,6 +10,7 @@ import re
 import shutil
 import time
 
+import httpx
 from fastapi import APIRouter, BackgroundTasks, File, Form, Request, UploadFile
 from fastapi.responses import JSONResponse
 from starlette.concurrency import run_in_threadpool
@@ -19,7 +20,7 @@ from ..analyzers.nosql import BuildError as NoSqlBuildError
 from ..analyzers.nosql import build_nosql_records
 from ..analyzers.sql import parse_ddl
 from ..core.ignore import append_repo_ignore_patterns
-from ..services.diff import empty_meta, run_diff_stream
+from ..services.diff import UploadError, empty_meta, run_diff_stream
 from ..services.inprocess import analyze_in_memory
 from .deps import ServerDeps
 from .errors import ApiError
@@ -124,8 +125,17 @@ async def analyze_diff(request: Request, background_tasks: BackgroundTasks) -> d
     except ApiError as exc:
         exc.failed_step = exc.failed_step or "git_acquire"
         raise
-    except Exception as exc:  # RuntimeError from git.py: provider REST, clone, timeout
+    except (RuntimeError, httpx.HTTPError) as exc:
+        # The provider's fault: git.py raises RuntimeError for provider REST 4xx/5xx,
+        # clone failures and timeouts; httpx raises for transport errors. 502 = upstream.
         raise ApiError(f"Git acquisition failed: {_scrub(str(exc))}", 502, "git_acquire") from exc
+    except Exception as exc:
+        # Ours: disk full, a KeyError on an unexpected payload, a bug. Still tagged
+        # with the step so the backend can show where it broke, but not blamed on the
+        # provider.
+        raise ApiError(
+            f"Git acquisition failed unexpectedly: {_scrub(str(exc))}", 500, "git_acquire"
+        ) from exc
     storage_key = f"code-ontology/{project_uuid}/{incoming}.ndjson.gz"
     has_changed = filter_set is None or len(filter_set) > 0
     try:
@@ -147,20 +157,26 @@ async def analyze_diff(request: Request, background_tasks: BackgroundTasks) -> d
                 meta = await run_in_threadpool(
                     run_diff_stream, settings, upload, temp_dir, filter_set, repo_name
                 )
-            except ApiError:
+            except ApiError as exc:
+                exc.failed_step = exc.failed_step or "parse_stream"
                 raise
+            except UploadError as exc:
+                # The sink wraps every storage write, so an S3 part-upload failure
+                # mid-stream is reported as the upload step, not as a parser failure.
+                raise ApiError(f"Upload failed: {_scrub(str(exc))}", 500, "upload") from exc
             except Exception as exc:
-                # run_diff_stream closes the upload itself, so an upload error also
-                # surfaces here; the message says which it was.
                 raise ApiError(
                     f"Parse/stream failed: {_scrub(str(exc))}", 500, "parse_stream"
                 ) from exc
         else:
-            try:
-                await run_in_threadpool(upload.close)
-            except Exception as exc:
-                raise ApiError(f"Upload failed: {_scrub(str(exc))}", 500, "upload") from exc
             meta = empty_meta(repo_name)
+        # Closing finalises the multipart upload (or writes the empty artifact), so it
+        # is an upload failure whichever branch ran. run_diff_stream deliberately does
+        # not close.
+        try:
+            await run_in_threadpool(upload.close)
+        except Exception as exc:
+            raise ApiError(f"Upload failed: {_scrub(str(exc))}", 500, "upload") from exc
     finally:
         shutil.rmtree(temp_dir, ignore_errors=True)
 

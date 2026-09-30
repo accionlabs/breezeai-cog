@@ -20,6 +20,13 @@ def _now() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+class UploadError(RuntimeError):
+    """A storage write failed while streaming. Raised instead of the provider's own
+    exception so the route can tell an upload failure (``failedStep: "upload"``) from
+    a parser failure (``parse_stream``) — both otherwise surface from the same call
+    (BREEZEAI-520 / BREEZEAI-681)."""
+
+
 class _InfraStreamSink:
     """Streams (optionally filtered) FileRecords to an open S3 upload and tallies
     projectMetaData over the records actually written. The meta is delivered
@@ -35,7 +42,11 @@ class _InfraStreamSink:
     def write(self, record: FileRecord) -> None:
         if self._filter is not None and record.path not in self._filter:
             return
-        self._upload.write_line(to_line(record))
+        line = to_line(record)
+        try:
+            self._upload.write_line(line)
+        except Exception as exc:  # S3 part upload / gzip pipe failures
+            raise UploadError(str(exc)) from exc
         self.files += 1
         self.funcs += len(record.functions)
         self.classes += len(record.classes)
@@ -52,9 +63,11 @@ class _InfraStreamSink:
 def run_diff_stream(
     settings: Settings, upload: Any, temp_dir: str | Path, filter_set: set[str] | None, repo_name: str
 ) -> dict[str, Any]:
+    """Parse ``temp_dir`` and stream the (filtered) records into ``upload``. The caller
+    owns ``upload`` and must ``close()`` it — closing is what finalises the multipart
+    upload, and the route reports that step separately from parsing."""
     sink = _InfraStreamSink(upload, filter_set)
     pipeline.run_inprocess(temp_dir, settings, sink)
-    upload.close()
     return {
         "repositoryPath": repo_name,
         "repositoryName": repo_name,
