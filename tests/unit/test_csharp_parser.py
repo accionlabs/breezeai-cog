@@ -274,6 +274,62 @@ def test_global_using_alias_and_static_resolve(tmp_path) -> None:
     assert {"Data/OrderRepo.cs", "Helpers/MathUtil.cs"} <= set(rec.importFiles)
 
 
+def test_using_static_unqualified_call_resolves(tmp_path) -> None:
+    # The point of `using static Ns.Type` is that Type's members come into scope
+    # *unqualified*: the call site writes a bare `Add(1,2)` with no receiver. Binding only
+    # the type name covers `MathUtil.Add(…)` (see the test above) but leaves the bare form
+    # unresolved, losing the CALLS edge even though the declaring file is known.
+    rec = _parse_repo(tmp_path, {
+        "Helpers/MathUtil.cs":
+            "namespace Acme.Helpers;\npublic static class MathUtil { public static int Add(int a,int b){return a+b;} }\n",
+        "App/Bare.cs":
+            "using static Acme.Helpers.MathUtil;\n"
+            "namespace Acme.App;\n"
+            "public class Bare { public int Run(){ return Add(1,2); } }\n",
+    }, "App/Bare.cs")
+    calls = {c.name: c.path for f in rec.functions for c in f.calls}
+    assert calls.get("Add") == "Helpers/MathUtil.cs"
+    assert "Helpers/MathUtil.cs" in rec.importFiles
+
+
+def test_colliding_static_imports_do_not_bind(tmp_path) -> None:
+    # Two static imports exposing the same member name: precision-first, like an ambiguous
+    # type (see test_ambiguous_type_does_not_bind). Picking one would attribute the call to
+    # a guess with no signal it was ambiguous, so it stays unresolved.
+    rec = _parse_repo(tmp_path, {
+        "H1/U1.cs":
+            "namespace Acme.H1;\npublic static class U1 { public static string Norm(string s){return s;} }\n",
+        "H2/U2.cs":
+            "namespace Acme.H2;\npublic static class U2 { public static string Norm(string s){return s;} }\n",
+        "App/Collide.cs":
+            "using static Acme.H1.U1;\n"
+            "using static Acme.H2.U2;\n"
+            "namespace Acme.App;\n"
+            "public class Collide { public string Go(string x){ return Norm(x); } }\n",
+    }, "App/Collide.cs")
+    calls = {c.name: c.path for f in rec.functions for c in f.calls}
+    assert calls.get("Norm") is None
+
+
+def test_local_declaration_wins_over_static_import(tmp_path) -> None:
+    # The resolver consults `bindings` before same-file definitions, so a statically
+    # imported member must never be bound over a method the file declares itself —
+    # that would shadow the real local declaration (C# resolves the local one).
+    rec = _parse_repo(tmp_path, {
+        "H1/U1.cs":
+            "namespace Acme.H1;\npublic static class U1 { public static string Norm(string s){return s;} }\n",
+        "App/LocalWins.cs":
+            "using static Acme.H1.U1;\n"
+            "namespace Acme.App;\n"
+            "public class LocalWins {\n"
+            '    string Norm(string s){ return s + "!"; }\n'
+            "    public string Go(string x){ return Norm(x); }\n"
+            "}\n",
+    }, "App/LocalWins.cs")
+    calls = {c.name: c.path for f in rec.functions for c in f.calls}
+    assert calls.get("Norm") == "App/LocalWins.cs"
+
+
 def test_ambiguous_type_does_not_bind(tmp_path) -> None:
     # Precision-first: a type declared in >1 in-repo file must NOT resolve (else a shared
     # name would create false hub edges and collapse unrelated files into one cluster).
