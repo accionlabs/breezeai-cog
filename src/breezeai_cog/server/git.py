@@ -11,6 +11,7 @@ from __future__ import annotations
 import base64
 import logging
 import re
+import shutil
 import subprocess
 import tempfile
 from pathlib import Path
@@ -286,11 +287,15 @@ def clone_repo_full(provider: str, owner: str, project: str, repo: str, incoming
                 subprocess.run(["git", "-C", temp_dir, "checkout", "--quiet", incoming],
                                check=True, capture_output=True, timeout=timeout)
     except subprocess.TimeoutExpired as exc:
+        shutil.rmtree(temp_dir, ignore_errors=True)  # a failed clone must not leak its dir
         raise RuntimeError(f"git clone timed out: {_scrub(str(exc))}") from None
     except subprocess.CalledProcessError as exc:
+        shutil.rmtree(temp_dir, ignore_errors=True)
         stderr = exc.stderr.decode() if exc.stderr else str(exc)
         raise RuntimeError(f"git clone failed: {_scrub(stderr)}") from None
-    import shutil
+    except BaseException:
+        shutil.rmtree(temp_dir, ignore_errors=True)
+        raise
 
     shutil.rmtree(Path(temp_dir) / ".git", ignore_errors=True)
     return temp_dir
