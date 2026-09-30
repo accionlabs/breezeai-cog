@@ -28,7 +28,15 @@ from ...schemas import SCHEMA_VERSION, FileRecord, Function, Statement
 from ...utils import count_loc
 from ..base import BaseParser, ParseContext
 from ..treesitter import node_text, parse_source
-from .classes import _CLASS_TYPES, _declarator_name, _unwrap_template, build_class, build_enum
+from .classes import (
+    _CLASS_TYPES,
+    TYPE_ALIAS_TYPES,
+    _declarator_name,
+    _unwrap_template,
+    build_class,
+    build_enum,
+    type_alias_statement,
+)
 from .functions import (
     build_function,
     defined_names,
@@ -116,6 +124,16 @@ class CppParser(BaseParser):
                         statements.extend(enum_stmts)
                 elif node.type == "function_definition":
                     _emit_function(node, ns)
+                elif node.type in TYPE_ALIAS_TYPES and capture:
+                    # `typedef X Y;` / `using Y = X;` at file or namespace scope. C++ carries
+                    # much of its vocabulary in typedefs, and the aliased type stays on the
+                    # statement's `text`. `using namespace …` / `using Ns::name` are a
+                    # `using_declaration` (an import) and are not in TYPE_ALIAS_TYPES.
+                    statements.append(
+                        type_alias_statement(
+                            node, source, path, parent_id=fid, limit=limit, seen_ids=seen_ids,
+                        )
+                    )
                 elif node.type == "declaration" and capture:
                     # A file-/namespace-scope variable or constant (`const int kMax = 5;`,
                     # `constexpr char kName[] = "x";`). C++ puts much of its controlled
