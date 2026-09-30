@@ -170,7 +170,7 @@ async def analyze_diff(request: Request, background_tasks: BackgroundTasks) -> d
 
     background_tasks.add_task(
         deps.notify, "/code-ontology/stream-ingest",
-        {"s3Key": storage_key, "projectMetaData": meta, "deletedFiles": deleted_files,
+        {"storage_key": storage_key, "projectMetaData": meta, "deletedFiles": deleted_files,
          "projectUuid": project_uuid, "codeOntologyId": code_ontology_id,
          "repoUrl": repo_url, "gitBranch": git_branch, "commitId": incoming},
     )
@@ -237,7 +237,7 @@ async def analyze_sql(
     await run_in_threadpool(_stream_records_to_infra, deps, storage_key, [record])
     background_tasks.add_task(
         deps.notify, "/db-ontology/stream-ingest-s3",
-        {"s3Key": storage_key, "projectUuid": projectUuid, "dataLakeId": dataLakeId,
+        {"storage_key": storage_key, "projectUuid": projectUuid, "dataLakeId": dataLakeId,
          "repositoryName": repositoryName or file_name},
     )
 
@@ -289,7 +289,7 @@ async def analyze_nosql(
     await run_in_threadpool(_stream_records_to_infra, deps, storage_key, build["records"])
     background_tasks.add_task(
         deps.notify, "/db-ontology/stream-ingest-s3",
-        {"s3Key": storage_key, "projectUuid": projectUuid, "dataLakeId": dataLakeId,
+        {"storage_key": storage_key, "projectUuid": projectUuid, "dataLakeId": dataLakeId,
          "repositoryName": repositoryName or primary_name},
     )
 
@@ -347,7 +347,7 @@ async def analyze_es(
     await run_in_threadpool(_stream_records_to_infra, deps, storage_key, build["records"])
     background_tasks.add_task(
         deps.notify, "/db-ontology/stream-ingest-s3",
-        {"s3Key": storage_key, "projectUuid": projectUuid, "dataLakeId": dataLakeId,
+        {"storage_key": storage_key, "projectUuid": projectUuid, "dataLakeId": dataLakeId,
          "repositoryName": repositoryName or primary_name},
     )
 
