@@ -410,6 +410,9 @@ layers do not interact the way you might expect:
 - The gate matches on the file extension case-insensitively, so `Site.Master` and `Default.ASPX`
   are recognised as templates even though the parsers themselves match case-sensitively.
 
+See [Template Capture](template-capture.md) for what each template type produces, worked
+examples, and guidance on which stacks need the flag.
+
 ---
 
 ## HTTP service (advanced)

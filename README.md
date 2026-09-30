@@ -11,6 +11,7 @@ Python reimplementation of `breezeai-code-ontology-generator`.
 - **[Developer Guide](docs/DEVELOPER_GUIDE.md)** — setup, project layout, and how it works.
 - **[Extending Capture](skills/extend-capture/SKILL.md)** — add a new language, framework, or cross-cutting detector (start here); reliability-first discipline.
 - **[Parser Reference](docs/parser-reference.md)** — the mechanical step-by-step for building a parser.
+- **[Template Capture](docs/template-capture.md)** — how `.html` / `.vue` / `.cshtml` / `.aspx` are handled, and why they are skipped by default.
 
 ## Supported languages & frameworks
 
@@ -40,7 +41,7 @@ Python reimplementation of `breezeai-code-ontology-generator`.
 nodes that bury the business logic when reading the graph. They are reported under their own
 `template` skip reason, not `ignored`, and `.repoinclude` does not re-include them. Turn the flag
 on for Razor Pages / Blazor (`@page` routes and `@code` methods live in the markup) and for Vue
-SFC `<script>` blocks.
+SFC `<script>` blocks. Full details: [Template Capture](docs/template-capture.md).
 
 † **Groovy is best-effort / second-tier.** It reliably captures the package / import /
 class / interface / enum / trait / method / field skeleton, but the grammar
