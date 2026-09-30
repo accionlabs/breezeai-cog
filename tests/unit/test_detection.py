@@ -211,6 +211,18 @@ def test_high_collision_verbs_require_db_receiver() -> None:
         ("user.save", "save"),              # bare active-record save, no DB receiver → ambiguous, drop
     ]:
         assert classify_call(callee, method) is None, callee
+    # Ruby class constants are not enough to establish an ActiveRecord receiver.
+    for callee, method in [
+        ("File.delete", "delete"),
+        ("Hash.merge", "merge"),
+        ("Logger.create", "create"),
+        ("Process.execute", "execute"),
+        ("Digest.update", "update"),
+        ("Set.merge", "merge"),
+        ("Marshal.save", "save"),
+        ("ENV.delete", "delete"),
+    ]:
+        assert classify_call(callee, method, language="ruby") is None, callee
     # real ORM on these verbs still matches via a positive DB receiver / vendor hint:
     assert classify_call("userRepository.find", "find") == ("db_method_call", "find", "typeorm")
     assert classify_call("this.repo.delete", "delete") == ("db_method_call", "delete", "typeorm")
@@ -220,6 +232,22 @@ def test_high_collision_verbs_require_db_receiver() -> None:
     assert classify_call("prisma.user.create", "create") == ("db_method_call", "create", "prisma")
     # em.merge / session.persist (Hibernate) keep matching via receiver hints:
     assert classify_call("this.entityManager.merge", "merge") == ("db_method_call", "merge", "typeorm")
+
+
+def test_ruby_active_record_shapes_are_detected() -> None:
+    for callee, method in [
+        ("User.find", "find"), ("User.create", "create"), ("User.find_by", "find_by"),
+        ("user.save", "save"), ("User.where", "where"), ("user.update", "update"),
+        ("User.all", "all"), ("User.destroy_all", "destroy_all"), ("Post.joins", "joins"),
+        ("User.includes", "includes"), ("User.pluck", "pluck"), ("User.first", "first"),
+        ("User.last", "last"),
+    ]:
+        assert classify_call(callee, method, language="ruby") == (
+            "db_method_call", method, "activerecord"
+        )
+
+    assert classify_call("File.delete", "delete", language="ruby") is None
+    assert classify_call("Hash.merge", "merge", language="ruby") is None
 
 
 def test_elasticsearch_client_verbs_gated() -> None:
