@@ -23,7 +23,7 @@ from ..services.diff import empty_meta, run_diff_stream
 from ..services.inprocess import analyze_in_memory
 from .deps import ServerDeps
 from .errors import ApiError
-from .git import parse_repo_url
+from .git import _scrub, parse_repo_url
 
 router = APIRouter()
 
@@ -112,8 +112,21 @@ async def analyze_diff(request: Request, background_tasks: BackgroundTasks) -> d
     repo_name = parsed["repo"]
     ignore_patterns = _normalize_ignore_patterns(body.get("ignorePatterns"))
 
-    temp_dir, filter_set, deleted_files = await run_in_threadpool(deps.acquire_diff, settings, body)
-    storage_key= f"code-ontology/{project_uuid}/{incoming}.ndjson.gz"
+    # Every failure below leaves as an ApiError carrying the stage that broke, so the
+    # Breeze backend (which awaits this call) can persist a real reason + step instead
+    # of a bare "Request failed with status code 500" (BREEZEAI-520 / BREEZEAI-681).
+    # Messages are credential-scrubbed: provider errors echo the response body and git
+    # errors can echo the authenticated clone URL.
+    try:
+        temp_dir, filter_set, deleted_files = await run_in_threadpool(
+            deps.acquire_diff, settings, body
+        )
+    except ApiError as exc:
+        exc.failed_step = exc.failed_step or "git_acquire"
+        raise
+    except Exception as exc:  # RuntimeError from git.py: provider REST, clone, timeout
+        raise ApiError(f"Git acquisition failed: {_scrub(str(exc))}", 502, "git_acquire") from exc
+    storage_key = f"code-ontology/{project_uuid}/{incoming}.ndjson.gz"
     has_changed = filter_set is None or len(filter_set) > 0
     try:
         if ignore_patterns:
@@ -122,13 +135,31 @@ async def analyze_diff(request: Request, background_tasks: BackgroundTasks) -> d
             try:
                 append_repo_ignore_patterns(temp_dir, ignore_patterns)
             except OSError as exc:
-                raise ApiError(f"Failed to apply ignorePatterns: {exc}", 500) from exc
+                raise ApiError(
+                    f"Failed to apply ignorePatterns: {exc}", 500, "ignore_patterns"
+                ) from exc
+        try:
+            upload = deps.open_storage(storage_key)
+        except Exception as exc:  # missing bucket / provider config / boto3 client errors
+            raise ApiError(f"Storage open failed: {_scrub(str(exc))}", 500, "upload") from exc
         if has_changed:
-            upload = deps.open_storage(storage_key)
-            meta = await run_in_threadpool(run_diff_stream, settings, upload, temp_dir, filter_set, repo_name)
+            try:
+                meta = await run_in_threadpool(
+                    run_diff_stream, settings, upload, temp_dir, filter_set, repo_name
+                )
+            except ApiError:
+                raise
+            except Exception as exc:
+                # run_diff_stream closes the upload itself, so an upload error also
+                # surfaces here; the message says which it was.
+                raise ApiError(
+                    f"Parse/stream failed: {_scrub(str(exc))}", 500, "parse_stream"
+                ) from exc
         else:
-            upload = deps.open_storage(storage_key)
-            await run_in_threadpool(upload.close)
+            try:
+                await run_in_threadpool(upload.close)
+            except Exception as exc:
+                raise ApiError(f"Upload failed: {_scrub(str(exc))}", 500, "upload") from exc
             meta = empty_meta(repo_name)
     finally:
         shutil.rmtree(temp_dir, ignore_errors=True)

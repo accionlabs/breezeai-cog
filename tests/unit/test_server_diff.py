@@ -236,3 +236,67 @@ def test_notification_uses_s3Key_the_backend_dto_requires(captured: _Captured) -
     _, payload = captured.notifications[0]
     assert payload["s3Key"] == "code-ontology/P1/abc123.ndjson.gz"
     assert "storage_key" not in payload
+
+
+# --- failure reporting (BREEZEAI-520 / BREEZEAI-681) -------------------------------
+
+def _make_failing_client(captured: _Captured, *, acquire_exc=None, storage_exc=None) -> TestClient:
+    def acquire(settings, body):
+        if acquire_exc is not None:
+            raise acquire_exc
+        d = Path(tempfile.mkdtemp(prefix="difftest-"))
+        (d / "a.py").write_text("def f():\n    return 1\n")
+        return str(d), None, []
+
+    def open_storage(key):
+        if storage_exc is not None:
+            raise storage_exc
+        return _FakeInfra(captured)
+
+    deps = ServerDeps(
+        settings=Settings(),
+        open_storage=open_storage,
+        notify=lambda path, payload: captured.notifications.append((path, payload)),
+        acquire_diff=acquire,
+    )
+    return TestClient(create_app(Settings(), deps), raise_server_exceptions=False)
+
+
+def test_git_failure_returns_structured_error_with_step(captured: _Captured) -> None:
+    """A bare RuntimeError from git.py used to become a body-less 500; the backend
+    then stored only "Request failed with status code 500"."""
+    client = _make_failing_client(captured, acquire_exc=RuntimeError("GitHub API 401: bad credentials"))
+    r = client.post("/api/analyze-diff", json=BODY)
+    assert r.status_code == 502
+    assert r.json() == {
+        "error": "Git acquisition failed: GitHub API 401: bad credentials",
+        "failedStep": "git_acquire",
+    }
+    assert captured.notifications == []  # nothing to ingest, nothing announced
+
+
+def test_git_failure_scrubs_credentials(captured: _Captured) -> None:
+    client = _make_failing_client(
+        captured, acquire_exc=RuntimeError("git clone failed: https://x:ghp_secret@github.com/a/b")
+    )
+    r = client.post("/api/analyze-diff", json=BODY)
+    assert r.status_code == 502
+    assert "ghp_secret" not in r.json()["error"]
+    assert "//***:***@github.com/a/b" in r.json()["error"]
+
+
+def test_typed_git_error_keeps_status_and_gains_step(captured: _Captured) -> None:
+    from breezeai_cog.server.errors import ApiError
+
+    client = _make_failing_client(captured, acquire_exc=ApiError("Unsupported git provider: svn", 400))
+    r = client.post("/api/analyze-diff", json=BODY)
+    assert r.status_code == 400
+    assert r.json() == {"error": "Unsupported git provider: svn", "failedStep": "git_acquire"}
+
+
+def test_storage_failure_reports_upload_step(captured: _Captured) -> None:
+    client = _make_failing_client(captured, storage_exc=ValueError("bucket not configured"))
+    r = client.post("/api/analyze-diff", json=BODY)
+    assert r.status_code == 500
+    assert r.json() == {"error": "Storage open failed: bucket not configured", "failedStep": "upload"}
+    assert captured.notifications == []
