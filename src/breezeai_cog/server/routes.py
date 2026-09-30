@@ -20,7 +20,8 @@ from ..analyzers.nosql import BuildError as NoSqlBuildError
 from ..analyzers.nosql import build_nosql_records
 from ..analyzers.sql import parse_ddl
 from ..core.ignore import append_repo_ignore_patterns
-from ..services.diff import UploadError, empty_meta, run_diff_stream
+from ..errors import UploadError
+from ..services.diff import empty_meta, run_diff_stream
 from ..services.inprocess import analyze_in_memory
 from .deps import ServerDeps
 from .errors import ApiError

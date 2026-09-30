@@ -13,18 +13,12 @@ from .._version import __version__
 from ..config import Settings
 from ..core import pipeline
 from ..emit.ndjson import to_line
+from ..errors import UploadError
 from ..schemas import FileRecord
 
 
 def _now() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-
-
-class UploadError(RuntimeError):
-    """A storage write failed while streaming. Raised instead of the provider's own
-    exception so the route can tell an upload failure (``failedStep: "upload"``) from
-    a parser failure (``parse_stream``) — both otherwise surface from the same call
-    (BREEZEAI-520 / BREEZEAI-681)."""
 
 
 class _InfraStreamSink:
@@ -46,6 +40,9 @@ class _InfraStreamSink:
         try:
             self._upload.write_line(line)
         except Exception as exc:  # S3 part upload / gzip pipe failures
+            # Re-raised as UploadError so the route can tell an upload failure
+            # (failedStep "upload") from a parser failure ("parse_stream"); both
+            # otherwise surface from the same run_diff_stream call.
             raise UploadError(str(exc)) from exc
         self.files += 1
         self.funcs += len(record.functions)
