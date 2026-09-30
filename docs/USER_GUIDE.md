@@ -370,6 +370,12 @@ Most-used settings:
 | Object-storage provider (server) | `BREEZEAI_COG_INFRA_PROVIDER` | `aws` |
 | Storage retries (per request; the SDK retries, so `3` allows 4 tries) | `BREEZEAI_COG_STORAGE_RETRY_ATTEMPTS` | `3` |
 | Storage connect / read timeout (seconds) | `BREEZEAI_COG_STORAGE_CONNECT_TIMEOUT` · `BREEZEAI_COG_STORAGE_READ_TIMEOUT` | `10` · `60` |
+| Git clone timeout (seconds, per subprocess; server) | `BREEZEAI_COG_GIT_CLONE_TIMEOUT` | `1800` |
+| SCM REST API base per provider (server; override for self-hosted) | `BREEZEAI_COG_GITHUB_API_BASE_URL` · `…_GITLAB_…` · `…_BITBUCKET_…` · `…_AZURE_DEVOPS_…` | public clouds |
+| SCM REST timeout / retries / backoff (server) | `BREEZEAI_COG_SCM_API_TIMEOUT` · `BREEZEAI_COG_SCM_API_RETRY_MAX` · `BREEZEAI_COG_SCM_API_RETRY_BACKOFF_SECONDS` | `60` · `3` · `2` |
+| SCM pagination ceiling (pages per listing; server) | `BREEZEAI_COG_SCM_MAX_PAGES` | `100` |
+| SCM fallback token per provider (server; used when the request has no `gitToken`) | `BREEZEAI_COG_SCM_TOKEN_GITHUB` · `…_GITLAB` · `…_BITBUCKET` · `…_AZURE_DEVOPS` | — |
+| Self-hosted SCM instances (server; JSON host→provider, host→API base) | `BREEZEAI_COG_SCM_INSTANCES` · `BREEZEAI_COG_SCM_INSTANCE_BASE_URL_MAPPING` | `{}` |
 
 ### Choosing which files are analyzed
 
@@ -394,13 +400,29 @@ breezeai-cog serve --port 3000        # requires the "[server]" install option
 |---|---|
 | `GET /health` | Liveness check → `{ "status": "ok" }`. |
 | `POST /api/analyze` | Analyze a small set of files sent **in the request body**, returns the ontology as JSON. |
-| `POST /api/analyze-diff` | Analyze a **remote** GitHub/Bitbucket repo (or just the files changed between two commits), upload the result to S3, and notify the backend. |
+| `POST /api/analyze-diff` | Analyze a **remote** git repo — GitHub, Bitbucket, GitLab or Azure DevOps, public cloud or self-hosted — or just the files changed between two commits, upload the result to S3, and notify the backend. |
 | `POST /api/analyze-sql` | Parse an uploaded SQL `.sql` file's tables/views/indexes. |
 | `POST /api/analyze-es` | Parse uploaded Elasticsearch mapping/settings JSON. |
+| `POST /api/git/check-update` | For the Breeze backend: is a stored commit behind the branch tip, and how many files changed? Body `repoUrl`, `gitBranch`, optional `gitToken`, `currentCommitId`. |
+| `POST /api/git/latest-commit` · `/compare` · `/tree` · `/pull-request` | The underlying git-provider operations (tip commit, changed/deleted files between two commits, file list at a commit, read-only pull-request metadata with full base/head commit ids), same body conventions. |
+| `POST /api/git/parse-pr-url` | For the Breeze backend's manual PR trigger: a pasted pull-request URL → provider, canonical repo URL, PR number and the `prLinks` block. No provider call, no token. |
+| `POST /api/git/pr-comment` | **The one write:** post a top-level comment on a pull request (`repoUrl`, `pullRequestId`, `body`, `gitToken` with write scope). Not retried, so a failure never double-posts. |
 
 The `-diff`, `-sql`, and `-es` endpoints stream their results to AWS S3 and notify the Breeze
 backend, so they require the `AWS_*` and `BREEZE_API_URL` settings. Errors come back as
 `{ "error": "<message>" }` with an HTTP `400` (bad request) or `422` (could not process the input).
+
+**Git providers for `/api/analyze-diff`.** The `repoUrl` decides the provider: `github.com`,
+`bitbucket.org`, `gitlab.com`, `dev.azure.com` and `<org>.visualstudio.com` are recognised out of
+the box. A self-hosted instance (GitHub Enterprise, GitLab, Bitbucket Server, Azure DevOps Server)
+is recognised once its host is listed in `BREEZEAI_COG_SCM_INSTANCES` and its REST API base in
+`BREEZEAI_COG_SCM_INSTANCE_BASE_URL_MAPPING`. Pass the credential as `gitToken` on the request
+(Bitbucket expects `username:api_key`); when it is absent the per-provider
+`BREEZEAI_COG_SCM_TOKEN_*` setting is used, and when that is absent too the request is anonymous,
+which only works for public repositories. The first analysis of a repository is a shallow clone;
+later runs that supply `currentCommitId` fetch only the changed files through the provider's REST
+API, for all four providers. A provider API failure is reported as `502`, a malformed credential or
+unknown host as `400`.
 
 ---
 
