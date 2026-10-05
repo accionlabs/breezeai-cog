@@ -1,4 +1,4 @@
-"""Flat statement capture for Scala (gated by --capture-statements).
+"""Flat statement capture for Scala (gated by statement capture).
 
 Emits one Statement per matching node at every depth within the same scope. A
 statement that contains a call is run through the shared detectors

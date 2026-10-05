@@ -315,7 +315,7 @@ def test_statements_require_capture(tmp_path) -> None:
     )
     # still a resolved template (role/link are structural, not gated)…
     assert rec.uiRole == "template"
-    # …but no markup statements without --capture-statements
+    # …but no markup statements without statement capture
     assert rec.statements == []
 
 

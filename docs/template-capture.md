@@ -78,10 +78,10 @@ bring it back — that format is simply not supported yet.
 
 ```bash
 # default — templates skipped
-breezeai-cog repo-to-json-tree --repo . --capture-statements
+breezeai-cog repo-to-json-tree --repo .
 
 # templates included
-breezeai-cog repo-to-json-tree --repo . --capture-statements --capture-templates
+breezeai-cog repo-to-json-tree --repo . --capture-templates
 ```
 
 Or through the environment, which is also how the HTTP service picks it up:
@@ -233,8 +233,8 @@ src/orphan.html           framework=None  uiRole=None
                           (no statements)
 ```
 
-> **Statements need both flags.** Markup is parsed into statements only when
-> `--capture-statements` is also on *and* a grammar exists for that dialect — today, Angular.
+> **Statements need statement capture too.** Markup is parsed into statements only when
+> statement capture is on (the default — not `--no-capture-statements`) *and* a grammar exists for that dialect — today, Angular.
 > A Thymeleaf or Knockout page is still tagged with its framework but produces no statements:
 > better an honest gap than statements parsed with the wrong grammar.
 

@@ -4,7 +4,7 @@ Extends KotlinParser. Claimed for any .kt file that imports from io.ktor.server.
 then detects Ktor HTTP route registrations (get/post/put/delete/patch/head/options
 DSL calls) and emits them as Statement records with semanticType="route".
 
-Route detection is gated by --capture-statements, consistent with the Spring Boot
+Route detection is gated by statement capture, consistent with the Spring Boot
 parser's behaviour for annotated @RequestMapping routes.
 """
 

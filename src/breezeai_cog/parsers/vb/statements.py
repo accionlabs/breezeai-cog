@@ -1,4 +1,4 @@
-"""Flat statement capture for VB.NET (gated by --capture-statements) + shared API/DB
+"""Flat statement capture for VB.NET (gated by statement capture) + shared API/DB
 call detection.
 
 VB wraps each in-body statement in a ``statement`` node and uses ``invocation`` /

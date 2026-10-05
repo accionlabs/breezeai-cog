@@ -1003,7 +1003,7 @@ def test_interface_members_captured(tmp_path) -> None:
     # Function (no body → calls:[]) so callers resolve to implementers via IMPLEMENTS +
     # name match. Every other member — the data field and the type-level call/construct/
     # index signatures — becomes a flat Statement (raw nodeType + full text), gated by
-    # --capture-statements. Nothing is dropped; the nameless signatures carry name=None.
+    # statement capture. Nothing is dropped; the nameless signatures carry name=None.
     src = (
         b"export interface Notifier {\n"
         b"  channel: string;\n"

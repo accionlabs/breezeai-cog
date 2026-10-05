@@ -76,7 +76,19 @@ def repo_to_json_tree(
              "File: <repo>-project-analysis.ndjson.gz. The skip report and logs always go to <repo>/.cog.",
     ),
     language: Optional[list[str]] = typer.Option(None, "--language", help="Restrict to languages (repeatable)."),
-    capture_statements: bool = typer.Option(False, "--capture-statements", help="Capture in-body statements."),
+    no_capture_statements: bool = typer.Option(
+        False, "--no-capture-statements",
+        help="Skip in-body statement capture (API calls, DB queries, routes, events, …). "
+             "Statements are captured by default; this shrinks the output but loses the "
+             "detail most downstream analysis needs. Env: BREEZEAI_COG_CAPTURE_STATEMENTS=false.",
+    ),
+    # Deprecated: capture is the default now. Kept hidden so existing callers (e.g. the
+    # breeze onboard-repository skill) don't fail with "No such option"; still forces
+    # capture on (overriding env/.env), exactly as it did before it became the default.
+    capture_statements: bool = typer.Option(
+        False, "--capture-statements", hidden=True,
+        help="Deprecated — statements are captured by default.",
+    ),
     capture_templates: bool = typer.Option(
         False, "--capture-templates",
         help="Capture markup/view template files (.html .htm .cshtml .razor .aspx .ascx .master .vue). "
@@ -164,6 +176,22 @@ def repo_to_json_tree(
     # unconditionally would clobber BREEZEAI_COG_CAPTURE_TEMPLATES.
     if capture_templates:
         overrides["capture_templates"] = True
+    # Same forwarding rule as capture_templates: only when given, so env can still decide.
+    if no_capture_statements and capture_statements:
+        typer.secho(
+            "error: --capture-statements and --no-capture-statements are mutually exclusive",
+            fg=typer.colors.RED, err=True,
+        )
+        raise typer.Exit(1)
+    if capture_statements:
+        typer.secho(
+            "warning: --capture-statements is deprecated — statements are captured by default; "
+            "drop the flag (use --no-capture-statements to turn capture off).",
+            fg=typer.colors.YELLOW, err=True,
+        )
+        overrides["capture_statements"] = True
+    if no_capture_statements:
+        overrides["capture_statements"] = False
 
     from pydantic import ValidationError
 
@@ -172,7 +200,6 @@ def repo_to_json_tree(
             repo=repo,
             out=out,
             languages=language or None,
-            capture_statements=capture_statements,
             jobs=jobs,
             log_level="DEBUG" if verbose else "INFO",
             **overrides,

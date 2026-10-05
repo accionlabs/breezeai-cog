@@ -557,7 +557,7 @@ def test_catch_finally_clauses_emitted(tmp_path) -> None:
 
 
 def test_enum_members_gated_by_capture_flag(tmp_path) -> None:
-    # Enum members are statements now → gated by --capture-statements (absent without it).
+    # Enum members are statements now → gated by statement capture (absent without it).
     src = 'enum Flags {\n  A = 1,\n  B = 1 << 2,\n}\n'
     p = tmp_path / REL
     p.parent.mkdir(parents=True, exist_ok=True)
