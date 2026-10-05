@@ -27,12 +27,14 @@ from tree_sitter import Node
 from ...schemas import Class, Function
 from ..treesitter import node_text
 from .mappings import (
+    AUTHORIZE_CALL,
     CONFIGURE_METHOD,
     DESCRIPTOR_BASES,
     DESCRIPTOR_PARAM_TYPES,
     FIELD_CALL,
     IGNORE_CALL,
     NAME_CALL,
+    OPERATION_TYPE_NAMES,
 )
 from .naming import camel_case
 
@@ -137,6 +139,105 @@ def _chained_calls(field_call: Node, source: bytes) -> Iterator[tuple[str, Node]
         if name is not None:
             yield name, invocation
         node = invocation
+
+
+def _call_args(call: Node, source: bytes) -> list[str]:
+    """Argument texts in the form the base parser records attribute arguments — a string
+    literal unquoted, anything else as written — so a fluent guard reads like its attribute
+    twin."""
+    args = call.child_by_field_name("arguments")
+    out: list[str] = []
+    for arg in args.named_children if args is not None else []:
+        value = arg.named_children[-1] if arg.type == "argument" and arg.named_children else arg
+        out.append(node_text(value, source).strip('"') if value.type == "string_literal"
+                   else node_text(arg, source))
+    return out
+
+
+def _chain_base(expr: Node) -> Node:
+    """The innermost call of a fluent chain — ``d.Name("Query")`` in
+    ``d.Name("Query").Description("…")``."""
+    node = expr
+    while node.type == "invocation_expression":
+        function_node = node.child_by_field_name("function")
+        inner = (function_node.named_children[0]
+                 if function_node is not None and function_node.type == "member_access_expression"
+                 and function_node.named_children else None)
+        if inner is None or inner.type != "invocation_expression":
+            break
+        node = inner
+    return node
+
+
+def _type_level_calls(body: Node, source: bytes, receiver: str) -> Iterator[tuple[str, Node]]:
+    """``(name, invocation)`` for each call made on the descriptor itself, in source order.
+
+    Only top-level statements of ``Configure`` count, and a chain stops at its first ``Field``:
+    after that the calls configure the field, not the type. So ``d.Field("x").Name("y")`` is a
+    field rename, and a ``Name`` inside an argument lambda is never seen.
+    """
+    for stmt in body.named_children:
+        if stmt.type != "expression_statement" or not stmt.named_children:
+            continue
+        base = _chain_base(stmt.named_children[0])
+        if base.type != "invocation_expression":
+            continue
+        function_node = base.child_by_field_name("function")
+        if function_node is None or _receiver_name(function_node, source) != receiver:
+            continue
+        name = _call_name(function_node, source)
+        if name is None or name == FIELD_CALL:
+            continue
+        yield name, base
+        for name, call in _chained_calls(base, source):
+            if name == FIELD_CALL:
+                break
+            yield name, call
+
+
+def _root_name_arg(call: Node, source: bytes) -> str | None:
+    """The schema name ``Name(...)`` gives the type: a string literal, or
+    ``OperationTypeNames.X``. Any other expression (a constant, a variable) is not in front of us,
+    so it names nothing."""
+    literal = _string_arg(call, source)
+    if literal is not None:
+        return literal
+    for arg in _arguments(call):
+        if arg is not None and arg.type == "member_access_expression":
+            holder, _, member = node_text(arg, source).rpartition(".")
+            if holder.rsplit(".", 1)[-1] == OPERATION_TYPE_NAMES:
+                return member or None
+    return None
+
+
+def named_target(body: Node, source: bytes, receiver: str) -> str | None:
+    """The type a descriptor without a generic argument describes, from its ``Name(...)`` call —
+    how the non-generic ``ObjectTypeExtension`` names what it extends:
+
+        protected override void Configure(IObjectTypeDescriptor d) {
+            d.Name(OperationTypeNames.Query);
+            d.Field("categories").Resolve(…);
+        }
+
+    The last call wins, as it does at runtime.
+    """
+    target = None
+    for name, call in _type_level_calls(body, source, receiver):
+        if name == NAME_CALL:
+            target = _root_name_arg(call, source)
+    return target
+
+
+def type_authorizations(body: Node, source: bytes, receiver: str) -> list[list[str]]:
+    """Arguments of each ``Authorize`` called on the descriptor — guards on every field."""
+    return [_call_args(call, source)
+            for name, call in _type_level_calls(body, source, receiver) if name == AUTHORIZE_CALL]
+
+
+def field_authorizations(field_call: Node, source: bytes) -> list[list[str]]:
+    """Arguments of each ``Authorize`` chained onto one ``Field(...)`` declaration."""
+    return [_call_args(call, source)
+            for name, call in _chained_calls(field_call, source) if name == AUTHORIZE_CALL]
 
 
 def field_declarations(
