@@ -124,6 +124,7 @@ def build_function(
     capture: bool,
     limit: int,
     resolve: CallResolver = noop_resolver,
+    typed_db_ids: frozenset[str] | None = None,
 ) -> tuple[list[Function], list[Statement]]:
     name_node = next((c for c in node.named_children if c.type == "identifier"), None)
     name = node_text(name_node, source) if name_node is not None else "<anonymous>"
@@ -143,5 +144,8 @@ def build_function(
         endLine=end,
         calls=_calls_in_block(body, source, resolve),
     )
-    statements = extract_statements(body, source, path, parent_id=fid, capture=capture, limit=limit, seen_ids=seen_ids)
+    statements = extract_statements(
+        body, source, path, parent_id=fid, capture=capture, limit=limit,
+        seen_ids=seen_ids, typed_db_ids=typed_db_ids,
+    )
     return [fn], statements

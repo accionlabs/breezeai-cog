@@ -92,18 +92,31 @@ _GENERIC = {
     "persist", "merge", "query", "execute",
 }
 
-# ActiveRecord methods that are distinctive when called on a Ruby model or record. Class
-# methods use a constant receiver (``User.find``); instance writes are included separately
-# because the receiver is conventionally lowercase (``user.save``).
-_ACTIVE_RECORD_METHODS = frozenset({
-    "find", "find_by", "where", "all", "create", "save", "update", "destroy",
-    "destroy_all", "joins", "includes", "pluck", "first", "last",
+# ActiveRecord verbs, split by how much they prove on their own. Every Ruby class name is
+# capitalized, so a constant receiver is NOT evidence of a model — the receiver has to be
+# identified from the declarations (``typed_db_ids``, built by ruby/models.py) or the verb
+# has to be one that effectively only exists in ActiveRecord.
+#
+# DISTINCTIVE verbs are safe without an identified receiver: no stdlib or common gem API
+# uses them. GENERIC verbs collide with ordinary Ruby (``Tempfile.create``, ``Date.first``,
+# ``Settings.all``) and are therefore only honoured on an identified model receiver.
+_ACTIVE_RECORD_DISTINCTIVE = frozenset({
+    "find_by", "find_by!", "find_each", "find_in_batches", "where", "where_not",
+    "joins", "includes", "pluck", "destroy_all", "update_all", "left_outer_joins", "take",
 })
-_ACTIVE_RECORD_INSTANCE_METHODS = frozenset({"save", "update", "destroy", "destroy_all"})
+_ACTIVE_RECORD_GENERIC = frozenset({
+    "find", "all", "create", "create!", "first", "last", "exists",
+})
+#: Verbs that write through a model *instance* (``user.save``), where the receiver is
+#: conventionally lowercase. Always require an identified receiver — ``config.save`` and
+#: ``image.update`` are ordinary Ruby.
+_ACTIVE_RECORD_INSTANCE_METHODS = frozenset({
+    "save", "save!", "update", "update!", "destroy", "destroy!", "update_attributes",
+})
+_ACTIVE_RECORD_METHODS = (
+    _ACTIVE_RECORD_DISTINCTIVE | _ACTIVE_RECORD_GENERIC | _ACTIVE_RECORD_INSTANCE_METHODS
+)
 _RUBY_CONSTANT_RECEIVER = re.compile(r"[A-Z][A-Za-z0-9_]*(?:::[A-Z][A-Za-z0-9_]*)*")
-_RUBY_NON_AR_CONSTANTS = frozenset({
-    "Digest", "ENV", "File", "Hash", "Logger", "Marshal", "Process", "Set",
-})
 
 # Receiver substring -> hint (refines _GENERIC).
 # Needles checked via `needle in low` (full lowercased callee). Ambiguous short tokens
@@ -206,17 +219,44 @@ def _has_ef_source(low_callee: str) -> bool:
     return any(mk in low_callee for mk in _EF_SOURCE_MARKERS)
 
 
-def _is_active_record_call(callee: str, method: str, language: str | None) -> bool:
-    if language != "ruby" or method.lower() not in _ACTIVE_RECORD_METHODS:
+def _is_active_record_call(
+    callee: str, method: str, language: str | None,
+    typed_db_ids: "frozenset[str] | None" = None,
+) -> bool:
+    """Whether a Ruby call is ActiveRecord data access.
+
+    Three tiers, strongest evidence first:
+
+    1. The receiver is an **identified model** (a constant that transitively extends
+       ``ActiveRecord::Base``, or a variable assigned from one) — any ActiveRecord verb
+       counts. ``typed_db_ids`` carries that set; see ``ruby/models.py``.
+    2. The verb is **distinctive** to ActiveRecord (``where`` / ``find_by`` / ``pluck`` / …)
+       on a constant receiver — trusted without the index, so a model defined in a gem
+       (or a file parsed on its own) is still captured.
+    3. Nothing else. A generic verb on an unidentified constant (``Tempfile.create``,
+       ``Settings.all``) and an instance write on an unidentified variable
+       (``config.save``) are ordinary Ruby — absent beats wrong.
+    """
+    if language != "ruby":
+        return False
+    m = method.lower().rstrip("?")
+    if m not in _ACTIVE_RECORD_METHODS:
         return False
     receiver = callee.rsplit(".", 1)[0] if "." in callee else ""
     terminal = receiver.rsplit(".", 1)[-1]
-    if _RUBY_CONSTANT_RECEIVER.fullmatch(terminal) and terminal not in _RUBY_NON_AR_CONSTANTS:
+    if not terminal:
+        return False
+    # Tier 1 — the receiver is a known model (constant or an instance assigned from one).
+    # Checked first because it is two set lookups, and it is the common case in an indexed
+    # repo; the constant regex below is only needed for the fallback tier.
+    if typed_db_ids and (
+        terminal in typed_db_ids or terminal.rsplit("::", 1)[-1] in typed_db_ids
+    ):
         return True
+    # Tier 2 — the verb alone is proof, provided it is a class-level query.
     return (
-        method.lower() in _ACTIVE_RECORD_INSTANCE_METHODS
-        and terminal.isidentifier()
-        and _RUBY_CONSTANT_RECEIVER.fullmatch(terminal) is None
+        m in _ACTIVE_RECORD_DISTINCTIVE
+        and _RUBY_CONSTANT_RECEIVER.fullmatch(terminal) is not None
     )
 
 # ElasticSearch / OpenSearch client verbs. These collide with ordinary code (``search`` is
@@ -283,7 +323,7 @@ def match_db(callee: str, method: str, language: str | None = None,
     # the call chain shows a queryable/DbContext source; else LINQ-to-Objects — drop, don't tag.
     if m in _EF_LINQ_VERBS and language in _DOTNET:
         return "entity_framework" if _has_ef_source(low) else None
-    if _is_active_record_call(callee, method, language):
+    if _is_active_record_call(callee, method, language, typed_db_ids):
         return "activerecord"
     receiver = low.rsplit(".", 1)[0].rsplit(".", 1)[-1] if "." in low else ""
     # ES match is gated on the TERMINAL receiver only (the segment the verb is invoked on) —

@@ -4,6 +4,9 @@ from __future__ import annotations
 
 from tree_sitter import Node
 
+from pathlib import Path
+from typing import Sequence
+
 from ...emit import file_id
 from ...schemas import SCHEMA_VERSION, FileRecord, Function, Statement
 from ...utils import count_loc
@@ -14,6 +17,7 @@ from .classes import build_class, iter_definitions
 from .functions import build_function, defined_names
 from .imports import extract_imports
 from .mappings import STATEMENT_TYPES, FRAMEWORKS
+from .models import build_model_index, model_receivers
 from .statement import extract_statements
 
 
@@ -27,6 +31,16 @@ class RubyParser(BaseParser):
 
     def claims(self, path: str, source: bytes, parse_timeout_micros: int = 0) -> bool:
         return True
+
+    def build_index(
+        self, repo_root: Path, files: Sequence[Path], jobs: int = 1
+    ) -> frozenset[str]:
+        """Repo-level pre-pass: the ActiveRecord model constants (see ``models.py``).
+
+        A model is declared in its own file but queried from controllers and services, so
+        the identity that separates ``User.find`` from ``Tempfile.create`` can only be
+        known repo-wide."""
+        return build_model_index(Path(repo_root), files, jobs)
 
     def parse_file(self, ctx: ParseContext) -> FileRecord:
         root = parse_source("ruby", ctx.source, ctx.parse_timeout_micros).root_node
@@ -45,6 +59,10 @@ class RubyParser(BaseParser):
 
         resolve = resolve_for_scope(root)
 
+        index = ctx.resolution_index
+        models = index if isinstance(index, frozenset) else frozenset()
+        typed_db_ids = model_receivers(root, source, models) or None
+
         functions: list[Function] = []
         classes = []
         statements: list[Statement] = []
@@ -60,6 +78,7 @@ class RubyParser(BaseParser):
                     capture=capture,
                     limit=limit,
                     resolve_for_scope=resolve_for_scope,
+                    typed_db_ids=typed_db_ids,
                 )
                 classes.extend(cls_list)
                 functions.extend(methods)
@@ -75,12 +94,16 @@ class RubyParser(BaseParser):
                     capture=capture,
                     limit=limit,
                     resolve=resolve,
+                    typed_db_ids=typed_db_ids,
                 )
                 functions.extend(fns)
                 statements.extend(fn_stmts)
 
         statements.extend(
-            extract_statements(root, source, path, parent_id=fid, capture=capture, limit=limit, seen_ids=seen_ids)
+            extract_statements(
+                root, source, path, parent_id=fid, capture=capture, limit=limit,
+                seen_ids=seen_ids, typed_db_ids=typed_db_ids,
+            )
         )
 
         return FileRecord(

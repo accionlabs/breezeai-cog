@@ -74,6 +74,7 @@ def extract_statements(
     capture: bool,
     limit: int,
     seen_ids: set[str],
+    typed_db_ids: frozenset[str] | None = None,
 ) -> list[Statement]:
     if not capture or body is None:
         return []
@@ -97,6 +98,7 @@ def extract_statements(
                 name_of=_name_of,
                 call_details=_call_details,
                 language="ruby",
+                typed_db_ids=typed_db_ids,
             )
         )
     return out

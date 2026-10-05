@@ -73,7 +73,7 @@ end
 def test_ruby_statements_use_shared_semantic_detection(tmp_path: Path) -> None:
     source = b'''class Data
   def load(id)
-    User.find(id)
+    User.where(id: id)
     Net::HTTP.get(uri)
     "SELECT * FROM users"
   end
@@ -195,3 +195,51 @@ end
     call = next(call for call in run.calls if call.name == "call")
     assert call.path is None
     assert any(item.endswith("lib/service.rb") for item in rec.importFiles)
+
+
+def test_ruby_model_index_identifies_activerecord_receivers(tmp_path: Path) -> None:
+    """End-to-end: the repo pre-pass finds the model, so generic verbs in a *different*
+    file (the controller) are trusted. Without that evidence they would be dropped."""
+    (tmp_path / "app" / "models").mkdir(parents=True)
+    (tmp_path / "app" / "models" / "user.rb").write_bytes(
+        b"class User < ApplicationRecord\nend\n"
+    )
+    controller = tmp_path / "app" / "controllers" / "users_controller.rb"
+    controller.parent.mkdir(parents=True)
+    controller.write_bytes(
+        b"class UsersController < ApplicationController\n"
+        b"  def show\n"
+        b"    user = User.find(params[:id])\n"
+        b"    user.save\n"
+        b"    Tempfile.create('x')\n"
+        b"  end\n"
+        b"end\n"
+    )
+
+    parser = RubyParser()
+    index = parser.build_index(tmp_path, [tmp_path / "app" / "models" / "user.rb", controller])
+    assert "User" in index
+
+    rec = parser.parse_file(ParseContext(
+        path="app/controllers/users_controller.rb", abs_path=controller,
+        source=controller.read_bytes(), repo_root=tmp_path,
+        capture_statements=True, resolution_index=index,
+    ))
+    hints = {s.text.splitlines()[0]: s.dataAccessHint for s in rec.statements
+             if s.semanticType == "db_method_call"}
+    assert any("User.find" in k for k in hints), hints
+    assert any("user.save" in k for k in hints), hints
+    # Tempfile.create shares a verb with ActiveRecord but is not a model -> never tagged.
+    assert not any("Tempfile" in k for k in hints), hints
+
+
+def test_ruby_generic_verbs_dropped_without_model_evidence(tmp_path: Path) -> None:
+    """The cost of the gate: with no index (single-file parse, or a model defined in a gem)
+    a generic verb is dropped rather than guessed."""
+    src = b"class C\n  def go\n    Thing.create(1)\n    Thing.all\n  end\nend\n"
+    p = tmp_path / "c.rb"
+    p.write_bytes(src)
+    rec = RubyParser().parse_file(ParseContext(
+        path="c.rb", abs_path=p, source=src, repo_root=tmp_path, capture_statements=True,
+    ))
+    assert not any(s.semanticType == "db_method_call" for s in rec.statements)

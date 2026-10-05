@@ -234,20 +234,51 @@ def test_high_collision_verbs_require_db_receiver() -> None:
     assert classify_call("this.entityManager.merge", "merge") == ("db_method_call", "merge", "typeorm")
 
 
-def test_ruby_active_record_shapes_are_detected() -> None:
+def test_ruby_active_record_distinctive_verbs_need_no_index() -> None:
+    """Verbs that effectively only exist in ActiveRecord are trusted on a bare constant —
+    no stdlib or common-gem class API uses them, so the receiver needs no identification."""
     for callee, method in [
-        ("User.find", "find"), ("User.create", "create"), ("User.find_by", "find_by"),
-        ("user.save", "save"), ("User.where", "where"), ("user.update", "update"),
-        ("User.all", "all"), ("User.destroy_all", "destroy_all"), ("Post.joins", "joins"),
-        ("User.includes", "includes"), ("User.pluck", "pluck"), ("User.first", "first"),
-        ("User.last", "last"),
+        ("User.find_by", "find_by"), ("User.where", "where"), ("Post.joins", "joins"),
+        ("User.includes", "includes"), ("User.pluck", "pluck"),
+        ("User.destroy_all", "destroy_all"), ("User.update_all", "update_all"),
+        ("User.take", "take"),
     ]:
         assert classify_call(callee, method, language="ruby") == (
             "db_method_call", method, "activerecord"
         )
 
-    assert classify_call("File.delete", "delete", language="ruby") is None
-    assert classify_call("Hash.merge", "merge", language="ruby") is None
+
+def test_ruby_generic_verbs_require_an_identified_model() -> None:
+    """``find``/``all``/``create``/``first``/``last`` collide with real stdlib and gem APIs
+    (``Tempfile.create``, ``Settings.all``, ``Date.first``), so they only count when the
+    receiver is a known model. Absent beats wrong."""
+    models = frozenset({"User", "user"})
+    for callee, method in [
+        ("User.find", "find"), ("User.create", "create"), ("User.all", "all"),
+        ("User.first", "first"), ("User.last", "last"),
+        ("user.save", "save"), ("user.update", "update"), ("user.destroy", "destroy"),
+    ]:
+        assert classify_call(callee, method, language="ruby", typed_db_ids=models) == (
+            "db_method_call", method, "activerecord"
+        )
+        assert classify_call(callee, method, language="ruby") is None
+
+
+def test_ruby_non_activerecord_constants_are_never_data_access() -> None:
+    """Real class-level APIs that share a name with an ActiveRecord verb. None is a model,
+    so none may be tagged — even though every Ruby class name is capitalized."""
+    for callee, method in [
+        ("File.delete", "delete"), ("Hash.merge", "merge"), ("Tempfile.create", "create"),
+        ("FileUtils.create", "create"), ("Pathname.create", "create"),
+        ("Struct.create", "create"), ("CSV.create", "create"), ("Logger.create", "create"),
+        ("Settings.all", "all"), ("Flipper.all", "all"), ("Thread.all", "all"),
+        ("Set.all", "all"), ("Date.first", "first"), ("Time.last", "last"),
+        ("Timeout.first", "first"), ("File.find", "find"), ("Dir.find", "find"),
+        ("Gem.find", "find"), ("ENV.find", "find"), ("Process.find", "find"),
+        ("File.exists", "exists"), ("Marshal.save", "save"), ("Digest.update", "update"),
+        ("config.save", "save"), ("image.update", "update"),
+    ]:
+        assert classify_call(callee, method, language="ruby") is None, callee
 
 
 def test_elasticsearch_client_verbs_gated() -> None:

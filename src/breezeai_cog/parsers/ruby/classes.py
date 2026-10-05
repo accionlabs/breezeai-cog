@@ -32,6 +32,7 @@ def build_class(
     capture: bool,
     limit: int,
     resolve_for_scope,
+    typed_db_ids: frozenset[str] | None = None,
 ):
     name = _name_of_class(node, source)
     resolve = resolve_for_scope(node)
@@ -43,7 +44,10 @@ def build_class(
     nested_classes: list[Class] = []
 
     if body is not None:
-        statements.extend(extract_statements(body, source, path, parent_id=cid, capture=capture, limit=limit, seen_ids=seen_ids))
+        statements.extend(extract_statements(
+            body, source, path, parent_id=cid, capture=capture, limit=limit,
+            seen_ids=seen_ids, typed_db_ids=typed_db_ids,
+        ))
         for child in body.named_children:
             if child.type == "method":
                 fns, fn_stmts = build_function(
@@ -56,6 +60,7 @@ def build_class(
                     capture=capture,
                     limit=limit,
                     resolve=resolve,
+                    typed_db_ids=typed_db_ids,
                 )
                 methods.extend(fns)
                 statements.extend(fn_stmts)
@@ -69,6 +74,7 @@ def build_class(
                     capture=capture,
                     limit=limit,
                     resolve_for_scope=resolve_for_scope,
+                    typed_db_ids=typed_db_ids,
                 )
                 nested_classes.extend(sub_classes)
                 methods.extend(sub_methods)
