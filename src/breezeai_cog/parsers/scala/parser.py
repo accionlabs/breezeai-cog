@@ -61,7 +61,7 @@ class ScalaParser(BaseParser):
 
     def extract(self, root: Node, ctx: ParseContext) -> FileRecord:
         ids = (
-            collect_http_client_ids(type_map(root, ctx.source))
+            collect_http_client_ids(type_map(root, ctx.source), ctx.source)
             if ctx.capture_statements
             else frozenset()
         )
