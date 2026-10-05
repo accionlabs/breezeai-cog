@@ -63,6 +63,32 @@ def test_typed_scala_http_clients_and_builder_chains() -> None:
     assert not any("not-http.example" in (s.endpoint or "") for s in calls)
 
 
+REST_TEMPLATE_SRC = b'''package example
+
+import org.springframework.web.client.RestTemplate
+import java.net.http.HttpClient
+
+class Calls(
+  restTemplate: RestTemplate,
+  httpClient: HttpClient,
+) {
+  def run(): Unit = {
+    restTemplate.getForObject(uri, classOf[String])
+    restTemplate.postForObject("/orders", body, classOf[String])
+    httpClient.send(req, handler)
+  }
+}
+'''
+
+
+def test_resttemplate_and_java_net_http_resolve_without_guessing() -> None:
+    record = _parse(REST_TEMPLATE_SRC)
+    calls = {s.method: s for s in record.statements if s.semanticType == "api_call"}
+    assert calls["GET"]
+    assert calls["POST"]
+    assert calls["REQUEST"]
+
+
 def test_scala_http_client_ids_do_not_leak_between_files() -> None:
     _parse()
     source = b'''class Plain {
