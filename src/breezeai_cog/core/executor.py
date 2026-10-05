@@ -30,14 +30,50 @@ _WORKER: dict[str, object] = {}
 
 
 def _options(settings) -> dict:
+    from .registry import discover_builtin, template_extensions
+
+    # The extensions the scanner is dropping this run — empty when --capture-templates is on.
+    # Needed here (not just in the scanner) to prune edges that would otherwise point at a
+    # File node that was never emitted; see _prune_template_edges.
+    if settings.capture_templates:
+        dropped: frozenset[str] = frozenset()
+    else:
+        discover_builtin()  # the main process may not have registered yet
+        dropped = template_extensions()
     return {
         "capture_statements": settings.capture_statements,
+        "template_extensions": dropped,
         "statement_text_limit": settings.statement_text_limit,
         "parse_timeout_micros": int(settings.parse_timeout * 1_000_000),
         "max_concat_depth": settings.max_concat_depth,
         "log_format": settings.log_format,
         "log_level": settings.log_level,
     }
+
+
+def _prune_template_edges(record: FileRecord, dropped: frozenset[str]) -> None:
+    """Drop cross-file edges pointing at a template the scanner skipped.
+
+    A skipped template is still on disk, so a resolver that probes the filesystem happily
+    binds to it — ``parsers/typescript/imports.py`` deliberately resolves ``./Avatar.vue``
+    because "the Vue parser emits a real File node for it". With the template gate on that
+    node is never emitted, so the edge would dangle. Pruning here (the single post-parse
+    chokepoint shared by the worker pool, ``run_inprocess`` and ``iter_records``) covers
+    every parser and any markup type added later, rather than patching each resolver.
+
+    ``calls[].path`` is set to ``None`` rather than dropping the call — the call really did
+    happen, only its target file is out of scope (honest-null, as elsewhere).
+    """
+    if not dropped:
+        return
+    def is_template(path: str) -> bool:
+        return os.path.splitext(path)[1].lower() in dropped
+
+    record.importFiles = [p for p in record.importFiles if not is_template(p)]
+    for holder in (*record.functions, *record.classes):
+        for call in getattr(holder, "calls", ()):
+            if call.path is not None and is_template(call.path):
+                call.path = None
 
 
 def _parse_entry(path: str, repo_root: str, options: dict) -> FileRecord | None:
@@ -83,6 +119,7 @@ def _parse_entry(path: str, repo_root: str, options: dict) -> FileRecord | None:
             "parse.file.failed", path=path, parser=parser.name, error=str(exc)
         )
         return None
+    _prune_template_edges(record, options.get("template_extensions") or frozenset())
     summary = summarize_skipped_concats(path)  # one clean, human-readable line if any
     if summary:
         get_logger("breezeai_cog.worker").warning(summary)

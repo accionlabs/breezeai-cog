@@ -11,6 +11,10 @@ Reasons (file-level, counted in :attr:`counts`):
 - ``ignored`` — matched an ignore rule (built-in ``default_ignores.txt``,
   ``.gitignore`` / ``.repoignore``, or a per-language layer-2 rule) and was not
   re-included via ``.repoinclude``.
+- ``template`` — a markup/view file (``.html``/``.cshtml``/``.aspx``/``.vue``…) dropped
+  because ``--capture-templates`` is off. A separate bucket from ``ignored`` on purpose:
+  it is a capture-scope decision, not an ignore rule, and ``.repoinclude`` does not
+  override it.
 - ``oversized`` — larger than ``max_file_size`` (2 MB default).
 
 Pruned **directories** are recorded in :attr:`dirs` but are intentionally **not**

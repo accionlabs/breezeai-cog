@@ -38,6 +38,7 @@ def test_defaults(env) -> None:
     s = _settings()
     assert s.repo is None and s.languages is None and s.jobs is None
     assert s.capture_statements is False and s.upload is False
+    assert s.capture_templates is False
     assert s.log_level == "INFO" and s.log_format == "plaintext" and s.log_to_file is True
     assert s.port == 3000
     assert s.statement_text_limit == 8000 and s.max_file_size == 2_000_000
@@ -118,3 +119,10 @@ def test_secret_not_leaked(env) -> None:
     assert isinstance(s.user_api_key, SecretStr)
     assert "topsecret" not in repr(s)
     assert s.user_api_key.get_secret_value() == "topsecret"
+
+
+def test_capture_templates_from_env(env) -> None:
+    env.setenv("BREEZEAI_COG_CAPTURE_TEMPLATES", "true")
+    assert _settings().capture_templates is True
+    # init kwargs outrank env — which is why the CLI forwards the flag only when given
+    assert _settings(capture_templates=False).capture_templates is False

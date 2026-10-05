@@ -47,6 +47,7 @@ def analyze_repo(
     *,
     languages: list[str] | None = None,
     capture_statements: bool = False,
+    capture_templates: bool = False,
     out: str | Path | None = None,
     jobs: int | None = None,
 ) -> AnalysisResult:
@@ -55,6 +56,7 @@ def analyze_repo(
         repo=Path(path),
         languages=languages,
         capture_statements=capture_statements,
+        capture_templates=capture_templates,
         out=Path(out) if out is not None else None,
         jobs=jobs,
     )
@@ -66,10 +68,14 @@ def iter_file_records(
     *,
     languages: list[str] | None = None,
     capture_statements: bool = False,
+    capture_templates: bool = False,
 ) -> Iterator[FileRecord]:
     """Stream ``FileRecord``s for programmatic consumption (no file written)."""
     settings = Settings(
-        repo=Path(path), languages=languages, capture_statements=capture_statements
+        repo=Path(path),
+        languages=languages,
+        capture_statements=capture_statements,
+        capture_templates=capture_templates,
     )
     return AnalysisService(settings).iter_file_records(path)
 

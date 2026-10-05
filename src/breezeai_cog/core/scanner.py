@@ -3,7 +3,12 @@
 Walks a local directory and yields ``(path, language)`` for each file that survives
 the ordered filter chain — **paths only, no content reads**:
 
-    extension allow-list (classify)  ->  ignore/include  ->  max_file_size  ->  symlink guard
+    ignore/include  ->  skip_rule  ->  extension allow-list (classify)  ->  max_file_size  ->  symlink guard
+
+``skip_rule`` is the caller's extra drop hook (the pipeline uses it for the template
+gate). It runs *after* ignore/include, so an ignored template is still reported as
+``ignored``, and *before* ``classify``, so the drop does not depend on which parser
+would have claimed the file.
 
 Directories are pruned when ignored (so ``node_modules/`` etc. are never descended).
 Symlinked directories are never followed and visited real paths are tracked, so the
@@ -27,11 +32,16 @@ _Stack = list[tuple[str, object]]
 #: Returns the language name for a path, or ``None`` if no parser claims it.
 Classifier = Callable[[str], str | None]
 
+#: Returns a skip reason for a path, or ``None`` to keep it. Lets a caller drop files for
+#: its own reason without teaching the scanner what that reason means.
+SkipRule = Callable[[str], str | None]
+
 
 class OnSkip(Protocol):
     """Called once per dropped file/directory. ``reason`` is one of
-    ``ignored`` / ``unsupported`` / ``oversized``; ``is_dir`` marks a pruned
-    directory; ``size`` carries the byte size for ``oversized`` files."""
+    ``ignored`` / ``template`` / ``unsupported`` / ``oversized`` (``template`` comes from
+    the caller's ``skip_rule``); ``is_dir`` marks a pruned directory; ``size`` carries the
+    byte size for ``oversized`` files."""
 
     def __call__(
         self, path: str, reason: str, *, is_dir: bool = ..., size: int | None = ...
@@ -61,6 +71,7 @@ def scan(
     engine: IgnoreEngine,
     max_file_size: int,
     follow_symlinks: bool = False,
+    skip_rule: SkipRule | None = None,
     on_skip: OnSkip | None = None,
 ) -> Iterator[ScanEntry]:
     root = Path(repo_root)
@@ -105,6 +116,10 @@ def scan(
                 if not keep(rel, False, ig, inc):
                     if on_skip is not None:
                         on_skip(rel, "ignored")
+                    continue
+                if skip_rule is not None and (reason := skip_rule(rel)) is not None:
+                    if on_skip is not None:
+                        on_skip(rel, reason)
                     continue
                 language = classify(rel)
                 if language is None:
