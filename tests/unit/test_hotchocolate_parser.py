@@ -830,3 +830,128 @@ def test_registration_only_root_sets_framework() -> None:
     p = _parser_with_root_types({"BookQueries": "query"})
     rec = _parse(p, REGISTRATION_ONLY_QUERY, "BookQueries.cs")
     assert rec.framework == "graphql"
+
+
+# v11/v12 fluent roots: AddQueryType<BookQueriesType>() registers the descriptor class itself,
+# AddMutationType<BookMutations>() the type a descriptor describes. Neither carries an attribute.
+REGISTRATION_ONLY_DESCRIPTORS = b"""using HotChocolate.Types;
+namespace Catalog {
+  public class BookQueriesType : ObjectType<BookQueries> {
+    protected override void Configure(IObjectTypeDescriptor<BookQueries> d) {
+      d.Field("books").Resolve(ctx => null);
+    }
+  }
+  public class BookMutationsType : ObjectType<BookMutations> {
+    protected override void Configure(IObjectTypeDescriptor<BookMutations> d) {
+      d.Field("addBook").Resolve(ctx => null);
+    }
+  }
+  public class BookType : ObjectType<Book> {
+    protected override void Configure(IObjectTypeDescriptor<Book> d) {
+      d.Field("title").Resolve(ctx => null);
+    }
+  }
+}
+"""
+
+
+def test_registration_only_descriptor_emits_operations() -> None:
+    p = _parser_with_root_types({"BookQueriesType": "query", "BookMutations": "mutation"})
+    ops = _by_endpoint(_parse(p, REGISTRATION_ONLY_DESCRIPTORS, "Types.cs"))
+    # The registered descriptor and the descriptor of a registered type are roots; an
+    # unregistered data type's fields stay shape.
+    assert set(ops) == {"books", "addBook"}
+    assert ops["books"].routeKind == "query" and ops["addBook"].routeKind == "mutation"
+
+
+# The non-generic ObjectTypeExtension names the type it extends with d.Name(...), not a generic
+# argument — the form both fluent root extensions in a real service took.
+NAMED_EXTENSIONS = b"""using HotChocolate.Types;
+namespace Shop {
+  public class ReportQueries : ObjectTypeExtension {
+    protected override void Configure(IObjectTypeDescriptor descriptor) {
+      descriptor.Name(OperationTypeNames.Query);
+      descriptor.Field("categories").Resolve(ctx => null);
+    }
+  }
+
+  public class AdminMutations : ObjectTypeExtension {
+    protected override void Configure(IObjectTypeDescriptor descriptor) {
+      descriptor.Name("Mutation").Description("Admin operations");
+      descriptor.Field("approveAllPendingOrders").Resolve(ctx => null);
+    }
+  }
+}
+"""
+
+
+def test_named_extension_resolves_its_root() -> None:
+    ops = _by_endpoint(_parse(CSharpHotChocolateParser(), NAMED_EXTENSIONS, "Extensions.cs"))
+    assert set(ops) == {"categories", "approveAllPendingOrders"}
+    assert ops["categories"].routeKind == "query"
+    # Name(...) heading a chain still names the type.
+    assert ops["approveAllPendingOrders"].routeKind == "mutation"
+
+
+def test_unreadable_or_non_root_name_yields_no_routes() -> None:
+    # A constant is not in front of us, a field-level .Name() renames the field rather than the
+    # type, and a data type's fields are its shape — none of them is an endpoint.
+    src = b"""using HotChocolate.Types;
+namespace Shop {
+  public class ByConstant : ObjectTypeExtension {
+    protected override void Configure(IObjectTypeDescriptor d) {
+      d.Name(Names.Query);
+      d.Field("a").Resolve(ctx => null);
+    }
+  }
+  public class FieldRename : ObjectTypeExtension {
+    protected override void Configure(IObjectTypeDescriptor d) {
+      d.Field("b").Name("Query").Resolve(ctx => null);
+    }
+  }
+  public class DataType : ObjectTypeExtension {
+    protected override void Configure(IObjectTypeDescriptor d) {
+      d.Name("Book");
+      d.Field("c").Resolve(ctx => null);
+    }
+  }
+}
+"""
+    assert _routes(_parse(CSharpHotChocolateParser(), src, "Extensions.cs")) == []
+
+
+# Fluent authorization: per field on the chain, and type-wide on the descriptor itself.
+FLUENT_GUARDS = b"""using HotChocolate.Types;
+namespace Shop {
+  public class ReportQueries : ObjectTypeExtension<Query> {
+    protected override void Configure(IObjectTypeDescriptor<Query> d) {
+      d.Field("dailySalesReport").Authorize("Admin").Resolve(ctx => null);
+      d.Field("categories").Resolve(ctx => null);
+    }
+  }
+  public class AdminMutations : ObjectTypeExtension {
+    protected override void Configure(IObjectTypeDescriptor d) {
+      d.Name(OperationTypeNames.Mutation);
+      d.Authorize();
+      d.Field("notifyLowStock").Authorize().Resolve(ctx => null);
+      d.Field("restock").Authorize(policy: "Ops").Resolve(ctx => null);
+    }
+  }
+}
+"""
+
+
+def test_fluent_field_authorize_becomes_a_guard() -> None:
+    ops = _by_endpoint(_parse(CSharpHotChocolateParser(), FLUENT_GUARDS, "Guards.cs"))
+    report = ops["dailySalesReport"]
+    assert report.guards == ["Authorize(Admin)"] and report.authRequired is True
+    # An unguarded field stays unguarded, as an unattributed method does.
+    assert ops["categories"].guards is None and ops["categories"].authRequired is None
+
+
+def test_descriptor_authorize_guards_every_field() -> None:
+    ops = _by_endpoint(_parse(CSharpHotChocolateParser(), FLUENT_GUARDS, "Guards.cs"))
+    # Type-level Authorize() applies to every field and dedupes with an identical field one,
+    # mirroring class-level [Authorize].
+    assert ops["notifyLowStock"].guards == ["Authorize"]
+    assert ops["restock"].guards == ["Authorize", "Authorize(Ops)"]
