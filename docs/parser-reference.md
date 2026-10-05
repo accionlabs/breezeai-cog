@@ -121,7 +121,7 @@ parse once and reuse the base extraction. Always provide it.
   `Statement`s parented to the enum `Class` (one per member — `nodeType` = the grammar's
   member node, `name` = the declared name, `text` = the member source, incl. any
   `= value`), via `emit_enum_members(body, source, path, member_types={…}, parent_id=cid,
-  limit=…, seen_ids=…)` from `statements_common` — gated behind `--capture-statements` like
+  limit=…, seen_ids=…)` from `statements_common` — gated on `ctx.capture_statements` like
   every other statement. (Do **not** carry members in `Class.metadata["constants"]`, and do
   **not** un-barrier the enum from `NESTED_SCOPES` — enum bodies can hold methods that must
   still be extracted as their own scope.)
@@ -146,9 +146,9 @@ if classified:
 elif text_has_query(statement_text):             # fallback: a raw SQL string literal in the stmt
     Statement(..., semanticType="query_statement", ...)
 ```
-Statement capture is gated by `--capture-statements` — see Step 5b.
+Statement capture is gated by `ctx.capture_statements` (on by default; `--no-capture-statements` turns it off) — see Step 5b.
 
-### Step 5b — Gate route/db/event/query statements behind `--capture-statements`
+### Step 5b — Gate route/db/event/query statements behind `ctx.capture_statements`
 Structural statements (control flow, declarations) always emit, but **semantic statements —
 routes, api_call/db_method_call/query_statement, events — must only be emitted when
 `ctx.capture_statements` is True**. The base extractors already thread

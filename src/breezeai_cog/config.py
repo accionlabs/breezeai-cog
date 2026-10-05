@@ -51,7 +51,9 @@ class Settings(BaseSettings):
         default=None,
         validation_alias=AliasChoices("BREEZEAI_COG_LANGUAGE", "BREEZEAI_COG_LANGUAGES"),
     )
-    capture_statements: bool = False  # --capture-statements
+    # In-body statement capture (API calls, DB queries, routes, events, …). On by default —
+    # nearly every downstream consumer needs it; --no-capture-statements turns it off.
+    capture_statements: bool = True
     # --capture-templates. Markup/view files (.html/.htm/.cshtml/.razor/.aspx/.ascx/
     # .master/.vue) are skipped at scan time by default — they flood the graph with
     # markup nodes that bury the business logic. Orthogonal to the ignore layers:

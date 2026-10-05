@@ -120,7 +120,7 @@ class CSharpParser(BaseParser):
             classes=classes,
             statements=statements,
         )
-        # Additive detectors — gated by --capture-statements, layered on top of base + any
+        # Additive detectors — gated by statement capture, layered on top of base + any
         # framework subclass's extraction (a Lambda handler is an orthogonal capability, so it
         # co-exists with an ASP.NET controller in the same file rather than displacing it).
         # Mirrors TypeScript's `typescript/aws_events.py` (sibling module, not a peer parser).

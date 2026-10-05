@@ -390,7 +390,7 @@ class KotlinParser(BaseParser):
                     statements.extend(sub_stmts)
 
             # Enum entries become flat statements parented to the enum Class (their `text`
-            # is queryable). Gated by --capture-statements like every other statement.
+            # is queryable). Gated by statement capture like every other statement.
             if capture and body.type == "enum_class_body":
                 statements.extend(
                     emit_enum_members(

@@ -331,7 +331,7 @@ def test_enum_bare_and_valued_members(tmp_path) -> None:
 
 
 def test_enum_members_gated_by_capture_flag(tmp_path) -> None:
-    # Enum members are statements now → gated by --capture-statements (absent without it).
+    # Enum members are statements now → gated by statement capture (absent without it).
     src = 'enum S { A("1"), B("2"); }'
     p = tmp_path / "E.java"
     p.write_text(src)

@@ -616,7 +616,7 @@ def test_file_scope_prototypes_and_forward_decls_not_constants(tmp_path) -> None
 
 
 def test_class_members_gated_by_capture_flag(tmp_path) -> None:
-    # Member/enumerator statements are gated by --capture-statements (absent without it).
+    # Member/enumerator statements are gated by statement capture (absent without it).
     src = b'class C { public:\n constexpr static const char* k = "v";\n };\nenum E { A = 1 };\n'
     rec = _parse_src(tmp_path, src, "c.h", capture=False)
     assert rec.statements == []

@@ -135,7 +135,7 @@ re-pollutes every graph.
 ### 3B. Server-framework parser (one per file)
 Subclass the base language parser, sniff the framework cheaply in `claims`, set a
 `priority` above the base, reuse `extract` (one parse), then add route/handler detection —
-gated behind `--capture-statements`, and skipping fixture files for route emitters. See the
+gated on `ctx.capture_statements` (on by default, off with `--no-capture-statements`), and skipping fixture files for route emitters. See the
 framework-parser section and detection idioms in the reference guide.
 
 ### 3C. Internal-framework detector (additive — composes on top)
@@ -150,7 +150,7 @@ a one-per-file parser. There are **two hook points** — choose by the shape of 
 - **Structure-shaped signal** (a base class, a decorator, a type annotation, a
   command-object argument) that a flat classifier cannot express → add a `detect_*` pass and
   call it at the end of the base language parser's `extract`, gated by
-  `--capture-statements` and preceded by a cheap byte guard so it only runs on relevant
+  `ctx.capture_statements` and preceded by a cheap byte guard so it only runs on relevant
   files. It **enriches statements in place or appends new ones**; it never replaces the
   file's parser. Because it lives in the base `extract`, it runs for every file of the
   language and layers underneath whichever framework won.
@@ -219,7 +219,7 @@ uv run pytest -q              # run the test suite (must stay green)
 uv run ruff check . && uv run ruff format .
 uv run mypy                   # type-check
 # run on a repository:
-uv run breezeai-cog repo-to-json-tree --repo <path> --out <dir> --capture-statements
+uv run breezeai-cog repo-to-json-tree --repo <path> --out <dir>
 ```
 
 Note: the parallel pool needs a real `__main__` — run via the CLI or a script file, not a
@@ -257,7 +257,7 @@ src/breezeai_cog/parsers/
 - [ ] No field holds a guess; unresolved values are left null (honest-null).
 - [ ] No relationship is emitted unless both ends resolve to real graph identities.
 - [ ] Semantic statements (routes, data access, events, queries) emit **only** when
-      `--capture-statements` is set; route emitters also skip fixture/test files.
+      `ctx.capture_statements` is True (i.e. not `--no-capture-statements`); route emitters also skip fixture/test files.
 - [ ] Ids come only from the `emit` helpers, one shared `seen_ids` set per file, so a
       detector's statements attach to the parent the base parser assigned.
 - [ ] Statements are flat and linked to their owner; nesting is expressed by line ranges.

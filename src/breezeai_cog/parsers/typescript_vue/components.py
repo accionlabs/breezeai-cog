@@ -14,7 +14,7 @@ Detection is keyed on the real import (name + source module, alias-resolved via 
 specifier), NOT the bare callee text — so a local function named ``defineStore`` is never
 matched, and ``import { defineStore as ds }`` still works. Only top-level declarations / exports
 are scanned; the walk never descends into a body. The statement-anchored form appears only under
-``--capture-statements``; the default-export File form is always set."""
+statement capture; the default-export File form is always set."""
 
 from __future__ import annotations
 
