@@ -103,3 +103,18 @@ def test_specific_framework_outranks_express() -> None:
     # a pure express file is owned by the base parser now — Express is an additive detector
     # (its routes are captured in extract), not a selecting parser.
     assert registry.select("app.ts", b"import express from 'express';\n").name == "typescript"
+
+
+def test_rails_outranks_grape_when_both_claim_ruby_file() -> None:
+    registry.discover_builtin()
+    source = b'''require "rails"
+class UsersAPI < Grape::API
+  get "/users" do
+  end
+end
+Rails.application.routes.draw do
+  get "/health", to: "health#show"
+end
+'''
+
+    assert registry.select("config/routes.rb", source).name == "ruby-rails"
