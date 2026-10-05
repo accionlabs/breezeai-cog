@@ -14,14 +14,30 @@ from breezeai_cog.parsers.typescript.parser import TypeScriptParser
 from breezeai_cog.schemas import FileRecord
 
 SRC = b'''const express = require('express');
+import externalRouter from './my-router';
 const app = express();
 const router = express.Router();
+const r = Router();
+const userApp = {};
+const myRouter = {};
+const api = {};
+let routeApp;
 
 app.get('/users/:id', (req, res) => { res.send('ok'); });
 router.post('/users', createUser);
+r.get('/router-instance', handleRouterInstance);
+externalRouter.get('/imported-router', handleImportedRouter);
+userApp.get('/fake-app', fakeHandler);
+myRouter.post('/fake-router', fakeHandler);
+api.get('/fake-api', fakeHandler);
+routeApp.get('/fake-uninitialized', fakeHandler);
+function registerRouter(userRouter) {
+  userRouter.get('/parameter-router', handleParameterRouter);
+}
 app.all('/health', healthCheck);
 app.use('/api', router);
 app.route('/book').get(getBook).post(postBook);
+router.route('/:id').put(updateBook).delete(deleteBook);
 
 // not routes:
 app.set('view engine', 'pug');
@@ -59,16 +75,31 @@ def test_routes_detected(tmp_path) -> None:
     assert set(routes) == {
         ("GET", "/users/:id"),
         ("POST", "/users"),
-        ("ALL", "/health"),
-        (None, "/api"),          # app.use / Router().use mount (both endpoints are /api)
-        (None, "/book"),         # app.route group
+        ("GET", "/router-instance"),
+        ("GET", "/imported-router"),
+        ("GET", "/parameter-router"),
+        ("ANY", "/health"),
+        # Spec example: app.use('/api', router) → method ANY, routeKind mount,
+        # endpoint /api. ANY is the method-enum value for an indeterminate verb.
+        ("ANY", "/api"),         # includes app.use / Router().use mounts
+        ("GET", "/book"),
+        ("POST", "/book"),
+        ("PUT", "/:id"),
+        ("DELETE", "/:id"),
         ("DELETE", "/orders/:id"),
         ("GET", "/ping"),        # express.Router().get(...) direct-constructor receiver
     }
     assert routes[("POST", "/users")].handler == "createUser"
+    assert routes[("GET", "/router-instance")].handler == "handleRouterInstance"
+    assert routes[("GET", "/imported-router")].handler == "handleImportedRouter"
+    assert routes[("GET", "/parameter-router")].handler == "handleParameterRouter"
     assert routes[("DELETE", "/orders/:id")].handler == "deleteOrder"
-    assert routes[(None, "/api")].routeKind == "mount"
-    assert routes[(None, "/book")].routeKind == "route"
+    assert routes[("ANY", "/api")].routeKind == "mount"
+    assert routes[("ANY", "/api")].nodeType == "expression_statement"
+    assert routes[("GET", "/book")].handler == "getBook"
+    assert routes[("POST", "/book")].handler == "postBook"
+    assert routes[("PUT", "/:id")].handler == "updateBook"
+    assert routes[("DELETE", "/:id")].handler == "deleteBook"
     assert all(r.framework == "express" for r in routes.values())
     assert rec.framework == "express"
 
@@ -79,6 +110,10 @@ def test_settings_getter_not_a_route(tmp_path) -> None:
     endpoints = {s.endpoint for s in rec.statements if s.semanticType == "route"}
     assert "title" not in endpoints
     assert "view engine" not in endpoints
+    assert "/fake-app" not in endpoints
+    assert "/fake-router" not in endpoints
+    assert "/fake-api" not in endpoints
+    assert "/fake-uninitialized" not in endpoints
 
 
 def test_parentid_linkage(tmp_path) -> None:
@@ -128,7 +163,7 @@ def test_template_literal_paths(tmp_path) -> None:
     assert ("GET", "/sitemaps/{key}.txt") in routes   # interpolation → {key} placeholder
     assert ("GET", "/plain") in routes                # a template with no substitution
     assert ("GET", "/assets/{name}") in routes        # leading ${prefix} base stripped
-    assert (None, "/api/{version}") in routes         # mount path via template literal
+    assert ("ANY", "/api/{version}") in routes        # mount path via template literal
 
 
 # R3: the Apollo GraphQL transport mount — app.use(path, expressMiddleware(server)).
@@ -155,7 +190,7 @@ def test_apollo_graphql_mount_detected(tmp_path) -> None:
     routes = {(s.method, s.endpoint): s for s in rec.statements if s.semanticType == "route"}
     # /health stays a plain express route; /api stays an express mount.
     assert ("GET", "/health") in routes and routes[("GET", "/health")].framework == "express"
-    assert (None, "/api") in routes and routes[(None, "/api")].routeKind == "mount"
+    assert ("ANY", "/api") in routes and routes[("ANY", "/api")].routeKind == "mount"
     # the expressMiddleware mount is a POST /graphql route tagged graphql (path resolved
     # from the graphqlPath param default).
     gql = routes[("POST", "/graphql")]

@@ -38,16 +38,91 @@ def _invocations(root: Node) -> list[Node]:
     return out
 
 
-def _is_router_obj(obj_text: str) -> bool:
-    """Cheap heuristic: is this call's receiver an Express app / router?
-    Handles the named-variable forms (``app`` / ``router`` / ``this.router`` /
-    ``userRouter`` / ``apiApp``) and the direct-constructor forms
-    (``Router().use(...)`` / ``express.Router().get(...)``)."""
-    low = obj_text.lower()
-    tail = low.rsplit(".", 1)[-1].strip()
-    if tail in {"app", "router", "server", "api", "route"} or tail.endswith(("router", "app")):
-        return True
-    return "router()" in low or "express()" in low
+_SCOPE_TYPES = {
+    "arrow_function", "class_body", "function_declaration", "function_expression",
+    "method_definition", "program", "statement_block",
+}
+
+
+def _scope_path(node: Node) -> list[Node]:
+    scopes: list[Node] = []
+    parent = node.parent
+    while parent is not None:
+        if parent.type in _SCOPE_TYPES:
+            scopes.append(parent)
+        parent = parent.parent
+    scopes.reverse()
+    return scopes
+
+
+def _router_initializer(
+    name: str, before_byte: int, root: Node, source: bytes, scope: list[Node]
+) -> tuple[bool, Node | None]:
+    """Find the nearest preceding local variable binding visible at a call site."""
+    found: tuple[int, Node | None, int] | None = None
+
+    def walk(node: Node) -> None:
+        nonlocal found
+        if node.type == "variable_declarator":
+            binding = node.child_by_field_name("name")
+            value = node.child_by_field_name("value")
+            if (
+                binding is not None
+                and binding.type == "identifier"
+                and node_text(binding, source) == name
+                and node.start_byte < before_byte
+            ):
+                binding_scope = _scope_path(node)
+                if len(binding_scope) <= len(scope) and all(
+                    left == right for left, right in zip(binding_scope, scope)
+                ):
+                    depth = len(binding_scope)
+                    if found is None or (depth, node.start_byte) > (found[2], found[0]):
+                        found = (node.start_byte, value, depth)
+        for child in node.named_children:
+            walk(child)
+
+    walk(root)
+    return (False, None) if found is None else (True, found[1])
+
+
+def _is_express_constructor(node: Node | None, source: bytes) -> bool:
+    if node is None or node.type != "call_expression":
+        return False
+    fn = node.child_by_field_name("function")
+    if fn is None:
+        return False
+    if fn.type == "identifier":
+        return node_text(fn, source) in {"express", "Router"}
+    if fn.type == "member_expression":
+        prop = fn.child_by_field_name("property")
+        obj = fn.child_by_field_name("object")
+        return (
+            prop is not None
+            and obj is not None
+            and node_text(prop, source) == "Router"
+            and node_text(obj, source) == "express"
+        )
+    return False
+
+
+def _is_router_obj(obj: Node, source: bytes, root: Node, before_byte: int) -> bool:
+    """Accept known Express constructors, unresolved router names, and reject local plain objects."""
+    obj_text = node_text(obj, source)
+    if obj.type == "call_expression":
+        return _is_express_constructor(obj, source)
+
+    name = obj_text.rsplit(".", 1)[-1].strip()
+    declared, initializer = _router_initializer(
+        name, before_byte, root, source, _scope_path(obj)
+    )
+    if declared:
+        return _is_express_constructor(initializer, source)
+
+    low = name.lower()
+    return low in {"app", "router", "server", "api", "route"} or low.endswith(
+        ("router", "app")
+    )
 
 
 def _string_value(node: Node, source: bytes) -> str | None:
@@ -78,6 +153,28 @@ def _path_value(node: Node, source: bytes) -> str | None:
     if node.type == "template_string":
         return _template_value(node, source)
     return _string_value(node, source)
+
+
+def _chained_route_path(call: Node, source: bytes, root: Node) -> str | None:
+    """Find the path of the ``.route(path)`` at the base of a chained verb call."""
+    fn = call.child_by_field_name("function")
+    if fn is None or fn.type != "member_expression":
+        return None
+    obj = fn.child_by_field_name("object")
+    prop = fn.child_by_field_name("property")
+    if obj is None or prop is None:
+        return None
+
+    method = node_text(prop, source)
+    if method == "route":
+        if not _is_router_obj(obj, source, root, call.start_byte):
+            return None
+        args = call.child_by_field_name("arguments")
+        route_args = list(args.named_children) if args is not None else []
+        return _path_value(route_args[0], source) if route_args else None
+    if method in _HTTP_VERBS and obj.type == "call_expression":
+        return _chained_route_path(obj, source, root)
+    return None
 
 
 def _handler(arg_nodes: list[Node], source: bytes) -> tuple[str | None, int | None]:
@@ -196,12 +293,22 @@ def _classify(
     if obj is None or prop is None:
         return None
     method = node_text(prop, source)
-    obj_text = node_text(obj, source)
-    if not _is_router_obj(obj_text):
-        return None
-
     args = call.child_by_field_name("arguments")
     arg_nodes = list(args.named_children) if args is not None else []
+    chained_path = _chained_route_path(call, source, root)
+    if method in _HTTP_VERBS and chained_path is not None and arg_nodes:
+        last = arg_nodes[-1]
+        handler = node_text(last, source) if last.type in (
+            "identifier", "member_expression"
+        ) else None
+        handler_line = last.start_point[0] + 1 if handler is not None else None
+        guards = _guard_names(arg_nodes[:-1], source)
+        route_method = "ANY" if method == "all" else method.upper()
+        return route_method, chained_path, handler, handler_line, guards, "express", "route"
+
+    if not _is_router_obj(obj, source, root, call.start_byte):
+        return None
+
     path = _path_value(arg_nodes[0], source) if arg_nodes else None
     chain = arg_nodes[1:]  # everything after the path — the middleware + handler/router stack
 
@@ -212,7 +319,8 @@ def _classify(
         if path is not None and len(arg_nodes) >= 2:
             handler, handler_line = _handler(arg_nodes, source)
             guards = _guard_names(chain[:-1], source)
-            return method.upper(), path, handler, handler_line, guards, "express", "route"
+            route_method = "ANY" if method == "all" else method.upper()
+            return route_method, path, handler, handler_line, guards, "express", "route"
         return None
     if method == "use":
         # ``app.use(path, expressMiddleware(server))`` mounts the GraphQL endpoint (R3):
@@ -229,10 +337,8 @@ def _classify(
             # mounted router is the handler, the surrounding middleware are guards. Bare
             # ``app.use(mw)`` (no leading path) is middleware, not a mount.
             handler, handler_line, guards = _mount_parts(chain, source, bindings)
-            return None, path, handler, handler_line, guards, "express", "mount"
+            return "ANY", path, handler, handler_line, guards, "express", "mount"
         return None
-    if method == "route" and path is not None:
-        return None, path, None, None, None, "express", "route"
     return None
 
 
@@ -260,9 +366,9 @@ def _owner_function(line: int, functions, fallback: str) -> str:
 
 def _has_express(source: bytes) -> bool:
     """Cheap correctness gate: the file imports ``express`` (either quote style). The
-    ``app``/``router``/``route`` receiver heuristic in ``_is_router_obj`` is only safe on
-    files that actually use Express, so this guard — not selection — bounds it now that
-    detection runs additively for every TS file (see TypeScriptParser.extract)."""
+    receiver-name fallback in :func:`_is_router_obj` is only safe on files that actually use
+    Express, so this guard — not selection — bounds it now that detection runs additively for
+    every TS file (see TypeScriptParser.extract)."""
     return (b"'express'" in source or b'"express"' in source
             or b"expressMiddleware" in source)  # Apollo → Express adapter mount
 
@@ -331,7 +437,9 @@ def detect_express(
         auth_required = True if guards else None
         line = call.start_point[0] + 1
 
-        stmt = _enclosing_statement(line, record.statements)
+        stmt = None if _chained_route_path(call, source, root) is not None else _enclosing_statement(
+            line, record.statements
+        )
         if stmt is not None:  # detection on the same span → enrich in place
             stmt.semanticType = "route"
             stmt.framework = framework
