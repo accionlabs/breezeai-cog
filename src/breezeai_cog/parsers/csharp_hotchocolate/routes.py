@@ -39,7 +39,14 @@ from .mappings import (
     ROOT_SCHEMA_NAMES,
     TOPIC_ATTR,
 )
-from .descriptor import configure_method, descriptor_target, field_declarations
+from .descriptor import (
+    configure_method,
+    descriptor_target,
+    field_authorizations,
+    field_declarations,
+    named_target,
+    type_authorizations,
+)
 from .naming import field_name
 
 
@@ -109,17 +116,22 @@ def is_infrastructure_param(p_type: str | None, decorators: list[Decorator]) -> 
     return base in INFRA_PARAM_TYPES or base.startswith(DATALOADER_TYPES)
 
 
+def _guard_labels(authorizations: list[list[str]]) -> list[str]:
+    """One label per authorization, by its arguments, deduped: ``Authorize`` /
+    ``Authorize(Admin)``. Shared by the attribute and fluent styles so the same guard reads the
+    same whichever way it was declared."""
+    out: list[str] = []
+    for args in authorizations:
+        label = f"{AUTHORIZE_ATTR}({', '.join(args)})" if args else AUTHORIZE_ATTR
+        if label not in out:
+            out.append(label)
+    return out
+
+
 def guards_of(cls: Class, fn: Function) -> list[str]:
     """``[Authorize]`` guards inherited from the class plus the method's own, deduped."""
-    out: list[str] = []
-    for decorators in (cls.decorators, fn.decorators):
-        for dec in decorators:
-            if simple_attr_name(dec.name) != AUTHORIZE_ATTR:
-                continue
-            label = f"{AUTHORIZE_ATTR}({', '.join(dec.args)})" if dec.args else AUTHORIZE_ATTR
-            if label not in out:
-                out.append(label)
-    return out
+    return _guard_labels([dec.args for decorators in (cls.decorators, fn.decorators)
+                          for dec in decorators if simple_attr_name(dec.name) == AUTHORIZE_ATTR])
 
 
 
@@ -396,7 +408,8 @@ def _extension_routes(
 
 
 def descriptor_field_statement(
-    configure: Function, kind: str, name: str, call: Node, source: bytes, seen: set[str]
+    configure: Function, kind: str, name: str, call: Node, source: bytes, seen: set[str],
+    guards: list[str] | None = None,
 ) -> Statement:
     """One field declared fluently inside ``Configure``. Unlike the attribute-derived routes this
     has a real backing node — the ``d.Field(...)`` call — so it keeps that ``nodeType``, matching
@@ -415,6 +428,8 @@ def descriptor_field_statement(
         handlerLine=line,
         routeKind=kind,
         isRegex=False,
+        authRequired=bool(guards) or None,
+        guards=guards or None,
         startLine=line,
         endLine=call.end_point[0] + 1,
         path=configure.path,
@@ -423,21 +438,21 @@ def descriptor_field_statement(
 
 def _descriptor_routes(
     cls: Class, record: FileRecord, nodes: dict[tuple[str, int], Node], source: bytes,
-    heritage: dict[str, object], seen: set[str],
+    heritage: dict[str, object], seen: set[str], hc_root_types: dict[str, str] | None = None,
 ) -> list[Statement]:
     """Fields declared fluently by ``cls``, when the type it describes is a resolved root.
 
     A non-root descriptor declares that type's *shape*: those fields are not endpoints, and
     emitting them is the over-capture the sibling graphql-dotnet parser measured.
+
+    The target comes from a generic argument when there is one; the non-generic
+    ``ObjectTypeExtension`` names it with ``d.Name(...)`` instead. ``hc_root_types`` resolves a
+    root registered only at ``AddQueryType<T>()`` — the descriptor class itself, or the type it
+    describes. Guards are the descriptor's own
+    ``d.Authorize(…)`` (every field) plus each field chain's ``.Authorize(…)``.
     """
     configure = configure_method(record.functions, cls)
     if configure is None:
-        return []
-    target = descriptor_target(cls, configure)
-    if target is None:
-        return []
-    kind = _root_kind_of_name(target, record, heritage)
-    if kind is None:
         return []
     node = nodes.get((configure.name, configure.startLine))
     body = node.child_by_field_name("body") if node is not None else None
@@ -446,7 +461,19 @@ def _descriptor_routes(
     receiver = configure.params[0].name if configure.params else None
     if receiver is None:
         return []
-    return [descriptor_field_statement(configure, kind, name, call, source, seen)
+    # A descriptor registered itself (AddQueryType<QueryType>()) is a root whatever it describes.
+    kind = (hc_root_types or {}).get(cls.name)
+    if kind is None:
+        target = descriptor_target(cls, configure) or named_target(body, source, receiver)
+        if target is None:
+            return []
+        kind = _root_kind_of_name(target, record, heritage, hc_root_types)
+    if kind is None:
+        return []
+    type_level = type_authorizations(body, source, receiver)
+    return [descriptor_field_statement(
+                configure, kind, name, call, source, seen,
+                _guard_labels(type_level + field_authorizations(call, source)))
             for name, call in field_declarations(body, source, receiver)]
 
 
@@ -490,5 +517,6 @@ def detect_hotchocolate_routes(
                     cls, target, own, record, heritage, record.path, seen, anchors,
                     generated_loaders, hc_root_types=hc_root_types))
             continue
-        routes.extend(_descriptor_routes(cls, record, nodes, source, heritage, seen))
+        routes.extend(_descriptor_routes(
+            cls, record, nodes, source, heritage, seen, hc_root_types))
     return routes
