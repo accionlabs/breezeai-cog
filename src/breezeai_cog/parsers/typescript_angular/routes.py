@@ -3,7 +3,8 @@
 ``RouterModule.forRoot([...])``. Emits ``semanticType="route"`` / ``routeKind="page"`` statements
 for the route objects (handler = ``component`` / ``loadComponent``), parented to the file
 (Angular routes are config, not handler methods). Nested ``children`` paths are joined onto the
-parent path.
+parent path. A ``redirectTo`` route is ``routeKind="navigation"`` — ``endpoint`` is the redirect
+*target*, like every other navigation emitter.
 
 Wiring has no record (contract §4): a ``loadChildren`` lazy mount whose loaded routes are in the
 repo and get its prefix (the repo mount index; its guards reach them through the
@@ -225,6 +226,16 @@ def _has_empty_path_child(children: Node | None, source: bytes) -> bool:
     return False
 
 
+def _redirect_target(node: Node, prefix: str | None, source: bytes, index: object) -> str | None:
+    """Where a ``redirectTo`` points, as a full route path. A leading ``/`` is absolute (used
+    as-is); anything else is relative to the parent route and composes with ``prefix`` like a
+    child ``path``. A function form or an unresolvable constant → ``None`` (never a guess)."""
+    target = _resolve_path(node, source, index)
+    if target is None:
+        return None
+    return _join("", target) if target.startswith("/") else _compose(prefix, target)
+
+
 def _process(arr: Node, prefix: str | None, source: bytes, path: str,
              routes: list[Emit], index: object, inherited: tuple[str, ...] = (),
              mounts: list[tuple[Node, list[str]]] | None = None) -> None:
@@ -239,12 +250,19 @@ def _process(arr: Node, prefix: str | None, source: bytes, path: str,
         pairs = _pairs(elem, source)
         if "path" not in pairs:
             continue
-        if "redirectTo" in pairs:
-            continue
         # Breadcrumb / nav-tree objects always carry a "name" key alongside "path" and
         # optional "children"; real Angular route config objects never have a top-level
         # "name" property — skip to avoid false-positive page nodes.
         if "name" in pairs:
+            continue
+        redirect = pairs.get("redirectTo")
+        if redirect is not None:  # a redirect is a navigation edge, not an endpoint
+            routes.append(Emit(elem, dict(
+                semanticType="route",
+                endpoint=_redirect_target(redirect, prefix, source, index),
+                framework="angular",
+                routeKind="navigation",
+            ), parent=file_id(path), node_type="synthetic", text=entry_text(elem, source)))
             continue
         full = _compose(prefix, _resolve_path(pairs["path"], source, index))
         own = _own_guards(elem, source)
