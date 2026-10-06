@@ -4,12 +4,14 @@ linkage, base reuse, override, settings-getter disambiguation."""
 from __future__ import annotations
 
 import json
+from unittest.mock import patch
 
 from jsonschema import Draft202012Validator
 
 from breezeai_cog.core import registry
 from breezeai_cog.emit import to_line
 from breezeai_cog.parsers.base import ParseContext
+from breezeai_cog.parsers.typescript_express import routes as express_routes
 from breezeai_cog.parsers.typescript.parser import TypeScriptParser
 from breezeai_cog.schemas import FileRecord
 
@@ -102,6 +104,38 @@ def test_routes_detected(tmp_path) -> None:
     assert routes[("DELETE", "/:id")].handler == "deleteBook"
     assert all(r.framework == "express" for r in routes.values())
     assert rec.framework == "express"
+
+
+def test_non_route_member_calls_skip_receiver_resolution(tmp_path) -> None:
+    src = b'''import express from 'express';
+const app = express();
+function handler(req, res) {
+  res.json({});
+  logger.info('request');
+  items.map(transform);
+  app.get('/ok', ok);
+}
+'''
+    p = tmp_path / "server.ts"
+    p.write_bytes(src)
+    ctx = ParseContext(path="server.ts", abs_path=p, source=src, repo_root=tmp_path,
+                       capture_statements=True)
+    with (
+        patch.object(express_routes, "_router_bindings", wraps=express_routes._router_bindings)
+        as binding_index,
+        patch.object(
+            express_routes,
+            "_router_initializer",
+            wraps=express_routes._router_initializer,
+        ) as initializer_lookup,
+    ):
+        rec = TypeScriptParser().parse_file(ctx)
+
+    assert binding_index.call_count == 1
+    assert [call.args[0] for call in initializer_lookup.call_args_list] == ["app"]
+    assert ("GET", "/ok") in {
+        (s.method, s.endpoint) for s in rec.statements if s.semanticType == "route"
+    }
 
 
 def test_settings_getter_not_a_route(tmp_path) -> None:

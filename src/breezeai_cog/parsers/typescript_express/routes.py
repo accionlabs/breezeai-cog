@@ -23,6 +23,7 @@ from ..treesitter import first_line, node_text
 
 # HTTP-verb methods that register a route handler on an app/router.
 _HTTP_VERBS = {"get", "post", "put", "delete", "patch", "options", "head", "all"}
+_ROUTE_METHODS = _HTTP_VERBS | {"use", "route"}
 
 
 def _invocations(root: Node) -> list[Node]:
@@ -55,34 +56,44 @@ def _scope_path(node: Node) -> list[Node]:
     return scopes
 
 
-def _router_initializer(
-    name: str, before_byte: int, root: Node, source: bytes, scope: list[Node]
-) -> tuple[bool, Node | None]:
-    """Find the nearest preceding local variable binding visible at a call site."""
-    found: tuple[int, Node | None, int] | None = None
+def _router_bindings(
+    root: Node, source: bytes
+) -> dict[str, list[tuple[int, list[Node], Node | None]]]:
+    """Index variable declarations by name once, retaining their lexical scope."""
+    bindings: dict[str, list[tuple[int, list[Node], Node | None]]] = {}
 
     def walk(node: Node) -> None:
-        nonlocal found
         if node.type == "variable_declarator":
             binding = node.child_by_field_name("name")
-            value = node.child_by_field_name("value")
-            if (
-                binding is not None
-                and binding.type == "identifier"
-                and node_text(binding, source) == name
-                and node.start_byte < before_byte
-            ):
-                binding_scope = _scope_path(node)
-                if len(binding_scope) <= len(scope) and all(
-                    left == right for left, right in zip(binding_scope, scope)
-                ):
-                    depth = len(binding_scope)
-                    if found is None or (depth, node.start_byte) > (found[2], found[0]):
-                        found = (node.start_byte, value, depth)
+            if binding is not None and binding.type == "identifier":
+                name = node_text(binding, source)
+                bindings.setdefault(name, []).append((
+                    node.start_byte,
+                    _scope_path(node),
+                    node.child_by_field_name("value"),
+                ))
         for child in node.named_children:
             walk(child)
 
     walk(root)
+    return bindings
+
+
+def _router_initializer(
+    name: str,
+    before_byte: int,
+    bindings: dict[str, list[tuple[int, list[Node], Node | None]]],
+    scope: list[Node],
+) -> tuple[bool, Node | None]:
+    """Find the nearest preceding local variable binding visible at a call site."""
+    found: tuple[int, Node | None, int] | None = None
+    for start_byte, binding_scope, initializer in bindings.get(name, ()):
+        if start_byte < before_byte and len(binding_scope) <= len(scope) and all(
+            left == right for left, right in zip(binding_scope, scope)
+        ):
+            depth = len(binding_scope)
+            if found is None or (depth, start_byte) > (found[2], found[0]):
+                found = (start_byte, initializer, depth)
     return (False, None) if found is None else (True, found[1])
 
 
@@ -106,7 +117,12 @@ def _is_express_constructor(node: Node | None, source: bytes) -> bool:
     return False
 
 
-def _is_router_obj(obj: Node, source: bytes, root: Node, before_byte: int) -> bool:
+def _is_router_obj(
+    obj: Node,
+    source: bytes,
+    router_bindings: dict[str, list[tuple[int, list[Node], Node | None]]],
+    before_byte: int,
+) -> bool:
     """Accept known Express constructors, unresolved router names, and reject local plain objects."""
     obj_text = node_text(obj, source)
     if obj.type == "call_expression":
@@ -114,7 +130,7 @@ def _is_router_obj(obj: Node, source: bytes, root: Node, before_byte: int) -> bo
 
     name = obj_text.rsplit(".", 1)[-1].strip()
     declared, initializer = _router_initializer(
-        name, before_byte, root, source, _scope_path(obj)
+        name, before_byte, router_bindings, _scope_path(obj)
     )
     if declared:
         return _is_express_constructor(initializer, source)
@@ -155,7 +171,11 @@ def _path_value(node: Node, source: bytes) -> str | None:
     return _string_value(node, source)
 
 
-def _chained_route_path(call: Node, source: bytes, root: Node) -> str | None:
+def _chained_route_path(
+    call: Node,
+    source: bytes,
+    router_bindings: dict[str, list[tuple[int, list[Node], Node | None]]],
+) -> str | None:
     """Find the path of the ``.route(path)`` at the base of a chained verb call."""
     fn = call.child_by_field_name("function")
     if fn is None or fn.type != "member_expression":
@@ -167,13 +187,13 @@ def _chained_route_path(call: Node, source: bytes, root: Node) -> str | None:
 
     method = node_text(prop, source)
     if method == "route":
-        if not _is_router_obj(obj, source, root, call.start_byte):
+        if not _is_router_obj(obj, source, router_bindings, call.start_byte):
             return None
         args = call.child_by_field_name("arguments")
         route_args = list(args.named_children) if args is not None else []
         return _path_value(route_args[0], source) if route_args else None
     if method in _HTTP_VERBS and obj.type == "call_expression":
-        return _chained_route_path(obj, source, root)
+        return _chained_route_path(obj, source, router_bindings)
     return None
 
 
@@ -280,11 +300,17 @@ def _resolve_str_identifier(name: str, root: Node, source: bytes) -> str | None:
 
 
 def _classify(
-    call: Node, source: bytes, root: Node, bindings: dict[str, str]
-) -> tuple[str | None, str, str | None, int | None, list[str] | None, str, str] | None:
-    """→ (method, endpoint, handler, handlerLine, guards, framework, routeKind), or None if not
-    a route. ``guards`` are the named route/mount middleware (auth/interceptor stack); ``bindings``
-    (in-repo imported name → file) lets a mount tell its sub-router from its guard middleware."""
+    call: Node,
+    source: bytes,
+    root: Node,
+    router_bindings: dict[str, list[tuple[int, list[Node], Node | None]]],
+    bindings: dict[str, str],
+) -> tuple[str | None, str, str | None, int | None, list[str] | None, str, str, bool] | None:
+    """Return route details, chained-call status, or None if the call is not a route.
+
+    ``guards`` are the named route/mount middleware (auth/interceptor stack); ``bindings``
+    (in-repo imported name → file) lets a mount tell its sub-router from its guard middleware.
+    """
     fn = call.child_by_field_name("function")
     if fn is None or fn.type != "member_expression":
         return None
@@ -293,9 +319,17 @@ def _classify(
     if obj is None or prop is None:
         return None
     method = node_text(prop, source)
+    if method not in _ROUTE_METHODS:
+        return None
+    if method == "route":
+        return None
     args = call.child_by_field_name("arguments")
     arg_nodes = list(args.named_children) if args is not None else []
-    chained_path = _chained_route_path(call, source, root)
+    chained_path = (
+        _chained_route_path(call, source, router_bindings)
+        if method in _HTTP_VERBS
+        else None
+    )
     if method in _HTTP_VERBS and chained_path is not None and arg_nodes:
         last = arg_nodes[-1]
         handler = node_text(last, source) if last.type in (
@@ -304,9 +338,11 @@ def _classify(
         handler_line = last.start_point[0] + 1 if handler is not None else None
         guards = _guard_names(arg_nodes[:-1], source)
         route_method = "ANY" if method == "all" else method.upper()
-        return route_method, chained_path, handler, handler_line, guards, "express", "route"
+        return (
+            route_method, chained_path, handler, handler_line, guards, "express", "route", True
+        )
 
-    if not _is_router_obj(obj, source, root, call.start_byte):
+    if not _is_router_obj(obj, source, router_bindings, call.start_byte):
         return None
 
     path = _path_value(arg_nodes[0], source) if arg_nodes else None
@@ -320,7 +356,7 @@ def _classify(
             handler, handler_line = _handler(arg_nodes, source)
             guards = _guard_names(chain[:-1], source)
             route_method = "ANY" if method == "all" else method.upper()
-            return route_method, path, handler, handler_line, guards, "express", "route"
+            return route_method, path, handler, handler_line, guards, "express", "route", False
         return None
     if method == "use":
         # ``app.use(path, expressMiddleware(server))`` mounts the GraphQL endpoint (R3):
@@ -331,13 +367,13 @@ def _classify(
             endpoint = path
             if endpoint is None and arg0 is not None and arg0.type == "identifier":
                 endpoint = _resolve_str_identifier(node_text(arg0, source), root, source)
-            return "POST", endpoint or "/graphql", None, None, None, "graphql", "route"
+            return "POST", endpoint or "/graphql", None, None, None, "graphql", "route", False
         if path is not None and path.startswith("/"):
             # ``app.use('/mount', ...guards, subRouter, ...guards)`` mounts a sub-router: the
             # mounted router is the handler, the surrounding middleware are guards. Bare
             # ``app.use(mw)`` (no leading path) is middleware, not a mount.
             handler, handler_line, guards = _mount_parts(chain, source, bindings)
-            return "ANY", path, handler, handler_line, guards, "express", "mount"
+            return "ANY", path, handler, handler_line, guards, "express", "mount", False
         return None
     return None
 
@@ -422,24 +458,23 @@ def detect_express(
     fid = file_id(path)
     seen = {s.id for s in record.statements}
     binds = bindings or {}
+    router_bindings = _router_bindings(root, source)
     # The base this file's routes are served under, if it is a factory mounted elsewhere.
     mounts = getattr(index, "express_mounts", None)
     mount_base = mounts.get(path) if isinstance(mounts, dict) else None
 
     for call in _invocations(root):
-        info = _classify(call, source, root, binds)
+        info = _classify(call, source, root, router_bindings, binds)
         if info is None:
             continue
-        method, endpoint, handler, handler_line, guards, framework, route_kind = info
+        method, endpoint, handler, handler_line, guards, framework, route_kind, chained = info
         served = _apply_base(mount_base, framework, route_kind, endpoint)
         # Honest-null: assert auth only when a route-level guard is present. Absence is
         # "unknown" (None), not "open" — app-level middleware may still protect the route.
         auth_required = True if guards else None
         line = call.start_point[0] + 1
 
-        stmt = None if _chained_route_path(call, source, root) is not None else _enclosing_statement(
-            line, record.statements
-        )
+        stmt = None if chained else _enclosing_statement(line, record.statements)
         if stmt is not None:  # detection on the same span → enrich in place
             stmt.semanticType = "route"
             stmt.framework = framework
