@@ -64,10 +64,11 @@ def template_extensions() -> frozenset[str]:
 
 
 def select(
-    path: str | Path, source: bytes, parse_timeout_micros: int = 0
+    path: str | Path, source: bytes, parse_timeout_micros: int = 0, index: object | None = None
 ) -> LanguageParser | None:
     """The single parser that handles this file: the highest-priority candidate whose
-    ``claims(path, source)`` is True (the base language parser is the priority-0 fallback)."""
+    ``claims_with_index(path, source, index)`` is True (the base language parser is the
+    priority-0 fallback). ``index`` is the language's ``build_index`` result, or None."""
     candidates = parsers_for(path)
     claiming = [
         p
@@ -75,7 +76,7 @@ def select(
         if (
             p.claims(str(path), source, parse_timeout_micros)
             if getattr(p, "claims_accepts_timeout", False)
-            else p.claims(str(path), source)
+            else p.claims_with_index(str(path), source, index)
         )
     ]
     if not claiming:

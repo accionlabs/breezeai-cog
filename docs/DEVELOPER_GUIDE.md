@@ -66,10 +66,13 @@ scan → select parser → parse → emit FileRecord → sink (file / memory / S
 1. **Scan** (`core/scanner.py`) walks the repo, applying hierarchical ignore/include rules
    (`.gitignore`/`.repoignore` + per-language defaults) and size limits.
 2. **Select** (`core/registry.py`) — each file is parsed by **exactly one** parser:
-   `select(path, source)` returns the highest-`priority` parser whose `claims(path, source)` is
-   `True`, falling back to the base language parser. Framework parsers (priority 10) sniff their
+   `select(path, source, index)` returns the highest-`priority` parser whose
+   `claims_with_index(path, source, index)` is `True`, falling back to the base language parser.
+   By default that is just `claims(path, source)`: framework parsers (priority 10) sniff their
    signature (e.g. `b"@nestjs/" in source`); the base parser (priority 0) is the fallback. No file
-   is ever parsed twice — multiple frameworks for one language coexist by per-file content.
+   is ever parsed twice — multiple frameworks for one language coexist by per-file content. A
+   parser overrides `claims_with_index` only when a file becomes framework code because of
+   another file — see [Cross-file framework facts](cross-file-framework-facts.md).
 3. **Parse** (`parsers/<lang>/`) turns the tree-sitter AST into a `FileRecord`. The id convention
    (`emit/ids.py`) assigns deterministic `id`/`parentId`, so framework parsers attach routes to the
    right handler.
