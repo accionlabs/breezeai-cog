@@ -261,7 +261,7 @@ def build_enum(
     limit: int,
 ) -> tuple[Class | None, list[Statement]]:
     """An ``enum_specifier`` → a ``Class`` of type ``enum`` plus one flat Statement per
-    ``enumerator`` member (parented to the enum, gated by --capture-statements; the member's
+    ``enumerator`` member (parented to the enum, gated by statement capture; the member's
     ``= value`` stays inside its ``text``). Anonymous enums and forward declarations (``enum
     Color;`` — no ``enumerator_list``) emit nothing (honest gap, no hollow node). ``enum
     class`` / ``enum struct`` are scoped enums, captured the same way (scoped-ness not stored)."""

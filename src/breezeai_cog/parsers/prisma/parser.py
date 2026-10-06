@@ -6,7 +6,7 @@ It parses the whole file with the ``prisma`` tree-sitter grammar and emits a fla
 ``Statement`` per top-level block: ``model`` → a ``data_model`` entity (fields + relations on
 ``text``), ``enum`` and the config blocks → plain statements. See :mod:`.schema`.
 
-Semantic capture is gated behind ``--capture-statements`` (the whole PSL surface is
+Semantic capture is gated behind statement capture (the whole PSL surface is
 semantic); the shared comment pass adds ``// …`` / ``/// …`` comments when capture is on.
 """
 
@@ -42,7 +42,7 @@ class PrismaParser(BaseParser):
         statements: list[Statement] = []
 
         # The PSL surface is entirely semantic (models/enums/config), so gate it on
-        # --capture-statements like every other route/db/entity emitter; skip fixture dirs.
+        # statement capture like every other route/db/entity emitter; skip fixture dirs.
         if ctx.capture_statements and not self.is_fixture_file(path):
             statements.extend(
                 collect_prisma_statements(root, source, path, seen_ids, ctx.statement_text_limit)

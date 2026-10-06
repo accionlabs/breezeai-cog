@@ -41,6 +41,7 @@ class VueParser(TypeScriptParser):
     # Add ``.vue`` to the inherited TS extensions so this parser is also a candidate for the
     # ``.ts``/``.js`` router/bootstrap files (where ``claims`` gates it on a vue import).
     extensions: tuple[str, ...] = (*TypeScriptParser.extensions, ".vue")
+    template_extensions: tuple[str, ...] = (".vue",)  # SFCs only — the .ts/.js half stays
     priority = 10  # above the base TS parser; coexists per-file with other TS frameworks
     frameworks = ["vue"]
     # TS statement types + the ``<template>`` nodes this parser emits (capabilities honesty).

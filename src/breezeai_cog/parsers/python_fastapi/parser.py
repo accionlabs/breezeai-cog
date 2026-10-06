@@ -23,7 +23,7 @@ class FastAPIParser(PythonParser):
     def parse_file(self, ctx: ParseContext) -> FileRecord:
         root = parse_source("python", ctx.source, ctx.parse_timeout_micros).root_node
         record = self.extract(root, ctx)  # inherited base extraction (one parse)
-        if ctx.capture_statements:  # routes are statements — gated by --capture-statements
+        if ctx.capture_statements:  # routes are statements — gated by statement capture
             routes = detect_routes(
                 root, ctx.source, ctx.path, seen_ids={s.id for s in record.statements}
             )

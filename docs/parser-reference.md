@@ -121,7 +121,7 @@ parse once and reuse the base extraction. Always provide it.
   `Statement`s parented to the enum `Class` (one per member — `nodeType` = the grammar's
   member node, `name` = the declared name, `text` = the member source, incl. any
   `= value`), via `emit_enum_members(body, source, path, member_types={…}, parent_id=cid,
-  limit=…, seen_ids=…)` from `statements_common` — gated behind `--capture-statements` like
+  limit=…, seen_ids=…)` from `statements_common` — gated on `ctx.capture_statements` like
   every other statement. (Do **not** carry members in `Class.metadata["constants"]`, and do
   **not** un-barrier the enum from `NESTED_SCOPES` — enum bodies can hold methods that must
   still be extracted as their own scope.)
@@ -146,9 +146,9 @@ if classified:
 elif text_has_query(statement_text):             # fallback: a raw SQL string literal in the stmt
     Statement(..., semanticType="query_statement", ...)
 ```
-Statement capture is gated by `--capture-statements` — see Step 5b.
+Statement capture is gated by `ctx.capture_statements` (on by default; `--no-capture-statements` turns it off) — see Step 5b.
 
-### Step 5b — Gate route/db/event/query statements behind `--capture-statements`
+### Step 5b — Gate route/db/event/query statements behind `ctx.capture_statements`
 Structural statements (control flow, declarations) always emit, but **semantic statements —
 routes, api_call/db_method_call/query_statement, events — must only be emitted when
 `ctx.capture_statements` is True**. The base extractors already thread
@@ -375,6 +375,13 @@ highest-`priority` parser whose `claims(path, source)` is True; the base languag
 - [ ] `PARSERS` exported from `__init__.py`.
 - [ ] `ignore.txt` / `include.txt` — **language-scoped, post-scan**; universal directory
       prunes go in `core/default_ignores.txt`.
+- [ ] **Markup/view parsers** declare `template_extensions` — the subset of `extensions` that
+      is markup, not code. The scanner drops those before classification unless
+      `--capture-templates` is given (skip reason `template`). Declare only the markup half:
+      WebForms owns `.cs` + `.aspx/.ascx/.master`, Vue owns `.ts`/`.js` + `.vue`, and the code
+      half must keep being captured. If a resolver of yours can bind an edge to a template
+      path, it is pruned centrally by `core/executor.py::_prune_template_edges` — do not
+      special-case it in the parser.
 - [ ] `build_index` only if cross-file resolution is needed (return a **picklable** index); if
       it full-parses, structure it as a `parallel_map` worker + deterministic reduce honouring `jobs`.
 - [ ] Framework parser subclasses the base, sets `priority` + `claims`, does full extraction

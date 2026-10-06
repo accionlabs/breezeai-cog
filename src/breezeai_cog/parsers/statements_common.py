@@ -1,4 +1,4 @@
-"""Shared statement-record emission for --capture-statements (all languages).
+"""Shared statement-record emission (gated by statement capture; all languages).
 
 The per-language ``statements.py`` yields statement nodes (``_iter_in_scope``) and
 supplies a language-specific ``name_of`` + ``call_details`` + call node type; this

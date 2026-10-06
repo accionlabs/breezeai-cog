@@ -1,4 +1,4 @@
-"""Flat statement capture for TypeScript/JavaScript (gated by --capture-statements),
+"""Flat statement capture for TypeScript/JavaScript (gated by statement capture),
 with shared API/DB call detection (``parsers/detection``)."""
 
 from __future__ import annotations

@@ -20,7 +20,7 @@ from ..logging import DETAIL_LOGGER, get_logger
 from ..schemas import FileRecord, ProjectMetaData
 from . import executor
 from .ignore import IgnoreEngine
-from .registry import base_parser_for, discover_builtin, registered
+from .registry import base_parser_for, discover_builtin, registered, template_extensions
 from .scanner import ScanEntry, scan
 from .skips import SkipReport
 
@@ -41,6 +41,49 @@ def _classifier(languages: set[str] | None) -> Callable[[str], str | None]:
     return classify
 
 
+def _template_skip_rule(settings) -> Callable[[str], str | None] | None:
+    """The ``skip_rule`` that drops markup/view files, or ``None`` when
+    ``--capture-templates`` is on.
+
+    Extension-based, so it costs a suffix lookup and never reads the file. Lowercased —
+    unlike ``BaseParser.matches``, which is case-sensitive — so ``Site.Master`` and
+    ``Default.ASPX`` (endemic in older ASP.NET trees) land in the honest ``template``
+    bucket instead of ``unsupported``. The gate is therefore a superset of what the
+    parsers actually claim.
+    """
+    if settings.capture_templates:
+        return None
+    exts = template_extensions()  # resolved once, not per file
+    if not exts:
+        return None
+
+    def skip_rule(path: str) -> str | None:
+        return "template" if os.path.splitext(path)[1].lower() in exts else None
+
+    return skip_rule
+
+
+def _warn_if_only_template_languages(settings, gate_on: bool) -> None:
+    """Warn when ``--language`` selects only parsers that own nothing but markup, while the
+    template gate is on — otherwise the run silently produces zero files."""
+    if not gate_on or not settings.languages:
+        return
+    selected = set(settings.languages)
+    template_only = {
+        p.name
+        for p in registered()
+        # every extension it owns is markup — so with the gate on it can match nothing
+        if (tmpl := getattr(p, "template_extensions", ())) and set(p.extensions) <= set(tmpl)
+    }
+    if selected and selected <= template_only:
+        log.warning(
+            "scan.templates_gated",
+            languages=sorted(selected),
+            hint="these languages only own template files, which are skipped by default; "
+                 "pass --capture-templates to analyze them",
+        )
+
+
 def _scan_entries(
     repo_root: Path, settings, report: SkipReport | None = None
 ) -> Iterator[ScanEntry]:
@@ -48,6 +91,8 @@ def _scan_entries(
     engine = IgnoreEngine.build(registered())
     languages = set(settings.languages) if settings.languages else None
     debug_on = settings.log_level == "DEBUG"
+    skip_rule = _template_skip_rule(settings)
+    _warn_if_only_template_languages(settings, skip_rule is not None)
 
     def on_skip(path: str, reason: str, *, is_dir: bool = False, size: int | None = None) -> None:
         if report is not None:  # tally + detail for the run summary and the sidecar report
@@ -57,7 +102,8 @@ def _scan_entries(
 
     for entry in scan(
         repo_root, _classifier(languages),
-        engine=engine, max_file_size=settings.max_file_size, on_skip=on_skip,
+        engine=engine, max_file_size=settings.max_file_size,
+        skip_rule=skip_rule, on_skip=on_skip,
     ):
         # Per-language layer-2 filter, applied post-scan and scoped to the file's
         # own classified language — so e.g. C#'s NuGet ``packages/`` never prunes a
