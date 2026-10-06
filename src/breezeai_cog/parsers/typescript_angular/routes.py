@@ -2,7 +2,9 @@
 (``{ path, component, loadChildren, canActivate, children }``) in ``Routes`` arrays /
 ``RouterModule.forRoot([...])``. Emits ``semanticType="route"`` statements
 (``routeKind="page"`` for component routes, ``"mount"`` for ``loadChildren`` lazy
-mounts). Nested ``children`` paths are joined onto the parent path. Routes are parented
+mounts, ``"navigation"`` for ``redirectTo`` routes — ``endpoint`` is the redirect *target*,
+like every other navigation emitter). Nested ``children`` paths are joined onto the parent
+path. Routes are parented
 to the file (Angular routes are config, not handler methods)."""
 
 from __future__ import annotations
@@ -188,6 +190,37 @@ def _is_children_value(arr: Node, source: bytes) -> bool:
     return p is not None and p.type == "pair" and _key(p, source) == "children"
 
 
+def _redirect_target(node: Node, prefix: str | None, source: bytes, index: object) -> str | None:
+    """Where a ``redirectTo`` points, as a full route path. A leading ``/`` is absolute (used
+    as-is); anything else is relative to the parent route and composes with ``prefix`` like a
+    child ``path``. A function form or an unresolvable constant → ``None`` (never a guess)."""
+    target = _resolve_path(node, source, index)
+    if target is None:
+        return None
+    return _join("", target) if target.startswith("/") else _compose(prefix, target)
+
+
+def _route_statement(elem: Node, source: bytes, path: str, seen: set[str], *, route_kind: str,
+                     endpoint: str | None, handler: str | None = None,
+                     guards: list[str] | None = None) -> Statement:
+    sl, sc = elem.start_point[0] + 1, elem.start_point[1]
+    return Statement(
+        id=disambiguate(statement_id(path, sl, sc), seen),
+        parentId=file_id(path),
+        nodeType="synthetic",
+        semanticType="route",
+        text=node_text(elem, source).split("\n", 1)[0][:120],
+        framework="angular",
+        startLine=sl,
+        endLine=elem.end_point[0] + 1,
+        path=path,
+        routeKind=route_kind,
+        endpoint=endpoint,
+        handler=handler,
+        guards=guards,
+    )
+
+
 def _process(arr: Node, prefix: str | None, source: bytes, path: str, seen: set[str],
              routes: list[Statement], index: object) -> None:
     for elem in arr.named_children:
@@ -196,12 +229,16 @@ def _process(arr: Node, prefix: str | None, source: bytes, path: str, seen: set[
         pairs = _pairs(elem, source)
         if "path" not in pairs:
             continue
-        if "redirectTo" in pairs:
-            continue
         # Breadcrumb / nav-tree objects always carry a "name" key alongside "path" and
         # optional "children"; real Angular route config objects never have a top-level
         # "name" property — skip to avoid false-positive page nodes.
         if "name" in pairs:
+            continue
+        redirect = pairs.get("redirectTo")
+        if redirect is not None:  # a redirect is a navigation edge, not an endpoint
+            routes.append(_route_statement(
+                elem, source, path, seen, route_kind="navigation",
+                endpoint=_redirect_target(redirect, prefix, source, index)))
             continue
         full = _compose(prefix, _resolve_path(pairs["path"], source, index))
         load = pairs.get("loadChildren")  # lazy route group -> mount
@@ -215,22 +252,10 @@ def _process(arr: Node, prefix: str | None, source: bytes, path: str, seen: set[
             handler = _lazy_target(load_component, source)
         else:
             handler = None
-        sl, sc = elem.start_point[0] + 1, elem.start_point[1]
-        routes.append(Statement(
-            id=disambiguate(statement_id(path, sl, sc), seen),
-            parentId=file_id(path),
-            nodeType="synthetic",
-            semanticType="route",
-            text=node_text(elem, source).split("\n", 1)[0][:120],
-            endpoint=full,
-            framework="angular",
-            routeKind="mount" if load is not None else "page",
-            handler=handler,
-            guards=_guards(pairs.get("canActivate"), source) or None,
-            startLine=sl,
-            endLine=elem.end_point[0] + 1,
-            path=path,
-        ))
+        routes.append(_route_statement(
+            elem, source, path, seen, endpoint=full, handler=handler,
+            route_kind="mount" if load is not None else "page",
+            guards=_guards(pairs.get("canActivate"), source) or None))
         children = pairs.get("children")
         if children is not None and children.type == "array":
             _process(children, full, source, path, seen, routes, index)
