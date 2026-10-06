@@ -292,13 +292,21 @@ def _apply_alter(alter: exp.Alter, by_table: dict[str, dict[str, Any]]) -> None:
             owner["constraints"].append(rec)
 
 
-def _view(create: exp.Create, dialect: str) -> dict[str, Any]:
+def _view(create: exp.Create, dialect: str, raw: str | None = None) -> dict[str, Any]:
+    """View record. ``definition`` is the **verbatim** CREATE statement text (``raw``) when the
+    caller could recover it from the source — exactly as written, header included, comments
+    and whitespace intact (BREEZEAI-958 AC2). Only when no raw text is available does it fall
+    back to sqlglot's re-serialised query, which drops the ``CREATE … AS`` header, collapses
+    whitespace, rewrites ``--`` comments as ``/* */`` and normalises aliases/operators."""
     table = create.find(exp.Table)
     name = table.name if table is not None else ""
     schema = (table.db or None) if table is not None else None
     full = f"{schema}.{name}" if schema else name
-    query = create.expression
-    definition = query.sql(dialect=_SQLGLOT.get(dialect, "postgres")) if query is not None else None
+    if raw is not None:
+        definition: str | None = raw
+    else:
+        query = create.expression
+        definition = query.sql(dialect=_SQLGLOT.get(dialect, "postgres")) if query is not None else None
     return {
         "name": name,
         "schema": schema,
@@ -307,6 +315,61 @@ def _view(create: exp.Create, dialect: str) -> dict[str, Any]:
         "definition": definition,
         "columns": [],
     }
+
+
+_TRAILING_TERMINATOR = re.compile(r"\s*;\s*$")
+
+# Head of a CREATE VIEW statement across the sqlglot dialects (T-SQL / Postgres / MySQL /
+# SQLite): optional OR REPLACE|ALTER, TEMP, RECURSIVE, MATERIALIZED, FORCE, MySQL ALGORITHM /
+# DEFINER / SQL SECURITY, IF NOT EXISTS, then the (optionally schema-qualified, possibly
+# quoted) name. Only the name is captured; the body is never inspected.
+_VIEW_HEAD = re.compile(
+    r"^CREATE\s+(?:OR\s+(?:REPLACE|ALTER)\s+)?(?:(?:GLOBAL\s+|LOCAL\s+)?TEMP(?:ORARY)?\s+)?"
+    r"(?:RECURSIVE\s+)?(?:MATERIALIZED\s+)?(?:FORCE\s+|NOFORCE\s+)?(?:ALGORITHM\s*=\s*\w+\s+)?"
+    r"(?:DEFINER\s*=\s*\S+\s+)?(?:SQL\s+SECURITY\s+\w+\s+)?VIEW\s+(?:IF\s+NOT\s+EXISTS\s+)?"
+    r"((?:[\w$]+|\"[^\"]+\"|`[^`]+`|\[[^\]]+\])(?:\s*\.\s*(?:[\w$]+|\"[^\"]+\"|`[^`]+`|\[[^\]]+\]))*)",
+    re.IGNORECASE,
+)
+
+
+def _raw_statement(stmt: str) -> str:
+    """Verbatim statement text: leading whitespace/comments dropped so it starts at the
+    keyword, trailing whitespace and a terminating ``;`` removed. Nothing inside is touched."""
+    return _TRAILING_TERMINATOR.sub("", _strip_leading_noise(stmt)).rstrip()
+
+
+def _bare_ident(ident: str) -> str:
+    """Strip one layer of ``[..]`` / ``".."`` / `` `..` `` quoting (case preserved)."""
+    ident = ident.strip()
+    if len(ident) >= 2 and ident[0] + ident[-1] in ('[]', '""', "``"):
+        return ident[1:-1]
+    return ident
+
+
+def _raw_view_statements(text: str) -> dict[str, list[str]]:
+    """Verbatim ``CREATE … VIEW`` statements keyed by the view's bare, lower-cased name, in
+    file order. Recovered with the quote/comment/paren-aware splitter so a ``;`` inside a
+    string or comment does not cut a statement. Used by the sqlglot path to store
+    ``definition`` exactly as written (sqlglot keeps no source offsets to slice from)."""
+    out: dict[str, list[str]] = {}
+    for chunk in _split_tsql_semicolons(text):
+        raw = _raw_statement(chunk)
+        m = _VIEW_HEAD.match(raw)
+        if not m:
+            continue
+        last = re.split(r"\s*\.\s*(?=(?:[\w$]+|\"[^\"]+\"|`[^`]+`|\[[^\]]+\])$)", m.group(1))[-1]
+        out.setdefault(_bare_ident(last).lower(), []).append(raw)
+    return out
+
+
+def _take_raw_view(raw_views: dict[str, list[str]], create: exp.Create) -> str | None:
+    """Pop the next verbatim statement recorded for this view's name (duplicates map in file
+    order). ``None`` when the splitter could not isolate it — ``_view`` then falls back."""
+    table = create.find(exp.Table)
+    if table is None:
+        return None
+    cands = raw_views.get(table.name.lower())
+    return cands.pop(0) if cands else None
 
 
 def _index(create: exp.Create, dialect: str) -> dict[str, Any]:
@@ -362,6 +425,7 @@ def parse_ddl(text: str, filepath: str | None = None) -> dict[str, Any]:
         statements = sqlglot.parse(text, read=read)
     except Exception:
         statements = [s for s in _safe_parse_each(text, read, sample_errors)]
+    raw_views = _raw_view_statements(text)  # verbatim CREATE VIEW text, by name
 
     for stmt in statements:
         if stmt is None:
@@ -373,7 +437,7 @@ def parse_ddl(text: str, filepath: str | None = None) -> dict[str, Any]:
                 if kind == "TABLE":
                     tables.append(_table(stmt, dialect))
                 elif kind == "VIEW":
-                    views.append(_view(stmt, dialect))
+                    views.append(_view(stmt, dialect, raw=_take_raw_view(raw_views, stmt)))
                 elif kind == "INDEX":
                     all_indexes.append(_index(stmt, dialect))
             elif isinstance(stmt, exp.Alter):
@@ -851,7 +915,7 @@ def _parse_tsql_ddl(text: str) -> dict[str, Any]:
                 tables.append(tbl)
                 ok += 1
             elif kind == "view" and isinstance(node, exp.Create):
-                views.append(_view(node, "transactsql"))
+                views.append(_view(node, "transactsql", raw=_raw_statement(s)))
                 ok += 1
             elif kind == "index" and isinstance(node, exp.Create):
                 all_indexes.append(_index(node, "transactsql"))
@@ -1667,9 +1731,17 @@ def _parse_create_table(stmt: str) -> dict[str, Any] | None:
     }
 
 
+# CREATE [OR REPLACE] [[NO] FORCE] [EDITIONABLE | NONEDITIONABLE] [EDITIONING] [MATERIALIZED] VIEW
+# — the EDITIONABLE keywords are what SQL Developer / DBMS_METADATA emit by default on 12c+.
+_ORA_VIEW_HEAD = (
+    r"CREATE\s+(?:OR\s+REPLACE\s+)?(?:FORCE\s+|NO\s*FORCE\s+)?(?:(?:NON)?EDITIONABLE\s+)?"
+    r"(?:EDITIONING\s+)?(?:MATERIALIZED\s+)?VIEW\b"
+)
+
+
 def _parse_create_view(stmt: str) -> dict[str, Any] | None:
     m = re.match(
-        r"^CREATE\s+(?:OR\s+REPLACE\s+)?(?:FORCE\s+|NOFORCE\s+)?(?:MATERIALIZED\s+)?VIEW\s+"
+        r"^" + _ORA_VIEW_HEAD + r"\s+"
         r"(?:(" + _IDENT + r")\.)?(" + _IDENT + r")([\s\S]*?)\bAS\b\s+([\s\S]+)",
         stmt,
         re.IGNORECASE,
@@ -1681,7 +1753,9 @@ def _parse_create_view(stmt: str) -> dict[str, Any] | None:
     full = f"{schema}.{name}" if schema else name
     col_list_m = re.match(r"^\s*\(([^)]*)\)", m.group(3) or "")
     column_list = _split_col_list(col_list_m.group(1)) if col_list_m else []
-    definition = m.group(4).strip() if m.group(4) else None
+    # Verbatim CREATE statement (header included), mirroring program bodies / ddlText —
+    # not just the text after AS (BREEZEAI-958 AC2: stored definition == source text).
+    definition = _raw_statement(stmt)
     is_mat = bool(re.search(r"MATERIALIZED\s+VIEW", stmt, re.IGNORECASE))
     return {
         "name": name,
@@ -2084,9 +2158,7 @@ def _parse_oracle_ddl(text: str) -> dict[str, Any]:
                 parsed += 1
             else:
                 record_skip(stripped, "create_table_unparsed")
-        elif upper.startswith("CREATE") and re.search(
-            r"CREATE\s+(?:OR\s+REPLACE\s+)?(?:FORCE\s+|NOFORCE\s+)?(?:MATERIALIZED\s+)?VIEW\b", stripped, re.IGNORECASE
-        ):
+        elif upper.startswith("CREATE") and re.search(_ORA_VIEW_HEAD, stripped, re.IGNORECASE):
             v = _parse_create_view(stripped)
             if v:
                 views.append(v)
