@@ -61,6 +61,12 @@ def test_jsx_routes_detected_and_nested(tmp_path) -> None:
     assert set(routes) == {"/", "/users", "/users/:id"}  # nested path joined onto parent
     assert routes["/users/:id"].handler == "UserDetail"
     assert routes["/"].handler == "Home"
+    assert {endpoint: route.nodeType for endpoint, route in routes.items()} == {
+        "/": "jsx_self_closing_element",
+        "/users": "jsx_element",
+        "/users/:id": "jsx_self_closing_element",
+    }
+    assert all(route.nodeType != "synthetic" for route in routes.values())
     assert all(r.framework == "react" and r.routeKind == "page" for r in routes.values())
     assert all(r.parentId == rec.id for r in routes.values())  # parented to file
     assert rec.framework == "react"

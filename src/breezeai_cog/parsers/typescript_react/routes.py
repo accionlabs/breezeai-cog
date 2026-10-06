@@ -92,7 +92,7 @@ def _process_jsx(el: Node, prefix: str, source: bytes, path: str, seen: set[str]
         routes.append(Statement(
             id=disambiguate(statement_id(path, sl, sc), seen),
             parentId=file_id(path),
-            nodeType="jsx_element",
+            nodeType=el.type,
             semanticType="route",
             text=node_text(_opening(el), source).split("\n", 1)[0][:120],
             endpoint=full,
