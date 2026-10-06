@@ -20,19 +20,11 @@ import externalRouter from './my-router';
 const app = express();
 const router = express.Router();
 const r = Router();
-const userApp = {};
-const myRouter = {};
-const api = {};
-let routeApp;
 
 app.get('/users/:id', (req, res) => { res.send('ok'); });
 router.post('/users', createUser);
 r.get('/router-instance', handleRouterInstance);
 externalRouter.get('/imported-router', handleImportedRouter);
-userApp.get('/fake-app', fakeHandler);
-myRouter.post('/fake-router', fakeHandler);
-api.get('/fake-api', fakeHandler);
-routeApp.get('/fake-uninitialized', fakeHandler);
 function registerRouter(userRouter) {
   userRouter.get('/parameter-router', handleParameterRouter);
 }
@@ -61,6 +53,14 @@ def _parse(tmp_path, *, capture=True) -> FileRecord:
     p.write_text(SRC.decode())
     ctx = ParseContext(path="server.js", abs_path=p, source=SRC, repo_root=tmp_path,
                        capture_statements=capture)
+    return TypeScriptParser().parse_file(ctx)
+
+
+def _parse_source(tmp_path, name: str, source: bytes) -> FileRecord:
+    p = tmp_path / name
+    p.write_bytes(source)
+    ctx = ParseContext(path=name, abs_path=p, source=source, repo_root=tmp_path,
+                       capture_statements=True)
     return TypeScriptParser().parse_file(ctx)
 
 
@@ -138,46 +138,19 @@ function handler(req, res) {
     }
 
 
-def test_receiver_constructor_forms_and_opaque_initializers(tmp_path) -> None:
+def test_receiver_constructor_expression_forms(tmp_path) -> None:
     src = b'''import express from 'express';
 const router = require('express').Router();
 const castApp = express() as Application;
 const nonNullApp = express()!;
 const parenthesizedApp = (express());
-const objectApp = {};
-const arrayApp = [];
-const literalApp = 1;
-const functionApp = () => {};
-let deferredRouter;
-deferredRouter = express.Router();
-let assignedObjectApp;
-assignedObjectApp = {};
 
 router.get('/cjs-router', cjsHandler);
 castApp.get('/cast-app', castHandler);
 nonNullApp.get('/non-null-app', nonNullHandler);
 parenthesizedApp.get('/parenthesized-app', parenthesizedHandler);
-objectApp.get('/object-is-not-router', handler);
-arrayApp.get('/array-is-not-router', handler);
-literalApp.get('/literal-is-not-router', handler);
-functionApp.get('/function-is-not-router', handler);
-deferredRouter.get('/assigned-router', assignedHandler);
-assignedObjectApp.get('/assigned-object-is-not-router', handler);
-
-{
-  const app = initApp(express());
-  app.get('/opaque-app-factory', opaqueAppHandler);
-}
-{
-  const router = createRouter();
-  router.post('/opaque-router-factory', opaqueRouterHandler);
-}
 '''
-    p = tmp_path / "receiver-forms.ts"
-    p.write_bytes(src)
-    ctx = ParseContext(path="receiver-forms.ts", abs_path=p, source=src, repo_root=tmp_path,
-                       capture_statements=True)
-    rec = TypeScriptParser().parse_file(ctx)
+    rec = _parse_source(tmp_path, "receiver-constructors.ts", src)
     routes = {
         (s.method, s.endpoint)
         for s in rec.statements
@@ -189,10 +162,124 @@ assignedObjectApp.get('/assigned-object-is-not-router', handler);
         ("GET", "/cast-app"),
         ("GET", "/non-null-app"),
         ("GET", "/parenthesized-app"),
-        ("GET", "/assigned-router"),
+    }
+
+
+def test_opaque_receiver_initializers_use_name_fallback(tmp_path) -> None:
+    src = b'''import express from 'express';
+{
+  const app = initApp(express());
+  app.get('/opaque-app-factory', opaqueAppHandler);
+}
+{
+  const router = createRouter();
+  router.post('/opaque-router-factory', opaqueRouterHandler);
+}
+'''
+    rec = _parse_source(tmp_path, "opaque-receivers.ts", src)
+    assert {
+        (s.method, s.endpoint)
+        for s in rec.statements
+        if s.semanticType == "route"
+    } == {
         ("GET", "/opaque-app-factory"),
         ("POST", "/opaque-router-factory"),
     }
+
+
+def test_known_non_router_receivers_are_rejected(tmp_path) -> None:
+    src = b'''import express from 'express';
+const objectApp = {};
+const arrayApp = [];
+const literalApp = 1;
+const functionApp = () => {};
+objectApp.get('/object', handler);
+arrayApp.get('/array', handler);
+literalApp.get('/literal', handler);
+functionApp.get('/function', handler);
+'''
+    rec = _parse_source(tmp_path, "non-router-receivers.ts", src)
+    assert not [s for s in rec.statements if s.semanticType == "route"]
+
+
+def test_deferred_router_assignment_and_uninitialized_receiver(tmp_path) -> None:
+    src = b'''import express from 'express';
+let deferredRouter;
+deferredRouter = express.Router();
+deferredRouter.get('/assigned-router', assignedHandler);
+let routeApp;
+routeApp.get('/uninitialized-app', handler);
+let assignedObject;
+assignedObject = {};
+assignedObject.get('/assigned-object', handler);
+'''
+    rec = _parse_source(tmp_path, "deferred-receivers.ts", src)
+    assert {
+        (s.method, s.endpoint)
+        for s in rec.statements
+        if s.semanticType == "route"
+    } == {("GET", "/assigned-router")}
+
+
+def test_router_binding_scopes_and_shadowing(tmp_path) -> None:
+    src = b'''import express from 'express';
+const scopedRouter = express.Router();
+function useOuterRouter() {
+  scopedRouter.get('/outer-scope', outerHandler);
+}
+{
+  const scopedRouter = {};
+  scopedRouter.get('/shadowed-object', notARoute);
+}
+{
+  const scopedRouter = createRouter();
+  scopedRouter.post('/inner-scope-opaque', innerHandler);
+}
+scopedRouter.get('/outer-scope-again', outerHandler);
+'''
+    rec = _parse_source(tmp_path, "receiver-scopes.ts", src)
+    assert {
+        (s.method, s.endpoint)
+        for s in rec.statements
+        if s.semanticType == "route"
+    } == {
+        ("GET", "/outer-scope"),
+        ("POST", "/inner-scope-opaque"),
+        ("GET", "/outer-scope-again"),
+    }
+
+
+def test_binding_after_call_does_not_use_receiver_name_fallback(tmp_path) -> None:
+    src = b'''import express from 'express';
+futureRouter.get('/before-binding', notAValidRoute);
+const futureRouter = {};
+'''
+    rec = _parse_source(tmp_path, "later-binding.ts", src)
+    assert not [s for s in rec.statements if s.semanticType == "route"]
+
+
+def test_chained_all_preserves_handler_and_middleware_guards(tmp_path) -> None:
+    src = b'''import express from 'express';
+const router = express.Router();
+router.route('/secure').all(requireAuth, auditLog, finalHandler);
+'''
+    rec = _parse_source(tmp_path, "chained-all.ts", src)
+    routes = [s for s in rec.statements if s.semanticType == "route"]
+    assert len(routes) == 1
+    assert routes[0].method == "ANY"
+    assert routes[0].endpoint == "/secure"
+    assert routes[0].handler == "finalHandler"
+    assert routes[0].guards == ["requireAuth", "auditLog"]
+    assert routes[0].authRequired is True
+
+
+def test_non_router_route_chain_is_not_detected(tmp_path) -> None:
+    src = b'''import express from 'express';
+const thing = {};
+thing.route('/x').get(handler);
+'''
+    rec = _parse_source(tmp_path, "non-router-chain.ts", src)
+    assert not [s for s in rec.statements if s.semanticType == "route"]
 
 
 def test_settings_getter_not_a_route(tmp_path) -> None:
@@ -201,10 +288,6 @@ def test_settings_getter_not_a_route(tmp_path) -> None:
     endpoints = {s.endpoint for s in rec.statements if s.semanticType == "route"}
     assert "title" not in endpoints
     assert "view engine" not in endpoints
-    assert "/fake-app" not in endpoints
-    assert "/fake-router" not in endpoints
-    assert "/fake-api" not in endpoints
-    assert "/fake-uninitialized" not in endpoints
 
 
 def test_parentid_linkage(tmp_path) -> None:

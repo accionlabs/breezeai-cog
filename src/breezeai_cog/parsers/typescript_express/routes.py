@@ -104,23 +104,30 @@ def _router_initializer(
     scope: list[Node],
 ) -> tuple[bool, Node | None, bool]:
     """Resolve a visible declaration and its latest preceding direct assignment."""
-    declaration: tuple[int, list[Node], Node | None, bool] | None = None
+    candidates: list[tuple[int, list[Node], Node | None, bool]] = []
     for entry in bindings.get(name, ()):
         start_byte, binding_scope, _, is_assignment = entry
         if (
             not is_assignment
-            and start_byte < before_byte
             and len(binding_scope) <= len(scope)
             and all(left == right for left, right in zip(binding_scope, scope))
         ):
-            if declaration is None or (len(binding_scope), start_byte) > (
-                len(declaration[1]), declaration[0]
-            ):
-                declaration = entry
-    if declaration is None:
+            candidates.append(entry)
+    if not candidates:
         return False, None, False
 
+    visible_depth = max(len(entry[1]) for entry in candidates)
+    visible = [entry for entry in candidates if len(entry[1]) == visible_depth]
+    preceding = [entry for entry in visible if entry[0] < before_byte]
+    declaration = (
+        max(preceding, key=lambda entry: entry[0])
+        if preceding
+        else min(visible, key=lambda entry: entry[0])
+    )
     start_byte, binding_scope, initializer, _ = declaration
+    if start_byte >= before_byte:
+        return True, None, False
+
     latest_assignment: tuple[int, Node] | None = None
     for assigned_byte, assignment_scope, value, is_assignment in bindings.get(name, ()):
         if (
