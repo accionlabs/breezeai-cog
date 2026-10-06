@@ -1,234 +1,232 @@
-"""ActiveRecord model and receiver evidence for Ruby parsing."""
+"""ActiveRecord model discovery — the positive evidence behind Ruby data-access hints.
+
+A Ruby data-access call is only distinguishable from ordinary code by *what the receiver
+is*: ``User.find(1)`` is a database read, ``Tempfile.create`` is not, and nothing in the
+call's own syntax separates them. Capitalization cannot decide it (every Ruby class name is
+capitalized) and a denylist of known non-models cannot either — it has to enumerate every
+gem and stdlib constant in existence to stay correct.
+
+So this module answers the question from the declarations instead: a constant is a model
+when its class **transitively extends** ``ActiveRecord::Base`` (directly, or through the
+conventional ``ApplicationRecord`` intermediate). That answer lives in the model file, which
+is a *different* file from the controller that queries it, so it is computed once per
+repository in :func:`build_model_index` (the ``build_index`` pre-pass) and handed to the
+shared classifier as ``typed_db_ids`` — the same positive-evidence gate TypeScript uses for
+``Repository<T>``-typed fields.
+
+:func:`model_receivers` then adds the per-file half: local variables and instance variables
+assigned from a model constant (``user = User.find(id)``), so instance writes
+(``user.save``) have evidence too.
+"""
 
 from __future__ import annotations
 
-import re
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterator
 from pathlib import Path
+from typing import Sequence
 
 from tree_sitter import Node
 
+from ..index_common import parallel_map
 from ..treesitter import node_text, parse_source
 
-_MODEL_BASES = {"activerecord::base", "applicationrecord"}
-_ASSOCIATIONS = {"belongs_to", "has_one", "has_many", "has_and_belongs_to_many"}
-_ASSOCIATION_ITERATORS = {"each", "find_each", "map", "collect"}
+#: Roots of the ActiveRecord hierarchy. ``ApplicationRecord`` is the Rails-generated
+#: intermediate; it is seeded as a root so a repo that never declares it (engines, or a
+#: model file parsed on its own) still resolves its subclasses.
+_AR_ROOTS = frozenset({"ActiveRecord::Base", "ApplicationRecord"})
+
+#: Call names that produce a model *instance* (or relation) from a model constant, so the
+#: assigned variable carries the model's identity: ``user = User.find(id)``.
+_MODEL_PRODUCERS = frozenset({
+    "find", "find_by", "find_by!", "where", "new", "create", "create!", "first", "last",
+    "build", "find_or_create_by", "find_or_initialize_by", "take", "all",
+})
 
 
-def _walk(node: Node) -> Iterable[Node]:
-    yield node
-    for child in node.named_children:
-        yield from _walk(child)
-
-
-def _last_constant(name: str) -> str:
-    return name.lstrip(":").rsplit("::", 1)[-1]
-
-
-def _class_parent(node: Node, source: bytes) -> tuple[str, str] | None:
-    header = node_text(node, source).splitlines()[0]
-    match = re.match(
-        r"\s*class\s+([A-Z]\w*(?:::[A-Z]\w*)*)(?:\s*<\s*([A-Z]\w*(?:::[A-Z]\w*)*))?",
-        header,
-    )
-    if match is None:
+def _class_name(node: Node, source: bytes) -> str | None:
+    """Declared name of a ``class`` node — ``User`` or ``Admin::User``."""
+    name = node.child_by_field_name("name")
+    if name is None or name.type not in {"constant", "scope_resolution"}:
         return None
-    return match.group(1), match.group(2) or ""
+    return node_text(name, source)
 
 
-def _resolve_models(declarations: list[tuple[str, str]]) -> frozenset[str]:
-    known = set(_MODEL_BASES)
+def _superclass_name(node: Node, source: bytes) -> str | None:
+    """Base-class name of a ``class`` node, with the grammar's ``<`` token stripped.
+
+    The ``superclass`` field text includes the ``<`` (``"< ApplicationRecord"``), so it is
+    stripped here rather than at each call site.
+    """
+    superclass = node.child_by_field_name("superclass")
+    if superclass is None:
+        return None
+    text = node_text(superclass, source).lstrip("<").strip().lstrip(":")
+    return text or None
+
+
+def _iter_classes(node: Node) -> Iterator[Node]:
+    if node.type == "class":
+        yield node
+    for child in node.named_children:
+        yield from _iter_classes(child)
+
+
+def _qualified_name(node: Node, source: bytes) -> str | None:
+    """Declared name prefixed by every enclosing class/module scope.
+
+    A nested class must not be recorded under its simple name: mastodon declares an
+    ``ActiveModelSerializers`` class ``MediaAttachment`` inside ``Translation`` *and* an
+    ActiveRecord model ``MediaAttachment`` at the top level. Recording both as
+    ``MediaAttachment`` makes the name look ambiguous and drops the real model. Mirrors the
+    nested-type qualification every other language parser applies to node ids.
+    """
+    name = _class_name(node, source)
+    if name is None:
+        return None
+    scopes: list[str] = []
+    current = node.parent
+    while current is not None:
+        if current.type in {"class", "module"}:
+            outer = _class_name(current, source)
+            if outer is not None:
+                scopes.append(outer)
+        current = current.parent
+    return "::".join([*reversed(scopes), name])
+
+
+def declared_parents(root: Node, source: bytes) -> list[tuple[str, str]]:
+    """``(qualified_name, superclass_name)`` for every class in one file that names a base."""
+    pairs: list[tuple[str, str]] = []
+    for node in _iter_classes(root):
+        name = _qualified_name(node, source)
+        parent = _superclass_name(node, source)
+        if name is not None and parent is not None:
+            pairs.append((name, parent))
+    return pairs
+
+
+def _file_parents(args: tuple[Path, Path]) -> list[tuple[str, str]]:
+    """Picklable per-file worker for :func:`build_model_index` (one parse per file).
+
+    A file that cannot be read or parsed contributes nothing — a missing model is a known
+    gap, whereas failing the pre-pass would block the whole repository.
+    """
+    repo_root, abs_path = args
+    try:
+        source = abs_path.read_bytes()
+    except OSError:
+        return []
+    # Guard on `class`, not on an ActiveRecord marker: a file declaring an unrelated class
+    # of the same name is what makes a name ambiguous, so it has to be seen even though it
+    # names no AR base. Files with no class at all (scripts, config, bare modules) are the
+    # only ones skipped.
+    if b"class" not in source:
+        return []
+    try:
+        root = parse_source("ruby", source).root_node
+    except ValueError:  # bounded-parse failure — skip this file only
+        return []
+    return declared_parents(root, source)
+
+
+def resolve_models(parents: dict[str, str]) -> frozenset[str]:
+    """Constants whose class transitively reaches an ActiveRecord root.
+
+    ``parents`` maps class name → base-class name. Walks each chain with a visited set so a
+    cyclic or self-referential declaration terminates instead of recursing forever.
+    """
     models: set[str] = set()
-    pending = declarations
-    while pending:
-        remaining: list[tuple[str, str]] = []
-        changed = False
-        for name, parent in pending:
-            if parent and (
-                parent.lower() in known
-                or _last_constant(parent).lower() in known
-            ):
+    for name in parents:
+        seen: set[str] = set()
+        current: str | None = name
+        while current is not None and current not in seen:
+            seen.add(current)
+            base = parents.get(current)
+            if base in _AR_ROOTS or current in _AR_ROOTS:
                 models.add(name)
-                models.add(_last_constant(name))
-                known.add(name.lower())
-                known.add(_last_constant(name).lower())
-                changed = True
-            else:
-                remaining.append((name, parent))
-        if not changed:
-            break
-        pending = remaining
-    return frozenset(models)
+                break
+            current = base
+    # A model's terminal segment is also a valid receiver (`Admin::User` is written `User`
+    # inside `module Admin`), so both forms are accepted.
+    return frozenset(models | {m.rsplit("::", 1)[-1] for m in models})
 
 
-def active_record_model_names(root: Node, source: bytes) -> frozenset[str]:
-    """Return model classes identifiable from ActiveRecord ancestry in this source file."""
-    declarations = [
-        declaration
-        for node in _walk(root)
-        if node.type == "class"
-        and (declaration := _class_parent(node, source)) is not None
-    ]
-    return _resolve_models(declarations)
-
-
-def build_active_record_model_index(
+def build_model_index(
     repo_root: Path, files: Sequence[Path], jobs: int = 1
 ) -> frozenset[str]:
-    """Index ActiveRecord subclasses across Ruby files for resolving parameter hints."""
-    del repo_root, jobs
-    declarations: list[tuple[str, str]] = []
-    for path in files:
-        source = path.read_bytes()
-        root = parse_source("ruby", source).root_node
-        declarations.extend(
-            declaration
-            for node in _walk(root)
-            if node.type == "class"
-            and (declaration := _class_parent(node, source)) is not None
-        )
-    return _resolve_models(declarations)
+    """Repo-level pre-pass: every constant that names an ActiveRecord model.
 
-
-def is_active_record_model(
-    node: Node, source: bytes, model_names: frozenset[str]
-) -> bool:
-    declaration = _class_parent(node, source)
-    if declaration is None:
-        return False
-    name, parent = declaration
-    known = {item.lower() for item in model_names}
-    return (
-        name.lower() in known
-        or _last_constant(name).lower() in known
-        or parent.lower() in _MODEL_BASES
+    Runs through the shared :func:`parallel_map` so it honours ``--jobs`` (serial at
+    ``jobs<=1``) like the parse stage, and reduces order-independently — the result is the
+    same set regardless of how the workers interleave.
+    """
+    root = Path(repo_root)
+    ruby_files = [f for f in files if f.suffix == ".rb"]
+    if not ruby_files:
+        return frozenset()
+    per_file = parallel_map(
+        [(root, f) for f in ruby_files], _file_parents, jobs
     )
+    # A name can be declared more than once: a model re-opened inside a migration or a CLI
+    # task (routine in Rails), or a genuinely different class sharing the name. Conflicting
+    # on the *base name* would drop the first kind, so the test is whether the declarations
+    # disagree about **model-ness**: all-model is kept, all-not-model is excluded, and a
+    # genuine disagreement is dropped (absent beats wrong). Order-independent — the verdict
+    # does not depend on which worker finished first.
+    by_name: dict[str, set[str]] = {}
+    for pairs in per_file:
+        for name, base in pairs:
+            by_name.setdefault(name, set()).add(base)
+    flat = {name: next(iter(bases)) for name, bases in by_name.items()}
+    verdicts: dict[str, set[bool]] = {}
+    for name, bases in by_name.items():
+        for base in bases:
+            probe = dict(flat)
+            probe[name] = base
+            verdicts.setdefault(name, set()).add(name in resolve_models(probe))
+    models = {n for n, v in verdicts.items() if v == {True}}
+    # A model's terminal segment is a valid receiver too (`Admin::User` is written `User`
+    # inside `module Admin`) — but never when that bare name is itself a declared non-model.
+    non_models = {n for n, v in verdicts.items() if True not in v}
+    terminals = {m.rsplit("::", 1)[-1] for m in models} - non_models
+    return frozenset(models | terminals)
 
 
-def association_receivers_for_class(node: Node, source: bytes) -> frozenset[str]:
-    body = next((child for child in node.named_children if child.type == "body_statement"), None)
-    if body is None:
+def model_receivers(
+    root: Node, source: bytes, models: frozenset[str]
+) -> frozenset[str]:
+    """Receivers in one file that carry a model's identity.
+
+    The model constants themselves, plus any local or instance variable assigned from one
+    (``user = User.find(id)`` → ``user``), so an instance write (``user.save``) has the same
+    positive evidence a class-level query does. An assignment from anything else — a gem, a
+    literal, a method call on ``self`` — contributes nothing.
+    """
+    if not models:
         return frozenset()
-    associations: dict[str, str] = {}
-    for child in body.named_children:
-        if child.type != "call":
-            continue
-        method = child.child_by_field_name("method")
-        method_name = node_text(method, source) if method is not None else ""
-        if method_name not in _ASSOCIATIONS:
-            continue
-        match = re.search(r":([a-z_]\w*)", node_text(child, source))
-        if match is not None:
-            associations[match.group(1)] = method_name
+    names: set[str] = set(models)
 
-    receivers = set(associations)
-    for association, kind in associations.items():
-        if kind in {"has_many", "has_and_belongs_to_many"}:
-            if association.endswith("ies") and len(association) > 3:
-                receivers.add(association[:-3] + "y")
-            elif association.endswith(("ses", "xes", "zes", "ches", "shes")):
-                receivers.add(association[:-2])
-            elif association.endswith("s") and not association.endswith(
-                ("ss", "us", "is", "ws")
+    def visit(node: Node) -> None:
+        if node.type == "assignment":
+            left = node.child_by_field_name("left")
+            right = node.child_by_field_name("right")
+            if (
+                left is not None
+                and right is not None
+                and left.type in {"identifier", "instance_variable", "class_variable"}
+                and right.type == "call"
             ):
-                receivers.add(association[:-1])
+                receiver = right.child_by_field_name("receiver")
+                method = right.child_by_field_name("method")
+                if receiver is not None and method is not None:
+                    base = node_text(receiver, source).lstrip(":")
+                    verb = node_text(method, source)
+                    if (
+                        base in models or base.rsplit("::", 1)[-1] in models
+                    ) and verb in _MODEL_PRODUCERS:
+                        names.add(node_text(left, source))
+        for child in node.named_children:
+            visit(child)
 
-    for block in _walk(node):
-        if block.type != "block":
-            continue
-        call = next((child for child in block.named_children if child.type == "call"), None)
-        if call is None:
-            continue
-        method = call.child_by_field_name("method")
-        receiver = call.child_by_field_name("receiver")
-        receiver_name = node_text(receiver, source) if receiver is not None else ""
-        method_name = node_text(method, source) if method is not None else ""
-        if receiver_name not in associations or method_name not in _ASSOCIATION_ITERATORS:
-            continue
-        parameters = block.child_by_field_name("parameters")
-        if parameters is None:
-            parameters = next(
-                (child for child in block.named_children if child.type == "block_parameters"),
-                None,
-            )
-        if parameters is not None:
-            receivers.update(
-                node_text(parameter, source)
-                for parameter in _walk(parameters)
-                if parameter.type == "identifier"
-            )
-    return frozenset(receiver.lower() for receiver in receivers)
-
-
-def _hinted_model_parameters(
-    method: Node, source: bytes, model_names: frozenset[str]
-) -> frozenset[str]:
-    parameters = method.child_by_field_name("parameters")
-    if parameters is None:
-        return frozenset()
-    parameter_names = _method_parameter_names(method, source)
-    if not parameter_names:
-        return frozenset()
-
-    prefix_lines = source[: method.start_byte].decode("utf-8", "replace").splitlines()
-    preceding: list[str] = []
-    for line in reversed(prefix_lines[-12:]):
-        stripped = line.strip()
-        if not stripped:
-            if preceding:
-                break
-            continue
-        if stripped.startswith(("#", "sig")):
-            preceding.append(stripped)
-            continue
-        break
-    hints = "\n".join(reversed(preceding))
-    model_types = {_last_constant(name).lower() for name in model_names}
-    typed: set[str] = set()
-
-    for match in re.finditer(
-        r"@param\s+(?:\[([^\]]+)\]\s+)?([a-z_]\w*)(?:\s+\[([^\]]+)\])?",
-        hints,
-    ):
-        name = match.group(2)
-        type_text = match.group(1) or match.group(3) or ""
-        if name in parameter_names and _last_constant(type_text).lower() in model_types:
-            typed.add(name.lower())
-
-    for match in re.finditer(
-        r"([a-z_]\w*)\s*:\s*(?:T(?:::|\.)\w+\s*\(\s*)?([A-Z]\w*(?:::[A-Z]\w*)*)",
-        hints,
-    ):
-        name, type_name = match.groups()
-        if name in parameter_names and _last_constant(type_name).lower() in model_types:
-            typed.add(name.lower())
-    return frozenset(typed)
-
-
-def _method_parameter_names(method: Node, source: bytes) -> set[str]:
-    parameters = method.child_by_field_name("parameters")
-    if parameters is None:
-        return set()
-    return {
-        node_text(child, source)
-        for child in _walk(parameters)
-        if child.type == "identifier"
-    }
-
-
-def active_record_receivers_for_method(
-    method: Node,
-    source: bytes,
-    model_names: frozenset[str],
-    association_receivers: frozenset[str],
-    *,
-    in_model_scope: bool,
-) -> frozenset[str]:
-    shadowed_associations = {
-        name.lower() for name in _method_parameter_names(method, source)
-    }
-    receivers = set(association_receivers) - shadowed_associations
-    receivers.update(_hinted_model_parameters(method, source, model_names))
-    if in_model_scope:
-        receivers.add("self")
-    return frozenset(receivers)
+    visit(root)
+    return frozenset(names)

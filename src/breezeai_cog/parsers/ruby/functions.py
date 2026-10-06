@@ -86,8 +86,6 @@ def _visibility(node: Node, source: bytes) -> str:
     return visibility
 
 
-# Bare identifiers like `foo` can be a zero-argument call or a local read; without semantic
-# analysis, skip them to avoid fabricating CALLS edges.
 def _calls_in_block(body: Node | None, source: bytes, resolve: CallResolver = noop_resolver) -> list[Call]:
     if body is None:
         return []
@@ -147,13 +145,7 @@ def build_function(
         calls=_calls_in_block(body, source, resolve),
     )
     statements = extract_statements(
-        body,
-        source,
-        path,
-        parent_id=fid,
-        capture=capture,
-        limit=limit,
-        seen_ids=seen_ids,
-        typed_db_ids=typed_db_ids,
+        body, source, path, parent_id=fid, capture=capture, limit=limit,
+        seen_ids=seen_ids, typed_db_ids=typed_db_ids,
     )
     return [fn], statements

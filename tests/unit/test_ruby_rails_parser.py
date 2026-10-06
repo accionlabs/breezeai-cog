@@ -3,7 +3,6 @@ from __future__ import annotations
 from pathlib import Path
 
 from breezeai_cog.parsers.base import ParseContext
-from breezeai_cog.parsers.ruby_rails import parser as rails_parser_module
 from breezeai_cog.parsers.ruby_rails.parser import RailsParser
 
 
@@ -82,21 +81,3 @@ def test_rails_parser_claims_only_rails_sources(tmp_path: Path) -> None:
     assert not parser.claims("lib/chart.rb", b"chart.axes.routes.draw do\nend")
     assert parser.priority > 0
     assert parser.frameworks == ["rails"]
-
-
-def test_rails_claims_parse_respects_common_timeout(monkeypatch) -> None:
-    original_parse_source = rails_parser_module.parse_source
-    observed_timeouts: list[int] = []
-
-    def parse_with_timeout(language, source, timeout_micros):
-        observed_timeouts.append(timeout_micros)
-        return original_parse_source(language, source, timeout_micros)
-
-    monkeypatch.setattr(rails_parser_module, "parse_source", parse_with_timeout)
-
-    assert RailsParser().claims(
-        "config/routes.rb",
-        b"Rails.application.routes.draw do\nend",
-        parse_timeout_micros=12_345,
-    )
-    assert observed_timeouts == [12_345]

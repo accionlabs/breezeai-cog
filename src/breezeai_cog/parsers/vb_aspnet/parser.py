@@ -29,7 +29,7 @@ class VbAspNetParser(VbParser):
     def parse_file(self, ctx: ParseContext) -> FileRecord:
         root = parse_source("vb", ctx.source, ctx.parse_timeout_micros).root_node
         record = self.extract(root, ctx)  # inherited VB extraction (one parse)
-        if ctx.capture_statements:  # routes are statements — gated by --capture-statements
+        if ctx.capture_statements:  # routes are statements — gated by statement capture
             routes = detect_controller_routes(record, ctx.resolution_index)
             seen = {s.id for s in record.statements} | {r.id for r in routes}
             routes += detect_minimal_api_routes(

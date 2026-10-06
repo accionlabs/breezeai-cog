@@ -10,6 +10,7 @@ import re
 import shutil
 import time
 
+import httpx
 from fastapi import APIRouter, BackgroundTasks, File, Form, Request, UploadFile
 from fastapi.responses import JSONResponse
 from starlette.concurrency import run_in_threadpool
@@ -19,11 +20,12 @@ from ..analyzers.nosql import BuildError as NoSqlBuildError
 from ..analyzers.nosql import build_nosql_records
 from ..analyzers.sql import parse_ddl
 from ..core.ignore import append_repo_ignore_patterns
+from ..errors import UploadError
 from ..services.diff import empty_meta, run_diff_stream
 from ..services.inprocess import analyze_in_memory
 from .deps import ServerDeps
 from .errors import ApiError
-from .git import parse_repo_url
+from .git import _scrub, parse_repo_url
 
 router = APIRouter()
 
@@ -112,8 +114,30 @@ async def analyze_diff(request: Request, background_tasks: BackgroundTasks) -> d
     repo_name = parsed["repo"]
     ignore_patterns = _normalize_ignore_patterns(body.get("ignorePatterns"))
 
-    temp_dir, filter_set, deleted_files = await run_in_threadpool(deps.acquire_diff, settings, body)
-    storage_key= f"code-ontology/{project_uuid}/{incoming}.ndjson.gz"
+    # Every failure below leaves as an ApiError carrying the stage that broke, so the
+    # Breeze backend (which awaits this call) can persist a real reason + step instead
+    # of a bare "Request failed with status code 500" (BREEZEAI-520 / BREEZEAI-681).
+    # Messages are credential-scrubbed: provider errors echo the response body and git
+    # errors can echo the authenticated clone URL.
+    try:
+        temp_dir, filter_set, deleted_files = await run_in_threadpool(
+            deps.acquire_diff, settings, body
+        )
+    except ApiError as exc:
+        exc.failed_step = exc.failed_step or "git_acquire"
+        raise
+    except (RuntimeError, httpx.HTTPError) as exc:
+        # The provider's fault: git.py raises RuntimeError for provider REST 4xx/5xx,
+        # clone failures and timeouts; httpx raises for transport errors. 502 = upstream.
+        raise ApiError(f"Git acquisition failed: {_scrub(str(exc))}", 502, "git_acquire") from exc
+    except Exception as exc:
+        # Ours: disk full, a KeyError on an unexpected payload, a bug. Still tagged
+        # with the step so the backend can show where it broke, but not blamed on the
+        # provider.
+        raise ApiError(
+            f"Git acquisition failed unexpectedly: {_scrub(str(exc))}", 500, "git_acquire"
+        ) from exc
+    storage_key = f"code-ontology/{project_uuid}/{incoming}.ndjson.gz"
     has_changed = filter_set is None or len(filter_set) > 0
     try:
         if ignore_patterns:
@@ -122,14 +146,38 @@ async def analyze_diff(request: Request, background_tasks: BackgroundTasks) -> d
             try:
                 append_repo_ignore_patterns(temp_dir, ignore_patterns)
             except OSError as exc:
-                raise ApiError(f"Failed to apply ignorePatterns: {exc}", 500) from exc
+                raise ApiError(
+                    f"Failed to apply ignorePatterns: {exc}", 500, "ignore_patterns"
+                ) from exc
+        try:
+            upload = deps.open_storage(storage_key)
+        except Exception as exc:  # missing bucket / provider config / boto3 client errors
+            raise ApiError(f"Storage open failed: {_scrub(str(exc))}", 500, "upload") from exc
         if has_changed:
-            upload = deps.open_storage(storage_key)
-            meta = await run_in_threadpool(run_diff_stream, settings, upload, temp_dir, filter_set, repo_name)
+            try:
+                meta = await run_in_threadpool(
+                    run_diff_stream, settings, upload, temp_dir, filter_set, repo_name
+                )
+            except ApiError as exc:
+                exc.failed_step = exc.failed_step or "parse_stream"
+                raise
+            except UploadError as exc:
+                # The sink wraps every storage write, so an S3 part-upload failure
+                # mid-stream is reported as the upload step, not as a parser failure.
+                raise ApiError(f"Upload failed: {_scrub(str(exc))}", 500, "upload") from exc
+            except Exception as exc:
+                raise ApiError(
+                    f"Parse/stream failed: {_scrub(str(exc))}", 500, "parse_stream"
+                ) from exc
         else:
-            upload = deps.open_storage(storage_key)
-            await run_in_threadpool(upload.close)
             meta = empty_meta(repo_name)
+        # Closing finalises the multipart upload (or writes the empty artifact), so it
+        # is an upload failure whichever branch ran. run_diff_stream deliberately does
+        # not close.
+        try:
+            await run_in_threadpool(upload.close)
+        except Exception as exc:
+            raise ApiError(f"Upload failed: {_scrub(str(exc))}", 500, "upload") from exc
     finally:
         shutil.rmtree(temp_dir, ignore_errors=True)
 
@@ -139,7 +187,7 @@ async def analyze_diff(request: Request, background_tasks: BackgroundTasks) -> d
 
     background_tasks.add_task(
         deps.notify, "/code-ontology/stream-ingest",
-        {"s3Key": storage_key, "projectMetaData": meta, "deletedFiles": deleted_files,
+        {"storage_key": storage_key, "projectMetaData": meta, "deletedFiles": deleted_files,
          "projectUuid": project_uuid, "codeOntologyId": code_ontology_id,
          "repoUrl": repo_url, "gitBranch": git_branch, "commitId": incoming},
     )
@@ -206,7 +254,7 @@ async def analyze_sql(
     await run_in_threadpool(_stream_records_to_infra, deps, storage_key, [record])
     background_tasks.add_task(
         deps.notify, "/db-ontology/stream-ingest-s3",
-        {"s3Key": storage_key, "projectUuid": projectUuid, "dataLakeId": dataLakeId,
+        {"storage_key": storage_key, "projectUuid": projectUuid, "dataLakeId": dataLakeId,
          "repositoryName": repositoryName or file_name},
     )
 
@@ -258,7 +306,7 @@ async def analyze_nosql(
     await run_in_threadpool(_stream_records_to_infra, deps, storage_key, build["records"])
     background_tasks.add_task(
         deps.notify, "/db-ontology/stream-ingest-s3",
-        {"s3Key": storage_key, "projectUuid": projectUuid, "dataLakeId": dataLakeId,
+        {"storage_key": storage_key, "projectUuid": projectUuid, "dataLakeId": dataLakeId,
          "repositoryName": repositoryName or primary_name},
     )
 
@@ -316,7 +364,7 @@ async def analyze_es(
     await run_in_threadpool(_stream_records_to_infra, deps, storage_key, build["records"])
     background_tasks.add_task(
         deps.notify, "/db-ontology/stream-ingest-s3",
-        {"s3Key": storage_key, "projectUuid": projectUuid, "dataLakeId": dataLakeId,
+        {"storage_key": storage_key, "projectUuid": projectUuid, "dataLakeId": dataLakeId,
          "repositoryName": repositoryName or primary_name},
     )
 

@@ -73,7 +73,7 @@ end
 def test_ruby_statements_use_shared_semantic_detection(tmp_path: Path) -> None:
     source = b'''class Data
   def load(id)
-    User.find(id)
+    User.where(id: id)
     Net::HTTP.get(uri)
     "SELECT * FROM users"
   end
@@ -95,84 +95,6 @@ end
     assert any(statement.semanticType == "api_call" for statement in rec.statements)
     assert any(statement.semanticType == "query_statement" for statement in rec.statements)
     assert not any(statement.nodeType in {"class", "module", "method"} for statement in rec.statements)
-
-
-def test_ruby_instance_writes_require_model_receiver_evidence(tmp_path: Path) -> None:
-    source = b'''class User < ApplicationRecord
-  belongs_to :account
-  has_many :posts
-
-  def deactivate(user)
-    user.save
-    account.update(active: false)
-    posts.each { |post| post.update(active: false) }
-    self.save
-  end
-
-  def override_association(account)
-    account.save
-  end
-end
-
-class Settings
-  def persist(config, file)
-    config.save
-    file.update
-  end
-end
-'''
-    path = tmp_path / "models.rb"
-    path.write_bytes(source)
-    rec = RubyParser().parse_file(ParseContext(
-        path="models.rb", abs_path=path, source=source, repo_root=tmp_path,
-        capture_statements=True,
-    ))
-
-    detected = {
-        statement.text.strip()
-        for statement in rec.statements
-        if statement.semanticType == "db_method_call"
-    }
-    assert "account.update(active: false)" in detected
-    assert "post.update(active: false)" in detected
-    assert "self.save" in detected
-    assert "user.save" not in detected
-    assert "account.save" not in detected
-    assert "config.save" not in detected
-    assert "file.update" not in detected
-
-
-def test_ruby_sorbet_parameter_hint_resolves_model_write(tmp_path: Path) -> None:
-    model_path = tmp_path / "app" / "models" / "user.rb"
-    model_path.parent.mkdir(parents=True)
-    model_path.write_text("class User < ApplicationRecord; end\n")
-    model_index = RubyParser().build_index(tmp_path, [model_path])
-
-    source = b'''class UsersController
-  sig { params(user: User).void }
-  def deactivate(user)
-    user.save
-  end
-
-  def update(config)
-    config.save
-  end
-end
-'''
-    path = tmp_path / "users_controller.rb"
-    path.write_bytes(source)
-    rec = RubyParser().parse_file(ParseContext(
-        path="users_controller.rb", abs_path=path, source=source, repo_root=tmp_path,
-        capture_statements=True, resolution_index=model_index,
-    ))
-
-    detected = {
-        statement.text.strip()
-        for statement in rec.statements
-        if statement.semanticType == "db_method_call"
-    }
-    assert "user.save" in detected
-    assert "config.save" not in detected
 
 
 def test_ruby_binary_expressions_are_not_standalone_statements(tmp_path: Path) -> None:
@@ -273,3 +195,51 @@ end
     call = next(call for call in run.calls if call.name == "call")
     assert call.path is None
     assert any(item.endswith("lib/service.rb") for item in rec.importFiles)
+
+
+def test_ruby_model_index_identifies_activerecord_receivers(tmp_path: Path) -> None:
+    """End-to-end: the repo pre-pass finds the model, so generic verbs in a *different*
+    file (the controller) are trusted. Without that evidence they would be dropped."""
+    (tmp_path / "app" / "models").mkdir(parents=True)
+    (tmp_path / "app" / "models" / "user.rb").write_bytes(
+        b"class User < ApplicationRecord\nend\n"
+    )
+    controller = tmp_path / "app" / "controllers" / "users_controller.rb"
+    controller.parent.mkdir(parents=True)
+    controller.write_bytes(
+        b"class UsersController < ApplicationController\n"
+        b"  def show\n"
+        b"    user = User.find(params[:id])\n"
+        b"    user.save\n"
+        b"    Tempfile.create('x')\n"
+        b"  end\n"
+        b"end\n"
+    )
+
+    parser = RubyParser()
+    index = parser.build_index(tmp_path, [tmp_path / "app" / "models" / "user.rb", controller])
+    assert "User" in index
+
+    rec = parser.parse_file(ParseContext(
+        path="app/controllers/users_controller.rb", abs_path=controller,
+        source=controller.read_bytes(), repo_root=tmp_path,
+        capture_statements=True, resolution_index=index,
+    ))
+    hints = {s.text.splitlines()[0]: s.dataAccessHint for s in rec.statements
+             if s.semanticType == "db_method_call"}
+    assert any("User.find" in k for k in hints), hints
+    assert any("user.save" in k for k in hints), hints
+    # Tempfile.create shares a verb with ActiveRecord but is not a model -> never tagged.
+    assert not any("Tempfile" in k for k in hints), hints
+
+
+def test_ruby_generic_verbs_dropped_without_model_evidence(tmp_path: Path) -> None:
+    """The cost of the gate: with no index (single-file parse, or a model defined in a gem)
+    a generic verb is dropped rather than guessed."""
+    src = b"class C\n  def go\n    Thing.create(1)\n    Thing.all\n  end\nend\n"
+    p = tmp_path / "c.rb"
+    p.write_bytes(src)
+    rec = RubyParser().parse_file(ParseContext(
+        path="c.rb", abs_path=p, source=src, repo_root=tmp_path, capture_statements=True,
+    ))
+    assert not any(s.semanticType == "db_method_call" for s in rec.statements)

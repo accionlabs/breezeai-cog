@@ -95,6 +95,12 @@ class BaseParser:
     #: Selection priority. A file is parsed by exactly ONE parser — the highest-priority
     #: one whose ``claims`` is True (framework parsers > base; base = 0, the fallback).
     priority: int = 0
+    #: The subset of ``extensions`` that are markup/view **templates** rather than code.
+    #: Skipped at scan time unless ``--capture-templates`` is given. Declared per parser
+    #: because a parser may own both kinds (WebForms owns ``.cs`` + ``.aspx``; Vue owns
+    #: ``.ts``/``.js`` + ``.vue``) and only the markup half is gated. Optional, like
+    #: ``priority``/``build_index`` — deliberately absent from the Protocol above.
+    template_extensions: tuple[str, ...] = ()
 
     def matches(self, path: str | Path) -> bool:
         """Whether this parser handles ``path`` by name/extension (the candidacy gate,

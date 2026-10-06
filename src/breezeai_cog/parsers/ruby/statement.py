@@ -7,8 +7,8 @@ from collections.abc import Iterator
 from tree_sitter import Node
 
 from ...schemas import Statement
-from ..detection import text_has_query
 from ..statements_common import classify_statement, render_concat, resolve_endpoint
+from ..detection import text_has_query
 from ..treesitter import node_text
 from .mappings import CONTROL_FLOW, EMIT_TYPES
 

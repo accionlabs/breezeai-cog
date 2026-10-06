@@ -123,3 +123,51 @@ def test_clone_failure_does_not_leak_the_credential(monkeypatch: pytest.MonkeyPa
     rendered = "".join(traceback.format_exception(excinfo.value))
     assert token not in rendered
     assert "Remote branch not found" in rendered
+
+
+def test_clone_failure_removes_its_temp_dir(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+    """A failed clone must not leave ``ontology-clone-*`` behind (pre-existing leak)."""
+    import tempfile
+
+    created: list[str] = []
+    real_mkdtemp = tempfile.mkdtemp
+
+    def tracking_mkdtemp(*args, **kwargs):
+        d = real_mkdtemp(*args, dir=str(tmp_path), **{k: v for k, v in kwargs.items() if k != "dir"})
+        created.append(d)
+        return d
+
+    def fake_run(*args, **kwargs):
+        raise subprocess.CalledProcessError(128, ["git", "clone"], stderr=b"fatal: nope\n")
+
+    monkeypatch.setattr(tempfile, "mkdtemp", tracking_mkdtemp)
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    with pytest.raises(RuntimeError, match="git clone failed"):
+        git_mod.clone_repo_full("github", "acme", "", "repo", _SHA, _BRANCH, None)
+
+    assert len(created) == 1
+    assert not Path(created[0]).exists()
+
+
+def test_clone_timeout_removes_its_temp_dir(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+    import tempfile
+
+    created: list[str] = []
+    real_mkdtemp = tempfile.mkdtemp
+
+    def tracking_mkdtemp(*args, **kwargs):
+        d = real_mkdtemp(*args, dir=str(tmp_path), **{k: v for k, v in kwargs.items() if k != "dir"})
+        created.append(d)
+        return d
+
+    def fake_run(*args, **kwargs):
+        raise subprocess.TimeoutExpired(["git", "clone"], 1)
+
+    monkeypatch.setattr(tempfile, "mkdtemp", tracking_mkdtemp)
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    with pytest.raises(RuntimeError, match="git clone timed out"):
+        git_mod.clone_repo_full("github", "acme", "", "repo", _SHA, _BRANCH, None)
+
+    assert not Path(created[0]).exists()

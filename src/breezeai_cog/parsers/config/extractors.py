@@ -30,6 +30,7 @@ _EXT_CATEGORY = {
     ".ini": "ini",
     ".xml": "xml",
     ".gradle": "gradle",
+    ".sbt": "sbt",
     ".csproj": "dotnet",
     ".vbproj": "dotnet",
     ".fsproj": "dotnet",
@@ -38,6 +39,9 @@ _EXT_CATEGORY = {
 }
 _GRADLE_DEP = re.compile(
     r"\b(?:implementation|api|compile|testImplementation|runtimeOnly|annotationProcessor|classpath)\b"
+)
+_SBT_DEP = re.compile(
+    r'"[^"]+"\s*%{1,3}\s*"[^"]+"\s*%\s*"[^"]+"'  # "org" %% "artifact" % "version"
 )
 _REQ_NAME = re.compile(r"[<>=!~;\s\[]")
 
@@ -105,6 +109,8 @@ def _dispatch(name: str, suffix: str, text: str) -> dict[str, Any]:
         return _pipfile(text)
     if name in ("build.gradle", "build.gradle.kts", "settings.gradle", "settings.gradle.kts"):
         return _gradle(name, text)
+    if name in ("build.sbt", "plugins.sbt") or suffix == ".sbt":
+        return _sbt(name, text)
     if name == "Makefile":
         return _makefile(text)
     if name in (".gitignore", ".dockerignore"):
@@ -644,6 +650,16 @@ def _gradle(name: str, text: str) -> dict[str, Any]:
         "buildTool": "gradle",
         "dependencyCount": len(_GRADLE_DEP.findall(text)),
         "isKotlinDSL": name.endswith(".kts"),
+    }
+
+
+def _sbt(name: str, text: str) -> dict[str, Any]:
+    return {
+        "kind": "sbt",
+        "category": "sbt",
+        "packageManager": "sbt",
+        "buildTool": "sbt",
+        "dependencyCount": len(_SBT_DEP.findall(text)),
     }
 
 

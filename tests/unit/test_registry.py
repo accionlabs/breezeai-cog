@@ -137,3 +137,36 @@ end
 '''
 
     assert registry.select("config/routes.rb", source).name == "ruby-rails"
+
+
+class FakeTemplateLang(BaseParser):
+    """Owns both code and markup — like WebForms (.cs + .aspx) and Vue (.ts + .vue)."""
+
+    name = "faketpl"
+    extensions = (".fk", ".fkhtml")
+    template_extensions = (".fkhtml",)
+
+    def parse_file(self, ctx: ParseContext) -> FileRecord:
+        return FileRecord(id=ctx.path, path=ctx.path, type="code", language="faketpl", loc=1)
+
+
+def test_template_extensions_aggregates_only_declared_markup() -> None:
+    registry.register(FakeLang())  # declares none — exercises the getattr default
+    registry.register(FakeTemplateLang())
+    assert registry.template_extensions() == {".fkhtml"}
+    assert registry.capabilities()["templateExtensions"] == [".fkhtml"]
+
+
+def test_template_extensions_empty_without_markup_parsers() -> None:
+    registry.register(FakeLang())
+    assert registry.template_extensions() == frozenset()
+
+
+def test_builtin_template_extensions() -> None:
+    """The real markup set the scanner gates on."""
+    from breezeai_cog.core.registry import discover_builtin
+
+    discover_builtin()
+    assert registry.template_extensions() == {
+        ".html", ".htm", ".cshtml", ".razor", ".aspx", ".ascx", ".master", ".vue",
+    }
