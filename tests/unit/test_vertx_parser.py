@@ -1,5 +1,5 @@
 """Vert.x parser: event-bus / verticle / timer / service-proxy / route detection,
-gated by --capture-statements; selection via claims; schema validity."""
+gated by statement capture; selection via claims; schema validity."""
 
 from __future__ import annotations
 

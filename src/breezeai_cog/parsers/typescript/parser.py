@@ -284,7 +284,7 @@ class TypeScriptParser(BaseParser):
             classes=classes,
             statements=statements,
         )
-        # Additive route/event detection — gated by --capture-statements and layered on top
+        # Additive route/event detection — gated by statement capture and layered on top
         # of base + framework extraction (runs for every TS parser that inherits extract, so
         # it also fires in files owned by another framework). Each detector self-guards on a
         # cheap marker. A more-specific framework label set by a subclass afterwards wins.

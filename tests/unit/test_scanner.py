@@ -62,3 +62,77 @@ def test_scan_filter_chain(tmp_path) -> None:
     assert any(p == "big.py" and r == "oversized" and s and s > 1000 for p, r, _d, s in skips)
     # symlinked dir never recursed (no duplicate / link-prefixed paths)
     assert not any(p.startswith("link/") for p in found)
+
+
+def _classify_any(path: str) -> str | None:
+    """Claims every extension used in the template tests, so a dropped file is provably
+    dropped by ``skip_rule`` and not by the extension allow-list."""
+    return "lang" if "." in path.rsplit("/", 1)[-1] else None
+
+
+def _template_rule(path: str) -> str | None:
+    return "template" if path.lower().endswith((".html", ".aspx", ".vue")) else None
+
+
+def _build_markup_repo(root) -> None:
+    (root / "app.html").write_text("<div></div>\n")
+    (root / "Page.aspx").write_text("<%@ Page %>\n")
+    (root / "Page.aspx.cs").write_text("class P {}\n")  # code-behind — must survive
+    (root / "Widget.vue").write_text("<template><b/></template>\n")
+    (root / "Widget.ts").write_text("export const x = 1\n")
+
+
+def test_skip_rule_drops_templates_but_keeps_code_behind(tmp_path) -> None:
+    _build_markup_repo(tmp_path)
+    skips: list[tuple[str, str]] = []
+
+    entries = list(
+        scan(tmp_path, _classify_any, engine=IgnoreEngine.build(), max_file_size=10_000,
+             skip_rule=_template_rule,
+             on_skip=lambda p, r, **kw: skips.append((p, r)))
+    )
+
+    # `.aspx.cs` / `.ts` are code, not markup — matching on the final suffix keeps them.
+    assert sorted(e.path for e in entries) == ["Page.aspx.cs", "Widget.ts"]
+    assert set(skips) == {("app.html", "template"), ("Page.aspx", "template"),
+                          ("Widget.vue", "template")}
+
+
+def test_no_skip_rule_keeps_templates(tmp_path) -> None:
+    _build_markup_repo(tmp_path)
+    entries = list(
+        scan(tmp_path, _classify_any, engine=IgnoreEngine.build(), max_file_size=10_000)
+    )
+    assert len(entries) == 5  # every file survives when the gate is off
+
+
+def test_ignored_template_reports_ignored_not_template(tmp_path) -> None:
+    """The gate runs *after* ignore/include, so an ignored template keeps the `ignored`
+    bucket — the template count never absorbs ordinary ignore noise."""
+    (tmp_path / ".repoignore").write_text("skipme/\n")
+    (tmp_path / "skipme").mkdir()
+    (tmp_path / "skipme" / "x.html").write_text("<i/>\n")
+    (tmp_path / "keep.html").write_text("<i/>\n")
+    skips: list[tuple[str, str, bool]] = []
+
+    list(scan(tmp_path, _classify_any, engine=IgnoreEngine.build(), max_file_size=10_000,
+              skip_rule=_template_rule,
+              on_skip=lambda p, r, **kw: skips.append((p, r, kw.get("is_dir", False)))))
+
+    assert ("skipme", "ignored", True) in skips  # pruned as a directory, never reached
+    assert ("keep.html", "template", False) in skips
+
+
+def test_repoinclude_does_not_override_the_template_gate(tmp_path) -> None:
+    """`.repoinclude` overrides the *ignore* layers only. The template gate is a separate
+    capture-scope axis — only --capture-templates lifts it."""
+    (tmp_path / ".repoinclude").write_text("*.html\n")
+    (tmp_path / "page.html").write_text("<i/>\n")
+    skips: list[tuple[str, str]] = []
+
+    entries = list(
+        scan(tmp_path, _classify_any, engine=IgnoreEngine.build(), max_file_size=10_000,
+             skip_rule=_template_rule, on_skip=lambda p, r, **kw: skips.append((p, r)))
+    )
+    assert "page.html" not in [e.path for e in entries]
+    assert ("page.html", "template") in skips

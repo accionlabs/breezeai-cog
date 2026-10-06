@@ -4,7 +4,7 @@ The ``prisma`` language parser owns ``.prisma`` files. It emits one flat ``State
 top-level block — a ``model`` as a ``data_model`` entity (full body, including fields,
 ``@relation`` and ``@@`` block attributes, on ``text``), an ``enum`` and the
 ``datasource``/``generator`` config blocks as plain statements — each carrying its declared
-``name``. Capture is gated on ``--capture-statements``.
+``name``. Capture is gated on statement capture.
 """
 
 from __future__ import annotations

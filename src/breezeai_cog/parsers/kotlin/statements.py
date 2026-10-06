@@ -1,4 +1,4 @@
-"""Flat statement capture for Kotlin (gated by --capture-statements)."""
+"""Flat statement capture for Kotlin (gated by statement capture)."""
 
 from __future__ import annotations
 

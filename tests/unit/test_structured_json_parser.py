@@ -178,9 +178,9 @@ def test_every_leaf_marker_reaches_toon() -> None:
     assert all(f"m{i}" in rows for i in range(6000))
 
 
-# ── the single structured_data statement (gated behind --capture-statements) ─────
+# ── the single structured_data statement (gated behind statement capture) ─────
 def test_no_statement_without_capture_statements() -> None:
-    # without --capture-statements the content is not captured anywhere (no statement, and
+    # without statement capture the content is not captured anywhere (no statement, and
     # metadata carries only the structural summary — never the TOON content)
     rec = _parse("a.json", [{"id": 1}], capture_statements=False)
     assert rec.statements == []
