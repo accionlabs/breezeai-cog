@@ -104,6 +104,16 @@ def test_routes_detected(tmp_path) -> None:
     assert routes[("DELETE", "/:id")].handler == "deleteBook"
     assert all(r.framework == "express" for r in routes.values())
     assert rec.framework == "express"
+    book_routes = [
+        s for s in rec.statements
+        if s.semanticType == "route" and s.endpoint == "/book"
+    ]
+    assert [s.method for s in book_routes] == ["GET", "POST"]
+    assert book_routes[0].nodeType == "expression_statement"
+    assert book_routes[0].text == ".get(getBook)"
+    assert book_routes[1].nodeType == "call_expression"
+    assert book_routes[1].text == ".post(postBook)"
+    assert len(book_routes) == 2
 
 
 def test_non_route_member_calls_skip_receiver_resolution(tmp_path) -> None:
@@ -271,6 +281,23 @@ router.route('/secure').all(requireAuth, auditLog, finalHandler);
     assert routes[0].handler == "finalHandler"
     assert routes[0].guards == ["requireAuth", "auditLog"]
     assert routes[0].authRequired is True
+    assert routes[0].nodeType == "expression_statement"
+    assert routes[0].text == ".all(requireAuth, auditLog, finalHandler)"
+
+
+def test_multiple_chained_verbs_inside_function_remain_distinct(tmp_path) -> None:
+    src = b'''import express from 'express';
+const router = express.Router();
+function register() {
+  router.route('/nested').get(readNested).post(writeNested);
+}
+'''
+    rec = _parse_source(tmp_path, "nested-chained-routes.ts", src)
+    routes = [s for s in rec.statements if s.semanticType == "route"]
+    assert [(s.method, s.endpoint, s.text) for s in routes] == [
+        ("GET", "/nested", ".get(readNested)"),
+        ("POST", "/nested", ".post(writeNested)"),
+    ]
 
 
 def test_non_router_route_chain_is_not_detected(tmp_path) -> None:

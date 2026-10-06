@@ -477,6 +477,27 @@ def _enclosing_statement(line: int, statements: list[Statement]) -> Statement | 
     return best
 
 
+def _invocation_order_byte(call: Node) -> int:
+    """Order calls by their called member, not by an enclosing chained call's start."""
+    fn = call.child_by_field_name("function")
+    if fn is not None and fn.type == "member_expression":
+        prop = fn.child_by_field_name("property")
+        if prop is not None:
+            return prop.start_byte
+    return call.start_byte
+
+
+def _verb_segment(call: Node, source: bytes) -> str:
+    """Return the chained verb segment, e.g. ``.get(getBook)``."""
+    fn = call.child_by_field_name("function")
+    prop = fn.child_by_field_name("property") if fn is not None else None
+    args = call.child_by_field_name("arguments")
+    if prop is None or args is None:
+        return first_line(node_text(call, source))
+    start = prop.start_byte - 1 if source[prop.start_byte - 1:prop.start_byte] == b"." else prop.start_byte
+    return source[start:args.end_byte].decode("utf-8", "replace")
+
+
 def _owner_function(line: int, functions, fallback: str) -> str:
     best = None
     best_span: int | None = None
@@ -547,11 +568,13 @@ def detect_express(
     seen = {s.id for s in record.statements}
     binds = bindings or {}
     router_bindings = _router_bindings(root, source)
+    chained_roots: set[int] = set()
     # The base this file's routes are served under, if it is a factory mounted elsewhere.
     mounts = getattr(index, "express_mounts", None)
     mount_base = mounts.get(path) if isinstance(mounts, dict) else None
 
-    for call in _invocations(root):
+    calls = sorted(_invocations(root), key=_invocation_order_byte)
+    for call in calls:
         info = _classify(call, source, root, router_bindings, binds)
         if info is None:
             continue
@@ -562,12 +585,19 @@ def detect_express(
         auth_required = True if guards else None
         line = call.start_point[0] + 1
 
-        stmt = None if chained else _enclosing_statement(line, record.statements)
+        stmt = _enclosing_statement(line, record.statements)
+        if chained:
+            if call.start_byte in chained_roots:
+                stmt = None
+            else:
+                chained_roots.add(call.start_byte)
         if stmt is not None:  # detection on the same span → enrich in place
             stmt.semanticType = "route"
             stmt.framework = framework
             stmt.routeKind = route_kind
             stmt.endpoint = served
+            if chained:
+                stmt.text = _verb_segment(call, source)
             if method:
                 stmt.method = method
             if handler:
@@ -583,7 +613,11 @@ def detect_express(
                 parentId=_owner_function(line, record.functions, fid),
                 nodeType=call.type,
                 semanticType="route",
-                text=first_line(node_text(call, source)),
+                text=(
+                    _verb_segment(call, source)
+                    if chained
+                    else first_line(node_text(call, source))
+                ),
                 method=method,
                 endpoint=served,
                 framework=framework,
