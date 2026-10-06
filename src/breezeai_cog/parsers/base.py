@@ -69,6 +69,13 @@ class LanguageParser(Protocol):
     schema_version: str
     statement_types: list[str]
     frameworks: list[str]
+    priority: int
+
+    def matches(self, path: str | Path) -> bool: ...
+
+    def claims(
+        self, path: str, source: bytes, parse_timeout_micros: int = 0
+    ) -> bool: ...
 
     def parse_file(self, ctx: ParseContext) -> FileRecord: ...
 
@@ -96,7 +103,9 @@ class BaseParser:
         p = Path(path)
         return p.suffix in self.extensions or p.name in self.extensions
 
-    def claims(self, path: str, source: bytes) -> bool:
+    def claims(
+        self, path: str, source: bytes, parse_timeout_micros: int = 0
+    ) -> bool:
         """Whether this parser should handle ``path``. The base language parser claims
         everything of its extension (fallback); framework parsers override this to sniff
         their framework's signature in ``source`` (e.g. ``b"@nestjs/" in source``)."""

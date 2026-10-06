@@ -33,7 +33,9 @@ class FakeFramework(FakeLang):
     priority = 10
     frameworks = ["fw"]
 
-    def claims(self, path: str, source: bytes) -> bool:
+    def claims(
+        self, path: str, source: bytes, parse_timeout_micros: int = 0
+    ) -> bool:
         return b"FRAMEWORK" in source
 
 
@@ -64,6 +66,23 @@ def test_framework_selected_only_when_it_claims() -> None:
     # absent -> falls back to the base language parser (one parser per file)
     assert registry.select("a.fk", b"plain code").name == "fake"
     assert registry.base_parser_for("a.fk").name == "fake"  # base = priority 0
+
+
+def test_select_passes_parse_timeout_to_claims() -> None:
+    timeouts: list[int] = []
+
+    class TimeoutFramework(FakeFramework):
+        def claims(
+            self, path: str, source: bytes, parse_timeout_micros: int = 0
+        ) -> bool:
+            timeouts.append(parse_timeout_micros)
+            return super().claims(path, source, parse_timeout_micros)
+
+    registry.register(FakeLang())
+    registry.register(TimeoutFramework())
+
+    assert registry.select("a.fk", b"FRAMEWORK", 12_345).name == "fake-fw"
+    assert timeouts == [12_345]
 
 
 def test_capabilities_aggregate() -> None:

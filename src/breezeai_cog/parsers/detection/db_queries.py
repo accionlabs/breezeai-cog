@@ -87,8 +87,8 @@ _GENERIC = {
 }
 
 # ActiveRecord methods that are distinctive when called on a Ruby model or record. Class
-# methods use a constant receiver (``User.find``); instance writes are included separately
-# because the receiver is conventionally lowercase (``user.save``).
+# methods use a constant receiver (``User.find``); instance writes require a receiver proven by
+# Ruby model scope, association metadata, or a model-typed parameter (``user.save``).
 _ACTIVE_RECORD_METHODS = frozenset({
     "find", "find_by", "where", "all", "create", "save", "update", "destroy",
     "destroy_all", "joins", "includes", "pluck", "first", "last",
@@ -200,7 +200,12 @@ def _has_ef_source(low_callee: str) -> bool:
     return any(mk in low_callee for mk in _EF_SOURCE_MARKERS)
 
 
-def _is_active_record_call(callee: str, method: str, language: str | None) -> bool:
+def _is_active_record_call(
+    callee: str,
+    method: str,
+    language: str | None,
+    typed_db_ids: frozenset[str] | None = None,
+) -> bool:
     if language != "ruby" or method.lower() not in _ACTIVE_RECORD_METHODS:
         return False
     receiver = callee.rsplit(".", 1)[0] if "." in callee else ""
@@ -209,8 +214,7 @@ def _is_active_record_call(callee: str, method: str, language: str | None) -> bo
         return True
     return (
         method.lower() in _ACTIVE_RECORD_INSTANCE_METHODS
-        and terminal.isidentifier()
-        and _RUBY_CONSTANT_RECEIVER.fullmatch(terminal) is None
+        and terminal.lower() in (typed_db_ids or frozenset())
     )
 
 # ElasticSearch / OpenSearch client verbs. These collide with ordinary code (``search`` is
@@ -260,7 +264,7 @@ def _is_prisma_chain(low: str) -> bool:
 
 
 def match_db(callee: str, method: str, language: str | None = None,
-             typed_db_ids: "frozenset[str] | None" = None) -> str | None:
+             typed_db_ids: frozenset[str] | None = None) -> str | None:
     m = method.lower()
     low = callee.lower()
     if m in _PRISMA_VERBS and _is_prisma_chain(low):
@@ -274,7 +278,7 @@ def match_db(callee: str, method: str, language: str | None = None,
     # the call chain shows a queryable/DbContext source; else LINQ-to-Objects — drop, don't tag.
     if m in _EF_LINQ_VERBS and language in _DOTNET:
         return "entity_framework" if _has_ef_source(low) else None
-    if _is_active_record_call(callee, method, language):
+    if _is_active_record_call(callee, method, language, typed_db_ids):
         return "activerecord"
     receiver = low.rsplit(".", 1)[0].rsplit(".", 1)[-1] if "." in low else ""
     # ES match is gated on the TERMINAL receiver only (the segment the verb is invoked on) —

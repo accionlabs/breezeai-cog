@@ -17,7 +17,7 @@ class AngularParser(TypeScriptParser):
     priority = 10
     frameworks = ["angular"]
 
-    def claims(self, path: str, source: bytes) -> bool:
+    def claims(self, path: str, source: bytes, parse_timeout_micros: int = 0) -> bool:
         return b"@angular/" in source
 
     def parse_file(self, ctx: ParseContext) -> FileRecord:

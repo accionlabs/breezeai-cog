@@ -25,7 +25,7 @@ class WcfParser(CSharpParser):
     priority = 10  # framework parser > base csharp (0); claims disjoint from webforms/aspnet
     frameworks = ["wcf", "asmx"]
 
-    def claims(self, path: str, source: bytes) -> bool:
+    def claims(self, path: str, source: bytes, parse_timeout_micros: int = 0) -> bool:
         if path.endswith(_WEBFORMS_SUFFIXES):
             return False  # a WCF-consuming page is WebFormsParser's file, not ours
         return any(m in source for m in _MARKERS)

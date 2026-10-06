@@ -20,7 +20,7 @@ class GraphQLParser(TypeScriptParser):
     priority = 10
     frameworks = ["graphql"]
 
-    def claims(self, path: str, source: bytes) -> bool:
+    def claims(self, path: str, source: bytes, parse_timeout_micros: int = 0) -> bool:
         # Resolver map: an object typed ``Resolvers`` with a root-operation key. SDL: a
         # ``type Query|Mutation|Subscription {`` block (the ``{`` excludes the TS alias
         # ``type Query =``). Either signal marks a GraphQL operation source; the byte

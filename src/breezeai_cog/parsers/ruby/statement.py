@@ -7,8 +7,8 @@ from collections.abc import Iterator
 from tree_sitter import Node
 
 from ...schemas import Statement
-from ..statements_common import classify_statement, render_concat, resolve_endpoint
 from ..detection import text_has_query
+from ..statements_common import classify_statement, render_concat, resolve_endpoint
 from ..treesitter import node_text
 from .mappings import CONTROL_FLOW, EMIT_TYPES
 
@@ -74,6 +74,7 @@ def extract_statements(
     capture: bool,
     limit: int,
     seen_ids: set[str],
+    typed_db_ids: frozenset[str] | None = None,
 ) -> list[Statement]:
     if not capture or body is None:
         return []
@@ -97,6 +98,7 @@ def extract_statements(
                 name_of=_name_of,
                 call_details=_call_details,
                 language="ruby",
+                typed_db_ids=typed_db_ids,
             )
         )
     return out

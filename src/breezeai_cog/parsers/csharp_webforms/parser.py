@@ -46,7 +46,7 @@ class WebFormsParser(CSharpParser):
     # C# statement types + the markup nodes the Step-1 markup pass emits (capabilities honesty).
     statement_types = [*CSharpParser.statement_types, "element", "attribute"]
 
-    def claims(self, path: str, source: bytes) -> bool:
+    def claims(self, path: str, source: bytes, parse_timeout_micros: int = 0) -> bool:
         return (
             path.endswith(_MARKUP_EXT)  # markup files (Step 1)
             or path.endswith((".aspx.cs", ".ascx.cs", ".master.cs"))

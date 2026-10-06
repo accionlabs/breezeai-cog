@@ -28,7 +28,7 @@ class GraphQLCodeFirstParser(TypeScriptParser):
     priority = 15  # above graphql/express/angular (10); below nestjs (20)
     frameworks = ["graphql"]
 
-    def claims(self, path: str, source: bytes) -> bool:
+    def claims(self, path: str, source: bytes, parse_timeout_micros: int = 0) -> bool:
         return bool(_DECORATORS_IMPORT.search(source) and _OP_USAGE.search(source))
 
     def parse_file(self, ctx: ParseContext) -> FileRecord:

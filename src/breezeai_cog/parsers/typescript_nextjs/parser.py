@@ -29,7 +29,7 @@ class NextJSParser(TypeScriptParser):
     priority = 10
     frameworks = ["nextjs"]
 
-    def claims(self, path: str, source: bytes) -> bool:
+    def claims(self, path: str, source: bytes, parse_timeout_micros: int = 0) -> bool:
         # Path-gated so we don't claim UI files that merely live under app/ or pages/, plus a
         # cheap byte sniff for the handler shape each router uses.
         if is_app_router_route_file(path):

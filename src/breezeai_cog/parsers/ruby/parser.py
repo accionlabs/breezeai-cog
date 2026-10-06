@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
+from pathlib import Path
+
 from tree_sitter import Node
 
 from ...emit import file_id
@@ -13,14 +16,14 @@ from ..treesitter import parse_source
 from .classes import build_class, iter_definitions
 from .functions import build_function, defined_names
 from .imports import extract_imports
-from .mappings import STATEMENT_TYPES, FRAMEWORKS
+from .mappings import FRAMEWORKS, STATEMENT_TYPES
+from .models import active_record_model_names, build_active_record_model_index
 from .statement import extract_statements
 
 
 class RubyParser(BaseParser):
     name = "ruby"
     extensions = (".rb",)
-    claims_accepts_timeout = True
     schema_version = SCHEMA_VERSION
     statement_types = STATEMENT_TYPES
     frameworks = FRAMEWORKS
@@ -32,11 +35,22 @@ class RubyParser(BaseParser):
         root = parse_source("ruby", ctx.source, ctx.parse_timeout_micros).root_node
         return self.extract(root, ctx)
 
+    def build_index(
+        self, repo_root: Path, files: Sequence[Path], jobs: int = 1
+    ) -> frozenset[str]:
+        return build_active_record_model_index(repo_root, files, jobs)
+
     def extract(self, root: Node, ctx: ParseContext) -> FileRecord:
         source, path = ctx.source, ctx.path
         fid = file_id(path)
         seen_ids: set[str] = set()
         capture, limit = ctx.capture_statements, ctx.statement_text_limit
+        indexed_models = (
+            ctx.resolution_index
+            if isinstance(ctx.resolution_index, frozenset)
+            else frozenset()
+        )
+        model_names = indexed_models | active_record_model_names(root, source)
 
         internal, external, exports, bindings = extract_imports(root, source, path, ctx.repo_root)
 
@@ -60,6 +74,7 @@ class RubyParser(BaseParser):
                     capture=capture,
                     limit=limit,
                     resolve_for_scope=resolve_for_scope,
+                    model_names=model_names,
                 )
                 classes.extend(cls_list)
                 functions.extend(methods)

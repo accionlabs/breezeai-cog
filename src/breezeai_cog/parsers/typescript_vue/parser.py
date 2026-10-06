@@ -46,7 +46,7 @@ class VueParser(TypeScriptParser):
     # TS statement types + the ``<template>`` nodes this parser emits (capabilities honesty).
     statement_types = [*TypeScriptParser.statement_types, "directive_attribute", "interpolation"]
 
-    def claims(self, path: str, source: bytes) -> bool:
+    def claims(self, path: str, source: bytes, parse_timeout_micros: int = 0) -> bool:
         # A .vue SFC is always ours. A .ts/.js file is ours only when it imports vue /
         # vue-router (router configs, app bootstrap) — byte guard keeps it off unrelated TS.
         return path.endswith(".vue") or any(g in source for g in _VUE_IMPORT_GUARDS)

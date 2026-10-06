@@ -33,7 +33,7 @@ class NestJSParser(TypeScriptParser):
     priority = 20
     frameworks = ["nestjs", "routing-controllers", "nestjs-like"]
 
-    def claims(self, path: str, source: bytes) -> bool:
+    def claims(self, path: str, source: bytes, parse_timeout_micros: int = 0) -> bool:
         if b"@nestjs/" in source or b"routing-controllers" in source:
             return True
         # Custom / re-exported decorator modules: detect the pattern itself (a @Controller

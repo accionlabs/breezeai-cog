@@ -60,11 +60,7 @@ def select(
     claiming = [
         p
         for p in candidates
-        if (
-            p.claims(str(path), source, parse_timeout_micros)
-            if getattr(p, "claims_accepts_timeout", False)
-            else p.claims(str(path), source)
-        )
+        if p.claims(str(path), source, parse_timeout_micros)
     ]
     if not claiming:
         return None

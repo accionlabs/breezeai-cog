@@ -23,7 +23,7 @@ class VbAspNetParser(VbParser):
     priority = 10
     frameworks = ["aspnet", "aspnetcore"]
 
-    def claims(self, path: str, source: bytes) -> bool:
+    def claims(self, path: str, source: bytes, parse_timeout_micros: int = 0) -> bool:
         return any(m in source for m in _MARKERS)
 
     def parse_file(self, ctx: ParseContext) -> FileRecord:

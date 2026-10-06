@@ -55,9 +55,9 @@ def extract_imports(
             if child.type in {"identifier", "constant"}:
                 name = node_text(child, source)
             elif child.type == "argument_list":
-                for arg in child.named_children:
-                    if arg.type in {"string", "string_content"}:
-                        text = node_text(arg, source).strip('"\'')
+                for argument_node in child.named_children:
+                    if argument_node.type in {"string", "string_content"}:
+                        text = node_text(argument_node, source).strip('"\'')
                         args.append(text)
         if name not in {"require", "require_relative"}:
             continue

@@ -25,7 +25,7 @@ class ReactParser(TypeScriptParser):
     priority = 10
     frameworks = ["react"]
 
-    def claims(self, path: str, source: bytes) -> bool:
+    def claims(self, path: str, source: bytes, parse_timeout_micros: int = 0) -> bool:
         return any(g in source for g in _REACT_GUARDS)
 
     def parse_file(self, ctx: ParseContext) -> FileRecord:

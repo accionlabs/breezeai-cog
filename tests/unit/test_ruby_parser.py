@@ -97,6 +97,84 @@ end
     assert not any(statement.nodeType in {"class", "module", "method"} for statement in rec.statements)
 
 
+def test_ruby_instance_writes_require_model_receiver_evidence(tmp_path: Path) -> None:
+    source = b'''class User < ApplicationRecord
+  belongs_to :account
+  has_many :posts
+
+  def deactivate(user)
+    user.save
+    account.update(active: false)
+    posts.each { |post| post.update(active: false) }
+    self.save
+  end
+
+  def override_association(account)
+    account.save
+  end
+end
+
+class Settings
+  def persist(config, file)
+    config.save
+    file.update
+  end
+end
+'''
+    path = tmp_path / "models.rb"
+    path.write_bytes(source)
+    rec = RubyParser().parse_file(ParseContext(
+        path="models.rb", abs_path=path, source=source, repo_root=tmp_path,
+        capture_statements=True,
+    ))
+
+    detected = {
+        statement.text.strip()
+        for statement in rec.statements
+        if statement.semanticType == "db_method_call"
+    }
+    assert "account.update(active: false)" in detected
+    assert "post.update(active: false)" in detected
+    assert "self.save" in detected
+    assert "user.save" not in detected
+    assert "account.save" not in detected
+    assert "config.save" not in detected
+    assert "file.update" not in detected
+
+
+def test_ruby_sorbet_parameter_hint_resolves_model_write(tmp_path: Path) -> None:
+    model_path = tmp_path / "app" / "models" / "user.rb"
+    model_path.parent.mkdir(parents=True)
+    model_path.write_text("class User < ApplicationRecord; end\n")
+    model_index = RubyParser().build_index(tmp_path, [model_path])
+
+    source = b'''class UsersController
+  sig { params(user: User).void }
+  def deactivate(user)
+    user.save
+  end
+
+  def update(config)
+    config.save
+  end
+end
+'''
+    path = tmp_path / "users_controller.rb"
+    path.write_bytes(source)
+    rec = RubyParser().parse_file(ParseContext(
+        path="users_controller.rb", abs_path=path, source=source, repo_root=tmp_path,
+        capture_statements=True, resolution_index=model_index,
+    ))
+
+    detected = {
+        statement.text.strip()
+        for statement in rec.statements
+        if statement.semanticType == "db_method_call"
+    }
+    assert "user.save" in detected
+    assert "config.save" not in detected
+
+
 def test_ruby_binary_expressions_are_not_standalone_statements(tmp_path: Path) -> None:
     source = b'''def render
   msg = "n=" + a.to_s + " of " + total.to_s

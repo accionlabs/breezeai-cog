@@ -19,7 +19,7 @@ class SpringBootParser(JavaParser):
     priority = 10
     frameworks = ["spring", "springboot"]
 
-    def claims(self, path: str, source: bytes) -> bool:
+    def claims(self, path: str, source: bytes, parse_timeout_micros: int = 0) -> bool:
         return b"org.springframework" in source
 
     def parse_file(self, ctx: ParseContext) -> FileRecord:

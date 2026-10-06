@@ -17,7 +17,7 @@ class FastAPIParser(PythonParser):
     priority = 10  # selected over base PythonParser when it claims the file
     frameworks = ["fastapi"]
 
-    def claims(self, path: str, source: bytes) -> bool:
+    def claims(self, path: str, source: bytes, parse_timeout_micros: int = 0) -> bool:
         return b"fastapi" in source
 
     def parse_file(self, ctx: ParseContext) -> FileRecord:

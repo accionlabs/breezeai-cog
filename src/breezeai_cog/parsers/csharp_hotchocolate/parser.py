@@ -35,7 +35,7 @@ class CSharpHotChocolateParser(CSharpParser):
     priority = 25  # above csharp-aspnet (10); distinct from csharp-graphql (20) — no tie
     frameworks = ["graphql"]
 
-    def claims(self, path: str, source: bytes) -> bool:
+    def claims(self, path: str, source: bytes, parse_timeout_micros: int = 0) -> bool:
         if _GRAPHQL_DOTNET_MARKER in source:
             return False  # graphql-dotnet owns it; keep the two guards mutually exclusive
         if any(m in source for m in COMPOSITION_ROOT_MARKERS):

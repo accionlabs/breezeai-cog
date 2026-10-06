@@ -25,7 +25,7 @@ class TerraformParser(HclParser):
     priority = 10
     _framework = "terraform"
 
-    def claims(self, path: str, source: bytes) -> bool:
+    def claims(self, path: str, source: bytes, parse_timeout_micros: int = 0) -> bool:
         from pathlib import Path
 
         suffix = Path(path).suffix
