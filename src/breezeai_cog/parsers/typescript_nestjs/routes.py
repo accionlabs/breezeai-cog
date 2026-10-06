@@ -18,7 +18,7 @@ import re
 from tree_sitter import Node
 
 from ...emit import disambiguate, function_id, statement_id
-from ...schemas import Decorator, Statement
+from ...schemas import Decorator, SemanticType, Statement
 from ...parsers.typescript.decorators import decorator
 from ...parsers.typescript.functions import _type_text, extract_params
 from ..treesitter import node_text
@@ -26,9 +26,15 @@ from ..treesitter import node_text
 _METHOD_DECORATORS = {
     "Get": "GET", "Post": "POST", "Put": "PUT", "Patch": "PATCH",
     "Delete": "DELETE", "Options": "OPTIONS", "Head": "HEAD", "All": "ALL",
+    "Sse": "GET",
 }
 # @nestjs/microservices message consumers → eventbus_consumer semanticType.
 _MESSAGING_DECORATORS = {"EventPattern": "EVENT", "MessagePattern": "MESSAGE"}
+_TIMER_DECORATORS: dict[str, SemanticType] = {
+    "Cron": "timer", "Interval": "timer", "Timeout": "timer",
+}
+_GATEWAY_DECORATORS = {"WebSocketGateway"}
+_WS_DECORATORS = {"SubscribeMessage": "MESSAGE"}
 # @nestjs/graphql code-first operations. Gated on the class being an @Resolver — @Query is
 # also a @nestjs/common *param* decorator, but that lives on a parameter, not in the method's
 # decorator list, so a method-level @Query on a resolver is unambiguously the GraphQL one.
@@ -41,6 +47,7 @@ _GRAPHQL_OPS = {"Query": "query", "Mutation": "mutation", "Subscription": "subsc
 # Unlike @Query/@Mutation they are not root operations, but they are the actual
 # implementation of individual GraphQL fields and must appear in the ontology.
 _FIELD_RESOLVERS = {"ResolveField", "ResolveProperty"}
+_REFERENCE_RESOLVERS = {"ResolveReference"}
 # Extracts the return type from a @ResolveField(() => Brand) / @ResolveField(() => [Brand]) arg.
 _RESOLVE_RETURN_RE = re.compile(r"=>\s*\[?\s*([A-Za-z_$][\w$]*)")
 # Singleton-only variant (no leading `[`): distinguishes a grouping-object return
@@ -101,6 +108,21 @@ _PATH_PROP_RE = re.compile(r"""\bpath\s*:\s*['"`]([^'"`]*)['"`]""")
 
 def _unquote(text: str) -> str:
     return text.strip().strip("'\"`")
+
+
+def _route_paths(dec_node: Node, d: Decorator, source: bytes) -> list[str]:
+    """Route path(s) from a method decorator, expanding a literal array argument."""
+    expression = dec_node.named_children[0] if dec_node.named_children else None
+    if expression is not None and expression.type == "call_expression":
+        arguments = expression.child_by_field_name("arguments")
+        first_arg = arguments.named_children[0] if arguments and arguments.named_children else None
+        if first_arg is not None and first_arg.type == "array":
+            return [
+                _unquote(node_text(element, source))
+                for element in first_arg.named_children
+                if element.type != "comment"
+            ]
+    return [_unquote(d.args[0]) if d.args else ""]
 
 
 def _pattern(d) -> str | None:
@@ -263,6 +285,7 @@ def _class_with_decorators(root: Node):
             cls = next((c for c in child.named_children if c.type == "class_declaration"), None)
         elif child.type == "class_declaration":
             cls = child
+            decs += [c for c in child.named_children if c.type == "decorator"]
         if cls is not None:
             yield cls, decs
 
@@ -275,6 +298,7 @@ def detect_nest_routes(
         base = _controller_base(decs, source)  # None when the class is not a @Controller
         is_controller = base is not None
         is_resolver = any(decorator(dec, source).name in _RESOLVER_DECORATORS for dec in decs)
+        is_gateway = any(decorator(dec, source).name in _GATEWAY_DECORATORS for dec in decs)
         class_name = node_text(cls.child_by_field_name("name"), source)
         body = cls.child_by_field_name("body")
         if body is None:
@@ -304,9 +328,13 @@ def detect_nest_routes(
                     d = decorator(dec, source)
                     verb = _METHOD_DECORATORS.get(d.name) if is_controller else None
                     msg = _MESSAGING_DECORATORS.get(d.name)
+                    timer = _TIMER_DECORATORS.get(d.name)
+                    ws = _WS_DECORATORS.get(d.name) if is_gateway else None
                     gql = _GRAPHQL_OPS.get(d.name) if is_resolver else None
                     fld = d.name if (is_resolver and d.name in _FIELD_RESOLVERS) else None
-                    if verb is None and msg is None and gql is None and fld is None:
+                    ref = d.name if (is_resolver and d.name in _REFERENCE_RESOLVERS) else None
+                    if (verb is None and msg is None and timer is None and ws is None
+                            and gql is None and fld is None and ref is None):
                         continue
                     sl, sc = dec.start_point[0] + 1, dec.start_point[1]
                     common = dict(
@@ -325,22 +353,43 @@ def detect_nest_routes(
                         path=path,
                     )
                     if verb is not None:  # HTTP route
-                        routes.append(Statement(
-                            semanticType="route",
-                            method=verb,
-                            endpoint=_join(base, _unquote(d.args[0]) if d.args else ""),
-                            routeKind="route",
-                            version=_version(pending, source) or ctrl_version,
-                            requestDTO=_request_dto(member, source),
-                            responseDTO=_response_dto(pending, source) or _return_dto(member, source),
-                            **common,
-                        ))
+                        for index, route_path in enumerate(_route_paths(dec, d, source)):
+                            route_common = common
+                            if index:
+                                route_common = {
+                                    **common,
+                                    "id": disambiguate(statement_id(path, sl, sc), seen_ids),
+                                }
+                            routes.append(Statement(
+                                semanticType="route",
+                                method=verb,
+                                endpoint=_join(base, route_path),
+                                routeKind="route",
+                                version=_version(pending, source) or ctrl_version,
+                                requestDTO=_request_dto(member, source),
+                                responseDTO=_response_dto(pending, source) or _return_dto(member, source),
+                                **route_common,
+                            ))
                     elif msg is not None:  # @EventPattern / @MessagePattern microservice consumer
                         routes.append(Statement(
                             semanticType="eventbus_consumer",
                             method=msg,
                             endpoint=_pattern(d),
                             routeKind="message",
+                            **common,
+                        ))
+                    elif timer is not None:
+                        routes.append(Statement(
+                            semanticType=timer,
+                            endpoint=_unquote(d.args[0]) if d.args else None,
+                            **common,
+                        ))
+                    elif ws is not None:
+                        routes.append(Statement(
+                            semanticType="route",
+                            method=ws,
+                            endpoint=_pattern(d),
+                            routeKind="ws",
                             **common,
                         ))
                     elif gql is not None:  # @Query/@Mutation/@Subscription code-first GraphQL op
@@ -380,5 +429,15 @@ def detect_nest_routes(
                                 requestDTO=_args_dto(member, source),
                                 responseDTO=_field_resolver_return_dto(d) or _return_dto(member, source),
                             ))
+                    elif ref is not None:  # @ResolveReference entity resolver
+                        parent_type = _resolver_type_arg(decs, source)
+                        routes.append(Statement(
+                            **{**common, "framework": "graphql"},
+                            semanticType="route",
+                            method="RESOLVE_REFERENCE",
+                            endpoint=f"{parent_type}.{mname}" if parent_type else mname,
+                            routeKind="reference_resolver",
+                            responseDTO=_return_dto(member, source),
+                        ))
             pending = []
     return routes
