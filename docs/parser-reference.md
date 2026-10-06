@@ -182,6 +182,13 @@ The pipeline runs it once in the main process (before the parse pool), passing t
 `jobs`** as the parse stage, and hands the (picklable!) result to every worker. Use it in
 `extract`/`imports` via `ctx.resolution_index`.
 
+**Only the base language parser's `build_index` runs** (`base_parser_for(path)` in
+`core/pipeline.py`). A framework parser that needs a cross-file fact adds it to the base index
+(as `data_loaders`, `page_routes` and `hc_root_files` do on `CSharpIndex`) — overriding
+`build_index` on the framework parser, or keeping state on its instance, never reaches the
+workers. See [Cross-file framework facts](cross-file-framework-facts.md) for the pattern and a
+worked example.
+
 **Parallelize a full-parse index.** If `build_index` parses every file, don't loop serially —
 split it map/reduce so it scales with `jobs`:
 ```python
@@ -334,15 +341,20 @@ invoked from the base parser's `extract` (structure-shaped signals) that enriche
 without displacing the file's parser.
 
 ### Selection: one parser per file
-A file is parsed by **exactly one** parser. `registry.select(path, source)` picks the
-highest-`priority` parser whose `claims(path, source)` is True; the base language parser
-(`priority = 0`, `claims` → True) is the fallback. So:
+A file is parsed by **exactly one** parser. `registry.select(path, source, index)` picks the
+highest-`priority` parser whose `claims_with_index(path, source, index)` is True — by default
+`claims(path, source)`; the base language parser (`priority = 0`, `claims` → True) is the
+fallback. So:
 - A framework parser **subclasses the base, sets `priority` (> 0) and `claims`**, and does
   full extraction + its detection (single parse, no duplicated code).
 - Multiple frameworks for one language **coexist by content** — each `claims` a distinctive
   import/dependency string; plain files fall through to the base. No composition, no
   collisions, single parse each.
 - Make `claims` a cheap substring check on `source`.
+- Override `claims_with_index` only when a file carries **no** marker of its own and becomes
+  framework code because of a declaration in another file (resolved onto the base index). Keep
+  the byte guard first and fall back to it when `index` is None. See
+  [Cross-file framework facts](cross-file-framework-facts.md).
 
 ---
 

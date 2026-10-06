@@ -4,14 +4,17 @@ against the sibling C# parsers, and schema validity."""
 
 from __future__ import annotations
 
+import gzip
 import json
 
+import pytest
 from jsonschema import Draft202012Validator
 
+from breezeai_cog import analyze_repo
 from breezeai_cog.core import registry
 from breezeai_cog.emit import to_line
 from breezeai_cog.parsers.base import ParseContext
-from breezeai_cog.parsers.csharp.imports import CSharpIndex
+from breezeai_cog.parsers.csharp.imports import CSharpIndex, build_csharp_index
 from breezeai_cog.parsers.csharp.parser import CSharpParser
 from breezeai_cog.parsers.index_common import ClassHeritage
 from breezeai_cog.parsers.csharp_hotchocolate.parser import CSharpHotChocolateParser
@@ -733,103 +736,191 @@ namespace Shop {
 
 
 # ---- registration-only roots (AddQueryType<T>() with no attribute on the class) ----------------
+#
+# Older (v11/v12) codebases register a plain class as a root in the composition root. The C#
+# repo index binds each registration to its declaring file, so these tests build a real index
+# over a small repo rather than seeding parser state — a seeded parser is how the pipeline gap
+# (the index never reaching the parser) went unnoticed.
 
-# A plain class with no HotChocolate attributes — only registered via AddQueryType<T>() in
-# Program.cs. Older (v11/v12) codebases used this pattern before source-generated attributes.
-REGISTRATION_ONLY_QUERY = b'''namespace Catalog {
+SETUP = b"""using HotChocolate.AspNetCore;
+using Catalog;
+var builder = WebApplication.CreateBuilder(args);
+builder.Services.AddGraphQLServer()
+    .AddQueryType<BookQueries>()
+    .AddMutationType<BookMutations>();
+    // .AddSubscriptionType<Ghost>()  -- commented out, so not a registration
+"""
+
+BOOK_QUERIES = b"""namespace Catalog {
   public class BookQueries {
     public Task<Book> GetBookByIdAsync(int id) => null;
     public IQueryable<Book> GetBooks() => null;
     private Book Hidden() => null;
   }
 }
-'''
+"""
 
-REGISTRATION_ONLY_MUTATION = b'''namespace Catalog {
+BOOK_MUTATIONS = b"""namespace Catalog {
   public class BookMutations {
     public Task<Book> AddBook(string title) => null;
   }
 }
-'''
-
-
-def _parser_with_root_types(root_types: dict) -> CSharpHotChocolateParser:
-    """Return a parser instance with ``_hc_root_types`` pre-seeded (simulates build_index)."""
-    p = CSharpHotChocolateParser()
-    p._hc_root_types = root_types
-    return p
-
-
-def test_scan_root_registrations_extracts_type_names(tmp_path) -> None:
-    from breezeai_cog.parsers.csharp_hotchocolate.parser import _scan_root_registrations
-
-    program = tmp_path / "Program.cs"
-    program.write_bytes(PROGRAM)  # already contains AddQueryType<BookQueries>
-    result = _scan_root_registrations([program])
-    assert result == {"BookQueries": "query"}
-
-
-def test_scan_root_registrations_all_root_kinds(tmp_path) -> None:
-    from breezeai_cog.parsers.csharp_hotchocolate.parser import _scan_root_registrations
-
-    src = b"""
-builder.Services.AddGraphQLServer()
-    .AddQueryType<MyQuery>()
-    .AddMutationType<MyMutation>()
-    .AddSubscriptionType<MySubs>();
 """
-    f = tmp_path / "Program.cs"
-    f.write_bytes(src)
-    result = _scan_root_registrations([f])
-    assert result == {"MyQuery": "query", "MyMutation": "mutation", "MySubs": "subscription"}
 
 
-def test_scan_skips_files_without_addgraphqlserver(tmp_path) -> None:
-    from breezeai_cog.parsers.csharp_hotchocolate.parser import _scan_root_registrations
-
-    f = tmp_path / "Other.cs"
-    f.write_bytes(b"services.AddQueryType<MyQuery>();")  # no AddGraphQLServer
-    assert _scan_root_registrations([f]) == {}
-
-
-def test_registration_only_root_is_claimed() -> None:
-    # Without the index, a file with no HotChocolate token is not claimed.
-    assert not CSharpHotChocolateParser().claims("BookQueries.cs", REGISTRATION_ONLY_QUERY)
-    # With _hc_root_types populated from build_index, the declaring file is claimed.
-    p = _parser_with_root_types({"BookQueries": "query"})
-    assert p.claims("BookQueries.cs", REGISTRATION_ONLY_QUERY)
+def _repo_index(tmp_path, files: dict[str, bytes]) -> CSharpIndex:
+    """Write ``files`` under ``tmp_path`` and build the real C# repo index over them."""
+    paths = []
+    for rel, src in files.items():
+        f = tmp_path / rel
+        f.parent.mkdir(parents=True, exist_ok=True)
+        f.write_bytes(src)
+        if rel.endswith(".cs"):
+            paths.append(f)
+    return build_csharp_index(tmp_path, paths)
 
 
-def test_registration_only_root_does_not_claim_unrelated_file() -> None:
-    # A file that references BookQueries as a type but does not declare it is not claimed.
-    ref_src = b"public class BookService { public BookQueries Queries { get; } }"
-    p = _parser_with_root_types({"BookQueries": "query"})
-    assert not p.claims("BookService.cs", ref_src)
+def _parse_selected(index: CSharpIndex, rel: str, src: bytes) -> FileRecord:
+    """Parse ``rel`` with whichever parser selection picks, as the pipeline does."""
+    parser = registry.select(rel, src, index)
+    ctx = ParseContext(path=rel, abs_path=None, source=src, repo_root=None,
+                       capture_statements=True, resolution_index=index)
+    return parser.parse_file(ctx)
 
 
-def test_registration_only_root_emits_operations() -> None:
-    p = _parser_with_root_types({"BookQueries": "query"})
-    rec = _parse(p, REGISTRATION_ONLY_QUERY, "BookQueries.cs")
+def test_registrations_bind_to_the_declaring_files(tmp_path) -> None:
+    index = _repo_index(tmp_path, {"Api/Program.cs": SETUP, "Api/BookQueries.cs": BOOK_QUERIES,
+                                   "Api/BookMutations.cs": BOOK_MUTATIONS})
+    assert index.hc_root_files == {"Api/BookQueries.cs": {"BookQueries": "query"},
+                                   "Api/BookMutations.cs": {"BookMutations": "mutation"}}
+    assert index.hc_root_types == {"BookQueries": "query", "BookMutations": "mutation"}
+    assert index.hc_registrations == []  # raw list is consumed, not shipped to workers
+
+
+def test_registration_only_root_is_claimed_and_emits_operations(tmp_path) -> None:
+    index = _repo_index(tmp_path, {"Api/Program.cs": SETUP, "Api/BookQueries.cs": BOOK_QUERIES})
+    assert registry.select("Api/BookQueries.cs", BOOK_QUERIES, index).name == "csharp-hotchocolate"
+    rec = _parse_selected(index, "Api/BookQueries.cs", BOOK_QUERIES)
     ops = _by_endpoint(rec)
-    assert set(ops) == {"bookById", "books"}
+    assert set(ops) == {"bookById", "books"}  # private methods are never exposed
     assert ops["bookById"].routeKind == "query" and ops["bookById"].method == "QUERY"
-    assert ops["books"].routeKind == "query"
-    # private methods are never exposed
-    assert "hidden" not in ops
-
-
-def test_registration_only_mutation_emits_operations() -> None:
-    p = _parser_with_root_types({"BookMutations": "mutation"})
-    rec = _parse(p, REGISTRATION_ONLY_MUTATION, "BookMutations.cs")
-    ops = _by_endpoint(rec)
-    assert "addBook" in ops
-    assert ops["addBook"].routeKind == "mutation" and ops["addBook"].method == "MUTATION"
-
-
-def test_registration_only_root_sets_framework() -> None:
-    p = _parser_with_root_types({"BookQueries": "query"})
-    rec = _parse(p, REGISTRATION_ONLY_QUERY, "BookQueries.cs")
     assert rec.framework == "graphql"
+
+
+def test_registration_only_class_is_plain_without_an_index() -> None:
+    # Single-file parsing has no repo pre-pass, so nothing says this class is a root.
+    assert registry.select("Api/BookQueries.cs", BOOK_QUERIES).name == "csharp"
+
+
+def test_a_file_only_referencing_a_registered_root_is_not_claimed(tmp_path) -> None:
+    ref = b"namespace Catalog { public class BookService { public BookQueries Queries { get; } } }"
+    index = _repo_index(tmp_path, {"Api/Program.cs": SETUP, "Api/BookQueries.cs": BOOK_QUERIES,
+                                   "Api/BookService.cs": ref})
+    assert registry.select("Api/BookService.cs", ref, index).name == "csharp"
+
+
+def test_only_a_composition_root_registers(tmp_path) -> None:
+    # No AddGraphQLServer → not a composition root, so its AddQueryType is not read.
+    other = b"using Catalog;\nservices.AddQueryType<BookQueries>();"
+    index = _repo_index(tmp_path, {"Api/Other.cs": other, "Api/BookQueries.cs": BOOK_QUERIES})
+    assert index.hc_root_files == {} and index.hc_root_types == {}
+
+
+def test_same_named_roots_bind_per_service(tmp_path) -> None:
+    # A monorepo: each service registers its own BookQueries, and an unregistered BookQueries
+    # elsewhere stays plain. Keyed by simple name, all three would have been roots.
+    def setup(ns: bytes) -> bytes:
+        return b"using " + ns + b";\nbuilder.Services.AddGraphQLServer().AddQueryType<BookQueries>();"
+
+    def queries(ns: bytes) -> bytes:
+        return b"namespace " + ns + b" { public class BookQueries { public Book GetBook() => null; } }"
+
+    index = _repo_index(tmp_path, {
+        "Shop/Program.cs": setup(b"Shop.GraphQL"), "Shop/BookQueries.cs": queries(b"Shop.GraphQL"),
+        "Admin/Program.cs": setup(b"Admin.GraphQL"), "Admin/BookQueries.cs": queries(b"Admin.GraphQL"),
+        "Legacy/BookQueries.cs": queries(b"Legacy"),
+    })
+    assert set(index.hc_root_files) == {"Shop/BookQueries.cs", "Admin/BookQueries.cs"}
+    # Not every BookQueries is a root, so the name alone resolves nothing.
+    assert "BookQueries" not in index.hc_root_types
+    legacy = queries(b"Legacy")
+    assert registry.select("Legacy/BookQueries.cs", legacy, index).name == "csharp"
+
+
+def test_ambiguous_registration_binds_nothing(tmp_path) -> None:
+    # Two in-scope namespaces both declare BookQueries and no project breaks the tie: the
+    # compiler would reject it (CS0104), so nothing is guessed.
+    setup = b"using A;\nusing B;\nbuilder.Services.AddGraphQLServer().AddQueryType<BookQueries>();"
+    index = _repo_index(tmp_path, {
+        "Program.cs": setup,
+        "A/BookQueries.cs": b"namespace A { public class BookQueries { } }",
+        "B/BookQueries.cs": b"namespace B { public class BookQueries { } }",
+    })
+    assert index.hc_root_files == {}
+
+
+def test_same_project_wins_a_registration_tie(tmp_path) -> None:
+    # As the compiler does (CS0436): the BookQueries in the registering project beats an
+    # identically-named one imported from another project.
+    setup = b"using A;\nusing B;\nbuilder.Services.AddGraphQLServer().AddQueryType<BookQueries>();"
+    index = _repo_index(tmp_path, {
+        "Api/Api.csproj": b"<Project />",
+        "Api/Program.cs": setup,
+        "Api/BookQueries.cs": b"namespace A { public class BookQueries { } }",
+        "Lib/Lib.csproj": b"<Project />",
+        "Lib/BookQueries.cs": b"namespace B { public class BookQueries { } }",
+    })
+    assert set(index.hc_root_files) == {"Api/BookQueries.cs"}
+
+
+def test_conflicting_registrations_are_dropped(tmp_path) -> None:
+    # Two composition roots register one class as different kinds: one is wrong, and nothing
+    # here says which.
+    index = _repo_index(tmp_path, {
+        "Shop/Program.cs": b"using Shared;\nb.AddGraphQLServer().AddQueryType<Root>();",
+        "Admin/Program.cs": b"using Shared;\nb.AddGraphQLServer().AddMutationType<Root>();",
+        "Shared/Root.cs": b"namespace Shared { public class Root { } }",
+    })
+    assert index.hc_root_files == {} and index.hc_root_types == {}
+
+
+def test_partial_root_binds_every_part(tmp_path) -> None:
+    index = _repo_index(tmp_path, {
+        "Api/Program.cs": SETUP,
+        "Api/BookQueries.cs": b"namespace Catalog { public partial class BookQueries { } }",
+        "Api/BookQueries.Admin.cs": b"namespace Catalog { public partial class BookQueries { } }",
+    })
+    assert set(index.hc_root_files) == {"Api/BookQueries.cs", "Api/BookQueries.Admin.cs"}
+
+
+def test_extension_of_a_registered_root_yields_operations(tmp_path) -> None:
+    # The target is declared in another file, so it resolves through hc_root_types.
+    ext = b"""using HotChocolate.Types;
+namespace Catalog {
+  [ExtendObjectType(typeof(BookQueries))]
+  public class BookSearch { public Book SearchBooks(string term) => null; }
+}
+"""
+    index = _repo_index(tmp_path, {"Api/Program.cs": SETUP, "Api/BookQueries.cs": BOOK_QUERIES,
+                                   "Api/BookSearch.cs": ext})
+    op = _by_endpoint(_parse_selected(index, "Api/BookSearch.cs", ext))["searchBooks"]
+    assert op.routeKind == "query"
+
+
+@pytest.mark.parametrize("jobs", [1, 2])
+def test_registration_only_root_through_the_pipeline(tmp_path, jobs) -> None:
+    # End to end: the index is built in the main process and must reach parser selection and
+    # parsing in the workers. Unit tests over a hand-built index cannot see that wiring.
+    repo = tmp_path / "repo"
+    (repo / "Api").mkdir(parents=True)
+    (repo / "Api" / "Program.cs").write_bytes(SETUP)
+    (repo / "Api" / "BookQueries.cs").write_bytes(BOOK_QUERIES)
+    result = analyze_repo(repo, capture_statements=True, out=tmp_path / "out", jobs=jobs)
+    lines = gzip.open(result.out_path, "rt", encoding="utf-8").read().splitlines()
+    rec = next(json.loads(line) for line in lines if '"Api/BookQueries.cs"' in line)
+    routes = {s["endpoint"]: s["method"] for s in rec["statements"] if s.get("semanticType") == "route"}
+    assert routes == {"bookById": "QUERY", "books": "QUERY"}
+    assert rec["framework"] == "graphql"
 
 
 # v11/v12 fluent roots: AddQueryType<BookQueriesType>() registers the descriptor class itself,
@@ -855,9 +946,12 @@ namespace Catalog {
 """
 
 
-def test_registration_only_descriptor_emits_operations() -> None:
-    p = _parser_with_root_types({"BookQueriesType": "query", "BookMutations": "mutation"})
-    ops = _by_endpoint(_parse(p, REGISTRATION_ONLY_DESCRIPTORS, "Types.cs"))
+def test_registration_only_descriptor_emits_operations(tmp_path) -> None:
+    setup = (b"using Catalog;\nbuilder.Services.AddGraphQLServer()\n"
+             b"  .AddQueryType<BookQueriesType>().AddMutationType<BookMutations>();")
+    index = _repo_index(tmp_path, {"Api/Program.cs": setup, "Api/Types.cs": REGISTRATION_ONLY_DESCRIPTORS,
+                                   "Api/BookMutations.cs": BOOK_MUTATIONS})
+    ops = _by_endpoint(_parse_selected(index, "Api/Types.cs", REGISTRATION_ONLY_DESCRIPTORS))
     # The registered descriptor and the descriptor of a registered type are roots; an
     # unregistered data type's fields stay shape.
     assert set(ops) == {"books", "addBook"}

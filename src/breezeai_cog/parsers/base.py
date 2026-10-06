@@ -102,6 +102,17 @@ class BaseParser:
         their framework's signature in ``source`` (e.g. ``b"@nestjs/" in source``)."""
         return True
 
+    def claims_with_index(self, path: str, source: bytes, index: Any | None) -> bool:
+        """``claims`` with the language's repo index in hand — what parser selection calls.
+
+        Almost every framework is recognisable from the file itself, so the default ignores
+        ``index``. Override only when a file becomes framework code because of a declaration
+        in *another* file: a HotChocolate v11/v12 root is a plain class until a composition
+        root registers it (``AddQueryType<T>()``). ``index`` is None without a repo pre-pass
+        (single-file parsing), so an override must still fall back to ``claims``.
+        """
+        return self.claims(path, source)
+
     def build_index(
         self, repo_root: Path, files: Sequence[Path], jobs: int = 1
     ) -> Any | None:  # optional pre-pass

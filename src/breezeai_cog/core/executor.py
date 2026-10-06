@@ -51,11 +51,11 @@ def _parse_entry(path: str, repo_root: str, options: dict) -> FileRecord | None:
     except OSError:
         return None
 
-    parser = select(path, source)  # exactly one parser per file (claims + priority)
-    if parser is None:  # pragma: no cover - classify already filtered
-        return None
     base = base_parser_for(path)
     index = options.get("indexes", {}).get(base.name if base is not None else "")
+    parser = select(path, source, index)  # exactly one parser per file (claims + priority)
+    if parser is None:  # pragma: no cover - classify already filtered
+        return None
     from ..parsers.statements_common import (
         begin_concat_tracking,
         set_concat_depth,
