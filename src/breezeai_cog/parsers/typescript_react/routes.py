@@ -128,8 +128,19 @@ def _pairs(obj: Node, source: bytes) -> dict[str, Node]:
     return out
 
 
+_ROUTE_DISCRIMINATING_KEYS = frozenset({
+    "element", "Component", "component", "children", "lazy", "loader", "action",
+    "errorElement", "index", "handle", "caseSensitive",
+})
+
+
 def _is_route_array(arr: Node, source: bytes) -> bool:
-    return any(e.type == "object" and "path" in _pairs(e, source) for e in arr.named_children)
+    return any(
+        e.type == "object"
+        and (pairs := _pairs(e, source)).keys() & _ROUTE_DISCRIMINATING_KEYS
+        and "path" in pairs
+        for e in arr.named_children
+    )
 
 
 def _is_children_value(arr: Node, source: bytes) -> bool:
@@ -324,6 +335,8 @@ def _detect_v7(root: Node, source: bytes, path: str, seen: set[str], routes: lis
 
 def detect_react_routes(root: Node, source: bytes, path: str, *, seen_ids: set[str],
                         const_values: dict[str, str | None] | None = None) -> list[Statement]:
+    if b"react-router" not in source:
+        return []
     routes: list[Statement] = []
     # JSX <Route>: start only at top-level Routes (no <Route> ancestor); recursion handles nesting.
     jsx: list[Node] = []

@@ -76,6 +76,32 @@ def test_config_routes_detected_with_lazy_mount(tmp_path) -> None:
     assert rec.framework == "react"
 
 
+def test_config_objects_need_a_router_discriminating_key(tmp_path) -> None:
+    src = b'''import { createBrowserRouter } from 'react-router-dom';
+
+const breadcrumbs = [
+  { path: '/home', label: 'Home' },
+  { path: '/about', label: 'About' },
+];
+
+export const router = createBrowserRouter([
+  { path: '/', element: <Home/> },
+]);
+'''
+    rec = _parse(tmp_path, src, "router.tsx")
+    routes = [s.endpoint for s in rec.statements if s.semanticType == "route"]
+    assert routes == ["/"]
+
+
+def test_config_routes_require_react_router_bytes(tmp_path) -> None:
+    src = b'''const routes = [
+  { path: '/home', element: <Home/> },
+];
+'''
+    rec = _parse(tmp_path, src, "router.tsx")
+    assert [s for s in rec.statements if s.semanticType == "route"] == []
+
+
 INDEX_JSX_SRC = b'''import { Routes, Route } from 'react-router-dom';
 
 export function App() {
