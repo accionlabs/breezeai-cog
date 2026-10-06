@@ -79,10 +79,15 @@ def clone_repo_full(
     except subprocess.TimeoutExpired as exc:
         # `from None`: CalledProcessError/TimeoutExpired render argv, which carries the
         # auth-bearing clone URL. Do not chain them onto the traceback.
+        shutil.rmtree(temp_dir, ignore_errors=True)  # a failed clone must not leak its dir
         raise RuntimeError(f"git clone timed out: {_scrub(str(exc))}") from None
     except subprocess.CalledProcessError as exc:
+        shutil.rmtree(temp_dir, ignore_errors=True)
         stderr = exc.stderr.decode() if exc.stderr else str(exc)
         raise RuntimeError(f"git clone failed: {_scrub(stderr)}") from None
+    except BaseException:
+        shutil.rmtree(temp_dir, ignore_errors=True)
+        raise
 
     shutil.rmtree(Path(temp_dir) / ".git", ignore_errors=True)
     return temp_dir

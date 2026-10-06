@@ -22,7 +22,12 @@ from ..callresolve import make_resolver
 from ..treesitter import parse_source
 from .classes import build_class
 from .functions import defined_names, type_map
-from .imports import CSharpIndex, build_csharp_index, extract_imports
+from .imports import (
+    CSharpIndex,
+    bind_static_import_members,
+    build_csharp_index,
+    extract_imports,
+)
 from .lambda_events import detect_lambda_handlers
 from .lucene import detect_lucene_access
 from ..comments_common import comment_statements_for
@@ -69,8 +74,15 @@ class CSharpParser(BaseParser):
         internal, external, _, bindings = extract_imports(
             root, source, path, ctx.resolution_index
         )
+        local_names = defined_names(root, source)
+        # A `using static Ns.Type` puts Type's members in scope unqualified, so a bare
+        # `M()` needs them bound; `local_names` keeps a same-file declaration winning.
+        bind_static_import_members(
+            root, source, bindings, local_names,
+            ctx.resolution_index if isinstance(ctx.resolution_index, CSharpIndex) else None,
+        )
         resolve = make_resolver(
-            bindings, defined_names(root, source), path, type_map(root, source),
+            bindings, local_names, path, type_map(root, source),
             ext_index=getattr(ctx.resolution_index, "ext_methods", None),
             heritage=getattr(ctx.resolution_index, "class_heritage", None),
         )
@@ -108,7 +120,7 @@ class CSharpParser(BaseParser):
             classes=classes,
             statements=statements,
         )
-        # Additive detectors — gated by --capture-statements, layered on top of base + any
+        # Additive detectors — gated by statement capture, layered on top of base + any
         # framework subclass's extraction (a Lambda handler is an orthogonal capability, so it
         # co-exists with an ASP.NET controller in the same file rather than displacing it).
         # Mirrors TypeScript's `typescript/aws_events.py` (sibling module, not a peer parser).

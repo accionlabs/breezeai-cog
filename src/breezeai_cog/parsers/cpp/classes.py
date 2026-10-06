@@ -56,6 +56,10 @@ def _nested_type_spec(member: Node) -> Node | None:
 #: an inline definition (or ``= default``) is a ``function_definition``.
 _MEMBER_FN_TYPES = ("field_declaration", "function_definition", "declaration")
 
+#: The two C++ type-alias declarations. ``using namespace …`` / ``using Ns::name`` are a
+#: ``using_declaration`` instead — an import, deliberately not in this set.
+TYPE_ALIAS_TYPES = ("type_definition", "alias_declaration")
+
 
 def _base_name(base: Node, source: bytes) -> str | None:
     """The base-class name from a ``base_class_clause`` entry — a ``type_identifier``,
@@ -88,19 +92,45 @@ def _heritage(node: Node, source: bytes) -> tuple[str | None, list[str]]:
     return bases[0], bases[1:]
 
 
+#: Nodes that *are* a declared name. ``type_identifier`` covers a ``typedef``'s new type
+#: name (``typedef int Handle`` → ``Handle``), which is never how a variable/field name is
+#: spelled — a field's name is an ``identifier``/``field_identifier``, and its type rides
+#: the separate ``type`` field — so accepting it here is unambiguous.
+_NAME_NODES = ("field_identifier", "identifier", "type_identifier")
+
+
 def _declarator_name(node: Node | None, source: bytes) -> str | None:
-    """Innermost declared name, unwrapping pointer/reference/array/init declarators
-    (``* kName`` → ``kName``)."""
+    """Innermost declared name, unwrapping pointer/reference/array/init/function
+    declarators (``* kName`` → ``kName``, ``(*Callback)(int)`` → ``Callback``)."""
     if node is None:
         return None
-    if node.type in ("field_identifier", "identifier"):
+    if node.type in _NAME_NODES:
         return node_text(node, source)
     inner = node.child_by_field_name("declarator") or next(
         (c for c in node.named_children
-         if c.type in ("field_identifier", "identifier") or c.type.endswith("declarator")),
+         if c.type in _NAME_NODES or c.type.endswith("declarator")),
         None,
     )
     return _declarator_name(inner, source) if inner is not None else None
+
+
+def type_alias_statement(
+    node: Node, source: bytes, path: str, *, parent_id: str, limit: int, seen_ids: set[str]
+) -> Statement:
+    """One flat Statement for a C++ type alias — ``typedef X Y;`` (``type_definition``, the
+    new name on its declarator) or ``using Y = X;`` (``alias_declaration``, a ``name``
+    field). The aliased type stays on ``text``, which is what makes it queryable.
+
+    Only these two node types are aliases: ``using namespace std;`` and ``using std::swap;``
+    are a ``using_declaration`` (an import, not a declaration) and never reach here."""
+    name = (
+        _declarator_name(node.child_by_field_name("name"), source)
+        if node.type == "alias_declaration"
+        else _declarator_name(node.child_by_field_name("declarator"), source)
+    )
+    return member_statement(
+        node, source, path, parent_id=parent_id, limit=limit, seen_ids=seen_ids, name=name
+    )
 
 
 def build_class(
@@ -145,6 +175,16 @@ def build_class(
                 continue  # corrupt declaration header — skip rather than emit fabricated data
             if member.type == "access_specifier":
                 visibility = node_text(member, source)
+                continue
+            if member.type in TYPE_ALIAS_TYPES:
+                # A member typedef/alias (`typedef int MemberHandle;`) declares a name on
+                # the class and is otherwise captured nowhere.
+                if capture:
+                    statements.append(
+                        type_alias_statement(
+                            member, source, path, parent_id=cid, limit=limit, seen_ids=seen_ids,
+                        )
+                    )
                 continue
             spec = _nested_type_spec(member)
             if spec is not None:  # a nested type definition (class/struct/union/enum)
@@ -221,7 +261,7 @@ def build_enum(
     limit: int,
 ) -> tuple[Class | None, list[Statement]]:
     """An ``enum_specifier`` → a ``Class`` of type ``enum`` plus one flat Statement per
-    ``enumerator`` member (parented to the enum, gated by --capture-statements; the member's
+    ``enumerator`` member (parented to the enum, gated by statement capture; the member's
     ``= value`` stays inside its ``text``). Anonymous enums and forward declarations (``enum
     Color;`` — no ``enumerator_list``) emit nothing (honest gap, no hollow node). ``enum
     class`` / ``enum struct`` are scoped enums, captured the same way (scoped-ness not stored)."""
@@ -255,13 +295,15 @@ def build_enum(
 
 
 def _unwrap_template(node: Node) -> Node:
-    """A ``template_declaration`` wraps its class/struct/function — return the inner
-    declaration so it is classified normally (else return the node unchanged)."""
+    """A ``template_declaration`` wraps its class/struct/function/alias — return the inner
+    declaration so it is classified normally (else return the node unchanged). The alias
+    case is the C++11 alias template, ``template<class T> using Ptr = T*;``."""
     if node.type != "template_declaration":
         return node
     inner = next(
         (c for c in node.named_children
-         if c.type in (*_CLASS_TYPES, "function_definition", "field_declaration")),
+         if c.type in (*_CLASS_TYPES, "function_definition", "field_declaration",
+                       *TYPE_ALIAS_TYPES)),
         None,
     )
     return inner if inner is not None else node

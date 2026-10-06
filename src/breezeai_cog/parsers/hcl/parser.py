@@ -1,6 +1,6 @@
 """HclParser — parses ``.tf``, ``.tfvars``, and ``.hcl`` files into FileRecords.
 
-Each top-level HCL block becomes a Statement (gated by ``--capture-statements``) whose
+Each top-level HCL block becomes a Statement (gated by statement capture) whose
 ``text`` is the verbatim block source.  This makes blocks directly filterable via the MCP
 ``get_nodes_by_label`` tool (e.g. ``filterby[text][containsi]="azure"``).
 
@@ -290,7 +290,7 @@ class HclParser(BaseParser):
     def extract(self, root: Node, ctx: ParseContext) -> FileRecord:  # noqa: C901
         """Build a FileRecord from an already-parsed AST root.
 
-        With ``--capture-statements``: each top-level block → one Statement whose
+        With statement capture: each top-level block → one Statement whose
         ``text`` is the verbatim HCL source, making it directly filterable by MCP.
         Without the flag: only ``externalImports`` (module + provider sources) are captured.
 

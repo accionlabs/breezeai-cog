@@ -28,7 +28,15 @@ from ...schemas import SCHEMA_VERSION, FileRecord, Function, Statement
 from ...utils import count_loc
 from ..base import BaseParser, ParseContext
 from ..treesitter import node_text, parse_source
-from .classes import _CLASS_TYPES, _unwrap_template, build_class, build_enum
+from .classes import (
+    _CLASS_TYPES,
+    TYPE_ALIAS_TYPES,
+    _declarator_name,
+    _unwrap_template,
+    build_class,
+    build_enum,
+    type_alias_statement,
+)
 from .functions import (
     build_function,
     defined_names,
@@ -38,6 +46,7 @@ from .functions import (
 from .imports import extract_imports
 from .index import CppIndex, _join_ns, _ns_name, build_cpp_index, make_cpp_resolver
 from ..comments_common import comment_statements_for
+from ..statements_common import member_statement
 from .mappings import COMMENT_TYPES, CONTROL_FLOW, FRAMEWORKS, STATEMENT_TYPES
 
 #: Transparent wrappers whose *members* are top-level declarations: the ``#ifndef GUARD``
@@ -115,6 +124,35 @@ class CppParser(BaseParser):
                         statements.extend(enum_stmts)
                 elif node.type == "function_definition":
                     _emit_function(node, ns)
+                elif node.type in TYPE_ALIAS_TYPES and capture:
+                    # `typedef X Y;` / `using Y = X;` at file or namespace scope. C++ carries
+                    # much of its vocabulary in typedefs, and the aliased type stays on the
+                    # statement's `text`. `using namespace …` / `using Ns::name` are a
+                    # `using_declaration` (an import) and are not in TYPE_ALIAS_TYPES.
+                    statements.append(
+                        type_alias_statement(
+                            node, source, path, parent_id=fid, limit=limit, seen_ids=seen_ids,
+                        )
+                    )
+                elif node.type == "declaration" and capture:
+                    # A file-/namespace-scope variable or constant (`const int kMax = 5;`,
+                    # `constexpr char kName[] = "x";`). C++ puts much of its controlled
+                    # vocabulary here rather than in a class, and these are otherwise
+                    # captured nowhere, so emit each as a flat statement (its `text` — incl.
+                    # any `= value` — is queryable). The grammar spells a *function
+                    # prototype* with this same node type, so a `function_declarator` marks
+                    # a declaration that is not a value; skip those (a defined function is a
+                    # `function_definition`, handled above). Namespace members parent to the
+                    # file, matching how `process` already flattens namespaces.
+                    if function_declarator_of(node.child_by_field_name("declarator")) is None:
+                        statements.append(
+                            member_statement(
+                                node, source, path, parent_id=fid, limit=limit, seen_ids=seen_ids,
+                                name=_declarator_name(
+                                    node.child_by_field_name("declarator"), source
+                                ),
+                            )
+                        )
 
         def _emit_function(node: Node, ns: str) -> None:
             fd = function_declarator_of(node.child_by_field_name("declarator"))

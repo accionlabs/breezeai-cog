@@ -53,6 +53,7 @@ _GRAMMAR_BY_FRAMEWORK: dict[str, str] = {"angular": "angular"}
 class HtmlParser(BaseParser):
     name = "html"
     extensions: tuple[str, ...] = (".html", ".htm")
+    template_extensions: tuple[str, ...] = (".html", ".htm")  # markup — gated by --capture-templates
     schema_version = SCHEMA_VERSION
     statement_types = STATEMENT_TYPES
     frameworks = FRAMEWORKS

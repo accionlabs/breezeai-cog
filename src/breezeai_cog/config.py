@@ -53,7 +53,14 @@ class Settings(BaseSettings):
         default=None,
         validation_alias=AliasChoices("BREEZEAI_COG_LANGUAGE", "BREEZEAI_COG_LANGUAGES"),
     )
-    capture_statements: bool = False  # --capture-statements
+    # In-body statement capture (API calls, DB queries, routes, events, …). On by default —
+    # nearly every downstream consumer needs it; --no-capture-statements turns it off.
+    capture_statements: bool = True
+    # --capture-templates. Markup/view files (.html/.htm/.cshtml/.razor/.aspx/.ascx/
+    # .master/.vue) are skipped at scan time by default — they flood the graph with
+    # markup nodes that bury the business logic. Orthogonal to the ignore layers:
+    # .repoinclude does not re-include them, only this flag does. (core/pipeline.py)
+    capture_templates: bool = False
     jobs: int | None = None  # --jobs; None = CPU count (resolved in the executor)
     # Max statement `text` length before it is split into ordered `#partNofN` records at
     # emit (emit/split.py) so the backend never drops an oversized statement; 0 disables.

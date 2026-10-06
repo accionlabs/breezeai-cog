@@ -10,18 +10,31 @@ system: it generates the ontology, a separate Breeze backend loads it into a gra
 tools query it. This guide only covers the generator — the part you run against your code.
 
 **What it understands today** (run `breezeai-cog capabilities` for the authoritative, live list):
-- **Languages:** TypeScript/JavaScript, Python, Java, C#, VB.NET, Kotlin, Groovy, and C++.
+- **Languages:** TypeScript/JavaScript, Python, Ruby, Java, C#, VB.NET, Kotlin, Groovy, and C++.
 - **Frameworks** (route/event detection on top of those languages): FastAPI (Python); NestJS,
   Angular, Express, React, Vue, Next.js, LoopBack, and GraphQL (TypeScript); Spring Boot, JAX-RS,
   and Vert.x (Java); ASP.NET, Web Forms, WCF/ASMX, and GraphQL (C#); ASP.NET (VB.NET); Ktor
-  (Kotlin); Vert.x (Groovy). Cross-cutting SDK detectors (AWS messaging, HubSpot, Chargebee,
-  Salesforce) layer on top additively.
+  (Kotlin); Rails, Sinatra, and Grape (Ruby); Vert.x (Groovy). Cross-cutting SDK detectors (AWS
+  messaging, HubSpot, Chargebee, Salesforce) layer on top additively.
 - **Database/search schemas:** SQL DDL files and Elasticsearch mappings (via the HTTP service).
 - **Config & structured data:** `package.json`, `tsconfig.json`, `Dockerfile`, `docker-compose.yml`,
   `pom.xml`, `build.gradle`, `pyproject.toml`, `requirements.txt`, `Pipfile`, `.csproj`/`.vbproj`/`.sln`,
   `.ini`/`.toml`/`.xml`/`.yaml`, and more — parsed into structured `metadata` (dependencies, scripts,
   images/ports, …) and summarized in `projectMetaData.configs`. Standalone JSON/data documents are
   also captured whole as a compact `structured_data` statement.
+
+### Ruby routes and data access
+
+Ruby framework parsers recognize these route stacks when statement capture is enabled:
+
+| Stack | Route shapes | File framework value |
+|---|---|---|
+| Rails | `Rails.application.routes.draw`, controller classes such as `UsersController < ApplicationController` | `rails` |
+| Sinatra | top-level DSL routes and modular classes such as `class API < Sinatra::Base` | `sinatra` |
+| Grape | API classes such as `class API < Grape::API` and their HTTP verb blocks | `grape` |
+
+Rails-style ActiveRecord calls such as `User.find`, `User.where`, and `user.save` are emitted
+as `db_method_call` statements with `dataAccessHint: "activerecord"`.
 
 It does **not** run or execute your code — it only reads and parses the source text, so it's safe to
 point at any repository.
@@ -166,7 +179,8 @@ edits your `.gitignore` itself, and it always skips a `.cog/` directory when sca
 | `--repo <dir>` | *(required)* | The folder to analyze. |
 | `--out <dir>` | `<repo>/.cog` | Output **directory** for the export only (not a filename). The file is named `<repo>-project-analysis.ndjson.gz`. The skip report and logs always go to `<repo>/.cog`. |
 | `--language <name>` | all (auto-detected) | Only analyze this language. Repeat the flag for several (e.g. `--language python --language java`). |
-| `--capture-statements` | off | Also record statements *inside* functions — needed to detect API calls, DB queries, and routes. Off by default because it produces more data. |
+| `--no-capture-statements` | off (statements captured) | Skip recording statements *inside* functions. Statements are captured by default because they are what detects API calls, DB queries, and routes; turn this on only when you want smaller output and don't need that detail. Env `BREEZEAI_COG_CAPTURE_STATEMENTS=false`. The old `--capture-statements` flag still works but is deprecated (prints a warning); it forces capture on, overriding the env var. |
+| `--capture-templates` | off | Also analyze markup/view **template** files — `.html` `.htm` `.cshtml` `.razor` `.aspx` `.ascx` `.master` `.vue`. Off by default: markup produces a large number of low-value nodes that bury the business logic when reading the graph. Turn it **on** for Razor Pages / Blazor (`@page` routes and `@code` methods live in the markup) and for Vue SFC `<script>` blocks. Env `BREEZEAI_COG_CAPTURE_TEMPLATES`. |
 | `--batch` | off | Treat `--repo` as a **workspace folder** and analyze each immediate subdirectory as its own project (one `.ndjson.gz` per subdir). See *Batch mode* below. |
 | `--repo-list <file>` | all subdirs | With `--batch`: a file of immediate-subdirectory **names** (one per line; `#` comments and blank lines ignored) to restrict the run to. |
 | `--jobs <n>` | number of CPU cores | How many files to parse in parallel. |
@@ -178,36 +192,37 @@ edits your `.gitignore` itself, and it always skips a `.cog/` directory when sca
 | `--parallel-uploads <n>` | `1` | How many repos to upload concurrently in `--batch`. Env `BREEZEAI_COG_UPLOAD_PARALLELISM`. |
 | `--upload-max-retries <n>` | `1` | Retries after a failed upload (total attempts = retries + 1). Only transient failures — network / timeout / HTTP 5xx — retry; a 4xx is fatal. Env `BREEZEAI_COG_UPLOAD_MAX_RETRIES`. |
 | `--force` | off | With `--batch --upload`: ignore any saved resume state and re-upload every selected project from scratch. |
-| `--verbose` | off | Print detailed (debug) logs: per-file parse results, each skipped file with its reason (`ignored` / `unsupported` / `oversized`), and index-build timing. |
+| `--verbose` | off | Print detailed (debug) logs: per-file parse results, each skipped file with its reason (`ignored` / `template` / `unsupported` / `oversized`), and index-build timing. |
 
 Every run — even without `--verbose` — ends with a one-line summary showing files **found** vs
 **parsed**, how many **failed** or were **skipped** (and why), plus cumulative totals:
 
 ```
 analysis.complete scanned=182 parsed=118 failed=0 skipped=64 \
-  skips={"unsupported":51,"ignored":12,"oversized":1} \
+  skips={"unsupported":51,"ignored":12,"template":8,"oversized":1} \
   functions=940 classes=210 statements=0 loc=18324 languages=["python","typescript"]
 ```
 
 - **scanned** — total files the scanner walked; equals **parsed** + **failed** + **skipped**.
 - **parsed** — records produced. **failed** — candidate source files that errored during parsing.
 - **skipped** — files dropped during scanning, by reason: `ignored` (by `.gitignore`/`.repoignore`),
-  `unsupported` (no parser for that type), `oversized` (over the size limit).
+  `template` (markup/view file, and `--capture-templates` is off), `unsupported` (no parser for
+  that type), `oversized` (over the size limit).
 - **statements** — captured in-body statements **plus** detected framework routes. With
-  `--capture-statements` off (the default) this is **routes only**, so it's normally far smaller
-  than the function count; turn the flag on to capture all in-body statements.
+  `--no-capture-statements` this is **routes only**, so it's normally far smaller than the function
+  count; by default all in-body statements are captured.
 
-Example — analyze only Python and Java, with statement detail, using 8 parallel workers:
+Example — analyze only Python and Java using 8 parallel workers:
 
 ```bash
 breezeai-cog repo-to-json-tree --repo . --language python --language java \
-    --capture-statements --jobs 8 --out ./out
+    --jobs 8 --out ./out
 ```
 
 Example — analyze and upload the result to a Breeze project in one step:
 
 ```bash
-breezeai-cog repo-to-json-tree --repo . --capture-statements \
+breezeai-cog repo-to-json-tree --repo . \
     --upload --baseurl https://api.breeze.example.com \
     --uuid 3f2c… --user-api-key "$API_KEY"
 ```
@@ -248,7 +263,7 @@ workspace/            ← point --repo here, with --batch
 ```
 
 ```bash
-breezeai-cog repo-to-json-tree --repo ./workspace --batch --capture-statements --out ./out
+breezeai-cog repo-to-json-tree --repo ./workspace --batch --out ./out
 ```
 
 - Only **immediate** subdirectories are analyzed — the tool does not recurse into deeper nesting.
@@ -257,7 +272,7 @@ breezeai-cog repo-to-json-tree --repo ./workspace --batch --capture-statements -
 - Each subdirectory is analyzed independently and prints its own summary under a `[name]` heading.
 - If the workspace has no subdirectories to analyze, the command exits with an error.
 
-Batch mode combines with all the other flags (`--language`, `--capture-statements`, `--jobs`, and
+Batch mode combines with all the other flags (`--language`, `--no-capture-statements`, `--jobs`, and
 the `--upload` group), applying them to every project in the run.
 
 **Uploading a subset.** Pass `--repo-list <file>` to restrict the run to specific subdirectories.
@@ -307,8 +322,12 @@ the tool version.
 | `externalImports` | Imports of third-party/external packages. |
 | `functions[]` | Each function/method: name, parameters, return type, decorators, visibility, the calls it makes. |
 | `classes[]` | Each class/interface/enum: name, what it extends/implements, its methods. |
-| `statements[]` | *(only with `--capture-statements`)* notable in-body statements — including detected API calls, DB queries, framework routes, event-bus/messaging operations, GraphQL entities, source comments, and captured structured data. |
-| `framework` | Set when a framework is detected in the file (e.g. `fastapi`, `nestjs`, `angular`, `spring`, `vertx`, `aspnet`, `wcf`). |
+| `statements[]` | *(omitted with `--no-capture-statements`)* notable in-body statements — including detected API calls, DB queries, framework routes, event-bus/messaging operations, GraphQL entities, source comments, and captured structured data. |
+| `framework` | Set when a framework is detected in the file (e.g. `fastapi`, `nestjs`, `angular`, `spring`, `vertx`, `aspnet`, `wcf`, `rails`, `sinatra`, `grape`). |
+
+`rails`, `sinatra`, and `grape` are **NEW in the Python target** (Target Spec §2.4). The local
+schema accepts framework strings, but the external backend framework allow-list must include these
+values for them to survive ingestion.
 
 **How things link together:** every function, class, and statement carries an `id`, and a
 `parentId` pointing to its container (a method's `parentId` is its class; a statement's `parentId`
@@ -353,7 +372,8 @@ Most-used settings:
 | Setting | Env var | Default |
 |---|---|---|
 | Languages | `BREEZEAI_COG_LANGUAGE` | all |
-| Capture statements | `BREEZEAI_COG_CAPTURE_STATEMENTS` | `false` |
+| Capture statements | `BREEZEAI_COG_CAPTURE_STATEMENTS` | `true` |
+| Capture templates (markup/view files) | `BREEZEAI_COG_CAPTURE_TEMPLATES` | `false` |
 | Worker processes | `BREEZEAI_COG_JOBS` | CPU count |
 | Statement text limit (chars; longer → split into `#partNofN` parts, `0` off) | `BREEZEAI_COG_STATEMENT_TEXT_LIMIT` | `8000` |
 | Max statement parts (cap; over it the tail is dropped + logged, `0` = unbounded) | `BREEZEAI_COG_MAX_STATEMENT_PARTS` | `0` |
@@ -384,6 +404,20 @@ binaries). It also honors **`.gitignore`** and a tool-specific **`.repoignore`**
 standard gitignore syntax. To force-include something that would otherwise be ignored, add it to a
 **`.repoinclude`** file (same syntax). These files are read per-directory, so rules can be scoped to
 subfolders.
+
+**Template files are a separate axis.** Markup/view files (`.html` `.htm` `.cshtml` `.razor`
+`.aspx` `.ascx` `.master` `.vue`) are skipped by default and reported under their own `template`
+skip reason — not `ignored`. This is a capture-scope choice rather than an ignore rule, so the two
+layers do not interact the way you might expect:
+
+- `.repoinclude` does **not** bring templates back. Only `--capture-templates` does.
+- `.repoignore` still wins over `--capture-templates`: the template gate runs *after* the ignore
+  layers, so an ignored template stays ignored.
+- The gate matches on the file extension case-insensitively, so `Site.Master` and `Default.ASPX`
+  are recognised as templates even though the parsers themselves match case-sensitively.
+
+See [Template Capture](template-capture.md) for what each template type produces, worked
+examples, and guidance on which stacks need the flag.
 
 ---
 
