@@ -58,9 +58,9 @@ def _scope_path(node: Node) -> list[Node]:
 
 def _router_bindings(
     root: Node, source: bytes
-) -> dict[str, list[tuple[int, list[Node], Node | None]]]:
-    """Index variable declarations by name once, retaining their lexical scope."""
-    bindings: dict[str, list[tuple[int, list[Node], Node | None]]] = {}
+) -> dict[str, list[tuple[int, list[Node], Node | None, bool]]]:
+    """Index declarations and direct assignments by name and lexical scope."""
+    bindings: dict[str, list[tuple[int, list[Node], Node | None, bool]]] = {}
 
     def walk(node: Node) -> None:
         if node.type == "variable_declarator":
@@ -71,7 +71,25 @@ def _router_bindings(
                     node.start_byte,
                     _scope_path(node),
                     node.child_by_field_name("value"),
+                    False,
                 ))
+        elif node.type == "assignment_expression":
+            binding = node.child_by_field_name("left")
+            value = node.child_by_field_name("right")
+            if binding is not None and binding.type == "identifier":
+                operator = (
+                    source[binding.end_byte:value.start_byte].strip()
+                    if value is not None
+                    else b""
+                )
+                if operator == b"=":
+                    name = node_text(binding, source)
+                    bindings.setdefault(name, []).append((
+                        node.start_byte,
+                        _scope_path(node),
+                        value,
+                        True,
+                    ))
         for child in node.named_children:
             walk(child)
 
@@ -82,58 +100,121 @@ def _router_bindings(
 def _router_initializer(
     name: str,
     before_byte: int,
-    bindings: dict[str, list[tuple[int, list[Node], Node | None]]],
+    bindings: dict[str, list[tuple[int, list[Node], Node | None, bool]]],
     scope: list[Node],
-) -> tuple[bool, Node | None]:
-    """Find the nearest preceding local variable binding visible at a call site."""
-    found: tuple[int, Node | None, int] | None = None
-    for start_byte, binding_scope, initializer in bindings.get(name, ()):
-        if start_byte < before_byte and len(binding_scope) <= len(scope) and all(
-            left == right for left, right in zip(binding_scope, scope)
+) -> tuple[bool, Node | None, bool]:
+    """Resolve a visible declaration and its latest preceding direct assignment."""
+    declaration: tuple[int, list[Node], Node | None, bool] | None = None
+    for entry in bindings.get(name, ()):
+        start_byte, binding_scope, _, is_assignment = entry
+        if (
+            not is_assignment
+            and start_byte < before_byte
+            and len(binding_scope) <= len(scope)
+            and all(left == right for left, right in zip(binding_scope, scope))
         ):
-            depth = len(binding_scope)
-            if found is None or (depth, start_byte) > (found[2], found[0]):
-                found = (start_byte, initializer, depth)
-    return (False, None) if found is None else (True, found[1])
+            if declaration is None or (len(binding_scope), start_byte) > (
+                len(declaration[1]), declaration[0]
+            ):
+                declaration = entry
+    if declaration is None:
+        return False, None, False
+
+    start_byte, binding_scope, initializer, _ = declaration
+    latest_assignment: tuple[int, Node] | None = None
+    for assigned_byte, assignment_scope, value, is_assignment in bindings.get(name, ()):
+        if (
+            is_assignment
+            and start_byte < assigned_byte < before_byte
+            and len(binding_scope) <= len(assignment_scope) <= len(scope)
+            and all(left == right for left, right in zip(binding_scope, assignment_scope))
+            and all(left == right for left, right in zip(assignment_scope, scope))
+            and value is not None
+            and (latest_assignment is None or assigned_byte > latest_assignment[0])
+        ):
+            latest_assignment = (assigned_byte, value)
+    if latest_assignment is not None:
+        return True, latest_assignment[1], True
+    return True, initializer, initializer is not None
 
 
-def _is_express_constructor(node: Node | None, source: bytes) -> bool:
-    if node is None or node.type != "call_expression":
+def _unwrap_expression(node: Node) -> Node:
+    """Remove transparent TypeScript and parenthesis wrappers around an expression."""
+    while node.type in {
+        "as_expression", "non_null_expression", "parenthesized_expression",
+    }:
+        expression = node.child_by_field_name("expression")
+        if expression is None and node.named_children:
+            expression = node.named_children[0]
+        if expression is None:
+            break
+        node = expression
+    return node
+
+
+def _is_express_constructor(node: Node | None, source: bytes) -> bool | None:
+    """True for known Express constructors, False for known non-routers, else unknown."""
+    if node is None:
+        return None
+    node = _unwrap_expression(node)
+    if node.type in {
+        "object", "array", "string", "template_string", "number", "true", "false",
+        "null", "regex", "arrow_function", "function_expression", "class",
+    }:
         return False
+    if node.type != "call_expression":
+        return None
     fn = node.child_by_field_name("function")
     if fn is None:
-        return False
+        return None
+    fn = _unwrap_expression(fn)
     if fn.type == "identifier":
-        return node_text(fn, source) in {"express", "Router"}
+        return True if node_text(fn, source) in {"express", "Router"} else None
     if fn.type == "member_expression":
         prop = fn.child_by_field_name("property")
         obj = fn.child_by_field_name("object")
-        return (
-            prop is not None
-            and obj is not None
-            and node_text(prop, source) == "Router"
-            and node_text(obj, source) == "express"
-        )
-    return False
+        if prop is None or obj is None or node_text(prop, source) != "Router":
+            return None
+        obj = _unwrap_expression(obj)
+        if obj.type == "identifier" and node_text(obj, source) == "express":
+            return True
+        if obj.type == "call_expression":
+            require_fn = obj.child_by_field_name("function")
+            require_args = obj.child_by_field_name("arguments")
+            args = list(require_args.named_children) if require_args is not None else []
+            if (
+                require_fn is not None
+                and require_fn.type == "identifier"
+                and node_text(require_fn, source) == "require"
+                and len(args) == 1
+                and _string_value(args[0], source) == "express"
+            ):
+                return True
+        return None
+    return None
 
 
 def _is_router_obj(
     obj: Node,
     source: bytes,
-    router_bindings: dict[str, list[tuple[int, list[Node], Node | None]]],
+    router_bindings: dict[str, list[tuple[int, list[Node], Node | None, bool]]],
     before_byte: int,
 ) -> bool:
     """Accept known Express constructors, unresolved router names, and reject local plain objects."""
     obj_text = node_text(obj, source)
     if obj.type == "call_expression":
-        return _is_express_constructor(obj, source)
+        return _is_express_constructor(obj, source) is True
 
     name = obj_text.rsplit(".", 1)[-1].strip()
-    declared, initializer = _router_initializer(
+    declared, initializer, initialized = _router_initializer(
         name, before_byte, router_bindings, _scope_path(obj)
     )
     if declared:
-        return _is_express_constructor(initializer, source)
+        router = _is_express_constructor(initializer, source)
+        if router is not None:
+            return router
+        if not initialized:
+            return False
 
     low = name.lower()
     return low in {"app", "router", "server", "api", "route"} or low.endswith(
@@ -174,7 +255,7 @@ def _path_value(node: Node, source: bytes) -> str | None:
 def _chained_route_path(
     call: Node,
     source: bytes,
-    router_bindings: dict[str, list[tuple[int, list[Node], Node | None]]],
+    router_bindings: dict[str, list[tuple[int, list[Node], Node | None, bool]]],
 ) -> str | None:
     """Find the path of the ``.route(path)`` at the base of a chained verb call."""
     fn = call.child_by_field_name("function")
@@ -303,7 +384,7 @@ def _classify(
     call: Node,
     source: bytes,
     root: Node,
-    router_bindings: dict[str, list[tuple[int, list[Node], Node | None]]],
+    router_bindings: dict[str, list[tuple[int, list[Node], Node | None, bool]]],
     bindings: dict[str, str],
 ) -> tuple[str | None, str, str | None, int | None, list[str] | None, str, str, bool] | None:
     """Return route details, chained-call status, or None if the call is not a route.

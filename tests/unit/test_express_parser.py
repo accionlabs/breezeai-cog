@@ -138,6 +138,63 @@ function handler(req, res) {
     }
 
 
+def test_receiver_constructor_forms_and_opaque_initializers(tmp_path) -> None:
+    src = b'''import express from 'express';
+const router = require('express').Router();
+const castApp = express() as Application;
+const nonNullApp = express()!;
+const parenthesizedApp = (express());
+const objectApp = {};
+const arrayApp = [];
+const literalApp = 1;
+const functionApp = () => {};
+let deferredRouter;
+deferredRouter = express.Router();
+let assignedObjectApp;
+assignedObjectApp = {};
+
+router.get('/cjs-router', cjsHandler);
+castApp.get('/cast-app', castHandler);
+nonNullApp.get('/non-null-app', nonNullHandler);
+parenthesizedApp.get('/parenthesized-app', parenthesizedHandler);
+objectApp.get('/object-is-not-router', handler);
+arrayApp.get('/array-is-not-router', handler);
+literalApp.get('/literal-is-not-router', handler);
+functionApp.get('/function-is-not-router', handler);
+deferredRouter.get('/assigned-router', assignedHandler);
+assignedObjectApp.get('/assigned-object-is-not-router', handler);
+
+{
+  const app = initApp(express());
+  app.get('/opaque-app-factory', opaqueAppHandler);
+}
+{
+  const router = createRouter();
+  router.post('/opaque-router-factory', opaqueRouterHandler);
+}
+'''
+    p = tmp_path / "receiver-forms.ts"
+    p.write_bytes(src)
+    ctx = ParseContext(path="receiver-forms.ts", abs_path=p, source=src, repo_root=tmp_path,
+                       capture_statements=True)
+    rec = TypeScriptParser().parse_file(ctx)
+    routes = {
+        (s.method, s.endpoint)
+        for s in rec.statements
+        if s.semanticType == "route"
+    }
+
+    assert routes == {
+        ("GET", "/cjs-router"),
+        ("GET", "/cast-app"),
+        ("GET", "/non-null-app"),
+        ("GET", "/parenthesized-app"),
+        ("GET", "/assigned-router"),
+        ("GET", "/opaque-app-factory"),
+        ("POST", "/opaque-router-factory"),
+    }
+
+
 def test_settings_getter_not_a_route(tmp_path) -> None:
     # app.get('title') / app.set(...) / bare app.use(mw) must not be misread as routes.
     rec = _parse(tmp_path)
