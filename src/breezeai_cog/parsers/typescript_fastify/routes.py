@@ -105,6 +105,7 @@ class _Binding:
     position: int
     is_fastify: bool = False
     string_value: Optional[str] = None
+    callable_node: Optional[Node] = None
 
 
 @dataclass
@@ -121,8 +122,11 @@ class _Scope:
         *,
         is_fastify: bool = False,
         string_value: Optional[str] = None,
+        callable_node: Optional[Node] = None,
     ) -> None:
-        self.bindings.setdefault(name, []).append(_Binding(position, is_fastify, string_value))
+        self.bindings.setdefault(name, []).append(
+            _Binding(position, is_fastify, string_value, callable_node)
+        )
 
     def binding_at(self, name: str, position: int) -> Optional[_Binding]:
         entries = self.bindings.get(name)
@@ -215,7 +219,11 @@ class _FileIndex:
                 if name_node is not None and name_node.type == "identifier":
                     destination = scope if node.type == "class_declaration" else parent_scope
                     if destination is not None:
-                        destination.add_binding(node_text(name_node, source), name_node.start_byte)
+                        destination.add_binding(
+                            node_text(name_node, source),
+                            name_node.start_byte,
+                            callable_node=node if node.type == "function_declaration" else None,
+                        )
             elif node.type in {"function_expression", "function"}:
                 name_node = node.child_by_field_name("name")
                 if name_node is not None and name_node.type == "identifier":
@@ -287,6 +295,12 @@ class _FileIndex:
             name_node.start_byte,
             is_fastify=(value_node is not None and _is_fastify_factory_call(value_node, source)),
             string_value=(_string_literal(value_node, source) if value_node is not None else None),
+            callable_node=(
+                value_node
+                if value_node is not None
+                and value_node.type in {"arrow_function", "function_expression", "function"}
+                else None
+            ),
         )
 
     def _index_pattern(
@@ -323,6 +337,15 @@ class _FileIndex:
                 return binding.string_value if binding is not None else None
             scope = scope.parent
         return self.external_constants.get(name)
+
+    def resolve_callable(self, name: str, node: Node) -> Optional[Node]:
+        scope: Optional[_Scope] = self.scope_for(node)
+        while scope is not None:
+            if name in scope.bindings:
+                binding = scope.binding_at(name, node.start_byte)
+                return binding.callable_node if binding is not None else None
+            scope = scope.parent
+        return None
 
     def mark_fastify_parameter(self, function: Node, source: bytes) -> None:
         name = _first_param_name(function, source)
@@ -545,6 +568,7 @@ def _walk(
     prefix: Optional[str],
 ) -> None:
     """Iteratively scan syntax nodes using the prebuilt per-file scope index."""
+    mounted_plugin_nodes = _registered_plugin_nodes(node, source, file_index)
     pending: list[tuple[Node, Optional[str]]] = [(node, prefix)]
 
     while pending:
@@ -605,7 +629,39 @@ def _walk(
                     )
                     continue
 
-        pending.extend((child, current_prefix) for child in reversed(current.named_children))
+        pending.extend(
+            (child, current_prefix)
+            for child in reversed(current.named_children)
+            if file_index.node_key(child) not in mounted_plugin_nodes
+        )
+
+
+def _registered_plugin_nodes(
+    root: Node,
+    source: bytes,
+    file_index: _FileIndex,
+) -> set[tuple[int, int, str]]:
+    """Find named plugin declarations so they are visited only at their mount prefix."""
+    mounted: set[tuple[int, int, str]] = set()
+    pending = [root]
+
+    while pending:
+        current = pending.pop()
+        if current.type == "call_expression":
+            dispatch = _dispatch_call(current, source, file_index)
+            if dispatch is not None and dispatch[0] == "register" and dispatch[2]:
+                plugin_node = dispatch[2][0]
+                if plugin_node.type == "identifier":
+                    callable_node = file_index.resolve_callable(
+                        node_text(plugin_node, source),
+                        plugin_node,
+                    )
+                    if callable_node is not None:
+                        mounted.add(file_index.node_key(callable_node))
+
+        pending.extend(current.named_children)
+
+    return mounted
 
 
 def _dispatch_call(
@@ -938,6 +994,12 @@ def _fastify_register(
     ):
         file_index.mark_fastify_parameter(plugin_node, source)
         children.append((plugin_node, child_prefix))
+    elif plugin_node.type == "identifier":
+        plugin_name = node_text(plugin_node, source)
+        callable_node = file_index.resolve_callable(plugin_name, plugin_node)
+        if callable_node is not None:
+            file_index.mark_fastify_parameter(callable_node, source)
+            children.append((callable_node, child_prefix))
 
     if opts_node is not None:
         children.append((opts_node, prefix))

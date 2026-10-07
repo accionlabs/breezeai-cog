@@ -467,6 +467,29 @@ def test_nested_register_prefixes_are_joined() -> None:
     assert [(route.method, route.endpoint) for route in routes] == [("GET", "/api/v2/items")]
 
 
+def test_register_resolves_named_plugin_references_with_prefixes() -> None:
+    source = (
+        b"const fastify = Fastify();\n"
+        b"const users = async (usersServer) => {\n"
+        b"  usersServer.get('/users', handler);\n"
+        b"};\n"
+        b"function admin(fastify) {\n"
+        b"  fastify.get('/admin', handler);\n"
+        b"}\n"
+        b"fastify.register(users, { prefix: '/api' });\n"
+        b"fastify.register(admin, { prefix: '/internal' });\n"
+    )
+
+    routes = _detect_routes(source)
+
+    assert [(route.method, route.endpoint) for route in routes] == [
+        (None, "/api"),
+        ("GET", "/api/users"),
+        (None, "/internal"),
+        ("GET", "/internal/admin"),
+    ]
+
+
 def test_unresolved_register_prefix_is_null_on_mount_and_nested_route() -> None:
     source = (
         b"const fastify = Fastify();\n"
