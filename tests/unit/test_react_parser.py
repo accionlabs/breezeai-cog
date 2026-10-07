@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 
+import pytest
 from jsonschema import Draft202012Validator
 
 from breezeai_cog.core import registry
@@ -92,11 +93,54 @@ const breadcrumbs = [
 
 export const router = createBrowserRouter([
   { path: '/', element: <Home/> },
+  { path: '/crumb', label: 'Breadcrumb' },
+  { path: '/nav', name: 'Navigation item', children: [] },
+  { path: '/step', title: 'Step', children: [] },
 ]);
 '''
     rec = _parse(tmp_path, src, "router.tsx")
     routes = [s.endpoint for s in rec.statements if s.semanticType == "route"]
     assert routes == ["/"]
+
+
+@pytest.mark.parametrize("item", [
+    "{ path: '/home', label: 'Home' }",
+    "{ path: '/projects', title: 'Projects', children: [] }",
+    "{ path: '/profile', name: 'Profile', icon: 'user', children: [] }",
+    "{ path: '/settings', icon: 'settings', children: [] }",
+    "{ path: '/help', href: '/help', children: [] }",
+])
+def test_navigation_items_with_route_like_keys_are_not_routes(tmp_path, item: str) -> None:
+    src = (
+        "import { useRoutes } from 'react-router-dom';\n"
+        f"const navigation = [{item}];\n"
+    ).encode()
+    rec = _parse(tmp_path, src, "navigation.tsx")
+    assert [s for s in rec.statements if s.semanticType == "route"] == []
+
+
+def test_config_routes_keep_supported_discriminating_keys(tmp_path) -> None:
+    src = b'''import { useRoutes } from 'react-router-dom';
+
+const routes = useRoutes([
+  { path: '/Component', Component: Home },
+  { path: '/component', component: Home },
+  { path: '/lazy', lazy: async () => ({ Component: Home }) },
+  { path: '/loader', loader: async () => null },
+  { path: '/children', children: [] },
+  { path: '/index', index: true },
+  { path: '/action', action: async () => null },
+  { path: '/error', errorElement: <ErrorPage/> },
+  { path: '/handle', handle: {} },
+  { path: '/case', caseSensitive: true },
+]);
+'''
+    rec = _parse(tmp_path, src, "routes.tsx")
+    endpoints = {s.endpoint for s in rec.statements if s.semanticType == "route"}
+    assert endpoints == {
+        "/Component", "/component", "/lazy", "/loader", "/children",
+        "/index", "/action", "/error", "/handle", "/case",
+    }
 
 
 def test_config_routes_require_react_router_bytes(tmp_path) -> None:
