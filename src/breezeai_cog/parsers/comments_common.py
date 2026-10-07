@@ -1,4 +1,4 @@
-"""Shared, language-agnostic comment capture (gated by --capture-statements).
+"""Shared, language-agnostic comment capture (gated by statement capture).
 
 Every parser runs one whole-file pass over its AST that turns source **comments** into
 flat :class:`~breezeai_cog.schemas.Statement` records — each keeping its real tree-sitter
@@ -158,7 +158,7 @@ def comment_statements_for(
     """Convenience wrapper for a parser's ``extract``: derive the scope table, statement start
     lines, and non-control-flow absorbing spans from the records the parser already built, then
     run the comment pass. Call after ``functions``/``classes``/``statements`` are assembled and
-    only when ``--capture-statements`` is on."""
+    only when statement capture is on."""
     scope_spans: list[ScopeSpan] = [(f.startLine, f.endLine, f.id) for f in functions]
     scope_spans += [(c.startLine, c.endLine, c.id) for c in classes]
     # Absorbing spans = where a comment already lives in a statement's ``text`` (so it must not

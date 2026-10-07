@@ -121,7 +121,7 @@ parse once and reuse the base extraction. Always provide it.
   `Statement`s parented to the enum `Class` (one per member — `nodeType` = the grammar's
   member node, `name` = the declared name, `text` = the member source, incl. any
   `= value`), via `emit_enum_members(body, source, path, member_types={…}, parent_id=cid,
-  limit=…, seen_ids=…)` from `statements_common` — gated behind `--capture-statements` like
+  limit=…, seen_ids=…)` from `statements_common` — gated on `ctx.capture_statements` like
   every other statement. (Do **not** carry members in `Class.metadata["constants"]`, and do
   **not** un-barrier the enum from `NESTED_SCOPES` — enum bodies can hold methods that must
   still be extracted as their own scope.)
@@ -146,9 +146,9 @@ if classified:
 elif text_has_query(statement_text):             # fallback: a raw SQL string literal in the stmt
     Statement(..., semanticType="query_statement", ...)
 ```
-Statement capture is gated by `--capture-statements` — see Step 5b.
+Statement capture is gated by `ctx.capture_statements` (on by default; `--no-capture-statements` turns it off) — see Step 5b.
 
-### Step 5b — Gate route/db/event/query statements behind `--capture-statements`
+### Step 5b — Gate route/db/event/query statements behind `ctx.capture_statements`
 Structural statements (control flow, declarations) always emit, but **semantic statements —
 routes, api_call/db_method_call/query_statement, events — must only be emitted when
 `ctx.capture_statements` is True**. The base extractors already thread
@@ -295,6 +295,12 @@ this is why deterministic ids matter. **Route/event/query detection MUST be gate
 Live examples of each idiom are in the framework parser packages under `parsers/` — browse
 there rather than relying on a list here.
 
+#### Framework enum additions
+The Ruby framework values `rails`, `sinatra`, and `grape` are **NEW in the Python target** and
+must be added to the Target Spec §2.4 `framework` enum and the backend allow-list. The local
+`Statement.framework` field is intentionally an open string, so parser output remains honest
+while the external ingestion contract is updated.
+
 - **AST-walk**: the detector walks `root` to find call/decorator patterns. Use when the
   signal isn't already on the extracted record (call-based routing, event bus, JSX) — pass
   `root`, `source`, `path`, and the current `seen_ids`.
@@ -304,6 +310,9 @@ there rather than relying on a list here.
   frameworks; it's simpler and can't drift from the base extraction. Route attributes
   (`guards`/`requestDTO`/`responseDTO`/`isRegex`/`authRequired`) are populated here from the
   captured decorators/params/`returnType`.
+  Ruby visibility is currently emitted as `public` for classes and methods. Ruby `private` /
+  `protected` section markers and `private :name` declarations are not yet mapped, so consumers
+  should treat those values as the parser default rather than a verified visibility signal.
   ```python
   def parse_file(self, ctx):
       root = parse_source("java", ctx.source, ctx.parse_timeout_micros).root_node
@@ -366,6 +375,13 @@ highest-`priority` parser whose `claims(path, source)` is True; the base languag
 - [ ] `PARSERS` exported from `__init__.py`.
 - [ ] `ignore.txt` / `include.txt` — **language-scoped, post-scan**; universal directory
       prunes go in `core/default_ignores.txt`.
+- [ ] **Markup/view parsers** declare `template_extensions` — the subset of `extensions` that
+      is markup, not code. The scanner drops those before classification unless
+      `--capture-templates` is given (skip reason `template`). Declare only the markup half:
+      WebForms owns `.cs` + `.aspx/.ascx/.master`, Vue owns `.ts`/`.js` + `.vue`, and the code
+      half must keep being captured. If a resolver of yours can bind an edge to a template
+      path, it is pruned centrally by `core/executor.py::_prune_template_edges` — do not
+      special-case it in the parser.
 - [ ] `build_index` only if cross-file resolution is needed (return a **picklable** index); if
       it full-parses, structure it as a `parallel_map` worker + deterministic reduce honouring `jobs`.
 - [ ] Framework parser subclasses the base, sets `priority` + `claims`, does full extraction

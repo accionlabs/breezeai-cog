@@ -10,7 +10,7 @@ It routes each JSON to one of two representations:
 * **Full capture** — every OTHER non-empty JSON (data / metadata: lookup maps, nested trees,
   record arrays, heterogeneous configs). The whole document is serialized as **TOON** (see
   :mod:`.toon`) and carried on a single ``structured_data`` **statement** (``text`` = the
-  TOON), emitted only under ``--capture-statements``. ``language="structured-json"``,
+  TOON), emitted only under statement capture. ``language="structured-json"``,
   ``metadata.format="toon"``, ``nodeType=synthetic`` (JSON is not tree-sitter parsed).
 
 Capture is domain-agnostic (it only recurses over keys and values, never interpreting a
@@ -104,7 +104,7 @@ class JsonParser(BaseParser):
         }
 
         # The whole document is captured ONLY as this statement (TOON in `text`) — a semantic
-        # capture, so gated behind --capture-statements. The text is not embedded; it is the
+        # capture, so gated behind statement capture. The text is not embedded; it is the
         # lexical/label retrieval handle (semanticType=structured_data).
         statements: list[Statement] = []
         if ctx.capture_statements:

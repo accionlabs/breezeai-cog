@@ -587,3 +587,107 @@ def test_upload_tuning_flags_plumb_into_settings(tmp_path, monkeypatch) -> None:
     )
     assert result.exit_code == 0, result.output
     assert captured == {"timeout": 30.0, "parallelism": 2, "retries": 0}
+
+
+def _markup_repo(tmp_path):
+    repo = tmp_path / "markup"
+    repo.mkdir()
+    (repo / "a.py").write_text("def f():\n    return 1\n")
+    (repo / "page.html").write_text("<div *ngIf='x'>{{ x }}</div>\n")
+    return repo
+
+
+def test_capabilities_reports_template_extensions() -> None:
+    result = runner.invoke(app, ["capabilities"])
+    assert result.exit_code == 0
+    assert ".vue" in json.loads(result.stdout)["templateExtensions"]
+
+
+def test_template_skips_appear_in_the_console_breakdown(tmp_path) -> None:
+    """Regression: the breakdown iterates a fixed reason tuple, so a new reason is easy
+    to count in the header and then never print."""
+    repo = _markup_repo(tmp_path)
+    result = runner.invoke(
+        app, ["repo-to-json-tree", "--repo", str(repo), "--out", str(tmp_path / "out")]
+    )
+    assert result.exit_code == 0
+    assert "template" in result.stdout
+
+
+def test_capture_templates_flag_includes_markup(tmp_path) -> None:
+    repo = _markup_repo(tmp_path)
+    out_dir = tmp_path / "out"
+    result = runner.invoke(
+        app, ["repo-to-json-tree", "--repo", str(repo), "--out", str(out_dir),
+              "--capture-templates"]
+    )
+    assert result.exit_code == 0
+    export = out_dir / "markup-project-analysis.ndjson.gz"
+    paths = {
+        json.loads(line).get("path")
+        for line in gzip.open(export, "rt", encoding="utf-8").read().splitlines()
+    }
+    assert "page.html" in paths
+
+
+def _api_call_repo(tmp_path):
+    repo = tmp_path / "stmts"
+    repo.mkdir()
+    (repo / "a.py").write_text(
+        'import requests\n\ndef f():\n    return requests.get("http://x/api")\n'
+    )
+    return repo
+
+
+def _statement_count(out_dir) -> int:
+    export = out_dir / "stmts-project-analysis.ndjson.gz"
+    records = [json.loads(line) for line in gzip.open(export, "rt", encoding="utf-8")]
+    return sum(len(r.get("statements") or []) for r in records)
+
+
+def _run(repo, out_dir, *extra):
+    return runner.invoke(
+        app, ["repo-to-json-tree", "--repo", str(repo), "--out", str(out_dir), "--jobs", "1", *extra]
+    )
+
+
+def test_statements_captured_by_default(tmp_path) -> None:
+    out_dir = tmp_path / "out"
+    result = _run(_api_call_repo(tmp_path), out_dir)
+    assert result.exit_code == 0, result.output
+    assert _statement_count(out_dir) > 0
+
+
+def test_no_capture_statements_flag_skips_them(tmp_path) -> None:
+    out_dir = tmp_path / "out"
+    result = _run(_api_call_repo(tmp_path), out_dir, "--no-capture-statements")
+    assert result.exit_code == 0, result.output
+    assert _statement_count(out_dir) == 0
+
+
+def test_deprecated_capture_statements_flag_warns_and_still_captures(tmp_path, monkeypatch) -> None:
+    # Old callers keep working, and the flag still forces capture on over env, as before.
+    monkeypatch.setenv("BREEZEAI_COG_CAPTURE_STATEMENTS", "false")
+    out_dir = tmp_path / "out"
+    result = _run(_api_call_repo(tmp_path), out_dir, "--capture-statements")
+    assert result.exit_code == 0, result.output
+    assert "deprecated" in result.output
+    assert _statement_count(out_dir) > 0
+
+
+def test_capture_and_no_capture_statements_are_mutually_exclusive(tmp_path) -> None:
+    result = _run(
+        _api_call_repo(tmp_path), tmp_path / "out", "--capture-statements", "--no-capture-statements"
+    )
+    assert result.exit_code == 1
+    assert "mutually exclusive" in result.output
+
+
+def test_capture_statements_env_not_clobbered_by_cli(tmp_path, monkeypatch) -> None:
+    """Regression: the CLI used to forward capture_statements unconditionally, and init
+    kwargs outrank env in pydantic-settings — so the env var was silently ignored."""
+    monkeypatch.setenv("BREEZEAI_COG_CAPTURE_STATEMENTS", "false")
+    out_dir = tmp_path / "out"
+    result = _run(_api_call_repo(tmp_path), out_dir)
+    assert result.exit_code == 0, result.output
+    assert _statement_count(out_dir) == 0

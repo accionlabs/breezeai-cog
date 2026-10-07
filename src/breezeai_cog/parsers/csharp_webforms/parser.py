@@ -41,6 +41,7 @@ class WebFormsParser(CSharpParser):
     name = "csharp-webforms"
     # Own the markup files too, so ``.aspx``/``.ascx``/``.master`` get a File node (was skipped).
     extensions: tuple[str, ...] = (*CSharpParser.extensions, *_MARKUP_EXT)
+    template_extensions: tuple[str, ...] = _MARKUP_EXT  # the markup half only — .cs stays
     priority = 10  # framework parser > base csharp (0); disjoint claims from csharp-aspnet
     frameworks = ["aspnet-webforms"]
     # C# statement types + the markup nodes the Step-1 markup pass emits (capabilities honesty).

@@ -122,7 +122,7 @@ def build_class(
 
         # Enum members become flat statements parented to the enum Class (their `text` is
         # queryable); best-effort — the Groovy grammar drops parenthesised enum constants.
-        # Gated by --capture-statements like every other statement.
+        # Gated by statement capture like every other statement.
         if capture and node.type == "enum_declaration":
             statements.extend(
                 emit_enum_members(

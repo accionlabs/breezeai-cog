@@ -49,6 +49,7 @@ NESTED_SCOPES = {
     "constructor_declaration",
     "destructor_declaration",
     "operator_declaration",
+    "conversion_operator_declaration",
     "local_function_statement",
     "lambda_expression",
     "anonymous_method_expression",

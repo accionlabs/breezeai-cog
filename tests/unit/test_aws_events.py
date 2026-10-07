@@ -1,6 +1,6 @@
 """AWS messaging / Lambda event detection (TypeScript): SNS/SQS/EventBridge producers
 and Lambda consumers, reusing the ``eventbus_*`` semantics with the AWS transport on
-``framework``. Gated by --capture-statements; additive on top of base/NestJS extraction."""
+``framework``. Gated by statement capture; additive on top of base/NestJS extraction."""
 
 from __future__ import annotations
 

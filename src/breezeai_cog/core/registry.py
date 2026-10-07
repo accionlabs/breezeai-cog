@@ -51,11 +51,32 @@ def base_parser_for(path: str | Path) -> LanguageParser | None:
     return min(candidates, key=lambda p: p.priority) if candidates else None
 
 
-def select(path: str | Path, source: bytes) -> LanguageParser | None:
+def template_extensions() -> frozenset[str]:
+    """Every extension any registered parser declares as markup/view, lowercased.
+
+    The scanner drops these before classification unless ``--capture-templates`` is on.
+    Read via ``getattr`` because ``template_extensions`` is an optional ``BaseParser``
+    capability, not part of the ``LanguageParser`` Protocol."""
+    return frozenset(
+        ext.lower() for p in _REGISTRY for ext in getattr(p, "template_extensions", ())
+    )
+
+
+def select(
+    path: str | Path, source: bytes, parse_timeout_micros: int = 0
+) -> LanguageParser | None:
     """The single parser that handles this file: the highest-priority candidate whose
     ``claims(path, source)`` is True (the base language parser is the priority-0 fallback)."""
     candidates = parsers_for(path)
-    claiming = [p for p in candidates if p.claims(str(path), source)]
+    claiming = [
+        p
+        for p in candidates
+        if (
+            p.claims(str(path), source, parse_timeout_micros)
+            if getattr(p, "claims_accepts_timeout", False)
+            else p.claims(str(path), source)
+        )
+    ]
     if not claiming:
         return None
     return max(claiming, key=lambda p: p.priority)
@@ -66,6 +87,7 @@ def capabilities() -> dict[str, object]:
         "schemaVersion": SCHEMA_VERSION,
         "languages": sorted({p.name for p in _REGISTRY}),
         "extensions": sorted({e for p in _REGISTRY for e in p.extensions}),
+        "templateExtensions": sorted(template_extensions()),
         "frameworks": sorted({f for p in _REGISTRY for f in p.frameworks}),
         "statementTypes": sorted({s for p in _REGISTRY for s in p.statement_types}),
     }

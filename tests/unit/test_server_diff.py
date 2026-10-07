@@ -14,7 +14,7 @@ from fastapi.testclient import TestClient
 from breezeai_cog.config import Settings
 from breezeai_cog.server.app import create_app
 from breezeai_cog.server.deps import ServerDeps
-from breezeai_cog.server.git import parse_repo_url
+from breezeai_cog.server.git import INVALID_REPO_URL_MESSAGE, parse_repo_url
 
 BODY = {
     "repoUrl": "https://github.com/acme/widgets.git",
@@ -127,16 +127,18 @@ def test_invalid_repo_url(captured: _Captured) -> None:
     client = _make_client(captured, filter_set=None, deleted=[])
     r = client.post("/api/analyze-diff", json={**BODY, "repoUrl": "https://unsupported-host.com/a/b"})
     assert r.status_code == 400
-    assert r.json() == {"error": "Invalid repo URL (supported hosts: github.com, bitbucket.org, gitlab.com, dev.azure.com)"}
+    assert r.json() == {"error": INVALID_REPO_URL_MESSAGE}
 
 
 def test_azure_devops_repo_url() -> None:
+    # `project` became its own key in 36ed49f (was packed into repo as "project/repo").
+    # Full URL-grammar coverage lives in tests/unit/integrations/test_scm_repository.py.
     url = "https://dev.azure.com/my-org/my-project/_git/my-repo"
-    res = parse_repo_url(url)
-    assert res == {
+    assert parse_repo_url(url) == {
         "provider": "azure_devops",
         "owner": "my-org",
-        "repo": "my-project/my-repo"
+        "project": "my-project",
+        "repo": "my-repo",
     }
 
 
@@ -227,3 +229,161 @@ def test_ignore_patterns_reject_wrong_type(captured: _Captured) -> None:
     assert r.json()["error"] == "ignorePatterns must be a string or an array of strings"
 
 
+# --- failure reporting (BREEZEAI-520 / BREEZEAI-681) -------------------------------
+
+class _BrokenInfra(_FakeInfra):
+    """Storage that fails on the first part write or on close — the two places an
+    S3 multipart upload can break after ``open_storage`` succeeded."""
+
+    def __init__(self, c: _Captured, *, write_exc=None, close_exc=None) -> None:
+        super().__init__(c)
+        self._write_exc, self._close_exc = write_exc, close_exc
+
+    def write_line(self, line: str) -> None:
+        if self._write_exc is not None:
+            raise self._write_exc
+        super().write_line(line)
+
+    def close(self) -> str:
+        if self._close_exc is not None:
+            raise self._close_exc
+        return super().close()
+
+
+def _make_failing_client(
+    captured: _Captured, *, acquire_exc=None, storage_exc=None, write_exc=None, close_exc=None,
+    changed: set[str] | None = None,
+) -> TestClient:
+    def acquire(settings, body):
+        if acquire_exc is not None:
+            raise acquire_exc
+        d = Path(tempfile.mkdtemp(prefix="difftest-"))
+        (d / "a.py").write_text("def f():\n    return 1\n")
+        return str(d), changed, []
+
+    def open_storage(key):
+        if storage_exc is not None:
+            raise storage_exc
+        if write_exc is not None or close_exc is not None:
+            return _BrokenInfra(captured, write_exc=write_exc, close_exc=close_exc)
+        return _FakeInfra(captured)
+
+    deps = ServerDeps(
+        settings=Settings(),
+        open_storage=open_storage,
+        notify=lambda path, payload: captured.notifications.append((path, payload)),
+        acquire_diff=acquire,
+    )
+    return TestClient(create_app(Settings(), deps), raise_server_exceptions=False)
+
+
+def test_git_failure_returns_structured_error_with_step(captured: _Captured) -> None:
+    """A bare RuntimeError from git.py used to become a body-less 500; the backend
+    then stored only "Request failed with status code 500"."""
+    client = _make_failing_client(captured, acquire_exc=RuntimeError("GitHub API 401: bad credentials"))
+    r = client.post("/api/analyze-diff", json=BODY)
+    assert r.status_code == 502
+    assert r.json() == {
+        "error": "Git acquisition failed: GitHub API 401: bad credentials",
+        "failedStep": "git_acquire",
+    }
+    assert captured.notifications == []  # nothing to ingest, nothing announced
+
+
+def test_git_failure_scrubs_credentials(captured: _Captured) -> None:
+    client = _make_failing_client(
+        captured, acquire_exc=RuntimeError("git clone failed: https://x:ghp_secret@github.com/a/b")
+    )
+    r = client.post("/api/analyze-diff", json=BODY)
+    assert r.status_code == 502
+    assert "ghp_secret" not in r.json()["error"]
+    assert "//***:***@github.com/a/b" in r.json()["error"]
+
+
+def test_typed_git_error_keeps_status_and_gains_step(captured: _Captured) -> None:
+    from breezeai_cog.server.errors import ApiError
+
+    client = _make_failing_client(captured, acquire_exc=ApiError("Unsupported git provider: svn", 400))
+    r = client.post("/api/analyze-diff", json=BODY)
+    assert r.status_code == 400
+    assert r.json() == {"error": "Unsupported git provider: svn", "failedStep": "git_acquire"}
+
+
+def test_storage_failure_reports_upload_step(captured: _Captured) -> None:
+    client = _make_failing_client(captured, storage_exc=ValueError("bucket not configured"))
+    r = client.post("/api/analyze-diff", json=BODY)
+    assert r.status_code == 500
+    assert r.json() == {"error": "Storage open failed: bucket not configured", "failedStep": "upload"}
+    assert captured.notifications == []
+
+
+def test_unexpected_git_error_is_500_not_502(captured: _Captured) -> None:
+    """Only provider-side failures (RuntimeError / httpx) are the provider's fault. A
+    local bug or disk failure keeps the step but is not reported as a bad gateway."""
+    client = _make_failing_client(captured, acquire_exc=KeyError("incomingCommitId"))
+    r = client.post("/api/analyze-diff", json=BODY)
+    assert r.status_code == 500
+    assert r.json() == {
+        "error": "Git acquisition failed unexpectedly: 'incomingCommitId'",
+        "failedStep": "git_acquire",
+    }
+
+
+def test_provider_transport_error_is_502(captured: _Captured) -> None:
+    import httpx
+
+    req = httpx.Request("GET", "https://api.github.com/x")
+    client = _make_failing_client(captured, acquire_exc=httpx.ConnectError("dns", request=req))
+    r = client.post("/api/analyze-diff", json=BODY)
+    assert r.status_code == 502
+    assert r.json()["failedStep"] == "git_acquire"
+
+
+def test_storage_failure_during_streaming_reports_upload_step(captured: _Captured) -> None:
+    """An S3 part upload that breaks inside write_line() used to be reported as
+    parse_stream because run_diff_stream wrapped both. The sink now tags it."""
+    client = _make_failing_client(
+        captured, write_exc=OSError("multipart upload part 3 failed: SlowDown")
+    )
+    r = client.post("/api/analyze-diff", json=BODY)
+    assert r.status_code == 500
+    assert r.json() == {
+        "error": "Upload failed: multipart upload part 3 failed: SlowDown",
+        "failedStep": "upload",
+    }
+    assert captured.notifications == []
+
+
+def test_close_failure_after_streaming_reports_upload_step(captured: _Captured) -> None:
+    """close() finalises the multipart upload; it now runs in the route, not inside
+    run_diff_stream, so its failure is the upload step too."""
+    client = _make_failing_client(captured, close_exc=RuntimeError("CompleteMultipartUpload 500"))
+    r = client.post("/api/analyze-diff", json=BODY)
+    assert r.status_code == 500
+    assert r.json() == {"error": "Upload failed: CompleteMultipartUpload 500", "failedStep": "upload"}
+    assert captured.notifications == []
+
+
+def test_close_failure_on_no_change_commit_reports_upload_step(captured: _Captured) -> None:
+    client = _make_failing_client(
+        captured, close_exc=RuntimeError("CompleteMultipartUpload 500"), changed=set()
+    )
+    r = client.post("/api/analyze-diff", json=BODY)
+    assert r.status_code == 500
+    assert r.json()["failedStep"] == "upload"
+
+
+def test_parser_failure_still_reports_parse_stream(captured: _Captured, monkeypatch: pytest.MonkeyPatch) -> None:
+    from breezeai_cog.server import routes as routes_mod
+
+    def boom(*args, **kwargs):
+        raise ValueError("tree-sitter grammar missing")
+
+    monkeypatch.setattr(routes_mod, "run_diff_stream", boom)
+    client = _make_failing_client(captured)
+    r = client.post("/api/analyze-diff", json=BODY)
+    assert r.status_code == 500
+    assert r.json() == {
+        "error": "Parse/stream failed: tree-sitter grammar missing",
+        "failedStep": "parse_stream",
+    }
