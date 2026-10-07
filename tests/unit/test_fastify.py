@@ -13,6 +13,7 @@ from breezeai_cog.parsers.base import ParseContext
 from breezeai_cog.parsers.treesitter import parse_source
 from breezeai_cog.parsers.typescript.imports import TsAliasIndex
 from breezeai_cog.parsers.typescript.parser import TypeScriptParser
+from breezeai_cog.parsers.typescript_fastify import routes as fastify_routes
 from breezeai_cog.parsers.typescript_fastify.routes import detect_fastify_routes
 from breezeai_cog.schemas import FileRecord
 
@@ -314,6 +315,110 @@ def test_nested_helper_in_exported_non_plugin_is_not_a_plugin() -> None:
     record = FileRecord(id="app.ts", path="app.ts", type="code", language="typescript", loc=1)
 
     assert detect_fastify_routes(root, source, "app.ts", record, seen_ids=set()) == []
+
+
+def test_fastify_instance_bindings_respect_block_and_parameter_shadowing() -> None:
+    source = (
+        b"const app = Fastify();\n"
+        b"{ const app = axios; app.get('/block-shadow', handler); }\n"
+        b"function unrelated(app) { app.get('/parameter-shadow', handler); }\n"
+        b"app.get('/outer', handler);"
+    )
+
+    routes = _detect_routes(source)
+
+    assert [(route.method, route.endpoint) for route in routes] == [("GET", "/outer")]
+
+
+def test_block_local_fastify_instance_does_not_escape_its_scope() -> None:
+    source = (
+        b"{ const local = Fastify(); local.get('/inside', handler); }\n"
+        b"local.get('/outside', handler);"
+    )
+
+    routes = _detect_routes(source)
+
+    assert [(route.method, route.endpoint) for route in routes] == [("GET", "/inside")]
+
+
+def test_fastify_instance_is_visible_from_nested_closure() -> None:
+    source = b"const app = Fastify();\nfunction registerRoutes() { app.get('/captured', handler); }"
+
+    routes = _detect_routes(source)
+
+    assert [(route.method, route.endpoint) for route in routes] == [("GET", "/captured")]
+
+
+def test_fastify_instance_binding_is_not_visible_before_its_initializer() -> None:
+    source = b"app.get('/before', handler);\nconst app = Fastify();\napp.get('/after', handler);"
+
+    routes = _detect_routes(source)
+
+    assert [(route.method, route.endpoint) for route in routes] == [("GET", "/after")]
+
+
+def test_route_path_constants_respect_scope_shadowing() -> None:
+    source = (
+        b"const fastify = Fastify();\n"
+        b"const URL = '/outer';\n"
+        b"fastify.get(URL, handler);\n"
+        b"{ const URL = '/inner'; fastify.get(URL, handler); }"
+    )
+
+    routes = _detect_routes(source)
+
+    assert [(route.method, route.endpoint) for route in routes] == [
+        ("GET", "/outer"),
+        ("GET", "/inner"),
+    ]
+
+
+def test_route_path_constant_is_not_resolved_from_a_later_declaration() -> None:
+    source = (
+        b"const fastify = Fastify();\n"
+        b"fastify.get(URL, handler);\n"
+        b"const URL = '/late';\n"
+        b"fastify.get(URL, handler);"
+    )
+
+    routes = _detect_routes(source)
+
+    assert [(route.method, route.endpoint) for route in routes] == [("GET", "/late")]
+
+
+def test_many_route_path_constants_resolve_from_the_per_file_index() -> None:
+    count = 300
+    declarations = b"\n".join(
+        f"const PATH_{index} = '/route-{index}';".encode() for index in range(count)
+    )
+    routes_source = b"\n".join(
+        f"fastify.get(PATH_{index}, handler);".encode() for index in range(count)
+    )
+    source = b"const fastify = Fastify();\n" + declarations + b"\n" + routes_source
+    root = parse_source("typescript", source).root_node
+    index = fastify_routes._FileIndex(root, source, {})
+    pending = [root]
+    syntax_node_count = 0
+    scope_lookup_node_count = 0
+    while pending:
+        node = pending.pop()
+        syntax_node_count += 1
+        if node.type in {
+            "call_expression",
+            "identifier",
+            "shorthand_property_identifier",
+            "shorthand_property_identifier_pattern",
+        }:
+            scope_lookup_node_count += 1
+        pending.extend(node.named_children)
+
+    routes = _detect_routes(source)
+
+    assert len(routes) == count
+    assert routes[0].endpoint == "/route-0"
+    assert routes[-1].endpoint == f"/route-{count - 1}"
+    assert index.indexed_node_count == syntax_node_count
+    assert len(index.node_scopes) == scope_lookup_node_count
 
 
 def test_route_method_array_keeps_unresolved_method_null() -> None:
