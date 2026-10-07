@@ -478,3 +478,110 @@ def test_jsx_file_is_javascript_language(tmp_path) -> None:
     rec = _parse(tmp_path, src, "Widget.jsx")
     assert rec.framework == "react" and rec.language == "javascript"
     assert {f.name: f.uiRole for f in rec.functions}["Widget"] == "component"
+
+
+def test_navigation_objects_with_path_are_not_routes(tmp_path) -> None:
+    src = b'''import { createBrowserRouter } from "react-router-dom";
+
+const navigation = [
+  { path: "/home", label: "Home" },
+  { path: "/projects", title: "Projects" },
+  { path: "/settings", name: "Settings", icon: "settings" },
+  { path: "/help", href: "/help" },
+];
+
+const router = createBrowserRouter([
+  { path: "/", element: <Home /> },
+]);
+'''
+
+    rec = _parse(tmp_path, src, "App.tsx")
+
+    routes = [
+        s.endpoint
+        for s in rec.statements
+        if s.semanticType == "route"
+    ]
+
+    assert routes == ["/"]
+
+
+def test_valid_react_router_config_is_detected(tmp_path) -> None:
+    src = b'''import { useRoutes } from "react-router-dom";
+
+const routes = useRoutes([
+  { path: "/component", Component: ComponentPage },
+  { path: "/lazy", lazy: loadPage },
+  { path: "/loader", loader: loadData },
+  { path: "/children", children: [] },
+  { path: "/action", action: handleAction },
+  { path: "/error", errorElement: <ErrorPage /> },
+  { path: "/handle", handle: {} },
+  { path: "/case", caseSensitive: true },
+]);
+
+'''
+
+    rec = _parse(tmp_path, src, "routes.tsx")
+
+    endpoints = {
+        s.endpoint
+        for s in rec.statements
+        if s.semanticType == "route"
+    }
+
+    assert endpoints == {
+        "/component",
+        "/lazy",
+        "/loader",
+        "/children",
+        "/action",
+        "/error",
+        "/handle",
+        "/case",
+    }
+
+
+def test_config_routes_require_react_router_reference(tmp_path) -> None:
+    src = b'''const routes = [
+  { path: "/home", element: <Home /> },
+];
+'''
+
+    rec = _parse(tmp_path, src, "routes.tsx")
+
+    assert [
+        s for s in rec.statements
+        if s.semanticType == "route"
+    ] == []
+
+
+def test_jsx_routes_preserve_actual_node_type(tmp_path) -> None:
+    src = b'''import { Routes, Route } from "react-router-dom";
+
+<Routes>
+  <Route path="/" element={<Home />} />
+  <Route path="/users">
+    <Users />
+  </Route>
+  <Route path="/users/:id" element={<UserDetail />} />
+</Routes>
+'''
+
+    rec = _parse(tmp_path, src, "App.tsx")
+
+    routes = {
+        s.endpoint: s
+        for s in rec.statements
+        if s.semanticType == "route"
+    }
+
+    assert routes["/"].nodeType == "jsx_self_closing_element"
+    assert routes["/users"].nodeType == "jsx_element"
+    assert routes["/users/:id"].nodeType == "jsx_self_closing_element"
+
+    assert all(
+        route.nodeType != "synthetic"
+        for route in routes.values()
+    )
+
