@@ -117,11 +117,12 @@ def _route_paths(dec_node: Node, d: Decorator, source: bytes) -> list[str]:
         arguments = expression.child_by_field_name("arguments")
         first_arg = arguments.named_children[0] if arguments and arguments.named_children else None
         if first_arg is not None and first_arg.type == "array":
-            return [
+            paths = [
                 _unquote(node_text(element, source))
                 for element in first_arg.named_children
                 if element.type != "comment"
             ]
+            return paths or [""]  # `@Get([])` is still a route (at the controller base)
     return [_unquote(d.args[0]) if d.args else ""]
 
 
@@ -297,8 +298,9 @@ def detect_nest_routes(
     for cls, decs in _class_with_decorators(root):
         base = _controller_base(decs, source)  # None when the class is not a @Controller
         is_controller = base is not None
-        is_resolver = any(decorator(dec, source).name in _RESOLVER_DECORATORS for dec in decs)
-        is_gateway = any(decorator(dec, source).name in _GATEWAY_DECORATORS for dec in decs)
+        class_dec_names = {decorator(dec, source).name for dec in decs}
+        is_resolver = bool(class_dec_names & _RESOLVER_DECORATORS)
+        is_gateway = bool(class_dec_names & _GATEWAY_DECORATORS)
         class_name = node_text(cls.child_by_field_name("name"), source)
         body = cls.child_by_field_name("body")
         if body is None:
@@ -308,10 +310,9 @@ def detect_nest_routes(
         # Grouping resolver: @Resolver(() => T) where a @Mutation/@Query on the class
         # returns a singleton T — @ResolveField methods inherit the parent op's identity.
         parent_op_info: tuple[str, str] | None = None
-        if is_resolver:
-            grouping_type = _resolver_type_arg(decs, source)
-            if grouping_type:
-                parent_op_info = _parent_op_for_grouping(body, source, grouping_type)
+        resolver_type = _resolver_type_arg(decs, source) if is_resolver else None
+        if resolver_type:
+            parent_op_info = _parent_op_for_grouping(body, source, resolver_type)
         pending: list[Node] = []
         for member in body.named_children:
             if member.type == "decorator":
@@ -323,9 +324,25 @@ def detect_nest_routes(
                 mname = node_text(member.child_by_field_name("name"), source)
                 mline = member.start_point[0] + 1
                 parent = function_id(path, mname, mline, class_name=class_name)
+                if not pending:
+                    continue  # undecorated method: nothing to detect (pending is already empty)
+                # Parse each decorator once; the checks below used to re-parse per helper.
+                parsed = [(dec, decorator(dec, source)) for dec in pending]
+                if not any(
+                    d.name in _MESSAGING_DECORATORS or d.name in _TIMER_DECORATORS
+                    or (is_controller and d.name in _METHOD_DECORATORS)
+                    or (is_gateway and d.name in _WS_DECORATORS)
+                    or (is_resolver and (d.name in _GRAPHQL_OPS or d.name in _FIELD_RESOLVERS
+                                         or d.name in _REFERENCE_RESOLVERS))
+                    for _, d in parsed
+                ):
+                    pending = []
+                    continue
                 guards = ctrl_guards + _guards(pending, source)  # merge controller + method
-                for dec in pending:
-                    d = decorator(dec, source)
+                # Per-method values shared by every route this method emits.
+                method_version = request_dto = response_dto = None
+                http_computed = False
+                for dec, d in parsed:
                     verb = _METHOD_DECORATORS.get(d.name) if is_controller else None
                     msg = _MESSAGING_DECORATORS.get(d.name)
                     timer = _TIMER_DECORATORS.get(d.name)
@@ -353,6 +370,11 @@ def detect_nest_routes(
                         path=path,
                     )
                     if verb is not None:  # HTTP route
+                        if not http_computed:
+                            method_version = _version(pending, source) or ctrl_version
+                            request_dto = _request_dto(member, source)
+                            response_dto = _response_dto(pending, source) or _return_dto(member, source)
+                            http_computed = True
                         for index, route_path in enumerate(_route_paths(dec, d, source)):
                             route_common = common
                             if index:
@@ -365,9 +387,9 @@ def detect_nest_routes(
                                 method=verb,
                                 endpoint=_join(base, route_path),
                                 routeKind="route",
-                                version=_version(pending, source) or ctrl_version,
-                                requestDTO=_request_dto(member, source),
-                                responseDTO=_response_dto(pending, source) or _return_dto(member, source),
+                                version=method_version,
+                                requestDTO=request_dto,
+                                responseDTO=response_dto,
                                 **route_common,
                             ))
                     elif msg is not None:  # @EventPattern / @MessagePattern microservice consumer
@@ -381,7 +403,8 @@ def detect_nest_routes(
                     elif timer is not None:
                         routes.append(Statement(
                             semanticType=timer,
-                            endpoint=_unquote(d.args[0]) if d.args else None,
+                            # @Interval/@Timeout take (name, ms) or (ms): the value is the last arg.
+                            endpoint=_unquote(d.args[-1 if d.name != "Cron" else 0]) if d.args else None,
                             **common,
                         ))
                     elif ws is not None:
@@ -419,7 +442,7 @@ def detect_nest_routes(
                             # the bare field name: a bare `author` does not say which type it
                             # hangs off, and many types have one. Same form csharp-hotchocolate
                             # emits. RESOLVE_FIELD is the spec's verb for this (not QUERY).
-                            parent_type = _resolver_type_arg(decs, source)
+                            parent_type = resolver_type
                             routes.append(Statement(
                                 **{**common, "framework": "graphql"},
                                 semanticType="route",
@@ -430,7 +453,7 @@ def detect_nest_routes(
                                 responseDTO=_field_resolver_return_dto(d) or _return_dto(member, source),
                             ))
                     elif ref is not None:  # @ResolveReference entity resolver
-                        parent_type = _resolver_type_arg(decs, source)
+                        parent_type = resolver_type
                         routes.append(Statement(
                             **{**common, "framework": "graphql"},
                             semanticType="route",
