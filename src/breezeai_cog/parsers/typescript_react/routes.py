@@ -132,15 +132,30 @@ _ROUTE_DISCRIMINATING_KEYS = frozenset({
     "element", "Component", "component", "children", "lazy", "loader", "action",
     "errorElement", "index", "handle", "caseSensitive",
 })
+_NON_ROUTE_CONFIG_KEYS = frozenset({"label", "title", "name", "icon", "href"})
 
 
-def _is_route_array(arr: Node, source: bytes) -> bool:
-    return any(
-        e.type == "object"
-        and (pairs := _pairs(e, source)).keys() & _ROUTE_DISCRIMINATING_KEYS
-        and "path" in pairs
-        for e in arr.named_children
+def _is_route_config(pairs: dict[str, Node], *, allow_index: bool = False) -> bool:
+    keys = pairs.keys()
+    has_path = "path" in keys
+    if not has_path and not (allow_index and "index" in keys):
+        return False
+    return bool(keys & _ROUTE_DISCRIMINATING_KEYS) and not bool(
+        keys & _NON_ROUTE_CONFIG_KEYS
     )
+
+
+def _route_configs(
+    arr: Node, source: bytes, *, allow_index: bool = False
+) -> list[tuple[Node, dict[str, Node]]]:
+    configs: list[tuple[Node, dict[str, Node]]] = []
+    for elem in arr.named_children:
+        if elem.type != "object":
+            continue
+        pairs = _pairs(elem, source)
+        if _is_route_config(pairs, allow_index=allow_index):
+            configs.append((elem, pairs))
+    return configs
 
 
 def _is_children_value(arr: Node, source: bytes) -> bool:
@@ -148,14 +163,16 @@ def _is_children_value(arr: Node, source: bytes) -> bool:
     return p is not None and p.type == "pair" and _key(p, source) == "children"
 
 
-def _process_config(arr: Node, prefix: str, source: bytes, path: str, seen: set[str], routes: list[Statement]) -> None:
-    for elem in arr.named_children:
-        if elem.type != "object":
-            continue
-        pairs = _pairs(elem, source)
+def _process_config(
+    configs: list[tuple[Node, dict[str, Node]]],
+    prefix: str,
+    source: bytes,
+    path: str,
+    seen: set[str],
+    routes: list[Statement],
+) -> None:
+    for elem, pairs in configs:
         is_index = "index" in pairs and "path" not in pairs  # index route -> parent's path
-        if "path" not in pairs and not is_index:
-            continue
         full = _join(prefix, "" if is_index else _string_val(pairs["path"], source))
         lazy = "lazy" in pairs
         element = pairs.get("element") or pairs.get("Component") or pairs.get("component")
@@ -176,25 +193,41 @@ def _process_config(arr: Node, prefix: str, source: bytes, path: str, seen: set[
         ))
         children = pairs.get("children")
         if children is not None and children.type == "array":
-            _process_config(children, full, source, path, seen, routes)
+            child_configs = _route_configs(children, source, allow_index=True)
+            _process_config(child_configs, full, source, path, seen, routes)
 
 
 # ---- entry point ------------------------------------------------------------
 
-def _walk(node: Node, typ: str, out: list[Node]) -> None:
-    if node.type == typ:
-        out.append(node)
-    for c in node.named_children:
-        _walk(c, typ, out)
-
-
-def _has_route_ancestor(el: Node, source: bytes) -> bool:
-    p = el.parent
-    while p is not None:
-        if _is_route(p, source):
-            return True
-        p = p.parent
-    return False
+def _collect_route_nodes(
+    root: Node, source: bytes, *, collect_v7: bool
+) -> tuple[list[Node], list[Node], list[Node], list[Node]]:
+    """Collect route roots, config arrays, and optional v7 candidates in one AST pass."""
+    jsx_roots: list[Node] = []
+    arrays: list[Node] = []
+    exports: list[Node] = []
+    declarations: list[Node] = []
+    stack = [(root, False)]
+    while stack:
+        node, inside_route = stack.pop()
+        is_route = (
+            node.type in ("jsx_element", "jsx_self_closing_element")
+            and _is_route(node, source)
+        )
+        if is_route and not inside_route:
+            jsx_roots.append(node)
+        if node.type == "array":
+            arrays.append(node)
+        elif collect_v7 and node.type == "export_statement":
+            exports.append(node)
+        elif collect_v7 and node.type == "variable_declarator":
+            declarations.append(node)
+        descendants_inside_route = inside_route or is_route
+        stack.extend(
+            (child, descendants_inside_route)
+            for child in reversed(node.named_children)
+        )
+    return jsx_roots, arrays, exports, declarations
 
 
 # ---- v7 framework-mode config DSL (route/index/layout/prefix calls) ---------
@@ -217,12 +250,10 @@ def _last_array(args: list[Node]) -> Node | None:
     return args[-1] if args and args[-1].type == "array" else None
 
 
-def _collect_consts(root: Node, source: bytes) -> dict[str, Node]:
+def _collect_consts(decls: list[Node], source: bytes) -> dict[str, Node]:
     """Map ``const <name> = <expr>`` → value node, so ``...spread`` of a route group
     resolves to its definition (v7 composes groups across module-level consts)."""
     consts: dict[str, Node] = {}
-    decls: list[Node] = []
-    _walk(root, "variable_declarator", decls)
     for d in decls:
         name = d.child_by_field_name("name")
         value = d.child_by_field_name("value")
@@ -307,10 +338,8 @@ def _process_v7(node: Node, prefix: str, source: bytes, path: str, seen: set[str
             _process_v7(children, _join(prefix, base), source, path, seen, routes, consts, guard, const_values)
 
 
-def _v7_entry(root: Node, source: bytes) -> Node | None:
+def _v7_entry(exports: list[Node]) -> Node | None:
     """The ``export default [...]`` route array (optionally wrapped in ``satisfies``)."""
-    exports: list[Node] = []
-    _walk(root, "export_statement", exports)
     for exp in exports:
         for child in exp.named_children:
             node = child
@@ -321,16 +350,13 @@ def _v7_entry(root: Node, source: bytes) -> Node | None:
     return None
 
 
-def _detect_v7(root: Node, source: bytes, path: str, seen: set[str], routes: list[Statement],
+def _detect_v7(exports: list[Node], declarations: list[Node], source: bytes, path: str,
+               seen: set[str], routes: list[Statement],
                const_values: dict[str, str | None] | None) -> None:
-    # Gate: the route/index/layout/prefix call helpers exist only in v7 framework mode.
-    # Keying on the import keeps this inert on v5/v6 (react-router-dom) code.
-    if b"@react-router/dev" not in source:
-        return
-    entry = _v7_entry(root, source)
+    entry = _v7_entry(exports)
     if entry is not None:
         _process_v7(entry, "", source, path, seen, routes,
-                    _collect_consts(root, source), frozenset(), const_values)
+                    _collect_consts(declarations, source), frozenset(), const_values)
 
 
 def detect_react_routes(root: Node, source: bytes, path: str, *, seen_ids: set[str],
@@ -338,19 +364,21 @@ def detect_react_routes(root: Node, source: bytes, path: str, *, seen_ids: set[s
     if b"react-router" not in source:
         return []
     routes: list[Statement] = []
-    # JSX <Route>: start only at top-level Routes (no <Route> ancestor); recursion handles nesting.
-    jsx: list[Node] = []
-    _walk(root, "jsx_element", jsx)
-    _walk(root, "jsx_self_closing_element", jsx)
-    for el in jsx:
-        if _is_route(el, source) and not _has_route_ancestor(el, source):
-            _process_jsx(el, "", source, path, seen_ids, routes)
+    collect_v7 = b"@react-router/dev" in source
+    jsx_roots, arrays, exports, declarations = _collect_route_nodes(
+        root, source, collect_v7=collect_v7
+    )
+    # Route roots are collected once; recursion handles each root's nested routes.
+    for el in jsx_roots:
+        _process_jsx(el, "", source, path, seen_ids, routes)
     # Config objects: route arrays that are not a nested ``children:`` value.
-    arrays: list[Node] = []
-    _walk(root, "array", arrays)
     for arr in arrays:
-        if _is_route_array(arr, source) and not _is_children_value(arr, source):
-            _process_config(arr, "", source, path, seen_ids, routes)
+        if _is_children_value(arr, source):
+            continue
+        configs = _route_configs(arr, source)
+        if configs:
+            _process_config(configs, "", source, path, seen_ids, routes)
     # v7 framework-mode config DSL (gated on the @react-router/dev import).
-    _detect_v7(root, source, path, seen_ids, routes, const_values)
+    if collect_v7:
+        _detect_v7(exports, declarations, source, path, seen_ids, routes, const_values)
     return routes
