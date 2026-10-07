@@ -16,6 +16,8 @@ Mutates ``record`` (mirrors the other call-based route detectors).
 from __future__ import annotations
 
 import logging
+from bisect import bisect_right
+from dataclasses import dataclass, field
 from typing import Optional
 
 from tree_sitter import Node
@@ -76,6 +78,9 @@ _IDENTIFIER_LIKE_TYPES = {
 _SCOPE_NODE_TYPES = {
     "program",
     "statement_block",
+    "catch_clause",
+    "for_statement",
+    "for_in_statement",
 }
 
 _FASTIFY_FACTORY_NAMES = {
@@ -88,7 +93,248 @@ _FUNCTION_NODE_TYPES = {
     "function_expression",
     "arrow_function",
     "function",
+    "method_definition",
 }
+
+_LEXICAL_SCOPE_NODE_TYPES = _SCOPE_NODE_TYPES | _FUNCTION_NODE_TYPES
+_SCOPE_LOOKUP_NODE_TYPES = {"call_expression"} | _IDENTIFIER_LIKE_TYPES
+
+
+@dataclass
+class _Binding:
+    position: int
+    is_fastify: bool = False
+    string_value: Optional[str] = None
+
+
+@dataclass
+class _Scope:
+    key: tuple[int, int, str]
+    kind: str
+    parent: Optional["_Scope"]
+    bindings: dict[str, list[_Binding]] = field(default_factory=dict)
+
+    def add_binding(
+        self,
+        name: str,
+        position: int,
+        *,
+        is_fastify: bool = False,
+        string_value: Optional[str] = None,
+    ) -> None:
+        self.bindings.setdefault(name, []).append(_Binding(position, is_fastify, string_value))
+
+    def binding_at(self, name: str, position: int) -> Optional[_Binding]:
+        entries = self.bindings.get(name)
+        if not entries:
+            return None
+        index = bisect_right(entries, position, key=lambda entry: entry.position)
+        return entries[index - 1] if index else None
+
+
+def _imported_binding_names(node: Node, source: bytes) -> list[str]:
+    clause = next(
+        (child for child in node.named_children if child.type == "import_clause"),
+        None,
+    )
+    if clause is None:
+        return []
+
+    names: list[str] = []
+    for child in clause.named_children:
+        if child.type == "identifier":
+            names.append(node_text(child, source))
+        elif child.type == "namespace_import":
+            identifier = next(
+                (item for item in child.named_children if item.type == "identifier"),
+                None,
+            )
+            if identifier is not None:
+                names.append(node_text(identifier, source))
+        elif child.type == "named_imports":
+            for specifier in child.named_children:
+                if specifier.type == "import_specifier":
+                    identifiers = [
+                        item for item in specifier.named_children if item.type == "identifier"
+                    ]
+                    if identifiers:
+                        names.append(node_text(identifiers[-1], source))
+    return names
+
+
+class _FileIndex:
+    """Per-file lexical scopes and declarations used by route and path lookup."""
+
+    def __init__(self, root: Node, source: bytes, external_constants: dict[str, str]):
+        self.external_constants = external_constants
+        self.node_scopes: dict[tuple[int, int, str], _Scope] = {}
+        self.scopes: dict[tuple[int, int, str], _Scope] = {}
+        self.indexed_node_count = 0
+        self.root_scope = self._build(root, source)
+        for scope in self.scopes.values():
+            for entries in scope.bindings.values():
+                entries.sort(key=lambda entry: entry.position)
+
+    @staticmethod
+    def node_key(node: Node) -> tuple[int, int, str]:
+        return node.start_byte, node.end_byte, node.type
+
+    def _build(self, root: Node, source: bytes) -> _Scope:
+        pending: list[tuple[Node, Optional[_Scope], bool]] = [(root, None, False)]
+        root_scope: Optional[_Scope] = None
+
+        while pending:
+            node, parent_scope, nested_function = pending.pop()
+            self.indexed_node_count += 1
+            scope = parent_scope
+            if node.type in _LEXICAL_SCOPE_NODE_TYPES:
+                key = self.node_key(node)
+                scope = _Scope(key, node.type, parent_scope)
+                self.scopes[key] = scope
+                if root_scope is None:
+                    root_scope = scope
+
+            if scope is None:
+                continue
+
+            if node.type in _SCOPE_LOOKUP_NODE_TYPES:
+                self.node_scopes[self.node_key(node)] = scope
+
+            if node.type in _FUNCTION_NODE_TYPES:
+                self._index_function(node, parent_scope, scope, source, nested_function)
+
+            if node.type == "variable_declarator":
+                self._index_variable(node, scope, source)
+
+            if node.type == "import_statement":
+                for name in _imported_binding_names(node, source):
+                    scope.add_binding(name, 0)
+
+            if node.type in {"function_declaration", "class_declaration"}:
+                name_node = node.child_by_field_name("name")
+                if name_node is not None and name_node.type == "identifier":
+                    destination = scope if node.type == "class_declaration" else parent_scope
+                    if destination is not None:
+                        destination.add_binding(node_text(name_node, source), name_node.start_byte)
+            elif node.type in {"function_expression", "function"}:
+                name_node = node.child_by_field_name("name")
+                if name_node is not None and name_node.type == "identifier":
+                    scope.add_binding(node_text(name_node, source), name_node.start_byte)
+
+            if node.type == "catch_clause":
+                parameter = node.child_by_field_name("parameter")
+                self._index_pattern(parameter, scope, source)
+
+            for child in reversed(node.named_children):
+                pending.append(
+                    (
+                        child,
+                        scope,
+                        nested_function or node.type in _FUNCTION_NODE_TYPES,
+                    )
+                )
+
+        if root_scope is None:
+            raise ValueError("Fastify route detection requires a scoped syntax tree")
+        return root_scope
+
+    def _index_function(
+        self,
+        node: Node,
+        parent_scope: Optional[_Scope],
+        function_scope: _Scope,
+        source: bytes,
+        nested_function: bool,
+    ) -> None:
+        params = node.child_by_field_name("parameters")
+        if params is None:
+            return
+
+        plugin = _is_fastify_plugin(node, source, nested=nested_function)
+        first_name = _first_param_name(node, source) if plugin else None
+        for index, parameter in enumerate(params.named_children):
+            pattern = (
+                parameter.child_by_field_name("pattern")
+                if parameter.type == "required_parameter"
+                else parameter
+            )
+            if pattern is None or pattern.type != "identifier":
+                continue
+            name = node_text(pattern, source)
+            function_scope.add_binding(
+                name,
+                pattern.start_byte,
+                is_fastify=index == 0 and name == first_name,
+            )
+
+    def _index_variable(self, node: Node, scope: _Scope, source: bytes) -> None:
+        name_node = node.child_by_field_name("name")
+        if name_node is None or name_node.type != "identifier":
+            return
+
+        declaration = node.parent
+        destination = scope
+        if declaration is not None and declaration.type == "variable_declaration":
+            while destination.parent is not None and destination.kind not in (
+                "program",
+                *_FUNCTION_NODE_TYPES,
+            ):
+                destination = destination.parent
+
+        value_node = node.child_by_field_name("value")
+        destination.add_binding(
+            node_text(name_node, source),
+            name_node.start_byte,
+            is_fastify=(value_node is not None and _is_fastify_factory_call(value_node, source)),
+            string_value=(_string_literal(value_node, source) if value_node is not None else None),
+        )
+
+    def _index_pattern(
+        self,
+        node: Optional[Node],
+        scope: _Scope,
+        source: bytes,
+    ) -> None:
+        if node is None:
+            return
+        if node.type == "identifier":
+            scope.add_binding(node_text(node, source), node.start_byte)
+            return
+        for child in node.named_children:
+            self._index_pattern(child, scope, source)
+
+    def scope_for(self, node: Node) -> _Scope:
+        return self.node_scopes[self.node_key(node)]
+
+    def is_fastify_instance(self, name: str, node: Node) -> bool:
+        scope: Optional[_Scope] = self.scope_for(node)
+        while scope is not None:
+            if name in scope.bindings:
+                binding = scope.binding_at(name, node.start_byte)
+                return binding.is_fastify if binding is not None else False
+            scope = scope.parent
+        return False
+
+    def resolve_constant(self, name: str, node: Node) -> Optional[str]:
+        scope: Optional[_Scope] = self.scope_for(node)
+        while scope is not None:
+            if name in scope.bindings:
+                binding = scope.binding_at(name, node.start_byte)
+                return binding.string_value if binding is not None else None
+            scope = scope.parent
+        return self.external_constants.get(name)
+
+    def mark_fastify_parameter(self, function: Node, source: bytes) -> None:
+        name = _first_param_name(function, source)
+        if name is None:
+            return
+        scope = self.scopes.get(self.node_key(function))
+        if scope is None:
+            return
+        for entry in scope.bindings.get(name, ()):
+            if function.start_byte <= entry.position < function.end_byte:
+                entry.is_fastify = True
+                return
 
 
 def detect_fastify_routes(
@@ -120,19 +366,14 @@ def detect_fastify_routes(
         function.name: function for function in record.functions if function.parentId == fid
     }
 
-    fastify_instance_names: set[str] = set()
-    resolution_cache: dict[
-        tuple[int, str],
-        Optional[str],
-    ] = {}
-
     # Reuse values already resolved by the shared resolution index.
     const_values = getattr(resolution_index, "const_values", None)
-
+    external_constants: dict[str, str] = {}
     if isinstance(const_values, dict):
-        resolution_cache.update(
-            {(-2, name): value for name, value in const_values.items() if isinstance(value, str)}
-        )
+        external_constants = {
+            name: value for name, value in const_values.items() if isinstance(value, str)
+        }
+    file_index = _FileIndex(root, source, external_constants)
 
     statements: list[Statement] = []
 
@@ -142,11 +383,10 @@ def detect_fastify_routes(
         path=path,
         fid=fid,
         fn_by_name=fn_by_name,
-        fastify_instance_names=fastify_instance_names,
+        file_index=file_index,
         seen_ids=seen_ids,
         out=statements,
         prefix="",
-        resolution_cache=resolution_cache,
     )
 
     return statements
@@ -184,6 +424,8 @@ def _first_param_name(
 def _is_fastify_plugin(
     fn_node: Node,
     source: bytes,
+    *,
+    nested: bool = False,
 ) -> bool:
     """Return whether a function looks like a Fastify plugin.
 
@@ -191,12 +433,6 @@ def _is_fastify_plugin(
     binding. Nested helper functions are local implementation details and must
     not leak their own `fastify` parameter into sibling or parent scopes.
     """
-    parent = fn_node.parent
-    while parent is not None:
-        if parent.type in _FUNCTION_NODE_TYPES:
-            return False
-        parent = parent.parent
-
     params = fn_node.child_by_field_name("parameters")
 
     if params is None or not params.named_children:
@@ -204,6 +440,9 @@ def _is_fastify_plugin(
 
     if _has_fastify_plugin_type(fn_node, source):
         return True
+
+    if nested:
+        return False
 
     first_param = params.named_children[0]
 
@@ -293,27 +532,6 @@ def _is_fastify_factory_call(
     return False
 
 
-def _add_fastify_instance_name(
-    node: Node,
-    source: bytes,
-    names: set[str],
-) -> None:
-    """Add variables initialized from a Fastify factory."""
-    if node.type != "variable_declarator":
-        return
-
-    name_node = node.child_by_field_name("name")
-    value_node = node.child_by_field_name("value")
-
-    if (
-        name_node is not None
-        and name_node.type == "identifier"
-        and value_node is not None
-        and _is_fastify_factory_call(value_node, source)
-    ):
-        names.add(node_text(name_node, source))
-
-
 def _walk(
     node: Node,
     *,
@@ -321,30 +539,19 @@ def _walk(
     path: str,
     fid: str,
     fn_by_name: dict[str, Function],
-    fastify_instance_names: set[str],
+    file_index: _FileIndex,
     seen_ids: set[str],
     out: list[Statement],
     prefix: Optional[str],
-    resolution_cache: dict[tuple[int, str], Optional[str]],
 ) -> None:
-    """Iteratively scan the syntax tree while keeping each scope's bindings."""
-    pending: list[tuple[Node, set[str], Optional[str]]] = [(node, fastify_instance_names, prefix)]
+    """Iteratively scan syntax nodes using the prebuilt per-file scope index."""
+    pending: list[tuple[Node, Optional[str]]] = [(node, prefix)]
 
     while pending:
-        current, instance_names, current_prefix = pending.pop()
-
-        if current.type in _FUNCTION_NODE_TYPES:
-            instance_names = set(instance_names)
-
-            if _is_fastify_plugin(current, source):
-                plugin_param = _first_param_name(current, source)
-                if plugin_param:
-                    instance_names.add(plugin_param)
-
-        _add_fastify_instance_name(current, source, instance_names)
+        current, current_prefix = pending.pop()
 
         if current.type == "call_expression":
-            dispatch = _dispatch_call(current, source, instance_names)
+            dispatch = _dispatch_call(current, source, file_index)
 
             if dispatch is not None:
                 kind, member_name, args = dispatch
@@ -361,7 +568,7 @@ def _walk(
                         fn_by_name=fn_by_name,
                         seen_ids=seen_ids,
                         out=out,
-                        resolution_cache=resolution_cache,
+                        file_index=file_index,
                     )
                     continue
 
@@ -376,7 +583,7 @@ def _walk(
                         fn_by_name=fn_by_name,
                         seen_ids=seen_ids,
                         out=out,
-                        resolution_cache=resolution_cache,
+                        file_index=file_index,
                     )
                     continue
 
@@ -389,23 +596,22 @@ def _walk(
                         path=path,
                         fid=fid,
                         fn_by_name=fn_by_name,
-                        fastify_instance_names=instance_names,
+                        file_index=file_index,
                         seen_ids=seen_ids,
                         out=out,
-                        resolution_cache=resolution_cache,
                     )
-                    pending.extend(reversed(children))
+                    pending.extend(
+                        (child, child_prefix) for child, child_prefix in reversed(children)
+                    )
                     continue
 
-        pending.extend(
-            (child, instance_names, current_prefix) for child in reversed(current.children)
-        )
+        pending.extend((child, current_prefix) for child in reversed(current.named_children))
 
 
 def _dispatch_call(
     node: Node,
     source: bytes,
-    fastify_instance_names: set[str],
+    file_index: _FileIndex,
 ) -> Optional[tuple[str, str, list[Node]]]:
     """Classify a Fastify method call."""
 
@@ -421,22 +627,21 @@ def _dispatch_call(
 
     member_name = node_text(prop, source)
 
-    args_node = node.child_by_field_name("arguments")
-
-    if args_node is None:
+    if member_name not in _HTTP_METHODS and member_name not in {"route", "register"}:
         return None
 
-    args = list(args_node.named_children)
-
     receiver = callee.child_by_field_name("object")
-
     if receiver is None or receiver.type != "identifier":
         return None
 
     receiver_name = node_text(receiver, source)
-
-    if receiver_name not in fastify_instance_names:
+    if not file_index.is_fastify_instance(receiver_name, node):
         return None
+
+    args_node = node.child_by_field_name("arguments")
+    if args_node is None:
+        return None
+    args = list(args_node.named_children)
 
     if member_name in _HTTP_METHODS:
         return "method", member_name, args
@@ -477,18 +682,14 @@ def _http_method_route(
     fn_by_name: dict[str, Function],
     seen_ids: set[str],
     out: list[Statement],
-    resolution_cache: dict[tuple[int, str], Optional[str]],
+    file_index: _FileIndex,
 ) -> None:
     """Handle shorthand Fastify route calls."""
 
     if len(args) < 2:
         return
 
-    url = _resolve_static_string(
-        args[0],
-        source,
-        resolution_cache,
-    )
+    url = _resolve_static_string(args[0], source, file_index)
 
     if url is None or not url.startswith("/"):
         return
@@ -543,7 +744,7 @@ def _app_route(
     fn_by_name: dict[str, Function],
     seen_ids: set[str],
     out: list[Statement],
-    resolution_cache: dict[tuple[int, str], Optional[str]],
+    file_index: _FileIndex,
 ) -> None:
     """Handle `fastify.route({...})` calls."""
 
@@ -562,11 +763,7 @@ def _app_route(
     if url_node is None:
         return
 
-    url = _resolve_static_string(
-        url_node,
-        source,
-        resolution_cache,
-    )
+    url = _resolve_static_string(url_node, source, file_index)
 
     if url is None or not url.startswith("/"):
         return
@@ -578,7 +775,7 @@ def _app_route(
         methods, dynamic = _method_values(
             method_node,
             source,
-            resolution_cache,
+            file_index,
         )
 
     if dynamic:
@@ -623,7 +820,7 @@ def _app_route(
 def _method_values(
     method_node: Node,
     source: bytes,
-    resolution_cache: dict[tuple[int, str], Optional[str]],
+    file_index: _FileIndex,
 ) -> tuple[list[str | None], bool]:
     """Resolve HTTP method values.
 
@@ -648,11 +845,7 @@ def _method_values(
         dynamic = False
 
         for child in method_node.named_children:
-            value = _resolve_static_string(
-                child,
-                source,
-                resolution_cache,
-            )
+            value = _resolve_static_string(child, source, file_index)
 
             if value:
                 methods.append(value.upper())
@@ -661,11 +854,7 @@ def _method_values(
 
         return methods, dynamic
 
-    resolved = _resolve_static_string(
-        method_node,
-        source,
-        resolution_cache,
-    )
+    resolved = _resolve_static_string(method_node, source, file_index)
 
     if resolved:
         return [resolved.upper()], False
@@ -682,11 +871,10 @@ def _fastify_register(
     path: str,
     fid: str,
     fn_by_name: dict[str, Function],
-    fastify_instance_names: set[str],
+    file_index: _FileIndex,
     seen_ids: set[str],
     out: list[Statement],
-    resolution_cache: dict[tuple[int, str], Optional[str]],
-) -> list[tuple[Node, set[str], Optional[str]]]:
+) -> list[tuple[Node, Optional[str]]]:
     """Handle `fastify.register(plugin, { prefix })` calls."""
 
     if not args:
@@ -703,11 +891,7 @@ def _fastify_register(
         prefix_node = pairs.get("prefix")
 
         if prefix_node is not None:
-            declared = _resolve_static_string(
-                prefix_node,
-                source,
-                resolution_cache,
-            )
+            declared = _resolve_static_string(prefix_node, source, file_index)
 
             if declared:
                 child_prefix = _join_prefix(prefix, declared)
@@ -745,27 +929,18 @@ def _fastify_register(
         )
     )
 
-    children: list[tuple[Node, set[str], Optional[str]]] = []
+    children: list[tuple[Node, Optional[str]]] = []
 
     if plugin_node.type in (
         "arrow_function",
         "function_expression",
         "function",
     ):
-        child_instance_names = set(fastify_instance_names)
-
-        plugin_param = _first_param_name(
-            plugin_node,
-            source,
-        )
-
-        if plugin_param:
-            child_instance_names.add(plugin_param)
-
-        children.append((plugin_node, child_instance_names, child_prefix))
+        file_index.mark_fastify_parameter(plugin_node, source)
+        children.append((plugin_node, child_prefix))
 
     if opts_node is not None:
-        children.append((opts_node, fastify_instance_names, prefix))
+        children.append((opts_node, prefix))
 
     return children
 
@@ -917,7 +1092,7 @@ def _object_pairs(
 def _resolve_static_string(
     node: Node,
     source: bytes,
-    resolution_cache: dict[tuple[int, str], Optional[str]],
+    file_index: _FileIndex,
 ) -> Optional[str]:
     """Resolve a node into a string value.
 
@@ -933,99 +1108,7 @@ def _resolve_static_string(
         return literal
 
     if node.type in _IDENTIFIER_LIKE_TYPES:
-        name = node_text(
-            node,
-            source,
-        )
-
-        scope = node.parent
-
-        while scope is not None and scope.type not in _SCOPE_NODE_TYPES:
-            scope = scope.parent
-
-        key = (
-            scope.start_byte if scope is not None else -1,
-            name,
-        )
-
-        if key not in resolution_cache:
-            resolution_cache[key] = _resolve_in_enclosing_scope(
-                node,
-                name,
-                source,
-            )
-
-        resolved = resolution_cache[key]
-
-        if resolved is not None:
-            return resolved
-
-        # (-2, name) contains values supplied by the shared
-        # resolution index.
-        return resolution_cache.get((-2, name))
-
-    return None
-
-
-def _resolve_in_enclosing_scope(
-    node: Node,
-    name: str,
-    source: bytes,
-) -> Optional[str]:
-    """Look up a variable through its surrounding function scopes."""
-
-    scope = node.parent
-
-    while scope is not None:
-        if scope.type in _SCOPE_NODE_TYPES:
-            value = _lookup_const_in_block(
-                scope,
-                name,
-                source,
-            )
-
-            if value is not None:
-                return value
-
-        scope = scope.parent
-
-    return None
-
-
-def _lookup_const_in_block(
-    block: Node,
-    name: str,
-    source: bytes,
-) -> Optional[str]:
-    """Find a variable declared directly in a code block."""
-
-    for child in block.named_children:
-        if child.type not in {
-            "lexical_declaration",
-            "variable_declaration",
-        }:
-            continue
-
-        for declarator in child.named_children:
-            if declarator.type != "variable_declarator":
-                continue
-
-            name_node = declarator.child_by_field_name("name")
-            value_node = declarator.child_by_field_name("value")
-
-            if (
-                name_node is not None
-                and name_node.type == "identifier"
-                and node_text(name_node, source) == name
-                and value_node is not None
-            ):
-                literal = _string_literal(
-                    value_node,
-                    source,
-                )
-
-                if literal is not None:
-                    return literal
+        return file_index.resolve_constant(node_text(node, source), node)
 
     return None
 
