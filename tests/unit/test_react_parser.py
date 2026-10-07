@@ -83,7 +83,7 @@ def test_config_routes_detected_with_lazy_mount(tmp_path) -> None:
     assert rec.framework == "react"
 
 
-def test_config_objects_need_a_router_discriminating_key(tmp_path) -> None:
+def test_router_discriminating_keys_capture_routes_with_navigation_metadata(tmp_path) -> None:
     src = b'''import { createBrowserRouter } from 'react-router-dom';
 
 const breadcrumbs = [
@@ -100,7 +100,7 @@ export const router = createBrowserRouter([
 '''
     rec = _parse(tmp_path, src, "router.tsx")
     routes = [s.endpoint for s in rec.statements if s.semanticType == "route"]
-    assert routes == ["/"]
+    assert routes == ["/", "/nav", "/step"]
 
 
 @pytest.mark.parametrize("item", [
@@ -584,4 +584,3 @@ def test_jsx_routes_preserve_actual_node_type(tmp_path) -> None:
         route.nodeType != "synthetic"
         for route in routes.values()
     )
-

@@ -132,7 +132,6 @@ _ROUTE_DISCRIMINATING_KEYS = frozenset({
     "element", "Component", "component", "children", "lazy", "loader", "action",
     "errorElement", "index", "handle", "caseSensitive",
 })
-_NON_ROUTE_CONFIG_KEYS = frozenset({"label", "title", "name", "icon", "href"})
 
 
 def _is_route_config(pairs: dict[str, Node], *, allow_index: bool = False) -> bool:
@@ -140,9 +139,7 @@ def _is_route_config(pairs: dict[str, Node], *, allow_index: bool = False) -> bo
     has_path = "path" in keys
     if not has_path and not (allow_index and "index" in keys):
         return False
-    return bool(keys & _ROUTE_DISCRIMINATING_KEYS) and not bool(
-        keys & _NON_ROUTE_CONFIG_KEYS
-    )
+    return bool(keys & _ROUTE_DISCRIMINATING_KEYS)
 
 
 def _route_configs(
@@ -161,6 +158,20 @@ def _route_configs(
 def _is_children_value(arr: Node, source: bytes) -> bool:
     p = arr.parent
     return p is not None and p.type == "pair" and _key(p, source) == "children"
+
+
+_ROUTE_CONFIG_CALLS = frozenset({
+    "createBrowserRouter", "createHashRouter", "createMemoryRouter", "useRoutes",
+})
+
+
+def _is_router_config_array(arr: Node, source: bytes) -> bool:
+    args = arr.parent
+    call = args.parent if args is not None else None
+    if args is None or args.type != "arguments" or call is None or call.type != "call_expression":
+        return False
+    fn = call.child_by_field_name("function")
+    return fn is not None and node_text(fn, source) in _ROUTE_CONFIG_CALLS
 
 
 def _process_config(
@@ -373,7 +384,7 @@ def detect_react_routes(root: Node, source: bytes, path: str, *, seen_ids: set[s
         _process_jsx(el, "", source, path, seen_ids, routes)
     # Config objects: route arrays that are not a nested ``children:`` value.
     for arr in arrays:
-        if _is_children_value(arr, source):
+        if _is_children_value(arr, source) or not _is_router_config_array(arr, source):
             continue
         configs = _route_configs(arr, source)
         if configs:
