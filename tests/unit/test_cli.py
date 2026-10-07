@@ -30,6 +30,7 @@ def test_capabilities() -> None:
     assert result.exit_code == 0
     caps = json.loads(result.stdout)
     assert "python" in caps["languages"] and caps["schemaVersion"] == "2.2"
+    assert "fastify" in caps["frameworks"]
 
 
 def test_repo_to_json_tree(tmp_path) -> None:

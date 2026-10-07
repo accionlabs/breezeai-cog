@@ -68,7 +68,7 @@ STATEMENT_TYPES = sorted(EMIT_TYPES)
 COMMENT_TYPES = {"comment"}
 
 FRAMEWORKS = [
-    "angular", "nestjs", "loopback", "express", "react", "vue",
+    "angular", "nestjs", "loopback", "express", "fastify", "react", "vue",
     # AWS messaging / Lambda (see aws_events.py) — transport carried on statement.framework.
     "aws-sns", "aws-sqs", "aws-eventbridge", "aws-lambda", "aws-apigw",
     "aws-dynamodb", "aws-kinesis", "aws-s3", "aws-ses",

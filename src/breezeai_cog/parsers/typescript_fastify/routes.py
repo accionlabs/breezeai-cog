@@ -90,46 +90,6 @@ _FUNCTION_NODE_TYPES = {
     "function",
 }
 
-_MAX_WALK_DEPTH = 900
-
-
-def _referenced_identifiers(node: Node, source: bytes) -> set[str]:
-    if node.type in _FUNCTION_NODE_TYPES:
-        return set()
-    if node.type == "identifier":
-        return {node_text(node, source)}
-
-    names: set[str] = set()
-    for child in node.named_children:
-        names.update(_referenced_identifiers(child, source))
-    return names
-
-
-def _exported_binding_names(root: Node, source: bytes) -> set[str]:
-    names: set[str] = set()
-    stack = [root]
-
-    while stack:
-        node = stack.pop()
-
-        if node.type == "export_statement":
-            for child in node.named_children:
-                names.update(_referenced_identifiers(child, source))
-        elif node.type == "assignment_expression":
-            left = node.child_by_field_name("left")
-            right = node.child_by_field_name("right")
-
-            if (
-                left is not None
-                and right is not None
-                and node_text(left, source) == "module.exports"
-            ):
-                names.update(_referenced_identifiers(right, source))
-
-        stack.extend(node.children)
-
-    return names
-
 
 def detect_fastify_routes(
     root: Node,
@@ -144,18 +104,20 @@ def detect_fastify_routes(
 
     Detects shorthand routes, `route()` configurations, and `register()`
     mounts, including inherited prefixes and resolvable variable values.
+
+    Known limitations: `require("fastify").default()` factory calls and
+    instances assigned after declaration (for example, `let app; app =
+    Fastify()`) are not detected.
     """
     # Cheap guard because Fastify detection is additive and runs for every
     # TypeScript/JavaScript file.
-    if b"fastify" not in source.lower():
+    if b"fastify" not in source and b"Fastify" not in source:
         return []
 
     fid = file_id(path)
 
     fn_by_name: dict[str, Function] = {
-        function.name: function
-        for function in record.functions
-        if function.parentId == fid
+        function.name: function for function in record.functions if function.parentId == fid
     }
 
     fastify_instance_names: set[str] = set()
@@ -169,11 +131,7 @@ def detect_fastify_routes(
 
     if isinstance(const_values, dict):
         resolution_cache.update(
-            {
-                (-2, name): value
-                for name, value in const_values.items()
-                if isinstance(value, str)
-            }
+            {(-2, name): value for name, value in const_values.items() if isinstance(value, str)}
         )
 
     statements: list[Statement] = []
@@ -244,6 +202,9 @@ def _is_fastify_plugin(
     if params is None or not params.named_children:
         return False
 
+    if _has_fastify_plugin_type(fn_node, source):
+        return True
+
     first_param = params.named_children[0]
 
     name = _first_param_name(fn_node, source)
@@ -251,10 +212,35 @@ def _is_fastify_plugin(
     if name is None:
         return False
 
-    return (
-        name.lower() == "fastify"
-        or _has_fastify_instance_type(first_param, source)
-    )
+    return name.lower() == "fastify" or _has_fastify_instance_type(first_param, source)
+
+
+def _has_fastify_plugin_type(
+    fn_node: Node,
+    source: bytes,
+) -> bool:
+    """Check whether a function is assigned to a FastifyPlugin-typed variable."""
+    node = fn_node.parent
+
+    while node is not None and node.type not in _FUNCTION_NODE_TYPES:
+        if node.type == "variable_declarator":
+            type_node = node.child_by_field_name("type")
+            if type_node is None:
+                return False
+
+            stack = [type_node]
+            while stack:
+                current = stack.pop()
+                if current.type == "type_identifier" and node_text(current, source).startswith(
+                    "FastifyPlugin"
+                ):
+                    return True
+                stack.extend(current.children)
+            return False
+
+        node = node.parent
+
+    return False
 
 
 def _has_fastify_instance_type(
@@ -264,10 +250,7 @@ def _has_fastify_instance_type(
     if node.type == "type_identifier":
         return node_text(node, source) == "FastifyInstance"
 
-    return any(
-        _has_fastify_instance_type(child, source)
-        for child in node.children
-    )
+    return any(_has_fastify_instance_type(child, source) for child in node.children)
 
 
 def _is_fastify_factory_call(
@@ -290,10 +273,7 @@ def _is_fastify_factory_call(
     if callee is None:
         return False
 
-    if (
-        callee.type == "identifier"
-        and node_text(callee, source) in _FASTIFY_FACTORY_NAMES
-    ):
+    if callee.type == "identifier" and node_text(callee, source) in _FASTIFY_FACTORY_NAMES:
         return True
 
     if callee.type == "call_expression":
@@ -307,10 +287,7 @@ def _is_fastify_factory_call(
         ):
             arg_nodes = list(inner_args.named_children)
 
-            if (
-                arg_nodes
-                and _string_literal(arg_nodes[0], source) == "fastify"
-            ):
+            if arg_nodes and _string_literal(arg_nodes[0], source) == "fastify":
                 return True
 
     return False
@@ -347,106 +324,81 @@ def _walk(
     fastify_instance_names: set[str],
     seen_ids: set[str],
     out: list[Statement],
-    prefix: str,
+    prefix: Optional[str],
     resolution_cache: dict[tuple[int, str], Optional[str]],
-    depth: int = 0,
 ) -> None:
-    """Recursively scan the syntax tree for Fastify route calls."""
+    """Iteratively scan the syntax tree while keeping each scope's bindings."""
+    pending: list[tuple[Node, set[str], Optional[str]]] = [(node, fastify_instance_names, prefix)]
 
-    if depth >= _MAX_WALK_DEPTH:
-        return
+    while pending:
+        current, instance_names, current_prefix = pending.pop()
 
-    if node.type in (
-        "function_declaration",
-        "function_expression",
-        "arrow_function",
-    ):
-        # Each function gets its own copy so that a nested plugin's
-        # Fastify parameter does not leak into unrelated functions.
-        fastify_instance_names = set(fastify_instance_names)
+        if current.type in _FUNCTION_NODE_TYPES:
+            instance_names = set(instance_names)
 
-        if _is_fastify_plugin(node, source):
-            plugin_param = _first_param_name(node, source)
-            if plugin_param:
-                fastify_instance_names.add(plugin_param)
+            if _is_fastify_plugin(current, source):
+                plugin_param = _first_param_name(current, source)
+                if plugin_param:
+                    instance_names.add(plugin_param)
 
-    _add_fastify_instance_name(
-        node,
-        source,
-        fastify_instance_names,
-    )
+        _add_fastify_instance_name(current, source, instance_names)
 
-    if node.type == "call_expression":
-        dispatch = _dispatch_call(
-            node,
-            source,
-            fastify_instance_names,
-        )
+        if current.type == "call_expression":
+            dispatch = _dispatch_call(current, source, instance_names)
 
-        if dispatch is not None:
-            kind, member_name, args = dispatch
+            if dispatch is not None:
+                kind, member_name, args = dispatch
 
-            if kind == "method":
-                _http_method_route(
-                    node,
-                    member_name,
-                    args,
-                    prefix,
-                    source=source,
-                    path=path,
-                    fid=fid,
-                    fn_by_name=fn_by_name,
-                    seen_ids=seen_ids,
-                    out=out,
-                    resolution_cache=resolution_cache,
-                )
-                return
+                if kind == "method":
+                    _http_method_route(
+                        current,
+                        member_name,
+                        args,
+                        current_prefix,
+                        source=source,
+                        path=path,
+                        fid=fid,
+                        fn_by_name=fn_by_name,
+                        seen_ids=seen_ids,
+                        out=out,
+                        resolution_cache=resolution_cache,
+                    )
+                    continue
 
-            if kind == "app_route":
-                _app_route(
-                    node,
-                    args,
-                    prefix,
-                    source=source,
-                    path=path,
-                    fid=fid,
-                    fn_by_name=fn_by_name,
-                    seen_ids=seen_ids,
-                    out=out,
-                    resolution_cache=resolution_cache,
-                )
-                return
+                if kind == "app_route":
+                    _app_route(
+                        current,
+                        args,
+                        current_prefix,
+                        source=source,
+                        path=path,
+                        fid=fid,
+                        fn_by_name=fn_by_name,
+                        seen_ids=seen_ids,
+                        out=out,
+                        resolution_cache=resolution_cache,
+                    )
+                    continue
 
-            if kind == "register":
-                _fastify_register(
-                    node,
-                    args,
-                    prefix,
-                    source=source,
-                    path=path,
-                    fid=fid,
-                    fn_by_name=fn_by_name,
-                    fastify_instance_names=fastify_instance_names,
-                    seen_ids=seen_ids,
-                    out=out,
-                    depth=depth,
-                    resolution_cache=resolution_cache,
-                )
-                return
+                if kind == "register":
+                    children = _fastify_register(
+                        current,
+                        args,
+                        current_prefix,
+                        source=source,
+                        path=path,
+                        fid=fid,
+                        fn_by_name=fn_by_name,
+                        fastify_instance_names=instance_names,
+                        seen_ids=seen_ids,
+                        out=out,
+                        resolution_cache=resolution_cache,
+                    )
+                    pending.extend(reversed(children))
+                    continue
 
-    for child in node.children:
-        _walk(
-            child,
-            source=source,
-            path=path,
-            fid=fid,
-            fn_by_name=fn_by_name,
-            fastify_instance_names=fastify_instance_names,
-            seen_ids=seen_ids,
-            out=out,
-            prefix=prefix,
-            depth=depth + 1,
-            resolution_cache=resolution_cache,
+        pending.extend(
+            (child, instance_names, current_prefix) for child in reversed(current.children)
         )
 
 
@@ -517,7 +469,7 @@ def _http_method_route(
     node: Node,
     member_name: str,
     args: list[Node],
-    prefix: str,
+    prefix: Optional[str],
     *,
     source: bytes,
     path: str,
@@ -545,19 +497,14 @@ def _http_method_route(
 
     if handler_node is None:
         logger.debug(
-            "fastify: no callable handler argument found for %s %s at "
-            "%s:%d; recording it with handler=UNKNOWN",
+            "fastify: no callable handler argument found for %s %s at %s:%d; handler is unresolved",
             member_name.upper(),
             url,
             path,
             node.start_point[0] + 1,
         )
 
-    methods = (
-        list(_ALL_METHODS)
-        if member_name == "all"
-        else [member_name.upper()]
-    )
+    methods = list(_ALL_METHODS) if member_name == "all" else [member_name.upper()]
 
     route = _join_prefix(prefix, url)
 
@@ -588,7 +535,7 @@ def _http_method_route(
 def _app_route(
     node: Node,
     args: list[Node],
-    prefix: str,
+    prefix: Optional[str],
     *,
     source: bytes,
     path: str,
@@ -624,6 +571,7 @@ def _app_route(
     if url is None or not url.startswith("/"):
         return
 
+    methods: list[str | None]
     if method_node is None:
         methods, dynamic = ["GET"], False
     else:
@@ -636,12 +584,12 @@ def _app_route(
     if dynamic:
         logger.debug(
             "fastify: could not statically resolve one or more HTTP "
-            "methods for route %s at %s:%d",
+            "methods for route %s at %s:%d; unresolved method is null",
             url,
             path,
             node.start_point[0] + 1,
         )
-        methods.append("UNKNOWN")
+        methods.append(None)
 
     if not methods:
         return
@@ -676,7 +624,7 @@ def _method_values(
     method_node: Node,
     source: bytes,
     resolution_cache: dict[tuple[int, str], Optional[str]],
-) -> tuple[list[str], bool]:
+) -> tuple[list[str | None], bool]:
     """Resolve HTTP method values.
 
     Supports:
@@ -696,7 +644,7 @@ def _method_values(
         )
 
     if method_node.type == "array":
-        methods: list[str] = []
+        methods: list[str | None] = []
         dynamic = False
 
         for child in method_node.named_children:
@@ -728,7 +676,7 @@ def _method_values(
 def _fastify_register(
     node: Node,
     args: list[Node],
-    prefix: str,
+    prefix: Optional[str],
     *,
     source: bytes,
     path: str,
@@ -737,19 +685,18 @@ def _fastify_register(
     fastify_instance_names: set[str],
     seen_ids: set[str],
     out: list[Statement],
-    depth: int,
     resolution_cache: dict[tuple[int, str], Optional[str]],
-) -> None:
+) -> list[tuple[Node, set[str], Optional[str]]]:
     """Handle `fastify.register(plugin, { prefix })` calls."""
 
     if not args:
-        return
+        return []
 
     plugin_node = args[0]
     opts_node = args[1] if len(args) > 1 else None
 
     child_prefix = prefix
-    mount_endpoint = prefix or "/"
+    mount_endpoint = (prefix or "/") if prefix is not None else None
 
     if opts_node is not None and opts_node.type == "object":
         pairs = _object_pairs(opts_node, source)
@@ -766,15 +713,12 @@ def _fastify_register(
                 child_prefix = _join_prefix(prefix, declared)
                 mount_endpoint = child_prefix
             else:
-                child_prefix = _join_prefix(
-                    prefix,
-                    "<unresolved-prefix>",
-                )
+                child_prefix = None
                 mount_endpoint = child_prefix
 
                 logger.debug(
                     "fastify: register() prefix at %s:%d is not a static "
-                    "string; using '<unresolved-prefix>'",
+                    "string; route endpoints under this mount are unresolved",
                     path,
                     node.start_point[0] + 1,
                 )
@@ -801,10 +745,8 @@ def _fastify_register(
         )
     )
 
-    # Inline plugin:
-    # fastify.register(async (childFastify) => {
-    #     childFastify.get("/users", handler)
-    # })
+    children: list[tuple[Node, set[str], Optional[str]]] = []
+
     if plugin_node.type in (
         "arrow_function",
         "function_expression",
@@ -820,41 +762,22 @@ def _fastify_register(
         if plugin_param:
             child_instance_names.add(plugin_param)
 
-        _walk(
-            plugin_node,
-            source=source,
-            path=path,
-            fid=fid,
-            fn_by_name=fn_by_name,
-            fastify_instance_names=child_instance_names,
-            seen_ids=seen_ids,
-            out=out,
-            prefix=child_prefix,
-            depth=depth + 1,
-            resolution_cache=resolution_cache,
-        )
+        children.append((plugin_node, child_instance_names, child_prefix))
 
     if opts_node is not None:
-        _walk(
-            opts_node,
-            source=source,
-            path=path,
-            fid=fid,
-            fn_by_name=fn_by_name,
-            fastify_instance_names=fastify_instance_names,
-            seen_ids=seen_ids,
-            out=out,
-            prefix=prefix,
-            depth=depth + 1,
-            resolution_cache=resolution_cache,
-        )
+        children.append((opts_node, fastify_instance_names, prefix))
+
+    return children
 
 
 def _join_prefix(
-    prefix: str,
+    prefix: Optional[str],
     suffix: str,
-) -> str:
+) -> Optional[str]:
     """Combine a prefix and URL into a clean path."""
+    if prefix is None:
+        return None
+
     prefix = prefix.rstrip("/")
 
     if not suffix or suffix == "/":
@@ -872,11 +795,11 @@ def _resolve_handler(
     *,
     fid: str,
     fn_by_name: dict[str, Function],
-) -> tuple[str, str, Optional[int]]:
+) -> tuple[str, Optional[str], Optional[int]]:
     """Resolve the function handling a route."""
 
     if node is None:
-        return fid, "<unknown>", None
+        return fid, None, None
 
     if node.type == "identifier":
         name = node_text(
@@ -909,24 +832,20 @@ def _resolve_handler(
     }:
         return (
             fid,
-            "<inline>",
+            None,
             node.start_point[0] + 1,
         )
 
-    return (
-        fid,
-        node_text(node, source)[:80],
-        node.start_point[0] + 1,
-    )
+    return fid, None, node.start_point[0] + 1
 
 
 def _make_statement(
     node: Node,
     *,
     method: Optional[str],
-    endpoint: str,
+    endpoint: Optional[str],
     parent_id: str,
-    handler: str,
+    handler: Optional[str],
     handler_line: Optional[int],
     route_kind: str,
     path: str,
@@ -1021,10 +940,7 @@ def _resolve_static_string(
 
         scope = node.parent
 
-        while (
-            scope is not None
-            and scope.type not in _SCOPE_NODE_TYPES
-        ):
+        while scope is not None and scope.type not in _SCOPE_NODE_TYPES:
             scope = scope.parent
 
         key = (
@@ -1046,9 +962,7 @@ def _resolve_static_string(
 
         # (-2, name) contains values supplied by the shared
         # resolution index.
-        return resolution_cache.get(
-            (-2, name)
-        )
+        return resolution_cache.get((-2, name))
 
     return None
 
@@ -1130,17 +1044,10 @@ def _string_literal(
             source,
         )
 
-        return (
-            text[1:-1]
-            if len(text) >= 2
-            else None
-        )
+        return text[1:-1] if len(text) >= 2 else None
 
     if node.type == "template_string":
-        if any(
-            child.type == "template_substitution"
-            for child in node.children
-        ):
+        if any(child.type == "template_substitution" for child in node.children):
             return None
 
         text = node_text(
@@ -1148,10 +1055,6 @@ def _string_literal(
             source,
         )
 
-        return (
-            text[1:-1]
-            if len(text) >= 2
-            else None
-        )
+        return text[1:-1] if len(text) >= 2 else None
 
     return None

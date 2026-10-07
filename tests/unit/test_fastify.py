@@ -2,9 +2,13 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
+from jsonschema import Draft202012Validator
+
 from breezeai_cog.core import registry
+from breezeai_cog.emit import to_line
 from breezeai_cog.parsers.base import ParseContext
 from breezeai_cog.parsers.treesitter import parse_source
 from breezeai_cog.parsers.typescript.imports import TsAliasIndex
@@ -33,9 +37,7 @@ def _parse_typescript(
 
 def _detect_routes(source: bytes, path: str = "app.ts"):
     root = parse_source("typescript", source).root_node
-    record = FileRecord(
-        id=path, path=path, type="code", language="typescript", loc=1
-    )
+    record = FileRecord(id=path, path=path, type="code", language="typescript", loc=1)
     return detect_fastify_routes(root, source, path, record, seen_ids=set())
 
 
@@ -94,18 +96,29 @@ def test_fastify_routes_from_exported_plugin_bindings() -> None:
         b"import type { FastifyPluginAsync } from 'fastify'; "
         b"const root: FastifyPluginAsync = async (fastify, opts) => { "
         b"fastify.get('/', h); }; export default root",
-        b"module.exports = async function (fastify, opts) { "
-        b"fastify.get('/cjs', h); }",
-        b"module.exports = fp(async function (fastify) { "
-        b"fastify.get('/wrapped-cjs', h); })",
+        b"import type { FastifyPluginAsync } from 'fastify'; "
+        b"const users: FastifyPluginAsync = async (app) => { "
+        b"app.get('/users', h); }",
+        b"import type { FastifyPluginCallback } from 'fastify'; "
+        b"const plugin: FastifyPluginCallback = (server, opts, done) => { "
+        b"server.get('/cb', h); done(); }",
+        b"module.exports = async function (fastify, opts) { fastify.get('/cjs', h); }",
+        b"module.exports = fp(async function (fastify) { fastify.get('/wrapped-cjs', h); })",
         b"import type { FastifyPluginAsync } from 'fastify'; "
         b"const users: FastifyPluginAsync = async (fastify) => { "
         b"fastify.get('/users', h); }; export default fp(users)",
     ]
-    expected_endpoints = [["/"], ["/cjs"], ["/wrapped-cjs"], ["/users"]]
+    expected_endpoints = [
+        ["/"],
+        ["/users"],
+        ["/cb"],
+        ["/cjs"],
+        ["/wrapped-cjs"],
+        ["/users"],
+    ]
 
     for index, (source, expected) in enumerate(zip(sources, expected_endpoints)):
-        extension = "js" if index in (1, 2) else "ts"
+        extension = "js" if index in (3, 4) else "ts"
         record = _parse_typescript(source, f"plugin-{index}.{extension}")
         routes = [statement for statement in record.statements if statement.framework == "fastify"]
 
@@ -122,9 +135,22 @@ def test_fastify_plugin_shapes_through_registry_selection() -> None:
             [("GET", "/")],
         ),
         (
+            "users.ts",
+            b"import type { FastifyPluginAsync } from 'fastify'; "
+            b"const users: FastifyPluginAsync = async (app) => { "
+            b"app.get('/users', h); }",
+            [("GET", "/users")],
+        ),
+        (
+            "callback.ts",
+            b"import type { FastifyPluginCallback } from 'fastify'; "
+            b"const plugin: FastifyPluginCallback = (server, opts, done) => { "
+            b"server.get('/cb', h); done(); }",
+            [("GET", "/cb")],
+        ),
+        (
             "plugin.cjs",
-            b"module.exports = async function (fastify, opts) { "
-            b"fastify.get('/cjs', h) }",
+            b"module.exports = async function (fastify, opts) { fastify.get('/cjs', h) }",
             [("GET", "/cjs")],
         ),
         (
@@ -162,9 +188,7 @@ def test_fastify_plugin_shapes_through_registry_selection() -> None:
             )
 
             routes = [
-                statement
-                for statement in record.statements
-                if statement.framework == "fastify"
+                statement for statement in record.statements if statement.framework == "fastify"
             ]
             assert [(route.method, route.endpoint) for route in routes] == expected
     finally:
@@ -179,9 +203,7 @@ def test_fastify_register_prefix_uses_repository_constant_index() -> None:
         b"  fastify.get('/', handler);\n"
         b"}, { prefix: API_PREFIX });\n"
     )
-    resolution_index = TsAliasIndex(
-        base_dir=".", paths={}, const_values={"API_PREFIX": "/api"}
-    )
+    resolution_index = TsAliasIndex(base_dir=".", paths={}, const_values={"API_PREFIX": "/api"})
 
     record = TypeScriptParser().parse_file(
         ParseContext(
@@ -224,9 +246,7 @@ def test_fastify_routes_are_additive_to_react_parser() -> None:
         )
 
         fastify_routes = [
-            statement
-            for statement in record.statements
-            if statement.framework == "fastify"
+            statement for statement in record.statements if statement.framework == "fastify"
         ]
         assert [route.endpoint for route in fastify_routes] == ["/api/x"]
     finally:
@@ -259,9 +279,7 @@ def test_fastify_routes_are_additive_to_angular_parser() -> None:
         )
 
         fastify_routes = [
-            statement
-            for statement in record.statements
-            if statement.framework == "fastify"
+            statement for statement in record.statements if statement.framework == "fastify"
         ]
         assert [route.endpoint for route in fastify_routes] == ["/api/x"]
     finally:
@@ -269,10 +287,7 @@ def test_fastify_routes_are_additive_to_angular_parser() -> None:
 
 
 def test_fastify_route_detection_requires_statement_capture() -> None:
-    source = (
-        b'import Fastify from "fastify";\n'
-        b"const f = Fastify(); f.get('/api/x', handler);"
-    )
+    source = b"import Fastify from \"fastify\";\nconst f = Fastify(); f.get('/api/x', handler);"
 
     record = _parse_typescript(source, "server.ts", capture_statements=False)
 
@@ -296,14 +311,12 @@ def test_nested_helper_in_exported_non_plugin_is_not_a_plugin() -> None:
         b"function helper(fastify) { fastify.get('/wrong', handler); } }"
     )
     root = parse_source("typescript", source).root_node
-    record = FileRecord(
-        id="app.ts", path="app.ts", type="code", language="typescript", loc=1
-    )
+    record = FileRecord(id="app.ts", path="app.ts", type="code", language="typescript", loc=1)
 
     assert detect_fastify_routes(root, source, "app.ts", record, seen_ids=set()) == []
 
 
-def test_route_method_array_keeps_unresolved_method_as_unknown() -> None:
+def test_route_method_array_keeps_unresolved_method_null() -> None:
     source = (
         b"const fastify = Fastify();\n"
         b"fastify.route({ method: [unknownMethod, 'get'], url: '/mixed', handler });"
@@ -313,7 +326,7 @@ def test_route_method_array_keeps_unresolved_method_as_unknown() -> None:
 
     assert [(route.method, route.endpoint) for route in routes] == [
         ("GET", "/mixed"),
-        ("UNKNOWN", "/mixed"),
+        (None, "/mixed"),
     ]
 
 
@@ -323,7 +336,13 @@ def test_all_shorthand_registers_every_method() -> None:
     routes = _detect_routes(source)
 
     assert [route.method for route in routes] == [
-        "GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS", "HEAD"
+        "GET",
+        "POST",
+        "PUT",
+        "DELETE",
+        "PATCH",
+        "OPTIONS",
+        "HEAD",
     ]
     assert {route.endpoint for route in routes} == {"/all"}
 
@@ -340,12 +359,10 @@ def test_nested_register_prefixes_are_joined() -> None:
 
     routes = [route for route in _detect_routes(source) if route.method is not None]
 
-    assert [(route.method, route.endpoint) for route in routes] == [
-        ("GET", "/api/v2/items")
-    ]
+    assert [(route.method, route.endpoint) for route in routes] == [("GET", "/api/v2/items")]
 
 
-def test_unresolved_register_prefix_is_marked_on_nested_route() -> None:
+def test_unresolved_register_prefix_is_null_on_mount_and_nested_route() -> None:
     source = (
         b"const fastify = Fastify();\n"
         b"fastify.register(async function plugin(pluginServer) {\n"
@@ -355,21 +372,59 @@ def test_unresolved_register_prefix_is_marked_on_nested_route() -> None:
 
     routes = [route for route in _detect_routes(source) if route.method is not None]
 
-    assert [(route.method, route.endpoint) for route in routes] == [
-        ("GET", "/<unresolved-prefix>/items")
-    ]
+    assert [(route.method, route.endpoint) for route in routes] == [("GET", None)]
+
+    mounts = [route for route in _detect_routes(source) if route.routeKind == "mount"]
+    assert len(mounts) == 1
+    assert mounts[0].endpoint is None
+
+
+def test_unresolved_route_handler_is_null() -> None:
+    routes = _detect_routes(b"const fastify = Fastify(); fastify.get('/health', {});")
+
+    assert len(routes) == 1
+    assert routes[0].handler is None
+    assert routes[0].handlerLine is None
+
+
+def test_fastify_records_validate_against_capture_schema() -> None:
+    source = (
+        b"const fastify = Fastify();\n"
+        b"fastify.get('/health', {});\n"
+        b"fastify.register(async function plugin(server) {\n"
+        b"  server.get('/items', handler);\n"
+        b"}, { prefix: dynamicPrefix });"
+    )
+    record = _parse_typescript(source, "server.ts")
+
+    errors = list(
+        Draft202012Validator(FileRecord.model_json_schema(by_alias=True)).iter_errors(
+            json.loads(to_line(record))
+        )
+    )
+    assert not errors, errors
+
+
+def test_iterative_walk_detects_routes_beyond_previous_depth_cutoff() -> None:
+    nested_blocks = b"if (true) {" * 950
+    closing_blocks = b"}" * 950
+    source = (
+        b"const fastify = Fastify();\n"
+        + nested_blocks
+        + b"fastify.get('/deep', handler);"
+        + closing_blocks
+    )
+
+    routes = _detect_routes(source)
+
+    assert [(route.method, route.endpoint) for route in routes] == [("GET", "/deep")]
 
 
 def test_shorthand_route_accepts_schema_options_before_handler() -> None:
-    source = (
-        b"const fastify = Fastify();\n"
-        b"fastify.get('/s', { schema: {} }, handler);"
-    )
+    source = b"const fastify = Fastify();\nfastify.get('/s', { schema: {} }, handler);"
 
     routes = _detect_routes(source)
 
     assert [(route.method, route.endpoint, route.handler) for route in routes] == [
         ("GET", "/s", "handler")
     ]
-
-

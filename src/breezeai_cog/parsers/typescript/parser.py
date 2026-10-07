@@ -217,9 +217,17 @@ class TypeScriptParser(BaseParser):
         if capture:
             statements.extend(
                 comment_statements_for(
-                    root, source, path, file_id=fid, functions=functions, classes=classes,
-                    statements=statements, control_flow=CONTROL_FLOW,
-                    comment_types=COMMENT_TYPES, limit=limit, seen_ids=seen_ids,
+                    root,
+                    source,
+                    path,
+                    file_id=fid,
+                    functions=functions,
+                    classes=classes,
+                    statements=statements,
+                    control_flow=CONTROL_FLOW,
+                    comment_types=COMMENT_TYPES,
+                    limit=limit,
+                    seen_ids=seen_ids,
                 )
             )
 
