@@ -100,6 +100,39 @@ class UsersController {
     assert all(route.method == "GET" and route.handler == "find" for route in routes)
 
 
+def test_array_controller_bases_expand_with_array_route_paths(tmp_path) -> None:
+    source = b'''import { Controller, Get } from '@nestjs/common';
+
+@Controller(['a', 'b'])
+class ArrayController {
+  @Get([':id', ':slug'])
+  find() {}
+}
+
+@Controller({ path: ['c', 'd'] })
+class ObjectPathController {
+  @Get([':id', ':slug'])
+  find() {}
+}
+'''
+    p = tmp_path / "array.controller.ts"
+    p.write_bytes(source)
+    ctx = ParseContext(path="array.controller.ts", abs_path=p, source=source,
+                       repo_root=tmp_path, capture_statements=True)
+
+    rec = NestJSParser().parse_file(ctx)
+    routes = [s for s in rec.statements if s.semanticType == "route"]
+
+    assert {route.endpoint for route in routes} == {
+        "/a/:id", "/a/:slug", "/b/:id", "/b/:slug",
+        "/c/:id", "/c/:slug", "/d/:id", "/d/:slug",
+    }
+    assert len(routes) == 8
+    assert len({route.id for route in routes}) == 8
+    assert all(route.method == "GET" and route.handler == "find" for route in routes)
+    assert all(not any(char in route.endpoint for char in "[]'\"") for route in routes)
+
+
 def test_base_extraction_reused(tmp_path) -> None:
     rec = _parse(tmp_path)
     assert {f.name for f in rec.functions} == {"getOne", "create", "helper"}
@@ -446,6 +479,43 @@ class NotAGateway {
     assert routes[0].method == "MESSAGE"
     assert routes[0].routeKind == "ws"
     assert routes[0].nodeType == "synthetic"
+
+
+def test_gateway_namespace_and_path_prefix_subscribe_endpoints(tmp_path) -> None:
+    source = b'''import { WebSocketGateway, SubscribeMessage } from '@nestjs/websockets';
+
+@WebSocketGateway(80, { namespace: 'chat', path: '/ws' })
+class ChatGateway {
+  @SubscribeMessage('msg')
+  onMsg() {}
+}
+
+@WebSocketGateway({ namespace: 'chat' })
+class NamespacedGateway {
+  @SubscribeMessage('msg')
+  onMsg() {}
+}
+
+@WebSocketGateway({ path: '/ws' })
+class PathGateway {
+  @SubscribeMessage('msg')
+  onMsg() {}
+}
+'''
+    p = tmp_path / "chat.gateway.ts"
+    p.write_bytes(source)
+    ctx = ParseContext(path="chat.gateway.ts", abs_path=p, source=source,
+                       repo_root=tmp_path, capture_statements=True)
+
+    rec = NestJSParser().parse_file(ctx)
+    routes = [s for s in rec.statements if s.semanticType == "route"]
+
+    assert {route.endpoint for route in routes} == {
+        "/ws/chat/msg", "/chat/msg", "/ws/msg",
+    }
+    assert len(routes) == 3
+    assert all(route.method == "MESSAGE" and route.routeKind == "ws" for route in routes)
+    assert all(route.nodeType == "synthetic" and route.handler == "onMsg" for route in routes)
 
 
 _RETTYPE_SRC = b'''import { Controller, Get } from '@nestjs/common';

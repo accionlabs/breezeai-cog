@@ -249,18 +249,44 @@ def _join(base: str, sub: str) -> str:
 _CONTROLLER_DECORATORS = {"Controller", "JsonController"}  # NestJS + routing-controllers
 
 
-def _controller_base(decorators: list[Node], source: bytes) -> str | None:
+_QUOTED_RE = re.compile(r"""['"`]([^'"`]*)['"`]""")
+_NAMESPACE_PROP_RE = re.compile(r"""\bnamespace\s*:\s*['"`]([^'"`]*)['"`]""")
+
+
+def _controller_bases(decorators: list[Node], source: bytes) -> list[str] | None:
+    """Base path(s) of a ``@Controller``; ``None`` when the class is not a controller.
+    ``@Controller(['a', 'b'])`` (valid NestJS) yields one base per element."""
     for dec in decorators:
         d = decorator(dec, source)
         if d.name in _CONTROLLER_DECORATORS:
             if not d.args:
-                return ""
+                return [""]
             arg = d.args[0].strip()
             if arg.startswith("{"):  # object form: @Controller({ path: 'x', host: ... })
+                m = re.search(r"\bpath\s*:\s*(\[[^\]]*\])", arg)
+                if m:
+                    return _QUOTED_RE.findall(m.group(1)) or [""]
                 m = _PATH_PROP_RE.search(arg)
-                return m.group(1) if m else ""
-            return _unquote(arg)
+                return [m.group(1) if m else ""]
+            if arg.startswith("["):
+                return _QUOTED_RE.findall(arg) or [""]
+            return [_unquote(arg)]
     return None
+
+
+def _gateway_prefix(decorators: list[Node], source: bytes) -> str:
+    """``@WebSocketGateway(80, { namespace: 'chat', path: '/ws' })`` → ``/ws/chat`` (``""``
+    when neither option is set). The namespace scopes event names, so two gateways handling
+    the same event stay distinguishable."""
+    for dec in decorators:
+        d = decorator(dec, source)
+        if d.name in _GATEWAY_DECORATORS:
+            opts = next((a for a in d.args if a.strip().startswith("{")), "")
+            ns = _NAMESPACE_PROP_RE.search(opts)
+            pth = _PATH_PROP_RE.search(opts)
+            parts = [m.group(1) for m in (pth, ns) if m and m.group(1).strip("/")]
+            return _join(parts[0], parts[1] if len(parts) > 1 else "") if parts else ""
+    return ""
 
 
 def _version(decorators: list[Node], source: bytes) -> str | None:
@@ -296,11 +322,12 @@ def detect_nest_routes(
 ) -> list[Statement]:
     routes: list[Statement] = []
     for cls, decs in _class_with_decorators(root):
-        base = _controller_base(decs, source)  # None when the class is not a @Controller
-        is_controller = base is not None
+        bases = _controller_bases(decs, source)  # None when the class is not a @Controller
+        is_controller = bases is not None
         class_dec_names = {decorator(dec, source).name for dec in decs}
         is_resolver = bool(class_dec_names & _RESOLVER_DECORATORS)
         is_gateway = bool(class_dec_names & _GATEWAY_DECORATORS)
+        gateway_prefix = _gateway_prefix(decs, source) if is_gateway else ""
         class_name = node_text(cls.child_by_field_name("name"), source)
         body = cls.child_by_field_name("body")
         if body is None:
@@ -375,13 +402,17 @@ def detect_nest_routes(
                             request_dto = _request_dto(member, source)
                             response_dto = _response_dto(pending, source) or _return_dto(member, source)
                             http_computed = True
-                        for index, route_path in enumerate(_route_paths(dec, d, source)):
+                        emitted = 0
+                        for base, route_path in (
+                            (b, p) for b in bases for p in _route_paths(dec, d, source)
+                        ):
                             route_common = common
-                            if index:
+                            if emitted:
                                 route_common = {
                                     **common,
                                     "id": disambiguate(statement_id(path, sl, sc), seen_ids),
                                 }
+                            emitted += 1
                             routes.append(Statement(
                                 semanticType="route",
                                 method=verb,
@@ -411,7 +442,10 @@ def detect_nest_routes(
                         routes.append(Statement(
                             semanticType="route",
                             method=ws,
-                            endpoint=_pattern(d),
+                            endpoint=(
+                                _join(gateway_prefix, _pattern(d))
+                                if gateway_prefix and _pattern(d) else _pattern(d)
+                            ),
                             routeKind="ws",
                             **common,
                         ))
