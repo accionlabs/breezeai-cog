@@ -102,7 +102,7 @@ MARKERS: tuple[bytes, ...] = (
 
 #: Server-registration calls. A file wiring up the GraphQL server is the application's
 #: composition root: ``csharp-aspnet`` owns it, captures its REST endpoints, and already emits the
-#: GraphQL HTTP mount (``_GRAPHQL_MOUNTS`` in ``csharp_aspnet/routes.py``). Never claim it — the
+#: GraphQL HTTP mount (``_GRAPHQL_MOUNTS`` in ``aspnet_common.py``). Never claim it — the
 #: cost of being wrong is the whole application's route inventory.
 COMPOSITION_ROOT_MARKERS: tuple[bytes, ...] = (
     b"AddGraphQLServer", b"MapGraphQL", b"UseGraphQL",

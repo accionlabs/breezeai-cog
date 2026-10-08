@@ -39,7 +39,7 @@ git diff --name-only main...HEAD
 | **Parser-local** | `parsers/<lang>_<framework>/**`, `tests/unit/test_<x>_parser.py` | This parser only | Normal |
 | **Language parser** | `parsers/<lang>/**` (when the work is for a framework) | Every framework built on this language | High — see §1.1 |
 | **Additive detector** | a module that calls `register_detector(...)`, or a changed `order` / `skip_fixtures` / `guard` | Every file of that language, whichever parser owns it | High — same blast radius as a language-parser change; see §1.1 |
-| **Shared family helper** | e.g. `parsers/vertx_common.py` (shared by `java_vertx` and `groovy_vertx`), `parsers/dotnet_common.py` (the .NET framework parsers) | Every parser that imports it | High |
+| **Shared family helper** | e.g. `parsers/vertx_common.py` (shared by `java_vertx` and `groovy_vertx`), `parsers/dotnet_common.py` (the .NET framework parsers), `parsers/aspnet_common.py` (`csharp_aspnet` and `vb_aspnet`) | Every parser that imports it | High |
 | **Core** | `schemas/`, `core/`, `emit/`, `parsers/base.py`, `parsers/treesitter.py`, `parsers/statements_common.py`, `parsers/comments_common.py`, `parsers/callresolve.py`, `parsers/index_common.py`, `parsers/constfold.py`, `parsers/detection/`, `cli.py`, `config.py` | Every parser | Highest — architectural change, see §1.2 |
 
 #### 1.1 Language-parser changes made during framework work

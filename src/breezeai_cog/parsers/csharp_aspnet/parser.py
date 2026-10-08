@@ -10,7 +10,7 @@ from ...schemas import FileRecord
 from ..base import ParseContext
 from ..csharp.parser import CSharpParser
 from ..treesitter import parse_source
-from .routes import detect_controller_routes, detect_minimal_api_routes, detect_route_registrations
+from ..aspnet_common import detect_controller_routes, detect_minimal_api_routes, detect_route_registrations
 
 _MARKERS = (b"Microsoft.AspNetCore", b"System.Web.Mvc", b"System.Web.Http")
 

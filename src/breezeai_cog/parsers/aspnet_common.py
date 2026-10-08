@@ -1,4 +1,4 @@
-"""ASP.NET route detection.
+"""ASP.NET route detection, shared by the ``csharp_aspnet`` and ``vb_aspnet`` parsers.
 
 Two idioms, both emitted as ``route`` statements:
 
@@ -6,7 +6,7 @@ Two idioms, both emitted as ``route`` statements:
   ``[ApiController]`` / ``[Route]`` / ``[HttpGet]`` onto ``Class.decorators`` /
   ``Function.decorators`` / ``Parameter.decorators``, so :func:`detect_controller_routes`
   reads the ``FileRecord`` directly (no AST re-walk). Because it only touches the
-  language-agnostic record shape, the VB ASP.NET parser reuses it verbatim.
+  language-agnostic record shape, C# and VB use it verbatim.
 
   The full route template is composed from three places, so all three are resolved:
   the controller ``[Route]`` prefix (possibly **inherited from a base/abstract
@@ -27,11 +27,11 @@ from typing import Any
 
 from tree_sitter import Node
 
-from ...emit import disambiguate, statement_id
-from ...schemas import Decorator, FileRecord, Function, Statement
-from ..dotnet_common import response_dto, simple_attr_name
-from ..index_common import walk_heritage
-from ..treesitter import node_text
+from ..emit import disambiguate, statement_id
+from ..schemas import Decorator, FileRecord, Function, Statement
+from .dotnet_common import response_dto, simple_attr_name
+from .index_common import walk_heritage
+from .treesitter import node_text
 
 _HTTP_ATTRS = {
     "HttpGet": "GET", "HttpPost": "POST", "HttpPut": "PUT",
