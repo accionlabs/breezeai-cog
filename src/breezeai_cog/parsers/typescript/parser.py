@@ -23,6 +23,7 @@ from ..callresolve import make_resolver
 from .aws_events import detect_aws_events
 from ..detection.sdk_calls import detect_sdk_calls
 from ..typescript_express.routes import detect_express
+from ..typescript_fastify.routes import detect_fastify_routes
 from .decorators import extract_decorators
 from .functions import (
     build_function,
@@ -265,9 +266,17 @@ class TypeScriptParser(BaseParser):
         if capture:
             statements.extend(
                 comment_statements_for(
-                    root, source, path, file_id=fid, functions=functions, classes=classes,
-                    statements=statements, control_flow=CONTROL_FLOW,
-                    comment_types=COMMENT_TYPES, limit=limit, seen_ids=seen_ids,
+                    root,
+                    source,
+                    path,
+                    file_id=fid,
+                    functions=functions,
+                    classes=classes,
+                    statements=statements,
+                    control_flow=CONTROL_FLOW,
+                    comment_types=COMMENT_TYPES,
+                    limit=limit,
+                    seen_ids=seen_ids,
                 )
             )
 
@@ -294,6 +303,19 @@ class TypeScriptParser(BaseParser):
             ):
                 if record.framework is None:
                     record.framework = "express"
+            if not self.is_fixture_file(path):
+                fastify_routes = detect_fastify_routes(
+                    root,
+                    source,
+                    path,
+                    record,
+                    seen_ids={statement.id for statement in record.statements},
+                    resolution_index=ctx.resolution_index,
+                )
+                if fastify_routes:
+                    record.statements.extend(fastify_routes)
+                    if record.framework is None:
+                        record.framework = "fastify"
             aws_fw = detect_aws_events(
                 root, source, path, record, is_fixture=self.is_fixture_file(path)
             )
