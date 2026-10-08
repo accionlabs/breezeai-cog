@@ -148,12 +148,21 @@ a one-per-file parser. There are **two hook points** — choose by the shape of 
   for example, is usually a single dictionary entry that tags the statement as a data-access
   call and records which ORM it is.
 - **Structure-shaped signal** (a base class, a decorator, a type annotation, a
-  command-object argument) that a flat classifier cannot express → add a `detect_*` pass and
-  call it at the end of the base language parser's `extract`, gated by
-  `ctx.capture_statements` and preceded by a cheap byte guard so it only runs on relevant
-  files. It **enriches statements in place or appends new ones**; it never replaces the
-  file's parser. Because it lives in the base `extract`, it runs for every file of the
-  language and layers underneath whichever framework won.
+  command-object argument) that a flat classifier cannot express → write a `detect_*` pass
+  and **register it** with `register_detector(Detector(...))` at the bottom of its own module
+  (`parsers/additive.py`). Do **not** edit the language parser: its `extract` already ends
+  with `run_additive(<language>, …)`, which runs every registered detector for that language,
+  so it fires for every file of the language and layers underneath whichever framework won.
+  It **enriches statements in place or appends new ones**; it never replaces the file's
+  parser. The runner applies the shared rules: it runs only with `ctx.capture_statements`,
+  skips fixture files when `skip_fixtures=True` (set it for route / entry-point emitters),
+  applies the cheap byte `guard` when one is given (otherwise guard inside the detector), and
+  lets a returned framework label fill `record.framework` only while it is unset. Pick a
+  unique `order` — it fixes the run order, which decides statement-id disambiguation — declare
+  the `frameworks` labels it can emit, and add it to the inventory in
+  `tests/unit/test_additive.py`. A language without the hook (see `HOOKED_LANGUAGES`) needs a
+  one-time `run_additive` call in its base `extract` first — that one is a language-parser
+  change.
 
 Some "internal frameworks" only describe data models. Often the base parser already
 captures the class, its base class, and its fields — so the only thing to add is a **role

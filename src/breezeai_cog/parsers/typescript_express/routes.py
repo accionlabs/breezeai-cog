@@ -18,6 +18,7 @@ from tree_sitter import Node
 
 from ...emit import disambiguate, file_id, statement_id
 from ...schemas import FileRecord, Statement
+from ..additive import DetectContext, Detector, register_detector
 from ..statements_common import strip_leading_base, url_placeholder
 from ..treesitter import first_line, node_text
 
@@ -369,3 +370,16 @@ def detect_express(
         matched = True
 
     return matched
+
+
+def _run(dc: DetectContext) -> str | None:
+    matched = detect_express(
+        dc.root, dc.source, dc.path, dc.record, dc.ctx.resolution_index, dc.bindings
+    )
+    return "express" if matched else None
+
+
+register_detector(Detector(
+    name="express", language="typescript", order=10, run=_run,
+    skip_fixtures=True, frameworks=("express",),
+))

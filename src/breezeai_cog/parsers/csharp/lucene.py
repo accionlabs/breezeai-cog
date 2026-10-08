@@ -41,6 +41,7 @@ from tree_sitter import Node
 
 from ...emit import disambiguate, file_id, statement_id
 from ...schemas import FileRecord, Statement
+from ..additive import DetectContext, Detector, register_detector
 from ..treesitter import first_line, node_text
 
 #: Cheap byte guard — the namespace every Lucene.NET file imports.
@@ -183,3 +184,13 @@ def detect_lucene_access(root: Node, source: bytes, path: str, record: FileRecor
         ))
         found = True
     return found
+
+
+def _run(dc: DetectContext) -> str | None:
+    detect_lucene_access(dc.root, dc.source, dc.path, dc.record)
+    return None
+
+
+# Index access is data access, not an entry point, so it is not fixture-skipped: a statement
+# inside a test file is still a real read of the index.
+register_detector(Detector(name="lucene", language="csharp", order=20, run=_run))

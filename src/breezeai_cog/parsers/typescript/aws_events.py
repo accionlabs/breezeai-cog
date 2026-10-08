@@ -35,6 +35,7 @@ from tree_sitter import Node
 
 from ...emit import disambiguate, file_id, statement_id
 from ...schemas import FileRecord, Function, SemanticType, Statement
+from ..additive import DetectContext, Detector, register_detector
 from ..treesitter import first_line, node_text
 
 # SDK v3 ``new XxxCommand({...})`` → (semanticType, framework).
@@ -411,3 +412,17 @@ def detect_aws_events(
         is_lambda = True
 
     return "aws-lambda" if is_lambda else file_fw
+
+
+def _run(dc: DetectContext) -> str | None:
+    return detect_aws_events(dc.root, dc.source, dc.path, dc.record, is_fixture=dc.is_fixture)
+
+
+# Not fixture-skipped: only the loose CommonJS handler fallback is fixture-gated, inside.
+register_detector(Detector(
+    name="aws-events", language="typescript", order=20, run=_run,
+    frameworks=(
+        "aws-lambda", "aws-sdk", "aws-sns", "aws-sqs", "aws-eventbridge", "aws-kinesis",
+        "aws-dynamodb", "aws-ses", "aws-cloudfront", "aws-apigw",
+    ),
+))

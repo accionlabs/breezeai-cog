@@ -339,8 +339,33 @@ Not every concern is a one-per-file parser. A library used *across* files owned 
 frameworks (ORM, validation, messaging SDK) is detected **additively** — see
 [`skills/extend-capture/SKILL.md`](../skills/extend-capture/SKILL.md) §3C. Either extend the
 shared `parsers/detection/` classifiers (call-shaped signals) or add a `detect_*` pass
-invoked from the base parser's `extract` (structure-shaped signals) that enriches/appends
-without displacing the file's parser.
+(structure-shaped signals) that enriches/appends without displacing the file's parser.
+
+A `detect_*` pass is registered, not called. At the bottom of the detector's module:
+
+```python
+from ..additive import DetectContext, Detector, register_detector
+
+def _run(dc: DetectContext) -> str | None:
+    found = detect_kafka(dc.root, dc.source, dc.path, dc.record)
+    return "kafka" if found else None          # file-level label, or None
+
+register_detector(Detector(
+    name="kafka", language="csharp", order=30, run=_run,
+    guard=b"Confluent.Kafka",                   # optional cheap byte check
+    skip_fixtures=True,                         # route / entry-point emitters only
+    frameworks=("kafka",),                      # advertised by `capabilities`
+))
+```
+
+- The base language parser's `extract` ends with `run_additive(<language>, …)`; discovery
+  imports every module under `parsers/` containing `register_detector(`, in each worker.
+- `language` must be in `HOOKED_LANGUAGES` (`typescript`, `csharp`, `scala`); `order` must be
+  unique per language. Both are checked at registration.
+- `DetectContext` carries `root`, `ctx` (`source`, `path`, `resolution_index`,
+  `parse_timeout_micros`), `record`, `is_fixture`, and language extras (`bindings` for
+  TypeScript, `types` for Scala).
+- Add the detector to the inventory in `tests/unit/test_additive.py`.
 
 ### Selection: one parser per file
 A file is parsed by **exactly one** parser. `registry.select(path, source)` picks the
