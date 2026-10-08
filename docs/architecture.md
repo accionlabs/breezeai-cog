@@ -305,9 +305,11 @@ line** followed by the records, gzipped. If nothing worth keeping was captured, 
 written.
 
 > **Decision —** NDJSON, streamed, metadata first.
-> **Why:** a large capture never has to fit in memory, on either side. The backend reads the
-> repository summary before the records. **Cost:** totals are only known at the end, so the
-> body is buffered to a temporary file and copied once.
+> **Why:** a large capture never has to fit in memory, on either side, and the summary is at a
+> fixed, cheap-to-read place. **Cost:** totals are only known at the end, so the body is buffered
+> to a temporary file and copied once. (The backend's graph ingest skips this line and recomputes
+> counts from the graph; the summary reaches it in the upload request instead — see
+> [Capture-to-graph mapping](architecture/graph-mapping.md#7-projectmetadata).)
 
 > **Decision —** size limits are applied in one place, at output time.
 > **Why:** parsers always capture the full text, and every parser gets the same splitting
@@ -377,9 +379,10 @@ flowchart TD
 | `…OrderVerticle.java:19:2` | `…#OrderVerticle#audit@20` | `line_comment` | `comment` | — |
 
 Things to notice:
-- The publish on line 13 sits **inside a lambda**. The language extraction does not emit
-  statements inside lambdas, so the Vert.x detector **added** that statement. It attached it to
-  the enclosing method `start`, because a lambda is not a `Function`.
+- The publish on line 13 sits **inside a lambda**. Inside a method body the Java extractor
+  walks into lambdas and gives their statements to the enclosing method (`start`), because a
+  lambda is not a `Function`. The Vert.x detector then found the same line and **enriched** that
+  statement with `semanticType`, `endpoint` and `framework`, instead of creating a second one.
 - The id of `start` (`path#OrderVerticle#start@9`) is computed the same way by the Java parser
   and the Vert.x detector. That is why the detector's statements attach to the right parent
   ([§8](#8-ids-and-linking)).
@@ -497,15 +500,17 @@ The full list, with comments explaining each, is in `src/breezeai_cog/schemas/en
 > members") that a grammar-specific `nodeType` cannot. **Cost:** consumers must look at both.
 
 **Which statements are emitted.** Each language lists in its `mappings.py` the node types that
-become statements (`EMIT_TYPES`: declarations, control flow, jumps). It also lists the scopes the
-extractor does **not** descend into (`NESTED_SCOPES`: lambdas, nested classes…), because those
-are handled as their own scope. A framework detector that finds something inside a lambda adds
-the statement itself, as in the [worked example](#5-worked-example-one-file-start-to-finish).
+become statements (`EMIT_TYPES`: declarations, control flow, jumps). It also lists the scopes
+(`NESTED_SCOPES`: nested classes, methods, lambdas…) that are extracted as their own
+`Class`/`Function`. At file and class level the extractor stops at those scopes. Inside a function
+body it walks into inline lambdas and gives their statements to the function, as in the
+[worked example](#5-worked-example-one-file-start-to-finish).
 
 **Enrich or append.** A detector that matches a call first looks for an existing statement on
 the same span:
 - if there is one, it **enriches** it (sets `semanticType`, `method`, `endpoint`…);
-- if there is none (e.g. inside a lambda), it **appends** a new statement.
+- if there is none (e.g. a call in a lambda that is a field initialiser, outside any
+  function body), it **appends** a new statement.
 
 This keeps one statement per piece of source, and avoids duplicates.
 
@@ -514,12 +519,13 @@ This keeps one statement per piece of source, and avoids duplicates.
 declaration that follows it, or else to the scope that contains it. Enum members are emitted as
 statements under their enum class.
 
-> **Decision —** semantic statements are gated by `ctx.capture_statements` (on by default; off with `--no-capture-statements`).
-> **Why:** statements are the largest part of a capture. Some uses only need structure, and
-> turning them off makes a capture much smaller and faster. **Cost:** every detector must check
-> the flag; reviews check this.
+> **Decision —** all statements are gated by `ctx.capture_statements` (on by default; off with `--no-capture-statements`).
+> **Why:** statements are the largest part of a capture. Some uses only need structure (files,
+> classes, functions, imports), and turning statements off makes a capture much smaller and
+> faster. **Cost:** with the flag off there are no routes, API/DB calls, events, comments or enum
+> members either. Every detector must check the flag; reviews check this.
 
-Detail page: [Statement model](architecture/statement-model.md) *(planned)*.
+Detail page: [Statement model](architecture/statement-model.md).
 
 ---
 
@@ -539,9 +545,10 @@ If two records would get the same id, `disambiguate` adds `#2`, `#3`… in a fix
 
 > **Decision —** ids are deterministic and computed from the source, never random or counters.
 > **Why:** (1) a framework detector can compute the *same* parent id the language parser
-> assigned, without a lookup; (2) re-running cog on unchanged code produces the same ids, so the
-> backend can update the graph in place (it stores the statement id as `captureId`, its unique
-> key). **Cost:** ids change when code moves to a different line.
+> assigned, without a lookup; (2) re-running cog on unchanged code produces the same ids. The
+> backend stores each `Class`/`Function`/`Statement` id as the `captureId` property and uses it
+> to match parents and children, so a stable id means a stable graph. **Cost:** ids change when
+> code moves to a different line.
 
 ---
 
@@ -560,17 +567,17 @@ flowchart LR
   C -- HAS_METHOD --> Fn
   F & C & Fn -- HAS_STATEMENT --> S[Statement]
   F -- "IMPORTS (importFiles)" --> F2[File]
-  Fn -- "CALLS (calls[].path)" --> F3[File]
-  C -- "EXTENDS (extends)" --> C2[Class]
+  Fn -- "CALLS (calls[].name + path)" --> Fn2[Function]
+  C -- "EXTENDS (extends, by name)" --> C2[Class]
 ```
 
 | Capture field | Becomes |
 |---|---|
 | `parentId` | Containment edges: `HAS_CLASS`, `HAS_FUNCTION`, `HAS_METHOD`, `HAS_STATEMENT` |
 | `importFiles` | `IMPORTS` edges between files |
-| `calls[].path` | `CALLS` edges (no edge when empty) |
-| `extends` | `EXTENDS` edges |
-| Statement `id` | The `captureId` property, the statement's unique key in Neo4j |
+| `calls[]` | `CALLS` edges to the functions named `calls[].name` in file `calls[].path` (no edge when `path` is empty) |
+| `extends` | `EXTENDS` edges to classes with that name in the repository |
+| `id` of Class / Function / Statement | The `captureId` property (the statement's unique key) |
 
 > **Decision —** `File` and `Class` are **open** nodes; `Function` and `Statement` are **allow-listed**.
 > **Why:** files and classes need room for parser-specific attributes (config metadata, UI
@@ -593,7 +600,7 @@ flowchart LR
 
 The external description of the graph model is the
 [Code Ontology Parser Target Spec](https://accionlabs.atlassian.net/wiki/spaces/~5cfa0cffd898610dbf3bacf1/pages/2483453956/Code+Ontology+Parser+Target+Spec+Neo4j+Graph+Model).
-Detail page: [Capture-to-graph mapping](architecture/graph-mapping.md) *(planned)*.
+Detail page: [Capture-to-graph mapping](architecture/graph-mapping.md).
 
 ---
 
@@ -630,7 +637,7 @@ Other places that resolve values:
 - **Inheritance** (`parsers/index_common.py`): base classes in other files, e.g. routes
   inherited from a base controller.
 
-Detail page: [Cross-file resolution](architecture/cross-file-resolution.md) *(planned)*.
+Detail page: [Cross-file resolution](architecture/cross-file-resolution.md).
 
 ---
 
@@ -827,7 +834,7 @@ from another — a few older framework packages still do this ([§16](#16-known-
 | Parsers | Route emitters skip fixture files | [§6](#6-the-parser-model) |
 | Statements | Flat list linked by `parentId` | [§7](#7-the-statement-model) |
 | Statements | Syntax (`nodeType`) and meaning (`semanticType`) are separate | [§7](#7-the-statement-model) |
-| Statements | Semantic statements are gated by `capture_statements` | [§7](#7-the-statement-model) |
+| Statements | All statements are gated by `capture_statements` | [§7](#7-the-statement-model) |
 | Ids | Deterministic ids computed from the source | [§8](#8-ids-and-linking) |
 | Contract | Open `File`/`Class`, allow-listed `Function`/`Statement` | [§9](#9-the-capture-contract-and-the-graph) |
 | Contract | Unknown values are omitted | [§9](#9-the-capture-contract-and-the-graph) |
@@ -855,9 +862,9 @@ from another — a few older framework packages still do this ([§16](#16-known-
 | [Parser Reference](parser-reference.md) | Building a parser step by step |
 | [Parser Review & Gap Analysis Guide](parser-review-guide.md) | Reviewing a parser and reporting its gaps |
 | [Template Capture](template-capture.md) | How markup files are handled |
-| [Statement model](architecture/statement-model.md) *(planned)* | Emission rules, enrichment, comments, enum members, splitting |
-| [Cross-file resolution](architecture/cross-file-resolution.md) *(planned)* | Indexes, call resolution, inheritance, constant folding |
-| [Capture-to-graph mapping](architecture/graph-mapping.md) *(planned)* | How each capture field becomes a Neo4j node, property or edge |
+| [Statement model](architecture/statement-model.md) | Emission rules, enrichment, comments, enum members, splitting |
+| [Cross-file resolution](architecture/cross-file-resolution.md) | Indexes, call resolution, inheritance, constant folding |
+| [Capture-to-graph mapping](architecture/graph-mapping.md) | How each capture field becomes a Neo4j node, property or edge |
 | [Target Spec (Confluence)](https://accionlabs.atlassian.net/wiki/spaces/~5cfa0cffd898610dbf3bacf1/pages/2483453956/Code+Ontology+Parser+Target+Spec+Neo4j+Graph+Model) | The graph model the backend ingests |
 </content>
 </invoke>
