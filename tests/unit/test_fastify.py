@@ -556,3 +556,51 @@ def test_shorthand_route_accepts_schema_options_before_handler() -> None:
     assert [(route.method, route.endpoint, route.handler) for route in routes] == [
         ("GET", "/s", "handler")
     ]
+
+
+def test_self_registering_plugin_terminates() -> None:
+    source = (
+        b"const fastify = Fastify();\n"
+        b"async function plugin(app) {\n"
+        b"  app.get('/x', handler);\n"
+        b"  app.register(plugin, { prefix: '/n' });\n"
+        b"}\n"
+        b"fastify.register(plugin, { prefix: '/a' });"
+    )
+
+    routes = _detect_routes(source)
+
+    assert ("GET", "/a/x") in [(route.method, route.endpoint) for route in routes]
+
+
+def test_mutually_registering_plugins_terminate() -> None:
+    source = (
+        b"const fastify = Fastify();\n"
+        b"async function a(app) {\n"
+        b"  app.get('/a', handler);\n"
+        b"  app.register(b, { prefix: '/b' });\n"
+        b"}\n"
+        b"async function b(app) {\n"
+        b"  app.get('/b', handler);\n"
+        b"  app.register(a, { prefix: '/a' });\n"
+        b"}\n"
+        b"fastify.register(a);"
+    )
+
+    routes = _detect_routes(source)
+
+    endpoints = [(route.method, route.endpoint) for route in routes]
+    assert ("GET", "/a") in endpoints
+    assert (None, "/b") in endpoints
+
+
+def test_plugin_declared_after_register_is_resolved() -> None:
+    source = (
+        b"const f = Fastify();\n"
+        b"f.register(users, { prefix: '/v1' });\n"
+        b"async function users(i) { i.get('/u', h); }"
+    )
+
+    routes = _detect_routes(source)
+
+    assert ("GET", "/v1/u") in [(route.method, route.endpoint) for route in routes]

@@ -124,8 +124,10 @@ class _Scope:
         string_value: Optional[str] = None,
         callable_node: Optional[Node] = None,
     ) -> None:
-        self.bindings.setdefault(name, []).append(
-            _Binding(position, is_fastify, string_value, callable_node)
+        entries = self.bindings.setdefault(name, [])
+        entries.insert(
+            bisect_right(entries, position, key=lambda entry: entry.position),
+            _Binding(position, is_fastify, string_value, callable_node),
         )
 
     def binding_at(self, name: str, position: int) -> Optional[_Binding]:
@@ -219,9 +221,11 @@ class _FileIndex:
                 if name_node is not None and name_node.type == "identifier":
                     destination = scope if node.type == "class_declaration" else parent_scope
                     if destination is not None:
+                        is_function = node.type == "function_declaration"
                         destination.add_binding(
                             node_text(name_node, source),
-                            name_node.start_byte,
+                            # Function declarations are hoisted: visible from scope start.
+                            destination.key[0] if is_function else name_node.start_byte,
                             callable_node=node if node.type == "function_declaration" else None,
                         )
             elif node.type in {"function_expression", "function"}:
@@ -569,10 +573,10 @@ def _walk(
 ) -> None:
     """Iteratively scan syntax nodes using the prebuilt per-file scope index."""
     mounted_plugin_nodes = _registered_plugin_nodes(node, source, file_index)
-    pending: list[tuple[Node, Optional[str]]] = [(node, prefix)]
+    pending: list[tuple[Node, Optional[str], frozenset]] = [(node, prefix, frozenset())]
 
     while pending:
-        current, current_prefix = pending.pop()
+        current, current_prefix, chain = pending.pop()
 
         if current.type == "call_expression":
             dispatch = _dispatch_call(current, source, file_index)
@@ -624,13 +628,17 @@ def _walk(
                         seen_ids=seen_ids,
                         out=out,
                     )
+                    # Skip plugins already on the current mount chain so
+                    # self- or mutually-registering plugins terminate.
                     pending.extend(
-                        (child, child_prefix) for child, child_prefix in reversed(children)
+                        (child, child_prefix, chain | {file_index.node_key(child)})
+                        for child, child_prefix in reversed(children)
+                        if file_index.node_key(child) not in chain
                     )
                     continue
 
         pending.extend(
-            (child, current_prefix)
+            (child, current_prefix, chain)
             for child in reversed(current.named_children)
             if file_index.node_key(child) not in mounted_plugin_nodes
         )
