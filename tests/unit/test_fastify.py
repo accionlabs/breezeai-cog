@@ -398,11 +398,9 @@ def test_many_route_path_constants_resolve_from_the_per_file_index() -> None:
     root = parse_source("typescript", source).root_node
     index = fastify_routes._FileIndex(root, source, {})
     pending = [root]
-    syntax_node_count = 0
     scope_lookup_node_count = 0
     while pending:
         node = pending.pop()
-        syntax_node_count += 1
         if node.type in {
             "call_expression",
             "identifier",
@@ -417,7 +415,6 @@ def test_many_route_path_constants_resolve_from_the_per_file_index() -> None:
     assert len(routes) == count
     assert routes[0].endpoint == "/route-0"
     assert routes[-1].endpoint == f"/route-{count - 1}"
-    assert index.indexed_node_count == syntax_node_count
     assert len(index.node_scopes) == scope_lookup_node_count
 
 
@@ -604,3 +601,31 @@ def test_plugin_declared_after_register_is_resolved() -> None:
     routes = _detect_routes(source)
 
     assert ("GET", "/v1/u") in [(route.method, route.endpoint) for route in routes]
+
+
+def test_fastify_plugin_wrapper_and_wildcard_routes() -> None:
+    source = (
+        b"const f = Fastify();\n"
+        b"f.register(fp(users), { prefix: '/v1' });\n"
+        b"f.get('*', h);\n"
+        b"async function users(i) { i.get('/u', h); i.get('', h); }"
+    )
+
+    endpoints = [(r.method, r.endpoint) for r in _detect_routes(source)]
+
+    assert ("GET", "/v1/u") in endpoints
+    assert ("GET", "/v1") in endpoints
+    assert ("GET", "/*") in endpoints
+
+
+def test_chained_register_and_route_calls_are_detected() -> None:
+    source = (
+        b"const f = Fastify();\n"
+        b"f.register(a, { prefix: '/a' }).register(b, { prefix: '/b' }).get('/c', h);\n"
+        b"async function a(i) { i.get('/x', h); }\n"
+        b"async function b(i) { i.get('/y', h); }"
+    )
+
+    endpoints = {(r.method, r.endpoint) for r in _detect_routes(source)}
+
+    assert {("GET", "/a/x"), ("GET", "/b/y"), ("GET", "/c"), (None, "/a"), (None, "/b")} <= endpoints

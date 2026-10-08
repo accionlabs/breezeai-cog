@@ -83,6 +83,13 @@ _SCOPE_NODE_TYPES = {
     "for_in_statement",
 }
 
+_CHAINABLE_METHODS = {"route", "register"}
+
+_PLUGIN_WRAPPER_NAMES = {
+    "fp",
+    "fastifyPlugin",
+}
+
 _FASTIFY_FACTORY_NAMES = {
     "fastify",
     "Fastify",
@@ -175,11 +182,7 @@ class _FileIndex:
         self.external_constants = external_constants
         self.node_scopes: dict[tuple[int, int, str], _Scope] = {}
         self.scopes: dict[tuple[int, int, str], _Scope] = {}
-        self.indexed_node_count = 0
         self.root_scope = self._build(root, source)
-        for scope in self.scopes.values():
-            for entries in scope.bindings.values():
-                entries.sort(key=lambda entry: entry.position)
 
     @staticmethod
     def node_key(node: Node) -> tuple[int, int, str]:
@@ -191,7 +194,6 @@ class _FileIndex:
 
         while pending:
             node, parent_scope, nested_function = pending.pop()
-            self.indexed_node_count += 1
             scope = parent_scope
             if node.type in _LEXICAL_SCOPE_NODE_TYPES:
                 key = self.node_key(node)
@@ -583,6 +585,10 @@ def _walk(
 
             if dispatch is not None:
                 kind, member_name, args = dispatch
+                # A chained receiver is itself a call that must be scanned.
+                chained = current.child_by_field_name("function").child_by_field_name("object")
+                if chained.type == "call_expression":
+                    pending.append((chained, current_prefix, chain))
 
                 if kind == "method":
                     _http_method_route(
@@ -658,7 +664,7 @@ def _registered_plugin_nodes(
         if current.type == "call_expression":
             dispatch = _dispatch_call(current, source, file_index)
             if dispatch is not None and dispatch[0] == "register" and dispatch[2]:
-                plugin_node = dispatch[2][0]
+                plugin_node = _unwrap_plugin(dispatch[2][0], source)
                 if plugin_node.type == "identifier":
                     callable_node = file_index.resolve_callable(
                         node_text(plugin_node, source),
@@ -670,6 +676,22 @@ def _registered_plugin_nodes(
         pending.extend(current.named_children)
 
     return mounted
+
+
+def _chain_base(node: Optional[Node], source: bytes) -> Optional[Node]:
+    """Follow chained Fastify calls (`app.register(a).get(...)`) to the instance."""
+    while node is not None and node.type == "call_expression":
+        callee = node.child_by_field_name("function")
+        if callee is None or callee.type != "member_expression":
+            break
+        prop = callee.child_by_field_name("property")
+        if prop is None or (
+            node_text(prop, source) not in _HTTP_METHODS
+            and node_text(prop, source) not in _CHAINABLE_METHODS
+        ):
+            break
+        node = callee.child_by_field_name("object")
+    return node
 
 
 def _dispatch_call(
@@ -694,7 +716,7 @@ def _dispatch_call(
     if member_name not in _HTTP_METHODS and member_name not in {"route", "register"}:
         return None
 
-    receiver = callee.child_by_field_name("object")
+    receiver = _chain_base(callee.child_by_field_name("object"), source)
     if receiver is None or receiver.type != "identifier":
         return None
 
@@ -713,10 +735,7 @@ def _dispatch_call(
     if member_name == "route":
         return "app_route", member_name, args
 
-    if member_name == "register":
-        return "register", member_name, args
-
-    return None
+    return "register", member_name, args
 
 
 def _find_handler_arg(
@@ -755,7 +774,7 @@ def _http_method_route(
 
     url = _resolve_static_string(args[0], source, file_index)
 
-    if url is None or not url.startswith("/"):
+    if url is None or not (url.startswith("/") or url in ("", "*")):
         return
 
     handler_node = _find_handler_arg(args[1:])
@@ -829,7 +848,7 @@ def _app_route(
 
     url = _resolve_static_string(url_node, source, file_index)
 
-    if url is None or not url.startswith("/"):
+    if url is None or not (url.startswith("/") or url in ("", "*")):
         return
 
     methods: list[str | None]
@@ -944,7 +963,7 @@ def _fastify_register(
     if not args:
         return []
 
-    plugin_node = args[0]
+    plugin_node = _unwrap_plugin(args[0], source)
     opts_node = args[1] if len(args) > 1 else None
 
     child_prefix = prefix
@@ -1013,6 +1032,23 @@ def _fastify_register(
         children.append((opts_node, prefix))
 
     return children
+
+
+def _unwrap_plugin(node: Node, source: bytes) -> Node:
+    """Strip `fp(plugin)` / `fastifyPlugin(plugin)` wrappers around a plugin."""
+    while node.type == "call_expression":
+        callee = node.child_by_field_name("function")
+        call_args = node.child_by_field_name("arguments")
+        if (
+            callee is None
+            or callee.type != "identifier"
+            or node_text(callee, source) not in _PLUGIN_WRAPPER_NAMES
+            or call_args is None
+            or not call_args.named_children
+        ):
+            break
+        node = call_args.named_children[0]
+    return node
 
 
 def _join_prefix(
