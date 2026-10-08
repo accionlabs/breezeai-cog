@@ -19,6 +19,7 @@ from breezeai_cog.parsers.groovy.parser import GroovyParser
 from breezeai_cog.parsers.java.parser import JavaParser
 from breezeai_cog.parsers.kotlin.parser import KotlinParser
 from breezeai_cog.parsers.python.parser import PythonParser
+from breezeai_cog.parsers.ruby.parser import RubyParser
 from breezeai_cog.parsers.typescript.parser import TypeScriptParser
 from breezeai_cog.parsers.vb.parser import VbParser
 
@@ -209,6 +210,38 @@ def test_vb_comment_capture(tmp_path) -> None:
     assert "' header comment" in {t for t, *_ in got}
 
 
+# --- Ruby: `#` line comments + `=begin`/`=end` block; in-body comment under a control-flow -----
+
+def test_ruby_comment_capture(tmp_path) -> None:
+    src = (
+        "# header\n"                 # L1 -> Invoice (bind-ahead)
+        "class Invoice\n"
+        "  # doc for total\n"        # L3 -> total (bind-ahead)
+        "  def total\n"
+        "    x = 1 # trailing\n"     # L5 -> folded into the assignment text
+        "    if x\n"
+        "      # inside if\n"        # L7 -> total (if absorbs only its header line)
+        "      x\n"
+        "    end\n"
+        "  end\n"
+        "=begin\n"                   # L11-13 block -> Invoice (containment)
+        "block doc\n"
+        "=end\n"
+        "end\n"
+    )
+    rec = _parse(tmp_path, RubyParser(), "invoice.rb", src)
+    got = _comments(rec)
+    assert ("# header", "Invoice", 1, 1) in got
+    assert ("# doc for total", "total", 3, 3) in got
+    assert ("# inside if", "total", 7, 7) in got
+    assert ("=begin\nblock doc\n=end", "Invoice", 11, 13) in got
+    assert not any("trailing" in t for t, *_ in got)
+    assert "x = 1 # trailing" in _stmt_texts(rec)
+
+    # Gating: no comments when capture is off.
+    assert not _comments(_parse(tmp_path, RubyParser(), "invoice.rb", src, capture=False))
+
+
 # --- TypeScript ---------------------------------------------------------------------------
 
 def test_typescript_comment_capture(tmp_path) -> None:
@@ -301,6 +334,12 @@ _COMMENT_FIXTURES = [
         "# k_hdr\nclass A:\n    \"\"\"k_doc.\"\"\"\n    def m(self):\n        x = 1  # k_trail\n"
         "        # k_m1\n        # k_m2\n        y = 2\n",
         ["k_hdr", "k_doc", "k_trail", "k_m1", "k_m2"],
+    ),
+    (
+        RubyParser(), "a.rb",
+        "# k_hdr\nclass A\n  # k_body\n  def m\n    x = 1 # k_trail\n"
+        "    # k_m1\n    # k_m2\n    y = 2\n  end\nend\n",
+        ["k_hdr", "k_body", "k_trail", "k_m1", "k_m2"],
     ),
 ]
 
