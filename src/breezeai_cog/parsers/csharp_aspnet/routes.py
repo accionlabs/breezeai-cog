@@ -29,6 +29,7 @@ from tree_sitter import Node
 
 from ...emit import disambiguate, statement_id
 from ...schemas import Decorator, FileRecord, Function, Statement
+from ..dotnet_common import response_dto, simple_attr_name
 from ..index_common import walk_heritage
 from ..treesitter import node_text
 
@@ -63,13 +64,6 @@ _GRAPHQL_UIS = {
 # MapControllers()/MapControllerRoute() only *enable* attribute/conventional routing; the
 # concrete controller endpoints come from detect_controller_routes, so they emit nothing
 # here (a conventional-route pattern like "{controller}/{action}" is not a callable path).
-
-
-def simple_attr_name(name: str) -> str:
-    """Normalize a C#/VB attribute name to its short form: an attribute may be written
-    ``[HttpGet]`` or ``[HttpGetAttribute]`` (and svcutil emits the full form) — both bind to
-    the same class, so drop a trailing ``Attribute``."""
-    return name[: -len("Attribute")] if name.endswith("Attribute") and name != "Attribute" else name
 
 
 def _first_arg(dec: Decorator) -> str:
@@ -165,47 +159,6 @@ def _method_templates(http_tmpl: str, method_route: str | None) -> list[str]:
     return [""]
 
 
-def _has_top_level_comma(type_args: str) -> bool:
-    """Whether ``type_args`` lists more than one type at its own nesting level —
-    ``"string, int"`` yes, ``"Dictionary<string, int>"`` no."""
-    depth = 0
-    for ch in type_args:
-        if ch == "<":
-            depth += 1
-        elif ch == ">":
-            depth -= 1
-        elif ch == "," and depth == 0:
-            return True
-    return False
-
-
-def _response_dto(return_type: str | None) -> str | None:
-    """Unwrap ``Task<…>`` / ``ActionResult<…>`` / ``Task(Of …)`` to the payload type;
-    bare action results (``IActionResult``/``ActionResult``/``void``) → None. A trailing ``?``
-    (nullable reference annotation) is dropped so the result names a real type."""
-    if not return_type:
-        return None
-    t = return_type.strip()
-    # C# generic: Foo<Bar> → Bar. A generic with several type arguments has no single payload
-    # (`FieldResult<string, MyException>`, `Dictionary<string, int>`), so unwrapping stops there
-    # and the declared outer type is kept — joining `Dictionary` to nothing is a clean miss,
-    # whereas the concatenation `string, int` is not a type name at all.
-    while "<" in t and t.endswith(">"):
-        inner = t[t.index("<") + 1: -1].strip()
-        if _has_top_level_comma(inner):
-            t = t[: t.index("<")].strip()
-            break
-        t = inner
-    # VB generic: Foo(Of Bar) → Bar
-    while t.startswith(("Task(Of ", "ValueTask(Of ", "ActionResult(Of ")) and t.endswith(")"):
-        t = t[t.index("(Of ") + 4: -1].strip()
-    if t in ("IActionResult", "ActionResult", "void", "Void", "Task", "ValueTask", ""):
-        return None
-    # `Task<Track?>` unwraps to `Track?`; the nullable annotation is not part of the type name,
-    # and keeping it means responseDTO names no captured class (a dead reference).
-    return t.rstrip("?").strip() or None
-
-
 def _request_dto(fn: Function) -> str | None:
     for p in fn.params:
         if any(simple_attr_name(d.name) == "FromBody" for d in p.decorators):
@@ -259,7 +212,7 @@ def _route_statement(
         authRequired=auth_required,
         guards=guards,
         requestDTO=_request_dto(fn),
-        responseDTO=_response_dto(fn.returnType),
+        responseDTO=response_dto(fn.returnType),
         startLine=fn.startLine,
         endLine=fn.endLine,
         path=fn.path,

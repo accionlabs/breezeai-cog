@@ -23,7 +23,7 @@ from tree_sitter import Node
 from ...emit import disambiguate, statement_id
 from ...logging import get_logger
 from ...schemas import Class, Decorator, FileRecord, Function, Statement
-from ..csharp_aspnet.routes import _response_dto, simple_attr_name
+from ..dotnet_common import response_dto, simple_attr_name
 from ..treesitter import first_line, node_text
 from .mappings import (
     ARG_MARKER_ATTRS,
@@ -146,7 +146,7 @@ def _statement(
         authRequired=bool(guards) or None,
         guards=guards or None,
         requestDTO=request_dto(fn),
-        responseDTO=_response_dto(fn.returnType),
+        responseDTO=response_dto(fn.returnType),
         dataLoaders=data_loaders(fn, generated_loaders),
         startLine=fn.startLine,
         endLine=fn.endLine,
