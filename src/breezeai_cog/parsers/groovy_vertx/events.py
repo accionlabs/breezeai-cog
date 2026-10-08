@@ -18,8 +18,9 @@ from tree_sitter import Node
 
 from ...emit import disambiguate, file_id, statement_id
 from ...schemas import FileRecord, Statement
+from ..enclosing import Enclosing
 from ..treesitter import first_line, node_text
-from ..vertx_common import classify_call, enclosing_statement, owner_function, render_address
+from ..vertx_common import classify_call, render_address
 
 
 def _invocations(root: Node) -> list[Node]:
@@ -99,6 +100,7 @@ def detect_vertx_groovy(
     # are routes only when the file actually builds a RouteMatcher — a cheap file-level gate
     # that keeps a stray `map.get(...)` from being mistaken for a route.
     uses_routematcher = b"RouteMatcher" in source
+    enclosing = Enclosing(record)
 
     for call in _invocations(root):
         method, endpoint_path, first_arg, obj = _parts(call, source, consts)
@@ -111,7 +113,7 @@ def detect_vertx_groovy(
         semantic, verb, endpoint, route_kind = info
         line = call.start_point[0] + 1
 
-        stmt = enclosing_statement(line, record.statements)
+        stmt = enclosing.statement(line)
         if stmt is not None:  # detection on the same span → enrich in place
             stmt.semanticType = semantic
             stmt.framework = "vertx"
@@ -125,7 +127,7 @@ def detect_vertx_groovy(
             new_id = disambiguate(statement_id(path, line, call.start_point[1]), seen)
             record.statements.append(Statement(
                 id=new_id,
-                parentId=owner_function(line, record.functions, fid),
+                parentId=enclosing.function_id(line, fid),
                 nodeType=call.type,
                 semanticType=semantic,
                 text=first_line(node_text(call, source)),
