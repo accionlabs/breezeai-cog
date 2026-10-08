@@ -32,7 +32,7 @@ from pathlib import Path
 
 from ...emit import disambiguate, file_id, statement_id
 from ...schemas import Statement
-from ..csharp_webforms.mounts import _app_root, _to_repo_path, ci_resolve
+from ..dotnet_common import ci_resolve, to_repo_path, web_app_root
 
 
 @dataclass(frozen=True)
@@ -98,7 +98,7 @@ def _codebehind_import(code_behind: str, rel_path: str, repo_root: Path | None) 
     against the host file's own directory (the standard same-folder ``CodeBehind`` convention)."""
     if repo_root is None:
         return None
-    rel = _to_repo_path(code_behind, posixpath.dirname(rel_path), _app_root(rel_path, repo_root))
+    rel = to_repo_path(code_behind, posixpath.dirname(rel_path), web_app_root(rel_path, repo_root))
     if rel is None:  # escaped the repo root
         return None
     return ci_resolve(repo_root, rel)

@@ -853,7 +853,7 @@ src/breezeai_cog/
 │  ├─ comments_common.py           shared comment pass
 │  ├─ callresolve.py, constfold.py, index_common.py   shared resolution helpers
 │  ├─ detection/                   shared api / db / query classifiers
-│  ├─ vertx_common.py              helpers shared by one framework family
+│  ├─ vertx_common.py, dotnet_common.py, aspnet_common.py   helpers shared by one framework family
 │  ├─ <lang>/                      language parsers
 │  └─ <lang>_<framework>/          framework parsers
 ├─ emit/                           ids, NDJSON, gzip, sinks, statement splitting
@@ -880,7 +880,7 @@ flowchart TD
 Dependencies point **one way**: entry points → services → core → parsers → schemas. Parsers
 never import from `core/`, `services/` or `server/`. Code shared between framework parsers
 should live in a shared module (like `vertx_common.py`) rather than one framework importing
-from another — a few older framework packages still do this ([§16](#16-known-limitations-and-open-questions)).
+from another.
 
 **Change zones.** How much review a change needs depends on where it lands:
 
@@ -906,7 +906,6 @@ from another — a few older framework packages still do this ([§16](#16-known-
 | Type information | tree-sitter has no type checker, so overloads and inferred types are only partly resolved. |
 | One repository at a time | Links between repositories (a client in one repo calling a service in another) are not made by cog. |
 | Ids and line numbers | Ids include line numbers, so moving code changes ids. |
-| Cross-framework imports | Some framework parsers import helpers from another framework's package (e.g. `csharp_wcf` and `csharp_hotchocolate` from `csharp_aspnet.routes`; `dotnet_servicehost` from `csharp_webforms`). A change in one silently changes the other; these helpers should move to a shared module. |
 | Grammar quality | Capture is only as good as the grammar. Some grammars are pinned to forks until upstream fixes land. |
 
 ---
