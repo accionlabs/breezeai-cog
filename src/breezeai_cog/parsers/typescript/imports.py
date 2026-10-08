@@ -478,9 +478,11 @@ def _relative_import_map(root: Node, source: bytes) -> dict[str, str]:
 
 
 def _mount_receiver_ok(obj_text: str) -> bool:
-    """Whether a ``X.use(...)`` receiver looks like an Express app/router — mirrors the runtime
-    detector's ``_is_router_obj`` heuristic (duplicated to keep the framework parser out of the
-    index module's imports)."""
+    """Whether a ``X.use(...)`` receiver matches the runtime detector's name fallback.
+
+    This intentionally checks only the receiver name; the route detector additionally resolves
+    local bindings and constructor expressions.
+    """
     tail = obj_text.lower().rsplit(".", 1)[-1].strip()
     return tail in {"app", "router", "server", "api", "route"} or tail.endswith(("router", "app"))
 
