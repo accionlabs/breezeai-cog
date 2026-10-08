@@ -54,6 +54,85 @@ def test_routes_detected_and_linked(tmp_path) -> None:
     assert rec.framework == "nestjs"
 
 
+def test_sse_decorator_is_detected_as_get_route(tmp_path) -> None:
+    source = b'''import { Controller, Sse } from '@nestjs/common';
+
+@Controller('users')
+export class UsersController {
+  @Sse('stream')
+  stream() {}
+}
+'''
+    p = tmp_path / "users.controller.ts"
+    p.write_bytes(source)
+    ctx = ParseContext(path="users.controller.ts", abs_path=p, source=source,
+                       repo_root=tmp_path, capture_statements=True)
+
+    rec = NestJSParser().parse_file(ctx)
+    routes = [s for s in rec.statements if s.semanticType == "route"]
+
+    assert len(routes) == 1
+    assert routes[0].endpoint == "/users/stream"
+    assert routes[0].method == "GET"
+    assert routes[0].routeKind == "route"
+
+
+def test_array_route_paths_emit_one_route_per_path(tmp_path) -> None:
+    source = b'''import { Controller, Get } from '@nestjs/common';
+
+@Controller('users')
+class UsersController {
+  @Get([':id', ':slug'])
+  find() {}
+}
+'''
+    p = tmp_path / "users.controller.ts"
+    p.write_bytes(source)
+    ctx = ParseContext(path="users.controller.ts", abs_path=p, source=source,
+                       repo_root=tmp_path, capture_statements=True)
+
+    rec = NestJSParser().parse_file(ctx)
+    routes = [s for s in rec.statements if s.semanticType == "route"]
+
+    assert {route.endpoint for route in routes} == {"/users/:id", "/users/:slug"}
+    assert len(routes) == 2
+    assert len({route.id for route in routes}) == 2
+    assert all(route.method == "GET" and route.handler == "find" for route in routes)
+
+
+def test_array_controller_bases_expand_with_array_route_paths(tmp_path) -> None:
+    source = b'''import { Controller, Get } from '@nestjs/common';
+
+@Controller(['a', 'b'])
+class ArrayController {
+  @Get([':id', ':slug'])
+  find() {}
+}
+
+@Controller({ path: ['c', 'd'] })
+class ObjectPathController {
+  @Get([':id', ':slug'])
+  find() {}
+}
+'''
+    p = tmp_path / "array.controller.ts"
+    p.write_bytes(source)
+    ctx = ParseContext(path="array.controller.ts", abs_path=p, source=source,
+                       repo_root=tmp_path, capture_statements=True)
+
+    rec = NestJSParser().parse_file(ctx)
+    routes = [s for s in rec.statements if s.semanticType == "route"]
+
+    assert {route.endpoint for route in routes} == {
+        "/a/:id", "/a/:slug", "/b/:id", "/b/:slug",
+        "/c/:id", "/c/:slug", "/d/:id", "/d/:slug",
+    }
+    assert len(routes) == 8
+    assert len({route.id for route in routes}) == 8
+    assert all(route.method == "GET" and route.handler == "find" for route in routes)
+    assert all(not any(char in route.endpoint for char in "[]'\"") for route in routes)
+
+
 def test_base_extraction_reused(tmp_path) -> None:
     rec = _parse(tmp_path)
     assert {f.name for f in rec.functions} == {"getOne", "create", "helper"}
@@ -217,6 +296,30 @@ def test_resolve_field_args_dto(tmp_path) -> None:
     assert by_endpoint["Brand.count"].requestDTO == "RegionArgs"
 
 
+def test_resolve_reference_captured_with_spec_method(tmp_path) -> None:
+    source = b'''import { Resolver, ResolveReference } from '@nestjs/graphql';
+
+@Resolver(() => Product)
+export class ProductResolver {
+  @ResolveReference()
+  resolveReference(reference: { id: string }): Product { return null; }
+}
+'''
+    p = tmp_path / "product.resolver.ts"
+    p.write_bytes(source)
+    ctx = ParseContext(path="product.resolver.ts", abs_path=p, source=source,
+                       repo_root=tmp_path, capture_statements=True)
+
+    rec = NestJSParser().parse_file(ctx)
+    references = [s for s in rec.statements if s.semanticType == "route"]
+
+    assert len(references) == 1
+    assert references[0].method == "RESOLVE_REFERENCE"
+    assert references[0].endpoint == "Product.resolveReference"
+    assert references[0].routeKind == "reference_resolver"
+    assert references[0].framework == "graphql"
+
+
 def test_output_validates(tmp_path) -> None:
     rec = _parse(tmp_path)
     errors = list(Draft202012Validator(FileRecord.model_json_schema(by_alias=True))
@@ -317,6 +420,102 @@ def test_event_and_message_patterns_detected(tmp_path) -> None:
     assert consumers["onContact"].method == "EVENT"
     assert consumers["onContact"].routeKind == "message" and consumers["onContact"].framework == "nestjs"
     assert consumers["sum"].method == "MESSAGE"
+
+
+def test_schedule_decorators_emit_timers(tmp_path) -> None:
+    source = b'''import { Cron, Interval, Timeout } from '@nestjs/schedule';
+
+export class ScheduledTasks {
+  @Cron('45 * * * * *')
+  nightly() {}
+
+  @Interval(1000)
+  refresh() {}
+
+  @Timeout(5000)
+  initialize() {}
+}
+'''
+    p = tmp_path / "scheduled-tasks.ts"
+    p.write_bytes(source)
+    ctx = ParseContext(path="scheduled-tasks.ts", abs_path=p, source=source,
+                       repo_root=tmp_path, capture_statements=True)
+
+    rec = NestJSParser().parse_file(ctx)
+    timers = {s.handler: s for s in rec.statements if s.semanticType == "timer"}
+
+    assert set(timers) == {"nightly", "refresh", "initialize"}
+    assert timers["nightly"].endpoint == "45 * * * * *"
+    assert timers["refresh"].endpoint == "1000"
+    assert timers["initialize"].endpoint == "5000"
+    assert all(timer.nodeType == "synthetic" for timer in timers.values())
+
+
+def test_gateway_subscribe_message_emits_websocket_route(tmp_path) -> None:
+    source = b'''import { WebSocketGateway, SubscribeMessage } from '@nestjs/websockets';
+
+@WebSocketGateway()
+class ChatGateway {
+  @SubscribeMessage('msg')
+  onMsg() {}
+}
+
+class NotAGateway {
+  @SubscribeMessage('ignored')
+  ignored() {}
+}
+'''
+    p = tmp_path / "chat.gateway.ts"
+    p.write_bytes(source)
+    ctx = ParseContext(path="chat.gateway.ts", abs_path=p, source=source,
+                       repo_root=tmp_path, capture_statements=True)
+
+    rec = NestJSParser().parse_file(ctx)
+    routes = [s for s in rec.statements if s.semanticType == "route"]
+
+    assert len(routes) == 1
+    assert routes[0].endpoint == "msg"
+    assert routes[0].handler == "onMsg"
+    assert routes[0].method == "MESSAGE"
+    assert routes[0].routeKind == "ws"
+    assert routes[0].nodeType == "synthetic"
+
+
+def test_gateway_namespace_and_path_prefix_subscribe_endpoints(tmp_path) -> None:
+    source = b'''import { WebSocketGateway, SubscribeMessage } from '@nestjs/websockets';
+
+@WebSocketGateway(80, { namespace: 'chat', path: '/ws' })
+class ChatGateway {
+  @SubscribeMessage('msg')
+  onMsg() {}
+}
+
+@WebSocketGateway({ namespace: 'chat' })
+class NamespacedGateway {
+  @SubscribeMessage('msg')
+  onMsg() {}
+}
+
+@WebSocketGateway({ path: '/ws' })
+class PathGateway {
+  @SubscribeMessage('msg')
+  onMsg() {}
+}
+'''
+    p = tmp_path / "chat.gateway.ts"
+    p.write_bytes(source)
+    ctx = ParseContext(path="chat.gateway.ts", abs_path=p, source=source,
+                       repo_root=tmp_path, capture_statements=True)
+
+    rec = NestJSParser().parse_file(ctx)
+    routes = [s for s in rec.statements if s.semanticType == "route"]
+
+    assert {route.endpoint for route in routes} == {
+        "/ws/chat/msg", "/chat/msg", "/ws/msg",
+    }
+    assert len(routes) == 3
+    assert all(route.method == "MESSAGE" and route.routeKind == "ws" for route in routes)
+    assert all(route.nodeType == "synthetic" and route.handler == "onMsg" for route in routes)
 
 
 _RETTYPE_SRC = b'''import { Controller, Get } from '@nestjs/common';
