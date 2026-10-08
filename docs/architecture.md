@@ -880,7 +880,7 @@ flowchart TD
 Dependencies point **one way**: entry points → services → core → parsers → schemas. Parsers
 never import from `core/`, `services/` or `server/`. Code shared between framework parsers
 should live in a shared module (like `vertx_common.py`) rather than one framework importing
-from another — a few older framework packages still do this ([§16](#16-known-limitations-and-open-questions)).
+from another — one older framework package still does this ([§16](#16-known-limitations-and-open-questions)).
 
 **Change zones.** How much review a change needs depends on where it lands:
 
@@ -906,7 +906,7 @@ from another — a few older framework packages still do this ([§16](#16-known-
 | Type information | tree-sitter has no type checker, so overloads and inferred types are only partly resolved. |
 | One repository at a time | Links between repositories (a client in one repo calling a service in another) are not made by cog. |
 | Ids and line numbers | Ids include line numbers, so moving code changes ids. |
-| Cross-framework imports | Two framework parsers still import from another framework's package: `vb_aspnet` reuses the route detectors in `csharp_aspnet.routes`, and `typescript_graphql_codefirst` imports helpers from `typescript_graphql.routes`. A change in one silently changes the other; these should move to a shared module, as the other .NET helpers did (`dotnet_common.py`). |
+| Cross-framework imports | `vb_aspnet` still imports the route detectors from `csharp_aspnet.routes`, so a change to C# ASP.NET routing silently changes VB too. The detectors should move to a shared module, as the smaller .NET helpers did (`dotnet_common.py`). |
 | Grammar quality | Capture is only as good as the grammar. Some grammars are pinned to forks until upstream fixes land. |
 
 ---
