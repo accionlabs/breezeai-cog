@@ -34,8 +34,9 @@ from __future__ import annotations
 from tree_sitter import Node
 
 from ...emit import disambiguate, file_id, statement_id
-from ...schemas import FileRecord, Function, SemanticType, Statement
+from ...schemas import FileRecord, SemanticType, Statement
 from ..additive import DetectContext, Detector, register_detector
+from ..enclosing import Enclosing
 from ..treesitter import first_line, node_text
 
 # SDK v3 ``new XxxCommand({...})`` → (semanticType, framework).
@@ -324,28 +325,6 @@ def _untyped_cjs_handler(
     return "eventbus_consumer", "aws-lambda", None, hname
 
 
-def _enclosing_statement(line: int, statements: list[Statement]) -> Statement | None:
-    best: Statement | None = None
-    best_span: int | None = None
-    for s in statements:
-        if s.startLine <= line <= s.endLine:
-            span = s.endLine - s.startLine
-            if best_span is None or span < best_span:
-                best, best_span = s, span
-    return best
-
-
-def _owner_function(line: int, functions: list[Function], fallback: str) -> str:
-    best = None
-    best_span: int | None = None
-    for f in functions:
-        if f.startLine <= line <= f.endLine:
-            span = f.endLine - f.startLine
-            if best_span is None or span < best_span:
-                best, best_span = f, span
-    return best.id if best is not None else fallback
-
-
 def detect_aws_events(
     root: Node, source: bytes, path: str, record: FileRecord, *, is_fixture: bool = False
 ) -> str | None:
@@ -359,6 +338,7 @@ def detect_aws_events(
         return None
     fid = file_id(path)
     seen = {s.id for s in record.statements}
+    enclosing = Enclosing(record)
     file_fw: str | None = None
     is_lambda = False
 
@@ -368,7 +348,7 @@ def detect_aws_events(
             continue
         sem, method, endpoint, fw = info
         line = call.start_point[0] + 1
-        stmt = _enclosing_statement(line, record.statements)
+        stmt = enclosing.statement(line)
         if stmt is not None and stmt.semanticType is None:  # enrich the base statement in place
             stmt.semanticType = sem
             stmt.framework = fw
@@ -379,7 +359,7 @@ def detect_aws_events(
             new_id = disambiguate(statement_id(path, line, call.start_point[1]), seen)
             seen.add(new_id)
             record.statements.append(Statement(
-                id=new_id, parentId=_owner_function(line, record.functions, fid),
+                id=new_id, parentId=enclosing.function_id(line, fid),
                 nodeType=call.type, semanticType=sem, text=first_line(node_text(call, source)),
                 method=method, endpoint=endpoint, framework=fw,
                 startLine=line, endLine=call.end_point[0] + 1, path=path,
@@ -404,7 +384,7 @@ def detect_aws_events(
         new_id = disambiguate(statement_id(path, line, decl.start_point[1]), seen)
         seen.add(new_id)
         record.statements.append(Statement(
-            id=new_id, parentId=_owner_function(line, record.functions, fid),
+            id=new_id, parentId=enclosing.function_id(line, fid),
             nodeType=decl.type, semanticType=sem, text=first_line(node_text(decl, source)),
             framework=fw, handler=hname, routeKind=route_kind,
             startLine=line, endLine=decl.end_point[0] + 1, path=path,

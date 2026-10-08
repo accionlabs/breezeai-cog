@@ -19,6 +19,7 @@ from tree_sitter import Node
 from ...emit import disambiguate, file_id, statement_id
 from ...schemas import FileRecord, Statement
 from ..additive import DetectContext, Detector, register_detector
+from ..enclosing import Enclosing
 from ..statements_common import strip_leading_base, url_placeholder
 from ..treesitter import first_line, node_text
 
@@ -237,28 +238,6 @@ def _classify(
     return None
 
 
-def _enclosing_statement(line: int, statements: list[Statement]) -> Statement | None:
-    best: Statement | None = None
-    best_span: int | None = None
-    for s in statements:
-        if s.startLine <= line <= s.endLine:
-            span = s.endLine - s.startLine
-            if best_span is None or span < best_span:
-                best, best_span = s, span
-    return best
-
-
-def _owner_function(line: int, functions, fallback: str) -> str:
-    best = None
-    best_span: int | None = None
-    for f in functions:
-        if f.startLine <= line <= f.endLine:
-            span = f.endLine - f.startLine
-            if best_span is None or span < best_span:
-                best, best_span = f, span
-    return best.id if best is not None else fallback
-
-
 def _has_express(source: bytes) -> bool:
     """Cheap correctness gate: the file imports ``express`` (either quote style). The
     ``app``/``router``/``route`` receiver heuristic in ``_is_router_obj`` is only safe on
@@ -316,6 +295,7 @@ def detect_express(
     matched = False
     fid = file_id(path)
     seen = {s.id for s in record.statements}
+    enclosing = Enclosing(record)
     binds = bindings or {}
     # The base this file's routes are served under, if it is a factory mounted elsewhere.
     mounts = getattr(index, "express_mounts", None)
@@ -332,7 +312,7 @@ def detect_express(
         auth_required = True if guards else None
         line = call.start_point[0] + 1
 
-        stmt = _enclosing_statement(line, record.statements)
+        stmt = enclosing.statement(line)
         if stmt is not None:  # detection on the same span → enrich in place
             stmt.semanticType = "route"
             stmt.framework = framework
@@ -350,7 +330,7 @@ def detect_express(
             new_id = disambiguate(statement_id(path, line, call.start_point[1]), seen)
             record.statements.append(Statement(
                 id=new_id,
-                parentId=_owner_function(line, record.functions, fid),
+                parentId=enclosing.function_id(line, fid),
                 nodeType=call.type,
                 semanticType="route",
                 text=first_line(node_text(call, source)),

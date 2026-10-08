@@ -18,8 +18,8 @@ from ...schemas import FileRecord, Statement
 from ...schemas.enums import SemanticType
 from ..base import ParseContext
 from ..additive import DetectContext, Detector, register_detector
+from ..enclosing import Enclosing
 from ..treesitter import node_text
-from ..vertx_common import enclosing_statement
 from .functions import type_map
 from .statements import _call_details, find_enclosing_parent_id
 
@@ -125,6 +125,7 @@ def detect_spark_calls(
 
     seen_ids = {s.id for s in record.statements}
     spark_types = _spark_types(root, source, base_types=types)
+    enclosing = Enclosing(record)
     found_any = False
 
     def walk(node: Node) -> None:
@@ -138,7 +139,7 @@ def detect_spark_calls(
                     found_any = True
                     sem_type, hint, op_method = _SPARK_OPS[op]
                     start = node.start_point[0] + 1
-                    stmt = enclosing_statement(start, record.statements)
+                    stmt = enclosing.statement(start)
                     if stmt is not None and stmt.semanticType is None:
                         stmt.semanticType = sem_type
                         stmt.dataAccessHint = hint
