@@ -358,3 +358,31 @@ def test_no_comment_dropped_or_duplicated(tmp_path, parser, filename, src, marke
         assert node_hits <= 1, f"{filename}: {m} emitted as {node_hits} comment nodes"
         assert node_hits + int(in_carrier) >= 1, f"{filename}: {m} dropped"
         assert not (node_hits and in_carrier), f"{filename}: {m} both a node and folded"
+
+
+# ── lookup structures (built once per file; must match the linear-scan semantics) ─────────
+
+
+def test_absorbed_uses_any_covering_span() -> None:
+    from breezeai_cog.parsers.comments_common import _Absorbed
+
+    absorbed = _Absorbed([(5, 6), (1, 20), (8, 9)])  # (1, 20) covers everything inside it
+    assert absorbed(10, 12) and absorbed(1, 20)
+    assert not absorbed(15, 21)  # runs past every span
+    assert not _Absorbed([(5, 6)])(4, 5)  # starts before the only span
+    assert not _Absorbed([])(1, 1)
+
+
+def test_innermost_latest_start_and_first_listed_tie() -> None:
+    from breezeai_cog.parsers.comments_common import _Innermost
+
+    # cls 1-30 ⊃ f 5-10, g 12-20; h and h2 share a start (one-line `class A { void h() {} }`)
+    scopes = [(1, 30, "cls"), (5, 10, "f"), (12, 20, "g"), (22, 25, "h"), (22, 25, "h2")]
+    innermost = _Innermost(scopes)
+    assert innermost(3, 3)[2] == "cls"
+    assert innermost(6, 7)[2] == "f"
+    assert innermost(9, 11)[2] == "cls"  # runs past f's end → the enclosing class
+    assert innermost(11, 11)[2] == "cls"  # between methods
+    assert innermost(15, 15)[2] == "g"
+    assert innermost(23, 23)[2] == "h"  # tie on start → first in list order wins
+    assert innermost(31, 31) is None  # after every scope
