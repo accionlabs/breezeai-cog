@@ -17,6 +17,7 @@ from ...emit import disambiguate, statement_id
 from ...schemas import FileRecord, Statement
 from ...schemas.enums import SemanticType
 from ..base import ParseContext
+from ..additive import DetectContext, Detector, register_detector
 from ..treesitter import node_text
 from ..vertx_common import enclosing_statement
 from .functions import type_map
@@ -168,3 +169,13 @@ def detect_spark_calls(
     walk(root)
     if found_any and not record.framework:
         record.framework = "spark"
+
+
+def _run(dc: DetectContext) -> str | None:
+    detect_spark_calls(dc.root, dc.ctx, dc.record, types=dc.types)  # labels the record itself
+    return None
+
+
+register_detector(Detector(
+    name="spark", language="scala", order=20, run=_run, frameworks=("spark",),
+))

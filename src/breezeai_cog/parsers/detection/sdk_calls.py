@@ -57,6 +57,7 @@ from tree_sitter import Node
 
 from ...emit import disambiguate, file_id, statement_id
 from ...schemas import FileRecord, Function, Statement
+from ..additive import DetectContext, Detector, register_detector
 from ..index_common import ClassHeritage
 from ..treesitter import first_line, node_text
 
@@ -1032,3 +1033,21 @@ def _detect_tsforce(
         emitted = True
 
     return emitted
+
+
+def _run(dc: DetectContext) -> str | None:
+    return detect_sdk_calls(
+        dc.root,
+        dc.source,
+        dc.path,
+        dc.record,
+        getattr(dc.ctx.resolution_index, "class_heritage", None),
+    )
+
+
+register_detector(Detector(
+    name="sdk-calls", language="typescript", order=30, run=_run,
+    frameworks=(
+        "hubspot", "chargebee", "salesforce", "graphql", "aws-s3", "aws-cognito", "aws-ssm",
+    ),
+))

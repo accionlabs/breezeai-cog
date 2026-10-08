@@ -38,6 +38,7 @@ git diff --name-only main...HEAD
 |---|---|---|---|
 | **Parser-local** | `parsers/<lang>_<framework>/**`, `tests/unit/test_<x>_parser.py` | This parser only | Normal |
 | **Language parser** | `parsers/<lang>/**` (when the work is for a framework) | Every framework built on this language | High — see §1.1 |
+| **Additive detector** | a module that calls `register_detector(...)`, or a changed `order` / `skip_fixtures` / `guard` | Every file of that language, whichever parser owns it | High — same blast radius as a language-parser change; see §1.1 |
 | **Shared family helper** | e.g. `parsers/vertx_common.py` (shared by `java_vertx` and `groovy_vertx`) | Every parser that imports it | High |
 | **Core** | `schemas/`, `core/`, `emit/`, `parsers/base.py`, `parsers/treesitter.py`, `parsers/statements_common.py`, `parsers/comments_common.py`, `parsers/callresolve.py`, `parsers/index_common.py`, `parsers/constfold.py`, `parsers/detection/`, `cli.py`, `config.py` | Every parser | Highest — architectural change, see §1.2 |
 
@@ -51,8 +52,11 @@ Check that:
 - the change is **framework-neutral** — no framework names, imports or annotations hard-coded
   in the language parser (see `extend-capture` §6, "Never bake framework-specific logic into a
   base language parser");
-- if it is a structure-shaped detector, it is a gated `detect_*` pass with a cheap byte guard
-  (`extend-capture` §3C), not an unconditional walk;
+- if it is a structure-shaped detector, it is a registered additive detector
+  (`register_detector`, `extend-capture` §3C) with a cheap byte guard, not an unconditional
+  walk or a new hard-coded call in `extract`; a new detector or a changed `order` shows up in
+  the `tests/unit/test_additive.py` inventory, and since order decides statement-id
+  disambiguation, a reorder needs a before/after capture diff;
 - the other frameworks' tests for that language still pass, and their output on a real repo
   did not change unexpectedly (diff the capture before and after);
 - it is consistent with the [architecture](architecture.md).

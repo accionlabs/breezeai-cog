@@ -46,6 +46,7 @@ from tree_sitter import Node
 
 from ...emit import disambiguate, file_id, statement_id
 from ...schemas import Class, FileRecord, Statement
+from ..additive import DetectContext, Detector, register_detector
 from ..graphql.sdl import extract_graphql
 from ..treesitter import first_line, node_text, parse_source
 
@@ -452,3 +453,16 @@ def detect_graphql_client(
     )
     record.statements.extend(routes)
     return bool(routes)
+
+
+def _run(dc: DetectContext) -> str | None:
+    matched = detect_graphql_client(
+        dc.root, dc.source, dc.path, dc.record, dc.ctx.parse_timeout_micros
+    )
+    return "graphql" if matched else None
+
+
+register_detector(Detector(
+    name="graphql-client", language="typescript", order=40, run=_run,
+    skip_fixtures=True, frameworks=("graphql",),
+))
