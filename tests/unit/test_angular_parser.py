@@ -247,24 +247,129 @@ def test_lazy_loadchildren_chain_composition(tmp_path) -> None:
     assert eps["BillingComponent"] == "/orgs/settings/billing"
 
 
-def test_redirect_to_routes_are_skipped(tmp_path) -> None:
-    # redirectTo routes must not be emitted as page/mount routes (they are not endpoints).
-    src = b'''import { Routes } from '@angular/router';
+_REDIRECT_SRC = b'''import { Routes } from '@angular/router';
 export const routes: Routes = [
-  { path: '', redirectTo: '/home', pathMatch: 'full' },
+  { path: '', redirectTo: 'home', pathMatch: 'full' },
   { path: 'home', component: HomeComponent },
+  { path: 'old/:id', redirectTo: 'new/:id' },
+  { path: 'admin', children: [
+    { path: '', redirectTo: 'users', pathMatch: 'full' },
+    { path: 'users', component: UsersComponent },
+  ]},
 ];
 '''
+
+
+def _parse_routes_file(src: bytes, tmp_path) -> FileRecord:
     p = tmp_path / "app.routes.ts"
     p.write_bytes(src)
     ctx = ParseContext(path="app.routes.ts", abs_path=p, source=src, repo_root=tmp_path,
                        capture_statements=True)
-    rec = AngularParser().parse_file(ctx)
-    routes = {s.endpoint: s for s in rec.statements if s.semanticType == "route"}
-    # The redirectTo route must NOT appear
-    assert not any(s.endpoint == "/" for s in rec.statements if s.semanticType == "route")
-    # The real route must still appear
-    assert "/home" in routes
+    return AngularParser().parse_file(ctx)
+
+
+def _route_rows(src: bytes, tmp_path) -> list[tuple[int, str | None, str | None, str | None]]:
+    rec = _parse_routes_file(src, tmp_path)
+    return [(s.startLine, s.routeKind, s.endpoint, s.handler)
+            for s in rec.statements if s.semanticType == "route"]
+
+
+def test_route_output_for_redirect_fixture_page_rows(tmp_path) -> None:
+    # Characterization: page/mount rows of a config that also contains redirects.
+    pages = [r for r in _route_rows(_REDIRECT_SRC, tmp_path) if r[1] != "navigation"]
+    assert pages == [
+        (4, "page", "/home", "HomeComponent"),
+        (6, "page", "/admin", None),
+        (8, "page", "/admin/users", "UsersComponent"),
+    ]
+
+
+def _navs(src: bytes, tmp_path) -> list[tuple[int, str | None]]:
+    return [(line, ep) for line, kind, ep, _ in _route_rows(src, tmp_path) if kind == "navigation"]
+
+
+def _routes_src(*entries: str) -> bytes:
+    body = "\n".join(f"  {e}," for e in entries)
+    return f"import {{ Routes }} from '@angular/router';\nexport const routes: Routes = [\n{body}\n];\n".encode()
+
+
+def test_redirect_routes_emit_navigation_to_target(tmp_path) -> None:
+    # Test expectation updated: redirectTo used to be skipped; #115 captures it as a
+    # navigation edge whose endpoint is the redirect target (never a page/mount row).
+    rows = _route_rows(_REDIRECT_SRC, tmp_path)
+    assert [r for r in rows if r[1] == "navigation"] == [
+        (3, "navigation", "/home", None),
+        (5, "navigation", "/new/:id", None),
+        (7, "navigation", "/admin/users", None),
+    ]
+    assert not any(r[1] in ("page", "mount") and r[2] == "/" for r in rows)
+
+
+def test_redirect_statement_shape(tmp_path) -> None:
+    rec = _parse_routes_file(_REDIRECT_SRC, tmp_path)
+    nav = next(s for s in rec.statements if s.routeKind == "navigation")
+    assert (nav.nodeType, nav.semanticType, nav.framework) == ("synthetic", "route", "angular")
+    assert nav.text.startswith("{ path: '', redirectTo: 'home'")  # source path stays visible
+
+
+def test_redirect_absolute_target_not_prefixed(tmp_path) -> None:
+    src = _routes_src("{ path: 'home', component: HomeComponent }",
+                      "{ path: 'admin', children: [{ path: 'x', redirectTo: '/home' }] }")
+    assert _navs(src, tmp_path) == [(4, "/home")]
+
+
+def test_redirect_function_form_target_is_null(tmp_path) -> None:
+    src = _routes_src("{ path: 'a', redirectTo: () => '/x' }",
+                      "{ path: 'b', redirectTo: (snap) => `/y/${snap.params.id}` }")
+    assert _navs(src, tmp_path) == [(3, None), (4, None)]
+
+
+def test_redirect_wildcard_and_empty_target(tmp_path) -> None:
+    src = _routes_src("{ path: '**', redirectTo: '' }",
+                      "{ path: 'p', children: [{ path: '', redirectTo: '' }] }")
+    assert _navs(src, tmp_path) == [(3, "/"), (4, "/p")]  # relative '' → the parent prefix
+
+
+def test_redirect_const_target_resolved_and_unresolved(tmp_path) -> None:
+    routing = _routes_src("{ path: '', redirectTo: RouteNames.DIAGNOSTICS }",
+                          "{ path: 'a', redirectTo: UNKNOWN.CONST }").decode()
+    rec = _parse_with_index({"route-names.ts": _CONSTS_SRC, "app-routing.module.ts": routing},
+                            "app-routing.module.ts", tmp_path)
+    navs = [(s.startLine, s.endpoint) for s in rec.statements if s.routeKind == "navigation"]
+    assert navs == [(3, "/diagnostics"), (4, None)]
+
+
+_ORG_REDIRECT_ROUTING = b'''import { RouterModule, Routes } from '@angular/router';
+export const routes: Routes = [
+  { path: '', redirectTo: 'projects', pathMatch: 'full' },
+  { path: 'legacy', redirectTo: '/projects' },
+  { path: 'projects', component: ProjectsComponent },
+];
+export class OrgModule {}
+'''
+
+
+def test_redirect_under_lazy_mount_relative_composes_absolute_does_not(tmp_path) -> None:
+    files = {"app.module.ts": _APP_ROUTING, "org.module.ts": _ORG_REDIRECT_ROUTING}
+    rec = _parse_with_index(files, "org.module.ts", tmp_path)
+    navs = [(s.startLine, s.endpoint) for s in rec.statements if s.routeKind == "navigation"]
+    assert navs == [(3, "/orgs/projects"), (4, "/projects")]
+
+
+def test_redirect_under_unresolved_parent_relative_is_null_absolute_survives(tmp_path) -> None:
+    # A relative target needs its parent prefix; with the parent unresolved it is unknown (None),
+    # never a guessed path. An absolute target does not depend on the parent.
+    src = _routes_src("{ path: Unknown.X, component: ShellComponent, children: [",
+                      "  { path: '', redirectTo: 'a', pathMatch: 'full' },",
+                      "  { path: 'abs', redirectTo: '/root' }] }")
+    assert _navs(src, tmp_path) == [(4, None), (5, "/root")]
+
+
+def test_redirect_breadcrumb_shaped_object_is_ignored(tmp_path) -> None:
+    # A nav/breadcrumb object carries a top-level "name"; it must never become a navigation row.
+    src = _routes_src("{ name: 'Home', path: '', redirectTo: 'home' }",
+                      "{ path: 'home', component: HomeComponent }")
+    assert _navs(src, tmp_path) == []
 
 
 def test_ngmodule_import_propagation(tmp_path) -> None:
