@@ -47,6 +47,14 @@ FIELD_CALL = "Field"
 IGNORE_CALL = "Ignore"
 NAME_CALL = "Name"
 
+#: Resolver calls on a fluent field chain: an inline ``Resolve(ctx => …)``, or
+#: ``ResolveWith<TResolvers>(t => t.Method(…))`` pointing at a method of a resolver class.
+RESOLVE_CALL = "Resolve"
+RESOLVE_WITH_CALL = "ResolveWith"
+
+#: ``ctx.Parent<T>()`` — how an inline resolver reads the object it resolves a field of.
+PARENT_CALL = "Parent"
+
 #: Fluent authorization: on a field chain it guards that field, called on the descriptor itself
 #: it guards every field of the type — the fluent counterpart of method- and class-level
 #: ``[Authorize]``.

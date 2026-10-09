@@ -521,6 +521,57 @@ def test_data_descriptor_fields_are_not_operations() -> None:
     assert "title" not in endpoints and "isbn" not in endpoints
 
 
+# A data type's fluent descriptor: plain fields, resolvers that read their parent (recorded), and
+# resolvers that show no such evidence (left out).
+DATA_TYPE_RESOLVERS = b"""using HotChocolate.Types;
+namespace Shop {
+  public class FluentProductType : ObjectType<Product> {
+    protected override void Configure(IObjectTypeDescriptor<Product> d) {
+      d.Field(p => p.Name);
+      d.Field("isAvailable").Authorize("Staff").Resolve(ctx => ctx.Parent<Product>().Stock > 0);
+      d.Field("reviews").ResolveWith<ProductResolvers>(r => r.GetReviews(default!, default!));
+      d.Field(p => p.Sku).ResolveWith<ProductResolvers>(r => r.GetSkuAsync(default!)).Name("code");
+      d.Field("constant").Resolve(ctx => 42);
+      d.Field("other").Resolve(ctx => ctx.Parent<Order>().Id);
+      d.Field("remote").ResolveWith<RemoteResolvers>(r => r.GetX(default!));
+      d.Field("noParent").ResolveWith<ProductResolvers>(r => r.GetFeatured(default!));
+    }
+  }
+  public class ProductResolvers {
+    public IEnumerable<Review> GetReviews([Parent] Product product, ReviewDb db) => null;
+    public Task<string> GetSkuAsync(Product product) => null;
+    public Product GetFeatured(ProductDb db) => null;
+  }
+}
+"""
+
+
+def test_data_type_resolvers_that_read_their_parent_are_field_resolvers() -> None:
+    ops = _by_endpoint(_parse(CSharpHotChocolateParser(), DATA_TYPE_RESOLVERS, "FluentProductType.cs"))
+    assert set(ops) == {"Product.isAvailable", "Product.reviews", "Product.code"}
+    for s in ops.values():
+        assert s.routeKind == "field_resolver" and s.method == "RESOLVE_FIELD"
+    # The inline resolver keeps the field as its handler; a ResolveWith method is the handler.
+    assert ops["Product.isAvailable"].guards == ["Authorize(Staff)"]
+    assert ops["Product.reviews"].handler == "GetReviews"
+    assert ops["Product.reviews"].responseDTO == "Review"
+    assert ops["Product.code"].handler == "GetSkuAsync"
+
+
+def test_resolver_without_parent_evidence_is_not_recorded() -> None:
+    # A root cog did not recognise (registered where it cannot see, custom name): its resolver
+    # reads no parent, so nothing is recorded — never a field resolver of a "RootQuery" type.
+    src = b"""using HotChocolate.Types;
+public class RootQuery : ObjectType {
+  protected override void Configure(IObjectTypeDescriptor d) {
+    d.Name("RootQuery");
+    d.Field("testData").Resolve(ctx => new TestData());
+  }
+}
+"""
+    assert _routes(_parse(CSharpHotChocolateParser(), src, "RootQuery.cs")) == []
+
+
 def test_descriptor_target_from_the_configure_parameter() -> None:
     rec = _parse(CSharpHotChocolateParser(), DESCRIPTOR_VIA_PARAM, "MutationType.cs")
     op = _by_endpoint(rec)["addBook"]

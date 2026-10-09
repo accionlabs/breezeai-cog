@@ -10,9 +10,19 @@ fields in code rather than annotating a class.
     }
 
 The described type ``T`` plays exactly the role ``typeof(...)`` plays for ``[ExtendObjectType]``:
-fields on a **root** are client-callable operations, fields on a data type are its shape. So only
-a root-targeted descriptor yields routes — emitting every ``Field()`` call is the over-capture
-the graphql-dotnet parser measured at 4,835 calls against ~520 real operations.
+fields on a **root** are client-callable operations. Fields on a data type are not endpoints:
+
+* a **plain** field (``d.Field(p => p.Name)``) is the type's shape and is never recorded —
+  emitting every ``Field()`` call is the over-capture the graphql-dotnet parser measured at 4,835
+  calls against ~520 real operations;
+* a **resolver** is recorded as a ``field_resolver`` (``RESOLVE_FIELD``, ``Product.isAvailable``)
+  only when it visibly reads the object it belongs to — ``ctx.Parent<Product>()``, or a
+  ``ResolveWith`` method in this file with a ``[Parent]`` / first parameter of that type. That is
+  the evidence the attribute style also requires, and what tells a data type's resolver apart
+  from the field of a root that was not recognised. Without it the field is left out.
+
+Residual risk: a root resolver that reads the root instance (``ctx.Parent<RootQuery>()``) on a
+root cog did not recognise would be recorded as a field resolver. Both conditions are rare.
 
 Unlike the attribute styles, these declarations live *inside a method body*, so this is the one
 part of the parser that reads the tree rather than the finished ``FileRecord``.
@@ -35,6 +45,9 @@ from .mappings import (
     IGNORE_CALL,
     NAME_CALL,
     OPERATION_TYPE_NAMES,
+    PARENT_CALL,
+    RESOLVE_CALL,
+    RESOLVE_WITH_CALL,
 )
 from .naming import camel_case, field_name
 
@@ -302,3 +315,55 @@ def field_declarations(
         if name:
             found.append((name, node))
     return sorted(found, key=lambda item: item[1].start_point)
+
+
+def resolve_with_method(field_call: Node, source: bytes) -> tuple[str, str] | None:
+    """``(resolver class, method)`` named by ``.ResolveWith<TResolvers>(t => t.Method(…))`` on this
+    field's chain, or None. Only the generic form names a class, and only a call on the lambda's
+    own parameter names one of its methods."""
+    for name, call in _chained_calls(field_call, source):
+        if name != RESOLVE_WITH_CALL:
+            continue
+        function_node = call.child_by_field_name("function")
+        generic = function_node.named_children[-1] if function_node is not None and function_node.named_children else None
+        targs = (next((c for c in generic.named_children if c.type == "type_argument_list"), None)
+                 if generic is not None and generic.type == "generic_name" else None)
+        if targs is None or len(targs.named_children) != 1:
+            return None
+        resolver_cls = node_text(targs.named_children[0], source).rsplit(".", 1)[-1]
+        for arg in _arguments(call):
+            if arg is None or not arg.type.endswith("lambda_expression"):
+                continue
+            body = arg.child_by_field_name("body")
+            inner = body.child_by_field_name("function") if body is not None and body.type == "invocation_expression" else None
+            if inner is None:
+                continue
+            method = _call_name(inner, source)
+            if method and _receiver_name(inner, source) == _lambda_param(arg, source):
+                return resolver_cls, method
+        return None
+    return None
+
+
+def resolve_reads_parent(field_call: Node, source: bytes, target: str) -> bool:
+    """Whether this field's inline ``.Resolve(…)`` reads the object it belongs to:
+    ``ctx.Parent<Target>()`` somewhere in the resolver, with exactly the described type."""
+    for name, call in _chained_calls(field_call, source):
+        if name != RESOLVE_CALL:
+            continue
+        stack = [call.child_by_field_name("arguments")]
+        while stack:
+            node = stack.pop()
+            if node is None:
+                continue
+            stack.extend(node.named_children)
+            if node.type != "generic_name":
+                continue
+            ident = next((c for c in node.named_children if c.type == "identifier"), None)
+            targs = next((c for c in node.named_children if c.type == "type_argument_list"), None)
+            if (ident is None or node_text(ident, source) != PARENT_CALL or targs is None
+                    or len(targs.named_children) != 1):
+                continue
+            if node_text(targs.named_children[0], source).rsplit(".", 1)[-1] == target:
+                return True
+    return False
