@@ -49,14 +49,22 @@ def test_tree_paginates_by_x_next_page(router, settings) -> None:
 
 def test_compare_maps_flags(router, settings) -> None:
     router.add(rf"/projects/{PROJ}/repository/compare\?from={BASE}&to={SHA}", httpx.Response(200, json={"diffs": [
-        {"old_path": "a.py", "new_path": "a.py"},
-        {"old_path": "b.py", "new_path": "b.py", "new_file": True},
-        {"old_path": "gone.py", "new_path": "gone.py", "deleted_file": True},
+        {"old_path": "a.py", "new_path": "a.py", "diff": "--- a/a.py\n+++ b/a.py\n@@ -1,2 +1,2 @@\n-x\n+y\n z"},
+        {"old_path": "b.py", "new_path": "b.py", "new_file": True, "diff": "@@ -0,0 +1,2 @@\n+a\n+b"},
+        {"old_path": "gone.py", "new_path": "gone.py", "deleted_file": True, "diff": "@@ -1 +0,0 @@\n-x"},
         {"old_path": "old.py", "new_path": "new.py", "renamed_file": True},
     ]}))
     cs = _client(router, settings).compare(REF, BASE, SHA)
     assert cs.changed == ["a.py", "b.py", "new.py"]
     assert cs.deleted == ["gone.py", "old.py"]
+    assert [(f.filename, f.status, f.additions, f.deletions) for f in cs.files] == [
+        ("a.py", "modified", 1, 1),
+        ("b.py", "added", 2, 0),
+        ("gone.py", "removed", 0, 1),
+        ("new.py", "renamed", 0, 0),
+    ]
+    assert cs.files[0].patch == "--- a/a.py\n+++ b/a.py\n@@ -1,2 +1,2 @@\n-x\n+y\n z"
+    assert cs.files[3].patch is None
 
 
 def test_file_content_raw_endpoint_fully_encodes_path(router, settings) -> None:

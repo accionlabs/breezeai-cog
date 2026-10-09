@@ -14,7 +14,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from typing import Final
+from typing import Any, Final
 
 #: Provider slugs. Also the keys of the factory registry, the suffix of the
 #: ``scm_token_<slug>`` settings, and the allowed values of ``scm_instances``.
@@ -71,17 +71,67 @@ class RepoRef:
         return out
 
 
+@dataclass(frozen=True, slots=True)
+class FileDiff:
+    """One file of a compare, in the per-file shape the Breeze backend's ``GitDiffResult``
+    carries (``git.service.ts`` ``GitDiffFile``).
+
+    ``status`` is normalised to GitHub's vocabulary: ``added`` / ``modified`` / ``removed``
+    / ``renamed`` (GitHub's own ``copied`` / ``changed`` pass through). For a rename
+    ``filename`` is the **new** path. ``additions`` / ``deletions`` are ``0`` and ``patch``
+    is ``None`` where the provider's compare endpoint does not report them (see each
+    provider's ``compare`` docstring).
+    """
+
+    filename: str
+    status: str
+    additions: int = 0
+    deletions: int = 0
+    patch: str | None = None
+
+    def as_dict(self) -> dict[str, Any]:
+        """The backend's ``GitDiffFile`` JSON shape; ``patch`` only when present."""
+        out: dict[str, Any] = {
+            "filename": self.filename,
+            "status": self.status,
+            "additions": self.additions,
+            "deletions": self.deletions,
+        }
+        if self.patch is not None:
+            out["patch"] = self.patch
+        return out
+
+
+def count_patch_lines(patch: str | None) -> tuple[int, int]:
+    """``(additions, deletions)`` of a unified-diff hunk body: ``+``/``-`` lines that are
+    not the ``+++``/``---`` file headers. For providers whose compare returns the diff
+    text but no counts (GitLab)."""
+    if not patch:
+        return 0, 0
+    additions = deletions = 0
+    for line in patch.splitlines():
+        if line.startswith("+") and not line.startswith("+++"):
+            additions += 1
+        elif line.startswith("-") and not line.startswith("---"):
+            deletions += 1
+    return additions, deletions
+
+
 @dataclass(slots=True)
 class ChangeSet:
     """Files changed and deleted between two commits.
 
     ``changed`` holds every path whose content must be re-read at the head commit
     (added, modified, renamed-to). ``deleted`` holds paths that no longer exist at the
-    head commit, including the old side of a rename.
+    head commit, including the old side of a rename. ``files`` holds one ``FileDiff``
+    per provider entry (a rename is **one** entry under its new path) — the per-file
+    view ``/api/git/compare`` returns; the orchestration in ``server/git.py`` reads only
+    ``changed`` / ``deleted``.
     """
 
     changed: list[str] = field(default_factory=list)
     deleted: list[str] = field(default_factory=list)
+    files: list[FileDiff] = field(default_factory=list)
 
     @property
     def is_empty(self) -> bool:

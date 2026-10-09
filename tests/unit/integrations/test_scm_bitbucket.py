@@ -61,14 +61,20 @@ def test_tree_follows_body_next_cursor(router, settings) -> None:
 
 def test_compare_uses_reversed_spec_and_maps_renames(router, settings) -> None:
     router.add(rf"/diffstat/{SHA}\.\.{BASE}\?pagelen=100", httpx.Response(200, json={"values": [
-        {"status": "modified", "new": {"path": "a.py"}, "old": {"path": "a.py"}},
-        {"status": "added", "new": {"path": "b.py"}, "old": None},
-        {"status": "removed", "new": None, "old": {"path": "gone.py"}},
+        {"status": "modified", "new": {"path": "a.py"}, "old": {"path": "a.py"}, "lines_added": 4, "lines_removed": 2},
+        {"status": "added", "new": {"path": "b.py"}, "old": None, "lines_added": 10, "lines_removed": 0},
+        {"status": "removed", "new": None, "old": {"path": "gone.py"}, "lines_added": 0, "lines_removed": 6},
         {"status": "renamed", "new": {"path": "new.py"}, "old": {"path": "old.py"}},
     ]}))
     cs = _client(router, settings).compare(REF, BASE, SHA)
     assert cs.changed == ["a.py", "b.py", "new.py"]
     assert cs.deleted == ["gone.py", "old.py"]
+    assert [f.as_dict() for f in cs.files] == [
+        {"filename": "a.py", "status": "modified", "additions": 4, "deletions": 2},
+        {"filename": "b.py", "status": "added", "additions": 10, "deletions": 0},
+        {"filename": "gone.py", "status": "removed", "additions": 0, "deletions": 6},
+        {"filename": "new.py", "status": "renamed", "additions": 0, "deletions": 0},
+    ]
 
 
 def test_file_content_encodes_each_segment(router, settings) -> None:

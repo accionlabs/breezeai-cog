@@ -15,7 +15,7 @@ from urllib.parse import quote
 
 import httpx
 
-from .base import DEFAULT_HOSTS, PR_STATES, AbstractSCMClient, ChangeSet, CommitInfo, PrComment, PullRequestInfo, RepoRef
+from .base import DEFAULT_HOSTS, PR_STATES, AbstractSCMClient, ChangeSet, CommitInfo, FileDiff, PrComment, PullRequestInfo, RepoRef
 from .errors import SCMCredentialError
 from .http import SCMHttpClient, warn_if_anonymous
 
@@ -147,7 +147,11 @@ class BitbucketSCMClient(AbstractSCMClient):
 
     def compare(self, ref: RepoRef, base: str, head: str) -> ChangeSet:
         """``diffstat/{head}..{base}`` — Bitbucket's spec order is reversed relative
-        to GitHub's ``base...head``; the old helper used this order and it is kept."""
+        to GitHub's ``base...head``; the old helper used this order and it is kept.
+
+        diffstat reports ``lines_added`` / ``lines_removed`` per file but no diff text,
+        so ``files[].patch`` is absent for Bitbucket.
+        """
         first = f"/repositories/{ref.owner}/{ref.repo}/diffstat/{head}..{base}"
         out = ChangeSet()
         for resp in self._http.paginate(first, _next_of, {"pagelen": "100"}):
@@ -155,6 +159,14 @@ class BitbucketSCMClient(AbstractSCMClient):
                 new_path = (entry.get("new") or {}).get("path")
                 old_path = (entry.get("old") or {}).get("path")
                 status = entry.get("status")
+                filename = new_path if status != "removed" else old_path
+                if filename:
+                    out.files.append(FileDiff(
+                        filename=filename,
+                        status=str(status or "modified"),
+                        additions=int(entry.get("lines_added") or 0),
+                        deletions=int(entry.get("lines_removed") or 0),
+                    ))
                 if status == "removed" and old_path:
                     out.deleted.append(old_path)
                 elif new_path:
