@@ -380,7 +380,10 @@ def in_scope_namespaces(root: Node, source: bytes) -> set[str]:
     return scopes
 
 
-def type_files(name: str, scopes: set[str], index: CSharpIndex, from_path: str) -> set[str]:
+def type_files(
+    name: str, scopes: set[str], index: CSharpIndex, from_path: str, *,
+    elsewhere_only: bool = False,
+) -> set[str]:
     """Files declaring the type ``name`` binds to from ``from_path``, or empty when it binds to
     nothing or is ambiguous.
 
@@ -392,15 +395,25 @@ def type_files(name: str, scopes: set[str], index: CSharpIndex, from_path: str) 
     declared in ``from_path``'s own project, or in a project it references (``project_refs``).
     Two unrelated projects that reuse a namespace (or both use the global one) are different
     types, not one type split over two files. Of several in-scope types, the one in the own
-    project wins (CS0436, as :func:`_resolve` does); any other tie refuses.
+    project wins (CS0436); any other tie refuses.
+
+    ``elsewhere_only`` ignores a type declared only in ``from_path`` itself before checking for
+    ambiguity — what an import edge needs: ``MassUpdate.ascx.cs`` declares its own
+    ``MassUpdate`` and refers to the base ``SplendidCRM.MassUpdate`` by the same simple name.
     """
     proj = index.project_of(from_path)
     if proj is not None:
         scopes = scopes | index.project_usings.get(proj, set())
     candidates: dict[str, set[str]] = {}
-    # As written (fully qualified) or under any namespace in scope (simple or partly qualified).
-    for fqn in sorted(({name} | {_join(ns, name) for ns in scopes}) & index.types.keys()):
+    if "." in name and name in index.types:
+        fqns = [name]  # already fully qualified (a static/alias target): exactly that type
+    else:
+        # Under any namespace in scope (simple or partly qualified name).
+        fqns = sorted(({name} | {_join(ns, name) for ns in scopes}) & index.types.keys())
+    for fqn in fqns:
         visible = _visible_from(index.types[fqn], proj, index)
+        if elsewhere_only and visible <= {from_path}:
+            continue
         if visible:
             candidates[fqn] = visible
     if len(candidates) > 1 and proj is not None:
@@ -691,29 +704,19 @@ def _referenced_types(root: Node, source: bytes) -> set[str]:
 
 
 def _resolve(name: str, scopes: set[str], index: CSharpIndex | None, self_path: str) -> str | None:
-    """A fully-qualified or simple type name → its declaring file, or ``None`` when
-    external / unresolved / **ambiguous** (a tie no rule can break)."""
+    """A fully-qualified or simple type name → the **other** file declaring it, or ``None`` when
+    external / unresolved / **ambiguous**.
+
+    The C# binding rules live in one place, :func:`type_files` — namespaces in scope (including
+    MSBuild ``<Using>``), project boundaries through ``<ProjectReference>``, the same-project
+    tiebreak (CS0436) — so an import edge and a detector's binding always agree. An import edge
+    is cross-file and names one file: a type whose other declaration is split over several files
+    (a partial class) is ambiguous for an edge.
+    """
     if index is None or not name:
         return None
-    if "." in name and name in index.types:  # already fully qualified (static/alias target)
-        hits = set(index.types[name])
-    else:
-        hits = set()
-        for ns in scopes:
-            hits |= index.types.get(_join(ns, name), set())
-    hits.discard(self_path)  # cross-file edges only
-    if len(hits) == 1:
-        return next(iter(hits))
-    if len(hits) > 1:
-        # Same-project wins (C# CS0436: a type in the consumer's own assembly
-        # beats an identically-named one imported from another project). A tie purely
-        # between *other* projects is CS0433, which the compiler errors on — so we refuse.
-        proj = index.project_of(self_path)
-        if proj is not None:
-            same = [h for h in hits if index.project_of(h) == proj]
-            if len(same) == 1:
-                return same[0]
-    return None
+    files = type_files(name, scopes, index, self_path, elsewhere_only=True) - {self_path}
+    return next(iter(files)) if len(files) == 1 else None
 
 
 def bind_static_import_members(

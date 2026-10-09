@@ -128,7 +128,7 @@ How each language turns an import into a file:
 |---|---|---|
 | Java, Groovy, Kotlin | Look up the fully-qualified name in the index. Same-package classes are bound without an import. Groovy `as` aliases are bound. | wildcards, unknown or ambiguous names |
 | Scala | As Java, plus selector groups `{A, B}`, renames `{A => B}` and relative package imports | wildcards, unknown names |
-| C# | A `using` names a namespace, not a file. Each **type used** in the file is looked up under the namespaces in scope (own namespace and parents, `using`s, `global using`s). Bound only if exactly one file matches; on a tie, a file in the same `.csproj` wins. | every namespace `using`; unresolved static / alias targets |
+| C# | A `using` names a namespace, not a file. Each **type used** in the file is looked up under the namespaces in scope (own namespace and parents, `using`s, `global using`s, and `<Using Include>` from the project's `.csproj` or a `Directory.Build.props` above it). A type in another project counts only if this project references it (`<ProjectReference>`, transitively). Bound only if exactly one other file matches; on a tie between types, the one in the same `.csproj` wins. A type declared only in this file is ignored, so `class MassUpdate : SplendidCRM.MassUpdate` still links to the base. The same rules (`type_files`) bind additive detectors' names. | every namespace `using`; unresolved static / alias targets |
 | VB | Not resolved (`Imports` names namespaces) | every `Imports` |
 | TypeScript / JavaScript | Relative paths from the file's folder; otherwise the nearest `tsconfig`/`jsconfig` path alias. Tries the exact file, `.js`→`.ts` rewrites, known extensions, then `index.*`. Re-exports and literal dynamic `import()` count too. | anything not found on disk |
 | Python | `import a.b` / `from a.b import x` from the repo root; relative imports walk up folders. Tries `a/b.py`, then `a/b/__init__.py`. | anything not found |
@@ -357,8 +357,8 @@ flowchart TD
   W --> RUN
 ```
 
-How a registered name is bound to a file uses the C# rules, so the binding is the one the compiler
-would make:
+How a registered name is bound to a file uses the C# rules — the same ones import resolution uses
+([§4](#4-import-resolution)) — so the binding is the one the compiler would make:
 - the namespaces in scope at the registering file: its own namespace and parents, its `using`s,
   `global using`s, and `<Using Include>` from its `.csproj` or a `Directory.Build.props` above it;
 - a type in another project counts only if the registering project **references** it
@@ -413,7 +413,6 @@ the link would point at nothing. After each file is parsed, `core/executor.py::_
 | Values from config files / environment | Routes and addresses built from them stay empty |
 | HotChocolate root registrations made inside a helper method in another file, or registered by name only (`AddQueryType(d => d.Name("Query"))` with no class) | Not bound to a class; such roots are found only through attributes or descriptors |
 | MSBuild conditions on `<Using>` / `<ProjectReference>` are not evaluated | A conditional using or reference is treated as always on |
-| C# import resolution (`importFiles`, `calls[].path`) does not yet use MSBuild `using`s or project references; only the additive index stage's type binding does | Some C# imports that the binding rules could resolve stay in `externalImports` |
 | The C++ resolver's docstring says `super`/`base` returns `None`, but the code resolves it | Docstring is out of date |
 
 ---
