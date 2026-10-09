@@ -585,3 +585,33 @@ def test_jsx_routes_preserve_actual_node_type(tmp_path) -> None:
         for route in routes.values()
     )
 
+
+
+def test_nav_item_mixed_into_route_array_is_not_a_route(tmp_path) -> None:
+    src = b'''import { createBrowserRouter } from "react-router-dom";
+export const router = createBrowserRouter([
+  { path: "/", element: <Home />, children: [
+    { path: "team", element: <Team /> },
+    { path: "crumb", label: "Crumb" },
+  ]},
+  { path: "/nav", label: "Nav" },
+]);
+'''
+    rec = _parse(tmp_path, src, "router.tsx")
+    eps = [s.endpoint for s in rec.statements if s.semanticType == "route"]
+    assert eps == ["/", "/team"]
+
+
+def test_jsx_mixed_forms_report_real_node_type_per_record(tmp_path) -> None:
+    src = b'''import { Route } from "react-router-dom";
+const app = (
+  <Route path="/a" element={<A />}>
+    <Route path="b" element={<B />} />
+    <Route index element={<C />} />
+  </Route>
+);
+'''
+    rec = _parse(tmp_path, src, "App.tsx")
+    types = {s.endpoint + s.handler: s.nodeType for s in rec.statements if s.semanticType == "route"}
+    assert types == {"/aA": "jsx_element", "/a/bB": "jsx_self_closing_element",
+                     "/aC": "jsx_self_closing_element"}

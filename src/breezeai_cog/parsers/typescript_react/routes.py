@@ -134,13 +134,26 @@ _ROUTE_DISCRIMINATING_KEYS = frozenset({
 })
 
 
+# Keys of breadcrumb/nav/menu items. ``children`` is the one router key that nav trees share, so
+# it only counts when no nav key sits beside it (Angular's explicit breadcrumb ``name`` exclusion).
+_NAV_KEYS = frozenset({"label", "title", "name", "icon", "href"})
+
+
+def _has_route_key(pairs: dict[str, Node]) -> bool:
+    keys = pairs.keys()
+    if keys & (_ROUTE_DISCRIMINATING_KEYS - {"children"}):
+        return True
+    return "children" in keys and not keys & _NAV_KEYS
+
+
 def _is_route_array(arr: Node, source: bytes) -> bool:
-    return any(
-        e.type == "object"
-        and (pairs := _pairs(e, source)).keys() & _ROUTE_DISCRIMINATING_KEYS
-        and "path" in pairs
-        for e in arr.named_children
-    )
+    for e in arr.named_children:
+        if e.type != "object":
+            continue
+        pairs = _pairs(e, source)
+        if "path" in pairs and _has_route_key(pairs):
+            return True
+    return False
 
 
 def _is_children_value(arr: Node, source: bytes) -> bool:
@@ -153,6 +166,8 @@ def _process_config(arr: Node, prefix: str, source: bytes, path: str, seen: set[
         if elem.type != "object":
             continue
         pairs = _pairs(elem, source)
+        if not _has_route_key(pairs):
+            continue  # breadcrumb/nav item sitting in a route array: path alone is not a route
         is_index = "index" in pairs and "path" not in pairs  # index route -> parent's path
         if "path" not in pairs and not is_index:
             continue
