@@ -438,7 +438,7 @@ breezeai-cog serve --port 3000        # requires the "[server]" install option
 | `POST /api/analyze-sql` | Parse an uploaded SQL `.sql` file's tables/views/indexes. |
 | `POST /api/analyze-es` | Parse uploaded Elasticsearch mapping/settings JSON. |
 | `POST /api/git/check-update` | For the Breeze backend: is a stored commit behind the branch tip, and how many files changed? Body `repoUrl`, `gitBranch`, optional `gitToken`, `currentCommitId`. |
-| `POST /api/git/latest-commit` · `/compare` · `/tree` · `/pull-request` | The underlying git-provider operations (tip commit, changed/deleted files between two commits, file list at a commit, read-only pull-request metadata with full base/head commit ids), same body conventions. |
+| `POST /api/git/latest-commit` · `/compare` · `/tree` · `/pull-request` | The underlying git-provider operations (tip commit, per-file diff between two commits — status, line counts and patch where the provider reports them, file list at a commit, read-only pull-request metadata with full base/head commit ids), same body conventions. |
 | `POST /api/git/parse-pr-url` | For the Breeze backend's manual PR trigger: a pasted pull-request URL → provider, canonical repo URL, PR number and the `prLinks` block. No provider call, no token. |
 | `POST /api/git/pr-comment` | **The one write:** post a top-level comment on a pull request (`repoUrl`, `pullRequestId`, `body`, `gitToken` with write scope). Not retried, so a failure never double-posts. |
 
