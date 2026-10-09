@@ -954,6 +954,68 @@ def test_partial_root_binds_every_part(tmp_path) -> None:
     assert set(_roots(index).files) == {"Api/BookQueries.cs", "Api/BookQueries.Admin.cs"}
 
 
+def test_same_named_types_in_other_projects_are_not_bound(tmp_path) -> None:
+    # Several sample projects each declare ConferencePlanner.GraphQL.Query and register their own.
+    # Same namespace, but different projects: each registration binds only its own project's
+    # class, and an unregistered project's same-named class is never a root.
+    query = b"namespace ConferencePlanner.GraphQL { public class Query { public int GetX() => 1; } }"
+    setup = b"using ConferencePlanner.GraphQL;\nb.AddGraphQLServer().AddQueryType<Query>();"
+    index = _repo_index(tmp_path, {
+        "s1/S1.csproj": b"<Project />", "s1/Startup.cs": setup, "s1/Query.cs": query,
+        "s2/S2.csproj": b"<Project />", "s2/Startup.cs": setup, "s2/Query.cs": query,
+        "s3/S3.csproj": b"<Project />", "s3/Query.cs": query,
+    })
+    assert set(_roots(index).files) == {"s1/Query.cs", "s2/Query.cs"}
+
+
+def test_a_root_in_a_referenced_project_is_bound(tmp_path) -> None:
+    # The registering project declares no BookQueries; it references the library that does
+    # (here transitively, through Core), so it binds there.
+    index = _repo_index(tmp_path, {
+        "Api/Api.csproj": b'<Project><ItemGroup><ProjectReference Include="..\\Core\\Core.csproj" /></ItemGroup></Project>',
+        "Api/Program.cs": b"using Catalog;\nb.AddGraphQLServer().AddQueryType<BookQueries>();",
+        "Core/Core.csproj": b'<Project><ItemGroup><ProjectReference Include="../Lib/Lib.csproj" /></ItemGroup></Project>',
+        "Core/Marker.cs": b"namespace Core { class Marker { } }",
+        "Lib/Lib.csproj": b"<Project />",
+        "Lib/BookQueries.cs": BOOK_QUERIES,
+    })
+    assert index.project_refs["Api"] == {"Core", "Lib"}
+    assert set(_roots(index).files) == {"Lib/BookQueries.cs"}
+
+
+def test_a_root_in_an_unreferenced_project_is_not_bound(tmp_path) -> None:
+    # Demo.Tests sees the parent namespace Demo, and an unrelated sample project declares
+    # Demo.Subscription. The test project does not reference that sample, so the compiler could
+    # never bind to it — neither do we.
+    index = _repo_index(tmp_path, {
+        "Tests/Tests.csproj": b'<Project><ItemGroup><ProjectReference Include="..\\Server\\Server.csproj" /></ItemGroup></Project>',
+        "Tests/UnitTest1.cs": b"namespace Demo.Tests { class T { void M() { b.AddSubscriptionType<Subscription>(); } } }",
+        "Server/Server.csproj": b"<Project />",
+        "Server/Other.cs": b"namespace Demo.Server { class Other { } }",
+        "Sample/Sample.csproj": b"<Project />",
+        "Sample/Subscription.cs": b"namespace Demo { public class Subscription { public int GetX() => 1; } }",
+    })
+    assert _roots(index).files == {}
+
+
+def test_project_file_usings_bring_namespaces_into_scope(tmp_path) -> None:
+    # Program.cs has no using: the namespace comes from <Using Include> in the project file (or a
+    # Directory.Build.props above it). A Static using imports a type, not a namespace.
+    setup = b"b.AddGraphQLServer().AddQueryType<Query>().AddMutationType<Mutation>();"
+    index = _repo_index(tmp_path, {
+        "Directory.Build.props": b'<Project><ItemGroup><Using Include="Shared" /></ItemGroup></Project>',
+        "App/App.csproj": (b'<Project><ItemGroup Condition="\'$(ImplicitUsings)\' == \'enable\'">'
+                           b'<Using Include="SubscriptionDemo" />'
+                           b'<Using Include="Other" Static="true" /></ItemGroup></Project>'),
+        "App/Program.cs": setup,
+        "App/Query.cs": b"namespace SubscriptionDemo { public class Query { public int GetX() => 1; } }",
+        "App/Mutation.cs": b"namespace Shared { public class Mutation { public int DoY() => 1; } }",
+    })
+    assert index.project_usings == {"App": {"SubscriptionDemo", "Shared"}}
+    assert _roots(index).files == {"App/Query.cs": {"Query": "query"},
+                                   "App/Mutation.cs": {"Mutation": "mutation"}}
+
+
 def test_extension_of_a_registered_root_yields_operations(tmp_path) -> None:
     # The target is declared in another file, so it resolves through the name-only lookup.
     ext = b"""using HotChocolate.Types;
