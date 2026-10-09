@@ -15,19 +15,32 @@ the guard is positive on *schema declarations* and negative on the registration 
 Residual gap: a root type declared **inside** the composition root yields no operations. A file
 that both wires up the server and declares a schema root is a single-file demo shape; losing an
 application's route inventory is the worse of the two failures.
+
+Registration-only roots (``AddQueryType<BookQueries>()`` on an attribute-less class, the v11/v12
+shape) are bound to their declaring file by the ``hotchocolate-registered-roots`` additive detector
+(:mod:`.registered_roots`) while the C# index is built. Such a file carries no HotChocolate marker,
+so this parser never claims it; the detector emits its operations instead. In a file this parser
+does claim, it reads the same fact itself.
 """
 
 from __future__ import annotations
+
+from typing import Any
 
 from ...schemas import FileRecord
 from ..base import ParseContext
 from ..csharp.parser import CSharpParser
 from ..treesitter import parse_source
-from .mappings import COMPOSITION_ROOT_MARKERS, MARKERS
+from .mappings import owned_by_hotchocolate
+from .registered_roots import registered_roots
 from .routes import detect_hotchocolate_routes
 
-#: graphql-dotnet's marker. A file declaring one is that library's, not this one's.
-_GRAPHQL_DOTNET_MARKER = b"ObjectGraphType"
+
+def _root_types(index: Any | None, path: str) -> dict[str, str] | None:
+    """Registered roots visible from ``path``: this file's own registered classes, plus names
+    that are registered roots repo-wide (for a target declared in another file)."""
+    roots = registered_roots(index)
+    return {**roots.types, **roots.files.get(path, {})} or None
 
 
 class CSharpHotChocolateParser(CSharpParser):
@@ -36,11 +49,7 @@ class CSharpHotChocolateParser(CSharpParser):
     frameworks = ["graphql"]
 
     def claims(self, path: str, source: bytes) -> bool:
-        if _GRAPHQL_DOTNET_MARKER in source:
-            return False  # graphql-dotnet owns it; keep the two guards mutually exclusive
-        if any(m in source for m in COMPOSITION_ROOT_MARKERS):
-            return False  # the composition root stays with csharp-aspnet (see mappings)
-        return any(m in source for m in MARKERS)
+        return owned_by_hotchocolate(source)
 
     def parse_file(self, ctx: ParseContext) -> FileRecord:
         root = parse_source("csharp", ctx.source, ctx.parse_timeout_micros).root_node
@@ -48,7 +57,8 @@ class CSharpHotChocolateParser(CSharpParser):
         if ctx.capture_statements and not self.is_fixture_file(ctx.path):
             seen = {s.id for s in record.statements}
             routes = detect_hotchocolate_routes(
-                record, root, ctx.source, seen, ctx.resolution_index)
+                record, root, ctx.source, seen, ctx.resolution_index,
+                hc_root_types=_root_types(ctx.resolution_index, ctx.path))
             if routes:
                 record.statements.extend(routes)
                 record.framework = "graphql"

@@ -200,6 +200,8 @@ Some facts can't be known from one file. For example, which file defines
 `com.acme.OrderService`? A language parser can provide `build_index`, which runs **once, before
 parsing**, and returns data that every worker receives. Today it is used for things like Java
 fully-qualified names and constants, TypeScript path aliases, and C#/VB class inheritance.
+Additive detectors can add their own facts to it through an optional index stage
+([§6](#6-the-parser-model)), so framework rules never have to live in the language's index code.
 
 > **Decision —** cross-file data is built once in a separate pre-pass, not shared between workers while parsing.
 > **Why:** workers then share no mutable state, so files can be parsed in any order, in
@@ -451,6 +453,17 @@ classDiagram
 > `tests/unit/test_additive.py` list it per language in run order. Run order is part of the
 > output (new statement ids are disambiguated against the ones already on the record), so
 > `order` is explicit and unique per language, and a reorder is a reviewed change.
+
+> **Decision —** a detector that needs a fact from another file declares an optional **index
+> stage** (`collect` / `resolve`), which the language's `build_index` runs; `run` reads the result
+> with `index_fact`.
+> **Why:** a fact like "`Program.cs` registers `BookQueries` as a GraphQL root" is declared in one
+> file and needed in another. The index stage keeps it in the framework's own module and in the
+> same registry as every other add-on, instead of a framework field on the language index or a new
+> parser-selection hook. **Cost:** a language must call `collect_additive` / `resolve_additive`
+> from its `build_index` to offer it (`INDEX_HOOKED_LANGUAGES`, C# today), and a detector that
+> emits for files with no marker cannot use a byte guard. Details:
+> [cross-file resolution §8](architecture/cross-file-resolution.md#a-framework-fact-from-another-file-the-additive-index-stage).
 
 > **Decision —** API, database and query detection is shared across languages (`parsers/detection/`).
 > **Why:** "is `axios.get` an HTTP call?" has the same answer everywhere; one table, improved
@@ -932,6 +945,7 @@ from another.
 | Parsers | Framework parsers subclass their language parser | [§6](#6-the-parser-model) |
 | Parsers | Cross-cutting libraries are additive detectors | [§6](#6-the-parser-model) |
 | Parsers | Additive detectors self-register; the language parser calls one runner | [§6](#6-the-parser-model) |
+| Parsers | A fact from another file comes from a detector's index stage, run by `build_index` | [§6](#6-the-parser-model) |
 | Parsers | API / DB / query detection is shared across languages | [§6](#6-the-parser-model) |
 | Parsers | Route emitters skip fixture files | [§6](#6-the-parser-model) |
 | Statements | Flat list linked by `parentId` | [§7](#7-the-statement-model) |

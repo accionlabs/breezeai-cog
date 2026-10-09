@@ -10,9 +10,19 @@ fields in code rather than annotating a class.
     }
 
 The described type ``T`` plays exactly the role ``typeof(...)`` plays for ``[ExtendObjectType]``:
-fields on a **root** are client-callable operations, fields on a data type are its shape. So only
-a root-targeted descriptor yields routes — emitting every ``Field()`` call is the over-capture
-the graphql-dotnet parser measured at 4,835 calls against ~520 real operations.
+fields on a **root** are client-callable operations. Fields on a data type are not endpoints:
+
+* a **plain** field (``d.Field(p => p.Name)``) is the type's shape and is never recorded —
+  emitting every ``Field()`` call is the over-capture the graphql-dotnet parser measured at 4,835
+  calls against ~520 real operations;
+* a **resolver** is recorded as a ``field_resolver`` (``RESOLVE_FIELD``, ``Product.isAvailable``)
+  only when it visibly reads the object it belongs to — ``ctx.Parent<Product>()``, or a
+  ``ResolveWith`` method in this file with a ``[Parent]`` / first parameter of that type. That is
+  the evidence the attribute style also requires, and what tells a data type's resolver apart
+  from the field of a root that was not recognised. Without it the field is left out.
+
+Residual risk: a root resolver that reads the root instance (``ctx.Parent<RootQuery>()``) on a
+root cog did not recognise would be recorded as a field resolver. Both conditions are rare.
 
 Unlike the attribute styles, these declarations live *inside a method body*, so this is the one
 part of the parser that reads the tree rather than the finished ``FileRecord``.
@@ -27,14 +37,19 @@ from tree_sitter import Node
 from ...schemas import Class, Function
 from ..treesitter import node_text
 from .mappings import (
+    AUTHORIZE_CALL,
     CONFIGURE_METHOD,
     DESCRIPTOR_BASES,
     DESCRIPTOR_PARAM_TYPES,
     FIELD_CALL,
     IGNORE_CALL,
     NAME_CALL,
+    OPERATION_TYPE_NAMES,
+    PARENT_CALL,
+    RESOLVE_CALL,
+    RESOLVE_WITH_CALL,
 )
-from .naming import camel_case
+from .naming import camel_case, field_name
 
 
 def _generic_arg(type_text: str | None, bases: tuple[str, ...]) -> str | None:
@@ -106,8 +121,27 @@ def _string_arg(call: Node, source: bytes) -> str | None:
     return None
 
 
+def _lambda_param(lam: Node, source: bytes) -> str | None:
+    """The single parameter of ``t => …`` or ``(Query t) => …``, else None."""
+    params = lam.child_by_field_name("parameters")
+    if params is None:
+        return None
+    if params.type == "implicit_parameter":
+        return node_text(params, source)
+    named = [p for p in params.named_children if p.type == "parameter"]
+    name = named[0].child_by_field_name("name") if len(named) == 1 else None
+    return node_text(name, source) if name is not None else None
+
+
 def _member_arg(call: Node, source: bytes) -> str | None:
-    """The property named by ``Field(f => f.Title)`` → ``Title``."""
+    """The wire name of the member a ``Field(…)`` lambda selects, or None.
+
+    * a property, ``Field(f => f.Title)`` → ``title`` (camel-cased);
+    * a method, ``Field(t => t.GetHero(default))`` → ``hero``: HotChocolate names a method-bound
+      field by its resolver convention (``Get``/``Async`` stripped, camel-cased), the same one the
+      attribute style uses. Only a call **on the lambda's parameter** names a member of the type;
+      ``t => Helpers.Make(t)`` names nothing.
+    """
     for arg in _arguments(call):
         if arg is None or not arg.type.endswith("lambda_expression"):
             continue
@@ -115,7 +149,15 @@ def _member_arg(call: Node, source: bytes) -> str | None:
         if body is not None and body.type == "member_access_expression":
             last = body.named_children[-1] if body.named_children else None
             if last is not None and last.type == "identifier":
-                return node_text(last, source)
+                return camel_case(node_text(last, source))
+        if body is not None and body.type == "invocation_expression":
+            function_node = body.child_by_field_name("function")
+            if function_node is None:
+                continue
+            method = _call_name(function_node, source)
+            receiver = _receiver_name(function_node, source)
+            if method and receiver is not None and receiver == _lambda_param(arg, source):
+                return field_name(method, [])
     return None
 
 
@@ -137,6 +179,105 @@ def _chained_calls(field_call: Node, source: bytes) -> Iterator[tuple[str, Node]
         if name is not None:
             yield name, invocation
         node = invocation
+
+
+def _call_args(call: Node, source: bytes) -> list[str]:
+    """Argument texts in the form the base parser records attribute arguments — a string
+    literal unquoted, anything else as written — so a fluent guard reads like its attribute
+    twin."""
+    args = call.child_by_field_name("arguments")
+    out: list[str] = []
+    for arg in args.named_children if args is not None else []:
+        value = arg.named_children[-1] if arg.type == "argument" and arg.named_children else arg
+        out.append(node_text(value, source).strip('"') if value.type == "string_literal"
+                   else node_text(arg, source))
+    return out
+
+
+def _chain_base(expr: Node) -> Node:
+    """The innermost call of a fluent chain — ``d.Name("Query")`` in
+    ``d.Name("Query").Description("…")``."""
+    node = expr
+    while node.type == "invocation_expression":
+        function_node = node.child_by_field_name("function")
+        inner = (function_node.named_children[0]
+                 if function_node is not None and function_node.type == "member_access_expression"
+                 and function_node.named_children else None)
+        if inner is None or inner.type != "invocation_expression":
+            break
+        node = inner
+    return node
+
+
+def _type_level_calls(body: Node, source: bytes, receiver: str) -> Iterator[tuple[str, Node]]:
+    """``(name, invocation)`` for each call made on the descriptor itself, in source order.
+
+    Only top-level statements of ``Configure`` count, and a chain stops at its first ``Field``:
+    after that the calls configure the field, not the type. So ``d.Field("x").Name("y")`` is a
+    field rename, and a ``Name`` inside an argument lambda is never seen.
+    """
+    for stmt in body.named_children:
+        if stmt.type != "expression_statement" or not stmt.named_children:
+            continue
+        base = _chain_base(stmt.named_children[0])
+        if base.type != "invocation_expression":
+            continue
+        function_node = base.child_by_field_name("function")
+        if function_node is None or _receiver_name(function_node, source) != receiver:
+            continue
+        name = _call_name(function_node, source)
+        if name is None or name == FIELD_CALL:
+            continue
+        yield name, base
+        for name, call in _chained_calls(base, source):
+            if name == FIELD_CALL:
+                break
+            yield name, call
+
+
+def _root_name_arg(call: Node, source: bytes) -> str | None:
+    """The schema name ``Name(...)`` gives the type: a string literal, or
+    ``OperationTypeNames.X``. Any other expression (a constant, a variable) is not in front of us,
+    so it names nothing."""
+    literal = _string_arg(call, source)
+    if literal is not None:
+        return literal
+    for arg in _arguments(call):
+        if arg is not None and arg.type == "member_access_expression":
+            holder, _, member = node_text(arg, source).rpartition(".")
+            if holder.rsplit(".", 1)[-1] == OPERATION_TYPE_NAMES:
+                return member or None
+    return None
+
+
+def named_target(body: Node, source: bytes, receiver: str) -> str | None:
+    """The type a descriptor without a generic argument describes, from its ``Name(...)`` call —
+    how the non-generic ``ObjectTypeExtension`` names what it extends:
+
+        protected override void Configure(IObjectTypeDescriptor d) {
+            d.Name(OperationTypeNames.Query);
+            d.Field("categories").Resolve(…);
+        }
+
+    The last call wins, as it does at runtime.
+    """
+    target = None
+    for name, call in _type_level_calls(body, source, receiver):
+        if name == NAME_CALL:
+            target = _root_name_arg(call, source)
+    return target
+
+
+def type_authorizations(body: Node, source: bytes, receiver: str) -> list[list[str]]:
+    """Arguments of each ``Authorize`` called on the descriptor — guards on every field."""
+    return [_call_args(call, source)
+            for name, call in _type_level_calls(body, source, receiver) if name == AUTHORIZE_CALL]
+
+
+def field_authorizations(field_call: Node, source: bytes) -> list[list[str]]:
+    """Arguments of each ``Authorize`` chained onto one ``Field(...)`` declaration."""
+    return [_call_args(call, source)
+            for name, call in _chained_calls(field_call, source) if name == AUTHORIZE_CALL]
 
 
 def field_declarations(
@@ -168,10 +309,61 @@ def field_declarations(
         rename = chain.get(NAME_CALL)
         name = _string_arg(rename, source) if rename is not None else None
         if name is None:
-            # A string argument is already the wire name; a property expression is a member, so
-            # it takes the framework's camel-casing.
-            member = _member_arg(node, source)
-            name = _string_arg(node, source) or (camel_case(member) if member else None)
+            # A string argument is already the wire name; a member expression (property or
+            # method) takes the framework's naming convention.
+            name = _string_arg(node, source) or _member_arg(node, source)
         if name:
             found.append((name, node))
     return sorted(found, key=lambda item: item[1].start_point)
+
+
+def resolve_with_method(field_call: Node, source: bytes) -> tuple[str, str] | None:
+    """``(resolver class, method)`` named by ``.ResolveWith<TResolvers>(t => t.Method(…))`` on this
+    field's chain, or None. Only the generic form names a class, and only a call on the lambda's
+    own parameter names one of its methods."""
+    for name, call in _chained_calls(field_call, source):
+        if name != RESOLVE_WITH_CALL:
+            continue
+        function_node = call.child_by_field_name("function")
+        generic = function_node.named_children[-1] if function_node is not None and function_node.named_children else None
+        targs = (next((c for c in generic.named_children if c.type == "type_argument_list"), None)
+                 if generic is not None and generic.type == "generic_name" else None)
+        if targs is None or len(targs.named_children) != 1:
+            return None
+        resolver_cls = node_text(targs.named_children[0], source).rsplit(".", 1)[-1]
+        for arg in _arguments(call):
+            if arg is None or not arg.type.endswith("lambda_expression"):
+                continue
+            body = arg.child_by_field_name("body")
+            inner = body.child_by_field_name("function") if body is not None and body.type == "invocation_expression" else None
+            if inner is None:
+                continue
+            method = _call_name(inner, source)
+            if method and _receiver_name(inner, source) == _lambda_param(arg, source):
+                return resolver_cls, method
+        return None
+    return None
+
+
+def resolve_reads_parent(field_call: Node, source: bytes, target: str) -> bool:
+    """Whether this field's inline ``.Resolve(…)`` reads the object it belongs to:
+    ``ctx.Parent<Target>()`` somewhere in the resolver, with exactly the described type."""
+    for name, call in _chained_calls(field_call, source):
+        if name != RESOLVE_CALL:
+            continue
+        stack = [call.child_by_field_name("arguments")]
+        while stack:
+            node = stack.pop()
+            if node is None:
+                continue
+            stack.extend(node.named_children)
+            if node.type != "generic_name":
+                continue
+            ident = next((c for c in node.named_children if c.type == "identifier"), None)
+            targs = next((c for c in node.named_children if c.type == "type_argument_list"), None)
+            if (ident is None or node_text(ident, source) != PARENT_CALL or targs is None
+                    or len(targs.named_children) != 1):
+                continue
+            if node_text(targs.named_children[0], source).rsplit(".", 1)[-1] == target:
+                return True
+    return False

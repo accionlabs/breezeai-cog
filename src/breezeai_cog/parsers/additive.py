@@ -21,6 +21,14 @@ The runner owns the shared rules: run only with statement capture, skip fixture 
 ``skip_fixtures`` is set, apply the optional byte ``guard``, run in ascending ``order``, and
 let a returned framework label set ``record.framework`` only while it is still ``None``.
 
+**Optional index stage.** Some detections need a fact that lives in *another* file — a class is a
+GraphQL root only because the composition root registers it (``AddQueryType<BookQueries>()``). A
+detector can therefore also declare ``collect`` and ``resolve``: the language's ``build_index``
+calls :func:`collect_additive` for every file (behind ``index_gate``, with the tree it already
+parsed) and :func:`resolve_additive` once after the reduce. The result is stored on the language
+index under the detector's name, and ``run`` reads it back with :func:`index_fact`. The fact is
+built once before parsing and is read-only afterwards, like every other index entry.
+
 Run order is part of the output: a detector disambiguates new statement ids against the
 statements already on the record, so swapping two detectors can swap ids (the backend's
 ``captureId``). ``order`` is therefore explicit and unique per language.
@@ -32,7 +40,7 @@ import importlib
 import threading
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable
+from typing import Any, Callable
 
 from tree_sitter import Node
 
@@ -43,6 +51,11 @@ from .base import ParseContext
 #: Languages whose base parser calls :func:`run_additive`. Registering a detector for any
 #: other language is an error: nothing would ever run it.
 HOOKED_LANGUAGES: frozenset[str] = frozenset({"typescript", "csharp", "scala"})
+
+#: Languages whose ``build_index`` calls :func:`collect_additive` / :func:`resolve_additive`.
+#: A detector with an index stage for any other language is an error: its fact would never be
+#: built, and its ``run`` would silently find nothing.
+INDEX_HOOKED_LANGUAGES: frozenset[str] = frozenset({"csharp"})
 
 #: Source marker that makes a module a detector module for :func:`discover_detectors`.
 _MARKER = b"register_detector("
@@ -86,6 +99,18 @@ class Detector:
     skip_fixtures: bool = False
     #: Framework labels this detector can emit (statement or file level), for ``capabilities``.
     frameworks: tuple[str, ...] = ()
+    #: Optional index stage. ``collect(root, source, rel, repo_root)`` runs during the language's
+    #: ``build_index`` on files containing one of ``index_gate`` and returns a picklable value
+    #: (or None); ``resolve(values, index)`` runs once after every file is indexed, gets the
+    #: values in file order, must not depend on that order, and returns the fact ``run`` reads
+    #: via :func:`index_fact`. Both or neither.
+    index_gate: tuple[bytes, ...] = ()
+    collect: Callable[[Node, bytes, str, Path | None], Any] | None = None
+    resolve: Callable[[list[Any], Any], Any] | None = None
+
+    @property
+    def has_index_stage(self) -> bool:
+        return self.collect is not None
 
 
 _DETECTORS: dict[str, list[Detector]] = {}
@@ -99,6 +124,16 @@ def register_detector(detector: Detector) -> Detector:
             f"detector {detector.name!r}: language {detector.language!r} has no additive "
             f"hook (one of {sorted(HOOKED_LANGUAGES)})"
         )
+    if (detector.collect is None) != (detector.resolve is None):
+        raise RegistryError(f"detector {detector.name!r}: index stage needs both collect and resolve")
+    if detector.has_index_stage:
+        if detector.language not in INDEX_HOOKED_LANGUAGES:
+            raise RegistryError(
+                f"detector {detector.name!r}: language {detector.language!r} has no index "
+                f"hook (one of {sorted(INDEX_HOOKED_LANGUAGES)})"
+            )
+        if not detector.index_gate:
+            raise RegistryError(f"detector {detector.name!r}: index stage needs an index_gate")
     existing = _DETECTORS.setdefault(detector.language, [])
     for other in existing:
         if other.name == detector.name:
@@ -169,3 +204,36 @@ def run_additive(
         label = detector.run(dc)
         if label and record.framework is None:
             record.framework = label
+
+
+def collect_additive(
+    language: str, root: Node, source: bytes, rel: str, repo_root: Path | None
+) -> dict[str, Any]:
+    """Run every index-stage ``collect`` registered for ``language`` on one file, from the
+    language's ``build_index`` per-file pass. Returns detector name → collected value, for the
+    detectors whose gate matched and that found something."""
+    out: dict[str, Any] = {}
+    for detector in detectors_for(language):
+        if not detector.has_index_stage or not any(g in source for g in detector.index_gate):
+            continue
+        value = detector.collect(root, source, rel, repo_root)  # type: ignore[misc]
+        if value is not None:
+            out[detector.name] = value
+    return out
+
+
+def resolve_additive(language: str, collected: dict[str, list[Any]], index: Any) -> dict[str, Any]:
+    """Resolve every index-stage detector for ``language`` once, after the language's index is
+    reduced. ``collected`` maps detector name → its per-file values in file order. Returns
+    detector name → fact, to be stored on the index for :func:`index_fact`."""
+    return {
+        d.name: d.resolve(collected.get(d.name, []), index)  # type: ignore[misc]
+        for d in detectors_for(language)
+        if d.has_index_stage
+    }
+
+
+def index_fact(index: Any | None, name: str) -> Any | None:
+    """The fact the index-stage detector ``name`` resolved, or None (no index, e.g. single-file
+    parsing, or a language whose index carries no facts)."""
+    return (getattr(index, "facts", None) or {}).get(name)
