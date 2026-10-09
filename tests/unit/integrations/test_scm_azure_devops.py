@@ -76,6 +76,11 @@ def test_compare_request_shape_and_change_mapping(router, settings) -> None:
     cs = _client(router, settings).compare(REF, BASE, SHA)
     assert cs.changed == ["src/a.cs", "src/b.cs", "new.cs", "moved.cs"]
     assert cs.deleted == ["gone.cs", "old.cs", "was.cs"]
+    assert [(f.filename, f.status) for f in cs.files] == [
+        ("src/a.cs", "modified"), ("src/b.cs", "added"), ("gone.cs", "removed"),
+        ("new.cs", "renamed"), ("moved.cs", "renamed"),
+    ]
+    assert all(f.additions == 0 and f.deletions == 0 and f.patch is None for f in cs.files)
     q = _qs(router.urls[0])
     assert q["baseVersion"] == BASE and q["baseVersionType"] == "commit"
     assert q["targetVersion"] == SHA and q["targetVersionType"] == "commit"

@@ -14,7 +14,7 @@ from urllib.parse import quote
 
 import httpx
 
-from .base import DEFAULT_HOSTS, PR_STATES, AbstractSCMClient, ChangeSet, CommitInfo, PrComment, PullRequestInfo, RepoRef
+from .base import DEFAULT_HOSTS, PR_STATES, AbstractSCMClient, ChangeSet, CommitInfo, FileDiff, PrComment, PullRequestInfo, RepoRef
 from .http import SCMHttpClient, warn_if_anonymous
 
 if TYPE_CHECKING:
@@ -126,7 +126,11 @@ class GitHubSCMClient(AbstractSCMClient):
         return PrComment(id=str(data.get("id") or ""), url=data.get("html_url") or "")
 
     def compare(self, ref: RepoRef, base: str, head: str) -> ChangeSet:
-        """Three-dot compare, paginated (``files`` is capped at 300 per page)."""
+        """Three-dot compare, paginated (``files`` is capped at 300 per page).
+
+        ``files`` carries GitHub's own ``additions`` / ``deletions`` / ``patch`` per
+        file (``patch`` is absent on binary or very large diffs, as GitHub omits it).
+        """
         first = f"/repos/{ref.owner}/{ref.repo}/compare/{base}...{head}"
         out = ChangeSet()
         for resp in self._http.paginate(first, _next_link, {"per_page": "100"}):
@@ -135,6 +139,13 @@ class GitHubSCMClient(AbstractSCMClient):
                 if not name:
                     continue
                 status = f.get("status")
+                out.files.append(FileDiff(
+                    filename=name,
+                    status=str(status or "modified"),
+                    additions=int(f.get("additions") or 0),
+                    deletions=int(f.get("deletions") or 0),
+                    patch=f.get("patch") if isinstance(f.get("patch"), str) else None,
+                ))
                 if status == "removed":
                     out.deleted.append(name)
                     continue

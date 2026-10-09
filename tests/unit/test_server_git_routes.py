@@ -11,6 +11,7 @@ from breezeai_cog.integrations.scm import (
     AbstractSCMClient,
     ChangeSet,
     CommitInfo,
+    FileDiff,
     PrComment,
     PullRequestInfo,
     RepoRef,
@@ -30,10 +31,10 @@ class FakeClient(AbstractSCMClient):
     provider = "github"
     supports_incremental = True
 
-    def __init__(self, *, tip=None, changed=(), deleted=(), tree=(), fail=None, pr=None) -> None:
+    def __init__(self, *, tip=None, changed=(), deleted=(), files=(), tree=(), fail=None, pr=None) -> None:
         self._tip = tip or CommitInfo(SHA, "feat: x", "Alice", "2026-09-01T00:00:00Z")
         self._pr = pr or PullRequestInfo(7, "Add x", "open", "main", "feat/x", OLD, SHA, "https://github.com/acme/widgets/pull/7")
-        self._changes = ChangeSet(list(changed), list(deleted))
+        self._changes = ChangeSet(list(changed), list(deleted), list(files))
         self._tree = list(tree)
         self._fail = fail
         self.calls: list[tuple] = []
@@ -202,12 +203,34 @@ def test_latest_commit() -> None:
     assert fake.calls == [("branch_head", "release/1")]
 
 
-def test_compare() -> None:
-    fake = FakeClient(changed=["a.py"], deleted=["b.py", "c.py"])
+def test_compare_returns_git_diff_result() -> None:
+    fake = FakeClient(
+        changed=["a.py"], deleted=["b.py", "c.py"],
+        files=[
+            FileDiff("a.py", "modified", 3, 1, "@@ -1 +1,3 @@\n-x\n+y\n+z\n+w"),
+            FileDiff("b.py", "removed", 0, 4),
+            FileDiff("c.py", "removed"),
+        ],
+    )
     r = _app(fake).post("/api/git/compare", json={"repoUrl": REPO, "baseCommitId": OLD, "headCommitId": SHA})
     assert r.status_code == 200
-    assert r.json() == {"changedFiles": ["a.py"], "deletedFiles": ["b.py", "c.py"], "fileUpdatedCount": 1, "fileDeletedCount": 2}
+    assert r.json() == {
+        "baseSha": OLD,
+        "headSha": SHA,
+        "totalFiles": 3,
+        "files": [
+            {"filename": "a.py", "status": "modified", "additions": 3, "deletions": 1, "patch": "@@ -1 +1,3 @@\n-x\n+y\n+z\n+w"},
+            {"filename": "b.py", "status": "removed", "additions": 0, "deletions": 4},
+            {"filename": "c.py", "status": "removed", "additions": 0, "deletions": 0},
+        ],
+    }
     assert fake.calls == [("compare", OLD, SHA)]
+
+
+def test_compare_empty_diff() -> None:
+    r = _app(FakeClient()).post("/api/git/compare", json={"repoUrl": REPO, "baseCommitId": OLD, "headCommitId": SHA})
+    assert r.status_code == 200
+    assert r.json() == {"baseSha": OLD, "headSha": SHA, "totalFiles": 0, "files": []}
 
 
 def test_compare_requires_both_commits() -> None:
