@@ -7,7 +7,7 @@ from __future__ import annotations
 import httpx
 import pytest
 
-from breezeai_cog.integrations.scm import CommitInfo, PrComment, PullRequestInfo, RepoRef, SCMAPIError
+from breezeai_cog.integrations.scm import CommitInfo, PrComment, PullRequestInfo, RepoRef, SCMAPIError, count_patch_lines
 from breezeai_cog.integrations.scm.gitlab import GitLabSCMClient
 
 REF = RepoRef("gitlab", "group/sub", "proj", host="gitlab.com")
@@ -49,7 +49,7 @@ def test_tree_paginates_by_x_next_page(router, settings) -> None:
 
 def test_compare_maps_flags(router, settings) -> None:
     router.add(rf"/projects/{PROJ}/repository/compare\?from={BASE}&to={SHA}", httpx.Response(200, json={"diffs": [
-        {"old_path": "a.py", "new_path": "a.py", "diff": "--- a/a.py\n+++ b/a.py\n@@ -1,2 +1,2 @@\n-x\n+y\n z"},
+        {"old_path": "a.py", "new_path": "a.py", "diff": "@@ -1,3 +1,3 @@\n-x\n--- sql comment\n+y\n+++counter;\n z"},
         {"old_path": "b.py", "new_path": "b.py", "new_file": True, "diff": "@@ -0,0 +1,2 @@\n+a\n+b"},
         {"old_path": "gone.py", "new_path": "gone.py", "deleted_file": True, "diff": "@@ -1 +0,0 @@\n-x"},
         {"old_path": "old.py", "new_path": "new.py", "renamed_file": True},
@@ -58,14 +58,22 @@ def test_compare_maps_flags(router, settings) -> None:
     assert cs.changed == ["a.py", "b.py", "new.py"]
     assert cs.deleted == ["gone.py", "old.py"]
     assert [(f.filename, f.status, f.additions, f.deletions) for f in cs.files] == [
-        ("a.py", "modified", 1, 1),
+        ("a.py", "modified", 2, 2),
         ("b.py", "added", 2, 0),
         ("gone.py", "removed", 0, 1),
         ("new.py", "renamed", 0, 0),
     ]
-    assert cs.files[0].patch == "--- a/a.py\n+++ b/a.py\n@@ -1,2 +1,2 @@\n-x\n+y\n z"
+    assert cs.files[0].patch == "@@ -1,3 +1,3 @@\n-x\n--- sql comment\n+y\n+++counter;\n z"
     assert cs.files[3].patch is None
 
+
+
+def test_count_patch_lines_skips_file_headers_but_not_lookalike_content() -> None:
+    # GitLab's diff has no file headers; a removed "-- x" / added "++i" must still count.
+    assert count_patch_lines("@@ -1,2 +1,2 @@\n--- x\n+++i;\n ctx") == (1, 1)
+    # With headers present, only the hunk body counts.
+    assert count_patch_lines("--- a/f\n+++ b/f\n@@ -1 +1 @@\n-a\n+b") == (1, 1)
+    assert count_patch_lines(None) == (0, 0) and count_patch_lines("") == (0, 0)
 
 def test_file_content_raw_endpoint_fully_encodes_path(router, settings) -> None:
     router.add(rf"/projects/{PROJ}/repository/files/src%2Fa%20b.py/raw\?ref={SHA}", httpx.Response(200, content=b"ok\n"))

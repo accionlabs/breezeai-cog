@@ -103,16 +103,24 @@ class FileDiff:
 
 
 def count_patch_lines(patch: str | None) -> tuple[int, int]:
-    """``(additions, deletions)`` of a unified-diff hunk body: ``+``/``-`` lines that are
-    not the ``+++``/``---`` file headers. For providers whose compare returns the diff
-    text but no counts (GitLab)."""
+    """``(additions, deletions)`` of a unified diff: ``+``/``-`` lines inside hunks. For
+    providers whose compare returns the diff text but no counts (GitLab).
+
+    Only lines after the first ``@@`` hunk header count, so ``---``/``+++`` file headers
+    are skipped without dropping content lines that start the same way (a removed
+    ``-- comment`` is the hunk line ``--- comment``)."""
     if not patch:
         return 0, 0
     additions = deletions = 0
+    in_hunk = False
     for line in patch.splitlines():
-        if line.startswith("+") and not line.startswith("+++"):
+        if line.startswith("@@"):
+            in_hunk = True
+        elif not in_hunk:
+            continue
+        elif line.startswith("+"):
             additions += 1
-        elif line.startswith("-") and not line.startswith("---"):
+        elif line.startswith("-"):
             deletions += 1
     return additions, deletions
 
