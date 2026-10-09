@@ -35,6 +35,9 @@ Python reimplementation of `breezeai-code-ontology-generator`.
 | GraphQL | `.graphql .gql .graphqls` | Schema-first SDL — types, fields, operations and resolvers |
 | HCL / Terraform | `.tf .tfvars .hcl` | HCL (HashiCorp Configuration Language) — top-level blocks as statements; `module` blocks as Classes (with `constructorParams` for input variables); module and provider sources as `externalImports`; Terraform-specific detection via `hcl_terraform` |
 | Prisma | `.prisma` | Prisma Schema Language — `model` → `data_model` entity, `enum` / `datasource` / `generator` blocks (full body on `text`) |
+| XSD | `.xsd` | XML Schema — global `element` / `complexType` / `simpleType` / `group` / `attributeGroup` → `data_model` entity (full body on `text`); `import` / `include` recorded, not resolved |
+| WSDL | `.wsdl` | WSDL 1.1 (SOAP) — `message` → `data_model` entity; every `portType` operation → a `route` (`routeKind=rpc`, `method=RPC`), independent of whether a `binding` implements it; reuses the XSD walker for embedded `<types>` schemas |
+| JSLT | `.jslt` | JSON query/transform language — hand-rolled structural scan (no tree-sitter grammar): `import` / `def` / `let` declarations plus the trailing module expression |
 | Structured JSON / data | `.json` (+ YAML/TOML config) | Whole-document capture as a TOON `structured_data` statement |
 | Config | `package.json`, `tsconfig`, `Dockerfile`, `docker-compose`, `pom.xml`, `requirements.txt`, `build.gradle`, `.csproj` / `.vbproj` / `.sln`, `Makefile`, … | — |
 
