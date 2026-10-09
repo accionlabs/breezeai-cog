@@ -142,7 +142,7 @@ flowchart TD
 | 2. Build indexes | `BaseParser.build_index`, `pipeline._build_indexes` | Once per language, main process (may fan out) | Optional; usually one parse per file of that language |
 | 3. Parse | `core/executor.py`, `core/registry.py`, `parsers/**` | Once per file, in parallel | One parse + a fixed number of tree walks |
 | 4. Assemble | `pipeline._assemble`, `emit/split.py` | Streaming, main process | Linear in output |
-| 5. Sink | `emit/sinks.py`, `emit/s3.py` | Streaming | Bounded memory |
+| 5. Sink | `emit/sinks.py`, `infra/aws/s3.py` | Streaming | Bounded memory |
 
 ### 4.1 Scanning and file selection
 
