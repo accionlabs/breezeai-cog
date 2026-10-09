@@ -19,6 +19,7 @@ from breezeai_cog.parsers.groovy.parser import GroovyParser
 from breezeai_cog.parsers.java.parser import JavaParser
 from breezeai_cog.parsers.kotlin.parser import KotlinParser
 from breezeai_cog.parsers.python.parser import PythonParser
+from breezeai_cog.parsers.ruby.parser import RubyParser
 from breezeai_cog.parsers.typescript.parser import TypeScriptParser
 from breezeai_cog.parsers.vb.parser import VbParser
 
@@ -209,6 +210,38 @@ def test_vb_comment_capture(tmp_path) -> None:
     assert "' header comment" in {t for t, *_ in got}
 
 
+# --- Ruby: `#` line comments + `=begin`/`=end` block; in-body comment under a control-flow -----
+
+def test_ruby_comment_capture(tmp_path) -> None:
+    src = (
+        "# header\n"                 # L1 -> Invoice (bind-ahead)
+        "class Invoice\n"
+        "  # doc for total\n"        # L3 -> total (bind-ahead)
+        "  def total\n"
+        "    x = 1 # trailing\n"     # L5 -> folded into the assignment text
+        "    if x\n"
+        "      # inside if\n"        # L7 -> total (if absorbs only its header line)
+        "      x\n"
+        "    end\n"
+        "  end\n"
+        "=begin\n"                   # L11-13 block -> Invoice (containment)
+        "block doc\n"
+        "=end\n"
+        "end\n"
+    )
+    rec = _parse(tmp_path, RubyParser(), "invoice.rb", src)
+    got = _comments(rec)
+    assert ("# header", "Invoice", 1, 1) in got
+    assert ("# doc for total", "total", 3, 3) in got
+    assert ("# inside if", "total", 7, 7) in got
+    assert ("=begin\nblock doc\n=end", "Invoice", 11, 13) in got
+    assert not any("trailing" in t for t, *_ in got)
+    assert "x = 1 # trailing" in _stmt_texts(rec)
+
+    # Gating: no comments when capture is off.
+    assert not _comments(_parse(tmp_path, RubyParser(), "invoice.rb", src, capture=False))
+
+
 # --- TypeScript ---------------------------------------------------------------------------
 
 def test_typescript_comment_capture(tmp_path) -> None:
@@ -302,6 +335,12 @@ _COMMENT_FIXTURES = [
         "        # k_m1\n        # k_m2\n        y = 2\n",
         ["k_hdr", "k_doc", "k_trail", "k_m1", "k_m2"],
     ),
+    (
+        RubyParser(), "a.rb",
+        "# k_hdr\nclass A\n  # k_body\n  def m\n    x = 1 # k_trail\n"
+        "    # k_m1\n    # k_m2\n    y = 2\n  end\nend\n",
+        ["k_hdr", "k_body", "k_trail", "k_m1", "k_m2"],
+    ),
 ]
 
 
@@ -319,3 +358,31 @@ def test_no_comment_dropped_or_duplicated(tmp_path, parser, filename, src, marke
         assert node_hits <= 1, f"{filename}: {m} emitted as {node_hits} comment nodes"
         assert node_hits + int(in_carrier) >= 1, f"{filename}: {m} dropped"
         assert not (node_hits and in_carrier), f"{filename}: {m} both a node and folded"
+
+
+# ── lookup structures (built once per file; must match the linear-scan semantics) ─────────
+
+
+def test_absorbed_uses_any_covering_span() -> None:
+    from breezeai_cog.parsers.comments_common import _Absorbed
+
+    absorbed = _Absorbed([(5, 6), (1, 20), (8, 9)])  # (1, 20) covers everything inside it
+    assert absorbed(10, 12) and absorbed(1, 20)
+    assert not absorbed(15, 21)  # runs past every span
+    assert not _Absorbed([(5, 6)])(4, 5)  # starts before the only span
+    assert not _Absorbed([])(1, 1)
+
+
+def test_innermost_latest_start_and_first_listed_tie() -> None:
+    from breezeai_cog.parsers.comments_common import _Innermost
+
+    # cls 1-30 ⊃ f 5-10, g 12-20; h and h2 share a start (one-line `class A { void h() {} }`)
+    scopes = [(1, 30, "cls"), (5, 10, "f"), (12, 20, "g"), (22, 25, "h"), (22, 25, "h2")]
+    innermost = _Innermost(scopes)
+    assert innermost(3, 3)[2] == "cls"
+    assert innermost(6, 7)[2] == "f"
+    assert innermost(9, 11)[2] == "cls"  # runs past f's end → the enclosing class
+    assert innermost(11, 11)[2] == "cls"  # between methods
+    assert innermost(15, 15)[2] == "g"
+    assert innermost(23, 23)[2] == "h"  # tie on start → first in list order wins
+    assert innermost(31, 31) is None  # after every scope

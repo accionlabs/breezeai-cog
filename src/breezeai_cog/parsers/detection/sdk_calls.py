@@ -56,7 +56,9 @@ from dataclasses import dataclass
 from tree_sitter import Node
 
 from ...emit import disambiguate, file_id, statement_id
-from ...schemas import FileRecord, Function, Statement
+from ...schemas import FileRecord, Statement
+from ..additive import DetectContext, Detector, register_detector
+from ..enclosing import Enclosing
 from ..index_common import ClassHeritage
 from ..treesitter import first_line, node_text
 
@@ -253,27 +255,6 @@ def _client_identifiers(root: Node, source: bytes, sdk: _Sdk) -> set[str]:
     return ids
 
 
-def _enclosing_statement(line: int, statements: list[Statement]) -> Statement | None:
-    best: Statement | None = None
-    best_span: int | None = None
-    for s in statements:
-        if s.startLine <= line <= s.endLine:
-            span = s.endLine - s.startLine
-            if best_span is None or span < best_span:
-                best, best_span = s, span
-    return best
-
-
-def _owner_function(line: int, functions: list[Function], fallback: str) -> str:
-    best_id, best_span = fallback, None
-    for f in functions:
-        if f.startLine <= line <= f.endLine:
-            span = f.endLine - f.startLine
-            if best_span is None or span < best_span:
-                best_id, best_span = f.id, span
-    return best_id
-
-
 def _emit_outbound(
     call: Node,
     line: int,
@@ -283,6 +264,7 @@ def _emit_outbound(
     path: str,
     record: FileRecord,
     seen: set[str],
+    enclosing: Enclosing,
     *,
     reclassify_db: bool = False,
 ) -> None:
@@ -291,7 +273,7 @@ def _emit_outbound(
     classifier grabs first (ts-force → ``db_method_call``), when ``reclassify_db`` and the
     statement is that ORM mis-tag; otherwise appends (so a genuinely different classified
     span is never overwritten)."""
-    stmt = _enclosing_statement(line, record.statements)
+    stmt = enclosing.statement(line)
     enrichable = stmt is not None and (
         stmt.semanticType is None or (reclassify_db and stmt.semanticType == "db_method_call")
     )
@@ -308,7 +290,7 @@ def _emit_outbound(
         record.statements.append(
             Statement(
                 id=new_id,
-                parentId=_owner_function(line, record.functions, file_id(path)),
+                parentId=enclosing.function_id(line, file_id(path)),
                 nodeType=call.type,
                 semanticType="api_call",
                 text=first_line(node_text(call, source)),
@@ -454,7 +436,12 @@ def _apollo_endpoint(call: Node, source: bytes) -> str | None:
 
 
 def _detect_apollo_calls(
-    root: Node, source: bytes, path: str, record: FileRecord, seen: set[str]
+    root: Node,
+    source: bytes,
+    path: str,
+    record: FileRecord,
+    seen: set[str],
+    enclosing: Enclosing,
 ) -> bool:
     """Detect Apollo GraphQL calls in two patterns:
 
@@ -488,7 +475,7 @@ def _detect_apollo_calls(
                     endpoint = _apollo_endpoint(call, source) or f"{field}.{method}"
                     _emit_outbound(
                         call, call.start_point[0] + 1, endpoint, "graphql", source, path,
-                        record, seen,
+                        record, seen, enclosing,
                     )
                     emitted = True
                     continue
@@ -502,7 +489,7 @@ def _detect_apollo_calls(
                     endpoint = _apollo_endpoint(call, source) or f"{inner}.{method}"
                     _emit_outbound(
                         call, call.start_point[0] + 1, endpoint, "graphql", source, path,
-                        record, seen,
+                        record, seen, enclosing,
                     )
                     emitted = True
 
@@ -674,6 +661,7 @@ def _detect_send_command_calls(
     path: str,
     record: FileRecord,
     seen: set[str],
+    enclosing: Enclosing,
     *,
     byte_guard: bytes,
     client_types: frozenset[str],
@@ -726,7 +714,7 @@ def _detect_send_command_calls(
         if command_name is not None and command_name in sdk_commands:
             _emit_outbound(
                 call, call.start_point[0] + 1, command_name, framework,
-                source, path, record, seen,
+                source, path, record, seen, enclosing,
             )
             emitted = True
     return emitted
@@ -749,6 +737,7 @@ def detect_sdk_calls(
     resolved repo-wide, not just from this file's classes. Omitting it (``None``) degrades
     gracefully to file-local resolution."""
     seen = {s.id for s in record.statements}
+    enclosing = Enclosing(record)
     file_fw: str | None = None
 
     for sdk in _sdks_in(source):
@@ -771,17 +760,20 @@ def detect_sdk_calls(
                 path,
                 record,
                 seen,
+                enclosing,
             )
             file_fw = file_fw or sdk.framework
 
-    if _detect_tsforce(root, source, path, record, seen, _repo_entities(class_heritage)):
+    if _detect_tsforce(
+        root, source, path, record, seen, enclosing, _repo_entities(class_heritage)
+    ):
         file_fw = file_fw or "salesforce"
 
-    if _detect_apollo_calls(root, source, path, record, seen):
+    if _detect_apollo_calls(root, source, path, record, seen, enclosing):
         file_fw = file_fw or "graphql"
 
     if _detect_send_command_calls(
-        root, source, path, record, seen,
+        root, source, path, record, seen, enclosing,
         byte_guard=_S3_BYTE_GUARD,
         client_types=_S3_CLIENT_TYPES,
         framework="aws-s3",
@@ -789,7 +781,7 @@ def detect_sdk_calls(
         file_fw = file_fw or "aws-s3"
 
     if _detect_send_command_calls(
-        root, source, path, record, seen,
+        root, source, path, record, seen, enclosing,
         byte_guard=_COGNITO_BYTE_GUARD,
         client_types=_COGNITO_CLIENT_TYPES,
         framework="aws-cognito",
@@ -797,7 +789,7 @@ def detect_sdk_calls(
         file_fw = file_fw or "aws-cognito"
 
     if _detect_send_command_calls(
-        root, source, path, record, seen,
+        root, source, path, record, seen, enclosing,
         byte_guard=_SSM_BYTE_GUARD,
         client_types=_SSM_CLIENT_TYPES,
         framework="aws-ssm",
@@ -937,6 +929,7 @@ def _detect_tsforce(
     path: str,
     record: FileRecord,
     seen: set[str],
+    enclosing: Enclosing,
     repo_entities: set[str],
 ) -> bool:
     """ts-force outbound detection. Two read shapes + instance writes, endpoint = SObject:
@@ -1027,8 +1020,27 @@ def _detect_tsforce(
             path,
             record,
             seen,
+            enclosing,
             reclassify_db=True,
         )
         emitted = True
 
     return emitted
+
+
+def _run(dc: DetectContext) -> str | None:
+    return detect_sdk_calls(
+        dc.root,
+        dc.source,
+        dc.path,
+        dc.record,
+        getattr(dc.ctx.resolution_index, "class_heritage", None),
+    )
+
+
+register_detector(Detector(
+    name="sdk-calls", language="typescript", order=30, run=_run,
+    frameworks=(
+        "hubspot", "chargebee", "salesforce", "graphql", "aws-s3", "aws-cognito", "aws-ssm",
+    ),
+))

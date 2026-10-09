@@ -46,7 +46,8 @@ from tree_sitter import Node
 
 from ...emit import disambiguate, file_id, statement_id
 from ...schemas import Class, FileRecord, Statement
-from ..graphql.sdl import extract_graphql
+from ..additive import DetectContext, Detector, register_detector
+from ..graphql.sdl import base_type_name, child_of_type, extract_graphql
 from ..treesitter import first_line, node_text, parse_source
 
 # The three root operation types. Everything else keyed in a resolver map
@@ -135,45 +136,6 @@ def _detect_resolver_maps(root: Node, source: bytes, path: str, seen: set[str]) 
 
 # A template_string is worth re-parsing as SDL only if it declares a root type.
 _SDL_MARKERS = (b"type Query", b"type Mutation", b"type Subscription")
-
-
-def _child(node: Node, typ: str) -> Node | None:
-    return next((c for c in node.named_children if c.type == typ), None)
-
-
-def _base_type_name(node: Node | None, source: bytes) -> str | None:
-    """The underlying type name of a ``type`` node, stripping ``!``/``[]`` wrappers:
-    ``[ProcurementItem!]!`` -> ``ProcurementItem``. Recurses to the first ``named_type``."""
-    if node is None:
-        return None
-    if node.type == "named_type":
-        name = _child(node, "name")
-        return node_text(name, source) if name is not None else None
-    for c in node.named_children:
-        found = _base_type_name(c, source)
-        if found is not None:
-            return found
-    return None
-
-
-def _request_dto(field: Node, source: bytes) -> str | None:
-    """The input DTO of a field's args — the ``input``/``data`` arg if present, else the
-    first arg — as its base type name. Shared with the code-first GraphQL detector."""
-    args = _child(field, "arguments_definition")
-    if args is None:
-        return None
-    inputs = [c for c in args.named_children if c.type == "input_value_definition"]
-    if not inputs:
-        return None
-    chosen = next(
-        (
-            i
-            for i in inputs
-            if (n := _child(i, "name")) is not None and node_text(n, source) in ("input", "data")
-        ),
-        inputs[0],
-    )
-    return _base_type_name(_child(chosen, "type"), source)
 
 
 def _parse_sdl_fragment(
@@ -294,15 +256,15 @@ def _is_gql_call_arg(tmpl: Node, source: bytes) -> bool:
 def _root_fields(op_def: Node) -> list[Node]:
     """Root selection-set fields of an operation — the actual API operations invoked.
     Skips bare fragment spreads (``...Foo``) at the root, which carry no field name."""
-    sel_set = _child(op_def, "selection_set")
+    sel_set = child_of_type(op_def, "selection_set")
     if sel_set is None:
         return []
     fields: list[Node] = []
     for selection in sel_set.named_children:
         if selection.type != "selection":
             continue
-        field = _child(selection, "field")
-        if field is not None and _child(field, "name") is not None:
+        field = child_of_type(selection, "field")
+        if field is not None and child_of_type(field, "name") is not None:
             fields.append(field)
     return fields
 
@@ -310,7 +272,7 @@ def _root_fields(op_def: Node) -> list[Node]:
 def _op_request_dto(op_def: Node, sdl: bytes) -> str | None:
     """DTO from the operation's variable definitions — the ``$input``/``$data`` variable if
     present, else the sole variable — as its base type name. ``None`` if 0 or many unnamed."""
-    var_defs = _child(op_def, "variable_definitions")
+    var_defs = child_of_type(op_def, "variable_definitions")
     if var_defs is None:
         return None
     variables = [c for c in var_defs.named_children if c.type == "variable_definition"]
@@ -318,8 +280,8 @@ def _op_request_dto(op_def: Node, sdl: bytes) -> str | None:
         return None
 
     def var_name(v: Node) -> str | None:
-        var = _child(v, "variable")
-        n = _child(var, "name") if var is not None else None
+        var = child_of_type(v, "variable")
+        n = child_of_type(var, "name") if var is not None else None
         return node_text(n, sdl) if n is not None else None
 
     chosen = next((v for v in variables if var_name(v) in ("input", "data")), None)
@@ -327,7 +289,7 @@ def _op_request_dto(op_def: Node, sdl: bytes) -> str | None:
         if len(variables) != 1:
             return None
         chosen = variables[0]
-    return _base_type_name(_child(chosen, "type"), sdl)
+    return base_type_name(child_of_type(chosen, "type"), sdl)
 
 
 def _emit_client_ops(
@@ -340,11 +302,11 @@ def _emit_client_ops(
     seen: set[str],
     routes: list[Statement],
 ) -> None:
-    op_name_node = _child(op_def, "name")
+    op_name_node = child_of_type(op_def, "name")
     op_name = node_text(op_name_node, sdl) if op_name_node is not None else None
     request_dto = _op_request_dto(op_def, sdl)
     for field in _root_fields(op_def):
-        name = _child(field, "name")
+        name = child_of_type(field, "name")
         line = row_base + name.start_point[0] + 1
         # Column only shifts on the template's first row (body starts after the backtick);
         # later rows begin at column 0 within the body.
@@ -398,7 +360,7 @@ def _detect_client_ops(
 
                 def gwalk(g: Node) -> None:
                     if g.type == "operation_definition":
-                        ot = _child(g, "operation_type")
+                        ot = child_of_type(g, "operation_type")
                         # operation_type may be omitted for a shorthand anonymous query (``{ … }``)
                         kind = _OP_KINDS.get(node_text(ot, body)) if ot is not None else "query"
                         if kind is not None:
@@ -452,3 +414,16 @@ def detect_graphql_client(
     )
     record.statements.extend(routes)
     return bool(routes)
+
+
+def _run(dc: DetectContext) -> str | None:
+    matched = detect_graphql_client(
+        dc.root, dc.source, dc.path, dc.record, dc.ctx.parse_timeout_micros
+    )
+    return "graphql" if matched else None
+
+
+register_detector(Detector(
+    name="graphql-client", language="typescript", order=40, run=_run,
+    skip_fixtures=True, frameworks=("graphql",),
+))

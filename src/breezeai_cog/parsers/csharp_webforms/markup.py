@@ -29,7 +29,8 @@ from tree_sitter import Node
 from ...emit import disambiguate, statement_id
 from ...schemas import Statement
 from ..treesitter import node_text
-from .mounts import _REGISTER_SRC, _app_root, _to_repo_path, ci_resolve
+from ..dotnet_common import ci_resolve, to_repo_path, web_app_root
+from .mounts import _REGISTER_SRC
 
 _NEWLINE = 0x0A
 _SPACE = 0x20
@@ -82,12 +83,12 @@ def resolve_control_mounts(source: bytes, path: str, repo_root: Path) -> list[tu
     exists — no dangling edge) + the directive's 1-based line. Deduped, in source order. The
     ``.ascx`` is now a File node (Step 1), so this is the host→control composition edge the
     graph was missing (765 Defect #1)."""
-    app_root = _app_root(path, repo_root)
+    app_root = web_app_root(path, repo_root)
     cur_dir = posixpath.dirname(path)
     seen: set[str] = set()
     out: list[tuple[str, int]] = []
     for m in _REGISTER_SRC.finditer(source):
-        rel = _to_repo_path(m.group(1).decode("utf-8", "replace"), cur_dir, app_root)
+        rel = to_repo_path(m.group(1).decode("utf-8", "replace"), cur_dir, app_root)
         if rel is None or not rel.lower().endswith(".ascx"):
             continue
         actual = ci_resolve(repo_root, rel)  # the .ascx markup itself (not the .cs)

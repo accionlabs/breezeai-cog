@@ -30,13 +30,13 @@ from tree_sitter import Node
 
 from ...emit import disambiguate, function_id, statement_id
 from ...schemas import Decorator, Statement
-from ..treesitter import node_text, parse_source
-from ..typescript.decorators import decorator
-from ..typescript.functions import extract_params
 # Reuse the SDL DTO helpers — the decorator's SDL fragment is re-parsed with the GraphQL
 # grammar (below), so `!`/`[]` wrappers and the argument list are handled by the grammar, not
 # by hand, exactly as the resolver-map/SDL detector does for `gql`` templates.
-from ..typescript_graphql.routes import _base_type_name, _child, _request_dto
+from ..graphql.sdl import base_type_name, child_of_type, request_dto
+from ..treesitter import node_text, parse_source
+from ..typescript.decorators import decorator
+from ..typescript.functions import extract_params
 
 _OPS = {"Query": "query", "Mutation": "mutation", "Subscription": "subscription"}
 _AUTH_DECORATORS = {"RequireScopes", "RequireAPIScope", "Authorized"}
@@ -100,8 +100,8 @@ def _sdl_dtos(fragment: str, timeout_micros: int) -> tuple[str | None, str | Non
     field = _first_field_definition(root)
     if field is None:
         return None, None
-    req = _dto_or_none(_request_dto(field, wrapped))
-    res = _dto_or_none(_base_type_name(_child(field, "type"), wrapped))
+    req = _dto_or_none(request_dto(field, wrapped))
+    res = _dto_or_none(base_type_name(child_of_type(field, "type"), wrapped))
     return req, res
 
 
@@ -203,7 +203,7 @@ def detect_codefirst_graphql_routes(
                     frag = _sdl_fragment(d.args[0]) if d.args else None
                     if frag is not None:
                         req_dto, res_dto = _sdl_dtos(frag, timeout_micros)
-                    request_dto = req_dto or _arg_request_dto(member, source)
+                    req_dto = req_dto or _arg_request_dto(member, source)
                     routes.append(Statement(
                         id=disambiguate(statement_id(path, sl, sc), seen_ids),
                         parentId=parent,
@@ -219,7 +219,7 @@ def detect_codefirst_graphql_routes(
                         isRegex=False,
                         authRequired=bool(guards) or None,
                         guards=guards or None,
-                        requestDTO=request_dto,
+                        requestDTO=req_dto,
                         responseDTO=res_dto,
                         startLine=sl,
                         endLine=dec.end_point[0] + 1,

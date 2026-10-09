@@ -15,17 +15,16 @@ from tree_sitter import Node
 from ...emit import file_id
 from ...schemas import SCHEMA_VERSION, FileRecord, Function, Statement
 from ...utils import count_loc
+from ..additive import run_additive
 from ..base import BaseParser, ParseContext
 from ..callresolve import make_resolver
 from ..comments_common import comment_statements_for
 from ..statements_common import reset_http_client_ids, set_http_client_ids
 from ..treesitter import parse_source
 from .classes import build_class
-from .events import detect_scala_events
 from .functions import build_function, defined_names, type_map
 from .imports import ScalaIndex, build_fqcn_index, extract_imports
 from .mappings import COMMENT_TYPES, CONTROL_FLOW, FRAMEWORKS, STATEMENT_TYPES
-from .spark import detect_spark_calls
 from .statements import collect_http_client_ids, extract_statements
 
 _CLASS_TYPES = (
@@ -192,6 +191,7 @@ class ScalaParser(BaseParser):
             statements=statements,
             framework=None,
         )
-        detect_scala_events(root, ctx, record, types=types)
-        detect_spark_calls(root, ctx, record, types=types)
+        run_additive(  # additive detectors (parsers/additive.py): Akka/Pekko, Spark
+            "scala", root, ctx, record, is_fixture=self.is_fixture_file(path), types=types
+        )
         return record

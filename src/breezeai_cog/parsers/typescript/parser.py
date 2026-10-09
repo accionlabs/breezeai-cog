@@ -16,13 +16,11 @@ from tree_sitter import Node
 from ...emit import file_id
 from ...schemas import SCHEMA_VERSION, FileRecord, Function, Statement
 from ...utils import count_loc
+from ..additive import run_additive
 from ..base import BaseParser, ParseContext
 from ..treesitter import node_text, parse_source
 from .classes import build_class
 from ..callresolve import make_resolver
-from .aws_events import detect_aws_events
-from ..detection.sdk_calls import detect_sdk_calls
-from ..typescript_express.routes import detect_express
 from .decorators import extract_decorators
 from .functions import (
     build_function,
@@ -284,55 +282,13 @@ class TypeScriptParser(BaseParser):
             classes=classes,
             statements=statements,
         )
-        # Additive route/event detection — gated by statement capture and layered on top
-        # of base + framework extraction (runs for every TS parser that inherits extract, so
-        # it also fires in files owned by another framework). Each detector self-guards on a
-        # cheap marker. A more-specific framework label set by a subclass afterwards wins.
-        if capture:
-            if not self.is_fixture_file(path) and detect_express(
-                root, source, path, record, ctx.resolution_index, bindings
-            ):
-                if record.framework is None:
-                    record.framework = "express"
-            aws_fw = detect_aws_events(
-                root, source, path, record, is_fixture=self.is_fixture_file(path)
-            )
-            if aws_fw and record.framework is None:
-                record.framework = aws_fw
-            sdk_fw = detect_sdk_calls(
-                root,
-                source,
-                path,
-                record,
-                getattr(ctx.resolution_index, "class_heritage", None),
-            )
-            if sdk_fw and record.framework is None:
-                record.framework = sdk_fw
-            # Deferred import: typescript_graphql.parser subclasses this module, so a
-            # top-level import would cycle. routes.py itself has no such dependency.
-            from ..typescript_graphql.routes import detect_graphql_client
-
-            if not self.is_fixture_file(path) and detect_graphql_client(
-                root, source, path, record, ctx.parse_timeout_micros
-            ):
-                if record.framework is None:
-                    record.framework = "graphql"
-            # Vue route configs are plain-data {path, component} arrays that often live in a
-            # file importing nothing from vue-router (a default-export array, a router/modules/*
-            # fragment), so — unlike React/Angular — they can't be caught by a claims-gated
-            # parser and must be detected additively here. Self-guards structurally on the array
-            # shape; defers to Angular/React. Deferred import: typescript_vue subclasses this
-            # module (would cycle at import time).
-            from ..typescript_vue.routes import detect_vue_routes
-
-            if not self.is_fixture_file(path):
-                vue_routes = detect_vue_routes(
-                    root, source, path, seen_ids={s.id for s in record.statements}
-                )
-                if vue_routes:
-                    record.statements.extend(vue_routes)
-                    if record.framework is None:
-                        record.framework = "vue"
+        # Additive detectors (parsers/additive.py) — layered on top of base + framework
+        # extraction for every TS parser that inherits extract, so they also fire in files owned
+        # by another framework. A more-specific framework label set by a subclass afterwards wins.
+        run_additive(
+            "typescript", root, ctx, record,
+            is_fixture=self.is_fixture_file(path), bindings=bindings,
+        )
         return record
 
     def _handle(

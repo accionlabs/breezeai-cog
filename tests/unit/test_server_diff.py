@@ -92,6 +92,20 @@ def test_incremental_diff_filters_to_changed(captured: _Captured) -> None:
     assert captured.notifications[0][1]["projectMetaData"]["totalFiles"] == 1
 
 
+def test_config_files_are_not_analyzed_languages(captured: _Captured) -> None:
+    # same rule as the full scan: config / data documents are counted, not listed as languages
+    files = {
+        "package.json": '{"name": "w", "dependencies": {"left-pad": "1.0.0"}}',
+        "workflow.json": '{"nodes": [{"id": "1", "name": "a"}], "active": true}',
+    }
+    client = _make_client(captured, filter_set={"a.py", *files}, deleted=[], repo_files=files)
+    assert client.post("/api/analyze-diff", json=BODY).status_code == 200
+    assert {rec["path"] for rec in captured.records} == {"a.py", *files}  # configs still streamed
+    meta = captured.notifications[0][1]["projectMetaData"]
+    assert meta["analyzedLanguages"] == ["python"]
+    assert meta["configs"]["totalConfigFiles"] == 2
+
+
 def test_deletion_only_commit(captured: _Captured) -> None:
     client = _make_client(captured, filter_set=set(), deleted=["gone.py"])
     r = client.post("/api/analyze-diff", json=BODY)

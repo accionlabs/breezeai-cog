@@ -26,6 +26,7 @@ from tree_sitter import Node
 
 from ...emit import disambiguate, file_id, statement_id
 from ...schemas import FileRecord, SemanticType, Statement
+from ..additive import DetectContext, Detector, register_detector
 from ..treesitter import first_line, node_text
 
 # The .NET context parameter every real handler carries — the primary marker.
@@ -131,3 +132,18 @@ def detect_lambda_handlers(root: Node, source: bytes, path: str, record: FileRec
         ))
         found = True
     return found
+
+
+def _run(dc: DetectContext) -> str | None:
+    return "aws-lambda" if detect_lambda_handlers(dc.root, dc.source, dc.path, dc.record) else None
+
+
+# An entry-point emitter, so fixture/test files are skipped.
+register_detector(Detector(
+    name="lambda-handlers", language="csharp", order=10, run=_run,
+    skip_fixtures=True,
+    frameworks=(
+        "aws-lambda", "aws-s3", "aws-sqs", "aws-sns", "aws-eventbridge", "aws-dynamodb",
+        "aws-kinesis", "aws-ses", "aws-apigw",
+    ),
+))

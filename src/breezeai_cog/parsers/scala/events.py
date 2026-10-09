@@ -18,6 +18,7 @@ from ...emit import disambiguate, statement_id
 from ...schemas import FileRecord, Statement
 from ...schemas.enums import SemanticType
 from ..base import ParseContext
+from ..additive import DetectContext, Detector, register_detector
 from ..treesitter import node_text
 from .functions import type_map
 from .statements import find_enclosing_parent_id
@@ -141,3 +142,13 @@ def detect_scala_events(
     walk(root)
     if found_any and not record.framework:
         record.framework = "akka"
+
+
+def _run(dc: DetectContext) -> str | None:
+    detect_scala_events(dc.root, dc.ctx, dc.record, types=dc.types)  # labels the record itself
+    return None
+
+
+register_detector(Detector(
+    name="akka-events", language="scala", order=10, run=_run, frameworks=("akka",),
+))

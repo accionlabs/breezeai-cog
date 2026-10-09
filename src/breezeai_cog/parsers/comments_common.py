@@ -33,11 +33,18 @@ Two rules:
 
 Consecutive standalone single-line comments are merged into one record (fixes multi-line
 ``//``/``#`` preambles being split by the grammar).
+
+**Cost.** Every lookup is answered from a structure built once per file — never by scanning all
+statements or scopes per comment, which made the pass O(comments × statements) and dominated
+parse time on large files. Comment groups arrive in ascending line order, so the dedup and
+containment lookups are sweeps/prefix tables and the bind-ahead lookup is a binary search.
 """
 
 from __future__ import annotations
 
-from collections.abc import Collection, Iterator
+from bisect import bisect_left, bisect_right
+from collections.abc import Collection, Iterator, Sequence
+from itertools import accumulate
 
 from tree_sitter import Node
 
@@ -107,18 +114,58 @@ def _within(inner: tuple[int, int], outer: tuple[int, int]) -> bool:
     return outer[0] <= inner[0] and inner[1] <= outer[1]
 
 
-def _containing(cs: int, ce: int, scopes: list[ScopeSpan]) -> ScopeSpan | None:
-    """Innermost scope whose span contains ``[cs, ce]`` (innermost = latest start)."""
-    best: ScopeSpan | None = None
-    for span in scopes:
-        s, e, _ = span
-        if s <= cs and ce <= e and (best is None or s > best[0]):
-            best = span
-    return best
+class _Absorbed:
+    """Whether a line range lies inside any absorbing span. With spans sorted by start and a
+    running maximum of their ends, ``[cs, ce]`` is inside one iff the largest end among spans
+    starting at or before ``cs`` reaches ``ce`` — one binary search per comment."""
+
+    __slots__ = ("_starts", "_max_end")
+
+    def __init__(self, spans: Collection[tuple[int, int]]) -> None:
+        ordered = sorted(spans)
+        self._starts = [s for s, _ in ordered]
+        self._max_end = list(accumulate((e for _, e in ordered), max))
+
+    def __call__(self, cs: int, ce: int) -> bool:
+        i = bisect_right(self._starts, cs)
+        return i > 0 and self._max_end[i - 1] >= ce
+
+
+class _Innermost:
+    """Innermost scope containing ``[cs, ce]`` (innermost = latest start; on a tie, the
+    earliest in ``scopes`` order), for queries in **non-decreasing** ``cs``.
+
+    A sweep: scopes open as ``cs`` passes their start and close once it passes their end, so
+    the open stack holds the scopes around the comment in start order and the answer is near
+    its top. Each scope is pushed and popped once per file."""
+
+    __slots__ = ("_scopes", "_order", "_next", "_open")
+
+    def __init__(self, scopes: Sequence[ScopeSpan]) -> None:
+        self._scopes = scopes
+        # Stable sort: equal starts keep ``scopes`` order, which decides ties below.
+        self._order = sorted(range(len(scopes)), key=lambda i: scopes[i][0])
+        self._next = 0
+        self._open: list[ScopeSpan] = []
+
+    def __call__(self, cs: int, ce: int) -> ScopeSpan | None:
+        while self._next < len(self._order) and self._scopes[self._order[self._next]][0] <= cs:
+            self._open.append(self._scopes[self._order[self._next]])
+            self._next += 1
+        while self._open and self._open[-1][1] < cs:  # closed before this comment
+            self._open.pop()
+        best: ScopeSpan | None = None
+        for span in reversed(self._open):  # descending start
+            if best is not None and span[0] < best[0]:
+                break
+            if span[1] >= ce:  # a lower same-start span is earlier in order → wins the tie
+                best = span
+        return best
 
 
 def _bind_ahead(
     ce: int,
+    scope_starts: list[int],
     scopes_by_start: list[ScopeSpan],
     stmt_starts: list[int],
     container: ScopeSpan | None,
@@ -130,15 +177,16 @@ def _bind_ahead(
     sibling) or if an emitted statement lies between the comment and it (then the comment
     documents that statement, not the scope). Decorators/annotations are not emitted as
     statements, so they never block a real doc-comment binding."""
-    for s, e, sid in scopes_by_start:  # ascending by start line
-        if s < ce:
-            continue
-        if container is not None and not _within((s, e), (container[0], container[1])):
-            return None
-        if any(ce < st < s for st in stmt_starts):
-            return None
-        return sid
-    return None
+    i = bisect_left(scope_starts, ce)  # nearest scope starting at/after the comment
+    if i == len(scopes_by_start):
+        return None
+    s, e, sid = scopes_by_start[i]
+    if container is not None and not _within((s, e), (container[0], container[1])):
+        return None
+    j = bisect_right(stmt_starts, ce)  # first statement starting after the comment
+    if j < len(stmt_starts) and stmt_starts[j] < s:
+        return None
+    return sid
 
 
 def comment_statements_for(
@@ -199,18 +247,20 @@ def collect_comment_statements(
         return []
 
     scopes_by_start = sorted(scope_spans, key=lambda sp: sp[0])
+    scope_starts = [sp[0] for sp in scopes_by_start]
     stmt_starts = sorted(stmt_start_lines)
-    absorbing = list(absorbing_spans)
+    absorbed = _Absorbed(absorbing_spans)
+    innermost = _Innermost(scope_spans)
 
     out: list[Statement] = []
-    for grp in _merge(comment_nodes, source):
+    for grp in _merge(comment_nodes, source):  # ascending start line (``_Innermost`` relies on it)
         cs = grp.first.start_point[0] + 1
         ce = grp.last.end_point[0] + 1
         # Dedup: already inside a captured (non-control-flow) statement's text.
-        if any(_within((cs, ce), span) for span in absorbing):
+        if absorbed(cs, ce):
             continue
-        container = _containing(cs, ce, scope_spans)
-        parent = _bind_ahead(ce, scopes_by_start, stmt_starts, container)
+        container = innermost(cs, ce)
+        parent = _bind_ahead(ce, scope_starts, scopes_by_start, stmt_starts, container)
         if parent is None:
             parent = container[2] if container is not None else file_id
         col = grp.first.start_point[1]
