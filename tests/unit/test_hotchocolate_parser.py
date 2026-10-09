@@ -18,6 +18,11 @@ from breezeai_cog.parsers.csharp.imports import CSharpIndex, build_csharp_index
 from breezeai_cog.parsers.csharp.parser import CSharpParser
 from breezeai_cog.parsers.index_common import ClassHeritage
 from breezeai_cog.parsers.csharp_hotchocolate.parser import CSharpHotChocolateParser
+from breezeai_cog.parsers.csharp_hotchocolate.registered_roots import (
+    NAME as REGISTERED_ROOTS,
+    RegisteredRoots,
+    registered_roots,
+)
 from breezeai_cog.schemas import FileRecord
 
 # A query root: the naming convention (Get/Async stripped, camelCased), an explicit
@@ -780,9 +785,18 @@ def _repo_index(tmp_path, files: dict[str, bytes]) -> CSharpIndex:
     return build_csharp_index(tmp_path, paths)
 
 
+def _roots(index: CSharpIndex) -> RegisteredRoots:
+    """The fact the registered-roots detector's index stage put on the C# index."""
+    return registered_roots(index)
+
+
+def _graphql_routes(rec: FileRecord) -> list:
+    return [s for s in rec.statements if s.semanticType == "route" and s.framework == "graphql"]
+
+
 def _parse_selected(index: CSharpIndex, rel: str, src: bytes) -> FileRecord:
     """Parse ``rel`` with whichever parser selection picks, as the pipeline does."""
-    parser = registry.select(rel, src, index=index)
+    parser = registry.select(rel, src)
     ctx = ParseContext(path=rel, abs_path=None, source=src, repo_root=None,
                        capture_statements=True, resolution_index=index)
     return parser.parse_file(ctx)
@@ -791,15 +805,18 @@ def _parse_selected(index: CSharpIndex, rel: str, src: bytes) -> FileRecord:
 def test_registrations_bind_to_the_declaring_files(tmp_path) -> None:
     index = _repo_index(tmp_path, {"Api/Program.cs": SETUP, "Api/BookQueries.cs": BOOK_QUERIES,
                                    "Api/BookMutations.cs": BOOK_MUTATIONS})
-    assert index.hc_root_files == {"Api/BookQueries.cs": {"BookQueries": "query"},
+    assert _roots(index).files == {"Api/BookQueries.cs": {"BookQueries": "query"},
                                    "Api/BookMutations.cs": {"BookMutations": "mutation"}}
-    assert index.hc_root_types == {"BookQueries": "query", "BookMutations": "mutation"}
-    assert index.hc_registrations == []  # raw list is consumed, not shipped to workers
+    assert _roots(index).types == {"BookQueries": "query", "BookMutations": "mutation"}
+    # Only the resolved fact reaches the workers, not the raw registrations.
+    assert set(index.facts) == {REGISTERED_ROOTS}
 
 
-def test_registration_only_root_is_claimed_and_emits_operations(tmp_path) -> None:
+def test_registration_only_root_emits_operations_through_the_detector(tmp_path) -> None:
+    # The file carries nothing HotChocolate, so it stays a plain C# file; the registered-roots
+    # detector adds its operations from the index fact.
     index = _repo_index(tmp_path, {"Api/Program.cs": SETUP, "Api/BookQueries.cs": BOOK_QUERIES})
-    assert registry.select("Api/BookQueries.cs", BOOK_QUERIES, index=index).name == "csharp-hotchocolate"
+    assert registry.select("Api/BookQueries.cs", BOOK_QUERIES).name == "csharp"
     rec = _parse_selected(index, "Api/BookQueries.cs", BOOK_QUERIES)
     ops = _by_endpoint(rec)
     assert set(ops) == {"bookById", "books"}  # private methods are never exposed
@@ -809,21 +826,65 @@ def test_registration_only_root_is_claimed_and_emits_operations(tmp_path) -> Non
 
 def test_registration_only_class_is_plain_without_an_index() -> None:
     # Single-file parsing has no repo pre-pass, so nothing says this class is a root.
-    assert registry.select("Api/BookQueries.cs", BOOK_QUERIES).name == "csharp"
+    rec = _parse(CSharpParser(), BOOK_QUERIES, "Api/BookQueries.cs")
+    assert _graphql_routes(rec) == []
 
 
-def test_a_file_only_referencing_a_registered_root_is_not_claimed(tmp_path) -> None:
+def test_a_file_only_referencing_a_registered_root_gets_no_routes(tmp_path) -> None:
     ref = b"namespace Catalog { public class BookService { public BookQueries Queries { get; } } }"
     index = _repo_index(tmp_path, {"Api/Program.cs": SETUP, "Api/BookQueries.cs": BOOK_QUERIES,
                                    "Api/BookService.cs": ref})
-    assert registry.select("Api/BookService.cs", ref, index=index).name == "csharp"
+    assert _graphql_routes(_parse_selected(index, "Api/BookService.cs", ref)) == []
 
 
-def test_only_a_composition_root_registers(tmp_path) -> None:
-    # No AddGraphQLServer → not a composition root, so its AddQueryType is not read.
-    other = b"using Catalog;\nservices.AddQueryType<BookQueries>();"
-    index = _repo_index(tmp_path, {"Api/Other.cs": other, "Api/BookQueries.cs": BOOK_QUERIES})
-    assert index.hc_root_files == {} and index.hc_root_types == {}
+def test_registrations_on_any_builder_are_read(tmp_path) -> None:
+    # AddGraphQL() (non-ASP.NET hosts) and the v10/v11 SchemaBuilder register roots exactly like
+    # AddGraphQLServer(); missing them would leave those roots' fields looking like a data type's.
+    host = b"using Catalog;\nservices.AddGraphQL().AddQueryType<BookQueries>();"
+    legacy = b"using Catalog;\nvar schema = SchemaBuilder.New().AddMutationType<BookMutations>().Create();"
+    index = _repo_index(tmp_path, {"Fn/Startup.cs": host, "Legacy/Schema.cs": legacy,
+                                   "Api/BookQueries.cs": BOOK_QUERIES,
+                                   "Api/BookMutations.cs": BOOK_MUTATIONS})
+    assert _roots(index).files == {"Api/BookQueries.cs": {"BookQueries": "query"},
+                                   "Api/BookMutations.cs": {"BookMutations": "mutation"}}
+
+
+def test_a_registering_file_gets_no_routes_for_its_own_root(tmp_path) -> None:
+    # The composition root declares its own root class and maps a REST endpoint. It stays with its
+    # own parser and keeps its REST routes; the root still resolves by name for an extension
+    # declared elsewhere.
+    setup = b"""using HotChocolate;
+var builder = WebApplication.CreateBuilder(args);
+builder.Services.AddGraphQL().AddQueryType<RootQuery>();
+var app = builder.Build();
+app.MapGet("/health", () => "ok");
+public class RootQuery { public string GetPing() => "pong"; }
+"""
+    ext = b"""using HotChocolate.Types;
+[ExtendObjectType(typeof(RootQuery))]
+public class Reports { public int GetDailyTotal() => 0; }
+"""
+    index = _repo_index(tmp_path, {"Api/Program.cs": setup, "Api/Reports.cs": ext})
+    assert "Api/Program.cs" not in _roots(index).files
+    assert _graphql_routes(_parse_selected(index, "Api/Program.cs", setup)) == []
+    assert _roots(index).types == {"RootQuery": "query"}
+    assert _by_endpoint(_parse_selected(index, "Api/Reports.cs", ext))["dailyTotal"].routeKind == "query"
+
+
+def test_detector_and_parser_never_both_emit(tmp_path) -> None:
+    # A registered root in a file the HotChocolate parser owns (it also holds an attribute-declared
+    # extension): the parser emits the root's operations, the detector stays out — no duplicates.
+    mixed = b"""using HotChocolate.Types;
+namespace Catalog {
+  public class BookQueries { public Book GetBookById(int id) => null; }
+  [ExtendObjectType(typeof(Author))]
+  public class AuthorBooks { public int GetBookCount([Parent] Author author) => 0; }
+}
+"""
+    index = _repo_index(tmp_path, {"Api/Program.cs": SETUP, "Api/Types.cs": mixed})
+    rec = _parse_selected(index, "Api/Types.cs", mixed)
+    endpoints = [s.endpoint for s in _graphql_routes(rec)]
+    assert sorted(endpoints) == ["Author.bookCount", "bookById"]
 
 
 def test_same_named_roots_bind_per_service(tmp_path) -> None:
@@ -840,11 +901,11 @@ def test_same_named_roots_bind_per_service(tmp_path) -> None:
         "Admin/Program.cs": setup(b"Admin.GraphQL"), "Admin/BookQueries.cs": queries(b"Admin.GraphQL"),
         "Legacy/BookQueries.cs": queries(b"Legacy"),
     })
-    assert set(index.hc_root_files) == {"Shop/BookQueries.cs", "Admin/BookQueries.cs"}
+    assert set(_roots(index).files) == {"Shop/BookQueries.cs", "Admin/BookQueries.cs"}
     # Not every BookQueries is a root, so the name alone resolves nothing.
-    assert "BookQueries" not in index.hc_root_types
+    assert "BookQueries" not in _roots(index).types
     legacy = queries(b"Legacy")
-    assert registry.select("Legacy/BookQueries.cs", legacy, index=index).name == "csharp"
+    assert _graphql_routes(_parse_selected(index, "Legacy/BookQueries.cs", legacy)) == []
 
 
 def test_ambiguous_registration_binds_nothing(tmp_path) -> None:
@@ -856,7 +917,7 @@ def test_ambiguous_registration_binds_nothing(tmp_path) -> None:
         "A/BookQueries.cs": b"namespace A { public class BookQueries { } }",
         "B/BookQueries.cs": b"namespace B { public class BookQueries { } }",
     })
-    assert index.hc_root_files == {}
+    assert _roots(index).files == {}
 
 
 def test_same_project_wins_a_registration_tie(tmp_path) -> None:
@@ -870,7 +931,7 @@ def test_same_project_wins_a_registration_tie(tmp_path) -> None:
         "Lib/Lib.csproj": b"<Project />",
         "Lib/BookQueries.cs": b"namespace B { public class BookQueries { } }",
     })
-    assert set(index.hc_root_files) == {"Api/BookQueries.cs"}
+    assert set(_roots(index).files) == {"Api/BookQueries.cs"}
 
 
 def test_conflicting_registrations_are_dropped(tmp_path) -> None:
@@ -881,7 +942,7 @@ def test_conflicting_registrations_are_dropped(tmp_path) -> None:
         "Admin/Program.cs": b"using Shared;\nb.AddGraphQLServer().AddMutationType<Root>();",
         "Shared/Root.cs": b"namespace Shared { public class Root { } }",
     })
-    assert index.hc_root_files == {} and index.hc_root_types == {}
+    assert _roots(index) == RegisteredRoots()
 
 
 def test_partial_root_binds_every_part(tmp_path) -> None:
@@ -890,11 +951,11 @@ def test_partial_root_binds_every_part(tmp_path) -> None:
         "Api/BookQueries.cs": b"namespace Catalog { public partial class BookQueries { } }",
         "Api/BookQueries.Admin.cs": b"namespace Catalog { public partial class BookQueries { } }",
     })
-    assert set(index.hc_root_files) == {"Api/BookQueries.cs", "Api/BookQueries.Admin.cs"}
+    assert set(_roots(index).files) == {"Api/BookQueries.cs", "Api/BookQueries.Admin.cs"}
 
 
 def test_extension_of_a_registered_root_yields_operations(tmp_path) -> None:
-    # The target is declared in another file, so it resolves through hc_root_types.
+    # The target is declared in another file, so it resolves through the name-only lookup.
     ext = b"""using HotChocolate.Types;
 namespace Catalog {
   [ExtendObjectType(typeof(BookQueries))]

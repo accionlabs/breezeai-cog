@@ -26,10 +26,12 @@ from __future__ import annotations
 import posixpath
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 from tree_sitter import Node
 
 from ...utils import repo_relative
+from ..additive import collect_additive, resolve_additive
 from ..dotnet_common import web_app_root
 from ..index_common import (
     ClassHeritage, merge_heritage, parallel_map, project_heritage, record_distinct,
@@ -76,19 +78,9 @@ class CSharpIndex:
     #: physical endpoint with these real routed URLs. Registrations are central (Global.asax /
     #: RouteConfig), so they cross files — hence they ride this repo-level index.
     page_routes: dict[str, list[str]] = field(default_factory=dict)
-    #: HotChocolate roots registered in the composition root — ``AddQueryType<BookQueries>()``
-    #: — that need not carry any attribute (the v11/v12 shape). Keyed by **declaring file** →
-    #: {simple class name: operation kind}, so two same-named classes in different namespaces
-    #: or projects are told apart the way the compiler binds the registration. Like
-    #: ``page_routes``, the registration and the class live in different files.
-    hc_root_files: dict[str, dict[str, str]] = field(default_factory=dict)
-    #: Simple name → kind, only when **every** class of that name in the repo is a registered
-    #: root of that one kind — the lookup for a name seen without its declaration (an
-    #: ``[ExtendObjectType(typeof(BookQueries))]`` target). Otherwise absent: honest-null.
-    hc_root_types: dict[str, str] = field(default_factory=dict)
-    #: Raw registrations collected per file — ``(file, kind, type name, namespaces in scope)`` —
-    #: resolved into the two maps above once every declared type is known, then cleared.
-    hc_registrations: list[tuple[str, str, str, tuple[str, ...]]] = field(default_factory=list)
+    #: Facts resolved by additive detectors' index stage (detector name → fact), built once
+    #: before parsing. Read with :func:`~..additive.index_fact`; see ``parsers/additive.py``.
+    facts: dict[str, Any] = field(default_factory=dict)
 
     def project_of(self, path: str) -> str | None:
         """The owning project (nearest ancestor ``.csproj`` dir) of a repo-relative file."""
@@ -311,8 +303,6 @@ def _index_file(
         _index_map_page_routes(root, source, rel, repo_root, index)
     if b"[DataLoader" in source:  # same idiom: only scan a file that can declare one
         _index_data_loaders(root, source, rel, index)
-    if b"AddGraphQLServer" in source:  # only a composition root registers schema roots
-        _index_root_registrations(root, source, rel, index)
 
     def walk(node: Node, ns: str) -> None:
         local_ns = ns
@@ -367,54 +357,27 @@ def _index_data_loaders(root: Node, source: bytes, rel: str, index: CSharpIndex)
 
 
 #: HotChocolate root registration calls → operation kind.
-_ROOT_REGISTRATIONS = {
-    "AddQueryType": "query", "AddMutationType": "mutation", "AddSubscriptionType": "subscription",
-}
-
-
-def _index_root_registrations(root: Node, source: bytes, rel: str, index: CSharpIndex) -> None:
-    """Record each ``AddQueryType<T>()`` / ``AddMutationType<T>()`` / ``AddSubscriptionType<T>()``
-    in this file with the namespaces in scope here, for :func:`_resolve_root_registrations`.
-
-    Read from the tree, not the bytes, so a commented-out registration is not one. Only the
-    generic form names a class; ``AddQueryType(d => d.Name("Query"))`` names a schema type.
-    """
+def in_scope_namespaces(root: Node, source: bytes) -> set[str]:
+    """Namespaces a type name in this file can bind under: the file's own namespaces and their
+    ancestors, the global namespace, and its ``using`` / ``global using`` directives. Add the
+    repo's ``index.global_usings`` when resolving (they are known only after the reduce)."""
     scopes = _file_scopes(root, source)
     for child in root.named_children:
         if child.type == "using_directive":
             kind, name, _ = _classify_using(child, source)
             if kind in ("using", "global") and name:
                 scopes.add(name)
-    stack = [root]
-    while stack:
-        node = stack.pop()
-        stack.extend(node.named_children)
-        if node.type != "generic_name":
-            continue
-        ident = next((c for c in node.named_children if c.type == "identifier"), None)
-        kind = _ROOT_REGISTRATIONS.get(node_text(ident, source)) if ident is not None else None
-        access = node.parent
-        if kind is None or access is None or access.type != "member_access_expression":
-            continue
-        if access.parent is None or access.parent.type != "invocation_expression":
-            continue
-        targs = next((c for c in node.named_children if c.type == "type_argument_list"), None)
-        if targs is None or len(targs.named_children) != 1:
-            continue
-        name = node_text(targs.named_children[0], source)
-        if "<" not in name:  # a generic type argument is not a class we can bind
-            index.hc_registrations.append((rel, kind, name, tuple(sorted(scopes))))
+    return scopes
 
 
-def _registered_type_files(
-    name: str, scopes: set[str], index: CSharpIndex, from_path: str
-) -> set[str]:
-    """Files declaring the type a registration names, or empty when it binds to nothing or is
-    ambiguous.
+def type_files(name: str, scopes: set[str], index: CSharpIndex, from_path: str) -> set[str]:
+    """Files declaring the type ``name`` binds to from ``from_path``, or empty when it binds to
+    nothing or is ambiguous.
 
     Binds by **type**, not file, so a partial class split over several files yields all of
-    them. Of several in-scope types sharing the name, the one in the registering project wins
-    (CS0436, as :func:`_resolve` does); any other tie refuses.
+    them. ``name`` may be simple, partly or fully qualified. Of several in-scope types sharing
+    the name, the one in ``from_path``'s project wins (CS0436, as :func:`_resolve` does); any
+    other tie refuses.
     """
     # As written (fully qualified) or under any namespace in scope (simple or partly qualified).
     fqns = sorted(({name} | {_join(ns, name) for ns in scopes}) & index.types.keys())
@@ -425,31 +388,12 @@ def _registered_type_files(
     return set(index.types[fqns[0]]) if len(fqns) == 1 else set()
 
 
-def _resolve_root_registrations(index: CSharpIndex) -> None:
-    """Bind each raw registration to the class it names — filling ``hc_root_files`` and
-    ``hc_root_types`` — then drop the raw list, which no consumer needs.
-
-    A class registered under two different kinds (two composition roots disagreeing) is
-    dropped: one of them is wrong and nothing here says which.
-    """
-    registered: dict[tuple[str, str], str | None] = {}
-    for rel, kind, name, scopes in sorted(index.hc_registrations):
-        simple = name.rsplit(".", 1)[-1]
-        for decl in _registered_type_files(name, set(scopes) | index.global_usings, index, rel):
-            prev = registered.get((decl, simple), kind)
-            registered[(decl, simple)] = kind if prev == kind else None
-    index.hc_registrations = []
-    for (decl, simple), kind in registered.items():
-        if kind is not None:
-            index.hc_root_files.setdefault(decl, {})[simple] = kind
-    declared: dict[str, set[str]] = {}
+def declared_files_by_name(index: CSharpIndex) -> dict[str, set[str]]:
+    """Simple type name → every file declaring a type of that name, across namespaces."""
+    out: dict[str, set[str]] = {}
     for fqn, tfiles in index.types.items():
-        declared.setdefault(fqn.rsplit(".", 1)[-1], set()).update(tfiles)
-    for simple in sorted({s for _, s in registered}):
-        kinds = {k for (_, s), k in registered.items() if s == simple}
-        files = {d for (d, s) in registered if s == simple}
-        if len(kinds) == 1 and None not in kinds and files == declared.get(simple):
-            index.hc_root_types[simple] = next(iter(kinds))
+        out.setdefault(fqn.rsplit(".", 1)[-1], set()).update(tfiles)
+    return out
 
 
 def _discover_project_roots(repo_root: Path, live_dirs: set[str]) -> list[str]:
@@ -472,7 +416,12 @@ def _discover_project_roots(repo_root: Path, live_dirs: set[str]) -> list[str]:
     return sorted(roots, key=len, reverse=True)
 
 
-_Fragment = tuple[CSharpIndex, dict[str, ClassHeritage | None], dict[tuple[str, str], str | None]]
+_Fragment = tuple[
+    CSharpIndex,
+    dict[str, ClassHeritage | None],
+    dict[tuple[str, str], str | None],
+    dict[str, Any],  # additive detector name → the value its index-stage collect returned
+]
 
 
 def _index_one(args: tuple[str, str]) -> _Fragment | None:
@@ -495,7 +444,7 @@ def _index_one(args: tuple[str, str]) -> _Fragment | None:
         by_fqn: dict[str, ClassHeritage | None] = {}
         method_files: dict[tuple[str, str], str | None] = {}
         _index_file(root, source, rel, frag, by_fqn, method_files, repo_root)
-        return frag, by_fqn, method_files
+        return frag, by_fqn, method_files, collect_additive("csharp", root, source, rel, repo_root)
     except Exception as exc:  # parse OR a pathologically deep AST walk (RecursionError) — skip this file
         from ...logging import get_logger
         get_logger("breezeai_cog.index").warning(
@@ -513,7 +462,7 @@ def _merge_fragment(
 ) -> None:
     """Reduce one file fragment into the shared index using the same collapse rules as the
     serial build (so the result is identical regardless of fragment order)."""
-    fidx, fby, fmf = frag
+    fidx, fby, fmf, _ = frag
     index.global_usings |= fidx.global_usings
     for tname, tfiles in fidx.types.items():
         index.types.setdefault(tname, set()).update(tfiles)
@@ -524,7 +473,6 @@ def _merge_fragment(
         record_distinct(index.ext_methods, ekey, efile)
     for lname, lfile in fidx.data_loaders.items():
         record_distinct(index.data_loaders, lname, lfile)
-    index.hc_registrations.extend(fidx.hc_registrations)
     for mkey, mfile in fmf.items():
         record_distinct(method_files, mkey, mfile)
     for fqn, ch in fby.items():
@@ -551,9 +499,12 @@ def build_csharp_index(repo_root: Path, files, jobs: int = 1) -> CSharpIndex:
     # MAP: parse each file into a pure partial fragment (parallel over ``jobs`` processes).
     fragments = parallel_map([(str(f), rel) for f, rel in zip(files, rels)], _index_one, jobs)
     # REDUCE: fold fragments into the shared index (deterministic, order-independent).
+    collected: dict[str, list[Any]] = {}
     for frag in fragments:
         if frag is not None:
             _merge_fragment(index, by_fqn, method_files, frag)
+            for name, value in frag[3].items():
+                collected.setdefault(name, []).append(value)
     # attach each class's method→file map to its (unambiguous) heritage record, then project
     # fully-qualified heritage down to simple names (distinct types sharing a name → None)
     for (fqn, mname), mfile in method_files.items():
@@ -561,7 +512,8 @@ def build_csharp_index(repo_root: Path, files, jobs: int = 1) -> CSharpIndex:
         if heritage is not None:
             heritage.methods[mname] = mfile
     index.class_heritage = project_heritage(by_fqn)
-    _resolve_root_registrations(index)  # needs every declared type, so after the reduce
+    # Additive detectors' facts may need every declared type, so they resolve after the reduce.
+    index.facts = resolve_additive("csharp", collected, index)
     # canonicalise friendly-url lists so output is fragment-order-independent (deterministic).
     index.page_routes = {k: sorted(set(v)) for k, v in index.page_routes.items()}
     return index

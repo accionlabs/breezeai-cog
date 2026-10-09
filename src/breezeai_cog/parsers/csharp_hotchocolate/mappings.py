@@ -116,3 +116,17 @@ MARKERS: tuple[bytes, ...] = (
 COMPOSITION_ROOT_MARKERS: tuple[bytes, ...] = (
     b"AddGraphQLServer", b"MapGraphQL", b"UseGraphQL",
 )
+
+#: graphql-dotnet's marker. A file declaring one is that library's, not this one's.
+GRAPHQL_DOTNET_MARKER = b"ObjectGraphType"
+
+
+def owned_by_hotchocolate(source: bytes) -> bool:
+    """Whether the HotChocolate parser claims a file, from its bytes alone: a schema declaration,
+    and neither a graphql-dotnet type nor the composition root. Shared by the parser's ``claims``
+    and the registered-roots detector, which must never emit for a file the parser owns."""
+    if GRAPHQL_DOTNET_MARKER in source:
+        return False  # graphql-dotnet owns it; keep the two guards mutually exclusive
+    if any(m in source for m in COMPOSITION_ROOT_MARKERS):
+        return False  # the composition root stays with csharp-aspnet
+    return any(m in source for m in MARKERS)

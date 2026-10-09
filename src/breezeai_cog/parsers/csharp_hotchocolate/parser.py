@@ -17,9 +17,10 @@ that both wires up the server and declares a schema root is a single-file demo s
 application's route inventory is the worse of the two failures.
 
 Registration-only roots (``AddQueryType<BookQueries>()`` on an attribute-less class, the v11/v12
-shape) are resolved by the C# repo index (``hc_root_files`` / ``hc_root_types``), which binds each
-registration to its declaring file the way the compiler binds the type. Such a file carries no
-HotChocolate marker, so it is claimed through :meth:`claims_with_index`.
+shape) are bound to their declaring file by the ``hotchocolate-registered-roots`` additive detector
+(:mod:`.registered_roots`) while the C# index is built. Such a file carries no HotChocolate marker,
+so this parser never claims it; the detector emits its operations instead. In a file this parser
+does claim, it reads the same fact itself.
 """
 
 from __future__ import annotations
@@ -30,19 +31,16 @@ from ...schemas import FileRecord
 from ..base import ParseContext
 from ..csharp.parser import CSharpParser
 from ..treesitter import parse_source
-from .mappings import COMPOSITION_ROOT_MARKERS, MARKERS
+from .mappings import owned_by_hotchocolate
+from .registered_roots import registered_roots
 from .routes import detect_hotchocolate_routes
-
-#: graphql-dotnet's marker. A file declaring one is that library's, not this one's.
-_GRAPHQL_DOTNET_MARKER = b"ObjectGraphType"
 
 
 def _root_types(index: Any | None, path: str) -> dict[str, str] | None:
     """Registered roots visible from ``path``: this file's own registered classes, plus names
     that are registered roots repo-wide (for a target declared in another file)."""
-    repo_wide = getattr(index, "hc_root_types", None) or {}
-    own = (getattr(index, "hc_root_files", None) or {}).get(path, {})
-    return {**repo_wide, **own} or None
+    roots = registered_roots(index)
+    return {**roots.types, **roots.files.get(path, {})} or None
 
 
 class CSharpHotChocolateParser(CSharpParser):
@@ -51,20 +49,7 @@ class CSharpHotChocolateParser(CSharpParser):
     frameworks = ["graphql"]
 
     def claims(self, path: str, source: bytes) -> bool:
-        if _GRAPHQL_DOTNET_MARKER in source:
-            return False  # graphql-dotnet owns it; keep the two guards mutually exclusive
-        if any(m in source for m in COMPOSITION_ROOT_MARKERS):
-            return False  # the composition root stays with csharp-aspnet (see mappings)
-        return any(m in source for m in MARKERS)
-
-    def claims_with_index(self, path: str, source: bytes, index: Any | None) -> bool:
-        """Also claim a file declaring a registration-only root: a plain class, with nothing
-        HotChocolate in it, that the composition root registers via ``AddQueryType<T>()``."""
-        if self.claims(path, source):
-            return True
-        if _GRAPHQL_DOTNET_MARKER in source or any(m in source for m in COMPOSITION_ROOT_MARKERS):
-            return False
-        return path in (getattr(index, "hc_root_files", None) or {})
+        return owned_by_hotchocolate(source)
 
     def parse_file(self, ctx: ParseContext) -> FileRecord:
         root = parse_source("csharp", ctx.source, ctx.parse_timeout_micros).root_node
