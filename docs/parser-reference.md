@@ -182,12 +182,10 @@ The pipeline runs it once in the main process (before the parse pool), passing t
 `jobs`** as the parse stage, and hands the (picklable!) result to every worker. Use it in
 `extract`/`imports` via `ctx.resolution_index`.
 
-**Only the base language parser's `build_index` runs** (`base_parser_for(path)` in
-`core/pipeline.py`). A framework parser that needs a cross-file fact adds it to the base index
-(as `data_loaders`, `page_routes` and `hc_root_files` do on `CSharpIndex`) — overriding
-`build_index` on the framework parser, or keeping state on its instance, never reaches the
-workers. See [Cross-file framework facts](cross-file-framework-facts.md) for the pattern and a
-worked example.
+Only the **language** parser's `build_index` runs; a framework parser's own `build_index`, or
+state kept on its instance, never reaches the workers. A framework that needs a fact declared in
+another file uses an additive detector's **index stage** instead (see
+[Additive detectors](#additive-detectors-internal--cross-cutting-frameworks), "Index stage").
 
 **Parallelize a full-parse index.** If `build_index` parses every file, don't loop serially —
 split it map/reduce so it scales with `jobs`:
@@ -374,21 +372,54 @@ register_detector(Detector(
   TypeScript, `types` for Scala).
 - Add the detector to the inventory in `tests/unit/test_additive.py`.
 
+**Index stage (optional).** When the detection needs a fact that lives in *another* file — a
+class is a GraphQL root only because `Program.cs` registers it with `AddQueryType<BookQueries>()`
+— the detector also declares `collect` and `resolve`. The language's `build_index` runs them, and
+`run` reads the result back:
+
+```python
+from ..additive import DetectContext, Detector, index_fact, register_detector
+
+def _collect(root, source, rel, repo_root):     # per file, in the index pass, behind index_gate
+    return [(rel, name) for name in _registrations(root, source)] or None   # picklable, or None
+
+def _resolve(values, index):                    # once, after every file is indexed
+    return _bind(values, index)                 # must not depend on the order of `values`
+
+def _run(dc: DetectContext) -> str | None:
+    roots = index_fact(dc.ctx.resolution_index, "my-detector") or {}
+    if dc.path not in roots:                     # the cheap check when no byte guard fits
+        return None
+    ...                                          # emit statements as usual
+
+register_detector(Detector(
+    name="my-detector", language="csharp", order=40, run=_run,
+    index_gate=(b"AddQueryType<",), collect=_collect, resolve=_resolve,
+))
+```
+
+- `language` must also be in `INDEX_HOOKED_LANGUAGES` (`csharp` today): those are the languages
+  whose `build_index` calls `collect_additive` / `resolve_additive`. `collect` and `resolve` come
+  together, and `index_gate` is required. All three are checked at registration.
+- The fact is stored as `index.facts[<detector name>]`, built once before parsing, read-only after.
+  `index_fact()` returns `None` without an index (single-file parsing), so `run` must cope.
+- Bind names with the language's own rules (for C#: `in_scope_namespaces`, `type_files`), and
+  leave a name unbound when it is ambiguous.
+- If the framework's own parser can also own such a file, make sure the two never both emit
+  (share one ownership check — `owned_by_hotchocolate` is the worked example).
+- Test it end to end through `analyze_repo` with `jobs` 1 and 2: a test over a hand-built index
+  cannot catch a fact that never reaches the workers.
+
 ### Selection: one parser per file
-A file is parsed by **exactly one** parser. `registry.select(path, source, index)` picks the
-highest-`priority` parser whose `claims_with_index(path, source, index)` is True — by default
-`claims(path, source)`; the base language parser (`priority = 0`, `claims` → True) is the
-fallback. So:
+A file is parsed by **exactly one** parser. `registry.select(path, source)` picks the
+highest-`priority` parser whose `claims(path, source)` is True; the base language parser
+(`priority = 0`, `claims` → True) is the fallback. So:
 - A framework parser **subclasses the base, sets `priority` (> 0) and `claims`**, and does
   full extraction + its detection (single parse, no duplicated code).
 - Multiple frameworks for one language **coexist by content** — each `claims` a distinctive
   import/dependency string; plain files fall through to the base. No composition, no
   collisions, single parse each.
 - Make `claims` a cheap substring check on `source`.
-- Override `claims_with_index` only when a file carries **no** marker of its own and becomes
-  framework code because of a declaration in another file (resolved onto the base index). Keep
-  the byte guard first and fall back to it when `index` is None. See
-  [Cross-file framework facts](cross-file-framework-facts.md).
 
 ---
 
