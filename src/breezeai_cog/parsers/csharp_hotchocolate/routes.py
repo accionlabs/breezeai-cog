@@ -349,7 +349,7 @@ def _root_kind_of_name(
     The schema name (``"Query"`` / ``OperationTypeNames.Query``) names the root directly. A CLR
     class name only counts when that class carries a root attribute (in this file or via the repo
     heritage index), or when it is registered via ``AddQueryType<T>()`` in the composition root
-    (supplied via ``hc_root_types`` from the repo index built by :func:`build_index`).
+    (supplied via ``hc_root_types`` from the registered-roots detector's fact on the C# index).
     """
     kind = ROOT_SCHEMA_NAMES.get(name)
     if kind is not None:
