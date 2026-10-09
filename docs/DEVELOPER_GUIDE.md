@@ -153,7 +153,7 @@ with client:
     client.tree(ref, commit)                 # every blob path at a commit
     client.pull_request(ref, number)         # PullRequestInfo: normalised state, full base/head SHAs
     client.post_pr_comment(ref, number, body) # PrComment(id, url) — the only write; not retried
-    client.compare(ref, base, head)          # ChangeSet(changed, deleted)
+    client.compare(ref, base, head)          # ChangeSet(changed, deleted, files: list[FileDiff])
     client.file_content(ref, path, commit)   # UTF-8 text; SCMAPIError for binary/unreadable
     client.clone_url(ref)                    # https URL with the credential embedded
 ```

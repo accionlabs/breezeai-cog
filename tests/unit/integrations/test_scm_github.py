@@ -57,9 +57,9 @@ def test_compare_maps_statuses_and_follows_link_pages(router, settings) -> None:
 
     def first(_req: httpx.Request) -> httpx.Response:
         return httpx.Response(200, json={"files": [
-            {"filename": "a.py", "status": "modified"},
-            {"filename": "b.py", "status": "added"},
-            {"filename": "gone.py", "status": "removed"},
+            {"filename": "a.py", "status": "modified", "additions": 2, "deletions": 1, "patch": "@@ -1 +1,2 @@\n-a\n+b\n+c"},
+            {"filename": "b.py", "status": "added", "additions": 5, "deletions": 0},
+            {"filename": "gone.py", "status": "removed", "additions": 0, "deletions": 7},
         ]}, headers={"Link": f'<{page2}>; rel="next", <x>; rel="last"'})
 
     router.add(r"page=2", httpx.Response(200, json={"files": [
@@ -69,6 +69,12 @@ def test_compare_maps_statuses_and_follows_link_pages(router, settings) -> None:
     cs = _client(router, settings).compare(REF, BASE, SHA)
     assert cs.changed == ["a.py", "b.py", "new/name.py"]
     assert cs.deleted == ["gone.py", "old/name.py"]
+    assert [f.as_dict() for f in cs.files] == [
+        {"filename": "a.py", "status": "modified", "additions": 2, "deletions": 1, "patch": "@@ -1 +1,2 @@\n-a\n+b\n+c"},
+        {"filename": "b.py", "status": "added", "additions": 5, "deletions": 0},
+        {"filename": "gone.py", "status": "removed", "additions": 0, "deletions": 7},
+        {"filename": "new/name.py", "status": "renamed", "additions": 0, "deletions": 0},
+    ]
     assert router.urls[0].endswith(f"/compare/{BASE}...{SHA}?per_page=100")
     assert router.urls[1] == page2
 

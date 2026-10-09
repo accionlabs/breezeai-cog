@@ -29,7 +29,7 @@ from urllib.parse import quote, urlencode
 
 import httpx
 
-from .base import DEFAULT_HOSTS, PR_STATES, AbstractSCMClient, ChangeSet, CommitInfo, PrComment, PullRequestInfo, RepoRef
+from .base import DEFAULT_HOSTS, PR_STATES, AbstractSCMClient, ChangeSet, CommitInfo, FileDiff, PrComment, PullRequestInfo, RepoRef
 from .errors import SCMAPIError
 from .http import SCMHttpClient, warn_if_anonymous
 
@@ -200,6 +200,9 @@ class AzureDevOpsSCMClient(AbstractSCMClient):
         )
 
     def compare(self, ref: RepoRef, base: str, head: str) -> ChangeSet:
+        """``diffs/commits``. Azure reports each change's ``changeType`` only — no line
+        counts and no diff text — so ``files[]`` carries ``additions`` / ``deletions``
+        of ``0`` and no ``patch``."""
         path = f"{self._repo_path(ref)}/diffs/commits"
         fixed = {
             "baseVersion": base,
@@ -237,8 +240,11 @@ class AzureDevOpsSCMClient(AbstractSCMClient):
         kinds = {k.strip() for k in str(change.get("changeType") or "").lower().split(",")}
         if "delete" in kinds:
             out.deleted.append(new_path)
+            out.files.append(FileDiff(new_path, "removed"))
             return
         out.changed.append(new_path)
+        status = "added" if "add" in kinds else "renamed" if "rename" in kinds else "modified"
+        out.files.append(FileDiff(new_path, status))
         if "rename" in kinds:
             old_path = _strip_slash(change.get("sourceServerItem") or change.get("originalPath") or "")
             if old_path and old_path != new_path:
