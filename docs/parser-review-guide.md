@@ -185,6 +185,17 @@ Flag any of the following:
 Measure it: run capture on a large repo before and after the change with the same `--jobs`
 and compare the wall time and the per-language parse time in the run log.
 
+A per-item scan rarely shows on ordinary files — it bites on very large ones. Two checks cover
+that:
+- `tests/unit/test_scaling.py` (in the normal suite) parses a synthetic file and the same file
+  at twice the size, and fails if the executed Python lines grow by more than 2.2× (linear code
+  is 2.00×). It counts work rather than time, so it can't flake. A parser or detector that adds
+  a new code path should add a sample there that exercises it.
+- `scripts/bench_parse_scaling.py` prints wall-clock time per item at doubling sizes for the
+  same samples. A flat figure is linear; a climbing one is not. Unlike the test, it also sees
+  work done inside C (tree-sitter, a search or slice over the whole source per item), which
+  executes no Python lines — use it when a change adds such calls.
+
 #### 6.2 Code complexity
 
 Code that is hard to read is hard to review and will drift. Check for:
