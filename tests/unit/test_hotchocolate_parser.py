@@ -480,6 +480,28 @@ def test_property_expression_field_takes_the_framework_casing() -> None:
     assert "stats" in _by_endpoint(rec)   # Field(f => f.Stats)
 
 
+def test_method_expression_field_takes_the_resolver_naming_convention() -> None:
+    # Field(t => t.GetHero(default)) binds a method; HotChocolate names it as it names any
+    # resolver (Get/Async stripped, camel-cased). Only a call on the lambda's own parameter
+    # selects a member of the type, so t => Helpers.Make(t) names nothing.
+    src = b"""using HotChocolate.Types;
+namespace StarWars {
+  public class QueryType : ObjectType<Query> {
+    protected override void Configure(IObjectTypeDescriptor<Query> d) {
+      d.Field(t => t.GetHero(default)).Type<CharacterType>();
+      d.Field(t => t.GetCharacter<int>(default, default));
+      d.Field((Query t) => t.Search(default));
+      d.Field(t => t.GetReviewsAsync(default)).Name("allReviews");
+      d.Field(t => Helpers.Make(t));
+    }
+  }
+}
+"""
+    ops = _by_endpoint(_parse(CSharpHotChocolateParser(), src, "QueryType.cs"))
+    assert set(ops) == {"hero", "character", "search", "allReviews"}
+    assert ops["hero"].routeKind == "query"
+
+
 def test_fluent_rename_wins_over_the_declared_name() -> None:
     rec = _parse(CSharpHotChocolateParser(), DESCRIPTORS, "Types.cs")
     ops = _by_endpoint(rec)

@@ -36,7 +36,7 @@ from .mappings import (
     NAME_CALL,
     OPERATION_TYPE_NAMES,
 )
-from .naming import camel_case
+from .naming import camel_case, field_name
 
 
 def _generic_arg(type_text: str | None, bases: tuple[str, ...]) -> str | None:
@@ -108,8 +108,27 @@ def _string_arg(call: Node, source: bytes) -> str | None:
     return None
 
 
+def _lambda_param(lam: Node, source: bytes) -> str | None:
+    """The single parameter of ``t => …`` or ``(Query t) => …``, else None."""
+    params = lam.child_by_field_name("parameters")
+    if params is None:
+        return None
+    if params.type == "implicit_parameter":
+        return node_text(params, source)
+    named = [p for p in params.named_children if p.type == "parameter"]
+    name = named[0].child_by_field_name("name") if len(named) == 1 else None
+    return node_text(name, source) if name is not None else None
+
+
 def _member_arg(call: Node, source: bytes) -> str | None:
-    """The property named by ``Field(f => f.Title)`` → ``Title``."""
+    """The wire name of the member a ``Field(…)`` lambda selects, or None.
+
+    * a property, ``Field(f => f.Title)`` → ``title`` (camel-cased);
+    * a method, ``Field(t => t.GetHero(default))`` → ``hero``: HotChocolate names a method-bound
+      field by its resolver convention (``Get``/``Async`` stripped, camel-cased), the same one the
+      attribute style uses. Only a call **on the lambda's parameter** names a member of the type;
+      ``t => Helpers.Make(t)`` names nothing.
+    """
     for arg in _arguments(call):
         if arg is None or not arg.type.endswith("lambda_expression"):
             continue
@@ -117,7 +136,15 @@ def _member_arg(call: Node, source: bytes) -> str | None:
         if body is not None and body.type == "member_access_expression":
             last = body.named_children[-1] if body.named_children else None
             if last is not None and last.type == "identifier":
-                return node_text(last, source)
+                return camel_case(node_text(last, source))
+        if body is not None and body.type == "invocation_expression":
+            function_node = body.child_by_field_name("function")
+            if function_node is None:
+                continue
+            method = _call_name(function_node, source)
+            receiver = _receiver_name(function_node, source)
+            if method and receiver is not None and receiver == _lambda_param(arg, source):
+                return field_name(method, [])
     return None
 
 
@@ -269,10 +296,9 @@ def field_declarations(
         rename = chain.get(NAME_CALL)
         name = _string_arg(rename, source) if rename is not None else None
         if name is None:
-            # A string argument is already the wire name; a property expression is a member, so
-            # it takes the framework's camel-casing.
-            member = _member_arg(node, source)
-            name = _string_arg(node, source) or (camel_case(member) if member else None)
+            # A string argument is already the wire name; a member expression (property or
+            # method) takes the framework's naming convention.
+            name = _string_arg(node, source) or _member_arg(node, source)
         if name:
             found.append((name, node))
     return sorted(found, key=lambda item: item[1].start_point)
