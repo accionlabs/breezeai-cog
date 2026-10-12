@@ -52,7 +52,6 @@ def test_router_verb_is_binding(analyze_files) -> None:
     )
 
 
-@pytest.mark.xfail(strict=True, reason="Vert.x route records have no handler / handlerLine")
 def test_router_verb_records_named_handler(analyze_files) -> None:
     st = analyze_files(
         _verticle("""    Router router = Router.router(vertx);
@@ -62,7 +61,6 @@ def test_router_verb_records_named_handler(analyze_files) -> None:
     assert (r.handler, r.handlerLine) == ("handle", 11)
 
 
-@pytest.mark.xfail(strict=True, reason="anonymous Vert.x route handler has no handlerLine")
 def test_router_verb_records_anonymous_handler(analyze_files) -> None:
     st = analyze_files(
         _verticle("""    Router router = Router.router(vertx);
@@ -133,7 +131,6 @@ def test_event_bus_consumer_is_binding(analyze_files) -> None:
     )
 
 
-@pytest.mark.xfail(strict=True, reason="Vert.x consumer records have no handler / handlerLine")
 def test_event_bus_consumer_records_handler(analyze_files) -> None:
     st = analyze_files(
         _verticle("""    vertx.eventBus().consumer("orders.created", this::handle);""")

@@ -349,3 +349,47 @@ def test_eventbus_request_and_constant_addresses(tmp_path) -> None:
     assert "orders.audit" in consumers
     assert "runtimeAddr" in sends      # unresolvable var → symbol (no compile-time value)
     assert all(s.framework == "vertx" for s in by_sem.get("eventbus_send", []))
+
+
+_HANDLERS_SRC = b'''package com.acme;
+
+import io.vertx.core.AbstractVerticle;
+import io.vertx.ext.web.Router;
+
+public class Api extends AbstractVerticle {
+    public void start() {
+        Router router = Router.router(vertx);
+        router.get("/a").handler(this::list);
+        router.post("/b").handler(BodyHandler.create()).handler(ctx -> ctx.end());
+        router.put("/c").handler(other::update);
+        router.delete("/d").handler(BodyHandler.create());
+        vertx.eventBus().consumer("q.one", this::onOne);
+        vertx.eventBus().consumer("q.two").handler(new Handler<Message<String>>() {
+            public void handle(Message<String> m) {}
+        });
+        vertx.eventBus().send("q.out", "x", reply -> {});
+    }
+
+    void list(RoutingContext ctx) {}
+    void onOne(Message<String> m) {}
+}
+'''
+
+
+def test_route_and_consumer_handlers(tmp_path) -> None:
+    p = tmp_path / "Api.java"
+    p.write_bytes(_HANDLERS_SRC)
+    ctx = ParseContext(path="Api.java", abs_path=p, source=_HANDLERS_SRC, repo_root=tmp_path,
+                       capture_statements=True)
+    rec = VertxParser().parse_file(ctx)
+    got = {s.endpoint: (s.handler, s.handlerLine) for s in rec.statements
+           if s.semanticType in ("route", "eventbus_consumer", "eventbus_send")}
+    assert got == {
+        "/a": ("list", 20),            # this::list — declared in this class
+        "/b": (None, 10),              # last chained .handler is the lambda (BodyHandler runs before)
+        "/c": ("update", None),        # other::update — another object's method: no line
+        "/d": (None, None),            # a factory call names no handler
+        "q.one": ("onOne", 21),
+        "q.two": (None, 14),           # anonymous Handler class
+        "q.out": (None, None),         # a send's reply callback is not an entry point's handler
+    }

@@ -192,3 +192,30 @@ def test_output_validates(tmp_path) -> None:
     errors = list(Draft202012Validator(FileRecord.model_json_schema(by_alias=True))
                   .iter_errors(json.loads(to_line(rec))))
     assert not errors, errors
+
+
+_HANDLERS = b"""import io.vertx.ext.web.Router
+
+class Api {
+    void start() {
+        def router = Router.router(vertx)
+        router.get("/a").handler(this::list)
+        vertx.eventBus().consumer("q.one", { m -> m.reply(1) })
+        vertx.eventBus().consumer("q.two", this.&onTwo)
+    }
+
+    void list(ctx) {}
+    void onTwo(m) {}
+}
+"""
+
+
+def test_route_and_consumer_handlers(tmp_path) -> None:
+    rec = _parse(tmp_path, _HANDLERS, "src/Api.groovy")
+    got = {s.endpoint: (s.handler, s.handlerLine) for s in rec.statements
+           if s.semanticType in ("route", "eventbus_consumer")}
+    assert got == {
+        "/a": ("list", 11),        # this::list — declared in this class
+        "q.one": (None, 7),        # closure: no name, its line
+        "q.two": ("onTwo", 12),    # this.&onTwo method pointer
+    }

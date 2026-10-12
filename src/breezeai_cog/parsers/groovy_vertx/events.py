@@ -20,7 +20,14 @@ from ...emit import disambiguate, file_id, statement_id
 from ...schemas import FileRecord, Statement
 from ..enclosing import Enclosing
 from ..treesitter import first_line, node_text
-from ..vertx_common import classify_call, render_address
+from ..vertx_common import (
+    HANDLER_CALLS,
+    HANDLER_SEMANTICS,
+    classify_call,
+    handler_info,
+    method_lines,
+    render_address,
+)
 
 
 def _invocations(root: Node) -> list[Node]:
@@ -87,6 +94,27 @@ def _parts(
     return method, path, first_arg, obj
 
 
+def _handler_arg(call: Node, source: bytes) -> Node | None:
+    """The handler argument of a route / consumer call: the second argument when the call takes
+    the address and the handler (``eb.consumer("a", { m -> … })``, 2.x ``rm.get("/x", h)``; a
+    third, 2.x ``registerHandler`` completion handler, is not it), else the argument of the last
+    chained ``.handler(…)``. In this grammar a chained call is
+    ``method_invocation(function: field_access(object: <call>, field: handler))``."""
+    args = call.child_by_field_name("arguments")
+    named = list(args.named_children) if args is not None else []
+    found = named[1] if len(named) >= 2 else None
+    node = call
+    while (access := node.parent) is not None and access.type == "field_access" \
+            and access.child_by_field_name("object") == node \
+            and (parent := access.parent) is not None and parent.type == "method_invocation":
+        field = access.child_by_field_name("field")
+        if field is not None and node_text(field, source) in HANDLER_CALLS:
+            pargs = parent.child_by_field_name("arguments")
+            found = pargs.named_children[0] if pargs is not None and pargs.named_children else None
+        node = parent
+    return found
+
+
 def detect_vertx_groovy(
     root: Node, source: bytes, path: str, record: FileRecord, consts: dict[str, str] | None = None
 ) -> bool:
@@ -101,6 +129,7 @@ def detect_vertx_groovy(
     # that keeps a stray `map.get(...)` from being mistaken for a route.
     uses_routematcher = b"RouteMatcher" in source
     enclosing = Enclosing(record)
+    methods = method_lines(record.functions)
 
     for call in _invocations(root):
         method, endpoint_path, first_arg, obj = _parts(call, source, consts)
@@ -112,6 +141,10 @@ def detect_vertx_groovy(
             continue
         semantic, verb, endpoint, route_kind = info
         line = call.start_point[0] + 1
+        handler, handler_line = (
+            handler_info(_handler_arg(call, source), source, methods)
+            if semantic in HANDLER_SEMANTICS else (None, None)
+        )
 
         stmt = enclosing.statement(line)
         if stmt is not None:  # detection on the same span → enrich in place
@@ -123,6 +156,10 @@ def detect_vertx_groovy(
                 stmt.endpoint = endpoint
             if route_kind:
                 stmt.routeKind = route_kind
+            if handler:
+                stmt.handler = handler
+            if handler_line:
+                stmt.handlerLine = handler_line
         else:  # inside a closure the base skipped → add a statement to the enclosing function
             new_id = disambiguate(statement_id(path, line, call.start_point[1]), seen)
             record.statements.append(Statement(
@@ -135,6 +172,8 @@ def detect_vertx_groovy(
                 endpoint=endpoint,
                 framework="vertx",
                 routeKind=route_kind,
+                handler=handler,
+                handlerLine=handler_line,
                 startLine=line,
                 endLine=call.end_point[0] + 1,
                 path=path,
