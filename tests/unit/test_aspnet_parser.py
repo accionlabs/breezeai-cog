@@ -496,3 +496,57 @@ def test_minimal_api_handler_and_line() -> None:
         "/remote": ("Remote.Get", None),
         "/twice": ("Twice", None),
     }
+
+
+_MAP_GROUPS = b'''var app = WebApplication.Create(args);
+var api = app.MapGroup("/api").RequireAuthorization();
+RouteGroupBuilder v1 = api.MapGroup("/v1");
+v1.MapGet("/items", () => "items");
+api.MapPost("/", () => "root");
+app.MapGroup("/chained").WithTags("x").MapGet("/c", () => "c");
+var dyn = app.MapGroup(Config.Prefix);
+dyn.MapGet("/d", () => "d");
+var twice = app.MapGroup("/a");
+twice = app.MapGroup("/b");
+twice.MapGet("/t", () => "t");
+app.MapGet(PathOf("x"), () => "computed");
+app.MapGet("/plain", () => "plain");
+
+static class Ext
+{
+    public static void MapMore(this RouteGroupBuilder group) => group.MapGet("/more", () => "m");
+}
+'''
+
+
+def test_map_group_prefixes_compose() -> None:
+    # Group prefixes compose (builder calls such as RequireAuthorization pass the group through);
+    # a group prefix that exists but cannot be resolved — non-literal, reassigned, or a
+    # RouteGroupBuilder parameter set by a caller elsewhere — leaves the endpoint empty (Q8).
+    rec = _parse(AspNetCoreParser(), _MAP_GROUPS, "Program.cs")
+    got = sorted((s.startLine, s.endpoint) for s in rec.statements if s.semanticType == "route")
+    assert got == [
+        (4, "/api/v1/items"),
+        (5, "/api"),
+        (6, "/chained/c"),
+        (8, None),      # app.MapGroup(Config.Prefix)
+        (11, None),     # `twice` holds two different groups
+        (12, None),     # non-literal route pattern
+        (13, "/plain"),
+        (17, None),     # RouteGroupBuilder parameter: prefix set in the caller
+    ]
+
+
+def test_vb_minimal_api_pattern_must_be_a_literal() -> None:
+    src = b'''Imports Microsoft.AspNetCore.Builder
+Module Program
+    Sub Main(args As String())
+        Dim app = WebApplication.Create(args)
+        app.MapGet("/hello", Function() "hi")
+        app.MapGet(PathOf("x"), Function() "hi")
+    End Sub
+End Module
+'''
+    rec = _parse(VbAspNetParser(), src, "Program.vb")
+    got = sorted((s.startLine, s.endpoint) for s in rec.statements if s.semanticType == "route")
+    assert got == [(5, "/hello"), (6, None)]  # a literal inside a call is not the pattern

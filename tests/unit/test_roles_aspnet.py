@@ -146,7 +146,6 @@ def test_minimal_api_named_handler_is_binding(program) -> None:
     assert (r.handler, r.handlerLine) == ("GetOrders", _program_line("static string GetOrders"))
 
 
-@pytest.mark.xfail(strict=True, reason="MapGroup prefix not applied to its endpoints")
 def test_map_group_is_wiring(program) -> None:
     assert _at(program, "Program.cs", _program_line('app.MapGroup("/api")')) == []
     [r] = _at(program, "Program.cs", _program_line('api.MapGet("/items"'))
