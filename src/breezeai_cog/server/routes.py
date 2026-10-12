@@ -25,7 +25,8 @@ from ..services.diff import empty_meta, run_diff_stream
 from ..services.inprocess import analyze_in_memory
 from .deps import ServerDeps
 from .errors import ApiError
-from .git import _scrub, parse_repo_url
+from .git import INVALID_REPO_URL_MESSAGE, _scrub, parse_repo_url
+from .git_routes import router as git_router
 
 router = APIRouter()
 
@@ -108,9 +109,9 @@ async def analyze_diff(request: Request, background_tasks: BackgroundTasks) -> d
         raise ApiError(
             "All fields required: repoUrl, incomingCommitId, gitBranch, projectUuid, codeOntologyId", 400
         )
-    parsed = parse_repo_url(repo_url)
+    parsed = parse_repo_url(repo_url, settings.scm_instances)
     if parsed is None:
-        raise ApiError("Invalid repo URL (supported hosts: github.com, bitbucket.org, gitlab.com, dev.azure.com)", 400)
+        raise ApiError(INVALID_REPO_URL_MESSAGE, 400)
     repo_name = parsed["repo"]
     ignore_patterns = _normalize_ignore_patterns(body.get("ignorePatterns"))
 
@@ -395,3 +396,8 @@ async def analyze_es(
         "settingsMatched": build["settingsMatched"],
         "message": message,
     })
+
+
+# The /api/git/* provider operations (server/git_routes.py) hang off this router so the
+# app mounts exactly one router; the handlers stay in their own module.
+router.include_router(git_router)

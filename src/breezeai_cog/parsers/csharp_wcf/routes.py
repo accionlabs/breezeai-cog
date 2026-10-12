@@ -17,7 +17,7 @@ from __future__ import annotations
 
 from ...emit import disambiguate, statement_id
 from ...schemas import Decorator, FileRecord, Statement
-from ..csharp_aspnet.routes import _response_dto, simple_attr_name  # reuse unwrap + attr normalization
+from ..dotnet_common import response_dto, simple_attr_name
 
 _SERVICE_ATTR = "ServiceContract"
 _OP_ATTR = "OperationContract"
@@ -119,7 +119,7 @@ def detect_wcf_services(record: FileRecord) -> list[Statement]:
                 handlerLine=fn.startLine,
                 routeKind=route_kind,
                 isRegex=False,
-                responseDTO=_response_dto(fn.returnType),
+                responseDTO=response_dto(fn.returnType),
                 startLine=fn.startLine,
                 endLine=fn.endLine,
                 path=fn.path,
@@ -157,7 +157,7 @@ def detect_asmx_services(record: FileRecord) -> list[Statement]:
                 handlerLine=fn.startLine,
                 routeKind="rpc",
                 isRegex=False,
-                responseDTO=_response_dto(fn.returnType),
+                responseDTO=response_dto(fn.returnType),
                 startLine=fn.startLine,
                 endLine=fn.endLine,
                 path=fn.path,

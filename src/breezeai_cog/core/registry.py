@@ -14,6 +14,7 @@ import pkgutil
 from pathlib import Path
 
 from ..errors import RegistryError
+from ..parsers.additive import all_detectors
 from ..parsers.base import LanguageParser
 from ..schemas import SCHEMA_VERSION
 
@@ -88,8 +89,14 @@ def capabilities() -> dict[str, object]:
         "languages": sorted({p.name for p in _REGISTRY}),
         "extensions": sorted({e for p in _REGISTRY for e in p.extensions}),
         "templateExtensions": sorted(template_extensions()),
-        "frameworks": sorted({f for p in _REGISTRY for f in p.frameworks}),
+        "frameworks": sorted(
+            {f for p in _REGISTRY for f in p.frameworks}
+            | {f for ds in all_detectors().values() for d in ds for f in d.frameworks}
+        ),
         "statementTypes": sorted({s for p in _REGISTRY for s in p.statement_types}),
+        "additiveDetectors": {
+            lang: [d.name for d in ds] for lang, ds in all_detectors().items()
+        },
     }
 
 

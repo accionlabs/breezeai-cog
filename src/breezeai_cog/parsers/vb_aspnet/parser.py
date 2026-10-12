@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from ...schemas import FileRecord
 from ..base import ParseContext
-from ..csharp_aspnet.routes import (
+from ..aspnet_common import (
     detect_controller_routes,
     detect_minimal_api_routes,
     detect_route_registrations,

@@ -24,7 +24,7 @@ from ...emit import disambiguate, file_id, statement_id
 from ...schemas import FileRecord, Statement
 from ..csharp.imports import _positional_args, _string_literal
 from ..treesitter import node_text
-from .mounts import _app_root, _to_repo_path, ci_resolve
+from ..dotnet_common import ci_resolve, to_repo_path, web_app_root
 from .routes import _page_class
 
 #: code-behind redirect/transfer method → the receiver it must be called on (precision guard,
@@ -42,7 +42,7 @@ def _nav_endpoint(target: str, cur_dir: str, app_root: str, repo_root: Path | No
     t = target.strip().replace("\\", "/").split("?", 1)[0].split("#", 1)[0]
     if t.lower().startswith(("http://", "https://", "mailto:", "javascript:", "//", "tel:")):
         return None
-    rel = _to_repo_path(t, cur_dir, app_root)
+    rel = to_repo_path(t, cur_dir, app_root)
     if rel is None or not rel.lower().endswith(".aspx"):  # page targets only
         return None
     actual = ci_resolve(repo_root, rel) if repo_root is not None else None
@@ -85,7 +85,7 @@ def detect_navigation(
     """``routeKind=navigation`` route statements for this page's outgoing navigation (item 4).
     Code-behind redirects keep their real node type/line; markup ``NavigateUrl``/``PostBackUrl``
     are ``synthetic`` (no C# node), anchored to the page class."""
-    app_root = _app_root(path, repo_root) if repo_root is not None else ""
+    app_root = web_app_root(path, repo_root) if repo_root is not None else ""
     cur_dir = posixpath.dirname(path)
     cls = _page_class(record, path)
     cname = cls.name if cls is not None else None

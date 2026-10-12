@@ -43,13 +43,12 @@ from tree_sitter import Node
 
 from ...emit import disambiguate, file_id, statement_id
 from ...schemas import FileRecord, SemanticType, Statement
+from ..enclosing import Enclosing
 from ..treesitter import first_line, node_text
 from ..vertx_common import (
     EVENTBUS,
     classify_call,
-    enclosing_statement,
     is_bus_receiver,
-    owner_function,
     render_address,
 )
 
@@ -209,6 +208,7 @@ def detect_vertx(
     suppress: set[tuple[int, int]] = set()
     if _may_have_wrapper(source):
         aliases, suppress = _wrapper_aliases(root, source)
+    enclosing = Enclosing(record)
 
     for call in _invocations(root):
         if (call.start_byte, call.end_byte) in suppress:  # wrapper plumbing → honest-null
@@ -219,7 +219,7 @@ def detect_vertx(
         semantic, method, endpoint, route_kind = info
         line = call.start_point[0] + 1
 
-        stmt = enclosing_statement(line, record.statements)
+        stmt = enclosing.statement(line)
         if stmt is not None:  # detection on the same span → enrich in place
             stmt.semanticType = semantic
             stmt.framework = "vertx"
@@ -233,7 +233,7 @@ def detect_vertx(
             new_id = disambiguate(statement_id(path, line, call.start_point[1]), seen)
             record.statements.append(Statement(
                 id=new_id,
-                parentId=owner_function(line, record.functions, fid),
+                parentId=enclosing.function_id(line, fid),
                 nodeType=call.type,
                 semanticType=semantic,
                 text=first_line(node_text(call, source)),

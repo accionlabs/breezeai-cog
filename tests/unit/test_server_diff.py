@@ -14,7 +14,7 @@ from fastapi.testclient import TestClient
 from breezeai_cog.config import Settings
 from breezeai_cog.server.app import create_app
 from breezeai_cog.server.deps import ServerDeps
-from breezeai_cog.server.git import parse_repo_url
+from breezeai_cog.server.git import INVALID_REPO_URL_MESSAGE, parse_repo_url
 
 BODY = {
     "repoUrl": "https://github.com/acme/widgets.git",
@@ -92,6 +92,20 @@ def test_incremental_diff_filters_to_changed(captured: _Captured) -> None:
     assert captured.notifications[0][1]["projectMetaData"]["totalFiles"] == 1
 
 
+def test_config_files_are_not_analyzed_languages(captured: _Captured) -> None:
+    # same rule as the full scan: config / data documents are counted, not listed as languages
+    files = {
+        "package.json": '{"name": "w", "dependencies": {"left-pad": "1.0.0"}}',
+        "workflow.json": '{"nodes": [{"id": "1", "name": "a"}], "active": true}',
+    }
+    client = _make_client(captured, filter_set={"a.py", *files}, deleted=[], repo_files=files)
+    assert client.post("/api/analyze-diff", json=BODY).status_code == 200
+    assert {rec["path"] for rec in captured.records} == {"a.py", *files}  # configs still streamed
+    meta = captured.notifications[0][1]["projectMetaData"]
+    assert meta["analyzedLanguages"] == ["python"]
+    assert meta["configs"]["totalConfigFiles"] == 2
+
+
 def test_deletion_only_commit(captured: _Captured) -> None:
     client = _make_client(captured, filter_set=set(), deleted=["gone.py"])
     r = client.post("/api/analyze-diff", json=BODY)
@@ -127,16 +141,18 @@ def test_invalid_repo_url(captured: _Captured) -> None:
     client = _make_client(captured, filter_set=None, deleted=[])
     r = client.post("/api/analyze-diff", json={**BODY, "repoUrl": "https://unsupported-host.com/a/b"})
     assert r.status_code == 400
-    assert r.json() == {"error": "Invalid repo URL (supported hosts: github.com, bitbucket.org, gitlab.com, dev.azure.com)"}
+    assert r.json() == {"error": INVALID_REPO_URL_MESSAGE}
 
 
 def test_azure_devops_repo_url() -> None:
+    # `project` became its own key in 36ed49f (was packed into repo as "project/repo").
+    # Full URL-grammar coverage lives in tests/unit/integrations/test_scm_repository.py.
     url = "https://dev.azure.com/my-org/my-project/_git/my-repo"
-    res = parse_repo_url(url)
-    assert res == {
+    assert parse_repo_url(url) == {
         "provider": "azure_devops",
         "owner": "my-org",
-        "repo": "my-project/my-repo"
+        "project": "my-project",
+        "repo": "my-repo",
     }
 
 

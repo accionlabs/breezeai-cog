@@ -625,6 +625,8 @@ def test_view_definition_not_truncated_sqlglot_path() -> None:
     # every projected alias survives, including the last one
     assert "alias_column_number_119" in definition
     assert "wide_table" in definition
+    # and it is the source text, not a sqlglot re-render
+    assert definition == f"CREATE VIEW app.wide_view AS\n{body}"
 
 
 def test_view_definition_not_truncated_oracle_path() -> None:
@@ -634,4 +636,132 @@ def test_view_definition_not_truncated_oracle_path() -> None:
     r = parse_ddl(ddl, "oracle/wide_view.sql")  # Oracle filename hint → regex path
     assert r["dialect"] == "oracle"
     (view,) = r["views"]
-    assert view["definition"] == body
+    # verbatim statement: header + body, no trailing terminator
+    assert view["definition"] == f"CREATE OR REPLACE FORCE VIEW app.wide_view AS\n{body}"
+    assert view["definition"].endswith(body)
+
+
+# ── BREEZEAI-958 AC2: `definition` is the verbatim source statement, every dialect ──────────
+
+
+def test_view_definition_is_verbatim_tsql() -> None:
+    # QA's reproduction (2026-10-06): bracket-quoted names, `--` comments, odd spacing, GO.
+    stmt = (
+        "CREATE VIEW [dbo].[VW_Test] AS\n"
+        "-- shows active students\n"
+        "SELECT  s.[Id],\n"
+        "        s.[Name]   -- student name\n"
+        "FROM   [dbo].[Student] s\n"
+        "WHERE  s.[Active]=1"
+    )
+    r = parse_ddl(f"CREATE TABLE dbo.Student (Id int, Name nvarchar(50), Active bit);\nGO\n{stmt}\nGO\n", "schema_mssql.sql")
+    assert r["dialect"] == "transactsql"
+    (view,) = r["views"]
+    assert view["name"] == "VW_Test"
+    assert view["definition"] == stmt  # byte-identical: header, newlines, `--` comments, `=1`, `Student s`
+
+
+def test_view_definition_is_verbatim_postgres_multi_statement() -> None:
+    v1 = "CREATE OR REPLACE VIEW app.v_one AS\n  SELECT t.a   AS x, -- don't collapse me\n   t.b\n  FROM app.t\n  WHERE t.a = 'a;b'"
+    v2 = "CREATE VIEW v_two AS SELECT 1 AS one /* trailing; comment */"
+    text = f"CREATE TABLE app.t (a text, b int);\n{v1};\n\n{v2};\nCREATE INDEX ix_t ON app.t (a);\n"
+    r = parse_ddl(text, "schema_pg.sql")
+    assert r["dialect"] == "postgresql"
+    by_name = {v["name"]: v for v in r["views"]}
+    assert by_name["v_one"]["definition"] == v1
+    assert by_name["v_two"]["definition"] == v2
+    assert r["parseStats"]["failed"] == 0
+
+
+def test_view_definition_is_verbatim_mysql_with_definer() -> None:
+    stmt = (
+        "CREATE OR REPLACE ALGORITHM=UNDEFINED DEFINER=`root`@`localhost` SQL SECURITY DEFINER "
+        "VIEW `v_users` AS\n  select `u`.`id` AS `id`,`u`.`name` AS `name` from `users` `u` where (`u`.`active` = 1)"
+    )
+    r = parse_ddl(f"CREATE TABLE users (id int, name varchar(10), active tinyint) ENGINE=InnoDB;\n{stmt};\n", "schema_mysql.sql")
+    (view,) = r["views"]
+    assert view["name"] == "v_users"
+    assert view["definition"] == stmt
+
+
+def test_oracle_editionable_view_is_recognised_and_verbatim() -> None:
+    # SQL Developer / DBMS_METADATA default shape on 12c+ — used to be `unrecognized_statement`.
+    stmt = (
+        'CREATE OR REPLACE FORCE EDITIONABLE VIEW "APP"."V_LONG" ("ID", "LABEL") AS\n'
+        "  SELECT /*+ FIRST_ROWS */ t.id, t.label\n"
+        "  FROM t\n"
+        "  WHERE t.flag = 'a;b'\n"
+        "  WITH READ ONLY"
+    )
+    r = parse_ddl(f"CREATE TABLE T (ID NUMBER, LABEL VARCHAR2(10), FLAG VARCHAR2(3));\n{stmt};\n", "schema_ora.sql")
+    assert r["dialect"] == "oracle"
+    assert r["parseStats"]["failed"] == 0
+    (view,) = r["views"]
+    assert view["fullName"] == "APP.V_LONG"
+    assert view["columns"] == ["ID", "LABEL"]
+    assert view["definition"] == stmt
+    for head in ("CREATE OR REPLACE NONEDITIONABLE VIEW V2 AS SELECT 1 FROM DUAL",
+                 "CREATE OR REPLACE NO FORCE EDITIONING VIEW V3 AS SELECT 1 FROM DUAL"):
+        rr = parse_ddl(head + ";\n", "schema_ora.sql")
+        assert [v["definition"] for v in rr["views"]] == [head], head
+
+
+# ── PR #117 review (2026-10-07): raw text is sliced at sqlglot's own `;` tokens ─────────────
+
+
+def test_view_definition_survives_mysql_backslash_escape() -> None:
+    # A `\'` escape used to end the string early for the hand-rolled splitter, so `v` swallowed
+    # the following statements and `w` fell back to a re-render.
+    v = "CREATE VIEW v AS SELECT 'it\\'s; not a terminator' AS x"
+    w = "CREATE VIEW w AS SELECT 'y' AS y"
+    r = parse_ddl(f"{v};\nCREATE TABLE t (a int);\n{w};\n", "schema_mysql.sql")
+    assert r["dialect"] == "mysql"
+    assert [(x["name"], x["definition"]) for x in r["views"]] == [("v", v), ("w", w)]
+    assert [t["name"] for t in r["tables"]] == ["t"]
+    assert r["parseStats"]["failed"] == 0
+
+
+def test_view_definition_survives_postgres_escape_string_and_dollar_quote() -> None:
+    v = "CREATE VIEW v AS SELECT E'it\\'s;' AS x"
+    w = "CREATE VIEW w AS\n  SELECT $$a;b$$ AS y, $tag$c;d$tag$ AS z"
+    r = parse_ddl(f"{v}; -- trailing comment after the terminator\n{w};", "schema_pg.sql")
+    assert r["dialect"] == "postgresql"
+    assert [(x["name"], x["definition"]) for x in r["views"]] == [("v", v), ("w", w)]
+    assert r["parseStats"]["failed"] == 0
+
+
+def test_view_definition_not_borrowed_by_same_bare_name_in_other_schema() -> None:
+    # `a.v` degrades to a generic Command in sqlglot (WITH CHECK OPTION LOCAL CASCADED), so it
+    # yields no view record. Name-keyed matching then handed its text to `b.v`; positional
+    # pairing cannot.
+    b_v = "CREATE VIEW b.v AS SELECT 2"
+    text = f"CREATE VIEW a.v AS SELECT 1 FROM t WITH CHECK OPTION LOCAL CASCADED;\n{b_v};\n"
+    r = parse_ddl(text, "schema_pg.sql")
+    assert [(x["fullName"], x["definition"]) for x in r["views"]] == [("b.v", b_v)]
+
+
+def test_sqlglot_path_tokenizer_failure_still_yields_parsable_statements() -> None:
+    # An unterminated string makes the dialect tokenizer reject the whole file; the naive
+    # fallback must still extract the statements that do parse and report the failure.
+    r = parse_ddl("CREATE TABLE t (a int);\nCREATE VIEW v AS SELECT 'oops AS x;", "schema_pg.sql")
+    assert [t["name"] for t in r["tables"]] == ["t"]
+    assert r["views"] == []
+    assert r["parseStats"]["failed"] == 1
+    assert r["parseStats"]["sampleErrors"]
+
+
+def test_oracle_package_body_with_dynamic_create_view_is_a_procedure() -> None:
+    # The router matched `CREATE … VIEW` anywhere in the statement, so a program whose body
+    # builds a view via EXECUTE IMMEDIATE was routed to the view parser and dropped.
+    text = (
+        "CREATE OR REPLACE EDITIONABLE PACKAGE BODY P AS\n"
+        "  PROCEDURE x IS BEGIN\n"
+        "    EXECUTE IMMEDIATE 'CREATE OR REPLACE VIEW Z AS SELECT 1 FROM DUAL';\n"
+        "  END;\n"
+        "END P;\n/\n"
+    )
+    r = parse_ddl(text, "schema_ora.sql")
+    assert r["dialect"] == "oracle"
+    assert [p["name"] for p in r["procedures"]] == ["P"]
+    assert r["views"] == []
+    assert r["parseStats"]["failed"] == 0
