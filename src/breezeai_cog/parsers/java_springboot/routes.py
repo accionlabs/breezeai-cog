@@ -83,6 +83,16 @@ def _join(base: str, sub: str) -> str:
     return "/" + "/".join(parts) if parts else "/"
 
 
+def apply_context_path(routes: list[Statement], context_path: str | None) -> None:
+    """Join the application's servlet context path onto each HTTP route's endpoint. ``None``
+    (set in config but unresolvable) leaves every endpoint empty: the address is unknown."""
+    for r in routes:
+        if r.semanticType != "route":
+            continue
+        r.endpoint = (_join(context_path, r.endpoint)
+                      if context_path is not None and r.endpoint is not None else None)
+
+
 def _request_dto(fn: Function) -> str | None:
     """Declared type of the ``@RequestBody`` parameter → requestDTO."""
     for p in fn.params:

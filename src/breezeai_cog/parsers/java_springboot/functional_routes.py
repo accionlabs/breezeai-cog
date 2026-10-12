@@ -13,9 +13,13 @@ We walk the AST for every RequestPredicate / builder verb call — ``GET`` / ``P
 and emit one route each. The handler (a ``ref::method``) is captured best-effort from the
 verb call itself (builder form) or the enclosing ``route`` / ``andRoute`` (static form).
 
+A shared prefix — ``nest(path("/v2"), …)`` / ``andNest(path("/v2"), …)`` or the builder's
+``.path("/v2", b -> …)`` — is joined onto every route nested inside it (nests compose). A
+prefix whose value is not a string literal makes the address unknown: the route's endpoint is
+empty (non-path predicates such as ``accept(JSON)`` add nothing).
+
 Gated by the caller on a ``RouterFunction`` signature so a stray ``GET(...)`` elsewhere
-cannot match. Not yet handled: a ``nest(path("/prefix"), ...)`` shared path prefix — the
-nested routes are captured with their own literal path only.
+cannot match.
 """
 
 from __future__ import annotations
@@ -28,6 +32,52 @@ from ..treesitter import first_line, node_text
 
 _FN_VERBS = {"GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"}
 _ROUTE_CALLS = {"route", "andRoute", "andNest"}
+_NEST_CALLS = {"nest", "andNest"}
+
+#: Sentinel for a prefix that exists but is not a string literal.
+_UNRESOLVED = object()
+
+
+def _path_prefix(predicate: Node, source: bytes) -> object | None:
+    """The path prefix of a ``nest`` predicate: the argument of a ``path(...)`` call inside it
+    (``path("/v2")``, ``path("/v2").and(accept(JSON))``) → the string, ``_UNRESOLVED`` when it
+    is not a literal, None when the predicate has no ``path(...)``."""
+    stack = [predicate]
+    while stack:
+        n = stack.pop()
+        if n.type == "method_invocation":
+            nm = n.child_by_field_name("name")
+            if nm is not None and node_text(nm, source) == "path":
+                p = _first_string_arg(n.child_by_field_name("arguments"), source)
+                return p if p is not None else _UNRESOLVED
+        stack.extend(reversed(n.named_children))
+    return None
+
+
+def _nest_prefix(call: Node, source: bytes) -> str | None:
+    """The joined path prefix of the ``nest`` / ``andNest`` / builder ``.path`` calls that
+    enclose ``call`` (outermost first), "" when there are none, None when one is unresolved."""
+    prefixes: list[str] = []
+    node = call
+    while (parent := node.parent) is not None:
+        inv = parent.parent if parent.type == "argument_list" else None
+        if inv is not None and inv.type == "method_invocation" and parent.named_children \
+                and node != parent.named_children[0]:  # nested in a later argument
+            nm = inv.child_by_field_name("name")
+            name = node_text(nm, source) if nm is not None else ""
+            first = parent.named_children[0]
+            prefix: object | None = None
+            if name in _NEST_CALLS:
+                prefix = _path_prefix(first, source)
+            elif name == "path":  # builder form: .path("/v2", b -> b.GET(...))
+                p = _first_string_arg(parent, source)
+                prefix = p if p is not None else _UNRESOLVED
+            if prefix is _UNRESOLVED:
+                return None
+            if isinstance(prefix, str):
+                prefixes.append(prefix)
+        node = parent
+    return "".join("/" + p.strip("/") for p in reversed(prefixes) if p.strip("/"))
 
 
 def _first_string_arg(args: Node | None, source: bytes) -> str | None:
@@ -38,6 +88,11 @@ def _first_string_arg(args: Node | None, source: bytes) -> str | None:
             frag = next((c for c in a.named_children if c.type == "string_fragment"), None)
             return node_text(frag, source) if frag is not None else node_text(a, source).strip('"')
     return None
+
+
+def _join(prefix: str, sub: str) -> str:
+    parts = [x.strip("/") for x in (prefix, sub) if x and x.strip("/")]
+    return "/" + "/".join(parts) if parts else "/"
 
 
 def _ref_name(node: Node, source: bytes) -> str:
@@ -103,6 +158,7 @@ def detect_spring_functional_routes(
                 if p is not None:
                     sl, sc = n.start_point[0] + 1, n.start_point[1]
                     handler, handler_line = _handler_for(n, args, source, methods)
+                    prefix = _nest_prefix(n, source)
                     routes.append(
                         Statement(
                             id=disambiguate(statement_id(path, sl, sc), seen),
@@ -111,7 +167,7 @@ def detect_spring_functional_routes(
                             semanticType="route",
                             text=first_line(node_text(n, source)),
                             method=name,
-                            endpoint="/" + p.strip("/") if p.strip("/") else "/",
+                            endpoint=_join(prefix, p) if prefix is not None else None,
                             framework="spring",
                             handler=handler,
                             handlerLine=handler_line,

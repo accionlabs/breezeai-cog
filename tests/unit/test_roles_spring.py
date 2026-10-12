@@ -96,7 +96,6 @@ public class C {
     assert r.endpoint == "/api/orders"
 
 
-@pytest.mark.xfail(strict=True, reason="server.servlet.context-path is not applied to endpoints")
 def test_context_path_is_wiring(analyze_files) -> None:
     files = _java(
         "C",
@@ -135,7 +134,6 @@ def test_functional_route_is_binding(analyze_files) -> None:
     assert (r.method, r.endpoint, r.routeKind, r.handler) == ("GET", "/products", "route", "list")
 
 
-@pytest.mark.xfail(strict=True, reason="functional nest(path(...)) prefix is not applied")
 def test_functional_nest_path_is_wiring(analyze_files) -> None:
     st = analyze_files(
         _java(

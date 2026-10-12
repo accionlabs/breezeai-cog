@@ -215,3 +215,99 @@ def test_array_path_mapping_splits(tmp_path) -> None:
     assert ("GET", "/orders/report/{fmt}") in eps
     assert ("GET", "/orders/x/{id:[0-9]{1,3}}") in eps   # single path, comma preserved
     assert not any('{"' in ep or ", " in ep for _, ep in eps)  # no raw array literal leaked
+
+
+# ── Context path (server.servlet.context-path) and functional nest prefixes ──────────────────
+_CTRL = (
+    "package a;\nimport org.springframework.web.bind.annotation.*;\n"
+    "@RestController\npublic class C {\n  @GetMapping(\"/x\")\n  public String x() { return \"\"; }\n}\n"
+)
+
+
+def _endpoints(stmts) -> dict[str, str | None]:
+    return {s.path: s.endpoint for s in stmts if s.semanticType == "route"}
+
+
+def test_context_path_prefixes_routes_of_its_module(analyze_files) -> None:
+    st = analyze_files({
+        # module "app": properties in resources and the same value in resources/config
+        "app/src/main/java/a/C.java": _CTRL,
+        "app/src/main/resources/application.properties": "server.port=8080\nserver.servlet.context-path=/shop\n",
+        "app/src/main/resources/config/application.properties": "server.servlet.context-path = /shop\n",
+        "app/src/main/resources/application-dev.properties": "server.servlet.context-path=/dev\n",
+        "app/src/test/resources/application.properties": "server.servlet.context-path=/test\n",
+        # module "yml": nested YAML; a profile document is ignored
+        "yml/src/main/java/a/C.java": _CTRL,
+        "yml/src/main/resources/application.yml": (
+            "server:\n  servlet:\n    context-path: /api\n---\n"
+            "spring:\n  config:\n    activate:\n      on-profile: dev\nserver:\n  servlet:\n    context-path: /x\n"
+        ),
+        # module "legacy": Spring Boot 1.x key
+        "legacy/src/main/java/a/C.java": _CTRL,
+        "legacy/src/main/resources/application.properties": "server.context-path=/old\n",
+        # module "plain": no context path → unchanged
+        "plain/src/main/java/a/C.java": _CTRL,
+    })
+    assert _endpoints(st) == {
+        "app/src/main/java/a/C.java": "/shop/x",
+        "yml/src/main/java/a/C.java": "/api/x",
+        "legacy/src/main/java/a/C.java": "/old/x",
+        "plain/src/main/java/a/C.java": "/x",
+    }
+
+
+def test_unresolvable_context_path_leaves_endpoint_empty(analyze_files) -> None:
+    st = analyze_files({
+        # base files disagree
+        "a/src/main/java/a/C.java": _CTRL,
+        "a/src/main/resources/application.properties": "server.servlet.context-path=/one\n",
+        "a/src/main/resources/config/application.yml": "server:\n  servlet:\n    context-path: /two\n",
+        # a placeholder cog does not resolve
+        "b/src/main/java/a/C.java": _CTRL,
+        "b/src/main/resources/application.properties": "server.servlet.context-path=${CTX:/b}\n",
+    })
+    routes = [s for s in st if s.semanticType == "route"]
+    assert {s.path: s.endpoint for s in routes} == {
+        "a/src/main/java/a/C.java": None, "b/src/main/java/a/C.java": None,
+    }
+    assert all(s.handler == "x" and s.method == "GET" for s in routes)  # the rest is kept
+
+
+_FN_NEST = b"""package demo;
+import org.springframework.context.annotation.Bean;
+import org.springframework.web.servlet.function.RouterFunction;
+import static org.springframework.web.servlet.function.RouterFunctions.*;
+import static org.springframework.web.servlet.function.RequestPredicates.*;
+
+public class Routes {
+    @Bean
+    public RouterFunction<?> r(Handler h) {
+        return route()
+            .nest(path("/v2").and(accept(JSON)), b -> b
+                .GET("/catalog", h::list)
+                .nest(path("/admin"), a -> a.DELETE("/items/{id}", h::delete)))
+            .nest(accept(JSON), b -> b.GET("/plain", h::plain))
+            .path("/v3", b -> b.POST("/orders", h::create))
+            .nest(path(PREFIX), b -> b.GET("/dyn", h::dyn))
+            .build();
+    }
+
+    @Bean
+    public RouterFunction<?> s(Handler h) {
+        return nest(path("/static"), route(GET("/s"), h::s));
+    }
+}
+"""
+
+
+def test_functional_nest_prefixes_compose(tmp_path) -> None:
+    rec = _parse(tmp_path, _FN_NEST, "Routes.java")
+    got = {s.handler: s.endpoint for s in rec.statements if s.semanticType == "route"}
+    assert got == {
+        "list": "/v2/catalog",
+        "delete": "/v2/admin/items/{id}",   # nested nests compose
+        "plain": "/plain",                  # accept(...) adds nothing
+        "create": "/v3/orders",             # builder .path(prefix, ...)
+        "dyn": None,                        # path(PREFIX): unresolved prefix → empty
+        "s": "/static/s",                   # static RouterFunctions.nest
+    }

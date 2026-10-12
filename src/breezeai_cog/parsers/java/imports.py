@@ -17,6 +17,7 @@ from ...utils import repo_relative
 from ..constfold import Token, resolve_all
 from ..index_common import parallel_map, record_distinct, seed_same_package
 from ..treesitter import node_text, parse_source
+from .config import spring_context_paths
 from .constants import collect_constants
 
 _TYPE_DECLS = (
@@ -37,6 +38,10 @@ class JavaIndex:
 
     fqcn: FqcnIndex = field(default_factory=dict)
     consts: dict[str, str] = field(default_factory=dict)
+    #: Spring Boot servlet context path per module root (``""`` = repo root): the prefix of
+    #: every HTTP route in that module. None = set in config but unresolvable (the base files
+    #: disagree, or a ``${…}`` placeholder). A module without one is absent. See ``config.py``.
+    context_paths: dict[str, str | None] = field(default_factory=dict)
 
 
 #: One file's contribution: ``{package.TypeName: rel}`` and ``{Class.FIELD: tokens}``.
@@ -96,7 +101,10 @@ def build_fqcn_index(repo_root: Path, files: Sequence[Path], jobs: int = 1) -> J
             record_distinct(fqcn, name, rel)
         for name, tokens in const_frag.items():
             record_distinct(raw_consts, name, tokens)
-    return JavaIndex(fqcn=fqcn, consts=resolve_all(raw_consts))
+    return JavaIndex(
+        fqcn=fqcn, consts=resolve_all(raw_consts),
+        context_paths=spring_context_paths(repo_root, (rel for _, rel in args)),
+    )
 
 
 def _package_of(root: Node, source: bytes) -> str:
