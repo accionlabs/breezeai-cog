@@ -45,7 +45,7 @@ Every framework construct a parser recognises has **exactly one** role:
 |---|---|---|---|
 | **Binding** | names **one** handler as the target of an inbound trigger | **one entry-point record** | `@GetMapping("/x")` on a method · `r.get('/x', h)` · `{ path, component }` · `@KafkaListener` · `@Scheduled` |
 | **Wiring** | adds part of an address (a prefix, a kind, a queue name) to **other** bindings, or marks a container whose members are bindings | **no entry-point record** — its value is copied into the bindings' records; its own code stays a plain statement ([§5](#wiring-keeps-its-statement)) | `app.use('/users', router)` · `loadChildren` · `@RequestMapping` on a class · `AddQueryType<T>()` · `serverless.yml` events |
-| **Guard** | attaches code that runs before **many** handlers | the guard's name in `guards` on each affected record | `app.use(auth)` · `canActivate` · `[Authorize]` |
+| **Guard** | attaches code that runs before **many** handlers | the guard's name in `guards` on each affected record | `app.use(auth)` · `canActivate` · `[Authorize]` · a `<ProtectedRoute/>` layout element |
 | **Outbound** | is our code calling something outside | an outbound record at the call (`api_call`, `eventbus_send`, `navigation`, …) — not an entry point | `fetch(...)` · `sqs.sendMessage(...)` · `<Link to="/orders">` |
 | **None** | is not inbound, or names one handler that has no address of its own | nothing | start-up calls, GraphQL data-type fields, everything else |
 
@@ -105,16 +105,17 @@ targets them.
 | HTTP route on a handler (decorator, route call, route-table entry with a component) | Binding |
 | SOAP / WCF / gRPC operation | Binding |
 | GraphQL query / mutation / subscription field | Binding |
-| GraphQL entity or node resolver (federation `__resolveReference`, Relay node lookup) | Binding — the framework's generated root field (`_entities`, `node`) calls it directly, addressed by type |
+| GraphQL entity or node resolver (federation `__resolveReference`, Relay node lookup) | Binding (`route`, `method: RESOLVE_REFERENCE`, `routeKind: query`) — the framework's generated root field (`_entities`, `node`) calls it directly, addressed by type |
 | GraphQL data-type field resolver (`Book.author`) | None — no address of its own (§3) |
 | Message, queue, topic or event consumer — including message-pattern handlers on an RPC transport (NestJS `@MessagePattern` / `@EventPattern`) | Binding (`eventbus_consumer`) |
 | Service registered on a message address (Vert.x `ServiceBinder…register(...)`) | Binding (`eventbus_consumer`), one per service method |
 | Service proxy client (Vert.x `ServiceProxyBuilder…build(...)`) | Outbound (`eventbus_send`) |
 | Service contract marker (Vert.x `@ProxyGen` interface) | None |
-| Scheduled job: cron or interval annotation, recurring-job registration, timer call (`@Scheduled`, `@Cron`, `@Interval`, Hangfire `RecurringJob`, Quartz, Celery beat, Vert.x `setPeriodic`) | Binding (`timer`) |
+| Scheduled job: cron or interval annotation, recurring-job registration, timer call (`@Scheduled`, `@Cron`, `@Interval`, Hangfire `RecurringJob`, Quartz, Celery beat, Vert.x `setTimer` / `setPeriodic`) | Binding (`timer`) |
 | Serverless function, classified by its trigger (a scheduled trigger such as AWS `ScheduledEvent` is a `timer`) | Binding |
 | Page reached by URL (SPA route, MVC action view, Razor Page, `.aspx`) | Binding |
 | Class-level route prefix, router mount, lazy route group, layout route, root-type registration, deployment-config trigger | Wiring |
+| Route with a `component` **and** `children` | Wiring (a layout) when one child has an empty path; otherwise **also** a Binding — its own URL shows the parent with an empty outlet |
 | Middleware, filters, auth guards, interceptors | Guard |
 | HTTP client call, message publish/send, DB query | Outbound |
 | Link or programmatic navigation to a page (`<Link to>`, `routerLink`, `router.navigate`) | Outbound (`semanticType: navigation`) |
@@ -134,8 +135,8 @@ the route-table entry, or — for a registered container — the member.
 | Field | Content | Required |
 |---|---|---|
 | `semanticType` | `route` (request, RPC, GraphQL or page) · `eventbus_consumer` (message or event) · `timer` (schedule) | Yes |
-| `method` | HTTP verb, or `QUERY` / `MUTATION` / `SUBSCRIPTION` | When the trigger has one |
-| `routeKind` | `route` (HTTP) · `rpc` (SOAP, WCF, gRPC) · `ws` (WebSocket) · `page` · `query` / `mutation` / `subscription` · `entity` / `node` | Yes for `route` |
+| `method` | HTTP verb · `QUERY` / `MUTATION` / `SUBSCRIPTION` / `RESOLVE_REFERENCE` · `RPC` · `MESSAGE` / `EVENT` / `CONSUMER` · `TIMER` / `PERIODIC` | When the trigger has one |
+| `routeKind` | `route` (HTTP) · `rpc` (SOAP, WCF, gRPC) · `ws` (WebSocket) · `page` · `query` / `mutation` / `subscription` (also `message` on an `eventbus_consumer`) | Yes for `route` |
 | `endpoint` | **The address, fully resolved** — the binding's own part joined with every wiring part ([§6](#6-address-format-endpoint)) | If any part can't be determined: **empty**. Never guessed, never a code name |
 | `framework` | Transport or framework: `spring`, `express`, `graphql`, `aws-sqs`, `kafka`, `angular` … | Yes |
 | `handler` | The handler's name: method, function or component | Yes, unless the handler is anonymous ([below](#anonymous-handlers)) |
@@ -163,8 +164,11 @@ A function is **named** when the source gives it a name: a declaration (`functio
 method, or a function assigned to a variable or property (`const getUser = async () => …`). Only
 a function with none of these is anonymous.
 
-When the handler argument is a wrapper call around a function (`asyncHandler(async (req, res) =>
-{ … })`), the handler is the **innermost function**; the wrapper is not the handler.
+**Wrappers are not handlers.** When the handler argument is a wrapper call around a function
+(`asyncHandler(async (req, res) => { … })`), the handler is the **innermost function**. When a page
+is wrapped in elements (`<Suspense><Dashboard/></Suspense>`), the handler is the **page
+component** (`Dashboard`). A guard element used as a layout (`<ProtectedRoute/>`) is not a handler:
+its name goes into `guards` on each child page.
 
 ### Wiring keeps its statement
 
@@ -194,6 +198,9 @@ matchRouter.get('/', async (req, res) => { ... });
 - A detector **never appends** a synthetic record for wiring. Wiring inside a larger construct
   (an entry in a route table) is already covered by the statement for that construct — for
   example the `const routes: Routes = [ … ]` declaration.
+- A **structural link** that wiring expresses — a page and its master page or layout, a host page
+  and the user control it loads — stays recorded as a structural link (for example in
+  `importFiles`), not as an entry point.
 
 **Which records are entry points.** `semanticType: route` means **inbound** only. Each outbound
 kind has its own `semanticType`, so it is never mistaken for an entry point:
@@ -326,8 +333,8 @@ describe what the contract requires.
 | Public method or property of a root container | Binding | One operation: `QUERY` / `MUTATION` / `SUBSCRIPTION`, field name as `endpoint` |
 | `descriptor.Field(...)` in `Configure` of a root `ObjectType<T>` / `ObjectTypeExtension` | Binding | One operation, declared fluently |
 | Fields of a data type (`[ExtendObjectType(typeof(Book))]`, `[Parent]` resolvers, `ObjectType<Book>` fields) | None | No address of their own; recorded as `routeKind: field_resolver`, not counted (§5) |
-| `[ReferenceResolver]` on a type (Apollo Federation) | Binding | Called by the gateway through the generated `_entities` field: `routeKind: entity`, type name as `endpoint` |
-| `[NodeResolver]` on a type marked `[Node]` (Relay, `AddGlobalObjectIdentification`) | Binding | Called through the generated `node` field: `routeKind: node`, type name as `endpoint` |
+| `[ReferenceResolver]` on a type (Apollo Federation) | Binding | Called by the gateway through the generated `_entities` field: `method: RESOLVE_REFERENCE`, `routeKind: query`, type name as `endpoint` |
+| `[NodeResolver]` on a type marked `[Node]` (Relay, `AddGlobalObjectIdentification`) | Binding | Called through the generated `node` field: `method: RESOLVE_REFERENCE`, `routeKind: query`, type name as `endpoint` |
 | `[Authorize]` / `.Authorize(...)` | Guard | |
 | `MapGraphQL("/graphql")` | Wiring | Transport path; GraphQL bindings are addressed by operation name |
 | `AddGraphQLServer()` | None | Start-up |
@@ -339,7 +346,8 @@ describe what the contract requires.
 | `{ path, component }` in a `Routes` array / `RouterModule.forRoot` / `forChild` | Binding | One component reached by URL |
 | `{ path, loadComponent }` | Binding | One component, loaded lazily |
 | `{ path, loadChildren }` | Wiring | Points at a module or route list: prefix for its routes |
-| `{ path, children: [...] }` | Wiring | Prefix for the children; also a Binding when it has a `component` |
+| `{ path, children: [...] }` | Wiring | Prefix for the children |
+| `{ path, component, children: [...] }` | Wiring when a child has `path: ''`; otherwise also a Binding | A layout when a child always fills its outlet; otherwise its own URL shows it with an empty outlet |
 | `{ path, redirectTo }` | None | An alias; no handler |
 | `canActivate` / `canMatch` / `canActivateChild` | Guard | |
 | `HttpClient` calls | Outbound | |
