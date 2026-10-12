@@ -31,7 +31,7 @@ from tree_sitter import Node
 from ...emit import disambiguate, file_id, statement_id
 from ...schemas import Statement
 from ..additive import DetectContext, Detector, register_detector
-from ..treesitter import node_text
+from ..treesitter import entry_text, node_text
 
 # Dynamic-import target: ``() => import('./views/Reports.vue')`` -> ``./views/Reports.vue``
 # (an import specifier is a resolvable link; falling back to it beats honest-null here).
@@ -152,7 +152,7 @@ def _emit(
                 parentId=file_id(path),
                 nodeType="synthetic",
                 semanticType="route",
-                text=node_text(elem, source).split("\n", 1)[0][:120],
+                text=entry_text(elem, source),
                 endpoint=full,
                 framework="vue",
                 routeKind="page",

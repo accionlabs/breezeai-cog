@@ -14,6 +14,8 @@ real structural grammar. See ``.todo/groovy-grammar-evaluation.md``.
 
 from __future__ import annotations
 
+from collections.abc import Collection
+
 import warnings
 from functools import lru_cache
 from typing import Callable
@@ -77,3 +79,26 @@ def line_span(node: Node) -> tuple[int, int]:
 
 def first_line(text: str) -> str:
     return text.split("\n", 1)[0]
+
+
+#: Cap for a route-table entry's one-line text.
+ENTRY_TEXT_LIMIT = 240
+
+
+def entry_text(node: Node, source: bytes, nested: Collection[str] = ("children",)) -> str:
+    """One-line text of a route-table entry (``{ path: 'x', component: X, … }``): whitespace runs
+    collapsed to one space, the value of a ``nested`` key (child routes, recorded on their own)
+    shown as ``[…]``, capped at :data:`ENTRY_TEXT_LIMIT`. The first line of a multi-line object
+    literal is just ``{`` — useless as search text."""
+    text = node_text(node, source)
+    if node.type == "object":
+        for pair in node.named_children:
+            key = pair.child_by_field_name("key") if pair.type == "pair" else None
+            value = pair.child_by_field_name("value") if key is not None else None
+            if key is not None and value is not None and node_text(key, source).strip("'\"") in nested:
+                start, end = value.start_byte - node.start_byte, value.end_byte - node.start_byte
+                raw = source[node.start_byte:node.end_byte]
+                text = (raw[:start] + b"[\xe2\x80\xa6]" + raw[end:]).decode("utf-8", "replace")
+                break
+    one = " ".join(text.split())
+    return one if len(one) <= ENTRY_TEXT_LIMIT else one[:ENTRY_TEXT_LIMIT - 1] + "\u2026"

@@ -21,7 +21,7 @@ from tree_sitter import Node
 
 from ...emit import disambiguate, file_id, statement_id
 from ...schemas import Statement
-from ..treesitter import node_text
+from ..treesitter import entry_text, node_text
 from ..typescript.imports import resolve_const_value
 
 
@@ -115,7 +115,7 @@ def _process_jsx(el: Node, prefix: str, source: bytes, path: str, seen: set[str]
             parentId=file_id(path),
             nodeType="jsx_element",
             semanticType="route",
-            text=node_text(_opening(el), source).split("\n", 1)[0][:120],
+            text=entry_text(_opening(el), source),
             endpoint=full,
             framework="react",
             routeKind="mount" if lazy else "page",
@@ -180,7 +180,7 @@ def _process_config(arr: Node, prefix: str, source: bytes, path: str, seen: set[
             parentId=file_id(path),
             nodeType="synthetic",
             semanticType="route",
-            text=node_text(elem, source).split("\n", 1)[0][:120],
+            text=entry_text(elem, source),
             endpoint=full,
             framework="react",
             routeKind="mount" if lazy else "page",

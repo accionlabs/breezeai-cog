@@ -477,3 +477,17 @@ def test_ui_roles_without_capture_statements(tmp_path) -> None:
     roles = {c.name: c.uiRole for c in rec.classes}
     assert roles["UserComponent"] == "component"
     assert roles["MoneyPipe"] == "pipe"
+
+
+def test_route_entry_text_is_one_line_without_children(analyze_files) -> None:
+    st = analyze_files({
+        "package.json": '{"dependencies": {"@angular/core": "17", "@angular/router": "17"}}',
+        "src/app/app.routes.ts": (
+            "import { Routes } from '@angular/router';\n"
+            "export const routes: Routes = [\n  {\n    path: 'admin',\n    component: AdminComponent,\n"
+            "    children: [\n      { path: 'users', component: UsersComponent },\n    ],\n  },\n];\n"
+        ),
+    })
+    texts = {s.endpoint: s.text for s in st if s.semanticType == "route"}
+    assert texts["/admin"] == "{ path: 'admin', component: AdminComponent, children: […], }"
+    assert texts["/admin/users"] == "{ path: 'users', component: UsersComponent }"

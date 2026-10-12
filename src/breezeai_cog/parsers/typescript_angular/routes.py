@@ -13,7 +13,7 @@ from tree_sitter import Node
 
 from ...emit import disambiguate, file_id, statement_id
 from ...schemas import Statement
-from ..treesitter import node_text
+from ..treesitter import entry_text, node_text
 
 # Lazy-load target extraction (Tier 1): capture what a route loads so the mount is a
 # traversable edge, not a dead end. Covers every Angular version's syntax:
@@ -221,7 +221,7 @@ def _process(arr: Node, prefix: str | None, source: bytes, path: str, seen: set[
             parentId=file_id(path),
             nodeType="synthetic",
             semanticType="route",
-            text=node_text(elem, source).split("\n", 1)[0][:120],
+            text=entry_text(elem, source),
             endpoint=full,
             framework="angular",
             routeKind="mount" if load is not None else "page",
