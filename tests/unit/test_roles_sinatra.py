@@ -30,9 +30,6 @@ def test_anonymous_handler_has_line(analyze_files) -> None:
     assert r.handlerLine == 7
 
 
-@pytest.mark.xfail(
-    strict=True, reason="namespace prefix not joined into the endpoint (wrong address)"
-)
 def test_namespace_is_wiring(analyze_files) -> None:
     st = analyze_files(
         {

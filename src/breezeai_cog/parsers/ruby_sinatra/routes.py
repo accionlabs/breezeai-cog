@@ -55,8 +55,27 @@ def _has_route_block(call: Node) -> bool:
     return block is not None and block.type == "do_block"
 
 
+def _namespace_prefix(call: Node, source: bytes) -> str | None:
+    """The path enclosing sinatra-contrib ``namespace '/api' do … end`` blocks put in front of a
+    route (outermost first; nested namespaces compose), ``""`` for none, or None when a
+    namespace's path is not a string literal (a regex or variable) — the address is unknown."""
+    segments: list[str] = []
+    current = call.parent
+    while current is not None:
+        if (current.type == "call" and _method(current, source) == "namespace"
+                and current.child_by_field_name("block") is not None):
+            args = _arguments(current)
+            seg = _string_value(args[0], source) if args else None
+            if seg is None:
+                return None
+            segments.append(seg)
+        current = current.parent
+    return "".join("/" + s.strip("/") for s in reversed(segments) if s.strip("/"))
+
+
 def detect_sinatra_routes(root: Node, source: bytes, path: str, record: FileRecord) -> bool:
-    """Append Sinatra routes whose path is an explicit string literal."""
+    """Append Sinatra routes whose path is an explicit string literal, prefixed by their enclosing
+    ``namespace`` blocks."""
     seen = {statement.id for statement in record.statements}
     fallback = file_id(path)
     matched = False
@@ -66,9 +85,12 @@ def detect_sinatra_routes(root: Node, source: bytes, path: str, record: FileReco
         if method not in _HTTP_METHODS or not _has_route_block(call):
             continue
         args = _arguments(call)
-        endpoint = _string_value(args[0], source) if args else None
-        if endpoint is None:
+        local = _string_value(args[0], source) if args else None
+        if local is None:
             continue
+        prefix = _namespace_prefix(call, source)
+        # Under an unresolved namespace the address is unknown → empty, never the bare path.
+        endpoint = None if prefix is None else (prefix + local if prefix else local)
         line = call.start_point[0] + 1
         block = call.child_by_field_name("block")  # the handler: an anonymous block
         record.statements.append(

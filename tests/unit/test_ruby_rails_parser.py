@@ -82,3 +82,44 @@ def test_rails_parser_claims_only_rails_sources(tmp_path: Path) -> None:
     assert not parser.claims("lib/chart.rb", b"chart.axes.routes.draw do\nend")
     assert parser.priority > 0
     assert parser.frameworks == ["rails"]
+
+
+def test_rails_namespace_and_scope_prefixes(tmp_path: Path) -> None:
+    source = b'''require "rails"
+Rails.application.routes.draw do
+  get "about", to: "pages#about"
+  namespace :admin do
+    get "stats", to: "stats#index"
+    scope "/v1", module: "legacy" do
+      get "/ping", to: "pages#ping"
+    end
+  end
+  namespace :internal, path: "secret" do
+    get "/ops", to: "ops#index"
+  end
+  scope module: "api" do
+    get "/plain", to: "plain#index"
+  end
+  scope path: "/p" do
+    get "/q", to: "q#index"
+  end
+  scope API_PREFIX do
+    get "/dyn", to: "dyn#index"
+  end
+  resources :photos do
+    get "preview", to: "photos#preview"
+  end
+end
+'''
+    record = RailsParser().parse_file(_context(tmp_path, "config/routes.rb", source))
+    got = {r.handler: r.endpoint for r in record.statements if r.semanticType == "route"}
+    assert got == {
+        "pages#about": "/about",            # relative path normalised
+        "stats#index": "/admin/stats",
+        "pages#ping": "/admin/v1/ping",     # nested scopes compose; module: adds no path
+        "ops#index": "/secret/ops",         # namespace path: overrides the name
+        "plain#index": "/plain",
+        "q#index": "/p/q",
+        "dyn#index": None,                  # unresolved scope path → address unknown
+        "photos#preview": None,             # resource nesting not computed → unknown
+    }

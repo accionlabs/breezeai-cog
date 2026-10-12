@@ -95,3 +95,30 @@ def test_sinatra_block_handler_has_line_only(tmp_path: Path) -> None:
     record = SinatraParser().parse_file(_context(tmp_path, "app.rb", source))
     got = {s.endpoint: (s.handler, s.handlerLine) for s in record.statements if s.semanticType == "route"}
     assert got == {"/a": (None, 3), "/b": (None, 8)}
+
+
+def test_sinatra_namespace_prefixes(tmp_path: Path) -> None:
+    source = b'''require "sinatra"
+require "sinatra/namespace"
+namespace "/api" do
+  get "/users" do
+    1
+  end
+  namespace "/v2" do
+    get "/items" do
+      2
+    end
+  end
+end
+namespace %r{/dyn} do
+  get "/x" do
+    3
+  end
+end
+get "/top" do
+  4
+end
+'''
+    record = SinatraParser().parse_file(_context(tmp_path, "app.rb", source))
+    got = sorted((r.endpoint or "") for r in record.statements if r.semanticType == "route")
+    assert got == ["", "/api/users", "/api/v2/items", "/top"]  # regex namespace → empty

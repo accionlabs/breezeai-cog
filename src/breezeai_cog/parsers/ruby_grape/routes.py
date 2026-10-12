@@ -86,6 +86,64 @@ def _prefix_for(call: Node, source: bytes) -> str | None:
     return "/" + "/".join(part.strip("/") for part in reversed(prefixes) if part.strip("/"))
 
 
+#: ``version … using:`` strategies that keep the version out of the path.
+_NON_PATH_VERSIONING = {"header", "param", "accept_version_header"}
+
+
+def _version_path(stmt: Node, source: bytes) -> str | None:
+    """What a ``version`` call adds to the path: the version with the ``:path`` strategy (Grape's
+    default), ``""`` with a header / param strategy, None when it cannot be resolved (a
+    non-literal value, several versions, an unknown strategy)."""
+    args = _arguments(stmt)
+    using = "path"
+    for a in args:
+        key = a.child_by_field_name("key") if a.type == "pair" else None
+        if key is not None and node_text(key, source).rstrip(":") == "using":
+            value = a.child_by_field_name("value")
+            using = node_text(value, source).lstrip(":").strip("'\"") if value is not None else ""
+    if using in _NON_PATH_VERSIONING:
+        return ""
+    if using != "path":
+        return None
+    positional = [a for a in args if a.type != "pair"]
+    return _literal_path(positional[0], source) if len(positional) == 1 else None
+
+
+def _api_settings(call: Node, source: bytes) -> str | None:
+    """The path Grape's ``prefix`` and ``version`` settings put in front of a route
+    (``/prefix/version``, ``""`` for none), or None when one is set but cannot be resolved.
+
+    ``prefix`` is read from the API class body; ``version`` is the last ``version`` call before
+    the route in the class body or an enclosing block."""
+    prefix = ""
+    version: str | None = ""
+    version_at = -1
+    node = call.parent
+    while node is not None:
+        if node.type == "body_statement":
+            in_class_body = node.parent is not None and _is_grape_api_class(node.parent, source)
+            for stmt in node.named_children:
+                if stmt.type != "call" or stmt.child_by_field_name("block") is not None:
+                    continue
+                name = _method(stmt, source)
+                if name == "prefix" and in_class_body:
+                    args = _arguments(stmt)
+                    value = _literal_path(args[0], source) if args else None
+                    if value is None:
+                        return None
+                    prefix = value
+                elif name == "version" and version_at < stmt.start_byte < call.start_byte:
+                    version_at = stmt.start_byte
+                    version = _version_path(stmt, source)
+        if _is_grape_api_class(node, source):
+            break
+        node = node.parent
+    if version is None:
+        return None
+    parts = [p.strip("/") for p in (prefix, version) if p and p.strip("/")]
+    return "/" + "/".join(parts) if parts else ""
+
+
 def _join_path(prefix: str, local: str | None) -> str | None:
     if local is None:
         return None
@@ -94,7 +152,8 @@ def _join_path(prefix: str, local: str | None) -> str | None:
 
 
 def detect_grape_routes(root: Node, source: bytes, path: str, record: FileRecord) -> bool:
-    """Append Grape routes whose class and path are syntactically verifiable."""
+    """Append Grape routes whose class and path are syntactically verifiable. The address is
+    prefix / version (path strategy) / namespaces / path; an unresolved part → empty endpoint."""
     seen = {statement.id for statement in record.statements}
     fallback = file_id(path)
     matched = False
@@ -105,12 +164,15 @@ def detect_grape_routes(root: Node, source: bytes, path: str, record: FileRecord
             continue
         args = _arguments(call)
         local = _literal_path(args[0], source) if args else ""
+        if local is None:
+            continue
+        settings = _api_settings(call, source)
         prefix = _prefix_for(call, source)
-        if prefix is None:
-            continue
-        endpoint = _join_path(prefix, local)
-        if endpoint is None:
-            continue
+        # An unresolved prefix, version or namespace leaves the address unknown: the route is kept
+        # with an empty endpoint, never recorded at a path missing that part.
+        endpoint = (
+            _join_path(settings + prefix, local) if settings is not None and prefix is not None else None
+        )
         line = call.start_point[0] + 1
         block = call.child_by_field_name("block")  # the handler: an anonymous block
         record.statements.append(

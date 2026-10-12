@@ -39,7 +39,9 @@ def test_grape_dynamic_prefix_is_not_guessed(tmp_path: Path) -> None:
     source = b'''require "grape"\nclass API < Grape::API\n  namespace API_NAMESPACE do\n    get "/users" do\n    end\n  end\nend\n'''
     record = GrapeParser().parse_file(_context(tmp_path, "api.rb", source))
 
-    assert not any(item.semanticType == "route" for item in record.statements)
+    # The route is kept; its prefix exists but cannot be resolved, so the address is unknown.
+    routes = [item for item in record.statements if item.semanticType == "route"]
+    assert [(r.method, r.endpoint) for r in routes] == [("GET", None)]
 
 
 def test_grape_routes_ignore_receiver_qualified_http_calls(tmp_path: Path) -> None:
@@ -81,3 +83,34 @@ def test_grape_block_handler_has_line_only(tmp_path: Path) -> None:
     record = GrapeParser().parse_file(_context(tmp_path, "api.rb", source))
     got = {s.endpoint: (s.handler, s.handlerLine) for s in record.statements if s.semanticType == "route"}
     assert got == {"/a": (None, 4), "/n/b": (None, 8)}
+
+
+def test_grape_prefix_and_version(tmp_path: Path) -> None:
+    source = b'''require "grape"
+class API < Grape::API
+  prefix :api
+  get "/before" do
+  end
+  version "v1"
+  namespace :users do
+    get "/list" do
+    end
+  end
+  version "v2", using: :header, vendor: "acme"
+  get "/hdr" do
+  end
+end
+class Other < Grape::API
+  prefix API_PREFIX
+  get "/x" do
+  end
+end
+'''
+    record = GrapeParser().parse_file(_context(tmp_path, "api.rb", source))
+    got = {r.startLine: r.endpoint for r in record.statements if r.semanticType == "route"}
+    assert got == {
+        4: "/api/before",          # prefix applies; no version yet
+        8: "/api/v1/users/list",   # prefix / version (path strategy) / namespace / path
+        12: "/api/hdr",            # header versioning adds no path
+        17: None,                  # unresolved prefix → address unknown
+    }

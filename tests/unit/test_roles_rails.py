@@ -47,7 +47,6 @@ def test_binding_leads_to_action(analyze_files) -> None:
     assert (r.handler, r.handlerLine) == ("show", 3)
 
 
-@pytest.mark.xfail(strict=True, reason="path without a leading '/' kept as written")
 def test_relative_path_is_normalised(analyze_files) -> None:
     st = _routes(analyze_files, "  get 'about', to: 'pages#about'\n")
     assert [s.endpoint for s in _eps(st)] == ["/about"]
@@ -83,9 +82,6 @@ def test_resources_makes_one_binding_per_action(analyze_files) -> None:
     } <= got
 
 
-@pytest.mark.xfail(
-    strict=True, reason="namespace / scope prefix not joined into the endpoint (wrong address)"
-)
 def test_namespace_and_scope_are_wiring(analyze_files) -> None:
     st = _routes(
         analyze_files,

@@ -45,9 +45,6 @@ def test_namespace_and_route_param_are_wiring(analyze_files) -> None:
     ]
 
 
-@pytest.mark.xfail(
-    strict=True, reason="prefix / version not joined into the endpoint (wrong address)"
-)
 def test_prefix_and_version_are_wiring(analyze_files) -> None:
     st = _api(analyze_files, "  prefix 'api'\n  version 'v1'\n  get '/status' do\n    1\n  end\n")
     assert [s.endpoint for s in _eps(st)] == ["/api/v1/status"]
