@@ -147,10 +147,6 @@ def test_apollo_transport_mount_is_wiring(analyze_files) -> None:
     assert _eps(st) == []
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="a leading unresolved path part is dropped instead of leaving the endpoint empty",
-)
 def test_unresolved_path_part_leaves_endpoint_empty(analyze_files) -> None:
     st = _app(
         analyze_files, "import { BASE } from './config.js';\napp.get(`${BASE}/users`, listUsers);\n"

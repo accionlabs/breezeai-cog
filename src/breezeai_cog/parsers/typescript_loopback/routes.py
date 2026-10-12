@@ -14,7 +14,6 @@ from ...emit import disambiguate, function_id, statement_id
 from ...parsers.typescript.decorators import decorator
 from ...parsers.typescript.functions import dto_from_type, extract_params, return_dto
 from ...schemas import Statement
-from ..statements_common import render_concat, url_placeholder
 from ..treesitter import node_text
 
 # LoopBack method decorators -> HTTP verb. ``del`` (not ``delete``) is LoopBack's
@@ -81,31 +80,27 @@ def _decorator_args(dec: Node) -> list[Node]:
 
 
 def _render_literal(node: Node, source: bytes) -> str | None:
-    """A path expression -> string, with interpolations/variables as ``{name}`` placeholders;
-    ``None`` if not a renderable literal (caller placeholders it). Handles string literals,
-    template literals, and ``+`` concatenation — so ``appConfig.apiPathV2 + '/x'`` renders as
-    the well-formed ``{apiPathV2}/x`` instead of a malformed ``+``-spliced string. Route
-    prefixes are kept (no leading-base stripping — the api-version segment is meaningful)."""
+    """A path expression -> its literal string, or ``None`` when any part is not a literal.
+    Handles string literals, template literals without ``${…}``, and ``+`` concatenation of
+    those (``'/api' + '/x'``). A variable part (``appConfig.apiPath + '/x'``, ``${version}``) is
+    unknown: the whole path is ``None`` — never a ``{name}`` placeholder, which would read as a
+    LoopBack path parameter. Route prefixes are kept (no leading-base stripping)."""
     if node.type == "string":
         frag = next((c for c in node.named_children if c.type == "string_fragment"), None)
         return node_text(frag, source) if frag is not None else ""
     if node.type == "template_string":
-        parts: list[str] = []
-        for c in node.named_children:
-            if c.type == "string_fragment":
-                parts.append(node_text(c, source))
-            elif c.type == "template_substitution":
-                expr = c.named_children[0] if c.named_children else None
-                parts.append(url_placeholder(node_text(expr, source)) if expr is not None else "{param}")
-        return "".join(parts)
+        if any(c.type == "template_substitution" for c in node.named_children):
+            return None
+        return "".join(node_text(c, source) for c in node.named_children
+                       if c.type == "string_fragment")
     if node.type == "binary_expression":  # string concatenation
-        return render_concat(node, source, _render_literal)
+        op = node.child_by_field_name("operator")
+        left, right = node.child_by_field_name("left"), node.child_by_field_name("right")
+        if op is None or node_text(op, source) != "+" or left is None or right is None:
+            return None
+        lv, rv = _render_literal(left, source), _render_literal(right, source)
+        return lv + rv if lv is not None and rv is not None else None
     return None
-
-
-def _render_path(node: Node, source: bytes) -> str:
-    r = _render_literal(node, source)
-    return r if r is not None else url_placeholder(node_text(node, source))
 
 
 def _auth(decs: list[Node], source: bytes) -> tuple[bool, list[str]]:
@@ -181,7 +176,9 @@ def detect_loopback_routes(root: Node, source: bytes, path: str, *, seen_ids: se
                         continue
                     verb, idx = vi
                     arg_nodes = _decorator_args(dec)
-                    sub = _render_path(arg_nodes[idx], source) if idx < len(arg_nodes) else ""
+                    sub: str | None = (
+                        _render_literal(arg_nodes[idx], source) if idx < len(arg_nodes) else ""
+                    )
                     sl, sc = dec.start_point[0] + 1, dec.start_point[1]
                     routes.append(Statement(
                         id=disambiguate(statement_id(path, sl, sc), seen_ids),
@@ -190,7 +187,7 @@ def detect_loopback_routes(root: Node, source: bytes, path: str, *, seen_ids: se
                         semanticType="route",
                         text=node_text(dec, source).split("\n", 1)[0],
                         method=verb,
-                        endpoint=_join(base, sub),
+                        endpoint=_join(base, sub) if sub is not None else None,
                         framework="loopback",
                         handler=mname,
                         handlerLine=mline,

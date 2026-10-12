@@ -115,9 +115,10 @@ def test_comment_between_decorator_and_handler(tmp_path) -> None:
     assert routes[("GET", "/timezones/{id}")].handler == "findById"
 
 
-def test_computed_path_rendered_wellformed(tmp_path) -> None:
-    # R1(a): a route path built by concatenation / template literal must render as a
-    # well-formed `{placeholder}` path, not a malformed `+`-spliced string.
+def test_computed_path_is_empty_unless_literal(tmp_path) -> None:
+    # A path built from a variable (concatenation or ${…}) is unknown: endpoint empty — never a
+    # `+`-spliced string or a `{name}` placeholder (it would read as a path parameter). A
+    # concatenation of literals is still a path.
     src = (
         b"import {get, post} from '@loopback/rest';\n"
         b"import appConfig from './config';\n"
@@ -128,6 +129,8 @@ def test_computed_path_rendered_wellformed(tmp_path) -> None:
         b"  async setting() {}\n"
         b"  @get('/api/v2/plain/literal')\n"
         b"  async plain() {}\n"
+        b"  @get('/api' + '/joined')\n"
+        b"  async joined() {}\n"
         b"}\n"
     )
     p = tmp_path / "c.controller.ts"
@@ -136,13 +139,10 @@ def test_computed_path_rendered_wellformed(tmp_path) -> None:
                        repo_root=tmp_path, capture_statements=True)
     eps = {s.handler: s.endpoint for s in LoopBackParser().parse_file(ctx).statements
            if s.semanticType == "route"}
-    # concat: no '+' and no dangling quote — a clean placeholder for the config var
-    assert "+" not in eps["count"] and "'" not in eps["count"]
-    assert eps["count"].endswith("/tender-status/count") and "{apiPathV2}" in eps["count"]
-    # template literal: ${...} normalized to {...}
-    assert eps["setting"] == "/{apiPathV2}/subscriber-setting"
-    # plain literal unchanged
+    assert eps["count"] is None
+    assert eps["setting"] is None
     assert eps["plain"] == "/api/v2/plain/literal"
+    assert eps["joined"] == "/api/joined"
 
 
 def test_request_and_response_dto(tmp_path) -> None:

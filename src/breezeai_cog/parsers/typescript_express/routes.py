@@ -20,9 +20,8 @@ from ...emit import disambiguate, file_id, statement_id
 from ...schemas import FileRecord, Statement
 from ..additive import DetectContext, Detector, register_detector
 from ..enclosing import Enclosing
-from ..statements_common import strip_leading_base, url_placeholder
 from ..treesitter import first_line, node_text
-from ..typescript.imports import router_locals
+from ..typescript.imports import resolve_const_value, router_locals
 
 # HTTP-verb methods that register a route handler on an app/router.
 _HTTP_VERBS = {"get", "post", "put", "delete", "patch", "options", "head", "all"}
@@ -60,26 +59,13 @@ def _string_value(node: Node, source: bytes) -> str | None:
     return node_text(frag, source) if frag is not None else ""
 
 
-def _template_value(node: Node, source: bytes) -> str:
-    """Render a ``template_string`` path to a route path, turning each ``${expr}`` into a
-    ``{name}`` placeholder (``/sitemaps/${key}.txt`` → ``/sitemaps/{key}.txt``). A leading
-    interpolated base/host segment is dropped so the path matches inbound routes."""
-    parts: list[str] = []
-    for c in node.named_children:
-        if c.type == "string_fragment":
-            parts.append(node_text(c, source))
-        elif c.type == "template_substitution":
-            expr = c.named_children[0] if c.named_children else None
-            parts.append(url_placeholder(node_text(expr, source)) if expr is not None else "{param}")
-    return strip_leading_base("".join(parts))
-
-
-def _path_value(node: Node, source: bytes) -> str | None:
-    """Route-path argument as a string: a plain string literal verbatim, or a template
-    literal rendered with ``{param}`` placeholders. Unlike ``_string_value`` (used for
-    resolving identifier constants), this accepts the dynamic template-literal form."""
+def _path_value(node: Node, source: bytes, consts: dict[str, str | None]) -> str | None:
+    """Route-path argument as a string: a plain string literal verbatim, or a template literal
+    whose every ``${…}`` resolves to a constant (``consts``: the repo's string constants). An
+    unresolved part makes the whole path unknown → None — never a ``{name}`` placeholder or a
+    path with its base dropped (``${BASE}/users`` is not ``/users``)."""
     if node.type == "template_string":
-        return _template_value(node, source)
+        return resolve_const_value(node, source, consts)
     return _string_value(node, source)
 
 
@@ -209,7 +195,8 @@ def _resolve_str_identifier(name: str, root: Node, source: bytes) -> str | None:
 def _classify(
     call: Node, source: bytes, root: Node, bindings: dict[str, str],
     routers: frozenset[str] = frozenset(), decl_lines: dict[str, int | None] | None = None,
-) -> tuple[str | None, str, str | None, int | None, list[str] | None, str, str] | None:
+    consts: dict[str, str | None] | None = None,
+) -> tuple[str | None, str | None, str | None, int | None, list[str] | None, str, str] | None:
     """→ (method, endpoint, handler, handlerLine, guards, framework, routeKind), or None if not
     a route. ``guards`` are the named route/mount middleware (auth/interceptor stack); ``bindings``
     (in-repo imported name → file) lets a mount tell its sub-router from its guard middleware.
@@ -228,14 +215,17 @@ def _classify(
 
     args = call.child_by_field_name("arguments")
     arg_nodes = list(args.named_children) if args is not None else []
-    path = _path_value(arg_nodes[0], source) if arg_nodes else None
+    path = _path_value(arg_nodes[0], source, consts or {}) if arg_nodes else None
+    # A template-literal path is a path even when it does not resolve: the route is recorded
+    # with an empty endpoint rather than dropped.
+    has_path = path is not None or (bool(arg_nodes) and arg_nodes[0].type == "template_string")
     chain = arg_nodes[1:]  # everything after the path — the middleware + handler/router stack
 
     if method in _HTTP_VERBS:
         # A verb call is a route only with a path arg + a handler arg — this rules out
         # the settings getter ``app.get('title')`` (single string arg, no handler). The last
         # arg is the terminal handler; the middleware before it are guards.
-        if path is not None and len(arg_nodes) >= 2:
+        if has_path and len(arg_nodes) >= 2:
             handler, handler_line = _handler(arg_nodes, source, decl_lines or {})
             guards = _guard_names(chain[:-1], source)
             return method.upper(), path, handler, handler_line, guards, "express", "route"
@@ -250,14 +240,14 @@ def _classify(
             if endpoint is None and arg0 is not None and arg0.type == "identifier":
                 endpoint = _resolve_str_identifier(node_text(arg0, source), root, source)
             return "POST", endpoint or "/graphql", None, None, None, "graphql", "route"
-        if path is not None and path.startswith("/"):
+        if has_path and (path is None or path.startswith("/")):
             # ``app.use('/mount', ...guards, subRouter, ...guards)`` mounts a sub-router: the
             # mounted router is the handler, the surrounding middleware are guards. Bare
             # ``app.use(mw)`` (no leading path) is middleware, not a mount.
             handler, handler_line, guards = _mount_parts(chain, source, bindings)
             return None, path, handler, handler_line, guards, "express", "mount"
         return None
-    if method == "route" and path is not None:
+    if method == "route" and has_path:
         return None, path, None, None, None, "express", "route"
     return None
 
@@ -388,6 +378,8 @@ def detect_express(
     imported = instance.get(path, {}) if isinstance(instance, dict) else {}
     receiver_base = _receiver_bases(root, source, mount_base, imported)
     routers = frozenset(router_locals(root, source)) if b"Router" in source else frozenset()
+    index_consts = getattr(index, "const_values", None)
+    consts: dict[str, str | None] = index_consts if isinstance(index_consts, dict) else {}
     # Top-level functions of this file → declaration line; a name declared twice → None.
     decl_lines: dict[str, int | None] = {}
     for f in record.functions:
@@ -395,7 +387,7 @@ def detect_express(
             decl_lines[f.name] = f.startLine if f.name not in decl_lines else None
 
     for call in _invocations(root):
-        info = _classify(call, source, root, binds, routers, decl_lines)
+        info = _classify(call, source, root, binds, routers, decl_lines, consts)
         if info is None:
             continue
         method, endpoint, handler, handler_line, guards, framework, route_kind = info

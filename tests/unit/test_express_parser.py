@@ -124,11 +124,25 @@ def test_template_literal_paths(tmp_path) -> None:
     ctx = ParseContext(path="ssr.js", abs_path=p, source=TEMPLATE_SRC, repo_root=tmp_path,
                        capture_statements=True)
     rec = TypeScriptParser().parse_file(ctx)
-    routes = {(s.method, s.endpoint) for s in rec.statements if s.semanticType == "route"}
-    assert ("GET", "/sitemaps/{key}.txt") in routes   # interpolation → {key} placeholder
-    assert ("GET", "/plain") in routes                # a template with no substitution
-    assert ("GET", "/assets/{name}") in routes        # leading ${prefix} base stripped
-    assert (None, "/api/{version}") in routes         # mount path via template literal
+    routes = {(s.method, s.endpoint, s.handler) for s in rec.statements if s.semanticType == "route"}
+    # An unresolved ${…} makes the address unknown: the route is kept, its endpoint empty —
+    # never a {key} placeholder (a code name) or a path with its base dropped.
+    assert ("GET", None, "sitemapHandler") in routes
+    assert ("GET", "/plain", "plainHandler") in routes  # a template with no substitution
+    assert ("GET", None, "assetHandler") in routes
+    assert (None, None, "router") in routes             # mount path via template literal
+
+
+def test_template_path_resolves_through_constants(analyze_files) -> None:
+    st = analyze_files({
+        "package.json": '{"dependencies": {"express": "4"}}',
+        "src/config.js": "export const API = '/api/v2';\n",
+        "src/app.js": (
+            "import express from 'express';\nimport { API } from './config.js';\n"
+            "const app = express();\napp.get(`${API}/users`, listUsers);\n"
+        ),
+    })
+    assert [s.endpoint for s in st if s.semanticType == "route"] == ["/api/v2/users"]
 
 
 # R3: the Apollo GraphQL transport mount — app.use(path, expressMiddleware(server)).
@@ -219,7 +233,7 @@ app.get('*.*', staticHandler);
 
     rec = AngularParser().parse_file(ctx)
     routes = {(s.method, s.endpoint) for s in rec.statements if s.semanticType == "route"}
-    assert ("GET", "/sitemaps/{key}.txt") in routes  # template route, no longer lost
+    assert ("GET", None) in routes                   # template route kept, address unknown
     assert ("GET", "*.*") in routes                  # wildcard route
     assert all(s.framework == "express" for s in rec.statements if s.semanticType == "route")
 

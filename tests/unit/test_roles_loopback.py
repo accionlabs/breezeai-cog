@@ -69,10 +69,6 @@ def test_application_base_path_is_wiring(analyze_files) -> None:
     assert r.endpoint == "/api/products"
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="an unresolved path part is written as a {name} placeholder instead of an empty endpoint",
-)
 def test_unresolved_path_part_leaves_endpoint_empty(analyze_files) -> None:
     st = _ctrl(analyze_files, "  @get(appConfig.apiPath + '/products')\n  find() { return []; }\n")
     [r] = _eps(st)
