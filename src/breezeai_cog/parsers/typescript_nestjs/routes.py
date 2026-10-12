@@ -167,16 +167,55 @@ def _resolver_type_arg(decs: list[Node], source: bytes) -> str | None:
     return None
 
 
+def _returns_empty_object(member: Node, source: bytes) -> bool:
+    """Whether every ``return`` in a method returns an empty object — ``{}``, ``{} as T``,
+    ``new T()`` with no arguments. That is what a stub parent's root operation does: the object
+    only exists so its fields can be resolved. A method with no return, or one that returns
+    anything else (a service call, ``null``, an entity), is not a stub."""
+    body = member.child_by_field_name("body")
+    returns: list[Node] = []
+
+    def walk(n: Node) -> None:
+        if n.type == "return_statement":
+            returns.append(n)
+        elif n.type in ("function_expression", "arrow_function", "function_declaration"):
+            return  # a nested function's returns are not this method's
+        for c in n.named_children:
+            walk(c)
+
+    if body is not None:
+        walk(body)
+
+    def empty(v: Node | None) -> bool:
+        while v is not None and v.type in ("as_expression", "parenthesized_expression",
+                                           "type_assertion", "satisfies_expression"):
+            v = v.named_children[0] if v.named_children else None
+        if v is None:
+            return False
+        if v.type == "object":
+            return not v.named_children
+        if v.type == "new_expression":
+            args = v.child_by_field_name("arguments")
+            return args is None or not args.named_children
+        return False
+
+    return bool(returns) and all(
+        empty(r.named_children[0] if r.named_children else None) for r in returns
+    )
+
+
 def _parent_op_for_grouping(
     body: Node, source: bytes, grouping_type: str
 ) -> tuple[str, str] | None:
     """Scan the class body for a ``@Query``/``@Mutation`` that returns a **singleton**
-    ``grouping_type`` — e.g. ``@Mutation(() => NotificationsMutation)`` (no ``[``).
-    Returns ``(op_name, 'MUTATION'|'QUERY')`` or ``None``.
+    ``grouping_type`` as an **empty object** — e.g. ``@Mutation(() => NotificationsMutation)
+    notifications() { return {}; }``. Returns ``(op_name, 'MUTATION'|'QUERY')`` or ``None``.
 
-    Distinguishes grouping resolvers (singleton shell, ``@Mutation(() => T)``) from
-    entity resolvers (array return, ``@Query(() => [T])``): ``_SINGLETON_RETURN_RE``
-    does not match when ``[`` follows ``=>`` because ``[`` is not in ``[A-Za-z_$]``."""
+    Distinguishes grouping resolvers (a stub shell) from entity resolvers: an array return
+    (``@Query(() => [T])``) does not match ``_SINGLETON_RETURN_RE`` (``[`` is not in
+    ``[A-Za-z_$]``), and a singleton op that returns a real entity (``@Mutation(() => Book)
+    addBook(...) { return this.books.create(...); }``) is not a stub — its type's fields are data
+    fields, not operations."""
     pending: list[Node] = []
     for member in body.named_children:
         if member.type == "decorator":
@@ -191,7 +230,7 @@ def _parent_op_for_grouping(
             if gql_method is None or not d.args:
                 continue
             m = _SINGLETON_RETURN_RE.search(d.args[0])
-            if m and m.group(1) == grouping_type:
+            if m and m.group(1) == grouping_type and _returns_empty_object(member, source):
                 mname = node_text(member.child_by_field_name("name"), source)
                 return _graphql_op_name(d, mname), gql_method.upper()
         pending = []

@@ -510,3 +510,47 @@ export class UserResolver {
     assert by_ep["createUser"].responseDTO == "UserDto"
     # @Query(() => String) — scalar → responseDTO None
     assert by_ep["ping"].responseDTO is None
+
+
+def _resolver_routes(tmp_path, src: bytes) -> dict[str, tuple[str | None, str | None]]:
+    p = tmp_path / "x.resolver.ts"
+    p.write_bytes(src)
+    ctx = ParseContext(path="x.resolver.ts", abs_path=p, source=src, repo_root=tmp_path,
+                       capture_statements=True)
+    rec = NestJSParser().parse_file(ctx)
+    return {s.endpoint: (s.method, s.routeKind) for s in rec.statements if s.semanticType == "route"}
+
+
+def test_crud_resolver_field_stays_a_field_resolver(tmp_path) -> None:
+    # @Mutation(() => Book) returns a real Book: Book is an entity, `author` is its data field.
+    routes = _resolver_routes(tmp_path, b'''import { Resolver, Mutation, Query, ResolveField, Args } from '@nestjs/graphql';
+@Resolver(() => Book)
+export class BookResolver {
+  @Query(() => Book)
+  book(@Args('id') id: string) { return this.books.find(id); }
+
+  @Mutation(() => Book)
+  addBook(@Args('input') input: BookInput) { return this.books.create(input); }
+
+  @ResolveField(() => Author)
+  author(@Parent() book: Book) { return this.authors.find(book.authorId); }
+}
+''')
+    assert routes["Book.author"] == ("RESOLVE_FIELD", "field_resolver")
+    assert routes["addBook"] == ("MUTATION", "mutation")
+    assert "addBook.author" not in routes and "book.author" not in routes
+
+
+def test_stub_parent_accepts_empty_object_forms(tmp_path) -> None:
+    for ret in (b"return {};", b"return {} as OrdersQuery;", b"return new OrdersQuery();"):
+        routes = _resolver_routes(tmp_path, b'''import { Resolver, Query, ResolveField } from '@nestjs/graphql';
+@Resolver(() => OrdersQuery)
+export class OrdersQueryResolver {
+  @Query(() => OrdersQuery)
+  orders() { ''' + ret + b''' }
+
+  @ResolveField(() => [Order])
+  list() { return []; }
+}
+''')
+        assert routes["orders.list"] == ("QUERY", "query"), ret

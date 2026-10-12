@@ -184,10 +184,6 @@ def test_data_type_field_is_none(analyze_files) -> None:
     assert (f.method, f.endpoint) == ("RESOLVE_FIELD", "Book.author")
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="a data-type field becomes a mutation when the class also has a mutation returning that type",
-)
 def test_data_type_field_beside_a_mutation_is_none(analyze_files) -> None:
     st = _resolvers(
         analyze_files,
