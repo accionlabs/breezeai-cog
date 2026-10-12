@@ -34,7 +34,6 @@ def test_typed_event_handler_is_a_consumer(analyze_files) -> None:
     )
 
 
-@pytest.mark.xfail(strict=True, reason="Lambda handler records have no handlerLine")
 def test_typed_event_handler_has_handler_line(analyze_files) -> None:
     st = _run(
         analyze_files,
