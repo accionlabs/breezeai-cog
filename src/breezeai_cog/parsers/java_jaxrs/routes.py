@@ -40,18 +40,32 @@ def _join(base: str, sub: str) -> str:
     return "/" + "/".join(parts) if parts else "/"
 
 
-def detect_jaxrs_routes(record: FileRecord) -> list[Statement]:
-    # Any class may hold resource methods; the class @Path (if present) is the base.
-    bases: dict[str, str] = {cls.id: _path_of(cls.decorators) for cls in record.classes}
+def detect_jaxrs_routes(
+    record: FileRecord,
+    app_path: str | None = "",
+    sub_bases: dict[str, str | None] | None = None,
+) -> list[Statement]:
+    """Resource-method routes of one file. ``app_path`` is the module's ``@ApplicationPath``
+    ("" = none, None = present but unresolvable); ``sub_bases`` maps a sub-resource class
+    (no class-level ``@Path``) to the base its locator serves it under (None = unresolvable).
+    An unresolvable prefix leaves the endpoint empty — the address is unknown."""
+    # Any class may hold resource methods; the class @Path (if present) is the base, else the
+    # base its sub-resource locator gives it (else none: a bare class keeps its own path).
+    subs = sub_bases or {}
+    bases: dict[str, str | None] = {}
+    for cls in record.classes:
+        own = _path_of(cls.decorators)
+        has_path = any(d.name == "Path" for d in cls.decorators)
+        bases[cls.id] = own if has_path or cls.name not in subs else subs[cls.name]
     if not bases:
         return []
 
     seen = {s.id for s in record.statements}
     routes: list[Statement] = []
     for fn in record.functions:
-        base = bases.get(fn.parentId)
-        if base is None:
+        if fn.parentId not in bases:
             continue
+        base = bases[fn.parentId]
         sub = _path_of(fn.decorators)
         for dec in fn.decorators:
             if dec.name not in _HTTP_METHODS:
@@ -63,7 +77,8 @@ def detect_jaxrs_routes(record: FileRecord) -> list[Statement]:
                 semanticType="route",
                 text=f"@{dec.name}",
                 method=dec.name,
-                endpoint=_join(base, sub),
+                endpoint=(_join(app_path, _join(base, sub))
+                          if app_path is not None and base is not None else None),
                 framework="jaxrs",
                 handler=fn.name,
                 handlerLine=fn.startLine,

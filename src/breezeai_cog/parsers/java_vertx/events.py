@@ -49,11 +49,16 @@ from ..vertx_common import (
     EVENTBUS,
     HANDLER_CALLS,
     HANDLER_SEMANTICS,
+    MOUNT_SUB_ROUTER,
+    SUB_ROUTER_CALL,
+    SubRouterMount,
     classify_call,
     handler_info,
     is_bus_receiver,
+    join_path,
     method_lines,
     render_address,
+    sub_router_bases,
 )
 
 
@@ -217,6 +222,31 @@ def _handler_arg(call: Node, source: bytes) -> Node | None:
     return found
 
 
+def _sub_router_mounts(
+    calls: list[Node], source: bytes, consts: dict[str, str]
+) -> tuple[list[SubRouterMount], set[tuple[int, int]]]:
+    """Sub-router mounts in this file, and the ``route("/api/*")`` calls they hang off (those are
+    the mount's path, not routes). ``router.route("/api/*").subRouter(sub)`` and
+    ``router.mountSubRouter("/api", sub)``; ``sub`` must be a plain variable."""
+    mounts: list[SubRouterMount] = []
+    mount_routes: set[tuple[int, int]] = set()
+    for call in calls:
+        method, prefix, _, obj = _parts(call, source, consts)
+        args = call.child_by_field_name("arguments")
+        named = list(args.named_children) if args is not None else []
+        if method == SUB_ROUTER_CALL and len(named) == 1 and named[0].type == "identifier":
+            inner = call.child_by_field_name("object")
+            if inner is None or inner.type != "method_invocation":
+                continue
+            inner_method, inner_path, inner_arg, inner_obj = _parts(inner, source, consts)
+            if inner_method == "route" and inner_arg is not None:
+                mounts.append((node_text(named[0], source), inner_obj, inner_path))
+                mount_routes.add((inner.start_byte, inner.end_byte))
+        elif method == MOUNT_SUB_ROUTER and len(named) == 2 and named[1].type == "identifier":
+            mounts.append((node_text(named[1], source), obj, prefix))
+    return mounts, mount_routes
+
+
 def detect_vertx(
     root: Node, source: bytes, path: str, record: FileRecord, consts: dict[str, str] | None = None
 ) -> bool:
@@ -233,14 +263,30 @@ def detect_vertx(
         aliases, suppress = _wrapper_aliases(root, source)
     enclosing = Enclosing(record)
     methods = method_lines(record.functions)
+    calls = _invocations(root)
+    mounts, mount_routes = (
+        _sub_router_mounts(calls, source, consts) if b"ubRouter" in source else ([], set())
+    )
+    bases = sub_router_bases(mounts)
 
-    for call in _invocations(root):
+    for call in calls:
         if (call.start_byte, call.end_byte) in suppress:  # wrapper plumbing → honest-null
+            continue
+        if (call.start_byte, call.end_byte) in mount_routes:  # a sub-router's mount path: wiring
             continue
         info = _classify(call, source, consts, aliases)
         if info is None:
             continue
         semantic, method, endpoint, route_kind = info
+        unknown_base = False
+        receiver = call.child_by_field_name("object")
+        recv = node_text(receiver, source) if receiver is not None else ""
+        if semantic == "route" and recv in bases:  # a sub-router's route: under its mount
+            base = bases[recv]
+            if base is None or endpoint is None:
+                unknown_base, endpoint = True, None
+            else:
+                endpoint = join_path(base, endpoint)
         line = call.start_point[0] + 1
         handler, handler_line = (
             handler_info(_handler_arg(call, source), source, methods)
@@ -253,7 +299,7 @@ def detect_vertx(
             stmt.framework = "vertx"
             if method:
                 stmt.method = method
-            if endpoint:
+            if endpoint or unknown_base:  # an unresolvable mount leaves the address unknown
                 stmt.endpoint = endpoint
             if route_kind:
                 stmt.routeKind = route_kind

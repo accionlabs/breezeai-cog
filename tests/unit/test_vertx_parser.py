@@ -393,3 +393,46 @@ def test_route_and_consumer_handlers(tmp_path) -> None:
         "q.two": (None, 14),           # anonymous Handler class
         "q.out": (None, None),         # a send's reply callback is not an entry point's handler
     }
+
+
+_SUB_ROUTERS_SRC = b"""package demo;
+import io.vertx.core.AbstractVerticle;
+import io.vertx.ext.web.Router;
+
+public class Api extends AbstractVerticle {
+  public void start() {
+    Router router = Router.router(vertx);
+    Router apiRouter = Router.router(vertx);
+    Router v1Router = Router.router(vertx);
+    Router oldRouter = Router.router(vertx);
+    Router dynRouter = Router.router(vertx);
+    v1Router.get("/items").handler(this::items);
+    apiRouter.get("/health").handler(this::health);
+    oldRouter.get("/legacy").handler(this::legacy);
+    dynRouter.get("/x").handler(this::x);
+    apiRouter.route("/v1/*").subRouter(v1Router);
+    router.route("/api/*").subRouter(apiRouter);
+    router.mountSubRouter("/old", oldRouter);
+    router.route(prefix + "/*").subRouter(dynRouter);
+    router.get("/root").handler(this::root);
+  }
+}
+"""
+
+
+def test_sub_router_prefix_composes_and_mount_is_not_a_route(tmp_path) -> None:
+    p = tmp_path / "Api.java"
+    p.write_bytes(_SUB_ROUTERS_SRC)
+    ctx = ParseContext(path="Api.java", abs_path=p, source=_SUB_ROUTERS_SRC, repo_root=tmp_path,
+                       capture_statements=True)
+    rec = VertxParser().parse_file(ctx)
+    got = {s.handler: s.endpoint for s in rec.statements if s.semanticType == "route"}
+    assert got == {
+        "items": "/api/v1/items",    # nested sub-routers compose
+        "health": "/api/health",
+        "legacy": "/old/legacy",     # 3.x mountSubRouter
+        "x": None,                   # mount path not a literal: address unknown
+        "root": "/root",
+    }
+    # the route("/api/*") calls the sub-routers hang off are mounts, not routes
+    assert all(s.handler for s in rec.statements if s.semanticType == "route")

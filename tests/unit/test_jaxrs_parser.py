@@ -104,3 +104,59 @@ def test_claims_selects_jaxrs() -> None:
     assert registry.select("X.java", b"import javax.ws.rs.Path;").name == "java-jaxrs"
     assert registry.select("X.java", b"package x;").name == "java"  # plain Java -> base
     registry.clear()
+
+
+# ── Prefixes from outside the resource class: @ApplicationPath, sub-resource locators ─────────
+_RS = "package a;\nimport javax.ws.rs.*;\n"
+_MAIN = "src/main/java/a/"
+
+
+def _eps(analyze_files, files: dict[str, str]) -> dict[tuple[str, str | None], str | None]:
+    """(file, handler) → endpoint of every JAX-RS route."""
+    return {(s.path.rsplit("/", 1)[-1], s.handler): s.endpoint
+            for s in analyze_files({_MAIN + k: _RS + v for k, v in files.items()})
+            if s.semanticType == "route" and s.framework == "jaxrs"}
+
+
+def test_application_path_and_nested_locators_compose(analyze_files) -> None:
+    got = _eps(analyze_files, {
+        "App.java": '@ApplicationPath(App.BASE)\npublic class App extends javax.ws.rs.core.Application {\n'
+                    '  static final String BASE = "/api";\n}\n',
+        "Orders.java": '@Path("/orders")\npublic class Orders {\n'
+                       '  @GET public String list() { return ""; }\n'
+                       '  @Path("/{id}/items") public Items items() { return new Items(); }\n}\n',
+        "Items.java": 'public class Items {\n  @GET public String all() { return ""; }\n'
+                      '  @Path("/{n}/notes") public Notes notes() { return new Notes(); }\n}\n',
+        "Notes.java": 'public class Notes {\n  @POST public void add(String n) {}\n}\n',
+    })
+    assert got == {
+        ("Orders.java", "list"): "/api/orders",
+        ("Items.java", "all"): "/api/orders/{id}/items",
+        ("Notes.java", "add"): "/api/orders/{id}/items/{n}/notes",
+    }
+
+
+def test_unresolved_application_or_locator_path_leaves_endpoint_empty(analyze_files) -> None:
+    got = _eps(analyze_files, {
+        "App.java": "@ApplicationPath(Config.ROOT)\npublic class App extends javax.ws.rs.core.Application {}\n",
+        "Orders.java": '@Path("/orders")\npublic class Orders {\n  @GET public String list() { return ""; }\n}\n',
+    })
+    assert got == {("Orders.java", "list"): None}
+
+
+def test_sub_resource_reached_twice_keeps_its_own_path(analyze_files) -> None:
+    got = _eps(analyze_files, {
+        "A.java": '@Path("/a")\npublic class A {\n  @Path("/x") public Shared x() { return null; }\n}\n',
+        "B.java": '@Path("/b")\npublic class B {\n  @Path("/y") public Shared y() { return null; }\n}\n',
+        "Shared.java": 'public class Shared {\n  @GET public String get() { return ""; }\n}\n',
+    })
+    assert got == {("Shared.java", "get"): "/"}
+
+
+def test_locator_on_a_root_resource_class_does_not_move_it(analyze_files) -> None:
+    # A returned class with its own @Path is a root resource: it keeps its own path.
+    got = _eps(analyze_files, {
+        "A.java": '@Path("/a")\npublic class A {\n  @Path("/x") public Root x() { return null; }\n}\n',
+        "Root.java": '@Path("/root")\npublic class Root {\n  @GET public String get() { return ""; }\n}\n',
+    })
+    assert got == {("Root.java", "get"): "/root"}

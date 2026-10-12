@@ -102,11 +102,6 @@ def test_router_route_without_path_has_no_record(analyze_files) -> None:
     assert _eps(st) == []
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="sub-router mount is recorded as a route and its "
-    "prefix is not applied to the sub-router's bindings",
-)
 def test_sub_router_mount_is_wiring(analyze_files) -> None:
     st = analyze_files(
         _verticle("""    Router router = Router.router(vertx);

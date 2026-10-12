@@ -219,3 +219,22 @@ def test_route_and_consumer_handlers(tmp_path) -> None:
         "q.one": (None, 7),        # closure: no name, its line
         "q.two": ("onTwo", 12),    # this.&onTwo method pointer
     }
+
+
+_SUB_ROUTERS = b"""import io.vertx.ext.web.Router
+
+class Api extends io.vertx.core.AbstractVerticle {
+  void start() {
+    def router = Router.router(vertx)
+    def apiRouter = Router.router(vertx)
+    apiRouter.get("/items").handler(this::items)
+    router.route("/api/*").subRouter(apiRouter)
+  }
+}
+"""
+
+
+def test_sub_router_prefix(tmp_path) -> None:
+    rec = _parse(tmp_path, _SUB_ROUTERS, "src/Api.groovy")
+    got = [(s.endpoint, s.handler) for s in rec.statements if s.semanticType == "route"]
+    assert got == [("/api/items", "items")]

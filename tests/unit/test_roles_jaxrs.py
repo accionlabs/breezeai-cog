@@ -80,7 +80,6 @@ public class Res {
     assert (r.endpoint, r.handler) == ("/orders", "list")
 
 
-@pytest.mark.xfail(strict=True, reason="@ApplicationPath is not applied to endpoints")
 def test_application_path_is_wiring(analyze_files) -> None:
     files = _java(
         "Res",
@@ -102,11 +101,6 @@ public class Res {
     assert r.endpoint == "/api/orders"
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="sub-resource locator prefix is not applied; "
-    "the sub-resource's bindings get endpoint '/'",
-)
 def test_sub_resource_locator_is_wiring(analyze_files) -> None:
     files = _java(
         "Res",

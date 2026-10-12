@@ -134,6 +134,69 @@ def render_address(
     return None
 
 
+# ── Sub-routers ─────────────────────────────────────────────────────────────────────────────
+#: ``router.route("/api/*").subRouter(sub)`` (4.x) / ``router.mountSubRouter("/api", sub)``
+#: (3.x) mount ``sub`` under a prefix: wiring, not a route. ``sub``'s routes are served under it.
+SUB_ROUTER_CALL = "subRouter"
+MOUNT_SUB_ROUTER = "mountSubRouter"
+
+#: A sub-router mount: (sub-router variable, parent router receiver, prefix — None when the
+#: mount path does not resolve to a literal).
+SubRouterMount = tuple[str, str, str | None]
+
+
+def _mount_prefix(path: str) -> str:
+    """``/api/*`` → ``/api``: the wildcard only says "everything under"."""
+    p = path[:-1] if path.endswith("*") else path
+    return p.rstrip("/") or "/"
+
+
+def sub_router_bases(mounts: Iterable[SubRouterMount]) -> dict[str, str | None]:
+    """Sub-router variable → the base its routes are served under, composed through nested
+    sub-routers (``api`` on ``router`` at ``/api``, ``v1`` on ``api`` at ``/v1`` → ``/api/v1``).
+    None = a mount path on the way does not resolve (the routes' address is unknown). A
+    sub-router mounted at two different prefixes, or in a cycle, is absent: its routes keep
+    their own path (honest-null)."""
+    local: dict[str, tuple[str, str | None] | None] = {}
+    for sub, parent, prefix in mounts:
+        # Vert.x path parameters are `:id`; a `{name}` in a rendered mount path is an unresolved
+        # part (render_address placeholder) — the prefix is unknown.
+        known = prefix is not None and "{" not in prefix
+        entry = (parent, _mount_prefix(prefix) if known and prefix is not None else None)
+        local[sub] = entry if local.get(sub, entry) == entry else None
+
+    unknown = object()
+
+    def base(var: str, seen: frozenset[str]) -> object:
+        entry = local.get(var)
+        if entry is None or var in seen:
+            return None  # ambiguous, or a cycle
+        parent, prefix = entry
+        if prefix is None:
+            return unknown
+        if parent in local:
+            above = base(parent, seen | {var})
+            if above is None or above is unknown:
+                return above
+            return join_path(str(above), prefix)
+        return join_path("", prefix)
+
+    out: dict[str, str | None] = {}
+    for var in local:
+        b = base(var, frozenset())
+        if b is unknown:
+            out[var] = None
+        elif isinstance(b, str):
+            out[var] = b
+    return out
+
+
+def join_path(base: str, local: str) -> str:
+    """``/api`` + ``/items`` → ``/api/items``; single slashes, empties ignored."""
+    parts = [p.strip("/") for p in (base, local) if p and p.strip("/")]
+    return "/" + "/".join(parts) if parts else "/"
+
+
 # ── Handler of a route / consumer ───────────────────────────────────────────────────────────
 #: Chained calls that attach the handler: ``router.get("/x").handler(h)``. A chain may attach
 #: several (``.handler(BodyHandler.create()).handler(this::create)``); the last one is the
