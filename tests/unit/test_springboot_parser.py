@@ -153,6 +153,35 @@ def test_functional_router_routes(tmp_path) -> None:
     assert all(s.framework == "spring" for s in rec.statements if s.semanticType == "route")
 
 
+_FN_HANDLERS = b"""package demo;
+import org.springframework.context.annotation.Bean;
+import org.springframework.web.servlet.function.RouterFunction;
+import static org.springframework.web.servlet.function.RouterFunctions.route;
+import static org.springframework.web.servlet.function.RequestPredicates.*;
+
+public class Routes {
+    @Bean
+    public RouterFunction<?> r(Handler h) {
+        return route(GET("/a"), this::own)
+                .andRoute(GET("/b"), h::other)
+                .andRoute(GET("/c"), req -> ok().build());
+    }
+
+    ServerResponse own(ServerRequest req) { return null; }
+}
+"""
+
+
+def test_functional_handler_line_is_the_declaration_or_the_lambda(tmp_path) -> None:
+    rec = _parse(tmp_path, _FN_HANDLERS, "Routes.java")
+    got = {s.endpoint: (s.handler, s.handlerLine) for s in rec.statements if s.semanticType == "route"}
+    assert got == {
+        "/a": ("own", 15),     # this::own — declared in this class
+        "/b": ("other", None),  # h::other — a method of another class: no line
+        "/c": (None, 12),      # lambda: no name, its line
+    }
+
+
 def test_functional_routing_gated(tmp_path) -> None:
     # A Spring file without RouterFunction must not trigger the functional walk.
     src = b"package x; import org.springframework.stereotype.Service;\n@Service class S { void GET(String p){} }"

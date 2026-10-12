@@ -44,25 +44,44 @@ def _ref_name(node: Node, source: bytes) -> str:
     return node_text(node, source).rsplit("::", 1)[-1].strip()
 
 
-def _handler_for(call: Node, args: Node | None, source: bytes) -> str | None:
-    # builder form: .GET("/x", handler::list) — the method reference is the verb call's arg
+_HANDLER_ARGS = ("method_reference", "lambda_expression")
+
+
+def _handler_arg(call: Node, args: Node | None, source: bytes) -> Node | None:
+    """The handler argument of a functional route: a method reference (``handler::list``) or a
+    lambda, either on the verb call (builder ``.GET("/x", handler::list)``) or on the enclosing
+    ``route`` / ``andRoute`` (static ``route(GET("/x"), handler::list)``)."""
     if args is not None:
         for a in args.named_children:
-            if a.type == "method_reference":
-                return _ref_name(a, source)
-    # static form: route(GET("/x"), handler::list) — reference is a route/andRoute sibling
+            if a.type in _HANDLER_ARGS:
+                return a
     node, depth = call.parent, 0
     while node is not None and depth < 8:
         if node.type == "method_invocation":
             nm = node.child_by_field_name("name")
             if nm is not None and node_text(nm, source) in _ROUTE_CALLS:
                 pa = node.child_by_field_name("arguments")
-                if pa is not None:
-                    for a in pa.named_children:
-                        if a.type == "method_reference":
-                            return _ref_name(a, source)
+                for a in pa.named_children if pa is not None else []:
+                    if a.type in _HANDLER_ARGS:
+                        return a
         node, depth = node.parent, depth + 1
     return None
+
+
+def _handler_for(
+    call: Node, args: Node | None, source: bytes, methods: dict[str, int | None]
+) -> tuple[str | None, int | None]:
+    """(handler, handlerLine). A method reference names the handler; its line is known only for
+    ``this::m`` with ``m`` declared once in this file (``h::list`` is a method of another class).
+    A lambda has no name; its line is where it starts."""
+    arg = _handler_arg(call, args, source)
+    if arg is None:
+        return None, None
+    if arg.type == "lambda_expression":
+        return None, arg.start_point[0] + 1
+    name = _ref_name(arg, source)
+    receiver = node_text(arg, source).rsplit("::", 1)[0].strip()
+    return name, methods.get(name) if receiver == "this" else None
 
 
 def detect_spring_functional_routes(
@@ -70,6 +89,9 @@ def detect_spring_functional_routes(
 ) -> list[Statement]:
     seen = {s.id for s in record.statements}
     routes: list[Statement] = []
+    methods: dict[str, int | None] = {}  # method name → declaration line (declared twice → None)
+    for f in record.functions:
+        methods[f.name] = f.startLine if f.name not in methods else None
 
     def visit(n: Node) -> None:
         if n.type == "method_invocation":
@@ -80,6 +102,7 @@ def detect_spring_functional_routes(
                 p = _first_string_arg(args, source)
                 if p is not None:
                     sl, sc = n.start_point[0] + 1, n.start_point[1]
+                    handler, handler_line = _handler_for(n, args, source, methods)
                     routes.append(
                         Statement(
                             id=disambiguate(statement_id(path, sl, sc), seen),
@@ -90,8 +113,8 @@ def detect_spring_functional_routes(
                             method=name,
                             endpoint="/" + p.strip("/") if p.strip("/") else "/",
                             framework="spring",
-                            handler=_handler_for(n, args, source),
-                            handlerLine=sl,
+                            handler=handler,
+                            handlerLine=handler_line,
                             routeKind="route",
                             isRegex=False,
                             startLine=sl,
