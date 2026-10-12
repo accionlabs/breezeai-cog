@@ -14,6 +14,8 @@ detector)."""
 
 from __future__ import annotations
 
+from collections.abc import Callable
+
 from tree_sitter import Node
 
 from ...emit import disambiguate, file_id, statement_id
@@ -393,6 +395,81 @@ def _receiver_bases(
     return out
 
 
+def _global_guards(
+    root: Node, source: bytes, routers: frozenset[str], bindings: dict[str, str],
+    local_functions: set[str],
+) -> Callable[[str, int], list[str]]:
+    """Guards that run before a route because of earlier ``use`` calls in this file.
+
+    ``R.use(fn, …)`` with no path registers middleware on receiver ``R``: it runs before every
+    route registered on ``R`` after it, and before the routes of a router mounted on ``R`` after
+    it (``app.use(auth); app.use('/api', api)`` → ``api``'s routes are guarded by ``auth``).
+    Middleware passed in a mount (``app.use('/api', auth, api)``) guards that router's routes.
+    Returns ``guards_for(receiver, byte_offset)``, outermost first.
+
+    A ``use`` argument counts as middleware only when that is certain: a call that is not an
+    in-repo router factory (``cors()``, ``passport.authenticate('jwt')``), a function declared in
+    this file, or a name not imported from another file of the repo. A relative import may be a
+    router mounted at ``/``, and a first argument that is not a call may be a path in a variable
+    (``app.use(cfg.path, mw)``) — unclear, so they add nothing (contract §8: record less)."""
+    uses: dict[str, list[tuple[int, list[str]]]] = {}  # receiver → [(offset, middleware names)]
+    mounted: dict[str, tuple[str, int, list[str]] | None] = {}  # router → (parent, offset, guards)
+
+    def middleware(arg: Node) -> str | None:
+        if arg.type == "call_expression":
+            return None if _is_internal_factory_call(arg, source, bindings) else _mw_name(arg, source)
+        if arg.type in ("identifier", "member_expression"):
+            name = node_text(arg, source)
+            if name in routers:
+                return None
+            if name in bindings and name not in local_functions:
+                return None
+            return name
+        return None
+
+    for call in _invocations(root):
+        fn = call.child_by_field_name("function")
+        prop = fn.child_by_field_name("property") if fn is not None and fn.type == "member_expression" else None
+        if prop is None or node_text(prop, source) != "use":
+            continue
+        receiver = _receiver(call, source)
+        if not _is_router_obj(receiver) and receiver not in routers:
+            continue
+        args = call.child_by_field_name("arguments")
+        arg_nodes = list(args.named_children) if args is not None else []
+        if not arg_nodes:
+            continue
+        if arg_nodes[0].type in ("string", "template_string"):  # a mount: app.use('/x', …, router)
+            local = [a for a in arg_nodes[1:]
+                     if a.type == "identifier" and node_text(a, source) in routers]
+            if len(local) == 1:
+                router = node_text(local[0], source)
+                guards = [n for a in arg_nodes[1:] if a is not local[0] and (n := middleware(a))]
+                entry = (receiver, call.start_byte, guards)
+                mounted[router] = entry if router not in mounted else None  # mounted twice → unclear
+            continue
+        if len(arg_nodes) > 1 and arg_nodes[0].type != "call_expression":
+            # app.use(config.basePath, mw, handler): the first argument may be a path held in a
+            # variable — then the middleware is path-scoped, not global. Unclear → nothing.
+            continue
+        names = [n for a in arg_nodes if (n := middleware(a))]
+        if names:
+            uses.setdefault(receiver, []).append((call.start_byte, names))
+
+    def guards_for(receiver: str, offset: int, depth: int = 0) -> list[str]:
+        out: list[str] = []
+        parent = mounted.get(receiver)
+        if parent is not None and depth < 8:
+            p_receiver, p_offset, mount_guards = parent
+            out += guards_for(p_receiver, p_offset, depth + 1) + mount_guards
+        for pos, names in uses.get(receiver, []):
+            if pos < offset:
+                out += names
+        return out
+
+    return guards_for
+
+
 def detect_express(
     root: Node,
     source: bytes,
@@ -440,6 +517,10 @@ def detect_express(
         if f.parentId == fid:
             decl_lines[f.name] = f.startLine if f.name not in decl_lines else None
 
+    global_guards = _global_guards(
+        root, source, routers, binds, {n for n, ln in decl_lines.items() if ln is not None}
+    )
+
     enriched: set[str] = set()  # statements enriched by this run
     for call in _invocations(root):
         info = _classify(call, source, root, binds, routers, decl_lines, consts)
@@ -452,6 +533,11 @@ def detect_express(
         # Honest-null: assert auth only when a route-level guard is present. Absence is
         # "unknown" (None), not "open" — app-level middleware may still protect the route.
         auth_required = True if guards else None
+        if route_kind == "route" and method:
+            # Middleware registered earlier on this receiver (or its parents) runs first. It does
+            # not set authRequired: app-wide middleware is often a body parser, not auth.
+            outer = global_guards(_receiver(call, source), call.start_byte)
+            guards = (outer + (guards or [])) or None
         line = call.start_point[0] + 1
 
         stmt = enclosing.statement(line)
@@ -471,6 +557,7 @@ def detect_express(
                 stmt.handlerLine = handler_line
             if guards:
                 stmt.guards = guards
+            if auth_required:
                 stmt.authRequired = True
         else:  # inside a handler/callback (base skips nested scopes) → add a statement
             new_id = disambiguate(statement_id(path, line, call.start_point[1]), seen)

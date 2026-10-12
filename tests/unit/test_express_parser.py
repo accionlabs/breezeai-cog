@@ -392,3 +392,34 @@ def test_route_chain_one_record_per_verb(analyze_files) -> None:
     ]
     assert len({s.id for s in st if s.semanticType == "route"}) == len(
         [s for s in st if s.semanticType == "route"])
+
+
+# ── Global guards: middleware registered with use() before a route ────────────────────────────
+def test_use_middleware_guards_later_routes(analyze_files) -> None:
+    st = analyze_files({
+        "package.json": _PKG,
+        "src/app.js": (
+            "import express from 'express';\nimport cors from 'cors';\n"
+            "import { apiRoutes } from './api.js';\n"
+            "const app = express();\n"
+            "app.get('/early', early);\n"            # registered before any use → no guard
+            "app.use(cors());\n"
+            "app.use(authenticate);\n"
+            "app.use(apiRoutes);\n"                  # relative import: may be a router → nothing
+            "app.use(cfg.gqlPath, gqlAuth, gqlServer());\n"  # path in a variable → path-scoped
+            "app.get('/me', requireRole('x'), getMe);\n"
+            "const admin = express.Router();\n"
+            "admin.use(audit);\n"
+            "admin.get('/stats', stats);\n"
+            "app.use('/admin', isAdmin, admin);\n"
+            "function authenticate(req, res, next) { next(); }\n"
+        ),
+        "src/api.js": "import { Router } from 'express';\nexport const apiRoutes = Router();\n",
+    })
+    got = {s.endpoint: (s.guards, s.authRequired)
+           for s in st if s.semanticType == "route" and s.routeKind == "route"}
+    assert got["/early"] == (None, None)
+    # global middleware first, then route-level; only the route-level guard asserts auth
+    assert got["/me"] == (["cors", "authenticate", "requireRole"], True)
+    # parent app's middleware, then the mount's guard, then the router's own use()
+    assert got["/admin/stats"] == (["cors", "authenticate", "isAdmin", "audit"], None)

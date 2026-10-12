@@ -116,9 +116,6 @@ def test_app_level_middleware_has_no_record(analyze_files) -> None:
     assert _eps(st) == []
 
 
-@pytest.mark.xfail(
-    strict=True, reason="app-level middleware is not added to the guards of later routes"
-)
 def test_app_level_middleware_is_a_guard_on_later_routes(analyze_files) -> None:
     st = _app(analyze_files, "app.use(authenticate);\napp.get('/me', getMe);\n")
     [r] = _eps(st)
