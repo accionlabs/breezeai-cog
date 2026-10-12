@@ -94,6 +94,19 @@ def test_detects_post_route() -> None:
     assert [(route.method, route.endpoint) for route in routes] == [("POST", "/users")]
 
 
+def test_template_route_paths_use_parameter_placeholders() -> None:
+    source = (
+        b"const fastify = Fastify();\n"
+        b"fastify.get(`/users/${userId}/posts/${user.id}`, handler);"
+    )
+
+    routes = _detect_routes(source)
+
+    assert [(route.method, route.endpoint, route.semanticType) for route in routes] == [
+        ("GET", "/users/{userId}/posts/{id}", "route")
+    ]
+
+
 def test_detects_route_with_named_handler() -> None:
     source = (
         b'import Fastify from "fastify";\n'

@@ -24,6 +24,7 @@ from tree_sitter import Node
 
 from ...emit import disambiguate, file_id, statement_id
 from ...schemas import FileRecord, Function, Statement
+from ..statements_common import url_placeholder
 from ..treesitter import node_text
 
 
@@ -826,7 +827,7 @@ def _http_method_route(
     if len(args) < 2:
         return
 
-    url = _resolve_static_string(args[0], source, file_index)
+    url = _resolve_route_string(args[0], source, file_index)
 
     if url is None or not (url.startswith("/") or url in ("", "*")):
         return
@@ -900,7 +901,7 @@ def _app_route(
     if url_node is None:
         return
 
-    url = _resolve_static_string(url_node, source, file_index)
+    url = _resolve_route_string(url_node, source, file_index)
 
     if url is None or not (url.startswith("/") or url in ("", "*")):
         return
@@ -1028,7 +1029,7 @@ def _fastify_register(
         prefix_node = pairs.get("prefix")
 
         if prefix_node is not None:
-            declared = _resolve_static_string(prefix_node, source, file_index)
+            declared = _resolve_route_string(prefix_node, source, file_index)
 
             if declared:
                 child_prefix = _join_prefix(prefix, declared)
@@ -1256,8 +1257,8 @@ def _resolve_static_string(
 ) -> Optional[str]:
     """Resolve a node into a string value.
 
-    Supports plain strings, static template literals, local variables,
-    and values supplied by the shared resolution index.
+    Supports plain strings, static template literals, local variables, and
+    values supplied by the shared resolution index.
     """
     literal = _string_literal(
         node,
@@ -1271,6 +1272,33 @@ def _resolve_static_string(
         return file_index.resolve_constant(node_text(node, source), node)
 
     return None
+
+
+def _resolve_route_string(
+    node: Node,
+    source: bytes,
+    file_index: _FileIndex,
+) -> Optional[str]:
+    """Resolve route paths, rendering dynamic template substitutions as placeholders."""
+    if node.type == "template_string":
+        return _template_value(node, source)
+    return _resolve_static_string(node, source, file_index)
+
+
+def _template_value(node: Node, source: bytes) -> str:
+    """Render template substitutions as route placeholders (e.g. ``${user.id}`` → ``{id}``)."""
+    parts: list[str] = []
+    for child in node.named_children:
+        if child.type == "string_fragment":
+            parts.append(node_text(child, source))
+        elif child.type == "template_substitution":
+            expression = child.named_children[0] if child.named_children else None
+            parts.append(
+                url_placeholder(node_text(expression, source))
+                if expression is not None
+                else "{param}"
+            )
+    return "".join(parts)
 
 
 def _string_literal(
