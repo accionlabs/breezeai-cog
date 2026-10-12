@@ -79,6 +79,12 @@ class TsAliasIndex:
     #: NestJS ``RouterModule.register`` prefixes: controller class name → its module's composed
     #: path (``None`` when ambiguous or unresolvable). Only controllers of registered modules.
     nest_controller_prefixes: dict[str, str | None] = field(default_factory=dict)
+    #: Application-level base paths: framework → {app directory → base path}. ``nextjs``: the
+    #: ``basePath`` of ``next.config.*`` (``""`` = the config sets none); ``loopback``: the
+    #: ``rest.basePath`` option / ``app.basePath(...)`` of the application. ``None`` = set but
+    #: unresolvable (env, a conditional, values that disagree). A route belongs to the deepest
+    #: app directory above it — see :func:`app_base_path`.
+    app_base_paths: dict[str, dict[str, str | None]] = field(default_factory=dict)
 
 
 def _load_jsonc(path: Path) -> dict | None:
@@ -607,6 +613,81 @@ _InstanceMount = tuple[str, str, str, str]
 
 _NEST_BOOT = (b"NestFactory", b"setGlobalPrefix")
 
+#: One file's application base-path facts: (framework, the path pieces of each ``basePath`` it
+#: sets — ``None`` for a dynamic value; an empty list = a Next.js config that sets none).
+_BasePathRaw = tuple[str, list[list[tuple[str, str]] | None]]
+
+
+def _collect_base_path(root: Node, source: bytes, rel: str) -> _BasePathRaw | None:
+    """Application base path set in this file. Next.js: a ``next.config.*`` file's ``basePath``
+    key (any object in it — ``module.exports = {…}``, ``export default withX({…})``). LoopBack:
+    a ``basePath`` key inside a ``rest: {…}`` options object, or an ``x.basePath('/api')`` call,
+    in a file that uses ``@loopback``. None when the file is neither."""
+    name = rel.rsplit("/", 1)[-1]
+    if name.startswith("next.config."):
+        framework = "nextjs"
+    elif b"basePath" in source and b"@loopback" in source:
+        framework = "loopback"
+    else:
+        return None
+    found: list[list[tuple[str, str]] | None] = []
+
+    def walk(n: Node) -> None:
+        if n.type == "pair":
+            key = n.child_by_field_name("key")
+            value = n.child_by_field_name("value")
+            if key is not None and value is not None and node_text(key, source).strip("'\"") == "basePath":
+                outer = n.parent.parent if n.parent is not None else None
+                okey = outer.child_by_field_name("key") if outer is not None and outer.type == "pair" else None
+                if framework == "nextjs" or (
+                        okey is not None and node_text(okey, source).strip("'\"") == "rest"):
+                    found.append(_path_pieces(value, source))
+        elif n.type == "call_expression" and framework == "loopback":
+            fn = n.child_by_field_name("function")
+            prop = fn.child_by_field_name("property") if fn is not None and fn.type == "member_expression" else None
+            args = n.child_by_field_name("arguments")
+            arg_nodes = list(args.named_children) if args is not None else []
+            if prop is not None and node_text(prop, source) == "basePath" and len(arg_nodes) == 1:
+                found.append(_path_pieces(arg_nodes[0], source))
+        for c in n.named_children:
+            walk(c)
+
+    walk(root)
+    if framework == "loopback" and not found:
+        return None
+    return framework, found
+
+
+def _app_base_paths(
+    raw: list[tuple[str, str, list[list[tuple[str, str]] | None]]],
+    const_values: dict[str, str | None],
+) -> dict[str, dict[str, str | None]]:
+    """(framework, app directory, basePath pieces) → framework → {directory → base path}, once
+    ``const_values`` is complete. No value → ``""``; one resolved value → it; a dynamic or
+    unresolved value, or values that disagree within one app directory → None (unknown)."""
+    values: dict[tuple[str, str], set[str | None]] = {}
+    for framework, anchor, found in raw:
+        bucket = values.setdefault((framework, anchor), set())
+        for pieces in found:
+            bucket.add(_resolve_pieces(pieces, const_values) if pieces is not None else None)
+    out: dict[str, dict[str, str | None]] = {}
+    for (framework, anchor), vals in values.items():
+        out.setdefault(framework, {})[anchor] = (
+            "" if not vals else next(iter(vals)) if len(vals) == 1 else None
+        )
+    return out
+
+
+def app_base_path(index: object | None, framework: str, path: str) -> tuple[bool, str | None]:
+    """(found, base path) of the app a ``path`` belongs to: the deepest app directory above it
+    in ``index.app_base_paths[framework]``. ``found`` False → no app config seen (address
+    unchanged); base ``None`` → set but unknown (the address is unknown)."""
+    apps = (getattr(index, "app_base_paths", None) or {}).get(framework) or {}
+    anchors = [d for d in apps if d == "" or path.startswith(d + "/")]
+    if not anchors:
+        return False, None
+    return True, apps[max(anchors, key=len)]
+
 
 def _nest_exclude(opts: Node | None, source: bytes) -> NestExclude | None:
     """``{ exclude: ['health', { path: 'metrics', method: RequestMethod.GET }] }`` → entries;
@@ -910,10 +991,11 @@ def _collect_ngmodule_imports(root: Node, source: bytes) -> dict[str, list[str]]
 
 def _ts_index_one(
     args: tuple[str, str, str]
-) -> tuple[dict[str, str | None], dict[str, ClassHeritage], list[str], list[_MountRaw], dict[str, list[str]], list[tuple[str, str]], list[_InstanceMount], tuple[str, dict[str, str]], _NestRaw | None] | None:
+) -> tuple[dict[str, str | None], dict[str, ClassHeritage], list[str], list[_MountRaw], dict[str, list[str]], list[tuple[str, str]], list[_InstanceMount], tuple[str, dict[str, str]], _NestRaw | None, _BasePathRaw | None] | None:
     """Parse one TS/JS file into its partials (string-constant map, class-heritage map, the
     classes it declares, its lazy-route mounts, NgModule imports, Express factory and
-    router-instance mounts, the routers it exports, and its NestJS wiring) —
+    router-instance mounts, the routers it exports, its NestJS wiring, and an application
+    base path it sets) —
     pure, picklable worker for :func:`parallel_map`. Returns ``None`` on read/parse failure."""
     file_s, rel, repo_root_s = args
     if not Path(file_s).is_file():
@@ -932,7 +1014,8 @@ def _ts_index_one(
         express_mounts, instance_mounts = _collect_express_mounts(root, src, rel, Path(repo_root_s))
         return (const_values, _collect_heritage(root, src, rel), classes, mounts,
                 ngmodule_imports, express_mounts, instance_mounts,
-                (rel, _collect_router_exports(root, src)), _collect_nest(root, src))
+                (rel, _collect_router_exports(root, src)), _collect_nest(root, src),
+                _collect_base_path(root, src, rel))
     except Exception as exc:  # parse OR a pathologically deep AST walk (RecursionError) — skip this file
         from ...logging import get_logger
         get_logger("breezeai_cog.index").warning(
@@ -1014,12 +1097,16 @@ def build_ts_index(repo_root: Path, files: Sequence[Path], jobs: int = 1) -> TsA
     nest_boots: list[tuple[str, tuple[list[tuple[str, str]] | None, NestExclude | None]]] = []
     nest_modules: dict[str, list[str] | None] = {}  # @Module class → controllers (name clash → None)
     nest_register: list[tuple[str, str | None, list[tuple[str, str]] | None]] = []
+    base_paths_raw: list[tuple[str, str, list[list[tuple[str, str]] | None]]] = []
     args = [(str(f), repo_relative(f, repo_root), str(repo_root)) for f in files]
     for frag in parallel_map(args, _ts_index_one, jobs):
         if not frag:
             continue
         (cv, heritage, classes, mounts, ngmodule_imports, file_express_mounts, file_instances,
-         (frag_rel, file_router_exports), nest) = frag
+         (frag_rel, file_router_exports), nest, base_path) = frag
+        if base_path is not None:
+            anchor = Path(frag_rel).parent.as_posix()
+            base_paths_raw.append((base_path[0], "" if anchor == "." else anchor, base_path[1]))
         if nest is not None:
             boot, mods, reg = nest
             if boot is not None:
@@ -1084,10 +1171,11 @@ def build_ts_index(repo_root: Path, files: Sequence[Path], jobs: int = 1) -> TsA
     nest_global_prefixes, nest_controller_prefixes = _nest_prefixes(
         nest_boots, nest_modules, nest_register, const_values
     )
+    app_base_paths = _app_base_paths(base_paths_raw, const_values)
 
     if (alias is None and not const_values and not class_heritage and not route_mounts
             and not express_mounts and not express_router_mounts and not nest_global_prefixes
-            and not nest_controller_prefixes):
+            and not nest_controller_prefixes and not app_base_paths):
         return None
     return TsAliasIndex(
         base_dir=alias.base_dir if alias else str(repo_root),
@@ -1100,6 +1188,7 @@ def build_ts_index(repo_root: Path, files: Sequence[Path], jobs: int = 1) -> TsA
         express_router_mounts=express_router_mounts,
         nest_global_prefixes=nest_global_prefixes,
         nest_controller_prefixes=nest_controller_prefixes,
+        app_base_paths=app_base_paths,
     )
 
 

@@ -66,7 +66,6 @@ def test_route_group_and_slot_are_wiring(analyze_files) -> None:
     assert r.endpoint == "/stats"
 
 
-@pytest.mark.xfail(strict=True, reason="next.config basePath is not applied")
 def test_base_path_is_wiring(analyze_files) -> None:
     st = _run(
         analyze_files,

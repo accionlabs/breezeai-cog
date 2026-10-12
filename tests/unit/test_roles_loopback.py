@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import pytest
 
 EP = {"route", "eventbus_consumer", "timer"}
 PKG = '{"dependencies": {"@loopback/core": "5", "@loopback/rest": "13"}}'
@@ -54,7 +53,6 @@ def test_api_base_path_is_wiring(analyze_files) -> None:
     assert (r.method, r.endpoint) == ("DELETE", "/products/{id}")
 
 
-@pytest.mark.xfail(strict=True, reason="the application-level rest basePath is not applied")
 def test_application_base_path_is_wiring(analyze_files) -> None:
     st = _ctrl(
         analyze_files,

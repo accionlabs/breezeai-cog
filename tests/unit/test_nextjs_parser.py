@@ -247,3 +247,54 @@ def test_claims_selects_nextjs() -> None:
         == "typescript"
     )
     registry.clear()
+
+
+# ── next.config basePath (app-level wiring) ───────────────────────────────────────────────────
+_NEXT_PKG = '{"dependencies": {"next": "14"}}'
+_ROUTE = "export async function GET() {\n  return Response.json({});\n}\n"
+_PAGES_API = "export default function handler(req, res) {\n  res.json([]);\n}\n"
+
+
+def _next_endpoints(analyze_files, files: dict[str, str]) -> dict[str, str | None]:
+    return {
+        s.path: s.endpoint
+        for s in analyze_files({"package.json": _NEXT_PKG, **files})
+        if s.semanticType == "route" and s.framework == "nextjs"
+    }
+
+
+def test_base_path_prefixes_app_and_pages_api_routes(analyze_files) -> None:
+    got = _next_endpoints(analyze_files, {
+        "next.config.mjs": "const nextConfig = { basePath: '/docs', reactStrictMode: true };\n"
+                           "export default nextConfig;\n",
+        "app/users/[id]/route.ts": _ROUTE,
+        "pages/api/health.ts": _PAGES_API,
+    })
+    assert got == {"app/users/[id]/route.ts": "/docs/users/[id]", "pages/api/health.ts": "/docs/api/health"}
+
+
+def test_base_path_per_app_in_a_monorepo(analyze_files) -> None:
+    got = _next_endpoints(analyze_files, {
+        "apps/web/next.config.js": "module.exports = { basePath: '/web' };\n",
+        "apps/web/app/ping/route.ts": _ROUTE,
+        "apps/admin/next.config.js": "module.exports = { reactStrictMode: true };\n",
+        "apps/admin/app/ping/route.ts": _ROUTE,
+    })
+    assert got == {"apps/web/app/ping/route.ts": "/web/ping", "apps/admin/app/ping/route.ts": "/ping"}
+
+
+def test_unresolvable_base_path_leaves_endpoint_empty(analyze_files) -> None:
+    # Set from the environment / a conditional: the address is unknown (contract §8, decision Q8).
+    for cfg in ("module.exports = { basePath: process.env.BASE_PATH };\n",
+                "module.exports = { basePath: isProd ? '/docs' : '' };\n"):
+        got = _next_endpoints(analyze_files, {"next.config.js": cfg, "app/users/route.ts": _ROUTE})
+        assert got == {"app/users/route.ts": None}, cfg
+
+
+def test_base_path_from_a_constant(analyze_files) -> None:
+    got = _next_endpoints(analyze_files, {
+        "config.ts": "export const BASE = '/shop';\n",
+        "next.config.ts": "import { BASE } from './config';\nexport default { basePath: BASE };\n",
+        "app/cart/route.ts": _ROUTE,
+    })
+    assert got == {"app/cart/route.ts": "/shop/cart"}

@@ -208,3 +208,38 @@ def test_claims_selects_loopback() -> None:
     assert registry.select("x.ts", b"import {get} from '@loopback/rest';").name == "typescript-loopback"
     assert registry.select("x.ts", b"const x = 1;").name == "typescript"  # plain TS -> base
     registry.clear()
+
+
+# ── Application rest.basePath (app-level wiring) ──────────────────────────────────────────────
+_LB_CTRL = ("import { get } from '@loopback/rest';\nexport class ProductController {\n"
+            "  @get('/products')\n  find() { return []; }\n}\n")
+
+
+def _lb_endpoints(analyze_files, files: dict[str, str]) -> list[str | None]:
+    return [s.endpoint for s in analyze_files({"src/controllers/product.controller.ts": _LB_CTRL, **files})
+            if s.semanticType == "route" and s.framework == "loopback"]
+
+
+def test_rest_base_path_option_prefixes_routes(analyze_files) -> None:
+    app = ("import { RestApplication } from '@loopback/rest';\n"
+           "export class ShopApplication extends RestApplication {\n"
+           "  constructor() {\n    super({ rest: { port: 3000, basePath: '/api' } });\n  }\n}\n")
+    assert _lb_endpoints(analyze_files, {"src/application.ts": app}) == ["/api/products"]
+
+
+def test_base_path_call_prefixes_routes(analyze_files) -> None:
+    app = ("import { RestApplication } from '@loopback/rest';\n"
+           "export class ShopApplication extends RestApplication {\n"
+           "  constructor() {\n    super();\n    this.basePath('/v1');\n  }\n}\n")
+    assert _lb_endpoints(analyze_files, {"src/application.ts": app}) == ["/v1/products"]
+
+
+def test_unresolvable_base_path_leaves_endpoint_empty(analyze_files) -> None:
+    app = ("import { RestApplication } from '@loopback/rest';\n"
+           "export class ShopApplication extends RestApplication {\n"
+           "  constructor(opts) {\n    super({ rest: { basePath: opts.base } });\n  }\n}\n")
+    assert _lb_endpoints(analyze_files, {"src/application.ts": app}) == [None]
+
+
+def test_no_base_path_leaves_routes_unchanged(analyze_files) -> None:
+    assert _lb_endpoints(analyze_files, {}) == ["/products"]

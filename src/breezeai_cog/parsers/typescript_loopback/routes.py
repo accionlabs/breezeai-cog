@@ -15,6 +15,7 @@ from ...parsers.typescript.decorators import decorator
 from ...parsers.typescript.functions import dto_from_type, extract_params, return_dto
 from ...schemas import Statement
 from ..treesitter import node_text
+from ..typescript.imports import app_base_path
 
 # LoopBack method decorators -> HTTP verb. ``del`` (not ``delete``) is LoopBack's
 # DELETE decorator because ``delete`` is a reserved word.
@@ -31,6 +32,15 @@ def _unquote(text: str) -> str:
 def _join(base: str, sub: str) -> str:
     parts = [p.strip("/") for p in (base, sub) if p and p.strip("/")]
     return "/" + "/".join(parts) if parts else "/"
+
+
+def _served(base: str, sub: str | None, found: bool, app_base: str | None) -> str | None:
+    """Controller ``base`` + route ``sub``, under the application's ``basePath`` when one was
+    seen: a literal is joined in front; set-but-unresolved (``app_base`` None) → unknown."""
+    if sub is None or (found and app_base is None):
+        return None
+    local = _join(base, sub)
+    return _join(app_base, local) if found and app_base else local
 
 
 def _api_base_path(decorators: list[Node], source: bytes) -> str:
@@ -146,8 +156,14 @@ def _class_with_decorators(root: Node):
             yield cls, decs
 
 
-def detect_loopback_routes(root: Node, source: bytes, path: str, *, seen_ids: set[str]) -> list[Statement]:
+def detect_loopback_routes(
+    root: Node, source: bytes, path: str, *, seen_ids: set[str], index: object | None = None
+) -> list[Statement]:
+    """``index`` is the repo's ``TsAliasIndex``: it carries the application's ``rest.basePath``,
+    joined in front of every controller route of that app (unknown when it cannot be
+    resolved)."""
     routes: list[Statement] = []
+    found, app_base = app_base_path(index, "loopback", path)
     for cls, decs in _class_with_decorators(root):
         base = _api_base_path(decs, source)
         ctrl_auth, ctrl_guards = _auth(decs, source)  # class-level @authenticate applies to all methods
@@ -187,7 +203,7 @@ def detect_loopback_routes(root: Node, source: bytes, path: str, *, seen_ids: se
                         semanticType="route",
                         text=node_text(dec, source).split("\n", 1)[0],
                         method=verb,
-                        endpoint=_join(base, sub) if sub is not None else None,
+                        endpoint=_served(base, sub, found, app_base),
                         framework="loopback",
                         handler=mname,
                         handlerLine=mline,

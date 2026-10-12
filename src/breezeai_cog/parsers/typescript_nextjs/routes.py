@@ -47,6 +47,7 @@ from tree_sitter import Node
 from ...emit import disambiguate, file_id, function_id, statement_id
 from ...schemas import FileRecord, Statement
 from ..treesitter import node_text
+from ..typescript.imports import app_base_path
 
 _VERBS = {"GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"}
 _ROUTE_STEMS = {"route"}  # App Router API handler file; page/layout are UI, not verb handlers
@@ -168,9 +169,22 @@ def _default_export_handler(root: Node, source: bytes) -> tuple[str | None, int,
     return None
 
 
+def _served(endpoint: str, path: str, index: object | None) -> str | None:
+    """The route's address under its app's ``next.config`` ``basePath``: joined in front when it
+    is a literal; unknown (None) when it is set but cannot be resolved; unchanged when the app
+    sets none or no ``next.config`` was seen."""
+    found, base = app_base_path(index, "nextjs", path)
+    if not found or base == "":
+        return endpoint
+    if base is None:
+        return None
+    parts = [p.strip("/") for p in (base, endpoint) if p and p.strip("/")]
+    return "/" + "/".join(parts) if parts else "/"
+
+
 def _make_route(
     path: str,
-    endpoint: str,
+    endpoint: str | None,
     method: str,
     handler: str | None,
     parent: str,
@@ -178,12 +192,13 @@ def _make_route(
     end_line: int,
     *,
     seen_ids: set[str],
+    local: str,
 ) -> Statement:
     return Statement(
         id=disambiguate(statement_id(path, handler_line, 0), seen_ids),
         parentId=parent,
         nodeType="synthetic",
-        text=f"{method} {endpoint}",
+        text=f"{method} {local}",
         semanticType="route",
         framework="nextjs",  # pending spec §4.1 enum ratification — see module docstring
         method=method,
@@ -199,8 +214,11 @@ def _make_route(
 
 
 def detect_nextjs_routes(
-    root: Node, source: bytes, path: str, record: FileRecord, *, seen_ids: set[str]
+    root: Node, source: bytes, path: str, record: FileRecord, *, seen_ids: set[str],
+    index: object | None = None,
 ) -> list[Statement]:
+    """``index`` is the repo's ``TsAliasIndex``: it carries each app's ``next.config``
+    ``basePath``, joined in front of the route's file-system address."""
     fid = file_id(path)
     # authoritative handler ids from the base extraction (top-level functions only)
     fn_by_name = {f.name: f for f in record.functions if f.parentId == fid}
@@ -219,13 +237,14 @@ def detect_nextjs_routes(
             routes.append(
                 _make_route(
                     path,
-                    endpoint,
+                    _served(endpoint, path, index),
                     verb,
                     verb,
                     parent,
                     handler_line,
                     end_line,
                     seen_ids=seen_ids,
+                    local=endpoint,
                 )
             )
         return routes
@@ -250,13 +269,14 @@ def detect_nextjs_routes(
         return [
             _make_route(
                 path,
-                pages_api_endpoint(path),
+                _served(pages_api_endpoint(path), path, index),
                 "ANY",
                 name,
                 parent,
                 handler_line,
                 end_line,
                 seen_ids=seen_ids,
+                local=pages_api_endpoint(path),
             )
         ]
 
