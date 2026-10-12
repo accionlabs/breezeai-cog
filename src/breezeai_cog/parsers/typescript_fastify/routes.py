@@ -212,7 +212,7 @@ class _FileIndex:
                 self.node_scopes[self.node_key(node)] = scope
 
             if node.type in _FUNCTION_NODE_TYPES:
-                self._index_function(node, parent_scope, scope, source, nested_function)
+                self._index_function(node, scope, source, nested_function)
 
             if node.type == "variable_declarator":
                 self._index_variable(node, scope, source)
@@ -258,7 +258,6 @@ class _FileIndex:
     def _index_function(
         self,
         node: Node,
-        parent_scope: Optional[_Scope],
         function_scope: _Scope,
         source: bytes,
         nested_function: bool,
@@ -383,9 +382,8 @@ def detect_fastify_routes(
     Detects shorthand routes, `route()` configurations, and `register()`
     mounts, including inherited prefixes and resolvable variable values.
 
-    Known limitations: `require("fastify").default()` factory calls and
-    instances assigned after declaration (for example, `let app; app =
-    Fastify()`) are not detected.
+    Known limitation: instances assigned after declaration (for example,
+    `let app; app = Fastify()`) are not detected.
     """
     # Cheap guard because Fastify detection is additive and runs for every
     # TypeScript/JavaScript file.
@@ -588,7 +586,9 @@ def _is_fastify_factory_call(
 
         Fastify()
         fastify()
+        fastify.default()
         require("fastify")()
+        require("fastify").default()
     """
     if value_node.type != "call_expression":
         return False
@@ -600,6 +600,35 @@ def _is_fastify_factory_call(
 
     if callee.type == "identifier" and node_text(callee, source) in _FASTIFY_FACTORY_NAMES:
         return True
+
+    if callee.type == "member_expression":
+        prop = callee.child_by_field_name("property")
+        factory = callee.child_by_field_name("object")
+        if (
+            prop is not None
+            and node_text(prop, source) == "default"
+            and factory is not None
+            and factory.type == "identifier"
+            and node_text(factory, source) in _FASTIFY_FACTORY_NAMES
+        ):
+            return True
+
+        if (
+            prop is not None
+            and node_text(prop, source) == "default"
+            and factory is not None
+            and factory.type == "call_expression"
+        ):
+            inner_callee = factory.child_by_field_name("function")
+            inner_args = factory.child_by_field_name("arguments")
+            if (
+                inner_callee is not None
+                and node_text(inner_callee, source) == "require"
+                and inner_args is not None
+            ):
+                arg_nodes = list(inner_args.named_children)
+                if arg_nodes and _string_literal(arg_nodes[0], source) == "fastify":
+                    return True
 
     if callee.type == "call_expression":
         inner_callee = callee.child_by_field_name("function")

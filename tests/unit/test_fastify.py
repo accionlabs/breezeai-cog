@@ -55,6 +55,29 @@ def test_detects_route_from_known_fastify_instance() -> None:
     assert routes[0].framework == "fastify"
 
 
+def test_detects_route_from_esm_default_fastify_factory() -> None:
+    source = (
+        b'import * as fastify from "fastify";\n'
+        b"const app = fastify.default();\n"
+        b"app.get('/users', async (request, reply) => ({ users: [] }));"
+    )
+
+    routes = _detect_routes(source)
+
+    assert [(route.method, route.endpoint) for route in routes] == [("GET", "/users")]
+
+
+def test_detects_route_from_require_default_fastify_factory() -> None:
+    source = (
+        b'const app = require("fastify").default();\n'
+        b"app.get('/users', async (request, reply) => ({ users: [] }));"
+    )
+
+    routes = _detect_routes(source)
+
+    assert [(route.method, route.endpoint) for route in routes] == [("GET", "/users")]
+
+
 def test_fastify_route_enriches_existing_expression_statement() -> None:
     source = (
         b'import Fastify from "fastify";\n'
