@@ -77,6 +77,17 @@ def _ts_express_aws(n: int) -> str:
     )
 
 
+def _ts_fastify(n: int) -> str:
+    body = "".join(
+        f"app.get('/r{i}', async (request, reply) => ({{ id: {i} }}));\n"
+        f"app.register(async function plugin{i}(instance) {{\n"
+        f"  instance.get('/nested', handler);\n"
+        f"}}, {{ prefix: '/api{i}' }});\n"
+        for i in range(n)
+    )
+    return f"import Fastify from 'fastify';\nconst app = Fastify();\n{body}"
+
+
 def _python(n: int) -> str:
     return "".join(
         f"# helper {i}\n"
@@ -106,6 +117,7 @@ SAMPLES: dict[str, tuple[str, Callable[[int], str]]] = {
     "java-vertx": ("V.java", _java_vertx),
     "groovy-vertx": ("Http.groovy", _groovy_vertx),
     "typescript-express-aws": ("app.ts", _ts_express_aws),
+    "typescript-fastify": ("app.ts", _ts_fastify),
     "python": ("mod.py", _python),
     "csharp": ("C.cs", _csharp),
 }

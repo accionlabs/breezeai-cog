@@ -453,23 +453,26 @@ def detect_fastify_routes(
         prefix="",
     )
 
+    statements_by_span: dict[tuple[str, int], list[Statement]] = {}
+    for statement in record.statements:
+        statements_by_span.setdefault((statement.id, statement.endLine), []).append(statement)
+
     unmatched: list[Statement] = []
     enriched_ids: set[str] = set()
+    span_positions: dict[tuple[str, int], int] = {}
     for route in statements:
         if route.parentId == fid:
             route.parentId = _owner_function(route.startLine, record.functions, fid)
 
         source_id = _source_statement_id(route.id)
-        existing = next(
-            (
-                statement
-                for statement in record.statements
-                if statement.id == source_id
-                and statement.endLine == route.endLine
-                and statement.id not in enriched_ids
-            ),
-            None,
-        )
+        span = (source_id, route.endLine)
+        candidates = statements_by_span.get(span, ())
+        position = span_positions.get(span, 0)
+        existing = candidates[position] if position < len(candidates) else None
+        while existing is not None and existing.id in enriched_ids:
+            position += 1
+            existing = candidates[position] if position < len(candidates) else None
+        span_positions[span] = position + 1 if existing is not None else position
         if existing is None:
             unmatched.append(route)
             continue
