@@ -115,7 +115,6 @@ def test_redirect_is_none(analyze_files) -> None:
     assert [r.endpoint for r in _eps(st)] == ["/users"]
 
 
-@pytest.mark.xfail(strict=True, reason="beforeEnter guards are not recorded in guards")
 def test_before_enter_is_guard(analyze_files) -> None:
     st = _routes(
         analyze_files, "  { path: '/users', component: UserList, beforeEnter: requireAuth },\n"

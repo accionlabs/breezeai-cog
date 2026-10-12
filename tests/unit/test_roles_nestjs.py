@@ -90,7 +90,6 @@ def test_use_guards_are_guards(analyze_files) -> None:
     assert r.guards == ["AuthGuard", "RolesGuard"]
 
 
-@pytest.mark.xfail(strict=True, reason="@UseInterceptors is not recorded in guards")
 def test_interceptors_are_guards(analyze_files) -> None:
     st = _ctrl(
         analyze_files, "  @Get()\n  @UseInterceptors(LoggingInterceptor)\n  list() { return []; }\n"

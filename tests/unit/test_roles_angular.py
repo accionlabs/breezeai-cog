@@ -162,7 +162,6 @@ def test_can_activate_is_guard(analyze_files) -> None:
     assert r.guards == ["AuthGuard"]
 
 
-@pytest.mark.xfail(strict=True, reason="canMatch guards are not recorded in guards")
 def test_can_match_is_guard(analyze_files) -> None:
     st = _routes(
         analyze_files,
@@ -173,7 +172,6 @@ def test_can_match_is_guard(analyze_files) -> None:
     assert r.guards == ["RoleGuard"]
 
 
-@pytest.mark.xfail(strict=True, reason="canActivateChild guards are not recorded on the children")
 def test_can_activate_child_is_guard_on_children(analyze_files) -> None:
     st = _routes(
         analyze_files,

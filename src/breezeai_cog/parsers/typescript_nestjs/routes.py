@@ -111,13 +111,15 @@ def _pattern(d) -> str | None:
     return _unquote(raw) if raw[:1] in "'\"`" else (raw or None)
 
 
-def _guards(decs: list[Node], source: bytes) -> list[str]:
+def _guards(decs: list[Node], source: bytes, *, interceptors: bool = False) -> list[str]:
     """Guard/auth names: ``@UseGuards(...)`` args (NestJS) and ``@Authorized`` (routing-
-    controllers). Presence of any drives ``authRequired``."""
+    controllers). Presence of any drives ``authRequired``. With ``interceptors``, also
+    ``@UseInterceptors(...)`` args in decorator order — they run before the handler too (a guard
+    in the contract's sense) but say nothing about auth, so they don't drive ``authRequired``."""
     out: list[str] = []
     for dec in decs:
         d = decorator(dec, source)
-        if d.name == "UseGuards":
+        if d.name == "UseGuards" or (interceptors and d.name == "UseInterceptors"):
             out.extend(_unquote(a) for a in d.args)
         elif d.name == "Authorized":  # routing-controllers auth decorator
             out.append("Authorized")
@@ -368,7 +370,8 @@ def detect_nest_routes(
         body = cls.child_by_field_name("body")
         if body is None:
             continue
-        ctrl_guards = _guards(decs, source) if is_controller else []
+        ctrl_guards = _guards(decs, source, interceptors=True) if is_controller else []
+        ctrl_auth = bool(_guards(decs, source)) if is_controller else False
         ctrl_version = _version(decs, source) if is_controller else None
         # Grouping resolver: @Resolver(() => T) where a @Mutation/@Query on the class
         # returns a singleton T — @ResolveField methods inherit the parent op's identity.
@@ -388,7 +391,9 @@ def detect_nest_routes(
                 mname = node_text(member.child_by_field_name("name"), source)
                 mline = member.start_point[0] + 1
                 parent = function_id(path, mname, mline, class_name=class_name)
-                guards = ctrl_guards + _guards(pending, source)  # merge controller + method
+                # merge controller + method; interceptors are guards but not auth
+                guards = ctrl_guards + _guards(pending, source, interceptors=True)
+                auth_required = ctrl_auth or bool(_guards(pending, source))
                 for dec in pending:
                     d = decorator(dec, source)
                     verb = _METHOD_DECORATORS.get(d.name) if is_controller else None
@@ -407,7 +412,7 @@ def detect_nest_routes(
                         handler=mname,
                         handlerLine=mline,
                         isRegex=False,
-                        authRequired=bool(guards),
+                        authRequired=auth_required,
                         guards=guards or None,
                         startLine=sl,
                         endLine=dec.end_point[0] + 1,

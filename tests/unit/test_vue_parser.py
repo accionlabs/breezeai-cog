@@ -699,3 +699,17 @@ def test_template_output_validates(tmp_path) -> None:
         )
     )
     assert not errors, errors
+
+
+def test_before_enter_guards(tmp_path) -> None:
+    src = b"""import { createRouter, createWebHistory } from 'vue-router'
+const routes = [
+  { path: '/a', component: A, beforeEnter: requireAuth },
+  { path: '/b', component: B, beforeEnter: [requireAuth, guards.admin] },
+  { path: '/c', component: C, beforeEnter: (to, from) => true },
+]
+export default createRouter({ history: createWebHistory(), routes })
+"""
+    rec = _parse("src/router/index.js", src, tmp_path)
+    guards = {s.endpoint: s.guards for s in rec.statements if s.semanticType == "route"}
+    assert guards == {"/a": ["requireAuth"], "/b": ["requireAuth", "guards.admin"], "/c": None}

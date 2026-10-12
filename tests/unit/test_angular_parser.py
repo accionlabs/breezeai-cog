@@ -492,3 +492,26 @@ def test_route_entry_text_is_one_line_without_children(analyze_files) -> None:
     texts = {s.endpoint: s.text for s in st if s.semanticType == "route"}
     assert texts["/admin"] == "{ path: 'admin', component: AdminComponent, children: […], }"
     assert texts["/admin/users"] == "{ path: 'users', component: UsersComponent }"
+
+
+def test_route_guards_can_match_and_can_activate_child(analyze_files) -> None:
+    st = analyze_files({
+        "package.json": '{"dependencies": {"@angular/core": "17", "@angular/router": "17"}}',
+        "src/app/app.routes.ts": (
+            "import { Routes } from '@angular/router';\n"
+            "export const routes: Routes = [\n"
+            "  { path: 'admin', component: AdminComponent, canMatch: [RoleGuard],\n"
+            "    canActivate: [AuthGuard], canActivateChild: [ChildGuard, () => true],\n"
+            "    children: [\n"
+            "      { path: 'users', component: UsersComponent, canActivate: [UsersGuard],\n"
+            "        canActivateChild: [DeepGuard],\n"
+            "        children: [ { path: ':id', component: UserComponent } ] },\n"
+            "    ] },\n];\n"
+        ),
+    })
+    guards = {s.endpoint: s.guards for s in st if s.semanticType == "route"}
+    assert guards == {
+        "/admin": ["RoleGuard", "AuthGuard"],          # own guards in source order
+        "/admin/users": ["ChildGuard", "UsersGuard"],  # parent's canActivateChild first
+        "/admin/users/:id": ["ChildGuard", "DeepGuard"],
+    }

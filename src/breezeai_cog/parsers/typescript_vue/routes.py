@@ -125,6 +125,15 @@ def _is_children_value(arr: Node, source: bytes) -> bool:
     return p is not None and p.type == "pair" and _key(p, source) == "children"
 
 
+def _before_enter(value: Node | None, source: bytes) -> list[str]:
+    """Names of a route's ``beforeEnter`` guard(s): a function reference or an array of them
+    (Vue Router 4). An inline function has no name and contributes nothing."""
+    if value is None:
+        return []
+    items = value.named_children if value.type == "array" else [value]
+    return [node_text(i, source) for i in items if i.type in ("identifier", "member_expression")]
+
+
 def _emit(
     elem: Node, prefix: str, source: bytes, path: str, seen: set[str], routes: list[Statement]
 ) -> None:
@@ -157,6 +166,7 @@ def _emit(
                 framework="vue",
                 routeKind="page",
                 handler=_handler(pairs.get("component"), source),
+                guards=_before_enter(pairs.get("beforeEnter"), source) or None,
                 startLine=sl,
                 endLine=elem.end_point[0] + 1,
                 path=path,

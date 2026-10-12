@@ -665,3 +665,31 @@ def test_router_module_children_compose(analyze_files) -> None:
         "src/reports.controller.ts": _ctrl_src("ReportsController", "daily", "  @Get()\n  daily() {}\n"),
     })
     assert _http(st) == {("GET", "daily"): "/api/admin/reports/daily"}
+
+
+def test_interceptors_are_guards_but_not_auth(tmp_path) -> None:
+    src = b'''import { Controller, Get, UseGuards, UseInterceptors } from '@nestjs/common';
+@Controller('items')
+@UseInterceptors(LoggingInterceptor)
+export class ItemsController {
+  @Get()
+  @UseInterceptors(CacheInterceptor)
+  list() { return []; }
+
+  @Get(':id')
+  @UseGuards(AuthGuard)
+  @UseInterceptors(TimingInterceptor)
+  one() { return null; }
+}
+'''
+    p = tmp_path / "items.controller.ts"
+    p.write_bytes(src)
+    ctx = ParseContext(path="items.controller.ts", abs_path=p, source=src, repo_root=tmp_path,
+                       capture_statements=True)
+    rec = NestJSParser().parse_file(ctx)
+    got = {s.endpoint: (s.guards, s.authRequired)
+           for s in rec.statements if s.semanticType == "route"}
+    assert got == {
+        "/items": (["LoggingInterceptor", "CacheInterceptor"], False),  # interceptors: not auth
+        "/items/:id": (["LoggingInterceptor", "AuthGuard", "TimingInterceptor"], True),
+    }
