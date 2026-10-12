@@ -316,7 +316,7 @@ Some frameworks build a route from pieces in several files. These use the index 
 
 | Framework | Pieces | Source of the cross-file data |
 |---|---|---|
-| Express | `app.use("/api", router)` in one file + `router.get("/orders")` in another → `/api/orders` | TypeScript index: Express mounts |
+| Express | `app.use("/api", router)` in one file + `router.get("/orders")` in another → `/api/orders`. The router is a factory call (`usersRouter()`) or an imported `Router()` instance — kept only when the router's file confirms it exports a `Router()`, so an imported middleware is never a prefix. A router mounted at two bases keeps its own path | TypeScript index: Express mounts |
 | Angular | lazy-loaded child routes under a parent path | TypeScript index: route mounts |
 | ASP.NET | base controller route prefix + action route | heritage ([§6](#6-inheritance-heritage)) |
 | WebForms | `MapPageRoute` URL → `.aspx` page | C# index: page routes |

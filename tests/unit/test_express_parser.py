@@ -58,14 +58,14 @@ def test_routes_detected(tmp_path) -> None:
     routes = {(s.method, s.endpoint): s for s in rec.statements if s.semanticType == "route"}
     assert set(routes) == {
         ("GET", "/users/:id"),
-        ("POST", "/users"),
+        ("POST", "/api/users"),  # router mounted at /api in the same file
         ("ALL", "/health"),
         (None, "/api"),          # app.use / Router().use mount (both endpoints are /api)
         (None, "/book"),         # app.route group
         ("DELETE", "/orders/:id"),
         ("GET", "/ping"),        # express.Router().get(...) direct-constructor receiver
     }
-    assert routes[("POST", "/users")].handler == "createUser"
+    assert routes[("POST", "/api/users")].handler == "createUser"
     assert routes[("DELETE", "/orders/:id")].handler == "deleteOrder"
     assert routes[(None, "/api")].routeKind == "mount"
     assert routes[(None, "/book")].routeKind == "route"
@@ -222,3 +222,101 @@ app.get('*.*', staticHandler);
     assert ("GET", "/sitemaps/{key}.txt") in routes  # template route, no longer lost
     assert ("GET", "*.*") in routes                  # wildcard route
     assert all(s.framework == "express" for s in rec.statements if s.semanticType == "route")
+
+
+# ── Router-instance mounts: app.use('/base', importedRouter) and same-file routers ──────────────
+_PKG = '{"dependencies": {"express": "4"}}'
+
+
+def _routes(analyze_files, files: dict[str, str]) -> dict[tuple[str, str | None], str | None]:
+    """(path, method) → endpoint for every non-mount Express route."""
+    return {
+        (s.path, s.method): s.endpoint
+        for s in analyze_files({"package.json": _PKG, **files})
+        if s.semanticType == "route" and s.routeKind == "route"
+    }
+
+
+def test_instance_mount_named_default_and_aliased_exports(analyze_files) -> None:
+    routes = _routes(analyze_files, {
+        "src/index.js": (
+            "import express from 'express';\n"
+            "import { matchRouter } from './matches.js';\n"
+            "import users from './users.js';\n"
+            "import { orders as ord } from './orders.js';\n"
+            "const app = express();\n"
+            "app.use('/matches', matchRouter);\napp.use('/users', users);\napp.use('/orders', ord);\n"
+        ),
+        "src/matches.js": (
+            "import { Router } from 'express';\nexport const matchRouter = Router();\n"
+            "matchRouter.get('/:id', getMatch);\n"
+        ),
+        "src/users.js": (
+            "import express from 'express';\nconst router = express.Router();\n"
+            "router.post('/', createUser);\nexport default router;\n"
+        ),
+        "src/orders.js": (
+            "import { Router } from 'express';\nconst r = Router();\nr.get('/', listOrders);\n"
+            "export { r as orders };\n"
+        ),
+    })
+    assert routes[("src/matches.js", "GET")] == "/matches/:id"
+    assert routes[("src/users.js", "POST")] == "/users"
+    assert routes[("src/orders.js", "GET")] == "/orders"
+
+
+def test_instance_mount_middleware_import_is_not_a_prefix(analyze_files) -> None:
+    # `auth` is a relative import but not a Router() → never a prefix; the router beside it is.
+    routes = _routes(analyze_files, {
+        "src/index.js": (
+            "import express from 'express';\nimport { auth } from './auth.js';\n"
+            "import { api } from './api.js';\nconst app = express();\n"
+            "app.use('/secure', auth);\napp.use('/api', auth, api);\n"
+        ),
+        "src/auth.js": "export function auth(req, res, next) { next(); }\nauth.get = 1;\n",
+        "src/api.js": (
+            "import { Router } from 'express';\nexport const api = Router();\n"
+            "api.get('/me', getMe);\n"
+        ),
+    })
+    assert routes == {("src/api.js", "GET"): "/api/me"}
+
+
+def test_instance_mounted_at_two_bases_keeps_its_own_path(analyze_files) -> None:
+    routes = _routes(analyze_files, {
+        "src/index.js": (
+            "import express from 'express';\nimport { shared } from './shared.js';\n"
+            "const app = express();\napp.use('/v1', shared);\napp.use('/v2', shared);\n"
+        ),
+        "src/shared.js": (
+            "import { Router } from 'express';\nexport const shared = Router();\n"
+            "shared.get('/status', status);\n"
+        ),
+    })
+    assert routes[("src/shared.js", "GET")] == "/status"
+
+
+def test_same_file_nested_routers_compose(analyze_files) -> None:
+    # `v1` is not named like a router; it is one because it is bound to express.Router().
+    st = analyze_files({
+        "package.json": _PKG,
+        "src/index.js": (
+            "import express from 'express';\nconst app = express();\n"
+            "const api = express.Router();\nconst v1 = express.Router();\n"
+            "v1.get('/ping', ping);\napi.get('/health', health);\n"
+            "api.use('/v1', v1);\napp.use('/api', api);\n"
+        ),
+    })
+    endpoints = sorted(s.endpoint for s in st if s.semanticType == "route" and s.routeKind == "route")
+    assert endpoints == ["/api/health", "/api/v1/ping"]
+
+
+def test_same_file_router_mounted_twice_keeps_its_own_path(analyze_files) -> None:
+    routes = _routes(analyze_files, {
+        "src/index.js": (
+            "import express from 'express';\nconst app = express();\n"
+            "const router = express.Router();\nrouter.get('/x', x);\n"
+            "app.use('/a', router);\napp.use('/b', router);\n"
+        ),
+    })
+    assert list(routes.values()) == ["/x"]

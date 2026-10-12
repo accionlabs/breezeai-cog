@@ -99,7 +99,6 @@ def test_router_factory_mount_prefixes_its_routes(analyze_files) -> None:
     assert r.endpoint == "/users/:id"
 
 
-@pytest.mark.xfail(strict=True, reason="a router instance mounted from another file gets no prefix")
 def test_router_instance_mount_prefixes_its_routes(analyze_files) -> None:
     st = _app(
         analyze_files,
@@ -113,7 +112,6 @@ def test_router_instance_mount_prefixes_its_routes(analyze_files) -> None:
     assert r.endpoint == "/items"
 
 
-@pytest.mark.xfail(strict=True, reason="a router mounted in the same file gets no prefix")
 def test_same_file_router_mount_prefixes_its_routes(analyze_files) -> None:
     st = _app(
         analyze_files,
