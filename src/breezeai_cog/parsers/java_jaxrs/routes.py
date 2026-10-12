@@ -13,6 +13,7 @@ from __future__ import annotations
 
 from ...emit import disambiguate, statement_id
 from ...schemas import Decorator, FileRecord, Statement
+from ..java.guards import security_guards
 
 # Standard @HttpMethod-meta-annotated markers (javax/jakarta.ws.rs).
 _HTTP_METHODS = {"GET", "POST", "PUT", "DELETE", "HEAD", "OPTIONS", "PATCH"}
@@ -53,6 +54,7 @@ def detect_jaxrs_routes(
     # base its sub-resource locator gives it (else none: a bare class keeps its own path).
     subs = sub_bases or {}
     bases: dict[str, str | None] = {}
+    class_decorators = {cls.id: cls.decorators for cls in record.classes}
     for cls in record.classes:
         own = _path_of(cls.decorators)
         has_path = any(d.name == "Path" for d in cls.decorators)
@@ -67,6 +69,7 @@ def detect_jaxrs_routes(
             continue
         base = bases[fn.parentId]
         sub = _path_of(fn.decorators)
+        guards = security_guards(class_decorators[fn.parentId], fn.decorators)
         for dec in fn.decorators:
             if dec.name not in _HTTP_METHODS:
                 continue
@@ -84,6 +87,8 @@ def detect_jaxrs_routes(
                 handlerLine=fn.startLine,
                 routeKind="route",
                 isRegex=False,
+                guards=guards,
+                authRequired=True if guards else None,
                 responseDTO=fn.returnType or None,  # JAX-RS has no @RequestBody → requestDTO stays null
                 startLine=fn.startLine,
                 endLine=fn.endLine,

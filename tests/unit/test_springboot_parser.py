@@ -311,3 +311,43 @@ def test_functional_nest_prefixes_compose(tmp_path) -> None:
         "dyn": None,                        # path(PREFIX): unresolved prefix → empty
         "s": "/static/s",                   # static RouterFunctions.nest
     }
+
+
+def test_security_annotations_are_guards(analyze_files) -> None:
+    # Class-level guards first, then the method's; @PermitAll / @PostAuthorize are not guards.
+    st = analyze_files({"src/main/java/a/Admin.java": """package a;
+import org.springframework.web.bind.annotation.*;
+import org.springframework.security.access.prepost.*;
+import org.springframework.security.access.annotation.Secured;
+
+@RestController
+@PreAuthorize("isAuthenticated()")
+public class Admin {
+  @Secured("ROLE_ADMIN")
+  @DeleteMapping("/users/{id}")
+  public void delete(String id) {}
+
+  @PostAuthorize("returnObject != null")
+  @GetMapping("/users/{id}")
+  public String get(String id) { return id; }
+}
+"""})
+    got = {(s.method, tuple(s.guards or ()), s.authRequired)
+           for s in st if s.semanticType == "route"}
+    assert got == {
+        ("DELETE", ("PreAuthorize(isAuthenticated())", "Secured(ROLE_ADMIN)"), True),
+        ("GET", ("PreAuthorize(isAuthenticated())",), True),
+    }
+
+
+def test_no_security_annotation_leaves_guards_unset(analyze_files) -> None:
+    st = analyze_files({"src/main/java/a/Open.java": """package a;
+import org.springframework.web.bind.annotation.*;
+@RestController
+public class Open {
+  @GetMapping("/ping")
+  public String ping() { return "ok"; }
+}
+"""})
+    [r] = [s for s in st if s.semanticType == "route"]
+    assert (r.guards, r.authRequired) == (None, None)

@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import pytest
-
 EP = {"route", "eventbus_consumer", "timer"}
 SRC = "src/main/scala/a/R.scala"
 HEAD = """package a
@@ -84,7 +82,6 @@ def test_authenticate_directive_has_no_record(analyze_files) -> None:
     assert r.endpoint == "/me"
 
 
-@pytest.mark.xfail(strict=True, reason="authentication directives are not recorded in guards")
 def test_authenticate_directive_is_guard(analyze_files) -> None:
     st = analyze_files(
         _routes("""    authenticateBasic(realm = "x", myAuth) { user =>

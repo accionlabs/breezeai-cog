@@ -98,6 +98,17 @@ def _lambda_body(call: Node) -> Node | None:
     return None
 
 
+def _guard_name(call: Node, source: bytes) -> str:
+    """``authenticate("jwt")`` → ``authenticate("jwt")``; ``authenticate { }`` → ``authenticate``
+    (the default provider). The provider names are kept: they say which check runs."""
+    for suffix in call.named_children:
+        if suffix.type == "call_suffix":
+            args = next((c for c in suffix.named_children if c.type == "value_arguments"), None)
+            if args is not None and args.named_children:
+                return "authenticate" + node_text(args, source)
+    return "authenticate"
+
+
 def _callee_name(call: Node, source: bytes) -> str | None:
     callee = call.named_children[0] if call.named_children else None
     if callee is None or callee.type != "simple_identifier":
@@ -114,20 +125,32 @@ def _collect_routes(
     limit: int,
     prefix: str = "",
     existing: dict[str, Statement] | None = None,
+    guards: tuple[str, ...] = (),
 ) -> list[Statement]:
     """Recursively collect Ktor route statements from a subtree. A route whose call the base
     parser already captured (``existing``: id → statement, same start line and column) is
-    enriched in place; only routes with no base statement are returned to be appended."""
+    enriched in place; only routes with no base statement are returned to be appended.
+    ``guards`` are the enclosing ``authenticate(...)`` blocks, outermost first."""
     base = existing if existing is not None else {}
     out: list[Statement] = []
     for child in node.named_children:
         if child.type != "call_expression":
-            out.extend(_collect_routes(child, source, path, parent_id, seen_ids, limit, prefix, base))
+            out.extend(_collect_routes(child, source, path, parent_id, seen_ids, limit, prefix, base, guards))
             continue
 
         verb = _callee_name(child, source)
         if verb is None:
-            out.extend(_collect_routes(child, source, path, parent_id, seen_ids, limit, prefix, base))
+            out.extend(_collect_routes(child, source, path, parent_id, seen_ids, limit, prefix, base, guards))
+            continue
+
+        if verb == "authenticate":
+            # Guard block: every route inside runs after this authentication check.
+            body = _lambda_body(child)
+            if body is not None:
+                out.extend(_collect_routes(
+                    body, source, path, parent_id, seen_ids, limit, prefix, base,
+                    (*guards, _guard_name(child, source)),
+                ))
             continue
 
         if verb == "route":
@@ -137,12 +160,12 @@ def _collect_routes(
             body = _lambda_body(child)
             if body is not None:
                 out.extend(
-                    _collect_routes(body, source, path, parent_id, seen_ids, limit, new_prefix, base)
+                    _collect_routes(body, source, path, parent_id, seen_ids, limit, new_prefix, base, guards)
                 )
             continue
 
         if verb not in _HTTP_VERBS:
-            out.extend(_collect_routes(child, source, path, parent_id, seen_ids, limit, prefix, base))
+            out.extend(_collect_routes(child, source, path, parent_id, seen_ids, limit, prefix, base, guards))
             continue
 
         arg = _first_arg(child, source)
@@ -170,6 +193,9 @@ def _collect_routes(
             captured.method = verb.upper()
             captured.endpoint = full_endpoint
             captured.handlerLine = handler_line
+            if guards:
+                captured.guards = list(guards)
+                captured.authRequired = True
             continue
         sid = disambiguate(statement_id(path, start_line, col), seen_ids)
         text = f"{verb}(\"{full_endpoint}\")"
@@ -183,6 +209,8 @@ def _collect_routes(
             method=verb.upper(),
             endpoint=full_endpoint,
             handlerLine=handler_line,
+            guards=list(guards) or None,
+            authRequired=True if guards else None,
             startLine=start_line,
             endLine=end_line,
             path=path,

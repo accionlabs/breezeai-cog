@@ -197,3 +197,25 @@ object Routes {
         if s.semanticType == "route" and s.framework == "http4s"
     }
     assert got == {"/a": (None, 7), "/b": (None, 9)}
+
+
+def test_authed_routes_are_guarded_by_their_middleware(analyze_files) -> None:
+    st = analyze_files({"src/main/scala/a/H.scala": """package a
+import cats.effect.IO
+import org.http4s._
+import org.http4s.dsl.io._
+import org.http4s.server.AuthMiddleware
+object H {
+  val open = HttpRoutes.of[IO] { case GET -> Root / "ping" => Ok("p") }
+  val authed = AuthedRoutes.of[User, IO] { case GET -> Root / "me" as user => Ok(user.name) }
+  val other = AuthedRoutes.of[User, IO] { case GET -> Root / "you" as user => Ok(user.name) }
+  val jwt: AuthMiddleware[IO, User] = AuthMiddleware(jwtUser)
+  val routes = jwt(authed)
+}
+"""})
+    got = {s.endpoint: s.guards for s in st if s.semanticType == "route"}
+    assert got == {
+        "/ping": None,
+        "/me": ["AuthMiddleware(jwtUser)"],  # the middleware applied to it
+        "/you": ["AuthMiddleware"],  # AuthedRoutes are only served through one
+    }

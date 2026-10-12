@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import pytest
-
 EP = {"route", "eventbus_consumer", "timer"}
 SRC = "src/main/java/a/"
 RS = "import javax.ws.rs.*;"
@@ -127,7 +125,6 @@ public class Res {
     assert r.endpoint == "/orders/items"
 
 
-@pytest.mark.xfail(strict=True, reason="security annotations are not recorded in guards")
 def test_roles_allowed_is_guard(analyze_files) -> None:
     st = analyze_files(
         _java(

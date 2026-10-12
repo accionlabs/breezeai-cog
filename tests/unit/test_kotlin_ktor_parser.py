@@ -252,3 +252,31 @@ fun Application.module() {
     assert routes[0].text.startswith('get("/a") {')
     spans = [(s.startLine, s.endLine, s.id.split("#")[0]) for s in rec.statements]
     assert len(spans) == len(set(spans))  # no two statements on the same span
+
+
+def test_authenticate_blocks_are_guards(analyze_files) -> None:
+    st = analyze_files({"src/main/kotlin/a/App.kt": """package a
+import io.ktor.server.application.*
+import io.ktor.server.routing.*
+import io.ktor.server.response.*
+import io.ktor.server.auth.*
+fun Application.module() {
+    routing {
+        get("/open") { call.respondText("o") }
+        authenticate("jwt") {
+            get("/me") { call.respondText("me") }
+            authenticate {
+                route("/admin") {
+                    post("/purge") { call.respondText("p") }
+                }
+            }
+        }
+    }
+}
+"""})
+    got = {s.endpoint: s.guards for s in st if s.semanticType == "route"}
+    assert got == {
+        "/open": None,
+        "/me": ['authenticate("jwt")'],
+        "/admin/purge": ['authenticate("jwt")', "authenticate"],
+    }

@@ -209,3 +209,22 @@ object Routes {
         if s.semanticType == "route" and s.framework == "akka-http"
     }
     assert got == {"GET": (None, 7), "POST": ("createA", None)}
+
+
+def test_auth_directives_are_guards(analyze_files) -> None:
+    st = analyze_files({"src/main/scala/a/R.scala": """package a
+import akka.http.scaladsl.server.Directives._
+import akka.http.scaladsl.server.Route
+object R {
+  val route: Route = concat(
+    path("open") { get { complete("o") } },
+    authenticateBasic(realm = "x", check) { user =>
+      authorize(user.isAdmin) {
+        path("admin") { delete { complete("d") } }
+      }
+    }
+  )
+}
+"""})
+    got = {s.endpoint: s.guards for s in st if s.semanticType == "route"}
+    assert got == {"/open": None, "/admin": ["authenticateBasic", "authorize"]}

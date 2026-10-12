@@ -160,3 +160,31 @@ def test_locator_on_a_root_resource_class_does_not_move_it(analyze_files) -> Non
         "Root.java": '@Path("/root")\npublic class Root {\n  @GET public String get() { return ""; }\n}\n',
     })
     assert got == {("Root.java", "get"): "/root"}
+
+
+def test_security_annotations_are_guards(analyze_files) -> None:
+    st = analyze_files({"src/main/java/a/Res.java": """package a;
+import javax.ws.rs.*;
+import javax.annotation.security.*;
+
+@Path("/orders")
+@RolesAllowed({"user"})
+public class Res {
+  @GET
+  public String list() { return ""; }
+
+  @DELETE
+  @DenyAll
+  public void purge() {}
+
+  @POST
+  @PermitAll
+  public void create(String o) {}
+}
+"""})
+    got = {s.method: s.guards for s in st if s.semanticType == "route"}
+    assert got == {
+        "GET": ['RolesAllowed({"user"})'],
+        "DELETE": ['RolesAllowed({"user"})', "DenyAll"],
+        "POST": ['RolesAllowed({"user"})'],  # @PermitAll opens nothing up front: not a guard
+    }

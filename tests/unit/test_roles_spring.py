@@ -198,7 +198,6 @@ public class J {
     assert got == {("timer", "0 2 * * *", "nightly"), ("timer", "5000", "poll")}
 
 
-@pytest.mark.xfail(strict=True, reason="method security annotations are not recorded in guards")
 def test_method_security_is_guard(analyze_files) -> None:
     st = analyze_files(
         _java(

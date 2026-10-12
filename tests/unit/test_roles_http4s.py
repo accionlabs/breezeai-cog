@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import pytest
-
 EP = {"route", "eventbus_consumer", "timer"}
 SRC = "src/main/scala/a/H.scala"
 HEAD = """package a
@@ -67,7 +65,6 @@ def test_router_mount_is_wiring(analyze_files) -> None:
     assert {r.endpoint for r in eps} == {"/api/orders/{id}", "/api/orders"}
 
 
-@pytest.mark.xfail(strict=True, reason="AuthMiddleware is not recorded in guards")
 def test_auth_middleware_is_guard(analyze_files) -> None:
     st = analyze_files(
         _obj("""  val authed = AuthedRoutes.of[User, IO] {

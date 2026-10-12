@@ -107,6 +107,8 @@ def detect_http4s_routes(
     route_bindings: dict[str, list[Statement]] = {}
     call_bindings: dict[int, str] = {}
     string_bindings: dict[str, str] = {}
+    # val name → its AuthMiddleware(...) construction text (the guard an AuthedRoutes runs behind)
+    middleware_bindings: dict[str, str] = {}
 
     def collect_bindings(node: Node) -> None:
         if node.type == "val_definition":
@@ -118,6 +120,9 @@ def detect_http4s_routes(
                     string_bindings[binding] = node_text(value, source).strip('"\'')
                 if value.type == "call_expression":
                     call_bindings[value.start_byte] = binding
+                    fn = value.child_by_field_name("function")
+                    if fn is not None and node_text(fn, source).startswith("AuthMiddleware"):
+                        middleware_bindings[binding] = " ".join(node_text(value, source).split())
         for child in node.named_children:
             collect_bindings(child)
 
@@ -132,6 +137,8 @@ def detect_http4s_routes(
             fn_text = node_text(fn_node, source) if fn_node is not None else ""
             if fn_text.endswith(".of") and "Routes" in fn_text:
                 route_binding = call_bindings.get(node.start_byte)
+                # AuthedRoutes are only served through an AuthMiddleware: every route is guarded.
+                authed = "AuthedRoutes" in fn_text
                 args = node.child_by_field_name("arguments")
                 if args is not None and args.type == "case_block":
                     for clause in args.named_children:
@@ -156,6 +163,8 @@ def detect_http4s_routes(
                                         framework="http4s",
                                         handler=None,
                                         handlerLine=body.start_point[0] + 1 if body is not None else None,
+                                        guards=["AuthMiddleware"] if authed else None,
+                                        authRequired=True if authed else None,
                                         method=verb,
                                         endpoint=endpoint,
                                         routeKind="route",
@@ -190,6 +199,23 @@ def detect_http4s_routes(
         return left + ("/" + right if right else "")
 
     walk(root)
+
+    # Name the guard after the middleware value applied to the AuthedRoutes (``middleware(authed)``).
+    if middleware_bindings and route_bindings:
+        def apply_middleware(node: Node) -> None:
+            if node.type == "call_expression":
+                fn = node.child_by_field_name("function")
+                args = node.child_by_field_name("arguments")
+                guard = middleware_bindings.get(node_text(fn, source)) if fn is not None else None
+                if guard is not None and args is not None:
+                    for arg in args.named_children:
+                        for route in route_bindings.get(node_text(arg, source), []):
+                            if route.guards:
+                                route.guards = [guard]
+            for child in node.named_children:
+                apply_middleware(child)
+
+        apply_middleware(root)
 
     # D2/E3: Only walk for Router mounts if Router is present and there are route bindings
     if b"Router" in source and route_bindings:
@@ -229,6 +255,8 @@ def detect_http4s_routes(
                                             framework=route.framework,
                                             handler=route.handler,
                                             handlerLine=route.handlerLine,
+                                            guards=route.guards,
+                                            authRequired=route.authRequired,
                                             method=route.method,
                                             endpoint=new_ep,
                                             routeKind=route.routeKind,

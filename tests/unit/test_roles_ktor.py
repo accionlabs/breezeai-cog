@@ -107,7 +107,6 @@ def test_authenticate_block_has_no_record(analyze_files) -> None:
     assert r.endpoint == "/me"
 
 
-@pytest.mark.xfail(strict=True, reason="authenticate(...) is not recorded in guards")
 def test_authenticate_is_guard(analyze_files) -> None:
     st = analyze_files(
         _app("""    routing {

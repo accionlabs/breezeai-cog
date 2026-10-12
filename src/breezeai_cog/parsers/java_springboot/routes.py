@@ -11,6 +11,7 @@ from __future__ import annotations
 
 from ...emit import disambiguate, statement_id
 from ...schemas import Decorator, FileRecord, Function, Statement
+from ..java.guards import security_guards
 
 _METHOD_MAPPINGS = {
     "GetMapping": "GET", "PostMapping": "POST", "PutMapping": "PUT",
@@ -103,9 +104,11 @@ def _request_dto(fn: Function) -> str | None:
 
 def detect_spring_routes(record: FileRecord) -> list[Statement]:
     controllers: dict[str, str] = {}  # class id -> base path
+    class_decorators: dict[str, list[Decorator]] = {}
     for cls in record.classes:
         if {d.name for d in cls.decorators} & _CONTROLLER_ANNOTATIONS:
             controllers[cls.id] = _mapping_path(cls.decorators)
+            class_decorators[cls.id] = cls.decorators
     if not controllers:
         return []
 
@@ -115,6 +118,7 @@ def detect_spring_routes(record: FileRecord) -> list[Statement]:
         base = controllers.get(fn.parentId)
         if base is None:
             continue
+        guards = security_guards(class_decorators[fn.parentId], fn.decorators)
         for dec in fn.decorators:
             verb, subs = _routes_of(dec)
             if verb is None:
@@ -133,6 +137,8 @@ def detect_spring_routes(record: FileRecord) -> list[Statement]:
                     handlerLine=fn.startLine,
                     routeKind="route",
                     isRegex=False,
+                    guards=guards,
+                    authRequired=True if guards else None,
                     requestDTO=_request_dto(fn),
                     responseDTO=fn.returnType or None,
                     startLine=fn.startLine,
