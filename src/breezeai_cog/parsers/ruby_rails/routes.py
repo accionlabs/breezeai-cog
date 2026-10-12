@@ -49,6 +49,39 @@ def _arguments(call: Node) -> list[Node]:
     return list(arguments.named_children) if arguments is not None else []
 
 
+def _hash_rocket(argument: Node | None, source: bytes) -> tuple[Node | None, Node | None] | None:
+    """``'/login' => 'sessions#create'`` (a ``pair`` written with ``=>``) → (path node, target
+    node); None for any other argument (a keyword pair like ``to:`` / ``via:`` uses ``:``)."""
+    if argument is None or argument.type != "pair":
+        return None
+    if not any(c.type == "=>" for c in argument.children):
+        return None
+    return argument.child_by_field_name("key"), argument.child_by_field_name("value")
+
+
+def _option(arguments: list[Node], source: bytes, name: str) -> Node | None:
+    """The value of a keyword option (``via: …``) among the call's arguments, else None."""
+    for argument in arguments:
+        if argument.type == "pair" and _hash_rocket(argument, source) is None:
+            key = argument.child_by_field_name("key")
+            if key is not None and node_text(key, source).rstrip(":") == name:
+                return argument.child_by_field_name("value")
+    return None
+
+
+def _via_methods(arguments: list[Node], source: bytes) -> list[str | None]:
+    """The HTTP methods a ``match`` route answers: ``via: :get`` / ``via: [:get, :post]`` → one
+    per verb. No ``via:``, ``via: :all`` or a non-literal value → ``[None]`` (one record, method
+    unknown — never a guessed verb)."""
+    value = _option(arguments, source, "via")
+    items = list(value.named_children) if value is not None and value.type == "array" else [value]
+    verbs = [node_text(v, source).lstrip(":").upper() if v is not None and v.type == "simple_symbol"
+             else None for v in items]
+    if not verbs or None in verbs or "ALL" in verbs:
+        return [None]
+    return list(dict.fromkeys(verbs))
+
+
 def _handler(arguments: list[Node], source: bytes) -> str | None:
     """The ``to: 'controller#action'`` target. The action lives in the controller's file, so
     the route has no ``handlerLine`` (the line of the ``to:`` string is not the handler)."""
@@ -138,30 +171,38 @@ def detect_rails_routes(root: Node, source: bytes, path: str, record: FileRecord
         if method not in _HTTP_METHODS or not _inside_routes_draw(call, source):
             continue
         args = _arguments(call)
-        local = _string_value(args[0], source) if args else None
+        rocket = _hash_rocket(args[0], source) if args else None
+        if rocket is not None:  # post '/login' => 'sessions#create'
+            path_node, target = rocket
+            local = _string_value(path_node, source)
+            handler = _string_value(target, source)
+        else:
+            local = _string_value(args[0], source) if args else None
+            handler = _handler(args, source)
         prefix = _route_prefix(call, source)
         # A literal path under literal scopes → the full path; an unresolved path or scope prefix
         # leaves the address unknown → empty (never a path missing its prefix).
         endpoint = _join(prefix, local) if local is not None and prefix is not None else None
-        handler = _handler(args, source)
         line = call.start_point[0] + 1
-        record.statements.append(
-            Statement(
-                id=disambiguate(statement_id(path, line, call.start_point[1]), seen),
-                parentId=owner_id(line, record.functions, record.classes, fallback),
-                nodeType="call",
-                semanticType="route",
-                text=first_line(node_text(call, source)),
-                method=method.upper() if method != "match" else None,
-                endpoint=endpoint,
-                handler=handler,
-                framework="rails",
-                routeKind="route",
-                isRegex=False,
-                startLine=line,
-                endLine=call.end_point[0] + 1,
-                path=path,
+        methods = _via_methods(args, source) if method == "match" else [method.upper()]
+        for verb in methods:  # match … via: [:get, :post] → one binding per verb
+            record.statements.append(
+                Statement(
+                    id=disambiguate(statement_id(path, line, call.start_point[1]), seen),
+                    parentId=owner_id(line, record.functions, record.classes, fallback),
+                    nodeType="call",
+                    semanticType="route",
+                    text=first_line(node_text(call, source)),
+                    method=verb,
+                    endpoint=endpoint,
+                    handler=handler,
+                    framework="rails",
+                    routeKind="route",
+                    isRegex=False,
+                    startLine=line,
+                    endLine=call.end_point[0] + 1,
+                    path=path,
+                )
             )
-        )
         matched = True
     return matched

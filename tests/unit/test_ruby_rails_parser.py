@@ -123,3 +123,36 @@ end
         "dyn#index": None,                  # unresolved scope path → address unknown
         "photos#preview": None,             # resource nesting not computed → unknown
     }
+
+
+def test_rails_hash_rocket_and_match_via(tmp_path: Path) -> None:
+    source = b'''require "rails"
+Rails.application.routes.draw do
+  post "/login" => "sessions#create", as: :login
+  namespace :admin do
+    get "stats" => "stats#index"
+  end
+  get PATH => "x#y"
+  match "/any", to: "x#any", via: [:get, :post]
+  match "/one" => "x#one", via: :put
+  match "/all", to: "x#all", via: :all
+  match "/bare", to: "x#bare"
+end
+'''
+    record = RailsParser().parse_file(_context(tmp_path, "config/routes.rb", source))
+    got = sorted(
+        (s.method or "", s.endpoint or "", s.handler or "")
+        for s in record.statements if s.semanticType == "route"
+    )
+    assert got == sorted([
+        ("POST", "/login", "sessions#create"),
+        ("GET", "/admin/stats", "stats#index"),
+        ("GET", "", "x#y"),            # non-literal path: endpoint empty, handler kept
+        ("GET", "/any", "x#any"),      # one binding per verb in via:
+        ("POST", "/any", "x#any"),
+        ("PUT", "/one", "x#one"),
+        ("", "/all", "x#all"),         # via: :all → method unknown
+        ("", "/bare", "x#bare"),       # no via: → method unknown
+    ])
+    ids = [s.id for s in record.statements if s.semanticType == "route"]
+    assert len(ids) == len(set(ids))

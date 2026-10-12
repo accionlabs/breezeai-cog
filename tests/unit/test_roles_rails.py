@@ -52,13 +52,11 @@ def test_relative_path_is_normalised(analyze_files) -> None:
     assert [s.endpoint for s in _eps(st)] == ["/about"]
 
 
-@pytest.mark.xfail(strict=True, reason="hash-rocket form leaves endpoint and handler empty")
 def test_hash_rocket_is_binding(analyze_files) -> None:
     st = _routes(analyze_files, "  post '/login' => 'sessions#create'\n")
     assert [(s.method, s.endpoint) for s in _eps(st)] == [("POST", "/login")]
 
 
-@pytest.mark.xfail(strict=True, reason="match ... via: gives one record with no method")
 def test_match_via_is_one_binding_per_verb(analyze_files) -> None:
     st = _routes(analyze_files, "  match '/any', to: 'x#y', via: [:get, :post]\n")
     assert sorted(s.method for s in _eps(st)) == ["GET", "POST"]
