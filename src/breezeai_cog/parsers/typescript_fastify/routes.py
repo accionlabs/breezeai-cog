@@ -86,6 +86,8 @@ _SCOPE_NODE_TYPES = {
 
 _CHAINABLE_METHODS = {"route", "register"}
 
+_ROUTE_HOOKS = ("onRequest", "preValidation", "preHandler")
+
 _PLUGIN_WRAPPER_NAMES = {
     "fp",
     "fastifyPlugin",
@@ -853,6 +855,7 @@ def _http_method_route(
         fid=fid,
         fn_by_name=fn_by_name,
     )
+    guards = _route_guards(args[1:], source)
 
     for method in methods:
         out.append(
@@ -867,6 +870,7 @@ def _http_method_route(
                 path=path,
                 source=source,
                 seen_ids=seen_ids,
+                guards=guards,
             )
         )
 
@@ -937,6 +941,7 @@ def _app_route(
         fid=fid,
         fn_by_name=fn_by_name,
     )
+    guards = _route_guards([args[0]], source)
 
     for method in methods:
         out.append(
@@ -951,8 +956,28 @@ def _app_route(
                 path=path,
                 source=source,
                 seen_ids=seen_ids,
+                guards=guards,
             )
         )
+
+
+def _route_guards(option_nodes: list[Node], source: bytes) -> Optional[list[str]]:
+    guards: list[str] = []
+    for option_node in option_nodes:
+        if option_node.type != "object":
+            continue
+        pairs = _object_pairs(option_node, source)
+        for hook in _ROUTE_HOOKS:
+            value = pairs.get(hook)
+            if value is None:
+                continue
+            values = value.named_children if value.type == "array" else [value]
+            guards.extend(
+                node_text(candidate, source)
+                for candidate in values
+                if candidate.type in {"identifier", "member_expression"}
+            )
+    return guards or None
 
 
 def _method_values(
@@ -1187,6 +1212,7 @@ def _make_statement(
     path: str,
     source: bytes,
     seen_ids: set[str],
+    guards: Optional[list[str]] = None,
 ) -> Statement:
     """Create a Statement for a Fastify route or plugin mount."""
 
@@ -1213,8 +1239,8 @@ def _make_statement(
         handler=handler,
         handlerLine=handler_line,
         isRegex=False,
-        authRequired=None,
-        guards=None,
+        authRequired=True if guards else None,
+        guards=guards,
         startLine=start_line,
         endLine=node.end_point[0] + 1,
         path=path,

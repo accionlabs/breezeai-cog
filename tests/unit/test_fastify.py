@@ -107,6 +107,28 @@ def test_template_route_paths_use_parameter_placeholders() -> None:
     ]
 
 
+def test_route_hooks_are_captured_as_guards() -> None:
+    source = (
+        b"const fastify = Fastify();\n"
+        b"fastify.get('/account', { preHandler: requireAuth }, getAccount);\n"
+        b"fastify.route({ method: 'POST', url: '/admin', "
+        b"onRequest: [authenticate, Admin.authorize], "
+        b"preValidation: validateRequest, handler: saveAdmin });"
+    )
+
+    routes = _detect_routes(source)
+
+    assert [(route.method, route.endpoint, route.guards, route.authRequired) for route in routes] == [
+        ("GET", "/account", ["requireAuth"], True),
+        (
+            "POST",
+            "/admin",
+            ["authenticate", "Admin.authorize", "validateRequest"],
+            True,
+        ),
+    ]
+
+
 def test_detects_route_with_named_handler() -> None:
     source = (
         b'import Fastify from "fastify";\n'
