@@ -24,6 +24,7 @@ from tree_sitter import Node
 
 from ...emit import disambiguate, file_id, statement_id
 from ...schemas import FileRecord, Function, Statement
+from ..additive import DetectContext, Detector, register_detector
 from ..statements_common import url_placeholder
 from ..treesitter import node_text
 
@@ -817,15 +818,22 @@ def _dispatch_call(
 
 def _find_handler_arg(
     trailing_args: list[Node],
+    source: bytes,
 ) -> Optional[Node]:
     """Find the most likely route handler.
 
     Checks arguments from right to left because the handler is normally
-    the last argument.
+    the last argument, including a handler in a route-options object.
     """
     for candidate in reversed(trailing_args):
         if candidate.type in _CALLABLE_NODE_TYPES:
             return candidate
+        if candidate.type == "object":
+            handler = _object_pairs(candidate, source).get("handler")
+            if handler is not None and (
+                handler.type in _CALLABLE_NODE_TYPES or handler.type in _SHORTHAND_PROPERTY_TYPES
+            ):
+                return handler
 
     return None
 
@@ -854,7 +862,7 @@ def _http_method_route(
     if url is None or not (url.startswith("/") or url in ("", "*")):
         return
 
-    handler_node = _find_handler_arg(args[1:])
+    handler_node = _find_handler_arg(args[1:], source)
 
     if handler_node is None:
         logger.debug(
@@ -1184,7 +1192,7 @@ def _resolve_handler(
     if node is None:
         return fid, None, None
 
-    if node.type == "identifier":
+    if node.type == "identifier" or node.type in _SHORTHAND_PROPERTY_TYPES:
         name = node_text(
             node,
             source,
@@ -1220,6 +1228,27 @@ def _resolve_handler(
         )
 
     return fid, None, node.start_point[0] + 1
+
+
+def _run(dc: DetectContext) -> str | None:
+    routes = detect_fastify_routes(
+        dc.root,
+        dc.source,
+        dc.path,
+        dc.record,
+        seen_ids={statement.id for statement in dc.record.statements},
+        resolution_index=dc.ctx.resolution_index,
+    )
+    dc.record.statements.extend(routes)
+    found = bool(routes) or any(statement.framework == "fastify" for statement in dc.record.statements)
+    return "fastify" if found else None
+
+
+# The detector has two byte markers, `fastify` and `Fastify`, so it keeps its own guard.
+register_detector(Detector(
+    name="fastify", language="typescript", order=15, run=_run,
+    guard=None, skip_fixtures=True, frameworks=("fastify",),
+))
 
 
 def _make_statement(

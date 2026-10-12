@@ -167,6 +167,20 @@ def test_detects_route_with_named_handler() -> None:
     ]
 
 
+def test_shorthand_route_resolves_handler_from_options_object() -> None:
+    source = (
+        b"const fastify = Fastify();\n"
+        b"function getUsers(request, reply) { return []; }\n"
+        b"fastify.get('/opts', { schema: {}, handler: getUsers });"
+    )
+
+    routes = _detect_routes(source)
+
+    assert [(route.method, route.endpoint, route.handler) for route in routes] == [
+        ("GET", "/opts", "getUsers")
+    ]
+
+
 def test_inline_handler_route_is_parented_to_enclosing_plugin_function() -> None:
     source = (
         b'import type { FastifyInstance } from "fastify";\n'
