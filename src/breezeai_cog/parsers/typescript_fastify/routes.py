@@ -108,6 +108,13 @@ _FUNCTION_NODE_TYPES = {
 
 _LEXICAL_SCOPE_NODE_TYPES = _SCOPE_NODE_TYPES | _FUNCTION_NODE_TYPES
 _SCOPE_LOOKUP_NODE_TYPES = {"call_expression"} | _IDENTIFIER_LIKE_TYPES
+_NON_EXECUTABLE_NODE_TYPES = {
+    "import_statement",
+    "export_clause",
+    "interface_declaration",
+    "type_alias_declaration",
+    "comment",
+}
 
 
 @dataclass
@@ -185,11 +192,29 @@ class _FileIndex:
         self.external_constants = external_constants
         self.node_scopes: dict[tuple[int, int, str], _Scope] = {}
         self.scopes: dict[tuple[int, int, str], _Scope] = {}
+        self.register_calls: list[Node] = []
         self.root_scope = self._build(root, source)
+        self.mounted_plugin_nodes: set[tuple[int, int, str]] = self._find_mounted_plugins(source)
 
     @staticmethod
     def node_key(node: Node) -> tuple[int, int, str]:
         return node.start_byte, node.end_byte, node.type
+
+    def _find_mounted_plugins(self, source: bytes) -> set[tuple[int, int, str]]:
+        """Find named plugin declarations from register calls collected during the first scan."""
+        mounted: set[tuple[int, int, str]] = set()
+        for current in self.register_calls:
+            dispatch = _dispatch_call(current, source, self)
+            if dispatch is not None and dispatch[0] == "register" and dispatch[2]:
+                plugin_node = _unwrap_plugin(dispatch[2][0], source)
+                if plugin_node.type == "identifier":
+                    callable_node = self.resolve_callable(
+                        node_text(plugin_node, source),
+                        plugin_node,
+                    )
+                    if callable_node is not None:
+                        mounted.add(self.node_key(callable_node))
+        return mounted
 
     def _build(self, root: Node, source: bytes) -> _Scope:
         pending: list[tuple[Node, Optional[_Scope], bool]] = [(root, None, False)]
@@ -210,6 +235,13 @@ class _FileIndex:
 
             if node.type in _SCOPE_LOOKUP_NODE_TYPES:
                 self.node_scopes[self.node_key(node)] = scope
+
+            if node.type == "call_expression":
+                callee = node.child_by_field_name("function")
+                if callee is not None and callee.type == "member_expression":
+                    prop = callee.child_by_field_name("property")
+                    if prop is not None and node_text(prop, source) == "register":
+                        self.register_calls.append(node)
 
             if node.type in _FUNCTION_NODE_TYPES:
                 self._index_function(node, scope, source, nested_function)
@@ -660,7 +692,7 @@ def _walk(
     prefix: Optional[str],
 ) -> None:
     """Iteratively scan syntax nodes using the prebuilt per-file scope index."""
-    mounted_plugin_nodes = _registered_plugin_nodes(node, source, file_index)
+    mounted_plugin_nodes = file_index.mounted_plugin_nodes
     pending: list[tuple[Node, Optional[str], frozenset]] = [(node, prefix, frozenset())]
 
     while pending:
@@ -732,36 +764,21 @@ def _walk(
         pending.extend(
             (child, current_prefix, chain)
             for child in reversed(current.named_children)
-            if file_index.node_key(child) not in mounted_plugin_nodes
+            if child.type not in _NON_EXECUTABLE_NODE_TYPES
+            and file_index.node_key(child) not in mounted_plugin_nodes
         )
 
 
 def _registered_plugin_nodes(
-    root: Node,
+    root_or_index: Node | _FileIndex,
     source: bytes,
-    file_index: _FileIndex,
+    file_index: Optional[_FileIndex] = None,
 ) -> set[tuple[int, int, str]]:
     """Find named plugin declarations so they are visited only at their mount prefix."""
-    mounted: set[tuple[int, int, str]] = set()
-    pending = [root]
-
-    while pending:
-        current = pending.pop()
-        if current.type == "call_expression":
-            dispatch = _dispatch_call(current, source, file_index)
-            if dispatch is not None and dispatch[0] == "register" and dispatch[2]:
-                plugin_node = _unwrap_plugin(dispatch[2][0], source)
-                if plugin_node.type == "identifier":
-                    callable_node = file_index.resolve_callable(
-                        node_text(plugin_node, source),
-                        plugin_node,
-                    )
-                    if callable_node is not None:
-                        mounted.add(file_index.node_key(callable_node))
-
-        pending.extend(current.named_children)
-
-    return mounted
+    index = root_or_index if isinstance(root_or_index, _FileIndex) else file_index
+    if index is not None:
+        return index.mounted_plugin_nodes
+    return set()
 
 
 def _chain_base(node: Optional[Node], source: bytes) -> Optional[Node]:
