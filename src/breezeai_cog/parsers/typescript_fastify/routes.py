@@ -85,6 +85,7 @@ _SCOPE_NODE_TYPES = {
 }
 
 _CHAINABLE_METHODS = {"route", "register"}
+_FASTIFY_CALL_METHODS = _HTTP_METHODS | _CHAINABLE_METHODS
 
 _ROUTE_HOOKS = ("onRequest", "preValidation", "preHandler")
 
@@ -630,51 +631,27 @@ def _is_fastify_factory_call(
     if callee is None:
         return False
 
-    if callee.type == "identifier" and node_text(callee, source) in _FASTIFY_FACTORY_NAMES:
-        return True
-
     if callee.type == "member_expression":
         prop = callee.child_by_field_name("property")
-        factory = callee.child_by_field_name("object")
-        if (
-            prop is not None
-            and node_text(prop, source) == "default"
-            and factory is not None
-            and factory.type == "identifier"
-            and node_text(factory, source) in _FASTIFY_FACTORY_NAMES
-        ):
-            return True
+        if prop is None or node_text(prop, source) != "default":
+            return False
+        callee = callee.child_by_field_name("object")
+        if callee is None:
+            return False
 
-        if (
-            prop is not None
-            and node_text(prop, source) == "default"
-            and factory is not None
-            and factory.type == "call_expression"
-        ):
-            inner_callee = factory.child_by_field_name("function")
-            inner_args = factory.child_by_field_name("arguments")
-            if (
-                inner_callee is not None
-                and node_text(inner_callee, source) == "require"
-                and inner_args is not None
-            ):
-                arg_nodes = list(inner_args.named_children)
-                if arg_nodes and _string_literal(arg_nodes[0], source) == "fastify":
-                    return True
+    if callee.type == "identifier":
+        return node_text(callee, source) in _FASTIFY_FACTORY_NAMES
 
     if callee.type == "call_expression":
         inner_callee = callee.child_by_field_name("function")
         inner_args = callee.child_by_field_name("arguments")
-
         if (
             inner_callee is not None
             and node_text(inner_callee, source) == "require"
             and inner_args is not None
         ):
             arg_nodes = list(inner_args.named_children)
-
-            if arg_nodes and _string_literal(arg_nodes[0], source) == "fastify":
-                return True
+            return bool(arg_nodes and _string_literal(arg_nodes[0], source) == "fastify")
 
     return False
 
@@ -788,10 +765,7 @@ def _chain_base(node: Optional[Node], source: bytes) -> Optional[Node]:
         if callee is None or callee.type != "member_expression":
             break
         prop = callee.child_by_field_name("property")
-        if prop is None or (
-            node_text(prop, source) not in _HTTP_METHODS
-            and node_text(prop, source) not in _CHAINABLE_METHODS
-        ):
+        if prop is None or node_text(prop, source) not in _FASTIFY_CALL_METHODS:
             break
         node = callee.child_by_field_name("object")
     return node
@@ -816,7 +790,7 @@ def _dispatch_call(
 
     member_name = node_text(prop, source)
 
-    if member_name not in _HTTP_METHODS and member_name not in {"route", "register"}:
+    if member_name not in _FASTIFY_CALL_METHODS:
         return None
 
     receiver = _chain_base(callee.child_by_field_name("object"), source)
