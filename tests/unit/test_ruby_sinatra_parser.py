@@ -87,3 +87,11 @@ def test_sinatra_parser_claims_only_sinatra_sources(tmp_path: Path) -> None:
     assert not parser.claims("app.rb", b'DOC = "see Sinatra::Base for details"')
     assert not parser.claims("app.rb", b"# Sinatra::Application is mentioned here\nclass PlainRuby; end")
     assert parser.frameworks == ["sinatra"]
+
+
+def test_sinatra_block_handler_has_line_only(tmp_path: Path) -> None:
+    # The handler is the route's anonymous block: no name, handlerLine = where the block starts.
+    source = b'''require "sinatra"\n\nget "/a" do\n  "a"\nend\n\npost "/b",\n     provides: :json do\n  "b"\nend\n'''
+    record = SinatraParser().parse_file(_context(tmp_path, "app.rb", source))
+    got = {s.endpoint: (s.handler, s.handlerLine) for s in record.statements if s.semanticType == "route"}
+    assert got == {"/a": (None, 3), "/b": (None, 8)}

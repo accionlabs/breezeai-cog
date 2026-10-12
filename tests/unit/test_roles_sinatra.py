@@ -25,7 +25,6 @@ def test_verb_block_is_binding(analyze_files) -> None:
     )
 
 
-@pytest.mark.xfail(strict=True, reason="anonymous block handler has no handlerLine")
 def test_anonymous_handler_has_line(analyze_files) -> None:
     (r,) = _eps(analyze_files({"app.rb": APP}))
     assert r.handlerLine == 7

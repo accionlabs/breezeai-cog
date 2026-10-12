@@ -70,6 +70,7 @@ def detect_sinatra_routes(root: Node, source: bytes, path: str, record: FileReco
         if endpoint is None:
             continue
         line = call.start_point[0] + 1
+        block = call.child_by_field_name("block")  # the handler: an anonymous block
         record.statements.append(
             Statement(
                 id=disambiguate(statement_id(path, line, call.start_point[1]), seen),
@@ -80,6 +81,7 @@ def detect_sinatra_routes(root: Node, source: bytes, path: str, record: FileReco
                 method=method.upper(),
                 endpoint=endpoint,
                 framework="sinatra",
+                handlerLine=block.start_point[0] + 1 if block is not None else None,
                 routeKind="route",
                 isRegex=False,
                 startLine=line,

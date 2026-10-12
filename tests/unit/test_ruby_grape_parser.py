@@ -73,3 +73,11 @@ def test_grape_routes_are_gated_and_claims_are_specific(tmp_path: Path) -> None:
     assert not parser.claims("plain.rb", b'DOC = "Grape::API is documented here"')
     assert not parser.claims("plain.rb", b"# Grape::Endpoint is mentioned here\nclass PlainRuby; end")
     assert parser.frameworks == ["grape"]
+
+
+def test_grape_block_handler_has_line_only(tmp_path: Path) -> None:
+    # The handler is the route's anonymous block: no name, handlerLine = where the block starts.
+    source = b'''require "grape"\n\nclass API < Grape::API\n  get "/a" do\n    1\n  end\n  namespace :n do\n    post "/b" do\n      2\n    end\n  end\nend\n'''
+    record = GrapeParser().parse_file(_context(tmp_path, "api.rb", source))
+    got = {s.endpoint: (s.handler, s.handlerLine) for s in record.statements if s.semanticType == "route"}
+    assert got == {"/a": (None, 4), "/n/b": (None, 8)}
