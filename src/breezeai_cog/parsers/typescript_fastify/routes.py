@@ -207,7 +207,7 @@ class _FileIndex:
         for current in self.register_calls:
             dispatch = _dispatch_call(current, source, self)
             if dispatch is not None and dispatch[0] == "register" and dispatch[2]:
-                plugin_node = _unwrap_plugin(dispatch[2][0], source)
+                plugin_node, _ = _unwrap_plugin(dispatch[2][0], source)
                 if plugin_node.type == "identifier":
                     callable_node = self.resolve_callable(
                         node_text(plugin_node, source),
@@ -1063,13 +1063,13 @@ def _fastify_register(
     if not args:
         return []
 
-    plugin_node = _unwrap_plugin(args[0], source)
+    plugin_node, wrapped = _unwrap_plugin(args[0], source)
     opts_node = args[1] if len(args) > 1 else None
 
     child_prefix = prefix
     mount_endpoint = (prefix or "/") if prefix is not None else None
 
-    if opts_node is not None and opts_node.type == "object":
+    if not wrapped and opts_node is not None and opts_node.type == "object":
         pairs = _object_pairs(opts_node, source)
         prefix_node = pairs.get("prefix")
 
@@ -1134,8 +1134,9 @@ def _fastify_register(
     return children
 
 
-def _unwrap_plugin(node: Node, source: bytes) -> Node:
-    """Strip `fp(plugin)` / `fastifyPlugin(plugin)` wrappers around a plugin."""
+def _unwrap_plugin(node: Node, source: bytes) -> tuple[Node, bool]:
+    """Strip plugin wrappers and report whether prefix options must be ignored."""
+    wrapped = False
     while node.type == "call_expression":
         callee = node.child_by_field_name("function")
         call_args = node.child_by_field_name("arguments")
@@ -1148,7 +1149,8 @@ def _unwrap_plugin(node: Node, source: bytes) -> Node:
         ):
             break
         node = call_args.named_children[0]
-    return node
+        wrapped = True
+    return node, wrapped
 
 
 def _join_prefix(

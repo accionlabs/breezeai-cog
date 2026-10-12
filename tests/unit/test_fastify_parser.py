@@ -578,6 +578,25 @@ def test_register_resolves_named_plugin_references_with_prefixes() -> None:
     ]
 
 
+def test_nested_named_plugins_keep_prefixes_without_duplicate_routes() -> None:
+    source = (
+        b"const fastify = Fastify();\n"
+        b"async function users(usersServer) {\n"
+        b"  usersServer.get('/items', handler);\n"
+        b"}\n"
+        b"async function api(apiServer) {\n"
+        b"  apiServer.register(users, { prefix: '/users' });\n"
+        b"}\n"
+        b"fastify.register(api, { prefix: '/api' });"
+    )
+
+    routes = [route for route in _detect_routes(source) if route.method is not None]
+
+    assert [(route.method, route.endpoint) for route in routes] == [
+        ("GET", "/api/users/items")
+    ]
+
+
 def test_unresolved_register_prefix_is_null_on_mount_and_nested_route() -> None:
     source = (
         b"const fastify = Fastify();\n"
@@ -704,9 +723,32 @@ def test_fastify_plugin_wrapper_and_wildcard_routes() -> None:
 
     endpoints = [(r.method, r.endpoint) for r in _detect_routes(source)]
 
-    assert ("GET", "/v1/u") in endpoints
-    assert ("GET", "/v1") in endpoints
+    assert ("GET", "/u") in endpoints
+    assert (None, "/") in endpoints
     assert ("GET", "/*") in endpoints
+
+
+def test_fastify_plugin_wrapper_ignores_prefix_but_plain_plugin_uses_it() -> None:
+    wrapped_source = (
+        b"const f = Fastify();\n"
+        b"f.register(fp(async (i) => { i.get('/health', h); }), { prefix: '/api' });"
+    )
+    plain_source = (
+        b"const f = Fastify();\n"
+        b"f.register(async (i) => { i.get('/health', h); }, { prefix: '/api' });"
+    )
+
+    wrapped_routes = _detect_routes(wrapped_source)
+    plain_routes = _detect_routes(plain_source)
+
+    assert [(route.method, route.endpoint) for route in wrapped_routes] == [
+        (None, "/"),
+        ("GET", "/health"),
+    ]
+    assert [(route.method, route.endpoint) for route in plain_routes] == [
+        (None, "/api"),
+        ("GET", "/api/health"),
+    ]
 
 
 def test_chained_register_and_route_calls_are_detected() -> None:
