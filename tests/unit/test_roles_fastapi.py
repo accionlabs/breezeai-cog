@@ -61,7 +61,6 @@ def test_websocket_is_binding(analyze_files) -> None:
     assert (r.routeKind, r.handler) == ("ws", "ws")
 
 
-@pytest.mark.xfail(strict=True, reason="APIRouter(prefix=...) not joined into the endpoint")
 def test_router_prefix_is_wiring(analyze_files) -> None:
     st = analyze_files(
         {

@@ -15,6 +15,10 @@ from ..treesitter import node_text
 # HTTP verbs (+ websocket) exposed as decorator methods on FastAPI app/router objects.
 _VERBS = {"get", "post", "put", "patch", "delete", "options", "head", "trace", "websocket"}
 
+#: A prefix that exists but has no resolvable value (``prefix=settings.API_PREFIX``): the
+#: bindings behind it have an unknown address, so their endpoint is empty.
+_UNKNOWN = object()
+
 
 def _name(node: Node, source: bytes) -> str:
     n = node.child_by_field_name("name")
@@ -26,9 +30,8 @@ def _endpoint(call: Node, source: bytes) -> str | None:
     if args is None:
         return None
     for arg in args.named_children:
-        if arg.type == "string":
-            content = next((c for c in arg.named_children if c.type == "string_content"), None)
-            return node_text(content, source) if content is not None else None
+        if arg.type == "string":  # "" is the router's prefix itself (``@router.get("")``)
+            return _literal(arg, source)
     return None
 
 
@@ -56,8 +59,93 @@ def _methods_kwarg(call: Node, source: bytes) -> list[str]:
     return []
 
 
+def _literal(node: Node | None, source: bytes) -> str | None:
+    """A plain string literal's value (no f-string interpolation), else None."""
+    if node is None or node.type != "string":
+        return None
+    if any(c.type == "interpolation" for c in node.named_children):
+        return None
+    content = next((c for c in node.named_children if c.type == "string_content"), None)
+    return node_text(content, source) if content is not None else ""
+
+
+def _prefix_kwarg(call: Node, source: bytes) -> str | object:
+    """The ``prefix=`` keyword of an ``APIRouter(...)`` / ``include_router(...)`` call: its literal
+    value, ``""`` when absent, or :data:`_UNKNOWN` when present but not a literal (Python has no
+    compile-time constants, so a name or attribute has no value cog can trust)."""
+    args = call.child_by_field_name("arguments")
+    for arg in args.named_children if args is not None else []:
+        key = arg.child_by_field_name("name") if arg.type == "keyword_argument" else None
+        if key is not None and node_text(key, source) == "prefix":
+            value = _literal(arg.child_by_field_name("value"), source)
+            return value if value is not None else _UNKNOWN
+    return ""
+
+
+def _calls(root: Node) -> list[Node]:
+    out: list[Node] = []
+
+    def walk(n: Node) -> None:
+        if n.type == "call":
+            out.append(n)
+        for c in n.named_children:
+            walk(c)
+
+    walk(root)
+    return out
+
+
+def _router_bases(root: Node, source: bytes) -> dict[str, str | object]:
+    """Router / app variable → the prefix its routes are served under, from this file's own
+    wiring: ``router = APIRouter(prefix="/users")`` and ``app.include_router(router, prefix=…)``
+    (nested includes compose; FastAPI joins prefixes by plain concatenation).
+
+    A router never included in this file keeps its own prefix (no wiring seen). A router
+    included at more than one place keeps its own prefix too (ambiguous). A prefix that exists
+    but is not a literal makes the base :data:`_UNKNOWN`. Includes of routers from other files
+    (``app.include_router(orders.router)``) are not resolved here."""
+    own: dict[str, str | object] = {}
+    for node in _calls(root):
+        fn = node.child_by_field_name("function")
+        parent = node.parent
+        if (fn is not None and node_text(fn, source) in ("APIRouter", "fastapi.APIRouter")
+                and parent is not None and parent.type == "assignment"):
+            target = parent.child_by_field_name("left")
+            if target is not None and target.type == "identifier":
+                own[node_text(target, source)] = _prefix_kwarg(node, source)
+    includes: dict[str, set[tuple[str, object]]] = {}
+    for node in _calls(root):
+        fn = node.child_by_field_name("function")
+        if fn is None or fn.type != "attribute":
+            continue
+        attr = fn.child_by_field_name("attribute")
+        obj = fn.child_by_field_name("object")
+        args = node.child_by_field_name("arguments")
+        first = next((a for a in args.named_children if a.type != "keyword_argument"), None) \
+            if args is not None else None
+        if (attr is None or obj is None or node_text(attr, source) != "include_router"
+                or first is None or first.type != "identifier"
+                or node_text(first, source) not in own):
+            continue
+        includes.setdefault(node_text(first, source), set()).add(
+            (node_text(obj, source), _prefix_kwarg(node, source)))
+
+    def base(name: str, seen: frozenset[str]) -> str | object:
+        prefix = own.get(name, "")
+        sites = includes.get(name, set())
+        if len(sites) != 1 or name in seen:  # not included here, or ambiguous, or a cycle
+            return prefix
+        (parent, mount), = sites
+        parent_base = base(parent, seen | {name})
+        if _UNKNOWN in (parent_base, mount, prefix):
+            return _UNKNOWN
+        return f"{parent_base}{mount}{prefix}"
+
+    return {name: base(name, frozenset()) for name in own}
+
+
 def _routes(dec: Node, fdef: Node, source: bytes, path: str, class_name: str | None,
-            seen_ids: set[str]) -> list[Statement]:
+            seen_ids: set[str], bases: dict[str, str | object]) -> list[Statement]:
     call = dec.named_children[0] if dec.named_children else None
     if call is None or call.type != "call":
         return []
@@ -80,6 +168,12 @@ def _routes(dec: Node, fdef: Node, source: bytes, path: str, class_name: str | N
     handler_line = fdef.start_point[0] + 1
     start_line, start_col = dec.start_point[0] + 1, dec.start_point[1]
     endpoint = _endpoint(call, source)
+    receiver = func.child_by_field_name("object")
+    served = bases.get(node_text(receiver, source), "") if receiver is not None else ""
+    if served is _UNKNOWN:
+        endpoint = None  # a prefix we cannot resolve: the address is unknown
+    elif endpoint is not None and isinstance(served, str):
+        endpoint = (served + endpoint) or None
     text = node_text(dec, source).split("\n", 1)[0]
     parent = function_id(path, name, handler_line, class_name=class_name)
     return [
@@ -106,6 +200,7 @@ def _routes(dec: Node, fdef: Node, source: bytes, path: str, class_name: str | N
 def detect_routes(root: Node, source: bytes, path: str, *, seen_ids: set[str]) -> list[Statement]:
     """Walk the tree (tracking the enclosing class) and emit route statements."""
     routes: list[Statement] = []
+    bases = _router_bases(root, source) if b"APIRouter" in source else {}
 
     def walk(node: Node, class_name: str | None) -> None:
         for child in node.named_children:
@@ -122,7 +217,7 @@ def detect_routes(root: Node, source: bytes, path: str, *, seen_ids: set[str]) -
                         walk(body, _name(cdef, source))
                 elif fdef is not None:
                     for dec in (c for c in child.named_children if c.type == "decorator"):
-                        routes.extend(_routes(dec, fdef, source, path, class_name, seen_ids))
+                        routes.extend(_routes(dec, fdef, source, path, class_name, seen_ids, bases))
                     body = fdef.child_by_field_name("body")
                     if body is not None:
                         walk(body, class_name)

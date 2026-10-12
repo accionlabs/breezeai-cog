@@ -116,3 +116,68 @@ def test_claims_selects_fastapi() -> None:
     assert registry.select("x.py", b"from fastapi import FastAPI").name == "python-fastapi"
     assert registry.select("x.py", b"print(1)").name == "python"  # plain python -> base
     registry.clear()
+
+
+# ── Router prefixes (same file) ───────────────────────────────────────────────────────────────
+def _endpoints(analyze_files, src: str) -> dict[str, str | None]:
+    st = analyze_files({"main.py": src})
+    return {s.handler: s.endpoint for s in st if s.semanticType == "route"}
+
+
+def test_router_prefix_and_same_file_include_compose(analyze_files) -> None:
+    got = _endpoints(analyze_files, (
+        "from fastapi import FastAPI, APIRouter\n"
+        "app = FastAPI()\n"
+        "users = APIRouter(prefix='/users')\n"
+        "admin = APIRouter(prefix='/admin')\n"
+        "plain = APIRouter()\n"
+        "@users.get('/{uid}')\ndef get_user(uid: int):\n    pass\n"
+        "@admin.get('/stats')\ndef stats():\n    pass\n"
+        "@plain.get('/ping')\ndef ping():\n    pass\n"
+        "@app.get('/health')\ndef health():\n    pass\n"
+        "admin.include_router(users, prefix='/v1')\n"
+        "app.include_router(admin, prefix='/api')\n"
+        "app.include_router(plain)\n"
+    ))
+    assert got == {
+        "get_user": "/api/admin/v1/users/{uid}",  # nested include: prefixes concatenate
+        "stats": "/api/admin/stats",
+        "ping": "/ping",                          # included with no prefix
+        "health": "/health",
+    }
+
+
+def test_unresolved_prefix_leaves_endpoint_empty(analyze_files) -> None:
+    got = _endpoints(analyze_files, (
+        "from fastapi import FastAPI, APIRouter\nfrom app.config import settings\n"
+        "app = FastAPI()\n"
+        "orders = APIRouter(prefix='/orders')\n"
+        "items = APIRouter(prefix=settings.ITEMS)\n"
+        "@orders.get('/{oid}')\ndef get_order(oid: int):\n    pass\n"
+        "@items.get('/')\ndef list_items():\n    pass\n"
+        "app.include_router(orders, prefix=settings.API_V1_PREFIX)\n"
+    ))
+    # a prefix that exists but has no value: the address is unknown — never a partial path
+    assert got == {"get_order": None, "list_items": None}
+
+
+def test_router_included_twice_or_not_here_keeps_its_own_path(analyze_files) -> None:
+    got = _endpoints(analyze_files, (
+        "from fastapi import FastAPI, APIRouter\n"
+        "app = FastAPI()\n"
+        "shared = APIRouter(prefix='/shared')\n"
+        "lonely = APIRouter(prefix='/lonely')\n"
+        "@shared.get('/x')\ndef x():\n    pass\n"
+        "@lonely.get('/y')\ndef y():\n    pass\n"
+        "app.include_router(shared, prefix='/v1')\n"
+        "app.include_router(shared, prefix='/v2')\n"
+    ))
+    assert got == {"x": "/shared/x", "y": "/lonely/y"}
+
+
+def test_empty_path_is_the_router_prefix(analyze_files) -> None:
+    got = _endpoints(analyze_files, (
+        "from fastapi import APIRouter\nrouter = APIRouter(prefix='/customers')\n"
+        "@router.get('')\ndef list_customers():\n    pass\n"
+    ))
+    assert got == {"list_customers": "/customers"}
