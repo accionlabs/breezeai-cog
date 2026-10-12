@@ -147,10 +147,10 @@ parser can be confidently wrong. Check every one of them against real code:
 |---|---|---|
 | File ownership | `claims()` | A file that only *mentions* `io.vertx` in a comment or string is claimed as Vert.x. |
 | `semanticType` = `api_call` / `query_statement` / `db_method_call` | `parsers/detection/` (`classify_call`) | `cache.get(key)` tagged as an HTTP `GET`; `"select an option"` tagged as SQL; `list.find(x)` tagged as a DB call. |
-| `semanticType` = `route` | framework `routes.py` | A test helper `router.get(...)` in a non-fixture file; a method named `get` on an unrelated object. |
+| `semanticType` = `route` | framework `routes.py` | A test helper `router.get(...)` in a non-fixture file; a method named `get` on an unrelated object; a mount, layout or redirect recorded as a route (wiring, not an entry point — see the [entry-point contract](architecture/entry-points.md)). |
 | `semanticType` = `eventbus_send` / `eventbus_publish` / `eventbus_consumer` | e.g. `parsers/java_vertx/events.py` | A user wrapper method also called `send(...)` tagged as an event-bus send. |
 | `semanticType` = `service_proxy`, `verticle_deploy`, `timer` | framework detectors | A class with an annotation that merely shares the simple name `ProxyGen` from another library. |
-| `endpoint`, `method`, `routeKind` | detectors, constant folding (`constfold.py`) | An endpoint folded from the wrong constant; a path concatenated from a router prefix that is never mounted. |
+| `endpoint`, `method`, `routeKind` | detectors, constant folding (`constfold.py`) | An endpoint folded from the wrong constant; a path concatenated from a router prefix that is never mounted; a child route missing the prefix of the router it is mounted under; a handler or method name used as `endpoint`. |
 | `calls[].path`, import resolution | `callresolve.py`, `imports.py`, `build_index` | A call resolved to a same-named class in another module. |
 | `Class.type`, visibility, `isStatic` | `classes.py` / `functions.py` | A defaulted value presented as if it was read (e.g. every member `public`). |
 
@@ -234,6 +234,7 @@ against it. Do not derive the list from the parser's own code.
 | **Heritage** | `extends`, `implements`, mixins; base classes that live in another file (needs `build_index`). |
 | **Decorators / annotations** | Every annotation on classes, methods **and parameters**, with arguments. One row per decorator form the framework uses. |
 | **Routes** | Every route form: annotations, router calls (`router.get(...)`), chained builders, sub-routers and mounts, path prefixes, regex routes, method-less routes. Fields: `method`, `endpoint`, `routeKind`, guards / auth, request / response DTOs. |
+| **Entry points** | The parser's role table ([entry-point contract](architecture/entry-points.md) §9) covers every inbound construct the framework documents — routes, message and event consumers, scheduled jobs, pages — and each record leads to its handler (`handler`, `handlerLine`). |
 | **Statements with a `semanticType`** | `route`, `api_call`, `db_method_call`, `query_statement`, `eventbus_send`, `eventbus_publish`, `eventbus_consumer`, `verticle_deploy`, `service_proxy`, `timer`, `graphql_entity`, `data_model`, `structured_data`, `comment`, `enum_member`, and the `iac_*` values for config parsers. Check each one that applies **wherever** it can appear — including inside lambdas and callbacks, which the base extraction skips as nested scopes. |
 | **Imports / calls** | Relative and internal imports resolved to repo-relative paths; external imports listed; `calls[]` resolved where the target is certain. |
 | **Configs** | Framework config files (YAML / JSON / properties / HCL) handled by the config parsers; values that drive routing (ports, base paths, event addresses). |
@@ -263,6 +264,7 @@ Run capture on at least one real repository for the language/framework (see
 - [ ] Pass budget kept; no unguarded full-file walk or re-parse (§6.1).
 - [ ] Complexity acceptable; pros and cons of the approach written down (§6.2, §6.3).
 - [ ] Element checklist built from official references, the capture contract and the Target Spec (§7).
+- [ ] Entry-point parsers have a role table, one test per row, and follow the [entry-point contract](architecture/entry-points.md) (§5, §7.1).
 - [ ] Parse failures, counts and skipped extensions all explained (§8).
 - [ ] Gap analysis report written (Part B).
 

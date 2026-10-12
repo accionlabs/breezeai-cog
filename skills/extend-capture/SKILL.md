@@ -136,7 +136,11 @@ re-pollutes every graph.
 Subclass the base language parser, sniff the framework cheaply in `claims`, set a
 `priority` above the base, reuse `extract` (one parse), then add route/handler detection —
 gated on `ctx.capture_statements` (on by default, off with `--no-capture-statements`), and skipping fixture files for route emitters. See the
-framework-parser section and detection idioms in the reference guide.
+framework-parser section and detection idioms in the reference guide. Entry points (routes,
+consumers, scheduled jobs, pages) follow the
+[entry-point contract](../../docs/architecture/entry-points.md): give each framework construct
+a role, record one entry point per binding, and keep wiring (mounts, prefixes, registrations)
+as plain statements. Write the role table before the detection code.
 
 ### 3C. Internal-framework detector (additive — composes on top)
 An internal framework appears *inside* files owned by other frameworks, so it must never be
@@ -274,6 +278,8 @@ src/breezeai_cog/parsers/
       internal framework is an additive detector that does not displace the file's owner.
 - [ ] Existing vocabulary reused where it fits; any new node/relationship/statement kind
       was raised for a decision (§5).
+- [ ] Entry points follow the entry-point contract: a role table with one test per row, one
+      record per binding, `endpoint` resolved or empty, wiring never recorded as a route.
 - [ ] Verified on unit tests **and** dogfooded on a real repository; the suite stays green
       and every emitted record validates against the schema.
 
