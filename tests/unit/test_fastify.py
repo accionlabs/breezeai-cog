@@ -55,6 +55,23 @@ def test_detects_route_from_known_fastify_instance() -> None:
     assert routes[0].framework == "fastify"
 
 
+def test_fastify_route_enriches_existing_expression_statement() -> None:
+    source = (
+        b'import Fastify from "fastify";\n'
+        b"const fastify = Fastify();\n"
+        b"fastify.get('/first', firstHandler); fastify.get('/second', secondHandler);"
+    )
+
+    record = _parse_typescript(source, "server.ts")
+    routes = [statement for statement in record.statements if statement.framework == "fastify"]
+
+    assert [(route.endpoint, route.nodeType) for route in routes] == [
+        ("/first", "expression_statement"),
+        ("/second", "expression_statement"),
+    ]
+    assert record.framework == "fastify"
+
+
 def test_ignores_unrelated_get_method() -> None:
     source = (
         b'import axios from "axios";\n'

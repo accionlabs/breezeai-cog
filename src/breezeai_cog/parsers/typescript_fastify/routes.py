@@ -375,7 +375,7 @@ def detect_fastify_routes(
     seen_ids: set[str],
     resolution_index: object | None = None,
 ) -> list[Statement]:
-    """Find Fastify routes and return them as Statements.
+    """Enrich captured statements with Fastify routes and return unmatched routes.
 
     Detects shorthand routes, `route()` configurations, and `register()`
     mounts, including inherited prefixes and resolvable variable values.
@@ -418,7 +418,46 @@ def detect_fastify_routes(
         prefix="",
     )
 
-    return statements
+    unmatched: list[Statement] = []
+    enriched_ids: set[str] = set()
+    for route in statements:
+        source_id = _source_statement_id(route.id)
+        existing = next(
+            (
+                statement
+                for statement in record.statements
+                if statement.id == source_id
+                and statement.endLine == route.endLine
+                and statement.id not in enriched_ids
+            ),
+            None,
+        )
+        if existing is None:
+            unmatched.append(route)
+            continue
+
+        existing.semanticType = route.semanticType
+        existing.method = route.method
+        existing.endpoint = route.endpoint
+        existing.routeKind = route.routeKind
+        existing.framework = route.framework
+        existing.handler = route.handler
+        existing.handlerLine = route.handlerLine
+        existing.isRegex = route.isRegex
+        existing.authRequired = route.authRequired
+        existing.guards = route.guards
+        enriched_ids.add(existing.id)
+
+    if enriched_ids and record.framework is None:
+        record.framework = "fastify"
+
+    return unmatched
+
+
+def _source_statement_id(route_id: str) -> str:
+    """Remove the collision suffix added when a route overlays its captured statement."""
+    base, separator, suffix = route_id.rpartition("#")
+    return base if separator and suffix.isdecimal() else route_id
 
 
 def _first_param_name(
