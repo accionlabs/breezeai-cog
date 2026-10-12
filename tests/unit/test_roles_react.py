@@ -42,7 +42,6 @@ def test_route_with_element_is_binding(analyze_files) -> None:
     )
 
 
-@pytest.mark.xfail(strict=True, reason="a page wrapped in elements: handler is the outer element")
 def test_wrapped_element_handler_is_the_page(analyze_files) -> None:
     st = _jsx(
         analyze_files,
@@ -148,9 +147,6 @@ def test_config_object_route_is_binding(analyze_files) -> None:
     assert (r.routeKind, r.handler) == ("page", "Team")
 
 
-@pytest.mark.xfail(
-    strict=True, reason="Component: X (a component reference, not JSX) gives no handler"
-)
 def test_config_object_component_reference_is_binding(analyze_files) -> None:
     src = (
         "import { createBrowserRouter } from 'react-router-dom';\n"

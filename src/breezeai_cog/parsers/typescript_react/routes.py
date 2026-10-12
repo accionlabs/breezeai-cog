@@ -39,19 +39,37 @@ def _string_val(node: Node | None, source: bytes) -> str:
     return node_text(node, source).strip("'\"`")
 
 
+_JSX_ELEMENTS = ("jsx_element", "jsx_self_closing_element")
+
+
 def _component_name(value: Node | None, source: bytes) -> str | None:
-    """Component rendered by an ``element`` attr/prop -> its tag name (``<Home/>`` -> ``Home``)."""
+    """The page an ``element`` attr/prop renders -> its component name (``<Home/>`` -> ``Home``).
+
+    Wrappers are not the page: an element whose only element child is another element is
+    unwrapped to that child (``<Suspense fallback={…}><Dashboard/></Suspense>`` -> ``Dashboard``,
+    ``<ErrorBoundary><Layout><Home/></Layout></ErrorBoundary>`` -> ``Home``). An element with
+    more than one element child has no single page -> None (honest-null). A ``Component: Home``
+    reference (data router) is the component itself."""
     if value is None:
         return None
-    node = value
-    if node.type == "jsx_expression":  # element={<Home/>}
+    if value.type == "identifier":  # Component: Home
+        return node_text(value, source)
+    node: Node | None = value
+    # element={<Home/>} / element: (<Home/>) — the JSX inside the braces or parentheses
+    while node is not None and node.type in ("jsx_expression", "parenthesized_expression"):
         node = next((c for c in node.named_children
-                     if c.type in ("jsx_self_closing_element", "jsx_element")), None)
+                     if c.type in (*_JSX_ELEMENTS, "parenthesized_expression")), None)
+    while node is not None and node.type == "jsx_element":
+        kids = [c for c in node.named_children if c.type in _JSX_ELEMENTS]
+        if not kids:  # <Home>text</Home>
+            break
+        if len(kids) > 1:
+            return None
+        node = kids[0]
     if node is None:
         return None
-    if node.type == "jsx_element":
-        node = node.child(0)  # opening element
-    name = node.child_by_field_name("name") if node is not None else None
+    tag = node.child(0) if node.type == "jsx_element" else node  # opening element
+    name = tag.child_by_field_name("name") if tag is not None else None
     return node_text(name, source) if name is not None else None
 
 
@@ -148,6 +166,8 @@ def _process_config(arr: Node, prefix: str, source: bytes, path: str, seen: set[
         full = _join(prefix, "" if is_index else _string_val(pairs["path"], source))
         lazy = "lazy" in pairs
         element = pairs.get("element") or pairs.get("Component") or pairs.get("component")
+        if element is not None and element.type == "identifier" and element is pairs.get("element"):
+            element = None  # element: someVar — a value, not a component name
         sl, sc = elem.start_point[0] + 1, elem.start_point[1]
         routes.append(Statement(
             id=disambiguate(statement_id(path, sl, sc), seen),

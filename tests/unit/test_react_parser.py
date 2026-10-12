@@ -402,3 +402,38 @@ def test_jsx_file_is_javascript_language(tmp_path) -> None:
     rec = _parse(tmp_path, src, "Widget.jsx")
     assert rec.framework == "react" and rec.language == "javascript"
     assert {f.name: f.uiRole for f in rec.functions}["Widget"] == "component"
+
+
+# ── The page behind wrapper elements ─────────────────────────────────────────────────────────
+def test_wrapped_page_handler_is_the_innermost_component(analyze_files) -> None:
+    st = analyze_files({
+        "package.json": '{"dependencies": {"react-router-dom": "6"}}',
+        "src/App.tsx": (
+            "import { Routes, Route } from 'react-router-dom';\n"
+            "export const App = () => (\n  <Routes>\n"
+            '    <Route path="/a" element={<Suspense fallback={<Spinner />}><Dash /></Suspense>} />\n'
+            '    <Route path="/b" element={<ErrorBoundary><Shell><Reports /></Shell></ErrorBoundary>} />\n'
+            '    <Route path="/c" element={<><Settings /></>} />\n'
+            '    <Route path="/d" element={<Split><Left /><Right /></Split>} />\n'
+            '    <Route path="/e" element={<Plain>text</Plain>} />\n'
+            "  </Routes>\n);\n"
+        ),
+    })
+    handlers = {s.endpoint: s.handler for s in st if s.semanticType == "route"}
+    assert handlers == {"/a": "Dash", "/b": "Reports", "/c": "Settings", "/d": None, "/e": "Plain"}
+
+
+def test_config_element_variable_is_not_a_component_name(analyze_files) -> None:
+    st = analyze_files({
+        "package.json": '{"dependencies": {"react-router-dom": "6"}}',
+        "src/router.tsx": (
+            "import { createBrowserRouter } from 'react-router-dom';\n"
+            "const page = <Home />;\n"
+            "export const router = createBrowserRouter([\n"
+            "  { path: '/', element: page },\n  { path: '/about', Component: About },\n"
+            "  { path: '/team', element: (\n    <Suspense fallback={<Spin />}>\n      <Provider>\n"
+            "        <Team />\n      </Provider>\n    </Suspense>\n  ) },\n]);\n"
+        ),
+    })
+    handlers = {s.endpoint: s.handler for s in st if s.semanticType == "route"}
+    assert handlers == {"/": None, "/about": "About", "/team": "Team"}
