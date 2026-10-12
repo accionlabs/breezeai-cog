@@ -33,11 +33,12 @@ class AspNetCoreParser(CSharpParser):
                 root, ctx.source, ctx.path, seen,
                 invocation_type="invocation_expression", member_type="member_access_expression",
             )
-            routes += detect_route_registrations(
+            registrations, wiring = detect_route_registrations(
                 root, ctx.source, ctx.path, seen,
                 invocation_type="invocation_expression", member_type="member_access_expression",
             )
-            if routes:
+            routes += registrations
+            if routes or wiring:  # a wiring-only RouteConfig is still ASP.NET code
                 record.statements.extend(routes)
                 record.framework = "aspnet"
         return record

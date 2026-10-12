@@ -658,18 +658,25 @@ def detect_route_registrations(
     *,
     invocation_type: str,
     member_type: str,
-) -> list[Statement]:
+) -> tuple[list[Statement], bool]:
     """AST-walk for MVC / Web-API **convention-route registrations** —
     ``routes.MapRoute(name, url, defaults)`` / ``config.Routes.MapHttpRoute(…)`` declared in
-    ``RouteConfig`` / ``Global.asax`` / an ``AreaRegistration``. Emits the declared URL
-    template as a ``route`` (method ``ANY``, since a convention route matches any verb), with
-    the default ``controller``[.``action``] as the handler. Grammar-specific node/field names
-    are supplied by the C#/VB caller (Phase 2 of the MVC endpoint-resolution work)."""
+    ``RouteConfig`` / ``Global.asax`` / an ``AreaRegistration``. A template that names one
+    action — no ``{controller}`` / ``{action}`` placeholder, and a literal default ``controller``
+    and ``action`` — is a binding: a ``route`` (method ``ANY``, since a convention route matches
+    any verb) with ``Controller.Action`` as the handler. A convention template
+    (``{controller}/{action}/{id}``, Web API ``api/{controller}/{id}`` where the verb picks the
+    action) identifies no single handler: it is wiring and its statement stays plain.
+    Grammar-specific node/field names are supplied by the C#/VB caller. Returns the bindings and
+    whether any registration was seen — a wiring-only file (``RouteConfig.cs``) is still ASP.NET
+    code and keeps its ``aspnet`` label."""
     routes: list[Statement] = []
+    seen_registration = False
     name_field = "name" if member_type == "member_access_expression" else "member"
     fn_field = "function" if invocation_type == "invocation_expression" else "target"
 
     def visit(node: Node) -> None:
+        nonlocal seen_registration
         for child in node.named_children:
             if child.type == invocation_type:
                 func = child.child_by_field_name(fn_field)
@@ -677,11 +684,13 @@ def detect_route_registrations(
                     name_node = func.child_by_field_name(name_field)
                     method = node_text(name_node, source) if name_node is not None else ""
                     url = _maproute_url(child, source) if method in _MAP_ROUTE_METHODS else None
-                    if url:
-                        text = node_text(child, source)
-                        ctrl, action = _CTRL_RE.search(text), _ACTION_RE.search(text)
-                        handler = (f"{ctrl.group(1)}.{action.group(1)}" if ctrl and action
-                                   else ctrl.group(1) if ctrl else None)
+                    text = node_text(child, source) if url else ""
+                    seen_registration = seen_registration or url is not None
+                    ctrl, action = _CTRL_RE.search(text), _ACTION_RE.search(text)
+                    one_action = (url is not None and ctrl is not None and action is not None
+                                  and "{controller}" not in url and "{action}" not in url)
+                    if url and one_action and ctrl is not None and action is not None:
+                        handler = f"{ctrl.group(1)}.{action.group(1)}"
                         start = child.start_point[0] + 1
                         routes.append(Statement(
                             id=disambiguate(statement_id(path, start, child.start_point[1]), seen_ids),
@@ -702,4 +711,4 @@ def detect_route_registrations(
             visit(child)
 
     visit(root)
-    return routes
+    return routes, seen_registration

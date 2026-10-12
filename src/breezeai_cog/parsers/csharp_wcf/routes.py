@@ -15,6 +15,9 @@ Emitted as ``route`` statements:
 
 from __future__ import annotations
 
+import re
+from pathlib import Path
+
 from ...emit import disambiguate, statement_id
 from ...schemas import Decorator, FileRecord, Statement
 from ..dotnet_common import response_dto, simple_attr_name
@@ -27,6 +30,8 @@ _WEB_SERVICE_ATTR = "WebService"   # ASMX (System.Web.Services)
 _WEB_METHOD_ATTR = "WebMethod"     # ASMX operation
 _GENERATED_ATTR = "GeneratedCode"  # svcutil-generated client proxy — NOT a server entry point
 _HTTP_VERBS = {"GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS"}
+#: ``Class="Ns.Type"`` inside an ``.asmx`` ``<%@ WebService … %>`` directive.
+_ASMX_CLASS_RE = re.compile(rb'<%@\s*WebService\b[^%]*?\bClass\s*=\s*["\']([^"\']+)["\']', re.IGNORECASE)
 
 
 def _has_attr(decorators: list[Decorator], name: str) -> bool:
@@ -128,11 +133,29 @@ def detect_wcf_services(record: FileRecord) -> list[Statement]:
     return routes
 
 
-def detect_asmx_services(record: FileRecord) -> list[Statement]:
+def asmx_host(path: str, repo_root: Path | None, cls_name: str) -> str | None:
+    """The ``.asmx`` file that serves class ``cls_name`` declared in ``path`` — the code-behind
+    convention ``X.asmx.cs`` beside ``X.asmx`` — when that file exists and its ``WebService``
+    directive's ``Class=`` names the class. Anything else → None (the host is not known)."""
+    if repo_root is None or not path.lower().endswith(".asmx.cs"):
+        return None
+    host = path[: -len(".cs")]
+    try:
+        body = (repo_root / host).read_bytes()
+    except OSError:
+        return None
+    m = _ASMX_CLASS_RE.search(body)
+    simple = m.group(1).decode("utf-8", "replace").rsplit(".", 1)[-1] if m else None
+    return host if simple == cls_name else None
+
+
+def detect_asmx_services(record: FileRecord, repo_root: Path | None = None) -> list[Statement]:
     """Legacy ASMX SOAP web services (``System.Web.Services``): each ``[WebMethod]`` method is
     an operation. ``[WebService]`` on the class is optional in ASMX, so the ``[WebMethod]``
-    methods themselves drive detection; the service name is ``[WebService(Name="X")]`` if set,
-    else the declaring class name. Emitted like WCF SOAP ops (``framework=asmx``, ``rpc``)."""
+    methods themselves drive detection. Emitted like WCF SOAP ops (``framework=asmx``, ``rpc``).
+    ``endpoint`` is the served address ``<.asmx path>/<Method>`` (the ``.asmx`` path is
+    repo-relative, as on the host record) when the ``.asmx`` file is found
+    (:func:`asmx_host`); otherwise empty — a service or class name is not an address."""
     cls_by_id = {c.id: c for c in record.classes}
     seen = {s.id for s in record.statements}
     routes: list[Statement] = []
@@ -143,6 +166,7 @@ def detect_asmx_services(record: FileRecord) -> list[Statement]:
         if cls is not None and _has_attr(cls.decorators, _GENERATED_ATTR):
             continue  # generated proxy, not a real ASMX service
         svc = (_name_arg(cls.decorators, _WEB_SERVICE_ATTR) or cls.name) if cls is not None else "WebService"
+        host = asmx_host(fn.path or record.path, repo_root, cls.name) if cls is not None else None
         routes.append(
             Statement(
                 id=disambiguate(statement_id(fn.path, fn.startLine, 0), seen),
@@ -151,7 +175,7 @@ def detect_asmx_services(record: FileRecord) -> list[Statement]:
                 semanticType="route",
                 text=f"[{_WEB_METHOD_ATTR}] {svc}.{fn.name}",
                 method="RPC",
-                endpoint=f"{svc}/{fn.name}",
+                endpoint=f"{host}/{fn.name}" if host is not None else None,
                 framework="asmx",
                 handler=fn.name,
                 handlerLine=fn.startLine,

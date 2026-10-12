@@ -36,11 +36,12 @@ class VbAspNetParser(VbParser):
                 root, ctx.source, ctx.path, seen,
                 invocation_type="invocation", member_type="member_access",
             )
-            routes += detect_route_registrations(
+            registrations, wiring = detect_route_registrations(
                 root, ctx.source, ctx.path, seen,
                 invocation_type="invocation", member_type="member_access",
             )
-            if routes:
+            routes += registrations
+            if routes or wiring:  # a wiring-only RouteConfig is still ASP.NET code
                 record.statements.extend(routes)
                 record.framework = "aspnet"
         return record

@@ -193,7 +193,7 @@ def test_asmx_webmethod() -> None:
     r = routes["GetData"]
     assert r.framework == "asmx"
     assert r.method == "RPC" and r.routeKind == "rpc"
-    assert r.endpoint == "LegacyService/GetData"  # [WebService] Name absent → class name
+    assert r.endpoint is None  # no .asmx host file in this test: the address is not known
     assert r.responseDTO == "Report"  # Task<Report> unwrapped
     assert rec.framework == "asmx"
 
@@ -229,3 +229,21 @@ def test_selection() -> None:
     )
     assert registry.select("plain.cs", b"class C {}").name == "csharp"
     registry.clear()
+
+
+def test_asmx_endpoint_is_the_asmx_file_and_method(analyze_files) -> None:
+    # <.asmx path>/<Method> when X.asmx sits beside X.asmx.cs and its Class= names the class;
+    # otherwise empty (a service or class name is not an address).
+    stmts = analyze_files({
+        "Svc/Legacy.asmx": '<%@ WebService Language="C#" CodeBehind="Legacy.asmx.cs" Class="K.LegacyService" %>',
+        "Svc/Legacy.asmx.cs": ASMX.decode(),
+        "Other/Wrong.asmx": '<%@ WebService Class="K.SomethingElse" %>',
+        "Other/Wrong.asmx.cs": ASMX.decode(),
+        "App_Code/Loose.cs": ASMX.decode(),
+    })
+    got = {s.path: s.endpoint for s in stmts if s.framework == "asmx" and s.path.endswith(".cs")}
+    assert got == {
+        "Svc/Legacy.asmx.cs": "Svc/Legacy.asmx/GetData",
+        "Other/Wrong.asmx.cs": None,   # the .asmx serves another class
+        "App_Code/Loose.cs": None,     # no .asmx beside it
+    }

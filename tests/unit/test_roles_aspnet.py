@@ -112,7 +112,6 @@ def test_conventional_mvc_action_is_binding(analyze_files) -> None:
     assert (r.method, r.endpoint, r.handler) == ("GET", "/Home/About", "About")
 
 
-@pytest.mark.xfail(strict=True, reason="convention route registration recorded as a route")
 def test_maproute_registration_is_wiring(analyze_files) -> None:
     stmts = analyze_files({"RouteConfig.cs": ROUTE_CONFIG})
     assert _eps(stmts) == []

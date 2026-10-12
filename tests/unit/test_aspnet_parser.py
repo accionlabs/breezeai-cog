@@ -326,8 +326,21 @@ def test_mvc_route_registration() -> None:
     routes = {s.endpoint: s for s in rec.statements if s.semanticType == "route"}
     assert routes["/products/{id}"].method == "ANY"
     assert routes["/products/{id}"].handler == "Catalog.Details"
-    assert "/{controller}/{action}/{id}" in routes            # default template captured
-    assert routes["/{controller}/{action}/{id}"].handler == "Home.Index"
+    # The default convention template identifies no single action: wiring, no route record.
+    assert "/{controller}/{action}/{id}" not in routes
+
+
+def test_mvc_route_registration_binding_vs_convention() -> None:
+    src = (b"using System.Web.Mvc;\nnamespace A {\npublic class RouteConfig {\n"
+           b"public static void RegisterRoutes(RouteCollection routes) {\n"
+           b'routes.MapRoute("About", "about", new { controller = "Home", action = "About" });\n'
+           b'routes.MapRoute("Area", "admin/{action}", new { controller = "Admin", action = "Index" });\n'
+           b'routes.MapRoute("NoAction", "shop/{id}", new { controller = "Shop" });\n'
+           b'config.Routes.MapHttpRoute("Api", "api/{controller}/{id}", new { id = 1 });\n'
+           b"} } }")
+    rec = _parse(AspNetCoreParser(), src, "App_Start/RouteConfig.cs")
+    routes = {s.endpoint: s.handler for s in rec.statements if s.semanticType == "route"}
+    assert routes == {"/about": "Home.About"}  # only the template that names one action
 
 
 def test_csharp_minimal_apis() -> None:
@@ -550,3 +563,19 @@ End Module
     rec = _parse(VbAspNetParser(), src, "Program.vb")
     got = sorted((s.startLine, s.endpoint) for s in rec.statements if s.semanticType == "route")
     assert got == [(5, "/hello"), (6, None)]  # a literal inside a call is not the pattern
+
+
+def test_wiring_only_route_config_keeps_aspnet_label(tmp_path) -> None:
+    # A RouteConfig with only a convention template has no route record, but is still ASP.NET.
+    from breezeai_cog import iter_file_records
+
+    (tmp_path / "RouteConfig.cs").write_text(
+        "using System.Web.Mvc;\nusing System.Web.Routing;\n"
+        "public class RouteConfig {\n  public static void RegisterRoutes(RouteCollection routes) {\n"
+        '    routes.MapRoute("Default", "{controller}/{action}/{id}",\n'
+        '      new { controller = "Home", action = "Index", id = UrlParameter.Optional });\n'
+        "  }\n}\n"
+    )
+    [rec] = list(iter_file_records(tmp_path))
+    assert rec.framework == "aspnet"
+    assert [s for s in rec.statements if s.semanticType == "route"] == []

@@ -124,7 +124,6 @@ def test_asmx_web_method_is_binding(analyze_files) -> None:
     assert (r.method, r.routeKind, r.framework, r.handler) == ("RPC", "rpc", "asmx", "GetOrder")
 
 
-@pytest.mark.xfail(strict=True, reason="ASMX endpoint lacks the .asmx file name")
 def test_asmx_endpoint_uses_asmx_file(analyze_files) -> None:
     stmts = analyze_files(
         {
