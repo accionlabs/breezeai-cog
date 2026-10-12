@@ -122,14 +122,16 @@ def test_pekko_only_file_detected_no_akka_substring(tmp_path: Path) -> None:
     assert all(s.parentId == run_fn.id for s in sends)
 
 
-def test_play_controller_emits_route_and_eventbus_send(tmp_path: Path) -> None:
+def test_play_controller_labels_play_and_emits_eventbus_send(tmp_path: Path) -> None:
     p = tmp_path / "NotifyController.scala"
     p.write_bytes(PLAY_AKKA_SRC)
     ctx = ParseContext(path="NotifyController.scala", abs_path=p, source=PLAY_AKKA_SRC,
                         repo_root=tmp_path, capture_statements=True)
     rec = ScalaPlayParser().parse_file(ctx)
     semantics = {s.semanticType for s in rec.statements}
-    assert "route" in semantics
+    # The controller Action is the handler of a conf/routes binding, not an entry point itself.
+    assert "route" not in semantics
+    assert rec.framework == "play"
     assert "eventbus_send" in semantics
 
 

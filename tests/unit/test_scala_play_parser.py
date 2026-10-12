@@ -13,7 +13,9 @@ from breezeai_cog.emit import to_line
 from breezeai_cog.parsers.base import ParseContext
 from breezeai_cog.parsers.detection.db_queries import match_db
 from breezeai_cog.parsers.scala.parser import ScalaParser
+from breezeai_cog.parsers.scala_play.actions import detect_play_actions
 from breezeai_cog.parsers.scala_play.parser import PlayRoutesParser, ScalaPlayParser
+from breezeai_cog.parsers.treesitter import parse_source
 from breezeai_cog.schemas import FileRecord
 
 CONTROLLER_SRC = b'''package controllers
@@ -48,24 +50,23 @@ def test_claims_play_only() -> None:
     assert p.claims("X.scala", PLAIN_SRC) is False
 
 
-def test_action_and_action_async_emit_one_route_each(tmp_path: Path) -> None:
+def _actions(src: bytes, tmp_path: Path, name: str) -> set[str]:
+    rec = _parse(tmp_path, src, name)
+    root = parse_source("scala", src, 0).root_node
+    return {fn.name for fn in detect_play_actions(root, src, rec)}
+
+
+def test_actions_are_detected_and_label_the_file(tmp_path: Path) -> None:
     rec = _parse(tmp_path, CONTROLLER_SRC, "HomeController.scala")
-    routes = {s.handler: s for s in rec.statements if s.semanticType == "route"}
-    assert "index" in routes
-    assert "create" in routes
-    assert "notAnAction" not in routes
+    assert _actions(CONTROLLER_SRC, tmp_path, "HomeController.scala") == {"index", "create"}
     assert rec.framework == "play"
 
 
-def test_action_route_has_honest_null_method_and_endpoint(tmp_path: Path) -> None:
-    # This is the test that stops someone "improving" it later — the verb/path live
-    # in conf/routes, not the controller; guessing one from the method name is wrong.
+def test_action_is_a_handler_not_an_entry_point(tmp_path: Path) -> None:
+    # The verb/path live in conf/routes, which records the binding with the action as its
+    # handler. A record for the action itself would count each binding twice, with no address.
     rec = _parse(tmp_path, CONTROLLER_SRC, "HomeController.scala")
-    routes = [s for s in rec.statements if s.semanticType == "route"]
-    assert routes
-    for r in routes:
-        assert r.method is None
-        assert r.endpoint is None
+    assert [s for s in rec.statements if s.semanticType == "route"] == []
 
 
 def test_action_return_type_does_not_match_action_helpers(tmp_path: Path) -> None:
@@ -78,9 +79,7 @@ class Helpers {
   def real(): Action = ???
 }
 '''
-    rec = _parse(tmp_path, src, "Helpers.scala")
-    routes = {s.handler for s in rec.statements if s.semanticType == "route"}
-    assert routes == {"real"}
+    assert _actions(src, tmp_path, "Helpers.scala") == {"real"}
 
 
 def test_sird_routes_are_captured(tmp_path: Path) -> None:

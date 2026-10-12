@@ -66,7 +66,6 @@ def test_router_include_is_wiring(analyze_files) -> None:
     assert _eps(st) == []
 
 
-@pytest.mark.xfail(strict=True, reason="controller Action is recorded as a route with no address")
 def test_controller_action_is_none(analyze_files) -> None:
     st = analyze_files({"app/controllers/OrderController.scala": CONTROLLER})
     assert _eps(st) == []
