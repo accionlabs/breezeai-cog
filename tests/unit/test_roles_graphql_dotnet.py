@@ -107,14 +107,12 @@ def test_field_on_mutation_root_is_binding(analyze_files) -> None:
     assert (r.method, r.routeKind, r.endpoint) == ("MUTATION", "mutation", "addBook")
 
 
-@pytest.mark.xfail(strict=True, reason="inline resolver: handler holds the field name")
 def test_inline_resolver_is_anonymous(analyze_files) -> None:
     stmts = analyze_files({"BookQuery.cs": QUERY})
     [r] = [s for s in _eps(stmts) if s.endpoint == "book"]
     assert not r.handler and r.handlerLine == _line(QUERY, 'Field<BookType>("book")')
 
 
-@pytest.mark.xfail(strict=True, reason="method-group resolver: handler holds the field name")
 def test_named_resolver_is_handler(analyze_files) -> None:
     stmts = analyze_files({"BookQuery.cs": QUERY})
     [r] = [s for s in _eps(stmts) if s.endpoint == "namedBook"]
