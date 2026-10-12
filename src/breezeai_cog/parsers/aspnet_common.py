@@ -298,8 +298,10 @@ def detect_minimal_api_routes(
     routes: list[Statement] = []
     name_field = "name" if member_type == "member_access_expression" else "member"
     fn_field = "function" if invocation_type == "invocation_expression" else "target"
+    decls: dict[str, dict[str, int | None]] | None = None  # built lazily, only for Map* calls
 
     def visit(node: Node) -> None:
+        nonlocal decls
         for child in node.named_children:
             if child.type == invocation_type:
                 func = child.child_by_field_name(fn_field)
@@ -309,6 +311,13 @@ def detect_minimal_api_routes(
                     if spec is not None:
                         verb, framework, endpoint = spec
                         start = child.start_point[0] + 1
+                        handler: str | None = None
+                        handler_line: int | None = None
+                        if method in _MAP_METHODS:
+                            if decls is None:
+                                decls = _declaration_lines(root, source)
+                            handler, handler_line = _minimal_handler(
+                                child, source, invocation_type, member_type, decls)
                         routes.append(Statement(
                             id=disambiguate(statement_id(path, start, child.start_point[1]), seen_ids),
                             parentId=path,
@@ -318,6 +327,8 @@ def detect_minimal_api_routes(
                             method=verb,
                             endpoint=endpoint,
                             framework=framework,
+                            handler=handler,
+                            handlerLine=handler_line,
                             routeKind="route",
                             isRegex=False,
                             startLine=start,
@@ -328,6 +339,71 @@ def detect_minimal_api_routes(
 
     visit(root)
     return routes
+
+
+#: Inline handler delegates: no name; ``handlerLine`` is where they start.
+_INLINE_DELEGATES = frozenset({"lambda_expression", "anonymous_method_expression"})
+#: Declarations a method-group handler can name (C# methods and top-level local functions).
+_DECLARATIONS = frozenset({"method_declaration", "local_function_statement"})
+
+
+def _declaration_lines(root: Node, source: bytes) -> dict[str, dict[str, int | None]]:
+    """Enclosing class name (``""`` for top-level local functions) → {method name → declaration
+    line}. A name declared twice in the same scope (overloads) → None (honest-null)."""
+    out: dict[str, dict[str, int | None]] = {}
+
+    def walk(node: Node, owner: str) -> None:
+        for c in node.named_children:
+            if c.type in _DECLARATIONS:
+                name = c.child_by_field_name("name")
+                if name is not None:
+                    scope = out.setdefault(owner, {})
+                    key = node_text(name, source)
+                    scope[key] = c.start_point[0] + 1 if key not in scope else None
+                continue  # a nested local function is not addressable as a method group here
+            if c.type == "class_declaration":
+                name = c.child_by_field_name("name")
+                walk(c, node_text(name, source) if name is not None else "?")
+            else:
+                walk(c, owner)
+
+    walk(root, "")
+    return out
+
+
+def _minimal_handler(
+    call: Node, source: bytes, invocation_type: str, member_type: str,
+    decls: dict[str, dict[str, int | None]],
+) -> tuple[str | None, int | None]:
+    """(handler, handlerLine) of a ``MapGet``/``MapPost``/… call — its LAST argument (the
+    delegate follows the route pattern in every minimal-API overload).
+
+    - an inline lambda / anonymous method: no name; ``handlerLine`` is where it starts;
+    - a method group (``GetOrders`` / ``Handlers.GetOrders``): its text as the name;
+      ``handlerLine`` is its declaration when declared once in this file (a bare name: a
+      top-level local function or a method of a class here; ``Type.Method``: a method of class
+      ``Type`` here), else empty;
+    - a wrapper call: unwrapped to its last argument. Anything else: (None, None)."""
+    args = _positional_args(call)
+    if len(args) < 2:
+        return None, None
+    last: Node | None = args[-1]
+    while last is not None and last.type == invocation_type:
+        inner = _positional_args(last)
+        last = inner[-1] if inner else None
+    if last is None:
+        return None, None
+    if last.type in _INLINE_DELEGATES:
+        return None, last.start_point[0] + 1
+    if last.type == "identifier":
+        name = node_text(last, source)
+        hits = [scope[name] for scope in decls.values() if name in scope]
+        return name, hits[0] if len(hits) == 1 else None
+    if last.type == member_type:
+        text = node_text(last, source)
+        owner, _, member = text.rpartition(".")
+        return text, decls.get(owner.rsplit(".", 1)[-1], {}).get(member)
+    return None, None
 
 
 def _member_method_name(func: Node, source: bytes, name_field: str) -> str:

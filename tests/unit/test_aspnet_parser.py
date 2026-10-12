@@ -332,10 +332,11 @@ def test_mvc_route_registration() -> None:
 
 def test_csharp_minimal_apis() -> None:
     rec = _parse(AspNetCoreParser(), CS, "Orders.cs")
-    minimal = {(s.method, s.endpoint) for s in rec.statements
-               if s.semanticType == "route" and s.handler is None}
-    assert ("GET", "/hello") in minimal
-    assert ("POST", "/items") in minimal
+    # minimal-API routes are parented to the file (controller actions to their method)
+    minimal = {(s.method, s.endpoint): s.handler for s in rec.statements
+               if s.semanticType == "route" and s.parentId == "Orders.cs"}
+    assert minimal[("GET", "/hello")] is None        # inline lambda: no name
+    assert minimal[("POST", "/items")] == "Handler"  # method group: its name
 
 
 # The Startup.cs registration block that the benchmark found uncaptured (grounded shape):
@@ -458,3 +459,40 @@ def test_selection() -> None:
     assert registry.select("Orders.vb", VB).name == "vb-aspnet"
     assert registry.select("plain.vb", b"Class C\nEnd Class").name == "vb"
     registry.clear()
+
+
+_MINIMAL_HANDLERS = b'''using Microsoft.AspNetCore.Builder;
+var app = WebApplication.CreateBuilder(args).Build();
+app.MapGet("/inline", () => "x");
+app.MapPost("/anon", delegate { return "y"; });
+app.MapGet("/local", GetOrders);
+app.MapGet("/static", Handlers.List);
+app.MapGet("/remote", Remote.Get);
+app.MapDelete("/twice", Twice);
+app.Run();
+
+static string GetOrders() => "o";
+
+static class Handlers
+{
+    public static string List() => "l";
+    public static string Twice() => "a";
+    public static string Twice(int x) => "b";
+}
+'''
+
+
+def test_minimal_api_handler_and_line() -> None:
+    # Inline delegate: no name, its line. Method group: its name; the declaration line only
+    # when declared once in this file (Remote.Get is elsewhere; Twice is overloaded).
+    rec = _parse(AspNetCoreParser(), _MINIMAL_HANDLERS, "Program.cs")
+    got = {s.endpoint: (s.handler, s.handlerLine)
+           for s in rec.statements if s.semanticType == "route"}
+    assert got == {
+        "/inline": (None, 3),
+        "/anon": (None, 4),
+        "/local": ("GetOrders", 11),
+        "/static": ("Handlers.List", 15),
+        "/remote": ("Remote.Get", None),
+        "/twice": ("Twice", None),
+    }

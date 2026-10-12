@@ -133,7 +133,6 @@ def test_map_controllers_is_wiring(program) -> None:
     assert _at(program, "Program.cs", _program_line("app.MapControllers()")) == []
 
 
-@pytest.mark.xfail(strict=True, reason="inline minimal-API handler has no handlerLine")
 def test_minimal_api_inline_handler_is_binding(program) -> None:
     line = _program_line('app.MapGet("/ping"')
     [r] = _at(program, "Program.cs", line)
@@ -141,7 +140,6 @@ def test_minimal_api_inline_handler_is_binding(program) -> None:
     assert not r.handler and r.handlerLine == line
 
 
-@pytest.mark.xfail(strict=True, reason="minimal-API method-group handler not recorded")
 def test_minimal_api_named_handler_is_binding(program) -> None:
     [r] = _at(program, "Program.cs", _program_line('app.MapGet("/orders"'))
     assert r.endpoint == "/orders"
