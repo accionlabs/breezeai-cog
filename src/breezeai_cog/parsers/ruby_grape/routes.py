@@ -144,6 +144,44 @@ def _api_settings(call: Node, source: bytes) -> str | None:
     return "/" + "/".join(parts) if parts else ""
 
 
+def _before_name(stmt: Node, source: bytes) -> str | None:
+    """The guard a ``before { authenticate! }`` / ``before do … end`` hook names: its block's only
+    statement when that is a receiver-less method call. Anything else (several statements, inline
+    logic) has no single name → None (no fabricated guard)."""
+    block = stmt.child_by_field_name("block")
+    body = next((c for c in block.named_children if c.type in ("block_body", "body_statement")),
+                None) if block is not None else None
+    stmts = list(body.named_children) if body is not None else []
+    if len(stmts) != 1:
+        return None
+    only = stmts[0]
+    if only.type == "identifier":
+        return node_text(only, source)
+    return _method(only, source) if only.type == "call" else None
+
+
+def _guards(call: Node, source: bytes) -> list[str]:
+    """``before`` hooks in scope for a route: each enclosing API class body / namespace block that
+    declares a ``before`` ahead of the route, outermost scope first. Grape callbacks apply to the
+    endpoints defined after them in the same namespace and its children."""
+    levels: list[list[str]] = []
+    node = call.parent
+    while node is not None:
+        if node.type in ("body_statement", "block_body"):
+            names = [
+                name for stmt in node.named_children
+                if stmt.type == "call" and stmt.start_byte < call.start_byte
+                and _method(stmt, source) == "before"
+                and stmt.child_by_field_name("block") is not None
+                and (name := _before_name(stmt, source)) is not None
+            ]
+            levels.append(names)
+        if _is_grape_api_class(node, source):
+            break
+        node = node.parent
+    return [name for names in reversed(levels) for name in names]
+
+
 def _join_path(prefix: str, local: str | None) -> str | None:
     if local is None:
         return None
@@ -175,6 +213,7 @@ def detect_grape_routes(root: Node, source: bytes, path: str, record: FileRecord
         )
         line = call.start_point[0] + 1
         block = call.child_by_field_name("block")  # the handler: an anonymous block
+        guards = _guards(call, source)
         record.statements.append(
             Statement(
                 id=disambiguate(statement_id(path, line, call.start_point[1]), seen),
@@ -186,6 +225,9 @@ def detect_grape_routes(root: Node, source: bytes, path: str, record: FileRecord
                 endpoint=endpoint,
                 framework="grape",
                 handlerLine=block.start_point[0] + 1 if block is not None else None,
+                guards=guards or None,
+                # Honest-null: assert auth only when a guard is present; absence is unknown.
+                authRequired=True if guards else None,
                 routeKind="route",
                 isRegex=False,
                 startLine=line,

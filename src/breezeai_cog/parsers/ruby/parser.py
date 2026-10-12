@@ -18,7 +18,8 @@ from .functions import build_function, defined_names
 from .imports import extract_imports
 from ..comments_common import comment_statements_for
 from .mappings import COMMENT_TYPES, CONTROL_FLOW, FRAMEWORKS, STATEMENT_TYPES
-from .models import build_model_index, model_receivers
+from .index import RubyIndex, build_ruby_index
+from .models import model_receivers
 from .statement import extract_statements
 
 
@@ -35,13 +36,15 @@ class RubyParser(BaseParser):
 
     def build_index(
         self, repo_root: Path, files: Sequence[Path], jobs: int = 1
-    ) -> frozenset[str]:
-        """Repo-level pre-pass: the ActiveRecord model constants (see ``models.py``).
+    ) -> RubyIndex:
+        """Repo-level pre-pass: the ActiveRecord model constants (see ``models.py``) and the
+        Rails controller callbacks (see ``controllers.py``).
 
         A model is declared in its own file but queried from controllers and services, so
         the identity that separates ``User.find`` from ``Tempfile.create`` can only be
-        known repo-wide."""
-        return build_model_index(Path(repo_root), files, jobs)
+        known repo-wide; likewise a controller's ``before_action`` guards a route declared in
+        ``config/routes.rb``."""
+        return build_ruby_index(Path(repo_root), files, jobs)
 
     def parse_file(self, ctx: ParseContext) -> FileRecord:
         root = parse_source("ruby", ctx.source, ctx.parse_timeout_micros).root_node
@@ -61,7 +64,8 @@ class RubyParser(BaseParser):
         resolve = resolve_for_scope(root)
 
         index = ctx.resolution_index
-        models = index if isinstance(index, frozenset) else frozenset()
+        models = index.models if isinstance(index, RubyIndex) else (
+            index if isinstance(index, frozenset) else frozenset())
         typed_db_ids = model_receivers(root, source, models) or None
 
         functions: list[Function] = []

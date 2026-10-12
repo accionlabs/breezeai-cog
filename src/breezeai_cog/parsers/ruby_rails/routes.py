@@ -8,6 +8,8 @@ from tree_sitter import Node
 
 from ...emit import disambiguate, file_id, statement_id
 from ...schemas import FileRecord, Statement
+from ..ruby.controllers import controller_class, guards_for
+from ..ruby.index import RubyIndex
 from ..ruby.ownership import owner_id
 from ..treesitter import first_line, node_text
 
@@ -153,6 +155,52 @@ def _route_prefix(call: Node, source: bytes) -> str | None:
     return "".join("/" + s.strip("/") for s in reversed(segments) if s.strip("/"))
 
 
+def _route_module(call: Node, source: bytes) -> str | None:
+    """The controller module the enclosing blocks put a route in: ``namespace :admin`` → ``admin``
+    (``module:`` overrides it), ``scope module: 'v1'`` → ``v1``; ``""`` for none, None when a
+    module is given by anything but a literal."""
+    modules: list[str] = []
+    current = call.parent
+    while current is not None:
+        if current.type == "call" and current.child_by_field_name("block") is not None:
+            method = _method(current, source)
+            if method in _PATH_SCOPES:
+                args = _arguments(current)
+                module: str | None = None
+                explicit = False
+                for a in args:
+                    key = a.child_by_field_name("key") if a.type == "pair" else None
+                    if key is not None and node_text(key, source).rstrip(":") == "module":
+                        explicit = True
+                        module = _segment(a.child_by_field_name("value"), source)
+                if explicit:
+                    if module is None:
+                        return None
+                    modules.append(module)
+                elif method == "namespace":
+                    positional = [a for a in args if a.type != "pair"]
+                    name = _segment(positional[0], source) if positional else None
+                    if name is None:
+                        return None
+                    modules.append(name)
+        current = current.parent
+    return "/".join(m.strip("/") for m in reversed(modules) if m.strip("/"))
+
+
+def _route_guards(handler: str | None, module: str | None, index: object) -> list[str]:
+    """The ``before_action`` guards of the controller action a route points at (``users#show`` →
+    ``UsersController#show``, inside ``namespace :admin`` → ``Admin::UsersController``). Unknown
+    controller, module or handler form → no guards."""
+    if handler is None or module is None or not isinstance(index, RubyIndex):
+        return []
+    target = controller_class(f"{module}/{handler}" if module else handler)
+    if target is None:
+        return []
+    controller, action = target
+    callbacks = index.controller_callbacks.get(controller)
+    return guards_for(callbacks, action) if callbacks is not None else []
+
+
 def _join(prefix: str, local: str) -> str:
     """``/admin`` + ``stats`` → ``/admin/stats``; a path without a leading ``/`` is relative to
     its scope, so it is normalised (``about`` → ``/about``)."""
@@ -160,8 +208,11 @@ def _join(prefix: str, local: str) -> str:
     return "/" + "/".join(parts) if parts else "/"
 
 
-def detect_rails_routes(root: Node, source: bytes, path: str, record: FileRecord) -> bool:
-    """Append explicit Rails route DSL statements; unresolved values stay null."""
+def detect_rails_routes(
+    root: Node, source: bytes, path: str, record: FileRecord, index: object = None
+) -> bool:
+    """Append explicit Rails route DSL statements; unresolved values stay null. ``index`` (the
+    Ruby repo index) supplies the controller callbacks that become each route's guards."""
     seen = {statement.id for statement in record.statements}
     matched = False
     fallback = file_id(path)
@@ -185,6 +236,7 @@ def detect_rails_routes(root: Node, source: bytes, path: str, record: FileRecord
         endpoint = _join(prefix, local) if local is not None and prefix is not None else None
         line = call.start_point[0] + 1
         methods = _via_methods(args, source) if method == "match" else [method.upper()]
+        guards = _route_guards(handler, _route_module(call, source), index)
         for verb in methods:  # match … via: [:get, :post] → one binding per verb
             record.statements.append(
                 Statement(
@@ -196,6 +248,9 @@ def detect_rails_routes(root: Node, source: bytes, path: str, record: FileRecord
                     method=verb,
                     endpoint=endpoint,
                     handler=handler,
+                    guards=guards or None,
+                    # Honest-null: assert auth only when a guard is present; absence is unknown.
+                    authRequired=True if guards else None,
                     framework="rails",
                     routeKind="route",
                     isRegex=False,

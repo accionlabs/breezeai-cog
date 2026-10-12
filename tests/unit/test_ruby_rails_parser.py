@@ -156,3 +156,46 @@ end
     ])
     ids = [s.id for s in record.statements if s.semanticType == "route"]
     assert len(ids) == len(set(ids))
+
+
+def test_rails_before_action_guards_from_the_controller(analyze_files) -> None:
+    st = analyze_files({
+        "config/routes.rb": (
+            "Rails.application.routes.draw do\n"
+            "  get '/users/:id', to: 'users#show'\n"
+            "  get '/users', to: 'users#index'\n"
+            "  post '/users/:id/ban', to: 'users#ban'\n"
+            "  namespace :admin do\n    get 'stats', to: 'stats#show'\n  end\n"
+            "  get '/open', to: 'pages#home'\n"
+            "end\n"
+        ),
+        "app/controllers/users_controller.rb": (
+            "class UsersController < ApplicationController\n"
+            "  before_action :authenticate\n"
+            "  before_action :load_user, only: [:show, :ban]\n"
+            "  before_action :admin_only, except: :index\n"
+            "  before_action :beta, if: :beta?\n"
+            "  def show; end\n  def index; end\n  def ban; end\n"
+            "end\n"
+        ),
+        "app/controllers/admin/stats_controller.rb": (
+            "module Admin\n  class StatsController < ApplicationController\n"
+            "    before_action :require_admin\n    def show; end\n  end\nend\n"
+        ),
+        "app/controllers/stats_controller.rb": (
+            "class StatsController < ApplicationController\n"
+            "  before_action :public_stats\n  def show; end\nend\n"
+        ),
+        "app/controllers/pages_controller.rb": (
+            "class PagesController < ApplicationController\n  def home; end\nend\n"
+        ),
+    })
+    got = {s.endpoint: (s.guards, s.authRequired) for s in st if s.semanticType == "route"}
+    assert got == {
+        "/users/:id": (["authenticate", "load_user", "admin_only"], True),
+        "/users": (["authenticate"], True),
+        "/users/:id/ban": (["authenticate", "load_user", "admin_only"], True),
+        # namespace :admin → Admin::StatsController, not the top-level StatsController
+        "/admin/stats": (["require_admin"], True),
+        "/open": (None, None),  # no callbacks; the if: callback above is never a guard
+    }

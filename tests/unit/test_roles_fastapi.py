@@ -105,7 +105,6 @@ def test_mount_is_wiring(analyze_files) -> None:
     assert _eps(st) == []
 
 
-@pytest.mark.xfail(strict=True, reason="Depends(...) dependencies not recorded in guards")
 def test_depends_is_guard(analyze_files) -> None:
     st = analyze_files(
         {

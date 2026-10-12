@@ -114,3 +114,33 @@ end
         12: "/api/hdr",            # header versioning adds no path
         17: None,                  # unresolved prefix → address unknown
     }
+
+
+def test_grape_before_hooks_are_guards(tmp_path: Path) -> None:
+    source = b'''require "grape"
+class Api < Grape::API
+  before { authenticate! }
+  get '/early' do
+    1
+  end
+  before do
+    check_scope(:read)
+  end
+  namespace :admin do
+    before { require_admin! }
+    before do
+      log; audit
+    end
+    get '/stats' do
+      2
+    end
+  end
+end
+'''
+    record = GrapeParser().parse_file(_context(tmp_path, "api.rb", source))
+    got = {s.endpoint: (s.guards, s.authRequired) for s in record.statements if s.semanticType == "route"}
+    assert got == {
+        "/early": (["authenticate!"], True),
+        # outer scope first; a hook with more than one statement names no guard
+        "/admin/stats": (["authenticate!", "check_scope", "require_admin!"], True),
+    }

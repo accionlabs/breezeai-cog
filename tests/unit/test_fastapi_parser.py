@@ -181,3 +181,37 @@ def test_empty_path_is_the_router_prefix(analyze_files) -> None:
         "@router.get('')\ndef list_customers():\n    pass\n"
     ))
     assert got == {"list_customers": "/customers"}
+
+
+# ── Guards: dependencies on routes, routers, includes and the app ───────────────────────────────
+def test_dependencies_are_guards_outer_first(analyze_files) -> None:
+    st = analyze_files({"main.py": (
+        "from fastapi import FastAPI, APIRouter, Depends, Security\n"
+        "app = FastAPI(dependencies=[Depends(audit)])\n"
+        "admin = APIRouter(prefix='/admin', dependencies=[Depends(require_admin)])\n"
+        "loose = APIRouter(dependencies=[Depends(rate_limit)])\n"
+        "@admin.get('/stats', dependencies=[Security(auth.scopes, scopes=['x']), Depends()])\n"
+        "def stats():\n    pass\n"
+        "@app.get('/open')\ndef open_():\n    pass\n"
+        "@loose.get('/l')\ndef l():\n    pass\n"
+        "def me(user = Depends(get_user)):\n    pass\n"
+        "app.include_router(admin, dependencies=[Depends(require_login)])\n"
+    )})
+    got = {s.handler: (s.guards, s.authRequired) for s in st if s.semanticType == "route"}
+    assert got == {
+        # app → include → router → route; Depends() with no callable is skipped
+        "stats": (["audit", "require_login", "require_admin", "auth.scopes"], True),
+        "open_": (["audit"], True),
+        # not included in this file: only its own dependencies
+        "l": (["rate_limit"], True),
+    }
+
+
+def test_route_without_dependencies_has_no_guards(analyze_files) -> None:
+    st = analyze_files({"main.py": (
+        "from fastapi import FastAPI, Depends\napp = FastAPI()\n"
+        "@app.get('/me')\ndef me(user = Depends(get_user)):\n    pass\n"
+    )})
+    [r] = [s for s in st if s.semanticType == "route"]
+    # a handler parameter's Depends is dependency injection, not a guard
+    assert (r.guards, r.authRequired) == (None, None)

@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import pytest
-
 EP = {"route", "eventbus_consumer", "timer"}
 
 
@@ -55,7 +53,6 @@ def test_mount_is_wiring(analyze_files) -> None:
     assert _eps(st) == []
 
 
-@pytest.mark.xfail(strict=True, reason="before hook not recorded in guards")
 def test_before_is_guard(analyze_files) -> None:
     st = _api(analyze_files, "  before { authenticate! }\n  get '/status' do\n    1\n  end\n")
     assert len(_eps(st)) == 1
