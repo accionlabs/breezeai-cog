@@ -63,7 +63,6 @@ def test_lazy_component_variable_is_binding(analyze_files) -> None:
     assert (r.routeKind, r.handler) == ("page", "Reports")
 
 
-@pytest.mark.xfail(strict=True, reason="a <Navigate> redirect is recorded as a page")
 def test_navigate_redirect_is_none(analyze_files) -> None:
     st = _jsx(analyze_files, '      <Route path="/old" element={<Navigate to="/" replace />} />\n')
     assert _at(st, "/old") == []

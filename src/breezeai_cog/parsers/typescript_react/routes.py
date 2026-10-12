@@ -40,6 +40,8 @@ def _string_val(node: Node | None, source: bytes) -> str:
 
 
 _JSX_ELEMENTS = ("jsx_element", "jsx_self_closing_element")
+#: Redirect elements: a route that renders one is an alias, not a page — no record.
+_REDIRECTS = frozenset({"Navigate", "Redirect"})
 
 
 def _component_name(value: Node | None, source: bytes) -> str | None:
@@ -104,7 +106,8 @@ def _process_jsx(el: Node, prefix: str, source: bytes, path: str, seen: set[str]
     is_index = "index" in attrs and not has_path  # <Route index .../> -> parent's path
     sub = _string_val(attrs.get("path"), source) if has_path else ""
     full = _join(prefix, sub)
-    if has_path or is_index:
+    handler = _component_name(attrs.get("element"), source)
+    if (has_path or is_index) and handler not in _REDIRECTS:
         sl, sc = el.start_point[0] + 1, el.start_point[1]
         lazy = "lazy" in attrs
         routes.append(Statement(
@@ -116,7 +119,7 @@ def _process_jsx(el: Node, prefix: str, source: bytes, path: str, seen: set[str]
             endpoint=full,
             framework="react",
             routeKind="mount" if lazy else "page",
-            handler=_component_name(attrs.get("element"), source),
+            handler=handler,
             startLine=sl,
             endLine=el.end_point[0] + 1,
             path=path,
@@ -168,6 +171,9 @@ def _process_config(arr: Node, prefix: str, source: bytes, path: str, seen: set[
         element = pairs.get("element") or pairs.get("Component") or pairs.get("component")
         if element is not None and element.type == "identifier" and element is pairs.get("element"):
             element = None  # element: someVar — a value, not a component name
+        handler = _component_name(element, source)
+        if handler in _REDIRECTS:
+            continue
         sl, sc = elem.start_point[0] + 1, elem.start_point[1]
         routes.append(Statement(
             id=disambiguate(statement_id(path, sl, sc), seen),
@@ -178,7 +184,7 @@ def _process_config(arr: Node, prefix: str, source: bytes, path: str, seen: set[
             endpoint=full,
             framework="react",
             routeKind="mount" if lazy else "page",
-            handler=_component_name(element, source),
+            handler=handler,
             startLine=sl,
             endLine=elem.end_point[0] + 1,
             path=path,

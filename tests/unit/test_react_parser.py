@@ -437,3 +437,20 @@ def test_config_element_variable_is_not_a_component_name(analyze_files) -> None:
     })
     handlers = {s.endpoint: s.handler for s in st if s.semanticType == "route"}
     assert handlers == {"/": None, "/about": "About", "/team": "Team"}
+
+
+def test_redirect_route_has_no_record(analyze_files) -> None:
+    st = analyze_files({
+        "package.json": '{"dependencies": {"react-router-dom": "6"}}',
+        "src/App.tsx": (
+            "import { Routes, Route, Navigate, createBrowserRouter } from 'react-router-dom';\n"
+            "export const App = () => (\n  <Routes>\n"
+            '    <Route path="/old" element={<Navigate to="/" replace />} />\n'
+            '    <Route path="/home" element={<Home />} />\n'
+            "  </Routes>\n);\n"
+            "export const router = createBrowserRouter([\n"
+            "  { path: '/legacy', element: <Navigate to='/home' /> },\n"
+            "  { path: '/about', element: <About /> },\n]);\n"
+        ),
+    })
+    assert sorted(s.endpoint for s in st if s.semanticType == "route") == ["/about", "/home"]
