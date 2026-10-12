@@ -33,14 +33,12 @@ def test_event_handler_is_binding(analyze_files) -> None:
     assert (r.handler, r.handlerLine) == ("FunctionHandler", 8)
 
 
-@pytest.mark.xfail(strict=True, reason="framework is aws-lambda, not the trigger's service")
 def test_event_handler_framework_is_trigger(analyze_files) -> None:
     stmts = analyze_files({"Function.cs": _handler("SQSEvent")})
     [r] = _eps(stmts)
     assert r.framework == "aws-sqs"
 
 
-@pytest.mark.xfail(strict=True, reason="endpoint holds the method name instead of the queue")
 def test_event_handler_endpoint_not_code_name(analyze_files) -> None:
     stmts = analyze_files({"Function.cs": _handler("SQSEvent")})
     [r] = _eps(stmts)
