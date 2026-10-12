@@ -140,7 +140,9 @@ framework-parser section and detection idioms in the reference guide. Entry poin
 consumers, scheduled jobs, pages) follow the
 [entry-point contract](../../docs/architecture/entry-points.md): give each framework construct
 a role, record one entry point per binding, and keep wiring (mounts, prefixes, registrations)
-as plain statements. Write the role table before the detection code.
+as plain statements. Write the role table (in
+[`docs/entry-point-roles/`](../../docs/entry-point-roles/README.md)) and its
+`tests/unit/test_roles_<framework>.py` before the detection code.
 
 ### 3C. Internal-framework detector (additive — composes on top)
 An internal framework appears *inside* files owned by other frameworks, so it must never be

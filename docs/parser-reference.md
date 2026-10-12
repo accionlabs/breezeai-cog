@@ -175,7 +175,10 @@ to a global list. (Full `*.test.*` / `*.spec.*` *exclusion* already lives in
 A parser or detector that emits entry points (`route`, `eventbus_consumer`, `timer`) follows the
 [entry-point contract](architecture/entry-points.md):
 - Give every framework construct it recognises one **role** (binding, wiring, guard, outbound,
-  none) and write them down as a **role table** in the parser's docs, with one test per row.
+  none) and write them down as a **role table** in
+  [`docs/entry-point-roles/`](entry-point-roles/README.md), with one test per row in
+  `tests/unit/test_roles_<framework>.py` (the `analyze_files` fixture runs the whole pipeline on a
+  temporary repo, for wiring in another file).
 - Emit **one record per binding**, at the binding: `endpoint` is the fully resolved address or
   empty, `handler` / `handlerLine` point at the handler (an anonymous handler has
   `handlerLine` only).

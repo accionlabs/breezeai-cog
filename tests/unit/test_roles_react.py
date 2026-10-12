@@ -1,0 +1,235 @@
+"""React Router role table: docs/entry-point-roles/react.md — one test per row."""
+
+from __future__ import annotations
+
+import pytest
+
+EP = {"route", "eventbus_consumer", "timer"}
+
+PKG = '{"dependencies": {"react": "18", "react-router-dom": "6"}}'
+V7_PKG = '{"dependencies": {"react": "19", "react-router": "7", "@react-router/dev": "7"}}'
+HEAD = "import React from 'react';\nimport { Routes, Route, Navigate } from 'react-router-dom';\n"
+
+
+def _jsx(analyze_files, routes: str):
+    src = (
+        HEAD
+        + f"export function App() {{\n  return (\n    <Routes>\n{routes}    </Routes>\n  );\n}}\n"
+    )
+    return analyze_files({"package.json": PKG, "src/App.tsx": src})
+
+
+def _eps(stmts, path: str = "src/App.tsx"):
+    return [
+        s
+        for s in stmts
+        if s.semanticType in EP and s.routeKind != "field_resolver" and s.path == path
+    ]
+
+
+def _at(stmts, endpoint: str, path: str = "src/App.tsx"):
+    return [s for s in _eps(stmts, path) if s.endpoint == endpoint]
+
+
+def test_route_with_element_is_binding(analyze_files) -> None:
+    st = _jsx(analyze_files, '      <Route path="/users" element={<Users />} />\n')
+    [r] = _at(st, "/users")
+    assert (r.semanticType, r.routeKind, r.framework, r.handler) == (
+        "route",
+        "page",
+        "react",
+        "Users",
+    )
+
+
+@pytest.mark.xfail(strict=True, reason="a page wrapped in elements: handler is the outer element")
+def test_wrapped_element_handler_is_the_page(analyze_files) -> None:
+    st = _jsx(
+        analyze_files,
+        '      <Route path="/dash" element={<Suspense fallback={<Spinner />}>'
+        "<Dashboard /></Suspense>} />\n",
+    )
+    [r] = _at(st, "/dash")
+    assert r.handler == "Dashboard"
+
+
+def test_lazy_component_variable_is_binding(analyze_files) -> None:
+    src = (
+        HEAD + "const Reports = React.lazy(() => import('./Reports'));\n"
+        'export function App() {\n  return <Routes><Route path="/reports" '
+        "element={<Reports />} /></Routes>;\n}\n"
+    )
+    st = analyze_files({"package.json": PKG, "src/App.tsx": src})
+    [r] = _at(st, "/reports")
+    assert (r.routeKind, r.handler) == ("page", "Reports")
+
+
+@pytest.mark.xfail(strict=True, reason="a <Navigate> redirect is recorded as a page")
+def test_navigate_redirect_is_none(analyze_files) -> None:
+    st = _jsx(analyze_files, '      <Route path="/old" element={<Navigate to="/" replace />} />\n')
+    assert _at(st, "/old") == []
+
+
+@pytest.mark.xfail(
+    strict=True, reason="a guard element used as a layout is not put in the children's guards"
+)
+def test_guard_layout_element_is_guard(analyze_files) -> None:
+    st = _jsx(
+        analyze_files,
+        "      <Route element={<ProtectedRoute />}>\n"
+        '        <Route path="/account" element={<Account />} />\n'
+        "      </Route>\n",
+    )
+    [r] = _at(st, "/account")
+    assert r.guards == ["ProtectedRoute"]
+    assert [s.handler for s in _eps(st)] == ["Account"]
+
+
+@pytest.mark.xfail(strict=True, reason="a layout (element + index child) is recorded as a page")
+def test_layout_with_index_child_is_wiring(analyze_files) -> None:
+    st = _jsx(
+        analyze_files,
+        '      <Route path="/settings" element={<SettingsLayout />}>\n'
+        "        <Route index element={<SettingsHome />} />\n"
+        '        <Route path="profile" element={<Profile />} />\n'
+        "      </Route>\n",
+    )
+    assert [r.handler for r in _at(st, "/settings")] == ["SettingsHome"]
+    assert [r.handler for r in _at(st, "/settings/profile")] == ["Profile"]
+
+
+def test_element_with_children_and_no_index_is_also_binding(analyze_files) -> None:
+    st = _jsx(
+        analyze_files,
+        '      <Route path="/orders" element={<OrderList />}>\n'
+        '        <Route path=":id" element={<OrderDetail />} />\n'
+        "      </Route>\n",
+    )
+    assert [r.handler for r in _at(st, "/orders")] == ["OrderList"]
+    assert [r.handler for r in _at(st, "/orders/:id")] == ["OrderDetail"]
+
+
+@pytest.mark.xfail(strict=True, reason="a path-only parent <Route path> is recorded as a page")
+def test_path_only_parent_is_wiring(analyze_files) -> None:
+    st = _jsx(
+        analyze_files,
+        '      <Route path="/admin">\n'
+        '        <Route path="users" element={<AdminUsers />} />\n'
+        "      </Route>\n",
+    )
+    assert _at(st, "/admin") == []
+
+
+def test_path_only_parent_prefixes_children(analyze_files) -> None:
+    st = _jsx(
+        analyze_files,
+        '      <Route path="/admin">\n'
+        '        <Route path="users" element={<AdminUsers />} />\n'
+        "      </Route>\n",
+    )
+    assert [r.handler for r in _at(st, "/admin/users")] == ["AdminUsers"]
+
+
+@pytest.mark.xfail(strict=True, reason="a lazy route module is recorded as routeKind mount")
+def test_lazy_route_module_is_binding(analyze_files) -> None:
+    st = _jsx(analyze_files, "      <Route path=\"/lazy\" lazy={() => import('./LazyPage')} />\n")
+    [r] = _at(st, "/lazy")
+    assert r.routeKind == "page"
+
+
+def test_config_object_route_is_binding(analyze_files) -> None:
+    src = (
+        "import { createBrowserRouter } from 'react-router-dom';\n"
+        "export const router = createBrowserRouter([\n"
+        "  { path: '/team', element: <Team /> },\n]);\n"
+    )
+    st = analyze_files({"package.json": PKG, "src/router.tsx": src})
+    [r] = _at(st, "/team", "src/router.tsx")
+    assert (r.routeKind, r.handler) == ("page", "Team")
+
+
+@pytest.mark.xfail(
+    strict=True, reason="Component: X (a component reference, not JSX) gives no handler"
+)
+def test_config_object_component_reference_is_binding(analyze_files) -> None:
+    src = (
+        "import { createBrowserRouter } from 'react-router-dom';\n"
+        "export const router = createBrowserRouter([\n"
+        "  { path: '/about', Component: About },\n]);\n"
+    )
+    st = analyze_files({"package.json": PKG, "src/router.tsx": src})
+    [r] = _at(st, "/about", "src/router.tsx")
+    assert r.handler == "About"
+
+
+def _v7(analyze_files, body: str):
+    src = (
+        "import { type RouteConfig, route, index, layout, prefix } from "
+        "'@react-router/dev/routes';\nexport default [\n" + body + "] satisfies RouteConfig;\n"
+    )
+    return analyze_files({"package.json": V7_PKG, "app/routes.ts": src})
+
+
+@pytest.mark.xfail(strict=True, reason="v7 route(path, file): handler is the module file path")
+def test_v7_route_is_binding(analyze_files) -> None:
+    st = _v7(analyze_files, "  route('about', 'routes/about.tsx'),\n")
+    [r] = _at(st, "/about", "app/routes.ts")
+    assert r.routeKind == "page"
+    assert not r.handler or "/" not in r.handler
+
+
+@pytest.mark.xfail(
+    strict=True, reason="v7 layout(file, [...]) is recorded as a route (routeKind mount)"
+)
+def test_v7_layout_is_wiring(analyze_files) -> None:
+    st = _v7(
+        analyze_files, "  layout('routes/shell.tsx', [ route('login', 'routes/login.tsx') ]),\n"
+    )
+    assert [r.endpoint for r in _eps(st, "app/routes.ts")] == ["/login"]
+
+
+def test_v7_prefix_is_wiring(analyze_files) -> None:
+    st = _v7(analyze_files, "  ...prefix('projects', [ route(':id', 'routes/project.tsx') ]),\n")
+    assert [r.endpoint for r in _eps(st, "app/routes.ts")] == ["/projects/:id"]
+
+
+@pytest.mark.xfail(strict=True, reason="<Link to> is not captured as navigation")
+def test_link_is_outbound_navigation(analyze_files) -> None:
+    src = (
+        "import React from 'react';\nimport { Link } from 'react-router-dom';\n"
+        'export function Nav() { return <Link to="/orders">Orders</Link>; }\n'
+    )
+    st = analyze_files({"package.json": PKG, "src/Nav.tsx": src})
+    assert _eps(st, "src/Nav.tsx") == []
+    assert [s.endpoint for s in st if s.semanticType == "navigation"] == ["/orders"]
+
+
+@pytest.mark.xfail(strict=True, reason="useNavigate() calls are not captured as navigation")
+def test_navigate_call_is_outbound_navigation(analyze_files) -> None:
+    src = (
+        "import React from 'react';\nimport { useNavigate } from 'react-router-dom';\n"
+        "export function Go() {\n  const navigate = useNavigate();\n"
+        "  return <button onClick={() => navigate('/reports')}>Go</button>;\n}\n"
+    )
+    st = analyze_files({"package.json": PKG, "src/Go.tsx": src})
+    assert _eps(st, "src/Go.tsx") == []
+    assert [s.endpoint for s in st if s.semanticType == "navigation"] == ["/reports"]
+
+
+def test_fetch_is_outbound(analyze_files) -> None:
+    src = (
+        "import React from 'react';\n"
+        "export async function loadUsers() { return fetch('/api/users'); }\n"
+    )
+    st = analyze_files({"package.json": PKG, "src/api.tsx": src})
+    assert _eps(st, "src/api.tsx") == []
+    assert [s.endpoint for s in st if s.semanticType == "api_call"] == ["/api/users"]
+
+
+def test_create_root_is_none(analyze_files) -> None:
+    src = (
+        "import React from 'react';\nimport { createRoot } from 'react-dom/client';\n"
+        "createRoot(document.getElementById('root')!).render(<App />);\n"
+    )
+    st = analyze_files({"package.json": PKG, "src/main.tsx": src})
+    assert _eps(st, "src/main.tsx") == []

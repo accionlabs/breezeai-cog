@@ -295,9 +295,11 @@ public Task FunctionHandler(SQSEvent e, ILambdaContext c)
 
 ## 9. Per-framework role tables
 
-Every parser that records entry points keeps a role table like these in its documentation. Its
-tests cover each row, and a reviewer checks the parser against its own table. The tables below
-describe what the contract requires.
+Every parser that records entry points keeps a role table like these in
+[`docs/entry-point-roles/`](../entry-point-roles/README.md). Its tests
+(`tests/unit/test_roles_<framework>.py`) cover each row, and a reviewer checks the parser against
+its own table. The tables below are examples of what the contract requires; the full tables live
+there.
 
 ### Express
 
