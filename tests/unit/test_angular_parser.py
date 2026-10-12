@@ -484,7 +484,8 @@ def test_route_entry_text_is_one_line_without_children(analyze_files) -> None:
         "package.json": '{"dependencies": {"@angular/core": "17", "@angular/router": "17"}}',
         "src/app/app.routes.ts": (
             "import { Routes } from '@angular/router';\n"
-            "export const routes: Routes = [\n  {\n    path: 'admin',\n    component: AdminComponent,\n"
+            "export const routes: Routes = [\n  {\n    // the admin area\n    path: 'admin',\n"
+            "    component: AdminComponent, /* lazy later */\n"
             "    children: [\n      { path: 'users', component: UsersComponent },\n    ],\n  },\n];\n"
         ),
     })

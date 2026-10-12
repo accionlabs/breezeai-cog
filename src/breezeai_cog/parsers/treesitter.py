@@ -87,18 +87,30 @@ ENTRY_TEXT_LIMIT = 240
 
 def entry_text(node: Node, source: bytes, nested: Collection[str] = ("children",)) -> str:
     """One-line text of a route-table entry (``{ path: 'x', component: X, … }``): whitespace runs
-    collapsed to one space, the value of a ``nested`` key (child routes, recorded on their own)
-    shown as ``[…]``, capped at :data:`ENTRY_TEXT_LIMIT`. The first line of a multi-line object
-    literal is just ``{`` — useless as search text."""
-    text = node_text(node, source)
-    if node.type == "object":
-        for pair in node.named_children:
-            key = pair.child_by_field_name("key") if pair.type == "pair" else None
-            value = pair.child_by_field_name("value") if key is not None else None
-            if key is not None and value is not None and node_text(key, source).strip("'\"") in nested:
-                start, end = value.start_byte - node.start_byte, value.end_byte - node.start_byte
-                raw = source[node.start_byte:node.end_byte]
-                text = (raw[:start] + b"[\xe2\x80\xa6]" + raw[end:]).decode("utf-8", "replace")
-                break
-    one = " ".join(text.split())
+    collapsed to one space, comments dropped (on one line a ``//`` would swallow the code after
+    it), the value of a ``nested`` key (child routes, recorded on their own) shown as ``[…]``,
+    capped at :data:`ENTRY_TEXT_LIMIT`. The first line of a multi-line object literal is just
+    ``{`` — useless as search text."""
+    cuts: list[tuple[int, int, bytes]] = []  # (start, end, replacement) byte ranges in source
+
+    def walk(n: Node) -> None:
+        if n.type == "comment":
+            cuts.append((n.start_byte, n.end_byte, b" "))
+            return
+        if n.type == "pair" and n.parent == node:
+            key, value = n.child_by_field_name("key"), n.child_by_field_name("value")
+            if (key is not None and value is not None
+                    and node_text(key, source).strip("'\"") in nested):
+                cuts.append((value.start_byte, value.end_byte, "[\u2026]".encode()))
+                return
+        for c in n.children:
+            walk(c)
+
+    walk(node)
+    raw, pos = b"", node.start_byte
+    for s, e, rep in sorted(cuts):
+        raw += source[pos:s] + rep
+        pos = e
+    raw += source[pos:node.end_byte]
+    one = " ".join(raw.decode("utf-8", "replace").split())
     return one if len(one) <= ENTRY_TEXT_LIMIT else one[:ENTRY_TEXT_LIMIT - 1] + "\u2026"
