@@ -57,10 +57,6 @@ def test_wrapper_handler_is_the_innermost_function(analyze_files) -> None:
     assert (r.method, r.handler, r.handlerLine) == ("PUT", None, 4)
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="chained verbs on route(path) are not recorded; route(path) is recorded instead",
-)
 def test_route_chain_is_one_binding_per_verb(analyze_files) -> None:
     st = _app(analyze_files, "app.route('/book').get(getBook).post(postBook);\n")
     got = {(r.method, r.endpoint, r.handler) for r in _eps(st)}

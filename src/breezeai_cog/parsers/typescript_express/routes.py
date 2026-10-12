@@ -209,6 +209,11 @@ def _classify(
     if obj is None or prop is None:
         return None
     method = node_text(prop, source)
+    # ``app.route('/book').get(h1).post(h2)``: each verb call is a binding at the route's path;
+    # ``route(path)`` itself only adds the path (wiring — no record).
+    route_call = _route_root(obj, source) if method in _HTTP_VERBS else None
+    if route_call is not None:
+        return _classify_route_verb(call, route_call, method, source, routers, decl_lines, consts)
     obj_text = node_text(obj, source)
     if not _is_router_obj(obj_text) and obj_text not in routers:
         return None
@@ -247,15 +252,64 @@ def _classify(
             handler, handler_line, guards = _mount_parts(chain, source, bindings)
             return None, path, handler, handler_line, guards, "express", "mount"
         return None
-    if method == "route" and has_path:
-        return None, path, None, None, None, "express", "route"
+    return None  # includes ``route(path)``: wiring for its chained verbs
+
+
+def _route_root(obj: Node | None, source: bytes) -> Node | None:
+    """The ``X.route(path)`` call at the root of a verb chain receiver
+    (``app.route('/book')`` / ``app.route('/book').get(h1)``), else None."""
+    while obj is not None and obj.type == "call_expression":
+        fn = obj.child_by_field_name("function")
+        prop = fn.child_by_field_name("property") if fn is not None and fn.type == "member_expression" else None
+        if fn is None or prop is None:
+            return None
+        name = node_text(prop, source)
+        if name == "route":
+            return obj
+        if name not in _HTTP_VERBS:
+            return None
+        obj = fn.child_by_field_name("object")
     return None
 
 
+def _classify_route_verb(
+    call: Node, route_call: Node, method: str, source: bytes, routers: frozenset[str],
+    decl_lines: dict[str, int | None] | None, consts: dict[str, str | None] | None,
+) -> tuple[str | None, str | None, str | None, int | None, list[str] | None, str, str] | None:
+    """One verb of an ``X.route(path).get(...)`` chain → a route at ``path`` with the verb's
+    handler (last argument) and guards (the arguments before it)."""
+    rfn = route_call.child_by_field_name("function")
+    robj = rfn.child_by_field_name("object") if rfn is not None else None
+    if robj is None:
+        return None
+    robj_text = node_text(robj, source)
+    if not _is_router_obj(robj_text) and robj_text not in routers:
+        return None
+    rargs = route_call.child_by_field_name("arguments")
+    first = rargs.named_children[0] if rargs is not None and rargs.named_children else None
+    if first is None:
+        return None
+    path = _path_value(first, source, consts or {})
+    if path is None and first.type != "template_string":
+        return None
+    vargs = call.child_by_field_name("arguments")
+    verb_args = list(vargs.named_children) if vargs is not None else []
+    if not verb_args:
+        return None
+    handler, handler_line = _handler([first, *verb_args], source, decl_lines or {})
+    return method.upper(), path, handler, handler_line, _guard_names(verb_args[:-1], source), \
+        "express", "route"
+
+
 def _receiver(call: Node, source: bytes) -> str:
-    """The object a method call is made on (``matchRouter`` in ``matchRouter.get(...)``)."""
+    """The object a method call is made on (``matchRouter`` in ``matchRouter.get(...)``; for a
+    ``router.route(path).get(...)`` chain, the router)."""
     fn = call.child_by_field_name("function")
     obj = fn.child_by_field_name("object") if fn is not None else None
+    route_call = _route_root(obj, source)
+    if route_call is not None:
+        rfn = route_call.child_by_field_name("function")
+        obj = rfn.child_by_field_name("object") if rfn is not None else None
     return node_text(obj, source) if obj is not None else ""
 
 
@@ -386,6 +440,7 @@ def detect_express(
         if f.parentId == fid:
             decl_lines[f.name] = f.startLine if f.name not in decl_lines else None
 
+    enriched: set[str] = set()  # statements enriched by this run
     for call in _invocations(root):
         info = _classify(call, source, root, binds, routers, decl_lines, consts)
         if info is None:
@@ -400,7 +455,10 @@ def detect_express(
         line = call.start_point[0] + 1
 
         stmt = enclosing.statement(line)
+        if stmt is not None and stmt.id in enriched:
+            stmt = None  # a second route in one statement (route(path).get(a).post(b)) → own record
         if stmt is not None:  # detection on the same span → enrich in place
+            enriched.add(stmt.id)
             stmt.semanticType = "route"
             stmt.framework = framework
             stmt.routeKind = route_kind
@@ -435,6 +493,7 @@ def detect_express(
                 path=path,
             ))
             seen.add(new_id)
+            enriched.add(new_id)
         matched = True
 
     return matched

@@ -61,14 +61,16 @@ def test_routes_detected(tmp_path) -> None:
         ("POST", "/api/users"),  # router mounted at /api in the same file
         ("ALL", "/health"),
         (None, "/api"),          # app.use / Router().use mount (both endpoints are /api)
-        (None, "/book"),         # app.route group
+        ("GET", "/book"),        # app.route('/book').get(getBook): one record per verb
+        ("POST", "/book"),       # ... .post(postBook); route('/book') itself is wiring
         ("DELETE", "/orders/:id"),
         ("GET", "/ping"),        # express.Router().get(...) direct-constructor receiver
     }
     assert routes[("POST", "/api/users")].handler == "createUser"
     assert routes[("DELETE", "/orders/:id")].handler == "deleteOrder"
     assert routes[(None, "/api")].routeKind == "mount"
-    assert routes[(None, "/book")].routeKind == "route"
+    assert (routes[("GET", "/book")].handler, routes[("POST", "/book")].handler) == (
+        "getBook", "postBook")
     assert all(r.framework == "express" for r in routes.values())
     assert rec.framework == "express"
 
@@ -363,3 +365,30 @@ def test_handler_line_is_the_declaration_or_the_inline_function(analyze_files) -
         "/e": ("Users.list", None),
         "/f": (None, None),        # a call with nothing to unwrap names no handler
     }
+
+
+def test_route_chain_one_record_per_verb(analyze_files) -> None:
+    st = analyze_files({
+        "package.json": _PKG,
+        "src/app.js": (
+            "import express from 'express';\nconst app = express();\n"
+            "const router = express.Router();\n"
+            "router.route('/items/:id')\n"
+            "  .get(getItem)\n"
+            "  .put(auth, (req, res) => res.end())\n"
+            "  .delete(asyncHandler(async (req, res) => res.end()));\n"
+            "app.use('/api', router);\n"
+            "function getItem(req, res) { res.end(); }\n"
+        ),
+    })
+    routes = sorted(
+        (s.method, s.endpoint, s.handler, s.handlerLine, s.guards)
+        for s in st if s.semanticType == "route" and s.routeKind == "route"
+    )
+    assert routes == [
+        ("DELETE", "/api/items/:id", None, 7, None),
+        ("GET", "/api/items/:id", "getItem", 9, None),
+        ("PUT", "/api/items/:id", None, 6, ["auth"]),
+    ]
+    assert len({s.id for s in st if s.semanticType == "route"}) == len(
+        [s for s in st if s.semanticType == "route"])
