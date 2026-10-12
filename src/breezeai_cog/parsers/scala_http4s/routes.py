@@ -144,6 +144,9 @@ def detect_http4s_routes(
                                 start = clause.start_point[0] + 1
                                 end = clause.end_point[0] + 1
                                 parent_id = find_enclosing_parent_id(start, record)
+                                # The handler is the case body after ``=>``: anonymous — no
+                                # name, its line is where the body starts.
+                                body = clause.child_by_field_name("body")
                                 route = Statement(
                                         id=disambiguate(statement_id(path, start, clause.start_point[1]), seen_ids),
                                         parentId=parent_id,
@@ -152,6 +155,7 @@ def detect_http4s_routes(
                                         text=node_text(clause, source),
                                         framework="http4s",
                                         handler=None,
+                                        handlerLine=body.start_point[0] + 1 if body is not None else None,
                                         method=verb,
                                         endpoint=endpoint,
                                         routeKind="route",
@@ -224,6 +228,7 @@ def detect_http4s_routes(
                                             text=route.text,
                                             framework=route.framework,
                                             handler=route.handler,
+                                            handlerLine=route.handlerLine,
                                             method=route.method,
                                             endpoint=new_ep,
                                             routeKind=route.routeKind,

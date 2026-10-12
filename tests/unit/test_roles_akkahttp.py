@@ -47,7 +47,6 @@ def test_verb_directive_is_binding(analyze_files) -> None:
     }
 
 
-@pytest.mark.xfail(strict=True, reason="anonymous Akka HTTP handler has no handlerLine")
 def test_verb_directive_records_anonymous_handler(analyze_files) -> None:
     st = analyze_files(
         _routes("""    path("health") {

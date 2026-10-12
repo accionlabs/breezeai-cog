@@ -38,7 +38,6 @@ def test_case_in_http_routes_is_binding(analyze_files) -> None:
     }
 
 
-@pytest.mark.xfail(strict=True, reason="anonymous http4s handler has no handlerLine")
 def test_case_records_anonymous_handler(analyze_files) -> None:
     st = analyze_files(_obj(ROUTES))
     got = {(r.method, r.handler, r.handlerLine) for r in _eps(st)}

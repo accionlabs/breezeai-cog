@@ -184,3 +184,28 @@ def test_akkahttp_conjunction_and_single_slash(tmp_path: Path) -> None:
         ("POST", "/ip"),
         ("GET", "/"),
     }
+
+
+def test_akkahttp_handler_is_the_directive_block(tmp_path: Path) -> None:
+    # An inline directive block is an anonymous handler (handlerLine only); a named route value
+    # is the handler's name, declared elsewhere (no line).
+    src = b"""import akka.http.scaladsl.server.Directives._
+import akka.http.scaladsl.server.Route
+
+object Routes {
+  val route: Route =
+    path("a") {
+      get {
+        complete("a")
+      } ~
+      post(createA)
+    }
+}
+"""
+    rec = _parse_akka_http(tmp_path, src, "Routes.scala")
+    got = {
+        s.method: (s.handler, s.handlerLine)
+        for s in rec.statements
+        if s.semanticType == "route" and s.framework == "akka-http"
+    }
+    assert got == {"GET": (None, 7), "POST": ("createA", None)}

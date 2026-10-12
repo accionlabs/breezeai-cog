@@ -144,6 +144,18 @@ def detect_akkahttp_routes(
         start = node.start_point[0] + 1
         end = node.end_point[0] + 1
         parent_id = find_enclosing_parent_id(start, record)
+        # The handler is the directive's block (``get { complete(...) }``): anonymous — no
+        # name, its line is where the block starts. A named route value (``get(listOrders)``)
+        # is the handler's name; it is declared elsewhere, so no line.
+        body = node.child_by_field_name("arguments")
+        handler: str | None = None
+        handler_line: int | None = None
+        if body is not None and body.type in ("block", "lambda_expression", "indented_block"):
+            handler_line = body.start_point[0] + 1
+        elif body is not None and body.type == "arguments":
+            only = body.named_children[0] if len(body.named_children) == 1 else None
+            if only is not None and only.type == "identifier":
+                handler = node_text(only, source)
         routes.append(
             Statement(
                 id=disambiguate(statement_id(path, start, node.start_point[1]), seen_ids),
@@ -152,7 +164,8 @@ def detect_akkahttp_routes(
                 semanticType="route",
                 text=node_text(node, source),
                 framework="akka-http",
-                handler=None,
+                handler=handler,
+                handlerLine=handler_line,
                 method=method,
                 endpoint=endpoint,
                 routeKind="route",

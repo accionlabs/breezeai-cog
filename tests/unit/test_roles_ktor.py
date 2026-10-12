@@ -50,7 +50,6 @@ def test_verb_in_routing_has_route_kind(analyze_files) -> None:
     assert r.routeKind == "route"
 
 
-@pytest.mark.xfail(strict=True, reason="anonymous Ktor handler has no handlerLine")
 def test_verb_in_routing_records_anonymous_handler(analyze_files) -> None:
     st = analyze_files(
         _app("""    routing {

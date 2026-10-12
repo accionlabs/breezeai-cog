@@ -156,6 +156,8 @@ def _collect_routes(
         end_line = child.end_point[0] + 1
         sid = disambiguate(statement_id(path, start_line, col), seen_ids)
         text = f"{verb}(\"{full_endpoint}\")"
+        # The handler is the trailing lambda: anonymous — no name, its line is where it starts.
+        body = _lambda_body(child)
         out.append(Statement(
             id=sid,
             parentId=parent_id,
@@ -165,6 +167,7 @@ def _collect_routes(
             text=text[:limit] if limit else text,
             method=verb.upper(),
             endpoint=full_endpoint,
+            handlerLine=body.start_point[0] + 1 if body is not None else None,
             startLine=start_line,
             endLine=end_line,
             path=path,

@@ -206,3 +206,27 @@ def test_qualified_call_not_a_route() -> None:
     assert any(s.endpoint == "/profile" for s in routes), (
         f"Expected /profile route; got: {[(s.method, s.endpoint) for s in routes]}"
     )
+
+
+def test_ktor_route_handler_is_the_trailing_lambda():
+    # The handler is the anonymous trailing lambda: no name, handlerLine where it starts.
+    src = (
+        b"import io.ktor.server.routing.*\n"
+        b"fun Application.module() {\n"
+        b"    routing {\n"
+        b"        get(\"/a\") {\n"
+        b"            call.respondText(\"a\")\n"
+        b"        }\n"
+        b"        route(\"/b\") {\n"
+        b"            post { call.respondText(\"b\") }\n"
+        b"        }\n"
+        b"    }\n"
+        b"}\n"
+    )
+    rec = _parse(src)
+    got = {
+        s.endpoint: (s.handler, s.handlerLine)
+        for s in rec.statements
+        if s.semanticType == "route" and s.framework == "ktor" and s.method
+    }
+    assert got == {"/a": (None, 4), "/b": (None, 8)}
