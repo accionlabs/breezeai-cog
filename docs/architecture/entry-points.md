@@ -107,11 +107,14 @@ targets them.
 | GraphQL query / mutation / subscription field | Binding |
 | GraphQL entity or node resolver (federation `__resolveReference`, Relay node lookup) | Binding — the framework's generated root field (`_entities`, `node`) calls it directly, addressed by type |
 | GraphQL data-type field resolver (`Book.author`) | None — no address of its own (§3) |
-| Message, queue, topic or event consumer | Binding |
-| Scheduled job (cron, timer) | Binding |
-| Serverless function, classified by its trigger | Binding |
+| Message, queue, topic or event consumer — including message-pattern handlers on an RPC transport (NestJS `@MessagePattern` / `@EventPattern`) | Binding (`eventbus_consumer`) |
+| Service registered on a message address (Vert.x `ServiceBinder…register(...)`) | Binding (`eventbus_consumer`), one per service method |
+| Service proxy client (Vert.x `ServiceProxyBuilder…build(...)`) | Outbound (`eventbus_send`) |
+| Service contract marker (Vert.x `@ProxyGen` interface) | None |
+| Scheduled job: cron or interval annotation, recurring-job registration, timer call (`@Scheduled`, `@Cron`, `@Interval`, Hangfire `RecurringJob`, Quartz, Celery beat, Vert.x `setPeriodic`) | Binding (`timer`) |
+| Serverless function, classified by its trigger (a scheduled trigger such as AWS `ScheduledEvent` is a `timer`) | Binding |
 | Page reached by URL (SPA route, MVC action view, Razor Page, `.aspx`) | Binding |
-| Class-level route prefix, router mount, lazy route group, root-type registration, deployment-config trigger | Wiring |
+| Class-level route prefix, router mount, lazy route group, layout route, root-type registration, deployment-config trigger | Wiring |
 | Middleware, filters, auth guards, interceptors | Guard |
 | HTTP client call, message publish/send, DB query | Outbound |
 | Link or programmatic navigation to a page (`<Link to>`, `routerLink`, `router.navigate`) | Outbound (`semanticType: navigation`) |
@@ -119,7 +122,7 @@ targets them.
 | Internal service / façade methods (only our own code calls them) | None |
 | Layouts, partials, child components, controls folded into a page | None (part of another entry point) |
 | Modals, panels and tabs opened from a running page | None (part of another entry point) |
-| GraphQL stub parent that only returns an object for its fields | Wiring (its fields are the bindings) — a convention, so it is listed in the framework's role table |
+| GraphQL stub parent that only returns an object for its fields (`mutation { notifications { create } }`) | Wiring: its fields are the bindings, recorded as operations (`mutation`, not `field_resolver`). A convention, so it is listed in the framework's role table |
 | Test fixtures, mocks, stories | None |
 
 ## 5. What a binding records
@@ -229,7 +232,7 @@ match.
 | HTTP | Full path with every prefix applied (verb goes in `method`) | `/api/v2/orders/{id}` |
 | SOAP | `<Service>.asmx/<Operation>` or `<Contract>/<Operation>` | `Orders.asmx/GetOrder` |
 | gRPC | `<Service>/<Method>` | `OrderService/GetOrder` |
-| GraphQL | Operation field name (type goes in `method`) | `bookById` |
+| GraphQL | Operation field name (type goes in `method`); for a field under a stub parent, `<StubType>.<field>` | `bookById`, `NotificationsMutation.create` |
 | GraphQL entity / node resolver | The type it resolves | `Book` |
 | Message / event | Queue, topic or address name | `billing`, `orders.created` |
 | Schedule | Cron or interval expression | `0 2 * * *` |
