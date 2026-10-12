@@ -230,3 +230,25 @@ def test_ktor_route_handler_is_the_trailing_lambda():
         if s.semanticType == "route" and s.framework == "ktor" and s.method
     }
     assert got == {"/a": (None, 4), "/b": (None, 8)}
+
+
+def test_ktor_route_enriches_the_base_statement():
+    # One route = one statement: the base parser's statement for the call is enriched in place
+    # (same id, its source text), not duplicated as a second `…#2` record on the same span.
+    src = b'''import io.ktor.server.routing.*
+fun Application.module() {
+    routing {
+        get("/a") { call.respond("a") }
+        route("/b") {
+            post { call.respond("b") }
+        }
+    }
+}
+'''
+    rec = _parse(src)
+    routes = [s for s in rec.statements if s.semanticType == "route"]
+    assert [(s.method, s.endpoint, s.startLine) for s in routes] == [("GET", "/a", 4), ("POST", "/b", 6)]
+    assert all("#" not in s.id.rsplit(":", 1)[-1] for s in routes)
+    assert routes[0].text.startswith('get("/a") {')
+    spans = [(s.startLine, s.endLine, s.id.split("#")[0]) for s in rec.statements]
+    assert len(spans) == len(set(spans))  # no two statements on the same span
