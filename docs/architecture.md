@@ -628,6 +628,8 @@ statements under their enum class.
 > members either. Every detector must check the flag; reviews check this.
 
 Detail page: [Statement model](architecture/statement-model.md).
+What counts as an entry point (`route`, `eventbus_consumer`, `timer`) and how one is recorded:
+[Entry-point contract](architecture/entry-points.md).
 
 ---
 
