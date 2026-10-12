@@ -262,6 +262,9 @@ single-line comments are merged into one record.
 > bodies, comments placed just outside a declaration). One pass based on the line ranges the
 > extractor already produced handles all languages the same way, and only needs each
 > language's comment node types (`COMMENT_TYPES`).
+> **Cost:** one extra tree walk per file. The binding and dedup lookups use tables built once per
+> file (sorted starts, a running maximum of span ends, an open-scope stack), never a scan of all
+> statements per comment, so the pass stays linear in file size.
 
 ---
 

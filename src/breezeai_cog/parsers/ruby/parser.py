@@ -16,7 +16,8 @@ from ..treesitter import parse_source
 from .classes import build_class, iter_definitions
 from .functions import build_function, defined_names
 from .imports import extract_imports
-from .mappings import STATEMENT_TYPES, FRAMEWORKS
+from ..comments_common import comment_statements_for
+from .mappings import COMMENT_TYPES, CONTROL_FLOW, FRAMEWORKS, STATEMENT_TYPES
 from .models import build_model_index, model_receivers
 from .statement import extract_statements
 
@@ -105,6 +106,16 @@ class RubyParser(BaseParser):
                 seen_ids=seen_ids, typed_db_ids=typed_db_ids,
             )
         )
+
+        # Comments as flat Statements, scoped by the shared binding rule (see comments_common).
+        if capture:
+            statements.extend(
+                comment_statements_for(
+                    root, source, path, file_id=fid, functions=functions, classes=classes,
+                    statements=statements, control_flow=CONTROL_FLOW,
+                    comment_types=COMMENT_TYPES, limit=limit, seen_ids=seen_ids,
+                )
+            )
 
         return FileRecord(
             id=fid,

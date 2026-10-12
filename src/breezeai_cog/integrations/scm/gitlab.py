@@ -15,7 +15,7 @@ from urllib.parse import quote
 
 import httpx
 
-from .base import DEFAULT_HOSTS, PR_STATES, AbstractSCMClient, ChangeSet, CommitInfo, PrComment, PullRequestInfo, RepoRef
+from .base import DEFAULT_HOSTS, PR_STATES, AbstractSCMClient, ChangeSet, CommitInfo, FileDiff, PrComment, PullRequestInfo, RepoRef, count_patch_lines
 from .http import SCMHttpClient, warn_if_anonymous
 
 if TYPE_CHECKING:
@@ -140,6 +140,8 @@ class GitLabSCMClient(AbstractSCMClient):
         return PrComment(id=str(data.get("id") or ""))
 
     def compare(self, ref: RepoRef, base: str, head: str) -> ChangeSet:
+        """``repository/compare``. GitLab returns each file's ``diff`` text but no line
+        counts, so ``additions`` / ``deletions`` are counted from the hunk body."""
         data = self._http.get_json(
             f"/projects/{self._project(ref)}/repository/compare",
             {"from": base, "to": head},
@@ -147,13 +149,19 @@ class GitLabSCMClient(AbstractSCMClient):
         out = ChangeSet()
         for d in data.get("diffs") or []:
             old_path, new_path = d.get("old_path"), d.get("new_path")
+            patch = d.get("diff") if isinstance(d.get("diff"), str) else None
+            additions, deletions = count_patch_lines(patch)
             if d.get("deleted_file"):
                 if old_path:
                     out.deleted.append(old_path)
+                    out.files.append(FileDiff(old_path, "removed", additions, deletions, patch))
             elif new_path:
                 out.changed.append(new_path)
-                if d.get("renamed_file") and old_path and old_path != new_path:
+                renamed = bool(d.get("renamed_file") and old_path and old_path != new_path)
+                if renamed:
                     out.deleted.append(old_path)
+                status = "added" if d.get("new_file") else "renamed" if renamed else "modified"
+                out.files.append(FileDiff(new_path, status, additions, deletions, patch))
         return out
 
     def file_content(self, ref: RepoRef, path: str, commit: str) -> str:

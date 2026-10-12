@@ -142,7 +142,7 @@ flowchart TD
 | 2. Build indexes | `BaseParser.build_index`, `pipeline._build_indexes` | Once per language, main process (may fan out) | Optional; usually one parse per file of that language |
 | 3. Parse | `core/executor.py`, `core/registry.py`, `parsers/**` | Once per file, in parallel | One parse + a fixed number of tree walks |
 | 4. Assemble | `pipeline._assemble`, `emit/split.py` | Streaming, main process | Linear in output |
-| 5. Sink | `emit/sinks.py`, `emit/s3.py` | Streaming | Bounded memory |
+| 5. Sink | `emit/sinks.py`, `infra/aws/s3.py` | Streaming | Bounded memory |
 
 ### 4.1 Scanning and file selection
 
@@ -399,7 +399,7 @@ when adding support for something new.
 |---|---|---|---|
 | A new programming language | **Language parser** | Yes, as the fallback for its extensions | `parsers/java/` |
 | A framework that defines how requests reach the code (routes, handlers) | **Framework parser** | Yes, when it claims the file | `parsers/java_vertx/` |
-| A library used inside files owned by other frameworks (ORM, HTTP client, messaging SDK) | **Additive detector** | No, it runs inside the owning parser | `parsers/detection/`, `parsers/typescript/aws_events.py` |
+| A library used inside files owned by other frameworks (ORM, HTTP client, messaging SDK) | **Additive detector** | No, it runs inside the owning parser | `parsers/detection/` (classifiers), `parsers/additive.py` (registry), `parsers/typescript/aws_events.py` |
 
 ```mermaid
 classDiagram
@@ -442,10 +442,112 @@ classDiagram
 > disappear. **Cost:** additive detectors run for every file of the language, so they must be
 > cheap and guarded by a byte check.
 
+> **Decision —** additive detectors self-register (`parsers/additive.py`); the language parser
+> only calls `run_additive(<language>, …)` once.
+> **Why:** adding a detector touches only its own module, not the language parser that every
+> framework parser for that language inherits. The runner applies the shared rules (capture
+> gate, fixture skip, byte guard, label only if unset) in one place. **Cost:** the detector list
+> is no longer visible in `extract()` — `breezeai-cog capabilities` (`additiveDetectors`) and
+> `tests/unit/test_additive.py` list it per language in run order. Run order is part of the
+> output (new statement ids are disambiguated against the ones already on the record), so
+> `order` is explicit and unique per language, and a reorder is a reviewed change.
+
 > **Decision —** API, database and query detection is shared across languages (`parsers/detection/`).
 > **Why:** "is `axios.get` an HTTP call?" has the same answer everywhere; one table, improved
 > once, benefits every language. **Cost:** the shared rules must stay conservative so they
 > don't produce false positives in any language.
+
+How the shared classifiers and the additive detectors layer on top of the parser that owns
+the file:
+
+```
+                        ┌──────────────────────────────────────┐
+                        │  source file  (e.g. order.ctrl.ts)   │
+                        └──────────────────┬───────────────────┘
+                                           │
+                                           ▼
+                        ┌──────────────────────────────────────┐
+                        │ registry.select(): exactly ONE owner │
+                        │ highest-priority claims() wins       │
+                        └──────────────────┬───────────────────┘
+                                           │
+             ┌─────────────────────────────┼─────────────────────────────┐
+             ▼                             ▼                             ▼
+  ┌─────────────────────┐       ┌─────────────────────┐       ┌─────────────────────┐
+  │ framework parser    │       │ framework parser    │       │ base lang parser    │
+  │ nestjs/angular/...  │       │ aspnet/wcf/...      │       │ (priority 0)        │
+  │  └─ subclasses ─┐   │       │  └─ subclasses ─┐   │       │                     │
+  └─────────────────┼───┘       └─────────────────┼───┘       └──────────┬──────────┘
+                    ▼                             ▼                      │
+     ═══════════════════════════════════════════════════════════════════╪═══════════
+      BASE LANGUAGE extract()  → classes · functions · statements        │
+     ═══════════════════════════════════════════════════════════════════╪═══════════
+             │                                                           │
+             ▼                                                           ▼
+  ┌──────────────────────────────────────────────────────────────────────────────────┐
+  │ SHARED CLASSIFIERS  parsers/detection/   (every language, per call statement)    │
+  │   classify_call ─┬─ match_api   → HTTP client calls   (axios, fetch, HttpClient) │
+  │                  ├─ match_db    → ORM / DB calls      (EF, Prisma, JPA, AR)      │
+  │                  └─ is_query    → inline SQL strings                             │
+  └──────────────────────────────────────┬───────────────────────────────────────────┘
+                                         │
+                                         ▼   only if --capture-statements
+  ┌──────────────────────────────────────────────────────────────────────────────────┐
+  │ ADDITIVE DETECTORS   base extract() ends with run_additive(<language>, …)        │
+  │   registry: parsers/additive.py; each detector registers itself in its own       │
+  │   module and is found by discovery; no parser edit to add one                    │
+  │   runner: capture gate · skip_fixtures · optional byte guard · run by `order`    │
+  │                                                                                  │
+  │  typescript    order  detector         code in                    [skips tests]  │
+  │                  10   express          typescript_express/routes.py      ✔       │
+  │                  20   aws-events       typescript/aws_events.py                  │
+  │                  30   sdk-calls        detection/sdk_calls.py                    │
+  │                  40   graphql-client   typescript_graphql/routes.py      ✔       │
+  │                  50   vue-routes       typescript_vue/routes.py          ✔       │
+  │                                                                                  │
+  │  csharp          10   lambda-handlers  csharp/lambda_events.py           ✔       │
+  │                  20   lucene           csharp/lucene.py                          │
+  │                                                                                  │
+  │  scala           10   akka-events      scala/events.py                           │
+  │                  20   spark            scala/spark.py                            │
+  │                                                                                  │
+  │  Java · Kotlin · Groovy · Python · PHP · Ruby · VB · C++ · HCL                   │
+  │   └─ no additive hook yet: shared classifiers only                               │
+  └──────────────────────────────────────┬───────────────────────────────────────────┘
+                                         │
+              each detector, per match:  ▼
+              ┌──────────────────────────────────────────────────────┐
+              │ call inside an existing, unclassified Statement?     │
+              └──────────┬─────────────────────────────┬─────────────┘
+                     yes │                             │ no
+                         ▼                             ▼
+          ┌────────────────────────────┐   ┌────────────────────────────┐
+          │ ENRICH in place            │   │ APPEND new Statement       │
+          │ semanticType · framework   │   │ (disambiguated id,         │
+          │ method · endpoint          │   │  parent = owning function) │
+          └─────────────┬──────────────┘   └─────────────┬──────────────┘
+                        └───────────────┬────────────────┘
+                                        ▼
+              ┌──────────────────────────────────────────────────────┐
+              │ FileRecord                                           │
+              │ framework = owner's label, KEPT                      │
+              │ (a detector sets it only if it is still None)        │
+              └──────────────────────────────────────────────────────┘
+```
+
+For example, `order.controller.ts` imports both `@nestjs/common` and `@aws-sdk/client-sqs`:
+
+```
+ select()            → nestjs parser owns the file
+ base extract()      → class OrderController, fn create, Statement@L11 "await this.sqs.send(...)"
+   run_additive()      (still inside extract)
+     express         → guard ✗ → skip
+     aws-events      → guard ✓ → ENRICH Statement@L11 → framework=aws-sqs, endpoint=ORDER_QUEUE
+     sdk-calls       → guard ✗ → skip
+ nestjs detection    → + Statement  POST /orders   (after extract returns)
+ ─────────────────────────────────────────────────────────────────────────────
+ FileRecord.framework = "nestjs"   (route ✔  +  queue publish ✔)
+```
 
 Framework detection follows one of four patterns:
 
@@ -751,7 +853,7 @@ src/breezeai_cog/
 │  ├─ comments_common.py           shared comment pass
 │  ├─ callresolve.py, constfold.py, index_common.py   shared resolution helpers
 │  ├─ detection/                   shared api / db / query classifiers
-│  ├─ vertx_common.py              helpers shared by one framework family
+│  ├─ vertx_common.py, dotnet_common.py, aspnet_common.py   helpers shared by one framework family
 │  ├─ <lang>/                      language parsers
 │  └─ <lang>_<framework>/          framework parsers
 ├─ emit/                           ids, NDJSON, gzip, sinks, statement splitting
@@ -778,7 +880,7 @@ flowchart TD
 Dependencies point **one way**: entry points → services → core → parsers → schemas. Parsers
 never import from `core/`, `services/` or `server/`. Code shared between framework parsers
 should live in a shared module (like `vertx_common.py`) rather than one framework importing
-from another — a few older framework packages still do this ([§16](#16-known-limitations-and-open-questions)).
+from another.
 
 **Change zones.** How much review a change needs depends on where it lands:
 
@@ -804,7 +906,6 @@ from another — a few older framework packages still do this ([§16](#16-known-
 | Type information | tree-sitter has no type checker, so overloads and inferred types are only partly resolved. |
 | One repository at a time | Links between repositories (a client in one repo calling a service in another) are not made by cog. |
 | Ids and line numbers | Ids include line numbers, so moving code changes ids. |
-| Cross-framework imports | Some framework parsers import helpers from another framework's package (e.g. `csharp_wcf` and `csharp_hotchocolate` from `csharp_aspnet.routes`; `dotnet_servicehost` from `csharp_webforms`). A change in one silently changes the other; these helpers should move to a shared module. |
 | Grammar quality | Capture is only as good as the grammar. Some grammars are pinned to forks until upstream fixes land. |
 
 ---
@@ -830,6 +931,7 @@ from another — a few older framework packages still do this ([§16](#16-known-
 | Output | Size limits applied in one place, by splitting, not truncating | [§4.6](#46-assembly-and-output) |
 | Parsers | Framework parsers subclass their language parser | [§6](#6-the-parser-model) |
 | Parsers | Cross-cutting libraries are additive detectors | [§6](#6-the-parser-model) |
+| Parsers | Additive detectors self-register; the language parser calls one runner | [§6](#6-the-parser-model) |
 | Parsers | API / DB / query detection is shared across languages | [§6](#6-the-parser-model) |
 | Parsers | Route emitters skip fixture files | [§6](#6-the-parser-model) |
 | Statements | Flat list linked by `parentId` | [§7](#7-the-statement-model) |

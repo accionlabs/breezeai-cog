@@ -30,6 +30,7 @@ from tree_sitter import Node
 
 from ...emit import disambiguate, file_id, statement_id
 from ...schemas import Statement
+from ..additive import DetectContext, Detector, register_detector
 from ..treesitter import node_text
 
 # Dynamic-import target: ``() => import('./views/Reports.vue')`` -> ``./views/Reports.vue``
@@ -238,3 +239,19 @@ def detect_vue_routes(
     for obj in _module_route_objects(root, source):
         _emit(obj, "", source, path, seen_ids, routes)
     return routes
+
+
+def _run(dc: DetectContext) -> str | None:
+    routes = detect_vue_routes(
+        dc.root, dc.source, dc.path, seen_ids={s.id for s in dc.record.statements}
+    )
+    if not routes:
+        return None
+    dc.record.statements.extend(routes)
+    return "vue"
+
+
+register_detector(Detector(
+    name="vue-routes", language="typescript", order=50, run=_run,
+    skip_fixtures=True, frameworks=("vue",),
+))

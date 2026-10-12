@@ -48,10 +48,11 @@ class _InfraStreamSink:
         self.funcs += len(record.functions)
         self.classes += len(record.classes)
         self.loc += record.loc
-        self.languages.add(record.language)
         self.by_type[record.language] = self.by_type.get(record.language, 0) + 1
         if record.type == "config":
             self.config += 1
+        else:
+            self.languages.add(record.language)  # config is not a programming language
 
     def finalize(self, _meta: Any) -> None:  # out-of-band; nothing to the stream
         pass
