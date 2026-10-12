@@ -656,7 +656,25 @@ def test_template_router_link_is_navigation(tmp_path) -> None:
     rec = _parse("Order.vue", _SFC_TEMPLATE, tmp_path)
     nav = [s for s in rec.statements if s.semanticType == "route"]
     assert nav and all(s.routeKind == "navigation" and s.framework == "vue" for s in nav)
-    assert nav[0].endpoint == "/orders/"  # first string literal of the :to expression
+    # '/orders/' + o.id is an expression: the address is not known, so no partial path
+    assert nav[0].endpoint is None
+
+
+def test_router_link_endpoint_forms(tmp_path) -> None:
+    src = b"""<template>
+  <nav>
+    <router-link to="/users">a</router-link>
+    <router-link :to="'/reports'">b</router-link>
+    <router-link :to="{ path: '/orders', query: { page: 1 } }">c</router-link>
+    <router-link :to="{ name: 'settings' }">d</router-link>
+    <router-link :to="target">e</router-link>
+    <router-link :to="`/x/${id}`">f</router-link>
+  </nav>
+</template>"""
+    rec = _parse("Nav.vue", src, tmp_path)
+    got = [s.endpoint for s in sorted(rec.statements, key=lambda s: s.startLine)
+           if s.semanticType == "route"]
+    assert got == ["/users", "/reports", "/orders", None, None, None]
 
 
 def test_template_only_sfc_captured(tmp_path) -> None:

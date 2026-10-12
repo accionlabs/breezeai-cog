@@ -134,7 +134,7 @@ def test_global_before_each_is_guard(analyze_files) -> None:
 
 
 @pytest.mark.xfail(
-    strict=True, reason="router-link is recorded as route/navigation; a static to has no endpoint"
+    strict=True, reason="router-link is recorded as route/navigation, not semanticType navigation"
 )
 def test_router_link_is_outbound_navigation(analyze_files) -> None:
     sfc = (
