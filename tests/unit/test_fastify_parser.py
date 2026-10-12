@@ -18,6 +18,18 @@ from breezeai_cog.parsers.typescript_fastify.routes import detect_fastify_routes
 from breezeai_cog.schemas import FileRecord
 
 
+def _with_factory_import_for_fixture(source: bytes) -> bytes:
+    if b'from "fastify"' in source or b"from 'fastify'" in source or b'require("fastify")' in source:
+        return source
+    if b"function Fastify(" in source or b"function fastify(" in source:
+        return source
+    if b"Fastify(" in source:
+        return b'import Fastify from "fastify";\n' + source
+    if b"fastify(" in source:
+        return b'import fastify from "fastify";\n' + source
+    return source
+
+
 def _parse_typescript(
     source: bytes,
     path: str,
@@ -25,6 +37,7 @@ def _parse_typescript(
     capture_statements: bool = True,
     resolution_index=None,
 ):
+    source = _with_factory_import_for_fixture(source)
     context = ParseContext(
         path=path,
         abs_path=Path(path),
@@ -36,7 +49,14 @@ def _parse_typescript(
     return TypeScriptParser().parse_file(context)
 
 
-def _detect_routes(source: bytes, path: str = "app.ts"):
+def _detect_routes(
+    source: bytes,
+    path: str = "app.ts",
+    *,
+    inject_factory_import: bool = True,
+):
+    if inject_factory_import:
+        source = _with_factory_import_for_fixture(source)
     root = parse_source("typescript", source).root_node
     record = FileRecord(id=path, path=path, type="code", language="typescript", loc=1)
     return detect_fastify_routes(root, source, path, record, seen_ids=set())
@@ -103,6 +123,25 @@ def test_ignores_unrelated_get_method() -> None:
     )
 
     assert _detect_routes(source) == []
+
+
+def test_ignores_locally_defined_fastify_factory_names() -> None:
+    sources = (
+        b"function Fastify() { return {}; }\n"
+        b"const app = Fastify();\n"
+        b"app.get('/not-fastify', handler);",
+        b"function fastify() { return {}; }\n"
+        b"const app = fastify();\n"
+        b"app.get('/not-fastify', handler);",
+    )
+
+    assert all(_detect_routes(source) == [] for source in sources)
+
+
+def test_ignores_unbound_fastify_factory_name() -> None:
+    source = b"const app = Fastify(); app.get('/not-fastify', handler);"
+
+    assert _detect_routes(source, inject_factory_import=False) == []
 
 
 def test_detects_post_route() -> None:

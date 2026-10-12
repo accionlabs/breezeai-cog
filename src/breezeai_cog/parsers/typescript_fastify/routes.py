@@ -125,6 +125,8 @@ class _Binding:
     is_fastify: bool = False
     string_value: Optional[str] = None
     callable_node: Optional[Node] = None
+    is_fastify_factory: bool = False
+    factory_call: Optional[Node] = None
 
 
 @dataclass
@@ -142,11 +144,20 @@ class _Scope:
         is_fastify: bool = False,
         string_value: Optional[str] = None,
         callable_node: Optional[Node] = None,
+        is_fastify_factory: bool = False,
+        factory_call: Optional[Node] = None,
     ) -> None:
         entries = self.bindings.setdefault(name, [])
         entries.insert(
             bisect_right(entries, position, key=lambda entry: entry.position),
-            _Binding(position, is_fastify, string_value, callable_node),
+            _Binding(
+                position,
+                is_fastify,
+                string_value,
+                callable_node,
+                is_fastify_factory,
+                factory_call,
+            ),
         )
 
     def binding_at(self, name: str, position: int) -> Optional[_Binding]:
@@ -187,6 +198,44 @@ def _imported_binding_names(node: Node, source: bytes) -> list[str]:
     return names
 
 
+def _imported_fastify_factory_names(node: Node, source: bytes) -> set[str]:
+    source_node = node.child_by_field_name("source")
+    if source_node is None or _string_literal(source_node, source) != "fastify":
+        return set()
+
+    clause = next(
+        (child for child in node.named_children if child.type == "import_clause"),
+        None,
+    )
+    if clause is None:
+        return set()
+
+    names: set[str] = set()
+    for child in clause.named_children:
+        if child.type == "identifier":
+            names.add(node_text(child, source))
+        elif child.type == "namespace_import":
+            identifier = next(
+                (item for item in child.named_children if item.type == "identifier"),
+                None,
+            )
+            if identifier is not None:
+                names.add(node_text(identifier, source))
+        elif child.type == "named_imports":
+            for specifier in child.named_children:
+                if specifier.type != "import_specifier":
+                    continue
+                imported = specifier.child_by_field_name("name")
+                local = specifier.child_by_field_name("alias") or imported
+                if (
+                    imported is not None
+                    and local is not None
+                    and node_text(imported, source) in _FASTIFY_FACTORY_NAMES
+                ):
+                    names.add(node_text(local, source))
+    return names
+
+
 class _FileIndex:
     """Per-file lexical scopes and declarations used by route and path lookup."""
 
@@ -196,6 +245,7 @@ class _FileIndex:
         self.scopes: dict[tuple[int, int, str], _Scope] = {}
         self.register_calls: list[Node] = []
         self.root_scope = self._build(root, source)
+        self._resolve_factory_bindings(source)
         self.mounted_plugin_nodes: set[tuple[int, int, str]] = self._find_mounted_plugins(source)
 
     @staticmethod
@@ -252,8 +302,9 @@ class _FileIndex:
                 self._index_variable(node, scope, source)
 
             if node.type == "import_statement":
+                factory_names = _imported_fastify_factory_names(node, source)
                 for name in _imported_binding_names(node, source):
-                    scope.add_binding(name, 0)
+                    scope.add_binding(name, 0, is_fastify_factory=name in factory_names)
 
             if node.type in {"function_declaration", "class_declaration"}:
                 name_node = node.child_by_field_name("name")
@@ -335,7 +386,6 @@ class _FileIndex:
         destination.add_binding(
             node_text(name_node, source),
             name_node.start_byte,
-            is_fastify=(value_node is not None and _is_fastify_factory_call(value_node, source)),
             string_value=(_string_literal(value_node, source) if value_node is not None else None),
             callable_node=(
                 value_node
@@ -343,7 +393,19 @@ class _FileIndex:
                 and value_node.type in {"arrow_function", "function_expression", "function"}
                 else None
             ),
+            factory_call=value_node if value_node is not None and value_node.type == "call_expression" else None,
         )
+
+    def _resolve_factory_bindings(self, source: bytes) -> None:
+        for scope in self.scopes.values():
+            for entries in scope.bindings.values():
+                for binding in entries:
+                    if binding.factory_call is not None:
+                        binding.is_fastify = _is_fastify_factory_call(
+                            binding.factory_call,
+                            source,
+                            self,
+                        )
 
     def _index_pattern(
         self,
@@ -370,6 +432,15 @@ class _FileIndex:
                 return binding.is_fastify if binding is not None else False
             scope = scope.parent
         return False
+
+    def is_fastify_factory(self, name: str, node: Node) -> Optional[bool]:
+        scope: Optional[_Scope] = self.scope_for(node)
+        while scope is not None:
+            if name in scope.bindings:
+                binding = scope.binding_at(name, node.start_byte)
+                return binding.is_fastify_factory if binding is not None else False
+            scope = scope.parent
+        return None
 
     def resolve_constant(self, name: str, node: Node) -> Optional[str]:
         scope: Optional[_Scope] = self.scope_for(node)
@@ -616,6 +687,7 @@ def _has_fastify_instance_type(
 def _is_fastify_factory_call(
     value_node: Node,
     source: bytes,
+    file_index: _FileIndex,
 ) -> bool:
     """Check whether a value is created by a Fastify factory call.
 
@@ -644,7 +716,9 @@ def _is_fastify_factory_call(
             return False
 
     if callee.type == "identifier":
-        return node_text(callee, source) in _FASTIFY_FACTORY_NAMES
+        name = node_text(callee, source)
+        imported_factory = file_index.is_fastify_factory(name, value_node)
+        return imported_factory is True
 
     if callee.type == "call_expression":
         inner_callee = callee.child_by_field_name("function")
