@@ -45,7 +45,6 @@ def test_controller_is_wiring(analyze_files) -> None:
     assert (r.method, r.endpoint) == ("POST", "/users")
 
 
-@pytest.mark.xfail(strict=True, reason="setGlobalPrefix is not applied to HTTP bindings")
 def test_global_prefix_is_wiring(analyze_files) -> None:
     st = _ctrl(
         analyze_files,
@@ -59,7 +58,6 @@ def test_global_prefix_is_wiring(analyze_files) -> None:
     assert [r.endpoint for r in _eps(st)] == ["/api/users"]
 
 
-@pytest.mark.xfail(strict=True, reason="RouterModule prefixes are not applied")
 def test_router_module_is_wiring(analyze_files) -> None:
     st = _ctrl(
         analyze_files,

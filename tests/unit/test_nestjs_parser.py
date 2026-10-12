@@ -554,3 +554,114 @@ export class OrdersQueryResolver {
 }
 ''')
         assert routes["orders.list"] == ("QUERY", "query"), ret
+
+
+# ── Global prefix (setGlobalPrefix) and RouterModule paths ─────────────────────────────────────
+_NEST_PKG = '{"dependencies": {"@nestjs/core": "10", "@nestjs/common": "10"}}'
+
+
+def _ctrl_src(name: str, base: str, body: str) -> str:
+    return (
+        "import { Controller, Get, Post } from '@nestjs/common';\n"
+        "import { MessagePattern } from '@nestjs/microservices';\n"
+        f"@Controller('{base}')\nexport class {name} {{\n{body}}}\n"
+    )
+
+
+def _main(prefix_call: str) -> str:
+    return (
+        "import { NestFactory } from '@nestjs/core';\nimport { AppModule } from './app.module';\n"
+        "async function bootstrap() {\n  const app = await NestFactory.create(AppModule);\n"
+        f"  {prefix_call}\n  await app.listen(3000);\n}}\nbootstrap();\n"
+    )
+
+
+def _http(stmts) -> dict[tuple[str | None, str], str | None]:
+    """(method, handler) → endpoint for NestJS HTTP routes."""
+    return {(s.method, s.handler): s.endpoint for s in stmts
+            if s.semanticType == "route" and s.framework == "nestjs"}
+
+
+def test_global_prefix_and_exclude(analyze_files) -> None:
+    st = analyze_files({
+        "package.json": _NEST_PKG,
+        "src/main.ts": _main(
+            "app.setGlobalPrefix('api', { exclude: ['health', "
+            "{ path: 'users/:id', method: RequestMethod.POST }] });"
+        ),
+        "src/users.controller.ts": _ctrl_src("UsersController", "users", (
+            "  @Get(':id')\n  one() { return 1; }\n"
+            "  @Post(':id')\n  touch() { return 1; }\n"
+            "  @MessagePattern('users.created')\n  created() { return 1; }\n"
+        )),
+        "src/health.controller.ts": _ctrl_src("HealthController", "health", "  @Get()\n  ok() {}\n"),
+    })
+    assert _http(st) == {
+        ("GET", "one"): "/api/users/:id",
+        ("POST", "touch"): "/users/:id",  # excluded for POST only
+        ("GET", "ok"): "/health",          # excluded
+    }
+    [msg] = [s for s in st if s.semanticType == "eventbus_consumer"]
+    assert msg.endpoint == "users.created"  # message patterns take no HTTP prefix
+
+
+def test_global_prefix_from_a_constant(analyze_files) -> None:
+    st = analyze_files({
+        "package.json": _NEST_PKG,
+        "src/config.ts": "export const API_PREFIX = 'v1';\n",
+        "src/main.ts": "import { API_PREFIX } from './config';\n" + _main("app.setGlobalPrefix(API_PREFIX);"),
+        "src/users.controller.ts": _ctrl_src("UsersController", "users", "  @Get()\n  list() {}\n"),
+    })
+    assert _http(st) == {("GET", "list"): "/v1/users"}
+
+
+def test_unresolvable_global_prefix_leaves_endpoint_empty(analyze_files) -> None:
+    # The prefix exists but comes from runtime config: the address is unknown (decision Q8).
+    st = analyze_files({
+        "package.json": _NEST_PKG,
+        "src/main.ts": _main("app.setGlobalPrefix(config.values.globalPrefix);"),
+        "src/users.controller.ts": _ctrl_src("UsersController", "users", "  @Get()\n  list() {}\n"),
+    })
+    [r] = [s for s in st if s.semanticType == "route"]
+    assert (r.method, r.endpoint, r.handler) == ("GET", None, "list")
+
+
+def test_global_prefix_per_app_in_a_monorepo(analyze_files) -> None:
+    st = analyze_files({
+        "package.json": _NEST_PKG,
+        "apps/admin/src/main.ts": _main("app.setGlobalPrefix('admin-api');"),
+        "apps/admin/src/a.controller.ts": _ctrl_src("AController", "a", "  @Get()\n  a() {}\n"),
+        "apps/shop/src/main.ts": _main("// no prefix"),
+        "apps/shop/src/b.controller.ts": _ctrl_src("BController", "b", "  @Get()\n  b() {}\n"),
+        "libs/shared/c.controller.ts": _ctrl_src("CController", "c", "  @Get()\n  c() {}\n"),
+    })
+    assert _http(st) == {
+        ("GET", "a"): "/admin-api/a",
+        ("GET", "b"): "/b",
+        ("GET", "c"): None,  # belongs to no app: the admin prefix may or may not apply
+    }
+
+
+def test_no_bootstrap_leaves_routes_unchanged(analyze_files) -> None:
+    st = analyze_files({
+        "package.json": _NEST_PKG,
+        "src/users.controller.ts": _ctrl_src("UsersController", "users", "  @Get()\n  list() {}\n"),
+    })
+    assert _http(st) == {("GET", "list"): "/users"}
+
+
+def test_router_module_children_compose(analyze_files) -> None:
+    st = analyze_files({
+        "package.json": _NEST_PKG,
+        "src/main.ts": _main("app.setGlobalPrefix('api');"),
+        "src/app.module.ts": (
+            "import { Module } from '@nestjs/common';\nimport { RouterModule } from '@nestjs/core';\n"
+            "@Module({ controllers: [ReportsController] })\nexport class ReportsModule {}\n"
+            "@Module({ controllers: [] })\nexport class AdminModule {}\n"
+            "@Module({ imports: [RouterModule.register([\n"
+            "  { path: 'admin', module: AdminModule, children: [{ path: 'reports', module: ReportsModule }] },\n"
+            "])] })\nexport class AppModule {}\n"
+        ),
+        "src/reports.controller.ts": _ctrl_src("ReportsController", "daily", "  @Get()\n  daily() {}\n"),
+    })
+    assert _http(st) == {("GET", "daily"): "/api/admin/reports/daily"}

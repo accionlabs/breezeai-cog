@@ -306,9 +306,59 @@ def _class_with_decorators(root: Node):
             yield cls, decs
 
 
+def _excluded(local: str, verb: str, exclude: tuple[tuple[str, str | None], ...]) -> bool | None:
+    """Whether a route (its path without the global prefix) is in ``setGlobalPrefix``'s exclude
+    list. A ``:param`` / ``*`` / ``(.*)`` pattern matches by segment; any other pattern syntax
+    cannot be decided → None."""
+    target = local.strip("/")
+    for pat, method in exclude:
+        if method is not None and method != verb:
+            continue
+        p = pat.strip("/")
+        if re.search(r"[^\w\-/:.*()]", p):
+            return None
+        rx = re.escape(p).replace(r"\(\.\*\)", ".*").replace(r"\*", ".*")
+        rx = re.sub(r":\w+", "[^/]+", rx)
+        if re.fullmatch(rx, target):
+            return True
+    return False
+
+
+def _served(local: str, verb: str, class_name: str, path: str, index: object | None) -> str | None:
+    """A NestJS HTTP route's full address: the app's ``setGlobalPrefix`` (unless excluded), then
+    its ``RouterModule`` path, then the controller and method paths (``local``). A prefix that is
+    set but cannot be resolved — or a controller that cannot be tied to its app when one of the
+    repo's apps sets a prefix — makes the address unknown → None (contract §8: never a partial
+    address)."""
+    ctrl_prefixes = getattr(index, "nest_controller_prefixes", None) or {}
+    if class_name in ctrl_prefixes:
+        mp = ctrl_prefixes[class_name]
+        if mp is None:
+            return None
+        local = _join(mp, local)
+    boots = getattr(index, "nest_global_prefixes", None) or {}
+    if not boots:
+        return local
+    anchors = [d for d in boots if d == "" or path.startswith(d + "/")]
+    if not anchors:  # not under any app's bootstrap
+        return local if all(b == ("", ()) for b in boots.values()) else None
+    prefix, exclude = boots[max(anchors, key=len)]  # the deepest app above this controller
+    if prefix == "":
+        return local
+    if prefix is None or exclude is None:
+        return None
+    hit = _excluded(local, verb, exclude)
+    if hit is None:
+        return None
+    return local if hit else _join(prefix, local)
+
+
 def detect_nest_routes(
-    root: Node, source: bytes, path: str, *, seen_ids: set[str], framework: str = "nestjs"
+    root: Node, source: bytes, path: str, *, seen_ids: set[str], framework: str = "nestjs",
+    index: object | None = None,
 ) -> list[Statement]:
+    """``index`` is the repo's ``TsAliasIndex``: it carries the NestJS global prefix of each app
+    and the ``RouterModule`` path of each registered controller (NestJS only)."""
     routes: list[Statement] = []
     for cls, decs in _class_with_decorators(root):
         base = _controller_base(decs, source)  # None when the class is not a @Controller
@@ -364,10 +414,14 @@ def detect_nest_routes(
                         path=path,
                     )
                     if verb is not None:  # HTTP route
+                        local = _join(base, _unquote(d.args[0]) if d.args else "")
                         routes.append(Statement(
                             semanticType="route",
                             method=verb,
-                            endpoint=_join(base, _unquote(d.args[0]) if d.args else ""),
+                            endpoint=(
+                                _served(local, verb, class_name, path, index)
+                                if framework == "nestjs" else local
+                            ),
                             routeKind="route",
                             version=_version(pending, source) or ctrl_version,
                             requestDTO=_request_dto(member, source),

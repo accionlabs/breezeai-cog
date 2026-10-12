@@ -57,6 +57,7 @@ class NestJSParser(TypeScriptParser):
             routes = detect_nest_routes(
                 root, ctx.source, ctx.path,
                 seen_ids={s.id for s in record.statements}, framework=framework,
+                index=ctx.resolution_index,
             )
             if routes:
                 record.statements.extend(routes)
