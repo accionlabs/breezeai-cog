@@ -83,15 +83,36 @@ def _path_value(node: Node, source: bytes) -> str | None:
     return _string_value(node, source)
 
 
-def _handler(arg_nodes: list[Node], source: bytes) -> tuple[str | None, int | None]:
-    """The route handler → (name, line). By Express convention the handler is the
-    **last** argument (any args between the path and it are middleware). Inline
-    functions have no name, so only ``identifier`` / ``member_expression`` refs count."""
+_FUNCTIONS = ("arrow_function", "function_expression", "function")
+
+
+def _handler(
+    arg_nodes: list[Node], source: bytes, decl_lines: dict[str, int | None]
+) -> tuple[str | None, int | None]:
+    """The route handler → (name, handlerLine). By Express convention the handler is the
+    **last** argument (any args between the path and it are middleware).
+
+    - A named reference (``listUsers`` / ``UsersController.list``): its name, and the line of
+      its declaration when it is a top-level function of this file (``decl_lines``); a handler
+      declared elsewhere keeps its name with no line (never the line of the reference).
+    - An inline function: no name; ``handlerLine`` is where the function starts.
+    - A wrapper call (``asyncHandler(async (req, res) => …)``): wrappers are not handlers — the
+      handler is the wrapper's last argument, unwrapped the same way. A call with no argument to
+      unwrap (``controller.handle()``) identifies no handler → (None, None)."""
     if len(arg_nodes) < 2:
         return None, None
-    last = arg_nodes[-1]
+    last: Node | None = arg_nodes[-1]
+    while last is not None and last.type == "call_expression":
+        args = last.child_by_field_name("arguments")
+        inner = list(args.named_children) if args is not None else []
+        last = inner[-1] if inner else None
+    if last is None:
+        return None, None
+    if last.type in _FUNCTIONS:
+        return None, last.start_point[0] + 1
     if last.type in ("identifier", "member_expression"):
-        return node_text(last, source), last.start_point[0] + 1
+        name = node_text(last, source)
+        return name, decl_lines.get(name)
     return None, None
 
 
@@ -187,7 +208,7 @@ def _resolve_str_identifier(name: str, root: Node, source: bytes) -> str | None:
 
 def _classify(
     call: Node, source: bytes, root: Node, bindings: dict[str, str],
-    routers: frozenset[str] = frozenset(),
+    routers: frozenset[str] = frozenset(), decl_lines: dict[str, int | None] | None = None,
 ) -> tuple[str | None, str, str | None, int | None, list[str] | None, str, str] | None:
     """→ (method, endpoint, handler, handlerLine, guards, framework, routeKind), or None if not
     a route. ``guards`` are the named route/mount middleware (auth/interceptor stack); ``bindings``
@@ -215,7 +236,7 @@ def _classify(
         # the settings getter ``app.get('title')`` (single string arg, no handler). The last
         # arg is the terminal handler; the middleware before it are guards.
         if path is not None and len(arg_nodes) >= 2:
-            handler, handler_line = _handler(arg_nodes, source)
+            handler, handler_line = _handler(arg_nodes, source, decl_lines or {})
             guards = _guard_names(chain[:-1], source)
             return method.upper(), path, handler, handler_line, guards, "express", "route"
         return None
@@ -367,9 +388,14 @@ def detect_express(
     imported = instance.get(path, {}) if isinstance(instance, dict) else {}
     receiver_base = _receiver_bases(root, source, mount_base, imported)
     routers = frozenset(router_locals(root, source)) if b"Router" in source else frozenset()
+    # Top-level functions of this file → declaration line; a name declared twice → None.
+    decl_lines: dict[str, int | None] = {}
+    for f in record.functions:
+        if f.parentId == fid:
+            decl_lines[f.name] = f.startLine if f.name not in decl_lines else None
 
     for call in _invocations(root):
-        info = _classify(call, source, root, binds, routers)
+        info = _classify(call, source, root, binds, routers, decl_lines)
         if info is None:
             continue
         method, endpoint, handler, handler_line, guards, framework, route_kind = info
@@ -391,6 +417,7 @@ def detect_express(
                 stmt.method = method
             if handler:
                 stmt.handler = handler
+            if handler_line:
                 stmt.handlerLine = handler_line
             if guards:
                 stmt.guards = guards

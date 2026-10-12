@@ -320,3 +320,32 @@ def test_same_file_router_mounted_twice_keeps_its_own_path(analyze_files) -> Non
         ),
     })
     assert list(routes.values()) == ["/x"]
+
+
+# ── Handler and handlerLine ──────────────────────────────────────────────────────────────────
+def test_handler_line_is_the_declaration_or_the_inline_function(analyze_files) -> None:
+    st = analyze_files({
+        "package.json": _PKG,
+        "src/app.js": (
+            "import express from 'express';\nimport { remote } from './remote.js';\n"
+            "const app = express();\n"
+            "app.get('/a', local);\n"                                   # 4
+            "app.get('/b', remote);\n"                                  # 5
+            "app.get('/c', (req, res) => res.send('c'));\n"             # 6
+            "app.get('/d', asyncHandler(async (req, res) => {\n"        # 7
+            "  res.send('d');\n}));\n"
+            "app.get('/e', Users.list);\n"                              # 10
+            "app.get('/f', make());\n"                                  # 11
+            "function local(req, res) { res.send('a'); }\n"             # 12
+        ),
+    })
+    got = {s.endpoint: (s.handler, s.handlerLine)
+           for s in st if s.semanticType == "route" and s.routeKind == "route"}
+    assert got == {
+        "/a": ("local", 12),       # declared in this file
+        "/b": ("remote", None),    # declared in another file: name, no line
+        "/c": (None, 6),           # inline: line only
+        "/d": (None, 7),           # wrapper unwrapped to the inner function
+        "/e": ("Users.list", None),
+        "/f": (None, None),        # a call with nothing to unwrap names no handler
+    }

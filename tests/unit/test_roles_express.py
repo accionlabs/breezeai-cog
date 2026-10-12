@@ -33,9 +33,6 @@ def test_named_handler_is_a_binding(analyze_files) -> None:
     )
 
 
-@pytest.mark.xfail(
-    strict=True, reason="handlerLine is the line of the reference, not the declaration"
-)
 def test_named_handler_line_is_its_declaration(analyze_files) -> None:
     st = _app(
         analyze_files,
@@ -45,14 +42,12 @@ def test_named_handler_line_is_its_declaration(analyze_files) -> None:
     assert r.handlerLine == 4
 
 
-@pytest.mark.xfail(strict=True, reason="anonymous handler gets no handlerLine")
 def test_inline_handler_has_handler_line_only(analyze_files) -> None:
     st = _app(analyze_files, "app.post('/users',\n  (req, res) => { res.send('x'); });\n")
     [r] = _eps(st)
     assert (r.method, r.endpoint, r.handler, r.handlerLine) == ("POST", "/users", None, 4)
 
 
-@pytest.mark.xfail(strict=True, reason="wrapper call is not unwrapped to the innermost function")
 def test_wrapper_handler_is_the_innermost_function(analyze_files) -> None:
     st = _app(
         analyze_files,
