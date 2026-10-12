@@ -30,6 +30,7 @@ def test_rails_routes_and_base_extraction(tmp_path: Path) -> None:
     assert routes[0].method == "GET"
     assert routes[0].endpoint == "/users"
     assert routes[0].handler == "users#index"
+    assert routes[0].handlerLine is None  # the action is in the controller, not on this line
 
 
 def test_rails_routes_are_gated_and_dynamic_paths_are_honest_null(tmp_path: Path) -> None:

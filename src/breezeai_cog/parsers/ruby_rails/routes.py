@@ -49,16 +49,18 @@ def _arguments(call: Node) -> list[Node]:
     return list(arguments.named_children) if arguments is not None else []
 
 
-def _handler(arguments: list[Node], source: bytes) -> tuple[str | None, int | None]:
+def _handler(arguments: list[Node], source: bytes) -> str | None:
+    """The ``to: 'controller#action'`` target. The action lives in the controller's file, so
+    the route has no ``handlerLine`` (the line of the ``to:`` string is not the handler)."""
     for argument in arguments[1:]:
         if argument.type == "pair":
             key = argument.child_by_field_name("key")
             value = argument.child_by_field_name("value")
             if key is not None and node_text(key, source).rstrip(":") == "to":
                 if value is not None and value.type == "string":
-                    return _string_value(value, source), value.start_point[0] + 1
-                return None, None
-    return None, None
+                    return _string_value(value, source)
+                return None
+    return None
 
 
 def detect_rails_routes(root: Node, source: bytes, path: str, record: FileRecord) -> bool:
@@ -73,7 +75,7 @@ def detect_rails_routes(root: Node, source: bytes, path: str, record: FileRecord
             continue
         args = _arguments(call)
         endpoint = _string_value(args[0], source) if args else None
-        handler, handler_line = _handler(args, source)
+        handler = _handler(args, source)
         line = call.start_point[0] + 1
         record.statements.append(
             Statement(
@@ -85,7 +87,6 @@ def detect_rails_routes(root: Node, source: bytes, path: str, record: FileRecord
                 method=method.upper() if method != "match" else None,
                 endpoint=endpoint,
                 handler=handler,
-                handlerLine=handler_line,
                 framework="rails",
                 routeKind="route",
                 isRegex=False,

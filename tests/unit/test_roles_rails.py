@@ -35,7 +35,7 @@ def test_verb_route_is_binding(analyze_files) -> None:
 
 @pytest.mark.xfail(
     strict=True,
-    reason="handler is 'users#show' and handlerLine is the routes-file line, not the action's def",
+    reason="handler is 'users#show' with no handlerLine: the action's file is not linked yet",
 )
 def test_binding_leads_to_action(analyze_files) -> None:
     st = _routes(
