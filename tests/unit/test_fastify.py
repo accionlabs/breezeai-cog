@@ -109,6 +109,22 @@ def test_detects_route_with_named_handler() -> None:
     ]
 
 
+def test_inline_handler_route_is_parented_to_enclosing_plugin_function() -> None:
+    source = (
+        b'import type { FastifyInstance } from "fastify";\n'
+        b"export async function userRoutes(fastify: FastifyInstance) {\n"
+        b"  fastify.get('/profile', async (req, rep) => ({ profile: true }));\n"
+        b"}"
+    )
+
+    record = _parse_typescript(source, "routes/users.ts")
+    route = next(statement for statement in record.statements if statement.framework == "fastify")
+    plugin = next(function for function in record.functions if function.name == "userRoutes")
+
+    assert route.handler is None
+    assert route.parentId == plugin.id
+
+
 def test_fastify_routes_from_exported_plugin_bindings() -> None:
     sources = [
         b"import type { FastifyPluginAsync } from 'fastify'; "

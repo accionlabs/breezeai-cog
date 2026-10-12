@@ -421,6 +421,9 @@ def detect_fastify_routes(
     unmatched: list[Statement] = []
     enriched_ids: set[str] = set()
     for route in statements:
+        if route.parentId == fid:
+            route.parentId = _owner_function(route.startLine, record.functions, fid)
+
         source_id = _source_statement_id(route.id)
         existing = next(
             (
@@ -436,6 +439,7 @@ def detect_fastify_routes(
             unmatched.append(route)
             continue
 
+        existing.parentId = route.parentId
         existing.semanticType = route.semanticType
         existing.method = route.method
         existing.endpoint = route.endpoint
@@ -458,6 +462,17 @@ def _source_statement_id(route_id: str) -> str:
     """Remove the collision suffix added when a route overlays its captured statement."""
     base, separator, suffix = route_id.rpartition("#")
     return base if separator and suffix.isdecimal() else route_id
+
+
+def _owner_function(line: int, functions: list[Function], fallback: str) -> str:
+    owner: Optional[Function] = None
+    owner_span: Optional[int] = None
+    for function in functions:
+        if function.startLine <= line <= function.endLine:
+            span = function.endLine - function.startLine
+            if owner_span is None or span < owner_span:
+                owner, owner_span = function, span
+    return owner.id if owner is not None else fallback
 
 
 def _first_param_name(
