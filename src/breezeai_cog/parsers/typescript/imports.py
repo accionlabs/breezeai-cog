@@ -1599,6 +1599,68 @@ def _dynamic_import_specifiers(root: Node, source: bytes) -> list[str]:
     return out
 
 
+# CommonJS ``require('x')`` — read like a static import. A ``require`` with a string literal can
+# sit anywhere (top level, inside a function, a side-effect ``require('./polyfill')``), so the
+# edges come from a tree walk; bindings only from top-level declarations, like ESM imports.
+_REQUIRE_GUARD = b"require("
+
+
+def _require_module(node: Node | None, source: bytes) -> str | None:
+    """``require('x')`` / ``require('x').member`` → ``'x'`` (any literal specifier); else None.
+    A dynamic ``require(name)`` has no literal and yields nothing (honest-null)."""
+    if node is not None and node.type == "member_expression":
+        node = node.child_by_field_name("object")
+    if node is None or node.type != "call_expression":
+        return None
+    fn = node.child_by_field_name("function")
+    args = node.child_by_field_name("arguments")
+    if fn is None or fn.type != "identifier" or node_text(fn, source) != "require" or args is None:
+        return None
+    first = args.named_children[0] if args.named_children else None
+    return _string_literal(first, source) or None
+
+
+def _require_specifiers(root: Node, source: bytes) -> list[str]:
+    """Every literal ``require('x')`` specifier in the tree, in source order."""
+    out: list[str] = []
+    stack = [root]
+    while stack:
+        n = stack.pop()
+        if n.type == "call_expression":
+            spec = _require_module(n, source)
+            if spec:
+                out.append(spec)
+        stack.extend(reversed(n.named_children))
+    return out
+
+
+def _require_bindings(root: Node, source: bytes) -> dict[str, str]:
+    """Local name → module for top-level CommonJS bindings: ``const x = require('m')``,
+    ``const x = require('m').y``, ``const { a, b: c } = require('m')`` (``var`` / ``let`` too)."""
+    out: dict[str, str] = {}
+    for node in root.named_children:
+        if node.type not in ("lexical_declaration", "variable_declaration"):
+            continue
+        for d in node.named_children:
+            if d.type != "variable_declarator":
+                continue
+            module = _require_module(d.child_by_field_name("value"), source)
+            name = d.child_by_field_name("name")
+            if module is None or name is None:
+                continue
+            if name.type == "identifier":
+                out[node_text(name, source)] = module
+            elif name.type == "object_pattern":
+                for p in name.named_children:
+                    if p.type == "shorthand_property_identifier_pattern":
+                        out[node_text(p, source)] = module
+                    elif p.type == "pair_pattern":
+                        value = p.child_by_field_name("value")
+                        if value is not None and value.type == "identifier":
+                            out[node_text(value, source)] = module
+    return out
+
+
 def extract_imports(
     root: Node, source: bytes, file_path: str, repo_root: str | Path, index: TsAliasIndex | None = None
 ) -> tuple[list[str], list[str], list[str], dict[str, str]]:
@@ -1630,6 +1692,20 @@ def extract_imports(
                 if module:
                     resolved = _resolve(module, file_path, repo_root, index)
                     (internal if resolved else external).setdefault(resolved or module, None)
+
+    # CommonJS `require('x')` — the same edges as an ESM import; top-level `const x = require(…)`
+    # also binds `x` to the resolved file, so calls[].path resolves through it.
+    if _REQUIRE_GUARD in source:
+        resolved_of: dict[str, str | None] = {}
+        for module in _require_specifiers(root, source):
+            if module not in resolved_of:
+                resolved_of[module] = _resolve(module, file_path, repo_root, index)
+            resolved = resolved_of[module]
+            (internal if resolved else external).setdefault(resolved or module, None)
+        for nm, module in _require_bindings(root, source).items():
+            resolved = resolved_of.get(module)
+            if resolved and nm not in bindings:
+                bindings[nm] = resolved
 
     # Dynamic imports (`import('x')`) — lazy pages / code-split components. Resolved into the
     # same file-level edge set as static imports (no binding: a dynamic import binds a Promise,

@@ -130,7 +130,7 @@ How each language turns an import into a file:
 | Scala | As Java, plus selector groups `{A, B}`, renames `{A => B}` and relative package imports | wildcards, unknown names |
 | C# | A `using` names a namespace, not a file. Each **type used** in the file is looked up under the namespaces in scope (own namespace and parents, `using`s, `global using`s). Bound only if exactly one file matches; on a tie, a file in the same `.csproj` wins. | every namespace `using`; unresolved static / alias targets |
 | VB | Not resolved (`Imports` names namespaces) | every `Imports` |
-| TypeScript / JavaScript | Relative paths from the file's folder; otherwise the nearest `tsconfig`/`jsconfig` path alias. Tries the exact file, `.js`→`.ts` rewrites, known extensions, then `index.*`. Re-exports and literal dynamic `import()` count too. | anything not found on disk |
+| TypeScript / JavaScript | Relative paths from the file's folder; otherwise the nearest `tsconfig`/`jsconfig` path alias. Tries the exact file, `.js`→`.ts` rewrites, known extensions, then `index.*`. Re-exports, literal dynamic `import()` and CommonJS `require('…')` (anywhere in the file; a top-level `const x = require(…)` / `const { a } = require(…)` also binds the names for `calls[].path`) count too. | anything not found on disk |
 | Python | `import a.b` / `from a.b import x` from the repo root; relative imports walk up folders. Tries `a/b.py`, then `a/b/__init__.py`. | anything not found |
 | Ruby | Only `require_relative` | every `require`; unresolved `require_relative` |
 | C++ | `#include "x.h"` looked up by file **basename** in the index | `<system>` includes; unknown or ambiguous basenames |
