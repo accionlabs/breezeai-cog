@@ -247,6 +247,38 @@ def test_regex_route_has_null_endpoint_and_is_marked_regex() -> None:
     ]
 
 
+def test_unresolved_shorthand_route_is_captured_with_null_endpoint() -> None:
+    source = (
+        b"const app = Fastify();\n"
+        b"app.get(ROUTES.users, handler);\n"
+    )
+
+    record = _parse_typescript(source, "app.ts")
+    routes = [statement for statement in record.statements if statement.semanticType == "route"]
+
+    assert [(route.method, route.endpoint, route.isRegex) for route in routes] == [
+        ("GET", None, False)
+    ]
+    assert routes[0].framework == "fastify"
+    assert record.framework == "fastify"
+
+
+def test_unresolved_route_object_url_is_captured_with_null_endpoint() -> None:
+    source = (
+        b"const app = Fastify();\n"
+        b"app.route({ method: 'GET', url: ROUTES.users, handler });\n"
+    )
+
+    record = _parse_typescript(source, "app.ts")
+    routes = [statement for statement in record.statements if statement.semanticType == "route"]
+
+    assert [(route.method, route.endpoint, route.isRegex) for route in routes] == [
+        ("GET", None, False)
+    ]
+    assert routes[0].framework == "fastify"
+    assert record.framework == "fastify"
+
+
 def test_template_route_paths_use_parameter_placeholders() -> None:
     source = (
         b"const fastify = Fastify();\n"
@@ -670,7 +702,7 @@ def test_route_path_constants_respect_scope_shadowing() -> None:
     ]
 
 
-def test_route_path_constant_is_not_resolved_from_a_later_declaration() -> None:
+def test_route_path_constant_before_declaration_is_captured_as_unresolved() -> None:
     source = (
         b"const fastify = Fastify();\n"
         b"fastify.get(URL, handler);\n"
@@ -680,7 +712,10 @@ def test_route_path_constant_is_not_resolved_from_a_later_declaration() -> None:
 
     routes = _detect_routes(source)
 
-    assert [(route.method, route.endpoint) for route in routes] == [("GET", "/late")]
+    assert [(route.method, route.endpoint) for route in routes] == [
+        ("GET", None),
+        ("GET", "/late"),
+    ]
 
 
 def test_many_route_path_constants_resolve_from_the_per_file_index() -> None:

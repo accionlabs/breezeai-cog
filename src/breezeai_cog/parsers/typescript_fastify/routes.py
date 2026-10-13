@@ -1093,7 +1093,9 @@ def _http_method_route(
     regex_path = args[0].type == "regex"
     url = None if regex_path else _resolve_route_string(args[0], source, file_index)
 
-    if not regex_path and (url is None or not (url.startswith("/") or url in ("", "*"))):
+    if not regex_path and url is not None and not (
+        url.startswith("/") or url in ("", "*")
+    ):
         return
 
     handler_node = _find_handler_arg(args[1:], source)
@@ -1171,7 +1173,9 @@ def _app_route(
     regex_path = url_node.type == "regex"
     url = None if regex_path else _resolve_route_string(url_node, source, file_index)
 
-    if not regex_path and (url is None or not (url.startswith("/") or url in ("", "*"))):
+    if not regex_path and url is not None and not (
+        url.startswith("/") or url in ("", "*")
+    ):
         return
 
     display_url = url if url is not None else node_text(url_node, source)
