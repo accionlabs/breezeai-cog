@@ -8,10 +8,13 @@ fabricated node.
 
 from __future__ import annotations
 
+import gzip
 import json
 
 from jsonschema import Draft202012Validator
 
+from breezeai_cog import analyze_repo
+from breezeai_cog.core import registry
 from breezeai_cog.emit import to_line
 from breezeai_cog.parsers.base import ParseContext
 from breezeai_cog.parsers.cpp.parser import CppParser
@@ -200,11 +203,11 @@ def test_same_file_free_function_call_resolves(tmp_path) -> None:
 
 
 def _parse_with_index(tmp_path, rel: str) -> FileRecord:
-    """Parse ``rel`` with a repo-wide index built over every .cpp/.h/.hpp under tmp_path
+    """Parse ``rel`` with a repo-wide index built over every .cpp/.h/.hpp/.c under tmp_path
     (so cross-file call resolution can fire)."""
     parser = CppParser()
     files = (list(tmp_path.rglob("*.cpp")) + list(tmp_path.rglob("*.h"))
-             + list(tmp_path.rglob("*.hpp")))
+             + list(tmp_path.rglob("*.hpp")) + list(tmp_path.rglob("*.c")))
     index = parser.build_index(tmp_path, files)
     p = tmp_path / rel
     return parser.parse_file(ParseContext(path=rel, abs_path=p, source=p.read_bytes(),
@@ -630,3 +633,74 @@ def test_cpp_members_output_validates(tmp_path) -> None:
     errors = list(Draft202012Validator(FileRecord.model_json_schema(by_alias=True))
                   .iter_errors(json.loads(to_line(rec))))
     assert not errors, errors
+
+
+_C_SRC = b"""
+struct Point { int x; };
+int add(int a, int b) { return a + b; }
+int run(void) { return add(1, 2); }
+"""
+
+
+def test_c_file_is_parsed_and_reported_as_c(tmp_path) -> None:
+    rec = _parse_src(tmp_path, _C_SRC, "mod.c", capture=True)
+    assert rec.language == "c"
+    assert {c.name for c in rec.classes} == {"Point"}
+    assert {f.name for f in rec.functions} == {"add", "run"}
+    assert rec.statements
+
+
+def test_c_and_cpp_with_same_content_differ_only_in_language(tmp_path) -> None:
+    c = _parse_src(tmp_path, _C_SRC, "mod.c", capture=True)
+    cpp = _parse_src(tmp_path, _C_SRC, "mod.cpp", capture=True)
+    assert c.language == "c"
+    assert cpp.language == "cpp"
+    assert {x.name for x in c.classes} == {x.name for x in cpp.classes}
+    assert {f.name for f in c.functions} == {f.name for f in cpp.functions}
+    assert len(c.statements) == len(cpp.statements)
+
+
+def test_header_stays_cpp(tmp_path) -> None:
+    assert _parse_src(tmp_path, b"int run(void);\n", "mod.h").language == "cpp"
+
+
+def test_c_include_resolves_to_header(tmp_path) -> None:
+    (tmp_path / "util.h").write_bytes(b"int util(void);\n")
+    (tmp_path / "mod.c").write_bytes(b'#include <stdio.h>\n#include "util.h"\nint run(void) { return util(); }\n')
+    rec = _parse_with_index(tmp_path, "mod.c")
+    assert rec.importFiles == ["util.h"]
+    assert "<stdio.h>" in rec.externalImports
+
+
+def test_c_call_into_cpp_resolves_through_shared_index(tmp_path) -> None:
+    (tmp_path / "helpers.cpp").write_bytes(b"int MakeId() { return 7; }\n")
+    (tmp_path / "mod.c").write_bytes(b"int go(void) { return MakeId(); }\n")
+    rec = _parse_with_index(tmp_path, "mod.c")
+    call = next(c for c in _fn(rec, "go").calls if c.name == "MakeId")
+    assert call.path == "helpers.cpp"
+
+
+def test_c_extension_is_registered() -> None:
+    registry.discover_builtin()
+    assert ".c" in registry.capabilities()["extensions"]
+    assert registry.base_parser_for("mod.c").name == "cpp"
+    assert registry.base_parser_for("mod.C") is None  # extension match is case-sensitive
+
+
+def test_c_repo_end_to_end(tmp_path) -> None:
+    # Whole pipeline (scanner → registry → index → parser): a .c file is picked up, labelled
+    # "c", its local include resolves to the header, and the header keeps "cpp".
+    repo = tmp_path / "crepo"
+    repo.mkdir()
+    (repo / "util.h").write_text("int util(void);\n")
+    (repo / "mod.c").write_text('#include "util.h"\nint run(void) { return util(); }\n')
+
+    result = analyze_repo(repo)
+    lines = gzip.open(result.out_path, "rt", encoding="utf-8").read().splitlines()
+    records = [json.loads(line) for line in lines]
+    meta, by_path = records[0], {r["path"]: r for r in records[1:]}
+
+    assert by_path["mod.c"]["language"] == "c"
+    assert by_path["mod.c"]["importFiles"] == ["util.h"]
+    assert by_path["util.h"]["language"] == "cpp"
+    assert meta["analyzedLanguages"] == ["c", "cpp"]
