@@ -59,7 +59,9 @@ def test_event_and_route_detection(tmp_path) -> None:
             by_semantic.setdefault(s.semanticType, []).append(s)
 
     assert {"eventbus_send", "eventbus_publish", "eventbus_consumer",
-            "timer", "verticle_deploy", "service_proxy", "route"} <= set(by_semantic)
+            "timer", "verticle_deploy", "route"} <= set(by_semantic)
+    # A @ProxyGen interface is a service contract only: no record.
+    assert "service_proxy" not in by_semantic
 
     assert by_semantic["eventbus_send"][0].endpoint == "orders.create"
     assert by_semantic["eventbus_publish"][0].endpoint == "orders.events"

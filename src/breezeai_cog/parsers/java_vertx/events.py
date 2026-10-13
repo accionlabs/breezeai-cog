@@ -4,7 +4,8 @@ walks method invocations and maps them to event/messaging/route semantics:
   eventBus.send/publish/consumer → eventbus_send / eventbus_publish / eventbus_consumer
   vertx.setTimer/setPeriodic     → timer
   vertx.deployVerticle(...)      → verticle_deploy
-  ServiceBinder…setAddress(...)  → service_proxy    (+ @ProxyGen interfaces)
+  ServiceBinder…setAddress(...)  → eventbus_consumer (the service on that address)
+  ServiceProxyBuilder…setAddress → eventbus_send     (a client of it; @ProxyGen: no record)
   router.get/post/…("/path")     → route
 
 The shared decision table (which call → which semanticType) lives in
@@ -58,6 +59,7 @@ from ..vertx_common import (
     join_path,
     method_lines,
     render_address,
+    service_builder_vars,
     sub_router_bases,
 )
 
@@ -189,12 +191,13 @@ def _classify(
     source: bytes,
     consts: dict[str, str],
     aliases: dict[str, SemanticType],
+    service_vars: dict[str, str] | None = None,
 ) -> tuple[SemanticType, str | None, str | None, str | None] | None:
     """→ (semanticType, method, endpoint, routeKind) or None. Falls back to an alias-wrapper
     match (``aliases``) when the direct decision table does not classify the call — the
     address is the wrapper call's own first argument, folded like any other."""
     method, first_str, first_arg, obj = _parts(call, source, consts)
-    info = classify_call(method, first_str, first_arg, obj)
+    info = classify_call(method, first_str, first_arg, obj, service_vars=service_vars)
     if info is not None:
         return info
     semantic = aliases.get(method)
@@ -268,13 +271,14 @@ def detect_vertx(
         _sub_router_mounts(calls, source, consts) if b"ubRouter" in source else ([], set())
     )
     bases = sub_router_bases(mounts)
+    service_vars = service_builder_vars(source) if b"setAddress" in source else {}
 
     for call in calls:
         if (call.start_byte, call.end_byte) in suppress:  # wrapper plumbing → honest-null
             continue
         if (call.start_byte, call.end_byte) in mount_routes:  # a sub-router's mount path: wiring
             continue
-        info = _classify(call, source, consts, aliases)
+        info = _classify(call, source, consts, aliases, service_vars)
         if info is None:
             continue
         semantic, method, endpoint, route_kind = info
@@ -326,15 +330,5 @@ def detect_vertx(
                 path=path,
             ))
         matched = True
-
-    for cls in record.classes:  # @ProxyGen service interfaces
-        if any(d.name == "ProxyGen" for d in cls.decorators):
-            new_id = disambiguate(statement_id(path, cls.startLine, 0), seen)
-            record.statements.append(Statement(
-                id=new_id, parentId=cls.id, nodeType="synthetic",
-                semanticType="service_proxy", text="@ProxyGen", framework="vertx",
-                startLine=cls.startLine, endLine=cls.startLine, path=path,
-            ))
-            matched = True
 
     return matched

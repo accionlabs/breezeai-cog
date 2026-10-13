@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import pytest
 
 EP = {"route", "eventbus_consumer", "timer"}
 SRC = "src/main/java/a/Api.java"
@@ -178,9 +177,6 @@ def test_one_shot_timer_with_inline_handler(analyze_files) -> None:
     )
 
 
-@pytest.mark.xfail(
-    strict=True, reason="ServiceBinder registration is typed service_proxy, not eventbus_consumer"
-)
 def test_service_binder_is_binding(analyze_files) -> None:
     st = analyze_files(
         _verticle(
@@ -191,9 +187,6 @@ def test_service_binder_is_binding(analyze_files) -> None:
     assert (r.semanticType, r.endpoint) == ("eventbus_consumer", "svc.orders")
 
 
-@pytest.mark.xfail(
-    strict=True, reason="ServiceProxyBuilder client is typed service_proxy, not eventbus_send"
-)
 def test_service_proxy_builder_is_outbound(analyze_files) -> None:
     st = analyze_files(
         _verticle(
@@ -205,7 +198,17 @@ def test_service_proxy_builder_is_outbound(analyze_files) -> None:
     assert (s.semanticType, s.endpoint) == ("eventbus_send", "svc.orders")
 
 
-@pytest.mark.xfail(strict=True, reason="@ProxyGen interface gets a synthetic service_proxy record")
+
+def test_service_builder_in_a_variable_and_unknown_receivers(analyze_files) -> None:
+    st = analyze_files(_verticle("""    ServiceBinder binder = new ServiceBinder(vertx);
+    binder.setAddress(System.getenv("ADDR")).register(Object.class, this);
+    other.setAddress("not.a.proxy");"""))
+    # The side comes from the variable's declared type; an unresolved address is empty (Q15); a
+    # setAddress on an unknown receiver is not known to be a service proxy: no record.
+    assert [(s.semanticType, s.endpoint) for s in st if s.semanticType] == [
+        ("eventbus_consumer", None),
+    ]
+
 def test_proxygen_interface_is_none(analyze_files) -> None:
     st = analyze_files(
         {

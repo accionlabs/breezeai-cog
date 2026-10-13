@@ -14,6 +14,7 @@ Both Vert.x generations are covered: 3.x (``io.vertx``, ``Router.router(vertx)``
 
 from __future__ import annotations
 
+import re
 from collections.abc import Callable, Iterable
 
 from tree_sitter import Node
@@ -45,6 +46,33 @@ EVENTBUS: dict[str, SemanticType] = {
 TIMERS = {"setTimer": "TIMER", "setPeriodic": "PERIODIC"}
 HTTP_VERBS = {"get", "post", "put", "delete", "patch", "options", "head"}
 
+#: Service proxies: the builder ``setAddress(...)`` is called on decides the side. The service
+#: (``ServiceBinder…register``) consumes the address; a client (``ServiceProxyBuilder…build``)
+#: sends to it. Any other receiver is not known to be either → no record.
+SERVICE_SIDES: dict[str, SemanticType] = {
+    "ServiceBinder": "eventbus_consumer",
+    "ServiceProxyBuilder": "eventbus_send",
+}
+_SERVICE_VAR = re.compile(rb"\b(ServiceBinder|ServiceProxyBuilder)\s+(\w+)\s*=")
+
+
+def service_builder_vars(source: bytes) -> dict[str, str]:
+    """Variable name → builder type for ``ServiceBinder b = …`` / ``ServiceProxyBuilder c = …``
+    (a name declared with both → dropped: unsure)."""
+    out: dict[str, str | None] = {}
+    for typ, name in _SERVICE_VAR.findall(source):
+        key, value = name.decode(), typ.decode()
+        out[key] = value if out.get(key, value) == value else None
+    return {k: v for k, v in out.items() if v is not None}
+
+
+def _service_side(obj: str, service_vars: dict[str, str] | None) -> SemanticType | None:
+    for builder, side in SERVICE_SIDES.items():
+        if f"new {builder}" in obj:
+            return side
+    builder_of = (service_vars or {}).get(obj.strip())
+    return SERVICE_SIDES.get(builder_of) if builder_of is not None else None
+
 #: Bare receiver names denoting a route registrar: a Vert.x 2.x ``RouteMatcher`` (commonly
 #: ``route`` / ``rm``) or a 3.x ``Router`` variable. ``"router"`` / ``"routematcher"`` are
 #: also matched as substrings, so ``httpRouter`` / ``apiRouteMatcher`` still count.
@@ -73,6 +101,7 @@ def classify_call(
     obj: str,
     *,
     route_scope: bool = False,
+    service_vars: dict[str, str] | None = None,
 ) -> tuple[SemanticType, str | None, str | None, str | None] | None:
     """Map one call to ``(semanticType, method, endpoint, routeKind)`` or ``None``.
 
@@ -81,6 +110,8 @@ def classify_call(
     ``first_arg`` raw text of the first argument — the fallback name for ``deployVerticle``
                   (event-bus addresses never fall back to it: unresolved → empty).
     ``obj``       the receiver text (``""`` for a bare, unqualified call).
+    ``service_vars`` variable → service-proxy builder type (:func:`service_builder_vars`), so a
+                  ``setAddress`` on a builder held in a variable still finds its side.
     ``route_scope`` marks a *bare* HTTP-verb call (no receiver) that the caller has
                   determined is lexically inside a RouteMatcher scope — the Vert.x 2.x
                   ``rm.with { get('/x', h) }`` idiom — so it should still count as a route.
@@ -100,8 +131,11 @@ def classify_call(
         return "timer", TIMERS[method], delay if delay.isdigit() else None, None
     if method == "deployVerticle":
         return "verticle_deploy", None, path or first_arg, None
-    if method == "setAddress" and path is not None:
-        return "service_proxy", None, path, None
+    if method == "setAddress":
+        side = _service_side(obj, service_vars)
+        if side is None:
+            return None
+        return side, None, _known_path(path) if path else None, None
     if method in HTTP_VERBS and path and (is_route_receiver(obj_l) or route_scope):
         return "route", method.upper(), _known_path(path), "route"
     if method == "route" and path and is_route_receiver(obj_l):
