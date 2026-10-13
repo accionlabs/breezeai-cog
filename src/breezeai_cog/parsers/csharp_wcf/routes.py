@@ -18,10 +18,13 @@ from __future__ import annotations
 
 import re
 from pathlib import Path
+from typing import Any
 
-from ...emit import disambiguate, statement_id
-from ...schemas import Class, Decorator, FileRecord, Statement
+from tree_sitter import Node
+
+from ...schemas import Class, Decorator, FileRecord, Function
 from ..dotnet_common import code_behind_host, response_dto, simple_attr_name
+from ..emits import Emit
 from .svc_hosts import SVC_SERVICE_RE, svc_hosts
 
 _SERVICE_ATTR = "ServiceContract"
@@ -88,6 +91,13 @@ def _service_name(decorators: list[Decorator], class_name: str) -> str:
     return class_name
 
 
+def _on_operation(fn: Function, text: str) -> dict[str, Any]:
+    """Where an operation's record sits: read off the record, so the file's root stands in for
+    a node and the span is the operation method's."""
+    return dict(parent=fn.id, node_type="synthetic", text=text, line=fn.startLine, col=0,
+                end_line=fn.endLine)
+
+
 def _implementing_handler(
     cls_name: str, op: str, record: FileRecord, index: object | None
 ) -> tuple[str, int | None] | None:
@@ -129,8 +139,8 @@ def _registered_host(cls: Class, path: str, index: object | None) -> str | None:
 
 
 def detect_wcf_services(
-    record: FileRecord, repo_root: Path | None = None, index: object | None = None
-) -> list[Statement]:
+    record: FileRecord, root: Node, repo_root: Path | None = None, index: object | None = None
+) -> list[Emit]:
     """One ``route`` statement per ``[OperationContract]`` under a ``[ServiceContract]`` type
     (WCF / CoreWCF; tolerant of the full ``…Attribute`` form). A REST operation's endpoint is
     its served address under the class's ``.svc`` (:func:`svc_host`, else the ``wcf.svc-hosts``
@@ -152,8 +162,7 @@ def detect_wcf_services(
     }
     interfaces = {cls.id: cls.name for cls in contracts if cls.type == "interface"}
 
-    seen = {s.id for s in record.statements}
-    routes: list[Statement] = []
+    routes: list[Emit] = []
     for fn in record.functions:
         svc = services.get(fn.parentId)
         if svc is None or not _has_attr(fn.decorators, _OP_ATTR):
@@ -173,12 +182,8 @@ def detect_wcf_services(
         if impl is not None:
             handler, handler_line = impl
         routes.append(
-            Statement(
-                id=disambiguate(statement_id(fn.path, fn.startLine, 0), seen),
-                parentId=fn.id,
-                nodeType="synthetic",
+            Emit(root, dict(
                 semanticType="route",
-                text=f"[{_OP_ATTR}] {svc}.{fn.name}",
                 method=method,
                 endpoint=endpoint,
                 framework="wcf",
@@ -187,10 +192,7 @@ def detect_wcf_services(
                 routeKind=route_kind,
                 isRegex=False,
                 responseDTO=response_dto(fn.returnType),
-                startLine=fn.startLine,
-                endLine=fn.endLine,
-                path=fn.path,
-            )
+            ), **_on_operation(fn, f"[{_OP_ATTR}] {svc}.{fn.name}"))
         )
     return routes
 
@@ -216,7 +218,9 @@ def _rest_address(host: str, template: str | None, operation: str) -> str:
     return "/" + (f"{host}/{tail}" if tail else host).lstrip("/")
 
 
-def detect_asmx_services(record: FileRecord, repo_root: Path | None = None) -> list[Statement]:
+def detect_asmx_services(
+    record: FileRecord, root: Node, repo_root: Path | None = None,
+) -> list[Emit]:
     """Legacy ASMX SOAP web services (``System.Web.Services``): each ``[WebMethod]`` method is
     an operation. ``[WebService]`` on the class is optional in ASMX, so the ``[WebMethod]``
     methods themselves drive detection. Emitted like WCF SOAP ops (``framework=asmx``, ``rpc``).
@@ -224,8 +228,7 @@ def detect_asmx_services(record: FileRecord, repo_root: Path | None = None) -> l
     repo-relative, as on the host record) when the ``.asmx`` file is found
     (:func:`asmx_host`); otherwise empty — a service or class name is not an address."""
     cls_by_id = {c.id: c for c in record.classes}
-    seen = {s.id for s in record.statements}
-    routes: list[Statement] = []
+    routes: list[Emit] = []
     for fn in record.functions:
         if not _has_attr(fn.decorators, _WEB_METHOD_ATTR):
             continue
@@ -235,12 +238,8 @@ def detect_asmx_services(record: FileRecord, repo_root: Path | None = None) -> l
         svc = (_name_arg(cls.decorators, _WEB_SERVICE_ATTR) or cls.name) if cls is not None else "WebService"
         host = asmx_host(fn.path or record.path, repo_root, cls.name) if cls is not None else None
         routes.append(
-            Statement(
-                id=disambiguate(statement_id(fn.path, fn.startLine, 0), seen),
-                parentId=fn.id,
-                nodeType="synthetic",
+            Emit(root, dict(
                 semanticType="route",
-                text=f"[{_WEB_METHOD_ATTR}] {svc}.{fn.name}",
                 method="RPC",
                 endpoint=f"{host}/{fn.name}" if host is not None else None,
                 framework="asmx",
@@ -249,9 +248,6 @@ def detect_asmx_services(record: FileRecord, repo_root: Path | None = None) -> l
                 routeKind="rpc",
                 isRegex=False,
                 responseDTO=response_dto(fn.returnType),
-                startLine=fn.startLine,
-                endLine=fn.endLine,
-                path=fn.path,
-            )
+            ), **_on_operation(fn, f"[{_WEB_METHOD_ATTR}] {svc}.{fn.name}"))
         )
     return routes
