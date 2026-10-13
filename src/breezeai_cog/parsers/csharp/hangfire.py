@@ -12,9 +12,10 @@ A recurring-job registration names one job method and its schedule, so it is a b
   ``RecurringJobManager``. ``AddOrUpdate`` alone is not enough: ``ConcurrentDictionary`` has one.
 * **Handler.** The method the job lambda calls (``c => c.Run()`` → ``Run``), with its declaration
   line when it is declared once in this file. A lambda that is not a single call → no handler.
-* **Schedule** (``endpoint``): the argument after the lambda — a string literal, or a no-argument
-  ``Cron`` helper (``Cron.Daily()`` / ``Cron.Daily``), whose expression Hangfire fixes. Anything
-  else (``Cron.Daily(2)``, a variable, a config value) → empty.
+* **Schedule** (``endpoint``): the argument after the lambda — a string literal, or a ``Cron``
+  helper whose arguments are literals (``Cron.Daily`` / ``Cron.Daily()`` → ``0 0 * * *``,
+  ``Cron.Daily(2, 30)`` → ``30 2 * * *``, ``Cron.Weekly(DayOfWeek.Friday, hour: 3)`` →
+  ``0 3 * * 5``): Hangfire's own formulas. Anything else (a variable, a config value) → empty.
 """
 
 from __future__ import annotations
@@ -28,15 +29,26 @@ from ..additive import DetectContext, Detection, Detector, Gate, register_detect
 from ..emits import Emit
 from ..treesitter import node_text
 
-#: ``Hangfire.Cron`` helpers called with no arguments → the expression they return.
-_CRON_HELPERS = {
-    "Minutely": "* * * * *",
-    "Hourly": "0 * * * *",
-    "Daily": "0 0 * * *",
-    "Weekly": "0 0 * * 1",
-    "Monthly": "0 0 1 * *",
-    "Yearly": "0 0 1 1 *",
+#: ``Hangfire.Cron`` helpers → (parameters with their defaults, the expression). As in
+#: ``Hangfire.Core/Cron.cs``: ``Daily(int hour, int minute)`` → ``$"{minute} {hour} * * *"``,
+#: ``Daily()`` = ``Daily(hour: 0)`` = ``Daily(0, minute: 0)``. ``None``: a required parameter.
+_CRON_HELPERS: dict[str, tuple[tuple[tuple[str, int | None], ...], str]] = {
+    "Minutely": ((), "* * * * *"),
+    "Hourly": ((("minute", 0),), "{minute} * * * *"),
+    "Daily": ((("hour", 0), ("minute", 0)), "{minute} {hour} * * *"),
+    "Weekly": ((("dayOfWeek", 1), ("hour", 0), ("minute", 0)), "{minute} {hour} * * {dayOfWeek}"),
+    "Monthly": ((("day", 1), ("hour", 0), ("minute", 0)), "{minute} {hour} {day} * *"),
+    "Yearly": ((("month", 1), ("day", 1), ("hour", 0), ("minute", 0)),
+               "{minute} {hour} {day} {month} *"),
+    "Never": ((), "0 0 31 2 *"),
+    "MinuteInterval": ((("interval", None),), "*/{interval} * * * *"),
+    "HourInterval": ((("interval", None),), "0 */{interval} * * *"),
+    "DayInterval": ((("interval", None),), "0 0 */{interval} * *"),
+    "MonthInterval": ((("interval", None),), "0 0 1 */{interval} *"),
 }
+#: ``System.DayOfWeek`` members → their value (``(int) dayOfWeek`` in ``Cron.Weekly``).
+_DAYS = {d: i for i, d in enumerate(
+    ("Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"))}
 
 _MANAGER_DECL = re.compile(rb"\bI?RecurringJobManager\s+(\w+)")
 
@@ -74,6 +86,41 @@ def _job_method(lam: Node, source: bytes) -> str | None:
     return node_text(fn, source) if fn.type == "identifier" else None
 
 
+def _int(arg: Node, source: bytes) -> int | None:
+    """An ``int`` literal or a ``DayOfWeek`` member; anything else → None."""
+    if arg.type == "integer_literal" and node_text(arg, source).isdigit():
+        return int(node_text(arg, source))
+    if arg.type == "member_access_expression":
+        recv = arg.child_by_field_name("expression")
+        name = arg.child_by_field_name("name")
+        if recv is not None and name is not None and \
+                node_text(recv, source) in ("DayOfWeek", "System.DayOfWeek"):
+            return _DAYS.get(node_text(name, source))
+    return None
+
+
+def _cron_helper(helper: str, args: Node | None, source: bytes) -> str | None:
+    """``Cron.<helper>(args)`` → the expression Hangfire returns; None when an argument is not a
+    literal, or does not fit the helper's parameters."""
+    spec = _CRON_HELPERS.get(helper)
+    if spec is None:
+        return None
+    params, template = spec
+    values: dict[str, int | None] = dict(params)
+    names = [p for p, _ in params]
+    for i, arg in enumerate(args.named_children if args is not None else []):
+        named = arg.child_by_field_name("name")
+        key = node_text(named, source) if named is not None else (names[i] if i < len(names) else None)
+        expr = arg.named_children[-1] if arg.named_children else None
+        value = _int(expr, source) if expr is not None else None
+        if key not in values or value is None:
+            return None
+        values[key] = value
+    if any(v is None for v in values.values()):
+        return None
+    return template.format(**values)
+
+
 def _schedule(arg: Node, source: bytes) -> str | None:
     if arg.type == "string_literal":
         text = node_text(arg, source)
@@ -81,10 +128,9 @@ def _schedule(arg: Node, source: bytes) -> str | None:
     if arg.type == "verbatim_string_literal":
         return node_text(arg, source)[2:-1]
     target: Node | None = arg
-    if arg.type == "invocation_expression":  # Cron.Daily() — only with no arguments
+    args: Node | None = None
+    if arg.type == "invocation_expression":  # Cron.Daily(2) — Cron.Daily is the method group
         args = arg.child_by_field_name("arguments")
-        if args is None or args.named_children:
-            return None
         target = arg.child_by_field_name("function")
     if target is None or target.type != "member_access_expression":
         return None
@@ -92,7 +138,7 @@ def _schedule(arg: Node, source: bytes) -> str | None:
     name = target.child_by_field_name("name")
     if recv is None or name is None or node_text(recv, source) not in ("Cron", "Hangfire.Cron"):
         return None
-    return _CRON_HELPERS.get(node_text(name, source))
+    return _cron_helper(node_text(name, source), args, source)
 
 
 def _detect(dc: DetectContext) -> Detection | None:
