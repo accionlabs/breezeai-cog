@@ -33,11 +33,10 @@ from __future__ import annotations
 
 from tree_sitter import Node
 
-from ...emit import disambiguate, file_id, statement_id
-from ...schemas import FileRecord, SemanticType, Statement
-from ..additive import DetectContext, Detector, Gate, register_detector
-from ..enclosing import Enclosing
-from ..treesitter import first_line, node_text
+from ...schemas import SemanticType
+from ..additive import DetectContext, Detection, Detector, Gate, register_detector
+from ..emits import Emit
+from ..treesitter import node_text
 
 # SDK v3 ``new XxxCommand({...})`` → (semanticType, framework).
 _V3_COMMANDS: dict[str, tuple[SemanticType, str]] = {
@@ -332,19 +331,17 @@ def _untyped_cjs_handler(
 
 
 def detect_aws_events(
-    root: Node, source: bytes, path: str, record: FileRecord, *, is_fixture: bool = False
-) -> str | None:
-    """Enrich/add AWS event statements on ``record``. Returns a file-level framework label
-    (``aws-lambda`` for a handler file, else the first producer transport) or ``None``.
+    root: Node, source: bytes, path: str, *, is_fixture: bool = False
+) -> Detection | None:
+    """AWS event statements, with a file-level framework label (``aws-lambda`` for a handler
+    file, else the first producer transport).
 
     ``is_fixture`` gates only the untyped-CommonJS handler fallback (:func:`_untyped_cjs_handler`),
     whose looser signature would otherwise match a mocked ``exports.handler`` in a test file — the
     detector is not fixture-guarded at the call site, so the guard is applied here."""
     if not _has_aws(source):
         return None
-    fid = file_id(path)
-    seen = {s.id for s in record.statements}
-    enclosing = Enclosing(record)
+    found: list[Emit] = []
     file_fw: str | None = None
     is_lambda = False
 
@@ -353,23 +350,12 @@ def detect_aws_events(
         if info is None:
             continue
         sem, method, endpoint, fw = info
-        line = call.start_point[0] + 1
-        stmt = enclosing.statement(line)
-        if stmt is not None and stmt.semanticType is None:  # enrich the base statement in place
-            stmt.semanticType = sem
-            stmt.framework = fw
-            stmt.method = method
-            if endpoint:
-                stmt.endpoint = endpoint
-        else:  # inside a lambda the base skipped, or the span is already classified → add
-            new_id = disambiguate(statement_id(path, line, call.start_point[1]), seen)
-            seen.add(new_id)
-            record.statements.append(Statement(
-                id=new_id, parentId=enclosing.function_id(line, fid),
-                nodeType=call.type, semanticType=sem, text=first_line(node_text(call, source)),
-                method=method, endpoint=endpoint, framework=fw,
-                startLine=line, endLine=call.end_point[0] + 1, path=path,
-            ))
+        # Enrich the base statement in place when it is unclassified; inside a lambda the base
+        # skipped, or on a span already classified → its own statement.
+        found.append(Emit(
+            call, {"semanticType": sem, "framework": fw, "method": method},
+            fill={"endpoint": endpoint}, enrich="unclassified",
+        ))
         file_fw = file_fw or fw
 
     # Handler entry points, most-precise first: a typed const (``const h: SQSHandler = …``), an
@@ -387,28 +373,26 @@ def detect_aws_events(
             continue
         sem, fw, route_kind, hname = hinfo
         line = decl.start_point[0] + 1
-        new_id = disambiguate(statement_id(path, line, decl.start_point[1]), seen)
-        seen.add(new_id)
-        record.statements.append(Statement(
-            id=new_id, parentId=enclosing.function_id(line, fid),
-            nodeType=decl.type, semanticType=sem, text=first_line(node_text(decl, source)),
+        found.append(Emit(decl, {
+            "semanticType": sem,
             # The handler is declared by this declarator/assignment: its line is the handler's.
-            framework=fw, handler=hname, handlerLine=line if hname else None, routeKind=route_kind,
-            method="PERIODIC" if sem == "timer" else None,
-            startLine=line, endLine=decl.end_point[0] + 1, path=path,
-        ))
+            "framework": fw, "handler": hname, "handlerLine": line if hname else None,
+            "routeKind": route_kind, "method": "PERIODIC" if sem == "timer" else None,
+        }))
         is_lambda = True
 
-    return "aws-lambda" if is_lambda else file_fw
+    if not found:
+        return None
+    return Detection(found, label="aws-lambda" if is_lambda else file_fw)
 
 
-def _run(dc: DetectContext) -> str | None:
-    return detect_aws_events(dc.root, dc.source, dc.path, dc.record, is_fixture=dc.is_fixture)
+def _detect(dc: DetectContext) -> Detection | None:
+    return detect_aws_events(dc.root, dc.source, dc.path, is_fixture=dc.is_fixture)
 
 
 # Not fixture-skipped: only the loose CommonJS handler fallback is fixture-gated, inside.
 register_detector(Detector(
-    name="aws-events", gate=Gate("typescript", order=20), run=_run,
+    name="aws-events", gate=Gate("typescript", order=20), detect=_detect,
     frameworks=(
         "aws-lambda", "aws-sdk", "aws-sns", "aws-sqs", "aws-eventbridge", "aws-kinesis",
         "aws-dynamodb", "aws-ses", "aws-cloudfront", "aws-apigw",
