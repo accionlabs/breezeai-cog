@@ -4,7 +4,8 @@ Parser: `src/breezeai_cog/parsers/csharp_webforms/` · Rules: [entry-point contr
 
 | Construct | Role | Record | Why |
 |---|---|---|---|
-| `.aspx` page (its code-behind `Page` class) | Binding | `route`, `GET`, `routeKind: page`, `/<path>.aspx` (or its `MapPageRoute` URL), `handler` = the page class, `handlerLine` | One page reached by URL |
+| `.aspx` page (its code-behind `Page` class) | Binding | `route`, `GET`, `routeKind: page`, `/<path>.aspx` (or its `MapPageRoute` URL), `handler` = the page class, `handlerLine` = the class declaration | One page reached by URL; GET and every postback share it (the event handler is chosen by form data) |
+| `[WebMethod] public static T M(…)` in a page's code-behind (ASP.NET AJAX page method) | Binding | `route`, `POST`, `routeKind: route`, `endpoint` = the page's endpoint + `/M`, `handler` = `M`, `handlerLine` | Its own URL, one handler |
 | `RouteTable.Routes.MapPageRoute(name, url, "~/X.aspx")` | Wiring | statement stays plain; `url` becomes the page's `endpoint` | Gives a page its friendly address |
 | `.ascx` user control | None | — | Folded into the pages that host it; no URL of its own |
 | `<%@ Register Src="~/X.ascx" %>` / `LoadControl("~/X.ascx")` | Wiring | statement stays plain; host → control stays in `importFiles` | Structural link, no handler |

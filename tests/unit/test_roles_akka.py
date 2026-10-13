@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import pytest
 
 EP = {"route", "eventbus_consumer", "timer"}
 SRC = "src/main/scala/a/Worker.scala"
@@ -12,9 +11,6 @@ def _eps(stmts):
     return [s for s in stmts if s.semanticType in EP and s.routeKind != "field_resolver"]
 
 
-@pytest.mark.xfail(
-    strict=True, reason="actor receive is recorded as eventbus_consumer though it has no address"
-)
 def test_actor_receive_is_none(analyze_files) -> None:
     st = analyze_files(
         {
@@ -31,10 +27,6 @@ class Worker extends Actor {
     assert _eps(st) == []
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="typed receiveMessage is recorded as eventbus_consumer though it has no address",
-)
 def test_typed_receive_message_is_none(analyze_files) -> None:
     st = analyze_files(
         {
@@ -51,7 +43,7 @@ object Worker {
     assert _eps(st) == []
 
 
-def test_tell_is_outbound(analyze_files) -> None:
+def test_tell_is_not_outbound(analyze_files) -> None:
     st = analyze_files(
         {
             SRC: """package a
@@ -63,7 +55,7 @@ class Client(worker: ActorRef) {
         }
     )
     assert _eps(st) == []
-    assert [s.semanticType for s in st if s.semanticType] == ["eventbus_send"]
+    assert [s.semanticType for s in st if s.semanticType] == []  # local actor send (Q7)
 
 
 def test_actor_creation_is_none(analyze_files) -> None:

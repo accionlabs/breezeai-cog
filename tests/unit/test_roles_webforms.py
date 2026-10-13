@@ -111,7 +111,6 @@ def test_aspx_page_is_binding(site) -> None:
     assert pages[0].handler == "Orders"
 
 
-@pytest.mark.xfail(strict=True, reason="page record has no handlerLine")
 def test_aspx_page_has_handler_line(site) -> None:
     [page] = [s for s in _eps(site) if s.routeKind == "page"]
     assert page.handlerLine

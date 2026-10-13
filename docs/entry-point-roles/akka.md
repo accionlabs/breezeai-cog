@@ -6,5 +6,5 @@ Detector: `src/breezeai_cog/parsers/scala/events.py` (additive detector `akka-ev
 |---|---|---|---|
 | `def receive: Receive = { case … }` in an actor | None | — | An in-process mailbox reached through an `ActorRef`; the source gives it no address the outside world uses (§3 check 2) |
 | `Behaviors.receiveMessage { case … }` (typed actors) | None | — | Same |
-| `ref ! msg` / `ref ? msg` | Outbound | `eventbus_send` | Our code sending to an actor |
+| `ref ! msg` / `ref ? msg` (`tell` / `ask`) | None | statement stays plain | An in-process message to our own actor — neither leaves the application nor reaches an entry point |
 | `system.actorOf(...)` / `context.spawn(...)` | None | — | Start-up |
