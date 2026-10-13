@@ -27,8 +27,8 @@ from typing import Any
 
 from tree_sitter import Node
 
-from ..emit import disambiguate, statement_id
-from ..schemas import Decorator, FileRecord, Function, Statement
+from .emits import Emit
+from ..schemas import Decorator, FileRecord, Function
 from .dotnet_common import response_dto, simple_attr_name
 from .index_common import walk_heritage
 from .treesitter import node_text
@@ -194,17 +194,14 @@ def _is_conventional_action(fn: Function) -> bool:
 
 
 def _route_statement(
-    fn: Function, method: str, endpoint: str, text: str,
-    auth_required: bool | None, guards: list[str] | None, seen: set[str],
-) -> Statement:
-    """Build one controller-route ``Statement`` (``nodeType="synthetic"`` — attribute/convention
-    derived, no backing AST node). Shared by the attribute-route and convention-route paths."""
-    return Statement(
-        id=disambiguate(statement_id(fn.path, fn.startLine, 0), seen),
-        parentId=fn.id,
-        nodeType="synthetic",
+    root: Node, fn: Function, method: str, endpoint: str, text: str,
+    auth_required: bool | None, guards: list[str] | None,
+) -> Emit:
+    """One controller route (``nodeType="synthetic"`` — attribute/convention derived, read off
+    the record, so the file's root stands in for a node and the span is the action's). Shared
+    by the attribute-route and convention-route paths."""
+    return Emit(root, dict(
         semanticType="route",
-        text=text,
         method=method,
         endpoint=endpoint,
         framework="aspnet",
@@ -216,13 +213,11 @@ def _route_statement(
         guards=guards,
         requestDTO=_request_dto(fn),
         responseDTO=response_dto(fn.returnType),
-        startLine=fn.startLine,
-        endLine=fn.endLine,
-        path=fn.path,
-    )
+    ), parent=fn.id, node_type="synthetic", text=text, line=fn.startLine, col=0,
+        end_line=fn.endLine)
 
 
-def detect_controller_routes(record: FileRecord, index: Any = None) -> list[Statement]:
+def detect_controller_routes(record: FileRecord, root: Node, index: Any = None) -> list[Emit]:
     # (prefix, chain guards, chain-resolved, has-any-[Route], class name, is-[ApiController]) per id
     controllers: dict[str, tuple[str, list[str], bool, bool, str, bool]] = {}
     for cls in record.classes:
@@ -235,8 +230,7 @@ def detect_controller_routes(record: FileRecord, index: Any = None) -> list[Stat
     if not controllers:
         return []
 
-    seen = {s.id for s in record.statements}
-    routes: list[Statement] = []
+    routes: list[Emit] = []
     for fn in record.functions:
         info = controllers.get(fn.parentId)
         if info is None:
@@ -271,7 +265,7 @@ def detect_controller_routes(record: FileRecord, index: Any = None) -> list[Stat
                     continue
                 bound.add((verb, endpoint))
                 routes.append(_route_statement(
-                    fn, verb, endpoint, f"[{dec.name}]", auth_required, all_guards, seen))
+                    root, fn, verb, endpoint, f"[{dec.name}]", auth_required, all_guards))
         # Classic MVC convention: a public action with NO [HttpX] attribute defaults to a GET at
         # /{controller}/{action} (or a bare method-level [Route], if any). Skipped for
         # [ApiController] (attribute routing is required there) and when the inherited prefix is
@@ -285,7 +279,7 @@ def detect_controller_routes(record: FileRecord, index: Any = None) -> list[Stat
             else:
                 endpoint = _convention_endpoint(cls_name, _action_name(fn))
             routes.append(_route_statement(
-                fn, "GET", endpoint, f"(convention) {fn.name}", auth_required, all_guards, seen))
+                root, fn, "GET", endpoint, f"(convention) {fn.name}", auth_required, all_guards))
     return routes
 
 
@@ -293,16 +287,15 @@ def detect_minimal_api_routes(
     root: Node,
     source: bytes,
     path: str,
-    seen_ids: set[str],
     *,
     invocation_type: str,
     member_type: str,
-) -> list[Statement]:
+) -> list[Emit]:
     """AST-walk for endpoint registrations on an ``app``/``endpoints`` object:
     ``MapGet/MapPost/…`` minimal APIs, ``MapHealthChecks`` and the GraphQL dev-UI middleware
     (``UseGraphQLPlayground``/…). The GraphQL transport mount (``UseGraphQL``/``MapGraphQL``) is
     wiring and has no record. Grammar-specific node/field names are supplied by the C#/VB caller."""
-    routes: list[Statement] = []
+    routes: list[Emit] = []
     name_field = "name" if member_type == "member_access_expression" else "member"
     fn_field = "function" if invocation_type == "invocation_expression" else "target"
     decls: dict[str, dict[str, int | None]] | None = None  # built lazily, only for Map* calls
@@ -319,7 +312,6 @@ def detect_minimal_api_routes(
                     if spec is not None:
                         verb, framework, spec_endpoint = spec
                         endpoint: str | None = spec_endpoint
-                        start = child.start_point[0] + 1
                         handler: str | None = None
                         handler_line: int | None = None
                         if method in _MAP_METHODS:
@@ -336,12 +328,8 @@ def detect_minimal_api_routes(
                             # cannot be resolved, or a non-literal pattern → empty (Q8).
                             endpoint = (_join(prefix, path_part)
                                         if prefix is not None and path_part is not None else None)
-                        routes.append(Statement(
-                            id=disambiguate(statement_id(path, start, child.start_point[1]), seen_ids),
-                            parentId=path,
-                            nodeType=child.type,
+                        routes.append(Emit(child, dict(
                             semanticType="route",
-                            text=node_text(child, source).split("\n", 1)[0][:200],
                             method=verb,
                             endpoint=endpoint,
                             framework=framework,
@@ -349,10 +337,8 @@ def detect_minimal_api_routes(
                             handlerLine=handler_line,
                             routeKind="route",
                             isRegex=False,
-                            startLine=start,
-                            endLine=child.end_point[0] + 1,
-                            path=path,
-                        ))
+                        ), parent=path,
+                            text=node_text(child, source).split("\n", 1)[0][:200]))
             visit(child)
 
     visit(root)
@@ -623,11 +609,10 @@ def detect_route_registrations(
     root: Node,
     source: bytes,
     path: str,
-    seen_ids: set[str],
     *,
     invocation_type: str,
     member_type: str,
-) -> tuple[list[Statement], bool]:
+) -> tuple[list[Emit], bool]:
     """AST-walk for MVC / Web-API **convention-route registrations** —
     ``routes.MapRoute(name, url, defaults)`` / ``config.Routes.MapHttpRoute(…)`` declared in
     ``RouteConfig`` / ``Global.asax`` / an ``AreaRegistration``. A template that names one
@@ -639,7 +624,7 @@ def detect_route_registrations(
     Grammar-specific node/field names are supplied by the C#/VB caller. Returns the bindings and
     whether any registration was seen — a wiring-only file (``RouteConfig.cs``) is still ASP.NET
     code and keeps its ``aspnet`` label."""
-    routes: list[Statement] = []
+    routes: list[Emit] = []
     seen_registration = False
     name_field = "name" if member_type == "member_access_expression" else "member"
     fn_field = "function" if invocation_type == "invocation_expression" else "target"
@@ -660,23 +645,15 @@ def detect_route_registrations(
                                   and "{controller}" not in url and "{action}" not in url)
                     if url and one_action and ctrl is not None and action is not None:
                         handler = f"{ctrl.group(1)}.{action.group(1)}"
-                        start = child.start_point[0] + 1
-                        routes.append(Statement(
-                            id=disambiguate(statement_id(path, start, child.start_point[1]), seen_ids),
-                            parentId=path,
-                            nodeType=child.type,
+                        routes.append(Emit(child, dict(
                             semanticType="route",
-                            text=text.split("\n", 1)[0][:200],
                             method="ANY",
                             endpoint="/" + url.strip("/"),
                             framework="aspnet",
                             handler=handler,
                             routeKind="route",
                             isRegex=False,
-                            startLine=start,
-                            endLine=child.end_point[0] + 1,
-                            path=path,
-                        ))
+                        ), parent=path, text=text.split("\n", 1)[0][:200]))
             visit(child)
 
     visit(root)
