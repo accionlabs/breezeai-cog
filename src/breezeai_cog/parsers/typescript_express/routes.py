@@ -9,8 +9,8 @@ Per the capture contract, a detection sets ``semanticType`` on the **same span**
 where the base parser already captured the enclosing statement (a top-level
 ``expression_statement``) we enrich it in place; for calls inside handler/callback
 scopes — which the base skips as a nested scope — we add a statement parented to the
-enclosing function. Mutates ``record`` (mirrors ``java_vertx``, the other call-based
-detector)."""
+enclosing function. The detector returns these as emits; the registry applies them
+(``parsers/emits.py``)."""
 
 from __future__ import annotations
 
@@ -18,11 +18,11 @@ from collections.abc import Callable
 
 from tree_sitter import Node
 
-from ...emit import disambiguate, file_id, statement_id
-from ...schemas import FileRecord, Statement
-from ..additive import DetectContext, Detector, Gate, register_detector
-from ..enclosing import Enclosing
-from ..treesitter import first_line, node_text
+from ...emit import file_id
+from ...schemas import FileRecord
+from ..additive import DetectContext, Detection, Detector, Gate, register_detector
+from ..emits import Emit
+from ..treesitter import node_text
 from ..typescript.imports import relative_requires, resolve_const_value, router_locals
 
 # HTTP-verb methods that register a route handler on an app/router.
@@ -482,12 +482,11 @@ def detect_express(
     record: FileRecord,
     index: object | None = None,
     bindings: dict[str, str] | None = None,
-) -> bool:
-    """Enrich/add Express route statements on ``record``. Returns True if anything matched.
+) -> list[Emit]:
+    """Express route statements of this file (``record`` is read for its functions only).
 
-    Additive: invoked from ``TypeScriptParser.extract`` for every TS file (whatever parser
-    owns it), self-guarded by :func:`_has_express`, and enriching the base parser's existing
-    statement in place — so it captures Express routes even in files owned by another
+    Additive: run for every TS file (whatever parser owns it), self-guarded by
+    :func:`_has_express`, and enriching the base parser's existing statement in place — so it captures Express routes even in files owned by another
     framework (Angular SSR, NestJS) without duplicating or displacing that owner.
 
     ``index`` is the repo-wide ``TsAliasIndex`` (or None). When this file is a router factory
@@ -499,11 +498,9 @@ def detect_express(
     guard middleware, so route-level auth (``requireAuth()``) lands in ``guards`` rather than
     being dropped or mistaken for the handler."""
     if not _has_express(source):
-        return False
-    matched = False
+        return []
+    found: list[Emit] = []
     fid = file_id(path)
-    seen = {s.id for s in record.statements}
-    enclosing = Enclosing(record)
     binds = bindings or {}
     # The base this file's routes are served under, if it is a factory mounted elsewhere.
     mounts = getattr(index, "express_mounts", None)
@@ -529,7 +526,6 @@ def detect_express(
         {n for n, ln in decl_lines.items() if ln is not None},
     )
 
-    enriched: set[str] = set()  # statements enriched by this run
     for call in _invocations(root):
         info = _classify(call, source, root, binds, routers, decl_lines, consts)
         if info is None:
@@ -546,62 +542,28 @@ def detect_express(
             # not set authRequired: app-wide middleware is often a body parser, not auth.
             outer = global_guards(_receiver(call, source), call.start_byte)
             guards = (outer + (guards or [])) or None
-        line = call.start_point[0] + 1
-
-        stmt = enclosing.statement(line)
-        if stmt is not None and stmt.id in enriched:
-            stmt = None  # a second route in one statement (route(path).get(a).post(b)) → own record
-        if stmt is not None:  # detection on the same span → enrich in place
-            enriched.add(stmt.id)
-            stmt.semanticType = "route"
-            stmt.framework = framework
-            stmt.routeKind = route_kind
-            stmt.endpoint = served
-            if method:
-                stmt.method = method
-            if handler:
-                stmt.handler = handler
-            if handler_line:
-                stmt.handlerLine = handler_line
-            if guards:
-                stmt.guards = guards
-            if auth_required:
-                stmt.authRequired = True
-        else:  # inside a handler/callback (base skips nested scopes) → add a statement
-            new_id = disambiguate(statement_id(path, line, call.start_point[1]), seen)
-            record.statements.append(Statement(
-                id=new_id,
-                parentId=enclosing.function_id(line, fid),
-                nodeType=call.type,
-                semanticType="route",
-                text=first_line(node_text(call, source)),
-                method=method,
-                endpoint=served,
-                framework=framework,
-                handler=handler,
-                handlerLine=handler_line,
-                guards=guards,
-                authRequired=auth_required,
-                routeKind=route_kind,
-                startLine=line,
-                endLine=call.end_point[0] + 1,
-                path=path,
-            ))
-            seen.add(new_id)
-            enriched.add(new_id)
-        matched = True
-
-    return matched
+        # Enrich the base statement on the call's line (a top-level route call); a second route in
+        # one statement (route(path).get(a).post(b)) or one inside a handler/callback (the base
+        # skips nested scopes) gets its own record.
+        found.append(Emit(
+            call,
+            {"semanticType": "route", "framework": framework, "routeKind": route_kind,
+             "endpoint": served},
+            fill={"method": method, "handler": handler, "handlerLine": handler_line,
+                  "guards": guards, "authRequired": auth_required},
+            enrich="any",
+        ))
+    return found
 
 
-def _run(dc: DetectContext) -> str | None:
-    matched = detect_express(
+def _detect(dc: DetectContext) -> Detection | None:
+    found = detect_express(
         dc.root, dc.source, dc.path, dc.record, dc.ctx.resolution_index, dc.bindings
     )
-    return "express" if matched else None
+    return Detection(found, label="express") if found else None
 
 
 register_detector(Detector(
-    name="express", gate=Gate("typescript", order=10, skip_fixtures=True), run=_run,
+    name="express", gate=Gate("typescript", order=10, skip_fixtures=True), detect=_detect,
     frameworks=("express",),
 ))
