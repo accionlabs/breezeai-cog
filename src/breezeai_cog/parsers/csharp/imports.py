@@ -76,6 +76,11 @@ class CSharpIndex:
     #: physical endpoint with these real routed URLs. Registrations are central (Global.asax /
     #: RouteConfig), so they cross files — hence they ride this repo-level index.
     page_routes: dict[str, list[str]] = field(default_factory=dict)
+    #: interface simple name → the fully-qualified name of the one class / struct / record that
+    #: lists it in its base list, or ``None`` when more than one type implements it (ambiguous →
+    #: honest-null). Lets a contract declared on an interface (WCF ``[ServiceContract]``) reach
+    #: the method with a body that runs.
+    implementers: dict[str, str | None] = field(default_factory=dict)
 
     def project_of(self, path: str) -> str | None:
         """The owning project (nearest ancestor ``.csproj`` dir) of a repo-relative file."""
@@ -141,6 +146,18 @@ def _base_name(node: Node, source: bytes) -> str | None:
     if len(short) >= 2 and short[0] == "I" and short[1].isupper():
         return None  # base_list holds only interfaces
     return short
+
+
+def _base_types(node: Node, source: bytes) -> list[str]:
+    """Simple names of every type in a declaration's ``base_list`` (base class and interfaces
+    alike — C# lists them together), namespace qualifier and generics stripped."""
+    base = node.child_by_field_name("base_list") or next(
+        (c for c in node.named_children if c.type == "base_list"), None)
+    if base is None:
+        return []
+    return [node_text(c, source).rsplit(".", 1)[-1].split("<", 1)[0]
+            for c in base.named_children
+            if c.type in ("identifier", "qualified_name", "generic_name")]
 
 
 def _record_heritage(
@@ -316,6 +333,9 @@ def _index_file(
                     fqn = _join(local_ns, nm)
                     index.types.setdefault(fqn, set()).add(rel)
                     _record_heritage(by_fqn, fqn, child, source)
+                    if t != "interface_declaration":
+                        for iface in _base_types(child, source):
+                            record_distinct(index.implementers, iface, fqn)
                     if body is not None:
                         _index_members(fqn, body, source, rel, index, method_files)
                 if body is not None:
@@ -423,6 +443,11 @@ def _merge_fragment(
         record_distinct(index.ext_methods, ekey, efile)
     for lname, lfile in fidx.data_loaders.items():
         record_distinct(index.data_loaders, lname, lfile)
+    for iface, impl in fidx.implementers.items():
+        if impl is None:
+            index.implementers[iface] = None  # ambiguous within the file → refuse
+        else:
+            record_distinct(index.implementers, iface, impl)
     for mkey, mfile in fmf.items():
         record_distinct(method_files, mkey, mfile)
     for fqn, ch in fby.items():

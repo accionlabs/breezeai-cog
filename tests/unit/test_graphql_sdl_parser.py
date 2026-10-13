@@ -127,7 +127,7 @@ def test_graphqls_schema_file_parsed(tmp_path) -> None:
     rec = _parse(tmp_path, "schema.graphqls", SDL)  # graphql-java / Spring extension
     assert rec.language == "graphql"
     assert _classes(rec)["User"].type == "class"
-    assert _by(rec, "user", "field_definition").semanticType == "route"
+    assert _by(rec, "user", "field_definition").name == "user"
 
 
 def test_type_system_becomes_class_nodes(tmp_path) -> None:
@@ -182,13 +182,15 @@ def test_union_members_are_child_statements(tmp_path) -> None:
     assert {s.name for s in members} == {"User", "Company"}
 
 
-def test_root_fields_are_routes(tmp_path) -> None:
+def test_root_fields_are_plain_statements(tmp_path) -> None:
+    # A root field declares an operation; the resolver is its entry point, so the field is a
+    # plain statement that keeps its name, text and DTOs.
     rec = _parse(tmp_path, "schema.graphql", SDL)
     q = _by(rec, "user", "field_definition")
-    assert (q.semanticType, q.method, q.routeKind) == ("route", "QUERY", "query")
+    assert (q.semanticType, q.method, q.routeKind, q.endpoint) == (None, None, None, None)
     assert q.responseDTO == "User"
     m = _by(rec, "createUser", "field_definition")
-    assert (m.method, m.routeKind) == ("MUTATION", "mutation")
+    assert m.semanticType is None
     assert m.requestDTO == "CreateUserInput"
 
 
@@ -198,12 +200,13 @@ def test_scalar_directive_are_plain_statements(tmp_path) -> None:
     assert _by(rec, "auth", "directive_definition").semanticType is None
 
 
-def test_schema_custom_roots_become_routes(tmp_path) -> None:
+def test_schema_custom_roots_are_root_fields(tmp_path) -> None:
     rec = _parse(tmp_path, "s.graphql", SCHEMA_ROOTS)
-    # RootQuery/RootMutation are roots (via schema{}), so NOT classes; their fields are routes
+    # RootQuery/RootMutation are roots (via schema{}), so NOT classes; their fields are root
+    # fields — plain statements parented to the file, not routes.
     assert "RootQuery" not in _classes(rec) and "RootMutation" not in _classes(rec)
-    assert _by(rec, "me", "field_definition").semanticType == "route"
-    assert _by(rec, "save", "field_definition").method == "MUTATION"
+    assert _by(rec, "me", "field_definition").semanticType is None
+    assert _by(rec, "save", "field_definition").parentId == rec.id
 
 
 def test_extend_kinds_are_handled(tmp_path) -> None:

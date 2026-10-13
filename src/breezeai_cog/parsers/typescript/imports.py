@@ -62,6 +62,81 @@ class TsAliasIndex:
     #: not collected. Consumed by ``detect_express`` to prefix a factory's router-local routes
     #: with their real base — the Express analogue of ``route_mounts`` for Angular lazy routes.
     express_mounts: dict[str, str] = field(default_factory=dict)
+    #: Express router-instance mount linkage: a router file (repo-relative) → {the router's
+    #: local variable in that file → the base it is served under}. ``app.use('/matches',
+    #: matchRouter)`` with ``import { matchRouter } from './routes/matches'`` maps
+    #: ``routes/matches.ts`` → ``{"matchRouter": "/matches"}``. Recorded only when the target file
+    #: confirms the import is a ``Router()`` it exports (a middleware import is never a prefix);
+    #: a router mounted at >1 distinct base is dropped (honest-null).
+    express_router_mounts: dict[str, dict[str, str]] = field(default_factory=dict)
+    #: NestJS global prefix per app: the directory of a bootstrap file (``NestFactory.create`` /
+    #: ``app.setGlobalPrefix``) → (prefix, exclude). prefix ``""`` = the app sets none, ``None`` =
+    #: set but unresolvable (config/env); exclude = ``((path, METHOD | None), …)``, ``None`` when
+    #: it cannot be read. A controller belongs to the deepest anchor directory above it.
+    nest_global_prefixes: dict[str, tuple[str | None, NestExclude | None]] = field(
+        default_factory=dict
+    )
+    #: NestJS ``RouterModule.register`` prefixes: controller class name → its module's composed
+    #: path (``None`` when ambiguous or unresolvable). Only controllers of registered modules.
+    nest_controller_prefixes: dict[str, str | None] = field(default_factory=dict)
+    #: Application-level base paths: framework → {app directory → base path}. ``nextjs``: the
+    #: ``basePath`` of ``next.config.*`` (``""`` = the config sets none); ``loopback``: the
+    #: ``rest.basePath`` option / ``app.basePath(...)`` of the application. ``None`` = set but
+    #: unresolvable (env, a conditional, values that disagree). A route belongs to the deepest
+    #: app directory above it — see :func:`app_base_path`.
+    app_base_paths: dict[str, dict[str, str | None]] = field(default_factory=dict)
+    #: Next.js ``middleware.(ts|js)``: app directory → its ``config.matcher`` patterns, or
+    #: ``None`` when it has no matcher (runs on every route). A matcher that cannot be read
+    #: (non-literal, a regex, has/missing conditions) contributes no pattern; an app directory
+    #: with two middleware files maps to ``()`` (covers nothing for certain). The app directory
+    #: is the middleware file's directory (its parent when that is ``src``).
+    next_middlewares: dict[str, tuple[str, ...] | None] = field(default_factory=dict)
+    #: Next.js apps: the root directories (``""`` = repo root) that hold an ``app/`` or ``pages/``
+    #: router and whose ``package.json`` depends on ``next`` or that hold a ``next.config.*``. A
+    #: file-based page under ``app/`` or ``pages/`` is a Next.js page only inside one of these —
+    #: Gatsby also routes ``src/pages/*.tsx``, and Angular has ``src/app``.
+    next_apps: frozenset[str] = frozenset()
+
+
+def router_root(path: str, router_dir: str) -> str | None:
+    """The app root of a file under a file-based ``router_dir`` (``app`` / ``pages``): the
+    directory holding it, or its parent when that is ``src`` (``src/app``, ``src/pages``).
+    ``""`` is the repo root; None when ``router_dir`` is not on the path."""
+    dirs = path.replace("\\", "/").split("/")[:-1]
+    if router_dir not in dirs:
+        return None
+    before = dirs[: dirs.index(router_dir)]
+    if before and before[-1] == "src":
+        before = before[:-1]
+    return "/".join(before)
+
+
+_NEXT_CONFIGS = ("next.config.js", "next.config.mjs", "next.config.ts", "next.config.cjs")
+
+
+def _next_apps(repo_root: Path, files: Sequence[Path]) -> frozenset[str]:
+    """App roots (see :attr:`TsAliasIndex.next_apps`) that are Next.js apps: the root of every
+    file under ``app/`` or ``pages/`` whose ``package.json`` lists ``next`` in dependencies /
+    devDependencies, or that holds a ``next.config.*``."""
+    roots = {
+        r
+        for f in files
+        for d in ("app", "pages")
+        if (r := router_root(repo_relative(f, repo_root), d)) is not None
+    }
+    out: set[str] = set()
+    for r in roots:
+        base = repo_root / r if r else repo_root
+        if any((base / c).is_file() for c in _NEXT_CONFIGS):
+            out.add(r)
+            continue
+        pkg = _load_jsonc(base / "package.json") if (base / "package.json").is_file() else None
+        if not isinstance(pkg, dict):
+            continue
+        deps = {**(pkg.get("dependencies") or {}), **(pkg.get("devDependencies") or {})}
+        if "next" in deps:
+            out.add(r)
+    return frozenset(out)
 
 
 def _load_jsonc(path: Path) -> dict | None:
@@ -462,6 +537,49 @@ def _is_fixture_path(rel: str) -> bool:
     return any(seg in _FIXTURE_MOUNT_DIRS for seg in parts[:-1])
 
 
+def require_specifier(node: Node | None, source: bytes) -> str | None:
+    """``require('./x')`` → ``'./x'`` when the specifier is relative; else None."""
+    if node is None or node.type != "call_expression":
+        return None
+    fn = node.child_by_field_name("function")
+    args = node.child_by_field_name("arguments")
+    if fn is None or node_text(fn, source) != "require" or args is None:
+        return None
+    first = args.named_children[0] if args.named_children else None
+    spec = _string_literal(first, source)
+    return spec if spec is not None and spec.startswith(".") else None
+
+
+def relative_requires(root: Node, source: bytes) -> dict[str, tuple[str, str]]:
+    """CommonJS counterpart of :func:`_relative_import_exports` — top-level
+    ``const x = require('./a')`` → ``x: ('./a', 'default')`` (``module.exports`` is the default)
+    and ``const { r, s: t } = require('./a')`` → ``r: ('./a', 'r')``, ``t: ('./a', 's')``."""
+    out: dict[str, tuple[str, str]] = {}
+    if b"require(" not in source:
+        return out
+    for node in root.named_children:
+        if node.type not in ("lexical_declaration", "variable_declaration"):
+            continue
+        for d in node.named_children:
+            if d.type != "variable_declarator":
+                continue
+            module = require_specifier(d.child_by_field_name("value"), source)
+            name = d.child_by_field_name("name")
+            if module is None or name is None:
+                continue
+            if name.type == "identifier":
+                out[node_text(name, source)] = (module, "default")
+            elif name.type == "object_pattern":
+                for p in name.named_children:
+                    if p.type == "shorthand_property_identifier_pattern":
+                        out[node_text(p, source)] = (module, node_text(p, source))
+                    elif p.type == "pair_pattern":
+                        key, value = p.child_by_field_name("key"), p.child_by_field_name("value")
+                        if key is not None and value is not None and value.type == "identifier":
+                            out[node_text(value, source)] = (module, node_text(key, source))
+    return out
+
+
 def _relative_import_map(root: Node, source: bytes) -> dict[str, str]:
     """local imported name → its **relative** module specifier (only ``.``-prefixed, since a
     factory mount is resolved file-to-file in the reduce). Bare/aliased specifiers are omitted."""
@@ -474,6 +592,8 @@ def _relative_import_map(root: Node, source: bytes) -> dict[str, str]:
             continue
         for nm in _imported_names(node, source):
             out[nm] = module
+    for nm, (module, _) in relative_requires(root, source).items():
+        out.setdefault(nm, module)
     return out
 
 
@@ -494,21 +614,464 @@ def _factory_call_name(arg: Node, source: bytes) -> str | None:
     return node_text(fn, source) if fn is not None and fn.type == "identifier" else None
 
 
+def _relative_import_exports(root: Node, source: bytes) -> dict[str, tuple[str, str]]:
+    """local imported name → (relative module specifier, the name the module exports it as):
+    ``import x from './a'`` → ``x: ('./a', 'default')``; ``import { r as s } from './a'`` →
+    ``s: ('./a', 'r')``. Namespace imports and non-relative specifiers are omitted."""
+    out: dict[str, tuple[str, str]] = {}
+    for node in root.named_children:
+        if node.type != "import_statement":
+            continue
+        module = _module_of(node, source)
+        clause = next((c for c in node.named_children if c.type == "import_clause"), None)
+        if module is None or not module.startswith(".") or clause is None:
+            continue
+        for c in clause.named_children:
+            if c.type == "identifier":
+                out[node_text(c, source)] = (module, "default")
+            elif c.type == "named_imports":
+                for spec in c.named_children:
+                    idents = [x for x in spec.named_children if x.type == "identifier"]
+                    if spec.type == "import_specifier" and idents:
+                        out[node_text(idents[-1], source)] = (module, node_text(idents[0], source))
+    for nm, imp in relative_requires(root, source).items():
+        out.setdefault(nm, imp)
+    return out
+
+
+def _is_router_call(node: Node | None, source: bytes) -> bool:
+    """``Router(...)`` / ``express.Router(...)`` (optionally ``new``) — an Express router instance."""
+    if node is not None and node.type == "new_expression":
+        fn = node.child_by_field_name("constructor")
+    elif node is not None and node.type == "call_expression":
+        fn = node.child_by_field_name("function")
+    else:
+        return False
+    return fn is not None and node_text(fn, source) in {"Router", "express.Router"}
+
+
+def router_locals(root: Node, source: bytes) -> set[str]:
+    """Variables bound to an Express router instance anywhere in the file
+    (``const r = Router()`` / ``express.Router()``)."""
+    out: set[str] = set()
+
+    def walk(node: Node) -> None:
+        if node.type == "variable_declarator":
+            name = node.child_by_field_name("name")
+            if (name is not None and name.type == "identifier"
+                    and _is_router_call(node.child_by_field_name("value"), source)):
+                out.add(node_text(name, source))
+        for c in node.named_children:
+            walk(c)
+
+    walk(root)
+    return out
+
+
+def _collect_router_exports(root: Node, source: bytes) -> dict[str, str]:
+    """Exported name → local variable, for each top-level router instance this file exports:
+    ``export const r = Router()`` (``r → r``), ``export default r`` (``default → r``),
+    ``export { r as s }`` (``s → r``). Only variables bound to ``Router()`` count."""
+    if b"Router" not in source:
+        return {}
+    routers = router_locals(root, source)
+    out: dict[str, str] = {}
+    for node in root.named_children:
+        if node.type != "export_statement" or not routers:
+            continue
+        for c in node.named_children:
+            if c.type == "lexical_declaration":
+                for d in c.named_children:
+                    name = d.child_by_field_name("name") if d.type == "variable_declarator" else None
+                    if name is not None and node_text(name, source) in routers:
+                        out[node_text(name, source)] = node_text(name, source)
+            elif c.type == "identifier" and node_text(c, source) in routers:  # export default r
+                out["default"] = node_text(c, source)
+            elif c.type == "export_clause":
+                for spec in c.named_children:
+                    idents = [x for x in spec.named_children if x.type == "identifier"]
+                    if spec.type == "export_specifier" and idents and node_text(idents[0], source) in routers:
+                        out[node_text(idents[-1], source)] = node_text(idents[0], source)
+    for node in root.named_children:  # CommonJS: module.exports = r / exports.x = r / { r }
+        expr = node.named_children[0] if node.type == "expression_statement" and node.named_children else None
+        if expr is None or expr.type != "assignment_expression" or not routers:
+            continue
+        left, right = expr.child_by_field_name("left"), expr.child_by_field_name("right")
+        target = node_text(left, source) if left is not None else ""
+        if right is None:
+            continue
+        if target == "module.exports":
+            if right.type == "identifier" and node_text(right, source) in routers:
+                out["default"] = node_text(right, source)
+            elif right.type == "object":
+                for p in right.named_children:
+                    if p.type == "shorthand_property_identifier" and node_text(p, source) in routers:
+                        out[node_text(p, source)] = node_text(p, source)
+                    elif p.type == "pair":
+                        key, value = p.child_by_field_name("key"), p.child_by_field_name("value")
+                        if (key is not None and value is not None and value.type == "identifier"
+                                and node_text(value, source) in routers):
+                            out[node_text(key, source)] = node_text(value, source)
+        elif target.startswith(("module.exports.", "exports.")) and right.type == "identifier" \
+                and node_text(right, source) in routers:
+            out[target.rsplit(".", 1)[-1]] = node_text(right, source)
+    return out
+
+
+#: A NestJS ``setGlobalPrefix`` exclude list: ``((path, METHOD | None), …)``.
+NestExclude = tuple[tuple[str, str | None], ...]
+#: One file's NestJS facts: (bootstrap: (prefix pieces | ``[]`` none | None dynamic, exclude) or
+#: None, @Module class → its controllers, RouterModule entries (module, parent module, pieces)).
+_NestRaw = tuple[
+    tuple[list[tuple[str, str]] | None, NestExclude | None] | None,
+    dict[str, list[str]],
+    list[tuple[str, str | None, list[tuple[str, str]] | None]],
+]
+
+#: An Express router-instance mount candidate: (mount site ``file:line``, target file, the name
+#: the target exports, base). Confirmed against the target's router exports in the reduce.
+_InstanceMount = tuple[str, str, str, str]
+
+
+_NEST_BOOT = (b"NestFactory", b"setGlobalPrefix")
+
+#: One file's application base-path facts: (framework, the path pieces of each ``basePath`` it
+#: sets — ``None`` for a dynamic value; an empty list = a Next.js config that sets none).
+_BasePathRaw = tuple[str, list[list[tuple[str, str]] | None]]
+
+
+def _collect_base_path(root: Node, source: bytes, rel: str) -> _BasePathRaw | None:
+    """Application base path set in this file. Next.js: a ``next.config.*`` file's ``basePath``
+    key (any object in it — ``module.exports = {…}``, ``export default withX({…})``). LoopBack:
+    a ``basePath`` key inside a ``rest: {…}`` options object, or an ``x.basePath('/api')`` call,
+    in a file that uses ``@loopback``. None when the file is neither."""
+    name = rel.rsplit("/", 1)[-1]
+    if name.startswith("next.config."):
+        framework = "nextjs"
+    elif b"basePath" in source and b"@loopback" in source:
+        framework = "loopback"
+    else:
+        return None
+    found: list[list[tuple[str, str]] | None] = []
+
+    def walk(n: Node) -> None:
+        if n.type == "pair":
+            key = n.child_by_field_name("key")
+            value = n.child_by_field_name("value")
+            if key is not None and value is not None and node_text(key, source).strip("'\"") == "basePath":
+                outer = n.parent.parent if n.parent is not None else None
+                okey = outer.child_by_field_name("key") if outer is not None and outer.type == "pair" else None
+                if framework == "nextjs" or (
+                        okey is not None and node_text(okey, source).strip("'\"") == "rest"):
+                    found.append(_path_pieces(value, source))
+        elif n.type == "call_expression" and framework == "loopback":
+            fn = n.child_by_field_name("function")
+            prop = fn.child_by_field_name("property") if fn is not None and fn.type == "member_expression" else None
+            args = n.child_by_field_name("arguments")
+            arg_nodes = list(args.named_children) if args is not None else []
+            if prop is not None and node_text(prop, source) == "basePath" and len(arg_nodes) == 1:
+                found.append(_path_pieces(arg_nodes[0], source))
+        for c in n.named_children:
+            walk(c)
+
+    walk(root)
+    if framework == "loopback" and not found:
+        return None
+    return framework, found
+
+
+#: A Next.js middleware file's facts: (its ``config.matcher`` patterns, or ``None`` = no matcher).
+_MiddlewareRaw = tuple[tuple[str, ...] | None]
+
+_MIDDLEWARE_FILES = frozenset({"middleware.ts", "middleware.js", "middleware.mjs"})
+
+
+def _matcher_patterns(value: Node, source: bytes) -> tuple[str, ...]:
+    """Literal ``config.matcher`` patterns: a string, an array of strings, or ``{ source }``
+    objects without ``has`` / ``missing`` conditions. Anything else contributes no pattern."""
+    items = value.named_children if value.type == "array" else [value]
+    out: list[str] = []
+    for item in items:
+        if item.type == "object":
+            pairs = {node_text(k, source).strip("'\""): pr.child_by_field_name("value")
+                     for pr in item.named_children if pr.type == "pair"
+                     and (k := pr.child_by_field_name("key")) is not None}
+            if "has" in pairs or "missing" in pairs:
+                continue
+            item = pairs.get("source")  # type: ignore[assignment]
+        lit = _string_literal(item, source)
+        if lit is not None:
+            out.append(lit)
+    return tuple(out)
+
+
+def _collect_next_middleware(root: Node, source: bytes, rel: str) -> _MiddlewareRaw | None:
+    """A Next.js ``middleware.(ts|js)`` that exports its middleware (``export function
+    middleware`` / ``export const middleware`` / ``export default``) → its matcher facts; None
+    for any other file. No ``config.matcher`` → ``(None,)`` (runs on every route)."""
+    if rel.rsplit("/", 1)[-1] not in _MIDDLEWARE_FILES:
+        return None
+    exported = False
+    matcher: tuple[str, ...] | None = None
+    for node in root.named_children:
+        if node.type != "export_statement":
+            continue
+        if any(c.type == "default" or node_text(c, source) == "default" for c in node.children):
+            exported = True
+        for decl in node.named_children:
+            if decl.type == "function_declaration":
+                name = decl.child_by_field_name("name")
+                exported = exported or (name is not None and node_text(name, source) == "middleware")
+            if decl.type not in ("lexical_declaration", "variable_declaration"):
+                continue
+            for vd in decl.named_children:
+                name, value = vd.child_by_field_name("name"), vd.child_by_field_name("value")
+                if name is None or value is None:
+                    continue
+                if node_text(name, source) == "middleware":
+                    exported = True
+                elif node_text(name, source) == "config":
+                    matcher = ()  # a config that is not a literal object covers nothing for certain
+                    for pair in value.named_children if value.type == "object" else []:
+                        key = pair.child_by_field_name("key") if pair.type == "pair" else None
+                        v = pair.child_by_field_name("value") if key is not None else None
+                        if key is not None and node_text(key, source).strip("'\"") == "matcher" \
+                                and v is not None:
+                            matcher = _matcher_patterns(v, source)
+                            break
+                    else:
+                        if value.type == "object":
+                            matcher = None  # config without a matcher: every route
+    return (matcher,) if exported else None
+
+
+def _app_base_paths(
+    raw: list[tuple[str, str, list[list[tuple[str, str]] | None]]],
+    const_values: dict[str, str | None],
+) -> dict[str, dict[str, str | None]]:
+    """(framework, app directory, basePath pieces) → framework → {directory → base path}, once
+    ``const_values`` is complete. No value → ``""``; one resolved value → it; a dynamic or
+    unresolved value, or values that disagree within one app directory → None (unknown)."""
+    values: dict[tuple[str, str], set[str | None]] = {}
+    for framework, anchor, found in raw:
+        bucket = values.setdefault((framework, anchor), set())
+        for pieces in found:
+            bucket.add(_resolve_pieces(pieces, const_values) if pieces is not None else None)
+    out: dict[str, dict[str, str | None]] = {}
+    for (framework, anchor), vals in values.items():
+        out.setdefault(framework, {})[anchor] = (
+            "" if not vals else next(iter(vals)) if len(vals) == 1 else None
+        )
+    return out
+
+
+def app_base_path(index: object | None, framework: str, path: str) -> tuple[bool, str | None]:
+    """(found, base path) of the app a ``path`` belongs to: the deepest app directory above it
+    in ``index.app_base_paths[framework]``. ``found`` False → no app config seen (address
+    unchanged); base ``None`` → set but unknown (the address is unknown)."""
+    apps = (getattr(index, "app_base_paths", None) or {}).get(framework) or {}
+    anchors = [d for d in apps if d == "" or path.startswith(d + "/")]
+    if not anchors:
+        return False, None
+    return True, apps[max(anchors, key=len)]
+
+
+def _nest_exclude(opts: Node | None, source: bytes) -> NestExclude | None:
+    """``{ exclude: ['health', { path: 'metrics', method: RequestMethod.GET }] }`` → entries;
+    ``()`` without an exclude; None when any entry is not a literal path (cannot be decided)."""
+    if opts is None:
+        return ()
+    if opts.type != "object":
+        return None
+    for pair in opts.named_children:
+        key = pair.child_by_field_name("key") if pair.type == "pair" else None
+        if key is None or node_text(key, source).strip("'\"") != "exclude":
+            continue
+        arr = pair.child_by_field_name("value")
+        if arr is None or arr.type != "array":
+            return None
+        out: list[tuple[str, str | None]] = []
+        for e in arr.named_children:
+            if e.type == "string":
+                out.append((_string_literal(e, source) or "", None))
+                continue
+            if e.type != "object":
+                return None
+            path_v, method = None, None
+            for kv in e.named_children:
+                k = kv.child_by_field_name("key") if kv.type == "pair" else None
+                v = kv.child_by_field_name("value") if k is not None else None
+                if k is None or v is None:
+                    return None
+                name = node_text(k, source).strip("'\"")
+                if name == "path":
+                    path_v = _string_literal(v, source)
+                elif name == "method":
+                    method = node_text(v, source).rsplit(".", 1)[-1].upper()
+            if path_v is None:
+                return None
+            out.append((path_v, None if method in (None, "ALL") else method))
+        return tuple(out)
+    return ()
+
+
+def _collect_nest(root: Node, source: bytes) -> _NestRaw | None:
+    """This file's NestJS wiring: a bootstrap (``NestFactory.create`` and/or
+    ``app.setGlobalPrefix(prefix, {exclude})``), ``@Module({controllers: [...]})`` classes, and
+    ``RouterModule.register([{path, module, children}])`` entries. None when there is none."""
+    boot_seen = any(m in source for m in _NEST_BOOT)
+    has_module = b"@Module" in source
+    if not boot_seen and not has_module:
+        return None
+    boot: tuple[list[tuple[str, str]] | None, NestExclude | None] | None = None
+    modules: dict[str, list[str]] = {}
+    register: list[tuple[str, str | None, list[tuple[str, str]] | None]] = []
+
+    def entries(arr: Node, parent: str | None) -> None:
+        for e in arr.named_children:
+            if e.type != "object":
+                continue
+            pairs = {node_text(k, source).strip("'\""): v for kv in e.named_children
+                     if kv.type == "pair" and (k := kv.child_by_field_name("key")) is not None
+                     and (v := kv.child_by_field_name("value")) is not None}
+            mod = pairs.get("module")
+            name = node_text(mod, source) if mod is not None and mod.type == "identifier" else None
+            if name is not None:
+                path_v = pairs.get("path")  # optional: a path-less entry only groups children
+                register.append((name, parent,
+                                 _path_pieces(path_v, source) if path_v is not None else [("lit", "")]))
+            kids = pairs.get("children")
+            if kids is not None and kids.type == "array":
+                entries(kids, name)
+
+    def walk(n: Node) -> None:
+        nonlocal boot
+        if n.type == "call_expression":
+            fn = n.child_by_field_name("function")
+            ftext = node_text(fn, source) if fn is not None else ""
+            args = n.child_by_field_name("arguments")
+            arg_nodes = list(args.named_children) if args is not None else []
+            if ftext.endswith(".setGlobalPrefix") and arg_nodes:
+                boot = (_path_pieces(arg_nodes[0], source),
+                        _nest_exclude(arg_nodes[1] if len(arg_nodes) > 1 else None, source))
+            elif ftext == "NestFactory.create" and boot is None:
+                boot = ([], ())
+            elif ftext == "RouterModule.register" and arg_nodes and arg_nodes[0].type == "array":
+                entries(arg_nodes[0], None)
+        if n.type == "decorator" and has_module:
+            call = next((c for c in n.named_children if c.type == "call_expression"), None)
+            fn = call.child_by_field_name("function") if call is not None else None
+            cls = n.parent  # `export @Module(...) class X` → the decorator sits on the export
+            if cls is not None and cls.type == "export_statement":
+                cls = next((c for c in cls.named_children if c.type == "class_declaration"), None)
+            if (fn is not None and node_text(fn, source) == "Module" and cls is not None
+                    and cls.type == "class_declaration"):
+                cname = cls.child_by_field_name("name")
+                a = call.child_by_field_name("arguments") if call is not None else None
+                obj = next((c for c in a.named_children if c.type == "object"), None) if a else None
+                for kv in obj.named_children if obj is not None else []:
+                    k = kv.child_by_field_name("key") if kv.type == "pair" else None
+                    v = kv.child_by_field_name("value") if k is not None else None
+                    if (cname is not None and k is not None and v is not None
+                            and node_text(k, source) == "controllers" and v.type == "array"):
+                        modules[node_text(cname, source)] = [
+                            node_text(c, source) for c in v.named_children if c.type == "identifier"
+                        ]
+        for c in n.named_children:
+            walk(c)
+
+    walk(root)
+    if boot is None and not modules and not register:
+        return None
+    return boot, modules, register
+
+
+def _nest_prefixes(
+    boots: list[tuple[str, tuple[list[tuple[str, str]] | None, NestExclude | None]]],
+    modules: dict[str, list[str] | None],
+    register: list[tuple[str, str | None, list[tuple[str, str]] | None]],
+    const_values: dict[str, str | None],
+) -> tuple[dict[str, tuple[str | None, NestExclude | None]], dict[str, str | None]]:
+    """Resolve NestJS wiring once ``const_values`` is complete: per bootstrap directory, its
+    global prefix (``""`` none, None unresolvable; two bootstraps in one directory that disagree
+    → None); per controller of a ``RouterModule``-registered module, its composed path."""
+    calls: dict[str, set[tuple[str | None, NestExclude | None]]] = {}
+    for d, (pieces, exclude) in boots:
+        calls.setdefault(d, set())
+        if pieces != []:  # a setGlobalPrefix call ([] = NestFactory.create alone)
+            calls[d].add((_resolve_pieces(pieces, const_values) if pieces else None, exclude))
+    by_dir: dict[str, tuple[str | None, NestExclude | None]] = {
+        d: ("", ()) if not found else next(iter(found)) if len(found) == 1 else (None, None)
+        for d, found in calls.items()
+    }
+    own: dict[str, str | None] = {}
+    parent: dict[str, str | None] = {}
+    for mod, par, pieces in register:
+        record_distinct(own, mod, _resolve_pieces(pieces, const_values) if pieces else None)
+        record_distinct(parent, mod, par)
+
+    def composed(mod: str, seen: frozenset[str]) -> str | None:
+        p = own.get(mod)
+        if p is None or mod in seen:
+            return None
+        par = parent.get(mod)
+        if par is None:
+            return _join_segments("", p)
+        base = composed(par, seen | {mod})
+        return _join_segments(base, p) if base is not None else None
+
+    controllers: dict[str, str | None] = {}
+    for mod in own:
+        prefix = composed(mod, frozenset())
+        for ctrl in modules.get(mod) or []:
+            record_distinct(controllers, ctrl, prefix)
+    return by_dir, controllers
+
+
+def _confirm_instance_mounts(
+    candidates: list[_InstanceMount], router_exports: dict[str, dict[str, str]]
+) -> dict[str, dict[str, str]]:
+    """Keep the router-instance mounts the target file confirms: the imported name is a
+    ``Router()`` that file exports. A mount site with more than one confirmed router is skipped,
+    and a router mounted at >1 distinct base is dropped (honest-null: its routes keep their own
+    bare path)."""
+    confirmed: dict[str, list[tuple[str, str, str]]] = {}
+    for site, target, exported, base in candidates:
+        router_var = router_exports.get(target, {}).get(exported)
+        if router_var is not None:
+            confirmed.setdefault(site, []).append((target, router_var, base))
+    base_of: dict[tuple[str, str], str | None] = {}
+    for hits in confirmed.values():
+        if len(hits) == 1:
+            target, local, base = hits[0]
+            record_distinct(base_of, (target, local), base)
+    out: dict[str, dict[str, str]] = {}
+    for (target, router_var), served in base_of.items():
+        if served is not None:
+            out.setdefault(target, {})[router_var] = served
+    return out
+
+
 def _collect_express_mounts(
     root: Node, source: bytes, rel: str, repo_root: Path
-) -> list[tuple[str, str]]:
-    """(mounted-factory file, base path) for each ``app.use('/base', factory())`` in this file.
-    The factory identifier is resolved to its defining file via this file's relative imports. A
-    mount whose base is not a plain string, or whose factory is not a single relative-imported
-    bare call, is skipped — honest-null, never a guessed link. Test/fixture files are not a mount
-    source (their throwaway bases must not define a factory's real prefix)."""
+) -> tuple[list[tuple[str, str]], list[_InstanceMount]]:
+    """Express mounts in this file: (mounted-factory file, base path) for each
+    ``app.use('/base', factory())``, and router-instance candidates for each
+    ``app.use('/base', importedName)``. The identifier is resolved to its defining file via this
+    file's relative imports. A mount whose base is not a plain string, or with more than one
+    imported factory, is skipped — honest-null, never a guessed link. Instance candidates are only
+    candidates: the reduce keeps one when the target file exports that name as a ``Router()``.
+    Test/fixture files are not a mount source (their throwaway bases must not define a router's
+    real prefix)."""
     if b".use(" not in source or _is_fixture_path(rel):
-        return []
+        return [], []
     import_map = _relative_import_map(root, source)
-    if not import_map:
-        return []
+    if not import_map and b"require(" not in source:
+        return [], []
+    exports_of = _relative_import_exports(root, source)
     mount_dir = (repo_root / rel).parent
     out: list[tuple[str, str]] = []
+    instances: list[_InstanceMount] = []
 
     def walk(node: Node) -> None:
         if node.type == "call_expression":
@@ -527,16 +1090,28 @@ def _collect_express_mounts(
                             for a in arg_nodes[1:]
                             if (name := _factory_call_name(a, source)) is not None
                             and name in import_map
+                        ] + [  # require('./r')() — an inline required factory
+                            spec for a in arg_nodes[1:] if a.type == "call_expression"
+                            and (spec := require_specifier(a.child_by_field_name("function"), source))
                         ]
                         if len(specs) == 1:  # exactly one imported factory arg → unambiguous
                             resolved = _try_paths(mount_dir / specs[0], repo_root)
                             if resolved is not None:
                                 out.append((resolved, base))
+                        elif not specs:  # router instances: every imported identifier is a candidate
+                            site = f"{rel}:{node.start_point[0] + 1}"
+                            for a in arg_nodes[1:]:
+                                inline = require_specifier(a, source)  # app.use('/x', require('./r'))
+                                imp = ((inline, "default") if inline is not None else
+                                       exports_of.get(node_text(a, source)) if a.type == "identifier" else None)
+                                target = _try_paths(mount_dir / imp[0], repo_root) if imp else None
+                                if imp is not None and target is not None:
+                                    instances.append((site, target, imp[1], base))
         for c in node.named_children:
             walk(c)
 
     walk(root)
-    return out
+    return out, instances
 
 
 _CLASS_NODES_SET = frozenset(_CLASS_NODES)
@@ -608,9 +1183,11 @@ def _collect_ngmodule_imports(root: Node, source: bytes) -> dict[str, list[str]]
 
 def _ts_index_one(
     args: tuple[str, str, str]
-) -> tuple[dict[str, str | None], dict[str, ClassHeritage], list[str], list[_MountRaw], dict[str, list[str]], list[tuple[str, str]]] | None:
+) -> tuple[dict[str, str | None], dict[str, ClassHeritage], list[str], list[_MountRaw], dict[str, list[str]], list[tuple[str, str]], list[_InstanceMount], tuple[str, dict[str, str]], _NestRaw | None, _BasePathRaw | None, _MiddlewareRaw | None] | None:
     """Parse one TS/JS file into its partials (string-constant map, class-heritage map, the
-    classes it declares, its lazy-route mounts, NgModule imports, and Express factory mounts) —
+    classes it declares, its lazy-route mounts, NgModule imports, Express factory and
+    router-instance mounts, the routers it exports, its NestJS wiring, an application
+    base path it sets, and its Next.js middleware matcher) —
     pure, picklable worker for :func:`parallel_map`. Returns ``None`` on read/parse failure."""
     file_s, rel, repo_root_s = args
     if not Path(file_s).is_file():
@@ -626,9 +1203,11 @@ def _ts_index_one(
         _collect_const_values(root, src, const_values)
         classes, mounts = _collect_route_mounts(root, src)
         ngmodule_imports = _collect_ngmodule_imports(root, src)
-        express_mounts = _collect_express_mounts(root, src, rel, Path(repo_root_s))
+        express_mounts, instance_mounts = _collect_express_mounts(root, src, rel, Path(repo_root_s))
         return (const_values, _collect_heritage(root, src, rel), classes, mounts,
-                ngmodule_imports, express_mounts)
+                ngmodule_imports, express_mounts, instance_mounts,
+                (rel, _collect_router_exports(root, src)), _collect_nest(root, src),
+                _collect_base_path(root, src, rel), _collect_next_middleware(root, src, rel))
     except Exception as exc:  # parse OR a pathologically deep AST walk (RecursionError) — skip this file
         from ...logging import get_logger
         get_logger("breezeai_cog.index").warning(
@@ -705,11 +1284,36 @@ def build_ts_index(repo_root: Path, files: Sequence[Path], jobs: int = 1) -> TsA
     # Express: mounted-factory file → its base path. A factory file mounted at >1 distinct base
     # collapses to None (honest-null) via record_distinct; the None entries are dropped below.
     express_mount_of: dict[str, str | None] = {}
+    instance_mounts: list[_InstanceMount] = []
+    router_exports: dict[str, dict[str, str]] = {}  # file → exported name → local router variable
+    nest_boots: list[tuple[str, tuple[list[tuple[str, str]] | None, NestExclude | None]]] = []
+    nest_modules: dict[str, list[str] | None] = {}  # @Module class → controllers (name clash → None)
+    nest_register: list[tuple[str, str | None, list[tuple[str, str]] | None]] = []
+    base_paths_raw: list[tuple[str, str, list[list[tuple[str, str]] | None]]] = []
+    next_middlewares: dict[str, tuple[str, ...] | None] = {}
     args = [(str(f), repo_relative(f, repo_root), str(repo_root)) for f in files]
     for frag in parallel_map(args, _ts_index_one, jobs):
         if not frag:
             continue
-        cv, heritage, classes, mounts, ngmodule_imports, file_express_mounts = frag
+        (cv, heritage, classes, mounts, ngmodule_imports, file_express_mounts, file_instances,
+         (frag_rel, file_router_exports), nest, base_path, middleware) = frag
+        if middleware is not None:
+            mw_dir = Path(frag_rel).parent
+            if mw_dir.name == "src":
+                mw_dir = mw_dir.parent
+            key = "" if mw_dir.as_posix() == "." else mw_dir.as_posix()
+            next_middlewares[key] = () if key in next_middlewares else middleware[0]
+        if base_path is not None:
+            anchor = Path(frag_rel).parent.as_posix()
+            base_paths_raw.append((base_path[0], "" if anchor == "." else anchor, base_path[1]))
+        if nest is not None:
+            boot, mods, reg = nest
+            if boot is not None:
+                anchor = Path(frag_rel).parent.as_posix()
+                nest_boots.append(("" if anchor == "." else anchor, boot))
+            for mname, ctrls in mods.items():
+                record_distinct(nest_modules, mname, ctrls)
+            nest_register.extend(reg)
         for sym, literal in cv.items():
             record_distinct(const_values, sym, literal)
         for cname, ch in heritage.items():  # same class name in >1 file → None (distinct types)
@@ -719,6 +1323,9 @@ def build_ts_index(repo_root: Path, files: Sequence[Path], jobs: int = 1) -> TsA
         all_ngmodule_imports.update(ngmodule_imports)
         for factory_file, base in file_express_mounts:
             record_distinct(express_mount_of, factory_file, base)
+        instance_mounts.extend(file_instances)
+        if file_router_exports:
+            router_exports[frag_rel] = file_router_exports
 
     # Now const_values is complete: resolve each mount's path and wire the graph. A module
     # symbol mounted at >1 distinct prefix (or an unresolved path) collapses to None — the
@@ -759,9 +1366,17 @@ def build_ts_index(repo_root: Path, files: Sequence[Path], jobs: int = 1) -> TsA
     # Drop ambiguous (None) Express mounts — a factory mounted at conflicting bases keeps its
     # own bare paths rather than being wrongly attributed to one of them (honest-null).
     express_mounts = {k: v for k, v in express_mount_of.items() if v is not None}
+    express_router_mounts = _confirm_instance_mounts(instance_mounts, router_exports)
+    nest_global_prefixes, nest_controller_prefixes = _nest_prefixes(
+        nest_boots, nest_modules, nest_register, const_values
+    )
+    app_base_paths = _app_base_paths(base_paths_raw, const_values)
+    next_apps = _next_apps(repo_root, files)
 
     if (alias is None and not const_values and not class_heritage and not route_mounts
-            and not express_mounts):
+            and not express_mounts and not express_router_mounts and not nest_global_prefixes
+            and not nest_controller_prefixes and not app_base_paths and not next_middlewares
+            and not next_apps):
         return None
     return TsAliasIndex(
         base_dir=alias.base_dir if alias else str(repo_root),
@@ -771,6 +1386,12 @@ def build_ts_index(repo_root: Path, files: Sequence[Path], jobs: int = 1) -> TsA
         class_heritage=class_heritage,
         route_mounts=route_mounts,
         express_mounts=express_mounts,
+        express_router_mounts=express_router_mounts,
+        nest_global_prefixes=nest_global_prefixes,
+        nest_controller_prefixes=nest_controller_prefixes,
+        app_base_paths=app_base_paths,
+        next_middlewares=next_middlewares,
+        next_apps=next_apps,
     )
 
 
@@ -978,6 +1599,68 @@ def _dynamic_import_specifiers(root: Node, source: bytes) -> list[str]:
     return out
 
 
+# CommonJS ``require('x')`` — read like a static import. A ``require`` with a string literal can
+# sit anywhere (top level, inside a function, a side-effect ``require('./polyfill')``), so the
+# edges come from a tree walk; bindings only from top-level declarations, like ESM imports.
+_REQUIRE_GUARD = b"require("
+
+
+def _require_module(node: Node | None, source: bytes) -> str | None:
+    """``require('x')`` / ``require('x').member`` → ``'x'`` (any literal specifier); else None.
+    A dynamic ``require(name)`` has no literal and yields nothing (honest-null)."""
+    if node is not None and node.type == "member_expression":
+        node = node.child_by_field_name("object")
+    if node is None or node.type != "call_expression":
+        return None
+    fn = node.child_by_field_name("function")
+    args = node.child_by_field_name("arguments")
+    if fn is None or fn.type != "identifier" or node_text(fn, source) != "require" or args is None:
+        return None
+    first = args.named_children[0] if args.named_children else None
+    return _string_literal(first, source) or None
+
+
+def _require_specifiers(root: Node, source: bytes) -> list[str]:
+    """Every literal ``require('x')`` specifier in the tree, in source order."""
+    out: list[str] = []
+    stack = [root]
+    while stack:
+        n = stack.pop()
+        if n.type == "call_expression":
+            spec = _require_module(n, source)
+            if spec:
+                out.append(spec)
+        stack.extend(reversed(n.named_children))
+    return out
+
+
+def _require_bindings(root: Node, source: bytes) -> dict[str, str]:
+    """Local name → module for top-level CommonJS bindings: ``const x = require('m')``,
+    ``const x = require('m').y``, ``const { a, b: c } = require('m')`` (``var`` / ``let`` too)."""
+    out: dict[str, str] = {}
+    for node in root.named_children:
+        if node.type not in ("lexical_declaration", "variable_declaration"):
+            continue
+        for d in node.named_children:
+            if d.type != "variable_declarator":
+                continue
+            module = _require_module(d.child_by_field_name("value"), source)
+            name = d.child_by_field_name("name")
+            if module is None or name is None:
+                continue
+            if name.type == "identifier":
+                out[node_text(name, source)] = module
+            elif name.type == "object_pattern":
+                for p in name.named_children:
+                    if p.type == "shorthand_property_identifier_pattern":
+                        out[node_text(p, source)] = module
+                    elif p.type == "pair_pattern":
+                        value = p.child_by_field_name("value")
+                        if value is not None and value.type == "identifier":
+                            out[node_text(value, source)] = module
+    return out
+
+
 def extract_imports(
     root: Node, source: bytes, file_path: str, repo_root: str | Path, index: TsAliasIndex | None = None
 ) -> tuple[list[str], list[str], list[str], dict[str, str]]:
@@ -1009,6 +1692,20 @@ def extract_imports(
                 if module:
                     resolved = _resolve(module, file_path, repo_root, index)
                     (internal if resolved else external).setdefault(resolved or module, None)
+
+    # CommonJS `require('x')` — the same edges as an ESM import; top-level `const x = require(…)`
+    # also binds `x` to the resolved file, so calls[].path resolves through it.
+    if _REQUIRE_GUARD in source:
+        resolved_of: dict[str, str | None] = {}
+        for module in _require_specifiers(root, source):
+            if module not in resolved_of:
+                resolved_of[module] = _resolve(module, file_path, repo_root, index)
+            resolved = resolved_of[module]
+            (internal if resolved else external).setdefault(resolved or module, None)
+        for nm, module in _require_bindings(root, source).items():
+            resolved = resolved_of.get(module)
+            if resolved and nm not in bindings:
+                bindings[nm] = resolved
 
     # Dynamic imports (`import('x')`) — lazy pages / code-split components. Resolved into the
     # same file-level edge set as static imports (no binding: a dynamic import binds a Promise,

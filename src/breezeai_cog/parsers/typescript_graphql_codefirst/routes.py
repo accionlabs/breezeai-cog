@@ -1,7 +1,8 @@
 """Route detection for an in-house (bespoke) TypeScript code-first GraphQL framework.
 
-Some codebases roll their own code-first GraphQL layer instead of using
-``@nestjs/graphql`` or ``type-graphql``: operation decorators (``@Query``/``@Mutation``/
+``type-graphql`` resolvers (``@Resolver`` classes with ``@Query(() => T, { name })``) use the
+same decorator names and are handled here too. Some codebases roll their own code-first GraphQL
+layer instead of using ``@nestjs/graphql`` or ``type-graphql``: operation decorators (``@Query``/``@Mutation``/
 ``@Subscription``) and helpers (``@Arg``/``@Ctx``/``resolversFromService``) are *defined
 locally* and imported from a project-relative ``decorators`` module, and resolver classes
 are plain DI services (``@Service``) rather than ``@Resolver`` classes. Neither the NestJS
@@ -53,16 +54,31 @@ _TS_NON_DTO = frozenset(
 )
 
 
+_NAME_OPTION_RE = re.compile(r"""\bname\s*:\s*['"`]([A-Za-z_$][\w$]*)['"`]""")
+#: type-graphql return type thunk: ``() => [Recipe]`` / ``returns => Recipe``.
+_RETURN_THUNK_RE = re.compile(r"=>\s*\[?\s*([A-Za-z_$][\w$]*)")
+
+
 def _op_name(d: Decorator, mname: str) -> str:
     """Operation name: the leading identifier of the SDL-fragment string argument
-    (``'products(input: X!): Y!'`` → ``products``), else the method name."""
+    (``'products(input: X!): Y!'`` → ``products``), a type-graphql ``{ name: 'x' }`` option,
+    else the method name."""
     if d.args:
         first = d.args[0].strip()
         if first[:1] in "'\"`":
             m = _LEADING_ID_RE.match(first.strip("'\"`").strip())
             if m:
                 return m.group(0)
+    for arg in d.args:
+        if arg.strip().startswith("{") and (m := _NAME_OPTION_RE.search(arg)):
+            return m.group(1)
     return mname
+
+
+def _thunk_dto(d: Decorator) -> str | None:
+    """responseDTO from a type-graphql return thunk (``() => [Recipe]`` → ``Recipe``)."""
+    m = _RETURN_THUNK_RE.search(d.args[0]) if d.args else None
+    return _dto_or_none(m.group(1)) if m and m.group(1)[:1].isupper() else None
 
 
 def _sdl_fragment(arg: str) -> str | None:
@@ -204,6 +220,7 @@ def detect_codefirst_graphql_routes(
                     if frag is not None:
                         req_dto, res_dto = _sdl_dtos(frag, timeout_micros)
                     req_dto = req_dto or _arg_request_dto(member, source)
+                    res_dto = res_dto or _thunk_dto(d)
                     routes.append(Statement(
                         id=disambiguate(statement_id(path, sl, sc), seen_ids),
                         parentId=parent,

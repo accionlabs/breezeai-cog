@@ -218,7 +218,7 @@ def test_ruby_model_index_identifies_activerecord_receivers(tmp_path: Path) -> N
 
     parser = RubyParser()
     index = parser.build_index(tmp_path, [tmp_path / "app" / "models" / "user.rb", controller])
-    assert "User" in index
+    assert "User" in index.models
 
     rec = parser.parse_file(ParseContext(
         path="app/controllers/users_controller.rb", abs_path=controller,

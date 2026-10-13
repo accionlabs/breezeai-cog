@@ -152,3 +152,32 @@ def test_selection() -> None:
     assert registry.select("Query.cs", QUERY).name == "csharp-graphql"       # graphql wins
     assert registry.select("plain.cs", b"class C {}").name == "csharp"         # base fallback
     registry.clear()
+
+
+_RESOLVERS = b'''using GraphQL.Types;
+public class Query : ObjectGraphType
+{
+    public Query(IBooks books)
+    {
+        Field<BookType>("inline").Description("d").Resolve(ctx => books.First());
+        FieldAsync<BookType>("named", resolve: async ctx => await books.FirstAsync());
+        Field<BookType>("group").Resolve(ResolveBook);
+        Field<BookType>("service").Resolve(books.Resolve);
+        Field<StringGraphType>("plain");
+    }
+
+    private Book ResolveBook(IResolveFieldContext ctx) => new Book();
+}
+'''
+
+
+def test_resolver_is_the_handler() -> None:
+    rec = _parse(CSharpGraphQLParser(), _RESOLVERS, "Query.cs")
+    got = {s.endpoint: (s.handler, s.handlerLine) for s in _routes(rec)}
+    assert got == {
+        "inline": (None, 6),            # lambda: no name, its line
+        "named": (None, 7),             # resolve: named argument
+        "group": ("ResolveBook", 13),   # method group: its declaration
+        "service": ("books.Resolve", None),
+        "plain": (None, None),          # no resolver: the source object's property
+    }

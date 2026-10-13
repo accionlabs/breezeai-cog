@@ -17,7 +17,10 @@ from ...utils import repo_relative
 from ..constfold import Token, resolve_all
 from ..index_common import parallel_map, record_distinct, seed_same_package
 from ..treesitter import node_text, parse_source
+from .config import spring_context_paths, spring_properties
+from .web_guards import GuardFacts, ModuleGuards, collect_guard_facts, resolve_guards
 from .constants import collect_constants
+from .jaxrs_index import JaxrsFacts, collect_jaxrs_facts, resolve_jaxrs
 
 _TYPE_DECLS = (
     "class_declaration", "interface_declaration", "enum_declaration",
@@ -37,10 +40,29 @@ class JavaIndex:
 
     fqcn: FqcnIndex = field(default_factory=dict)
     consts: dict[str, str] = field(default_factory=dict)
+    #: Spring Boot servlet context path per module root (``""`` = repo root): the prefix of
+    #: every HTTP route in that module. None = set in config but unresolvable (the base files
+    #: disagree, or a ``${…}`` placeholder). A module without one is absent. See ``config.py``.
+    context_paths: dict[str, str | None] = field(default_factory=dict)
+    #: JAX-RS ``@ApplicationPath`` per module root: the base of every resource of that module.
+    #: None = present but unresolvable (or two differ). Absent = none. See ``jaxrs_index.py``.
+    jaxrs_app_paths: dict[str, str | None] = field(default_factory=dict)
+    #: JAX-RS sub-resource class simple name → the base its locator serves it under (the
+    #: locator's class base + the locator's ``@Path``). None = a path on the way does not
+    #: resolve. Absent = a root resource, ambiguous, or not reached from a locator.
+    jaxrs_sub_bases: dict[str, str | None] = field(default_factory=dict)
+    #: Global guards per module root: servlet filters, MVC interceptors, JAX-RS request filters
+    #: (decision Q9 — their names go on every binding they certainly cover). See
+    #: ``web_guards.py``.
+    module_guards: dict[str, ModuleGuards] = field(default_factory=dict)
+    #: Base-config properties per module root (``key → value``; None = the base files
+    #: disagree) — resolves ``${…}`` placeholders in annotation values such as a
+    #: ``@KafkaListener`` topic. See ``config.py``.
+    module_properties: dict[str, dict[str, str | None]] = field(default_factory=dict)
 
 
 #: One file's contribution: ``{package.TypeName: rel}`` and ``{Class.FIELD: tokens}``.
-_IndexFrag = tuple[dict[str, str], dict[str, list[Token]]]
+_IndexFrag = tuple[dict[str, str], dict[str, list[Token]], JaxrsFacts | None, GuardFacts | None]
 
 
 def _fqcn_index_one(args: tuple[str, str]) -> _IndexFrag | None:
@@ -70,7 +92,8 @@ def _fqcn_index_one(args: tuple[str, str]) -> _IndexFrag | None:
                     fqcn_frag[f"{package}.{name}" if package else name] = rel
         # Qualified `Class.FIELD` keys only (drop bare names — they collide across files).
         const_frag = {k: v for k, v in collect_constants(root, source).items() if "." in k}
-        return fqcn_frag, const_frag
+        return (fqcn_frag, const_frag, collect_jaxrs_facts(root, source, rel),
+                collect_guard_facts(root, source, rel))
     except Exception as exc:  # parse OR a pathologically deep AST walk (RecursionError) — skip this file
         from ...logging import get_logger
         get_logger("breezeai_cog.index").warning(
@@ -88,15 +111,32 @@ def build_fqcn_index(repo_root: Path, files: Sequence[Path], jobs: int = 1) -> J
     args = [(str(f), repo_relative(f, repo_root)) for f in files]
     fqcn: FqcnIndex = {}
     raw_consts: dict[str, list[Token] | None] = {}
+    jaxrs: list[JaxrsFacts] = []
+    guard_facts: list[GuardFacts] = []
+    simple_names: dict[str, int] = {}  # top-level type simple name → declarations in the repo
     for frag in parallel_map(args, _fqcn_index_one, jobs):
         if frag is None:
             continue
-        fqcn_frag, const_frag = frag
+        fqcn_frag, const_frag, jaxrs_frag, guard_frag = frag
+        if jaxrs_frag is not None:
+            jaxrs.append(jaxrs_frag)
+        if guard_frag is not None:
+            guard_facts.append(guard_frag)
         for name, rel in fqcn_frag.items():
             record_distinct(fqcn, name, rel)
+            simple = name.rsplit(".", 1)[-1]
+            simple_names[simple] = simple_names.get(simple, 0) + 1
         for name, tokens in const_frag.items():
             record_distinct(raw_consts, name, tokens)
-    return JavaIndex(fqcn=fqcn, consts=resolve_all(raw_consts))
+    consts = resolve_all(raw_consts)
+    app_paths, sub_bases = resolve_jaxrs(jaxrs, consts, simple_names)
+    return JavaIndex(
+        fqcn=fqcn, consts=consts,
+        context_paths=spring_context_paths(repo_root, (rel for _, rel in args)),
+        jaxrs_app_paths=app_paths, jaxrs_sub_bases=sub_bases,
+        module_guards=resolve_guards(guard_facts),
+        module_properties=spring_properties(repo_root, (rel for _, rel in args)),
+    )
 
 
 def _package_of(root: Node, source: bytes) -> str:

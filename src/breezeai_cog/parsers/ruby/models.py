@@ -10,7 +10,7 @@ So this module answers the question from the declarations instead: a constant is
 when its class **transitively extends** ``ActiveRecord::Base`` (directly, or through the
 conventional ``ApplicationRecord`` intermediate). That answer lives in the model file, which
 is a *different* file from the controller that queries it, so it is computed once per
-repository in :func:`build_model_index` (the ``build_index`` pre-pass) and handed to the
+repository in ``ruby.index.build_ruby_index`` (the ``build_index`` pre-pass) and handed to the
 shared classifier as ``typed_db_ids`` — the same positive-evidence gate TypeScript uses for
 ``Repository<T>``-typed fields.
 
@@ -22,13 +22,11 @@ assigned from a model constant (``user = User.find(id)``), so instance writes
 from __future__ import annotations
 
 from collections.abc import Iterator
-from pathlib import Path
 from typing import Sequence
 
 from tree_sitter import Node
 
-from ..index_common import parallel_map
-from ..treesitter import node_text, parse_source
+from ..treesitter import node_text
 
 #: Roots of the ActiveRecord hierarchy. ``ApplicationRecord`` is the Rails-generated
 #: intermediate; it is seeded as a root so a repo that never declares it (engines, or a
@@ -105,30 +103,6 @@ def declared_parents(root: Node, source: bytes) -> list[tuple[str, str]]:
     return pairs
 
 
-def _file_parents(args: tuple[Path, Path]) -> list[tuple[str, str]]:
-    """Picklable per-file worker for :func:`build_model_index` (one parse per file).
-
-    A file that cannot be read or parsed contributes nothing — a missing model is a known
-    gap, whereas failing the pre-pass would block the whole repository.
-    """
-    repo_root, abs_path = args
-    try:
-        source = abs_path.read_bytes()
-    except OSError:
-        return []
-    # Guard on `class`, not on an ActiveRecord marker: a file declaring an unrelated class
-    # of the same name is what makes a name ambiguous, so it has to be seen even though it
-    # names no AR base. Files with no class at all (scripts, config, bare modules) are the
-    # only ones skipped.
-    if b"class" not in source:
-        return []
-    try:
-        root = parse_source("ruby", source).root_node
-    except ValueError:  # bounded-parse failure — skip this file only
-        return []
-    return declared_parents(root, source)
-
-
 def resolve_models(parents: dict[str, str]) -> frozenset[str]:
     """Constants whose class transitively reaches an ActiveRecord root.
 
@@ -151,28 +125,8 @@ def resolve_models(parents: dict[str, str]) -> frozenset[str]:
     return frozenset(models | {m.rsplit("::", 1)[-1] for m in models})
 
 
-def build_model_index(
-    repo_root: Path, files: Sequence[Path], jobs: int = 1
-) -> frozenset[str]:
-    """Repo-level pre-pass: every constant that names an ActiveRecord model.
-
-    Runs through the shared :func:`parallel_map` so it honours ``--jobs`` (serial at
-    ``jobs<=1``) like the parse stage, and reduces order-independently — the result is the
-    same set regardless of how the workers interleave.
-    """
-    root = Path(repo_root)
-    ruby_files = [f for f in files if f.suffix == ".rb"]
-    if not ruby_files:
-        return frozenset()
-    per_file = parallel_map(
-        [(root, f) for f in ruby_files], _file_parents, jobs
-    )
-    # A name can be declared more than once: a model re-opened inside a migration or a CLI
-    # task (routine in Rails), or a genuinely different class sharing the name. Conflicting
-    # on the *base name* would drop the first kind, so the test is whether the declarations
-    # disagree about **model-ness**: all-model is kept, all-not-model is excluded, and a
-    # genuine disagreement is dropped (absent beats wrong). Order-independent — the verdict
-    # does not depend on which worker finished first.
+def models_from_parents(per_file: Sequence[list[tuple[str, str]]]) -> frozenset[str]:
+    """Reduce per-file ``(class, superclass)`` pairs to the model constants (order-independent)."""
     by_name: dict[str, set[str]] = {}
     for pairs in per_file:
         for name, base in pairs:

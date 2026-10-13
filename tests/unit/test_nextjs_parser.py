@@ -247,3 +247,164 @@ def test_claims_selects_nextjs() -> None:
         == "typescript"
     )
     registry.clear()
+
+
+# ── next.config basePath (app-level wiring) ───────────────────────────────────────────────────
+_NEXT_PKG = '{"dependencies": {"next": "14"}}'
+_ROUTE = "export async function GET() {\n  return Response.json({});\n}\n"
+_PAGES_API = "export default function handler(req, res) {\n  res.json([]);\n}\n"
+
+
+def _next_endpoints(analyze_files, files: dict[str, str]) -> dict[str, str | None]:
+    return {
+        s.path: s.endpoint
+        for s in analyze_files({"package.json": _NEXT_PKG, **files})
+        if s.semanticType == "route" and s.framework == "nextjs"
+    }
+
+
+def test_base_path_prefixes_app_and_pages_api_routes(analyze_files) -> None:
+    got = _next_endpoints(analyze_files, {
+        "next.config.mjs": "const nextConfig = { basePath: '/docs', reactStrictMode: true };\n"
+                           "export default nextConfig;\n",
+        "app/users/[id]/route.ts": _ROUTE,
+        "pages/api/health.ts": _PAGES_API,
+    })
+    assert got == {"app/users/[id]/route.ts": "/docs/users/[id]", "pages/api/health.ts": "/docs/api/health"}
+
+
+def test_base_path_per_app_in_a_monorepo(analyze_files) -> None:
+    got = _next_endpoints(analyze_files, {
+        "apps/web/next.config.js": "module.exports = { basePath: '/web' };\n",
+        "apps/web/app/ping/route.ts": _ROUTE,
+        "apps/admin/next.config.js": "module.exports = { reactStrictMode: true };\n",
+        "apps/admin/app/ping/route.ts": _ROUTE,
+    })
+    assert got == {"apps/web/app/ping/route.ts": "/web/ping", "apps/admin/app/ping/route.ts": "/ping"}
+
+
+def test_unresolvable_base_path_leaves_endpoint_empty(analyze_files) -> None:
+    # Set from the environment / a conditional: the address is unknown (contract §8, decision Q8).
+    for cfg in ("module.exports = { basePath: process.env.BASE_PATH };\n",
+                "module.exports = { basePath: isProd ? '/docs' : '' };\n"):
+        got = _next_endpoints(analyze_files, {"next.config.js": cfg, "app/users/route.ts": _ROUTE})
+        assert got == {"app/users/route.ts": None}, cfg
+
+
+def test_base_path_from_a_constant(analyze_files) -> None:
+    got = _next_endpoints(analyze_files, {
+        "config.ts": "export const BASE = '/shop';\n",
+        "next.config.ts": "import { BASE } from './config';\nexport default { basePath: BASE };\n",
+        "app/cart/route.ts": _ROUTE,
+    })
+    assert got == {"app/cart/route.ts": "/shop/cart"}
+
+
+def _next_guards(analyze_files, files: dict[str, str]) -> dict[str, list[str] | None]:
+    return {
+        s.endpoint: s.guards
+        for s in analyze_files({"package.json": _NEXT_PKG, **files})
+        if s.semanticType == "route" and s.framework == "nextjs"
+    }
+
+
+_MW = "import { NextResponse } from 'next/server';\nexport function middleware(req) {\n  return NextResponse.next();\n}\n"
+_GET = "export async function GET() {\n  return Response.json([]);\n}\n"
+
+
+def test_middleware_guards_matched_routes(analyze_files) -> None:
+    guards = _next_guards(analyze_files, {
+        "next.config.js": "module.exports = {};\n",
+        "src/middleware.ts": _MW + "export const config = { matcher: ['/api/:path*', '/admin/:id'] };\n",
+        "src/app/api/users/[id]/route.ts": _GET,     # under /api/:path* → covered
+        "src/app/admin/[slug]/route.ts": _GET,       # :id covers one dynamic segment
+        "src/app/admin/[slug]/x/route.ts": _GET,     # one segment too many → not covered
+        "src/app/public/route.ts": _GET,             # not matched
+    })
+    assert guards == {
+        "/api/users/[id]": ["middleware"],
+        "/admin/[slug]": ["middleware"],
+        "/admin/[slug]/x": None,
+        "/public": None,
+    }
+
+
+def test_middleware_without_matcher_guards_every_route(analyze_files) -> None:
+    guards = _next_guards(analyze_files, {
+        "middleware.ts": _MW,
+        "app/a/route.ts": _GET,
+        "pages/api/b.ts": "export default function handler(req, res) { res.json([]); }\n",
+    })
+    assert guards == {"/a": ["middleware"], "/api/b": ["middleware"]}
+
+
+def test_middleware_uncertain_coverage_adds_nothing(analyze_files) -> None:
+    guards = _next_guards(analyze_files, {
+        # a regex-like matcher, a literal segment over a dynamic one, a has-condition source
+        "middleware.ts": _MW + "export const config = { matcher: ['/((?!_next).*)', '/users/me',"
+        " { source: '/orders/:p*', has: [{ type: 'header', key: 'x' }] }] };\n",
+        "app/users/[id]/route.ts": _GET,
+        "app/orders/route.ts": _GET,
+        # another app (its own next.config) is not covered by the root middleware
+        "apps/web/next.config.js": "module.exports = {};\n",
+        "apps/web/app/x/route.ts": _GET,
+    })
+    assert guards == {"/users/[id]": None, "/orders": None, "/x": None}
+
+
+# ── Pages (App Router page.tsx, Pages Router pages/**) ────────────────────────────────────────
+_NEXT_PKG = '{"dependencies": {"next": "14", "react": "18"}}'
+
+
+def _pages(analyze_files, files: dict[str, str], pkg: str = _NEXT_PKG):
+    st = analyze_files({"package.json": pkg, **files})
+    return {s.endpoint: (s.handler, s.handlerLine, s.path)
+            for s in st if s.semanticType == "route" and s.routeKind == "page"}
+
+
+def test_app_and_pages_router_pages(analyze_files) -> None:
+    got = _pages(analyze_files, {
+        "src/app/(shop)/orders/[id]/page.tsx": (
+            "import React from 'react';\nexport default function OrderPage() {\n  return <div/>;\n}\n"
+        ),
+        "src/app/page.tsx": "export default () => <main/>;\n",
+        "src/app/dashboard/layout.tsx": "export default function L({ children }) { return children; }\n",
+        "src/app/_lib/page.tsx": "export default function Hidden() { return null; }\n",
+        "src/app/@modal/(.)photo/page.tsx": "export default function Modal() { return null; }\n",
+        "pages/about.tsx": (
+            "import { memo } from 'react';\nfunction About() { return <p/>; }\nexport default memo(About);\n"
+        ),
+        "pages/blog/index.tsx": "export default class Blog { render() { return null; } }\n",
+        "pages/_app.tsx": "export default function App({ Component }) { return <Component/>; }\n",
+        "pages/404.tsx": "export default function NotFound() { return null; }\n",
+        "pages/api/users.ts": "export default function handler(req, res) { res.json([]); }\n",
+    })
+    assert got == {
+        "/orders/[id]": ("OrderPage", 2, "src/app/(shop)/orders/[id]/page.tsx"),
+        "/": (None, 1, "src/app/page.tsx"),
+        "/about": ("About", 2, "pages/about.tsx"),
+        "/blog": ("Blog", 1, "pages/blog/index.tsx"),
+    }
+
+
+def test_pages_need_a_next_app(analyze_files) -> None:
+    # Gatsby also routes src/pages/*.tsx — without a `next` dependency (or next.config) no page.
+    got = _pages(analyze_files, {
+        "src/pages/about.tsx": "export default function About() { return null; }\n",
+    }, pkg='{"dependencies": {"gatsby": "5", "react": "18"}}')
+    assert got == {}
+
+
+def test_page_gets_base_path_and_middleware_guard(analyze_files) -> None:
+    st = analyze_files({
+        "package.json": _NEXT_PKG,
+        "next.config.js": "module.exports = { basePath: '/shop' };\n",
+        "middleware.ts": (
+            "export function middleware(req) { return; }\n"
+            "export const config = { matcher: ['/account/:path*'] };\n"
+        ),
+        "app/account/page.tsx": "export default function Account() { return null; }\n",
+        "app/help/page.tsx": "export default function Help() { return null; }\n",
+    })
+    got = {s.endpoint: s.guards for s in st if s.routeKind == "page"}
+    assert got == {"/shop/account": ["middleware"], "/shop/help": None}

@@ -47,6 +47,7 @@ from tree_sitter import Node
 from ...emit import disambiguate, file_id, function_id, statement_id
 from ...schemas import FileRecord, Statement
 from ..treesitter import node_text
+from ..typescript.imports import app_base_path
 
 _VERBS = {"GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"}
 _ROUTE_STEMS = {"route"}  # App Router API handler file; page/layout are UI, not verb handlers
@@ -168,9 +169,71 @@ def _default_export_handler(root: Node, source: bytes) -> tuple[str | None, int,
     return None
 
 
+def _served(endpoint: str, path: str, index: object | None) -> str | None:
+    """The route's address under its app's ``next.config`` ``basePath``: joined in front when it
+    is a literal; unknown (None) when it is set but cannot be resolved; unchanged when the app
+    sets none or no ``next.config`` was seen."""
+    found, base = app_base_path(index, "nextjs", path)
+    if not found or base == "":
+        return endpoint
+    if base is None:
+        return None
+    parts = [p.strip("/") for p in (base, endpoint) if p and p.strip("/")]
+    return "/" + "/".join(parts) if parts else "/"
+
+
+def _pattern_covers(pattern: str, endpoint: str) -> bool:
+    """Whether a middleware ``matcher`` pattern matches EVERY URL of a route. Supports Next's
+    simple forms — literal segments, ``:name``, ``:name?`` and a final ``:name*`` / ``:name+``.
+    A regex-like pattern, or a route dynamic segment (``[id]``) under a literal pattern
+    segment (only some of its URLs match), is not certain coverage → False."""
+    if not pattern.startswith("/") or any(c in pattern for c in "()[]{}\\") or ".*" in pattern:
+        return False
+    psegs = [s for s in pattern.split("/") if s]
+    rsegs = [s for s in endpoint.split("/") if s]
+    for i, ps in enumerate(psegs):
+        last = i == len(psegs) - 1
+        if ps.startswith(":") and ps.endswith(("*", "+")):
+            if not last:
+                return False
+            rest = rsegs[i:]
+            return ps.endswith("*") or (bool(rest) and not rest[0].startswith("[[..."))
+        if i >= len(rsegs):
+            return last and ps.startswith(":") and ps.endswith("?")
+        rs = rsegs[i]
+        if rs.startswith(("[...", "[[...")):  # catch-all: only a final :x* / :x+ covers it
+            return False
+        if ps.startswith(":"):
+            continue
+        if rs.startswith("[") or rs != ps:  # literal pattern vs dynamic / different segment
+            return False
+    return len(psegs) == len(rsegs)
+
+
+def _middleware_guards(index: object | None, path: str, local: str) -> list[str]:
+    """``["middleware"]`` when the app's ``middleware.(ts|js)`` certainly runs before this route:
+    the route's app directory (the deepest directory above it holding a ``next.config`` or a
+    middleware) has a middleware, and it has no matcher or one of its patterns covers every URL
+    of the route (``local``: the file-system address, before ``basePath``)."""
+    mws = getattr(index, "next_middlewares", None) or {}
+    if not mws:
+        return []
+    configs = (getattr(index, "app_base_paths", None) or {}).get("nextjs") or {}
+    anchors = [d for d in {*mws, *configs} if d == "" or path.startswith(d + "/")]
+    if not anchors:
+        return []
+    app = max(anchors, key=len)
+    if app not in mws:
+        return []
+    patterns = mws[app]
+    if patterns is None or any(_pattern_covers(p, local) for p in patterns):
+        return ["middleware"]
+    return []
+
+
 def _make_route(
     path: str,
-    endpoint: str,
+    endpoint: str | None,
     method: str,
     handler: str | None,
     parent: str,
@@ -178,18 +241,21 @@ def _make_route(
     end_line: int,
     *,
     seen_ids: set[str],
+    local: str,
+    guards: list[str] | None = None,
 ) -> Statement:
     return Statement(
         id=disambiguate(statement_id(path, handler_line, 0), seen_ids),
         parentId=parent,
         nodeType="synthetic",
-        text=f"{method} {endpoint}",
+        text=f"{method} {local}",
         semanticType="route",
         framework="nextjs",  # pending spec §4.1 enum ratification — see module docstring
         method=method,
         endpoint=endpoint,
         handler=handler,
         handlerLine=handler_line,
+        guards=guards or None,
         routeKind="route",
         isRegex=False,
         startLine=handler_line,
@@ -199,8 +265,11 @@ def _make_route(
 
 
 def detect_nextjs_routes(
-    root: Node, source: bytes, path: str, record: FileRecord, *, seen_ids: set[str]
+    root: Node, source: bytes, path: str, record: FileRecord, *, seen_ids: set[str],
+    index: object | None = None,
 ) -> list[Statement]:
+    """``index`` is the repo's ``TsAliasIndex``: it carries each app's ``next.config``
+    ``basePath``, joined in front of the route's file-system address."""
     fid = file_id(path)
     # authoritative handler ids from the base extraction (top-level functions only)
     fn_by_name = {f.name: f for f in record.functions if f.parentId == fid}
@@ -219,13 +288,15 @@ def detect_nextjs_routes(
             routes.append(
                 _make_route(
                     path,
-                    endpoint,
+                    _served(endpoint, path, index),
                     verb,
                     verb,
                     parent,
                     handler_line,
                     end_line,
                     seen_ids=seen_ids,
+                    local=endpoint,
+                    guards=_middleware_guards(index, path, endpoint),
                 )
             )
         return routes
@@ -250,13 +321,15 @@ def detect_nextjs_routes(
         return [
             _make_route(
                 path,
-                pages_api_endpoint(path),
+                _served(pages_api_endpoint(path), path, index),
                 "ANY",
                 name,
                 parent,
                 handler_line,
                 end_line,
                 seen_ids=seen_ids,
+                local=pages_api_endpoint(path),
+                guards=_middleware_guards(index, path, pages_api_endpoint(path)),
             )
         ]
 

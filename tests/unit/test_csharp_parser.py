@@ -632,3 +632,38 @@ def test_operator_overload_and_conversions_are_captured_and_named(tmp_path) -> N
     assert all(f.isStatic and f.visibility == "public" for f in by_name.values())
     assert all(f.parentId == rec.classes[0].id for f in by_name.values())
     assert by_name["implicit operator decimal"].startLine == 12
+
+
+_HTTP_CLIENTS = b'''using System.Net.Http;
+public class OrdersGateway {
+  private readonly HttpClient _http = new HttpClient();
+  private readonly HttpClient api;
+  public OrdersGateway(IHttpClientFactory factory) { var named = factory.CreateClient("x"); }
+  async Task Run(HttpClient client) {
+    await _http.GetStringAsync("/api/orders");
+    await api.PostAsJsonAsync("api/items", 1);
+    await client.SendAsync(new HttpRequestMessage(HttpMethod.Delete, "api/items/1"));
+    await this.api.GetFromJsonAsync<int>("api/x");
+    var other = new Repository();
+    await other.GetAsync("not/http");
+  }
+}
+'''
+
+
+def test_http_client_calls_are_api_calls(tmp_path) -> None:
+    # Receivers typed HttpClient (field, property, parameter, factory-created) are clients
+    # whatever their name; .NET convenience methods and SendAsync(HttpRequestMessage) map to
+    # their verb; a GetAsync on something else is not an outbound call.
+    p = tmp_path / "OrdersGateway.cs"
+    p.write_bytes(_HTTP_CLIENTS)
+    ctx = ParseContext(path="OrdersGateway.cs", abs_path=p, source=_HTTP_CLIENTS,
+                       repo_root=tmp_path, capture_statements=True)
+    rec = CSharpParser().parse_file(ctx)
+    got = {(s.startLine, s.method, s.endpoint) for s in rec.statements if s.semanticType == "api_call"}
+    assert got == {
+        (7, "GET", "/api/orders"),
+        (8, "POST", "api/items"),
+        (9, "DELETE", "api/items/1"),
+        (10, "GET", "api/x"),
+    }

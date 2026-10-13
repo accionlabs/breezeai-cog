@@ -386,7 +386,8 @@ def detect_aws_events(
         record.statements.append(Statement(
             id=new_id, parentId=enclosing.function_id(line, fid),
             nodeType=decl.type, semanticType=sem, text=first_line(node_text(decl, source)),
-            framework=fw, handler=hname, routeKind=route_kind,
+            # The handler is declared by this declarator/assignment: its line is the handler's.
+            framework=fw, handler=hname, handlerLine=line if hname else None, routeKind=route_kind,
             startLine=line, endLine=decl.end_point[0] + 1, path=path,
         ))
         is_lambda = True

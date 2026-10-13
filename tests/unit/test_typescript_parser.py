@@ -1283,3 +1283,29 @@ def test_express_route_no_guards_is_unknown_not_open(tmp_path) -> None:
     assert mount.handler == "healthRouter"  # resolved handler
     assert mount.guards is None
     assert mount.authRequired is None  # not False
+
+
+# ── CommonJS require() is read like an ESM import ────────────────────────────────────────────
+def test_commonjs_require_imports_and_bindings(tmp_path) -> None:
+    from breezeai_cog import iter_file_records
+
+    (tmp_path / "lib").mkdir()
+    (tmp_path / "lib/util.js").write_text("function helper() { return 1; }\nmodule.exports = { helper };\n")
+    (tmp_path / "lib/db.js").write_text("module.exports = function connect() {};\n")
+    (tmp_path / "lib/cfg.js").write_text("module.exports = { port: 1 };\n")
+    (tmp_path / "app.js").write_text(
+        "import { helper as h2 } from './lib/util';\n"         # ESM + require of one module
+        "const express = require('express');\n"
+        "const { helper, other: o } = require('./lib/util');\n"
+        "const connect = require('./lib/db');\n"
+        "const port = require('./lib/cfg').port;\n"
+        "require('./lib/polyfill');\n"                         # side-effect, unresolved
+        "const dyn = require(name);\n"                         # dynamic: nothing
+        "function run() { const fs = require('fs'); helper(); connect(); }\n"
+    )
+    rec = next(r for r in iter_file_records(tmp_path) if r.path == "app.js")
+    assert rec.importFiles == ["lib/util.js", "lib/db.js", "lib/cfg.js"]  # no duplicate util
+    assert set(rec.externalImports) == {"express", "./lib/polyfill", "fs"}
+    calls = {c.name: c.path for f in rec.functions for c in f.calls}
+    assert calls["helper"] == "lib/util.js"
+    assert calls["connect"] == "lib/db.js"

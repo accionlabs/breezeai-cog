@@ -49,6 +49,7 @@ class NextJSParser(TypeScriptParser):
                 ctx.path,
                 record,
                 seen_ids={s.id for s in record.statements},
+                index=ctx.resolution_index,
             )
             if routes:
                 record.statements.extend(routes)

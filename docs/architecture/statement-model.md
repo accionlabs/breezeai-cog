@@ -189,6 +189,10 @@ if (await prisma.order.findUnique({ where: { id } })) {
 
 ## 4. Framework detectors: enrich or append
 
+Detectors that record **entry points** (routes, consumers, schedules) follow the
+[entry-point contract](entry-points.md): what is and isn't an entry point, where its record
+lives and what `endpoint` must hold.
+
 Framework detectors (routes, event buses, schedulers) run after the language extraction, on the
 same tree. For each thing they find, they look for an existing statement covering that line:
 

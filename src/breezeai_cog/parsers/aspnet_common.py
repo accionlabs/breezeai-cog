@@ -298,8 +298,11 @@ def detect_minimal_api_routes(
     routes: list[Statement] = []
     name_field = "name" if member_type == "member_access_expression" else "member"
     fn_field = "function" if invocation_type == "invocation_expression" else "target"
+    decls: dict[str, dict[str, int | None]] | None = None  # built lazily, only for Map* calls
+    groups: _Groups | None = None  # built lazily, only for Map* calls
 
     def visit(node: Node) -> None:
+        nonlocal decls, groups
         for child in node.named_children:
             if child.type == invocation_type:
                 func = child.child_by_field_name(fn_field)
@@ -307,8 +310,25 @@ def detect_minimal_api_routes(
                     method = _member_method_name(func, source, name_field)
                     spec = _endpoint_spec(method, child, root, source)
                     if spec is not None:
-                        verb, framework, endpoint = spec
+                        verb, framework, spec_endpoint = spec
+                        endpoint: str | None = spec_endpoint
                         start = child.start_point[0] + 1
+                        handler: str | None = None
+                        handler_line: int | None = None
+                        if method in _MAP_METHODS:
+                            if decls is None:
+                                decls = _declaration_lines(root, source)
+                            handler, handler_line = _minimal_handler(
+                                child, source, invocation_type, member_type, decls)
+                            if groups is None:
+                                groups = _Groups(root, source, invocation_type, member_type,
+                                                 fn_field, name_field)
+                            prefix = groups.prefix(_receiver(func, name_field), frozenset())
+                            path_part = _minimal_path(child, source)
+                            # Group prefix + route pattern. A group whose prefix exists but
+                            # cannot be resolved, or a non-literal pattern → empty (Q8).
+                            endpoint = (_join(prefix, path_part)
+                                        if prefix is not None and path_part is not None else None)
                         routes.append(Statement(
                             id=disambiguate(statement_id(path, start, child.start_point[1]), seen_ids),
                             parentId=path,
@@ -318,6 +338,8 @@ def detect_minimal_api_routes(
                             method=verb,
                             endpoint=endpoint,
                             framework=framework,
+                            handler=handler,
+                            handlerLine=handler_line,
                             routeKind="route",
                             isRegex=False,
                             startLine=start,
@@ -328,6 +350,161 @@ def detect_minimal_api_routes(
 
     visit(root)
     return routes
+
+
+#: Inline handler delegates: no name; ``handlerLine`` is where they start.
+_INLINE_DELEGATES = frozenset({"lambda_expression", "anonymous_method_expression"})
+#: Declarations a method-group handler can name (C# methods and top-level local functions).
+_DECLARATIONS = frozenset({"method_declaration", "local_function_statement"})
+
+
+def _declaration_lines(root: Node, source: bytes) -> dict[str, dict[str, int | None]]:
+    """Enclosing class name (``""`` for top-level local functions) → {method name → declaration
+    line}. A name declared twice in the same scope (overloads) → None (honest-null)."""
+    out: dict[str, dict[str, int | None]] = {}
+
+    def walk(node: Node, owner: str) -> None:
+        for c in node.named_children:
+            if c.type in _DECLARATIONS:
+                name = c.child_by_field_name("name")
+                if name is not None:
+                    scope = out.setdefault(owner, {})
+                    key = node_text(name, source)
+                    scope[key] = c.start_point[0] + 1 if key not in scope else None
+                continue  # a nested local function is not addressable as a method group here
+            if c.type == "class_declaration":
+                name = c.child_by_field_name("name")
+                walk(c, node_text(name, source) if name is not None else "?")
+            else:
+                walk(c, owner)
+
+    walk(root, "")
+    return out
+
+
+def _minimal_handler(
+    call: Node, source: bytes, invocation_type: str, member_type: str,
+    decls: dict[str, dict[str, int | None]],
+) -> tuple[str | None, int | None]:
+    """(handler, handlerLine) of a ``MapGet``/``MapPost``/… call — its LAST argument (the
+    delegate follows the route pattern in every minimal-API overload).
+
+    - an inline lambda / anonymous method: no name; ``handlerLine`` is where it starts;
+    - a method group (``GetOrders`` / ``Handlers.GetOrders``): its text as the name;
+      ``handlerLine`` is its declaration when declared once in this file (a bare name: a
+      top-level local function or a method of a class here; ``Type.Method``: a method of class
+      ``Type`` here), else empty;
+    - a wrapper call: unwrapped to its last argument. Anything else: (None, None)."""
+    args = _positional_args(call)
+    if len(args) < 2:
+        return None, None
+    last: Node | None = args[-1]
+    while last is not None and last.type == invocation_type:
+        inner = _positional_args(last)
+        last = inner[-1] if inner else None
+    if last is None:
+        return None, None
+    if last.type in _INLINE_DELEGATES:
+        return None, last.start_point[0] + 1
+    if last.type == "identifier":
+        name = node_text(last, source)
+        hits = [scope[name] for scope in decls.values() if name in scope]
+        return name, hits[0] if len(hits) == 1 else None
+    if last.type == member_type:
+        text = node_text(last, source)
+        owner, _, member = text.rpartition(".")
+        return text, decls.get(owner.rsplit(".", 1)[-1], {}).get(member)
+    return None, None
+
+
+def _receiver(func: Node, name_field: str) -> Node | None:
+    """The object a member call is made on (``api`` in ``api.MapGet``)."""
+    obj = func.child_by_field_name("expression")
+    if obj is not None:
+        return obj
+    name = func.child_by_field_name(name_field)
+    return next((c for c in func.named_children if c != name), None)
+
+
+class _Groups:
+    """Route-group prefixes of one file: ``var api = app.MapGroup("/api")`` (nested groups,
+    chained ``app.MapGroup("/x").MapGet(...)``, builder calls such as ``.RequireAuthorization()``
+    in between). :meth:`prefix` → ``""`` for the app itself, the composed prefix of a group, or
+    None when a group's prefix exists but cannot be resolved (a non-literal ``MapGroup`` argument,
+    a variable assigned two different groups, a ``RouteGroupBuilder`` parameter whose caller is in
+    another file)."""
+
+    def __init__(self, root: Node, source: bytes, invocation_type: str, member_type: str,
+                 fn_field: str, name_field: str) -> None:
+        self.source, self.invocation_type, self.member_type = source, invocation_type, member_type
+        self.fn_field, self.name_field = fn_field, name_field
+        self.values: dict[str, Node | None] = {}  # variable → its group expression (None: ambiguous)
+        self.params: set[str] = set()  # RouteGroupBuilder parameters (prefix set by the caller)
+        self._collect(root)
+
+    def _collect(self, node: Node) -> None:
+        for c in node.named_children:
+            if c.type == "variable_declarator":
+                name = c.child_by_field_name("name")
+                value = c.named_children[-1] if len(c.named_children) > 1 else None
+                if name is not None and value is not None and self._is_group(value):
+                    self._assign(node_text(name, self.source), value)
+            elif c.type == "assignment_expression":
+                left, right = c.child_by_field_name("left"), c.child_by_field_name("right")
+                if left is not None and right is not None and left.type == "identifier" \
+                        and self._is_group(right):
+                    self._assign(node_text(left, self.source), right)
+            elif c.type == "parameter":
+                ptype, pname = c.child_by_field_name("type"), c.child_by_field_name("name")
+                if ptype is not None and pname is not None \
+                        and node_text(ptype, self.source).rsplit(".", 1)[-1] == "RouteGroupBuilder":
+                    self.params.add(node_text(pname, self.source))
+            self._collect(c)
+
+    def _assign(self, name: str, value: Node) -> None:
+        prev = self.values.get(name, value)
+        same = prev is not None and node_text(prev, self.source) == node_text(value, self.source)
+        self.values[name] = value if name not in self.values or same else None
+
+    def _call_name(self, call: Node) -> str:
+        func = call.child_by_field_name(self.fn_field)
+        if func is None or func.type != self.member_type:
+            return ""
+        return _member_method_name(func, self.source, self.name_field)
+
+    def _is_group(self, expr: Node) -> bool:
+        """Whether an expression is a ``MapGroup`` call (possibly followed by builder calls)."""
+        while expr.type == self.invocation_type:
+            if self._call_name(expr) == "MapGroup":
+                return True
+            func = expr.child_by_field_name(self.fn_field)
+            inner = _receiver(func, self.name_field) if func is not None else None
+            if inner is None:
+                return False
+            expr = inner
+        return False
+
+    def prefix(self, expr: Node | None, seen: frozenset[str]) -> str | None:
+        if expr is None:
+            return ""
+        if expr.type == self.invocation_type:
+            func = expr.child_by_field_name(self.fn_field)
+            inner = _receiver(func, self.name_field) if func is not None else None
+            base = self.prefix(inner, seen)
+            if self._call_name(expr) != "MapGroup":
+                return base  # .RequireAuthorization() / .WithTags(...) return the same group
+            sub = _minimal_path(expr, self.source)
+            return _join(base, sub) if base is not None and sub is not None else None
+        if expr.type == "identifier":
+            name = node_text(expr, self.source)
+            if name in self.params:
+                return None
+            if name not in self.values:
+                return ""  # the app / endpoint builder itself
+            value = self.values[name]
+            return self.prefix(value, seen | {name}) if value is not None and name not in seen \
+                else None
+        return ""
 
 
 def _member_method_name(func: Node, source: bytes, name_field: str) -> str:
@@ -422,15 +599,18 @@ def _resolve_str(name: str, root: Node, source: bytes) -> str | None:
 
 
 def _minimal_path(call: Node, source: bytes) -> str | None:
-    """Route template = the FIRST argument's string literal. The args that follow (the handler
-    delegate/lambda) may hold their own string literals — never mistake those for the path;
-    return None when the first arg isn't a literal (absent beats a fabricated endpoint)."""
+    """Route template = the FIRST argument when it is a string literal. The args that follow
+    (the handler delegate/lambda) may hold their own string literals — never mistake those for
+    the path; return None when the first arg isn't itself a literal (``PathOf("x")``,
+    ``Config.Prefix``): absent beats a fabricated endpoint."""
     args = call.child_by_field_name("arguments")
     first = args.named_children[0] if args is not None and args.named_children else None
     if first is None:
         return None
-    lit = _find_string(first)
-    return _literal(lit, source) if lit is not None else None
+    inner = first
+    while inner.type != "string_literal" and len(inner.named_children) == 1:
+        inner = inner.named_children[0]  # argument / expression wrappers (VB nests several)
+    return _literal(inner, source) if inner.type == "string_literal" else None
 
 
 def _literal(lit: Node, source: bytes) -> str:
@@ -478,18 +658,25 @@ def detect_route_registrations(
     *,
     invocation_type: str,
     member_type: str,
-) -> list[Statement]:
+) -> tuple[list[Statement], bool]:
     """AST-walk for MVC / Web-API **convention-route registrations** —
     ``routes.MapRoute(name, url, defaults)`` / ``config.Routes.MapHttpRoute(…)`` declared in
-    ``RouteConfig`` / ``Global.asax`` / an ``AreaRegistration``. Emits the declared URL
-    template as a ``route`` (method ``ANY``, since a convention route matches any verb), with
-    the default ``controller``[.``action``] as the handler. Grammar-specific node/field names
-    are supplied by the C#/VB caller (Phase 2 of the MVC endpoint-resolution work)."""
+    ``RouteConfig`` / ``Global.asax`` / an ``AreaRegistration``. A template that names one
+    action — no ``{controller}`` / ``{action}`` placeholder, and a literal default ``controller``
+    and ``action`` — is a binding: a ``route`` (method ``ANY``, since a convention route matches
+    any verb) with ``Controller.Action`` as the handler. A convention template
+    (``{controller}/{action}/{id}``, Web API ``api/{controller}/{id}`` where the verb picks the
+    action) identifies no single handler: it is wiring and its statement stays plain.
+    Grammar-specific node/field names are supplied by the C#/VB caller. Returns the bindings and
+    whether any registration was seen — a wiring-only file (``RouteConfig.cs``) is still ASP.NET
+    code and keeps its ``aspnet`` label."""
     routes: list[Statement] = []
+    seen_registration = False
     name_field = "name" if member_type == "member_access_expression" else "member"
     fn_field = "function" if invocation_type == "invocation_expression" else "target"
 
     def visit(node: Node) -> None:
+        nonlocal seen_registration
         for child in node.named_children:
             if child.type == invocation_type:
                 func = child.child_by_field_name(fn_field)
@@ -497,11 +684,13 @@ def detect_route_registrations(
                     name_node = func.child_by_field_name(name_field)
                     method = node_text(name_node, source) if name_node is not None else ""
                     url = _maproute_url(child, source) if method in _MAP_ROUTE_METHODS else None
-                    if url:
-                        text = node_text(child, source)
-                        ctrl, action = _CTRL_RE.search(text), _ACTION_RE.search(text)
-                        handler = (f"{ctrl.group(1)}.{action.group(1)}" if ctrl and action
-                                   else ctrl.group(1) if ctrl else None)
+                    text = node_text(child, source) if url else ""
+                    seen_registration = seen_registration or url is not None
+                    ctrl, action = _CTRL_RE.search(text), _ACTION_RE.search(text)
+                    one_action = (url is not None and ctrl is not None and action is not None
+                                  and "{controller}" not in url and "{action}" not in url)
+                    if url and one_action and ctrl is not None and action is not None:
+                        handler = f"{ctrl.group(1)}.{action.group(1)}"
                         start = child.start_point[0] + 1
                         routes.append(Statement(
                             id=disambiguate(statement_id(path, start, child.start_point[1]), seen_ids),
@@ -522,4 +711,4 @@ def detect_route_registrations(
             visit(child)
 
     visit(root)
-    return routes
+    return routes, seen_registration

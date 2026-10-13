@@ -14,11 +14,11 @@ Both Vert.x generations are covered: 3.x (``io.vertx``, ``Router.router(vertx)``
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 
 from tree_sitter import Node
 
-from ..schemas import SemanticType
+from ..schemas import Function, SemanticType
 from .constfold import init_tokens, resolve_tokens
 from .statements_common import render_concat
 from .treesitter import node_text
@@ -75,8 +75,8 @@ def classify_call(
 
     ``path``      the first string-literal argument, already rendered by the caller (Java:
                   literal text; Groovy: GString → ``{name}`` placeholders).
-    ``first_arg`` raw text of the first argument — the fallback address for event-bus calls
-                  that pass a constant/variable rather than a string literal.
+    ``first_arg`` raw text of the first argument — the fallback name for ``deployVerticle``
+                  (event-bus addresses never fall back to it: unresolved → empty).
     ``obj``       the receiver text (``""`` for a bare, unqualified call).
     ``route_scope`` marks a *bare* HTTP-verb call (no receiver) that the caller has
                   determined is lexically inside a RouteMatcher scope — the Vert.x 2.x
@@ -89,7 +89,9 @@ def classify_call(
     obj_l = obj.lower()
 
     if method in EVENTBUS and is_bus_receiver(obj):
-        return EVENTBUS[method], None, path or first_arg, None
+        # The address is resolved or empty — never the symbol or a {…} placeholder (Q15): a
+        # consumer and its senders on the same unresolved symbol both stay empty.
+        return EVENTBUS[method], None, _known_path(path) if path else None, None
     if method in TIMERS:
         return "timer", None, None, None
     if method == "deployVerticle":
@@ -97,10 +99,17 @@ def classify_call(
     if method == "setAddress" and path is not None:
         return "service_proxy", None, path, None
     if method in HTTP_VERBS and path and (is_route_receiver(obj_l) or route_scope):
-        return "route", method.upper(), path, "route"
+        return "route", method.upper(), _known_path(path), "route"
     if method == "route" and path and is_route_receiver(obj_l):
-        return "route", None, path, "route"
+        return "route", None, _known_path(path), "route"
     return None
+
+
+def _known_path(path: str) -> str | None:
+    """A route path, or None when a part is unknown. Vert.x path parameters are ``:id``, so a
+    ``{…}`` in a rendered path is a placeholder for an unresolved code value (a GString
+    interpolation or a runtime concatenation): the address is unknown — never a code name."""
+    return None if "{" in path else path
 
 
 def _addr_leaf(node: Node, source: bytes, consts: dict[str, str], string_render: StringRender) -> str | None:
@@ -132,3 +141,115 @@ def render_address(
     if node.type == "binary_expression":
         return render_concat(node, source, lambda n, s: _addr_leaf(n, s, consts, string_render))
     return None
+
+
+# ── Sub-routers ─────────────────────────────────────────────────────────────────────────────
+#: ``router.route("/api/*").subRouter(sub)`` (4.x) / ``router.mountSubRouter("/api", sub)``
+#: (3.x) mount ``sub`` under a prefix: wiring, not a route. ``sub``'s routes are served under it.
+SUB_ROUTER_CALL = "subRouter"
+MOUNT_SUB_ROUTER = "mountSubRouter"
+
+#: A sub-router mount: (sub-router variable, parent router receiver, prefix — None when the
+#: mount path does not resolve to a literal).
+SubRouterMount = tuple[str, str, str | None]
+
+
+def _mount_prefix(path: str) -> str:
+    """``/api/*`` → ``/api``: the wildcard only says "everything under"."""
+    p = path[:-1] if path.endswith("*") else path
+    return p.rstrip("/") or "/"
+
+
+def sub_router_bases(mounts: Iterable[SubRouterMount]) -> dict[str, str | None]:
+    """Sub-router variable → the base its routes are served under, composed through nested
+    sub-routers (``api`` on ``router`` at ``/api``, ``v1`` on ``api`` at ``/v1`` → ``/api/v1``).
+    None = a mount path on the way does not resolve (the routes' address is unknown). A
+    sub-router mounted at two different prefixes, or in a cycle, is absent: its routes keep
+    their own path (honest-null)."""
+    local: dict[str, tuple[str, str | None] | None] = {}
+    for sub, parent, prefix in mounts:
+        # Vert.x path parameters are `:id`; a `{name}` in a rendered mount path is an unresolved
+        # part (render_address placeholder) — the prefix is unknown.
+        known = prefix is not None and "{" not in prefix
+        entry = (parent, _mount_prefix(prefix) if known and prefix is not None else None)
+        local[sub] = entry if local.get(sub, entry) == entry else None
+
+    unknown = object()
+
+    def base(var: str, seen: frozenset[str]) -> object:
+        entry = local.get(var)
+        if entry is None or var in seen:
+            return None  # ambiguous, or a cycle
+        parent, prefix = entry
+        if prefix is None:
+            return unknown
+        if parent in local:
+            above = base(parent, seen | {var})
+            if above is None or above is unknown:
+                return above
+            return join_path(str(above), prefix)
+        return join_path("", prefix)
+
+    out: dict[str, str | None] = {}
+    for var in local:
+        b = base(var, frozenset())
+        if b is unknown:
+            out[var] = None
+        elif isinstance(b, str):
+            out[var] = b
+    return out
+
+
+def join_path(base: str, local: str) -> str:
+    """``/api`` + ``/items`` → ``/api/items``; single slashes, empties ignored."""
+    parts = [p.strip("/") for p in (base, local) if p and p.strip("/")]
+    return "/" + "/".join(parts) if parts else "/"
+
+
+# ── Handler of a route / consumer ───────────────────────────────────────────────────────────
+#: Chained calls that attach the handler: ``router.get("/x").handler(h)``. A chain may attach
+#: several (``.handler(BodyHandler.create()).handler(this::create)``); the last one is the
+#: handler, the earlier ones run before it.
+HANDLER_CALLS = frozenset({"handler", "blockingHandler"})
+#: Inline handlers: a Java lambda, a Groovy closure.
+_INLINE = frozenset({"lambda_expression", "closure"})
+#: Method references: Java ``this::h``, Groovy ``this::h`` / ``this.&h``.
+_METHOD_REFS = frozenset({"method_reference", "method_reference_expression",
+                          "method_pointer_expression"})
+#: Semantic types whose handler is an entry point's handler (outbound reply callbacks are not).
+HANDLER_SEMANTICS = frozenset({"route", "eventbus_consumer"})
+
+
+def handler_info(
+    arg: Node | None, source: bytes, methods: dict[str, int | None]
+) -> tuple[str | None, int | None]:
+    """(handler, handlerLine) for a handler argument (contract §5).
+
+    - Inline lambda / closure / anonymous ``new Handler<>() {…}``: no name; its line.
+    - ``this::h`` / ``this.&h``: ``h``, line of its declaration in this file (``methods``).
+    - ``other::h`` / a handler variable: the name; declared elsewhere, so no line.
+    - Anything else (a factory call ``Handler.create()``): nothing — honest-null."""
+    if arg is None:
+        return None, None
+    if arg.type in _INLINE or (arg.type == "object_creation_expression"
+                               and any(c.type == "class_body" for c in arg.named_children)):
+        return None, arg.start_point[0] + 1
+    if arg.type in _METHOD_REFS:
+        text = node_text(arg, source)
+        sep = "::" if "::" in text else ".&"
+        receiver, _, name = text.rpartition(sep)
+        name = name.strip()
+        if not name.isidentifier():
+            return None, None
+        return name, methods.get(name) if receiver.strip() == "this" else None
+    if arg.type == "identifier":
+        return node_text(arg, source), None
+    return None, None
+
+
+def method_lines(functions: Iterable[Function]) -> dict[str, int | None]:
+    """Method name → declaration line for the file's methods (a name declared twice → None)."""
+    out: dict[str, int | None] = {}
+    for f in functions:
+        out[f.name] = f.startLine if f.name not in out else None
+    return out

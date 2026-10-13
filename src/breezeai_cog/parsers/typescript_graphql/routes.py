@@ -13,8 +13,9 @@ they live in two shapes, in separate files:
 
   Each field of the ``Query`` / ``Mutation`` / ``Subscription`` object is one
   operation. The value is (usually) an anonymous arrow function that the base
-  parser skips as a nested scope, so we surface it here — ``handler`` is the
-  operation name, ``handlerLine`` the arrow's line. Type-level field resolvers
+  parser skips as a nested scope, so we surface it here — an inline arrow has no
+  ``handler`` (anonymous) and ``handlerLine`` the arrow's line; shorthand methods and
+  function references name their handler. Type-level field resolvers
   (``ProcurementItem: { tenders: … }``) are **not** routes and are ignored.
 
 * **SDL** (the interface, carries request/response DTOs)::
@@ -25,18 +26,17 @@ they live in two shapes, in separate files:
       `;
 
   The SDL lives in an opaque ``template_string``; we re-parse it with the dedicated
-  ``graphql`` grammar and walk the SDL AST, so each field yields a route with
+  ``graphql`` grammar and walk the SDL AST, so each field yields a plain statement with
   ``requestDTO`` (an ``input:``/first arg type) and ``responseDTO`` (the return type),
   wrappers stripped. ``extend type Query`` is also matched.
 
-Both emit ``semanticType="route"``, ``framework="graphql"``,
-``routeKind ∈ {query, mutation, subscription}``, ``method`` the upper-cased
-operation kind (GraphQL has no per-operation HTTP verb — the transport is a
-single ``POST /graphql``, detected separately by the Express mount). Resolver
-and SDL routes for the same operation live in different files; the backend joins
-them on ``(framework, routeKind, endpoint)`` — the handler from the resolver, the
-DTOs from the SDL. Routes are parented to the file (config/markup, not handler
-methods), mirroring the React/Angular config detectors."""
+The resolver-map entry is the entry point (it names the code that runs): it emits
+``semanticType="route"``, ``framework="graphql"``, ``routeKind ∈ {query, mutation,
+subscription}``, ``method`` the upper-cased operation kind (GraphQL has no per-operation
+HTTP verb — the transport is a single ``POST /graphql``, detected separately by the Express
+mount). The SDL root field only declares the operation: it is captured as a plain statement,
+never an entry point, so one operation has one record. Routes are parented to the file
+(config/markup, not handler methods), mirroring the React/Angular config detectors."""
 
 from __future__ import annotations
 
@@ -79,11 +79,24 @@ def _operation_fields(group_obj: Node) -> list[Node]:
     return [c for c in group_obj.named_children if c.type in ("pair", "method_definition")]
 
 
-def _handler_line(field: Node) -> int:
-    """Line of the field's implementation — the value node for a pair, else the field."""
+def _handler(field: Node, source: bytes, op: str) -> tuple[str | None, int | None]:
+    """(handler, handlerLine) of a resolver-map entry. Shorthand ``books() {…}`` is a method named
+    after the field; an inline ``books: () => …`` is anonymous (no name, the function's line); a
+    reference ``books: getBooks`` names the function declared elsewhere (no line); a subscription
+    object ``{ subscribe: … }`` is handled by its ``subscribe`` function."""
     value = field.child_by_field_name("value")
-    node = value if value is not None else field
-    return node.start_point[0] + 1
+    if value is None:  # method_definition shorthand
+        return op, field.start_point[0] + 1
+    if value.type == "object":  # subscription: { subscribe: … } (or { resolve: … })
+        inner = next((c for c in value.named_children
+                      if c.type in ("pair", "method_definition")
+                      and _key_text(c, source) in ("subscribe", "resolve")), None)
+        return _handler(inner, source, "subscribe") if inner is not None else (None, None)
+    if value.type in ("arrow_function", "function_expression", "function"):
+        return None, value.start_point[0] + 1
+    if value.type in ("identifier", "member_expression"):
+        return node_text(value, source), None
+    return None, None
 
 
 def _detect_resolver_maps(root: Node, source: bytes, path: str, seen: set[str]) -> list[Statement]:
@@ -100,6 +113,7 @@ def _detect_resolver_maps(root: Node, source: bytes, path: str, seen: set[str]) 
                     if op is None:
                         continue
                     sl, sc = field.start_point[0] + 1, field.start_point[1]
+                    handler, handler_line = _handler(field, source, op)
                     routes.append(
                         Statement(
                             id=disambiguate(statement_id(path, sl, sc), seen),
@@ -110,8 +124,8 @@ def _detect_resolver_maps(root: Node, source: bytes, path: str, seen: set[str]) 
                             method=kind.upper(),
                             endpoint=op,
                             framework="graphql",
-                            handler=op,
-                            handlerLine=_handler_line(field),
+                            handler=handler,
+                            handlerLine=handler_line,
                             routeKind=kind,
                             startLine=sl,
                             endLine=field.end_point[0] + 1,

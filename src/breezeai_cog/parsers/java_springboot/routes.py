@@ -11,6 +11,8 @@ from __future__ import annotations
 
 from ...emit import disambiguate, statement_id
 from ...schemas import Decorator, FileRecord, Function, Statement
+from ..java.guards import security_guards
+from ..java.web_guards import ModuleGuards, spring_global_guards
 
 _METHOD_MAPPINGS = {
     "GetMapping": "GET", "PostMapping": "POST", "PutMapping": "PUT",
@@ -83,6 +85,27 @@ def _join(base: str, sub: str) -> str:
     return "/" + "/".join(parts) if parts else "/"
 
 
+def apply_global_guards(routes: list[Statement], module_guards: ModuleGuards) -> None:
+    """Prepend the servlet filters and MVC interceptors that run before each HTTP route
+    (decision Q9). They do not set ``authRequired``: a filter is often logging or CORS."""
+    for r in routes:
+        if r.semanticType != "route":
+            continue
+        outer = spring_global_guards(module_guards, r.endpoint)
+        if outer:
+            r.guards = outer + (r.guards or [])
+
+
+def apply_context_path(routes: list[Statement], context_path: str | None) -> None:
+    """Join the application's servlet context path onto each HTTP route's endpoint. ``None``
+    (set in config but unresolvable) leaves every endpoint empty: the address is unknown."""
+    for r in routes:
+        if r.semanticType != "route":
+            continue
+        r.endpoint = (_join(context_path, r.endpoint)
+                      if context_path is not None and r.endpoint is not None else None)
+
+
 def _request_dto(fn: Function) -> str | None:
     """Declared type of the ``@RequestBody`` parameter → requestDTO."""
     for p in fn.params:
@@ -93,9 +116,11 @@ def _request_dto(fn: Function) -> str | None:
 
 def detect_spring_routes(record: FileRecord) -> list[Statement]:
     controllers: dict[str, str] = {}  # class id -> base path
+    class_decorators: dict[str, list[Decorator]] = {}
     for cls in record.classes:
         if {d.name for d in cls.decorators} & _CONTROLLER_ANNOTATIONS:
             controllers[cls.id] = _mapping_path(cls.decorators)
+            class_decorators[cls.id] = cls.decorators
     if not controllers:
         return []
 
@@ -105,6 +130,7 @@ def detect_spring_routes(record: FileRecord) -> list[Statement]:
         base = controllers.get(fn.parentId)
         if base is None:
             continue
+        guards = security_guards(class_decorators[fn.parentId], fn.decorators)
         for dec in fn.decorators:
             verb, subs = _routes_of(dec)
             if verb is None:
@@ -123,6 +149,8 @@ def detect_spring_routes(record: FileRecord) -> list[Statement]:
                     handlerLine=fn.startLine,
                     routeKind="route",
                     isRegex=False,
+                    guards=guards,
+                    authRequired=True if guards else None,
                     requestDTO=_request_dto(fn),
                     responseDTO=fn.returnType or None,
                     startLine=fn.startLine,

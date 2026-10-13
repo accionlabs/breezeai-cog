@@ -46,9 +46,10 @@ def test_inventory_in_run_order() -> None:
     (statement-id disambiguation), so a change to it is a deliberate, reviewed change."""
     inventory = {lang: [d.name for d in ds] for lang, ds in all_detectors().items()}
     assert inventory == {
-        "csharp": ["lambda-handlers", "lucene"],
+        "csharp": ["lambda-handlers", "lucene", "generic-handlers"],
         "scala": ["akka-events", "spark"],
-        "typescript": ["express", "aws-events", "sdk-calls", "graphql-client", "vue-routes"],
+        "typescript": ["express", "aws-events", "sdk-calls", "graphql-client", "vue-routes",
+                       "nextjs-pages"],
     }
 
 

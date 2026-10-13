@@ -14,6 +14,7 @@ from ...schemas import FileRecord
 from ..base import ParseContext
 from ..treesitter import parse_source
 from ..typescript.parser import TypeScriptParser
+from .outbound import detect_client_proxy_calls
 from .routes import detect_nest_routes
 
 # Framework-agnostic controller-route signature: a ``@Controller``/``@JsonController``
@@ -57,8 +58,15 @@ class NestJSParser(TypeScriptParser):
             routes = detect_nest_routes(
                 root, ctx.source, ctx.path,
                 seen_ids={s.id for s in record.statements}, framework=framework,
+                index=ctx.resolution_index,
             )
             if routes:
                 record.statements.extend(routes)
+                record.framework = framework
+            # Outbound microservice messages (ClientProxy.send / emit) — services carry them too.
+            if detect_client_proxy_calls(
+                root, ctx.source, ctx.path, record, framework=framework,
+                index=ctx.resolution_index,
+            ) and record.framework is None:
                 record.framework = framework
         return record

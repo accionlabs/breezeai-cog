@@ -25,7 +25,8 @@ class FastAPIParser(PythonParser):
         record = self.extract(root, ctx)  # inherited base extraction (one parse)
         if ctx.capture_statements:  # routes are statements — gated by statement capture
             routes = detect_routes(
-                root, ctx.source, ctx.path, seen_ids={s.id for s in record.statements}
+                root, ctx.source, ctx.path, seen_ids={s.id for s in record.statements},
+                index=ctx.resolution_index,
             )
             if routes:
                 record.statements.extend(routes)

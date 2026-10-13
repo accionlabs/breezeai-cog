@@ -8,16 +8,20 @@ the ``FileRecord`` — no AST re-walk, no new grammar.
 
 Emitted as ``route`` statements:
 * ``semanticType=route``, ``framework=wcf``, ``handler`` = the operation method.
-* ``endpoint`` = ``ServiceName/OperationName`` (SOAP/RPC) or the ``UriTemplate`` (REST-over-WCF).
+* ``endpoint`` = ``ServiceName/OperationName`` (SOAP/RPC); for REST-over-WCF the served address
+  ``<.svc path>/<UriTemplate or Operation>`` when the class's ``.svc`` is found, else empty.
 * ``method`` = ``RPC`` for SOAP operations; the HTTP verb for ``[WebGet]``/``[WebInvoke]``.
 * ``routeKind`` = ``rpc`` (SOAP) or ``route`` (REST-over-WCF).
 """
 
 from __future__ import annotations
 
+import re
+from pathlib import Path
+
 from ...emit import disambiguate, statement_id
 from ...schemas import Decorator, FileRecord, Statement
-from ..dotnet_common import response_dto, simple_attr_name
+from ..dotnet_common import code_behind_host, response_dto, simple_attr_name
 
 _SERVICE_ATTR = "ServiceContract"
 _OP_ATTR = "OperationContract"
@@ -27,6 +31,10 @@ _WEB_SERVICE_ATTR = "WebService"   # ASMX (System.Web.Services)
 _WEB_METHOD_ATTR = "WebMethod"     # ASMX operation
 _GENERATED_ATTR = "GeneratedCode"  # svcutil-generated client proxy — NOT a server entry point
 _HTTP_VERBS = {"GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS"}
+#: ``Class="Ns.Type"`` inside an ``.asmx`` ``<%@ WebService … %>`` directive.
+_ASMX_CLASS_RE = re.compile(rb'<%@\s*WebService\b[^%]*?\bClass\s*=\s*["\']([^"\']+)["\']', re.IGNORECASE)
+#: ``Service="Ns.Type"`` inside a ``.svc`` ``<%@ ServiceHost … %>`` directive.
+_SVC_SERVICE_RE = re.compile(rb'<%@\s*ServiceHost\b[^%]*?\bService\s*=\s*["\']([^"\']+)["\']', re.IGNORECASE)
 
 
 def _has_attr(decorators: list[Decorator], name: str) -> bool:
@@ -81,16 +89,50 @@ def _service_name(decorators: list[Decorator], class_name: str) -> str:
     return class_name
 
 
-def detect_wcf_services(record: FileRecord) -> list[Statement]:
+def _implementing_handler(
+    cls_name: str, op: str, record: FileRecord, index: object | None
+) -> tuple[str, int | None] | None:
+    """For a contract declared on an interface: the method with a body that runs —
+    ``(Class.Method, handlerLine)`` when exactly one type in the repo implements the interface
+    and declares that method; else None (the interface method stays the handler). handlerLine
+    is set only when the implementing method is in this file (no ``handlerPath`` yet)."""
+    implementers = getattr(index, "implementers", None)
+    heritage_map = getattr(index, "class_heritage", None)
+    if not isinstance(implementers, dict) or not isinstance(heritage_map, dict):
+        return None
+    impl = implementers.get(cls_name)
+    if impl is None:
+        return None
+    simple = impl.rsplit(".", 1)[-1]
+    heritage = heritage_map.get(simple)
+    if heritage is None or op not in heritage.methods:
+        return None
+    impl_cls = next((c for c in record.classes if c.name == simple), None)
+    line = next((f.startLine for f in record.functions
+                 if impl_cls is not None and f.parentId == impl_cls.id and f.name == op), None)
+    return f"{simple}.{op}", line
+
+
+def detect_wcf_services(
+    record: FileRecord, repo_root: Path | None = None, index: object | None = None
+) -> list[Statement]:
     """One ``route`` statement per ``[OperationContract]`` under a ``[ServiceContract]`` type
-    (WCF / CoreWCF; tolerant of the full ``…Attribute`` form)."""
-    services: dict[str, str] = {
-        cls.id: _service_name(cls.decorators, cls.name)
-        for cls in record.classes
+    (WCF / CoreWCF; tolerant of the full ``…Attribute`` form). A REST operation's endpoint is
+    its served address under the class's ``.svc`` (:func:`svc_host`), empty when that host is
+    not known — a bare ``UriTemplate`` or a service name is not an address. For a contract on an
+    interface, the handler is the implementing class's method when the repo has exactly one
+    implementer (``index.implementers``); otherwise the interface method."""
+    contracts = [
+        cls for cls in record.classes
         if _has_attr(cls.decorators, _SERVICE_ATTR) and not _has_attr(cls.decorators, _GENERATED_ATTR)
-    }
-    if not services:
+    ]
+    if not contracts:
         return []
+    services: dict[str, str] = {cls.id: _service_name(cls.decorators, cls.name) for cls in contracts}
+    hosts: dict[str, str | None] = {
+        cls.id: svc_host(cls.path or record.path, repo_root, cls.name) for cls in contracts
+    }
+    interfaces = {cls.id: cls.name for cls in contracts if cls.type == "interface"}
 
     seen = {s.id for s in record.statements}
     routes: list[Statement] = []
@@ -101,10 +143,17 @@ def detect_wcf_services(record: FileRecord) -> list[Statement]:
         web = next((d for d in fn.decorators if simple_attr_name(d.name) in (_WEB_GET, _WEB_INVOKE)), None)
         if web is not None:  # REST-over-WCF (WebHttpBinding)
             method = "GET" if simple_attr_name(web.name) == _WEB_GET else (_verb_arg(web) or "POST")
-            endpoint = _uri_arg(web) or f"{svc}/{fn.name}"
+            host = hosts.get(fn.parentId)
+            endpoint = _rest_address(host, _uri_arg(web), fn.name) if host is not None else None
             route_kind = "route"
         else:  # SOAP / net.tcp RPC
             method, endpoint, route_kind = "RPC", f"{svc}/{fn.name}", "rpc"
+        handler: str = fn.name
+        handler_line: int | None = fn.startLine
+        iface = interfaces.get(fn.parentId)
+        impl = _implementing_handler(iface, fn.name, record, index) if iface else None
+        if impl is not None:
+            handler, handler_line = impl
         routes.append(
             Statement(
                 id=disambiguate(statement_id(fn.path, fn.startLine, 0), seen),
@@ -115,8 +164,8 @@ def detect_wcf_services(record: FileRecord) -> list[Statement]:
                 method=method,
                 endpoint=endpoint,
                 framework="wcf",
-                handler=fn.name,
-                handlerLine=fn.startLine,
+                handler=handler,
+                handlerLine=handler_line,
                 routeKind=route_kind,
                 isRegex=False,
                 responseDTO=response_dto(fn.returnType),
@@ -128,11 +177,34 @@ def detect_wcf_services(record: FileRecord) -> list[Statement]:
     return routes
 
 
-def detect_asmx_services(record: FileRecord) -> list[Statement]:
+def asmx_host(path: str, repo_root: Path | None, cls_name: str) -> str | None:
+    """The ``.asmx`` file serving class ``cls_name`` (``X.asmx.cs`` beside ``X.asmx``), or None."""
+    return code_behind_host(path, repo_root, cls_name, ".asmx", _ASMX_CLASS_RE)
+
+
+def svc_host(path: str, repo_root: Path | None, cls_name: str) -> str | None:
+    """The ``.svc`` file serving class ``cls_name`` (``X.svc.cs`` beside ``X.svc``, its
+    ``ServiceHost Service=`` naming the class), or None. An interface contract, or a class whose
+    ``.svc`` is elsewhere, has no known host here."""
+    return code_behind_host(path, repo_root, cls_name, ".svc", _SVC_SERVICE_RE)
+
+
+def _rest_address(host: str, template: str | None, operation: str) -> str:
+    """``/<.svc path>/<UriTemplate>`` (its query part dropped — those are query bindings, not the
+    path), or ``/<.svc path>/<Operation>`` when the operation has no ``UriTemplate`` (WCF's default
+    for WebGet / WebInvoke). REST over WCF is HTTP, so the address is a path with a leading
+    ``/``, like a Web Forms page's (contract §6); SOAP keeps ``<Service>.asmx/<Operation>``."""
+    tail = template.split("?", 1)[0].strip("/") if template else operation
+    return "/" + (f"{host}/{tail}" if tail else host).lstrip("/")
+
+
+def detect_asmx_services(record: FileRecord, repo_root: Path | None = None) -> list[Statement]:
     """Legacy ASMX SOAP web services (``System.Web.Services``): each ``[WebMethod]`` method is
     an operation. ``[WebService]`` on the class is optional in ASMX, so the ``[WebMethod]``
-    methods themselves drive detection; the service name is ``[WebService(Name="X")]`` if set,
-    else the declaring class name. Emitted like WCF SOAP ops (``framework=asmx``, ``rpc``)."""
+    methods themselves drive detection. Emitted like WCF SOAP ops (``framework=asmx``, ``rpc``).
+    ``endpoint`` is the served address ``<.asmx path>/<Method>`` (the ``.asmx`` path is
+    repo-relative, as on the host record) when the ``.asmx`` file is found
+    (:func:`asmx_host`); otherwise empty — a service or class name is not an address."""
     cls_by_id = {c.id: c for c in record.classes}
     seen = {s.id for s in record.statements}
     routes: list[Statement] = []
@@ -143,6 +215,7 @@ def detect_asmx_services(record: FileRecord) -> list[Statement]:
         if cls is not None and _has_attr(cls.decorators, _GENERATED_ATTR):
             continue  # generated proxy, not a real ASMX service
         svc = (_name_arg(cls.decorators, _WEB_SERVICE_ATTR) or cls.name) if cls is not None else "WebService"
+        host = asmx_host(fn.path or record.path, repo_root, cls.name) if cls is not None else None
         routes.append(
             Statement(
                 id=disambiguate(statement_id(fn.path, fn.startLine, 0), seen),
@@ -151,7 +224,7 @@ def detect_asmx_services(record: FileRecord) -> list[Statement]:
                 semanticType="route",
                 text=f"[{_WEB_METHOD_ATTR}] {svc}.{fn.name}",
                 method="RPC",
-                endpoint=f"{svc}/{fn.name}",
+                endpoint=f"{host}/{fn.name}" if host is not None else None,
                 framework="asmx",
                 handler=fn.name,
                 handlerLine=fn.startLine,

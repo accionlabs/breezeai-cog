@@ -130,6 +130,32 @@ def _has_route_signature(node: Node, source: bytes) -> bool:
     return "complete(" in txt or "complete (" in txt
 
 
+#: Directives that check the caller before the inner route runs (contract role: Guard).
+_AUTH_DIRECTIVES = frozenset({
+    "authenticatebasic", "authenticatebasicasync", "authenticatebasicpf",
+    "authenticatebasicpfasync", "authenticateoauth2", "authenticateoauth2async",
+    "authenticateoauth2pf", "authenticateoauth2pfasync", "authenticateorrejectwithchallenge",
+    "authorize", "authorizeasync",
+})
+
+
+def _guards_of(node: Node, source: bytes) -> list[str] | None:
+    """Auth directives wrapping ``node`` (``authenticateBasic(realm, auth) { user => … }``),
+    outermost first, by directive name."""
+    out: list[str] = []
+    cur = node.parent
+    while cur is not None:
+        if cur.type == "call_expression":
+            fn = cur.child_by_field_name("function")
+            inner = fn.child_by_field_name("function") if fn is not None and fn.type == "call_expression" else fn
+            if inner is not None and inner.type == "identifier":
+                name = node_text(inner, source)
+                if name.lower() in _AUTH_DIRECTIVES:
+                    out.append(name)
+        cur = cur.parent
+    return list(reversed(out)) or None
+
+
 def detect_akkahttp_routes(
     root: Node,
     source: bytes,
@@ -144,6 +170,19 @@ def detect_akkahttp_routes(
         start = node.start_point[0] + 1
         end = node.end_point[0] + 1
         parent_id = find_enclosing_parent_id(start, record)
+        # The handler is the directive's block (``get { complete(...) }``): anonymous — no
+        # name, its line is where the block starts. A named route value (``get(listOrders)``)
+        # is the handler's name; it is declared elsewhere, so no line.
+        body = node.child_by_field_name("arguments")
+        handler: str | None = None
+        handler_line: int | None = None
+        if body is not None and body.type in ("block", "lambda_expression", "indented_block"):
+            handler_line = body.start_point[0] + 1
+        elif body is not None and body.type == "arguments":
+            only = body.named_children[0] if len(body.named_children) == 1 else None
+            if only is not None and only.type == "identifier":
+                handler = node_text(only, source)
+        guards = _guards_of(node, source)
         routes.append(
             Statement(
                 id=disambiguate(statement_id(path, start, node.start_point[1]), seen_ids),
@@ -152,7 +191,10 @@ def detect_akkahttp_routes(
                 semanticType="route",
                 text=node_text(node, source),
                 framework="akka-http",
-                handler=None,
+                handler=handler,
+                handlerLine=handler_line,
+                guards=guards,
+                authRequired=True if guards else None,
                 method=method,
                 endpoint=endpoint,
                 routeKind="route",

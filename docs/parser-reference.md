@@ -171,6 +171,22 @@ TypeScript adds `.stories.`, `.cy.`, `.e2e.`). Add your language's fixture infix
 to a global list. (Full `*.test.*` / `*.spec.*` *exclusion* already lives in
 `default_ignores.txt`; this guard is the narrower route-only case for files still captured.)
 
+### Step 5d — Record entry points by the entry-point contract
+A parser or detector that emits entry points (`route`, `eventbus_consumer`, `timer`) follows the
+[entry-point contract](architecture/entry-points.md):
+- Give every framework construct it recognises one **role** (binding, wiring, guard, outbound,
+  none) and write them down as a **role table** in
+  [`docs/entry-point-roles/`](entry-point-roles/README.md), with one test per row in
+  `tests/unit/test_roles_<framework>.py` (the `analyze_files` fixture runs the whole pipeline on a
+  temporary repo, for wiring in another file).
+- Emit **one record per binding**, at the binding: `endpoint` is the fully resolved address or
+  empty, `handler` / `handlerLine` point at the handler (an anonymous handler has
+  `handlerLine` only).
+- **Never** turn wiring (mounts, prefixes, registrations, layouts) into a `route`: its statement
+  stays plain, and its prefix goes into the bindings' `endpoint`.
+- Outbound records (`api_call`, `eventbus_send`, `navigation`) use the same `endpoint` format as
+  the entry point they reach.
+
 ### Step 6 — `build_index` (only if cross-file resolution is needed)
 If imports/symbols need repo-wide info (path aliases, fully-qualified class names, route
 mounts):

@@ -13,7 +13,7 @@ from tree_sitter import Node
 
 from ...emit import disambiguate, file_id, statement_id
 from ...schemas import Statement
-from ..treesitter import node_text
+from ..treesitter import entry_text, node_text
 
 # Lazy-load target extraction (Tier 1): capture what a route loads so the mount is a
 # traversable edge, not a dead end. Covers every Angular version's syntax:
@@ -152,6 +152,20 @@ def _guards(node: Node | None, source: bytes) -> list[str]:
     return [node_text(c, source) for c in node.named_children if c.type == "identifier"]
 
 
+#: Route keys whose guards run before this route's own component (in source order).
+_OWN_GUARD_KEYS = ("canActivate", "canMatch")
+
+
+def _own_guards(elem: Node, source: bytes) -> list[str]:
+    """``canActivate`` / ``canMatch`` guard names of one route object, in source order. Only
+    named guards count — an inline functional guard has no name."""
+    out: list[str] = []
+    for pair in elem.named_children:
+        if pair.type == "pair" and _key(pair, source) in _OWN_GUARD_KEYS:
+            out.extend(_guards(pair.child_by_field_name("value"), source))
+    return out
+
+
 def _join(base: str, sub: str) -> str:
     parts = [p.strip("/") for p in (base, sub) if p and p.strip("/")]
     return "/" + "/".join(parts) if parts else "/"
@@ -189,7 +203,11 @@ def _is_children_value(arr: Node, source: bytes) -> bool:
 
 
 def _process(arr: Node, prefix: str | None, source: bytes, path: str, seen: set[str],
-             routes: list[Statement], index: object) -> None:
+             routes: list[Statement], index: object, inherited: tuple[str, ...] = ()) -> None:
+    """``inherited``: guards of the ancestor routes that run before this route — each ancestor's
+    own ``canMatch`` / ``canActivate`` (Angular matches and activates the parent first) and then
+    its ``canActivateChild``, which guards every child binding, not the route that declares it.
+    Lazy ``loadChildren`` routes in other files do not inherit (not linked here)."""
     for elem in arr.named_children:
         if elem.type != "object":
             continue
@@ -204,6 +222,7 @@ def _process(arr: Node, prefix: str | None, source: bytes, path: str, seen: set[
         if "name" in pairs:
             continue
         full = _compose(prefix, _resolve_path(pairs["path"], source, index))
+        own = _own_guards(elem, source)
         load = pairs.get("loadChildren")  # lazy route group -> mount
         component = pairs.get("component")
         load_component = pairs.get("loadComponent")  # lazy standalone component -> page
@@ -221,19 +240,20 @@ def _process(arr: Node, prefix: str | None, source: bytes, path: str, seen: set[
             parentId=file_id(path),
             nodeType="synthetic",
             semanticType="route",
-            text=node_text(elem, source).split("\n", 1)[0][:120],
+            text=entry_text(elem, source),
             endpoint=full,
             framework="angular",
             routeKind="mount" if load is not None else "page",
             handler=handler,
-            guards=_guards(pairs.get("canActivate"), source) or None,
+            guards=[*inherited, *own] or None,
             startLine=sl,
             endLine=elem.end_point[0] + 1,
             path=path,
         ))
         children = pairs.get("children")
         if children is not None and children.type == "array":
-            _process(children, full, source, path, seen, routes, index)
+            child_guards = (*inherited, *own, *_guards(pairs.get("canActivateChild"), source))
+            _process(children, full, source, path, seen, routes, index, child_guards)
 
 
 _CLASS_NODE_TYPES = ("class_declaration", "class", "abstract_class_declaration")

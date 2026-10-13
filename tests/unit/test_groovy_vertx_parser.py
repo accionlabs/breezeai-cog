@@ -80,34 +80,32 @@ def _routes(rec: FileRecord) -> set[tuple[str | None, str | None]]:
 
 
 def test_receiver_qualified_routematcher(tmp_path) -> None:
-    """``route.get("${prefix}/...")`` → route, GString rendered to ``{prefix}/...``."""
+    """``route.get("${prefix}/...")`` → route; ``def prefix = "/api/employee"`` (bound once)
+    is substituted into the GString."""
     rec = _parse(tmp_path, EMPLOYEE_SRC, "HttpServerVerticle.groovy")
     assert rec.framework == "vertx"
     routes = _routes(rec)
     assert routes == {
-        ("GET", "{prefix}/:platformId/empno/issue"),
-        ("POST", "{prefix}/:platformId/employee"),
-        ("PUT", "{prefix}/:platformId/employee"),
-        ("GET", "{prefix}/:platformId/empno"),
-        ("GET", "{prefix}/:platformId/paynumber"),
-        ("GET", "{prefix}/echo"),
-        ("DELETE", "{prefix}/cache"),
+        ("GET", "/api/employee/:platformId/empno/issue"),
+        ("POST", "/api/employee/:platformId/employee"),
+        ("PUT", "/api/employee/:platformId/employee"),
+        ("GET", "/api/employee/:platformId/empno"),
+        ("GET", "/api/employee/:platformId/paynumber"),
+        ("GET", "/api/employee/echo"),
+        ("DELETE", "/api/employee/cache"),
     }
     assert all(s.framework == "vertx" and s.routeKind == "route"
                for s in rec.statements if s.semanticType == "route")
 
 
 def test_bare_calls_inside_routematcher_scope(tmp_path) -> None:
-    """Bare ``get("...")`` / ``delete("...")`` inside ``rm.with {}`` → route (route_scope)."""
+    """Bare ``get("...")`` / ``delete("...")`` inside ``rm.with {}`` → route (route_scope). The
+    paths start with ``${config.path}`` (runtime config): the address is unknown → empty."""
     rec = _parse(tmp_path, FILTER_SRC, "URIMapperVerticle.groovy")
     assert rec.framework == "vertx"
-    routes = _routes(rec)
-    assert routes == {
-        ("GET", "{config.path}/:platformId/:filterId"),
-        ("GET", "{config.path}/{ECHO}"),
-        ("DELETE", "{config.path}/{cache}"),
-        ("DELETE", "{config.path}/{cache}/schema"),
-    }
+    routes = [(s.method, s.endpoint) for s in rec.statements if s.semanticType == "route"]
+    assert sorted(m for m, _ in routes) == ["DELETE", "DELETE", "GET", "GET"]
+    assert all(ep is None for _, ep in routes)
 
 
 def test_bare_verb_calls_need_routematcher_in_file(tmp_path) -> None:
@@ -146,12 +144,12 @@ def test_constant_addresses_fold(tmp_path) -> None:
     eps = {s.endpoint for s in rec.statements if s.semanticType == "eventbus_consumer"}
     assert "svc/local" in eps    # same-file constant
     assert "svc/web" in eps      # cross-file constant (Addr.WEB)
-    assert "runtimeVar" in eps   # unresolvable var → symbol
+    assert None in eps and "runtimeVar" not in eps  # unresolvable var → empty (Q15)
 
 
-def test_dynamic_prefix_route_renders_placeholder(tmp_path) -> None:
-    # A route path that concatenates a runtime variable with a literal (`cfg.path + '/job'`)
-    # renders the runtime part as a placeholder — the route surface stays visible.
+def test_dynamic_prefix_route_leaves_endpoint_empty(tmp_path) -> None:
+    # A route path that concatenates a runtime variable with a literal (`cfg.path + '/job'`) is
+    # still a route, but its address is unknown: endpoint empty — never a {path} placeholder.
     src = (
         b"package a\n"
         b"import org.vertx.groovy.core.http.RouteMatcher\n"
@@ -164,8 +162,8 @@ def test_dynamic_prefix_route_renders_placeholder(tmp_path) -> None:
     )
     rec = _parse(tmp_path, src, "M.groovy")
     routes = _routes(rec)
-    assert ("POST", "{path}/job") in routes
-    assert ("DELETE", "{path}/job/:jobId") in routes
+    assert ("POST", None) in routes
+    assert ("DELETE", None) in routes
 
 
 def test_routes_require_capture_statements(tmp_path) -> None:
@@ -192,3 +190,68 @@ def test_output_validates(tmp_path) -> None:
     errors = list(Draft202012Validator(FileRecord.model_json_schema(by_alias=True))
                   .iter_errors(json.loads(to_line(rec))))
     assert not errors, errors
+
+
+_HANDLERS = b"""import io.vertx.ext.web.Router
+
+class Api {
+    void start() {
+        def router = Router.router(vertx)
+        router.get("/a").handler(this::list)
+        vertx.eventBus().consumer("q.one", { m -> m.reply(1) })
+        vertx.eventBus().consumer("q.two", this.&onTwo)
+    }
+
+    void list(ctx) {}
+    void onTwo(m) {}
+}
+"""
+
+
+def test_route_and_consumer_handlers(tmp_path) -> None:
+    rec = _parse(tmp_path, _HANDLERS, "src/Api.groovy")
+    got = {s.endpoint: (s.handler, s.handlerLine) for s in rec.statements
+           if s.semanticType in ("route", "eventbus_consumer")}
+    assert got == {
+        "/a": ("list", 11),        # this::list — declared in this class
+        "q.one": (None, 7),        # closure: no name, its line
+        "q.two": ("onTwo", 12),    # this.&onTwo method pointer
+    }
+
+
+_SUB_ROUTERS = b"""import io.vertx.ext.web.Router
+
+class Api extends io.vertx.core.AbstractVerticle {
+  void start() {
+    def router = Router.router(vertx)
+    def apiRouter = Router.router(vertx)
+    apiRouter.get("/items").handler(this::items)
+    router.route("/api/*").subRouter(apiRouter)
+  }
+}
+"""
+
+
+def test_sub_router_prefix(tmp_path) -> None:
+    rec = _parse(tmp_path, _SUB_ROUTERS, "src/Api.groovy")
+    got = [(s.endpoint, s.handler) for s in rec.statements if s.semanticType == "route"]
+    assert got == [("/api/items", "items")]
+
+
+def test_gstring_constants_resolve_reassigned_variables_do_not(tmp_path) -> None:
+    src = (
+        b"package a\n"
+        b"import io.vertx.ext.web.Router\n"
+        b"class R {\n"
+        b"  static final String BASE = '/v1'\n"
+        b"  def routes(router) {\n"
+        b"    def fixed = '/fixed'\n"
+        b"    def moving = '/a'\n"
+        b"    moving = '/b'\n"
+        b'    router.get("${BASE}/x").handler(h)\n'
+        b'    router.get("${fixed}/y").handler(h)\n'
+        b'    router.get("${moving}/z").handler(h)\n'
+        b"  }\n}\n"
+    )
+    rec = _parse(tmp_path, src, "R.groovy")
+    assert _routes(rec) == {("GET", "/v1/x"), ("GET", "/fixed/y"), ("GET", None)}

@@ -2,9 +2,9 @@
 
 A Play action is a ``Function`` whose body is a call rooted at ``Action`` —
 ``Action { ... }`` / ``Action.async { ... }`` / ``Action(parse.json) { ... }`` /
-``Action.async(parse.json) { ... }``. The verb and path live in ``conf/routes``, not the
-controller, so ``method``/``endpoint`` are left honest-null here (see
-``PlayRoutesParser`` in :mod:`.routes`).
+``Action.async(parse.json) { ... }``. The verb and path live in ``conf/routes`` (see
+``PlayRoutesParser`` in :mod:`.routes`), which records the entry point with the action as its
+handler; the action itself gets no record.
 
 Play SIRD (String Interpolating Routing DSL) defines routes directly in code:
 ``override def routes: Routes = { case GET(p"/posts/$id") => postController.show(id) }``.
@@ -13,12 +13,10 @@ Play SIRD (String Interpolating Routing DSL) defines routes directly in code:
 from __future__ import annotations
 
 import re
-from typing import Collection
-
 from tree_sitter import Node
 
 from ...emit import disambiguate, statement_id
-from ...schemas import FileRecord, Statement
+from ...schemas import FileRecord, Function, Statement
 from ..scala.statements import find_enclosing_parent_id
 from ..treesitter import node_text
 
@@ -57,13 +55,13 @@ def _is_play_action(fn_node: Node, source: bytes) -> bool:
     return ret == "Action" or ret.startswith("Action[")
 
 
-def detect_play_actions(
-    root: Node,
-    source: bytes,
-    record: FileRecord,
-    seen_ids: set[str] | None = None,
-    exclude_handlers: Collection[str] = (),
-) -> list[Statement]:
+def detect_play_actions(root: Node, source: bytes, record: FileRecord) -> list[Function]:
+    """The controller functions that are Play actions (``def index = Action { … }``).
+
+    An action is the **handler** of a binding, not a binding: its verb and path live in
+    ``conf/routes`` (or a SIRD case), which records the entry point and names the action as its
+    handler. So no statement is emitted for an action — a second record with no address would
+    count each binding twice. The caller uses the result to label the file ``play``."""
     if b"Action" not in source:
         return []
     action_lines: set[int] = set()
@@ -75,36 +73,8 @@ def detect_play_actions(
             walk(c)
 
     walk(root)
-    if not action_lines:
-        return []
-
     by_start = {fn.startLine: fn for fn in record.functions}
-    seen = seen_ids if seen_ids is not None else {s.id for s in record.statements}
-    routes: list[Statement] = []
-    for start in sorted(action_lines):
-        fn = by_start.get(start)
-        if fn is None:
-            continue
-        if fn.name in exclude_handlers:
-            continue
-        sid = disambiguate(statement_id(record.path, fn.startLine, 0), seen)
-        routes.append(Statement(
-            id=sid,
-            parentId=fn.id,
-            nodeType="synthetic",
-            semanticType="route",
-            text=fn.name,
-            framework="play",
-            handler=fn.name,
-            method=None,
-            endpoint=None,
-            routeKind="route",
-            isRegex=False,
-            startLine=fn.startLine,
-            endLine=fn.endLine,
-            path=fn.path,
-        ))
-    return routes
+    return [by_start[line] for line in sorted(action_lines) if line in by_start]
 
 
 _SIRD_VERBS = frozenset({"GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS"})

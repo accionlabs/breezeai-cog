@@ -656,7 +656,25 @@ def test_template_router_link_is_navigation(tmp_path) -> None:
     rec = _parse("Order.vue", _SFC_TEMPLATE, tmp_path)
     nav = [s for s in rec.statements if s.semanticType == "route"]
     assert nav and all(s.routeKind == "navigation" and s.framework == "vue" for s in nav)
-    assert nav[0].endpoint == "/orders/"  # first string literal of the :to expression
+    # '/orders/' + o.id is an expression: the address is not known, so no partial path
+    assert nav[0].endpoint is None
+
+
+def test_router_link_endpoint_forms(tmp_path) -> None:
+    src = b"""<template>
+  <nav>
+    <router-link to="/users">a</router-link>
+    <router-link :to="'/reports'">b</router-link>
+    <router-link :to="{ path: '/orders', query: { page: 1 } }">c</router-link>
+    <router-link :to="{ name: 'settings' }">d</router-link>
+    <router-link :to="target">e</router-link>
+    <router-link :to="`/x/${id}`">f</router-link>
+  </nav>
+</template>"""
+    rec = _parse("Nav.vue", src, tmp_path)
+    got = [s.endpoint for s in sorted(rec.statements, key=lambda s: s.startLine)
+           if s.semanticType == "route"]
+    assert got == ["/users", "/reports", "/orders", None, None, None]
 
 
 def test_template_only_sfc_captured(tmp_path) -> None:
@@ -681,3 +699,65 @@ def test_template_output_validates(tmp_path) -> None:
         )
     )
     assert not errors, errors
+
+
+def test_before_enter_guards(tmp_path) -> None:
+    src = b"""import { createRouter, createWebHistory } from 'vue-router'
+const routes = [
+  { path: '/a', component: A, beforeEnter: requireAuth },
+  { path: '/b', component: B, beforeEnter: [requireAuth, guards.admin] },
+  { path: '/c', component: C, beforeEnter: (to, from) => true },
+]
+export default createRouter({ history: createWebHistory(), routes })
+"""
+    rec = _parse("src/router/index.js", src, tmp_path)
+    guards = {s.endpoint: s.guards for s in rec.statements if s.semanticType == "route"}
+    assert guards == {"/a": ["requireAuth"], "/b": ["requireAuth", "guards.admin"], "/c": None}
+
+
+def test_router_global_guards(tmp_path) -> None:
+    # beforeEach runs before beforeEnter, beforeResolve after; children inherit; inline → no name.
+    src = b"""import { createRouter, createWebHistory } from 'vue-router'
+const routes = [
+  { path: '/a', component: A, beforeEnter: requireAuth },
+  { path: '/s', component: S, children: [ { path: 'x', component: X } ] },
+]
+const router = createRouter({ history: createWebHistory(), routes })
+router.beforeEach(trackPage)
+router.beforeEach((to) => true)
+router.beforeResolve(loadData)
+export default router
+"""
+    rec = _parse("src/router/index.js", src, tmp_path)
+    guards = {s.endpoint: s.guards for s in rec.statements if s.semanticType == "route"}
+    assert guards == {
+        "/a": ["trackPage", "requireAuth", "loadData"],
+        "/s": ["trackPage", "loadData"],
+        "/s/x": ["trackPage", "loadData"],
+    }
+
+
+def test_router_guards_need_a_router_of_this_file(tmp_path) -> None:
+    # Routes array not linked to a router created here, or a guard on another object → nothing.
+    src = b"""const routes = [ { path: '/a', component: A } ]
+export default routes
+other.beforeEach(trackPage)
+"""
+    rec = _parse("src/router/routes.js", src, tmp_path)
+    assert [s.guards for s in rec.statements if s.semanticType == "route"] == [None]
+
+
+def test_named_views_default_is_the_page(analyze_files) -> None:
+    st = analyze_files({
+        "src/router.js": (
+            "import { createRouter } from 'vue-router';\n"
+            "export default createRouter({ routes: [\n"
+            "  { path: '/home', components: { default: Home, sidebar: Side } },\n"
+            "  { path: '/lazy', components: { default: () => import('./views/Lazy.vue'), aside: A } },\n"
+            "  { path: '/split', components: { left: L, right: R } },\n"
+            "  { path: '/one', component: One },\n"
+            "]});\n"
+        ),
+    })
+    got = {s.endpoint: s.handler for s in st if s.semanticType == "route" and s.routeKind == "page"}
+    assert got == {"/home": "Home", "/lazy": "./views/Lazy.vue", "/split": None, "/one": "One"}

@@ -94,10 +94,10 @@ What each index holds:
 | VB | class heritage (base class + attributes) | inherited controller routes |
 | TypeScript / JavaScript | `tsconfig`/`jsconfig` path aliases (per config scope); constant values; class heritage; Angular and Express route mounts | aliased imports, inherited calls, route prefixes |
 | C++ | header basename → file; free functions; `Class::method`; `Class::field` types; heritage | `#include`, calls |
-| Ruby | ActiveRecord model names | recognising DB calls |
+| Ruby | ActiveRecord model names; controller `before_action` callbacks | recognising DB calls; Rails route guards |
 | HCL / Terraform | folder → `.tf` files | local `module` sources |
 | HTML | template → owning component | linking templates to components |
-| Python | *(no index)* | — |
+| Python | FastAPI wiring: `APIRouter` variables (own prefix, dependencies), `include_router` sites (also routers imported from other files), app middleware, module-level string constants used as prefixes | route prefixes and guards of routers mounted in another file |
 
 > **Decision —** indexes are built once, before parsing, and are read-only afterwards.
 > **Why:** workers share nothing, so files can be parsed in any order and in parallel, with the
@@ -130,7 +130,7 @@ How each language turns an import into a file:
 | Scala | As Java, plus selector groups `{A, B}`, renames `{A => B}` and relative package imports | wildcards, unknown names |
 | C# | A `using` names a namespace, not a file. Each **type used** in the file is looked up under the namespaces in scope (own namespace and parents, `using`s, `global using`s). Bound only if exactly one file matches; on a tie, a file in the same `.csproj` wins. | every namespace `using`; unresolved static / alias targets |
 | VB | Not resolved (`Imports` names namespaces) | every `Imports` |
-| TypeScript / JavaScript | Relative paths from the file's folder; otherwise the nearest `tsconfig`/`jsconfig` path alias. Tries the exact file, `.js`→`.ts` rewrites, known extensions, then `index.*`. Re-exports and literal dynamic `import()` count too. | anything not found on disk |
+| TypeScript / JavaScript | Relative paths from the file's folder; otherwise the nearest `tsconfig`/`jsconfig` path alias. Tries the exact file, `.js`→`.ts` rewrites, known extensions, then `index.*`. Re-exports, literal dynamic `import()` and CommonJS `require('…')` (anywhere in the file; a top-level `const x = require(…)` / `const { a } = require(…)` also binds the names for `calls[].path`) count too. | anything not found on disk |
 | Python | `import a.b` / `from a.b import x` from the repo root; relative imports walk up folders. Tries `a/b.py`, then `a/b/__init__.py`. | anything not found |
 | Ruby | Only `require_relative` | every `require`; unresolved `require_relative` |
 | C++ | `#include "x.h"` looked up by file **basename** in the index | `<system>` includes; unknown or ambiguous basenames |
@@ -316,8 +316,9 @@ Some frameworks build a route from pieces in several files. These use the index 
 
 | Framework | Pieces | Source of the cross-file data |
 |---|---|---|
-| Express | `app.use("/api", router)` in one file + `router.get("/orders")` in another → `/api/orders` | TypeScript index: Express mounts |
+| Express | `app.use("/api", router)` in one file + `router.get("/orders")` in another → `/api/orders`. The router is a factory call (`usersRouter()`) or an imported `Router()` instance — kept only when the router's file confirms it exports a `Router()`, so an imported middleware is never a prefix. A router mounted at two bases keeps its own path | TypeScript index: Express mounts |
 | Angular | lazy-loaded child routes under a parent path | TypeScript index: route mounts |
+| FastAPI | `app.include_router(orders.router, prefix="/api")` in one file + `router = APIRouter(prefix="/orders")` in another → `/api/orders/…`. A constant prefix (`API_PREFIX = "/v1"`) is resolved; a settings attribute is not (the environment can override it) → endpoint empty. A router included at two places keeps its own path | Python index: FastAPI wiring |
 | ASP.NET | base controller route prefix + action route | heritage ([§6](#6-inheritance-heritage)) |
 | WebForms | `MapPageRoute` URL → `.aspx` page | C# index: page routes |
 | Terraform | local `module` source → the `.tf` files it loads | HCL index |

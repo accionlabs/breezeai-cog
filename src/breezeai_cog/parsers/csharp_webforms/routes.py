@@ -19,7 +19,8 @@ markup pass and intentionally out of scope here."""
 from __future__ import annotations
 
 from ...emit import disambiguate, file_id, statement_id
-from ...schemas import Class, FileRecord, Statement
+from ...schemas import Class, FileRecord, Function, Statement
+from ..dotnet_common import simple_attr_name
 
 #: code-behind suffix → (routeKind, nodeType). nodeType is the shared ``synthetic`` sentinel
 #: (no backing AST node — the markup isn't parsed); the page/control distinction lives in routeKind.
@@ -81,11 +82,53 @@ def detect_webforms_pages(
                 framework="aspnet-webforms",
                 routeKind=route_kind,
                 handler=cls.name if cls is not None else None,
+                # the page class is the handler: GET and every postback share the page URL,
+                # the event handler is chosen by form data (decision Q6)
+                handlerLine=start if cls is not None and route_kind == "page" else None,
                 startLine=start,
                 endLine=end,
                 path=path,
             )
         )
+    if route_kind == "page" and cls is not None:
+        out += _page_methods(record, path, cls, endpoints, seen)
+    return out
+
+
+#: ``[WebMethod]`` / ``[ScriptMethod]`` mark an ASP.NET AJAX page method (attribute short names).
+_PAGE_METHOD_ATTRS = frozenset({"WebMethod", "ScriptMethod"})
+
+
+def _page_methods(
+    record: FileRecord, path: str, cls: Class, endpoints: list[str], seen: set[str]
+) -> list[Statement]:
+    """A static ``[WebMethod]`` on a page class is an ASP.NET AJAX *page method*: its own entry
+    point, called with ``POST <page URL>/<Method>`` (JSON). One binding per page URL; the
+    handler is the method itself (handlerLine its declaration, attributes included)."""
+    out: list[Statement] = []
+    methods: list[Function] = [
+        fn for fn in record.functions
+        if fn.parentId == cls.id and fn.isStatic
+        and any(simple_attr_name(d.name) in _PAGE_METHOD_ATTRS for d in fn.decorators)
+    ]
+    for fn in methods:
+        for endpoint in endpoints:
+            out.append(Statement(
+                id=disambiguate(statement_id(path, fn.startLine, 0), seen),
+                parentId=fn.id,
+                nodeType="synthetic",
+                semanticType="route",
+                text=f"[WebMethod] {cls.name}.{fn.name}",
+                method="POST",
+                endpoint=f"{endpoint.rstrip('/')}/{fn.name}" if endpoint else None,
+                framework="aspnet-webforms",
+                routeKind="route",
+                handler=fn.name,
+                handlerLine=fn.startLine,
+                startLine=fn.startLine,
+                endLine=fn.endLine,
+                path=path,
+            ))
     return out
 
 

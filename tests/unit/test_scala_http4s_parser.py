@@ -174,3 +174,48 @@ def test_http4s_repeated_mount_no_stacking(tmp_path: Path) -> None:
     assert "/v1/users" in endpoints
     assert "/v2/users" in endpoints
 
+
+
+def test_http4s_handler_is_the_case_body(tmp_path: Path) -> None:
+    # The case body after `=>` is an anonymous handler: no name, handlerLine where it starts.
+    src = b"""import cats.effect._
+import org.http4s._
+import org.http4s.dsl.io._
+
+object Routes {
+  val routes = HttpRoutes.of[IO] {
+    case GET -> Root / "a" => Ok("a")
+    case POST -> Root / "b" =>
+      Ok("b")
+  }
+}
+"""
+    rec = _parse_http4s(tmp_path, src, "Routes.scala")
+    got = {
+        s.endpoint: (s.handler, s.handlerLine)
+        for s in rec.statements
+        if s.semanticType == "route" and s.framework == "http4s"
+    }
+    assert got == {"/a": (None, 7), "/b": (None, 9)}
+
+
+def test_authed_routes_are_guarded_by_their_middleware(analyze_files) -> None:
+    st = analyze_files({"src/main/scala/a/H.scala": """package a
+import cats.effect.IO
+import org.http4s._
+import org.http4s.dsl.io._
+import org.http4s.server.AuthMiddleware
+object H {
+  val open = HttpRoutes.of[IO] { case GET -> Root / "ping" => Ok("p") }
+  val authed = AuthedRoutes.of[User, IO] { case GET -> Root / "me" as user => Ok(user.name) }
+  val other = AuthedRoutes.of[User, IO] { case GET -> Root / "you" as user => Ok(user.name) }
+  val jwt: AuthMiddleware[IO, User] = AuthMiddleware(jwtUser)
+  val routes = jwt(authed)
+}
+"""})
+    got = {s.endpoint: s.guards for s in st if s.semanticType == "route"}
+    assert got == {
+        "/ping": None,
+        "/me": ["AuthMiddleware(jwtUser)"],  # the middleware applied to it
+        "/you": ["AuthMiddleware"],  # AuthedRoutes are only served through one
+    }

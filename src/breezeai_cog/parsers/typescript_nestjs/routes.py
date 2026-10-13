@@ -21,6 +21,7 @@ from ...emit import disambiguate, function_id, statement_id
 from ...schemas import Decorator, Statement
 from ...parsers.typescript.decorators import decorator
 from ...parsers.typescript.functions import _type_text, extract_params
+from .patterns import message_pattern
 from ..treesitter import node_text
 
 _METHOD_DECORATORS = {
@@ -103,21 +104,25 @@ def _unquote(text: str) -> str:
     return text.strip().strip("'\"`")
 
 
-def _pattern(d) -> str | None:
-    """Address/topic of ``@EventPattern('x')`` / ``@MessagePattern({cmd:'y'})``."""
-    if not d.args:
-        return None
-    raw = d.args[0].strip()
-    return _unquote(raw) if raw[:1] in "'\"`" else (raw or None)
+def _pattern(dec: Node, source: bytes, consts: dict[str, str | None]) -> str | None:
+    """Address/topic of ``@EventPattern('x')`` / ``@MessagePattern({cmd:'y'})``: the string, or
+    canonical JSON for an object pattern (:func:`.patterns.message_pattern`, shared with the
+    ``ClientProxy`` sender so the two match); unresolved → None."""
+    call = next((c for c in dec.named_children if c.type == "call_expression"), None)
+    args = call.child_by_field_name("arguments") if call is not None else None
+    first = next((c for c in args.named_children if c.type != "comment"), None) if args else None
+    return message_pattern(first, source, consts) if first is not None else None
 
 
-def _guards(decs: list[Node], source: bytes) -> list[str]:
+def _guards(decs: list[Node], source: bytes, *, interceptors: bool = False) -> list[str]:
     """Guard/auth names: ``@UseGuards(...)`` args (NestJS) and ``@Authorized`` (routing-
-    controllers). Presence of any drives ``authRequired``."""
+    controllers). Presence of any drives ``authRequired``. With ``interceptors``, also
+    ``@UseInterceptors(...)`` args in decorator order — they run before the handler too (a guard
+    in the contract's sense) but say nothing about auth, so they don't drive ``authRequired``."""
     out: list[str] = []
     for dec in decs:
         d = decorator(dec, source)
-        if d.name == "UseGuards":
+        if d.name == "UseGuards" or (interceptors and d.name == "UseInterceptors"):
             out.extend(_unquote(a) for a in d.args)
         elif d.name == "Authorized":  # routing-controllers auth decorator
             out.append("Authorized")
@@ -167,16 +172,55 @@ def _resolver_type_arg(decs: list[Node], source: bytes) -> str | None:
     return None
 
 
+def _returns_empty_object(member: Node, source: bytes) -> bool:
+    """Whether every ``return`` in a method returns an empty object — ``{}``, ``{} as T``,
+    ``new T()`` with no arguments. That is what a stub parent's root operation does: the object
+    only exists so its fields can be resolved. A method with no return, or one that returns
+    anything else (a service call, ``null``, an entity), is not a stub."""
+    body = member.child_by_field_name("body")
+    returns: list[Node] = []
+
+    def walk(n: Node) -> None:
+        if n.type == "return_statement":
+            returns.append(n)
+        elif n.type in ("function_expression", "arrow_function", "function_declaration"):
+            return  # a nested function's returns are not this method's
+        for c in n.named_children:
+            walk(c)
+
+    if body is not None:
+        walk(body)
+
+    def empty(v: Node | None) -> bool:
+        while v is not None and v.type in ("as_expression", "parenthesized_expression",
+                                           "type_assertion", "satisfies_expression"):
+            v = v.named_children[0] if v.named_children else None
+        if v is None:
+            return False
+        if v.type == "object":
+            return not v.named_children
+        if v.type == "new_expression":
+            args = v.child_by_field_name("arguments")
+            return args is None or not args.named_children
+        return False
+
+    return bool(returns) and all(
+        empty(r.named_children[0] if r.named_children else None) for r in returns
+    )
+
+
 def _parent_op_for_grouping(
     body: Node, source: bytes, grouping_type: str
 ) -> tuple[str, str] | None:
     """Scan the class body for a ``@Query``/``@Mutation`` that returns a **singleton**
-    ``grouping_type`` — e.g. ``@Mutation(() => NotificationsMutation)`` (no ``[``).
-    Returns ``(op_name, 'MUTATION'|'QUERY')`` or ``None``.
+    ``grouping_type`` as an **empty object** — e.g. ``@Mutation(() => NotificationsMutation)
+    notifications() { return {}; }``. Returns ``(op_name, 'MUTATION'|'QUERY')`` or ``None``.
 
-    Distinguishes grouping resolvers (singleton shell, ``@Mutation(() => T)``) from
-    entity resolvers (array return, ``@Query(() => [T])``): ``_SINGLETON_RETURN_RE``
-    does not match when ``[`` follows ``=>`` because ``[`` is not in ``[A-Za-z_$]``."""
+    Distinguishes grouping resolvers (a stub shell) from entity resolvers: an array return
+    (``@Query(() => [T])``) does not match ``_SINGLETON_RETURN_RE`` (``[`` is not in
+    ``[A-Za-z_$]``), and a singleton op that returns a real entity (``@Mutation(() => Book)
+    addBook(...) { return this.books.create(...); }``) is not a stub — its type's fields are data
+    fields, not operations."""
     pending: list[Node] = []
     for member in body.named_children:
         if member.type == "decorator":
@@ -191,7 +235,7 @@ def _parent_op_for_grouping(
             if gql_method is None or not d.args:
                 continue
             m = _SINGLETON_RETURN_RE.search(d.args[0])
-            if m and m.group(1) == grouping_type:
+            if m and m.group(1) == grouping_type and _returns_empty_object(member, source):
                 mname = node_text(member.child_by_field_name("name"), source)
                 return _graphql_op_name(d, mname), gql_method.upper()
         pending = []
@@ -267,9 +311,61 @@ def _class_with_decorators(root: Node):
             yield cls, decs
 
 
+def _excluded(local: str, verb: str, exclude: tuple[tuple[str, str | None], ...]) -> bool | None:
+    """Whether a route (its path without the global prefix) is in ``setGlobalPrefix``'s exclude
+    list. A ``:param`` / ``*`` / ``(.*)`` pattern matches by segment; any other pattern syntax
+    cannot be decided → None."""
+    target = local.strip("/")
+    for pat, method in exclude:
+        if method is not None and method != verb:
+            continue
+        p = pat.strip("/")
+        if re.search(r"[^\w\-/:.*()]", p):
+            return None
+        rx = re.escape(p).replace(r"\(\.\*\)", ".*").replace(r"\*", ".*")
+        rx = re.sub(r":\w+", "[^/]+", rx)
+        if re.fullmatch(rx, target):
+            return True
+    return False
+
+
+def _served(local: str, verb: str, class_name: str, path: str, index: object | None) -> str | None:
+    """A NestJS HTTP route's full address: the app's ``setGlobalPrefix`` (unless excluded), then
+    its ``RouterModule`` path, then the controller and method paths (``local``). A prefix that is
+    set but cannot be resolved — or a controller that cannot be tied to its app when one of the
+    repo's apps sets a prefix — makes the address unknown → None (contract §8: never a partial
+    address)."""
+    ctrl_prefixes = getattr(index, "nest_controller_prefixes", None) or {}
+    if class_name in ctrl_prefixes:
+        mp = ctrl_prefixes[class_name]
+        if mp is None:
+            return None
+        local = _join(mp, local)
+    boots = getattr(index, "nest_global_prefixes", None) or {}
+    if not boots:
+        return local
+    anchors = [d for d in boots if d == "" or path.startswith(d + "/")]
+    if not anchors:  # not under any app's bootstrap
+        return local if all(b == ("", ()) for b in boots.values()) else None
+    prefix, exclude = boots[max(anchors, key=len)]  # the deepest app above this controller
+    if prefix == "":
+        return local
+    if prefix is None or exclude is None:
+        return None
+    hit = _excluded(local, verb, exclude)
+    if hit is None:
+        return None
+    return local if hit else _join(prefix, local)
+
+
 def detect_nest_routes(
-    root: Node, source: bytes, path: str, *, seen_ids: set[str], framework: str = "nestjs"
+    root: Node, source: bytes, path: str, *, seen_ids: set[str], framework: str = "nestjs",
+    index: object | None = None,
 ) -> list[Statement]:
+    """``index`` is the repo's ``TsAliasIndex``: it carries the NestJS global prefix of each app
+    and the ``RouterModule`` path of each registered controller (NestJS only)."""
+    index_consts = getattr(index, "const_values", None)
+    consts: dict[str, str | None] = index_consts if isinstance(index_consts, dict) else {}
     routes: list[Statement] = []
     for cls, decs in _class_with_decorators(root):
         base = _controller_base(decs, source)  # None when the class is not a @Controller
@@ -279,7 +375,8 @@ def detect_nest_routes(
         body = cls.child_by_field_name("body")
         if body is None:
             continue
-        ctrl_guards = _guards(decs, source) if is_controller else []
+        ctrl_guards = _guards(decs, source, interceptors=True) if is_controller else []
+        ctrl_auth = bool(_guards(decs, source)) if is_controller else False
         ctrl_version = _version(decs, source) if is_controller else None
         # Grouping resolver: @Resolver(() => T) where a @Mutation/@Query on the class
         # returns a singleton T — @ResolveField methods inherit the parent op's identity.
@@ -299,7 +396,9 @@ def detect_nest_routes(
                 mname = node_text(member.child_by_field_name("name"), source)
                 mline = member.start_point[0] + 1
                 parent = function_id(path, mname, mline, class_name=class_name)
-                guards = ctrl_guards + _guards(pending, source)  # merge controller + method
+                # merge controller + method; interceptors are guards but not auth
+                guards = ctrl_guards + _guards(pending, source, interceptors=True)
+                auth_required = ctrl_auth or bool(_guards(pending, source))
                 for dec in pending:
                     d = decorator(dec, source)
                     verb = _METHOD_DECORATORS.get(d.name) if is_controller else None
@@ -318,17 +417,21 @@ def detect_nest_routes(
                         handler=mname,
                         handlerLine=mline,
                         isRegex=False,
-                        authRequired=bool(guards),
+                        authRequired=auth_required,
                         guards=guards or None,
                         startLine=sl,
                         endLine=dec.end_point[0] + 1,
                         path=path,
                     )
                     if verb is not None:  # HTTP route
+                        local = _join(base, _unquote(d.args[0]) if d.args else "")
                         routes.append(Statement(
                             semanticType="route",
                             method=verb,
-                            endpoint=_join(base, _unquote(d.args[0]) if d.args else ""),
+                            endpoint=(
+                                _served(local, verb, class_name, path, index)
+                                if framework == "nestjs" else local
+                            ),
                             routeKind="route",
                             version=_version(pending, source) or ctrl_version,
                             requestDTO=_request_dto(member, source),
@@ -339,7 +442,7 @@ def detect_nest_routes(
                         routes.append(Statement(
                             semanticType="eventbus_consumer",
                             method=msg,
-                            endpoint=_pattern(d),
+                            endpoint=_pattern(dec, source, consts),
                             routeKind="message",
                             **common,
                         ))

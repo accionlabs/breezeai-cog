@@ -627,7 +627,17 @@ statements under their enum class.
 > faster. **Cost:** with the flag off there are no routes, API/DB calls, events, comments or enum
 > members either. Every detector must check the flag; reviews check this.
 
+> **Decision —** entry points are decided by the role of a framework construct, not by how the code runs.
+> **Why:** a parser sees constructs, not execution. Every construct a parser recognises is a
+> binding, wiring, guard, outbound or none; only a binding (one handler, directly addressable)
+> becomes an entry-point record (`route`, `eventbus_consumer`, `timer`), and wiring stays a plain
+> statement. One binding, one record, so "all entry points" is an accurate count across languages
+> and Breeze components. **Cost:** each entry-point parser keeps a role table, and wiring in
+> another file must reach the binding through the repository index.
+
 Detail page: [Statement model](architecture/statement-model.md).
+What counts as an entry point and how one is recorded:
+[Entry-point contract](architecture/entry-points.md).
 
 ---
 
@@ -937,6 +947,7 @@ from another.
 | Statements | Flat list linked by `parentId` | [§7](#7-the-statement-model) |
 | Statements | Syntax (`nodeType`) and meaning (`semanticType`) are separate | [§7](#7-the-statement-model) |
 | Statements | All statements are gated by `capture_statements` | [§7](#7-the-statement-model) |
+| Statements | Entry points are decided by construct roles; one binding, one record | [§7](#7-the-statement-model) |
 | Ids | Deterministic ids computed from the source | [§8](#8-ids-and-linking) |
 | Contract | Open `File`/`Class`, allow-listed `Function`/`Statement` | [§9](#9-the-capture-contract-and-the-graph) |
 | Contract | Unknown values are omitted | [§9](#9-the-capture-contract-and-the-graph) |
@@ -965,6 +976,7 @@ from another.
 | [Parser Review & Gap Analysis Guide](parser-review-guide.md) | Reviewing a parser and reporting its gaps |
 | [Template Capture](template-capture.md) | How markup files are handled |
 | [Statement model](architecture/statement-model.md) | Emission rules, enrichment, comments, enum members, splitting |
+| [Entry-point contract](architecture/entry-points.md) | What an entry point is, construct roles, what a binding records |
 | [Cross-file resolution](architecture/cross-file-resolution.md) | Indexes, call resolution, inheritance, constant folding |
 | [Capture-to-graph mapping](architecture/graph-mapping.md) | How each capture field becomes a Neo4j node, property or edge |
 | [Target Spec (Confluence)](https://accionlabs.atlassian.net/wiki/spaces/~5cfa0cffd898610dbf3bacf1/pages/2483453956/Code+Ontology+Parser+Target+Spec+Neo4j+Graph+Model) | The graph model the backend ingests |

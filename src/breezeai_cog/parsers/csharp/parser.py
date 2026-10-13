@@ -20,6 +20,7 @@ from ...utils import count_loc
 from ..additive import run_additive
 from ..base import BaseParser, ParseContext
 from ..callresolve import make_resolver
+from ..statements_common import reset_http_client_ids, set_http_client_ids
 from ..treesitter import parse_source
 from .classes import build_class
 from .functions import defined_names, type_map
@@ -31,6 +32,7 @@ from .imports import (
 )
 from ..comments_common import comment_statements_for
 from .mappings import COMMENT_TYPES, CONTROL_FLOW, FRAMEWORKS, STATEMENT_TYPES
+from .statements import collect_http_client_ids
 
 _CLASS_TYPES = (
     "class_declaration", "interface_declaration", "enum_declaration",
@@ -65,6 +67,17 @@ class CSharpParser(BaseParser):
         return self.extract(root, ctx)
 
     def extract(self, root: Node, ctx: ParseContext) -> FileRecord:
+        # Names holding an HttpClient, for the shared outbound-call classifier — set for this
+        # file's extraction only (reset in a finally so a reused worker never leaks them).
+        ids = (collect_http_client_ids(root, ctx.source, type_map(root, ctx.source))
+               if ctx.capture_statements else frozenset())
+        token = set_http_client_ids(ids)
+        try:
+            return self._extract(root, ctx)
+        finally:
+            reset_http_client_ids(token)
+
+    def _extract(self, root: Node, ctx: ParseContext) -> FileRecord:
         source, path = ctx.source, ctx.path
         fid = file_id(path)
         seen_ids: set[str] = set()

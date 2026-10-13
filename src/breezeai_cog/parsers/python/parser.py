@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+from typing import Sequence
+
 from tree_sitter import Node
 
 from ...emit import file_id
@@ -14,6 +17,7 @@ from ..callresolve import make_resolver
 from .classes import build_class, iter_definitions
 from .functions import build_function, defined_names, extract_decorators
 from .imports import extract_imports
+from .index import PythonIndex, build_python_index
 from .mappings import COMMENT_TYPES, CONTROL_FLOW, FRAMEWORKS, STATEMENT_TYPES
 from .statements import extract_statements
 
@@ -24,6 +28,13 @@ class PythonParser(BaseParser):
     schema_version = SCHEMA_VERSION
     statement_types = STATEMENT_TYPES
     frameworks = FRAMEWORKS
+
+    def build_index(
+        self, repo_root: Path, files: Sequence[Path], jobs: int = 1
+    ) -> PythonIndex:
+        """Repo-level pre-pass: FastAPI wiring that crosses files (a router declared in one file
+        and mounted with ``include_router`` in another) — see ``index.py``."""
+        return build_python_index(Path(repo_root), files, jobs)
 
     def parse_file(self, ctx: ParseContext) -> FileRecord:
         """Parse the source into an AST, then extract. Split so subclasses /
