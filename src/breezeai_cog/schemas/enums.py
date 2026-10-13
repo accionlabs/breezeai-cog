@@ -36,6 +36,10 @@ SemanticType = Literal[
     "verticle_deploy",
     "service_proxy",
     "timer",
+    # outbound UI link — a link or programmatic navigation to a page (``<router-link to>``,
+    # ``routerLink``, ``Response.Redirect``). It *leaves* a page, so it is outbound: paired with a
+    # ``route`` of ``routeKind: page`` on ``endpoint``, as ``api_call`` is with ``route``.
+    "navigation",
     "graphql_entity",
     # data/metadata document (not a behaviour) — the whole content of a captured
     # structured-JSON file, serialized as TOON on the statement `text`. Format-independent

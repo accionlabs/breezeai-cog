@@ -11,8 +11,8 @@ is worse than missing (§8): a parser leaves a handler empty when it cannot name
 
 The entry points are the ``route``, ``eventbus_consumer`` and ``timer`` records whose
 ``routeKind`` is not ``field_resolver`` (contract §5). Records still filed under ``route`` with
-``routeKind`` ``mount`` / ``layout`` / ``navigation`` are wiring and outbound links whose own
-semantic types are a pending spec change; they are not entry points and are not checked.
+``routeKind`` ``mount`` / ``layout`` are wiring that is still to become plain statements; they
+are not entry points and are not checked.
 
 =============== ======== =================================================================
 Rule            Severity Violation
@@ -43,7 +43,7 @@ from .aspnet_common import FRAMEWORK_SERVED
 ENTRY_POINT_TYPES = frozenset({"route", "eventbus_consumer", "timer"})
 
 #: ``routeKind`` values filed under ``route`` that are not entry points (see the docstring).
-NOT_ENTRY_POINT_KINDS = frozenset({"field_resolver", "mount", "layout", "navigation"})
+NOT_ENTRY_POINT_KINDS = frozenset({"field_resolver", "mount", "layout"})
 
 HTTP_METHODS = frozenset({"GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS"})
 METHODS = HTTP_METHODS | frozenset({

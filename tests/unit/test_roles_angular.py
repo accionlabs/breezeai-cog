@@ -198,7 +198,6 @@ def test_http_client_call_is_outbound(analyze_files) -> None:
     ]
 
 
-@pytest.mark.xfail(strict=True, reason="routerLink is recorded as route/navigation, not navigation")
 def test_router_link_is_outbound_navigation(analyze_files) -> None:
     st = analyze_files(
         {

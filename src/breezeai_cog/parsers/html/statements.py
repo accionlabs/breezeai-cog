@@ -148,7 +148,7 @@ def collect_template_statements(
 ) -> list[Statement]:
     """Walk the template tree and emit one flat Statement per captured construct.
 
-    ``routerLink`` navigation becomes a ``route`` statement (``routeKind="navigation"``) so the
+    ``routerLink`` navigation becomes a ``navigation`` statement (outbound) so the
     page→page navigation graph is queryable — gated by ``emit_routes`` (off for fixture files,
     like every other route emitter). ``framework`` stamps that route (the template's framework).
     """
@@ -166,9 +166,8 @@ def collect_template_statements(
                     id=disambiguate(statement_id(path, start, col), seen_ids),
                     parentId=parent_id,
                     nodeType=node.type,  # real grammar node (attribute / property_binding)
-                    semanticType="route",
+                    semanticType="navigation",
                     framework=framework,
-                    routeKind="navigation",
                     endpoint=_nav_endpoint(node, source),  # honest-null when dynamic
                     name=_NAV_DIRECTIVE,
                     text=clip,
@@ -177,7 +176,7 @@ def collect_template_statements(
                     path=path,
                 )
             )
-            continue  # a nav link is one route statement; don't also emit it as a binding
+            continue  # a nav link is one navigation statement; don't also emit it as a binding
         if node.type in _CAPTURED:
             out.append(
                 Statement(

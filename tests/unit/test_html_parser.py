@@ -239,14 +239,14 @@ def _nav_routes(tmp_path):
         {"nav.component.ts": _NAV_TS, "nav.component.html": _NAV_HTML},
         "nav.component.html",
     )
-    return rec, [s for s in rec.statements if s.semanticType == "route"]
+    return rec, [s for s in rec.statements if s.semanticType == "navigation"]
 
 
 def test_router_link_is_navigation_route(tmp_path) -> None:
     rec, routes = _nav_routes(tmp_path)
-    assert routes, "routerLink should produce route statements"
+    assert routes, "routerLink should produce navigation statements"
     for r in routes:
-        assert r.routeKind == "navigation" and r.framework == "angular" and r.name == "routerLink"
+        assert r.routeKind is None and r.framework == "angular" and r.name == "routerLink"
     endpoints = {r.endpoint for r in routes}
     assert "/orders" in endpoints  # plain attr + array base both resolve to /orders
     assert "/home" in endpoints  # quoted string literal

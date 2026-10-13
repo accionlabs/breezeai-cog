@@ -157,13 +157,11 @@ def test_server_control_event_is_none(site) -> None:
     assert on_click and all(s.semanticType not in EP for s in on_click)
 
 
-@pytest.mark.xfail(strict=True, reason="redirect recorded as route/navigation, not navigation")
 def test_redirect_is_outbound_navigation(site) -> None:
     nav = [s for s in site if s.endpoint == "/Done.aspx"]
     assert [s.semanticType for s in nav] == ["navigation"]
 
 
-@pytest.mark.xfail(strict=True, reason="link recorded as route/navigation, not navigation")
 def test_navigate_url_is_outbound_navigation(site) -> None:
     nav = [s for s in site if s.endpoint == "/Help.aspx"]
     assert [s.semanticType for s in nav] == ["navigation"]

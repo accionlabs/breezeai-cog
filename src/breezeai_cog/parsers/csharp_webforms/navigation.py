@@ -106,11 +106,10 @@ def detect_navigation(
             ),  # col 2 → distinct from page(0)/layout(1)
             parentId=file_id(path),
             nodeType=node_type,
-            semanticType="route",
+            semanticType="navigation",
             text=endpoint,
             endpoint=endpoint,
             framework="aspnet-webforms",
-            routeKind="navigation",
             handler=cname,
             startLine=start,
             endLine=end,

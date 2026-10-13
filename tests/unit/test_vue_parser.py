@@ -654,8 +654,8 @@ def test_template_bindings_captured(tmp_path) -> None:
 
 def test_template_router_link_is_navigation(tmp_path) -> None:
     rec = _parse("Order.vue", _SFC_TEMPLATE, tmp_path)
-    nav = [s for s in rec.statements if s.semanticType == "route"]
-    assert nav and all(s.routeKind == "navigation" and s.framework == "vue" for s in nav)
+    nav = [s for s in rec.statements if s.semanticType == "navigation"]
+    assert nav and all(s.routeKind is None and s.framework == "vue" for s in nav)
     # '/orders/' + o.id is an expression: the address is not known, so no partial path
     assert nav[0].endpoint is None
 
@@ -673,7 +673,7 @@ def test_router_link_endpoint_forms(tmp_path) -> None:
 </template>"""
     rec = _parse("Nav.vue", src, tmp_path)
     got = [s.endpoint for s in sorted(rec.statements, key=lambda s: s.startLine)
-           if s.semanticType == "route"]
+           if s.semanticType == "navigation"]
     assert got == ["/users", "/reports", "/orders", None, None, None]
 
 

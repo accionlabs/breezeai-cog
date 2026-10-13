@@ -131,9 +131,6 @@ def test_global_before_each_is_guard(analyze_files) -> None:
     assert [r.endpoint for r in _eps(st)] == ["/users"]
 
 
-@pytest.mark.xfail(
-    strict=True, reason="router-link is recorded as route/navigation, not semanticType navigation"
-)
 def test_router_link_is_outbound_navigation(analyze_files) -> None:
     sfc = (
         '<template>\n  <nav><router-link to="/users">Users</router-link></nav>\n</template>\n'

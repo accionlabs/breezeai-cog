@@ -134,7 +134,7 @@ class WebFormsParser(CSharpParser):
             if layout:
                 record.statements.extend(layout)
                 record.framework = "aspnet-webforms"
-            # Page→page navigation → routeKind=navigation statements (item 4).
+            # Page→page navigation → navigation statements (item 4).
             nav = detect_navigation(record, ctx.path, root, ctx.source, markup, ctx.repo_root)
             if nav:
                 record.statements.extend(nav)
