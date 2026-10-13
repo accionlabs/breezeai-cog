@@ -28,9 +28,9 @@ import re
 
 from tree_sitter import Node
 
-from ...emit import disambiguate, file_id, statement_id
-from ...schemas import Statement
-from ..additive import DetectContext, Detector, Gate, register_detector
+from ...emit import file_id
+from ..additive import DetectContext, Detection, Detector, Gate, register_detector
+from ..emits import Emit
 from ..treesitter import entry_text, node_text
 
 # Dynamic-import target: ``() => import('./views/Reports.vue')`` -> ``./views/Reports.vue``
@@ -219,7 +219,7 @@ def _router_guards(root: Node, source: bytes) -> dict[int, _RouterGuards]:
 
 
 def _emit(
-    elem: Node, prefix: str, source: bytes, path: str, seen: set[str], routes: list[Statement],
+    elem: Node, prefix: str, source: bytes, path: str, routes: list[Emit],
     outer: _RouterGuards = _NO_ROUTER_GUARDS,
 ) -> None:
     """Emit ONE route object (if it isn't a pure redirect) and recurse into its ``children``.
@@ -241,39 +241,33 @@ def _emit(
         "redirect" in pairs and "component" not in pairs and "components" not in pairs
     )
     if not is_pure_redirect:
-        sl, sc = elem.start_point[0] + 1, elem.start_point[1]
-        routes.append(
-            Statement(
-                id=disambiguate(statement_id(path, sl, sc), seen),
-                parentId=file_id(path),
-                nodeType="synthetic",
-                semanticType="route",
-                text=entry_text(elem, source),
-                endpoint=full,
-                framework="vue",
-                routeKind="page",
-                handler=_handler(
+        routes.append(Emit(
+            elem,
+            {
+                "semanticType": "route",
+                "endpoint": full,
+                "framework": "vue",
+                "routeKind": "page",
+                "handler": _handler(
                     pairs.get("component") or _default_view(pairs.get("components"), source), source
                 ),
-                guards=(outer[0] + _before_enter(pairs.get("beforeEnter"), source) + outer[1])
+                "guards": (outer[0] + _before_enter(pairs.get("beforeEnter"), source) + outer[1])
                 or None,
-                startLine=sl,
-                endLine=elem.end_point[0] + 1,
-                path=path,
-            )
-        )
+            },
+            parent=file_id(path), text=entry_text(elem, source), node_type="synthetic",
+        ))
     children = pairs.get("children")
     if children is not None and children.type == "array":
         for child in children.named_children:
-            _emit(child, full, source, path, seen, routes, outer)
+            _emit(child, full, source, path, routes, outer)
 
 
 def _process(
-    arr: Node, prefix: str, source: bytes, path: str, seen: set[str], routes: list[Statement],
+    arr: Node, prefix: str, source: bytes, path: str, routes: list[Emit],
     outer: _RouterGuards = _NO_ROUTER_GUARDS,
 ) -> None:
     for elem in arr.named_children:
-        _emit(elem, prefix, source, path, seen, routes, outer)
+        _emit(elem, prefix, source, path, routes, outer)
 
 
 def _is_route_object(obj: Node, source: bytes) -> bool:
@@ -318,9 +312,7 @@ def _module_route_objects(root: Node, source: bytes) -> list[Node]:
 _COMPETING_CONFIG_ROUTERS = (b"@angular/", b"react-router")
 
 
-def detect_vue_routes(
-    root: Node, source: bytes, path: str, *, seen_ids: set[str], index: object = None
-) -> list[Statement]:
+def detect_vue_routes(root: Node, source: bytes, path: str) -> list[Emit]:
     # Vue route configs are plain-data arrays that often live in files importing nothing from
     # vue-router (a default-export array, a `router/modules/*.js` fragment mounted elsewhere).
     # So detection can't gate on an import — the ARRAY SHAPE is the signal. A cheap structural
@@ -330,31 +322,26 @@ def detect_vue_routes(
         return []
     if b"path" not in source or (b"component" not in source and b"beforeEnter" not in source):
         return []
-    routes: list[Statement] = []
+    routes: list[Emit] = []
     router_guards = _router_guards(root, source)
     for arr in _all(root, "array"):
         if _is_route_array(arr, source) and not _is_children_value(arr, source):
-            _process(arr, "", source, path, seen_ids, routes,
+            _process(arr, "", source, path, routes,
                      router_guards.get(arr.start_byte, _NO_ROUTER_GUARDS))
     # Single route OBJECT modules (const r = {…}; export default r) — not reachable via the
     # array walk. Elements referenced by identifier inside a routes array are skipped there
     # (not objects), and captured here from their own declaration, so there is no double-emit.
     for obj in _module_route_objects(root, source):
-        _emit(obj, "", source, path, seen_ids, routes)
+        _emit(obj, "", source, path, routes)
     return routes
 
 
-def _run(dc: DetectContext) -> str | None:
-    routes = detect_vue_routes(
-        dc.root, dc.source, dc.path, seen_ids={s.id for s in dc.record.statements}
-    )
-    if not routes:
-        return None
-    dc.record.statements.extend(routes)
-    return "vue"
+def _detect(dc: DetectContext) -> Detection | None:
+    routes = detect_vue_routes(dc.root, dc.source, dc.path)
+    return Detection(routes, label="vue") if routes else None
 
 
 register_detector(Detector(
-    name="vue-routes", gate=Gate("typescript", order=50, skip_fixtures=True), run=_run,
+    name="vue-routes", gate=Gate("typescript", order=50, skip_fixtures=True), detect=_detect,
     frameworks=("vue",),
 ))
