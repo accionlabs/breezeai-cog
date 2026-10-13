@@ -1,9 +1,14 @@
 """Angular route detection. Unlike Nest/Spring, Angular routes are **config objects**
 (``{ path, component, loadChildren, canActivate, children }``) in ``Routes`` arrays /
-``RouterModule.forRoot([...])``. Emits ``semanticType="route"`` statements
-(``routeKind="page"`` for component routes, ``"mount"`` for ``loadChildren`` lazy
-mounts). Nested ``children`` paths are joined onto the parent path. Routes are parented
-to the file (Angular routes are config, not handler methods)."""
+``RouterModule.forRoot([...])``. Emits ``semanticType="route"`` / ``routeKind="page"`` statements
+for the routes that show a component (``component`` / ``loadComponent``), parented to the file
+(Angular routes are config, not handler methods). Nested ``children`` paths are joined onto the
+parent path.
+
+Wiring has no record (contract §4): a ``loadChildren`` lazy mount (its prefix and guards reach the
+loaded routes: the repo mount index and the ``angular.mount-guards`` fact), a path-only parent
+``{ path, children }``, and a layout — a component whose children include an empty-path child,
+which always fills its outlet, so the parent's URL is that child's page."""
 
 from __future__ import annotations
 
@@ -14,6 +19,7 @@ from tree_sitter import Node
 from ...emit import disambiguate, file_id, statement_id
 from ...schemas import Statement
 from ..treesitter import entry_text, node_text
+from .mount_guards import incoming_guards
 
 # Lazy-load target extraction (Tier 1): capture what a route loads so the mount is a
 # traversable edge, not a dead end. Covers every Angular version's syntax:
@@ -202,12 +208,26 @@ def _is_children_value(arr: Node, source: bytes) -> bool:
     return p is not None and p.type == "pair" and _key(p, source) == "children"
 
 
+def _has_empty_path_child(children: Node | None, source: bytes) -> bool:
+    """Whether a ``children`` array holds a route object with ``path: ''``."""
+    if children is None or children.type != "array":
+        return False
+    for child in children.named_children:
+        if child.type == "object":
+            p = _pairs(child, source).get("path")
+            if p is not None and p.type == "string" and _string_val(p, source) == "":
+                return True
+    return False
+
+
 def _process(arr: Node, prefix: str | None, source: bytes, path: str, seen: set[str],
-             routes: list[Statement], index: object, inherited: tuple[str, ...] = ()) -> None:
+             routes: list[Statement], index: object, inherited: tuple[str, ...] = (),
+             mounts: list[tuple[Node, list[str]]] | None = None) -> None:
     """``inherited``: guards of the ancestor routes that run before this route — each ancestor's
     own ``canMatch`` / ``canActivate`` (Angular matches and activates the parent first) and then
     its ``canActivateChild``, which guards every child binding, not the route that declares it.
-    Lazy ``loadChildren`` routes in other files do not inherit (not linked here)."""
+    ``mounts`` (when given) collects each lazy mount's ``loadChildren`` node with the guards its
+    loaded routes inherit — read by the ``angular.mount-guards`` fact."""
     for elem in arr.named_children:
         if elem.type != "object":
             continue
@@ -223,37 +243,38 @@ def _process(arr: Node, prefix: str | None, source: bytes, path: str, seen: set[
             continue
         full = _compose(prefix, _resolve_path(pairs["path"], source, index))
         own = _own_guards(elem, source)
-        load = pairs.get("loadChildren")  # lazy route group -> mount
+        load = pairs.get("loadChildren")  # lazy route group → wiring
         component = pairs.get("component")
-        load_component = pairs.get("loadComponent")  # lazy standalone component -> page
-        if load is not None:  # mount: handler = the loaded module/routes (a traversable link)
-            handler = _lazy_target(load, source)
-        elif component is not None:
-            handler = node_text(component, source)
-        elif load_component is not None:
-            handler = _lazy_target(load_component, source)
-        else:
-            handler = None
-        sl, sc = elem.start_point[0] + 1, elem.start_point[1]
-        routes.append(Statement(
-            id=disambiguate(statement_id(path, sl, sc), seen),
-            parentId=file_id(path),
-            nodeType="synthetic",
-            semanticType="route",
-            text=entry_text(elem, source),
-            endpoint=full,
-            framework="angular",
-            routeKind="mount" if load is not None else "page",
-            handler=handler,
-            guards=[*inherited, *own] or None,
-            startLine=sl,
-            endLine=elem.end_point[0] + 1,
-            path=path,
-        ))
+        load_component = pairs.get("loadComponent")  # lazy standalone component → page
         children = pairs.get("children")
+        child_guards = (*inherited, *own, *_guards(pairs.get("canActivateChild"), source))
+        if load is not None:
+            if mounts is not None:
+                mounts.append((load, list(child_guards)))
+        elif component is not None or load_component is not None:
+            # A layout (a child with path '' always fills the outlet) is wiring; otherwise the
+            # parent's own URL shows it, so it is a page.
+            if not _has_empty_path_child(children, source):
+                handler = (node_text(component, source) if component is not None
+                           else _lazy_target(load_component, source))
+                sl, sc = elem.start_point[0] + 1, elem.start_point[1]
+                routes.append(Statement(
+                    id=disambiguate(statement_id(path, sl, sc), seen),
+                    parentId=file_id(path),
+                    nodeType="synthetic",
+                    semanticType="route",
+                    text=entry_text(elem, source),
+                    endpoint=full,
+                    framework="angular",
+                    routeKind="page",
+                    handler=handler,
+                    guards=[*inherited, *own] or None,
+                    startLine=sl,
+                    endLine=elem.end_point[0] + 1,
+                    path=path,
+                ))
         if children is not None and children.type == "array":
-            child_guards = (*inherited, *own, *_guards(pairs.get("canActivateChild"), source))
-            _process(children, full, source, path, seen, routes, index, child_guards)
+            _process(children, full, source, path, seen, routes, index, child_guards, mounts)
 
 
 _CLASS_NODE_TYPES = ("class_declaration", "class", "abstract_class_declaration")
@@ -290,7 +311,29 @@ def detect_angular_routes(root: Node, source: bytes, path: str, *, seen_ids: set
         return []
     routes: list[Statement] = []
     prefix = _mount_prefix(root, source, index)  # parent mount prefix (cross-file), else ""
+    # Guards of the lazy mount that loads this file's routes (cross-file), else none.
+    incoming = tuple(incoming_guards(index, path, declared_classes(root, source)))
     for arr in _all(root, "array"):
         if _is_route_array(arr, source) and not _is_children_value(arr, source):
-            _process(arr, prefix, source, path, seen_ids, routes, index)
+            _process(arr, prefix, source, path, seen_ids, routes, index, incoming)
     return routes
+
+
+def declared_classes(root: Node, source: bytes) -> list[str]:
+    """Names of the classes this file declares (a lazily-loaded module is reached by one)."""
+    return [node_text(name, source)
+            for cls_type in _CLASS_NODE_TYPES for cls in _all(root, cls_type)
+            if (name := cls.child_by_field_name("name")) is not None]
+
+
+def lazy_mount_guards(root: Node, source: bytes) -> list[tuple[Node, list[str]]]:
+    """Each lazy mount's ``loadChildren`` node with the guards its loaded routes inherit from
+    this file (the mount route's ancestors, its own ``canActivate`` / ``canMatch`` and its
+    ``canActivateChild``)."""
+    if not any(guard in source for guard in _ROUTER_BYTE_GUARDS):
+        return []
+    found: list[tuple[Node, list[str]]] = []
+    for arr in _all(root, "array"):
+        if _is_route_array(arr, source) and not _is_children_value(arr, source):
+            _process(arr, "", source, "", set(), [], None, (), found)
+    return found

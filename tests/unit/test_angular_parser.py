@@ -53,10 +53,10 @@ def test_routes_require_capture_statements(tmp_path) -> None:
 def test_routes(tmp_path) -> None:
     rec = _parse(tmp_path)
     routes = {s.endpoint: s for s in rec.statements if s.semanticType == "route"}
-    assert {"/orders", "/orders/:id", "/admin", "/settings", "/settings/profile"} <= set(routes)
+    assert {"/orders", "/orders/:id", "/settings", "/settings/profile"} <= set(routes)
     assert routes["/orders"].handler == "OrderListComponent" and routes["/orders"].routeKind == "page"
     assert routes["/orders/:id"].guards == ["AuthGuard"]
-    assert routes["/admin"].routeKind == "mount"  # loadChildren lazy mount
+    assert "/admin" not in routes  # loadChildren lazy mount: wiring, no record
     assert routes["/settings/profile"].handler == "ProfileComponent"  # nested child path joined
     assert rec.framework == "angular"
     assert any(c.name == "AppRoutingModule" for c in rec.classes)  # base extraction reused
@@ -80,14 +80,11 @@ def test_claims_selects_angular() -> None:
     registry.clear()
 
 
-def test_mount_captures_lazy_module_link(tmp_path) -> None:
-    # Tier 1: a loadChildren mount must record what it loads, so it's a traversable
-    # edge in the code graph rather than a dead-end path segment.
+def test_lazy_mount_is_wiring(tmp_path) -> None:
+    # A loadChildren mount has no record: its prefix and guards reach the loaded routes, and
+    # the link to the loaded module stays a structural link (the dynamic import).
     rec = _parse(tmp_path)
-    mount = next(s for s in rec.statements
-                 if s.semanticType == "route" and s.endpoint == "/admin")
-    assert mount.routeKind == "mount"
-    assert mount.handler == "AdminModule"
+    assert [s for s in rec.statements if s.semanticType == "route" and s.endpoint == "/admin"] == []
 
 
 _STANDALONE_SRC = b'''import { Routes } from '@angular/router';
@@ -109,9 +106,9 @@ def test_lazy_forms_across_angular_versions(tmp_path) -> None:
                        repo_root=tmp_path, capture_statements=True)
     rec = AngularParser().parse_file(ctx)
     by_ep = {s.endpoint: s for s in rec.statements if s.semanticType == "route"}
-    assert by_ep["/catalog"].routeKind == "mount" and by_ep["/catalog"].handler == "CATALOG_ROUTES"
+    # Lazy route groups (routes const, legacy string form) are wiring; a lazy component is a page.
+    assert set(by_ep) == {"/user/:id"}
     assert by_ep["/user/:id"].routeKind == "page" and by_ep["/user/:id"].handler == "UserComponent"
-    assert by_ep["/legacy"].routeKind == "mount" and by_ep["/legacy"].handler == "LegacyModule"
 
 
 # ── Non-literal path resolution (Task #9) ──────────────────────────────────────

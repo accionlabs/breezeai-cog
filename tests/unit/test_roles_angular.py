@@ -63,7 +63,6 @@ def test_load_component_default_export_handler_is_not_a_path(analyze_files) -> N
     assert not r.handler or "/" not in r.handler
 
 
-@pytest.mark.xfail(strict=True, reason="loadChildren is recorded as a route (routeKind mount)")
 def test_load_children_is_wiring(analyze_files) -> None:
     st = _routes(
         analyze_files,
@@ -92,9 +91,6 @@ def test_load_children_prefixes_the_loaded_routes(analyze_files) -> None:
     assert r.handler == "ReportsComponent"
 
 
-@pytest.mark.xfail(
-    strict=True, reason="a path-only parent { path, children } is recorded as a page"
-)
 def test_children_only_parent_is_wiring(analyze_files) -> None:
     st = _routes(
         analyze_files,
@@ -116,9 +112,6 @@ def test_children_only_parent_prefixes_children(analyze_files) -> None:
     assert r.handler == "CartComponent"
 
 
-@pytest.mark.xfail(
-    strict=True, reason="a layout (component + empty-path child) is recorded as a page"
-)
 def test_layout_with_empty_path_child_is_wiring(analyze_files) -> None:
     st = _routes(
         analyze_files,
@@ -239,3 +232,20 @@ def test_bootstrap_is_none(analyze_files) -> None:
         }
     )
     assert _eps(st, "src/main.ts") == []
+
+
+def test_lazy_mount_guards_reach_the_loaded_routes(analyze_files) -> None:
+    st = _routes(
+        analyze_files,
+        "export const routes: Routes = [\n  { path: 'admin', canActivate: [authGuard], loadChildren:"
+        " () => import('./admin/admin.routes') },\n];\n",
+        **{
+            "src/app/admin/admin.routes.ts": (
+                "import { Routes } from '@angular/router';\n"
+                "const routes: Routes = [ { path: 'reports', component: ReportsComponent } ];\n"
+                "export default routes;\n"
+            )
+        },
+    )
+    [r] = _eps(st, "src/app/admin/admin.routes.ts")
+    assert (r.handler, r.guards) == ("ReportsComponent", ["authGuard"])
