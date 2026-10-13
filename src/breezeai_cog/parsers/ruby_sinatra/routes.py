@@ -7,10 +7,11 @@ from collections.abc import Iterator
 
 from tree_sitter import Node
 
-from ...emit import disambiguate, file_id, statement_id
-from ...schemas import FileRecord, Statement
+from ...emit import file_id
+from ...schemas import FileRecord
+from ..emits import Emit
 from ..ruby.ownership import owner_id
-from ..treesitter import first_line, node_text
+from ..treesitter import node_text
 
 _HTTP_METHODS = {
     "get",
@@ -161,12 +162,11 @@ def _guards_for(call: Node, endpoint: str | None,
     return [name for *_, name in sorted(covering)]
 
 
-def detect_sinatra_routes(root: Node, source: bytes, path: str, record: FileRecord) -> bool:
-    """Append Sinatra routes whose path is an explicit string literal, prefixed by their enclosing
-    ``namespace`` blocks."""
-    seen = {statement.id for statement in record.statements}
+def detect_sinatra_routes(root: Node, source: bytes, path: str, record: FileRecord) -> list[Emit]:
+    """The Sinatra routes whose path is an explicit string literal, prefixed by their enclosing
+    ``namespace`` blocks, for :func:`~..emits.apply`."""
     fallback = file_id(path)
-    matched = False
+    found: list[Emit] = []
     hooks = _global_guards(root, source) if b"before" in source or b"use " in source else []
 
     for call in _calls(root):
@@ -184,13 +184,9 @@ def detect_sinatra_routes(root: Node, source: bytes, path: str, record: FileReco
         block = call.child_by_field_name("block")  # the handler: an anonymous block
         # Global guards don't assert auth (middleware is often logging or sessions).
         guards = _guards_for(call, endpoint, hooks) or None
-        record.statements.append(
-            Statement(
-                id=disambiguate(statement_id(path, line, call.start_point[1]), seen),
-                parentId=owner_id(line, record.functions, record.classes, fallback),
-                nodeType="call",
+        found.append(
+            Emit(call, dict(
                 semanticType="route",
-                text=first_line(node_text(call, source)),
                 method=method.upper(),
                 endpoint=endpoint,
                 framework="sinatra",
@@ -198,10 +194,6 @@ def detect_sinatra_routes(root: Node, source: bytes, path: str, record: FileReco
                 guards=guards,
                 routeKind="route",
                 isRegex=False,
-                startLine=line,
-                endLine=call.end_point[0] + 1,
-                path=path,
-            )
+            ), parent=owner_id(line, record.functions, record.classes, fallback), node_type="call")
         )
-        matched = True
-    return matched
+    return found
