@@ -11,6 +11,9 @@ from __future__ import annotations
 
 import re
 
+# PHP-specific query helpers must not leak into other language parsers.
+_PHP = frozenset({"php"})
+
 # Require structure, not just a leading verb, to avoid natural-language false positives.
 _SQL_RE = re.compile(
     r"^\s*\(?\s*("
@@ -31,18 +34,33 @@ _SQL_RE = re.compile(
 )
 
 # Builders that execute a raw query even when the SQL isn't a captured literal
-# (e.g. `em.createNativeQuery(sql)`, `prisma.$queryRaw`...).
+# (e.g. `em.createNativeQuery(sql)`, `prisma.$queryRaw`, `$wpdb->get_results`...).
 _STRONG_QUERY_METHODS = {
     "$queryraw", "$queryrawunsafe", "$executeraw", "$executerawunsafe",
     "createnativequery", "createquery", "executequery", "executeupdate",
     "preparestatement", "nativequery", "rawquery",
 }
+_PHP_QUERY_METHODS = {"get_results", "get_row", "get_col", "get_var"}
 
 
-def is_query(method: str, arg: str | None) -> bool:
+def is_query(
+    method: str,
+    arg: str | None,
+    callee: str | None = None,
+    language: str | None = None,
+) -> bool:
     if arg and _SQL_RE.match(arg):
         return True
-    return method.lower() in _STRONG_QUERY_METHODS
+    m = method.lower()
+    if m in _STRONG_QUERY_METHODS or (language in _PHP and m in _PHP_QUERY_METHODS):
+        return True
+    if callee is not None and language in _PHP:
+        low_callee = callee.lower()
+        if "pdo" in low_callee and m in ("query", "prepare", "exec", "execute"):
+            return True
+        if "wpdb" in low_callee and m in ("get_results", "get_row", "get_col", "get_var", "query"):
+            return True
+    return False
 
 
 # A quoted (string-literal) SQL query embedded anywhere in a statement's source —

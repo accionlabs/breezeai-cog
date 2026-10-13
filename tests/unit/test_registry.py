@@ -3,6 +3,8 @@ capabilities, the schema-version gate, and filename matching for config files.""
 
 from __future__ import annotations
 
+from typing import Any
+
 import pytest
 
 from breezeai_cog.core import registry
@@ -33,7 +35,7 @@ class FakeFramework(FakeLang):
     priority = 10
     frameworks = ["fw"]
 
-    def claims(self, path: str, source: bytes) -> bool:
+    def claims(self, path: str, source: bytes, *args: Any, **kwargs: Any) -> bool:
         return b"FRAMEWORK" in source
 
 

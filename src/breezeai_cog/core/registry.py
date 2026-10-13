@@ -10,6 +10,7 @@ composition — one file, one parser.
 from __future__ import annotations
 
 import importlib
+import inspect
 import pkgutil
 from pathlib import Path
 
@@ -67,7 +68,7 @@ def select(
     path: str | Path, source: bytes, parse_timeout_micros: int = 0
 ) -> LanguageParser | None:
     """The single parser that handles this file: the highest-priority candidate whose
-    ``claims(path, source)`` is True (the base language parser is the priority-0 fallback)."""
+    ``claims(path, source, repo_root=...)`` is True (the base language parser is the priority-0 fallback)."""
     candidates = parsers_for(path)
     claiming = [
         p

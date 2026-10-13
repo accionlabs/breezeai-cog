@@ -35,7 +35,7 @@ from .treesitter import first_line, node_text
 # Per-file collector for concatenations skipped by the fold cap. ``render_concat`` records
 # the line of each; the executor resets it around each file and emits ONE human-readable
 # summary — far cleaner than a machine log line per concat shredding the progress display.
-_skipped_concat_lines: contextvars.ContextVar["list[int] | None"] = contextvars.ContextVar(
+_skipped_concat_lines: contextvars.ContextVar[list[int] | None] = contextvars.ContextVar(
     "skipped_concat_lines", default=None
 )
 
@@ -51,13 +51,13 @@ _http_client_ids: contextvars.ContextVar[frozenset[str]] = contextvars.ContextVa
 )
 
 
-def set_http_client_ids(ids: frozenset[str]) -> "contextvars.Token[frozenset[str]]":
+def set_http_client_ids(ids: frozenset[str]) -> contextvars.Token[frozenset[str]]:
     """Set the per-file HTTP-client name set; returns a token to pass to
     :func:`reset_http_client_ids` (in a ``finally``)."""
     return _http_client_ids.set(ids)
 
 
-def reset_http_client_ids(token: "contextvars.Token[frozenset[str]]") -> None:
+def reset_http_client_ids(token: contextvars.Token[frozenset[str]]) -> None:
     _http_client_ids.reset(token)
 
 
@@ -87,6 +87,7 @@ def summarize_skipped_concats(path: str) -> str | None:
         f"HTML/JS builders); the statement{plural} {'are' if plural else 'is'} still "
         f"captured, only the endpoint is omitted. Line{plural}: {shown}{more}"
     )
+
 
 # (callee, method, first_string_arg) or None for a single call node.
 CallDetails = Callable[[Node, bytes], "tuple[str, str, str | None] | None"]
@@ -124,6 +125,7 @@ def text_with_trailing_comment(node: Node, source: bytes) -> str:
     :func:`_trailing_comment_end`)."""
     return source[node.start_byte : _trailing_comment_end(node, source)].decode("utf-8", "replace")
 
+
 # --- Endpoint resolution, shared across languages -------------------
 # HTTP verbs that may appear as the *first argument* (``request('GET', url)``).
 HTTP_VERB_ARGS = frozenset({"get", "post", "put", "patch", "delete", "head", "options"})
@@ -144,6 +146,16 @@ def strip_leading_base(url: str) -> str:
         if slash != -1:
             return url[slash:]
     return url
+
+
+def normalize_route_endpoints(routes: list[Statement]) -> list[Statement]:
+    """Normalize emitted route endpoints to one leading slash and no trailing slash."""
+    for route in routes:
+        if route.semanticType != "route" or route.endpoint is None:
+            continue
+        endpoint = f"/{route.endpoint.lstrip('/')}".rstrip("/")
+        route.endpoint = endpoint or "/"
+    return routes
 
 
 #: Max binary-expression nesting ``render_concat`` will fold. String concatenation is
@@ -225,9 +237,12 @@ def _iter_calls(
     call_type: str | Collection[str],
     stmt_expr: Collection[str],
     containers: Collection[str],
+    call_barrier_types: Collection[str] = (),
 ) -> Iterator[Node]:
     call_types = _call_type_set(call_type)
     for child in node.named_children:
+        if child.type in call_barrier_types:
+            continue
         if child.type in emit_types:
             continue  # a nested statement — classified on its own
         if child.type in stmt_expr and node.type in containers:
@@ -240,7 +255,9 @@ def _iter_calls(
             child.type == "field_expression" and node.type == "call_expression"
         ):
             yield child
-        yield from _iter_calls(child, emit_types, call_type, stmt_expr, containers)
+        yield from _iter_calls(
+            child, emit_types, call_type, stmt_expr, containers, call_barrier_types
+        )
 
 
 def _calls_in_statement(
@@ -249,22 +266,29 @@ def _calls_in_statement(
     call_type: str | Collection[str],
     stmt_expr: Collection[str],
     containers: Collection[str],
+    call_barrier_types: Collection[str] = (),
 ) -> Iterator[Node]:
     call_types = _call_type_set(call_type)
     # The statement node may itself be a call — a bare Python call-statement
     # (``session.add(x)``) has no expression-statement wrapper.
     if node.type in call_types:
         yield node
-    yield from _iter_calls(node, emit_types, call_type, stmt_expr, containers)
+    yield from _iter_calls(node, emit_types, call_type, stmt_expr, containers, call_barrier_types)
 
 
 #: Block/body node types a control-flow statement wraps (empirically verified across
 #: TS/JS, Python, Java, C#, C++, Groovy, Kotlin). Used to take a control statement's **header**
 #: as the text up to its first such child — so a multi-line condition is kept whole while the
 #: body (already captured as its own child statements) is not duplicated into the header.
-_BODY_BLOCK_TYPES = frozenset({
-    "statement_block", "block", "compound_statement", "switch_body", "control_structure_body",
-})
+_BODY_BLOCK_TYPES = frozenset(
+    {
+        "statement_block",
+        "block",
+        "compound_statement",
+        "switch_body",
+        "control_structure_body",
+    }
+)
 
 
 def _control_flow_header(node: Node, source: bytes) -> str:
@@ -314,7 +338,9 @@ def classify_statement(
     # All api/db/query hits in this statement's own expression, deduped by (kind, method).
     hits: list[tuple[str, str, str | None, str | None, Node]] = []
     seen_hit: set[tuple[str, str]] = set()
-    for call in _calls_in_statement(node, emit_types, call_type, stmt_expr, container_types):
+    for call in _calls_in_statement(
+        node, emit_types, call_type, stmt_expr, container_types, call_barrier_types
+    ):
         det = call_details(call, source)
         if det is None:
             continue
@@ -456,7 +482,7 @@ def member_statement(
     limit: int,
     seen_ids: set[str],
     name: str | None = None,
-    decorators: "list[Decorator] | None" = None,
+    decorators: list[Decorator] | None = None,
     semantic_type: str | None = None,
 ) -> Statement:
     """One flat declaration Statement for ``node`` (``nodeType`` = the AST node, ``text`` =
@@ -494,8 +520,15 @@ def emit_enum_members(
     ``member_types`` — parented to the enum's Class id. Each carries ``semanticType`` =
     ``enum_member`` (the cross-language role) while ``nodeType`` keeps its raw grammar type."""
     return [
-        member_statement(node, source, path, parent_id=parent_id, limit=limit,
-                         seen_ids=seen_ids, semantic_type="enum_member")
+        member_statement(
+            node,
+            source,
+            path,
+            parent_id=parent_id,
+            limit=limit,
+            seen_ids=seen_ids,
+            semantic_type="enum_member",
+        )
         for node in body.named_children
         if node.type in member_types
     ]

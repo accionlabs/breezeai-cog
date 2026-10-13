@@ -11,14 +11,34 @@ from __future__ import annotations
 # it only counts when the callee also carries a client hint (below), so it can't match a
 # bare ``foo.request()``.
 _HTTP_VERBS = {"get", "post", "put", "patch", "delete", "head", "options", "request"}
+_PHP = frozenset({"php"})
 
 # Substrings in the callee that signal an HTTP client (matches JS ``API_CLIENT_NAMES``,
 # minus a bare ``client`` which would over-match s3Client/dbClient/graphqlClient as
 # substrings — precision-preserving deviation).
 _CLIENT_HINTS = (
-    "axios", "http", "httpclient", "httpservice", "httpx", "requests", "session", "fetch",
-    "restclient", "apiclient", "resttemplate", "webclient", "$http", "superagent",
-    "got", "ky", "urllib", "aiohttp", "guzzle", "ofetch",
+    "axios",
+    "http",
+    "httpclient",
+    "httpservice",
+    "httpx",
+    "requests",
+    "session",
+    "fetch",
+    "restclient",
+    "apiclient",
+    "resttemplate",
+    "webclient",
+    "$http",
+    "$client",
+    "->client->",
+    "superagent",
+    "got",
+    "ky",
+    "urllib",
+    "aiohttp",
+    "guzzle",
+    "ofetch",
 )
 
 # Bare (receiver-less) function calls that are HTTP requests → default GET.
@@ -64,7 +84,10 @@ def _receiver_text(callee: str) -> str:
 
 
 def match_api(
-    callee: str, method: str, http_client_ids: "frozenset[str] | None" = None
+    callee: str,
+    method: str,
+    language: str | None = None,
+    http_client_ids: frozenset[str] | None = None,
 ) -> str | None:
     """Return the HTTP verb (uppercased) if ``callee.method(...)`` is an HTTP call.
 
