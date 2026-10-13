@@ -54,6 +54,7 @@ from pathlib import Path, PurePosixPath
 from typing import Any
 
 from .additive import FactSpec, index_fact, register_fact
+from .typescript.reexports import ModuleExports, collect_exports, declaring
 
 FACT = "aws.deployed-handlers"
 
@@ -269,18 +270,29 @@ def _type_key(fn: _Function) -> tuple[str, str] | None:
     return (parts[1], parts[2]) if len(parts) == 3 and parts[1] and parts[2] else None
 
 
-def _resolve(values: list[list[_Function]], index: object) -> DeployedHandlers | None:
+def _resolve(values: list[Any], index: object) -> DeployedHandlers | None:
+    functions = [v for v in values if isinstance(v, list)]
+    exports = {v.stem: v for v in values if isinstance(v, ModuleExports)}
     modules: dict[str, dict[str, tuple[Trigger, ...]]] = {}
     types: dict[str, dict[str, tuple[Trigger, ...]]] = {}
-    for per_file in sorted(values, key=lambda fs: [(f.base, f.handler) for f in fs]):
+
+    def add(table: dict[str, dict[str, tuple[Trigger, ...]]], key: tuple[str, str],
+            triggers: tuple[Trigger, ...]) -> None:
+        # Two triggers the config leaves identical (two queues by reference: no name) cannot be
+        # told apart, so they are one record.
+        known = table.setdefault(key[0], {}).get(key[1], ())
+        table[key[0]][key[1]] = tuple(dict.fromkeys((*known, *triggers)))
+
+    for per_file in sorted(functions, key=lambda fs: [(f.base, f.handler) for f in fs]):
         for fn in per_file:
-            for key, table in ((_module_key(fn), modules), (_type_key(fn), types)):
-                if key is None:
-                    continue
-                # Two triggers the config leaves identical (two queues by reference: no name)
-                # cannot be told apart, so they are one record.
-                known = table.setdefault(key[0], {}).get(key[1], ())
-                table[key[0]][key[1]] = tuple(dict.fromkeys((*known, *fn.triggers)))
+            module = _module_key(fn)
+            if module is not None:
+                # handler.sender may only re-export sender (`export { sender } from
+                # './sqs/sender'`): the triggers go to the file that declares it.
+                add(modules, declaring(exports, *module) or module, fn.triggers)
+            dotnet = _type_key(fn)
+            if dotnet is not None:
+                add(types, dotnet, fn.triggers)
     fact = DeployedHandlers(modules, types)
     return fact if modules or types else None
 
@@ -370,8 +382,16 @@ def read_sam(source: bytes, rel: str) -> list[_Function]:
 _SOURCES = (".yml", ".yaml", ".json", ".template")
 
 
-def _collect(root: object, source: bytes, rel: str, repo_root: Path | None) -> list[_Function] | None:
-    if not rel.lower().endswith(_SOURCES):  # the language's own files pass here too
+_TS_FILES = (".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs")
+
+
+def _collect(root: Any, source: bytes, rel: str,
+             repo_root: Path | None) -> list[_Function] | ModuleExports | None:
+    """Deployment config: its functions. A TypeScript / JavaScript file (the index's own): its
+    exports, to follow a configured handler through re-exports to the file declaring it."""
+    if rel.lower().endswith(_TS_FILES):
+        return collect_exports(root, source, rel, repo_root) if root is not None else None
+    if not rel.lower().endswith(_SOURCES):
         return None
     return (read_serverless(source, rel) + read_sam(source, rel)) or None
 
@@ -379,7 +399,8 @@ def _collect(root: object, source: bytes, rel: str, repo_root: Path | None) -> l
 # The same fact on both indexes: TypeScript reads the module handlers, C# the .NET ones.
 for _language in ("typescript", "csharp"):
     register_fact(FactSpec(
-        name=FACT, language=_language, gate=(b"functions:", b"AWS::Serverless::Function"),
+        name=FACT, language=_language,
+        gate=(b"functions:", b"AWS::Serverless::Function", b"export"),
         sources=_SOURCES,
         collect=_collect, resolve=_resolve,
     ))

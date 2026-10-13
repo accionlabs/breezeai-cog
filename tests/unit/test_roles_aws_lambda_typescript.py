@@ -298,3 +298,55 @@ def test_sam_template_events_are_bindings(analyze_files) -> None:
         ("api", "route", "aws-apigw", "ANY", None),                # HttpApi catch-all
         ("nightly", "timer", "aws-eventbridge", "PERIODIC", "cron(0 2 * * ? *)"),
     ]
+
+
+SENDER = (
+    "import { APIGatewayProxyHandler } from 'aws-lambda';\n"
+    "const sender: APIGatewayProxyHandler = async (event) => ({ statusCode: 200, body: '' });\n"
+    "export default sender;\n"
+)
+NAMED = (
+    "import { APIGatewayProxyHandler } from 'aws-lambda';\n"
+    "export const onOrder: APIGatewayProxyHandler = async (event) => ({ statusCode: 200, body: '' });\n"
+)
+CONFIG = "service: shop\nfunctions:\n  f:\n    handler: handler.{name}\n    events:\n      - http: 'POST /{name}'\n"
+
+
+def _reexported(analyze_files, entry: str, name: str, **files: str):
+    st = analyze_files({"package.json": PKG, "handler.ts": entry,
+                        "serverless.yml": CONFIG.format(name=name), **files})
+    return [(r.path, r.handler, r.method, r.endpoint) for r in _eps(st)]
+
+
+def test_config_handler_followed_to_a_default_export(analyze_files) -> None:
+    # export { default as sender } from './sqs/sender' — the handler is the target's default export
+    assert _reexported(analyze_files, "export { default as sender } from './sqs/sender';\n",
+                       "sender", **{"sqs/sender.ts": SENDER}) == [
+        ("sqs/sender.ts", "sender", "POST", "/sender")]
+
+
+def test_config_handler_followed_through_a_renamed_re_export_and_an_index(analyze_files) -> None:
+    got = _reexported(analyze_files, "export { onOrder as order } from './api';\n", "order",
+                      **{"api/index.ts": "export * from './orders';\n", "api/orders.ts": NAMED})
+    assert got == [("api/orders.ts", "onOrder", "POST", "/order")]
+
+
+def test_config_handler_followed_through_import_then_export(analyze_files) -> None:
+    got = _reexported(analyze_files, "import { onOrder } from './api/orders';\nexport { onOrder };\n",
+                      "onOrder", **{"api/orders.ts": NAMED})
+    assert got == [("api/orders.ts", "onOrder", "POST", "/onOrder")]
+
+
+def test_ambiguous_star_re_export_is_not_followed(analyze_files) -> None:
+    # two `export *` targets both provide onOrder: ambiguous (TypeScript rejects it too)
+    got = _reexported(analyze_files, "export * from './a';\nexport * from './b';\n", "onOrder",
+                      **{"a.ts": NAMED, "b.ts": NAMED})
+    assert [(p, e) for p, _, _, e in got] == [("a.ts", None), ("b.ts", None)]
+
+
+def test_alias_re_export_is_not_followed(analyze_files) -> None:
+    # only relative specifiers are followed, never a path alias
+    got = _reexported(analyze_files, "export { onOrder } from '@api/orders';\n", "onOrder",
+                      **{"api/orders.ts": NAMED,
+                         "tsconfig.json": '{"compilerOptions": {"paths": {"@api/*": ["api/*"]}}}'})
+    assert [(p, e) for p, _, _, e in got] == [("api/orders.ts", None)]
