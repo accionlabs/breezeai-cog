@@ -54,6 +54,7 @@ _ALL_METHODS = [
     "PATCH",
     "OPTIONS",
     "HEAD",
+    "TRACE",
 ]
 
 _CALLABLE_NODE_TYPES = {
@@ -246,10 +247,13 @@ class _FileIndex:
         self.scopes: dict[tuple[int, int, str], _Scope] = {}
         self.register_calls: list[Node] = []
         self.call_nodes: list[Node] = []
+        self._class_factory_fields: list[tuple[tuple[int, int, str], str, Node]] = []
+        self.fastify_class_fields: dict[tuple[int, int, str], set[str]] = {}
         self.root_scope = self._build(root, source)
         self.call_nodes.sort(key=lambda call: call.start_byte)
         self.call_starts = [call.start_byte for call in self.call_nodes]
         self._resolve_factory_bindings(source)
+        self._resolve_class_factory_fields(source)
         self.mounted_plugin_nodes: set[tuple[int, int, str]] = self._find_mounted_plugins(source)
 
     @staticmethod
@@ -314,6 +318,42 @@ class _FileIndex:
 
             if node.type == "variable_declarator":
                 self._index_variable(node, scope, source)
+
+            if node.type in {"public_field_definition", "property_definition"}:
+                name_node = node.child_by_field_name("name")
+                value_node = node.child_by_field_name("value")
+                class_node = _enclosing_class(node)
+                if (
+                    name_node is not None
+                    and value_node is not None
+                    and value_node.type == "call_expression"
+                    and class_node is not None
+                ):
+                    self._class_factory_fields.append(
+                        (self.node_key(class_node), node_text(name_node, source), value_node)
+                    )
+
+            if node.type == "assignment_expression":
+                left = node.child_by_field_name("left")
+                right = node.child_by_field_name("right")
+                class_node = _enclosing_class(node)
+                if (
+                    left is not None
+                    and left.type == "member_expression"
+                    and right is not None
+                    and right.type == "call_expression"
+                    and class_node is not None
+                ):
+                    receiver = left.child_by_field_name("object")
+                    name_node = left.child_by_field_name("property")
+                    if (
+                        receiver is not None
+                        and receiver.type == "this"
+                        and name_node is not None
+                    ):
+                        self._class_factory_fields.append(
+                            (self.node_key(class_node), node_text(name_node, source), right)
+                        )
 
             if node.type == "import_statement":
                 factory_names = _imported_fastify_factory_names(node, source)
@@ -421,6 +461,11 @@ class _FileIndex:
                             self,
                         )
 
+    def _resolve_class_factory_fields(self, source: bytes) -> None:
+        for class_key, name, factory_call in self._class_factory_fields:
+            if _is_fastify_factory_call(factory_call, source, self):
+                self.fastify_class_fields.setdefault(class_key, set()).add(name)
+
     def _index_pattern(
         self,
         node: Optional[Node],
@@ -446,6 +491,13 @@ class _FileIndex:
                 return binding.is_fastify if binding is not None else False
             scope = scope.parent
         return False
+
+    def is_fastify_this_property(self, name: str, node: Node) -> bool:
+        class_node = _enclosing_class(node)
+        return (
+            class_node is not None
+            and name in self.fastify_class_fields.get(self.node_key(class_node), set())
+        )
 
     def is_fastify_factory(self, name: str, node: Node) -> Optional[bool]:
         scope: Optional[_Scope] = self.scope_for(node)
@@ -763,6 +815,8 @@ def _walk(
         allowed_plugin: Optional[tuple[int, int, str]] = None,
     ) -> None:
         candidates = file_index.calls_in(root)
+        # Candidates and suppressed_starts are start-ordered; suppressed_max_ends stores
+        # the matching prefix maximum, so bisect selects the latest possible suppressor.
         suppressed_starts: list[int] = []
         suppressed_max_ends: list[int] = []
 
@@ -880,6 +934,15 @@ def _chain_base(node: Optional[Node], source: bytes) -> Optional[Node]:
     return node
 
 
+def _enclosing_class(node: Node) -> Optional[Node]:
+    current = node.parent
+    while current is not None:
+        if current.type in {"class_declaration", "class"}:
+            return current
+        current = current.parent
+    return None
+
+
 def _dispatch_call(
     node: Node,
     source: bytes,
@@ -903,11 +966,25 @@ def _dispatch_call(
         return None
 
     receiver = _chain_base(callee.child_by_field_name("object"), source)
-    if receiver is None or receiver.type != "identifier":
+    if receiver is None:
         return None
 
-    receiver_name = node_text(receiver, source)
-    if not file_index.is_fastify_instance(receiver_name, node):
+    if receiver.type == "identifier":
+        receiver_name = node_text(receiver, source)
+        is_fastify = file_index.is_fastify_instance(receiver_name, node)
+    elif receiver.type == "member_expression":
+        owner = receiver.child_by_field_name("object")
+        property_node = receiver.child_by_field_name("property")
+        is_fastify = (
+            owner is not None
+            and owner.type == "this"
+            and property_node is not None
+            and file_index.is_fastify_this_property(node_text(property_node, source), node)
+        )
+    else:
+        return None
+
+    if not is_fastify:
         return None
 
     args_node = node.child_by_field_name("arguments")
@@ -984,7 +1061,7 @@ def _http_method_route(
 
     methods = list(_ALL_METHODS) if member_name == "all" else [member_name.upper()]
 
-    route = None if regex_path else _join_prefix(prefix, url)
+    route = _join_prefix(prefix, url) if url is not None else None
 
     parent_id, handler_name, handler_line = _resolve_handler(
         handler_node,
@@ -1073,7 +1150,7 @@ def _app_route(
     if not methods:
         return
 
-    route = None if regex_path else _join_prefix(prefix, url)
+    route = _join_prefix(prefix, url) if url is not None else None
 
     parent_id, handler_name, handler_line = _resolve_handler(
         handler_node,

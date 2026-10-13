@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 
 from jsonschema import Draft202012Validator
+import pytest
 
 from breezeai_cog.core import registry
 from breezeai_cog.emit import to_line
@@ -185,6 +186,34 @@ def test_detects_post_route() -> None:
     routes = _detect_routes(source)
 
     assert [(route.method, route.endpoint) for route in routes] == [("POST", "/users")]
+
+
+@pytest.mark.parametrize(
+    "class_body",
+    [
+        b"app = Fastify();\n  add() { this.app.get('/users', handler); }",
+        b"constructor() { this.app = Fastify(); }\n"
+        b"  add() { this.app.get('/users', handler); }",
+    ],
+)
+def test_detects_fastify_route_on_initialized_this_property(class_body: bytes) -> None:
+    source = b'import Fastify from "fastify";\nclass Routes {\n  ' + class_body + b"\n}"
+
+    routes = _detect_routes(source)
+
+    assert [(route.method, route.endpoint) for route in routes] == [("GET", "/users")]
+
+
+def test_ignores_unrelated_this_property_route_call() -> None:
+    source = (
+        b'import Fastify from "fastify";\n'
+        b"class Routes {\n"
+        b"  app = {};\n"
+        b"  add() { this.app.get('/not-fastify', handler); }\n"
+        b"}"
+    )
+
+    assert _detect_routes(source) == []
 
 
 def test_regex_route_has_null_endpoint_and_is_marked_regex() -> None:
@@ -682,6 +711,7 @@ def test_all_shorthand_registers_every_method() -> None:
         "PATCH",
         "OPTIONS",
         "HEAD",
+        "TRACE",
     ]
     assert {route.endpoint for route in routes} == {"/all"}
 
