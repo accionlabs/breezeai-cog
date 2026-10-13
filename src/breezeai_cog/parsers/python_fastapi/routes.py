@@ -10,15 +10,17 @@ from tree_sitter import Node
 
 from ...emit import disambiguate, function_id, statement_id
 from ...schemas import Statement
+from ..python.fastapi_facts import ROUTERS as _ROUTERS
+from ..python.fastapi_facts import UNKNOWN as _UNKNOWN
+from ..python.fastapi_facts import app_middleware as _app_middleware
+from ..python.fastapi_facts import calls as _calls
+from ..python.fastapi_facts import dependencies as _dependencies
+from ..python.fastapi_facts import literal as _literal
+from ..python.fastapi_facts import prefix_kwarg as _prefix_kwarg
 from ..treesitter import node_text
 
 # HTTP verbs (+ websocket) exposed as decorator methods on FastAPI app/router objects.
 _VERBS = {"get", "post", "put", "patch", "delete", "options", "head", "trace", "websocket"}
-
-#: A prefix that exists but has no resolvable value (``prefix=settings.API_PREFIX``): the
-#: bindings behind it have an unknown address, so their endpoint is empty.
-_UNKNOWN = object()
-
 
 def _name(node: Node, source: bytes) -> str:
     n = node.child_by_field_name("name")
@@ -57,106 +59,6 @@ def _methods_kwarg(call: Node, source: bytes) -> list[str]:
                     out.append(node_text(content, source).upper())
         return out
     return []
-
-
-def _literal(node: Node | None, source: bytes) -> str | None:
-    """A plain string literal's value (no f-string interpolation), else None."""
-    if node is None or node.type != "string":
-        return None
-    if any(c.type == "interpolation" for c in node.named_children):
-        return None
-    content = next((c for c in node.named_children if c.type == "string_content"), None)
-    return node_text(content, source) if content is not None else ""
-
-
-def _prefix_kwarg(call: Node, source: bytes) -> str | object:
-    """The ``prefix=`` keyword of an ``APIRouter(...)`` / ``include_router(...)`` call: its literal
-    value, ``""`` when absent, or :data:`_UNKNOWN` when present but not a literal (Python has no
-    compile-time constants, so a name or attribute has no value cog can trust)."""
-    args = call.child_by_field_name("arguments")
-    for arg in args.named_children if args is not None else []:
-        key = arg.child_by_field_name("name") if arg.type == "keyword_argument" else None
-        if key is not None and node_text(key, source) == "prefix":
-            value = _literal(arg.child_by_field_name("value"), source)
-            return value if value is not None else _UNKNOWN
-    return ""
-
-
-def _calls(root: Node) -> list[Node]:
-    out: list[Node] = []
-
-    def walk(n: Node) -> None:
-        if n.type == "call":
-            out.append(n)
-        for c in n.named_children:
-            walk(c)
-
-    walk(root)
-    return out
-
-
-_DEPENDS = frozenset({"Depends", "Security", "fastapi.Depends", "fastapi.Security"})
-_ROUTERS = frozenset({"APIRouter", "fastapi.APIRouter", "FastAPI", "fastapi.FastAPI"})
-
-
-def _dependencies(call: Node, source: bytes) -> list[str]:
-    """Guard names from a ``dependencies=[Depends(fn), Security(fn, scopes=…)]`` keyword: the
-    dependency callable of each entry (``fn`` / ``auth.require_user``). An entry that is not a
-    ``Depends``/``Security`` call on a name is skipped (no fabricated name)."""
-    args = call.child_by_field_name("arguments")
-    for arg in args.named_children if args is not None else []:
-        key = arg.child_by_field_name("name") if arg.type == "keyword_argument" else None
-        if key is None or node_text(key, source) != "dependencies":
-            continue
-        value = arg.child_by_field_name("value")
-        names: list[str] = []
-        for el in value.named_children if value is not None and value.type in ("list", "tuple") else []:
-            fn = el.child_by_field_name("function") if el.type == "call" else None
-            dep_args = el.child_by_field_name("arguments") if fn is not None else None
-            first = next((a for a in dep_args.named_children if a.type != "keyword_argument"), None) \
-                if dep_args is not None else None
-            if (fn is not None and node_text(fn, source) in _DEPENDS and first is not None
-                    and first.type in ("identifier", "attribute")):
-                names.append(node_text(first, source))
-        return names
-    return []
-
-
-def _app_middleware(root: Node, source: bytes) -> dict[str, list[str]]:
-    """App variable → its global middleware names, in source order: functions decorated
-    ``@app.middleware("http")`` and classes passed to ``app.add_middleware(Cls, …)``. Middleware
-    runs before every route of the app, whatever the registration order."""
-    out: dict[str, list[str]] = {}
-
-    def receiver_of(fn: Node | None, attr_name: str) -> str | None:
-        if fn is None or fn.type != "attribute":
-            return None
-        attr, obj = fn.child_by_field_name("attribute"), fn.child_by_field_name("object")
-        if attr is None or obj is None or node_text(attr, source) != attr_name:
-            return None
-        return node_text(obj, source)
-
-    def walk(node: Node) -> None:
-        for child in node.named_children:
-            if child.type == "decorated_definition":
-                fdef = next((c for c in child.named_children if c.type == "function_definition"), None)
-                for dec in (c for c in child.named_children if c.type == "decorator"):
-                    call = dec.named_children[0] if dec.named_children else None
-                    app = receiver_of(call.child_by_field_name("function"), "middleware") \
-                        if call is not None and call.type == "call" else None
-                    if app is not None and fdef is not None:
-                        out.setdefault(app, []).append(_name(fdef, source))
-            elif child.type == "call":
-                app = receiver_of(child.child_by_field_name("function"), "add_middleware")
-                args = child.child_by_field_name("arguments")
-                first = next((a for a in args.named_children if a.type != "keyword_argument"), None) \
-                    if args is not None else None
-                if app is not None and first is not None and first.type in ("identifier", "attribute"):
-                    out.setdefault(app, []).append(node_text(first, source))
-            walk(child)
-
-    walk(root)
-    return out
 
 
 def _router_bases(
@@ -284,14 +186,47 @@ def _routes(dec: Node, fdef: Node, source: bytes, path: str, class_name: str | N
     ]
 
 
-def detect_routes(root: Node, source: bytes, path: str, *, seen_ids: set[str]) -> list[Statement]:
-    """Walk the tree (tracking the enclosing class) and emit route statements."""
+def _from_index(
+    index: object | None, path: str
+) -> tuple[dict[str, str | object], dict[str, list[str]], dict[str, str], dict[str, list[str]]] | None:
+    """This file's router wiring from the repo index (``PythonIndex``), which also follows
+    ``include_router`` across files: (bases, inherited guards, roots, middleware by root).
+    A root in another file is keyed ``file::var`` so it never collides with a local name. None
+    when there is no index or it has no entry for this file."""
+    wiring = getattr(index, "fastapi_wiring", None)
+    mine = wiring.get(path) if isinstance(wiring, dict) else None
+    if not mine:
+        return None
+    all_middleware = getattr(index, "fastapi_middleware", None) or {}
+    bases: dict[str, str | object] = {}
+    guards: dict[str, list[str]] = {}
+    roots: dict[str, str] = {}
+    middleware: dict[str, list[str]] = {}
+    for var, (served, deps, (top_file, top_var)) in mine.items():
+        bases[var] = _UNKNOWN if served is None else served
+        guards[var] = list(deps)
+        key = top_var if top_file == path else f"{top_file}::{top_var}"
+        roots[var] = key
+        middleware[key] = list(all_middleware.get(top_file, {}).get(top_var, []))
+    return bases, guards, roots, middleware
+
+
+def detect_routes(
+    root: Node, source: bytes, path: str, *, seen_ids: set[str], index: object | None = None
+) -> list[Statement]:
+    """Walk the tree (tracking the enclosing class) and emit route statements. ``index`` is the
+    Python repo index: when given, router wiring comes from it (it also follows
+    ``include_router`` across files); without it, only this file's wiring is seen."""
     routes: list[Statement] = []
-    bases, router_guards, roots = (
-        _router_bases(root, source) if b"APIRouter" in source or b"FastAPI(" in source
-        else ({}, {}, {})
-    )
-    middleware = _app_middleware(root, source) if b"middleware" in source else {}
+    from_index = _from_index(index, path)
+    if from_index is not None:
+        bases, router_guards, roots, middleware = from_index
+    else:
+        bases, router_guards, roots = (
+            _router_bases(root, source) if b"APIRouter" in source or b"FastAPI(" in source
+            else ({}, {}, {})
+        )
+        middleware = _app_middleware(root, source) if b"middleware" in source else {}
 
     def walk(node: Node, class_name: str | None) -> None:
         for child in node.named_children:

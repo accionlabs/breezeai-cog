@@ -240,3 +240,54 @@ def test_app_middleware_guards_every_route_of_the_app(analyze_files) -> None:
         # a router not included in this file: coverage uncertain → no app middleware
         "x": (None, None),
     }
+
+
+# ── Cross-file include_router (Python repo index) ─────────────────────────────────────────────
+def test_include_router_from_another_file(analyze_files) -> None:
+    st = analyze_files({
+        "app/__init__.py": "",
+        "app/config.py": 'API_PREFIX = "/api/v1"\n',
+        "app/routers/__init__.py": "",
+        "app/routers/orders.py": (
+            "from fastapi import APIRouter, Depends\n"
+            "router = APIRouter(prefix='/orders', dependencies=[Depends(auth)])\n\n"
+            "@router.get('/{oid}')\ndef get_order(oid: int):\n    pass\n"
+        ),
+        "app/routers/users.py": (
+            "from fastapi import APIRouter\nrouter = APIRouter(prefix='/users')\n\n"
+            "@router.get('/')\ndef list_users():\n    pass\n"
+        ),
+        "app/main.py": (
+            "from fastapi import FastAPI, APIRouter, Depends\n"
+            "from fastapi.middleware.cors import CORSMiddleware\n"
+            "from app.config import API_PREFIX\n"
+            "from app.routers import orders\n"
+            "from .routers.users import router as users_router\n"
+            "from app.settings import settings\n"
+            "app = FastAPI()\napp.add_middleware(CORSMiddleware)\n"
+            "api = APIRouter(prefix=API_PREFIX)\n"
+            "api.include_router(orders.router, dependencies=[Depends(audit)])\n"
+            "app.include_router(api)\n"
+            "app.include_router(users_router, prefix=settings.USERS_PREFIX)\n"
+        ),
+    })
+    got = {s.handler: (s.endpoint, s.guards, s.authRequired)
+           for s in st if s.semanticType == "route"}
+    # imported constant + nested include across files; guards: app middleware, mount, own
+    assert got["get_order"] == ("/api/v1/orders/{oid}", ["CORSMiddleware", "audit", "auth"], True)
+    # a settings attribute is not resolved (the environment can override it) → address unknown
+    assert got["list_users"] == (None, ["CORSMiddleware"], None)
+
+
+def test_router_included_twice_keeps_its_own_path(analyze_files) -> None:
+    st = analyze_files({
+        "items.py": (
+            "from fastapi import APIRouter\nrouter = APIRouter(prefix='/items')\n\n"
+            "@router.get('/')\ndef list_items():\n    pass\n"
+        ),
+        "v1.py": "from fastapi import FastAPI\nimport items as it\napp = FastAPI()\n"
+                 "app.include_router(it.router, prefix='/v1')\n",
+        "v2.py": "from fastapi import FastAPI\nfrom items import router\napp = FastAPI()\n"
+                 "app.include_router(router, prefix='/v2')\n",
+    })
+    assert [s.endpoint for s in st if s.semanticType == "route"] == ["/items/"]

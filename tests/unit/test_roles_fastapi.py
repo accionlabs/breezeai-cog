@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import pytest
 
 EP = {"route", "eventbus_consumer", "timer"}
 
@@ -73,9 +72,6 @@ def test_router_prefix_is_wiring(analyze_files) -> None:
     _one(st, "POST", "/users/")
 
 
-@pytest.mark.xfail(
-    strict=True, reason="include_router(prefix=...) in another file not joined into the endpoint"
-)
 def test_include_router_is_wiring(analyze_files) -> None:
     st = analyze_files(
         {

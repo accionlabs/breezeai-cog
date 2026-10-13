@@ -94,10 +94,10 @@ What each index holds:
 | VB | class heritage (base class + attributes) | inherited controller routes |
 | TypeScript / JavaScript | `tsconfig`/`jsconfig` path aliases (per config scope); constant values; class heritage; Angular and Express route mounts | aliased imports, inherited calls, route prefixes |
 | C++ | header basename → file; free functions; `Class::method`; `Class::field` types; heritage | `#include`, calls |
-| Ruby | ActiveRecord model names | recognising DB calls |
+| Ruby | ActiveRecord model names; controller `before_action` callbacks | recognising DB calls; Rails route guards |
 | HCL / Terraform | folder → `.tf` files | local `module` sources |
 | HTML | template → owning component | linking templates to components |
-| Python | *(no index)* | — |
+| Python | FastAPI wiring: `APIRouter` variables (own prefix, dependencies), `include_router` sites (also routers imported from other files), app middleware, module-level string constants used as prefixes | route prefixes and guards of routers mounted in another file |
 
 > **Decision —** indexes are built once, before parsing, and are read-only afterwards.
 > **Why:** workers share nothing, so files can be parsed in any order and in parallel, with the
@@ -318,6 +318,7 @@ Some frameworks build a route from pieces in several files. These use the index 
 |---|---|---|
 | Express | `app.use("/api", router)` in one file + `router.get("/orders")` in another → `/api/orders`. The router is a factory call (`usersRouter()`) or an imported `Router()` instance — kept only when the router's file confirms it exports a `Router()`, so an imported middleware is never a prefix. A router mounted at two bases keeps its own path | TypeScript index: Express mounts |
 | Angular | lazy-loaded child routes under a parent path | TypeScript index: route mounts |
+| FastAPI | `app.include_router(orders.router, prefix="/api")` in one file + `router = APIRouter(prefix="/orders")` in another → `/api/orders/…`. A constant prefix (`API_PREFIX = "/v1"`) is resolved; a settings attribute is not (the environment can override it) → endpoint empty. A router included at two places keeps its own path | Python index: FastAPI wiring |
 | ASP.NET | base controller route prefix + action route | heritage ([§6](#6-inheritance-heritage)) |
 | WebForms | `MapPageRoute` URL → `.aspx` page | C# index: page routes |
 | Terraform | local `module` source → the `.tf` files it loads | HCL index |
