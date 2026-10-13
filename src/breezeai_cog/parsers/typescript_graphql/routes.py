@@ -45,8 +45,9 @@ import re
 from tree_sitter import Node
 
 from ...emit import disambiguate, file_id, statement_id
-from ...schemas import Class, FileRecord, Statement
-from ..additive import DetectContext, Detector, Gate, register_detector
+from ...schemas import Class, Statement
+from ..additive import DetectContext, Detection, Detector, Gate, register_detector
+from ..emits import Emit
 from ..graphql.sdl import base_type_name, child_of_type, extract_graphql
 from ..treesitter import first_line, node_text, parse_source
 
@@ -340,8 +341,7 @@ def _emit_client_ops(
     row_base: int,
     col_base: int,
     path: str,
-    seen: set[str],
-    routes: list[Statement],
+    routes: list[Emit],
 ) -> None:
     op_name_node = child_of_type(op_def, "name")
     op_name = node_text(op_name_node, sdl) if op_name_node is not None else None
@@ -352,32 +352,30 @@ def _emit_client_ops(
         # Column only shifts on the template's first row (body starts after the backtick);
         # later rows begin at column 0 within the body.
         col = name.start_point[1] + (col_base if name.start_point[0] == 0 else 0)
-        routes.append(
-            Statement(
-                id=disambiguate(statement_id(path, line, col), seen),
-                parentId=file_id(path),
-                nodeType="synthetic",
-                semanticType="api_call",
-                text=first_line(node_text(field, sdl))[:120],
-                method=kind.upper(),
+        # The field sits in the template's own GraphQL tree, so its span is given in TS terms.
+        routes.append(Emit(
+            field,
+            {
+                "semanticType": "api_call",
+                "method": kind.upper(),
                 # endpoint = invoked API field (joins to a server route); operation name is the
                 # client-side label, kept in handler.
-                endpoint=node_text(name, source=sdl),
-                framework="graphql",
-                routeKind=kind,
-                handler=op_name,
-                requestDTO=request_dto,
-                startLine=line,
-                endLine=row_base + field.end_point[0] + 1,
-                path=path,
-            )
-        )
+                "endpoint": node_text(name, source=sdl),
+                "framework": "graphql",
+                "routeKind": kind,
+                "handler": op_name,
+                "requestDTO": request_dto,
+            },
+            parent=file_id(path), node_type="synthetic",
+            text=first_line(node_text(field, sdl))[:120],
+            line=line, col=col, end_line=row_base + field.end_point[0] + 1,
+        ))
 
 
 def _detect_client_ops(
-    root: Node, source: bytes, path: str, seen: set[str], timeout_micros: int
-) -> list[Statement]:
-    routes: list[Statement] = []
+    root: Node, source: bytes, path: str, timeout_micros: int
+) -> list[Emit]:
+    routes: list[Emit] = []
 
     def walk(n: Node) -> None:
         # Walk whole ``template_string`` nodes, NOT individual ``string_fragment`` children:
@@ -405,7 +403,7 @@ def _detect_client_ops(
                         # operation_type may be omitted for a shorthand anonymous query (``{ … }``)
                         kind = _OP_KINDS.get(node_text(ot, body)) if ot is not None else "query"
                         if kind is not None:
-                            _emit_client_ops(g, kind, body, row_base, col_base, path, seen, routes)
+                            _emit_client_ops(g, kind, body, row_base, col_base, path, routes)
                     for c in g.named_children:
                         gwalk(c)
 
@@ -444,27 +442,21 @@ def detect_graphql(
 # on resolver-maps / server SDL). So expose the client pass as an additive detector, run for
 # every TS file from ``TypeScriptParser.extract`` (like ``detect_express``/``detect_sdk_calls``).
 def detect_graphql_client(
-    root: Node, source: bytes, path: str, record: FileRecord, timeout_micros: int = 0
-) -> bool:
-    """Add client-side GraphQL operation statements (``gql`` tagged templates) to ``record``.
-    Returns True if any were found. Cheap byte-guard first so non-GraphQL files skip the walk."""
+    root: Node, source: bytes, path: str, timeout_micros: int = 0
+) -> list[Emit]:
+    """Client-side GraphQL operation statements (``gql`` tagged templates). Cheap byte-guard
+    first so non-GraphQL files skip the walk."""
     if not any(m in source for m in (b"gql`", b"graphql`", b"gql(", b"graphql(")):
-        return False
-    routes = _detect_client_ops(
-        root, source, path, {s.id for s in record.statements}, timeout_micros
-    )
-    record.statements.extend(routes)
-    return bool(routes)
+        return []
+    return _detect_client_ops(root, source, path, timeout_micros)
 
 
-def _run(dc: DetectContext) -> str | None:
-    matched = detect_graphql_client(
-        dc.root, dc.source, dc.path, dc.record, dc.ctx.parse_timeout_micros
-    )
-    return "graphql" if matched else None
+def _detect(dc: DetectContext) -> Detection | None:
+    ops = detect_graphql_client(dc.root, dc.source, dc.path, dc.ctx.parse_timeout_micros)
+    return Detection(ops, label="graphql") if ops else None
 
 
 register_detector(Detector(
-    name="graphql-client", gate=Gate("typescript", order=40, skip_fixtures=True), run=_run,
-    frameworks=("graphql",),
+    name="graphql-client", gate=Gate("typescript", order=40, skip_fixtures=True),
+    detect=_detect, frameworks=("graphql",),
 ))
