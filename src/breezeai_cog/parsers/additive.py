@@ -26,8 +26,7 @@ ascending ``order``.
 :class:`~.emits.Emit` values and an optional file-level framework label. The runner applies the
 emits with :func:`~.emits.apply`, which owns the shared output rules (enrich in place or append,
 statement ids, parents), and sets the label only while ``record.framework`` is still ``None``.
-A detector not yet moved to ``detect`` sets ``run`` instead, which mutates the record itself
-and returns the label. Exactly one of the two is set.
+A detector never edits the record itself.
 
 **Facts from other files.** Some detections need a fact that lives in *another* file: a class
 is a GraphQL root only because the composition root registers it (``AddQueryType<BookQueries>()``).
@@ -129,10 +128,7 @@ class Detector:
     name: str
     gate: Gate
     #: Find the file's statements; the runner applies them. ``None`` = nothing found.
-    detect: Callable[[DetectContext], Detection | None] | None = None
-    #: Not yet moved to ``detect``: enrich/append on ``dc.record`` directly and return a
-    #: file-level framework label or None.
-    run: Callable[[DetectContext], str | None] | None = None
+    detect: Callable[[DetectContext], Detection | None]
     #: Framework labels this detector can emit (statement or file level), for ``capabilities``.
     frameworks: tuple[str, ...] = ()
 
@@ -182,8 +178,6 @@ def register_detector(detector: Detector) -> Detector:
             f"detector {detector.name!r}: language {detector.language!r} has no additive "
             f"hook (one of {sorted(HOOKED_LANGUAGES)})"
         )
-    if (detector.detect is None) == (detector.run is None):
-        raise RegistryError(f"detector {detector.name!r}: set exactly one of detect and run")
     existing = _DETECTORS.setdefault(detector.language, [])
     for other in existing:
         if other.name == detector.name:
@@ -335,16 +329,12 @@ def run_additive(
     for detector in detectors_for(language):
         if not detector.gate.admits(ctx.source, is_fixture=is_fixture):
             continue
-        if detector.detect is not None:
-            found = detector.detect(dc)
-            if found is None:
-                continue
-            apply(record, found.emits, ctx.source, ctx.path)
-            label = found.label
-        else:
-            label = detector.run(dc)  # type: ignore[misc]
-        if label and record.framework is None:
-            record.framework = label
+        found = detector.detect(dc)
+        if found is None:
+            continue
+        apply(record, found.emits, ctx.source, ctx.path)
+        if found.label and record.framework is None:
+            record.framework = found.label
 
 
 def collect_additive(

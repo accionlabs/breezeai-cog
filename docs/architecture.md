@@ -477,7 +477,9 @@ classDiagram
 > fails the role tests; a missing handler is counted as a gap, because an honest empty value is
 > allowed. **Cost:** a detector can no longer read back what it wrote earlier in the same run; the
 > validator runs only in tests, golden comparisons and under `--verbose`, never on normal output.
-> Detectors move to `detect` one per commit, byte-identical; until then `run` keeps working.
+> Every detector and framework parser writes through `apply`; the framework parsers that read text
+> rather than a syntax tree and build a record of their own (Play `conf/routes`, the `.svc` /
+> `.asmx` ServiceHost directive, Web Forms markup) build it directly.
 
 > **Decision —** API, database and query detection is shared across languages (`parsers/detection/`).
 > **Why:** "is `axios.get` an HTTP call?" has the same answer everywhere; one table, improved

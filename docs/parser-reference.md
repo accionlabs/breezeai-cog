@@ -407,8 +407,7 @@ register_detector(Detector(
   - An appended statement's id is `path:line:col`, disambiguated (`#2`) in emit order; its parent
     is `parent`, else the smallest function on the line, else the file. `text`, `node_type`,
     `line`, `col` and `end_line` override what the node gives.
-- A detector not yet moved to `detect` sets `run` instead: it mutates `dc.record` and returns
-  the label. Exactly one of `detect` and `run` is set; checked at registration.
+- A detector never edits `dc.record` itself: everything it finds is an `Emit`.
 - The base language parser's `extract` ends with `run_additive(<language>, …)`; discovery
   imports every module under `parsers/` containing `register_detector(` or `register_fact(`, in
   each worker.

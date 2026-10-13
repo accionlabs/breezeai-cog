@@ -74,17 +74,17 @@ def test_hooked_language_parsers_call_the_runner(language: str, parser_file: str
 
 def test_unhooked_language_rejected(isolated) -> None:
     with pytest.raises(RegistryError, match="no additive hook"):
-        register_detector(Detector(name="x", gate=Gate("c#", order=999), run=lambda dc: None))
+        register_detector(Detector(name="x", gate=Gate("c#", order=999), detect=lambda dc: None))
 
 
 def test_duplicate_order_rejected(isolated) -> None:
     with pytest.raises(RegistryError, match="order 10 already used"):
-        register_detector(Detector(name="x", gate=Gate("csharp", order=10), run=lambda dc: None))
+        register_detector(Detector(name="x", gate=Gate("csharp", order=10), detect=lambda dc: None))
 
 
 def test_reregistering_same_name_is_idempotent(isolated) -> None:
     before = [d.name for d in isolated["csharp"]]
-    register_detector(Detector(name="lucene", gate=Gate("csharp", order=999), run=lambda dc: None))
+    register_detector(Detector(name="lucene", gate=Gate("csharp", order=999), detect=lambda dc: None))
     assert [d.name for d in isolated["csharp"]] == before
 
 
@@ -92,7 +92,7 @@ def _probe(isolated, **kw) -> list[str]:
     calls: list[str] = []
     isolated["typescript"] = [
         Detector(name="probe", gate=Gate("typescript", order=1, **kw),
-                 run=lambda dc: calls.append(dc.path))
+                 detect=lambda dc: calls.append(dc.path))
     ]
     return calls
 
@@ -122,7 +122,8 @@ def test_runner_applies_byte_guard(isolated) -> None:
 
 def test_label_only_fills_an_empty_framework(isolated) -> None:
     isolated["typescript"] = [
-        Detector(name="probe", gate=Gate("typescript", order=1), run=lambda dc: "kafka")
+        Detector(name="probe", gate=Gate("typescript", order=1),
+                 detect=lambda dc: Detection([], label="kafka"))
     ]
     record = _record()
     run_additive("typescript", None, _ctx(b"x"), record, is_fixture=False)
@@ -166,16 +167,6 @@ def test_gate_admits() -> None:
     assert not gate.admits(b"plain", is_fixture=False)
     assert not gate.admits(b"import 'kafkajs'", is_fixture=True)
     assert Gate("typescript", order=1).admits(b"plain", is_fixture=True)
-
-
-def test_detector_sets_exactly_one_of_detect_and_run(isolated) -> None:
-    with pytest.raises(RegistryError, match="exactly one of detect and run"):
-        register_detector(Detector(name="x", gate=Gate("csharp", order=999)))
-    with pytest.raises(RegistryError, match="exactly one of detect and run"):
-        register_detector(Detector(
-            name="x", gate=Gate("csharp", order=999),
-            detect=lambda dc: None, run=lambda dc: None,
-        ))
 
 
 def test_detection_is_applied_and_labels_the_file(isolated) -> None:
