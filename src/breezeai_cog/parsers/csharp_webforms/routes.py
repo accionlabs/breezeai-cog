@@ -21,9 +21,12 @@ markup pass and intentionally out of scope here."""
 
 from __future__ import annotations
 
-from ...emit import disambiguate, file_id, statement_id
-from ...schemas import Class, FileRecord, Function, Statement
+from tree_sitter import Node
+
+from ...emit import file_id
+from ...schemas import Class, FileRecord, Function
 from ..dotnet_common import simple_attr_name
+from ..emits import Emit
 
 #: code-behind suffix → (routeKind, nodeType). nodeType is the shared ``synthetic`` sentinel
 #: (no backing AST node — the markup isn't parsed); the page/control distinction lives in routeKind.
@@ -47,12 +50,14 @@ def _page_class(record: FileRecord, path: str) -> Class | None:
 
 
 def detect_webforms_pages(
-    record: FileRecord, path: str, page_routes: dict[str, list[str]] | None = None
-) -> list[Statement]:
-    """Emit file-parented ``route`` statement(s) for a Web Forms page. Returns ``[]`` for
-    anything else (a user control, a ``.master.cs``, a plain base-class file).
+    record: FileRecord, root: Node, path: str, page_routes: dict[str, list[str]] | None = None
+) -> list[Emit]:
+    """File-parented ``route`` record(s) for a Web Forms page, for :func:`~..emits.apply` —
+    read off the record and the path, so the file's root stands in for a node and the span is
+    set explicitly. Returns ``[]`` for anything else (a user control, a ``.master.cs``, a plain
+    base-class file).
 
-    When ``page_routes`` (from the C# index) maps this page's physical ``.aspx`` to friendly
+    When ``page_routes`` (the ``webforms.page-routes`` fact) maps this page's physical ``.aspx`` to friendly
     ``MapPageRoute`` URLs, the endpoint is **enriched** with the real routed URL(s) — one
     route per URL — instead of the physical path (BREEZEAI-765 item 2); otherwise a single
     physical-path route is emitted, as before."""
@@ -63,22 +68,17 @@ def detect_webforms_pages(
     cls = _page_class(record, path)
     start = cls.startLine if cls is not None else 1
     end = cls.endLine if cls is not None else 1
-    seen = {s.id for s in record.statements}
 
     # friendly MapPageRoute URLs win over the physical .aspx path (page routeKind only —
     # a mount/control isn't page-routed). Key is the physical .aspx repo path (path − ".cs").
     friendly = (page_routes or {}).get(path[: -len(".cs")]) if route_kind == "page" else None
     endpoints = [f"/{u.lstrip('/')}" for u in friendly] if friendly else [_endpoint(path)]
 
-    out: list[Statement] = []
+    out: list[Emit] = []
     for endpoint in endpoints:
         out.append(
-            Statement(
-                id=disambiguate(statement_id(path, start, 0), seen),
-                parentId=file_id(path),
-                nodeType=node_type,
+            Emit(root, dict(
                 semanticType="route",
-                text=path.rsplit("/", 1)[-1],
                 method="GET",
                 endpoint=endpoint,
                 framework="aspnet-webforms",
@@ -87,13 +87,11 @@ def detect_webforms_pages(
                 # the page class is the handler: GET and every postback share the page URL,
                 # the event handler is chosen by form data (decision Q6)
                 handlerLine=start if cls is not None and route_kind == "page" else None,
-                startLine=start,
-                endLine=end,
-                path=path,
-            )
+            ), parent=file_id(path), node_type=node_type, text=path.rsplit("/", 1)[-1],
+                line=start, col=0, end_line=end)
         )
     if route_kind == "page" and cls is not None:
-        out += _page_methods(record, path, cls, endpoints, seen)
+        out += _page_methods(record, root, cls, endpoints)
     return out
 
 
@@ -102,12 +100,12 @@ _PAGE_METHOD_ATTRS = frozenset({"WebMethod", "ScriptMethod"})
 
 
 def _page_methods(
-    record: FileRecord, path: str, cls: Class, endpoints: list[str], seen: set[str]
-) -> list[Statement]:
+    record: FileRecord, root: Node, cls: Class, endpoints: list[str],
+) -> list[Emit]:
     """A static ``[WebMethod]`` on a page class is an ASP.NET AJAX *page method*: its own entry
     point, called with ``POST <page URL>/<Method>`` (JSON). One binding per page URL; the
     handler is the method itself (handlerLine its declaration, attributes included)."""
-    out: list[Statement] = []
+    out: list[Emit] = []
     methods: list[Function] = [
         fn for fn in record.functions
         if fn.parentId == cls.id and fn.isStatic
@@ -115,20 +113,14 @@ def _page_methods(
     ]
     for fn in methods:
         for endpoint in endpoints:
-            out.append(Statement(
-                id=disambiguate(statement_id(path, fn.startLine, 0), seen),
-                parentId=fn.id,
-                nodeType="synthetic",
+            out.append(Emit(root, dict(
                 semanticType="route",
-                text=f"[WebMethod] {cls.name}.{fn.name}",
                 method="POST",
                 endpoint=f"{endpoint.rstrip('/')}/{fn.name}" if endpoint else None,
                 framework="aspnet-webforms",
                 routeKind="route",
                 handler=fn.name,
                 handlerLine=fn.startLine,
-                startLine=fn.startLine,
-                endLine=fn.endLine,
-                path=path,
-            ))
+            ), parent=fn.id, node_type="synthetic", text=f"[WebMethod] {cls.name}.{fn.name}",
+                line=fn.startLine, col=0, end_line=fn.endLine))
     return out

@@ -13,6 +13,9 @@ from breezeai_cog.emit import to_line
 from breezeai_cog.parsers.base import ParseContext
 from breezeai_cog.parsers.csharp.parser import CSharpParser
 from breezeai_cog.parsers.csharp_aspnet.parser import AspNetCoreParser
+from breezeai_cog.parsers.csharp_webforms.page_routes import page_routes
+from breezeai_cog.parsers.emits import apply
+from breezeai_cog.parsers.treesitter import parse_source
 from breezeai_cog.parsers.csharp_webforms.parser import WebFormsParser
 from breezeai_cog.parsers.csharp_webforms.routes import (
     detect_webforms_pages,
@@ -228,7 +231,7 @@ def _page_routes(*cs_sources: bytes) -> dict[str, list[str]]:
             p.parent.mkdir(parents=True, exist_ok=True)
             p.write_bytes(src)
             files.append(p)
-        return build_csharp_index(root, files).page_routes
+        return page_routes(build_csharp_index(root, files))
 
 
 ROUTECFG = b"""
@@ -275,7 +278,7 @@ namespace Acme {
         cfg = app / "App_Start" / "RouteConfig.cs"
         cfg.parent.mkdir(parents=True)
         cfg.write_bytes(src)
-        pr = build_csharp_index(root, [cfg]).page_routes
+        pr = page_routes(build_csharp_index(root, [cfg]))
     # Key must include the full subdir prefix so it matches
     # "SplendidCRM-CE/App/CMS/Enrollment.aspx.cs"[:-len(".cs")]
     assert pr == {"SplendidCRM-CE/App/CMS/Enrollment.aspx": ["enroll/{id}"]}
@@ -302,11 +305,17 @@ namespace X { class C { void R(System.Web.Routing.RouteCollection routes, string
     assert _page_routes(src) == {}
 
 
+def _pages(rec, path: str, page_routes_: dict[str, list[str]]) -> list:
+    """The records ``detect_webforms_pages`` writes onto ``rec`` (through ``apply``)."""
+    root = parse_source("csharp", b"", 0).root_node  # stands in for the node, as in the parser
+    before = len(rec.statements)
+    apply(rec, detect_webforms_pages(rec, root, path, page_routes_), b"", path)
+    return rec.statements[before:]
+
+
 def test_page_route_uses_friendly_url() -> None:
     rec = _parse(WebFormsParser(), PAGE, "CMS/Enrollment.aspx.cs")
-    routes = detect_webforms_pages(
-        rec, "CMS/Enrollment.aspx.cs", {"CMS/Enrollment.aspx": ["enroll/{id}"]}
-    )
+    routes = _pages(rec, "CMS/Enrollment.aspx.cs", {"CMS/Enrollment.aspx": ["enroll/{id}"]})
     assert len(routes) == 1
     assert routes[0].endpoint == "/enroll/{id}"  # friendly, not /CMS/Enrollment.aspx
     assert routes[0].routeKind == "page"
@@ -334,18 +343,18 @@ namespace Acme {
     cfg = app / "App_Start" / "RouteConfig.cs"
     cfg.parent.mkdir(parents=True)
     cfg.write_bytes(route_src)
-    pr = build_csharp_index(tmp_path, [cfg]).page_routes
+    pr = page_routes(build_csharp_index(tmp_path, [cfg]))
 
     # Now simulate detect_webforms_pages for the code-behind at the full repo-relative path.
     page_path = "SplendidCRM-CE/App/CMS/Enrollment.aspx.cs"
     rec = _parse(WebFormsParser(), PAGE, page_path)
-    routes = detect_webforms_pages(rec, page_path, pr)
+    routes = _pages(rec, page_path, pr)
     assert len(routes) == 1
     assert routes[0].endpoint == "/enroll/{id}"
 
 
 def test_page_route_multiple_friendly_urls() -> None:
-    routes = detect_webforms_pages(
+    routes = _pages(
         _parse(WebFormsParser(), PAGE, "P.aspx.cs"), "P.aspx.cs", {"P.aspx": ["a/{id}", "b/{id}"]}
     )
     assert sorted(r.endpoint for r in routes) == ["/a/{id}", "/b/{id}"]
@@ -353,7 +362,7 @@ def test_page_route_multiple_friendly_urls() -> None:
 
 
 def test_page_route_physical_fallback_without_mapping() -> None:
-    routes = detect_webforms_pages(
+    routes = _pages(
         _parse(WebFormsParser(), PAGE, "CMS/Enrollment.aspx.cs"),
         "CMS/Enrollment.aspx.cs",
         {"Other.aspx": ["x"]},
@@ -363,7 +372,7 @@ def test_page_route_physical_fallback_without_mapping() -> None:
 
 def test_control_not_friendly_routed() -> None:
     # A control never becomes a route, even if a MapPageRoute URL keys its path.
-    routes = detect_webforms_pages(
+    routes = _pages(
         _parse(WebFormsParser(), CONTROL, "Ctrl.ascx.cs"),
         "Ctrl.ascx.cs",
         {"Ctrl.ascx": ["should/not/apply"]},

@@ -19,6 +19,7 @@ from ...schemas import FileRecord
 from ...utils import count_loc
 from ..base import ParseContext
 from ..csharp.parser import CSharpParser
+from ..emits import apply
 from ..treesitter import parse_source
 from .markup import (
     collect_markup_statements,
@@ -28,6 +29,7 @@ from .markup import (
 )
 from .mounts import master_codebehind, read_sibling_markup, resolve_master, resolve_mounts
 from .navigation import detect_navigation
+from .page_routes import page_routes
 from .routes import detect_webforms_pages
 
 #: Web Forms code-behind imports System.Web.UI (Page/UserControl) — NOT the MVC/Core
@@ -103,16 +105,16 @@ class WebFormsParser(CSharpParser):
         markup = read_sibling_markup(ctx.abs_path)  # read once — shared by all markup passes
         master_ep = resolve_master(markup, ctx.path, ctx.repo_root)  # → the master import edge
         if ctx.capture_statements:  # routes are statements — gated (spec A4)
-            page_routes = getattr(ctx.resolution_index, "page_routes", None)
-            routes = detect_webforms_pages(record, ctx.path, page_routes)
-            record.statements.extend(routes)
+            routes = detect_webforms_pages(
+                record, root, ctx.path, page_routes(ctx.resolution_index))
+            apply(record, routes, ctx.source, ctx.path)
             # A page, a user control, or a file composed into a master page is Web Forms code.
             if routes or master_ep is not None or ctx.path.endswith(".ascx.cs"):
                 record.framework = "aspnet-webforms"
             # Page→page navigation → navigation statements (item 4).
             nav = detect_navigation(record, ctx.path, root, ctx.source, markup, ctx.repo_root)
             if nav:
-                record.statements.extend(nav)
+                apply(record, nav, ctx.source, ctx.path)
                 record.framework = "aspnet-webforms"
         # Cross-file IMPORTS edges (core field, NOT statement-gated): host→control mounts +
         # page→master composition. Deduped against existing imports, sorted for determinism.
