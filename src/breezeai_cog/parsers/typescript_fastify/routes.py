@@ -574,9 +574,6 @@ def detect_fastify_routes(
         existing.guards = route.guards
         enriched_ids.add(existing.id)
 
-    if enriched_ids and record.framework is None:
-        record.framework = "fastify"
-
     return unmatched
 
 
