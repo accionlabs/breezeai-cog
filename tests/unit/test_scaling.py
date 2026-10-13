@@ -102,12 +102,58 @@ def _csharp(n: int) -> str:
     return f"namespace A;\npublic class C {{\n{body}}}\n"
 
 
+def _xsd(n: int) -> str:
+    body = "".join(
+        f"  <!-- field {i} -->\n"
+        f'  <xs:element name="f{i}" type="xs:string"/>\n'
+        for i in range(n)
+    )
+    return (
+        '<?xml version="1.0"?>\n'
+        '<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema">\n'
+        f"{body}"
+        "</xs:schema>\n"
+    )
+
+
+def _wsdl(n: int) -> str:
+    messages = "".join(
+        f'  <wsdl:message name="M{i}Request"/>\n  <wsdl:message name="M{i}Response"/>\n'
+        for i in range(n)
+    )
+    operations = "".join(
+        f"    <!-- op {i} -->\n"
+        f'    <wsdl:operation name="Op{i}">\n'
+        f'      <wsdl:input message="tns:M{i}Request"/>\n'
+        f'      <wsdl:output message="tns:M{i}Response"/>\n'
+        f"    </wsdl:operation>\n"
+        for i in range(n)
+    )
+    return (
+        '<?xml version="1.0"?>\n'
+        '<wsdl:definitions xmlns:tns="urn:x" xmlns:wsdl="http://schemas.xmlsoap.org/wsdl/">\n'
+        f"{messages}"
+        '  <wsdl:portType name="Port">\n'
+        f"{operations}"
+        "  </wsdl:portType>\n"
+        "</wsdl:definitions>\n"
+    )
+
+
+def _jslt(n: int) -> str:
+    body = "".join(f"// doc for f{i}\ndef f{i}(x)\n  x + {i} // note\n\n" for i in range(n))
+    return f"{body}f0(1)\n"
+
+
 SAMPLES: dict[str, tuple[str, Callable[[int], str]]] = {
     "java-vertx": ("V.java", _java_vertx),
     "groovy-vertx": ("Http.groovy", _groovy_vertx),
     "typescript-express-aws": ("app.ts", _ts_express_aws),
     "python": ("mod.py", _python),
     "csharp": ("C.cs", _csharp),
+    "xsd": ("schema.xsd", _xsd),
+    "wsdl": ("service.wsdl", _wsdl),
+    "jslt": ("transform.jslt", _jslt),
 }
 
 
