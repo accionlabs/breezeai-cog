@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import pytest
 
 EP = {"route", "eventbus_consumer", "timer"}
 SRC = "src/main/java/a/"
@@ -177,7 +176,6 @@ public class L {
     }
 
 
-@pytest.mark.xfail(strict=True, reason="@Scheduled jobs are not recorded as timer")
 def test_scheduled_is_binding(analyze_files) -> None:
     st = analyze_files(
         _java(
@@ -195,6 +193,25 @@ public class J {
     )
     got = {(r.semanticType, r.endpoint, r.handler) for r in _eps(st)}
     assert got == {("timer", "0 2 * * *", "nightly"), ("timer", "5000", "poll")}
+
+
+def test_scheduled_schedule_is_resolved_or_empty(analyze_files) -> None:
+    files = _java(
+        "J",
+        "import org.springframework.scheduling.annotation.Scheduled;",
+        """public class J {
+  static final String NIGHTLY = "0 3 * * *";
+  @Scheduled(cron = NIGHTLY)
+  @Scheduled(fixedDelayString = "${jobs.poll}")
+  public void twice() {}
+  @Scheduled(cron = "#{@cfg.cron}")
+  public void spel() {}
+}""",
+    )
+    files["src/main/resources/application.properties"] = "jobs.poll=30000\n"
+    got = sorted((r.endpoint or "", r.handler) for r in _eps(analyze_files(files)))
+    # The repeatable annotation gives two bindings; SpEL is unknown → empty, never the code.
+    assert got == [("", "spel"), ("0 3 * * *", "twice"), ("30000", "twice")]
 
 
 def test_method_security_is_guard(analyze_files) -> None:
