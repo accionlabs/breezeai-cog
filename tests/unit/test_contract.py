@@ -69,3 +69,9 @@ def test_consumers_and_timers_have_their_own_route_kinds() -> None:
     assert _rules(_route(semanticType="eventbus_consumer", routeKind=None, method=None)) == []
     assert _rules(_route(semanticType="eventbus_consumer", routeKind="message")) == []
     assert _rules(_route(semanticType="timer", routeKind="page")) == [("routeKind", "error")]
+
+
+def test_outbound_addresses_are_written_like_entry_points() -> None:
+    assert _rules(_route(semanticType="api_call", routeKind=None, endpoint="/users/{id}")) == []
+    assert _rules(_route(semanticType="navigation", endpoint="${BASE}/x")) == [("outbound", "error")]
+    assert _rules(_route(semanticType="eventbus_send", endpoint="")) == [("outbound", "error")]

@@ -28,6 +28,10 @@ Rule            Severity Violation
 ``guards``      error    an empty list, an empty name or a repeated name (§5)
 ``handler``     gap      neither ``handler`` nor ``handlerLine``, except for a URL served
                          by framework code (§4, §8 "every record leads to its handler")
+``outbound``    error    an outbound record (``api_call``, ``navigation``,
+                         ``eventbus_send`` / ``_publish``) whose ``endpoint`` is an empty
+                         string or a code placeholder — it must be written like the entry
+                         point it reaches (§6)
 =============== ======== =================================================================
 """
 
@@ -74,6 +78,18 @@ class Violation:
     detail: str
 
 
+#: Outbound semantic types: their address is written like the entry point they reach (§6).
+OUTBOUND_TYPES = frozenset({"api_call", "navigation", "eventbus_send", "eventbus_publish"})
+
+
+def _bad_address(endpoint: str | None) -> str | None:
+    if endpoint == "":
+        return "empty string; an unresolved address has no value"
+    if endpoint is not None and any(p in endpoint for p in _PLACEHOLDERS):
+        return endpoint
+    return None
+
+
 def is_entry_point(s: Statement) -> bool:
     return s.semanticType in ENTRY_POINT_TYPES and s.routeKind not in NOT_ENTRY_POINT_KINDS
 
@@ -91,10 +107,9 @@ def _check(s: Statement) -> list[tuple[str, str]]:
         found.append(("routeKind", repr(s.routeKind)))
     if not s.framework:
         found.append(("framework", "missing"))
-    if s.endpoint == "":
-        found.append(("endpoint", "empty string; an unresolved address has no value"))
-    elif s.endpoint is not None and any(p in s.endpoint for p in _PLACEHOLDERS):
-        found.append(("endpoint", s.endpoint))
+    bad = _bad_address(s.endpoint)
+    if bad is not None:
+        found.append(("endpoint", bad))
     if not s.handler and s.handlerLine is None and not _framework_served(s):
         found.append(("handler", "no handler and no handlerLine"))
     if s.guards is not None and (
@@ -109,6 +124,11 @@ def validate(record: FileRecord) -> list[Violation]:
     out: list[Violation] = []
     seen: Counter[tuple[int, str | None, str | None]] = Counter()
     for s in record.statements:
+        if s.semanticType in OUTBOUND_TYPES:
+            bad = _bad_address(s.endpoint)
+            if bad is not None:
+                out.append(Violation("outbound", "error", s.id, bad))
+            continue
         if not is_entry_point(s):
             continue
         out.extend(
