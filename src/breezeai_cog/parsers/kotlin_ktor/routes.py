@@ -237,6 +237,7 @@ def _collect_routes(
             captured.framework = "ktor"
             captured.method = verb.upper()
             captured.endpoint = full_endpoint
+            captured.routeKind = "route"
             captured.handlerLine = handler_line
             if guards:
                 captured.guards = list(guards)
@@ -254,6 +255,7 @@ def _collect_routes(
             method=verb.upper(),
             endpoint=full_endpoint,
             handlerLine=handler_line,
+            routeKind="route",
             guards=list(guards) or None,
             authRequired=True if guards else None,
             startLine=start_line,

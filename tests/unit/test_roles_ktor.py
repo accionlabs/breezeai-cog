@@ -39,7 +39,6 @@ def test_verb_in_routing_is_binding(analyze_files) -> None:
     )
 
 
-@pytest.mark.xfail(strict=True, reason="Ktor routes have no routeKind")
 def test_verb_in_routing_has_route_kind(analyze_files) -> None:
     st = analyze_files(
         _app("""    routing {
