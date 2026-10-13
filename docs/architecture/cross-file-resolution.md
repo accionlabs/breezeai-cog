@@ -90,7 +90,7 @@ What each index holds:
 |---|---|---|
 | Java, Groovy | fully-qualified class name → file; `Class.FIELD` → constant value | imports, same-package types, event addresses / route paths |
 | Kotlin, Scala | fully-qualified class name → file | imports, same-package types |
-| C# | type → files; global `using`s; project roots (`.csproj`), their MSBuild `using`s and project references; class heritage incl. methods; extension methods; page routes; **registered facts** (`index.facts`) | type resolution, inherited calls, extension calls, routes |
+| C# | type → files; global `using`s; project roots (`.csproj`), their MSBuild `using`s and project references; class heritage incl. methods; extension methods; page routes; implemented interfaces; **registered facts** (`index.facts`: HotChocolate registered roots, WCF `.svc` hosts — read from `.svc` files, which the ServiceHost parser owns) | type resolution, inherited calls, extension calls, routes |
 | VB | class heritage (base class + attributes) | inherited controller routes |
 | TypeScript / JavaScript | `tsconfig`/`jsconfig` path aliases (per config scope); constant values; class heritage; Angular route mounts; **registered facts** (`index.facts`: Express mounts `express.router-mounts`, NestJS stub parents `nest.stub-parents`) | aliased imports, inherited calls, route prefixes |
 | C++ | header basename → file; free functions; `Class::method`; `Class::field` types; heritage | `#include`, calls |
@@ -322,6 +322,7 @@ Some frameworks build a route from pieces in several files. These use the index 
 | ASP.NET | base controller route prefix + action route | heritage ([§6](#6-inheritance-heritage)) |
 | WebForms | `MapPageRoute` URL → `.aspx` page | C# index: page routes |
 | HotChocolate | `AddQueryType<BookQueries>()` in `Program.cs` → `BookQueries.cs` is a query root | registered fact ([below](#a-framework-fact-from-another-file-a-registered-fact)) |
+| WCF REST | `<%@ ServiceHost Service="Shop.OrderService" %>` in any `.svc` → the class's (or, for an interface contract, its one implementer's) `[WebGet]` operations are served under that `.svc` path. Matched by fully-qualified type name; a type named by two `.svc` files → no host | registered fact `wcf.svc-hosts`, collected from another parser's files (`FactSpec.sources`) |
 | Terraform | local `module` source → the `.tf` files it loads | HCL index |
 
 ### A framework fact from another file: a registered fact

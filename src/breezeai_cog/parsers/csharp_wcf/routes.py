@@ -20,8 +20,9 @@ import re
 from pathlib import Path
 
 from ...emit import disambiguate, statement_id
-from ...schemas import Decorator, FileRecord, Statement
+from ...schemas import Class, Decorator, FileRecord, Statement
 from ..dotnet_common import code_behind_host, response_dto, simple_attr_name
+from .svc_hosts import SVC_SERVICE_RE, svc_hosts
 
 _SERVICE_ATTR = "ServiceContract"
 _OP_ATTR = "OperationContract"
@@ -33,8 +34,6 @@ _GENERATED_ATTR = "GeneratedCode"  # svcutil-generated client proxy — NOT a se
 _HTTP_VERBS = {"GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS"}
 #: ``Class="Ns.Type"`` inside an ``.asmx`` ``<%@ WebService … %>`` directive.
 _ASMX_CLASS_RE = re.compile(rb'<%@\s*WebService\b[^%]*?\bClass\s*=\s*["\']([^"\']+)["\']', re.IGNORECASE)
-#: ``Service="Ns.Type"`` inside a ``.svc`` ``<%@ ServiceHost … %>`` directive.
-_SVC_SERVICE_RE = re.compile(rb'<%@\s*ServiceHost\b[^%]*?\bService\s*=\s*["\']([^"\']+)["\']', re.IGNORECASE)
 
 
 def _has_attr(decorators: list[Decorator], name: str) -> bool:
@@ -113,13 +112,30 @@ def _implementing_handler(
     return f"{simple}.{op}", line
 
 
+def _registered_host(cls: Class, path: str, index: object | None) -> str | None:
+    """The ``.svc`` serving ``cls`` from the repo's ``wcf.svc-hosts`` fact: a class by its own
+    type, an interface contract by its one implementing type (``index.implementers``)."""
+    hosts = svc_hosts(index)
+    if not hosts.by_fqn:
+        return None
+    if cls.type == "interface":
+        implementers = getattr(index, "implementers", None)
+        impl = implementers.get(cls.name) if isinstance(implementers, dict) else None
+        return hosts.host(impl)
+    types = getattr(index, "types", None)
+    fqns = [fqn for fqn, files in (types or {}).items()
+            if fqn.rsplit(".", 1)[-1] == cls.name and path in files] if isinstance(types, dict) else []
+    return hosts.host(fqns[0] if len(fqns) == 1 else None)
+
+
 def detect_wcf_services(
     record: FileRecord, repo_root: Path | None = None, index: object | None = None
 ) -> list[Statement]:
     """One ``route`` statement per ``[OperationContract]`` under a ``[ServiceContract]`` type
     (WCF / CoreWCF; tolerant of the full ``…Attribute`` form). A REST operation's endpoint is
-    its served address under the class's ``.svc`` (:func:`svc_host`), empty when that host is
-    not known — a bare ``UriTemplate`` or a service name is not an address. For a contract on an
+    its served address under the class's ``.svc`` (:func:`svc_host`, else the ``wcf.svc-hosts``
+    fact — a ``.svc`` anywhere naming the class or the interface's implementer), empty when that
+    host is not known — a bare ``UriTemplate`` or a service name is not an address. For a contract on an
     interface, the handler is the implementing class's method when the repo has exactly one
     implementer (``index.implementers``); otherwise the interface method."""
     contracts = [
@@ -130,7 +146,9 @@ def detect_wcf_services(
         return []
     services: dict[str, str] = {cls.id: _service_name(cls.decorators, cls.name) for cls in contracts}
     hosts: dict[str, str | None] = {
-        cls.id: svc_host(cls.path or record.path, repo_root, cls.name) for cls in contracts
+        cls.id: svc_host(cls.path or record.path, repo_root, cls.name)
+        or _registered_host(cls, record.path, index)
+        for cls in contracts
     }
     interfaces = {cls.id: cls.name for cls in contracts if cls.type == "interface"}
 
@@ -186,7 +204,7 @@ def svc_host(path: str, repo_root: Path | None, cls_name: str) -> str | None:
     """The ``.svc`` file serving class ``cls_name`` (``X.svc.cs`` beside ``X.svc``, its
     ``ServiceHost Service=`` naming the class), or None. An interface contract, or a class whose
     ``.svc`` is elsewhere, has no known host here."""
-    return code_behind_host(path, repo_root, cls_name, ".svc", _SVC_SERVICE_RE)
+    return code_behind_host(path, repo_root, cls_name, ".svc", SVC_SERVICE_RE)
 
 
 def _rest_address(host: str, template: str | None, operation: str) -> str:

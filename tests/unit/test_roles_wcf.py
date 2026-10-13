@@ -94,10 +94,46 @@ def test_webget_operation_is_http_binding(wcf) -> None:
     assert (r.method, r.routeKind) == ("GET", "route")
 
 
-@pytest.mark.xfail(strict=True, reason=".svc path not applied to a WebGet UriTemplate")
-def test_webget_endpoint_includes_svc_path(wcf) -> None:
+IMPL = """namespace Shop
+{
+    public class OrderService : IOrderService
+    {
+        public Order GetOrder(int id) { return null; }
+        public Order FindOrder(string id) { return null; }
+        public int Helper() { return 0; }
+    }
+}
+"""
+
+
+def test_webget_endpoint_includes_svc_path(analyze_files) -> None:
+    # The .svc names the implementing class; the contract is its interface, in another file.
+    st = analyze_files({
+        "Services/IOrderService.cs": CONTRACT,
+        "Services/Impl/OrderService.cs": IMPL,
+        "Services/OrderService.svc": '<%@ ServiceHost Service="Shop.OrderService" %>',
+    })
+    [r] = [s for s in _eps(st) if s.endpoint and "orders" in s.endpoint]
+    assert (r.endpoint, r.handler) == ("/Services/OrderService.svc/orders/{id}", "OrderService.FindOrder")
+
+
+def test_svc_in_another_folder_hosts_a_contract_class(analyze_files) -> None:
+    contract_class = CONTRACT.replace("public interface IOrderService", "public class OrderService") \
+        .replace("Order GetOrder(int id);", "public Order GetOrder(int id) { return null; }") \
+        .replace("Order FindOrder(string id);", "public Order FindOrder(string id) { return null; }") \
+        .replace("int Helper();", "public int Helper() { return 0; }")
+    st = analyze_files({
+        "src/Shop/OrderService.cs": contract_class,
+        "web/api/Orders.svc": '<%@ ServiceHost Service="Shop.OrderService" %>',
+    })
+    [r] = [s for s in _eps(st) if s.handler == "FindOrder"]
+    assert r.endpoint == "/web/api/Orders.svc/orders/{id}"
+
+
+def test_svc_without_implementer_leaves_the_address_empty(wcf) -> None:
+    # No class implements IOrderService, so nothing links it to the .svc: empty, never guessed.
     [r] = [s for s in _eps(wcf) if s.handler == "FindOrder"]
-    assert r.endpoint == "/Services/OrderService.svc/orders/{id}"
+    assert r.endpoint is None
 
 
 @pytest.mark.xfail(strict=True, reason=".svc host directive recorded as a route")
