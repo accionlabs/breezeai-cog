@@ -13,8 +13,15 @@
 
 Emits ``semanticType="route"`` statements with ``routeKind="page"`` — element routes and
 ``lazy`` code-split routes alike (a lazy route is a page whose component loads on demand, like
-Angular ``loadComponent``); v7 ``layout()`` stays ``"mount"``. Routes are parented to the file (React
-routes are config/markup, not handler methods), mirroring the Angular detector."""
+Angular ``loadComponent``). Routes are parented to the file (React routes are config/markup, not
+handler methods), mirroring the Angular detector.
+
+Wiring has no record (contract §4): a path-only parent (nested routes, no element), a layout (an
+element whose children include an index or empty-path child, which always fills its outlet), a
+pathless layout route, and v7 ``layout()`` / ``prefix()``. A layout whose element is a guard
+(``<Route element={<ProtectedRoute/>}>``, with or without a path) puts its name in the children's
+``guards``; an element counts as a guard only by its name (:func:`_is_guard_element`) — any other
+layout is plain wiring (when unsure, record less)."""
 
 from __future__ import annotations
 
@@ -76,6 +83,20 @@ def _component_name(value: Node | None, source: bytes) -> str | None:
     return node_text(name, source) if name is not None else None
 
 
+# ---- layouts and guard elements ------------------------------------------------
+
+#: Name parts that mark a pathless layout element as a guard (``ProtectedRoute``, ``RequireAuth``,
+#: ``PrivateOutlet``, ``AuthGuard``); a name that also says it is a layout / page is not one.
+_GUARD_PARTS = ("Protected", "Private", "Require", "Guard", "Authenticated", "Authorized")
+_NOT_GUARD_PARTS = ("Layout", "Page", "Shell")
+
+
+def _is_guard_element(name: str | None) -> bool:
+    if not name:
+        return False
+    return any(p in name for p in _GUARD_PARTS) and not any(p in name for p in _NOT_GUARD_PARTS)
+
+
 # ---- JSX <Route> form -------------------------------------------------------
 
 def _opening(el: Node) -> Node:
@@ -101,14 +122,33 @@ def _jsx_attrs(el: Node, source: bytes) -> dict[str, Node]:
     return out
 
 
-def _process_jsx(el: Node, prefix: str, source: bytes, path: str, seen: set[str], routes: list[Statement]) -> None:
+#: Attributes / keys through which a route shows a component of its own.
+_ELEMENT_KEYS = ("element", "Component", "component", "render", "lazy")
+
+
+def _fills_outlet(attrs: dict[str, Node], source: bytes) -> bool:
+    """An index route, or one with ``path=""`` — it renders at its parent's URL."""
+    return ("index" in attrs and "path" not in attrs) or (
+        "path" in attrs and _string_val(attrs["path"], source) == "")
+
+
+def _process_jsx(el: Node, prefix: str, source: bytes, path: str, seen: set[str],
+                 routes: list[Statement], inherited: tuple[str, ...] = ()) -> None:
     attrs = _jsx_attrs(el, source)
     has_path = "path" in attrs
     is_index = "index" in attrs and not has_path  # <Route index .../> -> parent's path
     sub = _string_val(attrs.get("path"), source) if has_path else ""
     full = _join(prefix, sub)
     handler = _component_name(attrs.get("element"), source)
-    if (has_path or is_index) and handler not in _REDIRECTS:
+    nested = [c for c in el.named_children if _is_route(c, source)] if el.type == "jsx_element" else []
+    shows = any(k in attrs for k in _ELEMENT_KEYS)
+    # A guard element around nested routes runs before each of them (it renders their outlet).
+    guard_layout = bool(nested) and bool(handler) and _is_guard_element(handler)
+    # Wiring: nested routes under a path with no element, a layout (a child fills the outlet),
+    # or a guard layout.
+    wiring = bool(nested) and (guard_layout or not shows or any(
+        _fills_outlet(_jsx_attrs(c, source), source) for c in nested))
+    if (has_path or is_index) and handler not in _REDIRECTS and not wiring:
         sl, sc = el.start_point[0] + 1, el.start_point[1]
         routes.append(Statement(
             id=disambiguate(statement_id(path, sl, sc), seen),
@@ -120,15 +160,15 @@ def _process_jsx(el: Node, prefix: str, source: bytes, path: str, seen: set[str]
             framework="react",
             routeKind="page",  # a lazy route is a page too, its component loaded on demand
             handler=handler,
+            guards=list(inherited) or None,
             startLine=sl,
             endLine=el.end_point[0] + 1,
             path=path,
         ))
+    child_guards = (*inherited, handler) if guard_layout and handler else inherited
     # Recurse into nested <Route> children (paired elements only), joining paths.
-    if el.type == "jsx_element":
-        for child in el.named_children:
-            if _is_route(child, source):
-                _process_jsx(child, full if has_path else prefix, source, path, seen, routes)
+    for child in nested:
+        _process_jsx(child, full if has_path else prefix, source, path, seen, routes, child_guards)
 
 
 # ---- config-object form -----------------------------------------------------
@@ -150,7 +190,15 @@ def _pairs(obj: Node, source: bytes) -> dict[str, Node]:
 
 
 def _is_route_array(arr: Node, source: bytes) -> bool:
-    return any(e.type == "object" and "path" in _pairs(e, source) for e in arr.named_children)
+    """An array of route objects: one has a ``path``, or is a pathless layout route (an element
+    or component with ``children``) — the shape of a router whose top level is a layout."""
+    for e in arr.named_children:
+        if e.type != "object":
+            continue
+        keys = _pairs(e, source).keys()
+        if "path" in keys or ("children" in keys and keys & {"element", "Component"}):
+            return True
+    return False
 
 
 def _is_children_value(arr: Node, source: bytes) -> bool:
@@ -158,20 +206,37 @@ def _is_children_value(arr: Node, source: bytes) -> bool:
     return p is not None and p.type == "pair" and _key(p, source) == "children"
 
 
-def _process_config(arr: Node, prefix: str, source: bytes, path: str, seen: set[str], routes: list[Statement]) -> None:
+def _process_config(arr: Node, prefix: str, source: bytes, path: str, seen: set[str],
+                    routes: list[Statement], inherited: tuple[str, ...] = ()) -> None:
     for elem in arr.named_children:
         if elem.type != "object":
             continue
         pairs = _pairs(elem, source)
         is_index = "index" in pairs and "path" not in pairs  # index route -> parent's path
-        if "path" not in pairs and not is_index:
-            continue
-        full = _join(prefix, "" if is_index else _string_val(pairs["path"], source))
+        children = pairs.get("children")
+        nested = [c for c in children.named_children if c.type == "object"] \
+            if children is not None and children.type == "array" else []
         element = pairs.get("element") or pairs.get("Component") or pairs.get("component")
         if element is not None and element.type == "identifier" and element is pairs.get("element"):
             element = None  # element: someVar — a value, not a component name
         handler = _component_name(element, source)
+        if "path" not in pairs and not is_index:
+            # A pathless layout route: no record; a guard element guards its children.
+            if children is not None and nested:
+                guards = (*inherited, handler) if handler and _is_guard_element(handler) \
+                    else inherited
+                _process_config(children, prefix, source, path, seen, routes, guards)
+            continue
+        full = _join(prefix, "" if is_index else _string_val(pairs["path"], source))
         if handler in _REDIRECTS:
+            continue
+        shows = any(k in pairs for k in _ELEMENT_KEYS)
+        guard_layout = bool(nested) and bool(handler) and _is_guard_element(handler)
+        wiring = bool(nested) and (guard_layout or not shows or any(
+            _fills_outlet(_pairs(c, source), source) for c in nested))
+        if wiring and children is not None:
+            guards = (*inherited, handler) if guard_layout and handler else inherited
+            _process_config(children, full, source, path, seen, routes, guards)
             continue
         sl, sc = elem.start_point[0] + 1, elem.start_point[1]
         routes.append(Statement(
@@ -184,13 +249,13 @@ def _process_config(arr: Node, prefix: str, source: bytes, path: str, seen: set[
             framework="react",
             routeKind="page",  # a lazy route is a page too, its component loaded on demand
             handler=handler,
+            guards=list(inherited) or None,
             startLine=sl,
             endLine=elem.end_point[0] + 1,
             path=path,
         ))
-        children = pairs.get("children")
-        if children is not None and children.type == "array":
-            _process_config(children, full, source, path, seen, routes)
+        if children is not None and nested:
+            _process_config(children, full, source, path, seen, routes, inherited)
 
 
 # ---- entry point ------------------------------------------------------------
@@ -256,7 +321,7 @@ def _emit_v7(call: Node, kind: str, endpoint: str, handler_arg: Node | None,
         text=node_text(call, source).split("\n", 1)[0][:120],
         endpoint=endpoint,
         framework="react",
-        routeKind="page" if kind in ("route", "index") else "mount",
+        routeKind="page",
         handler=_string_val(handler_arg, source) or None,
         startLine=sl,
         endLine=call.end_point[0] + 1,
@@ -309,8 +374,7 @@ def _process_v7(node: Node, prefix: str, source: bytes, path: str, seen: set[str
         _emit_v7(node, kind, _join(prefix, seg), handler, source, path, seen, routes)
     elif kind == "index":  # index(file, opts?) -> renders at the parent path
         _emit_v7(node, kind, _join(prefix, ""), args[0] if args else None, source, path, seen, routes)
-    elif kind == "layout":  # layout(file, [children]) -> no path segment; recurse
-        _emit_v7(node, kind, _join(prefix, ""), args[0] if args else None, source, path, seen, routes)
+    elif kind == "layout":  # layout(file, [children]) -> wiring: no record, no path segment
         children = _last_array(args)
         if children is not None:
             _process_v7(children, prefix, source, path, seen, routes, consts, guard, const_values)

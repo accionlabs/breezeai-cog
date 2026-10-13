@@ -68,9 +68,6 @@ def test_navigate_redirect_is_none(analyze_files) -> None:
     assert _at(st, "/old") == []
 
 
-@pytest.mark.xfail(
-    strict=True, reason="a guard element used as a layout is not put in the children's guards"
-)
 def test_guard_layout_element_is_guard(analyze_files) -> None:
     st = _jsx(
         analyze_files,
@@ -83,7 +80,6 @@ def test_guard_layout_element_is_guard(analyze_files) -> None:
     assert [s.handler for s in _eps(st)] == ["Account"]
 
 
-@pytest.mark.xfail(strict=True, reason="a layout (element + index child) is recorded as a page")
 def test_layout_with_index_child_is_wiring(analyze_files) -> None:
     st = _jsx(
         analyze_files,
@@ -105,17 +101,6 @@ def test_element_with_children_and_no_index_is_also_binding(analyze_files) -> No
     )
     assert [r.handler for r in _at(st, "/orders")] == ["OrderList"]
     assert [r.handler for r in _at(st, "/orders/:id")] == ["OrderDetail"]
-
-
-@pytest.mark.xfail(strict=True, reason="a path-only parent <Route path> is recorded as a page")
-def test_path_only_parent_is_wiring(analyze_files) -> None:
-    st = _jsx(
-        analyze_files,
-        '      <Route path="/admin">\n'
-        '        <Route path="users" element={<AdminUsers />} />\n'
-        "      </Route>\n",
-    )
-    assert _at(st, "/admin") == []
 
 
 def test_path_only_parent_prefixes_children(analyze_files) -> None:
@@ -172,9 +157,6 @@ def test_v7_route_is_binding(analyze_files) -> None:
     assert not r.handler or "/" not in r.handler
 
 
-@pytest.mark.xfail(
-    strict=True, reason="v7 layout(file, [...]) is recorded as a route (routeKind mount)"
-)
 def test_v7_layout_is_wiring(analyze_files) -> None:
     st = _v7(
         analyze_files, "  layout('routes/shell.tsx', [ route('login', 'routes/login.tsx') ]),\n"
@@ -227,3 +209,50 @@ def test_create_root_is_none(analyze_files) -> None:
     )
     st = analyze_files({"package.json": PKG, "src/main.tsx": src})
     assert _eps(st, "src/main.tsx") == []
+
+
+def test_path_only_parent_is_wiring(analyze_files) -> None:
+    st = _jsx(
+        analyze_files,
+        '      <Route path="/admin">\n'
+        '        <Route path="users" element={<AdminUsers />} />\n'
+        "      </Route>\n",
+    )
+    assert _at(st, "/admin") == []
+    assert [r.handler for r in _at(st, "/admin/users")] == ["AdminUsers"]
+
+
+def test_plain_pathless_layout_is_not_a_guard(analyze_files) -> None:
+    st = _jsx(
+        analyze_files,
+        "      <Route element={<AppLayout />}>\n"
+        '        <Route path="/home" element={<Home />} />\n'
+        "      </Route>\n",
+    )
+    [r] = _at(st, "/home")
+    assert (r.handler, r.guards) == ("Home", None)
+
+
+def test_config_guard_layout_is_guard(analyze_files) -> None:
+    src = (
+        "import { createBrowserRouter } from 'react-router-dom';\n"
+        "export const router = createBrowserRouter([\n"
+        "  { element: <RequireAuth />, children: [ { path: '/billing', element: <Billing /> } ] },\n"
+        "]);\n"
+    )
+    st = analyze_files({"package.json": PKG, "src/router.tsx": src})
+    [r] = _at(st, "/billing", "src/router.tsx")
+    assert (r.handler, r.guards) == ("Billing", ["RequireAuth"])
+
+
+def test_guard_layout_with_a_path_guards_its_children(analyze_files) -> None:
+    src = (
+        "import { createBrowserRouter } from 'react-router-dom';\n"
+        "export const router = createBrowserRouter([\n"
+        "  { path: '/', element: <ProtectedRoute />, children: [\n"
+        "    { index: true, element: <Dashboard /> },\n"
+        "    { path: 'orders', element: <Orders /> },\n  ] },\n]);\n"
+    )
+    st = analyze_files({"package.json": PKG, "src/router.tsx": src})
+    got = sorted((r.endpoint, r.handler, tuple(r.guards or ())) for r in _eps(st, "src/router.tsx"))
+    assert got == [("/", "Dashboard", ("ProtectedRoute",)), ("/orders", "Orders", ("ProtectedRoute",))]
