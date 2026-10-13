@@ -56,16 +56,15 @@ DIRECTIVES: dict[str, _HostSpec] = {
 #: Known ServiceHost/WebService factories that move the endpoint OFF plain SOAP. A ``Factory=``
 #: naming one of these tells us the real hosting model — e.g. ``DataServiceHostFactory`` makes a
 #: ``.svc`` an OData **REST** endpoint, not a SOAP RPC host. Keyed by the *simple* type name
-#: (namespace + ``", Assembly, Version=…"`` suffix stripped), lower-cased. The load-bearing
-#: signal is the protocol, so it rides the existing ``framework``/``routeKind`` vocabulary — no
-#: new field. Anything not listed (custom/DI factories, or no ``Factory=``) keeps the default
+#: (namespace + ``", Assembly, Version=…"`` suffix stripped), lower-cased. The protocol becomes
+#: the file's ``framework`` label. Anything not listed (custom/DI factories, or no ``Factory=``) keeps the default
 #: SOAP classification: honest-null — we only reclassify a factory we can name.
-_PROTOCOL_FACTORIES: dict[str, tuple[str, str]] = {
-    # simple type name (lower)              -> (framework, routeKind)
-    "dataservicehostfactory": ("odata", "rest"),  # WCF Data Services / OData
-    "entityframeworkdataservicehostfactory": ("odata", "rest"),
-    "webservicehostfactory": ("wcf-rest", "rest"),  # WCF REST (WebHttpBinding)
-    "webscriptservicehostfactory": ("wcf-rest", "rest"),  # AJAX/JSON-enabled
+_PROTOCOL_FACTORIES: dict[str, str] = {
+    # simple type name (lower)              -> framework
+    "dataservicehostfactory": "odata",  # WCF Data Services / OData
+    "entityframeworkdataservicehostfactory": "odata",
+    "webservicehostfactory": "wcf-rest",  # WCF REST (WebHttpBinding)
+    "webscriptservicehostfactory": "wcf-rest",  # AJAX/JSON-enabled
 }
 
 
@@ -106,28 +105,33 @@ def _codebehind_import(code_behind: str, rel_path: str, repo_root: Path | None) 
 
 def detect_service_host(
     source: bytes, rel_path: str, repo_root: Path | None, *, seen_ids: set[str]
-) -> tuple[Statement | None, list[str]]:
+) -> tuple[Statement | None, str | None, list[str]]:
     """Parse the ServiceHost/WebService directive of a ``.svc``/``.asmx`` file. Returns
-    ``(route_statement_or_None, import_paths)``. Emits nothing when the path is neither type,
-    the file has no directive, or the directive names no concrete class (honest-null)."""
+    ``(directive statement or None, framework label or None, import paths)``.
+
+    The directive is wiring (contract §4): it names the class that serves the address, and the
+    operations — recorded from the class (``csharp_wcf``) under this file's path — are the
+    bindings. So its statement stays **plain**: the directive text, no ``semanticType``,
+    endpoint, handler or ``routeKind``. Nothing when the path is neither type, the file has no
+    directive, or the directive names no concrete class (honest-null)."""
     spec = spec_for(rel_path)
     if spec is None:
-        return None, []
+        return None, None, []
     m = _directive_re(spec.directive).search(source)
     if m is None:
-        return None, []
+        return None, None, []
     body = m.group(1)
     cls = _attr(body, spec.class_attr)
     if not cls:  # a directive with no concrete class → nothing to bind (honest-null)
-        return None, []
+        return None, None, []
 
-    # Default: a SOAP operation host. A recognised ``Factory=`` reclassifies the protocol
-    # (e.g. OData/REST) onto the existing framework/routeKind fields; unknown/absent → SOAP.
-    framework, route_kind = spec.framework, "rpc"
+    # The file's framework label: a SOAP host by default; a recognised ``Factory=`` names the
+    # protocol (OData / REST); unknown or absent → the spec default.
+    framework = spec.framework
     factory = _attr(body, "Factory")
     if factory:
         simple = factory.split(",", 1)[0].strip().rsplit(".", 1)[-1].lower()
-        framework, route_kind = _PROTOCOL_FACTORIES.get(simple, (framework, route_kind))
+        framework = _PROTOCOL_FACTORIES.get(simple, framework)
 
     imports: list[str] = []
     code_behind = _attr(body, "CodeBehind")
@@ -140,18 +144,11 @@ def detect_service_host(
     col = m.start() - (source.rfind(b"\n", 0, m.start()) + 1)
     stmt = Statement(
         id=disambiguate(statement_id(rel_path, line, col), seen_ids),
-        parentId=file_id(rel_path),  # the host file owns the endpoint (no functions here)
+        parentId=file_id(rel_path),  # the host file (no functions here)
         nodeType="synthetic",  # directive-derived, no backing AST node
-        semanticType="route",
-        text=m.group(0).decode("utf-8", "replace"),  # the full <%@ … %> directive — source of every derived field (Service/Class, Factory, CodeBehind, Language)
-        framework=framework,  # spec default (wcf/asmx), or a Factory-derived protocol (odata/wcf-rest)
-        method="RPC",  # host-level marker — addressed by name, not a per-request HTTP verb
-        endpoint=rel_path,  # the served endpoint (physical path)
-        handler=cls,  # the concrete impl FQN — resolves interface/URL → concrete class
-        routeKind=route_kind,  # "rpc" for SOAP, "rest" for a Factory-reclassified endpoint
-        isRegex=False,
+        text=m.group(0).decode("utf-8", "replace"),  # the full <%@ … %> directive (searchable)
         startLine=line,
         endLine=source[: m.end()].count(b"\n") + 1,
         path=rel_path,
     )
-    return stmt, imports
+    return stmt, framework, imports

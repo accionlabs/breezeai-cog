@@ -136,7 +136,6 @@ def test_svc_without_implementer_leaves_the_address_empty(wcf) -> None:
     assert r.endpoint is None
 
 
-@pytest.mark.xfail(strict=True, reason=".svc host directive recorded as a route")
 def test_svc_host_directive_is_wiring(wcf) -> None:
     assert [s for s in _eps(wcf) if s.path == "Services/OrderService.svc"] == []
 
@@ -171,7 +170,6 @@ def test_asmx_endpoint_uses_asmx_file(analyze_files) -> None:
     assert r.endpoint == "Orders.asmx/GetOrder"
 
 
-@pytest.mark.xfail(strict=True, reason=".asmx host directive recorded as a route")
 def test_asmx_host_directive_is_wiring(analyze_files) -> None:
     stmts = analyze_files(
         {
