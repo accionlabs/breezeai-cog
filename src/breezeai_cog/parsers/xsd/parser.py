@@ -7,9 +7,9 @@ that module's docstring) and emits a flat ``Statement`` per global declaration; 
 :mod:`.schema`. The same schema-walker is reused by ``wsdl/parser.py`` for the inline
 ``<wsdl:types><xsd:schema>…`` block almost every real WSDL carries.
 
-Semantic capture is gated behind ``--capture-statements`` (the whole XSD surface is
-semantic, same as Prisma); the shared comment pass adds ``<!-- … -->`` comments when capture
-is on.
+Semantic capture is on by default (gated behind ``ctx.capture_statements``; the CLI's
+``--no-capture-statements`` turns it off) — the whole XSD surface is semantic, same as
+Prisma; the shared comment pass adds ``<!-- … -->`` comments when capture is on.
 """
 
 from __future__ import annotations
@@ -49,9 +49,11 @@ class XsdParser(BaseParser):
             ctx.capture_statements
             and schema_node is not None
             and element_tag(schema_node, source) == "schema"
-            and not self.is_fixture_file(path)
         ):
-            statements.extend(collect_schema_statements(schema_node, source, path, seen_ids))
+            # No is_fixture_file gate: that check exists only for route/entry-point emitters
+            # (base.py), and XSD emits no routes — a fixture .xsd still has real data_model
+            # declarations worth capturing.
+            statements.extend(collect_schema_statements(schema_node, source, path, seen_ids, "xsd"))
 
         record = FileRecord(
             id=fid,

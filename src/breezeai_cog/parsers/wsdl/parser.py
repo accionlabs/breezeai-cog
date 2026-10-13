@@ -12,8 +12,10 @@ declare their message types inline rather than only importing external ``.xsd`` 
 WSDL 2.0 (``interface``, no ``portType``) is out of scope — this parser targets WSDL 1.1,
 the version this repo's existing SOAP support (``csharp_wcf``, ASMX) already targets.
 
-Semantic capture is gated behind ``--capture-statements``; the shared comment pass adds
-``<!-- … -->`` comments when capture is on.
+Semantic capture is on by default (gated behind ``ctx.capture_statements``; the CLI's
+``--no-capture-statements`` turns it off); the shared comment pass adds ``<!-- … -->``
+comments when capture is on. ``is_fixture_file`` (base.py) scopes only route emission — a
+fixture WSDL's ``message``/``import``/embedded-schema declarations are still captured.
 """
 
 from __future__ import annotations
@@ -54,15 +56,22 @@ class WsdlParser(BaseParser):
             ctx.capture_statements
             and definitions is not None
             and element_tag(definitions, source) == "definitions"
-            and not self.is_fixture_file(path)
         ):
-            statements.extend(collect_definitions_statements(definitions, source, path, seen_ids))
+            statements.extend(
+                collect_definitions_statements(
+                    definitions,
+                    source,
+                    path,
+                    seen_ids,
+                    include_routes=not self.is_fixture_file(path),
+                )
+            )
             types = find_child(definitions, source, "types")
             if types is not None:
                 for schema_node in child_elements(types):
                     if element_tag(schema_node, source) == "schema":
                         statements.extend(
-                            collect_schema_statements(schema_node, source, path, seen_ids)
+                            collect_schema_statements(schema_node, source, path, seen_ids, "wsdl")
                         )
 
         record = FileRecord(

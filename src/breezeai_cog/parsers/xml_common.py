@@ -38,8 +38,16 @@ def element_tag(node: Node, source: bytes) -> str | None:
 
 
 def element_attr(node: Node, source: bytes, attr: str) -> str | None:
-    """The value of ``attr`` (matched by local name, prefix-insensitive) on ``node``'s open
-    tag, its delimiting quote pair removed. ``None`` if ``node`` has no such attribute."""
+    """The value of ``attr`` — matched by its exact raw text, **not** prefix-stripped — on
+    ``node``'s open tag, its delimiting quote pair removed. ``None`` if ``node`` has no such
+    attribute.
+
+    Unlike element tags (where ``xs:``/``xsd:`` are interchangeable spellings of the *same*
+    vocabulary and stripping the prefix is correct), an attribute prefix names a genuinely
+    *different* namespace — e.g. an EMF-generated schema's ``ecore:name`` is unrelated to the
+    schema's own unprefixed ``name``. Stripping prefixes here would let a foreign-namespace
+    attribute that merely shares a local name shadow the real one if it happens to appear
+    first in the tag (verified against real EMF-annotated `.xsd` files)."""
     open_tag = _child(node, "STag") or _child(node, "EmptyElemTag")
     if open_tag is None:
         return None
@@ -47,7 +55,7 @@ def element_attr(node: Node, source: bytes, attr: str) -> str | None:
         if a.type != "Attribute":
             continue
         name = _child(a, "Name")
-        if name is not None and local_name(node_text(name, source)) == attr:
+        if name is not None and node_text(name, source) == attr:
             value = _child(a, "AttValue")
             # AttValue's text always includes exactly the delimiting `"…"`/`'…'` pair (the
             # grammar requires one), so slicing them off is correct where `.strip("'\"")`

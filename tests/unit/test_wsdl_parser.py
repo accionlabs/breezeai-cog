@@ -1,12 +1,13 @@
 """Standalone WSDL 1.1 (SOAP service contract) capture.
 
 The ``wsdl`` language parser owns ``.wsdl`` files. It emits one ``data_model`` statement per
-``message``, one ``route`` statement per operation declared under any ``portType`` —
-regardless of whether a same-file ``binding`` implements it (real-world WSDLs commonly
-separate the interface from its wiring across files, or omit a binding entirely) — one
-``import`` statement per ``wsdl:import`` (never resolved), and reuses the ``xsd`` walker for
-every ``<xsd:schema>`` embedded in ``<wsdl:types>``. Capture is gated on
-``--capture-statements``.
+``message`` (``endpoint=name``, ``framework="wsdl"`` — matches Prisma's own ``data_model``
+statements, the join key a route's ``requestDTO``/``responseDTO`` resolves to), one ``route``
+statement per operation declared under any ``portType`` — regardless of whether a same-file
+``binding`` implements it (real-world WSDLs commonly separate the interface from its wiring
+across files, or omit a binding entirely) — one ``import`` statement per ``wsdl:import``
+(never resolved), and reuses the ``xsd`` walker (tagged ``framework="wsdl"``) for every
+``<xsd:schema>`` embedded in ``<wsdl:types>``. Capture is on by default.
 """
 
 from __future__ import annotations
@@ -76,7 +77,9 @@ WSDL = """\
 """
 
 
-def _parse(tmp_path, filename: str, src: str, *, capture: bool = True, limit: int = 1000) -> FileRecord:
+def _parse(
+    tmp_path, filename: str, src: str, *, capture: bool = True, limit: int = 1000
+) -> FileRecord:
     p = tmp_path / filename
     p.write_text(src)
     ctx = ParseContext(
@@ -108,6 +111,8 @@ def test_message_is_data_model_entity(tmp_path) -> None:
     req = _by_name(rec, "GetUserRequest", "message")
     assert req.semanticType == "data_model"
     assert req.parentId == rec.id
+    assert req.endpoint == "GetUserRequest"
+    assert req.framework == "wsdl"
     assert 'name="id"' in req.text
 
 
@@ -310,6 +315,9 @@ def test_embedded_xsd_schema_reuses_xsd_walker(tmp_path) -> None:
     rec = _parse(tmp_path, "service.wsdl", WSDL)
     user = _by_name(rec, "User", "complexType")
     assert user.semanticType == "data_model"
+    # Tagged "wsdl", not "xsd" -- this type is declared inline in the WSDL's own <types>.
+    assert user.framework == "wsdl"
+    assert user.endpoint == "User"
     assert 'name="id"' in user.text
 
 
@@ -331,6 +339,15 @@ def test_capture_gate(tmp_path) -> None:
     assert rec.statements == []
     assert rec.language == "wsdl"
     assert rec.framework is None
+
+
+def test_fixture_file_still_captures_messages_but_not_routes(tmp_path) -> None:
+    # `is_fixture_file` (base.py) scopes only route/entry-point emission -- a fixture WSDL's
+    # message/import/embedded-schema declarations are still real and worth capturing.
+    rec = _parse(tmp_path, "service.test.wsdl", WSDL)
+    assert any(s.nodeType == "message" for s in rec.statements)
+    assert any(s.nodeType == "complexType" for s in rec.statements)
+    assert not any(s.nodeType == "operation" for s in rec.statements)
 
 
 def test_malformed_markup_yields_no_statements_not_a_crash(tmp_path) -> None:

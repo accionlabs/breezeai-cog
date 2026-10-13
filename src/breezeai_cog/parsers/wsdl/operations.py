@@ -13,7 +13,10 @@ this repo (``csharp_wcf``, ASMX, ``dotnet_servicehost``) — a binding's SOAP ac
 wire-protocol detail, not the messaging verb the schema's ``method`` field documents, and
 there is no dedicated field for it in this v1.
 
-* ``message`` (global) → a ``data_model`` entity, same shape as an XSD global ``element``.
+* ``message`` (global) → a ``data_model`` entity, same shape as an XSD global ``element``:
+  ``framework="wsdl"``, ``endpoint=name`` (the join key — matches Prisma's own ``data_model``
+  statements, so a route's ``requestDTO``/``responseDTO`` can resolve to the ``message`` it
+  names).
 * ``portType/operation`` → a ``route`` statement, the operation's own real grammar node
   (``nodeType="operation"``), ``framework="wsdl"``, ``method="RPC"``, ``routeKind="rpc"``,
   ``endpoint`` = ``f"{portType}/{operation}"``, ``requestDTO``/``responseDTO`` = the
@@ -57,6 +60,8 @@ def _plain_statement(
         nodeType=tag,
         semanticType=semantic,
         name=name,
+        endpoint=name,
+        framework="wsdl",
         text=node_text(node, source),
         startLine=start,
         endLine=end,
@@ -133,11 +138,15 @@ def _collect_routes(
 
 
 def collect_definitions_statements(
-    definitions: Node, source: bytes, path: str, seen_ids: set[str]
+    definitions: Node, source: bytes, path: str, seen_ids: set[str], *, include_routes: bool
 ) -> list[Statement]:
-    """Walk a ``<definitions>`` element's direct children and emit ``message``/``route``/
-    ``import`` statements, parented to the file."""
+    """Walk a ``<definitions>`` element's direct children and emit ``message``/``import``
+    statements, plus ``route`` statements when ``include_routes`` is True. Pass
+    ``include_routes=False`` for a fixture file — the ``is_fixture_file`` gate (base.py)
+    exists only for route/entry-point emitters; a fixture WSDL's ``message``/``import``
+    declarations are still real and worth capturing."""
     fid = file_id(path)
-    return _collect_messages(definitions, source, path, fid, seen_ids) + _collect_routes(
-        definitions, source, path, fid, seen_ids
-    )
+    out = _collect_messages(definitions, source, path, fid, seen_ids)
+    if include_routes:
+        out += _collect_routes(definitions, source, path, fid, seen_ids)
+    return out
