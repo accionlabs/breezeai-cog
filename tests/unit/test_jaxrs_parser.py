@@ -188,3 +188,25 @@ public class Res {
         "DELETE": ['RolesAllowed({"user"})', "DenyAll"],
         "POST": ['RolesAllowed({"user"})'],  # @PermitAll opens nothing up front: not a guard
     }
+
+
+def test_provider_request_filters_guard_bound_and_unbound_routes(analyze_files) -> None:
+    st = analyze_files({_MAIN + k: _RS + v for k, v in {
+        "Secured.java": "@NameBinding\npublic @interface Secured {}\n",
+        "LogFilter.java": "@Provider\npublic class LogFilter implements ContainerRequestFilter {}\n",
+        "AuthFilter.java": "@Provider\n@Secured\npublic class AuthFilter implements ContainerRequestFilter {}\n",
+        "Orders.java": (
+            '@Path("/orders")\npublic class Orders {\n'
+            '  @GET public String list() { return ""; }\n'
+            '  @GET @Path("/{id}") @Secured @RolesAllowed("admin") public String one() { return ""; }\n}\n'
+        ),
+        "Admin.java": '@Path("/admin")\n@Secured\npublic class Admin {\n  @GET public String stats() { return ""; }\n}\n',
+    }.items()})
+    got = {s.handler: (tuple(s.guards or ()), s.authRequired)
+           for s in st if s.semanticType == "route" and s.framework == "jaxrs"}
+    assert got == {
+        "list": (("LogFilter",), None),                                  # unbound filter only
+        # filters in a deterministic order (by file; JAX-RS orders by @Priority, unset here)
+        "one": (("AuthFilter", "LogFilter", "RolesAllowed(admin)"), True),  # bound on the method
+        "stats": (("AuthFilter", "LogFilter"), None),                    # bound on the class
+    }

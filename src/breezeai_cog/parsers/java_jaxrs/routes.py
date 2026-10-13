@@ -45,11 +45,14 @@ def detect_jaxrs_routes(
     record: FileRecord,
     app_path: str | None = "",
     sub_bases: dict[str, str | None] | None = None,
+    filters: list[tuple[str, frozenset[str]]] | None = None,
 ) -> list[Statement]:
     """Resource-method routes of one file. ``app_path`` is the module's ``@ApplicationPath``
     ("" = none, None = present but unresolvable); ``sub_bases`` maps a sub-resource class
     (no class-level ``@Path``) to the base its locator serves it under (None = unresolvable).
-    An unresolvable prefix leaves the endpoint empty — the address is unknown."""
+    An unresolvable prefix leaves the endpoint empty — the address is unknown. ``filters`` are
+    the module's ``@Provider`` request filters with their name bindings: an unbound one guards
+    every route, a bound one only routes whose class or method carries the binding (Q9)."""
     # Any class may hold resource methods; the class @Path (if present) is the base, else the
     # base its sub-resource locator gives it (else none: a bare class keeps its own path).
     subs = sub_bases or {}
@@ -64,12 +67,19 @@ def detect_jaxrs_routes(
 
     seen = {s.id for s in record.statements}
     routes: list[Statement] = []
+    bound = {b for _, binds in filters or [] for b in binds}
     for fn in record.functions:
         if fn.parentId not in bases:
             continue
         base = bases[fn.parentId]
         sub = _path_of(fn.decorators)
-        guards = security_guards(class_decorators[fn.parentId], fn.decorators)
+        carried = {d.name for d in class_decorators[fn.parentId]} | {d.name for d in fn.decorators}
+        outer = [name for name, binds in filters or [] if not binds or binds & carried]
+        # A name-binding annotation (@Secured bound to a filter) selects that filter; it is not a
+        # guard itself (Spring Security's @Secured shares the name).
+        scoped = [g for g in security_guards(class_decorators[fn.parentId], fn.decorators) or []
+                  if g.split("(", 1)[0] not in bound]
+        guards = (outer + scoped) or None
         for dec in fn.decorators:
             if dec.name not in _HTTP_METHODS:
                 continue
@@ -88,7 +98,7 @@ def detect_jaxrs_routes(
                 routeKind="route",
                 isRegex=False,
                 guards=guards,
-                authRequired=True if guards else None,
+                authRequired=True if scoped else None,
                 responseDTO=fn.returnType or None,  # JAX-RS has no @RequestBody → requestDTO stays null
                 startLine=fn.startLine,
                 endLine=fn.endLine,

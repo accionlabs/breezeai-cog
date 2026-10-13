@@ -32,7 +32,10 @@ class JaxRsParser(JavaParser):
                         if isinstance(idx, JavaIndex) and module is not None else "")
             sub_bases = idx.jaxrs_sub_bases if isinstance(idx, JavaIndex) else {}
             # off the record — no AST re-walk
-            routes = detect_jaxrs_routes(record, app_path, sub_bases)
+            mg = idx.module_guards.get(module) if isinstance(idx, JavaIndex) and module is not None else None
+            routes = detect_jaxrs_routes(
+                record, app_path, sub_bases, mg.jaxrs_filters if mg is not None else []
+            )
             if routes:
                 record.statements.extend(routes)
                 record.framework = "jaxrs"

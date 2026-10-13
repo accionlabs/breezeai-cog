@@ -351,3 +351,82 @@ public class Open {
 """})
     [r] = [s for s in st if s.semanticType == "route"]
     assert (r.guards, r.authRequired) == (None, None)
+
+
+# ── Global guards: servlet filters and MVC interceptors (decision Q9) ─────────────────────────
+_SPRING = "package a;\nimport org.springframework.stereotype.Component;\nimport org.springframework.web.filter.OncePerRequestFilter;\n"
+
+
+def test_filters_and_interceptors_guard_the_routes_they_cover(analyze_files) -> None:
+    m = "app/src/main/java/a/"
+    st = analyze_files({
+        "app/src/main/resources/application.properties": "server.servlet.context-path=/shop\n",
+        m + "AuthFilter.java": _SPRING + "@Component\npublic class AuthFilter extends OncePerRequestFilter {}\n",
+        m + "AuditFilter.java": (
+            "package a;\nimport jakarta.servlet.Filter;\n"
+            '@WebFilter(urlPatterns = {"/api/*"})\npublic class AuditFilter implements Filter {}\n'
+        ),
+        # a bean filter registered on /admin/* only; another registered on a non-literal pattern
+        m + "LegacyFilter.java": _SPRING + "@Component\npublic class LegacyFilter extends OncePerRequestFilter {}\n",
+        m + "DynFilter.java": _SPRING + "@Component\npublic class DynFilter extends OncePerRequestFilter {}\n",
+        m + "Filters.java": (
+            "package a;\nimport org.springframework.boot.web.servlet.FilterRegistrationBean;\n"
+            "public class Filters {\n"
+            "  FilterRegistrationBean<LegacyFilter> legacy() {\n"
+            "    FilterRegistrationBean<LegacyFilter> r = new FilterRegistrationBean<>(new LegacyFilter());\n"
+            '    r.addUrlPatterns("/admin/*");\n    return r;\n  }\n'
+            "  FilterRegistrationBean<DynFilter> dyn() {\n"
+            "    FilterRegistrationBean<DynFilter> r = new FilterRegistrationBean<>(new DynFilter());\n"
+            "    r.addUrlPatterns(props.path());\n    return r;\n  }\n}\n"
+        ),
+        m + "Web.java": (
+            "package a;\nimport org.springframework.web.servlet.config.annotation.*;\n"
+            "public class Web implements WebMvcConfigurer {\n"
+            "  private AuthInterceptor authInterceptor;\n"
+            "  public void addInterceptors(InterceptorRegistry registry) {\n"
+            '    registry.addInterceptor(new LogInterceptor()).addPathPatterns("/api/**")'
+            '.excludePathPatterns("/api/public/**");\n'
+            "    registry.addInterceptor(authInterceptor);\n"
+            "    registry.addInterceptor(new DynInterceptor()).addPathPatterns(paths);\n"
+            "  }\n}\n"
+        ),
+        m + "C.java": (
+            "package a;\nimport org.springframework.web.bind.annotation.*;\n"
+            "@RestController\npublic class C {\n"
+            '  @GetMapping("/api/orders/{id}") public String order() { return ""; }\n'
+            '  @GetMapping("/api/public/info") public String info() { return ""; }\n'
+            '  @GetMapping("/admin/stats") public String stats() { return ""; }\n'
+            '  @GetMapping("/home") public String home() { return ""; }\n}\n'
+        ),
+        # another module: none of app's filters or interceptors
+        "other/src/main/java/a/D.java": _CTRL,
+    })
+    got = {(s.endpoint, tuple(s.guards or ()), s.authRequired)
+           for s in st if s.semanticType == "route"}
+    assert got == {
+        ("/shop/api/orders/{id}", ("AuditFilter", "AuthFilter", "LogInterceptor", "AuthInterceptor"), None),
+        ("/shop/api/public/info", ("AuditFilter", "AuthFilter", "AuthInterceptor"), None),
+        ("/shop/admin/stats", ("AuthFilter", "LegacyFilter", "AuthInterceptor"), None),
+        ("/shop/home", ("AuthFilter", "AuthInterceptor"), None),
+        ("/x", (), None),
+    }
+
+
+def test_registration_bean_filter_through_a_local_variable(analyze_files) -> None:
+    m = "app/src/main/java/a/"
+    st = analyze_files({
+        m + "Web.java": (
+            "package a;\nimport org.springframework.boot.web.servlet.FilterRegistrationBean;\n"
+            "public class Web {\n  FilterRegistrationBean timing() {\n"
+            "    FilterRegistrationBean registration = new FilterRegistrationBean();\n"
+            "    Filter f = new TimingFilter();\n    registration.setFilter(f);\n"
+            '    registration.addUrlPatterns("/*");\n    return registration;\n  }\n'
+            "  FilterRegistrationBean ctx() {\n"
+            "    FilterRegistrationBean registration = new FilterRegistrationBean();\n"
+            "    Filter f = new ContextFilter();\n    registration.setFilter(f);\n"
+            '    registration.addUrlPatterns(Paths.SERVICES + "/*");\n    return registration;\n  }\n}\n'
+        ),
+        m + "C.java": _CTRL,
+    })
+    [r] = [s for s in st if s.semanticType == "route"]
+    assert r.guards == ["TimingFilter"]  # ContextFilter's pattern is not a literal → not added

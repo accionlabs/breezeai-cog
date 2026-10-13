@@ -12,6 +12,7 @@ from __future__ import annotations
 from ...emit import disambiguate, statement_id
 from ...schemas import Decorator, FileRecord, Function, Statement
 from ..java.guards import security_guards
+from ..java.web_guards import ModuleGuards, spring_global_guards
 
 _METHOD_MAPPINGS = {
     "GetMapping": "GET", "PostMapping": "POST", "PutMapping": "PUT",
@@ -82,6 +83,17 @@ def _routes_of(dec: Decorator) -> tuple[str | None, list[str]]:
 def _join(base: str, sub: str) -> str:
     parts = [p.strip("/") for p in (base, sub) if p and p.strip("/")]
     return "/" + "/".join(parts) if parts else "/"
+
+
+def apply_global_guards(routes: list[Statement], module_guards: ModuleGuards) -> None:
+    """Prepend the servlet filters and MVC interceptors that run before each HTTP route
+    (decision Q9). They do not set ``authRequired``: a filter is often logging or CORS."""
+    for r in routes:
+        if r.semanticType != "route":
+            continue
+        outer = spring_global_guards(module_guards, r.endpoint)
+        if outer:
+            r.guards = outer + (r.guards or [])
 
 
 def apply_context_path(routes: list[Statement], context_path: str | None) -> None:

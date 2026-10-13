@@ -14,7 +14,7 @@ from ..java.parser import JavaParser
 from ..treesitter import parse_source
 from .functional_routes import detect_spring_functional_routes
 from .queries import detect_spring_queries
-from .routes import apply_context_path, detect_spring_routes
+from .routes import apply_context_path, apply_global_guards, detect_spring_routes
 
 
 class SpringBootParser(JavaParser):
@@ -33,10 +33,15 @@ class SpringBootParser(JavaParser):
             if b"RouterFunction" in ctx.source:  # functional routing needs the AST
                 routes += detect_spring_functional_routes(root, ctx.source, ctx.path, record)
             if routes:
-                # server.servlet.context-path of this file's module prefixes every HTTP route
                 idx = ctx.resolution_index
-                paths = idx.context_paths if isinstance(idx, JavaIndex) else {}
                 module = module_of(ctx.path)
+                # Servlet filters and MVC interceptors of this module run first (matched within
+                # the servlet context, so before the context path is joined).
+                guards = idx.module_guards if isinstance(idx, JavaIndex) else {}
+                if module is not None and module in guards:
+                    apply_global_guards(routes, guards[module])
+                # server.servlet.context-path of this file's module prefixes every HTTP route
+                paths = idx.context_paths if isinstance(idx, JavaIndex) else {}
                 if module is not None and module in paths:
                     apply_context_path(routes, paths[module])
                 record.statements.extend(routes)
