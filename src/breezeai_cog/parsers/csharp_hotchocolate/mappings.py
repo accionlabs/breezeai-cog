@@ -30,6 +30,11 @@ EXTEND_ATTR = "ExtendObjectType"
 #: Marks the parameter that carries the object being resolved — only meaningful on a data type.
 PARENT_ATTR = "Parent"
 
+#: Entity / node resolvers: the method the gateway's `_entities` field (Apollo Federation) or
+#: the Relay `node` field calls to fetch one object by its key. Each is a binding whose address
+#: is the type it resolves (`method: RESOLVE_REFERENCE`, `routeKind: query`).
+ENTITY_RESOLVER_ATTRS = ("ReferenceResolver", "NodeResolver")
+
 #: Root operation types by their **schema** name. ``[ExtendObjectType("Query")]`` and
 #: ``[ExtendObjectType(OperationTypeNames.Query)]`` name the schema type directly, and the roots
 #: are called Query/Mutation/Subscription there by default — enforced, unlike a CLR class name.
@@ -115,6 +120,7 @@ MARKERS: tuple[bytes, ...] = (
     b"[ExtendObjectType",
     b"[Subscribe",              # covers [Subscribe] and [SubscribeAndResolve]
     b"IObjectTypeDescriptor",
+    b"[ReferenceResolver]", b"[NodeResolver]",   # an entity / node resolver on its own type
 )
 
 #: Server-registration calls. A file wiring up the GraphQL server is the application's

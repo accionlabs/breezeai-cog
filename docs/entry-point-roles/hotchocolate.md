@@ -13,7 +13,8 @@ Parser: `src/breezeai_cog/parsers/csharp_hotchocolate/` · Rules: [entry-point c
 | `[Subscribe]` + `[Topic("t")]` on a subscription | Binding | `eventbus_consumer`, `CONSUMER`, `t` as `endpoint` (in addition to the subscription's `route`) | The method consumes the topic |
 | Field of a data type (`[ExtendObjectType(typeof(Book))]` with `[Parent]`, `ObjectType<Book>` fields) | None | `route`, `routeKind: field_resolver`, `RESOLVE_FIELD` (not an entry point) | No address of its own |
 | `[ReferenceResolver]` (Apollo Federation) | Binding | `route`, `RESOLVE_REFERENCE`, `routeKind: query`, type name as `endpoint` | Called by the generated `_entities` field |
-| `[NodeResolver]` on a `[Node]` type (Relay) | Binding | `route`, `RESOLVE_REFERENCE`, `routeKind: query`, type name as `endpoint` | Called by the generated `node` field |
+| `[NodeResolver]` on a `[Node]` type (Relay); on a query root it is also a query field (two records) | Binding | `route`, `RESOLVE_REFERENCE`, `routeKind: query`, type name as `endpoint` | Called by the generated `node` field |
+| `descriptor.ImplementsNode().ResolveNode(…)` / `ResolveNodeWith<T>(…)` / `ResolveReferenceWith(…)` | Binding | `route`, `RESOLVE_REFERENCE`, `routeKind: query`, the descriptor's type as `endpoint`; inline lambda → `handlerLine` only | Fluent form of the two rows above |
 | `[Authorize]` / `.Authorize(...)` | Guard | name in `guards` | |
 | `MapGraphQL("/graphql")` | Wiring | statement stays plain | Transport path; operations are addressed by name |
 | `AddGraphQLServer()` | None | — | Start-up |

@@ -367,3 +367,35 @@ def resolve_reads_parent(field_call: Node, source: bytes, target: str) -> bool:
             if node_text(targs.named_children[0], source).rsplit(".", 1)[-1] == target:
                 return True
     return False
+
+
+#: Type-level calls that register an entity / node resolver fluently.
+ENTITY_RESOLVER_CALLS = frozenset({"ResolveNode", "ResolveNodeWith", "ResolveReferenceWith"})
+
+
+def entity_resolver_calls(
+    body: Node, source: bytes, receiver: str
+) -> Iterator[tuple[Node, str | None, int | None]]:
+    """``(name node, handler, handlerLine)`` for each fluent entity / node resolver of the type.
+
+    ``.ResolveNode((ctx, id) => …)`` → an inline handler: no name, the lambda's line.
+    ``.ResolveNodeWith<Queries>(q => q.GetById(default))`` → the method the lambda calls, by name.
+    Anything else → no handler."""
+    for name, call in _type_level_calls(body, source, receiver):
+        if name not in ENTITY_RESOLVER_CALLS:
+            continue
+        access = call.child_by_field_name("function")
+        if access is None or not access.named_children:
+            continue
+        args = _arguments(call)
+        lam = args[0] if args and args[0].type == "lambda_expression" else None
+        handler: str | None = None
+        line: int | None = None
+        if lam is not None and name == "ResolveNode":
+            line = lam.start_point[0] + 1
+        elif lam is not None:
+            body_node = lam.child_by_field_name("body")
+            fn = body_node.child_by_field_name("function") \
+                if body_node is not None and body_node.type == "invocation_expression" else None
+            handler = _call_name(fn, source) if fn is not None else None
+        yield access.named_children[-1], handler, line

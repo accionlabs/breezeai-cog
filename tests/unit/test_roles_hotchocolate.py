@@ -215,7 +215,6 @@ def test_subscription_topic_is_consumer(analyze_files) -> None:
     assert (r.endpoint, r.handler) == ("book-added", "OnBookAdded")
 
 
-@pytest.mark.xfail(strict=True, reason="entity reference resolver not recorded")
 def test_reference_resolver_is_binding(analyze_files) -> None:
     stmts = analyze_files({"BookResolvers.cs": REFERENCE})
     [r] = _eps(stmts)
@@ -227,7 +226,6 @@ def test_reference_resolver_is_binding(analyze_files) -> None:
     )
 
 
-@pytest.mark.xfail(strict=True, reason="Relay node resolver not recorded")
 def test_node_resolver_is_binding(analyze_files) -> None:
     stmts = analyze_files({"BookNode.cs": NODE})
     [r] = _eps(stmts)
@@ -238,6 +236,51 @@ def test_node_resolver_is_binding(analyze_files) -> None:
         "GetBookAsync",
     )
 
+
+
+def test_node_resolver_on_the_query_root_is_also_a_field(analyze_files) -> None:
+    src = """using System.Threading.Tasks;
+using HotChocolate.Types;
+using HotChocolate.Types.Relay;
+
+[QueryType]
+public class SessionQueries
+{
+    [NodeResolver]
+    public Task<Session?> GetSessionByIdAsync(int id) => null!;
+}
+"""
+    stmts = analyze_files({"SessionQueries.cs": src})
+    # One method, two triggers: the query field and the Relay node resolver.
+    got = sorted((r.method, r.endpoint, r.handler) for r in _eps(stmts))
+    assert got == [
+        ("QUERY", "sessionById", "GetSessionByIdAsync"),
+        ("RESOLVE_REFERENCE", "Session", "GetSessionByIdAsync"),
+    ]
+
+
+def test_fluent_node_resolver_is_binding(analyze_files) -> None:
+    src = """using HotChocolate.Types;
+using HotChocolate.Types.Relay;
+
+public class AttendeeType : ObjectType<Attendee>
+{
+    protected override void Configure(IObjectTypeDescriptor<Attendee> descriptor)
+    {
+        descriptor
+            .ImplementsNode()
+            .IdField(a => a.Id)
+            .ResolveNode((ctx, id) => ctx.DataLoader<AttendeeByIdDataLoader>().LoadAsync(id));
+    }
+}
+"""
+    stmts = analyze_files({"AttendeeType.cs": src})
+    [r] = _eps(stmts)
+    line = _line(src, ".ResolveNode(")
+    # An inline handler: no name, the lambda's line.
+    assert (r.method, r.routeKind, r.endpoint, r.handler, r.handlerLine, r.startLine) == (
+        "RESOLVE_REFERENCE", "query", "Attendee", None, line, line,
+    )
 
 @pytest.mark.xfail(strict=True, reason="GraphQL transport mount recorded as a route")
 def test_map_graphql_is_wiring(analyze_files) -> None:
