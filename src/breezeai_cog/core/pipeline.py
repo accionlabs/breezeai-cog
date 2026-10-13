@@ -17,6 +17,7 @@ from typing import Callable, Iterator
 from .._version import __version__
 from ..emit import split_oversized_statements
 from ..logging import DETAIL_LOGGER, get_logger
+from ..parsers.additive import fact_sources
 from ..parsers.contract import validate as validate_contract
 from ..schemas import FileRecord, ProjectMetaData
 from . import executor
@@ -133,6 +134,16 @@ def _build_indexes(
             continue
         bases[base.name] = base
         files.setdefault(base.name, []).append(repo_root / entry.path)
+    # A registered fact may read files another parser owns (``FactSpec.sources``): hand them to
+    # that language's index too. The owning parser still parses and emits them.
+    for language, exts in fact_sources().items():
+        if language not in bases:
+            continue
+        own = set(files[language])
+        files[language] += [
+            repo_root / e.path for e in entries
+            if str(e.path).lower().endswith(exts) and repo_root / e.path not in own
+        ]
     indexes: dict[str, object] = {}
     for name, base in bases.items():
         start = time.perf_counter()

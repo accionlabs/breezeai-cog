@@ -17,7 +17,9 @@ from typing import Any, Iterator, Sequence
 from tree_sitter import Node
 
 from ...utils import repo_relative
-from ..additive import collect_additive, resolve_additive
+from ..additive import (
+    collect_additive, collect_fact_sources, resolve_additive, split_fact_sources,
+)
 from ..index_common import ClassHeritage, parallel_map, record_distinct
 from ..treesitter import node_text, parse_source
 
@@ -1078,6 +1080,7 @@ def build_ts_index(repo_root: Path, files: Sequence[Path], jobs: int = 1) -> TsA
     (for inherited-call resolution), and Angular lazy-route mount linkage — parses each file
     once, across ``jobs`` processes. Returns None only when there is nothing to resolve with."""
     alias = build_alias_index(repo_root)  # repo-level (tsconfig) — computed once in main
+    files, fact_files = split_fact_sources("typescript", list(files))
     const_values: dict[str, str | None] = {}
     class_heritage: dict[str, ClassHeritage | None] = {}
     # Mount graph, collected raw then resolved after const_values is complete (paths reference
@@ -1092,7 +1095,8 @@ def build_ts_index(repo_root: Path, files: Sequence[Path], jobs: int = 1) -> TsA
     nest_register: list[tuple[str, str | None, list[tuple[str, str]] | None]] = []
     base_paths_raw: list[tuple[str, str, list[list[tuple[str, str]] | None]]] = []
     next_middlewares: dict[str, tuple[str, ...] | None] = {}
-    collected: dict[str, list[Any]] = {}  # registered fact name → per-file values, file order
+    # registered fact name → per-file values: fact-source files (another parser's), then our own
+    collected: dict[str, list[Any]] = collect_fact_sources("typescript", fact_files, repo_root, jobs)
     args = [(str(f), repo_relative(f, repo_root), str(repo_root)) for f in files]
     for frag in parallel_map(args, _ts_index_one, jobs):
         if not frag:

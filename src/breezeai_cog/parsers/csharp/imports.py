@@ -32,7 +32,9 @@ from typing import Any
 from tree_sitter import Node
 
 from ...utils import repo_relative
-from ..additive import collect_additive, resolve_additive
+from ..additive import (
+    collect_additive, collect_fact_sources, resolve_additive, split_fact_sources,
+)
 from ..dotnet_common import web_app_root
 from ..index_common import (
     ClassHeritage, merge_heritage, parallel_map, project_heritage, record_distinct,
@@ -633,6 +635,7 @@ def build_csharp_index(repo_root: Path, files, jobs: int = 1) -> CSharpIndex:
     project (``.csproj``) roots for the same-project tiebreak. Files are parsed into partial
     fragments across ``jobs`` processes and reduced deterministically (``jobs<=1`` → serial)."""
     repo_root = Path(repo_root)
+    files, fact_files = split_fact_sources("csharp", list(files))
     rels = [repo_relative(f, repo_root) for f in files]
     live_dirs = {""}  # every ancestor dir of a scanned file (its owning-project candidates)
     for rel in rels:
@@ -648,7 +651,8 @@ def build_csharp_index(repo_root: Path, files, jobs: int = 1) -> CSharpIndex:
     # MAP: parse each file into a pure partial fragment (parallel over ``jobs`` processes).
     fragments = parallel_map([(str(f), rel) for f, rel in zip(files, rels)], _index_one, jobs)
     # REDUCE: fold fragments into the shared index (deterministic, order-independent).
-    collected: dict[str, list[Any]] = {}
+    # registered fact name → per-file values: fact-source files (another parser's), then our own
+    collected: dict[str, list[Any]] = collect_fact_sources("csharp", fact_files, repo_root, jobs)
     for frag in fragments:
         if frag is not None:
             _merge_fragment(index, by_fqn, method_files, frag)

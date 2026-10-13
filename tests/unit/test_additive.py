@@ -265,5 +265,23 @@ def test_typescript_fact_is_resolved_on_the_index(isolated, tmp_path, jobs) -> N
     assert index_fact(index, "test.marked") == ["a.ts"]
 
 
+
+def test_fact_reads_files_another_parser_owns(isolated, tmp_path) -> None:
+    from breezeai_cog.parsers.csharp.imports import build_csharp_index
+
+    register_fact(_marked(
+        name="test.hosts", gate=(b"ServiceHost",), sources=(".svc",),
+        collect=lambda root, source, rel, repo_root: (rel, root is None),
+        resolve=lambda values, index: sorted(values),
+    ))
+    (tmp_path / "Api.svc").write_bytes(b'<%@ ServiceHost Service="A.Api" %>')
+    (tmp_path / "Api.svc.cs").write_bytes(b"namespace A { class Api {} }")
+    files = [tmp_path / "Api.svc.cs", tmp_path / "Api.svc"]
+    assert additive.split_fact_sources("csharp", files) == ([files[0]], [files[1]])
+    index = build_csharp_index(tmp_path, files, 1)
+    # The .svc reaches only the fact (no grammar → no tree); C# indexing sees only the .cs file.
+    assert index_fact(index, "test.hosts") == [("Api.svc", True)]
+    assert {f for fs in index.types.values() for f in fs} == {"Api.svc.cs"}
+
 def test_index_fact_tolerates_a_missing_index() -> None:
     assert index_fact(None, "anything") is None

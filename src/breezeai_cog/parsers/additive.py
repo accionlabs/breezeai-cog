@@ -157,8 +157,16 @@ class FactSpec:
     name: str
     language: str
     gate: tuple[bytes, ...]
-    collect: Callable[[Node, bytes, str, Path | None], Any]
+    collect: Callable[[Any, bytes, str, Path | None], Any]  # root: a Node, or None (no grammar)
     resolve: Callable[[list[Any], Any], Any]
+    #: Extra file extensions to collect from, owned by another parser (``(".svc",)`` for a C#
+    #: fact, ``(".graphql",)`` for a TypeScript one). The pipeline hands such files to this
+    #: language's index too; they reach only this ``collect``, never the language's own
+    #: indexing, and the owning parser still emits their records.
+    sources: tuple[str, ...] = ()
+    #: tree-sitter grammar ``collect`` gets those files parsed with; ``None`` = no tree (the
+    #: fact reads the bytes, e.g. a ``<%@ ServiceHost %>`` directive).
+    grammar: str | None = None
 
 
 _DETECTORS: dict[str, list[Detector]] = {}
@@ -247,6 +255,68 @@ def facts_for(language: str) -> list[FactSpec]:
     return list(_FACTS.get(language, ()))
 
 
+def fact_sources() -> dict[str, tuple[str, ...]]:
+    """Language → the extra file extensions its facts collect from (see ``FactSpec.sources``)."""
+    discover_detectors()
+    return {
+        lang: tuple(sorted({ext for spec in specs for ext in spec.sources}))
+        for lang, specs in sorted(_FACTS.items())
+        if any(spec.sources for spec in specs)
+    }
+
+
+def split_fact_sources(language: str, files: list[Path]) -> tuple[list[Path], list[Path]]:
+    """``files`` handed to ``language``'s ``build_index`` → (its own files, fact-source files)."""
+    exts = fact_sources().get(language, ())
+    own = [f for f in files if not f.name.lower().endswith(exts)] if exts else list(files)
+    foreign = [f for f in files if exts and f.name.lower().endswith(exts)]
+    return own, foreign
+
+
+def _collect_source_one(args: tuple[str, str, str, str]) -> dict[str, Any]:
+    """Collect every fact of ``language`` that reads this fact-source file (picklable worker)."""
+    language, file_s, rel, repo_root_s = args
+    try:
+        source = Path(file_s).read_bytes()
+    except OSError:
+        return {}
+    out: dict[str, Any] = {}
+    roots: dict[str, Node | None] = {}
+    for spec in facts_for(language):
+        if not rel.lower().endswith(spec.sources) or not any(g in source for g in spec.gate):
+            continue
+        try:
+            if spec.grammar is not None and spec.grammar not in roots:
+                from .treesitter import parse_source
+                roots[spec.grammar] = parse_source(spec.grammar, source, 0).root_node
+            value = spec.collect(roots.get(spec.grammar) if spec.grammar else None,
+                                 source, rel, Path(repo_root_s))
+        except Exception as exc:  # a fact never takes the index down: this file adds nothing
+            from ..logging import get_logger
+            get_logger("breezeai_cog.index").warning(
+                "index.fact.skipped", path=rel, fact=spec.name, error=str(exc))
+            continue
+        if value is not None:
+            out[spec.name] = value
+    return out
+
+
+def collect_fact_sources(
+    language: str, files: list[Path], repo_root: Path, jobs: int = 1
+) -> dict[str, list[Any]]:
+    """Run ``language``'s facts over its fact-source files (from :func:`split_fact_sources`),
+    across ``jobs`` processes. Returns fact name → collected values, in file order."""
+    from ..utils import repo_relative
+    from .index_common import parallel_map
+
+    args = [(language, str(f), repo_relative(f, repo_root), str(repo_root)) for f in files]
+    collected: dict[str, list[Any]] = {}
+    for per_file in parallel_map(args, _collect_source_one, jobs):
+        for name, value in per_file.items():
+            collected.setdefault(name, []).append(value)
+    return collected
+
+
 def run_additive(
     language: str,
     root: Node,
@@ -295,11 +365,11 @@ def collect_additive(
 def resolve_additive(language: str, collected: dict[str, list[Any]], index: Any) -> dict[str, Any]:
     """Resolve every fact for ``language`` once, after the language's index is reduced.
     ``collected`` maps fact name → its per-file values in file order. Returns fact name →
-    fact, to be stored on the index for :func:`index_fact`."""
-    return {
-        spec.name: spec.resolve(collected.get(spec.name, []), index)
-        for spec in facts_for(language)
-    }
+    fact (a fact that resolved to ``None`` is left out), to be stored on the index for
+    :func:`index_fact`."""
+    facts = {spec.name: spec.resolve(collected.get(spec.name, []), index)
+             for spec in facts_for(language)}
+    return {name: fact for name, fact in facts.items() if fact is not None}
 
 
 def index_fact(index: Any | None, name: str) -> Any | None:
