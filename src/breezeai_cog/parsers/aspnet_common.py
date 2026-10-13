@@ -251,6 +251,7 @@ def detect_controller_routes(record: FileRecord, index: Any = None) -> list[Stat
                          and ("Authorize" in cls_guards or "Authorize" in fn_guards)) or None
         all_guards = (cls_guards + fn_guards) or None
         verb_attrs = [d for d in fn.decorators if simple_attr_name(d.name) in _HTTP_ATTRS]
+        bound: set[tuple[str, str]] = set()  # one binding per (verb, endpoint): [HttpPost] twice is one
         for dec in verb_attrs:
             verb = _HTTP_ATTRS[simple_attr_name(dec.name)]
             for sub in _method_templates(_first_arg(dec), method_route):
@@ -266,6 +267,9 @@ def detect_controller_routes(record: FileRecord, index: Any = None) -> list[Stat
                 else:
                     # verb attribute but no route anywhere → MVC convention /{controller}/{action}
                     endpoint = _convention_endpoint(cls_name, _action_name(fn))
+                if (verb, endpoint) in bound:
+                    continue
+                bound.add((verb, endpoint))
                 routes.append(_route_statement(
                     fn, verb, endpoint, f"[{dec.name}]", auth_required, all_guards, seen))
         # Classic MVC convention: a public action with NO [HttpX] attribute defaults to a GET at

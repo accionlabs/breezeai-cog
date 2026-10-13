@@ -219,3 +219,21 @@ public static class Jobs
     stmts = analyze_files({"Jobs.cs": src})
     [r] = _eps(stmts)
     assert (r.semanticType, r.endpoint) == ("timer", "0 2 * * *")
+
+
+def test_repeated_verb_attribute_is_one_binding(analyze_files) -> None:
+    src = USINGS + """
+[ApiController]
+[Route("api/orders")]
+public class OrdersController : ControllerBase
+{
+    [HttpPost]
+    [HttpPost]
+    [HttpOptions]
+    [Route("filter")]
+    public IActionResult Filter() { return Ok(); }
+}
+"""
+    stmts = analyze_files({"OrdersController.cs": src})
+    got = sorted((r.method, r.endpoint) for r in _eps(stmts))
+    assert got == [("OPTIONS", "/api/orders/filter"), ("POST", "/api/orders/filter")]
