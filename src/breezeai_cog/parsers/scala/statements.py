@@ -27,14 +27,41 @@ from .mappings import CONTROL_FLOW, EMIT_TYPES, NESTED_SCOPES
 
 _CALL_TYPE = "call_expression"
 
+#: Distinctive HTTP client type names — safe to match on the bare simple name anywhere.
 _SCALA_HTTP_TYPES = frozenset({
     "WSClient",
     "StandaloneWSClient",
-    "Client",
     "HttpExt",
     "SttpBackend",
+    "RestTemplate",
 })
+#: Type name -> substring that must appear in the file's source for the bare name to
+#: count as an HTTP client. ``Client`` and ``HttpClient`` alone are too common (Kafka/
+#: cache/gRPC wrappers, domain traits) to treat as a signal on their own — gated on the
+#: owning framework's import path actually appearing, same cheap byte guard as
+#: events.py/spark.py.
+_SCALA_HTTP_TYPES_GATED: dict[str, bytes] = {
+    "Client": b"org.http4s",
+    "HttpClient": b"java.net.http",
+}
 _HTTP_METHODS = frozenset({"get", "post", "put", "patch", "delete", "head", "options"})
+#: scalaj builder methods that aren't themselves named after the verb they produce.
+_HTTP_METHOD_ALIASES = {"postdata": "post"}
+#: Spring RestTemplate's "ForObject"/"ForEntity" family — the verb is baked into the
+#: method name rather than being the method name itself.
+_REST_TEMPLATE_METHOD_VERBS = {
+    "getforobject": "get",
+    "getforentity": "get",
+    "postforobject": "post",
+    "postforentity": "post",
+    "postforlocation": "post",
+    "patchforobject": "patch",
+    "headforheaders": "head",
+    "optionsforallow": "options",
+}
+#: Calls whose verb lives inside a request/method argument rather than the method name
+#: itself (RestTemplate's generic ``exchange``/``execute``, java.net.http's ``send``).
+_SCALA_AMBIGUOUS_VERB_METHODS = frozenset({"exchange", "execute"})
 
 # Bare expression-statements: Scala puts a statement-position call / infix expression
 # directly under a block or template_body (no expression_statement wrapper).
@@ -132,7 +159,15 @@ def _chain_http_method(call: Node, source: bytes) -> str | None:
         method = _function_name(function, source).lower()
         if method in _HTTP_METHODS:
             return method
+        alias = _HTTP_METHOD_ALIASES.get(method)
+        if alias is not None:
+            return alias
     return None
+
+
+def _is_uri_or_string_arg(args: list[Node]) -> bool:
+    """True when a call's sole argument is a URI/string literal (not a Request-typed value)."""
+    return len(args) == 1 and args[0].type in ("string", "interpolated_string_expression")
 
 
 def _chain_endpoint(call: Node, source: bytes) -> str | None:
@@ -200,8 +235,13 @@ def _call_details(call: Node, source: bytes) -> tuple[str, str, str | None] | No
             if value is not None and value.type == _CALL_TYPE
             else None
         )
-        if method.lower() == "asstring" and _receiver_name(callee).lower() == "http":
-            return "Http", "get", endpoint
+        # scalaj's ``Http`` companion object only — a user-named ``http`` variable (e.g. a
+        # config section) must not match, so this is an exact-case check, not a name hint.
+        if method.lower() == "asstring" and _receiver_name(callee) == "Http":
+            verb = None
+            if value is not None and value.type == _CALL_TYPE:
+                verb = _chain_http_method(value, source)
+            return "Http", verb or "get", endpoint
         return callee, method, endpoint
 
     fn = call.child_by_field_name("function")
@@ -239,26 +279,53 @@ def _call_details(call: Node, source: bytes) -> tuple[str, str, str | None] | No
         backend = _sttp_backend_receiver(call, source)
         if verb is not None and backend is not None:
             return f"{backend}.{verb}", verb, endpoint
+        # java.net.http's ``HttpClient.send(request, handler)`` — the verb lives inside
+        # the HttpRequest value, not the method name, so fall back to the sentinel.
+        if root_receiver in current_http_client_ids():
+            return callee, "request", endpoint
 
-    # http4s terminal operations represent a GET when no earlier verb is present. Only
-    # typed HTTP receivers get this fallback; Quill/Neo4j/ordinary ``run`` calls remain
-    # available to the existing DB detectors.
+    # Spring RestTemplate: "ForObject"/"ForEntity" methods carry the verb in their name;
+    # ``exchange``/``execute`` take it as an argument instead, so fall back to the
+    # sentinel rather than guessing. Gated on the receiver's declared type so an
+    # unrelated user method of the same name is untouched.
+    rest_verb = _REST_TEMPLATE_METHOD_VERBS.get(lower_method)
+    if rest_verb is not None and root_receiver in current_http_client_ids():
+        return callee, rest_verb, endpoint
+    if lower_method in _SCALA_AMBIGUOUS_VERB_METHODS and root_receiver in current_http_client_ids():
+        return callee, "request", endpoint
+
+    # http4s terminal operations represent a GET only when the sole argument is a bare
+    # Uri/String; when it's a Request value the verb lives inside that value (could be
+    # anything), so fall back to the generic "request" sentinel rather than guessing GET.
+    # Only typed HTTP receivers get this fallback; Quill/Neo4j/ordinary ``run`` calls
+    # remain available to the existing DB detectors.
     if lower_method in {"expect", "fetchas", "run"} and root_receiver in current_http_client_ids():
-        return callee, "get", endpoint
+        verb = "get" if _is_uri_or_string_arg(named_args) else "request"
+        return callee, verb, endpoint
 
     # scalaj's ``Http(url).asString`` is a GET-shaped request whose receiver itself carries
-    # the HTTP hint. Do not generalize ``asString`` to arbitrary string conversions.
-    if lower_method == "asstring" and root_receiver.lower() == "http":
+    # the HTTP hint — gated on the literal ``Http`` companion object, not any name containing
+    # "http", so it doesn't generalize to arbitrary string conversions.
+    if lower_method == "asstring" and root_receiver == "Http":
         return root_receiver, "get", endpoint
     return callee, method, endpoint
 
 
-def collect_http_client_ids(types: dict[str, str]) -> frozenset[str]:
-    """Return Scala variables whose declared type is a known HTTP client/backend."""
+def collect_http_client_ids(types: dict[str, str], source: bytes) -> frozenset[str]:
+    """Return Scala variables whose declared type is a known HTTP client/backend.
+
+    ``Client`` and ``HttpClient`` only count in a file that actually references their
+    owning framework (http4s / java.net.http) — otherwise they over-match Kafka/cache/
+    gRPC wrapper types and user-defined traits of the same name.
+    """
     ids: set[str] = set()
     for name, type_text in types.items():
         base = type_text.split("<", 1)[0].split("[", 1)[0].strip().rsplit(".", 1)[-1]
         if base in _SCALA_HTTP_TYPES:
+            ids.add(name)
+            continue
+        gate = _SCALA_HTTP_TYPES_GATED.get(base)
+        if gate is not None and gate in source:
             ids.add(name)
     return frozenset(ids)
 
