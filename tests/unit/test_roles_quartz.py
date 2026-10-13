@@ -138,6 +138,28 @@ def test_schedule_job_with_trigger_only_has_no_record_of_its_own(analyze_files) 
     assert r.text.startswith("Trigger t = ")
 
 
+def test_cancellation_token_is_not_a_job_or_a_trigger(analyze_files) -> None:
+    # Every Quartz.NET scheduler call takes a token: named or trailing positional, it is dropped.
+    body = """  public async Task Run(IScheduler scheduler, CancellationToken ct) {
+    IJobDetail job = JobBuilder.Create<HelloJob>().WithIdentity("job1").Build();
+    ITrigger a = TriggerBuilder.Create().WithCronSchedule("0 0/5 * * * ?").Build();
+    ITrigger b = TriggerBuilder.Create().WithCronSchedule("0 0 1 * * ?").Build();
+    await scheduler.ScheduleJob(job, a, cancellationToken: ct);
+    await scheduler.ScheduleJob(job, b, ct);
+    ITrigger c = TriggerBuilder.Create().ForJob(job).WithCronSchedule("0 0 2 * * ?").Build();
+    await scheduler.ScheduleJob(c, cancellationToken: ct);
+  }
+"""
+    src = CS_HEAD + body + CS_JOB
+    got = [(r.startLine, r.endpoint, r.handler) for r in _cs(analyze_files, body)]
+    assert got == [
+        (_line(src, "ScheduleJob(job, a"), "0 0/5 * * * ?", "Execute"),
+        (_line(src, "ScheduleJob(job, b"), "0 0 1 * * ?", "Execute"),
+        # the trigger naming its job is the binding; ScheduleJob(c, …) adds no record
+        (_line(src, "ITrigger c ="), "0 0 2 * * ?", "Execute"),
+    ]
+
+
 def test_job_class_is_none(analyze_files) -> None:
     assert _java(analyze_files, "") == []
     assert _cs(analyze_files, "") == []

@@ -15,6 +15,11 @@ from ..quartz_common import Call, detect_quartz
 from ..treesitter import node_text
 
 
+#: A trailing positional argument that is a cancellation token (``ScheduleJob(job, trigger, ct)``).
+_TOKENS = frozenset({"cancellationtoken", "ct", "token", "stoppingtoken",
+                     "cancellationtoken.none", "default", "default(cancellationtoken)"})
+
+
 class _CSharp:
     handler = "Execute"
 
@@ -35,10 +40,27 @@ class _CSharp:
         targs = next((c for c in fn.named_children if c.type == "type_argument_list"), None)
         type_arg = node_text(targs.named_children[0], self.source) \
             if targs is not None and len(targs.named_children) == 1 else None
-        arg_list = node.child_by_field_name("arguments")
-        args = [a.named_children[-1] for a in arg_list.named_children
-                if a.type == "argument" and a.named_children] if arg_list is not None else []
-        return Call(node, receiver, node_text(name, self.source).lower(), type_arg, args)
+        method = node_text(name, self.source).lower()
+        return Call(node, receiver, method, type_arg, self._arguments(node, method))
+
+    def _arguments(self, call: Node, method: str) -> list[Node]:
+        """The call's argument values, without its cancellation token: every Quartz.NET scheduler
+        call takes one (``ScheduleJob(job, trigger, cancellationToken: ct)``), and it is never a
+        job or a trigger. A named ``cancellationToken:`` argument is always left out; a trailing
+        positional one (``ct``, ``CancellationToken.None``, …) of a ``ScheduleJob`` call too."""
+        arg_list = call.child_by_field_name("arguments")
+        args: list[Node] = []
+        for a in arg_list.named_children if arg_list is not None else []:
+            if a.type != "argument" or not a.named_children:
+                continue
+            name = a.child_by_field_name("name")
+            if name is not None and node_text(name, self.source).lower() == "cancellationtoken":
+                continue
+            args.append(a.named_children[-1])
+        if method == "schedulejob" and args and \
+                node_text(args[-1], self.source).replace(" ", "").lower() in _TOKENS:
+            args.pop()
+        return args
 
     def string(self, node: Node) -> str | None:
         if node.type == "string_literal":
