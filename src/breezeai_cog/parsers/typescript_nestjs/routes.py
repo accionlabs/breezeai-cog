@@ -21,6 +21,8 @@ from ...emit import disambiguate, function_id, statement_id
 from ...schemas import Decorator, Statement
 from ...parsers.typescript.decorators import decorator
 from ...parsers.typescript.functions import _type_text, extract_params
+from ..additive import FactSpec, index_fact, register_fact
+from ..index_common import record_distinct
 from .patterns import message_pattern
 from ..treesitter import node_text
 
@@ -227,18 +229,18 @@ def _returns_empty_object(member: Node, source: bytes) -> bool:
     )
 
 
-def _parent_op_for_grouping(
-    body: Node, source: bytes, grouping_type: str
-) -> tuple[str, str] | None:
-    """Scan the class body for a ``@Query``/``@Mutation`` that returns a **singleton**
-    ``grouping_type`` as an **empty object** — e.g. ``@Mutation(() => NotificationsMutation)
-    notifications() { return {}; }``. Returns ``(op_name, 'MUTATION'|'QUERY')`` or ``None``.
+def _stub_ops(body: Node, source: bytes) -> list[tuple[str, str]]:
+    """``(stub type, 'MUTATION'|'QUERY')`` for each ``@Query``/``@Mutation`` in the class body that
+    returns a **singleton** type as an **empty object** — e.g. ``@Mutation(() =>
+    NotificationsMutation) notifications() { return {}; }``. That type is a stub parent: its
+    fields are the operations.
 
     Distinguishes grouping resolvers (a stub shell) from entity resolvers: an array return
     (``@Query(() => [T])``) does not match ``_SINGLETON_RETURN_RE`` (``[`` is not in
     ``[A-Za-z_$]``), and a singleton op that returns a real entity (``@Mutation(() => Book)
     addBook(...) { return this.books.create(...); }``) is not a stub — its type's fields are data
     fields, not operations."""
+    out: list[tuple[str, str]] = []
     pending: list[Node] = []
     for member in body.named_children:
         if member.type == "decorator":
@@ -253,11 +255,39 @@ def _parent_op_for_grouping(
             if gql_method is None or not d.args:
                 continue
             m = _SINGLETON_RETURN_RE.search(d.args[0])
-            if m and m.group(1) == grouping_type and _returns_empty_object(member, source):
-                mname = node_text(member.child_by_field_name("name"), source)
-                return _graphql_op_name(d, mname), gql_method.upper()
+            if m and _returns_empty_object(member, source):
+                out.append((m.group(1), gql_method.upper()))
         pending = []
-    return None
+    return out
+
+
+#: Fact: stub type → the operation kind (``MUTATION`` / ``QUERY``) of the root op that returns it,
+#: from every resolver in the repo — so a stub's fields declared in another resolver class (often
+#: another file) are recorded as operations too. A type returned as a stub by both kinds → absent.
+STUB_PARENTS = "nest.stub-parents"
+
+
+def _collect_stub_parents(
+    root: Node, source: bytes, rel: str, repo_root: object
+) -> list[tuple[str, str]] | None:
+    found = [op for cls, decs in _class_with_decorators(root)
+             if any(decorator(dec, source).name in _RESOLVER_DECORATORS for dec in decs)
+             and (body := cls.child_by_field_name("body")) is not None
+             for op in _stub_ops(body, source)]
+    return found or None
+
+
+def _resolve_stub_parents(values: list[list[tuple[str, str]]], index: object) -> dict[str, str]:
+    kinds: dict[str, str | None] = {}
+    for stub, kind in sorted(op for per_file in values for op in per_file):
+        record_distinct(kinds, stub, kind)
+    return {stub: kind for stub, kind in kinds.items() if kind is not None}
+
+
+register_fact(FactSpec(
+    name=STUB_PARENTS, language="typescript", gate=(b"@Resolver",),
+    collect=_collect_stub_parents, resolve=_resolve_stub_parents,
+))
 
 
 def _args_dto(member: Node, source: bytes) -> str | None:
@@ -386,6 +416,7 @@ def detect_nest_routes(
     consts: dict[str, str | None] = index_consts if isinstance(index_consts, dict) else {}
     routes: list[Statement] = []
     schedules = framework == "nestjs" and b"@nestjs/schedule" in source
+    stub_parents: dict[str, str] = index_fact(index, STUB_PARENTS) or {}
     for cls, decs in _class_with_decorators(root):
         base = _controller_base(decs, source)  # None when the class is not a @Controller
         is_controller = base is not None
@@ -397,13 +428,16 @@ def detect_nest_routes(
         ctrl_guards = _guards(decs, source, interceptors=True) if is_controller else []
         ctrl_auth = bool(_guards(decs, source)) if is_controller else False
         ctrl_version = _version(decs, source) if is_controller else None
-        # Grouping resolver: @Resolver(() => T) where a @Mutation/@Query on the class
-        # returns a singleton T — @ResolveField methods inherit the parent op's identity.
-        parent_op_info: tuple[str, str] | None = None
+        # Stub parent: @Resolver(() => T) where a root @Mutation/@Query (in this class or any
+        # other resolver of the repo) returns T as an empty object — T's @ResolveField methods
+        # are that kind's operations, addressed <T>.<field>.
+        stub_type: str | None = None
+        stub_method: str | None = None
         if is_resolver:
-            grouping_type = _resolver_type_arg(decs, source)
-            if grouping_type:
-                parent_op_info = _parent_op_for_grouping(body, source, grouping_type)
+            stub_type = _resolver_type_arg(decs, source)
+            if stub_type:
+                stub_method = next((k for t, k in _stub_ops(body, source) if t == stub_type),
+                                   None) or stub_parents.get(stub_type)
         pending: list[Node] = []
         for member in body.named_children:
             if member.type == "decorator":
@@ -493,15 +527,14 @@ def detect_nest_routes(
                             responseDTO=_field_resolver_return_dto(d) or _return_dto(member, source),
                         ))
                     elif fld is not None:  # @ResolveField/@ResolveProperty field resolver
-                        if parent_op_info is not None:
-                            # Grouping resolver: inherit parent @Mutation/@Query identity.
-                            op_name, op_method = parent_op_info
+                        if stub_method is not None:
+                            # A stub parent's field: an operation of the stub's kind.
                             routes.append(Statement(
                                 **{**common, "framework": "graphql"},
                                 semanticType="route",
-                                method=op_method,
-                                endpoint=f"{op_name}.{mname}",
-                                routeKind=op_method.lower(),
+                                method=stub_method,
+                                endpoint=f"{stub_type}.{mname}",
+                                routeKind=stub_method.lower(),
                                 requestDTO=_args_dto(member, source),
                                 responseDTO=_field_resolver_return_dto(d) or _return_dto(member, source),
                             ))

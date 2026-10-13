@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import pytest
 
 EP = {"route", "eventbus_consumer", "timer"}
 PKG = '{"dependencies": {"@nestjs/core": "10", "@nestjs/common": "10"}}'
@@ -208,9 +207,6 @@ def test_data_type_field_beside_a_mutation_is_none(analyze_files) -> None:
     assert [r.endpoint for r in _eps(st)] == ["addBook"]
 
 
-@pytest.mark.xfail(
-    strict=True, reason="stub-parent fields use '<operation>.<field>', not '<StubType>.<field>'"
-)
 def test_stub_parent_field_is_an_operation(analyze_files) -> None:
     st = _resolvers(
         analyze_files,
@@ -222,10 +218,6 @@ def test_stub_parent_field_is_an_operation(analyze_files) -> None:
     assert got == {("MUTATION", "mutation", "NotificationsMutation.create")}
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="stub-parent fields in another resolver class are recorded as field_resolver",
-)
 def test_stub_parent_field_in_another_class_is_an_operation(analyze_files) -> None:
     st = analyze_files(
         {

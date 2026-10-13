@@ -457,23 +457,23 @@ export class BrandEntityResolver {
 
 
 def test_grouping_resolver_resolve_fields_inherit_parent_op(tmp_path) -> None:
-    # Gap 1: @ResolveField on a grouping resolver inherits the parent @Mutation/@Query
-    # identity: endpoint = "<op>.<field>", method = MUTATION/QUERY, routeKind = mutation/query.
+    # A stub parent's @ResolveField is an operation of the stub's kind: endpoint
+    # "<StubType>.<field>", method = MUTATION/QUERY, routeKind = mutation/query.
     p = tmp_path / "notifications-mutation.resolver.ts"
     p.write_text(_GROUPING_RESOLVER_SRC.decode())
     ctx = ParseContext(path="notifications-mutation.resolver.ts", abs_path=p,
                        source=_GROUPING_RESOLVER_SRC, repo_root=tmp_path, capture_statements=True)
     rec = NestJSParser().parse_file(ctx)
     by_ep = {s.endpoint: s for s in rec.statements if s.semanticType == "route"}
-    # Grouping @Mutation fields: endpoint = "<op>.<field>", method = MUTATION
-    assert "notifications.create" in by_ep
-    assert "notifications.markAsRead" in by_ep
-    assert by_ep["notifications.create"].method == "MUTATION"
-    assert by_ep["notifications.create"].routeKind == "mutation"
-    assert by_ep["notifications.create"].framework == "graphql"
-    assert by_ep["notifications.create"].responseDTO == "NotificationDto"
-    assert by_ep["notifications.create"].requestDTO == "CreateNotificationInput"
-    assert by_ep["notifications.markAsRead"].method == "MUTATION"
+    # Stub-parent fields: endpoint = "<StubType>.<field>", method = MUTATION
+    assert "NotificationsMutation.create" in by_ep
+    assert "NotificationsMutation.markAsRead" in by_ep
+    assert by_ep["NotificationsMutation.create"].method == "MUTATION"
+    assert by_ep["NotificationsMutation.create"].routeKind == "mutation"
+    assert by_ep["NotificationsMutation.create"].framework == "graphql"
+    assert by_ep["NotificationsMutation.create"].responseDTO == "NotificationDto"
+    assert by_ep["NotificationsMutation.create"].requestDTO == "CreateNotificationInput"
+    assert by_ep["NotificationsMutation.markAsRead"].method == "MUTATION"
     # Entity resolver (@Query returning an array): @ResolveField stays a field_resolver,
     # addressed <ParentType>.<field> with no method.
     assert "Brand.all" in by_ep
@@ -553,7 +553,7 @@ export class OrdersQueryResolver {
   list() { return []; }
 }
 ''')
-        assert routes["orders.list"] == ("QUERY", "query"), ret
+        assert routes["OrdersQuery.list"] == ("QUERY", "query"), ret
 
 
 # ── Global prefix (setGlobalPrefix) and RouterModule paths ─────────────────────────────────────
