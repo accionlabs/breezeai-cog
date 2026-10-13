@@ -154,13 +154,14 @@ def test_named_interval_timeout_and_library_cron(analyze_files) -> None:
             "@Injectable()\nexport class JobsService {\n"
             "  @Interval('sync', 60000)\n  sync() {}\n"
             "  @Timeout(3000)\n  warmup() {}\n"
-            "  @Cron(CronExpression.EVERY_HOUR, { name: 'h' })\n  hourly() {}\n}\n",
+            "  @Cron(CronExpression.EVERY_HOUR, { name: 'h' })\n  hourly() {}\n"
+            "  @Cron(CronExpression.NOT_A_MEMBER)\n  unknown() {}\n}\n",
         }
     )
     got = {(r.method, r.endpoint, r.handler) for r in _eps(st)}
-    # A library enum member is not resolved: empty, never the member name.
+    # A library enum member is its fixed value; an unknown member stays empty, never its name.
     assert got == {("PERIODIC", "60000", "sync"), ("TIMER", "3000", "warmup"),
-                   ("PERIODIC", None, "hourly")}
+                   ("PERIODIC", "0 0-23/1 * * *", "hourly"), ("PERIODIC", None, "unknown")}
 
 
 GQL = "import { Resolver, Query, Mutation, Subscription, ResolveField, ResolveReference, Parent } from '@nestjs/graphql';\n"

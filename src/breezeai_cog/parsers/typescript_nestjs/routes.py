@@ -23,6 +23,7 @@ from ...parsers.typescript.decorators import decorator
 from ...parsers.typescript.functions import _type_text, extract_params
 from ..additive import FactSpec, index_fact, register_fact
 from ..index_common import record_distinct
+from .cron_expressions import CRON_EXPRESSIONS
 from .patterns import message_pattern
 from ..treesitter import node_text
 
@@ -121,8 +122,8 @@ def _pattern(dec: Node, source: bytes, consts: dict[str, str | None]) -> str | N
 
 def _schedule(dec: Node, name: str, source: bytes, consts: dict[str, str | None]) -> str | None:
     """Schedule of ``@Cron(expr)`` (the first argument) or ``@Interval([name,] ms)`` /
-    ``@Timeout([name,] ms)`` (the last): a literal or a constant; anything else (a
-    ``CronExpression`` member, a runtime value) → None."""
+    ``@Timeout([name,] ms)`` (the last): a literal, a constant or a ``CronExpression`` member
+    (its value is fixed by the library); anything else (a runtime value) → None."""
     call = next((c for c in dec.named_children if c.type == "call_expression"), None)
     args = call.child_by_field_name("arguments") if call is not None else None
     values = [c for c in args.named_children if c.type != "comment"] if args is not None else []
@@ -131,6 +132,9 @@ def _schedule(dec: Node, name: str, source: bytes, consts: dict[str, str | None]
     arg = values[0] if name == "Cron" else values[-1]
     if arg.type == "object":  # @Cron(expr, { name, timeZone }) never puts options first
         return None
+    member = node_text(arg, source)
+    if name == "Cron" and member.startswith("CronExpression."):
+        return CRON_EXPRESSIONS.get(member.removeprefix("CronExpression."))
     return message_pattern(arg, source, consts)
 
 
