@@ -11,6 +11,7 @@ import re
 
 from ...schemas import FileRecord
 from ..base import ParseContext
+from ..emits import apply
 from ..treesitter import parse_source
 from ..typescript.parser import TypeScriptParser
 from .routes import detect_codefirst_graphql_routes
@@ -37,10 +38,9 @@ class GraphQLCodeFirstParser(TypeScriptParser):
         record = self.extract(root, ctx)  # inherited base extraction (one parse)
         if ctx.capture_statements and not self.is_fixture_file(ctx.path):
             routes = detect_codefirst_graphql_routes(
-                root, ctx.source, ctx.path, seen_ids={s.id for s in record.statements},
-                timeout_micros=ctx.parse_timeout_micros,
+                root, ctx.source, ctx.path, timeout_micros=ctx.parse_timeout_micros,
             )
             if routes:
-                record.statements.extend(routes)
+                apply(record, routes, ctx.source, ctx.path)
                 record.framework = "graphql"
         return record

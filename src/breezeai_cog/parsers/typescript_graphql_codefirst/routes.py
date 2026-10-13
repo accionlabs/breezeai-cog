@@ -29,8 +29,9 @@ from typing import Iterator
 
 from tree_sitter import Node
 
-from ...emit import disambiguate, function_id, statement_id
-from ...schemas import Decorator, Statement
+from ...emit import function_id
+from ...schemas import Decorator
+from ..emits import Emit
 # Reuse the SDL DTO helpers — the decorator's SDL fragment is re-parsed with the GraphQL
 # grammar (below), so `!`/`[]` wrappers and the argument list are handled by the grammar, not
 # by hand, exactly as the resolver-map/SDL detector does for `gql`` templates.
@@ -181,9 +182,11 @@ def _classes_with_decorators(root: Node) -> Iterator[tuple[Node, list[Node]]]:
 
 
 def detect_codefirst_graphql_routes(
-    root: Node, source: bytes, path: str, *, seen_ids: set[str], timeout_micros: int = 0
-) -> list[Statement]:
-    routes: list[Statement] = []
+    root: Node, source: bytes, path: str, *, timeout_micros: int = 0
+) -> list[Emit]:
+    """Code-first GraphQL operations (TypeGraphQL-style ``@Query`` / ``@Mutation`` /
+    ``@Subscription`` methods on a ``@Resolver`` class), for :func:`~..emits.apply`."""
+    routes: list[Emit] = []
     for cls, cls_decs in _classes_with_decorators(root):
         name_node = cls.child_by_field_name("name")
         body = cls.child_by_field_name("body")
@@ -212,7 +215,6 @@ def detect_codefirst_graphql_routes(
                     kind = _OPS.get(d.name)
                     if kind is None:
                         continue  # @FieldResolver, @Arg, etc. are not operations
-                    sl, sc = dec.start_point[0] + 1, dec.start_point[1]
                     # DTOs: the decorator's SDL fragment is the contract (source of truth); the
                     # method's `@Arg` types are the fallback when it declares no input type.
                     req_dto = res_dto = None
@@ -221,12 +223,8 @@ def detect_codefirst_graphql_routes(
                         req_dto, res_dto = _sdl_dtos(frag, timeout_micros)
                     req_dto = req_dto or _arg_request_dto(member, source)
                     res_dto = res_dto or _thunk_dto(d)
-                    routes.append(Statement(
-                        id=disambiguate(statement_id(path, sl, sc), seen_ids),
-                        parentId=parent,
-                        nodeType="synthetic",  # decorator-derived route → no backing AST node
+                    routes.append(Emit(dec, dict(
                         semanticType="route",
-                        text=node_text(dec, source).split("\n", 1)[0][:200],
                         method=kind.upper(),
                         endpoint=_op_name(d, mname),
                         framework="graphql",
@@ -238,9 +236,7 @@ def detect_codefirst_graphql_routes(
                         guards=guards or None,
                         requestDTO=req_dto,
                         responseDTO=res_dto,
-                        startLine=sl,
-                        endLine=dec.end_point[0] + 1,
-                        path=path,
-                    ))
+                    ), parent=parent, node_type="synthetic",  # decorator-derived, no AST node
+                        text=node_text(dec, source).split("\n", 1)[0][:200]))
             pending = []
     return routes
