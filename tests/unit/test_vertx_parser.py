@@ -122,7 +122,7 @@ def test_vertx2_sendWithTimeout_is_eventbus_send(tmp_path) -> None:
     rec = VertxParser().parse_file(ctx)
     sends = [s for s in rec.statements if s.semanticType == "eventbus_send"]
     assert len(sends) == 1
-    assert sends[0].framework == "vertx" and sends[0].endpoint == "ADDR"
+    assert sends[0].framework == "vertx" and sends[0].endpoint is None  # ADDR unresolved → empty (Q15)
 
 
 def test_dynamic_prefix_address_renders_placeholder(tmp_path) -> None:
@@ -141,7 +141,7 @@ def test_dynamic_prefix_address_renders_placeholder(tmp_path) -> None:
     rec = VertxParser().parse_file(ctx)
     by = {(s.semanticType, s.method, s.endpoint) for s in rec.statements if s.semanticType}
     assert ("route", "POST", None) in by
-    assert ("eventbus_send", None, "{prefix}/audit") in by
+    assert ("eventbus_send", None, None) in by  # unknown address → empty, never {prefix}/audit
 
 
 def test_same_file_constant_address_folds(tmp_path) -> None:
@@ -167,7 +167,7 @@ def test_same_file_constant_address_folds(tmp_path) -> None:
     eps = {s.endpoint for s in rec.statements if (s.semanticType or "").startswith("eventbus")}
     assert "svc/lookup" in eps          # ADDR folded
     assert "app/svc/lookup" in eps      # PREF folded (concat + same-file constant ref)
-    assert "NF" in eps                  # non-final → not folded, stays symbolic
+    assert None in eps and "NF" not in eps  # non-final → not folded → empty, never the symbol
 
 
 def test_cross_file_constant_address_folds(tmp_path) -> None:
@@ -209,7 +209,7 @@ def test_vertx2_registerHandler_detected_as_consumer(tmp_path) -> None:
     assert consumers[0].framework == "vertx"
     # endpoint is the loop variable — address resolution (layers 3/4 + constant folding) is
     # deliberately out of scope for this fix; we only assert the consumer is now detected.
-    assert consumers[0].endpoint == "ebName"
+    assert consumers[0].endpoint is None  # ebName is a runtime variable → empty (Q15)
 
 
 # Delegation-wrapper idiom: a private helper forwards its address parameter to
@@ -253,7 +253,7 @@ def test_delegation_wrapper_promotes_call_sites(tmp_path) -> None:
     rec = VertxParser().parse_file(ctx)
     consumers = {s.endpoint for s in rec.statements if s.semanticType == "eventbus_consumer"}
     # three real call-site addresses (`app` is a local var → rendered as placeholder)
-    assert consumers == {"FULL_{app}/formal", "{app}/submit", "view/APP"}
+    assert consumers == {None, "view/APP"}  # {app} parts are runtime values → empty
     # the wrapper's own forwarded call is NOT emitted as a junk consumer
     assert "address" not in consumers
     assert rec.framework == "vertx"
@@ -300,7 +300,7 @@ def test_non_wrapper_private_method_is_not_aliased(tmp_path) -> None:
     # `fire(...)` call site is not classified; the in-wrapper send(addr, ...) is still a send
     # (addr is a local var → symbolic, not suppressed since it is not the parameter).
     sends = [s for s in rec.statements if s.semanticType == "eventbus_send"]
-    assert {s.endpoint for s in sends} == {"addr"}
+    assert {s.endpoint for s in sends} == {None}  # addr is a parameter → empty
     assert not any(s.semanticType and s.text.startswith("fire(") for s in rec.statements)
 
 
@@ -347,7 +347,7 @@ def test_eventbus_request_and_constant_addresses(tmp_path) -> None:
     assert "orders.ask" in sends       # request(...) mapped to eventbus_send
     assert "orders.audit" in sends     # constant TOPIC folded to its value
     assert "orders.audit" in consumers
-    assert "runtimeAddr" in sends      # unresolvable var → symbol (no compile-time value)
+    assert None in sends and "runtimeAddr" not in sends  # unresolvable var → empty (Q15)
     assert all(s.framework == "vertx" for s in by_sem.get("eventbus_send", []))
 
 

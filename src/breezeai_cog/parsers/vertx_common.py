@@ -75,8 +75,8 @@ def classify_call(
 
     ``path``      the first string-literal argument, already rendered by the caller (Java:
                   literal text; Groovy: GString → ``{name}`` placeholders).
-    ``first_arg`` raw text of the first argument — the fallback address for event-bus calls
-                  that pass a constant/variable rather than a string literal.
+    ``first_arg`` raw text of the first argument — the fallback name for ``deployVerticle``
+                  (event-bus addresses never fall back to it: unresolved → empty).
     ``obj``       the receiver text (``""`` for a bare, unqualified call).
     ``route_scope`` marks a *bare* HTTP-verb call (no receiver) that the caller has
                   determined is lexically inside a RouteMatcher scope — the Vert.x 2.x
@@ -89,7 +89,9 @@ def classify_call(
     obj_l = obj.lower()
 
     if method in EVENTBUS and is_bus_receiver(obj):
-        return EVENTBUS[method], None, path or first_arg, None
+        # The address is resolved or empty — never the symbol or a {…} placeholder (Q15): a
+        # consumer and its senders on the same unresolved symbol both stay empty.
+        return EVENTBUS[method], None, _known_path(path) if path else None, None
     if method in TIMERS:
         return "timer", None, None, None
     if method == "deployVerticle":

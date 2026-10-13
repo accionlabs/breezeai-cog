@@ -198,8 +198,8 @@ def _classify(
     if info is not None:
         return info
     semantic = aliases.get(method)
-    if semantic is not None:
-        return semantic, None, first_str or first_arg, None
+    if semantic is not None:  # an event-bus wrapper: resolved address or empty (Q15)
+        return semantic, None, first_str if first_str and "{" not in first_str else None, None
     return None
 
 

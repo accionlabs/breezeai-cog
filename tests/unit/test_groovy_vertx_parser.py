@@ -144,7 +144,7 @@ def test_constant_addresses_fold(tmp_path) -> None:
     eps = {s.endpoint for s in rec.statements if s.semanticType == "eventbus_consumer"}
     assert "svc/local" in eps    # same-file constant
     assert "svc/web" in eps      # cross-file constant (Addr.WEB)
-    assert "runtimeVar" in eps   # unresolvable var → symbol
+    assert None in eps and "runtimeVar" not in eps  # unresolvable var → empty (Q15)
 
 
 def test_dynamic_prefix_route_leaves_endpoint_empty(tmp_path) -> None:
