@@ -11,8 +11,8 @@ Parser: `src/breezeai_cog/parsers/typescript_nestjs/` (also routing-controllers 
 | `@Version(v)` on a method or controller | Wiring | — (`version` on the bindings; part of the path under URI versioning) | Adds to other bindings |
 | `@UseGuards(...)` / `@Authorized()` on a class or method | Guard | names in `guards` | Run before the handlers |
 | `@UseInterceptors(...)` on a class or method | Guard | names in `guards` | Run before the handlers |
-| `@EventPattern(pattern)` | Binding | `eventbus_consumer`, `EVENT`, `routeKind: message`, pattern as `endpoint` | Event consumer on a transport |
-| `@MessagePattern(pattern)` | Binding | `eventbus_consumer`, `MESSAGE`, `routeKind: message`, pattern as `endpoint` | Request-response message consumer |
+| `@EventPattern(pattern)` | Binding | `eventbus_consumer`, `EVENT`, `routeKind: message`, pattern as `endpoint` (object → canonical JSON, as above) | Event consumer on a transport |
+| `@MessagePattern(pattern)` | Binding | `eventbus_consumer`, `MESSAGE`, `routeKind: message`, pattern as `endpoint` — a string as written, an object as canonical JSON with sorted keys (`{"cmd":"sum"}`) | Request-response message consumer |
 | `@Cron(expr)` / `@Interval(ms)` (`@nestjs/schedule`) | Binding | `timer`, schedule as `endpoint` | Scheduled job |
 | `@Resolver()` on a class | Wiring | — | Container of GraphQL operations |
 | `@Query` / `@Mutation` / `@Subscription` on a resolver method | Binding | `route`, `framework: graphql`, `QUERY` / `MUTATION` / `SUBSCRIPTION`, `routeKind` the same in lower case, operation name as `endpoint` | One GraphQL operation |
@@ -21,4 +21,4 @@ Parser: `src/breezeai_cog/parsers/typescript_nestjs/` (also routing-controllers 
 | `@ResolveReference()` (federation) | Binding | `route`, `RESOLVE_REFERENCE`, `routeKind: query`, type name as `endpoint` | Called by the gateway's `_entities` field |
 | `NestFactory.create(...)` / `app.listen(port)` | None | — | Start-up |
 | `HttpService` / `fetch` calls | Outbound | `api_call` | Our code calling out |
-| `ClientProxy.send(...)` / `.emit(...)` | Outbound | `eventbus_send` / `eventbus_publish` | Our code sending a message |
+| `ClientProxy.send(...)` / `.emit(...)` | Outbound | `eventbus_send` / `eventbus_publish`, pattern as `endpoint` written exactly like the consumer's | Our code sending a message |

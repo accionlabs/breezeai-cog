@@ -9,7 +9,8 @@ def _eps(stmts):
     return [s for s in stmts if s.semanticType in EP and s.routeKind != "field_resolver"]
 
 
-def test_root_fields_are_bindings(analyze_files) -> None:
+def test_root_fields_are_captured_but_not_entry_points(analyze_files) -> None:
+    # The resolver is the entry point; a root field only declares the operation (Q1).
     st = analyze_files(
         {
             "schema.graphql": (
@@ -19,12 +20,8 @@ def test_root_fields_are_bindings(analyze_files) -> None:
             )
         }
     )
-    assert sorted((s.method, s.routeKind, s.endpoint) for s in _eps(st)) == [
-        ("MUTATION", "mutation", "addBook"),
-        ("QUERY", "query", "book"),
-        ("SUBSCRIPTION", "subscription", "bookAdded"),
-    ]
-    assert {s.framework for s in _eps(st)} == {"graphql"}
+    assert _eps(st) == []
+    assert {"book", "addBook", "bookAdded"} <= {s.name for s in st if s.semanticType is None}
 
 
 def test_schema_block_is_wiring(analyze_files) -> None:
@@ -35,7 +32,8 @@ def test_schema_block_is_wiring(analyze_files) -> None:
             )
         }
     )
-    assert [(s.method, s.endpoint, s.startLine) for s in _eps(st)] == [("QUERY", "me", 3)]
+    assert _eps(st) == []
+    assert [s.startLine for s in st if s.name == "me"] == [3]
 
 
 def test_data_type_field_is_none(analyze_files) -> None:

@@ -27,7 +27,7 @@ export function App() {
 }
 '''
 
-# Data-router config-object form (with nesting + lazy mount).
+# Data-router config-object form (with nesting + a lazy route).
 CONFIG_SRC = b'''import { createBrowserRouter } from 'react-router-dom';
 
 export const router = createBrowserRouter([
@@ -66,12 +66,12 @@ def test_jsx_routes_detected_and_nested(tmp_path) -> None:
     assert rec.framework == "react"
 
 
-def test_config_routes_detected_with_lazy_mount(tmp_path) -> None:
+def test_config_routes_detected_with_lazy_page(tmp_path) -> None:
     rec = _parse(tmp_path, CONFIG_SRC, "router.tsx")
     routes = {s.endpoint: s for s in rec.statements if s.semanticType == "route"}
     assert set(routes) == {"/", "/team", "/reports"}
     assert routes["/team"].handler == "Team"
-    assert routes["/reports"].routeKind == "mount"  # lazy code-split
+    assert routes["/reports"].routeKind == "page"  # lazy code-split: still a page (Q10)
     assert routes["/team"].routeKind == "page"
     assert rec.framework == "react"
 

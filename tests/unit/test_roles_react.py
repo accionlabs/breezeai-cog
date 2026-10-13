@@ -128,7 +128,6 @@ def test_path_only_parent_prefixes_children(analyze_files) -> None:
     assert [r.handler for r in _at(st, "/admin/users")] == ["AdminUsers"]
 
 
-@pytest.mark.xfail(strict=True, reason="a lazy route module is recorded as routeKind mount")
 def test_lazy_route_module_is_binding(analyze_files) -> None:
     st = _jsx(analyze_files, "      <Route path=\"/lazy\" lazy={() => import('./LazyPage')} />\n")
     [r] = _at(st, "/lazy")

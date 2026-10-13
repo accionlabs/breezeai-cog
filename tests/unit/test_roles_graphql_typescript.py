@@ -32,10 +32,10 @@ def test_resolver_map_root_fields_are_bindings(analyze_files) -> None:
         (r.framework, r.method, r.routeKind, r.endpoint, r.handler, r.handlerLine) for r in _eps(st)
     }
     assert got == {
-        ("graphql", "QUERY", "query", "books", "books", 4),
-        ("graphql", "QUERY", "query", "book", "book", 5),
-        ("graphql", "MUTATION", "mutation", "addBook", "addBook", 8),
-        ("graphql", "SUBSCRIPTION", "subscription", "bookAdded", "bookAdded", 11),
+        ("graphql", "QUERY", "query", "books", None, 4),  # inline arrow: anonymous
+        ("graphql", "QUERY", "query", "book", "book", 5),  # shorthand method
+        ("graphql", "MUTATION", "mutation", "addBook", None, 8),
+        ("graphql", "SUBSCRIPTION", "subscription", "bookAdded", None, 11),  # its subscribe fn
     }
 
 

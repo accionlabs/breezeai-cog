@@ -6,10 +6,10 @@ A receiver whose type is not known to be a ``ClientProxy`` records nothing (``se
 ``emit`` are common method names).
 
 The ``endpoint`` is written exactly like the consumer side's ``@MessagePattern`` /
-``@EventPattern`` records (:func:`routes._pattern`) so a sender and its consumer match: a
-string pattern unquoted, an object pattern as its source text. A pattern held in a constant
-resolves through the repo's string constants; anything else leaves the endpoint empty (never
-the symbol it was read from)."""
+``@EventPattern`` records (:func:`.patterns.message_pattern`, shared) so a sender and its
+consumer match: a string pattern as the string, an object pattern as canonical JSON with sorted
+keys. A pattern held in a constant resolves through the repo's string constants; anything else
+leaves the endpoint empty (never the symbol it was read from)."""
 
 from __future__ import annotations
 
@@ -19,7 +19,7 @@ from ...emit import disambiguate, file_id, statement_id
 from ...schemas import FileRecord, SemanticType, Statement
 from ..enclosing import Enclosing
 from ..treesitter import first_line, node_text
-from ..typescript.imports import resolve_const_value
+from .patterns import message_pattern
 
 _KIND: dict[str, SemanticType] = {"send": "eventbus_send", "emit": "eventbus_publish"}
 
@@ -66,13 +66,6 @@ def _client_members(root: Node, source: bytes) -> set[str]:
     return names
 
 
-def _pattern(arg: Node, source: bytes, consts: dict[str, str | None]) -> str | None:
-    """The message pattern as the consumer side writes it, or None when it cannot be resolved."""
-    if arg.type == "object":
-        return node_text(arg, source)  # same as @MessagePattern({ … }) on the consumer side
-    return resolve_const_value(arg, source, consts)
-
-
 def detect_client_proxy_calls(
     root: Node, source: bytes, path: str, record: FileRecord, *, framework: str,
     index: object | None = None,
@@ -101,7 +94,7 @@ def detect_client_proxy_calls(
             continue
         args = call.child_by_field_name("arguments")
         first = next(iter(args.named_children), None) if args is not None else None
-        endpoint = _pattern(first, source, consts) if first is not None else None
+        endpoint = message_pattern(first, source, consts) if first is not None else None
         kind = _KIND[node_text(prop, source)]
         line = call.start_point[0] + 1
         stmt = enclosing.statement(line)

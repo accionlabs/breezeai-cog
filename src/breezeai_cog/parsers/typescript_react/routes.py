@@ -11,8 +11,9 @@
   so this detection is gated on the ``@react-router/dev`` import and cannot fire on
   v5/v6 code (whose APIs are the JSX/object forms above).
 
-Emits ``semanticType="route"`` statements (``routeKind="page"`` for element routes,
-``"mount"`` for ``lazy`` code-split routes). Routes are parented to the file (React
+Emits ``semanticType="route"`` statements with ``routeKind="page"`` — element routes and
+``lazy`` code-split routes alike (a lazy route is a page whose component loads on demand, like
+Angular ``loadComponent``); v7 ``layout()`` stays ``"mount"``. Routes are parented to the file (React
 routes are config/markup, not handler methods), mirroring the Angular detector."""
 
 from __future__ import annotations
@@ -109,7 +110,6 @@ def _process_jsx(el: Node, prefix: str, source: bytes, path: str, seen: set[str]
     handler = _component_name(attrs.get("element"), source)
     if (has_path or is_index) and handler not in _REDIRECTS:
         sl, sc = el.start_point[0] + 1, el.start_point[1]
-        lazy = "lazy" in attrs
         routes.append(Statement(
             id=disambiguate(statement_id(path, sl, sc), seen),
             parentId=file_id(path),
@@ -118,7 +118,7 @@ def _process_jsx(el: Node, prefix: str, source: bytes, path: str, seen: set[str]
             text=entry_text(_opening(el), source),
             endpoint=full,
             framework="react",
-            routeKind="mount" if lazy else "page",
+            routeKind="page",  # a lazy route is a page too, its component loaded on demand
             handler=handler,
             startLine=sl,
             endLine=el.end_point[0] + 1,
@@ -167,7 +167,6 @@ def _process_config(arr: Node, prefix: str, source: bytes, path: str, seen: set[
         if "path" not in pairs and not is_index:
             continue
         full = _join(prefix, "" if is_index else _string_val(pairs["path"], source))
-        lazy = "lazy" in pairs
         element = pairs.get("element") or pairs.get("Component") or pairs.get("component")
         if element is not None and element.type == "identifier" and element is pairs.get("element"):
             element = None  # element: someVar — a value, not a component name
@@ -183,7 +182,7 @@ def _process_config(arr: Node, prefix: str, source: bytes, path: str, seen: set[
             text=entry_text(elem, source),
             endpoint=full,
             framework="react",
-            routeKind="mount" if lazy else "page",
+            routeKind="page",  # a lazy route is a page too, its component loaded on demand
             handler=handler,
             startLine=sl,
             endLine=elem.end_point[0] + 1,

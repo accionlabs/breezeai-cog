@@ -12,7 +12,7 @@ behaviour → ``Statement``s. Node types verified empirically against the ``grap
 | ``type`` (non-root) / ``interface`` / ``enum`` / ``union`` / ``input`` (+ ``extend`` of each) | ``Class`` (class/interface/enum/union/record) |
 | ``type X @key(fields:…)`` | the Class **plus** a ``graphql_entity`` statement with ``keyFields`` |
 | object/interface/input fields, enum values, union members | child ``Statement``s parented to the Class |
-| ``type Query/Mutation/Subscription`` (or a ``schema{}``-declared root) field | ``route`` statement |
+| ``type Query/Mutation/Subscription`` (or a ``schema{}``-declared root) field | plain ``Statement`` (name, text, DTOs) — the resolver is the entry point |
 | ``scalar`` / ``directive`` / ``schema`` | plain ``Statement`` (name + text) |
 | ``query/mutation/subscription`` op / ``fragment`` | ``api_call`` / plain statement |
 
@@ -299,7 +299,7 @@ def extract_graphql(
             **fields,  # type: ignore[arg-type]
         )
 
-    def emit_root_fields(obj: Node, kind: str) -> None:
+    def emit_root_fields(obj: Node) -> None:
         fields_def = child_of_type(obj, "fields_definition")
         if fields_def is None:
             return
@@ -314,12 +314,8 @@ def extract_graphql(
                     field,
                     fid,
                     nodeType=nt("field_definition"),
-                    semanticType="route",
                     name=name,
                     text=node_text(field, source)[:limit],
-                    method=kind.upper(),
-                    endpoint=name,
-                    routeKind=kind,
                     requestDTO=request_dto(field, source),
                     responseDTO=base_type_name(child_of_type(field, "type"), source),
                 )
@@ -383,7 +379,7 @@ def extract_graphql(
         if name is None:
             return
         if n.type in ("object_type_definition", "object_type_extension") and name in roots:
-            emit_root_fields(n, roots[name])  # a root operation type: fields are routes
+            emit_root_fields(n)  # a root operation type: fields are captured as plain statements
             return
         cid = emitted_class.get(name)
         if cid is None:  # first declaration of this type in the file → emit the Class node

@@ -727,7 +727,46 @@ def test_client_proxy_send_and_emit_are_outbound(analyze_files) -> None:
         ("eventbus_publish", ""),               # topic is a parameter → empty, never the symbol
         ("eventbus_publish", "order.created"),
         ("eventbus_send", "audit.write"),       # constant resolved
-        ("eventbus_send", "{ cmd: 'sum' }"),    # written like the consumer's pattern
+        ("eventbus_send", '{"cmd":"sum"}'),     # canonical JSON, like the consumer (Q12)
     ]                                           # this.mailer.send: not a ClientProxy → nothing
     consumer = [s.endpoint for s in st if s.semanticType == "eventbus_consumer"]
-    assert consumer == ["{ cmd: 'sum' }"]
+    assert consumer == ['{"cmd":"sum"}']
+
+
+def test_object_patterns_are_canonical_json_on_both_sides(tmp_path) -> None:
+    # NestJS sorts the keys of an object pattern and serialises it as JSON, so spacing, quotes
+    # and key order do not matter: both sides are written {"a":1,"cmd":"sum"}.
+    src = b"""import { Controller } from '@nestjs/common';
+import { MessagePattern, EventPattern, ClientProxy } from '@nestjs/microservices';
+const RUNTIME = process.env.X;
+@Controller()
+export class MathController {
+  constructor(private readonly client: ClientProxy) {}
+  @MessagePattern({ cmd: 'sum', a: 1 })
+  sum() { return 0; }
+  @MessagePattern({ role: 'user', nested: { b: [1, true, null] } })
+  nested() { return 0; }
+  @MessagePattern({ cmd: RUNTIME })
+  unknown() { return 0; }
+  @EventPattern('order.created')
+  created() { return 0; }
+  run() {
+    this.client.send({a:1,"cmd":"sum"}, []);
+    this.client.send({ ...base, cmd: 'x' }, []);
+  }
+}
+"""
+    p = tmp_path / "math.controller.ts"
+    p.write_bytes(src)
+    ctx = ParseContext(path="math.controller.ts", abs_path=p, source=src, repo_root=tmp_path,
+                       capture_statements=True)
+    rec = NestJSParser().parse_file(ctx)
+    consumers = [s.endpoint for s in rec.statements if s.semanticType == "eventbus_consumer"]
+    assert consumers == [
+        '{"a":1,"cmd":"sum"}',
+        '{"nested":{"b":[1,true,null]},"role":"user"}',
+        None,                      # a runtime value → unknown
+        "order.created",           # a string pattern is the string
+    ]
+    sends = [s.endpoint for s in rec.statements if s.semanticType == "eventbus_send"]
+    assert sends == ['{"a":1,"cmd":"sum"}', None]  # matches its consumer; a spread → unknown

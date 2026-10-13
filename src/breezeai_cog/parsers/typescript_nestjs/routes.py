@@ -21,6 +21,7 @@ from ...emit import disambiguate, function_id, statement_id
 from ...schemas import Decorator, Statement
 from ...parsers.typescript.decorators import decorator
 from ...parsers.typescript.functions import _type_text, extract_params
+from .patterns import message_pattern
 from ..treesitter import node_text
 
 _METHOD_DECORATORS = {
@@ -103,12 +104,14 @@ def _unquote(text: str) -> str:
     return text.strip().strip("'\"`")
 
 
-def _pattern(d) -> str | None:
-    """Address/topic of ``@EventPattern('x')`` / ``@MessagePattern({cmd:'y'})``."""
-    if not d.args:
-        return None
-    raw = d.args[0].strip()
-    return _unquote(raw) if raw[:1] in "'\"`" else (raw or None)
+def _pattern(dec: Node, source: bytes, consts: dict[str, str | None]) -> str | None:
+    """Address/topic of ``@EventPattern('x')`` / ``@MessagePattern({cmd:'y'})``: the string, or
+    canonical JSON for an object pattern (:func:`.patterns.message_pattern`, shared with the
+    ``ClientProxy`` sender so the two match); unresolved → None."""
+    call = next((c for c in dec.named_children if c.type == "call_expression"), None)
+    args = call.child_by_field_name("arguments") if call is not None else None
+    first = next((c for c in args.named_children if c.type != "comment"), None) if args else None
+    return message_pattern(first, source, consts) if first is not None else None
 
 
 def _guards(decs: list[Node], source: bytes, *, interceptors: bool = False) -> list[str]:
@@ -361,6 +364,8 @@ def detect_nest_routes(
 ) -> list[Statement]:
     """``index`` is the repo's ``TsAliasIndex``: it carries the NestJS global prefix of each app
     and the ``RouterModule`` path of each registered controller (NestJS only)."""
+    index_consts = getattr(index, "const_values", None)
+    consts: dict[str, str | None] = index_consts if isinstance(index_consts, dict) else {}
     routes: list[Statement] = []
     for cls, decs in _class_with_decorators(root):
         base = _controller_base(decs, source)  # None when the class is not a @Controller
@@ -437,7 +442,7 @@ def detect_nest_routes(
                         routes.append(Statement(
                             semanticType="eventbus_consumer",
                             method=msg,
-                            endpoint=_pattern(d),
+                            endpoint=_pattern(dec, source, consts),
                             routeKind="message",
                             **common,
                         ))
