@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import pytest
 
 EP = {"route", "eventbus_consumer", "timer"}
 
@@ -129,9 +128,31 @@ def test_schema_root_assignment_is_wiring(analyze_files) -> None:
     assert _eps(stmts) == []
 
 
-@pytest.mark.xfail(strict=True, reason="root named off the Query/Mutation convention not found")
 def test_root_assigned_in_schema_is_found(analyze_files) -> None:
     schema = SCHEMA.replace("RootQueries", "RootQueries2")
     stmts = analyze_files({"BookSchema.cs": schema, "RootQueries2.cs": OFF_CONVENTION_ROOT})
     [r] = _eps(stmts)
     assert (r.method, r.endpoint) == ("QUERY", "latest")
+
+
+def test_root_assigned_in_a_schema_initializer_is_found(analyze_files) -> None:
+    program = """using GraphQL.Types;
+using Books;
+
+var schema = new Schema { Mutation = new Writes() };
+"""
+    writes = """using GraphQL.Types;
+
+namespace Books;
+
+public class Writes : ObjectGraphType
+{
+    public Writes()
+    {
+        Field<BookType>("addBook").Resolve(ctx => new Book());
+    }
+}
+"""
+    stmts = analyze_files({"Program.cs": program, "Writes.cs": writes})
+    [r] = _eps(stmts)
+    assert (r.method, r.endpoint) == ("MUTATION", "addBook")

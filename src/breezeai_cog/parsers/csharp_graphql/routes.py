@@ -13,11 +13,12 @@ Two signals — matching how the runtime is wired, and grounded on the real
 
 * **base type** — an operation root/namespace derives from the **non-generic**
   ``ObjectGraphType``. ``ObjectGraphType<T>`` (generic) is a result/data wrapper → excluded.
-* **name convention** — the class is a root (``Query``/``Mutation``/``Subscription``) or a
-  namespace group ending in one of those (``ProductQuery``, ``AdminMutations``, …). This is
-  the same convention the schema wiring relies on; the framework itself is name-agnostic, so
-  a root registered under an off-convention class name is a known blind spot (honest gap, not
-  a wrong route — see the task notes). HotChocolate (attribute-based) is not handled here.
+* **schema wiring** — the schema assigns the class as a root (``Query = sp.GetRequiredService<
+  RootQueries>()`` in a ``Schema`` subclass, possibly in another file): the registered fact
+  ``graphql-dotnet.schema-roots`` (:mod:`.schema_roots`) gives its kind, whatever its name;
+* **name convention** — otherwise, the class is a root (``Query``/``Mutation``/``Subscription``)
+  or a namespace group ending in one of those (``ProductQuery``, ``AdminMutations``, …).
+  HotChocolate (attribute-based) is not handled here.
 
 Emits ``semanticType="route"``, ``framework="graphql"``, ``routeKind ∈ {query, mutation,
 subscription}``, ``method`` = the upper-cased kind, ``endpoint`` = the operation name —
@@ -35,6 +36,7 @@ from tree_sitter import Node
 from ...emit import disambiguate, statement_id
 from ...schemas import Statement
 from ..treesitter import first_line, node_text
+from .schema_roots import schema_roots
 
 _FIELD_CALLS = {"Field", "FieldAsync"}      # name is the first positional string arg
 _ADDFIELD_CALLS = {"AddField"}              # name is a `Name = "…"` object-initializer entry
@@ -54,16 +56,17 @@ def _name_kind(name: str) -> str | None:
     return None
 
 
-def _operation_kind(cls: Any) -> str | None:
+def _operation_kind(cls: Any, schema_roots: dict[str, str]) -> str | None:
     """Operation kind if ``cls`` is a graphql-dotnet operation type (non-generic
-    ``ObjectGraphType`` whose name follows the query/mutation/subscription convention),
-    else None. A generic base (``ObjectGraphType<T>``) is a result/data wrapper → excluded."""
+    ``ObjectGraphType`` the schema assigns as a root, or whose name follows the
+    query/mutation/subscription convention), else None. A generic base (``ObjectGraphType<T>``)
+    is a result/data wrapper → excluded."""
     ext = cls.extends or ""
     if "<" in ext:  # ObjectGraphType<T> — a data/result type, not an operation root
         return None
     if ext.rsplit(".", 1)[-1] != "ObjectGraphType":
         return None
-    return _name_kind(cls.name)
+    return schema_roots.get(cls.name) or _name_kind(cls.name)
 
 
 def _bare_call_name(func: Node, source: bytes) -> str | None:
@@ -201,10 +204,11 @@ def _handler(field_call: Node, source: bytes, methods: dict[str, int | None]
 
 
 def detect_graphql_dotnet_routes(
-    record: Any, root: Node, source: bytes, path: str, seen: set[str]
+    record: Any, root: Node, source: bytes, path: str, seen: set[str], index: Any = None,
 ) -> list[Statement]:
+    roots = schema_roots(index, path)
     op_types = {cls.name: (cls.id, kind) for cls in record.classes
-                if (kind := _operation_kind(cls)) is not None}
+                if (kind := _operation_kind(cls, roots)) is not None}
     if not op_types:
         return []
 

@@ -5,7 +5,7 @@ Parser: `src/breezeai_cog/parsers/csharp_graphql/` · Rules: [entry-point contra
 | Construct | Role | Record | Why |
 |---|---|---|---|
 | Root operation type (`class BookQuery : ObjectGraphType`, assigned to `Schema.Query` / `Mutation` / `Subscription`) | Wiring | — | A container: each field is a binding |
-| `Schema` constructor `Query = …` / `Mutation = …` | Wiring | statement stays plain | Names the root types; no handler |
+| `Schema` constructor `Query = …` / `Mutation = …`, or `new Schema { Query = … }` | Wiring | statement stays plain; the class it names (`new T()`, `GetRequiredService<T>()`, `GetService<T>()`, `Resolve<T>()`) is a root of that kind, whatever its name — found in any file (registered fact `graphql-dotnet.schema-roots`); otherwise the name convention (`…Query`, `…Mutations`) | Names the root types; no handler |
 | `Field<T>("x")` / `FieldAsync` / `AddField` on a root type | Binding | `route`, `QUERY` / `MUTATION` / `SUBSCRIPTION`, matching `routeKind`, `x` as `endpoint` | One operation |
 | `.Resolve(ctx => …)` on that field | — | `handler` empty, `handlerLine` = the lambda | Inline resolver is anonymous |
 | `.Resolve(ResolveX)` on that field | — | `handler: ResolveX`, `handlerLine` = its declaration | Named resolver |

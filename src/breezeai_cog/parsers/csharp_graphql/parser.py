@@ -32,7 +32,8 @@ class CSharpGraphQLParser(CSharpParser):
         record = self.extract(root, ctx)  # inherited C# extraction (one parse)
         if ctx.capture_statements and not self.is_fixture_file(ctx.path):
             seen = {s.id for s in record.statements}
-            routes = detect_graphql_dotnet_routes(record, root, ctx.source, ctx.path, seen)
+            routes = detect_graphql_dotnet_routes(record, root, ctx.source, ctx.path, seen,
+                                                  ctx.resolution_index)
             if routes:
                 record.statements.extend(routes)
                 record.framework = "graphql"
