@@ -96,7 +96,7 @@ What each index holds:
 | VB | class heritage (base class + attributes) | inherited controller routes |
 | TypeScript / JavaScript | `tsconfig`/`jsconfig` path aliases (per config scope); constant values; class heritage; Angular route mounts; **registered facts** (`index.facts`: Express mounts `express.router-mounts`, NestJS stub parents `nest.stub-parents` and prefixes `nest.prefixes`, Next.js apps `next.apps`, middleware matchers `next.middlewares` and base paths `next.base-paths`, LoopBack base paths `loopback.base-paths`, GraphQL root-field DTOs `graphql.sdl-root-fields` — read from `.graphql` files too, which the GraphQL parser owns) | aliased imports, inherited calls, route prefixes |
 | C++ | header basename → file; free functions; `Class::method`; `Class::field` types; heritage | `#include`, calls |
-| Ruby | ActiveRecord model names; controller `before_action` callbacks | recognising DB calls; Rails route guards |
+| Ruby | ActiveRecord model names; **registered facts** (`index.facts`: Rails controller `before_action` callbacks `rails.controller-callbacks`) | recognising DB calls; Rails route guards |
 | HCL / Terraform | folder → `.tf` files | local `module` sources |
 | HTML | template → owning component | linking templates to components |
 | Python | **registered facts** (`index.facts`): FastAPI wiring `fastapi.wiring` — `APIRouter` variables (own prefix, dependencies), `include_router` sites (also routers imported from other files), app middleware, module-level string constants used as prefixes; Celery task names `celery.tasks` | route prefixes and guards of routers mounted in another file |

@@ -6,12 +6,12 @@ from collections.abc import Iterator
 
 from tree_sitter import Node
 
-from ...emit import disambiguate, file_id, statement_id
-from ...schemas import FileRecord, Statement
-from ..ruby.controllers import controller_class, guards_for
-from ..ruby.index import RubyIndex
+from ...emit import file_id
+from ...schemas import FileRecord
+from ..emits import Emit
 from ..ruby.ownership import owner_id
-from ..treesitter import first_line, node_text
+from ..treesitter import node_text
+from .callbacks import callbacks_of, controller_class, guards_for
 
 _HTTP_METHODS = {"get", "post", "put", "patch", "delete", "head", "options", "match"}
 
@@ -343,13 +343,13 @@ def _route_guards(handler: str | None, module: str | None, index: object) -> lis
     """The ``before_action`` guards of the controller action a route points at (``users#show`` →
     ``UsersController#show``, inside ``namespace :admin`` → ``Admin::UsersController``). Unknown
     controller, module or handler form → no guards."""
-    if handler is None or module is None or not isinstance(index, RubyIndex):
+    if handler is None or module is None:
         return []
     target = controller_class(f"{module}/{handler}" if module else handler)
     if target is None:
         return []
     controller, action = target
-    callbacks = index.controller_callbacks.get(controller)
+    callbacks = callbacks_of(index, controller)
     return guards_for(callbacks, action) if callbacks is not None else []
 
 
@@ -382,27 +382,23 @@ def _root_handler(args: list[Node], source: bytes) -> str | None:
 
 def detect_rails_routes(
     root: Node, source: bytes, path: str, record: FileRecord, index: object = None
-) -> bool:
-    """Append explicit Rails route DSL statements; unresolved values stay null. ``index`` (the
-    Ruby repo index) supplies the controller callbacks that become each route's guards.
+) -> list[Emit]:
+    """Explicit Rails route DSL bindings, for :func:`~..emits.apply`; unresolved values stay
+    null. ``index`` (the Ruby repo index) supplies the controller callbacks
+    (``rails.controller-callbacks``) that become each route's guards.
 
     ``resources :photos`` / ``resource :profile`` expand to one binding per RESTful action
     (``only:`` / ``except:`` honoured) and nest the routes in their block; ``root`` is ``GET`` at
     its scope's path."""
-    seen = {statement.id for statement in record.statements}
-    matched = False
+    found: list[Emit] = []
     fallback = file_id(path)
 
     def emit(call: Node, verb: str | None, endpoint: str | None, handler: str | None) -> None:
         line = call.start_point[0] + 1
         guards = _route_guards(handler, _route_module(call, source), index)
-        record.statements.append(
-            Statement(
-                id=disambiguate(statement_id(path, line, call.start_point[1]), seen),
-                parentId=owner_id(line, record.functions, record.classes, fallback),
-                nodeType="call",
+        found.append(
+            Emit(call, dict(
                 semanticType="route",
-                text=first_line(node_text(call, source)),
                 method=verb,
                 endpoint=endpoint,
                 handler=handler,
@@ -412,10 +408,7 @@ def detect_rails_routes(
                 framework="rails",
                 routeKind="route",
                 isRegex=False,
-                startLine=line,
-                endLine=call.end_point[0] + 1,
-                path=path,
-            )
+            ), parent=owner_id(line, record.functions, record.classes, fallback), node_type="call")
         )
 
     handler: str | None
@@ -441,13 +434,11 @@ def detect_rails_routes(
                         if base is not None else None
                     handler = f"{resource.controller}#{action}" if resource.controller else None
                     emit(call, verb, endpoint, handler)
-                matched = True
             continue
         if method == "root":
             prefix = _route_prefix(call, source)
             emit(call, "GET", _join(prefix, "") if prefix is not None else None,
                  _root_handler(args, source))
-            matched = True
             continue
         if method not in _HTTP_METHODS:
             continue
@@ -474,5 +465,4 @@ def detect_rails_routes(
         methods = _via_methods(args, source) if method == "match" else [method.upper()]
         for route_verb in methods:  # match … via: [:get, :post] → one binding per verb
             emit(call, route_verb, endpoint, handler)
-        matched = True
-    return matched
+    return found

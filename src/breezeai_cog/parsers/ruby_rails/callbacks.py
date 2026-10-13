@@ -2,8 +2,9 @@
 
 A Rails route is declared in ``config/routes.rb`` (``get '/users/:id', to: 'users#show'``) but
 its ``before_action :authenticate`` lives in ``UsersController``, another file. The callbacks are
-collected once per repository in the ``build_index`` pre-pass (:mod:`.index`) and looked up by the
-route's ``controller#action`` handler.
+a registered fact on the Ruby index, ``rails.controller-callbacks`` (controller qualified name →
+its callbacks; a controller declared in more than one file with different callbacks is dropped —
+ambiguous, no guards), looked up by the route's ``controller#action`` handler.
 
 Only what the syntax states is recorded: ``before_action :a, :b`` with literal ``only:`` /
 ``except:`` action lists, minus ``skip_before_action``. A callback with ``if:`` / ``unless:``
@@ -13,10 +14,17 @@ are included only when that parent is declared in the same file.
 
 from __future__ import annotations
 
+from pathlib import Path
+from typing import Any
+
 from tree_sitter import Node
 
+from ..additive import FactSpec, index_fact, register_fact
+from ..index_common import record_distinct
+from ..ruby.models import _iter_classes, _qualified_name, _superclass_name
 from ..treesitter import node_text
-from .models import _iter_classes, _qualified_name, _superclass_name
+
+FACT = "rails.controller-callbacks"
 
 #: One ``before_action`` entry: (guard name, actions it is limited to or None for all,
 #: actions it excludes).
@@ -130,3 +138,30 @@ def guards_for(callbacks: list[Callback], action: str) -> list[str]:
     """The guard names that run before ``action``, in declaration order."""
     return [name for name, only, exclude in callbacks
             if (only is None or action in only) and action not in exclude]
+
+
+def callbacks_of(index: Any | None, controller: str) -> list[Callback] | None:
+    """The ``before_action`` callbacks of ``controller``, or None when unknown."""
+    found: dict[str, list[Callback]] = index_fact(index, FACT) or {}
+    return found.get(controller)
+
+
+def _collect(
+    root: Node, source: bytes, rel: str, repo_root: Path | None,
+) -> list[tuple[str, list[Callback]]] | None:
+    return controller_callbacks(root, source) or None
+
+
+def _resolve(
+    values: list[list[tuple[str, list[Callback]]]], index: Any,
+) -> dict[str, list[Callback]] | None:
+    callbacks: dict[str, list[Callback] | None] = {}
+    for per_file in values:
+        for name, entries in per_file:
+            record_distinct(callbacks, name, entries)
+    return {k: v for k, v in callbacks.items() if v is not None} or None
+
+
+register_fact(FactSpec(
+    name=FACT, language="ruby", gate=(b"before_action",), collect=_collect, resolve=_resolve,
+))

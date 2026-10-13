@@ -38,12 +38,11 @@ class RubyParser(BaseParser):
         self, repo_root: Path, files: Sequence[Path], jobs: int = 1
     ) -> RubyIndex:
         """Repo-level pre-pass: the ActiveRecord model constants (see ``models.py``) and the
-        Rails controller callbacks (see ``controllers.py``).
+        registered facts of the Ruby files (Rails controller callbacks, …).
 
         A model is declared in its own file but queried from controllers and services, so
         the identity that separates ``User.find`` from ``Tempfile.create`` can only be
-        known repo-wide; likewise a controller's ``before_action`` guards a route declared in
-        ``config/routes.rb``."""
+        known repo-wide."""
         return build_ruby_index(Path(repo_root), files, jobs)
 
     def parse_file(self, ctx: ParseContext) -> FileRecord:

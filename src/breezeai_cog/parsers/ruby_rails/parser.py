@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from ...schemas import FileRecord
 from ..base import ParseContext
+from ..emits import apply
 from ..ruby.parser import RubyParser
 from ..treesitter import parse_source
 from ..ruby.claims import has_call, has_require, has_superclass
@@ -31,6 +32,8 @@ class RailsParser(RubyParser):
         root = parse_source("ruby", ctx.source, ctx.parse_timeout_micros).root_node
         record = self.extract(root, ctx)
         if ctx.capture_statements and not self.is_fixture_file(ctx.path):
-            if detect_rails_routes(root, ctx.source, ctx.path, record, ctx.resolution_index):
+            routes = detect_rails_routes(root, ctx.source, ctx.path, record, ctx.resolution_index)
+            if routes:
+                apply(record, routes, ctx.source, ctx.path)
                 record.framework = "rails"
         return record
