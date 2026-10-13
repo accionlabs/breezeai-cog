@@ -33,8 +33,7 @@ from typing import Any, Iterator
 
 from tree_sitter import Node
 
-from ...emit import disambiguate, statement_id
-from ...schemas import Statement
+from ..emits import Emit
 from ..treesitter import first_line, node_text
 from .schema_roots import schema_roots
 
@@ -204,15 +203,17 @@ def _handler(field_call: Node, source: bytes, methods: dict[str, int | None]
 
 
 def detect_graphql_dotnet_routes(
-    record: Any, root: Node, source: bytes, path: str, seen: set[str], index: Any = None,
-) -> list[Statement]:
+    record: Any, root: Node, source: bytes, path: str, index: Any = None,
+) -> list[Emit]:
+    """Each root field (``Field<T>("name", …)``) of a query / mutation / subscription type, for
+    :func:`~..emits.apply`."""
     roots = schema_roots(index, path)
     op_types = {cls.name: (cls.id, kind) for cls in record.classes
                 if (kind := _operation_kind(cls, roots)) is not None}
     if not op_types:
         return []
 
-    routes: list[Statement] = []
+    routes: list[Emit] = []
 
     def visit(node: Node) -> None:
         for child in node.named_children:
@@ -221,7 +222,7 @@ def detect_graphql_dotnet_routes(
                 name = node_text(name_node, source) if name_node is not None else None
                 info = op_types.get(name) if name is not None else None
                 if info is not None:
-                    _emit(child, info, source, path, seen, routes)
+                    _emit(child, info, source, routes)
                     continue  # its Field calls are consumed here — don't recurse into it
             visit(child)
 
@@ -229,19 +230,13 @@ def detect_graphql_dotnet_routes(
     return routes
 
 
-def _emit(class_node: Node, info: tuple[str, str], source: bytes, path: str,
-          seen: set[str], routes: list[Statement]) -> None:
+def _emit(class_node: Node, info: tuple[str, str], source: bytes, routes: list[Emit]) -> None:
     parent_id, kind = info
     methods = _method_lines(class_node, source)
     for op, node in _field_operations(class_node, source):
-        sl, sc = node.start_point[0] + 1, node.start_point[1]
         handler, handler_line = _handler(node, source, methods)
-        routes.append(Statement(
-            id=disambiguate(statement_id(path, sl, sc), seen),
-            parentId=parent_id,
-            nodeType="invocation_expression",
+        routes.append(Emit(node, dict(
             semanticType="route",
-            text=first_line(node_text(node, source))[:120],
             method=kind.upper(),
             endpoint=op,
             framework="graphql",
@@ -249,7 +244,5 @@ def _emit(class_node: Node, info: tuple[str, str], source: bytes, path: str,
             handlerLine=handler_line,
             routeKind=kind,
             isRegex=False,
-            startLine=sl,
-            endLine=node.end_point[0] + 1,
-            path=path,
-        ))
+        ), parent=parent_id, node_type="invocation_expression",
+            text=first_line(node_text(node, source))[:120]))
