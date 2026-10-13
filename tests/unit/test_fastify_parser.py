@@ -9,6 +9,7 @@ from jsonschema import Draft202012Validator
 
 from breezeai_cog.core import registry
 from breezeai_cog.emit import to_line
+from breezeai_cog.parsers.additive import all_detectors
 from breezeai_cog.parsers.base import ParseContext
 from breezeai_cog.parsers.treesitter import parse_source
 from breezeai_cog.parsers.typescript.imports import TsAliasIndex
@@ -16,6 +17,14 @@ from breezeai_cog.parsers.typescript.parser import TypeScriptParser
 from breezeai_cog.parsers.typescript_fastify import routes as fastify_routes
 from breezeai_cog.parsers.typescript_fastify.routes import detect_fastify_routes
 from breezeai_cog.schemas import FileRecord
+
+
+def test_fastify_is_registered_as_additive_detector() -> None:
+    detectors = {detector.name: detector for detector in all_detectors()["typescript"]}
+
+    assert "fastify" in detectors
+    assert detectors["fastify"].frameworks == ("fastify",)
+    assert detectors["fastify"].skip_fixtures is True
 
 
 def _with_factory_import_for_fixture(source: bytes) -> bytes:
@@ -123,6 +132,20 @@ def test_fastify_route_enriches_existing_expression_statement() -> None:
     assert record.framework == "fastify"
 
 
+def test_parse_file_captures_fastify_route_end_to_end() -> None:
+    source = (
+        b'import Fastify from "fastify";\n'
+        b"const app = Fastify();\n"
+        b"app.get('/users', handler);\n"
+    )
+
+    record = _parse_typescript(source, "app.ts")
+
+    routes = [statement for statement in record.statements if statement.framework == "fastify"]
+    assert [(route.method, route.endpoint) for route in routes] == [("GET", "/users")]
+    assert record.framework == "fastify"
+
+
 def test_ignores_unrelated_get_method() -> None:
     source = (
         b'import axios from "axios";\n'
@@ -164,6 +187,20 @@ def test_detects_post_route() -> None:
     assert [(route.method, route.endpoint) for route in routes] == [("POST", "/users")]
 
 
+def test_regex_route_has_null_endpoint_and_is_marked_regex() -> None:
+    source = (
+        b'import Fastify from "fastify";\n'
+        b"const app = Fastify();\n"
+        b"app.get(/users\\/.*/, handler);\n"
+    )
+
+    routes = _detect_routes(source)
+
+    assert [(route.method, route.endpoint, route.isRegex) for route in routes] == [
+        ("GET", None, True)
+    ]
+
+
 def test_template_route_paths_use_parameter_placeholders() -> None:
     source = (
         b"const fastify = Fastify();\n"
@@ -194,6 +231,35 @@ def test_template_route_path_resolves_constants_and_falls_back_to_placeholders()
         ("GET", "/internal/admin"),
         ("GET", "/public"),
     ]
+
+
+def test_template_route_with_constant_base_is_resolved() -> None:
+    source = (
+        b'import Fastify from "fastify";\n'
+        b"const f = Fastify();\n"
+        b"const BASE = '/api';\n"
+        b"f.get(`${BASE}/users`, handler);\n"
+    )
+
+    routes = _detect_routes(source)
+
+    assert [(route.method, route.endpoint) for route in routes] == [("GET", "/api/users")]
+
+
+def test_handler_inside_route_options_is_captured() -> None:
+    source = (
+        b'import Fastify from "fastify";\n'
+        b"const f = Fastify();\n"
+        b"f.get('/opts', { schema: {}, handler: getUsers });\n"
+    )
+
+    routes = _detect_routes(source)
+
+    assert [(route.endpoint, route.handler) for route in routes] == [("/opts", "getUsers")]
+
+    record = _parse_typescript(source, "opts.ts")
+    captured = [statement for statement in record.statements if statement.framework == "fastify"]
+    assert [(route.endpoint, route.handler) for route in captured] == [("/opts", "getUsers")]
 
 
 def test_route_hooks_are_captured_as_guards() -> None:

@@ -965,9 +965,10 @@ def _http_method_route(
     if len(args) < 2:
         return
 
-    url = _resolve_route_string(args[0], source, file_index)
+    regex_path = args[0].type == "regex"
+    url = None if regex_path else _resolve_route_string(args[0], source, file_index)
 
-    if url is None or not (url.startswith("/") or url in ("", "*")):
+    if not regex_path and (url is None or not (url.startswith("/") or url in ("", "*"))):
         return
 
     handler_node = _find_handler_arg(args[1:], source)
@@ -976,14 +977,14 @@ def _http_method_route(
         logger.debug(
             "fastify: no callable handler argument found for %s %s at %s:%d; handler is unresolved",
             member_name.upper(),
-            url,
+            url if url is not None else node_text(args[0], source),
             path,
             node.start_point[0] + 1,
         )
 
     methods = list(_ALL_METHODS) if member_name == "all" else [member_name.upper()]
 
-    route = _join_prefix(prefix, url)
+    route = None if regex_path else _join_prefix(prefix, url)
 
     parent_id, handler_name, handler_line = _resolve_handler(
         handler_node,
@@ -1007,6 +1008,7 @@ def _http_method_route(
                 source=source,
                 seen_ids=seen_ids,
                 guards=guards,
+                is_regex=regex_path,
             )
         )
 
@@ -1041,11 +1043,13 @@ def _app_route(
     if url_node is None:
         return
 
-    url = _resolve_route_string(url_node, source, file_index)
+    regex_path = url_node.type == "regex"
+    url = None if regex_path else _resolve_route_string(url_node, source, file_index)
 
-    if url is None or not (url.startswith("/") or url in ("", "*")):
+    if not regex_path and (url is None or not (url.startswith("/") or url in ("", "*"))):
         return
 
+    display_url = url if url is not None else node_text(url_node, source)
     methods: list[str | None]
     if method_node is None:
         methods, dynamic = ["GET"], False
@@ -1060,7 +1064,7 @@ def _app_route(
         logger.debug(
             "fastify: could not statically resolve one or more HTTP "
             "methods for route %s at %s:%d; unresolved method is null",
-            url,
+            display_url,
             path,
             node.start_point[0] + 1,
         )
@@ -1069,7 +1073,7 @@ def _app_route(
     if not methods:
         return
 
-    route = _join_prefix(prefix, url)
+    route = None if regex_path else _join_prefix(prefix, url)
 
     parent_id, handler_name, handler_line = _resolve_handler(
         handler_node,
@@ -1093,6 +1097,7 @@ def _app_route(
                 source=source,
                 seen_ids=seen_ids,
                 guards=guards,
+                is_regex=regex_path,
             )
         )
 
@@ -1381,6 +1386,7 @@ def _make_statement(
     source: bytes,
     seen_ids: set[str],
     guards: Optional[list[str]] = None,
+    is_regex: bool = False,
 ) -> Statement:
     """Create a Statement for a Fastify route or plugin mount."""
 
@@ -1406,7 +1412,7 @@ def _make_statement(
         framework="fastify",
         handler=handler,
         handlerLine=handler_line,
-        isRegex=False,
+        isRegex=is_regex,
         authRequired=True if guards else None,
         guards=guards,
         startLine=start_line,
