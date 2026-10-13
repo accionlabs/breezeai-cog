@@ -14,17 +14,20 @@ detector so the backend joins them uniformly."""
 from __future__ import annotations
 
 import re
+from typing import Any
 
 from tree_sitter import Node
 
-from ...emit import disambiguate, function_id, statement_id
-from ...schemas import Decorator, Statement
+from ...emit import function_id
+from ...schemas import Decorator
 from ...parsers.typescript.decorators import decorator
 from ...parsers.typescript.functions import _type_text, extract_params
 from ..additive import FactSpec, index_fact, register_fact
+from ..emits import Emit
 from ..index_common import record_distinct
 from .cron_expressions import CRON_EXPRESSIONS
 from .patterns import message_pattern
+from .prefixes import nest_prefixes
 from ..treesitter import node_text
 
 _METHOD_DECORATORS = {
@@ -387,13 +390,16 @@ def _served(local: str, verb: str, class_name: str, path: str, index: object | N
     set but cannot be resolved — or a controller that cannot be tied to its app when one of the
     repo's apps sets a prefix — makes the address unknown → None (contract §8: never a partial
     address)."""
-    ctrl_prefixes = getattr(index, "nest_controller_prefixes", None) or {}
+    prefixes = nest_prefixes(index)
+    if prefixes is None:
+        return local
+    ctrl_prefixes = prefixes.controller_prefixes
     if class_name in ctrl_prefixes:
         mp = ctrl_prefixes[class_name]
         if mp is None:
             return None
         local = _join(mp, local)
-    boots = getattr(index, "nest_global_prefixes", None) or {}
+    boots = prefixes.global_prefixes
     if not boots:
         return local
     anchors = [d for d in boots if d == "" or path.startswith(d + "/")]
@@ -411,14 +417,15 @@ def _served(local: str, verb: str, class_name: str, path: str, index: object | N
 
 
 def detect_nest_routes(
-    root: Node, source: bytes, path: str, *, seen_ids: set[str], framework: str = "nestjs",
+    root: Node, source: bytes, path: str, *, framework: str = "nestjs",
     index: object | None = None,
-) -> list[Statement]:
-    """``index`` is the repo's ``TsAliasIndex``: it carries the NestJS global prefix of each app
-    and the ``RouterModule`` path of each registered controller (NestJS only)."""
+) -> list[Emit]:
+    """The bindings of this file's controllers and resolvers, for :func:`~..emits.apply`.
+    ``index`` is the repo's ``TsAliasIndex``: its ``nest.prefixes`` fact gives the global prefix
+    of each app and the ``RouterModule`` path of each registered controller (NestJS only)."""
     index_consts = getattr(index, "const_values", None)
     consts: dict[str, str | None] = index_consts if isinstance(index_consts, dict) else {}
-    routes: list[Statement] = []
+    routes: list[Emit] = []
     schedules = framework == "nestjs" and b"@nestjs/schedule" in source
     stub_parents: dict[str, str] = index_fact(index, STUB_PARENTS) or {}
     for cls, decs in _class_with_decorators(root):
@@ -467,25 +474,18 @@ def detect_nest_routes(
                     if (verb is None and msg is None and gql is None and fld is None
                             and job is None and not ref):
                         continue
-                    sl, sc = dec.start_point[0] + 1, dec.start_point[1]
-                    common = dict(
-                        id=disambiguate(statement_id(path, sl, sc), seen_ids),
-                        parentId=parent,
-                        nodeType="synthetic",
-                        text=node_text(dec, source).split("\n", 1)[0],
+                    common: dict[str, Any] = dict(
                         framework=framework,
                         handler=mname,
                         handlerLine=mline,
                         isRegex=False,
                         authRequired=auth_required,
                         guards=guards or None,
-                        startLine=sl,
-                        endLine=dec.end_point[0] + 1,
-                        path=path,
                     )
+                    fields: dict[str, Any]
                     if verb is not None:  # HTTP route
                         local = _join(base, _unquote(d.args[0]) if d.args else "")
-                        routes.append(Statement(
+                        fields = dict(
                             semanticType="route",
                             method=verb,
                             endpoint=(
@@ -497,43 +497,43 @@ def detect_nest_routes(
                             requestDTO=_request_dto(member, source),
                             responseDTO=_response_dto(pending, source) or _return_dto(member, source),
                             **common,
-                        ))
+                        )
                     elif ref:  # @ResolveReference: the gateway's _entities fetch of this type
-                        routes.append(Statement(
+                        fields = dict(
                             **{**common, "framework": "graphql"},
                             semanticType="route",
                             method="RESOLVE_REFERENCE",
                             endpoint=_resolver_type_arg(decs, source),
                             routeKind="query",
-                        ))
+                        )
                     elif job is not None:  # @Cron / @Interval / @Timeout scheduled job
-                        routes.append(Statement(
+                        fields = dict(
                             **{**common, "isRegex": None, "authRequired": None, "guards": None},
                             semanticType="timer",
                             method=job,
                             endpoint=_schedule(dec, d.name, source, consts),
-                        ))
+                        )
                     elif msg is not None:  # @EventPattern / @MessagePattern microservice consumer
-                        routes.append(Statement(
+                        fields = dict(
                             semanticType="eventbus_consumer",
                             method=msg,
                             endpoint=_pattern(dec, source, consts),
                             routeKind="message",
                             **common,
-                        ))
+                        )
                     elif gql is not None:  # @Query/@Mutation/@Subscription code-first GraphQL op
-                        routes.append(Statement(
+                        fields = dict(
                             **{**common, "framework": "graphql"},
                             semanticType="route",
                             method=gql.upper(),
                             endpoint=_graphql_op_name(d, mname),
                             routeKind=gql,
                             responseDTO=_field_resolver_return_dto(d) or _return_dto(member, source),
-                        ))
+                        )
                     elif fld is not None:  # @ResolveField/@ResolveProperty field resolver
                         if stub_method is not None:
                             # A stub parent's field: an operation of the stub's kind.
-                            routes.append(Statement(
+                            fields = dict(
                                 **{**common, "framework": "graphql"},
                                 semanticType="route",
                                 method=stub_method,
@@ -541,14 +541,14 @@ def detect_nest_routes(
                                 routeKind=stub_method.lower(),
                                 requestDTO=_args_dto(member, source),
                                 responseDTO=_field_resolver_return_dto(d) or _return_dto(member, source),
-                            ))
+                            )
                         else:
                             # `Parent.field` when @Resolver(() => T) names the parent type, else
                             # the bare field name: a bare `author` does not say which type it
                             # hangs off, and many types have one. Same form csharp-hotchocolate
                             # emits. RESOLVE_FIELD is the spec's verb for this (not QUERY).
                             parent_type = _resolver_type_arg(decs, source)
-                            routes.append(Statement(
+                            fields = dict(
                                 **{**common, "framework": "graphql"},
                                 semanticType="route",
                                 method="RESOLVE_FIELD",
@@ -556,6 +556,7 @@ def detect_nest_routes(
                                 routeKind="field_resolver",
                                 requestDTO=_args_dto(member, source),
                                 responseDTO=_field_resolver_return_dto(d) or _return_dto(member, source),
-                            ))
+                            )
+                    routes.append(Emit(dec, fields, parent=parent, node_type="synthetic"))
             pending = []
     return routes

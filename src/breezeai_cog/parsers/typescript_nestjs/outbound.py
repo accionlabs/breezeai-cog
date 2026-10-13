@@ -15,9 +15,8 @@ from __future__ import annotations
 
 from tree_sitter import Node
 
-from ...emit import disambiguate, file_id, statement_id
-from ...schemas import FileRecord, SemanticType, Statement
-from ..enclosing import Enclosing
+from ...schemas import SemanticType
+from ..emits import Emit
 from ..treesitter import first_line, node_text
 from .patterns import message_pattern
 
@@ -67,21 +66,18 @@ def _client_members(root: Node, source: bytes) -> set[str]:
 
 
 def detect_client_proxy_calls(
-    root: Node, source: bytes, path: str, record: FileRecord, *, framework: str,
-    index: object | None = None,
-) -> bool:
-    """Enrich / append ``eventbus_send`` / ``eventbus_publish`` statements. True if any."""
+    root: Node, source: bytes, *, framework: str, index: object | None = None,
+) -> list[Emit]:
+    """The ``eventbus_send`` / ``eventbus_publish`` calls of this file, for
+    :func:`~..emits.apply`: each enriches the unclassified statement it sits on, or is a new one."""
     if b"ClientProxy" not in source:
-        return False
+        return []
     clients = _client_members(root, source)
     if not clients:
-        return False
+        return []
     index_consts = getattr(index, "const_values", None)
     consts: dict[str, str | None] = index_consts if isinstance(index_consts, dict) else {}
-    enclosing = Enclosing(record)
-    seen = {s.id for s in record.statements}
-    used: set[str] = set()
-    found = False
+    found: list[Emit] = []
     for call in _walk(root, ("call_expression",)):
         fn = call.child_by_field_name("function")
         prop = fn.child_by_field_name("property") if fn is not None and fn.type == "member_expression" else None
@@ -94,29 +90,12 @@ def detect_client_proxy_calls(
             continue
         args = call.child_by_field_name("arguments")
         first = next(iter(args.named_children), None) if args is not None else None
-        endpoint = message_pattern(first, source, consts) if first is not None else None
-        kind = _KIND[node_text(prop, source)]
-        line = call.start_point[0] + 1
-        stmt = enclosing.statement(line)
-        if stmt is not None and stmt.semanticType is None and stmt.id not in used:
-            used.add(stmt.id)
-            stmt.semanticType = kind
-            stmt.endpoint = endpoint
-            stmt.framework = framework
-        else:
-            new_id = disambiguate(statement_id(path, line, call.start_point[1]), seen)
-            seen.add(new_id)
-            record.statements.append(Statement(
-                id=new_id,
-                parentId=enclosing.function_id(line, file_id(path)),
-                nodeType="synthetic",
-                semanticType=kind,
-                text=first_line(node_text(call, source))[:200],
-                endpoint=endpoint,
-                framework=framework,
-                startLine=line,
-                endLine=call.end_point[0] + 1,
-                path=path,
-            ))
-        found = True
+        found.append(Emit(
+            call,
+            {"semanticType": _KIND[node_text(prop, source)],
+             "endpoint": message_pattern(first, source, consts) if first is not None else None,
+             "framework": framework},
+            enrich="unclassified", node_type="synthetic",
+            text=first_line(node_text(call, source))[:200],
+        ))
     return found
