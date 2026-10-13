@@ -171,7 +171,6 @@ def test_startup_is_none(program) -> None:
         assert _at(program, "Program.cs", _program_line(snippet)) == []
 
 
-@pytest.mark.xfail(strict=True, reason="C# HttpClient call not recorded as api_call")
 def test_http_client_call_is_outbound(analyze_files) -> None:
     src = """using System.Net.Http;
 

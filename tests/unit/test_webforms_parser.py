@@ -872,3 +872,30 @@ def test_markup_master_missing_is_dropped(tmp_path) -> None:
     )
     rec = WebFormsParser().parse_file(ctx)
     assert not any("Ghost.master" in i for i in rec.importFiles)
+
+
+def test_generic_handlers_are_bound_at_their_ashx(analyze_files) -> None:
+    sync_cb = (
+        "using System.Web;\nnamespace Shop {\npublic class Export : IHttpHandler\n{\n"
+        "    public bool IsReusable => false;\n"
+        "    public void ProcessRequest(HttpContext context) { }\n}\n}\n"
+    )
+    async_cb = (
+        "using System.Web;\npublic class Feed : HttpTaskAsyncHandler\n{\n"
+        "    public override async Task ProcessRequestAsync(HttpContext context) { }\n}\n"
+    )
+    stmts = analyze_files({
+        "Handlers/Export.ashx": '<%@ WebHandler Language="C#" CodeBehind="Export.ashx.cs" Class="Shop.Export" %>',
+        "Handlers/Export.ashx.cs": sync_cb,
+        "Feed.ashx": '<%@ WebHandler Class="Feed" %>',
+        "Feed.ashx.cs": async_cb,
+        "Other.ashx": '<%@ WebHandler Class="Shop.Somewhere" %>',  # names another class
+        "Other.ashx.cs": sync_cb.replace("Export", "Other"),
+        "Loose.cs": sync_cb.replace("Export", "Loose"),               # no .ashx at all
+    })
+    got = {(s.path, s.method, s.endpoint, s.handler, s.handlerLine)
+           for s in stmts if s.semanticType == "route"}
+    assert got == {
+        ("Handlers/Export.ashx.cs", "ANY", "/Handlers/Export.ashx", "ProcessRequest", 6),
+        ("Feed.ashx.cs", "ANY", "/Feed.ashx", "ProcessRequestAsync", 4),
+    }

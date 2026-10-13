@@ -175,7 +175,6 @@ def test_application_start_is_none(analyze_files) -> None:
     assert _eps(stmts) == []
 
 
-@pytest.mark.xfail(strict=True, reason="generic handler (.ashx / IHttpHandler) not recorded")
 def test_generic_handler_is_binding(analyze_files) -> None:
     stmts = analyze_files(
         {

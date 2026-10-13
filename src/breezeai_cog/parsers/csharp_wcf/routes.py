@@ -21,7 +21,7 @@ from pathlib import Path
 
 from ...emit import disambiguate, statement_id
 from ...schemas import Decorator, FileRecord, Statement
-from ..dotnet_common import response_dto, simple_attr_name
+from ..dotnet_common import code_behind_host, response_dto, simple_attr_name
 
 _SERVICE_ATTR = "ServiceContract"
 _OP_ATTR = "OperationContract"
@@ -142,34 +142,16 @@ def detect_wcf_services(record: FileRecord, repo_root: Path | None = None) -> li
     return routes
 
 
-def _code_behind_host(
-    path: str, repo_root: Path | None, cls_name: str, ext: str, directive: re.Pattern[bytes]
-) -> str | None:
-    """The host file (``X.asmx`` / ``X.svc``) that serves class ``cls_name`` declared in
-    ``path`` — the code-behind convention ``X<ext>.cs`` beside ``X<ext>`` — when that file exists
-    and its directive's class attribute names the class. Anything else → None (host unknown)."""
-    if repo_root is None or not path.lower().endswith(ext + ".cs"):
-        return None
-    host = path[: -len(".cs")]
-    try:
-        body = (repo_root / host).read_bytes()
-    except OSError:
-        return None
-    m = directive.search(body)
-    simple = m.group(1).decode("utf-8", "replace").rsplit(".", 1)[-1] if m else None
-    return host if simple == cls_name else None
-
-
 def asmx_host(path: str, repo_root: Path | None, cls_name: str) -> str | None:
     """The ``.asmx`` file serving class ``cls_name`` (``X.asmx.cs`` beside ``X.asmx``), or None."""
-    return _code_behind_host(path, repo_root, cls_name, ".asmx", _ASMX_CLASS_RE)
+    return code_behind_host(path, repo_root, cls_name, ".asmx", _ASMX_CLASS_RE)
 
 
 def svc_host(path: str, repo_root: Path | None, cls_name: str) -> str | None:
     """The ``.svc`` file serving class ``cls_name`` (``X.svc.cs`` beside ``X.svc``, its
     ``ServiceHost Service=`` naming the class), or None. An interface contract, or a class whose
     ``.svc`` is elsewhere, has no known host here."""
-    return _code_behind_host(path, repo_root, cls_name, ".svc", _SVC_SERVICE_RE)
+    return code_behind_host(path, repo_root, cls_name, ".svc", _SVC_SERVICE_RE)
 
 
 def _rest_address(host: str, template: str | None, operation: str) -> str:
