@@ -13,9 +13,9 @@ from tree_sitter import Node
 
 from ...schemas import Decorator, FileRecord, Function
 from ..emits import Emit
+from ..java.functions import method_nodes
 from ..java.guards import security_guards
 from ..java.web_guards import ModuleGuards, spring_global_guards
-from ..treesitter import node_text
 
 _METHOD_MAPPINGS = {
     "GetMapping": "GET", "PostMapping": "POST", "PutMapping": "PUT",
@@ -108,21 +108,6 @@ def apply_context_path(routes: list[Emit], context_path: str | None) -> None:
         endpoint = r.fields.get("endpoint")
         r.fields["endpoint"] = (_join(context_path, endpoint)
                                 if context_path is not None and endpoint is not None else None)
-
-
-def method_nodes(root: Node, source: bytes) -> dict[tuple[str, int], Node]:
-    """``(name, start line)`` → the method's declaration, the key the Java parser's
-    ``Function`` records carry (``name``, ``startLine``)."""
-    out: dict[tuple[str, int], Node] = {}
-    stack = [root]
-    while stack:
-        n = stack.pop()
-        if n.type in ("method_declaration", "constructor_declaration"):
-            name = n.child_by_field_name("name")
-            if name is not None:
-                out[(node_text(name, source), n.start_point[0] + 1)] = n
-        stack.extend(n.named_children)
-    return out
 
 
 def _request_dto(fn: Function) -> str | None:

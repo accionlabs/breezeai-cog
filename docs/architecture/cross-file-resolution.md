@@ -88,7 +88,7 @@ What each index holds:
 
 | Language | Holds | Used for |
 |---|---|---|
-| Java, Groovy | fully-qualified class name → file; `Class.FIELD` → constant value; **registered facts** (Java: `index.facts` — Vert.x service interfaces `vertx.service-interfaces`, Spring context paths `spring.context-paths` and module properties `spring.properties`) | imports, same-package types, event addresses / route paths |
+| Java, Groovy | fully-qualified class name → file; `Class.FIELD` → constant value; **registered facts** (Java: `index.facts` — Vert.x service interfaces `vertx.service-interfaces`, Spring context paths `spring.context-paths` and module properties `spring.properties`, JAX-RS application paths and sub-resource bases `jaxrs.prefixes`, servlet filters / interceptors / JAX-RS request filters `java.web-guards`) | imports, same-package types, event addresses / route paths |
 | Kotlin | fully-qualified class name → file | imports, same-package types |
 | Scala | fully-qualified class name → file; **registered facts** (`index.facts`: Play router includes `play.router-includes` — read from the routes files, which the Play routes parser owns) | imports, same-package types, SIRD router prefixes |
 | Play routes files | the `->` router includes, resolved to each router's prefix | route prefixes of included routes files |

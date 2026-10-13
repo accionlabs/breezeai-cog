@@ -11,8 +11,11 @@ argument.
 
 from __future__ import annotations
 
-from ...emit import disambiguate, statement_id
-from ...schemas import Decorator, FileRecord, Statement
+from tree_sitter import Node
+
+from ...schemas import Decorator, FileRecord
+from ..emits import Emit
+from ..java.functions import method_nodes
 from ..java.guards import security_guards
 
 # Standard @HttpMethod-meta-annotated markers (javax/jakarta.ws.rs).
@@ -51,12 +54,14 @@ def _join(base: str, sub: str) -> str:
 
 def detect_jaxrs_routes(
     record: FileRecord,
+    root: Node,
+    source: bytes,
     app_path: str | None = "",
     sub_bases: dict[str, str | None] | None = None,
     filters: list[tuple[str, frozenset[str]]] | None = None,
     paths: dict[tuple[str, int], str | None] | None = None,
-) -> list[Statement]:
-    """Resource-method routes of one file. ``app_path`` is the module's ``@ApplicationPath``
+) -> list[Emit]:
+    """Resource-method routes of one file, for :func:`~..emits.apply`, each on its method. ``app_path`` is the module's ``@ApplicationPath``
     ("" = none, None = present but unresolvable); ``sub_bases`` maps a sub-resource class
     (no class-level ``@Path``) to the base its locator serves it under (None = unresolvable).
     An unresolvable prefix leaves the endpoint empty — the address is unknown. ``filters`` are
@@ -75,8 +80,8 @@ def detect_jaxrs_routes(
     if not bases:
         return []
 
-    seen = {s.id for s in record.statements}
-    routes: list[Statement] = []
+    nodes = method_nodes(root, source)
+    routes: list[Emit] = []
     bound = {b for _, binds in filters or [] for b in binds}
     for fn in record.functions:
         if fn.parentId not in bases:
@@ -93,12 +98,8 @@ def detect_jaxrs_routes(
         for dec in fn.decorators:
             if dec.name not in _HTTP_METHODS:
                 continue
-            routes.append(Statement(
-                id=disambiguate(statement_id(fn.path, fn.startLine, 0), seen),
-                parentId=fn.id,
-                nodeType="synthetic",
+            routes.append(Emit(nodes.get((fn.name, fn.startLine), root), dict(
                 semanticType="route",
-                text=f"@{dec.name}",
                 method=dec.name,
                 endpoint=(_join(app_path, _join(base, sub))
                           if app_path is not None and base is not None and sub is not None
@@ -111,8 +112,6 @@ def detect_jaxrs_routes(
                 guards=guards,
                 authRequired=True if scoped else None,
                 responseDTO=fn.returnType or None,  # JAX-RS has no @RequestBody → requestDTO stays null
-                startLine=fn.startLine,
-                endLine=fn.endLine,
-                path=fn.path,
-            ))
+            ), parent=fn.id, node_type="synthetic", text=f"@{dec.name}",
+                line=fn.startLine, col=0, end_line=fn.endLine))
     return routes

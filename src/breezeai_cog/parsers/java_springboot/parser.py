@@ -16,6 +16,7 @@ from ..java.config import module_of
 from ..java.constants import collect_constants
 from ..java.imports import JavaIndex
 from ..java.parser import JavaParser
+from ..java.web_guards import module_guards
 from ..treesitter import parse_source
 from .config_facts import context_paths, module_properties
 from .functional_routes import detect_spring_functional_routes
@@ -45,7 +46,7 @@ class SpringBootParser(JavaParser):
             if routes:
                 # Servlet filters and MVC interceptors of this module run first (matched within
                 # the servlet context, so before the context path is joined).
-                guards = idx.module_guards if isinstance(idx, JavaIndex) else {}
+                guards = module_guards(idx)
                 if module is not None and module in guards:
                     apply_global_guards(routes, guards[module])
                 # server.servlet.context-path of this file's module prefixes every HTTP route

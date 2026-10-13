@@ -1,4 +1,5 @@
-"""Global guards for the Java repo index: servlet filters, MVC interceptors, JAX-RS filters.
+"""Global guards as a registered fact on the Java index, ``java.web-guards``: servlet filters,
+MVC interceptors, JAX-RS filters (Spring and JAX-RS read it).
 
 These run before many handlers but are declared away from them (contract role: Guard; decision
 Q9 — a global guard's name goes into ``guards`` of every binding it **certainly** covers):
@@ -22,9 +23,12 @@ from __future__ import annotations
 import re
 from collections.abc import Iterable
 from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any
 
 from tree_sitter import Node
 
+from ..additive import FactSpec, index_fact, register_fact
 from ..treesitter import node_text
 from .config import module_of
 
@@ -367,3 +371,25 @@ def spring_global_guards(mg: ModuleGuards, endpoint: str | None) -> list[str]:
             continue
         out.append(name)
     return out
+
+
+FACT = "java.web-guards"
+
+
+def module_guards(index: Any | None) -> dict[str, ModuleGuards]:
+    """Module root → its global guards (``java.web-guards``; Spring and JAX-RS read it)."""
+    return index_fact(index, FACT) or {}
+
+
+def _collect(root: Node, source: bytes, rel: str, repo_root: Path | None) -> GuardFacts | None:
+    return collect_guard_facts(root, source, rel)
+
+
+def _resolve(values: list[GuardFacts], index: Any) -> dict[str, ModuleGuards] | None:
+    return resolve_guards(values) or None
+
+
+register_fact(FactSpec(
+    name=FACT, language="java", gate=(b"Filter", b"Interceptor", b"NameBinding"),
+    collect=_collect, resolve=_resolve,
+))

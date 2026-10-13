@@ -1,4 +1,5 @@
-"""JAX-RS wiring facts for the Java repo index: ``@ApplicationPath`` and sub-resource locators.
+"""JAX-RS wiring as a registered fact on the Java index, ``jaxrs.prefixes``: ``@ApplicationPath``
+and sub-resource locators.
 
 Two constructs put a prefix in front of a JAX-RS resource's routes from outside its class:
 
@@ -21,11 +22,16 @@ import re
 
 from collections.abc import Iterable
 from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any
 
 from tree_sitter import Node
 
+from ..additive import FactSpec, index_fact, register_fact
+from ..java.config import module_of
 from ..treesitter import node_text
-from .config import module_of
+
+FACT = "jaxrs.prefixes"
 
 _HTTP_VERBS = frozenset({"GET", "POST", "PUT", "DELETE", "HEAD", "OPTIONS", "PATCH"})
 
@@ -300,3 +306,37 @@ def resolve_jaxrs(
         elif isinstance(b, str):
             bases[cls] = b
     return app, bases
+
+
+@dataclass(frozen=True)
+class JaxrsPrefixes:
+    #: module root → its ``@ApplicationPath`` (None = present but unresolvable, or two differ).
+    app_paths: dict[str, str | None]
+    #: sub-resource class simple name → the base its locator serves it under (None = a path on
+    #: the way does not resolve).
+    sub_bases: dict[str, str | None]
+
+
+def jaxrs_prefixes(index: Any | None) -> JaxrsPrefixes:
+    found: JaxrsPrefixes | None = index_fact(index, FACT)
+    return found if found is not None else JaxrsPrefixes({}, {})
+
+
+def _collect(root: Node, source: bytes, rel: str, repo_root: Path | None) -> JaxrsFacts | None:
+    return collect_jaxrs_facts(root, source, rel)
+
+
+def _resolve(values: list[JaxrsFacts], index: Any) -> JaxrsPrefixes | None:
+    # Top-level type declarations per simple name, from the FQCN index: an FQCN declared in two
+    # files maps to None there (counted twice — only "exactly one" matters).
+    top_level: dict[str, int] = {}
+    for fqcn, rel in (getattr(index, "fqcn", None) or {}).items():
+        simple = fqcn.rsplit(".", 1)[-1]
+        top_level[simple] = top_level.get(simple, 0) + (1 if rel is not None else 2)
+    app_paths, sub_bases = resolve_jaxrs(values, getattr(index, "consts", None) or {}, top_level)
+    if not app_paths and not sub_bases:
+        return None
+    return JaxrsPrefixes(app_paths, sub_bases)
+
+
+register_fact(FactSpec(name=FACT, language="java", gate=(b"ws.rs",), collect=_collect, resolve=_resolve))

@@ -21,9 +21,7 @@ from ..additive import (
 from ..constfold import Token, resolve_all
 from ..index_common import parallel_map, record_distinct, seed_same_package
 from ..treesitter import node_text, parse_source
-from .web_guards import GuardFacts, ModuleGuards, collect_guard_facts, resolve_guards
 from .constants import collect_constants
-from .jaxrs_index import JaxrsFacts, collect_jaxrs_facts, resolve_jaxrs
 
 _TYPE_DECLS = (
     "class_declaration", "interface_declaration", "enum_declaration",
@@ -43,26 +41,14 @@ class JavaIndex:
 
     fqcn: FqcnIndex = field(default_factory=dict)
     consts: dict[str, str] = field(default_factory=dict)
-    #: JAX-RS ``@ApplicationPath`` per module root: the base of every resource of that module.
-    #: None = present but unresolvable (or two differ). Absent = none. See ``jaxrs_index.py``.
-    jaxrs_app_paths: dict[str, str | None] = field(default_factory=dict)
-    #: JAX-RS sub-resource class simple name → the base its locator serves it under (the
-    #: locator's class base + the locator's ``@Path``). None = a path on the way does not
-    #: resolve. Absent = a root resource, ambiguous, or not reached from a locator.
-    jaxrs_sub_bases: dict[str, str | None] = field(default_factory=dict)
-    #: Global guards per module root: servlet filters, MVC interceptors, JAX-RS request filters
-    #: (decision Q9 — their names go on every binding they certainly cover). See
-    #: ``web_guards.py``.
-    module_guards: dict[str, ModuleGuards] = field(default_factory=dict)
     #: Facts registered with ``register_fact`` (fact name → fact), resolved once before
     #: parsing. Read with :func:`~..additive.index_fact`; see ``parsers/additive.py``.
     facts: dict[str, Any] = field(default_factory=dict)
 
 
-#: One file's contribution: ``{package.TypeName: rel}``, ``{Class.FIELD: tokens}``, its JAX-RS
-#: and guard facts, and what registered facts collect from it.
-_IndexFrag = tuple[dict[str, str], dict[str, list[Token]], JaxrsFacts | None, GuardFacts | None,
-                   dict[str, Any]]
+#: One file's contribution: ``{package.TypeName: rel}``, ``{Class.FIELD: tokens}``, and what
+#: registered facts collect from it.
+_IndexFrag = tuple[dict[str, str], dict[str, list[Token]], dict[str, Any]]
 
 
 def _fqcn_index_one(args: tuple[str, str]) -> _IndexFrag | None:
@@ -93,8 +79,7 @@ def _fqcn_index_one(args: tuple[str, str]) -> _IndexFrag | None:
                     fqcn_frag[f"{package}.{name}" if package else name] = rel
         # Qualified `Class.FIELD` keys only (drop bare names — they collide across files).
         const_frag = {k: v for k, v in collect_constants(root, source).items() if "." in k}
-        return (fqcn_frag, const_frag, collect_jaxrs_facts(root, source, rel),
-                collect_guard_facts(root, source, rel),
+        return (fqcn_frag, const_frag,
                 collect_additive("java", root, source, rel, repo_root))
     except Exception as exc:  # parse OR a pathologically deep AST walk (RecursionError) — skip this file
         from ...logging import get_logger
@@ -116,32 +101,18 @@ def build_fqcn_index(repo_root: Path, files: Sequence[Path], jobs: int = 1) -> J
     collected: dict[str, list[Any]] = collect_fact_sources("java", fact_files, repo_root, jobs)
     fqcn: FqcnIndex = {}
     raw_consts: dict[str, list[Token] | None] = {}
-    jaxrs: list[JaxrsFacts] = []
-    guard_facts: list[GuardFacts] = []
-    simple_names: dict[str, int] = {}  # top-level type simple name → declarations in the repo
     for frag in parallel_map(args, _fqcn_index_one, jobs):
         if frag is None:
             continue
-        fqcn_frag, const_frag, jaxrs_frag, guard_frag, facts = frag
+        fqcn_frag, const_frag, facts = frag
         for name, value in facts.items():
             collected.setdefault(name, []).append(value)
-        if jaxrs_frag is not None:
-            jaxrs.append(jaxrs_frag)
-        if guard_frag is not None:
-            guard_facts.append(guard_frag)
         for name, rel in fqcn_frag.items():
             record_distinct(fqcn, name, rel)
-            simple = name.rsplit(".", 1)[-1]
-            simple_names[simple] = simple_names.get(simple, 0) + 1
         for name, tokens in const_frag.items():
             record_distinct(raw_consts, name, tokens)
     consts = resolve_all(raw_consts)
-    app_paths, sub_bases = resolve_jaxrs(jaxrs, consts, simple_names)
-    index = JavaIndex(
-        fqcn=fqcn, consts=consts,
-        jaxrs_app_paths=app_paths, jaxrs_sub_bases=sub_bases,
-        module_guards=resolve_guards(guard_facts),
-    )
+    index = JavaIndex(fqcn=fqcn, consts=consts)
     # Registered facts may need the whole index, so they resolve after it is built.
     return replace(index, facts=resolve_additive("java", collected, index))
 

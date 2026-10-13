@@ -9,7 +9,7 @@ from tree_sitter import Node
 
 from ...schemas import FileRecord
 from ..emits import Emit
-from .routes import method_nodes
+from ..java.functions import method_nodes
 
 
 def detect_spring_queries(record: FileRecord, root: Node, source: bytes) -> list[Emit]:
