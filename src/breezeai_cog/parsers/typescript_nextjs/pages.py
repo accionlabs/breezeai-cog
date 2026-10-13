@@ -22,9 +22,10 @@ from __future__ import annotations
 
 from tree_sitter import Node
 
-from ...emit import disambiguate, file_id, statement_id
-from ...schemas import FileRecord, Statement
-from ..additive import DetectContext, Detector, Gate, register_detector
+from ...emit import file_id
+from ...schemas import FileRecord
+from ..additive import DetectContext, Detection, Detector, Gate, register_detector
+from ..emits import Emit
 from ..treesitter import first_line, node_text
 from ..typescript.imports import router_root
 from .routes import _middleware_guards, _served, _url_segments
@@ -119,18 +120,18 @@ def _handler(
     return None, None
 
 
-def detect_nextjs_page(dc: DetectContext) -> bool:
-    """Append the page record for a Next.js page file; True if one was recorded."""
+def detect_nextjs_page(dc: DetectContext) -> Emit | None:
+    """The page record for a Next.js page file, or None."""
     found = _page_endpoint(dc.path)
     if found is None:
-        return False
+        return None
     router_dir, local = found
     apps = getattr(dc.ctx.resolution_index, "next_apps", None) or frozenset()
     if router_root(dc.path, router_dir) not in apps:
-        return False
+        return None
     export = _default_export(dc.root)
     if export is None:
-        return False  # Next.js renders a page's default export; without one it is not a page
+        return None  # Next.js renders a page's default export; without one it is not a page
     stmt_node, value = export
     fid = file_id(dc.path)
     handler, handler_line = _handler(value, dc.source, dc.record, fid)
@@ -141,32 +142,29 @@ def detect_nextjs_page(dc: DetectContext) -> bool:
          if handler and f.name == handler and f.parentId == fid),
         fid,
     )
-    seen = {s.id for s in dc.record.statements}
-    dc.record.statements.append(Statement(
-        id=disambiguate(statement_id(dc.path, line, stmt_node.start_point[1]), seen),
-        parentId=parent,
-        nodeType="synthetic",
-        semanticType="route",
+    return Emit(
+        stmt_node,
+        {
+            "semanticType": "route",
+            "endpoint": _served(local, dc.path, index),
+            "framework": "nextjs",
+            "handler": handler,
+            "handlerLine": handler_line,
+            "guards": _middleware_guards(index, dc.path, local) or None,
+            "routeKind": "page",
+            "isRegex": False,
+        },
+        parent=parent, node_type="synthetic", line=line,
         text=first_line(node_text(stmt_node, dc.source))[:200],
-        endpoint=_served(local, dc.path, index),
-        framework="nextjs",
-        handler=handler,
-        handlerLine=handler_line,
-        guards=_middleware_guards(index, dc.path, local) or None,
-        routeKind="page",
-        isRegex=False,
-        startLine=line,
-        endLine=stmt_node.end_point[0] + 1,
-        path=dc.path,
-    ))
-    return True
+    )
 
 
-def _run(dc: DetectContext) -> str | None:
-    return "nextjs" if detect_nextjs_page(dc) else None
+def _detect(dc: DetectContext) -> Detection | None:
+    page = detect_nextjs_page(dc)
+    return Detection([page], label="nextjs") if page is not None else None
 
 
 register_detector(Detector(
-    name="nextjs-pages", gate=Gate("typescript", order=60, skip_fixtures=True), run=_run,
+    name="nextjs-pages", gate=Gate("typescript", order=60, skip_fixtures=True), detect=_detect,
     frameworks=("nextjs",),
 ))
