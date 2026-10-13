@@ -245,3 +245,28 @@ def test_deploy_verticle_is_none(analyze_files) -> None:
 def test_http_server_listen_is_none(analyze_files) -> None:
     st = analyze_files(_verticle("""    vertx.createHttpServer().listen(8080);"""))
     assert _eps(st) == []
+
+
+def test_service_binder_is_one_binding_per_service_method(analyze_files) -> None:
+    files = _verticle(
+        """    new ServiceBinder(vertx).setAddress("svc.orders").register(OrderService.class, this);"""
+    )
+    files["src/main/java/a/OrderService.java"] = """package a;
+import io.vertx.codegen.annotations.ProxyGen;
+import io.vertx.codegen.annotations.ProxyIgnore;
+@ProxyGen
+public interface OrderService {
+  void listOrders(Object h);
+  void getOrder(String id, Object h);
+  void getOrder(String id, String lang, Object h);
+  @ProxyIgnore void internal();
+  static OrderService create() { return null; }
+}
+"""
+    st = analyze_files(files)
+    # Every call reaches the one address; the message's action header picks the method.
+    got = [(r.semanticType, r.endpoint, r.handler) for r in _eps(st)]
+    assert got == [
+        ("eventbus_consumer", "svc.orders", "listOrders"),
+        ("eventbus_consumer", "svc.orders", "getOrder"),
+    ]

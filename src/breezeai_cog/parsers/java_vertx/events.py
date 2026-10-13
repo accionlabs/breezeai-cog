@@ -45,6 +45,7 @@ from tree_sitter import Node
 from ...emit import disambiguate, file_id, statement_id
 from ...schemas import FileRecord, SemanticType, Statement
 from ..enclosing import Enclosing
+from .service_interfaces import service_methods
 from ..treesitter import first_line, node_text
 from ..vertx_common import (
     EVENTBUS,
@@ -250,11 +251,48 @@ def _sub_router_mounts(
     return mounts, mount_routes
 
 
+def _registered_interface(call: Node, source: bytes) -> str | None:
+    """``…setAddress(a).register(OrderService.class, impl)`` → ``OrderService`` (as written)."""
+    node = call
+    while (parent := node.parent) is not None and parent.type == "method_invocation" \
+            and parent.child_by_field_name("object") == node:
+        name = parent.child_by_field_name("name")
+        if name is not None and node_text(name, source) in ("register", "registerLocal"):
+            args = parent.child_by_field_name("arguments")
+            first = args.named_children[0] if args is not None and args.named_children else None
+            if first is not None and first.type == "class_literal" and first.named_children:
+                return node_text(first.named_children[0], source)
+            return None
+        node = parent
+    return None
+
+
+def _qualified(type_name: str, root: Node, source: bytes) -> str:
+    """A type as written in this file → its fully-qualified name: a single-type import that
+    names it, else this file's package (a dotted name is taken as written)."""
+    if "." in type_name:
+        return type_name
+    package = ""
+    for node in root.named_children:
+        if node.type == "import_declaration":
+            text = node_text(node, source).removeprefix("import").strip().rstrip(";").strip()
+            if text.endswith("." + type_name) and not text.startswith("static "):
+                return text
+        elif node.type == "package_declaration":
+            nm = next((c for c in node.named_children
+                       if c.type in ("scoped_identifier", "identifier")), None)
+            package = node_text(nm, source) if nm is not None else ""
+    return f"{package}.{type_name}" if package else type_name
+
+
 def detect_vertx(
-    root: Node, source: bytes, path: str, record: FileRecord, consts: dict[str, str] | None = None
+    root: Node, source: bytes, path: str, record: FileRecord, consts: dict[str, str] | None = None,
+    index: object | None = None,
 ) -> bool:
     """Enrich/add Vert.x statements on ``record``. Returns True if anything matched.
-    ``consts`` (``name → value``) folds symbolic addresses to their String value."""
+    ``consts`` (``name → value``) folds symbolic addresses to their String value. ``index`` (the
+    Java index) carries the ``vertx.service-interfaces`` fact: a ``ServiceBinder`` registration
+    becomes one consumer per method of the registered interface."""
     matched = False
     fid = file_id(path)
     seen = {s.id for s in record.statements}
@@ -296,6 +334,16 @@ def detect_vertx(
             handler_info(_handler_arg(call, source), source, methods)
             if semantic in HANDLER_SEMANTICS else (None, None)
         )
+        # A service registration: every method of the interface is a binding on the address
+        # (the message's `action` header picks it) — one consumer per method, handler = method.
+        handlers: list[str | None] = [handler]
+        call_name = call.child_by_field_name("name")
+        if semantic == "eventbus_consumer" and call_name is not None \
+                and node_text(call_name, source) == "setAddress":
+            iface = _registered_interface(call, source)
+            names = service_methods(index, _qualified(iface, root, source)) if iface else ()
+            handlers = list(names) or [handler]
+        handler = handlers[0]
 
         stmt = enclosing.statement(line)
         if stmt is not None:  # detection on the same span → enrich in place
@@ -325,6 +373,22 @@ def detect_vertx(
                 routeKind=route_kind,
                 handler=handler,
                 handlerLine=handler_line,
+                startLine=line,
+                endLine=call.end_point[0] + 1,
+                path=path,
+            ))
+        for extra in handlers[1:]:  # the others: their own records on the same span
+            record.statements.append(Statement(
+                id=disambiguate(statement_id(path, line, call.start_point[1]), seen),
+                parentId=enclosing.function_id(line, fid),
+                nodeType=call.type,
+                semanticType=semantic,
+                text=first_line(node_text(call, source)),
+                method=method,
+                endpoint=endpoint,
+                framework="vertx",
+                routeKind=route_kind,
+                handler=extra,
                 startLine=line,
                 endLine=call.end_point[0] + 1,
                 path=path,

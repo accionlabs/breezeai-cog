@@ -12,7 +12,7 @@ Parser: `src/breezeai_cog/parsers/vertx_common.py` (shared rules), `java_vertx/`
 | `eventBus.consumer(addr, h)` / `localConsumer` / 2.x `registerHandler` / `registerLocalHandler` | Binding | `eventbus_consumer`, address as `endpoint`, `handler` = `h` | One handler, inbound message |
 | Private helper that forwards its first `String` parameter to `consumer` / `registerHandler` | Wiring | each call of the helper is the binding, with its own address | The helper's address is a parameter |
 | `vertx.setPeriodic(ms, h)` / `vertx.setTimer(ms, h)` | Binding | `timer`, `method: PERIODIC` / `TIMER`, interval as `endpoint`, `handler` = `h` | One handler, triggered by a schedule |
-| `new ServiceBinder(vertx).setAddress(addr).register(Iface, impl)` | Binding, one per service method | `eventbus_consumer`, `endpoint` = address | A service on a message address |
+| `new ServiceBinder(vertx).setAddress(addr).register(Iface, impl)` | Binding, one per service method | `eventbus_consumer`, `endpoint` = address, `handler` = the method (from the interface, any file; `default` / `static` / `@ProxyIgnore` methods are not proxied); interface unknown → one record, no handler | A service on a message address |
 | `new ServiceProxyBuilder(vertx).setAddress(addr).build(Iface)` | Outbound | `eventbus_send`, `endpoint` = address | A client of that service |
 | `@ProxyGen` interface | None | — | Service contract only |
 | `eventBus.send` / `request` / 2.x `sendWithTimeout` | Outbound | `eventbus_send` | Our code sending |

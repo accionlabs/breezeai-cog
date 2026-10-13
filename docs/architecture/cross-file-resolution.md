@@ -88,7 +88,7 @@ What each index holds:
 
 | Language | Holds | Used for |
 |---|---|---|
-| Java, Groovy | fully-qualified class name → file; `Class.FIELD` → constant value | imports, same-package types, event addresses / route paths |
+| Java, Groovy | fully-qualified class name → file; `Class.FIELD` → constant value; **registered facts** (Java: `index.facts` — Vert.x service interfaces `vertx.service-interfaces`) | imports, same-package types, event addresses / route paths |
 | Kotlin, Scala | fully-qualified class name → file | imports, same-package types |
 | C# | type → files; global `using`s; project roots (`.csproj`), their MSBuild `using`s and project references; class heritage incl. methods; extension methods; page routes; implemented interfaces; **registered facts** (`index.facts`: HotChocolate registered roots, WCF `.svc` hosts — read from `.svc` files, which the ServiceHost parser owns) | type resolution, inherited calls, extension calls, routes |
 | VB | class heritage (base class + attributes) | inherited controller routes |

@@ -34,6 +34,6 @@ class VertxParser(JavaParser):
             idx = ctx.resolution_index
             cross = idx.consts if isinstance(idx, JavaIndex) else {}  # repo-wide constants
             consts = resolve_all(collect_constants(root, ctx.source), base=cross)
-            if detect_vertx(root, ctx.source, ctx.path, record, consts):
+            if detect_vertx(root, ctx.source, ctx.path, record, consts, idx):
                 record.framework = "vertx"
         return record
