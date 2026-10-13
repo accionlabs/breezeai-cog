@@ -11,8 +11,8 @@ from __future__ import annotations
 
 from tree_sitter import Node
 
-from ...emit import disambiguate, statement_id
-from ...schemas import FileRecord, Statement
+from ..emits import Emit
+from ...schemas import FileRecord
 from ..scala.statements import find_enclosing_parent_id
 from ..statements_common import url_placeholder
 from ..treesitter import node_text
@@ -91,7 +91,7 @@ def detect_http4s_routes(
     source: bytes,
     path: str,
     record: FileRecord,
-) -> list[Statement]:
+) -> list[Emit]:
     """Find all HttpRoutes.of / AuthedRoutes.of blocks and emit route statements for their case clauses."""
     # D2: cheap byte guard
     if (
@@ -102,9 +102,8 @@ def detect_http4s_routes(
     ):
         return []
 
-    seen_ids = {s.id for s in record.statements}
-    routes: list[Statement] = []
-    route_bindings: dict[str, list[Statement]] = {}
+    routes: list[Emit] = []
+    route_bindings: dict[str, list[Emit]] = {}
     call_bindings: dict[int, str] = {}
     string_bindings: dict[str, str] = {}
     # val name → its AuthMiddleware(...) construction text (the guard an AuthedRoutes runs behind)
@@ -148,18 +147,13 @@ def detect_http4s_routes(
                             if res is not None:
                                 verb, segs = res
                                 endpoint = "/" + "/".join(segs) if segs else "/"
-                                start = clause.start_point[0] + 1
-                                end = clause.end_point[0] + 1
-                                parent_id = find_enclosing_parent_id(start, record)
+                                parent_id = find_enclosing_parent_id(
+                                    clause.start_point[0] + 1, record)
                                 # The handler is the case body after ``=>``: anonymous — no
                                 # name, its line is where the body starts.
                                 body = clause.child_by_field_name("body")
-                                route = Statement(
-                                        id=disambiguate(statement_id(path, start, clause.start_point[1]), seen_ids),
-                                        parentId=parent_id,
-                                        nodeType="synthetic",
+                                route = Emit(clause, dict(
                                         semanticType="route",
-                                        text=node_text(clause, source),
                                         framework="http4s",
                                         handler=None,
                                         handlerLine=body.start_point[0] + 1 if body is not None else None,
@@ -169,10 +163,8 @@ def detect_http4s_routes(
                                         endpoint=endpoint,
                                         routeKind="route",
                                         isRegex=False,
-                                        startLine=start,
-                                        endLine=end,
-                                        path=path,
-                                    )
+                                    ), parent=parent_id, node_type="synthetic",
+                                        text=node_text(clause, source))
                                 routes.append(route)
                                 if route_binding is not None:
                                     route_bindings.setdefault(route_binding, []).append(route)
@@ -210,8 +202,8 @@ def detect_http4s_routes(
                 if guard is not None and args is not None:
                     for arg in args.named_children:
                         for route in route_bindings.get(node_text(arg, source), []):
-                            if route.guards:
-                                route.guards = [guard]
+                            if route.fields["guards"]:
+                                route.fields["guards"] = [guard]
             for child in node.named_children:
                 apply_middleware(child)
 
@@ -219,8 +211,9 @@ def detect_http4s_routes(
 
     # D2/E3: Only walk for Router mounts if Router is present and there are route bindings
     if b"Router" in source and route_bindings:
-        base_endpoints = {r.id: r.endpoint for r in routes}
-        mounted_routes: set[str] = set()
+        # a route's own endpoint, before any mount (keyed by the Emit itself)
+        base_endpoints = {id(r): r.fields["endpoint"] for r in routes}
+        mounted_routes: set[int] = set()
 
         def apply_router_mounts(node: Node) -> None:
             if node.type == "call_expression":
@@ -237,35 +230,20 @@ def detect_http4s_routes(
                                 prefix = resolve_prefix(arrow.child_by_field_name("left"))
                                 target_name = node_text(target, source)
                                 for route in route_bindings.get(target_name, []):
-                                    base_ep = base_endpoints.get(route.id, route.endpoint)
+                                    base_ep = base_endpoints.get(id(route), route.fields["endpoint"])
                                     new_ep = join_paths(prefix, base_ep)
                                     # B7: Prevent iterative prefix stacking
-                                    if route.id not in mounted_routes:
-                                        route.endpoint = new_ep
-                                        mounted_routes.add(route.id)
+                                    if id(route) not in mounted_routes:
+                                        route.fields["endpoint"] = new_ep
+                                        mounted_routes.add(id(route))
                                     else:
-                                        # Secondary mount of the same route under another prefix
-                                        sid = disambiguate(statement_id(path, route.startLine, 0), seen_ids)
-                                        cloned = Statement(
-                                            id=sid,
-                                            parentId=route.parentId,
-                                            nodeType=route.nodeType,
-                                            semanticType=route.semanticType,
-                                            text=route.text,
-                                            framework=route.framework,
-                                            handler=route.handler,
-                                            handlerLine=route.handlerLine,
-                                            guards=route.guards,
-                                            authRequired=route.authRequired,
-                                            method=route.method,
-                                            endpoint=new_ep,
-                                            routeKind=route.routeKind,
-                                            isRegex=route.isRegex,
-                                            startLine=route.startLine,
-                                            endLine=route.endLine,
-                                            path=route.path,
-                                        )
-                                        routes.append(cloned)
+                                        # Secondary mount of the same route under another prefix:
+                                        # its own record, at the start of the route's line
+                                        routes.append(Emit(
+                                            route.node, {**route.fields, "endpoint": new_ep},
+                                            parent=route.parent, node_type=route.node_type,
+                                            text=route.text, col=0,
+                                        ))
             for child in node.named_children:
                 apply_router_mounts(child)
 
