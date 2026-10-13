@@ -48,7 +48,8 @@ def test_inventory_in_run_order() -> None:
     assert inventory == {
         "csharp": ["lambda-handlers", "lucene"],
         "scala": ["akka-events", "spark"],
-        "typescript": ["express", "aws-events", "sdk-calls", "graphql-client", "vue-routes"],
+        "typescript": ["express", "aws-events", "sdk-calls", "graphql-client", "vue-routes",
+                       "nextjs-pages"],
     }
 
 

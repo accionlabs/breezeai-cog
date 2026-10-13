@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import pytest
-
 EP = {"route", "eventbus_consumer", "timer"}
 PKG = '{"dependencies": {"next": "14", "react": "18"}}'
 
@@ -78,7 +76,6 @@ def test_base_path_is_wiring(analyze_files) -> None:
     assert r.endpoint == "/docs/users"
 
 
-@pytest.mark.xfail(strict=True, reason="App Router pages are not recorded")
 def test_app_router_page_is_a_binding(analyze_files) -> None:
     st = _run(
         analyze_files,
@@ -90,7 +87,6 @@ def test_app_router_page_is_a_binding(analyze_files) -> None:
     assert got == {("page", "/settings/profile", "ProfilePage")}
 
 
-@pytest.mark.xfail(strict=True, reason="Pages Router pages are not recorded")
 def test_pages_router_page_is_a_binding(analyze_files) -> None:
     st = _run(
         analyze_files,

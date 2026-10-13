@@ -91,6 +91,52 @@ class TsAliasIndex:
     #: with two middleware files maps to ``()`` (covers nothing for certain). The app directory
     #: is the middleware file's directory (its parent when that is ``src``).
     next_middlewares: dict[str, tuple[str, ...] | None] = field(default_factory=dict)
+    #: Next.js apps: the root directories (``""`` = repo root) that hold an ``app/`` or ``pages/``
+    #: router and whose ``package.json`` depends on ``next`` or that hold a ``next.config.*``. A
+    #: file-based page under ``app/`` or ``pages/`` is a Next.js page only inside one of these —
+    #: Gatsby also routes ``src/pages/*.tsx``, and Angular has ``src/app``.
+    next_apps: frozenset[str] = frozenset()
+
+
+def router_root(path: str, router_dir: str) -> str | None:
+    """The app root of a file under a file-based ``router_dir`` (``app`` / ``pages``): the
+    directory holding it, or its parent when that is ``src`` (``src/app``, ``src/pages``).
+    ``""`` is the repo root; None when ``router_dir`` is not on the path."""
+    dirs = path.replace("\\", "/").split("/")[:-1]
+    if router_dir not in dirs:
+        return None
+    before = dirs[: dirs.index(router_dir)]
+    if before and before[-1] == "src":
+        before = before[:-1]
+    return "/".join(before)
+
+
+_NEXT_CONFIGS = ("next.config.js", "next.config.mjs", "next.config.ts", "next.config.cjs")
+
+
+def _next_apps(repo_root: Path, files: Sequence[Path]) -> frozenset[str]:
+    """App roots (see :attr:`TsAliasIndex.next_apps`) that are Next.js apps: the root of every
+    file under ``app/`` or ``pages/`` whose ``package.json`` lists ``next`` in dependencies /
+    devDependencies, or that holds a ``next.config.*``."""
+    roots = {
+        r
+        for f in files
+        for d in ("app", "pages")
+        if (r := router_root(repo_relative(f, repo_root), d)) is not None
+    }
+    out: set[str] = set()
+    for r in roots:
+        base = repo_root / r if r else repo_root
+        if any((base / c).is_file() for c in _NEXT_CONFIGS):
+            out.add(r)
+            continue
+        pkg = _load_jsonc(base / "package.json") if (base / "package.json").is_file() else None
+        if not isinstance(pkg, dict):
+            continue
+        deps = {**(pkg.get("dependencies") or {}), **(pkg.get("devDependencies") or {})}
+        if "next" in deps:
+            out.add(r)
+    return frozenset(out)
 
 
 def _load_jsonc(path: Path) -> dict | None:
@@ -1325,10 +1371,12 @@ def build_ts_index(repo_root: Path, files: Sequence[Path], jobs: int = 1) -> TsA
         nest_boots, nest_modules, nest_register, const_values
     )
     app_base_paths = _app_base_paths(base_paths_raw, const_values)
+    next_apps = _next_apps(repo_root, files)
 
     if (alias is None and not const_values and not class_heritage and not route_mounts
             and not express_mounts and not express_router_mounts and not nest_global_prefixes
-            and not nest_controller_prefixes and not app_base_paths and not next_middlewares):
+            and not nest_controller_prefixes and not app_base_paths and not next_middlewares
+            and not next_apps):
         return None
     return TsAliasIndex(
         base_dir=alias.base_dir if alias else str(repo_root),
@@ -1343,6 +1391,7 @@ def build_ts_index(repo_root: Path, files: Sequence[Path], jobs: int = 1) -> TsA
         nest_controller_prefixes=nest_controller_prefixes,
         app_base_paths=app_base_paths,
         next_middlewares=next_middlewares,
+        next_apps=next_apps,
     )
 
 

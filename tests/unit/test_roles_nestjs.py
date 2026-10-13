@@ -258,9 +258,6 @@ def test_http_client_call_is_outbound(analyze_files) -> None:
     ]
 
 
-@pytest.mark.xfail(
-    strict=True, reason="ClientProxy send/emit are not recorded as eventbus_send/publish"
-)
 def test_client_proxy_is_outbound(analyze_files) -> None:
     st = _ctrl(
         analyze_files,

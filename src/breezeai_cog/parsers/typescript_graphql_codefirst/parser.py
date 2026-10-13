@@ -1,7 +1,7 @@
-"""GraphQLCodeFirstParser — a TypeScript framework parser for an in-house code-first GraphQL
-framework whose operation decorators (``@Query``/``@Mutation``/``@Subscription``) are
-defined locally and imported from a project-relative ``decorators`` module (resolver
-classes are plain ``@Service`` DI classes, not ``@Resolver``). A sibling of the other TS
+"""GraphQLCodeFirstParser — a TypeScript framework parser for code-first GraphQL whose operation
+decorators (``@Query``/``@Mutation``/``@Subscription``) come from ``type-graphql``, or from an
+in-house framework that defines them locally in a project-relative ``decorators`` module
+(resolver classes are plain ``@Service`` DI classes, not ``@Resolver``). A sibling of the other TS
 framework parsers — selected per file by ``claims`` + ``priority``. See routes.py for why
 the NestJS and resolver-map/SDL detectors do not cover this style."""
 
@@ -19,7 +19,7 @@ from .routes import detect_codefirst_graphql_routes
 # project-relative ``decorators`` module AND applied as method decorators. This excludes
 # the framework's own ``decorators.ts`` (which *defines* them, never applies them) and
 # never matches ``@nestjs/graphql`` files (they import from ``@nestjs/``).
-_DECORATORS_IMPORT = re.compile(rb"""from\s+['"][^'"]*\bdecorators['"]""")
+_DECORATORS_IMPORT = re.compile(rb"""from\s+['"](?:[^'"]*\bdecorators|type-graphql)['"]""")
 _OP_USAGE = re.compile(rb"@(?:Query|Mutation|Subscription)\s*\(")
 
 

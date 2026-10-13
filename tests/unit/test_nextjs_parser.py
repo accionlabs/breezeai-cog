@@ -350,3 +350,61 @@ def test_middleware_uncertain_coverage_adds_nothing(analyze_files) -> None:
         "apps/web/app/x/route.ts": _GET,
     })
     assert guards == {"/users/[id]": None, "/orders": None, "/x": None}
+
+
+# ── Pages (App Router page.tsx, Pages Router pages/**) ────────────────────────────────────────
+_NEXT_PKG = '{"dependencies": {"next": "14", "react": "18"}}'
+
+
+def _pages(analyze_files, files: dict[str, str], pkg: str = _NEXT_PKG):
+    st = analyze_files({"package.json": pkg, **files})
+    return {s.endpoint: (s.handler, s.handlerLine, s.path)
+            for s in st if s.semanticType == "route" and s.routeKind == "page"}
+
+
+def test_app_and_pages_router_pages(analyze_files) -> None:
+    got = _pages(analyze_files, {
+        "src/app/(shop)/orders/[id]/page.tsx": (
+            "import React from 'react';\nexport default function OrderPage() {\n  return <div/>;\n}\n"
+        ),
+        "src/app/page.tsx": "export default () => <main/>;\n",
+        "src/app/dashboard/layout.tsx": "export default function L({ children }) { return children; }\n",
+        "src/app/_lib/page.tsx": "export default function Hidden() { return null; }\n",
+        "src/app/@modal/(.)photo/page.tsx": "export default function Modal() { return null; }\n",
+        "pages/about.tsx": (
+            "import { memo } from 'react';\nfunction About() { return <p/>; }\nexport default memo(About);\n"
+        ),
+        "pages/blog/index.tsx": "export default class Blog { render() { return null; } }\n",
+        "pages/_app.tsx": "export default function App({ Component }) { return <Component/>; }\n",
+        "pages/404.tsx": "export default function NotFound() { return null; }\n",
+        "pages/api/users.ts": "export default function handler(req, res) { res.json([]); }\n",
+    })
+    assert got == {
+        "/orders/[id]": ("OrderPage", 2, "src/app/(shop)/orders/[id]/page.tsx"),
+        "/": (None, 1, "src/app/page.tsx"),
+        "/about": ("About", 2, "pages/about.tsx"),
+        "/blog": ("Blog", 1, "pages/blog/index.tsx"),
+    }
+
+
+def test_pages_need_a_next_app(analyze_files) -> None:
+    # Gatsby also routes src/pages/*.tsx — without a `next` dependency (or next.config) no page.
+    got = _pages(analyze_files, {
+        "src/pages/about.tsx": "export default function About() { return null; }\n",
+    }, pkg='{"dependencies": {"gatsby": "5", "react": "18"}}')
+    assert got == {}
+
+
+def test_page_gets_base_path_and_middleware_guard(analyze_files) -> None:
+    st = analyze_files({
+        "package.json": _NEXT_PKG,
+        "next.config.js": "module.exports = { basePath: '/shop' };\n",
+        "middleware.ts": (
+            "export function middleware(req) { return; }\n"
+            "export const config = { matcher: ['/account/:path*'] };\n"
+        ),
+        "app/account/page.tsx": "export default function Account() { return null; }\n",
+        "app/help/page.tsx": "export default function Help() { return null; }\n",
+    })
+    got = {s.endpoint: s.guards for s in st if s.routeKind == "page"}
+    assert got == {"/shop/account": ["middleware"], "/shop/help": None}

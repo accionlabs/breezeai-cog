@@ -124,7 +124,6 @@ def test_code_first_scopes_are_guards(analyze_files) -> None:
 TG = "import { Resolver, Query, Mutation, FieldResolver, Root } from 'type-graphql';\n"
 
 
-@pytest.mark.xfail(strict=True, reason="type-graphql resolvers are not recorded")
 def test_type_graphql_operations_are_bindings(analyze_files) -> None:
     st = _run(
         analyze_files,

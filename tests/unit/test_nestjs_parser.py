@@ -693,3 +693,41 @@ export class ItemsController {
         "/items": (["LoggingInterceptor", "CacheInterceptor"], False),  # interceptors: not auth
         "/items/:id": (["LoggingInterceptor", "AuthGuard", "TimingInterceptor"], True),
     }
+
+
+def test_client_proxy_send_and_emit_are_outbound(analyze_files) -> None:
+    st = analyze_files({
+        "package.json": '{"dependencies": {"@nestjs/core": "10", "@nestjs/microservices": "10"}}',
+        "src/constants.ts": "export const AUDIT = 'audit.write';\n",
+        "src/orders.service.ts": (
+            "import { Inject, Injectable } from '@nestjs/common';\n"
+            "import { ClientProxy, ClientProxyFactory } from '@nestjs/microservices';\n"
+            "import { AUDIT } from './constants';\n"
+            "@Injectable()\nexport class OrdersService {\n"
+            "  private events = ClientProxyFactory.create({});\n"
+            "  constructor(@Inject('MATH') private readonly math: ClientProxy, private mailer: Mailer) {}\n"
+            "  run(topic: string) {\n"
+            "    this.math.send({ cmd: 'sum' }, [1, 2]);\n"
+            "    this.math.send(AUDIT, {});\n"
+            "    this.events.emit('order.created', {});\n"
+            "    this.events.emit(topic, {});\n"
+            "    return this.mailer.send('x', {});\n"
+            "  }\n}\n"
+        ),
+        "src/math.controller.ts": (
+            "import { Controller } from '@nestjs/common';\n"
+            "import { MessagePattern } from '@nestjs/microservices';\n"
+            "@Controller()\nexport class MathController {\n"
+            "  @MessagePattern({ cmd: 'sum' })\n  sum(data: number[]) { return 3; }\n}\n"
+        ),
+    })
+    out = sorted((s.semanticType, s.endpoint or "")
+                 for s in st if s.semanticType in ("eventbus_send", "eventbus_publish"))
+    assert out == [
+        ("eventbus_publish", ""),               # topic is a parameter → empty, never the symbol
+        ("eventbus_publish", "order.created"),
+        ("eventbus_send", "audit.write"),       # constant resolved
+        ("eventbus_send", "{ cmd: 'sum' }"),    # written like the consumer's pattern
+    ]                                           # this.mailer.send: not a ClientProxy → nothing
+    consumer = [s.endpoint for s in st if s.semanticType == "eventbus_consumer"]
+    assert consumer == ["{ cmd: 'sum' }"]
