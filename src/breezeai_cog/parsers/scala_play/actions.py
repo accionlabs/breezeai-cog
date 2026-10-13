@@ -17,8 +17,8 @@ from typing import Any
 
 from tree_sitter import Node
 
-from ...emit import disambiguate, statement_id
-from ...schemas import FileRecord, Function, Statement
+from ...schemas import FileRecord, Function
+from ..emits import Emit
 from ..scala.imports import _package_of
 from ..scala.statements import find_enclosing_parent_id
 from ..treesitter import node_text
@@ -176,17 +176,15 @@ def _extract_sird_handler(clause: Node, source: bytes) -> str | None:
 
 
 def detect_play_sird_routes(
-    root: Node, source: bytes, record: FileRecord, seen_ids: set[str] | None = None,
-    *, index: Any | None = None,
-) -> list[Statement]:
+    root: Node, source: bytes, record: FileRecord, *, index: Any | None = None,
+) -> list[Emit]:
     """Detect Play SIRD ``Routes`` methods (``case GET(p"/path") => ...``). The router's prefix
     is the one a routes file includes it under (``-> /v1/posts v1.post.PostRouter``, from the
     Scala index); failing that, its own ``val prefix``."""
     # D2: cheap byte guard
     if b"p\"" not in source and b"Routes" not in source and b"SimpleRouter" not in source:
         return []
-    seen = seen_ids if seen_ids is not None else {s.id for s in record.statements}
-    routes: list[Statement] = []
+    routes: list[Emit] = []
 
     def walk(node: Node) -> None:
         if node.type in _FN_TYPES:
@@ -231,25 +229,17 @@ def detect_play_sird_routes(
                         endpoint = p + ("/" if endpoint == "/" else endpoint)
                     # C6: Populate handler from case body
                     handler = _extract_sird_handler(clause, source)
-                    start = clause.start_point[0] + 1
-                    sid = disambiguate(statement_id(record.path, start, clause.start_point[1]), seen)
                     routes.append(
-                        Statement(
-                            id=sid,
-                            parentId=find_enclosing_parent_id(start, record),
-                            nodeType="synthetic",
+                        Emit(clause, dict(
                             semanticType="route",
-                            text=node_text(clause, source),
                             framework="play",
                             handler=handler,
                             method=verb,
                             endpoint=endpoint,
                             routeKind="route",
                             isRegex=is_regex,
-                            startLine=start,
-                            endLine=clause.end_point[0] + 1,
-                            path=record.path,
-                        )
+                        ), parent=find_enclosing_parent_id(clause.start_point[0] + 1, record),
+                            node_type="synthetic", text=node_text(clause, source))
                     )
         for child in node.named_children:
             walk(child)

@@ -20,6 +20,7 @@ from ...emit import file_id
 from ...schemas import FileRecord
 from ...utils import count_loc, repo_relative
 from ..base import BaseParser, ParseContext
+from ..emits import apply
 from ..scala.parser import ScalaParser
 from ..treesitter import parse_source
 from .actions import detect_play_actions, detect_play_sird_routes
@@ -41,11 +42,10 @@ class ScalaPlayParser(ScalaParser):
         root = parse_source("scala", ctx.source, ctx.parse_timeout_micros).root_node
         record = self.extract(root, ctx)  # inherited Scala extraction (one parse)
         if ctx.capture_statements and not self.is_fixture_file(ctx.path):
-            seen_ids = {s.id for s in record.statements}
             sird_routes = detect_play_sird_routes(
-                root, ctx.source, record, seen_ids, index=ctx.resolution_index,
+                root, ctx.source, record, index=ctx.resolution_index,
             )
-            record.statements.extend(sird_routes)
+            apply(record, sird_routes, ctx.source, ctx.path)
             # Actions are handlers of conf/routes / SIRD bindings — they label the file, no record.
             if sird_routes or detect_play_actions(root, ctx.source, record):
                 record.framework = "play"
