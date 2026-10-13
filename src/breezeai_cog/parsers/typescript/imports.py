@@ -491,6 +491,49 @@ def _is_fixture_path(rel: str) -> bool:
     return any(seg in _FIXTURE_MOUNT_DIRS for seg in parts[:-1])
 
 
+def require_specifier(node: Node | None, source: bytes) -> str | None:
+    """``require('./x')`` → ``'./x'`` when the specifier is relative; else None."""
+    if node is None or node.type != "call_expression":
+        return None
+    fn = node.child_by_field_name("function")
+    args = node.child_by_field_name("arguments")
+    if fn is None or node_text(fn, source) != "require" or args is None:
+        return None
+    first = args.named_children[0] if args.named_children else None
+    spec = _string_literal(first, source)
+    return spec if spec is not None and spec.startswith(".") else None
+
+
+def relative_requires(root: Node, source: bytes) -> dict[str, tuple[str, str]]:
+    """CommonJS counterpart of :func:`_relative_import_exports` — top-level
+    ``const x = require('./a')`` → ``x: ('./a', 'default')`` (``module.exports`` is the default)
+    and ``const { r, s: t } = require('./a')`` → ``r: ('./a', 'r')``, ``t: ('./a', 's')``."""
+    out: dict[str, tuple[str, str]] = {}
+    if b"require(" not in source:
+        return out
+    for node in root.named_children:
+        if node.type not in ("lexical_declaration", "variable_declaration"):
+            continue
+        for d in node.named_children:
+            if d.type != "variable_declarator":
+                continue
+            module = require_specifier(d.child_by_field_name("value"), source)
+            name = d.child_by_field_name("name")
+            if module is None or name is None:
+                continue
+            if name.type == "identifier":
+                out[node_text(name, source)] = (module, "default")
+            elif name.type == "object_pattern":
+                for p in name.named_children:
+                    if p.type == "shorthand_property_identifier_pattern":
+                        out[node_text(p, source)] = (module, node_text(p, source))
+                    elif p.type == "pair_pattern":
+                        key, value = p.child_by_field_name("key"), p.child_by_field_name("value")
+                        if key is not None and value is not None and value.type == "identifier":
+                            out[node_text(value, source)] = (module, node_text(key, source))
+    return out
+
+
 def _relative_import_map(root: Node, source: bytes) -> dict[str, str]:
     """local imported name → its **relative** module specifier (only ``.``-prefixed, since a
     factory mount is resolved file-to-file in the reduce). Bare/aliased specifiers are omitted."""
@@ -503,6 +546,8 @@ def _relative_import_map(root: Node, source: bytes) -> dict[str, str]:
             continue
         for nm in _imported_names(node, source):
             out[nm] = module
+    for nm, (module, _) in relative_requires(root, source).items():
+        out.setdefault(nm, module)
     return out
 
 
@@ -543,6 +588,8 @@ def _relative_import_exports(root: Node, source: bytes) -> dict[str, tuple[str, 
                     idents = [x for x in spec.named_children if x.type == "identifier"]
                     if spec.type == "import_specifier" and idents:
                         out[node_text(idents[-1], source)] = (module, node_text(idents[0], source))
+    for nm, imp in relative_requires(root, source).items():
+        out.setdefault(nm, imp)
     return out
 
 
@@ -599,6 +646,29 @@ def _collect_router_exports(root: Node, source: bytes) -> dict[str, str]:
                     idents = [x for x in spec.named_children if x.type == "identifier"]
                     if spec.type == "export_specifier" and idents and node_text(idents[0], source) in routers:
                         out[node_text(idents[-1], source)] = node_text(idents[0], source)
+    for node in root.named_children:  # CommonJS: module.exports = r / exports.x = r / { r }
+        expr = node.named_children[0] if node.type == "expression_statement" and node.named_children else None
+        if expr is None or expr.type != "assignment_expression" or not routers:
+            continue
+        left, right = expr.child_by_field_name("left"), expr.child_by_field_name("right")
+        target = node_text(left, source) if left is not None else ""
+        if right is None:
+            continue
+        if target == "module.exports":
+            if right.type == "identifier" and node_text(right, source) in routers:
+                out["default"] = node_text(right, source)
+            elif right.type == "object":
+                for p in right.named_children:
+                    if p.type == "shorthand_property_identifier" and node_text(p, source) in routers:
+                        out[node_text(p, source)] = node_text(p, source)
+                    elif p.type == "pair":
+                        key, value = p.child_by_field_name("key"), p.child_by_field_name("value")
+                        if (key is not None and value is not None and value.type == "identifier"
+                                and node_text(value, source) in routers):
+                            out[node_text(key, source)] = node_text(value, source)
+        elif target.startswith(("module.exports.", "exports.")) and right.type == "identifier" \
+                and node_text(right, source) in routers:
+            out[target.rsplit(".", 1)[-1]] = node_text(right, source)
     return out
 
 
@@ -950,7 +1020,7 @@ def _collect_express_mounts(
     if b".use(" not in source or _is_fixture_path(rel):
         return [], []
     import_map = _relative_import_map(root, source)
-    if not import_map:
+    if not import_map and b"require(" not in source:
         return [], []
     exports_of = _relative_import_exports(root, source)
     mount_dir = (repo_root / rel).parent
@@ -974,6 +1044,9 @@ def _collect_express_mounts(
                             for a in arg_nodes[1:]
                             if (name := _factory_call_name(a, source)) is not None
                             and name in import_map
+                        ] + [  # require('./r')() — an inline required factory
+                            spec for a in arg_nodes[1:] if a.type == "call_expression"
+                            and (spec := require_specifier(a.child_by_field_name("function"), source))
                         ]
                         if len(specs) == 1:  # exactly one imported factory arg → unambiguous
                             resolved = _try_paths(mount_dir / specs[0], repo_root)
@@ -982,7 +1055,9 @@ def _collect_express_mounts(
                         elif not specs:  # router instances: every imported identifier is a candidate
                             site = f"{rel}:{node.start_point[0] + 1}"
                             for a in arg_nodes[1:]:
-                                imp = exports_of.get(node_text(a, source)) if a.type == "identifier" else None
+                                inline = require_specifier(a, source)  # app.use('/x', require('./r'))
+                                imp = ((inline, "default") if inline is not None else
+                                       exports_of.get(node_text(a, source)) if a.type == "identifier" else None)
                                 target = _try_paths(mount_dir / imp[0], repo_root) if imp else None
                                 if imp is not None and target is not None:
                                     instances.append((site, target, imp[1], base))

@@ -23,7 +23,7 @@ from ...schemas import FileRecord, Statement
 from ..additive import DetectContext, Detector, register_detector
 from ..enclosing import Enclosing
 from ..treesitter import first_line, node_text
-from ..typescript.imports import resolve_const_value, router_locals
+from ..typescript.imports import relative_requires, resolve_const_value, router_locals
 
 # HTTP-verb methods that register a route handler on an app/router.
 _HTTP_VERBS = {"get", "post", "put", "delete", "patch", "options", "head", "all"}
@@ -517,8 +517,11 @@ def detect_express(
         if f.parentId == fid:
             decl_lines[f.name] = f.startLine if f.name not in decl_lines else None
 
+    # A name bound by a relative require() is an in-repo import too (it may be a router).
+    required = {n: m for n, (m, _) in relative_requires(root, source).items()}
     global_guards = _global_guards(
-        root, source, routers, binds, {n for n, ln in decl_lines.items() if ln is not None}
+        root, source, routers, {**required, **binds},
+        {n for n, ln in decl_lines.items() if ln is not None},
     )
 
     enriched: set[str] = set()  # statements enriched by this run

@@ -745,3 +745,19 @@ other.beforeEach(trackPage)
 """
     rec = _parse("src/router/routes.js", src, tmp_path)
     assert [s.guards for s in rec.statements if s.semanticType == "route"] == [None]
+
+
+def test_named_views_default_is_the_page(analyze_files) -> None:
+    st = analyze_files({
+        "src/router.js": (
+            "import { createRouter } from 'vue-router';\n"
+            "export default createRouter({ routes: [\n"
+            "  { path: '/home', components: { default: Home, sidebar: Side } },\n"
+            "  { path: '/lazy', components: { default: () => import('./views/Lazy.vue'), aside: A } },\n"
+            "  { path: '/split', components: { left: L, right: R } },\n"
+            "  { path: '/one', component: One },\n"
+            "]});\n"
+        ),
+    })
+    got = {s.endpoint: s.handler for s in st if s.semanticType == "route" and s.routeKind == "page"}
+    assert got == {"/home": "Home", "/lazy": "./views/Lazy.vue", "/split": None, "/one": "One"}

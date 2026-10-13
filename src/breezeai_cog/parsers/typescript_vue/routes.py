@@ -93,6 +93,19 @@ def _handler(component: Node | None, source: bytes) -> str | None:
     return m.group(1) if m else None
 
 
+def _default_view(components: Node | None, source: bytes) -> Node | None:
+    """Named views (``components: { default: Home, sidebar: Side }``): the page is the
+    ``default`` view. No ``default`` key → None (several views, no single page)."""
+    if components is None or components.type != "object":
+        return None
+    for pair in components.named_children:
+        if pair.type == "pair" and _key(pair, source) == "default":
+            return pair.child_by_field_name("value")
+        if pair.type == "shorthand_property_identifier" and node_text(pair, source) == "default":
+            return pair
+    return None
+
+
 # For an array to QUALIFY as a route array, at least one element must have 'path' PLUS a
 # strongly route-specific render key. Detection now runs on every TS/JS file (no vue-router
 # import to gate on — see detect_vue_routes), so the discriminator must be strong enough that
@@ -239,7 +252,9 @@ def _emit(
                 endpoint=full,
                 framework="vue",
                 routeKind="page",
-                handler=_handler(pairs.get("component"), source),
+                handler=_handler(
+                    pairs.get("component") or _default_view(pairs.get("components"), source), source
+                ),
                 guards=(outer[0] + _before_enter(pairs.get("beforeEnter"), source) + outer[1])
                 or None,
                 startLine=sl,

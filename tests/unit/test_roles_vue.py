@@ -53,7 +53,6 @@ def test_lazy_component_is_binding(analyze_files) -> None:
     assert not r.handler or "/" not in r.handler
 
 
-@pytest.mark.xfail(strict=True, reason="named views (components: { default }) give no handler")
 def test_named_views_default_component_is_handler(analyze_files) -> None:
     st = _routes(
         analyze_files, "  { path: '/home', components: { default: Home, sidebar: Side } },\n"

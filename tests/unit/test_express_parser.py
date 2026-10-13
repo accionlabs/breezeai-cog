@@ -423,3 +423,73 @@ def test_use_middleware_guards_later_routes(analyze_files) -> None:
     assert got["/me"] == (["cors", "authenticate", "requireRole"], True)
     # parent app's middleware, then the mount's guard, then the router's own use()
     assert got["/admin/stats"] == (["cors", "authenticate", "isAdmin", "audit"], None)
+
+
+# ── CommonJS: require() mounts and module.exports routers ─────────────────────────────────────
+def test_commonjs_router_mounts_are_composed(analyze_files) -> None:
+    st = analyze_files({
+        "package.json": _PKG,
+        "src/app.js": (
+            "const express = require('express');\n"
+            "const users = require('./routes/users');\n"
+            "const { orders } = require('./routes/orders');\n"
+            "const { admin: adm } = require('./routes/admin');\n"
+            "const app = express();\n"
+            "app.use('/users', users);\n"
+            "app.use('/orders', orders);\n"
+            "app.use('/admin', adm);\n"
+            "app.use('/items', require('./routes/items'));\n"
+            "app.use('/auth', require('./routes/auth')());\n"
+            "app.use(users);\n"                       # a required router mounted at / → not a guard
+            "app.get('/ping', ping);\n"
+        ),
+        "src/routes/users.js": (
+            "const express = require('express');\nconst router = express.Router();\n"
+            "router.get('/:id', getUser);\nmodule.exports = router;\n"
+        ),
+        "src/routes/orders.js": (
+            "const { Router } = require('express');\nconst r = Router();\n"
+            "r.get('/', listOrders);\nmodule.exports = { orders: r };\n"
+        ),
+        "src/routes/admin.js": (
+            "const express = require('express');\nconst admin = express.Router();\n"
+            "admin.get('/stats', stats);\nexports.admin = admin;\n"
+        ),
+        "src/routes/items.js": (
+            "const express = require('express');\nconst router = express.Router();\n"
+            "router.post('/', createItem);\nmodule.exports = router;\n"
+        ),
+        "src/routes/auth.js": (
+            "const express = require('express');\n"
+            "module.exports = function authRouter() {\n"
+            "  const router = express.Router();\n  router.post('/login', login);\n  return router;\n};\n"
+        ),
+        "src/routes/mw.js": "module.exports = function audit(req, res, next) { next(); };\n",
+    })
+    got = {(s.path, s.method): s.endpoint for s in st
+           if s.semanticType == "route" and s.routeKind == "route"}
+    assert got[("src/routes/users.js", "GET")] == "/users/:id"
+    assert got[("src/routes/orders.js", "GET")] == "/orders"
+    assert got[("src/routes/admin.js", "GET")] == "/admin/stats"
+    assert got[("src/routes/items.js", "POST")] == "/items"
+    assert got[("src/routes/auth.js", "POST")] == "/auth/login"
+    [ping] = [s for s in st if s.semanticType == "route" and s.endpoint == "/ping"]
+    assert ping.guards is None
+
+
+def test_commonjs_required_middleware_is_never_a_prefix(analyze_files) -> None:
+    st = analyze_files({
+        "package.json": _PKG,
+        "src/app.js": (
+            "const express = require('express');\nconst audit = require('./mw');\n"
+            "const api = require('./api');\nconst app = express();\n"
+            "app.use('/secure', audit);\napp.use('/api', audit, api);\n"
+        ),
+        "src/mw.js": "module.exports = function audit(req, res, next) { next(); };\n",
+        "src/api.js": (
+            "const express = require('express');\nconst api = express.Router();\n"
+            "api.get('/me', me);\nmodule.exports = api;\n"
+        ),
+    })
+    got = {s.path: s.endpoint for s in st if s.semanticType == "route" and s.routeKind == "route"}
+    assert got == {"src/api.js": "/api/me"}
