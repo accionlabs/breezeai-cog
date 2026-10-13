@@ -59,7 +59,7 @@ def test_routes_detected(tmp_path) -> None:
     assert set(routes) == {
         ("GET", "/users/:id"),
         ("POST", "/api/users"),  # router mounted at /api in the same file
-        ("ALL", "/health"),
+        ("ANY", "/health"),       # app.all: every verb (Q13)
         (None, "/api"),          # app.use / Router().use mount (both endpoints are /api)
         ("GET", "/book"),        # app.route('/book').get(getBook): one record per verb
         ("POST", "/book"),       # ... .post(postBook); route('/book') itself is wiring

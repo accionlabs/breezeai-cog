@@ -158,7 +158,7 @@ end
         ("GET", "/any", "x#any"),      # one binding per verb in via:
         ("POST", "/any", "x#any"),
         ("PUT", "/one", "x#one"),
-        ("", "/all", "x#all"),         # via: :all → method unknown
+        ("ANY", "/all", "x#all"),      # via: :all → every verb (Q13)
         ("", "/bare", "x#bare"),       # no via: → method unknown
     ])
     ids = [s.id for s in record.statements if s.semanticType == "route"]

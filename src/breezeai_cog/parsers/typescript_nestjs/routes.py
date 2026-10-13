@@ -28,7 +28,7 @@ from ..treesitter import node_text
 
 _METHOD_DECORATORS = {
     "Get": "GET", "Post": "POST", "Put": "PUT", "Patch": "PATCH",
-    "Delete": "DELETE", "Options": "OPTIONS", "Head": "HEAD", "All": "ALL",
+    "Delete": "DELETE", "Options": "OPTIONS", "Head": "HEAD", "All": "ANY",
 }
 # @nestjs/microservices message consumers → eventbus_consumer semanticType.
 _MESSAGING_DECORATORS = {"EventPattern": "EVENT", "MessagePattern": "MESSAGE"}

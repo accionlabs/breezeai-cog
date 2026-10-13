@@ -73,13 +73,15 @@ def _option(arguments: list[Node], source: bytes, name: str) -> Node | None:
 
 def _via_methods(arguments: list[Node], source: bytes) -> list[str | None]:
     """The HTTP methods a ``match`` route answers: ``via: :get`` / ``via: [:get, :post]`` → one
-    per verb. No ``via:``, ``via: :all`` or a non-literal value → ``[None]`` (one record, method
-    unknown — never a guessed verb)."""
+    per verb. ``via: :all`` → ``["ANY"]`` (one handler for every verb). No ``via:`` or a
+    non-literal value → ``[None]`` (one record, method unknown — never a guessed verb)."""
     value = _option(arguments, source, "via")
     items = list(value.named_children) if value is not None and value.type == "array" else [value]
     verbs = [node_text(v, source).lstrip(":").upper() if v is not None and v.type == "simple_symbol"
              else None for v in items]
-    if not verbs or None in verbs or "ALL" in verbs:
+    if "ALL" in verbs:
+        return ["ANY"]
+    if not verbs or None in verbs:
         return [None]
     return list(dict.fromkeys(verbs))
 

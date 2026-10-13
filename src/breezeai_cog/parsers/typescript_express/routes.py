@@ -29,6 +29,11 @@ from ..typescript.imports import relative_requires, resolve_const_value, router_
 _HTTP_VERBS = {"get", "post", "put", "delete", "patch", "options", "head", "all"}
 
 
+def _verb(method: str) -> str:
+    """The record's ``method``: the verb upper-cased; ``all`` (every verb) → ``ANY``."""
+    return "ANY" if method == "all" else method.upper()
+
+
 def _invocations(root: Node) -> list[Node]:
     out: list[Node] = []
 
@@ -235,7 +240,7 @@ def _classify(
         if has_path and len(arg_nodes) >= 2:
             handler, handler_line = _handler(arg_nodes, source, decl_lines or {})
             guards = _guard_names(chain[:-1], source)
-            return method.upper(), path, handler, handler_line, guards, "express", "route"
+            return _verb(method), path, handler, handler_line, guards, "express", "route"
         return None
     if method == "use":
         # ``app.use(path, expressMiddleware(server))`` mounts the GraphQL endpoint (R3):
@@ -299,7 +304,7 @@ def _classify_route_verb(
     if not verb_args:
         return None
     handler, handler_line = _handler([first, *verb_args], source, decl_lines or {})
-    return method.upper(), path, handler, handler_line, _guard_names(verb_args[:-1], source), \
+    return _verb(method), path, handler, handler_line, _guard_names(verb_args[:-1], source), \
         "express", "route"
 
 
