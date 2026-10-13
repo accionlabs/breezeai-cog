@@ -230,3 +230,71 @@ def test_config_naming_another_file_changes_nothing(analyze_files) -> None:
 """)
     assert got == [("onOrder", "eventbus_consumer", "aws-sqs", None, None),
                    ("getUser", "route", "aws-apigw", None, None)]
+
+
+SAM_HANDLERS = (
+    "import { SQSHandler, APIGatewayProxyHandler } from 'aws-lambda';\n"
+    "export const onOrder: SQSHandler = async (event) => {};\n"
+    "export const api = async (event) => ({ statusCode: 200, body: '' });\n"
+    "export const nightly = async () => {};\n"
+)
+
+SAM = """AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Globals:
+  Function:
+    CodeUri: functions/
+    Runtime: nodejs20.x
+Resources:
+  OrderFn:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: app.onOrder
+      Events:
+        Orders:
+          Type: SQS
+          Properties:
+            Queue: arn:aws:sqs:eu-west-1:1:orders
+        Retry:
+          Type: SQS
+          Properties:
+            Queue: !GetAtt RetryQueue.Arn
+  ApiFn:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: app.api
+      Events:
+        Get:
+          Type: Api
+          Properties:
+            Path: /users/{id}
+            Method: get
+        All:
+          Type: HttpApi
+  NightlyFn:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: app.nightly
+      Events:
+        Every:
+          Type: Schedule
+          Properties:
+            Schedule: cron(0 2 * * ? *)
+  Remote:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: s3://bucket/code.zip
+      Handler: app.onOrder
+"""
+
+
+def test_sam_template_events_are_bindings(analyze_files) -> None:
+    st = analyze_files({"package.json": PKG, "functions/app.ts": SAM_HANDLERS, "template.yaml": SAM})
+    got = [(r.handler, r.semanticType, r.framework, r.method, r.endpoint) for r in _eps(st)]
+    assert got == [
+        ("onOrder", "eventbus_consumer", "aws-sqs", None, "orders"),
+        ("onOrder", "eventbus_consumer", "aws-sqs", None, None),   # !GetAtt: not in the code
+        ("api", "route", "aws-apigw", "GET", "/users/{id}"),
+        ("api", "route", "aws-apigw", "ANY", None),                # HttpApi catch-all
+        ("nightly", "timer", "aws-eventbridge", "PERIODIC", "cron(0 2 * * ? *)"),
+    ]

@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import pytest
-
 EP = {"route", "eventbus_consumer", "timer"}
 
 
@@ -70,7 +68,6 @@ def test_context_only_helper_is_none(analyze_files) -> None:
     assert [s for s in _eps(stmts) if s.handler == "Report"] == []
 
 
-@pytest.mark.xfail(strict=True, reason="deployment-config trigger (queue name) not read")
 def test_deployment_config_is_wiring(analyze_files) -> None:
     template = """{
   "Resources": {

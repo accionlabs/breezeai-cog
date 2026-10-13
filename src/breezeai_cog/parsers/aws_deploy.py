@@ -1,6 +1,8 @@
 """Lambda triggers declared in deployment config, as a registered fact, ``aws.deployed-handlers``.
 
-A Lambda handler's trigger is often written only in the deployment config::
+A Lambda handler's trigger is often written only in the deployment config — ``serverless.yml``
+or a SAM template (``AWS::Serverless::Function`` resources in ``template.yaml`` or the JSON
+``serverless.template``; ``Handler`` relative to ``CodeUri``, ``Globals.Function`` filling in)::
 
     # serverless.yml
     functions:
@@ -29,6 +31,10 @@ Event                              Record                ``endpoint``
 ``http`` / ``httpApi``             route                 ``/path`` (verb in ``method``; ``*`` →
                                                          ``ANY``)
 =================================  ====================  =========================================
+
+SAM spells the same events ``SQS`` / ``SNS`` / ``Kinesis`` / ``DynamoDB`` / ``Schedule`` /
+``ScheduleV2`` / ``EventBridgeRule`` / ``CloudWatchEvent`` / ``Api`` / ``HttpApi`` (an
+``HttpApi`` without a path is the catch-all route: ``ANY``, no path).
 
 Anything the config leaves to deploy time — a variable (``${self:custom.queue}``), a CloudFormation
 reference (``Fn::GetAtt``, ``!Ref``), a catch-all path — gives an empty endpoint, never its text.
@@ -279,15 +285,101 @@ def _resolve(values: list[list[_Function]], index: object) -> DeployedHandlers |
     return fact if modules or types else None
 
 
-def _collect(root: object, source: bytes, rel: str, repo_root: Path | None) -> list[_Function] | None:
-    if not rel.lower().endswith((".yml", ".yaml")):  # the language's own files pass here too
+def _dict(value: Any) -> dict[str, Any]:
+    return value if isinstance(value, dict) else {}
+
+
+def _sam_triggers(events: Any) -> tuple[Trigger, ...]:
+    """SAM ``Events`` (``{name: {Type, Properties}}``) as triggers — the same rules as
+    ``serverless.yml`` events, spelled the SAM way."""
+    out: list[Trigger] = []
+    for event in events.values() if isinstance(events, dict) else []:
+        if not isinstance(event, dict):
+            continue
+        kind = event.get("Type")
+        props = _dict(event.get("Properties"))
+        if kind == "SQS":
+            out.append(_sqs(props.get("Queue")))
+        elif kind == "SNS":
+            topic = props.get("Topic")
+            out.append(_sns(topic if isinstance(topic, str) and topic.startswith("arn:") else None))
+        elif kind == "Kinesis":
+            out.append(_stream({"type": "kinesis", "arn": props.get("Stream")}) or
+                       Trigger("eventbus_consumer", "aws-kinesis"))
+        elif kind == "DynamoDB":
+            out.append(_stream({"type": "dynamodb", "arn": props.get("Stream")}) or
+                       Trigger("eventbus_consumer", "aws-dynamodb"))
+        elif kind == "Schedule":
+            out.extend(_schedules(props.get("Schedule")))
+        elif kind == "ScheduleV2":
+            out.extend(_schedules(props.get("ScheduleExpression")))
+        elif kind in ("EventBridgeRule", "CloudWatchEvent"):
+            out.extend(_event_bridge({"eventBus": props.get("EventBusName")}))
+        elif kind in ("Api", "HttpApi"):
+            # HttpApi without a path is the catch-all ($default) route: every verb, any path.
+            out.append(_http({"path": props.get("Path"), "method": props.get("Method")})
+                       if props.get("Path") is not None else _http("*"))
+    return tuple(out)
+
+
+def _code_dir(template_dir: str, code_uri: Any) -> str | None:
+    """The folder a SAM function's ``Handler`` is relative to: ``CodeUri`` (a local folder) under
+    the template's folder; an S3 location or a reference → None (not in the repository)."""
+    if code_uri is None:
+        return template_dir
+    text = _literal(code_uri)
+    if text is None or text.startswith("s3://") or text.endswith((".zip", ".jar")):
         return None
-    return read_serverless(source, rel) or None
+    joined = PurePosixPath(template_dir) / text.strip("/") if template_dir else PurePosixPath(text.strip("/"))
+    return "" if str(joined) in (".", "") else str(joined)
+
+
+def read_sam(source: bytes, rel: str) -> list[_Function]:
+    """The ``AWS::Serverless::Function`` resources of a SAM / CloudFormation template (YAML, or
+    JSON as in ``serverless.template``) with a literal ``Handler``; ``Globals.Function`` supplies
+    a missing ``Handler`` / ``CodeUri``."""
+    if b"AWS::Serverless::Function" not in source:
+        return []
+    if rel.lower().endswith((".json", ".template")):
+        import json
+
+        try:
+            doc = json.loads(source)
+        except ValueError:
+            return []
+    else:
+        doc = _load(source)
+    resources = doc.get("Resources") if isinstance(doc, dict) else None
+    if not isinstance(resources, dict):
+        return []
+    globals_ = _dict(_dict(doc.get("Globals")).get("Function"))
+    template_dir = str(PurePosixPath(rel).parent)
+    template_dir = "" if template_dir == "." else template_dir
+    out: list[_Function] = []
+    for resource in resources.values():
+        if not isinstance(resource, dict) or resource.get("Type") != "AWS::Serverless::Function":
+            continue
+        props = _dict(resource.get("Properties"))
+        handler = _literal(props.get("Handler", globals_.get("Handler")))
+        base = _code_dir(template_dir, props.get("CodeUri", globals_.get("CodeUri")))
+        if handler is not None and base is not None:
+            out.append(_Function(handler, base, _sam_triggers(props.get("Events"))))
+    return out
+
+
+_SOURCES = (".yml", ".yaml", ".json", ".template")
+
+
+def _collect(root: object, source: bytes, rel: str, repo_root: Path | None) -> list[_Function] | None:
+    if not rel.lower().endswith(_SOURCES):  # the language's own files pass here too
+        return None
+    return (read_serverless(source, rel) + read_sam(source, rel)) or None
 
 
 # The same fact on both indexes: TypeScript reads the module handlers, C# the .NET ones.
 for _language in ("typescript", "csharp"):
     register_fact(FactSpec(
-        name=FACT, language=_language, gate=(b"functions:",), sources=(".yml", ".yaml"),
+        name=FACT, language=_language, gate=(b"functions:", b"AWS::Serverless::Function"),
+        sources=_SOURCES,
         collect=_collect, resolve=_resolve,
     ))

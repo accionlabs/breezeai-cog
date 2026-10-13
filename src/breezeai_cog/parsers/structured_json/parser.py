@@ -37,7 +37,10 @@ from .toon import encode
 class JsonParser(BaseParser):
     name = "json"
     schema_version = SCHEMA_VERSION
-    extensions = (".json",)  # the sole ``.json`` owner (ConfigParser no longer claims .json)
+    #: The sole ``.json`` owner (ConfigParser no longer claims .json), plus ``serverless.template``
+    #: — the JSON CloudFormation template the AWS .NET Lambda tooling writes (its Lambda
+    #: triggers are read by ``parsers/aws_deploy.py``).
+    extensions = (".json", "serverless.template")
     #: `framework` value carried on the statement to name the serialization. Keeps
     #: `semanticType` format-independent.
     serialization = "toon"
