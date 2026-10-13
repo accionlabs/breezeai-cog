@@ -11,11 +11,16 @@ A module is the directory above ``src/main/java``. Only its **base** config coun
 (``application-<profile>.*``) are ignored, and so are YAML documents activated by a profile.
 
 Result per module: the path, or ``None`` when a context path is set but cannot be resolved —
-the base files disagree, or the value is a ``${…}`` placeholder (cog does not resolve property
-placeholders). A module without a context path is absent from the result."""
+the base files disagree, or the value is a ``${…}`` placeholder. A module without a context path
+is absent from the result.
+
+:func:`spring_properties` reads the same base files into a flat ``key → value`` map per module,
+so an annotation value written as a property placeholder (``@KafkaListener(topics =
+"${app.orders-topic}")``) resolves through :func:`resolve_placeholders`."""
 
 from __future__ import annotations
 
+import re
 from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
@@ -126,3 +131,113 @@ def spring_context_paths(repo_root: Path, java_files: Iterable[str]) -> dict[str
         if is_set:
             out[module] = value
     return out
+
+
+def _properties_all(text: str) -> dict[str, str]:
+    """Every ``key = value`` of a ``.properties`` file (``=``, ``:`` or whitespace separated)."""
+    found: dict[str, str] = {}
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line or line[0] in "#!":
+            continue
+        for sep in ("=", ":"):
+            if sep in line:
+                key, value = line.split(sep, 1)
+                break
+        else:
+            parts = line.split(None, 1)
+            key, value = parts[0], parts[1] if len(parts) > 1 else ""
+        found[key.strip()] = value.strip()
+    return found
+
+
+def _flatten(node: object, prefix: str, out: dict[str, str]) -> None:
+    if isinstance(node, dict):
+        for k, v in node.items():
+            _flatten(v, f"{prefix}.{k}" if prefix else str(k), out)
+    elif isinstance(node, list):
+        out[prefix] = ",".join(str(v) for v in node)
+    elif node is not None:
+        out[prefix] = str(node).strip()
+
+
+def _yaml_all(text: str) -> dict[str, str]:
+    """Every dotted key of the profile-less documents of a YAML file."""
+    if yaml is None:
+        return {}
+    try:
+        docs = list(yaml.safe_load_all(text))
+    except yaml.YAMLError:
+        return {}
+    out: dict[str, str] = {}
+    for doc in docs:
+        if isinstance(doc, dict) and not any(_lookup(doc, k) is not None for k in _PROFILE_KEYS):
+            _flatten(doc, "", out)
+    return out
+
+
+def _module_properties(module_dir: Path) -> dict[str, str | None]:
+    """Flat base-config properties of one module; a key the base files set to different values
+    → None (unknown)."""
+    out: dict[str, str | None] = {}
+    for d in _RESOURCE_DIRS:
+        for name in _NAMES:
+            f = module_dir / d / name
+            if not f.is_file():
+                continue
+            try:
+                text = f.read_text("utf-8", errors="replace")
+            except OSError:
+                continue
+            values = _properties_all(text) if name.endswith(".properties") else _yaml_all(text)
+            for key, value in values.items():
+                out[key] = value if out.get(key, value) == value else None
+    return out
+
+
+def spring_properties(
+    repo_root: Path, java_files: Iterable[str]
+) -> dict[str, dict[str, str | None]]:
+    """Module root → its base-config properties (``key → value``; None = the base files
+    disagree), for every module with Java sources under ``src/main/java`` and a base config."""
+    out: dict[str, dict[str, str | None]] = {}
+    for module in sorted({m for f in java_files if (m := module_of(f)) is not None}):
+        props = _module_properties(repo_root / module if module else repo_root)
+        if props:
+            out[module] = props
+    return out
+
+
+_PLACEHOLDER = re.compile(r"\$\{([^{}:]+)(?::([^{}]*))?\}")
+
+
+def resolve_placeholders(value: str, props: dict[str, str | None]) -> str | None:
+    """Substitute ``${key}`` / ``${key:default}`` from the module's base config. A key that is
+    absent uses its default; absent without a default, or set to different values, → None (the
+    address is unknown). A SpEL ``#{…}`` expression never resolves. Nested placeholders are
+    followed a few levels."""
+    if "#{" in value:
+        return None
+    for _ in range(4):
+        if "${" not in value:
+            return value
+        missing = False
+
+        def sub(m: re.Match[str]) -> str:
+            nonlocal missing
+            key, default = m.group(1).strip(), m.group(2)
+            if key in props:
+                hit = props[key]
+                if hit is None:
+                    missing = True
+                    return ""
+                return hit
+            if default is not None:
+                return default
+            missing = True
+            return ""
+
+        value = _PLACEHOLDER.sub(sub, value)
+        if missing:
+            return None
+    return None if "${" in value else value

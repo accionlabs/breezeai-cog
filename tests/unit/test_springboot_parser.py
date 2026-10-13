@@ -430,3 +430,106 @@ def test_registration_bean_filter_through_a_local_variable(analyze_files) -> Non
     })
     [r] = [s for s in st if s.semanticType == "route"]
     assert r.guards == ["TimingFilter"]  # ContextFilter's pattern is not a literal → not added
+
+
+# ── Messaging: broker listeners (inbound) and template sends (outbound) ──────────────────────
+_MSG = "src/main/java/m/"
+
+
+def _msg(analyze_files, files: dict[str, str]):
+    st = analyze_files(files)
+    eps = {(s.handler, s.endpoint, s.framework, s.method, s.routeKind)
+           for s in st if s.semanticType == "eventbus_consumer"}
+    sends = {(s.path.rsplit("/", 1)[-1], s.startLine, s.endpoint, s.framework)
+             for s in st if s.semanticType == "eventbus_send"}
+    return eps, sends
+
+
+def test_listeners_one_binding_per_address(analyze_files) -> None:
+    eps, _ = _msg(analyze_files, {
+        "src/main/resources/application.yml": "app:\n  topics:\n    orders: orders.v1\n",
+        f"{_MSG}Topics.java": (
+            "package m;\npublic class Topics {\n"
+            '  public static final String BILLING = "billing";\n}\n'
+        ),
+        f"{_MSG}L.java": (
+            "package m;\n"
+            "import org.springframework.kafka.annotation.KafkaListener;\n"
+            "import org.springframework.amqp.rabbit.annotation.RabbitListener;\n"
+            "import org.springframework.jms.annotation.JmsListener;\n"
+            "import io.awspring.cloud.sqs.annotation.SqsListener;\n"
+            "import org.springframework.stereotype.Component;\n"
+            "@Component\npublic class L {\n"
+            '  private static final String AUDIT = "audit";\n'
+            '  @KafkaListener(topics = {"a", "b"}, groupId = "g")\n  public void two(String m) {}\n'
+            '  @KafkaListener(topics = "${app.topics.orders}")\n  public void prop(String m) {}\n'
+            '  @KafkaListener(topics = "${missing.key}")\n  public void unknown(String m) {}\n'
+            '  @KafkaListener(topicPattern = "evt.*")\n  public void pattern(String m) {}\n'
+            "  @RabbitListener(queues = Topics.BILLING)\n  public void bill(String m) {}\n"
+            "  @JmsListener(destination = AUDIT)\n  public void audit(String m) {}\n"
+            '  @SqsListener("jobs")\n  public void job(String m) {}\n'
+            "}\n"
+        ),
+    })
+    assert eps == {
+        ("two", "a", "kafka", "EVENT", "message"),
+        ("two", "b", "kafka", "EVENT", "message"),
+        ("prop", "orders.v1", "kafka", "EVENT", "message"),   # ${property} from base config
+        ("unknown", None, "kafka", "EVENT", "message"),       # unresolved → empty, never the key
+        ("pattern", None, "kafka", "EVENT", "message"),       # a pattern is not one address
+        ("bill", "billing", "rabbitmq", "MESSAGE", "message"),  # Class.FIELD constant
+        ("audit", "audit", "jms", "MESSAGE", "message"),        # same-class constant
+        ("job", "jobs", "aws-sqs", "MESSAGE", "message"),
+    }
+
+
+def test_class_level_listener_binds_its_handler_methods(analyze_files) -> None:
+    eps, _ = _msg(analyze_files, {
+        f"{_MSG}C.java": (
+            "package m;\n"
+            "import org.springframework.kafka.annotation.KafkaHandler;\n"
+            "import org.springframework.kafka.annotation.KafkaListener;\n"
+            '@KafkaListener(topics = "multi")\npublic class C {\n'
+            "  @KafkaHandler\n  public void onA(String a) {}\n"
+            "  @KafkaHandler\n  public void onB(Integer b) {}\n"
+            "  public void helper() {}\n}\n"
+        ),
+    })
+    assert {(h, e) for h, e, *_ in eps} == {("onA", "multi"), ("onB", "multi")}
+
+
+def test_template_sends(analyze_files) -> None:
+    _, sends = _msg(analyze_files, {
+        f"{_MSG}S.java": (
+            "package m;\n"
+            "import org.springframework.kafka.core.KafkaTemplate;\n"
+            "import org.springframework.amqp.rabbit.core.RabbitTemplate;\n"
+            "import org.springframework.jms.core.JmsTemplate;\n"
+            "import org.springframework.stereotype.Service;\n"
+            "@Service\npublic class S {\n"
+            "  private final KafkaTemplate<String, String> kafka;\n"
+            "  private final RabbitTemplate rabbit;\n"
+            "  private final JmsTemplate jms;\n"
+            "  S(KafkaTemplate<String, String> kafka, RabbitTemplate rabbit, JmsTemplate jms) {\n"
+            "    this.kafka = kafka; this.rabbit = rabbit; this.jms = jms;\n  }\n"
+            "  void go(String topic, Other other) {\n"
+            '    kafka.send("orders", "x");\n'                      # 15
+            "    kafka.send(topic, \"x\");\n"                       # 16 runtime → empty
+            "    kafka.sendDefault(\"x\");\n"                        # 17 default → empty
+            '    rabbit.convertAndSend("billing", "x");\n'          # 18 default exchange
+            '    rabbit.convertAndSend("", "billing", "x");\n'      # 19 "" exchange → queue
+            '    rabbit.convertAndSend("events", "rk", "x");\n'     # 20 exchange
+            '    this.jms.convertAndSend("audit", "x");\n'          # 21
+            '    other.send("orders", "x");\n'                      # 22 not a template → none
+            "  }\n}\n"
+        ),
+    })
+    assert sends == {
+        ("S.java", 15, "orders", "kafka"),
+        ("S.java", 16, None, "kafka"),
+        ("S.java", 17, None, "kafka"),
+        ("S.java", 18, "billing", "rabbitmq"),
+        ("S.java", 19, "billing", "rabbitmq"),
+        ("S.java", 20, "events", "rabbitmq"),
+        ("S.java", 21, "audit", "jms"),
+    }

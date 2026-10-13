@@ -17,7 +17,7 @@ from ...utils import repo_relative
 from ..constfold import Token, resolve_all
 from ..index_common import parallel_map, record_distinct, seed_same_package
 from ..treesitter import node_text, parse_source
-from .config import spring_context_paths
+from .config import spring_context_paths, spring_properties
 from .web_guards import GuardFacts, ModuleGuards, collect_guard_facts, resolve_guards
 from .constants import collect_constants
 from .jaxrs_index import JaxrsFacts, collect_jaxrs_facts, resolve_jaxrs
@@ -55,6 +55,10 @@ class JavaIndex:
     #: (decision Q9 — their names go on every binding they certainly cover). See
     #: ``web_guards.py``.
     module_guards: dict[str, ModuleGuards] = field(default_factory=dict)
+    #: Base-config properties per module root (``key → value``; None = the base files
+    #: disagree) — resolves ``${…}`` placeholders in annotation values such as a
+    #: ``@KafkaListener`` topic. See ``config.py``.
+    module_properties: dict[str, dict[str, str | None]] = field(default_factory=dict)
 
 
 #: One file's contribution: ``{package.TypeName: rel}`` and ``{Class.FIELD: tokens}``.
@@ -131,6 +135,7 @@ def build_fqcn_index(repo_root: Path, files: Sequence[Path], jobs: int = 1) -> J
         context_paths=spring_context_paths(repo_root, (rel for _, rel in args)),
         jaxrs_app_paths=app_paths, jaxrs_sub_bases=sub_bases,
         module_guards=resolve_guards(guard_facts),
+        module_properties=spring_properties(repo_root, (rel for _, rel in args)),
     )
 
 

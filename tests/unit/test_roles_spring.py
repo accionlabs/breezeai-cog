@@ -156,7 +156,6 @@ import org.springframework.amqp.rabbit.annotation.RabbitListener;
 import org.springframework.stereotype.Component;"""
 
 
-@pytest.mark.xfail(strict=True, reason="message listener annotations are not recorded")
 def test_message_listener_is_binding(analyze_files) -> None:
     st = analyze_files(
         _java(
