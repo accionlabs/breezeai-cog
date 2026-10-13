@@ -1,12 +1,12 @@
 """Standalone JSLT (JSON transform language) capture.
 
 The ``jslt`` language parser owns ``.jslt`` files. Since JSLT has no tree-sitter grammar in
-this project's language pack (see the plan's Decisions table for why the only public
-third-party grammar was rejected), structure comes from a hand-rolled line-scan: top-level
-(column-0) ``import``/``def``/``let`` declarations, plus a trailing ``module_expression``
-for the output expression. Capture is gated on ``--capture-statements``; unlike every
-tree-sitter-backed parser in this project, ``//`` comments are not captured as their own
-statements (no grammar tree to run the shared comment pass over).
+this project's language pack, structure comes from a hand-rolled line-scan: ``import``/
+``let`` declarations and a trailing ``module_expression`` are flat Statements; top-level
+(column-0) ``def`` declarations are ``Function`` records (independently searchable,
+call-linked) with untyped ``Parameter``s and same-file ``calls[]`` resolution. Capture is on
+by default; unlike every tree-sitter-backed parser in this project, ``//`` comments are not
+captured as their own statements (no grammar tree to run the shared comment pass over).
 """
 
 from __future__ import annotations
@@ -38,7 +38,9 @@ let greeting = "Hello"
 """
 
 
-def _parse(tmp_path, filename: str, src: str, *, capture: bool = True, limit: int = 1000) -> FileRecord:
+def _parse(
+    tmp_path, filename: str, src: str, *, capture: bool = True, limit: int = 1000
+) -> FileRecord:
     p = tmp_path / filename
     p.write_text(src)
     ctx = ParseContext(
@@ -54,6 +56,18 @@ def _parse(tmp_path, filename: str, src: str, *, capture: bool = True, limit: in
 
 def _by_name(rec, name: str, node_type: str):
     return next(s for s in rec.statements if s.name == name and s.nodeType == node_type)
+
+
+def _func(rec, name: str):
+    return next(f for f in rec.functions if f.name == name)
+
+
+def _body(rec, fn) -> str:
+    """The full-text `function_body` statement companion to `fn` (Function has no `text`
+    field)."""
+    return next(
+        s for s in rec.statements if s.nodeType == "function_body" and s.parentId == fn.id
+    ).text
 
 
 def test_language_and_extensions() -> None:
@@ -72,11 +86,50 @@ def test_import_is_captured_with_alias_as_name(tmp_path) -> None:
     assert imp.text == 'import "common.jslt" as common'
 
 
-def test_def_captures_full_multiline_body(tmp_path) -> None:
+def test_def_is_a_function_record_with_untyped_param(tmp_path) -> None:
     rec = _parse(tmp_path, "transform.jslt", SOURCE)
-    fn = _by_name(rec, "full-name", "function_def")
-    assert "def full-name(p)" in fn.text
-    assert 'p.firstName + " " + p.lastName' in fn.text
+    fn = _func(rec, "full-name")
+    assert fn.parentId == rec.id
+    assert [p.name for p in fn.params] == ["p"]
+    assert fn.params[0].type == ""  # JSLT is untyped
+    body = _body(rec, fn)
+    assert body.startswith("def full-name(p)")
+    assert 'p.firstName + " " + p.lastName' in body
+
+
+def test_calls_resolve_to_same_file_def(tmp_path) -> None:
+    src = "def helper(x)\n  x + 1\n\ndef main(y)\n  helper(y)\n\nmain(1)\n"
+    rec = _parse(tmp_path, "transform.jslt", src)
+    main_fn = _func(rec, "main")
+    assert [c.name for c in main_fn.calls] == ["helper"]
+    assert main_fn.calls[0].path == "transform.jslt"
+    helper_fn = _func(rec, "helper")
+    assert helper_fn.calls == []  # no calls in its own body
+
+
+def test_recursive_call_resolves_to_self(tmp_path) -> None:
+    src = "def fact(n)\n  if ($n <= 1) 1 else $n * fact($n - 1)\n\nfact(5)\n"
+    rec = _parse(tmp_path, "transform.jslt", src)
+    fn = _func(rec, "fact")
+    assert [c.name for c in fn.calls] == ["fact"]
+    assert fn.calls[0].path == "transform.jslt"
+
+
+def test_call_to_parameter_not_resolved(tmp_path) -> None:
+    # `f` is a parameter (a function-valued argument), not a top-level `def` -- calling it
+    # must not produce a fabricated same-file edge.
+    src = "def apply(f, x)\n  f(x)\n\napply(.,.)\n"
+    rec = _parse(tmp_path, "transform.jslt", src)
+    fn = _func(rec, "apply")
+    assert fn.calls == []
+
+
+def test_call_in_own_header_not_mistaken_for_self_call(tmp_path) -> None:
+    # The header line `def f(x)` must not read its own name (`f(`) as a call to itself.
+    src = "def f(x)\n  x + 1\n\nf(1)\n"
+    rec = _parse(tmp_path, "transform.jslt", src)
+    fn = _func(rec, "f")
+    assert fn.calls == []
 
 
 def test_text_not_truncated_by_statement_text_limit(tmp_path) -> None:
@@ -87,10 +140,10 @@ def test_text_not_truncated_by_statement_text_limit(tmp_path) -> None:
     body_lines = "\n".join(f"    .field{i}" for i in range(50))
     src = f"def big(x)\n  x +\n{body_lines}\n\nbig(.)\n"
     rec = _parse(tmp_path, "transform.jslt", src, limit=20)
-    fn = _by_name(rec, "big", "function_def")
-    assert ".field0" in fn.text
-    assert ".field49" in fn.text
-    assert len(fn.text) > 20
+    body = _body(rec, _func(rec, "big"))
+    assert ".field0" in body
+    assert ".field49" in body
+    assert len(body) > 20
 
 
 def test_text_not_emptied_when_statement_text_limit_is_zero(tmp_path) -> None:
@@ -126,7 +179,8 @@ def test_leading_comment_line_not_captured_as_a_statement(tmp_path) -> None:
     # No tree-sitter grammar -> no shared comment pass; `//` lines are simply not statements.
     rec = _parse(tmp_path, "transform.jslt", SOURCE)
     assert not any("Transform a user record" in s.text for s in rec.statements)
-    assert len(rec.statements) == 4  # import + def + let + module_expression, nothing else
+    assert len(rec.statements) == 4  # import + let + function_body + module_expression
+    assert len(rec.functions) == 1  # full-name
 
 
 def test_bare_expression_with_no_declarations(tmp_path) -> None:
@@ -134,6 +188,7 @@ def test_bare_expression_with_no_declarations(tmp_path) -> None:
     assert len(rec.statements) == 1
     assert rec.statements[0].nodeType == "module_expression"
     assert rec.statements[0].text == "."
+    assert rec.functions == []
 
 
 def test_nested_let_inside_def_stays_on_def_text_not_split(tmp_path) -> None:
@@ -148,9 +203,34 @@ def test_nested_let_inside_def_stays_on_def_text_not_split(tmp_path) -> None:
     rec = _parse(tmp_path, "transform.jslt", src)
     let_bindings = [s for s in rec.statements if s.nodeType == "let_binding"]
     assert let_bindings == []  # the nested lets are indented -- part of the def's body only
-    fn = _by_name(rec, "full-name", "function_def")
-    assert "let first = p.firstName" in fn.text
-    assert "let last = p.lastName" in fn.text
+    body = _body(rec, _func(rec, "full-name"))
+    assert "let first = p.firstName" in body
+    assert "let last = p.lastName" in body
+
+
+def test_let_value_starting_on_next_line_not_cut_off(tmp_path) -> None:
+    # Regression: a `let`'s header ending with nothing after `=` (the value starts on the
+    # next line) used to be read as a complete, valueless declaration, and the value itself
+    # was then misread as a new boundary -- corrupting the real module expression that
+    # followed it.
+    src = 'let cfg =\n{\n  "a": 1\n}\n\n{"out": cfg}\n'
+    rec = _parse(tmp_path, "transform.jslt", src)
+    binding = _by_name(rec, "cfg", "let_binding")
+    assert binding.text == 'let cfg =\n{\n  "a": 1\n}'
+    module = next(s for s in rec.statements if s.nodeType == "module_expression")
+    assert module.text == '{"out": cfg}'
+
+
+def test_def_body_starting_on_next_line_not_cut_off(tmp_path) -> None:
+    # Same bug, for a `def` whose header ends with nothing after the closing `)` -- the body
+    # itself at column 0 (not indented), so bracket-depth tracking alone (which already
+    # handles an *indented* continuation) can't save it; only the incomplete-header check can.
+    src = 'def f(x)\nif ($x) 1 else 2\n\n{"y": f(.a)}\n'
+    rec = _parse(tmp_path, "transform.jslt", src)
+    body = _body(rec, _func(rec, "f"))
+    assert body == "def f(x)\nif ($x) 1 else 2"
+    module = next(s for s in rec.statements if s.nodeType == "module_expression")
+    assert module.text == '{"y": f(.a)}'
 
 
 def test_multiline_value_closing_brace_at_column_zero_not_a_new_boundary(tmp_path) -> None:
@@ -158,14 +238,7 @@ def test_multiline_value_closing_brace_at_column_zero_not_a_new_boundary(tmp_pat
     # ordinary JSLT formatting, not a new top-level construct -- bracket-depth tracking must
     # keep it part of the `let`'s own span, not truncate it and corrupt the module expression
     # that follows.
-    src = (
-        "let config = {\n"
-        '  "a": 1,\n'
-        '  "b": 2\n'
-        "}\n"
-        "\n"
-        '{ "result": config }\n'
-    )
+    src = 'let config = {\n  "a": 1,\n  "b": 2\n}\n\n{ "result": config }\n'
     rec = _parse(tmp_path, "transform.jslt", src)
     binding = _by_name(rec, "config", "let_binding")
     assert binding.text == 'let config = {\n  "a": 1,\n  "b": 2\n}'
@@ -215,19 +288,30 @@ def test_utf8_bom_stripped_before_scanning(tmp_path) -> None:
     )
     rec = JsltParser().parse_file(ctx)
     node_types = [s.nodeType for s in rec.statements]
-    assert node_types == ["import", "let_binding", "function_def", "module_expression"]
+    assert node_types == ["import", "let_binding", "module_expression", "function_body"]
+    assert [f.name for f in rec.functions] == ["f"]
 
 
 def test_capture_gate(tmp_path) -> None:
     rec = _parse(tmp_path, "transform.jslt", SOURCE, capture=False)
     assert rec.statements == []
+    assert rec.functions == []
     assert rec.language == "jslt"
     assert rec.framework is None
+
+
+def test_fixture_file_still_captures_declarations(tmp_path) -> None:
+    # JSLT emits no routes, so `is_fixture_file` (route/entry-point-only, per base.py) must
+    # not gate its capture at all -- statements and functions alike.
+    rec = _parse(tmp_path, "transform.test.jslt", SOURCE)
+    assert any(s.nodeType == "let_binding" for s in rec.statements)
+    assert any(f.name == "full-name" for f in rec.functions)
 
 
 def test_empty_file_yields_no_statements(tmp_path) -> None:
     rec = _parse(tmp_path, "empty.jslt", "")
     assert rec.statements == []
+    assert rec.functions == []
 
 
 def test_records_validate_against_schema(tmp_path) -> None:
