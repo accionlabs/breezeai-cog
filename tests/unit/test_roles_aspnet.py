@@ -187,7 +187,6 @@ public class OrdersClient
     assert any(s.semanticType == "api_call" for s in stmts)
 
 
-@pytest.mark.xfail(strict=True, reason="Razor page record has no handler")
 def test_razor_page_directive_is_binding(analyze_files) -> None:
     page = '@page "/orders"\n@model OrdersModel\n<h1>Orders</h1>\n'
     model = """using Microsoft.AspNetCore.Mvc.RazorPages;
@@ -202,7 +201,16 @@ public class OrdersModel : PageModel
     )
     [r] = [s for s in _eps(stmts) if s.path == "Pages/Orders.cshtml"]
     assert (r.semanticType, r.routeKind, r.endpoint) == ("route", "page", "/orders")
-    assert r.handler and r.handlerLine
+    # The PageModel class serves the page; it is declared in another file, so no handlerLine
+    # here (its file goes to handlerPath).
+    assert (r.handler, r.handlerLine) == ("OrdersModel", None)
+
+
+def test_blazor_page_handler_is_its_component(analyze_files) -> None:
+    stmts = analyze_files({"Pages/Counter.razor": '@page "/counter"\n<h1>Counter</h1>\n'},
+                          templates=True)
+    [r] = [s for s in _eps(stmts) if s.path == "Pages/Counter.razor"]
+    assert (r.endpoint, r.handler) == ("/counter", "Counter")
 
 
 def test_recurring_job_is_timer(analyze_files) -> None:
