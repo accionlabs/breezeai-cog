@@ -36,8 +36,12 @@ SAM spells the same events ``SQS`` / ``SNS`` / ``Kinesis`` / ``DynamoDB`` / ``Sc
 ``ScheduleV2`` / ``EventBridgeRule`` / ``CloudWatchEvent`` / ``Api`` / ``HttpApi`` (an
 ``HttpApi`` without a path is the catch-all route: ``ANY``, no path).
 
-Anything the config leaves to deploy time — a variable (``${self:custom.queue}``), a CloudFormation
-reference (``Fn::GetAtt``, ``!Ref``), a catch-all path — gives an empty endpoint, never its text.
+A reference to a resource of the **same file** (``Fn::GetAtt: [Orders, Arn]``, ``!Ref Alerts``) is
+followed when that resource is of the event's type (``AWS::SQS::Queue``, ``AWS::SNS::Topic``,
+``AWS::Kinesis::Stream``, ``AWS::DynamoDB::Table``) and names itself with a literal
+(``QueueName`` / ``TopicName`` / ``Name`` / ``TableName``). Anything the config leaves to deploy
+time — a variable (``${self:custom.queue}``), a resource without a name (AWS generates one), a
+template parameter, another stack, a catch-all path — gives an empty endpoint, never its text.
 Other event types (``s3``, ``websocket``, ``cognitoUserPool`` …) add nothing.
 
 The handler is matched by name: ``src/handler.onOrder`` (relative to the config's folder) is the
@@ -107,19 +111,90 @@ def type_triggers(index: Any | None, type_name: str, method: str) -> tuple[Trigg
 
 # ── reading ────────────────────────────────────────────────────────────────────────────────
 
+@dataclass(frozen=True)
 class _Ref:
-    """A CloudFormation tag (``!Ref``, ``!GetAtt``, ``!Sub`` …): a deploy-time value."""
+    """A CloudFormation tag (``!Ref``, ``!GetAtt``, ``!Sub`` …): a deploy-time value, kept with
+    what it points at so a reference to a resource of the same file can be followed."""
+
+    tag: str
+    value: Any
+
+
+def _tagged(loader: Any, suffix: str, node: Any) -> _Ref:
+    import yaml  # type: ignore[import-untyped]
+
+    if isinstance(node, yaml.ScalarNode):
+        return _Ref(suffix, loader.construct_scalar(node))
+    if isinstance(node, yaml.SequenceNode):
+        return _Ref(suffix, loader.construct_sequence(node, deep=True))
+    return _Ref(suffix, loader.construct_mapping(node, deep=True))
+
+
+#: Event service → the resource type an event's reference must point at, and its name property.
+_NAMED_RESOURCES = {
+    "sqs": ("AWS::SQS::Queue", "QueueName"),
+    "sns": ("AWS::SNS::Topic", "TopicName"),
+    "kinesis": ("AWS::Kinesis::Stream", "Name"),
+    "dynamodb": ("AWS::DynamoDB::Table", "TableName"),
+}
+
+
+def _logical_id(value: Any) -> str | None:
+    """The resource a reference names: ``{Fn::GetAtt: [Orders, Arn]}`` / ``!GetAtt Orders.Arn`` /
+    ``{Ref: Orders}`` / ``!Ref Orders`` → ``Orders``."""
+    if isinstance(value, _Ref):
+        tag, target = value.tag, value.value
+    elif isinstance(value, dict) and len(value) == 1:
+        (tag, target), = value.items()
+        tag = tag.removeprefix("Fn::")
+    else:
+        return None
+    if tag == "GetAtt":
+        if isinstance(target, list) and target and isinstance(target[0], str):
+            return target[0]
+        return target.split(".", 1)[0] if isinstance(target, str) else None
+    return target if tag == "Ref" and isinstance(target, str) else None
+
+
+@dataclass(frozen=True)
+class _Resources:
+    """The resources declared in the same config file (``resources.Resources`` of a
+    ``serverless.yml``, ``Resources`` of a SAM template)."""
+
+    items: dict[str, Any] = field(default_factory=dict)
+
+    def service_of(self, ref: Any) -> str | None:
+        """The event service of the resource ``ref`` points at (``AWS::Kinesis::Stream`` →
+        ``kinesis``), when it is one of ``_NAMED_RESOURCES``."""
+        resource = self.items.get(_logical_id(ref) or "")
+        kind = resource.get("Type") if isinstance(resource, dict) else None
+        return next((svc for svc, (typ, _) in _NAMED_RESOURCES.items() if typ == kind), None)
+
+    def name(self, ref: Any, service: str) -> str | None:
+        """The literal name of the resource ``ref`` points at, when it is a resource of this file
+        of the event's type: ``{Fn::GetAtt: [Orders, Arn]}`` with ``Orders: {Type:
+        AWS::SQS::Queue, Properties: {QueueName: orders}}`` → ``orders``. No name (AWS generates
+        one), a variable, a parameter or another stack → None."""
+        resource = self.items.get(_logical_id(ref) or "")
+        typ, prop = _NAMED_RESOURCES[service]
+        if not isinstance(resource, dict) or resource.get("Type") != typ:
+            return None
+        props = resource.get("Properties")
+        return _literal(props.get(prop)) if isinstance(props, dict) else None
+
+
+_NO_RESOURCES = _Resources()
 
 
 def _load(source: bytes) -> Any:
-    import yaml  # type: ignore[import-untyped]
+    import yaml
 
     base: Any = getattr(yaml, "CSafeLoader", yaml.SafeLoader)
 
     class Loader(base):  # type: ignore[misc]
         pass
 
-    Loader.add_multi_constructor("!", lambda loader, suffix, node: _Ref())
+    Loader.add_multi_constructor("!", _tagged)
     try:
         return yaml.load(source, Loader=Loader)  # noqa: S506 — a SafeLoader subclass
     except yaml.YAMLError:
@@ -140,33 +215,41 @@ def _arn_resource(value: Any, service: str) -> str | None:
     return m["resource"] if m is not None and m["service"] == service else None
 
 
-def _sqs(spec: Any) -> Trigger:
-    arn = spec.get("arn") if isinstance(spec, dict) else spec
-    return Trigger("eventbus_consumer", "aws-sqs", endpoint=_arn_resource(arn, "sqs"))
+def _sqs(spec: Any, res: _Resources = _NO_RESOURCES) -> Trigger:
+    arn = spec.get("arn") if isinstance(spec, dict) and _logical_id(spec) is None else spec
+    return Trigger("eventbus_consumer", "aws-sqs",
+                   endpoint=_arn_resource(arn, "sqs") or res.name(arn, "sqs"))
 
 
-def _sns(spec: Any) -> Trigger:
-    if isinstance(spec, dict):
-        name = _literal(spec.get("topicName")) or _arn_resource(spec.get("arn"), "sns")
+def _sns(spec: Any, res: _Resources = _NO_RESOURCES) -> Trigger:
+    if isinstance(spec, dict) and _logical_id(spec) is None:
+        arn = spec.get("arn")
+        name = _literal(spec.get("topicName")) or _arn_resource(arn, "sns") or res.name(arn, "sns")
     else:
         text = _literal(spec)
-        name = _arn_resource(text, "sns") if text and text.startswith("arn:") else text
+        name = (_arn_resource(text, "sns") if text and text.startswith("arn:") else text) \
+            or res.name(spec, "sns")
     return Trigger("eventbus_consumer", "aws-sns", endpoint=name)
 
 
-def _stream(spec: Any) -> Trigger | None:
-    arn = spec.get("arn") if isinstance(spec, dict) else spec
-    kind = spec.get("type") if isinstance(spec, dict) else None
+def _stream(spec: Any, res: _Resources = _NO_RESOURCES) -> Trigger | None:
+    plain = isinstance(spec, dict) and _logical_id(spec) is None
+    arn = spec.get("arn") if plain else spec
+    kind = spec.get("type") if plain else None
     text = _literal(arn) or ""
-    if kind == "kinesis" or ":kinesis:" in text:
+    kind = kind or ("kinesis" if ":kinesis:" in text else "dynamodb" if ":dynamodb:" in text
+                    else res.service_of(arn))
+    if kind == "kinesis":
         resource = _arn_resource(arn, "kinesis")  # stream/orders
         return Trigger("eventbus_consumer", "aws-kinesis",
-                       endpoint=resource.split("/", 1)[1] if resource and "/" in resource else None)
-    if kind == "dynamodb" or ":dynamodb:" in text:
+                       endpoint=resource.split("/", 1)[1] if resource and "/" in resource
+                       else res.name(arn, "kinesis"))
+    if kind == "dynamodb":
         resource = _arn_resource(arn, "dynamodb")  # table/Orders/stream/2024-…
         parts = resource.split("/") if resource else []
         return Trigger("eventbus_consumer", "aws-dynamodb",
-                       endpoint=parts[1] if len(parts) > 1 and parts[0] == "table" else None)
+                       endpoint=parts[1] if len(parts) > 1 and parts[0] == "table"
+                       else res.name(arn, "dynamodb"))
     return None
 
 
@@ -207,18 +290,18 @@ def _http(spec: Any) -> Trigger:
     return Trigger("route", "aws-apigw", verb, endpoint, "route")
 
 
-def _triggers(events: Any) -> tuple[Trigger, ...]:
+def _triggers(events: Any, res: _Resources = _NO_RESOURCES) -> tuple[Trigger, ...]:
     out: list[Trigger] = []
     for event in events if isinstance(events, list) else []:
         if not isinstance(event, dict) or len(event) != 1:
             continue
         (kind, spec), = event.items()
         if kind == "sqs":
-            out.append(_sqs(spec))
+            out.append(_sqs(spec, res))
         elif kind == "sns":
-            out.append(_sns(spec))
+            out.append(_sns(spec, res))
         elif kind == "stream":
-            t = _stream(spec)
+            t = _stream(spec, res)
             if t is not None:
                 out.append(t)
         elif kind == "schedule":
@@ -247,11 +330,12 @@ def read_serverless(source: bytes, rel: str) -> list[_Function]:
         return []
     base = str(PurePosixPath(rel).parent)
     base = "" if base == "." else base
+    resources = _Resources(_dict(_dict(doc.get("resources")).get("Resources")))
     out: list[_Function] = []
     for spec in functions.values():
         handler = _literal(spec.get("handler")) if isinstance(spec, dict) else None
         if handler is not None:
-            out.append(_Function(handler, base, _triggers(spec.get("events"))))
+            out.append(_Function(handler, base, _triggers(spec.get("events"), resources)))
     return out
 
 
@@ -301,7 +385,7 @@ def _dict(value: Any) -> dict[str, Any]:
     return value if isinstance(value, dict) else {}
 
 
-def _sam_triggers(events: Any) -> tuple[Trigger, ...]:
+def _sam_triggers(events: Any, res: _Resources = _NO_RESOURCES) -> tuple[Trigger, ...]:
     """SAM ``Events`` (``{name: {Type, Properties}}``) as triggers — the same rules as
     ``serverless.yml`` events, spelled the SAM way."""
     out: list[Trigger] = []
@@ -311,15 +395,16 @@ def _sam_triggers(events: Any) -> tuple[Trigger, ...]:
         kind = event.get("Type")
         props = _dict(event.get("Properties"))
         if kind == "SQS":
-            out.append(_sqs(props.get("Queue")))
+            out.append(_sqs(props.get("Queue"), res))
         elif kind == "SNS":
             topic = props.get("Topic")
-            out.append(_sns(topic if isinstance(topic, str) and topic.startswith("arn:") else None))
+            out.append(_sns(topic if not isinstance(topic, str) or topic.startswith("arn:")
+                            else None, res))
         elif kind == "Kinesis":
-            out.append(_stream({"type": "kinesis", "arn": props.get("Stream")}) or
+            out.append(_stream({"type": "kinesis", "arn": props.get("Stream")}, res) or
                        Trigger("eventbus_consumer", "aws-kinesis"))
         elif kind == "DynamoDB":
-            out.append(_stream({"type": "dynamodb", "arn": props.get("Stream")}) or
+            out.append(_stream({"type": "dynamodb", "arn": props.get("Stream")}, res) or
                        Trigger("eventbus_consumer", "aws-dynamodb"))
         elif kind == "Schedule":
             out.extend(_schedules(props.get("Schedule")))
@@ -375,7 +460,8 @@ def read_sam(source: bytes, rel: str) -> list[_Function]:
         handler = _literal(props.get("Handler", globals_.get("Handler")))
         base = _code_dir(template_dir, props.get("CodeUri", globals_.get("CodeUri")))
         if handler is not None and base is not None:
-            out.append(_Function(handler, base, _sam_triggers(props.get("Events"))))
+            out.append(_Function(handler, base, _sam_triggers(props.get("Events"),
+                                                              _Resources(resources))))
     return out
 
 

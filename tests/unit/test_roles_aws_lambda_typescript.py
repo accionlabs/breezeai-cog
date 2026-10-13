@@ -350,3 +350,70 @@ def test_alias_re_export_is_not_followed(analyze_files) -> None:
                       **{"api/orders.ts": NAMED,
                          "tsconfig.json": '{"compilerOptions": {"paths": {"@api/*": ["api/*"]}}}'})
     assert [(p, e) for p, _, _, e in got] == [("api/orders.ts", None)]
+
+
+REF_HANDLERS = "".join(
+    f"export const {n} = async (event) => {{}};\n" for n in ("q1", "q2", "q3", "q4", "t1", "s1")
+)
+
+
+def test_reference_to_a_resource_of_the_same_file_gives_its_literal_name(analyze_files) -> None:
+    config = """service: shop
+functions:
+  q1: { handler: src/handler.q1, events: [ { sqs: { arn: { Fn::GetAtt: [Orders, Arn] } } } ] }
+  q2: { handler: src/handler.q2, events: [ { sqs: { arn: { Fn::GetAtt: [Staged, Arn] } } } ] }
+  q3: { handler: src/handler.q3, events: [ { sqs: { arn: { Fn::GetAtt: [Unnamed, Arn] } } } ] }
+  q4: { handler: src/handler.q4, events: [ { sqs: { arn: { Fn::GetAtt: [Bucket, Arn] } } } ] }
+  t1: { handler: src/handler.t1, events: [ { sns: { arn: { Ref: Alerts }, topicName: alerts } } ] }
+  s1:
+    handler: src/handler.s1
+    events:
+      - stream: { type: dynamodb, arn: { Fn::GetAtt: [Table, StreamArn] } }
+resources:
+  Resources:
+    Orders: { Type: AWS::SQS::Queue, Properties: { QueueName: orders } }
+    Staged: { Type: AWS::SQS::Queue, Properties: { QueueName: "${sls:stage}-jobs" } }
+    Unnamed: { Type: AWS::SQS::Queue }
+    Bucket: { Type: AWS::S3::Bucket, Properties: { BucketName: files } }
+    Alerts: { Type: AWS::SNS::Topic }
+    Table: { Type: AWS::DynamoDB::Table, Properties: { TableName: Orders } }
+"""
+    st = _run(analyze_files, REF_HANDLERS, **{"serverless.yml": config})
+    got = {r.handler: (r.framework, r.endpoint) for r in _eps(st)}
+    assert got == {
+        "q1": ("aws-sqs", "orders"),
+        "q2": ("aws-sqs", None),          # a variable: known at deploy time only
+        "q3": ("aws-sqs", None),          # no name: AWS generates one
+        "q4": ("aws-sqs", None),          # not a queue: never another resource's name
+        "t1": ("aws-sns", "alerts"),      # topicName given beside the reference
+        "s1": ("aws-dynamodb", "Orders"),
+    }
+
+
+def test_sam_reference_tags_are_followed_to_the_same_template(analyze_files) -> None:
+    template = """Transform: AWS::Serverless-2016-10-31
+Parameters:
+  QueueArn: { Type: String }
+Resources:
+  Q1:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: src/handler.q1
+      Events: { E: { Type: SQS, Properties: { Queue: !GetAtt Orders.Arn } } }
+  Q2:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: src/handler.q2
+      Events: { E: { Type: SQS, Properties: { Queue: !Ref QueueArn } } }
+  T1:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: src/handler.t1
+      Events: { E: { Type: SNS, Properties: { Topic: !Ref Alerts } } }
+  Orders: { Type: AWS::SQS::Queue, Properties: { QueueName: orders } }
+  Alerts: { Type: AWS::SNS::Topic, Properties: { TopicName: alerts } }
+"""
+    st = _run(analyze_files, REF_HANDLERS, **{"template.yaml": template})
+    got = {r.handler: r.endpoint for r in _eps(st)}
+    # !Ref QueueArn is a template parameter, not a resource: unknown
+    assert got == {"q1": "orders", "q2": None, "t1": "alerts"}
