@@ -16,10 +16,11 @@ import re
 
 from tree_sitter import Node
 
-from ...emit import disambiguate, file_id, statement_id
-from ...schemas import Statement
+from ...emit import file_id
+from ..emits import Emit
 from ..treesitter import entry_text, node_text
 from .mount_guards import incoming_guards
+from .mounts import route_mounts
 
 # Lazy-load target extraction (Tier 1): capture what a route loads so the mount is a
 # traversable edge, not a dead end. Covers every Angular version's syntax:
@@ -220,8 +221,8 @@ def _has_empty_path_child(children: Node | None, source: bytes) -> bool:
     return False
 
 
-def _process(arr: Node, prefix: str | None, source: bytes, path: str, seen: set[str],
-             routes: list[Statement], index: object, inherited: tuple[str, ...] = (),
+def _process(arr: Node, prefix: str | None, source: bytes, path: str,
+             routes: list[Emit], index: object, inherited: tuple[str, ...] = (),
              mounts: list[tuple[Node, list[str]]] | None = None) -> None:
     """``inherited``: guards of the ancestor routes that run before this route — each ancestor's
     own ``canMatch`` / ``canActivate`` (Angular matches and activates the parent first) and then
@@ -257,24 +258,16 @@ def _process(arr: Node, prefix: str | None, source: bytes, path: str, seen: set[
             if not _has_empty_path_child(children, source):
                 handler = (node_text(component, source) if component is not None
                            else _lazy_target(load_component, source))
-                sl, sc = elem.start_point[0] + 1, elem.start_point[1]
-                routes.append(Statement(
-                    id=disambiguate(statement_id(path, sl, sc), seen),
-                    parentId=file_id(path),
-                    nodeType="synthetic",
+                routes.append(Emit(elem, dict(
                     semanticType="route",
-                    text=entry_text(elem, source),
                     endpoint=full,
                     framework="angular",
                     routeKind="page",
                     handler=handler,
                     guards=[*inherited, *own] or None,
-                    startLine=sl,
-                    endLine=elem.end_point[0] + 1,
-                    path=path,
-                ))
+                ), parent=file_id(path), node_type="synthetic", text=entry_text(elem, source)))
         if children is not None and children.type == "array":
-            _process(children, full, source, path, seen, routes, index, child_guards, mounts)
+            _process(children, full, source, path, routes, index, child_guards, mounts)
 
 
 _CLASS_NODE_TYPES = ("class_declaration", "class", "abstract_class_declaration")
@@ -285,7 +278,7 @@ def _mount_prefix(root: Node, source: bytes, index: object) -> str:
     fully-composed parent prefix keyed by a class this file declares (a lazy child module is
     reached via ``.then(m => m.XModule)``). Empty string when this file is a routing root, its
     module isn't mounted, or the mount is ambiguous/unresolved (honest-null → own bare paths)."""
-    mounts = getattr(index, "route_mounts", None) or {}
+    mounts = route_mounts(index)
     if not mounts:
         return ""
     # Search all class node shapes (grammar may emit "class" or "class_declaration" depending
@@ -303,19 +296,20 @@ def _mount_prefix(root: Node, source: bytes, index: object) -> str:
 _ROUTER_BYTE_GUARDS = (b"@angular/router", b"RouterModule", b"Routes")
 
 
-def detect_angular_routes(root: Node, source: bytes, path: str, *, seen_ids: set[str],
-                          index: object = None) -> list[Statement]:
+def detect_angular_routes(root: Node, source: bytes, path: str, *,
+                          index: object = None) -> list[Emit]:
+    """This file's Angular page routes, for :func:`~..emits.apply`."""
     # Fast-path: files that don't import @angular/router (breadcrumb services, nav helpers,
     # etc.) can't contain Angular route arrays — skip the entire AST walk.
     if not any(guard in source for guard in _ROUTER_BYTE_GUARDS):
         return []
-    routes: list[Statement] = []
+    routes: list[Emit] = []
     prefix = _mount_prefix(root, source, index)  # parent mount prefix (cross-file), else ""
     # Guards of the lazy mount that loads this file's routes (cross-file), else none.
     incoming = tuple(incoming_guards(index, path, declared_classes(root, source)))
     for arr in _all(root, "array"):
         if _is_route_array(arr, source) and not _is_children_value(arr, source):
-            _process(arr, prefix, source, path, seen_ids, routes, index, incoming)
+            _process(arr, prefix, source, path, routes, index, incoming)
     return routes
 
 
@@ -335,5 +329,5 @@ def lazy_mount_guards(root: Node, source: bytes) -> list[tuple[Node, list[str]]]
     found: list[tuple[Node, list[str]]] = []
     for arr in _all(root, "array"):
         if _is_route_array(arr, source) and not _is_children_value(arr, source):
-            _process(arr, "", source, "", set(), [], None, (), found)
+            _process(arr, "", source, "", [], None, (), found)
     return found
