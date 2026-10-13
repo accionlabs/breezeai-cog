@@ -523,7 +523,8 @@ the file:
   │ ADDITIVE DETECTORS   base extract() ends with run_additive(<language>, …)        │
   │   registry: parsers/additive.py; each detector registers itself in its own       │
   │   module and is found by discovery; no parser edit to add one                    │
-  │   runner: capture gate · skip_fixtures · optional byte guard · run by `order`    │
+  │   Gate: capture · skip_fixtures · optional byte guard · run by `order`;          │
+  │   a `detect` detector returns Emits, written by `apply` (parsers/emits.py)       │
   │                                                                                  │
   │  typescript    order  detector         code in                    [skips tests]  │
   │                  10   express          typescript_express/routes.py      ✔       │
@@ -531,9 +532,13 @@ the file:
   │                  30   sdk-calls        detection/sdk_calls.py                    │
   │                  40   graphql-client   typescript_graphql/routes.py      ✔       │
   │                  50   vue-routes       typescript_vue/routes.py          ✔       │
+  │                  60   nextjs-pages     typescript_nextjs/pages.py        ✔       │
   │                                                                                  │
   │  csharp          10   lambda-handlers  csharp/lambda_events.py           ✔       │
   │                  20   lucene           csharp/lucene.py                          │
+  │                  30   hotchocolate-…   csharp_hotchocolate/…roots.py     ✔       │
+  │                  40   generic-handlers csharp_webforms/handlers.py       ✔       │
+  │                  50   hangfire         csharp/hangfire.py                ✔       │
   │                                                                                  │
   │  scala           10   akka-events      scala/events.py                           │
   │                  20   spark            scala/spark.py                            │

@@ -206,7 +206,6 @@ public class OrdersModel : PageModel
     assert r.handler and r.handlerLine
 
 
-@pytest.mark.xfail(strict=True, reason="Hangfire recurring job not recorded as a timer")
 def test_recurring_job_is_timer(analyze_files) -> None:
     src = """using Hangfire;
 

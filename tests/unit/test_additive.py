@@ -55,7 +55,7 @@ def test_inventory_in_run_order() -> None:
     inventory = {lang: [d.name for d in ds] for lang, ds in all_detectors().items()}
     assert inventory == {
         "csharp": ["lambda-handlers", "lucene", "hotchocolate-registered-roots",
-                   "generic-handlers"],
+                   "generic-handlers", "hangfire"],
         "scala": ["akka-events", "spark"],
         "typescript": ["express", "aws-events", "sdk-calls", "graphql-client", "vue-routes",
                        "nextjs-pages"],
