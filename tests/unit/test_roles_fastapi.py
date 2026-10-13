@@ -117,7 +117,6 @@ def test_depends_is_guard(analyze_files) -> None:
     assert _one(st, "GET", "/me").guards == ["require_user"]
 
 
-@pytest.mark.xfail(strict=True, reason="@app.middleware functions not recorded in guards")
 def test_middleware_is_guard(analyze_files) -> None:
     st = analyze_files(
         {

@@ -215,3 +215,28 @@ def test_route_without_dependencies_has_no_guards(analyze_files) -> None:
     [r] = [s for s in st if s.semanticType == "route"]
     # a handler parameter's Depends is dependency injection, not a guard
     assert (r.guards, r.authRequired) == (None, None)
+
+
+def test_app_middleware_guards_every_route_of_the_app(analyze_files) -> None:
+    st = analyze_files({"main.py": (
+        "from fastapi import FastAPI, APIRouter, Depends\n"
+        "from starlette.middleware.cors import CORSMiddleware\n"
+        "app = FastAPI()\n"
+        "api = APIRouter(prefix='/api')\n"
+        "other = APIRouter()\n"
+        "@api.get('/me', dependencies=[Depends(require_user)])\ndef me():\n    pass\n"
+        "@app.get('/health')\ndef health():\n    pass\n"
+        "@other.get('/x')\ndef x():\n    pass\n"
+        "@app.middleware('http')\nasync def audit(request, call_next):\n"
+        "    return await call_next(request)\n"
+        "app.add_middleware(CORSMiddleware, allow_origins=['*'])\n"
+        "app.include_router(api)\n"
+    )})
+    got = {s.handler: (s.guards, s.authRequired) for s in st if s.semanticType == "route"}
+    assert got == {
+        # app middleware first, then dependencies; only dependencies assert auth
+        "me": (["audit", "CORSMiddleware", "require_user"], True),
+        "health": (["audit", "CORSMiddleware"], None),
+        # a router not included in this file: coverage uncertain → no app middleware
+        "x": (None, None),
+    }

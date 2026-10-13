@@ -122,9 +122,46 @@ def _dependencies(call: Node, source: bytes) -> list[str]:
     return []
 
 
+def _app_middleware(root: Node, source: bytes) -> dict[str, list[str]]:
+    """App variable → its global middleware names, in source order: functions decorated
+    ``@app.middleware("http")`` and classes passed to ``app.add_middleware(Cls, …)``. Middleware
+    runs before every route of the app, whatever the registration order."""
+    out: dict[str, list[str]] = {}
+
+    def receiver_of(fn: Node | None, attr_name: str) -> str | None:
+        if fn is None or fn.type != "attribute":
+            return None
+        attr, obj = fn.child_by_field_name("attribute"), fn.child_by_field_name("object")
+        if attr is None or obj is None or node_text(attr, source) != attr_name:
+            return None
+        return node_text(obj, source)
+
+    def walk(node: Node) -> None:
+        for child in node.named_children:
+            if child.type == "decorated_definition":
+                fdef = next((c for c in child.named_children if c.type == "function_definition"), None)
+                for dec in (c for c in child.named_children if c.type == "decorator"):
+                    call = dec.named_children[0] if dec.named_children else None
+                    app = receiver_of(call.child_by_field_name("function"), "middleware") \
+                        if call is not None and call.type == "call" else None
+                    if app is not None and fdef is not None:
+                        out.setdefault(app, []).append(_name(fdef, source))
+            elif child.type == "call":
+                app = receiver_of(child.child_by_field_name("function"), "add_middleware")
+                args = child.child_by_field_name("arguments")
+                first = next((a for a in args.named_children if a.type != "keyword_argument"), None) \
+                    if args is not None else None
+                if app is not None and first is not None and first.type in ("identifier", "attribute"):
+                    out.setdefault(app, []).append(node_text(first, source))
+            walk(child)
+
+    walk(root)
+    return out
+
+
 def _router_bases(
     root: Node, source: bytes
-) -> tuple[dict[str, str | object], dict[str, list[str]]]:
+) -> tuple[dict[str, str | object], dict[str, list[str]], dict[str, str]]:
     """Router / app variable → (the prefix its routes are served under, the guards its routes
     inherit), from this file's own wiring: ``router = APIRouter(prefix="/users",
     dependencies=[Depends(auth)])`` and ``app.include_router(router, prefix=…, dependencies=…)``
@@ -134,7 +171,8 @@ def _router_bases(
     A router never included in this file keeps its own prefix and guards (no wiring seen). A
     router included at more than one place keeps its own too (ambiguous). A prefix that exists
     but is not a literal makes the base :data:`_UNKNOWN`. Includes of routers from other files
-    (``app.include_router(orders.router)``) are not resolved here."""
+    (``app.include_router(orders.router)``) are not resolved here. The third map gives each
+    router the outermost app/router it is reached from in this file (itself when not included)."""
     own: dict[str, str | object] = {}
     own_deps: dict[str, list[str]] = {}
     for node in _calls(root):
@@ -164,26 +202,28 @@ def _router_bases(
             (node_text(obj, source), _prefix_kwarg(node, source),
              tuple(_dependencies(node, source))))
 
-    def wiring(name: str, seen: frozenset[str]) -> tuple[str | object, list[str]]:
+    def wiring(name: str, seen: frozenset[str]) -> tuple[str | object, list[str], str]:
         prefix, deps = own.get(name, ""), own_deps.get(name, [])
         sites = includes.get(name, set())
         if len(sites) != 1 or name in seen:  # not included here, or ambiguous, or a cycle
-            return prefix, deps
+            return prefix, deps, name
         (parent, mount, mount_deps), = sites
-        parent_base, parent_deps = wiring(parent, seen | {name})
+        parent_base, parent_deps, top = wiring(parent, seen | {name})
         guards = parent_deps + list(mount_deps) + deps
         if _UNKNOWN in (parent_base, mount, prefix):
-            return _UNKNOWN, guards
-        return f"{parent_base}{mount}{prefix}", guards
+            return _UNKNOWN, guards, top
+        return f"{parent_base}{mount}{prefix}", guards, top
 
     resolved = {name: wiring(name, frozenset()) for name in own}
     return ({k: v[0] for k, v in resolved.items()},
-            {k: v[1] for k, v in resolved.items()})
+            {k: v[1] for k, v in resolved.items()},
+            {k: v[2] for k, v in resolved.items()})
 
 
 def _routes(dec: Node, fdef: Node, source: bytes, path: str, class_name: str | None,
             seen_ids: set[str], bases: dict[str, str | object],
-            router_guards: dict[str, list[str]]) -> list[Statement]:
+            router_guards: dict[str, list[str]], roots: dict[str, str],
+            middleware: dict[str, list[str]]) -> list[Statement]:
     call = dec.named_children[0] if dec.named_children else None
     if call is None or call.type != "call":
         return []
@@ -209,8 +249,11 @@ def _routes(dec: Node, fdef: Node, source: bytes, path: str, class_name: str | N
     receiver = func.child_by_field_name("object")
     receiver_name = node_text(receiver, source) if receiver is not None else ""
     served = bases.get(receiver_name, "")
-    # Guards: the router's / app's inherited dependencies, then the route's own (outer first).
-    guards = router_guards.get(receiver_name, []) + _dependencies(call, source)
+    # Guards: the app's middleware (decision Q9: a global guard on every binding it covers),
+    # then the router's / app's inherited dependencies, then the route's own (outer first).
+    # Only dependencies assert auth: app middleware is often logging or CORS.
+    scoped = router_guards.get(receiver_name, []) + _dependencies(call, source)
+    guards = middleware.get(roots.get(receiver_name, receiver_name), []) + scoped
     if served is _UNKNOWN:
         endpoint = None  # a prefix we cannot resolve: the address is unknown
     elif endpoint is not None and isinstance(served, str):
@@ -231,7 +274,7 @@ def _routes(dec: Node, fdef: Node, source: bytes, path: str, class_name: str | N
             handlerLine=handler_line,
             guards=guards or None,
             # Honest-null: assert auth only when a guard is present; absence is unknown.
-            authRequired=True if guards else None,
+            authRequired=True if scoped else None,
             routeKind="ws" if m == "WEBSOCKET" else "route",
             startLine=start_line,
             endLine=dec.end_point[0] + 1,
@@ -244,10 +287,11 @@ def _routes(dec: Node, fdef: Node, source: bytes, path: str, class_name: str | N
 def detect_routes(root: Node, source: bytes, path: str, *, seen_ids: set[str]) -> list[Statement]:
     """Walk the tree (tracking the enclosing class) and emit route statements."""
     routes: list[Statement] = []
-    bases, router_guards = (
+    bases, router_guards, roots = (
         _router_bases(root, source) if b"APIRouter" in source or b"FastAPI(" in source
-        else ({}, {})
+        else ({}, {}, {})
     )
+    middleware = _app_middleware(root, source) if b"middleware" in source else {}
 
     def walk(node: Node, class_name: str | None) -> None:
         for child in node.named_children:
@@ -265,7 +309,7 @@ def detect_routes(root: Node, source: bytes, path: str, *, seen_ids: set[str]) -
                 elif fdef is not None:
                     for dec in (c for c in child.named_children if c.type == "decorator"):
                         routes.extend(_routes(dec, fdef, source, path, class_name, seen_ids,
-                                              bases, router_guards))
+                                              bases, router_guards, roots, middleware))
                     body = fdef.child_by_field_name("body")
                     if body is not None:
                         walk(body, class_name)

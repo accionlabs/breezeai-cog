@@ -122,3 +122,66 @@ end
     record = SinatraParser().parse_file(_context(tmp_path, "app.rb", source))
     got = sorted((r.endpoint or "") for r in record.statements if r.semanticType == "route")
     assert got == ["", "/api/users", "/api/v2/items", "/top"]  # regex namespace → empty
+
+
+def test_sinatra_filters_and_middleware_are_guards(tmp_path: Path) -> None:
+    source = b'''require "sinatra"
+require "sinatra/namespace"
+use Rack::Auth::Basic
+before do
+  authenticate!
+end
+before "/admin/*" do
+  require_admin!
+end
+before do
+  log_request
+  touch_session
+end
+before %r{/dyn} do
+  check!
+end
+get "/home" do
+  1
+end
+get "/admin/users/:id" do
+  2
+end
+namespace "/api" do
+  before do
+    api_key!
+  end
+  get "/items" do
+    3
+  end
+end
+'''
+    record = SinatraParser().parse_file(_context(tmp_path, "app.rb", source))
+    got = {s.endpoint: (s.guards, s.authRequired) for s in record.statements if s.semanticType == "route"}
+    assert got == {
+        # middleware first, then filters in order; a multi-statement filter or a regex path
+        # names no guard; global guards do not assert auth
+        "/home": (["Rack::Auth::Basic", "authenticate!"], None),
+        "/admin/users/:id": (["Rack::Auth::Basic", "authenticate!", "require_admin!"], None),
+        # outer scope first, then the namespace's own filter
+        "/api/items": (["Rack::Auth::Basic", "authenticate!", "api_key!"], None),
+    }
+
+
+def test_sinatra_modular_app_guards_are_scoped_to_its_class(tmp_path: Path) -> None:
+    source = b'''require "sinatra/base"
+class Admin < Sinatra::Base
+  use Rack::Session::Cookie
+  get "/a" do
+    1
+  end
+end
+class Open < Sinatra::Base
+  get "/b" do
+    2
+  end
+end
+'''
+    record = SinatraParser().parse_file(_context(tmp_path, "apps.rb", source))
+    got = {s.endpoint: s.guards for s in record.statements if s.semanticType == "route"}
+    assert got == {"/a": ["Rack::Session::Cookie"], "/b": None}

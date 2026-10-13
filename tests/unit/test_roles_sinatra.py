@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import pytest
 
 EP = {"route", "eventbus_consumer", "timer"}
 
@@ -42,14 +41,12 @@ def test_namespace_is_wiring(analyze_files) -> None:
     assert [s.endpoint for s in _eps(st)] == ["/api/x"]
 
 
-@pytest.mark.xfail(strict=True, reason="before filter not recorded in guards")
 def test_before_filter_is_guard(analyze_files) -> None:
     st = analyze_files({"app.rb": APP})
     assert len(_eps(st)) == 1
     assert _eps(st)[0].guards
 
 
-@pytest.mark.xfail(strict=True, reason="Rack middleware (use ...) not recorded in guards")
 def test_use_middleware_is_guard(analyze_files) -> None:
     st = analyze_files(
         {"app.rb": ("require 'sinatra'\nuse Rack::Auth::Basic\n\nget '/hi' do\n  'hi'\nend\n")}
