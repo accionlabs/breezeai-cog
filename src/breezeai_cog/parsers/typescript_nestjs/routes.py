@@ -425,7 +425,9 @@ def detect_nest_routes(
                     gql = _GRAPHQL_OPS.get(d.name) if is_resolver else None
                     fld = d.name if (is_resolver and d.name in _FIELD_RESOLVERS) else None
                     job = _SCHEDULE_DECORATORS.get(d.name) if schedules else None
-                    if verb is None and msg is None and gql is None and fld is None and job is None:
+                    ref = is_resolver and d.name == "ResolveReference"
+                    if (verb is None and msg is None and gql is None and fld is None
+                            and job is None and not ref):
                         continue
                     sl, sc = dec.start_point[0] + 1, dec.start_point[1]
                     common = dict(
@@ -457,6 +459,14 @@ def detect_nest_routes(
                             requestDTO=_request_dto(member, source),
                             responseDTO=_response_dto(pending, source) or _return_dto(member, source),
                             **common,
+                        ))
+                    elif ref:  # @ResolveReference: the gateway's _entities fetch of this type
+                        routes.append(Statement(
+                            **{**common, "framework": "graphql"},
+                            semanticType="route",
+                            method="RESOLVE_REFERENCE",
+                            endpoint=_resolver_type_arg(decs, source),
+                            routeKind="query",
                         ))
                     elif job is not None:  # @Cron / @Interval / @Timeout scheduled job
                         routes.append(Statement(

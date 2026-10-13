@@ -53,6 +53,7 @@ from ..treesitter import first_line, node_text, parse_source
 # The three root operation types. Everything else keyed in a resolver map
 # (``ProcurementItem``, ``Tender``, scalars, …) is a field/scalar resolver, not a route.
 _ROOT_TYPES = {"Query": "query", "Mutation": "mutation", "Subscription": "subscription"}
+_RESOLVE_REFERENCE = "__resolveReference"
 
 # Client-side operation keywords (lowercase) -> kind. Mirrors _ROOT_TYPES for the caller
 # side (``query Foo {…}`` in a ``gql`` template) rather than the schema side.
@@ -127,6 +128,32 @@ def _detect_resolver_maps(root: Node, source: bytes, path: str, seen: set[str]) 
                             handler=handler,
                             handlerLine=handler_line,
                             routeKind=kind,
+                            startLine=sl,
+                            endLine=field.end_point[0] + 1,
+                            path=path,
+                        )
+                    )
+            elif key and value is not None and value.type == "object":
+                # Federation: a type's __resolveReference is what the gateway's _entities field
+                # calls to fetch one object by key — a binding addressed by the type.
+                for field in _operation_fields(value):
+                    if _key_text(field, source) != _RESOLVE_REFERENCE:
+                        continue
+                    sl, sc = field.start_point[0] + 1, field.start_point[1]
+                    handler, handler_line = _handler(field, source, _RESOLVE_REFERENCE)
+                    routes.append(
+                        Statement(
+                            id=disambiguate(statement_id(path, sl, sc), seen),
+                            parentId=file_id(path),
+                            nodeType=field.type,
+                            semanticType="route",
+                            text=first_line(node_text(field, source))[:120],
+                            method="RESOLVE_REFERENCE",
+                            endpoint=key,
+                            framework="graphql",
+                            handler=handler,
+                            handlerLine=handler_line,
+                            routeKind="query",
                             startLine=sl,
                             endLine=field.end_point[0] + 1,
                             path=path,

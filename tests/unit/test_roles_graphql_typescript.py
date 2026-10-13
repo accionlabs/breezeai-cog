@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import pytest
 
 EP = {"route", "eventbus_consumer", "timer"}
 PKG = '{"dependencies": {"@apollo/server": "4", "graphql": "16"}}'
@@ -63,7 +62,6 @@ def test_data_type_fields_in_a_resolver_map_are_none(analyze_files) -> None:
     assert [r.endpoint for r in _eps(st)] == ["books"]
 
 
-@pytest.mark.xfail(strict=True, reason="__resolveReference is not recorded")
 def test_resolve_reference_is_a_binding(analyze_files) -> None:
     st = _run(
         analyze_files,

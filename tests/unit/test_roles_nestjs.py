@@ -241,7 +241,6 @@ def test_stub_parent_field_in_another_class_is_an_operation(analyze_files) -> No
     assert got == {("MUTATION", "AlertsMutation.dismiss")}
 
 
-@pytest.mark.xfail(strict=True, reason="@ResolveReference is not recorded")
 def test_resolve_reference_is_a_binding(analyze_files) -> None:
     st = _resolvers(
         analyze_files,
