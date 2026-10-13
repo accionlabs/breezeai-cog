@@ -39,7 +39,10 @@ EVENTBUS: dict[str, SemanticType] = {
     "registerHandler": "eventbus_consumer",
     "registerLocalHandler": "eventbus_consumer",
 }
-TIMERS = {"setTimer", "setPeriodic"}
+#: Timer calls → ``method``: a one-shot delay or a repeating period. The first argument (the
+#: delay in milliseconds) is the ``endpoint`` when it is a number literal; anything else is
+#: unknown → empty.
+TIMERS = {"setTimer": "TIMER", "setPeriodic": "PERIODIC"}
 HTTP_VERBS = {"get", "post", "put", "delete", "patch", "options", "head"}
 
 #: Bare receiver names denoting a route registrar: a Vert.x 2.x ``RouteMatcher`` (commonly
@@ -93,7 +96,8 @@ def classify_call(
         # consumer and its senders on the same unresolved symbol both stay empty.
         return EVENTBUS[method], None, _known_path(path) if path else None, None
     if method in TIMERS:
-        return "timer", None, None, None
+        delay = (first_arg or "").replace("_", "").rstrip("lL")
+        return "timer", TIMERS[method], delay if delay.isdigit() else None, None
     if method == "deployVerticle":
         return "verticle_deploy", None, path or first_arg, None
     if method == "setAddress" and path is not None:
@@ -217,7 +221,7 @@ _INLINE = frozenset({"lambda_expression", "closure"})
 _METHOD_REFS = frozenset({"method_reference", "method_reference_expression",
                           "method_pointer_expression"})
 #: Semantic types whose handler is an entry point's handler (outbound reply callbacks are not).
-HANDLER_SEMANTICS = frozenset({"route", "eventbus_consumer"})
+HANDLER_SEMANTICS = frozenset({"route", "eventbus_consumer", "timer"})
 
 
 def handler_info(

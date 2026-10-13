@@ -155,7 +155,6 @@ def test_address_forwarding_helper_is_wiring(analyze_files) -> None:
     assert got == [("eventbus_consumer", "svc.a"), ("eventbus_consumer", "svc.b")]
 
 
-@pytest.mark.xfail(strict=True, reason="Vert.x timer has no method, endpoint or handler")
 def test_timer_is_binding(analyze_files) -> None:
     st = analyze_files(_verticle("""    vertx.setPeriodic(5000, this::handle);"""))
     [r] = _eps(st)
@@ -164,6 +163,18 @@ def test_timer_is_binding(analyze_files) -> None:
         "PERIODIC",
         "5000",
         "handle",
+    )
+
+
+def test_one_shot_timer_with_inline_handler(analyze_files) -> None:
+    # A delay held in a variable is unknown: empty, never the variable name. The inline lambda is
+    # an anonymous handler: no name, its line.
+    st = analyze_files(_verticle("""    vertx.setTimer(delayMs, id -> {
+      System.out.println("x");
+    });"""))
+    [r] = _eps(st)
+    assert (r.semanticType, r.method, r.endpoint, r.handler, r.handlerLine) == (
+        "timer", "TIMER", None, None, 8,
     )
 
 
