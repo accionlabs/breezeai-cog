@@ -533,17 +533,21 @@ the file:
   │                  40   graphql-client   typescript_graphql/routes.py      ✔       │
   │                  50   vue-routes       typescript_vue/routes.py          ✔       │
   │                  60   nextjs-pages     typescript_nextjs/pages.py        ✔       │
+  │                  70   navigation       typescript/navigation.py          ✔       │
   │                                                                                  │
   │  csharp          10   lambda-handlers  csharp/lambda_events.py           ✔       │
   │                  20   lucene           csharp/lucene.py                          │
   │                  30   hotchocolate-…   csharp_hotchocolate/…roots.py     ✔       │
   │                  40   generic-handlers csharp_webforms/handlers.py       ✔       │
   │                  50   hangfire         csharp/hangfire.py                ✔       │
+  │                  60   quartz           csharp/quartz.py                  ✔       │
+  │                                                                                  │
+  │  java            10   quartz           java/quartz.py                    ✔       │
   │                                                                                  │
   │  scala           10   akka-events      scala/events.py                           │
   │                  20   spark            scala/spark.py                            │
   │                                                                                  │
-  │  Java · Kotlin · Groovy · Python · PHP · Ruby · VB · C++ · HCL                   │
+  │  Kotlin · Groovy · Python · PHP · Ruby · VB · C++ · HCL                          │
   │   └─ no additive hook yet: shared classifiers only                               │
   └──────────────────────────────────────┬───────────────────────────────────────────┘
                                          │
