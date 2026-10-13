@@ -9,7 +9,7 @@ Parser: `src/breezeai_cog/parsers/typescript_express/` (additive detector, every
 | Same, with a wrapper call as the handler (`asyncHandler(async (req, res) => …)`) | Binding | as above; the handler is the innermost function | Wrappers are not handlers |
 | `router.route(path).get(h1).post(h2)` | Binding per verb | one `route` per verb call, `endpoint` = `path` | Each verb call names one handler; `route(path)` itself only adds the path |
 | Functions between the path and the handler | Guard | their names in `guards` | Run before this handler |
-| `app.use(path, router)` / `app.use(path, routerFactory())` | Wiring | statement stays plain; `path` is joined in front of the router's bindings, in this file or the router's file | Points at a router, no handler |
+| `app.use(path, router)` / `app.use(path, routerFactory())` | Wiring | statement stays plain; `path` is joined in front of the router's bindings, and the mount's own middleware (`app.use(path, auth, router)`) go first in their `guards` — in this file or the router's file | Points at a router, no handler |
 | `app.use(fn)` / `app.use(path, fn)` where `fn` is middleware | Guard | `fn` in `guards` of the bindings registered after it | Runs before many handlers |
 | `app.use(path, x)` where `x` may be a router or middleware (`express.static(...)`) | Wiring | statement stays plain | Contract §8: choose the role that records less |
 | `app.use(path, expressMiddleware(server))` (Apollo) | Wiring | statement stays plain | GraphQL transport; the operations are the bindings |

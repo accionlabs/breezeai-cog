@@ -25,7 +25,7 @@ from ..emits import Emit
 from ..treesitter import node_text
 from ..typescript.imports import relative_requires, resolve_const_value, router_locals
 from ..wiring import compose_guards
-from .mounts import express_mounts
+from .mounts import express_mounts, mw_name
 
 # HTTP-verb methods that register a route handler on an app/router.
 _HTTP_VERBS = {"get", "post", "put", "delete", "patch", "options", "head", "all"}
@@ -111,20 +111,10 @@ def _handler(
     return None, None
 
 
-def _mw_name(node: Node, source: bytes) -> str | None:
-    """A middleware/handler arg's callable name — ``requireAuth`` from ``requireAuth()``,
-    ``Auth.check`` from the member call, ``rateLimit`` from a bare reference. An inline
-    (arrow/function) middleware has no name → None (honest-null, no fabricated name)."""
-    n = node.child_by_field_name("function") if node.type == "call_expression" else node
-    if n is not None and n.type in ("identifier", "member_expression"):
-        return node_text(n, source)
-    return None
-
-
 def _guard_names(nodes: list[Node], source: bytes) -> list[str] | None:
     """Named middleware in a route/mount chain → guard names, in source order. Unnamed inline
     middleware are skipped. Empty → None (so the field stays unset rather than an empty list)."""
-    names = [nm for n in nodes if (nm := _mw_name(n, source)) is not None]
+    names = [nm for n in nodes if (nm := mw_name(n, source)) is not None]
     return names or None
 
 
@@ -137,68 +127,6 @@ def _is_internal_factory_call(node: Node, source: bytes, bindings: dict[str, str
         return False
     fn = node.child_by_field_name("function")
     return fn is not None and fn.type == "identifier" and node_text(fn, source) in bindings
-
-
-def _mount_parts(
-    chain: list[Node], source: bytes, bindings: dict[str, str]
-) -> tuple[str | None, int | None, list[str] | None]:
-    """Split a mount's arg chain (everything after the path) into (handler, handlerLine, guards):
-    the mounted sub-router — the single bare internally-imported ``factory()`` call — is the
-    handler, and the surrounding middleware are guards. When the router is not cleanly
-    identifiable (0 or >1 such calls), fall back to the Express default (last arg is the handler,
-    the rest are guards) so the result is never worse than before."""
-    routers = [n for n in chain if _is_internal_factory_call(n, source, bindings)]
-    if len(routers) == 1:
-        router = routers[0]
-        fn = router.child_by_field_name("function")
-        handler = node_text(fn, source) if fn is not None else None
-        guards = _guard_names([n for n in chain if n is not router], source)
-        return handler, router.start_point[0] + 1, guards
-    if not chain:
-        return None, None, None
-    name = _mw_name(chain[-1], source)  # ambiguous → Express default: last arg is the handler
-    line = chain[-1].start_point[0] + 1 if name is not None else None
-    return name, line, _guard_names(chain[:-1], source)
-
-
-# The Apollo → Express adapter (``@apollo/server/express4``). ``app.use(path, expressMiddleware(server))``
-# mounts the GraphQL transport endpoint — a real route, not a generic sub-router mount.
-_APOLLO_MIDDLEWARE = "expressMiddleware"
-
-
-def _has_apollo_middleware(arg_nodes: list[Node], source: bytes) -> bool:
-    for a in arg_nodes:
-        if a.type == "call_expression":
-            callee = a.child_by_field_name("function")
-            if callee is not None and node_text(callee, source).rsplit(".", 1)[-1] == _APOLLO_MIDDLEWARE:
-                return True
-    return False
-
-
-def _resolve_str_identifier(name: str, root: Node, source: bytes) -> str | None:
-    """Best-effort: resolve an identifier used as a mount path to a string literal — a
-    param default (``graphqlPath = '/graphql'``) or a ``const graphqlPath = '/x'``."""
-    found: str | None = None
-
-    def walk(n: Node) -> None:
-        nonlocal found
-        if found is not None:
-            return
-        if n.type in ("required_parameter", "optional_parameter"):
-            pat, val = n.child_by_field_name("pattern"), n.child_by_field_name("value")
-            if pat is not None and node_text(pat, source) == name and val is not None and val.type == "string":
-                found = _string_value(val, source)
-                return
-        if n.type == "variable_declarator":
-            nm, val = n.child_by_field_name("name"), n.child_by_field_name("value")
-            if nm is not None and node_text(nm, source) == name and val is not None and val.type == "string":
-                found = _string_value(val, source)
-                return
-        for c in n.named_children:
-            walk(c)
-
-    walk(root)
-    return found
 
 
 def _classify(
@@ -244,24 +172,12 @@ def _classify(
             guards = _guard_names(chain[:-1], source)
             return _verb(method), path, handler, handler_line, guards, "express", "route"
         return None
-    if method == "use":
-        # ``app.use(path, expressMiddleware(server))`` mounts the GraphQL endpoint (R3):
-        # a POST route. The path is often a variable (``graphqlPath``) — resolve it, else
-        # fall back to the ``/graphql`` convention.
-        if _has_apollo_middleware(arg_nodes, source):
-            arg0 = arg_nodes[0] if arg_nodes else None
-            endpoint = path
-            if endpoint is None and arg0 is not None and arg0.type == "identifier":
-                endpoint = _resolve_str_identifier(node_text(arg0, source), root, source)
-            return "POST", endpoint or "/graphql", None, None, None, "graphql", "route"
-        if has_path and (path is None or path.startswith("/")):
-            # ``app.use('/mount', ...guards, subRouter, ...guards)`` mounts a sub-router: the
-            # mounted router is the handler, the surrounding middleware are guards. Bare
-            # ``app.use(mw)`` (no leading path) is middleware, not a mount.
-            handler, handler_line, guards = _mount_parts(chain, source, bindings)
-            return None, path, handler, handler_line, guards, "express", "mount"
-        return None
-    return None  # includes ``route(path)``: wiring for its chained verbs
+    # ``app.use(path, …)`` is wiring: a router mount (its prefix and middleware reach the
+    # mounted router's routes through the express.router-mounts fact and the same-file mount
+    # composition), a static handler, or the Apollo transport ``expressMiddleware(server)``,
+    # which serves many operations (contract §4). Its statement stays plain. ``app.use(mw)``
+    # is a guard. ``route(path)`` is wiring for its chained verbs.
+    return None
 
 
 def _route_root(obj: Node | None, source: bytes) -> Node | None:
@@ -424,7 +340,7 @@ def _global_guards(
 
     def middleware(arg: Node) -> str | None:
         if arg.type == "call_expression":
-            return None if _is_internal_factory_call(arg, source, bindings) else _mw_name(arg, source)
+            return None if _is_internal_factory_call(arg, source, bindings) else mw_name(arg, source)
         if arg.type in ("identifier", "member_expression"):
             name = node_text(arg, source)
             if name in routers:
@@ -511,6 +427,10 @@ def detect_express(
     # Per router variable: routers this file exports that another file mounts, and routers
     # mounted in this file.
     imported = mounts.routers.get(path, {})
+    # Middleware another file's mount puts in front of this file's routers: per router variable
+    # (an exported Router()), else the whole file (a router factory).
+    mount_guards = mounts.router_guards.get(path, {})
+    file_mount_guards = list(mounts.factory_guards.get(path, ()))
     receiver_base = _receiver_bases(root, source, mount_base, imported)
     routers = frozenset(router_locals(root, source)) if b"Router" in source else frozenset()
     index_consts = getattr(index, "const_values", None)
@@ -542,8 +462,10 @@ def detect_express(
         if route_kind == "route" and method:
             # Middleware registered earlier on this receiver (or its parents) runs first. It does
             # not set authRequired: app-wide middleware is often a body parser, not auth.
-            outer = global_guards(_receiver(call, source), call.start_byte)
-            guards = compose_guards(outer, guards)
+            receiver = _receiver(call, source)
+            outer = global_guards(receiver, call.start_byte)
+            mounted = list(mount_guards.get(receiver, ())) or file_mount_guards
+            guards = compose_guards(mounted, outer, guards)
         # Enrich the base statement on the call's line (a top-level route call); a second route in
         # one statement (route(path).get(a).post(b)) or one inside a handler/callback (the base
         # skips nested scopes) gets its own record.

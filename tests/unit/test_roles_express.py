@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import pytest
 
 EP = {"route", "eventbus_consumer", "timer"}
 PKG = '{"dependencies": {"express": "4"}}'
@@ -70,7 +69,6 @@ def test_middleware_before_handler_are_guards(analyze_files) -> None:
     assert r.guards == ["requireAuth", "rateLimit"]
 
 
-@pytest.mark.xfail(strict=True, reason="a router mount is recorded as route/mount")
 def test_router_mount_statement_stays_plain(analyze_files) -> None:
     st = _app(analyze_files, "const router = express.Router();\napp.use('/api', router);\n")
     assert _eps(_at(st, "src/app.js", 4)) == []
@@ -122,13 +120,11 @@ def test_app_level_middleware_is_a_guard_on_later_routes(analyze_files) -> None:
     assert r.guards == ["authenticate"]
 
 
-@pytest.mark.xfail(strict=True, reason="an ambiguous app.use(path, x) is recorded as route/mount")
 def test_ambiguous_use_is_wiring(analyze_files) -> None:
     st = _app(analyze_files, "app.use('/static', express.static('public'));\n")
     assert _eps(st) == []
 
 
-@pytest.mark.xfail(strict=True, reason="the Apollo transport mount is recorded as POST /graphql")
 def test_apollo_transport_mount_is_wiring(analyze_files) -> None:
     st = analyze_files(
         {
@@ -162,3 +158,18 @@ def test_http_client_call_is_outbound(analyze_files) -> None:
     st = _app(analyze_files, "fetch('/remote/api');\n")
     assert _eps(st) == []
     assert [s.endpoint for s in st if s.semanticType == "api_call"] == ["/remote/api"]
+
+
+def test_mount_middleware_guards_the_mounted_routes_in_another_file(analyze_files) -> None:
+    st = _app(
+        analyze_files,
+        "import { usersRouter } from './users.js';\napp.use('/users', requireAuth, usersRouter);\n",
+        **{
+            "src/users.js": "import { Router } from 'express';\nexport const usersRouter = Router();\n"
+            "usersRouter.get('/:id', getUser);\n"
+        },
+    )
+    [r] = [s for s in _eps(st) if s.path == "src/users.js"]
+    # The mount is wiring; its middleware certainly runs before the router's routes (Q9).
+    assert (r.endpoint, r.guards) == ("/users/:id", ["requireAuth"])
+    assert [s for s in _eps(st) if s.path == "src/app.js"] == []

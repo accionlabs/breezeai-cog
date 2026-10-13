@@ -1215,12 +1215,12 @@ def test_express_no_index_leaves_local_path(tmp_path) -> None:
     assert "/list" in routes
 
 
-# --- Express guards + handler on the mount chain --------------------------------------------
-# `app.use('/orders', Auth.check(), ordersRouter(), rateLimit)` — the mounted router is the
-# handler; the surrounding auth/rate-limit middleware are guards (so a "protected route" query
-# no longer sees an empty `guards` and reports it as open).
+# --- Express mount middleware reaches the mounted router's routes ------------------------------
+# `app.use('/orders', Auth.check(), ordersRouter(), rateLimit)` is wiring: no record of its own.
+# The middleware around the mounted router certainly run before each of its routes, so they are
+# those routes' outermost guards — in the router's own file.
 
-def test_express_mount_guards_and_handler(tmp_path) -> None:
+def test_express_mount_guards_reach_the_mounted_routes(tmp_path) -> None:
     rec = _parse_repo(
         tmp_path,
         {
@@ -1234,13 +1234,12 @@ def test_express_mount_guards_and_handler(tmp_path) -> None:
             "auth.ts": "export const Auth = { check: () => (q: any,s: any,n: any)=>n() };\n",
             "mw.ts": "export const rateLimit = (q: any,s: any,n: any)=>n();\n",
         },
-        "server.ts",
+        "routes/orders-router.ts",
     )
-    mount = next(s for s in rec.statements
-                 if s.semanticType == "route" and s.routeKind == "mount" and s.endpoint == "/orders")
-    assert mount.handler == "ordersRouter"  # the mounted router, not the trailing guard
-    assert mount.guards == ["Auth.check", "rateLimit"]
-    assert mount.authRequired is True
+    [route] = [s for s in rec.statements if s.semanticType == "route"]
+    assert (route.method, route.endpoint) == ("POST", "/orders")
+    assert route.guards == ["Auth.check", "rateLimit"]
+    assert route.authRequired is None  # middleware on the mount does not assert auth
 
 
 def test_express_verb_route_guards(tmp_path) -> None:
@@ -1276,13 +1275,12 @@ def test_express_route_no_guards_is_unknown_not_open(tmp_path) -> None:
             "const app = express();\napp.use('/health', healthRouter());\n",
             "routes/health-router.ts": _factory_default("/"),
         },
-        "server.ts",
+        "routes/health-router.ts",
     )
-    mount = next(s for s in rec.statements
-                 if s.semanticType == "route" and s.routeKind == "mount" and s.endpoint == "/health")
-    assert mount.handler == "healthRouter"  # resolved handler
-    assert mount.guards is None
-    assert mount.authRequired is None  # not False
+    [route] = [s for s in rec.statements if s.semanticType == "route"]
+    assert route.endpoint == "/health"
+    assert route.guards is None
+    assert route.authRequired is None  # not False
 
 
 # ── CommonJS require() is read like an ESM import ────────────────────────────────────────────
