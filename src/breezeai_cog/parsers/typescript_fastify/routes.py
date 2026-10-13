@@ -244,6 +244,7 @@ class _FileIndex:
         self.node_scopes: dict[tuple[int, int, str], _Scope] = {}
         self.scopes: dict[tuple[int, int, str], _Scope] = {}
         self.register_calls: list[Node] = []
+        self.call_nodes: list[Node] = []
         self.root_scope = self._build(root, source)
         self._resolve_factory_bindings(source)
         self.mounted_plugin_nodes: set[tuple[int, int, str]] = self._find_mounted_plugins(source)
@@ -289,6 +290,7 @@ class _FileIndex:
                 self.node_scopes[self.node_key(node)] = scope
 
             if node.type == "call_expression":
+                self.call_nodes.append(node)
                 callee = node.child_by_field_name("function")
                 if callee is not None and callee.type == "member_expression":
                     prop = callee.child_by_field_name("property")
@@ -746,94 +748,114 @@ def _walk(
     out: list[Statement],
     prefix: Optional[str],
 ) -> None:
-    """Iteratively scan syntax nodes using the prebuilt per-file scope index."""
+    """Detect routes from call nodes collected while building the scope index."""
     mounted_plugin_nodes = file_index.mounted_plugin_nodes
-    pending: list[tuple[Node, Optional[str], frozenset]] = [(node, prefix, frozenset())]
+    all_calls = file_index.call_nodes
 
-    while pending:
-        current, current_prefix, chain = pending.pop()
+    def visit_calls(
+        root: Node,
+        current_prefix: Optional[str],
+        chain: frozenset[tuple[int, int, str]],
+        allowed_plugin: Optional[tuple[int, int, str]] = None,
+    ) -> None:
+        candidates = [
+            call
+            for call in all_calls
+            if root.start_byte <= call.start_byte and call.end_byte <= root.end_byte
+        ]
+        suppressed: list[tuple[int, int]] = []
 
-        if current.type == "call_expression":
+        for current in candidates:
+            if any(
+                start < current.start_byte and current.end_byte < end for start, end in suppressed
+            ):
+                continue
+
+            ancestor = current.parent
+            executable = True
+            while ancestor is not None and ancestor != root:
+                key = file_index.node_key(ancestor)
+                if ancestor.type in _NON_EXECUTABLE_NODE_TYPES or (
+                    key in mounted_plugin_nodes and key != allowed_plugin
+                ):
+                    executable = False
+                    break
+                ancestor = ancestor.parent
+            if not executable:
+                continue
+
             dispatch = _dispatch_call(current, source, file_index)
+            if dispatch is None:
+                continue
 
-            if dispatch is not None:
-                kind, member_name, args = dispatch
-                # A chained receiver is itself a call that must be scanned.
-                chained = current.child_by_field_name("function").child_by_field_name("object")
-                if chained.type == "call_expression":
-                    pending.append((chained, current_prefix, chain))
+            kind, member_name, args = dispatch
+            callee = current.child_by_field_name("function")
+            chained = callee.child_by_field_name("object") if callee is not None else None
 
-                if kind == "method":
-                    _http_method_route(
-                        current,
-                        member_name,
-                        args,
-                        current_prefix,
-                        source=source,
-                        path=path,
-                        fid=fid,
-                        fn_by_name=fn_by_name,
-                        seen_ids=seen_ids,
-                        out=out,
-                        file_index=file_index,
-                    )
-                    continue
+            if kind == "method":
+                _http_method_route(
+                    current,
+                    member_name,
+                    args,
+                    current_prefix,
+                    source=source,
+                    path=path,
+                    fid=fid,
+                    fn_by_name=fn_by_name,
+                    seen_ids=seen_ids,
+                    out=out,
+                    file_index=file_index,
+                )
+                suppressed.append((current.start_byte, current.end_byte))
+                if chained is not None and chained.type == "call_expression":
+                    visit_calls(chained, current_prefix, chain, allowed_plugin)
+                continue
 
-                if kind == "app_route":
-                    _app_route(
-                        current,
-                        args,
-                        current_prefix,
-                        source=source,
-                        path=path,
-                        fid=fid,
-                        fn_by_name=fn_by_name,
-                        seen_ids=seen_ids,
-                        out=out,
-                        file_index=file_index,
-                    )
-                    continue
+            if kind == "app_route":
+                _app_route(
+                    current,
+                    args,
+                    current_prefix,
+                    source=source,
+                    path=path,
+                    fid=fid,
+                    fn_by_name=fn_by_name,
+                    seen_ids=seen_ids,
+                    out=out,
+                    file_index=file_index,
+                )
+                suppressed.append((current.start_byte, current.end_byte))
+                if chained is not None and chained.type == "call_expression":
+                    visit_calls(chained, current_prefix, chain, allowed_plugin)
+                continue
 
-                if kind == "register":
-                    children = _fastify_register(
-                        current,
-                        args,
-                        current_prefix,
-                        source=source,
-                        path=path,
-                        fid=fid,
-                        fn_by_name=fn_by_name,
-                        file_index=file_index,
-                        seen_ids=seen_ids,
-                        out=out,
-                    )
-                    # Skip plugins already on the current mount chain so
-                    # self- or mutually-registering plugins terminate.
-                    pending.extend(
-                        (child, child_prefix, chain | {file_index.node_key(child)})
-                        for child, child_prefix in reversed(children)
-                        if file_index.node_key(child) not in chain
-                    )
-                    continue
+            if kind == "register":
+                children = _fastify_register(
+                    current,
+                    args,
+                    current_prefix,
+                    source=source,
+                    path=path,
+                    fid=fid,
+                    fn_by_name=fn_by_name,
+                    file_index=file_index,
+                    seen_ids=seen_ids,
+                    out=out,
+                )
+                suppressed.append((current.start_byte, current.end_byte))
+                for child, child_prefix in children:
+                    child_key = file_index.node_key(child)
+                    if child_key not in chain:
+                        visit_calls(
+                            child,
+                            child_prefix,
+                            chain | {child_key},
+                            child_key,
+                        )
+                if chained is not None and chained.type == "call_expression":
+                    visit_calls(chained, current_prefix, chain, allowed_plugin)
 
-        pending.extend(
-            (child, current_prefix, chain)
-            for child in reversed(current.named_children)
-            if child.type not in _NON_EXECUTABLE_NODE_TYPES
-            and file_index.node_key(child) not in mounted_plugin_nodes
-        )
-
-
-def _registered_plugin_nodes(
-    root_or_index: Node | _FileIndex,
-    source: bytes,
-    file_index: Optional[_FileIndex] = None,
-) -> set[tuple[int, int, str]]:
-    """Find named plugin declarations so they are visited only at their mount prefix."""
-    index = root_or_index if isinstance(root_or_index, _FileIndex) else file_index
-    if index is not None:
-        return index.mounted_plugin_nodes
-    return set()
+    visit_calls(node, prefix, frozenset())
 
 
 def _chain_base(node: Optional[Node], source: bytes) -> Optional[Node]:
@@ -1317,15 +1339,24 @@ def _run(dc: DetectContext) -> str | None:
         resolution_index=dc.ctx.resolution_index,
     )
     dc.record.statements.extend(routes)
-    found = bool(routes) or any(statement.framework == "fastify" for statement in dc.record.statements)
+    found = bool(routes) or any(
+        statement.framework == "fastify" for statement in dc.record.statements
+    )
     return "fastify" if found else None
 
 
 # The detector has two byte markers, `fastify` and `Fastify`, so it keeps its own guard.
-register_detector(Detector(
-    name="fastify", language="typescript", order=15, run=_run,
-    guard=None, skip_fixtures=True, frameworks=("fastify",),
-))
+register_detector(
+    Detector(
+        name="fastify",
+        language="typescript",
+        order=15,
+        run=_run,
+        guard=None,
+        skip_fixtures=True,
+        frameworks=("fastify",),
+    )
+)
 
 
 def _make_statement(
