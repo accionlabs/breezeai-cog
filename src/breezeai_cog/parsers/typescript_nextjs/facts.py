@@ -14,6 +14,10 @@
       // apps/web/src/middleware.ts                → {"apps/web": ("/admin/:path*",)}
       export function middleware(req) { … }
       export const config = { matcher: ["/admin/:path*"] };
+
+* ``next.base-paths`` — app directory (a ``next.config.*`` file's) → its ``basePath``
+  (:mod:`..typescript.base_paths`, shared with LoopBack). Every config file counts, one that
+  sets no ``basePath`` too: it marks its directory as an app.
 """
 
 from __future__ import annotations
@@ -25,10 +29,12 @@ from tree_sitter import Node
 
 from ..additive import FactSpec, index_fact, register_fact
 from ..treesitter import node_text
+from ..typescript.base_paths import BasePathRaw, collect_base_path, resolve_base_paths
 from ..typescript.imports import _load_jsonc, _string_literal, router_root
 
 APPS = "next.apps"
 MIDDLEWARES = "next.middlewares"
+BASE_PATHS = "next.base-paths"
 
 _NEXT_CONFIGS = ("next.config.js", "next.config.mjs", "next.config.ts", "next.config.cjs")
 _MIDDLEWARE_FILES = frozenset({"middleware.ts", "middleware.js", "middleware.mjs"})
@@ -40,6 +46,18 @@ def next_apps(index: Any | None) -> frozenset[str]:
 
 def next_middlewares(index: Any | None) -> dict[str, tuple[str, ...] | None]:
     return index_fact(index, MIDDLEWARES) or {}
+
+
+def next_base_paths(index: Any | None) -> dict[str, str | None]:
+    return index_fact(index, BASE_PATHS) or {}
+
+
+def _collect_base_path(
+    root: Node, source: bytes, rel: str, repo_root: Path | None,
+) -> BasePathRaw | None:
+    if not rel.rsplit("/", 1)[-1].startswith("next.config."):
+        return None
+    return collect_base_path(root, source, rel, "nextjs")
 
 
 def _is_next_app(repo_root: str, root: str) -> bool:
@@ -152,4 +170,9 @@ register_fact(FactSpec(
 register_fact(FactSpec(
     name=MIDDLEWARES, language="typescript", gate=(b"export",),
     collect=_collect_middleware, resolve=_resolve_middlewares,
+))
+# Every file: a config that sets no basePath still marks its app directory.
+register_fact(FactSpec(
+    name=BASE_PATHS, language="typescript", gate=(b"",),
+    collect=_collect_base_path, resolve=resolve_base_paths,
 ))

@@ -48,8 +48,8 @@ from ...emit import file_id, function_id
 from ...schemas import FileRecord
 from ..emits import Emit
 from ..treesitter import node_text
-from ..typescript.imports import app_base_path
-from .facts import next_middlewares
+from ..typescript.base_paths import app_base_path
+from .facts import next_base_paths, next_middlewares
 
 _VERBS = {"GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"}
 _ROUTE_STEMS = {"route"}  # App Router API handler file; page/layout are UI, not verb handlers
@@ -175,7 +175,7 @@ def _served(endpoint: str, path: str, index: object | None) -> str | None:
     """The route's address under its app's ``next.config`` ``basePath``: joined in front when it
     is a literal; unknown (None) when it is set but cannot be resolved; unchanged when the app
     sets none or no ``next.config`` was seen."""
-    found, base = app_base_path(index, "nextjs", path)
+    found, base = app_base_path(next_base_paths(index), path)
     if not found or base == "":
         return endpoint
     if base is None:
@@ -220,7 +220,7 @@ def _middleware_guards(index: object | None, path: str, local: str) -> list[str]
     mws = next_middlewares(index)
     if not mws:
         return []
-    configs = (getattr(index, "app_base_paths", None) or {}).get("nextjs") or {}
+    configs = next_base_paths(index)
     anchors = [d for d in {*mws, *configs} if d == "" or path.startswith(d + "/")]
     if not anchors:
         return []

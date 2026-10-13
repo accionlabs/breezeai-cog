@@ -10,12 +10,13 @@ from __future__ import annotations
 
 from tree_sitter import Node
 
-from ...emit import disambiguate, function_id, statement_id
+from ...emit import function_id
 from ...parsers.typescript.decorators import decorator
 from ...parsers.typescript.functions import dto_from_type, extract_params, return_dto
-from ...schemas import Statement
+from ..emits import Emit
 from ..treesitter import node_text
-from ..typescript.imports import app_base_path
+from ..typescript.base_paths import app_base_path
+from .facts import loopback_base_paths
 
 # LoopBack method decorators -> HTTP verb. ``del`` (not ``delete``) is LoopBack's
 # DELETE decorator because ``delete`` is a reserved word.
@@ -157,13 +158,14 @@ def _class_with_decorators(root: Node):
 
 
 def detect_loopback_routes(
-    root: Node, source: bytes, path: str, *, seen_ids: set[str], index: object | None = None
-) -> list[Statement]:
-    """``index`` is the repo's ``TsAliasIndex``: it carries the application's ``rest.basePath``,
+    root: Node, source: bytes, path: str, *, index: object | None = None
+) -> list[Emit]:
+    """This file's controller routes, for :func:`~..emits.apply`. ``index`` is the repo's
+    ``TsAliasIndex``: its ``loopback.base-paths`` fact gives the application's ``rest.basePath``,
     joined in front of every controller route of that app (unknown when it cannot be
     resolved)."""
-    routes: list[Statement] = []
-    found, app_base = app_base_path(index, "loopback", path)
+    routes: list[Emit] = []
+    found, app_base = app_base_path(loopback_base_paths(index), path)
     for cls, decs in _class_with_decorators(root):
         base = _api_base_path(decs, source)
         ctrl_auth, ctrl_guards = _auth(decs, source)  # class-level @authenticate applies to all methods
@@ -195,13 +197,8 @@ def detect_loopback_routes(
                     sub: str | None = (
                         _render_literal(arg_nodes[idx], source) if idx < len(arg_nodes) else ""
                     )
-                    sl, sc = dec.start_point[0] + 1, dec.start_point[1]
-                    routes.append(Statement(
-                        id=disambiguate(statement_id(path, sl, sc), seen_ids),
-                        parentId=function_id(path, mname, mline, class_name=class_name),
-                        nodeType="synthetic",
+                    routes.append(Emit(dec, dict(
                         semanticType="route",
-                        text=node_text(dec, source).split("\n", 1)[0],
                         method=verb,
                         endpoint=_served(base, sub, found, app_base),
                         framework="loopback",
@@ -212,9 +209,7 @@ def detect_loopback_routes(
                         authRequired=auth_required,
                         requestDTO=_request_dto(member, source),
                         responseDTO=return_dto(member, source),
-                        startLine=sl,
-                        endLine=dec.end_point[0] + 1,
-                        path=path,
-                    ))
+                    ), parent=function_id(path, mname, mline, class_name=class_name),
+                        node_type="synthetic"))
             pending = []
     return routes
