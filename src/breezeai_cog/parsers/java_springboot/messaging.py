@@ -31,10 +31,8 @@ from __future__ import annotations
 
 from tree_sitter import Node
 
-from ...emit import disambiguate, file_id, statement_id
-from ...schemas import FileRecord, Function, Statement
+from ...schemas import FileRecord, Function
 from ..emits import Emit
-from ..enclosing import Enclosing
 from ..java.config import resolve_placeholders
 from ..java.constants import fold_arg
 from ..treesitter import first_line, node_text
@@ -247,20 +245,16 @@ def _send_address(method: str, args: list[Node], source: bytes, consts: dict[str
 
 
 def detect_spring_sends(
-    root: Node, source: bytes, path: str, record: FileRecord, consts: dict[str, str],
-    props: dict[str, str | None],
-) -> bool:
-    """Enrich (or add) an ``eventbus_send`` statement for each broker-template send."""
+    root: Node, source: bytes, consts: dict[str, str], props: dict[str, str | None],
+) -> list[Emit]:
+    """An ``eventbus_send`` for each broker-template send, for :func:`~..emits.apply`: it
+    enriches the unclassified statement the call begins (``starts``), else is a new record."""
     templates = _template_vars(root, source)
     if not templates:
-        return False
-    enclosing = Enclosing(record)
-    fid = file_id(path)
-    seen = {s.id for s in record.statements}
-    matched = False
+        return []
+    found: list[Emit] = []
 
     def walk(n: Node) -> None:
-        nonlocal matched
         if n.type == "method_invocation":
             obj = n.child_by_field_name("object")
             name = n.child_by_field_name("name")
@@ -271,31 +265,12 @@ def detect_spring_sends(
                 framework = _TEMPLATES[typ][0]
                 arg_list = n.child_by_field_name("arguments")
                 args = list(arg_list.named_children) if arg_list is not None else []
-                endpoint = _send_address(method, args, source, consts, props, framework)
-                line = n.start_point[0] + 1
-                stmt = enclosing.statement(line)
-                # the call's own statement (not an enclosing block) → enrich in place
-                if stmt is not None and stmt.semanticType is None and stmt.startLine == line:
-                    stmt.semanticType = "eventbus_send"
-                    stmt.framework = framework
-                    stmt.endpoint = endpoint
-                else:
-                    new_id = disambiguate(statement_id(path, line, n.start_point[1]), seen)
-                    record.statements.append(Statement(
-                        id=new_id,
-                        parentId=enclosing.function_id(line, fid),
-                        nodeType=n.type,
-                        semanticType="eventbus_send",
-                        text=first_line(node_text(n, source)),
-                        endpoint=endpoint,
-                        framework=framework,
-                        startLine=line,
-                        endLine=n.end_point[0] + 1,
-                        path=path,
-                    ))
-                matched = True
+                found.append(Emit(n, {
+                    "semanticType": "eventbus_send", "framework": framework,
+                    "endpoint": _send_address(method, args, source, consts, props, framework),
+                }, enrich="starts"))
         for c in n.named_children:
             walk(c)
 
     walk(root)
-    return matched
+    return found

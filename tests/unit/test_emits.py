@@ -108,3 +108,19 @@ def test_own_enriches_only_the_construct_s_own_statement() -> None:
     apply(record, [Emit(get, {"semanticType": "navigation"}, enrich="own", end_line=3)],
           SOURCE, "a.ts")
     assert [s.semanticType for s in record.statements] == [None, "navigation"]
+
+
+def test_starts_enriches_the_statement_the_construct_begins() -> None:
+    post, get = _calls()
+    # A construct on the statement's first line enriches it, whatever the spans' ends…
+    record = _record()
+    apply(record, [Emit(get, {"semanticType": "eventbus_send"}, enrich="starts", end_line=3)],
+          SOURCE, "a.ts")
+    assert [s.semanticType for s in record.statements] == ["eventbus_send"]
+    # …one on a later line of a statement (an argument on its second line) does not.
+    record = _record()
+    record.statements[0].endLine = 3
+    apply(record, [Emit(get, {"semanticType": "eventbus_send"}, enrich="starts", line=3)],
+          SOURCE, "a.ts")
+    assert [(s.startLine, s.semanticType) for s in record.statements] == [
+        (2, None), (3, "eventbus_send")]

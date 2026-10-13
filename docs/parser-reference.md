@@ -395,8 +395,10 @@ register_detector(Detector(
   - `enrich="never"` (default) always appends; `"unclassified"` writes onto the smallest
     statement already captured on the node's line when that statement has no `semanticType`
     (or one listed in `reclassify`); `"own"` only when that statement is the construct itself
-    (exactly its line span) — a call nested in a larger statement gets its own record; `"any"`
-    writes onto whatever statement is there.
+    (exactly its line span) — a call nested in a larger statement gets its own record;
+    `"starts"` only when that statement begins on the node's first line (a send chained into
+    a multi-line statement enriches it; a send passed as an argument on a later line does not);
+    `"any"` writes onto whatever statement is there.
   - `fields` are always written; `fill` fields are written when enriching only if truthy.
   - A statement is written at most once per run: a second emit on the same statement appends
     its own record (`route(p).get(a).post(b)` gives two routes).

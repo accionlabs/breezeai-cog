@@ -64,8 +64,9 @@ class SpringBootParser(JavaParser):
                     listeners = detect_spring_listeners(
                         root, ctx.source, ctx.path, record, consts, props)
                     apply(record, listeners, ctx.source, ctx.path)
-                    sent = detect_spring_sends(root, ctx.source, ctx.path, record, consts, props)
-                    found = bool(listeners or sent)
+                    sends = detect_spring_sends(root, ctx.source, consts, props)
+                    apply(record, sends, ctx.source, ctx.path)
+                    found = bool(listeners or sends)
                 if scheduled:
                     timers = detect_spring_scheduled(
                         root, ctx.source, ctx.path, record, consts, props)
