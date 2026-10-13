@@ -62,6 +62,10 @@ def parse_source(language: str, source: bytes, timeout_micros: int = 0) -> Tree:
     input, so it can't be used here.)
     """
     parser = get_parser(language)
+    # The parser is cached per process. A parse halted by the timeout keeps its state, and the
+    # next parse() would resume it — building a tree from the previous file's bytes for this
+    # file's source (garbled statements, wrong offsets). Start every parse from a clean state.
+    parser.reset()
     with warnings.catch_warnings():  # timeout_micros is deprecated but is the only bytes-path option
         warnings.simplefilter("ignore", DeprecationWarning)
         parser.timeout_micros = int(timeout_micros) if timeout_micros and timeout_micros > 0 else 0
