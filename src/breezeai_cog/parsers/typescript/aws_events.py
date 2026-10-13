@@ -35,6 +35,7 @@ from tree_sitter import Node
 
 from ...schemas import SemanticType
 from ..additive import DetectContext, Detection, Detector, Gate, register_detector
+from ..aws_deploy import deployed_handlers
 from ..emits import Emit
 from ..treesitter import node_text
 
@@ -386,8 +387,82 @@ def detect_aws_events(
     return Detection(found, label="aws-lambda" if is_lambda else file_fw)
 
 
+_ENTRY_TYPES = frozenset({"route", "eventbus_consumer", "timer"})
+
+
+def _exported_functions(root: Node, source: bytes) -> dict[str, Node]:
+    """Exported functions by name — ``export const n = () => …``, ``export function n``,
+    ``exports.n = …`` / ``module.exports.n = …`` — at the node a handler record sits on."""
+    out: dict[str, Node] = {}
+    for child in root.named_children:
+        if child.type == "export_statement":
+            for decl in child.named_children:
+                if decl.type == "function_declaration":
+                    name = decl.child_by_field_name("name")
+                    if name is not None:
+                        out.setdefault(node_text(name, source), decl)
+                elif decl.type in ("lexical_declaration", "variable_declaration"):
+                    for v in decl.named_children:
+                        name = v.child_by_field_name("name") if v.type == "variable_declarator" else None
+                        if name is not None and _fn_value(v) is not None:
+                            out.setdefault(node_text(name, source), v)
+        elif child.type == "expression_statement" and child.named_children:
+            assign = child.named_children[0]
+            left = assign.child_by_field_name("left") if assign.type == "assignment_expression" else None
+            obj = left.child_by_field_name("object") if left is not None and \
+                left.type == "member_expression" else None
+            prop = left.child_by_field_name("property") if left is not None and \
+                left.type == "member_expression" else None
+            if obj is not None and prop is not None and node_text(obj, source) in \
+                    _CJS_EXPORT_RECEIVERS and _fn_value(assign) is not None:
+                out.setdefault(node_text(prop, source), assign)
+    return out
+
+
+def _apply_deployed(found: list[Emit], root: Node, source: bytes, path: str,
+                    index: object) -> list[Emit]:
+    """Copy the deployment config's triggers (:mod:`..aws_deploy`) onto this file's handlers:
+    the first trigger onto the handler's record, one more record per further trigger. A handler
+    the config names but the code does not type gets its records at its declaration."""
+    fact = deployed_handlers(index)
+    stem = path.rsplit(".", 1)[0]
+    handlers = fact.modules.get(stem, {}) if fact is not None else {}
+    if not handlers:
+        return found
+    out: list[Emit] = []
+    seen: set[str] = set()
+    for emit in found:
+        name = emit.fields.get("handler")
+        triggers = handlers.get(name, ()) if isinstance(name, str) and \
+            emit.fields.get("semanticType") in _ENTRY_TYPES else ()
+        if not isinstance(name, str) or not triggers or name in seen:
+            out.append(emit)
+            continue
+        seen.add(name)
+        for t in triggers:
+            out.append(Emit(emit.node, {**emit.fields, **t.fields()}))
+    exported = None
+    for name in sorted(set(handlers) - seen):
+        exported = exported if exported is not None else _exported_functions(root, source)
+        node = exported.get(name)
+        if node is None:
+            continue
+        for t in handlers[name]:
+            out.append(Emit(node, {"handler": name, "handlerLine": node.start_point[0] + 1,
+                                   **t.fields()}))
+    return out
+
+
 def _detect(dc: DetectContext) -> Detection | None:
-    return detect_aws_events(dc.root, dc.source, dc.path, is_fixture=dc.is_fixture)
+    detection = detect_aws_events(dc.root, dc.source, dc.path, is_fixture=dc.is_fixture)
+    found = list(detection.emits) if detection is not None else []
+    if not dc.is_fixture:
+        found = _apply_deployed(found, dc.root, dc.source, dc.path, dc.ctx.resolution_index)
+    if not found:
+        return None
+    lambda_handler = any(e.fields.get("semanticType") in _ENTRY_TYPES for e in found)
+    return Detection(found, label="aws-lambda" if lambda_handler else
+                     (detection.label if detection is not None else None))
 
 
 # Not fixture-skipped: only the loose CommonJS handler fallback is fixture-gated, inside.

@@ -87,3 +87,26 @@ def test_deployment_config_is_wiring(analyze_files) -> None:
     stmts = analyze_files({"Function.cs": _handler("SQSEvent"), "serverless.template": template})
     [r] = _eps(stmts)
     assert r.endpoint == "orders"
+
+
+def test_serverless_yml_trigger_is_copied_to_the_handler(analyze_files) -> None:
+    config = """service: jobs
+provider:
+  runtime: dotnet8
+functions:
+  worker:
+    handler: Jobs::Jobs.Function::FunctionHandler
+    events:
+      - sqs: arn:aws:sqs:eu-west-1:1:orders
+  report:
+    handler: Jobs::Jobs.Function::Report
+    events:
+      - schedule: cron(0 2 * * ? *)
+"""
+    stmts = analyze_files({"Function.cs": _handler("SQSEvent"), "serverless.yml": config})
+    got = sorted((r.handler, r.semanticType, r.framework, r.endpoint) for r in _eps(stmts))
+    # Report has no Lambda event parameter: the config alone says it is a handler.
+    assert got == [
+        ("FunctionHandler", "eventbus_consumer", "aws-sqs", "orders"),
+        ("Report", "timer", "aws-eventbridge", "cron(0 2 * * ? *)"),
+    ]

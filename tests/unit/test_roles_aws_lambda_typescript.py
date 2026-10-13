@@ -3,8 +3,6 @@ one test per row."""
 
 from __future__ import annotations
 
-import pytest
-
 EP = {"route", "eventbus_consumer", "timer"}
 PKG = (
     '{"dependencies": {"@aws-sdk/client-sqs": "3"}, "devDependencies": {"@types/aws-lambda": "8"}}'
@@ -102,9 +100,6 @@ def test_untyped_cjs_handler_is_a_binding(analyze_files) -> None:
     assert (r.framework, r.handler) == ("aws-lambda", "handler")
 
 
-@pytest.mark.xfail(
-    strict=True, reason="queue names and paths in serverless.yml are not copied to the handler"
-)
 def test_deployment_config_is_wiring(analyze_files) -> None:
     st = _run(
         analyze_files,
@@ -158,3 +153,80 @@ def test_sms_publish_is_a_send(analyze_files) -> None:
         for s in st
         if s.semanticType and s.semanticType.startswith("eventbus")
     ] == [("eventbus_send", "aws-sns")]
+
+
+HANDLERS = (
+    "import { SQSHandler, APIGatewayProxyHandler } from 'aws-lambda';\n"
+    "export const onOrder: SQSHandler = async (event) => {};\n"
+    "export const getUser: APIGatewayProxyHandler = async (event) => ({ statusCode: 200, body: '' });\n"
+    "export const plain = async (event) => {};\n"
+)
+
+
+def _deployed(analyze_files, functions: str):
+    st = _run(analyze_files, HANDLERS, **{"serverless.yml": "service: shop\nfunctions:\n" + functions})
+    return [(r.handler, r.semanticType, r.framework, r.method, r.endpoint) for r in _eps(st)]
+
+
+def test_each_config_event_is_a_binding(analyze_files) -> None:
+    got = _deployed(analyze_files, """  onOrder:
+    handler: src/handler.onOrder
+    events:
+      - sqs: arn:aws:sqs:eu-west-1:1:orders
+      - sqs:
+          arn: arn:aws:sqs:eu-west-1:1:orders-retry
+  getUser:
+    handler: src/handler.getUser
+    events:
+      - http:
+          path: users/{id}
+          method: get
+      - httpApi: 'POST /users'
+""")
+    assert got == [
+        ("onOrder", "eventbus_consumer", "aws-sqs", None, "orders"),
+        ("onOrder", "eventbus_consumer", "aws-sqs", None, "orders-retry"),
+        ("getUser", "route", "aws-apigw", "GET", "/users/{id}"),
+        ("getUser", "route", "aws-apigw", "POST", "/users"),
+    ]
+
+
+def test_config_types_an_untyped_handler(analyze_files) -> None:
+    got = _deployed(analyze_files, """  plain:
+    handler: src/handler.plain
+    events:
+      - schedule: rate(1 day)
+      - sns: order-events
+""")
+    assert got == [
+        ("onOrder", "eventbus_consumer", "aws-sqs", None, None),
+        ("getUser", "route", "aws-apigw", None, None),
+        ("plain", "timer", "aws-eventbridge", "PERIODIC", "rate(1 day)"),
+        ("plain", "eventbus_consumer", "aws-sns", None, "order-events"),
+    ]
+
+
+def test_config_reference_leaves_the_address_empty(analyze_files) -> None:
+    # A variable or a CloudFormation reference is resolved at deploy time: no address, never
+    # its text. Two such queues cannot be told apart, so they are one record.
+    got = _deployed(analyze_files, """  onOrder:
+    handler: src/handler.onOrder
+    events:
+      - sqs: ${self:custom.queueArn}
+      - sqs:
+          arn: !GetAtt OrdersQueue.Arn
+      - s3: uploads
+""")
+    assert got[0] == ("onOrder", "eventbus_consumer", "aws-sqs", None, None)
+    assert len(got) == 2  # onOrder once (s3 adds nothing), getUser untouched
+
+
+def test_config_naming_another_file_changes_nothing(analyze_files) -> None:
+    # A handler in built output (dist/…) matches no source file.
+    got = _deployed(analyze_files, """  onOrder:
+    handler: dist/handler.onOrder
+    events:
+      - sqs: arn:aws:sqs:eu-west-1:1:orders
+""")
+    assert got == [("onOrder", "eventbus_consumer", "aws-sqs", None, None),
+                   ("getUser", "route", "aws-apigw", None, None)]

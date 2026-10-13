@@ -29,6 +29,7 @@ from tree_sitter import Node
 from ...emit import file_id
 from ...schemas import SemanticType
 from ..additive import DetectContext, Detection, Detector, Gate, register_detector
+from ..aws_deploy import Trigger, deployed_handlers
 from ..emits import Emit
 from ..treesitter import first_line, node_text
 
@@ -103,35 +104,73 @@ def _handler_kind(method: Node, source: bytes) -> tuple[SemanticType, str, str |
     return None
 
 
-def detect_lambda_handlers(root: Node, source: bytes, path: str) -> list[Emit]:
+def _type_name(method: Node, source: bytes) -> str | None:
+    """``Namespace.Type`` of the type declaring ``method`` (nested: ``Namespace.Outer.Inner``) —
+    the middle part of a .NET Lambda handler string ``Assembly::Namespace.Type::Method``."""
+    names: list[str] = []
+    n = method.parent
+    while n is not None:
+        if n.type in ("class_declaration", "struct_declaration", "record_declaration",
+                      "namespace_declaration"):
+            name = n.child_by_field_name("name")
+            if name is None:
+                return None
+            names.append(node_text(name, source))
+        n = n.parent
+    root = method
+    while root.parent is not None:
+        root = root.parent
+    scoped = next((c for c in root.named_children
+                   if c.type == "file_scoped_namespace_declaration"), None)
+    scoped_name = scoped.child_by_field_name("name") if scoped is not None else None
+    if scoped_name is not None:
+        names.append(node_text(scoped_name, source))
+    return ".".join(reversed(names)) or None
+
+
+def detect_lambda_handlers(
+    root: Node, source: bytes, path: str, index: object = None,
+) -> list[Emit]:
     """AWS Lambda handler entry points in a C# file. Additive — invoked for every C# file,
     self-guarded by a cheap byte check, layering on top of whatever framework already owns the
     file. Each handler is a convention over a method (parented to the file, like the ASP.NET
-    route detectors)."""
-    if b"ILambdaContext" not in source:
+    route detectors).
+
+    A handler the deployment config names (``Assembly::Namespace.Type::Method``, see
+    :mod:`..aws_deploy`) takes its triggers from there: one record per trigger, with its address
+    — whether or not its parameters say it is a Lambda."""
+    fact = deployed_handlers(index)
+    deployed = fact.types if fact is not None else {}
+    if b"ILambdaContext" not in source and not deployed:
         return []
     found: list[Emit] = []
     for method in _all(root, "method_declaration"):
-        info = _handler_kind(method, source)
-        if info is None:
-            continue
-        semantic, framework, route_kind = info
         name_node = method.child_by_field_name("name")
         name = node_text(name_node, source) if name_node is not None else None
+        triggers: tuple[Trigger, ...] = ()
+        if deployed and name is not None:
+            type_name = _type_name(method, source)
+            triggers = deployed.get(type_name, {}).get(name, ()) if type_name else ()
+        info = _handler_kind(method, source) if b"ILambdaContext" in source else None
+        if info is None and not triggers:
+            continue
         sl = method.start_point[0] + 1
-        found.append(Emit(
-            method,
-            {"semanticType": semantic, "framework": framework, "handler": name,
-             "handlerLine": sl, "routeKind": route_kind,
-             "method": "PERIODIC" if semantic == "timer" else None},
-            parent=file_id(path), node_type="synthetic",
-            text=first_line(node_text(method, source))[:120],
-        ))
+        base: dict[str, object] = {"handler": name, "handlerLine": sl}
+        if info is not None:
+            semantic, framework, route_kind = info
+            base.update({"semanticType": semantic, "framework": framework,
+                         "routeKind": route_kind,
+                         "method": "PERIODIC" if semantic == "timer" else None})
+        for fields in ([{**base, **t.fields()} for t in triggers] or [base]):
+            found.append(Emit(
+                method, fields, parent=file_id(path), node_type="synthetic",
+                text=first_line(node_text(method, source))[:120],
+            ))
     return found
 
 
 def _detect(dc: DetectContext) -> Detection | None:
-    found = detect_lambda_handlers(dc.root, dc.source, dc.path)
+    found = detect_lambda_handlers(dc.root, dc.source, dc.path, dc.ctx.resolution_index)
     return Detection(found, label="aws-lambda") if found else None
 
 
