@@ -42,12 +42,12 @@ from __future__ import annotations
 
 from tree_sitter import Node
 
-from ...emit import disambiguate, file_id, statement_id
-from ...schemas import FileRecord, SemanticType, Statement
-from ..enclosing import Enclosing
+from ...schemas import FileRecord, SemanticType
+from ..emits import Emit
 from .service_interfaces import service_methods
-from ..treesitter import first_line, node_text
+from ..treesitter import node_text
 from ..vertx_common import (
+    vertx_emit,
     EVENTBUS,
     HANDLER_CALLS,
     HANDLER_SEMANTICS,
@@ -288,21 +288,18 @@ def _qualified(type_name: str, root: Node, source: bytes) -> str:
 def detect_vertx(
     root: Node, source: bytes, path: str, record: FileRecord, consts: dict[str, str] | None = None,
     index: object | None = None,
-) -> bool:
-    """Enrich/add Vert.x statements on ``record``. Returns True if anything matched.
+) -> list[Emit]:
+    """This file's Vert.x routes, consumers, sends and timers, for :func:`~..emits.apply`.
     ``consts`` (``name → value``) folds symbolic addresses to their String value. ``index`` (the
     Java index) carries the ``vertx.service-interfaces`` fact: a ``ServiceBinder`` registration
     becomes one consumer per method of the registered interface."""
-    matched = False
-    fid = file_id(path)
-    seen = {s.id for s in record.statements}
+    found: list[Emit] = []
     consts = consts or {}
 
     aliases: dict[str, SemanticType] = {}
     suppress: set[tuple[int, int]] = set()
     if _may_have_wrapper(source):
         aliases, suppress = _wrapper_aliases(root, source)
-    enclosing = Enclosing(record)
     methods = method_lines(record.functions)
     calls = _invocations(root)
     mounts, mount_routes = (
@@ -329,7 +326,6 @@ def detect_vertx(
                 unknown_base, endpoint = True, None
             else:
                 endpoint = join_path(base, endpoint)
-        line = call.start_point[0] + 1
         handler, handler_line = (
             handler_info(_handler_arg(call, source), source, methods)
             if semantic in HANDLER_SEMANTICS else (None, None)
@@ -345,54 +341,12 @@ def detect_vertx(
             handlers = list(names) or [handler]
         handler = handlers[0]
 
-        stmt = enclosing.statement(line)
-        if stmt is not None:  # detection on the same span → enrich in place
-            stmt.semanticType = semantic
-            stmt.framework = "vertx"
-            if method:
-                stmt.method = method
-            if endpoint or unknown_base:  # an unresolvable mount leaves the address unknown
-                stmt.endpoint = endpoint
-            if route_kind:
-                stmt.routeKind = route_kind
-            if handler:
-                stmt.handler = handler
-            if handler_line:
-                stmt.handlerLine = handler_line
-        else:  # inside a lambda (base skips nested scopes) → add a statement
-            new_id = disambiguate(statement_id(path, line, call.start_point[1]), seen)
-            record.statements.append(Statement(
-                id=new_id,
-                parentId=enclosing.function_id(line, fid),
-                nodeType=call.type,
-                semanticType=semantic,
-                text=first_line(node_text(call, source)),
-                method=method,
-                endpoint=endpoint,
-                framework="vertx",
-                routeKind=route_kind,
-                handler=handler,
-                handlerLine=handler_line,
-                startLine=line,
-                endLine=call.end_point[0] + 1,
-                path=path,
-            ))
+        found.append(vertx_emit(call, semantic, method, endpoint, route_kind, handler,
+                                handler_line, unknown_base=unknown_base))
         for extra in handlers[1:]:  # the others: their own records on the same span
-            record.statements.append(Statement(
-                id=disambiguate(statement_id(path, line, call.start_point[1]), seen),
-                parentId=enclosing.function_id(line, fid),
-                nodeType=call.type,
-                semanticType=semantic,
-                text=first_line(node_text(call, source)),
-                method=method,
-                endpoint=endpoint,
-                framework="vertx",
-                routeKind=route_kind,
-                handler=extra,
-                startLine=line,
-                endLine=call.end_point[0] + 1,
-                path=path,
-            ))
-        matched = True
+            found.append(Emit(call, {
+                "semanticType": semantic, "method": method, "endpoint": endpoint,
+                "framework": "vertx", "routeKind": route_kind, "handler": extra,
+            }))
 
-    return matched
+    return found

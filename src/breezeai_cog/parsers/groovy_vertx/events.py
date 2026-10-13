@@ -16,11 +16,11 @@ from __future__ import annotations
 
 from tree_sitter import Node
 
-from ...emit import disambiguate, file_id, statement_id
-from ...schemas import FileRecord, Statement
-from ..enclosing import Enclosing
-from ..treesitter import first_line, node_text
+from ...schemas import FileRecord
+from ..emits import Emit
+from ..treesitter import node_text
 from ..vertx_common import (
+    vertx_emit,
     HANDLER_CALLS,
     HANDLER_SEMANTICS,
     MOUNT_SUB_ROUTER,
@@ -181,18 +181,15 @@ def _sub_router_mounts(
 
 def detect_vertx_groovy(
     root: Node, source: bytes, path: str, record: FileRecord, consts: dict[str, str] | None = None
-) -> bool:
-    """Enrich/add Vert.x statements on ``record``. Returns True if anything matched.
+) -> list[Emit]:
+    """This file's Vert.x routes, consumers, sends and timers, for :func:`~..emits.apply`.
     ``consts`` (``name → value``) folds symbolic addresses to their String value."""
-    matched = False
-    fid = file_id(path)
-    seen = {s.id for s in record.statements}
+    found: list[Emit] = []
     consts = {**_local_literals(root, source), **(consts or {})}
     # Vert.x 2.x RouteMatcher: bare `get("/x", h)` calls (no receiver) inside `rm.with {}`
     # are routes only when the file actually builds a RouteMatcher — a cheap file-level gate
     # that keeps a stray `map.get(...)` from being mistaken for a route.
     uses_routematcher = b"RouteMatcher" in source
-    enclosing = Enclosing(record)
     methods = method_lines(record.functions)
     calls = _invocations(root)
     mounts, mount_routes = (
@@ -220,44 +217,12 @@ def detect_vertx_groovy(
                 unknown_base, endpoint = True, None
             else:
                 endpoint = join_path(base, endpoint)
-        line = call.start_point[0] + 1
         handler, handler_line = (
             handler_info(_handler_arg(call, source), source, methods)
             if semantic in HANDLER_SEMANTICS else (None, None)
         )
 
-        stmt = enclosing.statement(line)
-        if stmt is not None:  # detection on the same span → enrich in place
-            stmt.semanticType = semantic
-            stmt.framework = "vertx"
-            if verb:
-                stmt.method = verb
-            if endpoint or unknown_base:  # an unresolvable mount leaves the address unknown
-                stmt.endpoint = endpoint
-            if route_kind:
-                stmt.routeKind = route_kind
-            if handler:
-                stmt.handler = handler
-            if handler_line:
-                stmt.handlerLine = handler_line
-        else:  # inside a closure the base skipped → add a statement to the enclosing function
-            new_id = disambiguate(statement_id(path, line, call.start_point[1]), seen)
-            record.statements.append(Statement(
-                id=new_id,
-                parentId=enclosing.function_id(line, fid),
-                nodeType=call.type,
-                semanticType=semantic,
-                text=first_line(node_text(call, source)),
-                method=verb,
-                endpoint=endpoint,
-                framework="vertx",
-                routeKind=route_kind,
-                handler=handler,
-                handlerLine=handler_line,
-                startLine=line,
-                endLine=call.end_point[0] + 1,
-                path=path,
-            ))
-        matched = True
+        found.append(vertx_emit(call, semantic, verb, endpoint, route_kind, handler,
+                                handler_line, unknown_base=unknown_base))
 
-    return matched
+    return found

@@ -15,6 +15,7 @@ from __future__ import annotations
 
 from ...schemas import FileRecord
 from ..base import ParseContext
+from ..emits import apply
 from ..constfold import resolve_all
 from ..groovy.constants import collect_constants
 from ..groovy.imports import GroovyIndex
@@ -38,6 +39,8 @@ class GroovyVertxParser(GroovyParser):
             idx = ctx.resolution_index
             cross = idx.consts if isinstance(idx, GroovyIndex) else {}  # repo-wide constants
             consts = resolve_all(collect_constants(root, ctx.source), base=cross)
-            if detect_vertx_groovy(root, ctx.source, ctx.path, record, consts):
+            found = detect_vertx_groovy(root, ctx.source, ctx.path, record, consts)
+            if found:
+                apply(record, found, ctx.source, ctx.path)
                 record.framework = "vertx"
         return record
