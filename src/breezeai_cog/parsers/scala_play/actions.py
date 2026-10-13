@@ -13,12 +13,16 @@ Play SIRD (String Interpolating Routing DSL) defines routes directly in code:
 from __future__ import annotations
 
 import re
+from typing import Any
+
 from tree_sitter import Node
 
 from ...emit import disambiguate, statement_id
 from ...schemas import FileRecord, Function, Statement
+from ..scala.imports import _package_of
 from ..scala.statements import find_enclosing_parent_id
 from ..treesitter import node_text
+from .includes import join, router_prefix
 
 _FN_TYPES = ("function_definition", "function_declaration")
 
@@ -107,6 +111,23 @@ def _sird_path(node: Node, source: bytes) -> tuple[str, bool] | None:
     return norm, is_regex
 
 
+def _router_fqn(node: Node, source: bytes) -> str | None:
+    """``package.Name`` of the class / object enclosing ``node`` (nested: ``package.Outer.Inner``)."""
+    names: list[str] = []
+    in_block_package = False  # `package a.b { … }` — else the package is a `package a.b` header
+    curr, root = node.parent, node
+    while curr is not None:
+        if curr.type in ("class_definition", "object_definition", "package_clause"):
+            name = curr.child_by_field_name("name")
+            if name is None:
+                return None
+            names.append(node_text(name, source).strip())
+            in_block_package |= curr.type == "package_clause"
+        root, curr = curr, curr.parent
+    package = "" if in_block_package else _package_of(root, source)
+    return ".".join(([package] if package else []) + names[::-1]) or None
+
+
 def _find_router_prefix(node: Node, source: bytes) -> str | None:
     """Find ``val prefix = "/v1/posts"`` on the router class/object."""
     curr = node.parent
@@ -155,9 +176,12 @@ def _extract_sird_handler(clause: Node, source: bytes) -> str | None:
 
 
 def detect_play_sird_routes(
-    root: Node, source: bytes, record: FileRecord, seen_ids: set[str] | None = None
+    root: Node, source: bytes, record: FileRecord, seen_ids: set[str] | None = None,
+    *, index: Any | None = None,
 ) -> list[Statement]:
-    """Detect Play SIRD ``Routes`` methods (``case GET(p"/path") => ...``)."""
+    """Detect Play SIRD ``Routes`` methods (``case GET(p"/path") => ...``). The router's prefix
+    is the one a routes file includes it under (``-> /v1/posts v1.post.PostRouter``, from the
+    Scala index); failing that, its own ``val prefix``."""
     # D2: cheap byte guard
     if b"p\"" not in source and b"Routes" not in source and b"SimpleRouter" not in source:
         return []
@@ -177,8 +201,10 @@ def detect_play_sird_routes(
                 and body is not None
                 and body.type == "case_block"
             ):
+                fqn = _router_fqn(node, source)
+                included = router_prefix(index, fqn) if fqn is not None else None
                 # C5: Mount prefix from class
-                mount_prefix = _find_router_prefix(node, source)
+                mount_prefix = None if included is not None else _find_router_prefix(node, source)
                 for clause in body.named_children:
                     if clause.type != "case_clause":
                         continue
@@ -198,7 +224,9 @@ def detect_play_sird_routes(
                     endpoint, is_regex = res
                     if not endpoint.startswith("/"):
                         endpoint = "/" + endpoint
-                    if mount_prefix:
+                    if included:
+                        endpoint = join(included, endpoint)
+                    elif mount_prefix:
                         p = "/" + mount_prefix.strip("/")
                         endpoint = p + ("/" if endpoint == "/" else endpoint)
                     # C6: Populate handler from case body

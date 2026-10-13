@@ -13,6 +13,7 @@ import re
 
 from ...emit import disambiguate, file_id, statement_id
 from ...schemas import Statement
+from .includes import join
 
 _VERB_RE = re.compile(
     r"^\s*(?P<verb>GET|POST|PUT|DELETE|PATCH|HEAD|OPTIONS)\s+(?P<path>\S+)\s+(?P<handler>.+?)\s*$"
@@ -34,7 +35,9 @@ def _handler_text(raw: str) -> str:
     return raw.split("(", 1)[0].strip()
 
 
-def extract_routes(text: str, path: str) -> list[Statement]:
+def extract_routes(text: str, path: str, prefix: str | None = None) -> list[Statement]:
+    """The bindings of one routes file. ``prefix``: where its router is served (from the ``->``
+    includes, :mod:`.includes`); ``None`` = unknown, paths as written."""
     fid = file_id(path)
     seen: set[str] = set()
     routes: list[Statement] = []
@@ -50,7 +53,7 @@ def extract_routes(text: str, path: str) -> list[Statement]:
                 semanticType="route",
                 text=raw_line.strip(),
                 method=m["verb"],
-                endpoint=m["path"],
+                endpoint=join(prefix, m["path"]) if prefix else m["path"],
                 handler=_handler_text(m["handler"]),
                 framework="play",
                 routeKind="route",
@@ -60,5 +63,6 @@ def extract_routes(text: str, path: str) -> list[Statement]:
                 path=path,
             ))
             continue
-        # ``-> /prefix router.Routes`` includes another router: wiring (contract §4) — no record.
+        # ``-> /prefix router.Routes`` includes another router: wiring (contract §4) — no record;
+        # its prefix reaches that router's bindings through the index (:mod:`.includes`).
     return routes

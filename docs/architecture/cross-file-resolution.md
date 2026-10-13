@@ -89,7 +89,9 @@ What each index holds:
 | Language | Holds | Used for |
 |---|---|---|
 | Java, Groovy | fully-qualified class name → file; `Class.FIELD` → constant value; **registered facts** (Java: `index.facts` — Vert.x service interfaces `vertx.service-interfaces`) | imports, same-package types, event addresses / route paths |
-| Kotlin, Scala | fully-qualified class name → file | imports, same-package types |
+| Kotlin | fully-qualified class name → file | imports, same-package types |
+| Scala | fully-qualified class name → file; **registered facts** (`index.facts`: Play router includes `play.router-includes` — read from the routes files, which the Play routes parser owns) | imports, same-package types, SIRD router prefixes |
+| Play routes files | the `->` router includes, resolved to each router's prefix | route prefixes of included routes files |
 | C# | type → files; global `using`s; project roots (`.csproj`), their MSBuild `using`s and project references; class heritage incl. methods; extension methods; page routes; implemented interfaces; **registered facts** (`index.facts`: HotChocolate registered roots, WCF `.svc` hosts — read from `.svc` files, which the ServiceHost parser owns) | type resolution, inherited calls, extension calls, routes |
 | VB | class heritage (base class + attributes) | inherited controller routes |
 | TypeScript / JavaScript | `tsconfig`/`jsconfig` path aliases (per config scope); constant values; class heritage; Angular route mounts; **registered facts** (`index.facts`: Express mounts `express.router-mounts`, NestJS stub parents `nest.stub-parents`, GraphQL root-field DTOs `graphql.sdl-root-fields` — read from `.graphql` files too, which the GraphQL parser owns) | aliased imports, inherited calls, route prefixes |
@@ -323,6 +325,7 @@ Some frameworks build a route from pieces in several files. These use the index 
 | WebForms | `MapPageRoute` URL → `.aspx` page | C# index: page routes |
 | HotChocolate | `AddQueryType<BookQueries>()` in `Program.cs` → `BookQueries.cs` is a query root | registered fact ([below](#a-framework-fact-from-another-file-a-registered-fact)) |
 | WCF REST | `<%@ ServiceHost Service="Shop.OrderService" %>` in any `.svc` → the class's (or, for an interface contract, its one implementer's) `[WebGet]` operations are served under that `.svc` path. Matched by fully-qualified type name; a type named by two `.svc` files → no host | registered fact `wcf.svc-hosts`, collected from another parser's files (`FactSpec.sources`) |
+| Play | `-> /admin admin.Routes` in `conf/routes` + `GET /users …` in `conf/admin.routes` → `/admin/users`; `-> /v1/posts v1.post.PostRouter` + a SIRD `case GET(p"/$id")` in that class → `/v1/posts/{id}`. A routes file defines the router named after it (`conf/routes` → `router.Routes`, served at the root), so includes chain. A router included twice, or not included at all, keeps its own paths | `scala_play/includes.py`: the routes parser's own index for routes files; registered fact `play.router-includes` on the Scala index for SIRD classes (matched by fully-qualified name) |
 | Terraform | local `module` source → the `.tf` files it loads | HCL index |
 
 ### A framework fact from another file: a registered fact

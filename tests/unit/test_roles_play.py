@@ -65,6 +65,75 @@ def test_router_include_is_wiring(analyze_files) -> None:
     assert _eps(st) == []
 
 
+def _served(stmts) -> list[tuple[str, str]]:
+    return sorted((s.path, s.endpoint) for s in _eps(stmts))
+
+
+def test_included_routes_file_is_served_under_the_include_prefix(analyze_files) -> None:
+    st = analyze_files(
+        {
+            "conf/routes": "->      /admin           admin.Routes\n",
+            "conf/admin.routes": "GET     /users     controllers.Admin.users\n"
+            "GET     /          controllers.Admin.index\n",
+        }
+    )
+    assert _served(st) == [("conf/admin.routes", "/admin"), ("conf/admin.routes", "/admin/users")]
+
+
+def test_includes_chain(analyze_files) -> None:
+    st = analyze_files(
+        {
+            "conf/routes": "->      /admin           admin.Routes\n",
+            "conf/admin.routes": "->      /reports   reports.Routes\n",
+            "conf/reports.routes": "GET     /daily     controllers.Reports.daily\n",
+        }
+    )
+    assert _served(st) == [("conf/reports.routes", "/admin/reports/daily")]
+
+
+def test_router_included_twice_keeps_its_paths(analyze_files) -> None:
+    st = analyze_files(
+        {
+            "conf/routes": "->      /admin           admin.Routes\n"
+            "->      /backoffice      admin.Routes\n",
+            "conf/admin.routes": "GET     /users     controllers.Admin.users\n",
+        }
+    )
+    assert _served(st) == [("conf/admin.routes", "/users")]
+
+
+def test_routes_file_not_included_keeps_its_paths(analyze_files) -> None:
+    st = analyze_files({"conf/admin.routes": "GET     /users     controllers.Admin.users\n"})
+    assert _served(st) == [("conf/admin.routes", "/users")]
+
+
+SIRD_ROUTER = """package v1.post
+import javax.inject.Inject
+import play.api.routing.Router.Routes
+import play.api.routing.SimpleRouter
+import play.api.routing.sird._
+class PostRouter @Inject()(controller: PostController) extends SimpleRouter {
+  override def routes: Routes = {
+    case GET(p"/") => controller.index
+    case GET(p"/$id") => controller.show(id)
+  }
+}
+"""
+
+
+def test_included_sird_router_is_served_under_the_include_prefix(analyze_files) -> None:
+    st = analyze_files(
+        {
+            "conf/routes": "->      /v1/posts        v1.post.PostRouter\n",
+            "app/v1/post/PostRouter.scala": SIRD_ROUTER,
+        }
+    )
+    assert _served(st) == [
+        ("app/v1/post/PostRouter.scala", "/v1/posts"),
+        ("app/v1/post/PostRouter.scala", "/v1/posts/{id}"),
+    ]
+
+
 def test_controller_action_is_none(analyze_files) -> None:
     st = analyze_files({"app/controllers/OrderController.scala": CONTROLLER})
     assert _eps(st) == []
