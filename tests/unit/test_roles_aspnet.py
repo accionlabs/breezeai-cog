@@ -158,7 +158,6 @@ def test_health_checks_is_binding_without_handler(program) -> None:
     assert (r.semanticType, r.endpoint, r.handler) == ("route", "/health", None)
 
 
-@pytest.mark.xfail(strict=True, reason="GraphQL transport mount recorded as a route")
 def test_map_graphql_is_wiring(program) -> None:
     assert _at(program, "Program.cs", _program_line("app.MapGraphQL()")) == []
 

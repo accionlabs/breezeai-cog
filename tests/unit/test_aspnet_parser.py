@@ -377,8 +377,8 @@ def test_csharp_endpoint_registrations() -> None:
     rec = _parse(AspNetCoreParser(), STARTUP, "Startup.cs")
     routes = {(s.method, s.endpoint): s for s in rec.statements if s.semanticType == "route"}
     assert ("GET", "/health") in routes and routes[("GET", "/health")].framework == "aspnet"
-    # GraphQL HTTP mount: verb POST, path resolved from the _graphQlEndpoint field
-    assert ("POST", "/graphql") in routes and routes[("POST", "/graphql")].framework == "graphql"
+    # The GraphQL transport mount is wiring (it serves every operation): no record
+    assert ("POST", "/graphql") not in routes
     # dev UIs at their library-default paths
     assert ("GET", "/ui/playground") in routes
     assert ("GET", "/ui/voyager") in routes
@@ -386,12 +386,11 @@ def test_csharp_endpoint_registrations() -> None:
     assert not any("{controller" in (e or "") for _, e in routes)
 
 
-def test_graphql_mount_defaults_when_no_arg() -> None:
+def test_graphql_transport_mount_is_wiring() -> None:
     src = b'''using Microsoft.AspNetCore.Builder;
 namespace A { class S { void C(IApplicationBuilder app){ app.UseGraphQL<ISchema>(); } } }'''
     rec = _parse(AspNetCoreParser(), src, "S.cs")
-    routes = {(s.method, s.endpoint) for s in rec.statements if s.semanticType == "route"}
-    assert ("POST", "/graphql") in routes  # graphql-dotnet convention default
+    assert [s for s in rec.statements if s.semanticType == "route"] == []
 
 
 def test_vb_controller_routes() -> None:

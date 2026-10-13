@@ -282,7 +282,6 @@ public class AttendeeType : ObjectType<Attendee>
         "RESOLVE_REFERENCE", "query", "Attendee", None, line, line,
     )
 
-@pytest.mark.xfail(strict=True, reason="GraphQL transport mount recorded as a route")
 def test_map_graphql_is_wiring(analyze_files) -> None:
     stmts = analyze_files({"Program.cs": PROGRAM})
     assert _eps(stmts) == []
