@@ -26,7 +26,7 @@ from ...emit import disambiguate, file_id, statement_id
 from ...schemas import FileRecord, Function, Statement
 from ..additive import DetectContext, Detector, register_detector
 from ..enclosing import Enclosing
-from ..statements_common import strip_leading_base, url_placeholder
+from ..statements_common import render_template_url
 from ..treesitter import node_text
 
 
@@ -1558,22 +1558,13 @@ def _resolve_route_string(
 ) -> Optional[str]:
     """Resolve route paths, rendering dynamic template substitutions as placeholders."""
     if node.type == "template_string":
-        parts: list[str] = []
-        for child in node.named_children:
-            if child.type == "string_fragment":
-                parts.append(node_text(child, source))
-            elif child.type == "template_substitution":
-                expression = child.named_children[0] if child.named_children else None
-                if expression is None:
-                    parts.append("{param}")
-                    continue
-                resolved = _resolve_static_string(expression, source, file_index)
-                parts.append(
-                    resolved
-                    if resolved is not None
-                    else url_placeholder(node_text(expression, source))
-                )
-        return strip_leading_base("".join(parts))
+        return render_template_url(
+            node,
+            source,
+            resolve_substitution=lambda expression: _resolve_static_string(
+                expression, source, file_index
+            ),
+        )
     return _resolve_static_string(node, source, file_index)
 
 
