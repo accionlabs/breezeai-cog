@@ -104,7 +104,8 @@ targets them.
 |---|---|
 | HTTP route on a handler (decorator, route call, route-table entry with a component) | Binding |
 | SOAP / WCF / gRPC operation | Binding |
-| GraphQL query / mutation / subscription field | Binding |
+| GraphQL query / mutation / subscription field | Binding — in schema-first code, the resolver-map entry (`Query: { books: … }`) is the binding; the SDL root field (`type Query { books }`) is captured as a plain statement, never an entry point |
+| Subscription that is also fed by a topic (HotChocolate `[Subscribe] [Topic("orders")]`) | Two bindings: the subscription (`route`) and the topic (`eventbus_consumer`) — one method, two triggers |
 | GraphQL entity or node resolver (federation `__resolveReference`, Relay node lookup) | Binding (`route`, `method: RESOLVE_REFERENCE`, `routeKind: query`) — the framework's generated root field (`_entities`, `node`) calls it directly, addressed by type |
 | GraphQL data-type field resolver (`Book.author`) | None — no address of its own (§3) |
 | Message, queue, topic or event consumer — including message-pattern handlers on an RPC transport (NestJS `@MessagePattern` / `@EventPattern`) | Binding (`eventbus_consumer`) |
@@ -112,8 +113,9 @@ targets them.
 | Service proxy client (Vert.x `ServiceProxyBuilder…build(...)`) | Outbound (`eventbus_send`) |
 | Service contract marker (Vert.x `@ProxyGen` interface) | None |
 | Scheduled job: cron or interval annotation, recurring-job registration, timer call (`@Scheduled`, `@Cron`, `@Interval`, Hangfire `RecurringJob`, Quartz, Celery beat, Vert.x `setTimer` / `setPeriodic`) | Binding (`timer`) |
-| Serverless function, classified by its trigger (a scheduled trigger such as AWS `ScheduledEvent` is a `timer`) | Binding |
-| Page reached by URL (SPA route, MVC action view, Razor Page, `.aspx`) | Binding |
+| Serverless function, classified by its trigger (a scheduled trigger such as AWS `ScheduledEvent` is a `timer`) | Binding. A handler whose trigger the code does not show (untyped `exports.handler`) stays a binding: `eventbus_consumer`, `framework: aws-lambda` (invoked by AWS, trigger unknown) until deployment config says more |
+| Page reached by URL (SPA route, MVC action view, Razor Page, `.aspx`) — including a route whose component is loaded lazily (Angular `loadComponent`, React Router `lazy`) | Binding. A Web Forms page's handler is its code-behind class (GET and every postback share the page URL); a static `[WebMethod]` page method is its own binding at `<page>.aspx/<Method>` |
+| Endpoint served by framework code with no handler of ours (`MapHealthChecks`, a GraphQL playground / dev UI) | Binding with an empty `handler` — a real URL outside callers reach |
 | Class-level route prefix, router mount, lazy route group, layout route, root-type registration, deployment-config trigger | Wiring |
 | Route with a `component` **and** `children` | Wiring (a layout) when one child has an empty path; otherwise **also** a Binding — its own URL shows the parent with an empty outlet |
 | Middleware, filters, auth guards, interceptors | Guard |
@@ -121,6 +123,7 @@ targets them.
 | Link or programmatic navigation to a page (`<Link to>`, `routerLink`, `router.navigate`) | Outbound (`semanticType: navigation`) |
 | Application start-up (`main`, `Program.cs`, `app.listen`) | None |
 | Internal service / façade methods (only our own code calls them) | None |
+| In-process actor messaging (Akka `receive`, local `!` / `tell`) | None — the message comes from our own code |
 | Layouts, partials, child components, controls folded into a page | None (part of another entry point) |
 | Modals, panels and tabs opened from a running page | None (part of another entry point) |
 | GraphQL stub parent that only returns an object for its fields (`mutation { notifications { create } }`) | Wiring: its fields are the bindings, recorded as operations (`mutation`, not `field_resolver`). A convention, so it is listed in the framework's role table |
@@ -135,12 +138,12 @@ the route-table entry, or — for a registered container — the member.
 | Field | Content | Required |
 |---|---|---|
 | `semanticType` | `route` (request, RPC, GraphQL or page) · `eventbus_consumer` (message or event) · `timer` (schedule) | Yes |
-| `method` | HTTP verb · `QUERY` / `MUTATION` / `SUBSCRIPTION` / `RESOLVE_REFERENCE` · `RPC` · `MESSAGE` / `EVENT` / `CONSUMER` · `TIMER` / `PERIODIC` | When the trigger has one |
+| `method` | HTTP verb · `ANY` (one handler for every verb) · `WEBSOCKET` · `QUERY` / `MUTATION` / `SUBSCRIPTION` / `RESOLVE_REFERENCE` · `RPC` · `MESSAGE` / `EVENT` / `CONSUMER` · `TIMER` / `PERIODIC` | When the trigger has one |
 | `routeKind` | `route` (HTTP) · `rpc` (SOAP, WCF, gRPC) · `ws` (WebSocket) · `page` · `query` / `mutation` / `subscription` (also `message` on an `eventbus_consumer`) | Yes for `route` |
 | `endpoint` | **The address, fully resolved** — the binding's own part joined with every wiring part ([§6](#6-address-format-endpoint)) | If any part can't be determined: **empty**. Never guessed, never a code name |
 | `framework` | Transport or framework: `spring`, `express`, `graphql`, `aws-sqs`, `kafka`, `angular` … | Yes |
 | `handler` | The handler's name: method, function or component | Yes, unless the handler is anonymous ([below](#anonymous-handlers)) |
-| `handlerLine` | Line of the handler's declaration (for an anonymous handler, the line where the function starts) | Yes |
+| `handlerLine` | Line of the handler's declaration — the start line of its `Function` record, which for C# / Java includes attributes and annotations (for an anonymous handler, the line where the function starts) | Yes |
 | `handlerPath` | File of the handler, when it is not the record's own file | When different |
 | `guards` | Names of the guards that apply to it, outermost first — scoped ones (on the handler, its class, its route) and global ones (app-wide middleware, filters, router hooks) alike, when the code shows for certain that they cover this binding | When present |
 
@@ -241,7 +244,7 @@ match.
 | gRPC | `<Service>/<Method>` | `OrderService/GetOrder` |
 | GraphQL | Operation field name (type goes in `method`); for a field under a stub parent, `<StubType>.<field>` | `bookById`, `NotificationsMutation.create` |
 | GraphQL entity / node resolver | The type it resolves | `Book` |
-| Message / event | Queue, topic or address name | `billing`, `orders.created` |
+| Message / event | Queue, topic or address name; an object pattern as canonical JSON with sorted keys (the form the transport matches on) | `billing`, `orders.created`, `{"cmd":"sum"}` |
 | Schedule | Cron or interval expression | `0 2 * * *` |
 | Page | URL path, with parent prefixes applied | `/settings/profile` |
 

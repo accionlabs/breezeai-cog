@@ -13,9 +13,9 @@ Parser: `src/breezeai_cog/parsers/csharp_aspnet/`, `vb_aspnet/` (shared detector
 | `app.MapGroup(prefix)` | Wiring | statement stays plain; prefix joins the group's endpoints | Points at many endpoints |
 | `[Authorize]` / `[AllowAnonymous]` on a controller or action | Guard | name in `guards` | Runs before the handler; applies to many |
 | `app.UseAuthentication()` / `UseAuthorization()` / `UseMiddleware<T>()` / MVC filters | Guard | — | Run before many handlers |
-| `app.MapHealthChecks(path)` | None | — | The framework's handler runs; no code of ours |
+| `app.MapHealthChecks(path)` | Binding | `route`, `GET`, `endpoint` = path, `handler` empty | A real URL outside callers hit; the framework's handler runs, none of ours |
 | `MapGraphQL()` / `UseGraphQL<T>()` | Wiring | statement stays plain | Transport path for many GraphQL operations |
-| `UseGraphQLPlayground()` / `Voyager` / `GraphiQL` / `Altair` | None | — | Framework dev UI; no code of ours |
+| `UseGraphQLPlayground()` / `Voyager` / `GraphiQL` / `Altair` | Binding | `route`, `GET`, `endpoint` = the UI path, `handler` empty | A real URL; the framework serves it, no handler of ours |
 | `@page "/path"` in a `.cshtml` / `.razor` file | Binding | `route`, `routeKind: page`, path, `handler` = the page model or component | One page reached by URL |
 | `RecurringJob.AddOrUpdate(...)` (Hangfire) | Binding | `timer`, cron as `endpoint`, `handler` = the job method | One handler, started by a schedule |
 | `HttpClient` calls | Outbound | `api_call` | Our code calling out |

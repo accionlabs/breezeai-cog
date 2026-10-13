@@ -96,7 +96,8 @@ def test_http_verb_attribute_is_binding(analyze_files) -> None:
     assert r.framework == "aspnet"
     lines = CONTROLLER.splitlines()
     attr = lines.index('    [HttpGet("{id}")]') + 1  # the declaration starts at its attributes
-    assert r.handler == "Get" and attr <= r.handlerLine <= attr + 1
+    # Decision Q3: handlerLine is the handler Function's start line (attributes included).
+    assert r.handler == "Get" and r.handlerLine == attr
 
 
 def test_controller_route_attribute_is_wiring(analyze_files) -> None:
@@ -151,9 +152,10 @@ def test_map_group_is_wiring(program) -> None:
     assert r.endpoint == "/api/items"
 
 
-@pytest.mark.xfail(strict=True, reason="framework health-check endpoint recorded as a route")
-def test_health_checks_is_none(program) -> None:
-    assert _at(program, "Program.cs", _program_line("app.MapHealthChecks")) == []
+def test_health_checks_is_binding_without_handler(program) -> None:
+    # Decision Q2: a framework-served URL is an entry point with an empty handler.
+    [r] = _at(program, "Program.cs", _program_line("app.MapHealthChecks"))
+    assert (r.semanticType, r.endpoint, r.handler) == ("route", "/health", None)
 
 
 @pytest.mark.xfail(strict=True, reason="GraphQL transport mount recorded as a route")
@@ -161,9 +163,10 @@ def test_map_graphql_is_wiring(program) -> None:
     assert _at(program, "Program.cs", _program_line("app.MapGraphQL()")) == []
 
 
-@pytest.mark.xfail(strict=True, reason="GraphQL dev-UI middleware recorded as a route")
-def test_graphql_ui_is_none(program) -> None:
-    assert _at(program, "Program.cs", _program_line("app.UseGraphQLPlayground()")) == []
+def test_graphql_ui_is_binding_without_handler(program) -> None:
+    # Decision Q2: the dev UI is a real URL served by the framework; no handler of ours.
+    [r] = _at(program, "Program.cs", _program_line("app.UseGraphQLPlayground()"))
+    assert r.semanticType == "route" and r.handler is None
 
 
 def test_startup_is_none(program) -> None:
