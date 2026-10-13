@@ -16,7 +16,7 @@ Mutates ``record`` (mirrors the other call-based route detectors).
 from __future__ import annotations
 
 import logging
-from bisect import bisect_right
+from bisect import bisect_left, bisect_right
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -246,12 +246,23 @@ class _FileIndex:
         self.register_calls: list[Node] = []
         self.call_nodes: list[Node] = []
         self.root_scope = self._build(root, source)
+        self.call_nodes.sort(key=lambda call: call.start_byte)
+        self.call_starts = [call.start_byte for call in self.call_nodes]
         self._resolve_factory_bindings(source)
         self.mounted_plugin_nodes: set[tuple[int, int, str]] = self._find_mounted_plugins(source)
 
     @staticmethod
     def node_key(node: Node) -> tuple[int, int, str]:
         return node.start_byte, node.end_byte, node.type
+
+    def calls_in(self, node: Node) -> list[Node]:
+        start = bisect_left(self.call_starts, node.start_byte)
+        end = bisect_left(self.call_starts, node.end_byte)
+        return [
+            call
+            for call in self.call_nodes[start:end]
+            if call.end_byte <= node.end_byte
+        ]
 
     def _find_mounted_plugins(self, source: bytes) -> set[tuple[int, int, str]]:
         """Find named plugin declarations from register calls collected during the first scan."""
@@ -750,7 +761,6 @@ def _walk(
 ) -> None:
     """Detect routes from call nodes collected while building the scope index."""
     mounted_plugin_nodes = file_index.mounted_plugin_nodes
-    all_calls = file_index.call_nodes
 
     def visit_calls(
         root: Node,
@@ -758,11 +768,7 @@ def _walk(
         chain: frozenset[tuple[int, int, str]],
         allowed_plugin: Optional[tuple[int, int, str]] = None,
     ) -> None:
-        candidates = [
-            call
-            for call in all_calls
-            if root.start_byte <= call.start_byte and call.end_byte <= root.end_byte
-        ]
+        candidates = file_index.calls_in(root)
         suppressed: list[tuple[int, int]] = []
 
         for current in candidates:
