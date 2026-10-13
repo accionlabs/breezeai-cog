@@ -142,7 +142,7 @@ the route-table entry, or — for a registered container — the member.
 | `handler` | The handler's name: method, function or component | Yes, unless the handler is anonymous ([below](#anonymous-handlers)) |
 | `handlerLine` | Line of the handler's declaration (for an anonymous handler, the line where the function starts) | Yes |
 | `handlerPath` | File of the handler, when it is not the record's own file | When different |
-| `guards` | Names of the guards that apply to it | When present |
+| `guards` | Names of the guards that apply to it, outermost first — scoped ones (on the handler, its class, its route) and global ones (app-wide middleware, filters, router hooks) alike, when the code shows for certain that they cover this binding | When present |
 
 ### Anonymous handlers
 
@@ -283,7 +283,10 @@ public Task FunctionHandler(SQSEvent e, ILambdaContext c)
 ## 8. Accuracy rules
 
 - **Wrong is worse than missing.** If the address can't be resolved, record the entry point with
-  an empty `endpoint` — never a guess.
+  an empty `endpoint` — never a guess. This includes a prefix that exists but can't be resolved
+  (`include_router(r, prefix=settings.X)`, `setGlobalPrefix(config.x)`): the bindings behind it
+  get an empty `endpoint`, not the part that is known. A message address that can't be resolved
+  is empty on both sides — consumer and sender — rather than the symbol it was read from.
 - **When unsure of a role, choose the one that records less.** A construct that might be a
   router or a middleware is wiring, not a guard; a construct that might not be inbound is None.
 - **One binding, one record.** Wiring and guards never produce entry-point records; their code
