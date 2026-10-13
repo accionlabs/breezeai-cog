@@ -92,7 +92,7 @@ What each index holds:
 | Kotlin, Scala | fully-qualified class name → file | imports, same-package types |
 | C# | type → files; global `using`s; project roots (`.csproj`), their MSBuild `using`s and project references; class heritage incl. methods; extension methods; page routes; **registered facts** (`index.facts`) | type resolution, inherited calls, extension calls, routes |
 | VB | class heritage (base class + attributes) | inherited controller routes |
-| TypeScript / JavaScript | `tsconfig`/`jsconfig` path aliases (per config scope); constant values; class heritage; Angular and Express route mounts | aliased imports, inherited calls, route prefixes |
+| TypeScript / JavaScript | `tsconfig`/`jsconfig` path aliases (per config scope); constant values; class heritage; Angular and Express route mounts; **registered facts** (`index.facts`) | aliased imports, inherited calls, route prefixes |
 | C++ | header basename → file; free functions; `Class::method`; `Class::field` types; heritage | `#include`, calls |
 | Ruby | ActiveRecord model names; controller `before_action` callbacks | recognising DB calls; Rails route guards |
 | HCL / Terraform | folder → `.tf` files | local `module` sources |

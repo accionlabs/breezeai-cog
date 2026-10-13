@@ -10,13 +10,14 @@ from __future__ import annotations
 import json
 import os
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import Iterator, Sequence
+from typing import Any, Iterator, Sequence
 
 from tree_sitter import Node
 
 from ...utils import repo_relative
+from ..additive import collect_additive, resolve_additive
 from ..index_common import ClassHeritage, parallel_map, record_distinct
 from ..treesitter import node_text, parse_source
 
@@ -96,6 +97,9 @@ class TsAliasIndex:
     #: file-based page under ``app/`` or ``pages/`` is a Next.js page only inside one of these —
     #: Gatsby also routes ``src/pages/*.tsx``, and Angular has ``src/app``.
     next_apps: frozenset[str] = frozenset()
+    #: Facts registered with ``register_fact`` (fact name → fact), resolved once before
+    #: parsing. Read with :func:`~..additive.index_fact`; see ``parsers/additive.py``.
+    facts: dict[str, Any] = field(default_factory=dict)
 
 
 def router_root(path: str, router_dir: str) -> str | None:
@@ -1183,11 +1187,11 @@ def _collect_ngmodule_imports(root: Node, source: bytes) -> dict[str, list[str]]
 
 def _ts_index_one(
     args: tuple[str, str, str]
-) -> tuple[dict[str, str | None], dict[str, ClassHeritage], list[str], list[_MountRaw], dict[str, list[str]], list[tuple[str, str]], list[_InstanceMount], tuple[str, dict[str, str]], _NestRaw | None, _BasePathRaw | None, _MiddlewareRaw | None] | None:
+) -> tuple[dict[str, str | None], dict[str, ClassHeritage], list[str], list[_MountRaw], dict[str, list[str]], list[tuple[str, str]], list[_InstanceMount], tuple[str, dict[str, str]], _NestRaw | None, _BasePathRaw | None, _MiddlewareRaw | None, dict[str, Any]] | None:
     """Parse one TS/JS file into its partials (string-constant map, class-heritage map, the
     classes it declares, its lazy-route mounts, NgModule imports, Express factory and
     router-instance mounts, the routers it exports, its NestJS wiring, an application
-    base path it sets, and its Next.js middleware matcher) —
+    base path it sets, its Next.js middleware matcher, and what registered facts collect) —
     pure, picklable worker for :func:`parallel_map`. Returns ``None`` on read/parse failure."""
     file_s, rel, repo_root_s = args
     if not Path(file_s).is_file():
@@ -1207,7 +1211,8 @@ def _ts_index_one(
         return (const_values, _collect_heritage(root, src, rel), classes, mounts,
                 ngmodule_imports, express_mounts, instance_mounts,
                 (rel, _collect_router_exports(root, src)), _collect_nest(root, src),
-                _collect_base_path(root, src, rel), _collect_next_middleware(root, src, rel))
+                _collect_base_path(root, src, rel), _collect_next_middleware(root, src, rel),
+                collect_additive("typescript", root, src, rel, Path(repo_root_s)))
     except Exception as exc:  # parse OR a pathologically deep AST walk (RecursionError) — skip this file
         from ...logging import get_logger
         get_logger("breezeai_cog.index").warning(
@@ -1291,12 +1296,15 @@ def build_ts_index(repo_root: Path, files: Sequence[Path], jobs: int = 1) -> TsA
     nest_register: list[tuple[str, str | None, list[tuple[str, str]] | None]] = []
     base_paths_raw: list[tuple[str, str, list[list[tuple[str, str]] | None]]] = []
     next_middlewares: dict[str, tuple[str, ...] | None] = {}
+    collected: dict[str, list[Any]] = {}  # registered fact name → per-file values, file order
     args = [(str(f), repo_relative(f, repo_root), str(repo_root)) for f in files]
     for frag in parallel_map(args, _ts_index_one, jobs):
         if not frag:
             continue
         (cv, heritage, classes, mounts, ngmodule_imports, file_express_mounts, file_instances,
-         (frag_rel, file_router_exports), nest, base_path, middleware) = frag
+         (frag_rel, file_router_exports), nest, base_path, middleware, facts) = frag
+        for name, value in facts.items():
+            collected.setdefault(name, []).append(value)
         if middleware is not None:
             mw_dir = Path(frag_rel).parent
             if mw_dir.name == "src":
@@ -1373,12 +1381,7 @@ def build_ts_index(repo_root: Path, files: Sequence[Path], jobs: int = 1) -> TsA
     app_base_paths = _app_base_paths(base_paths_raw, const_values)
     next_apps = _next_apps(repo_root, files)
 
-    if (alias is None and not const_values and not class_heritage and not route_mounts
-            and not express_mounts and not express_router_mounts and not nest_global_prefixes
-            and not nest_controller_prefixes and not app_base_paths and not next_middlewares
-            and not next_apps):
-        return None
-    return TsAliasIndex(
+    index = TsAliasIndex(
         base_dir=alias.base_dir if alias else str(repo_root),
         paths=alias.paths if alias else {},
         alias_scopes=alias.alias_scopes if alias else (),
@@ -1393,6 +1396,14 @@ def build_ts_index(repo_root: Path, files: Sequence[Path], jobs: int = 1) -> TsA
         next_middlewares=next_middlewares,
         next_apps=next_apps,
     )
+    # Registered facts may need the whole index, so they resolve after it is built.
+    facts = resolve_additive("typescript", collected, index)
+    if (alias is None and not const_values and not class_heritage and not route_mounts
+            and not express_mounts and not express_router_mounts and not nest_global_prefixes
+            and not nest_controller_prefixes and not app_base_paths and not next_middlewares
+            and not next_apps and not any(v is not None for v in facts.values())):
+        return None
+    return replace(index, facts=facts)
 
 
 #: ESM / NodeNext specifiers name the *emitted* file (`./x.js`) while the source on disk is

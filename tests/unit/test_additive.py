@@ -221,7 +221,7 @@ def test_index_hooked_languages_call_the_collector(language: str) -> None:
 
 def test_fact_for_an_unhooked_language_rejected(isolated) -> None:
     with pytest.raises(RegistryError, match="no index hook"):
-        register_fact(_marked(language="typescript"))
+        register_fact(_marked(language="scala"))
 
 
 def test_fact_needs_a_gate(isolated) -> None:
@@ -248,6 +248,21 @@ def test_fact_is_resolved_on_the_index(isolated, tmp_path, jobs) -> None:
     index = build_csharp_index(tmp_path, paths, jobs)
     # Collected behind the gate, resolved once against the full index, the same for any --jobs.
     assert index_fact(index, "test.marked") == ["a/Marked.cs"]
+
+
+
+@pytest.mark.parametrize("jobs", [1, 2])
+def test_typescript_fact_is_resolved_on_the_index(isolated, tmp_path, jobs) -> None:
+    from breezeai_cog.parsers.typescript.imports import build_ts_index
+
+    register_fact(_marked(language="typescript", resolve=lambda values, index: sorted(values)))
+    paths = []
+    for rel, src in {"a.ts": b"// MARK\nexport const a = 1;", "b.ts": b"export const b = 2;"}.items():
+        f = tmp_path / rel
+        f.write_bytes(src)
+        paths.append(f)
+    index = build_ts_index(tmp_path, paths, jobs)
+    assert index_fact(index, "test.marked") == ["a.ts"]
 
 
 def test_index_fact_tolerates_a_missing_index() -> None:
