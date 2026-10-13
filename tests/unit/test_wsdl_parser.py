@@ -285,6 +285,27 @@ def test_port_type_and_operation_missing_name_skipped(tmp_path) -> None:
     assert [s for s in rec.statements if s.nodeType == "operation"] == []
 
 
+def test_binding_only_operation_not_captured_as_route(tmp_path) -> None:
+    # Negative case (parser-review-guide §5): a <wsdl:operation> living only under a
+    # <binding> -- never under a <portType> -- must not be mistaken for a route. Routes
+    # come exclusively from portType/operation; binding elements are not modeled at all.
+    src = """\
+<?xml version="1.0"?>
+<wsdl:definitions
+    xmlns:tns="http://example.com/x"
+    xmlns:wsdl="http://schemas.xmlsoap.org/wsdl/"
+    xmlns:soap="http://schemas.xmlsoap.org/wsdl/soap/">
+  <wsdl:binding name="OrphanBinding" type="tns:NoSuchPortType">
+    <wsdl:operation name="LooksLikeARoute">
+      <soap:operation soapAction="urn:looks-like-a-route"/>
+    </wsdl:operation>
+  </wsdl:binding>
+</wsdl:definitions>
+"""
+    rec = _parse(tmp_path, "service.wsdl", src)
+    assert rec.statements == []
+
+
 def test_embedded_xsd_schema_reuses_xsd_walker(tmp_path) -> None:
     rec = _parse(tmp_path, "service.wsdl", WSDL)
     user = _by_name(rec, "User", "complexType")
