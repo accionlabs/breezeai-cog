@@ -5,8 +5,16 @@ body on ``text``" philosophy as ``prisma/schema.py``: nested/local element and a
 declarations inside a ``complexType``/``simpleType`` stay in that type's ``text``, never
 split into their own records.
 
-* ``element`` / ``complexType`` / ``simpleType`` / ``group`` / ``attributeGroup`` (global)
-  → a ``data_model`` entity (parallels a Prisma ``model``), the full declaration on ``text``.
+* ``element`` / ``complexType`` (global) → a ``data_model`` entity (parallels a Prisma
+  ``model``), the full declaration on ``text``, ``endpoint=name`` (the join key — matches
+  Prisma's own ``data_model`` statements, so a WSDL route's ``requestDTO``/``responseDTO``
+  can resolve to the ``message``/type it names) and ``framework`` set to the caller's
+  ``framework`` (``"xsd"`` for a standalone ``.xsd`` file, ``"wsdl"`` when this walker is
+  reused for a schema embedded in a WSDL's ``<wsdl:types>``).
+* ``simpleType`` / ``group`` / ``attributeGroup`` (global) → captured the same way, but with
+  ``semanticType=None`` — these are reusable content fragments / scalar constraints (referenced
+  via ``ref=``/``base=`` elsewhere), not standalone domain entities, so they don't carry the
+  ``data_model`` tag.
 * ``import`` / ``include`` → a plain statement recording the referenced namespace /
   schemaLocation — never resolved across files (honest-null; matches this project's v1 scope
   decision to record cross-file XSD/WSDL references without resolving them).
@@ -21,33 +29,39 @@ from __future__ import annotations
 from tree_sitter import Node
 
 from ...emit import disambiguate, file_id, statement_id
-from ...schemas import Statement
+from ...schemas import SemanticType, Statement
 from ..treesitter import line_span, node_text
 from ..xml_common import child_elements, element_attr, element_tag
 
-_ENTITY_TAGS = ("element", "complexType", "simpleType", "group", "attributeGroup")
+#: Global declarations this walker captures structurally (full body on `text`).
+_STRUCTURAL_TAGS = ("element", "complexType", "simpleType", "group", "attributeGroup")
+#: Of those, the ones that are real domain entities (vs. a reusable fragment / constraint)
+#: and so carry `semanticType="data_model"`.
+_ENTITY_TAGS = ("element", "complexType")
 _IMPORT_TAGS = ("import", "include")
 
 
 def collect_schema_statements(
-    schema_node: Node, source: bytes, path: str, seen_ids: set[str]
+    schema_node: Node, source: bytes, path: str, seen_ids: set[str], framework: str
 ) -> list[Statement]:
     """Walk a ``<schema>`` element's direct children and emit one flat ``Statement`` per
-    global declaration, parented to the file."""
+    global declaration, parented to the file. ``framework`` is the owning parser's label
+    (``"xsd"`` or, when reused for an embedded schema, ``"wsdl"``)."""
     fid = file_id(path)
     out: list[Statement] = []
 
     for node in child_elements(schema_node):
         tag = element_tag(node, source)
-        if tag not in _ENTITY_TAGS and tag not in _IMPORT_TAGS:
+        if tag not in _STRUCTURAL_TAGS and tag not in _IMPORT_TAGS:
             continue  # annotation/notation/redefine/override/… — not modeled
 
         start, end = line_span(node)
         name = element_attr(node, source, "name")
+        semantic: SemanticType | None = "data_model" if tag in _ENTITY_TAGS else None
         if tag in _IMPORT_TAGS:
-            name = (
-                element_attr(node, source, "namespace")
-                or element_attr(node, source, "schemaLocation")
+            semantic = None
+            name = element_attr(node, source, "namespace") or element_attr(
+                node, source, "schemaLocation"
             )
 
         out.append(
@@ -56,8 +70,10 @@ def collect_schema_statements(
                 parentId=fid,
                 path=path,
                 nodeType=tag,
-                semanticType="data_model" if tag in _ENTITY_TAGS else None,
+                semanticType=semantic,
                 name=name,
+                endpoint=name,
+                framework=framework,
                 text=node_text(node, source),
                 startLine=start,
                 endLine=end,

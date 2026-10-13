@@ -1,11 +1,12 @@
 """Standalone XML Schema (XSD) capture.
 
 The ``xsd`` language parser owns ``.xsd`` files. It emits one flat Statement per global
-declaration — ``complexType``/``simpleType``/``group``/``attributeGroup``/``element`` as a
-``data_model`` entity (full declaration, including nested elements/restrictions, on
-``text``), ``import``/``include`` as a plain statement recording the referenced
-namespace/schemaLocation (never resolved across files) — each carrying its declared
-``name``. Capture is gated on ``--capture-statements``.
+declaration (full body, including nested elements/restrictions, on ``text``,
+``endpoint=name`` as the join key, ``framework="xsd"``): ``element``/``complexType`` as a
+``data_model`` entity; ``simpleType``/``group``/``attributeGroup`` captured the same way but
+with no ``data_model`` tag (reusable fragments / scalar constraints, not domain entities);
+``import``/``include`` as a plain statement recording the referenced
+namespace/schemaLocation (never resolved across files). Capture is on by default.
 """
 
 from __future__ import annotations
@@ -41,12 +42,24 @@ SCHEMA = """\
     </xs:sequence>
   </xs:complexType>
 
+  <xs:group name="AddressFields">
+    <xs:sequence>
+      <xs:element name="city" type="xs:string"/>
+    </xs:sequence>
+  </xs:group>
+
+  <xs:attributeGroup name="CommonAttrs">
+    <xs:attribute name="id" type="xs:ID"/>
+  </xs:attributeGroup>
+
   <xs:element name="Person" type="tns:AddressType"/>
 </xs:schema>
 """
 
 
-def _parse(tmp_path, filename: str, src: str, *, capture: bool = True, limit: int = 1000) -> FileRecord:
+def _parse(
+    tmp_path, filename: str, src: str, *, capture: bool = True, limit: int = 1000
+) -> FileRecord:
     p = tmp_path / filename
     p.write_text(src)
     ctx = ParseContext(
@@ -78,9 +91,43 @@ def test_complex_type_is_data_model_entity_with_full_body(tmp_path) -> None:
     addr = _by_name(rec, "AddressType", "complexType")
     assert addr.semanticType == "data_model"
     assert addr.parentId == rec.id
+    assert addr.endpoint == "AddressType"
+    assert addr.framework == "xsd"
     # full body carries nested elements as text (contents capture)
     assert 'name="street"' in addr.text
     assert 'name="zip"' in addr.text
+
+
+def test_group_and_attribute_group_are_structural_not_entities(tmp_path) -> None:
+    # Reusable content fragments (referenced via `ref=` elsewhere), not domain entities --
+    # still fully captured (name, endpoint, framework, full body), just no data_model tag.
+    rec = _parse(tmp_path, "schema.xsd", SCHEMA)
+    group = _by_name(rec, "AddressFields", "group")
+    assert group.semanticType is None
+    assert group.endpoint == "AddressFields"
+    assert group.framework == "xsd"
+    assert 'name="city"' in group.text
+
+    attr_group = _by_name(rec, "CommonAttrs", "attributeGroup")
+    assert attr_group.semanticType is None
+    assert attr_group.endpoint == "CommonAttrs"
+    assert 'name="id"' in attr_group.text
+
+
+def test_foreign_namespace_attribute_does_not_shadow_real_name(tmp_path) -> None:
+    # Regression: `element_attr` used to match by prefix-stripped local name, so a
+    # foreign-namespace attribute that merely shares a local name (e.g. an EMF-annotated
+    # schema's `ecore:name`) could shadow the real unprefixed `name` if it appeared first in
+    # the tag. Attribute prefixes name a genuinely different namespace, unlike element tags.
+    src = (
+        '<?xml version="1.0"?>\n'
+        '<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema" xmlns:ecore="http://x/ecore">\n'
+        '  <xs:complexType ecore:name="ProcessingInstructionImpl" name="ProcessingInstruction"/>\n'
+        "</xs:schema>\n"
+    )
+    rec = _parse(tmp_path, "schema.xsd", src)
+    names = {s.name for s in rec.statements if s.nodeType == "complexType"}
+    assert names == {"ProcessingInstruction"}
 
 
 def test_text_not_truncated_by_statement_text_limit(tmp_path) -> None:
@@ -114,12 +161,14 @@ def test_text_not_emptied_when_statement_text_limit_is_zero(tmp_path) -> None:
     assert 'name="Person"' in person.text
 
 
-def test_simple_type_restriction_carried_on_text_not_as_edge(tmp_path) -> None:
-    # A restriction base is honest-null: it stays visible in the type's text, but the
-    # parser never fabricates a structured extends/base field.
+def test_simple_type_is_structural_not_an_entity(tmp_path) -> None:
+    # Per review decision: a `simpleType` is a scalar constraint (often a reusable one via
+    # `base=`), not a standalone domain entity like `element`/`complexType` -- still captured
+    # (full body on text, restriction base visible, never a fabricated structured field), but
+    # with no `data_model` tag.
     rec = _parse(tmp_path, "schema.xsd", SCHEMA)
     zip_type = _by_name(rec, "ZipCode", "simpleType")
-    assert zip_type.semanticType == "data_model"
+    assert zip_type.semanticType is None
     assert 'base="xs:string"' in zip_type.text
 
 
@@ -145,7 +194,7 @@ def test_attribute_value_ending_in_quote_character_preserved(tmp_path) -> None:
     src = (
         '<?xml version="1.0"?>\n'
         '<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema">\n'
-        "  <xs:element name=\"Editors'\"/>\n"
+        '  <xs:element name="Editors\'"/>\n'
         "</xs:schema>\n"
     )
     rec = _parse(tmp_path, "schema.xsd", src)
@@ -171,6 +220,13 @@ def test_capture_gate(tmp_path) -> None:
     assert rec.statements == []
     assert rec.language == "xsd"
     assert rec.framework is None
+
+
+def test_fixture_file_still_captures_statements(tmp_path) -> None:
+    # XSD emits no routes, so `is_fixture_file` (route/entry-point-only, per base.py) must
+    # not gate its capture at all.
+    rec = _parse(tmp_path, "schema.test.xsd", SCHEMA)
+    assert any(s.nodeType == "complexType" for s in rec.statements)
 
 
 def test_annotation_and_other_unmodeled_tags_skipped(tmp_path) -> None:
