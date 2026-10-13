@@ -291,13 +291,14 @@ def test_handler_inside_route_options_is_captured() -> None:
     assert [(route.endpoint, route.handler) for route in captured] == [("/opts", "getUsers")]
 
 
-def test_route_hooks_are_captured_as_guards() -> None:
+def test_route_hooks_are_captured_as_guards_but_auth_only_when_auth_like() -> None:
     source = (
         b"const fastify = Fastify();\n"
         b"fastify.get('/account', { preHandler: requireAuth }, getAccount);\n"
         b"fastify.route({ method: 'POST', url: '/admin', "
         b"onRequest: [authenticate, Admin.authorize], "
-        b"preValidation: validateRequest, handler: saveAdmin });"
+        b"preValidation: validateRequest, handler: saveAdmin });\n"
+        b"fastify.get('/health', { preValidation: validateRequest }, health);"
     )
 
     routes = _detect_routes(source)
@@ -310,7 +311,20 @@ def test_route_hooks_are_captured_as_guards() -> None:
             ["authenticate", "Admin.authorize", "validateRequest"],
             True,
         ),
+        ("GET", "/health", ["validateRequest"], None),
     ]
+
+
+def test_detects_route_after_later_fastify_reassignment() -> None:
+    source = (
+        b"let app;\n"
+        b"app = Fastify();\n"
+        b"app.get('/late', handler);"
+    )
+
+    routes = _detect_routes(source)
+
+    assert [(route.method, route.endpoint) for route in routes] == [("GET", "/late")]
 
 
 def test_detects_route_with_named_handler() -> None:

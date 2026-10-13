@@ -355,6 +355,19 @@ class _FileIndex:
                             (self.node_key(class_node), node_text(name_node, source), right)
                         )
 
+                if (
+                    left is not None
+                    and left.type == "identifier"
+                    and right is not None
+                    and right.type == "call_expression"
+                ):
+                    self._mark_reassigned_fastify_binding(
+                        node_text(left, source),
+                        right,
+                        source,
+                        node,
+                    )
+
             if node.type == "import_statement":
                 factory_names = _imported_fastify_factory_names(node, source)
                 for name in _imported_binding_names(node, source):
@@ -450,6 +463,28 @@ class _FileIndex:
             factory_call=value_node if value_node is not None and value_node.type == "call_expression" else None,
         )
 
+    def _mark_reassigned_fastify_binding(
+        self,
+        name: str,
+        value_node: Node,
+        source: bytes,
+        node: Node,
+    ) -> None:
+        if not _is_fastify_factory_call(value_node, source, self):
+            return
+
+        scope: Optional[_Scope] = self.scope_for(node)
+        while scope is not None:
+            if name in scope.bindings:
+                binding = scope.binding_at(name, node.start_byte)
+                if binding is not None:
+                    binding.is_fastify = True
+                    binding.factory_call = value_node
+                    binding.string_value = None
+                    binding.callable_node = None
+                return
+            scope = scope.parent
+
     def _resolve_factory_bindings(self, source: bytes) -> None:
         for scope in self.scopes.values():
             for entries in scope.bindings.values():
@@ -481,7 +516,15 @@ class _FileIndex:
             self._index_pattern(child, scope, source)
 
     def scope_for(self, node: Node) -> _Scope:
-        return self.node_scopes[self.node_key(node)]
+        current: Optional[Node] = node
+        while current is not None:
+            key = self.node_key(current)
+            if key in self.node_scopes:
+                return self.node_scopes[key]
+            if current.type in _LEXICAL_SCOPE_NODE_TYPES and key in self.scopes:
+                return self.scopes[key]
+            current = current.parent
+        return self.root_scope
 
     def is_fastify_instance(self, name: str, node: Node) -> bool:
         scope: Optional[_Scope] = self.scope_for(node)
@@ -1179,6 +1222,23 @@ def _app_route(
         )
 
 
+_AUTH_GUARD_HINTS = (
+    "auth",
+    "authorize",
+    "authenticate",
+    "authenticated",
+    "login",
+    "jwt",
+    "oauth",
+    "session",
+)
+
+
+def _is_auth_guard_name(name: str) -> bool:
+    lowered = name.lower()
+    return any(hint in lowered for hint in _AUTH_GUARD_HINTS)
+
+
 def _route_guards(option_nodes: list[Node], source: bytes) -> Optional[list[str]]:
     guards: list[str] = []
     for option_node in option_nodes:
@@ -1196,6 +1256,12 @@ def _route_guards(option_nodes: list[Node], source: bytes) -> Optional[list[str]
                 if candidate.type in {"identifier", "member_expression"}
             )
     return guards or None
+
+
+def _route_auth_required(guards: Optional[list[str]]) -> Optional[bool]:
+    if not guards:
+        return None
+    return any(_is_auth_guard_name(name) for name in guards) or None
 
 
 def _method_values(
@@ -1490,7 +1556,7 @@ def _make_statement(
         handler=handler,
         handlerLine=handler_line,
         isRegex=is_regex,
-        authRequired=True if guards else None,
+        authRequired=_route_auth_required(guards),
         guards=guards,
         startLine=start_line,
         endLine=node.end_point[0] + 1,
