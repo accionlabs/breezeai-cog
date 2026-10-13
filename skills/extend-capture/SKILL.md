@@ -124,10 +124,18 @@ split, imports/functions/classes/statements, ids, registration, tests) is in
 apply throughout: resolve imports to real repo-relative paths (or leave them external), and
 never invent a call target you cannot resolve.
 
+If the file type you are adding is **markup/view** (a template: `.hbs`, `.jsp`, `.svelte`,
+`.twig`, …), also declare `template_extensions` on the parser — the subset of `extensions`
+that is markup rather than code. Those files are skipped at scan time unless the caller
+passes `--capture-templates`, which is what keeps markup from flooding the graph. Declare
+only the markup half: a parser owning both (WebForms: `.cs` + `.aspx`; Vue: `.ts` + `.vue`)
+must keep capturing its code half. Skip this and your new template type silently
+re-pollutes every graph.
+
 ### 3B. Server-framework parser (one per file)
 Subclass the base language parser, sniff the framework cheaply in `claims`, set a
 `priority` above the base, reuse `extract` (one parse), then add route/handler detection —
-gated behind `--capture-statements`, and skipping fixture files for route emitters. See the
+gated on `ctx.capture_statements` (on by default, off with `--no-capture-statements`), and skipping fixture files for route emitters. See the
 framework-parser section and detection idioms in the reference guide.
 
 ### 3C. Internal-framework detector (additive — composes on top)
@@ -140,12 +148,21 @@ a one-per-file parser. There are **two hook points** — choose by the shape of 
   for example, is usually a single dictionary entry that tags the statement as a data-access
   call and records which ORM it is.
 - **Structure-shaped signal** (a base class, a decorator, a type annotation, a
-  command-object argument) that a flat classifier cannot express → add a `detect_*` pass and
-  call it at the end of the base language parser's `extract`, gated by
-  `--capture-statements` and preceded by a cheap byte guard so it only runs on relevant
-  files. It **enriches statements in place or appends new ones**; it never replaces the
-  file's parser. Because it lives in the base `extract`, it runs for every file of the
-  language and layers underneath whichever framework won.
+  command-object argument) that a flat classifier cannot express → write a `detect_*` pass
+  and **register it** with `register_detector(Detector(...))` at the bottom of its own module
+  (`parsers/additive.py`). Do **not** edit the language parser: its `extract` already ends
+  with `run_additive(<language>, …)`, which runs every registered detector for that language,
+  so it fires for every file of the language and layers underneath whichever framework won.
+  It **enriches statements in place or appends new ones**; it never replaces the file's
+  parser. The runner applies the shared rules: it runs only with `ctx.capture_statements`,
+  skips fixture files when `skip_fixtures=True` (set it for route / entry-point emitters),
+  applies the cheap byte `guard` when one is given (otherwise guard inside the detector), and
+  lets a returned framework label fill `record.framework` only while it is unset. Pick a
+  unique `order` — it fixes the run order, which decides statement-id disambiguation — declare
+  the `frameworks` labels it can emit, and add it to the inventory in
+  `tests/unit/test_additive.py`. A language without the hook (see `HOOKED_LANGUAGES`) needs a
+  one-time `run_additive` call in its base `extract` first — that one is a language-parser
+  change.
 
 Some "internal frameworks" only describe data models. Often the base parser already
 captures the class, its base class, and its fields — so the only thing to add is a **role
@@ -211,7 +228,7 @@ uv run pytest -q              # run the test suite (must stay green)
 uv run ruff check . && uv run ruff format .
 uv run mypy                   # type-check
 # run on a repository:
-uv run breezeai-cog repo-to-json-tree --repo <path> --out <dir> --capture-statements
+uv run breezeai-cog repo-to-json-tree --repo <path> --out <dir>
 ```
 
 Note: the parallel pool needs a real `__main__` — run via the CLI or a script file, not a
@@ -249,7 +266,7 @@ src/breezeai_cog/parsers/
 - [ ] No field holds a guess; unresolved values are left null (honest-null).
 - [ ] No relationship is emitted unless both ends resolve to real graph identities.
 - [ ] Semantic statements (routes, data access, events, queries) emit **only** when
-      `--capture-statements` is set; route emitters also skip fixture/test files.
+      `ctx.capture_statements` is True (i.e. not `--no-capture-statements`); route emitters also skip fixture/test files.
 - [ ] Ids come only from the `emit` helpers, one shared `seen_ids` set per file, so a
       detector's statements attach to the parent the base parser assigned.
 - [ ] Statements are flat and linked to their owner; nesting is expressed by line ranges.

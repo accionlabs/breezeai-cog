@@ -1,4 +1,4 @@
-"""Flat statement capture for Java (gated by --capture-statements) + shared API/DB
+"""Flat statement capture for Java (gated by statement capture) + shared API/DB
 call detection."""
 
 from __future__ import annotations

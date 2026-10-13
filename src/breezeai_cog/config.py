@@ -29,6 +29,8 @@ from pydantic import (
 )
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from .integrations.scm.base import SUPPORTED_PROVIDERS
+
 _LOG_LEVELS = {"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"}
 
 
@@ -51,7 +53,14 @@ class Settings(BaseSettings):
         default=None,
         validation_alias=AliasChoices("BREEZEAI_COG_LANGUAGE", "BREEZEAI_COG_LANGUAGES"),
     )
-    capture_statements: bool = False  # --capture-statements
+    # In-body statement capture (API calls, DB queries, routes, events, …). On by default —
+    # nearly every downstream consumer needs it; --no-capture-statements turns it off.
+    capture_statements: bool = True
+    # --capture-templates. Markup/view files (.html/.htm/.cshtml/.razor/.aspx/.ascx/
+    # .master/.vue) are skipped at scan time by default — they flood the graph with
+    # markup nodes that bury the business logic. Orthogonal to the ignore layers:
+    # .repoinclude does not re-include them, only this flag does. (core/pipeline.py)
+    capture_templates: bool = False
     jobs: int | None = None  # --jobs; None = CPU count (resolved in the executor)
     # Max statement `text` length before it is split into ordered `#partNofN` records at
     # emit (emit/split.py) so the backend never drops an oversized statement; 0 disables.
@@ -82,6 +91,36 @@ class Settings(BaseSettings):
 
     # ── Git ───────────────────────────────────────────────────────────────
     git_clone_timeout: float = 1800.0  # seconds; git clone/fetch/checkout cap (server/git.py)
+
+    # ── SCM providers (server; integrations/scm/) ─────────────────────────
+    # REST API base per provider. Override for GitHub Enterprise / self-hosted GitLab /
+    # Bitbucket Server / Azure DevOps Server; the public cloud is the default.
+    github_api_base_url: str = "https://api.github.com"
+    gitlab_api_base_url: str = "https://gitlab.com/api/v4"
+    bitbucket_api_base_url: str = "https://api.bitbucket.org/2.0"
+    azure_devops_api_base_url: str = "https://dev.azure.com"
+    # Per-request cap (seconds) on provider REST calls (tree / compare / file content).
+    scm_api_timeout: float = Field(default=60.0, gt=0)
+    # Retries after a transient failure (429/502/503/504 or a transport error). 0 = one try.
+    scm_api_retry_max: int = Field(default=3, ge=0)
+    # Base backoff (seconds); doubled per attempt, jittered, capped at 60 s.
+    scm_api_retry_backoff_seconds: float = Field(default=2.0, ge=0)
+    # Pagination ceiling per listing (tree / diffstat pages). Reaching it logs a warning
+    # and returns the truncated result rather than growing memory without bound.
+    scm_max_pages: int = Field(default=100, ge=1)
+    # Global fallback credential per provider, used when a request carries no gitToken.
+    # Bitbucket expects "username:api_key". A missing token means anonymous access.
+    scm_token_github: SecretStr | None = None
+    scm_token_gitlab: SecretStr | None = None
+    scm_token_bitbucket: SecretStr | None = None
+    scm_token_azure_devops: SecretStr | None = None
+    # Self-hosted instances: host → provider slug, e.g. {"git.acme.com": "gitlab"}. A repo
+    # URL on a listed host is parsed with that provider's grammar. (JSON in env.)
+    scm_instances: dict[str, str] = Field(default_factory=dict)
+    # Self-hosted instances: host → REST API base URL, e.g.
+    # {"git.acme.com": "https://git.acme.com/api/v4"}. An unmapped host falls back to
+    # the provider's <provider>_api_base_url. (JSON in env.)
+    scm_instance_base_url_mapping: dict[str, str] = Field(default_factory=dict)
 
     # ── Backend upload ────────────────────────────────────────────────────
     upload: bool = False  # --upload toggle
@@ -133,6 +172,21 @@ class Settings(BaseSettings):
         if isinstance(v, str):
             return [part.strip() for part in v.split(",") if part.strip()]
         return v
+
+    @field_validator("scm_instances")
+    @classmethod
+    def _scm_instances_known_providers(cls, v: dict[str, str]) -> dict[str, str]:
+        """Lower-case hosts and slugs; reject a slug no provider module serves."""
+        out: dict[str, str] = {}
+        for host, provider in v.items():
+            slug = provider.strip().lower()
+            if slug not in SUPPORTED_PROVIDERS:
+                raise ValueError(
+                    f"scm_instances[{host!r}]={provider!r}: unknown provider; "
+                    f"expected one of {sorted(SUPPORTED_PROVIDERS)}"
+                )
+            out[host.strip().lower().rstrip("/")] = slug
+        return out
 
     @field_validator("log_level", mode="before")
     @classmethod

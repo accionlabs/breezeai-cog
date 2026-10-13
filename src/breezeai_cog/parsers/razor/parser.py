@@ -38,6 +38,9 @@ _CODE_METHODS = ("method_declaration", "constructor_declaration", "local_functio
 class RazorParser(BaseParser):
     name = "razor"
     extensions: tuple[str, ...] = (".cshtml", ".razor")
+    # Both are markup: .cshtml is a view, .razor a Blazor component. This parser owns
+    # nothing else, so it goes idle entirely without --capture-templates.
+    template_extensions: tuple[str, ...] = (".cshtml", ".razor")
     schema_version = SCHEMA_VERSION
     statement_types = STATEMENT_TYPES
     frameworks = FRAMEWORKS

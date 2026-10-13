@@ -513,7 +513,7 @@ def test_file_platform_none_for_generic() -> None:
 
 def test_file_platform_from_provider_even_without_capture_statements() -> None:
     # provider block is always scanned (ungated) — same as externalImports collection —
-    # so file-level platform is available without --capture-statements
+    # so file-level platform is available without statement capture
     rec = _parse("main.tf", _TF_SRC, capture_statements=False)
     assert rec.platform == "aws"
 
@@ -565,7 +565,7 @@ def test_module_class_ids_unique() -> None:
 
 
 def test_module_class_emitted_without_capture_statements() -> None:
-    # Class records are not gated by --capture-statements
+    # Class records are not gated by statement capture
     rec = _parse("main.tf", _TF_SRC, capture_statements=False)
     assert len(rec.classes) > 0
 

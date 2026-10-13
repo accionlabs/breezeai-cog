@@ -19,6 +19,8 @@ classified as ``query_statement`` before this runs.
 
 from __future__ import annotations
 
+import re
+
 # DB/ORM -> distinctive method names (lowercased). Order matters: on a name collision
 # the first DB wins (mirrors the legacy reverse-map "first one wins").
 _DB_METHODS: dict[str, tuple[str, ...]] = {
@@ -70,6 +72,12 @@ _DB_METHODS: dict[str, tuple[str, ...]] = {
         "get_or_create", "update_or_create", "bulk_update", "values_list",
     ),
     "sqlalchemy": ("filter_by", "session_query", "add_all"),
+    # `.result`/`.to`/`.option`/`.unique` deliberately omitted — they collide with
+    # `Future.result`/collection `.to(List)`/Scala `Option`/generic `.unique` and cannot
+    # be made precise (BREEZEAI-220 P2 audit).
+    "slick": ("forceinsert", "insertorupdate", "tablequery"),
+    "doobie": ("transact", "queryschema"),
+    "quill": ("liftquery",),
 }
 
 # Reverse lookup: method (lowercased) -> DB; first DB in _DB_METHODS wins a collision.
@@ -83,6 +91,32 @@ _GENERIC = {
     "findone", "findbyid", "find", "save", "create", "update", "delete", "remove",
     "persist", "merge", "query", "execute",
 }
+
+# ActiveRecord verbs, split by how much they prove on their own. Every Ruby class name is
+# capitalized, so a constant receiver is NOT evidence of a model — the receiver has to be
+# identified from the declarations (``typed_db_ids``, built by ruby/models.py) or the verb
+# has to be one that effectively only exists in ActiveRecord.
+#
+# DISTINCTIVE verbs are safe without an identified receiver: no stdlib or common gem API
+# uses them. GENERIC verbs collide with ordinary Ruby (``Tempfile.create``, ``Date.first``,
+# ``Settings.all``) and are therefore only honoured on an identified model receiver.
+_ACTIVE_RECORD_DISTINCTIVE = frozenset({
+    "find_by", "find_by!", "find_each", "find_in_batches", "where", "where_not",
+    "joins", "includes", "pluck", "destroy_all", "update_all", "left_outer_joins", "take",
+})
+_ACTIVE_RECORD_GENERIC = frozenset({
+    "find", "all", "create", "create!", "first", "last", "exists",
+})
+#: Verbs that write through a model *instance* (``user.save``), where the receiver is
+#: conventionally lowercase. Always require an identified receiver — ``config.save`` and
+#: ``image.update`` are ordinary Ruby.
+_ACTIVE_RECORD_INSTANCE_METHODS = frozenset({
+    "save", "save!", "update", "update!", "destroy", "destroy!", "update_attributes",
+})
+_ACTIVE_RECORD_METHODS = (
+    _ACTIVE_RECORD_DISTINCTIVE | _ACTIVE_RECORD_GENERIC | _ACTIVE_RECORD_INSTANCE_METHODS
+)
+_RUBY_CONSTANT_RECEIVER = re.compile(r"[A-Z][A-Za-z0-9_]*(?:::[A-Z][A-Za-z0-9_]*)*")
 
 # Receiver substring -> hint (refines _GENERIC).
 # Needles checked via `needle in low` (full lowercased callee). Ambiguous short tokens
@@ -184,6 +218,47 @@ _EF_SOURCE_MARKERS = ("dbcontext", "dbset", "iqueryable", "queryable", "context.
 def _has_ef_source(low_callee: str) -> bool:
     return any(mk in low_callee for mk in _EF_SOURCE_MARKERS)
 
+
+def _is_active_record_call(
+    callee: str, method: str, language: str | None,
+    typed_db_ids: "frozenset[str] | None" = None,
+) -> bool:
+    """Whether a Ruby call is ActiveRecord data access.
+
+    Three tiers, strongest evidence first:
+
+    1. The receiver is an **identified model** (a constant that transitively extends
+       ``ActiveRecord::Base``, or a variable assigned from one) — any ActiveRecord verb
+       counts. ``typed_db_ids`` carries that set; see ``ruby/models.py``.
+    2. The verb is **distinctive** to ActiveRecord (``where`` / ``find_by`` / ``pluck`` / …)
+       on a constant receiver — trusted without the index, so a model defined in a gem
+       (or a file parsed on its own) is still captured.
+    3. Nothing else. A generic verb on an unidentified constant (``Tempfile.create``,
+       ``Settings.all``) and an instance write on an unidentified variable
+       (``config.save``) are ordinary Ruby — absent beats wrong.
+    """
+    if language != "ruby":
+        return False
+    m = method.lower().rstrip("?")
+    if m not in _ACTIVE_RECORD_METHODS:
+        return False
+    receiver = callee.rsplit(".", 1)[0] if "." in callee else ""
+    terminal = receiver.rsplit(".", 1)[-1]
+    if not terminal:
+        return False
+    # Tier 1 — the receiver is a known model (constant or an instance assigned from one).
+    # Checked first because it is two set lookups, and it is the common case in an indexed
+    # repo; the constant regex below is only needed for the fallback tier.
+    if typed_db_ids and (
+        terminal in typed_db_ids or terminal.rsplit("::", 1)[-1] in typed_db_ids
+    ):
+        return True
+    # Tier 2 — the verb alone is proof, provided it is a class-level query.
+    return (
+        m in _ACTIVE_RECORD_DISTINCTIVE
+        and _RUBY_CONSTANT_RECEIVER.fullmatch(terminal) is not None
+    )
+
 # ElasticSearch / OpenSearch client verbs. These collide with ordinary code (``search`` is
 # ``String.prototype.search``; app repos/services expose ``.search()`` too — 270+ in one repo)
 # and with HTTP (``get``/``delete``), so they are gated on an ES-*client* receiver and the
@@ -238,19 +313,30 @@ def match_db(callee: str, method: str, language: str | None = None,
         return "prisma"
     if m in _DISTINCTIVE:
         db = _DISTINCTIVE[m]
-        # EF verbs are .NET-only; suppress them in a known non-.NET file (name collision).
-        if not (db == "entity_framework" and language is not None and language not in _DOTNET):
+        # A receiverless distinctive verb is a local/helper call, not a database access.
+        # This is defense-in-depth for callers that do not provide local_names.
+        if callee != method and not (
+            db == "entity_framework" and language is not None and language not in _DOTNET
+        ):
             return db
     # Ambiguous sync LINQ terminals (ToList/FirstOrDefault/…): EF only in a .NET file AND when
     # the call chain shows a queryable/DbContext source; else LINQ-to-Objects — drop, don't tag.
     if m in _EF_LINQ_VERBS and language in _DOTNET:
         return "entity_framework" if _has_ef_source(low) else None
+    if _is_active_record_call(callee, method, language, typed_db_ids):
+        return "activerecord"
     receiver = low.rsplit(".", 1)[0].rsplit(".", 1)[-1] if "." in low else ""
     # ES match is gated on the TERMINAL receiver only (the segment the verb is invoked on) —
     # never a deeper chain segment, so a bare ``…client`` further up (``prismaClient``,
     # ``apiClient``) can't hijack the call: ``this.prismaClient.user.count()`` stays out of ES.
     if m in _ES_VERBS and receiver:
-        if m in _ES_COLLISION_VERBS:
+        if language == "scala":
+            # In Scala, ``client`` is canonical for HTTP clients (org.http4s.client.Client, WSClient);
+            # do not treat bare "client" or HTTP clients as ES.
+            es_names = _ES_RECEIVERS - {"client"}
+            if receiver in es_names:
+                return "elasticsearch"
+        elif m in _ES_COLLISION_VERBS:
             # count/index also mean ORM/array ops — demand an explicit ES receiver name,
             # a bare ``…client`` (httpClient) is not enough.
             if receiver in _ES_RECEIVERS:
@@ -261,10 +347,10 @@ def match_db(callee: str, method: str, language: str | None = None,
     # explicit cache/redis receiver NAME. A bare ``endswith("cache")`` is deliberately NOT used:
     # in-memory ``Map``/``LRUCache`` fields are routinely named ``…Cache`` (e.g. a DataLoader
     # ``dataLoaderCache: Map<K,V>``), and their ``.get()``/``.set()`` are memory ops, not Redis.
-    # Residual: an in-memory object named exactly ``cache``/``cacheService`` still matches, and the
-    # NestJS ``Cache`` abstraction may be memory-backed — resolving those needs type resolution
-    # (see typed_db_ids) plus a cache-vs-redis vocabulary decision; left for a follow-up.
-    if receiver and (receiver in _CACHE_RECEIVERS or receiver.endswith("redis")):
+    cache_receivers = _CACHE_RECEIVERS
+    if language == "scala":
+        cache_receivers = _CACHE_RECEIVERS - {"cache"}
+    if receiver and (receiver in cache_receivers or receiver.endswith("redis")):
         if m in _CACHE_VERBS or m in ("delete", "remove"):
             return "redis"
     if m in _GENERIC:
@@ -301,6 +387,9 @@ def match_db(callee: str, method: str, language: str | None = None,
         # callee includes the method (``session.run``); the receiver is everything before
         # it, and we match on the receiver's final segment (``this.session`` -> ``session``).
         receiver_last = low.rsplit(".", 1)[0].rsplit(".", 1)[-1]
-        if any(receiver_last == r or receiver_last.endswith(r) for r in _NEO4J_RUN_RECEIVERS):
+        if receiver_last in ("ctx", "context"):
+            if language == "scala":
+                return "quill"
+        if receiver_last in _NEO4J_RUN_RECEIVERS:
             return "neo4j"
     return None

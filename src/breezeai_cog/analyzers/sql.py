@@ -17,10 +17,13 @@ mutations in file order."""
 from __future__ import annotations
 
 import re
+from collections.abc import Iterator
 from typing import Any
 
 import sqlglot
 from sqlglot import exp
+from sqlglot.dialects.dialect import Dialect
+from sqlglot.tokens import Token, TokenType  # type: ignore[attr-defined]  # re-exported, not in __all__
 
 # Our dialect label -> sqlglot read dialect.
 _SQLGLOT = {
@@ -292,21 +295,94 @@ def _apply_alter(alter: exp.Alter, by_table: dict[str, dict[str, Any]]) -> None:
             owner["constraints"].append(rec)
 
 
-def _view(create: exp.Create, dialect: str) -> dict[str, Any]:
+def _view(create: exp.Create, dialect: str, raw: str) -> dict[str, Any]:
+    """View record. ``definition`` is ``raw``: the **verbatim** CREATE statement as written in
+    the source — header included, interior comments and whitespace intact (BREEZEAI-958 AC2).
+    Every caller slices ``raw`` from the file text (see ``_sqlglot_statements`` /
+    ``_parse_tsql_ddl``); sqlglot's re-serialised query is never stored, because it drops the
+    ``CREATE … AS`` header, collapses whitespace, rewrites ``--`` comments as ``/* */`` and
+    normalises aliases/operators. ``dialect`` is kept for signature parity with ``_table``."""
     table = create.find(exp.Table)
     name = table.name if table is not None else ""
     schema = (table.db or None) if table is not None else None
     full = f"{schema}.{name}" if schema else name
-    query = create.expression
-    definition = query.sql(dialect=_SQLGLOT.get(dialect, "postgres")) if query is not None else None
     return {
         "name": name,
         "schema": schema,
         "fullName": full,
         "viewType": "materialized_view" if create.args.get("materialized") else "view",
-        "definition": definition,
+        "definition": raw,
         "columns": [],
     }
+
+
+_TRAILING_TERMINATOR = re.compile(r"\s*;\s*$")
+
+
+def _raw_statement(stmt: str) -> str:
+    """Verbatim statement text from one ``;``-delimited chunk: *leading* whitespace and
+    comments are dropped so the text starts at the ``CREATE`` keyword, and trailing
+    whitespace plus a terminating ``;`` are removed. Everything in between — interior and
+    trailing comments, spacing, quoting, hints — is left exactly as written."""
+    return _TRAILING_TERMINATOR.sub("", _strip_leading_noise(stmt)).rstrip()
+
+
+def _sqlglot_statements(
+    text: str, read: str, sample_errors: list[str]
+) -> Iterator[tuple[str, exp.Expr | None]]:
+    """Yield ``(raw_chunk, expression)`` per statement of a Postgres / MySQL / SQLite file.
+
+    The file is tokenized once with sqlglot's own dialect tokenizer and cut at its ``;``
+    tokens, then each chunk's tokens are parsed on their own. Because the tokenizer is the
+    one sqlglot parses with, a ``;`` inside a string literal — including dialect escapes the
+    hand-rolled T-SQL splitter does not know (MySQL ``\\'``, Postgres ``E'..'`` and ``$$..$$``)
+    — never splits a statement, and ``raw_chunk`` is the exact source slice of the expression
+    it is paired with (BREEZEAI-958 AC2: stored view ``definition`` == source text). Pairing by
+    position also means a view that sqlglot degrades to a generic ``Command`` simply has no
+    view record; it can never hand its text to a later view of the same bare name.
+
+    A chunk that fails to parse yields ``None`` (counted as failed by the caller, first few
+    errors sampled). If the tokenizer itself rejects the file (e.g. an unterminated string)
+    the old naive ``;`` split + ``parse_one`` per piece is used so partial files still yield
+    whatever parses; ``raw_chunk`` is then that naive piece.
+    """
+    dialect = Dialect.get_or_raise(read)
+    try:
+        tokens = dialect.tokenize(text)
+    except Exception as exc:
+        if len(sample_errors) < 5:
+            sample_errors.append(str(exc))
+        for raw in text.split(";"):
+            if not raw.strip():
+                continue
+            try:
+                yield raw, sqlglot.parse_one(raw, read=read)
+            except Exception as exc2:
+                if len(sample_errors) < 5:
+                    sample_errors.append(str(exc2))
+                yield raw, None
+        return
+
+    parser = dialect.parser()
+    chunk_tokens: list[Token] = []
+    chunk_start = 0
+    # ``None`` sentinel so the final statement (no ``;`` after it) takes the same branch.
+    for tok in [*tokens, None]:
+        if tok is not None and tok.token_type != TokenType.SEMICOLON:
+            chunk_tokens.append(tok)
+            continue
+        end = tok.start if tok is not None else len(text)
+        raw = text[chunk_start:end]
+        chunk_start = end + 1
+        if chunk_tokens:  # a blank run between two ``;`` (or trailing whitespace) is not a statement
+            try:
+                parsed = parser.parse(chunk_tokens, text)
+                yield raw, parsed[0] if parsed else None
+            except Exception as exc:
+                if len(sample_errors) < 5:
+                    sample_errors.append(str(exc))
+                yield raw, None
+        chunk_tokens = []
 
 
 def _index(create: exp.Create, dialect: str) -> dict[str, Any]:
@@ -358,12 +434,7 @@ def parse_ddl(text: str, filepath: str | None = None) -> dict[str, Any]:
     ok = failed = 0
     sample_errors: list[str] = []
 
-    try:
-        statements = sqlglot.parse(text, read=read)
-    except Exception:
-        statements = [s for s in _safe_parse_each(text, read, sample_errors)]
-
-    for stmt in statements:
+    for raw, stmt in _sqlglot_statements(text, read, sample_errors):
         if stmt is None:
             failed += 1
             continue
@@ -373,7 +444,7 @@ def parse_ddl(text: str, filepath: str | None = None) -> dict[str, Any]:
                 if kind == "TABLE":
                     tables.append(_table(stmt, dialect))
                 elif kind == "VIEW":
-                    views.append(_view(stmt, dialect))
+                    views.append(_view(stmt, dialect, raw=_raw_statement(raw)))
                 elif kind == "INDEX":
                     all_indexes.append(_index(stmt, dialect))
             elif isinstance(stmt, exp.Alter):
@@ -415,19 +486,6 @@ def parse_ddl(text: str, filepath: str | None = None) -> dict[str, Any]:
         "sequences": [],
         "parseStats": {"ok": ok, "failed": failed, "sampleErrors": sample_errors},
     }
-
-
-def _safe_parse_each(text: str, read: str, sample_errors: list[str]):
-    for raw in text.split(";"):
-        chunk = raw.strip()
-        if not chunk:
-            continue
-        try:
-            yield sqlglot.parse_one(chunk, read=read)
-        except Exception as exc:
-            if len(sample_errors) < 5:
-                sample_errors.append(str(exc))
-            yield None
 
 
 # SQL Server / T-SQL storage & replication clauses that sqlglot's ``tsql`` dialect cannot
@@ -851,7 +909,7 @@ def _parse_tsql_ddl(text: str) -> dict[str, Any]:
                 tables.append(tbl)
                 ok += 1
             elif kind == "view" and isinstance(node, exp.Create):
-                views.append(_view(node, "transactsql"))
+                views.append(_view(node, "transactsql", raw=_raw_statement(s)))
                 ok += 1
             elif kind == "index" and isinstance(node, exp.Create):
                 all_indexes.append(_index(node, "transactsql"))
@@ -1667,9 +1725,17 @@ def _parse_create_table(stmt: str) -> dict[str, Any] | None:
     }
 
 
+# CREATE [OR REPLACE] [[NO] FORCE] [EDITIONABLE | NONEDITIONABLE] [EDITIONING] [MATERIALIZED] VIEW
+# — the EDITIONABLE keywords are what SQL Developer / DBMS_METADATA emit by default on 12c+.
+_ORA_VIEW_HEAD = (
+    r"CREATE\s+(?:OR\s+REPLACE\s+)?(?:FORCE\s+|NO\s*FORCE\s+)?(?:(?:NON)?EDITIONABLE\s+)?"
+    r"(?:EDITIONING\s+)?(?:MATERIALIZED\s+)?VIEW\b"
+)
+
+
 def _parse_create_view(stmt: str) -> dict[str, Any] | None:
     m = re.match(
-        r"^CREATE\s+(?:OR\s+REPLACE\s+)?(?:FORCE\s+|NOFORCE\s+)?(?:MATERIALIZED\s+)?VIEW\s+"
+        r"^" + _ORA_VIEW_HEAD + r"\s+"
         r"(?:(" + _IDENT + r")\.)?(" + _IDENT + r")([\s\S]*?)\bAS\b\s+([\s\S]+)",
         stmt,
         re.IGNORECASE,
@@ -1681,7 +1747,9 @@ def _parse_create_view(stmt: str) -> dict[str, Any] | None:
     full = f"{schema}.{name}" if schema else name
     col_list_m = re.match(r"^\s*\(([^)]*)\)", m.group(3) or "")
     column_list = _split_col_list(col_list_m.group(1)) if col_list_m else []
-    definition = m.group(4).strip() if m.group(4) else None
+    # Verbatim CREATE statement (header included), mirroring program bodies / ddlText —
+    # not just the text after AS (BREEZEAI-958 AC2: stored definition == source text).
+    definition = _raw_statement(stmt)
     is_mat = bool(re.search(r"MATERIALIZED\s+VIEW", stmt, re.IGNORECASE))
     return {
         "name": name,
@@ -2084,9 +2152,9 @@ def _parse_oracle_ddl(text: str) -> dict[str, Any]:
                 parsed += 1
             else:
                 record_skip(stripped, "create_table_unparsed")
-        elif upper.startswith("CREATE") and re.search(
-            r"CREATE\s+(?:OR\s+REPLACE\s+)?(?:FORCE\s+|NOFORCE\s+)?(?:MATERIALIZED\s+)?VIEW\b", stripped, re.IGNORECASE
-        ):
+        # Anchored: an unanchored search also matched ``CREATE … VIEW`` inside the dynamic SQL
+        # of a package/procedure body and sent the whole program here, where it was dropped.
+        elif upper.startswith("CREATE") and re.match(_ORA_VIEW_HEAD, stripped, re.IGNORECASE):
             v = _parse_create_view(stripped)
             if v:
                 views.append(v)

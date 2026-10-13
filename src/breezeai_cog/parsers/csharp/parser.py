@@ -17,14 +17,18 @@ from tree_sitter import Node
 from ...emit import file_id
 from ...schemas import SCHEMA_VERSION, FileRecord, Function, Statement
 from ...utils import count_loc
+from ..additive import run_additive
 from ..base import BaseParser, ParseContext
 from ..callresolve import make_resolver
 from ..treesitter import parse_source
 from .classes import build_class
 from .functions import defined_names, type_map
-from .imports import CSharpIndex, build_csharp_index, extract_imports
-from .lambda_events import detect_lambda_handlers
-from .lucene import detect_lucene_access
+from .imports import (
+    CSharpIndex,
+    bind_static_import_members,
+    build_csharp_index,
+    extract_imports,
+)
 from ..comments_common import comment_statements_for
 from .mappings import COMMENT_TYPES, CONTROL_FLOW, FRAMEWORKS, STATEMENT_TYPES
 
@@ -69,8 +73,15 @@ class CSharpParser(BaseParser):
         internal, external, _, bindings = extract_imports(
             root, source, path, ctx.resolution_index
         )
+        local_names = defined_names(root, source)
+        # A `using static Ns.Type` puts Type's members in scope unqualified, so a bare
+        # `M()` needs them bound; `local_names` keeps a same-file declaration winning.
+        bind_static_import_members(
+            root, source, bindings, local_names,
+            ctx.resolution_index if isinstance(ctx.resolution_index, CSharpIndex) else None,
+        )
         resolve = make_resolver(
-            bindings, defined_names(root, source), path, type_map(root, source),
+            bindings, local_names, path, type_map(root, source),
             ext_index=getattr(ctx.resolution_index, "ext_methods", None),
             heritage=getattr(ctx.resolution_index, "class_heritage", None),
         )
@@ -108,15 +119,8 @@ class CSharpParser(BaseParser):
             classes=classes,
             statements=statements,
         )
-        # Additive detectors — gated by --capture-statements, layered on top of base + any
-        # framework subclass's extraction (a Lambda handler is an orthogonal capability, so it
-        # co-exists with an ASP.NET controller in the same file rather than displacing it).
-        # Mirrors TypeScript's `typescript/aws_events.py` (sibling module, not a peer parser).
-        if capture and not self.is_fixture_file(path):  # entry-point emitter → skip fixtures/tests
-            if detect_lambda_handlers(root, source, path, record) and record.framework is None:
-                record.framework = "aws-lambda"
-        if capture:
-            # Index access is data access, not an entry point, so it is not fixture-gated: a
-            # statement inside a test file is still a real read of the index.
-            detect_lucene_access(root, source, path, record)
+        # Additive detectors (parsers/additive.py) — layered on top of base + any framework
+        # subclass's extraction (a Lambda handler or a Lucene read co-exists with an ASP.NET
+        # controller in the same file rather than displacing it).
+        run_additive("csharp", root, ctx, record, is_fixture=self.is_fixture_file(path))
         return record

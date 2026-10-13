@@ -30,6 +30,7 @@ from pathlib import Path
 from tree_sitter import Node
 
 from ...utils import repo_relative
+from ..dotnet_common import web_app_root
 from ..index_common import (
     ClassHeritage, merge_heritage, parallel_map, project_heritage, record_distinct,
 )
@@ -226,22 +227,11 @@ def _string_literal(node: Node | None, source: bytes) -> str | None:
     return None
 
 
-_WEB_CONFIG = ("web.config", "Web.config")
-
-
 def _aspx_app_root(rel: str, repo_root: Path | None) -> str:
     """Application root for a file in a Web Forms repo: the shallowest ancestor directory
     (repo-root downward) containing ``web.config``. Falls back to ``""`` (repo root) when
-    ``repo_root`` is absent or no ``web.config`` is found. Mirrors ``mounts._app_root``."""
-    if repo_root is None:
-        return ""
-    dirname = posixpath.dirname(rel)
-    parts = dirname.split("/") if dirname else []
-    for i in range(len(parts) + 1):
-        d = "/".join(parts[:i])
-        if any((repo_root / d / c).is_file() for c in _WEB_CONFIG):
-            return d
-    return ""
+    ``repo_root`` is absent or no ``web.config`` is found."""
+    return web_app_root(rel, repo_root) if repo_root is not None else ""
 
 
 def _physical_aspx_key(physical: str, app_root: str = "") -> str | None:
@@ -558,6 +548,49 @@ def _resolve(name: str, scopes: set[str], index: CSharpIndex | None, self_path: 
             if len(same) == 1:
                 return same[0]
     return None
+
+
+def bind_static_import_members(
+    root: Node,
+    source: bytes,
+    bindings: dict[str, str],
+    local_names: set[str],
+    index: CSharpIndex | None,
+) -> None:
+    """Bind the *members* a ``using static Ns.Type`` brings into scope unqualified.
+
+    :func:`extract_imports` binds the imported type's own simple name, which is what an
+    *alias* needs (it is always written ``Alias.M()``). A static import is the opposite: the
+    call site writes a bare ``M()``, with no receiver to look up — so without this the call
+    resolves nowhere even though its declaring file is known.
+
+    A member binds only when it is unambiguous. A name exposed by two static imports from
+    different files collapses to ambiguous and is left **unbound**, so the call stays
+    honestly unresolved rather than attributed to a guess; a name already ambiguous in the
+    index is skipped for the same reason. A name the file declares itself is never bound —
+    the resolver consults ``bindings`` before same-file definitions, so binding it would
+    shadow the real local declaration. Likewise an existing binding (an alias, a referenced
+    type) always wins.
+    """
+    if index is None:
+        return
+    candidates: dict[str, str | None] = {}
+    for child in root.named_children:
+        if child.type != "using_directive":
+            continue
+        kind, name, _ = _classify_using(child, source)
+        if kind != "static" or not name:
+            continue
+        heritage = index.class_heritage.get(_simple(name) or "")
+        if heritage is None:
+            continue
+        for member, member_file in heritage.methods.items():
+            if member_file is not None:  # already-ambiguous member → leave unbound
+                record_distinct(candidates, member, member_file)
+    for member, member_file in candidates.items():
+        if member_file is None or member in local_names or member in bindings:
+            continue
+        bindings[member] = member_file
 
 
 def extract_imports(

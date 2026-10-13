@@ -21,8 +21,8 @@ _TYPE = {
     "struct_declaration": "struct",
     "record_declaration": "record",
 }
-_METHOD_MEMBERS = ("method_declaration", "constructor_declaration",
-                   "destructor_declaration", "operator_declaration")
+_METHOD_MEMBERS = ("method_declaration", "constructor_declaration", "destructor_declaration",
+                   "operator_declaration", "conversion_operator_declaration")
 _NESTED_CLASS_TYPES = tuple(_TYPE)  # member (nested) types declared in a type body
 
 
@@ -124,7 +124,7 @@ def build_class(
 
     # Enum members become flat statements parented to the enum Class (their `text` is
     # queryable); `enum_member_declaration` is otherwise captured nowhere (it is not a
-    # field_declaration). Gated by --capture-statements like every other statement.
+    # field_declaration). Gated by statement capture like every other statement.
     if capture and node.type == "enum_declaration" and body is not None:
         statements.extend(
             emit_enum_members(

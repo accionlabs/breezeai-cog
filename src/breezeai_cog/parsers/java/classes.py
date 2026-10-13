@@ -106,7 +106,7 @@ def build_class(
 
     # Enum members become flat statements parented to the enum Class (their `text` is
     # queryable). `NAME("value")` (constructor syntax) carries its value in the text;
-    # gated by --capture-statements like every other statement.
+    # gated by statement capture like every other statement.
     if capture and node.type == "enum_declaration" and body is not None:
         statements.extend(
             emit_enum_members(

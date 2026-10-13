@@ -12,10 +12,13 @@ def test_files_tallied_by_reason() -> None:
     r.record("c.txt", "unsupported")
     r.record("secret.env", "ignored")
     r.record("huge.bin", "oversized", size=5_000_000)
+    r.record("page.html", "template")
 
-    assert r.counts == {"unsupported": 3, "ignored": 1, "oversized": 1}
-    assert r.total_files == 5
+    assert r.counts == {"unsupported": 3, "ignored": 1, "oversized": 1, "template": 1}
+    assert r.total_files == 6
     assert not r.is_empty
+    # a gated template is not an unsupported extension — it stays out of that histogram
+    assert ".html" not in r.extensions
 
 
 def test_unsupported_extension_histogram() -> None:

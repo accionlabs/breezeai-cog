@@ -17,7 +17,29 @@ from .statements import extract_statements, method_name
 
 _VISIBILITY = {"public", "private", "protected", "internal", "file"}
 _METHOD_TYPES = ("method_declaration", "constructor_declaration", "destructor_declaration",
-                 "operator_declaration", "local_function_statement")
+                 "operator_declaration", "conversion_operator_declaration",
+                 "local_function_statement")
+
+
+def declaration_name(node: Node, source: bytes) -> str | None:
+    """Declared name of a member. Operators carry no ``name`` field in the C# grammar —
+    an overload holds its token under ``operator`` (``operator +``) and a conversion holds
+    its target type under ``type`` (``implicit operator decimal``) — so both are spelled
+    out here rather than falling through to ``<anonymous>``."""
+    name_node = node.child_by_field_name("name")
+    if name_node is not None:
+        return node_text(name_node, source)
+    if node.type == "operator_declaration":
+        token = node.child_by_field_name("operator")
+        return f"operator {node_text(token, source)}" if token is not None else None
+    if node.type == "conversion_operator_declaration":
+        target = node.child_by_field_name("type")
+        kind = next((node_text(c, source) for c in node.children
+                     if c.type in ("implicit", "explicit")), None)
+        if kind is None or target is None:
+            return None
+        return f"{kind} operator {node_text(target, source)}"
+    return None
 
 
 def flags(node: Node, source: bytes) -> tuple[str, bool]:
@@ -127,9 +149,9 @@ def defined_names(root: Node, source: bytes) -> set[str]:
     def walk(n: Node) -> None:
         for c in n.named_children:
             if c.type in types:
-                nm = c.child_by_field_name("name")
+                nm = declaration_name(c, source)
                 if nm is not None:
-                    names.add(node_text(nm, source))
+                    names.add(nm)
             walk(c)
 
     walk(root)
@@ -195,8 +217,7 @@ def build_method(
     """Return the Function(s) and their (flat) statements — this function plus any
     nested local functions, which are extracted as their own Functions parented to
     this one."""
-    name_node = node.child_by_field_name("name")
-    name = node_text(name_node, source) if name_node is not None else "<anonymous>"
+    name = declaration_name(node, source) or "<anonymous>"
     start, end = line_span(node)
     # The id carries the qualified owner (`Outer.Inner`) so a nested type's methods are
     # identified unambiguously; `class_name` stays simple for call resolution.

@@ -211,6 +211,18 @@ def test_high_collision_verbs_require_db_receiver() -> None:
         ("user.save", "save"),              # bare active-record save, no DB receiver → ambiguous, drop
     ]:
         assert classify_call(callee, method) is None, callee
+    # Ruby class constants are not enough to establish an ActiveRecord receiver.
+    for callee, method in [
+        ("File.delete", "delete"),
+        ("Hash.merge", "merge"),
+        ("Logger.create", "create"),
+        ("Process.execute", "execute"),
+        ("Digest.update", "update"),
+        ("Set.merge", "merge"),
+        ("Marshal.save", "save"),
+        ("ENV.delete", "delete"),
+    ]:
+        assert classify_call(callee, method, language="ruby") is None, callee
     # real ORM on these verbs still matches via a positive DB receiver / vendor hint:
     assert classify_call("userRepository.find", "find") == ("db_method_call", "find", "typeorm")
     assert classify_call("this.repo.delete", "delete") == ("db_method_call", "delete", "typeorm")
@@ -220,6 +232,53 @@ def test_high_collision_verbs_require_db_receiver() -> None:
     assert classify_call("prisma.user.create", "create") == ("db_method_call", "create", "prisma")
     # em.merge / session.persist (Hibernate) keep matching via receiver hints:
     assert classify_call("this.entityManager.merge", "merge") == ("db_method_call", "merge", "typeorm")
+
+
+def test_ruby_active_record_distinctive_verbs_need_no_index() -> None:
+    """Verbs that effectively only exist in ActiveRecord are trusted on a bare constant —
+    no stdlib or common-gem class API uses them, so the receiver needs no identification."""
+    for callee, method in [
+        ("User.find_by", "find_by"), ("User.where", "where"), ("Post.joins", "joins"),
+        ("User.includes", "includes"), ("User.pluck", "pluck"),
+        ("User.destroy_all", "destroy_all"), ("User.update_all", "update_all"),
+        ("User.take", "take"),
+    ]:
+        assert classify_call(callee, method, language="ruby") == (
+            "db_method_call", method, "activerecord"
+        )
+
+
+def test_ruby_generic_verbs_require_an_identified_model() -> None:
+    """``find``/``all``/``create``/``first``/``last`` collide with real stdlib and gem APIs
+    (``Tempfile.create``, ``Settings.all``, ``Date.first``), so they only count when the
+    receiver is a known model. Absent beats wrong."""
+    models = frozenset({"User", "user"})
+    for callee, method in [
+        ("User.find", "find"), ("User.create", "create"), ("User.all", "all"),
+        ("User.first", "first"), ("User.last", "last"),
+        ("user.save", "save"), ("user.update", "update"), ("user.destroy", "destroy"),
+    ]:
+        assert classify_call(callee, method, language="ruby", typed_db_ids=models) == (
+            "db_method_call", method, "activerecord"
+        )
+        assert classify_call(callee, method, language="ruby") is None
+
+
+def test_ruby_non_activerecord_constants_are_never_data_access() -> None:
+    """Real class-level APIs that share a name with an ActiveRecord verb. None is a model,
+    so none may be tagged — even though every Ruby class name is capitalized."""
+    for callee, method in [
+        ("File.delete", "delete"), ("Hash.merge", "merge"), ("Tempfile.create", "create"),
+        ("FileUtils.create", "create"), ("Pathname.create", "create"),
+        ("Struct.create", "create"), ("CSV.create", "create"), ("Logger.create", "create"),
+        ("Settings.all", "all"), ("Flipper.all", "all"), ("Thread.all", "all"),
+        ("Set.all", "all"), ("Date.first", "first"), ("Time.last", "last"),
+        ("Timeout.first", "first"), ("File.find", "find"), ("Dir.find", "find"),
+        ("Gem.find", "find"), ("ENV.find", "find"), ("Process.find", "find"),
+        ("File.exists", "exists"), ("Marshal.save", "save"), ("Digest.update", "update"),
+        ("config.save", "save"), ("image.update", "update"),
+    ]:
+        assert classify_call(callee, method, language="ruby") is None, callee
 
 
 def test_elasticsearch_client_verbs_gated() -> None:
@@ -475,3 +534,45 @@ export class TaskService {
     db_stmts = [s for s in rec.statements if s.semanticType == "db_method_call"]
     assert len(db_stmts) == 1
     assert db_stmts[0].dataAccessHint in ("typeorm", "orm")
+
+
+def test_scala_false_positive_gates() -> None:
+    from breezeai_cog.parsers.detection.db_queries import match_db
+    from breezeai_cog.parsers.detection.api_calls import match_api
+
+    # B1: in-memory Map named cache is not Redis in Scala
+    assert match_db("cache.get", "get", language="scala") is None
+    assert match_db("cache.get", "get", language="javascript") == "redis"
+
+    # B2: bare aggregate is not MongoDB
+    assert match_db("aggregate", "aggregate", language="scala") is None
+    assert match_db("aggregate", "aggregate", language="javascript") is None
+    assert match_db("collection.aggregate", "aggregate") == "mongodb"
+
+    # B3: Scala HTTP client named client is not Elasticsearch
+    assert match_db("client.search", "search", language="scala") is None
+    assert match_db("client.index", "index", language="scala") is None
+    assert match_db("esClient.search", "search", language="scala") == "elasticsearch"
+
+    # B4: ctx.run in Scala is Quill, not Neo4j
+    assert match_db("ctx.run", "run", language="scala") == "quill"
+    assert match_db("context.run", "run", language="scala") == "quill"
+    assert match_db("session.run", "run") == "neo4j"
+    assert match_db("driver.run", "run") == "neo4j"
+
+    # B5: Capitalized Request constructor is not an outbound api_call
+    assert match_api("http4s.Request", "Request") is None
+    assert match_api("Request", "Request") is None
+    assert match_api("axios.request", "request") == "REQUEST"
+
+
+def test_api_hints_ignore_call_arguments() -> None:
+    from breezeai_cog.parsers.detection.api_calls import match_api
+
+    # A URL literal must not turn an arbitrary receiver into an HTTP client.
+    assert match_api('ws.url("https://api.example/users").get', "get") is None
+    assert match_api('builder.run("https://api.example/users")', "run") is None
+    # Receiver hints still work through ordinary member chains.
+    assert match_api("this.http.post", "post") == "POST"
+    assert match_api("axios.get", "get") == "GET"
+
