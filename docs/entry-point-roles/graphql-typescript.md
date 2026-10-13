@@ -7,7 +7,7 @@ follows [graphql-sdl.md](graphql-sdl.md); the Apollo transport mount is in [expr
 
 | Construct | Role | Record | Why |
 |---|---|---|---|
-| Field of the `Query` / `Mutation` / `Subscription` object in a resolver map (`Query: { books: (…) => … }`) | Binding | `route`, `framework: graphql`, `QUERY` / `MUTATION` / `SUBSCRIPTION`, `routeKind` the same in lower case, field name as `endpoint` and `handler`, `handlerLine` = where the function starts | One operation; the property names the function |
+| Field of the `Query` / `Mutation` / `Subscription` object in a resolver map (`Query: { books: (…) => … }`) | Binding | `route`, `framework: graphql`, `QUERY` / `MUTATION` / `SUBSCRIPTION`, `routeKind` the same in lower case, field name as `endpoint` and `handler`, `handlerLine` = where the function starts; `requestDTO` / `responseDTO` from the field's SDL declaration (a `.graphql` file or an embedded `gql` schema, anywhere in the repo; empty if declared twice differently) | One operation; the property names the function |
 | Resolver-map object and `new ApolloServer({ typeDefs, resolvers })` | Wiring | — | Registers many operations |
 | Field of a data-type object in a resolver map (`Book: { author: … }`) | None | — | No address of its own |
 | `__resolveReference` of a type in a resolver map (federation) | Binding | `route`, `RESOLVE_REFERENCE`, `routeKind: query`, type name as `endpoint` | Called by the gateway's `_entities` field |

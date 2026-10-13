@@ -48,6 +48,7 @@ from ...emit import disambiguate, file_id, statement_id
 from ...schemas import Class, Statement
 from ..additive import DetectContext, Detection, Detector, Gate, register_detector
 from ..emits import Emit
+from .sdl_fields import root_field_dto
 from ..graphql.sdl import base_type_name, child_of_type, extract_graphql
 from ..treesitter import first_line, node_text, parse_source
 
@@ -101,7 +102,9 @@ def _handler(field: Node, source: bytes, op: str) -> tuple[str | None, int | Non
     return None, None
 
 
-def _detect_resolver_maps(root: Node, source: bytes, path: str, seen: set[str]) -> list[Statement]:
+def _detect_resolver_maps(
+    root: Node, source: bytes, path: str, seen: set[str], index: object = None
+) -> list[Statement]:
     routes: list[Statement] = []
 
     def walk(node: Node) -> None:
@@ -116,6 +119,8 @@ def _detect_resolver_maps(root: Node, source: bytes, path: str, seen: set[str]) 
                         continue
                     sl, sc = field.start_point[0] + 1, field.start_point[1]
                     handler, handler_line = _handler(field, source, op)
+                    # The DTOs are declared by the SDL, often in another file (.graphql).
+                    request_dto, response_dto = root_field_dto(index, key, op)
                     routes.append(
                         Statement(
                             id=disambiguate(statement_id(path, sl, sc), seen),
@@ -125,6 +130,8 @@ def _detect_resolver_maps(root: Node, source: bytes, path: str, seen: set[str]) 
                             text=first_line(node_text(field, source))[:120],
                             method=kind.upper(),
                             endpoint=op,
+                            requestDTO=request_dto,
+                            responseDTO=response_dto,
                             framework="graphql",
                             handler=handler,
                             handlerLine=handler_line,
@@ -426,13 +433,14 @@ def detect_graphql(
     seen_ids: set[str],
     timeout_micros: int = 0,
     limit: int = 8000,
+    index: object = None,
 ) -> tuple[list[Class], list[Statement]]:
     """Server-side GraphQL — resolver-map operations (statements, with handlers) and embedded
     SDL (the type system as ``Class`` nodes plus route/entity/member statements). ``timeout_micros``
     bounds the secondary ``graphql`` parse of embedded SDL; ``limit`` bounds statement ``text``.
     Returns ``(classes, statements)`` to append to the record. (Client operations are handled
     additively for every TS file by :func:`detect_graphql_client`, not here.)"""
-    routes = _detect_resolver_maps(root, source, path, seen_ids)
+    routes = _detect_resolver_maps(root, source, path, seen_ids, index)
     classes, sdl_stmts = _detect_sdl(root, source, path, seen_ids, timeout_micros, limit)
     return classes, routes + sdl_stmts
 

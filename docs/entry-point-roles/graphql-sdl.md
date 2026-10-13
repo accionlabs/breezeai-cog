@@ -8,7 +8,7 @@ fields are captured as plain statements and are never entry points.
 
 | Construct | Role | Record | Why |
 |---|---|---|---|
-| Field of `type Query` / `Mutation` / `Subscription` (or `extend type …`) | Wiring | statement stays plain; the resolver for the field is the binding | Declares the operation's name; names no handler |
+| Field of `type Query` / `Mutation` / `Subscription` (or `extend type …`) | Wiring | statement stays plain (keeps its DTOs); the resolver for the field is the binding and carries the same DTOs | Declares the operation's name; names no handler |
 | `schema { query: RootQuery }` | Wiring | statement stays plain; makes `RootQuery`'s fields operations | Marks a root container |
 | Field of a data type (`type Book { author: … }`) | None | — | No address of its own |
 | `type Book @key(fields: …)` | None | `graphql_entity` (not an entry point); the entity resolver in code is the binding | Declares the entity, does not resolve it |

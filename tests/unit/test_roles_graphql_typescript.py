@@ -160,3 +160,45 @@ def test_client_operation_is_outbound(analyze_files) -> None:
     assert [(s.endpoint, s.handler) for s in st if s.semanticType == "api_call"] == [
         ("books", "GetBooks")
     ]
+
+
+def test_resolver_takes_its_dtos_from_a_graphql_file(analyze_files) -> None:
+    # Schema-first: the SDL (a .graphql file, another parser's) declares the DTOs; the resolver
+    # map is the binding and carries them.
+    st = _run(
+        analyze_files,
+        {
+            "src/schema.graphql": "type Query { book(id: ID!): Book }\n"
+            "type Mutation { addBook(input: BookInput!): Book }\n",
+            "src/resolvers.ts": MAP_HEAD + "  Query: {\n    book: () => null,\n  },\n"
+            "  Mutation: {\n    addBook: () => null,\n  },\n};\n",
+        },
+    )
+    got = {(r.endpoint, r.requestDTO, r.responseDTO) for r in _eps(st) if r.path == "src/resolvers.ts"}
+    assert got == {("book", "ID", "Book"), ("addBook", "BookInput", "Book")}
+
+
+def test_resolver_takes_its_dtos_from_embedded_sdl(analyze_files) -> None:
+    st = _run(
+        analyze_files,
+        {
+            "src/schema.ts": "import gql from 'graphql-tag';\n"
+            "export const typeDefs = gql`\n  type Query { books(filter: BookFilter): [Book] }\n`;\n",
+            "src/resolvers.ts": MAP_HEAD + "  Query: {\n    books: () => [],\n  },\n};\n",
+        },
+    )
+    [r] = [r for r in _eps(st) if r.path == "src/resolvers.ts"]
+    assert (r.requestDTO, r.responseDTO) == ("BookFilter", "Book")
+
+
+def test_conflicting_sdl_leaves_the_dtos_empty(analyze_files) -> None:
+    st = _run(
+        analyze_files,
+        {
+            "a.graphql": "type Query { book(id: ID!): Book }\n",
+            "b.graphql": "type Query { book(id: ID!): BookV2 }\n",
+            "src/resolvers.ts": MAP_HEAD + "  Query: {\n    book: () => null,\n  },\n};\n",
+        },
+    )
+    [r] = [r for r in _eps(st) if r.path == "src/resolvers.ts"]
+    assert (r.requestDTO, r.responseDTO) == (None, None)
