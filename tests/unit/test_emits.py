@@ -124,3 +124,23 @@ def test_starts_enriches_the_statement_the_construct_begins() -> None:
           SOURCE, "a.ts")
     assert [(s.startLine, s.semanticType) for s in record.statements] == [
         (2, None), (3, "eventbus_send")]
+
+
+def test_same_enriches_the_statement_captured_on_the_node_itself() -> None:
+    post, get = _calls()
+    record = _record(base="query_statement")
+    # The base statement sits on the outer call (2:2, a call_expression), typed already.
+    record.statements[0].nodeType = "call_expression"
+    apply(record, [
+        Emit(post, {"semanticType": "route", "endpoint": "/b"}, enrich="same"),
+        Emit(get, {"semanticType": "route", "endpoint": "/a"}, enrich="same"),
+    ], SOURCE, "a.ts")
+    # The outer call enriches its own statement, whatever its type; the inner call (same line,
+    # same column, but already written this run) gets its own record.
+    assert [(s.id, s.semanticType, s.endpoint) for s in record.statements] == [
+        ("a.ts:2:2", "route", "/b"), ("a.ts:2:2#2", "route", "/a")]
+    # A statement at the same position but of another node type is not the node's own.
+    record = _record()
+    apply(record, [Emit(post, {"semanticType": "route"}, enrich="same")], SOURCE, "a.ts")
+    assert [(s.id, s.semanticType) for s in record.statements] == [
+        ("a.ts:2:2", None), ("a.ts:2:2#2", "route")]

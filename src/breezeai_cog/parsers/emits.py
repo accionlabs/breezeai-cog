@@ -41,8 +41,10 @@ from .treesitter import first_line, node_text
 #: span), so a call nested in a larger statement gets a record of its own; ``starts`` — an
 #: unclassified one that begins on the construct's first line (``send(…).whenComplete(…)`` over
 #: three lines is the send's statement; a send passed as an argument on a statement's second
-#: line is not); ``any`` — whatever statement is there.
-Enrich = Literal["never", "unclassified", "own", "starts", "any"]
+#: line is not); ``same`` — the statement captured on this very node (same start line and
+#: column, same node type), whatever its type — the base parser's record of the call itself;
+#: ``any`` — whatever statement is there.
+Enrich = Literal["never", "unclassified", "own", "starts", "same", "any"]
 
 
 @dataclass(slots=True)
@@ -77,7 +79,7 @@ class Emit:
 
 
 def _eligible(stmt: Statement, emit: Emit) -> bool:
-    if emit.enrich == "any":
+    if emit.enrich in ("any", "same"):
         return True
     if emit.enrich == "own" and (stmt.startLine, stmt.endLine) != (emit.start_line, emit.last_line):
         return False
@@ -94,9 +96,18 @@ def apply(record: FileRecord, emits: list[Emit], source: bytes, path: str) -> No
     enclosing = Enclosing(record)
     done: set[str] = set()  # statements enriched or appended by this run
     fid = file_id(path)
+    by_id: dict[str, Statement] | None = None  # for ``same``, built on first use
     for emit in emits:
         line = emit.start_line
-        stmt = enclosing.statement(line) if emit.enrich != "never" else None
+        if emit.enrich == "same":
+            if by_id is None:
+                by_id = {s.id: s for s in record.statements}
+            col = emit.col if emit.col is not None else emit.node.start_point[1]
+            stmt = by_id.get(statement_id(path, line, col))
+            if stmt is not None and stmt.nodeType != emit.node.type:
+                stmt = None
+        else:
+            stmt = enclosing.statement(line) if emit.enrich != "never" else None
         if stmt is not None and stmt.id not in done and _eligible(stmt, emit):
             done.add(stmt.id)
             for name, value in emit.fields.items():

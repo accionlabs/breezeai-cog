@@ -398,6 +398,8 @@ register_detector(Detector(
     (exactly its line span) — a call nested in a larger statement gets its own record;
     `"starts"` only when that statement begins on the node's first line (a send chained into
     a multi-line statement enriches it; a send passed as an argument on a later line does not);
+    `"same"` onto the statement captured on that very node (same start line and column, same
+    node type), whatever its type — two routes on one line each enrich their own call;
     `"any"` writes onto whatever statement is there.
   - `fields` are always written; `fill` fields are written when enriching only if truthy.
   - A statement is written at most once per run: a second emit on the same statement appends

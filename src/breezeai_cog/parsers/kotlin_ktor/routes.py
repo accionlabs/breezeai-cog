@@ -18,8 +18,7 @@ from collections.abc import Callable
 
 from tree_sitter import Node
 
-from ...emit import disambiguate, statement_id
-from ...schemas import Statement
+from ..emits import Emit
 from ..treesitter import node_text
 
 _HTTP_VERBS = frozenset({"get", "post", "put", "delete", "patch", "head", "options"})
@@ -162,28 +161,23 @@ def _collect_routes(
     source: bytes,
     path: str,
     parent_id: str,
-    seen_ids: set[str],
     limit: int,
     prefix: str | None = "",
-    existing: dict[str, Statement] | None = None,
     guards: tuple[str, ...] = (),
     consts: dict[str, str | None] | None = None,
-) -> list[Statement]:
-    """Recursively collect Ktor route statements from a subtree. A route whose call the base
-    parser already captured (``existing``: id → statement, same start line and column) is
-    enriched in place; only routes with no base statement are returned to be appended.
-    ``guards`` are the enclosing ``authenticate(...)`` blocks, outermost first."""
-    base = existing if existing is not None else {}
+) -> list[Emit]:
+    """Recursively collect Ktor routes from a subtree. ``guards`` are the enclosing
+    ``authenticate(...)`` blocks, outermost first."""
     consts = consts if consts is not None else {}
-    out: list[Statement] = []
+    out: list[Emit] = []
     for child in node.named_children:
         if child.type != "call_expression":
-            out.extend(_collect_routes(child, source, path, parent_id, seen_ids, limit, prefix, base, guards, consts))
+            out.extend(_collect_routes(child, source, path, parent_id, limit, prefix, guards, consts))
             continue
 
         verb = _callee_name(child, source)
         if verb is None:
-            out.extend(_collect_routes(child, source, path, parent_id, seen_ids, limit, prefix, base, guards, consts))
+            out.extend(_collect_routes(child, source, path, parent_id, limit, prefix, guards, consts))
             continue
 
         if verb == "authenticate":
@@ -191,7 +185,7 @@ def _collect_routes(
             body = _lambda_body(child)
             if body is not None:
                 out.extend(_collect_routes(
-                    body, source, path, parent_id, seen_ids, limit, prefix, base,
+                    body, source, path, parent_id, limit, prefix,
                     (*guards, _guard_name(child, source)), consts,
                 ))
             continue
@@ -205,12 +199,12 @@ def _collect_routes(
             body = _lambda_body(child)
             if body is not None:
                 out.extend(
-                    _collect_routes(body, source, path, parent_id, seen_ids, limit, new_prefix, base, guards, consts)
+                    _collect_routes(body, source, path, parent_id, limit, new_prefix, guards, consts)
                 )
             continue
 
         if verb not in _HTTP_VERBS and verb not in _WS_BUILDERS:
-            out.extend(_collect_routes(child, source, path, parent_id, seen_ids, limit, prefix, base, guards, consts))
+            out.extend(_collect_routes(child, source, path, parent_id, limit, prefix, guards, consts))
             continue
 
         method, kind = ("WEBSOCKET", "ws") if verb in _WS_BUILDERS else (verb.upper(), "route")
@@ -229,42 +223,18 @@ def _collect_routes(
         else:
             full_endpoint = prefix + str(arg)
 
-        start_line = child.start_point[0] + 1
-        col = child.start_point[1]
-        end_line = child.end_point[0] + 1
         # The handler is the trailing lambda: anonymous — no name, its line is where it starts.
         body = _lambda_body(child)
         handler_line = body.start_point[0] + 1 if body is not None else None
-        captured = base.get(statement_id(path, start_line, col))
-        if captured is not None:  # the base parser captured this call: enrich it in place
-            captured.semanticType = "route"
-            captured.framework = "ktor"
-            captured.method = method
-            captured.endpoint = full_endpoint
-            captured.routeKind = kind
-            captured.handlerLine = handler_line
-            if guards:
-                captured.guards = list(guards)
-                captured.authRequired = True
-            continue
-        sid = disambiguate(statement_id(path, start_line, col), seen_ids)
+        # The base parser's statement of this call is enriched in place (``same``) — one record
+        # per route, not a base statement plus an ``…#2`` copy; else a new one on the file.
         text = node_text(child, source).split("\n", 1)[0]
-        out.append(Statement(
-            id=sid,
-            parentId=parent_id,
-            nodeType="call_expression",
-            semanticType="route",
-            framework="ktor",
-            text=text[:limit] if limit else text,
-            method=method,
-            endpoint=full_endpoint,
-            handlerLine=handler_line,
-            routeKind=kind,
-            guards=list(guards) or None,
-            authRequired=True if guards else None,
-            startLine=start_line,
-            endLine=end_line,
-            path=path,
+        out.append(Emit(
+            child,
+            {"semanticType": "route", "framework": "ktor", "method": method,
+             "endpoint": full_endpoint, "routeKind": kind, "handlerLine": handler_line},
+            fill={"guards": list(guards) or None, "authRequired": True if guards else None},
+            enrich="same", parent=parent_id, text=text[:limit] if limit else text,
         ))
 
     return out
@@ -275,14 +245,8 @@ def detect_ktor_routes(
     source: bytes,
     file_path: str,
     file_id: str,
-    seen_ids: set[str],
     limit: int = 8000,
-    statements: list[Statement] | None = None,
-) -> list[Statement]:
-    """Walk the full file AST and record every Ktor HTTP route. A route call the base parser
-    already captured (in ``statements``) is enriched in place — same span, same id — so a route
-    is one statement, not a base statement plus an ``…#2`` copy. Returns the routes that had no
-    base statement, to be appended."""
-    existing = {s.id: s for s in statements or [] if s.nodeType == "call_expression"}
-    return _collect_routes(root, source, file_path, file_id, seen_ids, limit, existing=existing,
+) -> list[Emit]:
+    """Every Ktor HTTP / WebSocket route of the file, for :func:`~..emits.apply`."""
+    return _collect_routes(root, source, file_path, file_id, limit,
                            consts=string_constants(root, source))
