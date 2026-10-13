@@ -16,6 +16,7 @@ Mutates ``record`` (mirrors the other call-based route detectors).
 from __future__ import annotations
 
 import logging
+import re
 from bisect import bisect_left, bisect_right
 from dataclasses import dataclass, field
 from typing import Optional
@@ -90,7 +91,18 @@ _SCOPE_NODE_TYPES = {
 _CHAINABLE_METHODS = {"route", "register"}
 _FASTIFY_CALL_METHODS = _HTTP_METHODS | _CHAINABLE_METHODS
 
-_ROUTE_HOOKS = ("onRequest", "preValidation", "preHandler")
+_ROUTE_HOOKS = (
+    "onRequest",
+    "preParsing",
+    "preValidation",
+    "preHandler",
+    "preSerialization",
+    "onSend",
+    "onResponse",
+    "onTimeout",
+    "onError",
+)
+_PLUGIN_INSTANCE_NAMES = {"app", "fastify", "instance", "server"}
 
 _PLUGIN_WRAPPER_NAMES = {
     "fp",
@@ -247,11 +259,13 @@ class _FileIndex:
         self.scopes: dict[tuple[int, int, str], _Scope] = {}
         self.register_calls: list[Node] = []
         self.call_nodes: list[Node] = []
+        self._plugin_parameter_candidates: list[tuple[tuple[int, int, str], str, int, Node]] = []
         self._class_factory_fields: list[tuple[tuple[int, int, str], str, Node]] = []
         self.fastify_class_fields: dict[tuple[int, int, str], set[str]] = {}
         self.root_scope = self._build(root, source)
         self.call_nodes.sort(key=lambda call: call.start_byte)
         self.call_starts = [call.start_byte for call in self.call_nodes]
+        self._resolve_exported_plugin_parameters(source)
         self._resolve_factory_bindings(source)
         self._resolve_class_factory_fields(source)
         self.mounted_plugin_nodes: set[tuple[int, int, str]] = self._find_mounted_plugins(source)
@@ -421,12 +435,8 @@ class _FileIndex:
         plugin = _is_fastify_plugin(node, source, nested=nested_function)
         first_name = _first_param_name(node, source) if plugin else None
         for index, parameter in enumerate(params.named_children):
-            pattern = (
-                parameter.child_by_field_name("pattern")
-                if parameter.type == "required_parameter"
-                else parameter
-            )
-            if pattern is None or pattern.type != "identifier":
+            pattern = _parameter_identifier(parameter)
+            if pattern is None:
                 continue
             name = node_text(pattern, source)
             function_scope.add_binding(
@@ -434,6 +444,28 @@ class _FileIndex:
                 pattern.start_byte,
                 is_fastify=index == 0 and name == first_name,
             )
+            if (
+                index == 0
+                and not nested_function
+                and _is_exported_function(node, source)
+                and name.lower() in _PLUGIN_INSTANCE_NAMES
+            ):
+                self._plugin_parameter_candidates.append(
+                    (function_scope.key, name, pattern.start_byte, node)
+                )
+
+    def _resolve_exported_plugin_parameters(self, source: bytes) -> None:
+        for scope_key, name, position, function in self._plugin_parameter_candidates:
+            scope = self.scopes[scope_key]
+            if not any(
+                _is_fastify_parameter_route_call(call, name, function, source)
+                for call in self.call_nodes
+                if function.start_byte <= call.start_byte < function.end_byte
+            ):
+                continue
+            binding = scope.binding_at(name, position)
+            if binding is not None:
+                binding.is_fastify = True
 
     def _index_variable(self, node: Node, scope: _Scope, source: bytes) -> None:
         name_node = node.child_by_field_name("name")
@@ -601,7 +633,14 @@ def detect_fastify_routes(
     """
     # Cheap guard because Fastify detection is additive and runs for every
     # TypeScript/JavaScript file.
-    if b"fastify" not in source and b"Fastify" not in source:
+    has_fastify_marker = b"fastify" in source or b"Fastify" in source
+    has_plugin_export = (
+        b"export" in source or b"module.exports" in source or b"exports." in source
+    )
+    has_route_method_marker = any(
+        b"." + method.encode() in source for method in _FASTIFY_CALL_METHODS
+    )
+    if not has_fastify_marker and not (has_plugin_export and has_route_method_marker):
         return []
 
     fid = file_id(path)
@@ -699,20 +738,20 @@ def _first_param_name(
     if params is None:
         return None
 
-    for child in params.named_children:
-        if child.type == "identifier":
-            return node_text(child, source)
+    first = next(iter(params.named_children), None)
+    name = _parameter_identifier(first) if first is not None else None
+    return node_text(name, source) if name is not None else None
 
-        if child.type == "required_parameter":
-            name = child.child_by_field_name("pattern")
 
-            if name is not None and name.type == "identifier":
-                return node_text(name, source)
-
-        # The first parameter exists but is not a simple identifier.
-        return None
-
-    return None
+def _parameter_identifier(parameter: Node) -> Optional[Node]:
+    pattern = (
+        parameter.child_by_field_name("pattern")
+        if parameter.type == "required_parameter"
+        else parameter
+    )
+    if pattern is not None and pattern.type == "assignment_pattern":
+        pattern = pattern.child_by_field_name("left")
+    return pattern if pattern is not None and pattern.type == "identifier" else None
 
 
 def _is_fastify_plugin(
@@ -784,6 +823,44 @@ def _has_fastify_instance_type(
         return node_text(node, source) == "FastifyInstance"
 
     return any(_has_fastify_instance_type(child, source) for child in node.children)
+
+
+def _is_exported_function(node: Node, source: bytes) -> bool:
+    current = node.parent
+    while current is not None:
+        if current.type == "export_statement":
+            return True
+        if current.type == "assignment_expression":
+            left = current.child_by_field_name("left")
+            if left is not None:
+                target = node_text(left, source).replace(" ", "")
+                if target == "module.exports" or target.startswith("exports."):
+                    return True
+        if current.type in _FUNCTION_NODE_TYPES:
+            return False
+        current = current.parent
+    return False
+
+
+def _is_fastify_parameter_route_call(
+    call: Node,
+    parameter_name: str,
+    function: Node,
+    source: bytes,
+) -> bool:
+    callee = call.child_by_field_name("function")
+    if callee is None or callee.type != "member_expression":
+        return False
+    method = callee.child_by_field_name("property")
+    if method is None or node_text(method, source) not in _FASTIFY_CALL_METHODS:
+        return False
+    receiver = _chain_base(callee.child_by_field_name("object"), source)
+    return (
+        receiver is not None
+        and receiver.type == "identifier"
+        and node_text(receiver, source) == parameter_name
+        and function.start_byte <= call.start_byte < function.end_byte
+    )
 
 
 def _is_fastify_factory_call(
@@ -1231,21 +1308,24 @@ def _app_route(
         )
 
 
-_AUTH_GUARD_HINTS = (
+_AUTH_GUARD_SUFFIXES = {
     "auth",
-    "authorize",
     "authenticate",
     "authenticated",
-    "login",
+    "authentication",
+    "authorize",
+    "authorized",
+    "authorization",
     "jwt",
     "oauth",
-    "session",
-)
+}
 
 
 def _is_auth_guard_name(name: str) -> bool:
-    lowered = name.lower()
-    return any(hint in lowered for hint in _AUTH_GUARD_HINTS)
+    separated = re.sub(r"([a-z0-9])([A-Z])", r"\1 \2", name)
+    separated = re.sub(r"([A-Z])([A-Z][a-z])", r"\1 \2", separated)
+    tokens = re.findall(r"[A-Za-z0-9]+", separated.lower())
+    return bool(tokens and tokens[-1] in _AUTH_GUARD_SUFFIXES)
 
 
 def _route_guards(option_nodes: list[Node], source: bytes) -> Optional[list[str]]:
@@ -1258,13 +1338,54 @@ def _route_guards(option_nodes: list[Node], source: bytes) -> Optional[list[str]
             value = pairs.get(hook)
             if value is None:
                 continue
-            values = value.named_children if value.type == "array" else [value]
-            guards.extend(
-                node_text(candidate, source)
-                for candidate in values
-                if candidate.type in {"identifier", "member_expression"}
-            )
+            guards.extend(_guard_expressions(value, source))
+
+        for config_key in ("config",):
+            config = pairs.get(config_key)
+            if config is not None and config.type == "object":
+                for key, value in _object_pairs(config, source).items():
+                    if any(part in key.lower() for part in ("auth", "guard", "security")):
+                        guards.append(f"{config_key}.{key}")
+
+        schema = pairs.get("schema")
+        if schema is not None and schema.type == "object":
+            security = _object_pairs(schema, source).get("security")
+            if security is not None:
+                guards.extend(_security_requirement_names(security, source))
+
+        security = pairs.get("security")
+        if security is not None:
+            guards.extend(_security_requirement_names(security, source))
     return guards or None
+
+
+def _guard_expressions(node: Node, source: bytes) -> list[str]:
+    if node.type == "array":
+        return [
+            expression
+            for child in node.named_children
+            for expression in _guard_expressions(child, source)
+        ]
+    text = node_text(node, source).strip()
+    return [text] if text else []
+
+
+def _security_requirement_names(node: Node, source: bytes) -> list[str]:
+    if node.type == "array":
+        return [
+            name
+            for child in node.named_children
+            for name in _security_requirement_names(child, source)
+        ]
+    if node.type == "object":
+        names: list[str] = []
+        for key, value in _object_pairs(node, source).items():
+            if value.type in {"array", "object"}:
+                names.append(key)
+            else:
+                names.extend(_security_requirement_names(value, source))
+        return names
+    return _guard_expressions(node, source)
 
 
 def _route_auth_required(guards: Optional[list[str]]) -> Optional[bool]:

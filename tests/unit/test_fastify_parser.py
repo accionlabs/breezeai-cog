@@ -347,7 +347,11 @@ def test_route_hooks_are_captured_as_guards_but_auth_only_when_auth_like() -> No
         b"fastify.route({ method: 'POST', url: '/admin', "
         b"onRequest: [authenticate, Admin.authorize], "
         b"preValidation: validateRequest, handler: saveAdmin });\n"
-        b"fastify.get('/health', { preValidation: validateRequest }, health);"
+        b"fastify.get('/health', { preValidation: validateRequest }, health);\n"
+        b"fastify.get('/author', { preHandler: authorsLoader }, authorHandler);\n"
+        b"fastify.get('/oauth-log', { preHandler: oauthRedirectLogger }, oauthHandler);\n"
+        b"fastify.get('/session-log', { preHandler: sessionLogger }, sessionHandler);\n"
+        b"fastify.get('/login-limit', { preHandler: loginRateLimit }, loginHandler);"
     )
 
     routes = _detect_routes(source)
@@ -361,6 +365,10 @@ def test_route_hooks_are_captured_as_guards_but_auth_only_when_auth_like() -> No
             True,
         ),
         ("GET", "/health", ["validateRequest"], None),
+        ("GET", "/author", ["authorsLoader"], None),
+        ("GET", "/oauth-log", ["oauthRedirectLogger"], None),
+        ("GET", "/session-log", ["sessionLogger"], None),
+        ("GET", "/login-limit", ["loginRateLimit"], None),
     ]
 
 
