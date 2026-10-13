@@ -62,13 +62,11 @@ def test_match_via_is_one_binding_per_verb(analyze_files) -> None:
     assert sorted(s.method for s in _eps(st)) == ["GET", "POST"]
 
 
-@pytest.mark.xfail(strict=True, reason="root route not detected")
 def test_root_is_binding(analyze_files) -> None:
     st = _routes(analyze_files, "  root 'home#index'\n")
     assert [(s.method, s.endpoint) for s in _eps(st)] == [("GET", "/")]
 
 
-@pytest.mark.xfail(strict=True, reason="resources / resource not expanded into routes")
 def test_resources_makes_one_binding_per_action(analyze_files) -> None:
     st = _routes(analyze_files, "  resources :users\n")
     got = {(s.method, s.endpoint) for s in _eps(st)}

@@ -121,7 +121,14 @@ end
         "plain#index": "/plain",
         "q#index": "/p/q",
         "dyn#index": None,                  # unresolved scope path → address unknown
-        "photos#preview": None,             # resource nesting not computed → unknown
+        "photos#preview": "/photos/:photo_id/preview",  # nested in its resource
+        "photos#index": "/photos",          # resources :photos expands to its actions
+        "photos#create": "/photos",
+        "photos#new": "/photos/new",
+        "photos#edit": "/photos/:id/edit",
+        "photos#show": "/photos/:id",
+        "photos#update": "/photos/:id",
+        "photos#destroy": "/photos/:id",
     }
 
 
@@ -199,3 +206,56 @@ def test_rails_before_action_guards_from_the_controller(analyze_files) -> None:
         "/admin/stats": (["require_admin"], True),
         "/open": (None, None),  # no callbacks; the if: callback above is never a guard
     }
+
+
+def test_rails_resources_root_member_and_collection(tmp_path: Path) -> None:
+    source = b'''require "rails"
+Rails.application.routes.draw do
+  root "home#index"
+  resources :categories, only: [:index, :show] do
+    resources :posts, except: :destroy
+    member do
+      get :preview
+    end
+    collection do
+      get "search"
+    end
+    get :export, on: :collection
+  end
+  resource :profile, controller: "accounts"
+  namespace :admin do
+    root to: "dashboard#show"
+    resources :people, path: "staff", param: :slug, only: :show
+  end
+  resources :items, only: ONLY
+  resources :data
+  resources :data do
+    get :x
+  end
+end
+'''
+    record = RailsParser().parse_file(_context(tmp_path, "config/routes.rb", source))
+    got = {(r.method, r.endpoint, r.handler)
+           for r in record.statements if r.semanticType == "route"}
+    def has(*row):
+        assert row in got, row
+    has("GET", "/", "home#index")
+    has("GET", "/categories", "categories#index")
+    has("GET", "/categories/:id", "categories#show")
+    assert ("POST", "/categories", "categories#create") not in got   # only: honoured
+    has("GET", "/categories/:category_id/posts", "posts#index")        # nested resources
+    has("PATCH", "/categories/:category_id/posts/:id", "posts#update")
+    has("PUT", "/categories/:category_id/posts/:id", "posts#update")
+    assert not any(h == "posts#destroy" for _, _, h in got)            # except: honoured
+    has("GET", "/categories/:id/preview", "categories#preview")        # member
+    has("GET", "/categories/search", "categories#search")              # collection
+    has("GET", "/categories/export", "categories#export")              # on: :collection
+    has("GET", "/profile", "accounts#show")                            # singular, controller:
+    has("GET", "/profile/edit", "accounts#edit")
+    assert not any(e == "/profile/:id" for _, e, _ in got)
+    has("GET", "/admin", "dashboard#show")                             # root in a namespace
+    has("GET", "/admin/staff/:slug", "people#show")                    # path:, param:
+    assert not any(h and h.startswith("items#") for _, _, h in got)    # only: not a literal
+    has("GET", "/data/:id", "data#show")
+    # "data" has no singular the rules are sure of → nested routes have no known address
+    has("GET", None, "data#x")
