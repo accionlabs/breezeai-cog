@@ -14,8 +14,8 @@ from __future__ import annotations
 
 from tree_sitter import Node
 
-from ...emit import disambiguate, statement_id
-from ...schemas import FileRecord, Statement
+from ..emits import Emit
+from ...schemas import FileRecord
 from ..scala.statements import find_enclosing_parent_id
 from ..statements_common import url_placeholder
 from ..treesitter import node_text
@@ -161,15 +161,12 @@ def detect_akkahttp_routes(
     source: bytes,
     path: str,
     record: FileRecord,
-) -> list[Statement]:
-    """Walk tree-sitter AST and detect akka-http route definitions."""
-    seen_ids = {s.id for s in record.statements}
-    routes: list[Statement] = []
+) -> list[Emit]:
+    """Walk tree-sitter AST and detect akka-http route definitions, for :func:`~..emits.apply`."""
+    routes: list[Emit] = []
 
     def emit_route(node: Node, method: str | None, endpoint: str) -> None:
-        start = node.start_point[0] + 1
-        end = node.end_point[0] + 1
-        parent_id = find_enclosing_parent_id(start, record)
+        parent_id = find_enclosing_parent_id(node.start_point[0] + 1, record)
         # The handler is the directive's block (``get { complete(...) }``): anonymous — no
         # name, its line is where the block starts. A named route value (``get(listOrders)``)
         # is the handler's name; it is declared elsewhere, so no line.
@@ -184,12 +181,8 @@ def detect_akkahttp_routes(
                 handler = node_text(only, source)
         guards = _guards_of(node, source)
         routes.append(
-            Statement(
-                id=disambiguate(statement_id(path, start, node.start_point[1]), seen_ids),
-                parentId=parent_id,
-                nodeType="synthetic",
+            Emit(node, dict(
                 semanticType="route",
-                text=node_text(node, source),
                 framework="akka-http",
                 handler=handler,
                 handlerLine=handler_line,
@@ -199,10 +192,7 @@ def detect_akkahttp_routes(
                 endpoint=endpoint,
                 routeKind="route",
                 isRegex=False,
-                startLine=start,
-                endLine=end,
-                path=path,
-            )
+            ), parent=parent_id, node_type="synthetic", text=node_text(node, source))
         )
 
     def walk_directives(
