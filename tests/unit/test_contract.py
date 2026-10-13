@@ -60,7 +60,8 @@ def test_one_record_per_binding() -> None:
 
 def test_only_entry_points_are_checked() -> None:
     assert _rules(_route(routeKind="field_resolver", method="RESOLVE_FIELD")) == []
-    assert _rules(_route(routeKind="mount", handler=None, handlerLine=None)) == []
+    # Wiring has no record: a mount / layout route is an unknown kind.
+    assert _rules(_route(routeKind="mount")) == [("routeKind", "error")]
     assert _rules(_route(semanticType="api_call", routeKind=None)) == []
 
 

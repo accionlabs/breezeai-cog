@@ -10,9 +10,8 @@ is worse than missing (§8): a parser leaves a handler empty when it cannot name
 ``endpoint`` empty. Tests fail on errors; gaps are counted, as a completeness measure.
 
 The entry points are the ``route``, ``eventbus_consumer`` and ``timer`` records whose
-``routeKind`` is not ``field_resolver`` (contract §5). Records still filed under ``route`` with
-``routeKind`` ``mount`` / ``layout`` are wiring that is still to become plain statements; they
-are not entry points and are not checked.
+``routeKind`` is not ``field_resolver`` (contract §5). Wiring has no record at all, so a ``route``
+with ``routeKind`` ``mount`` or ``layout`` is an error like any other unknown kind.
 
 =============== ======== =================================================================
 Rule            Severity Violation
@@ -43,7 +42,7 @@ from .aspnet_common import FRAMEWORK_SERVED
 ENTRY_POINT_TYPES = frozenset({"route", "eventbus_consumer", "timer"})
 
 #: ``routeKind`` values filed under ``route`` that are not entry points (see the docstring).
-NOT_ENTRY_POINT_KINDS = frozenset({"field_resolver", "mount", "layout"})
+NOT_ENTRY_POINT_KINDS = frozenset({"field_resolver"})
 
 HTTP_METHODS = frozenset({"GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS"})
 METHODS = HTTP_METHODS | frozenset({
