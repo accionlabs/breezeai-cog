@@ -135,7 +135,6 @@ def test_router_link_is_outbound_navigation(analyze_files) -> None:
     assert [s.endpoint for s in st if s.semanticType == "navigation"] == ["/users"]
 
 
-@pytest.mark.xfail(strict=True, reason="router.push is not captured as navigation")
 def test_router_push_is_outbound_navigation(analyze_files) -> None:
     src = (
         "import { useRouter } from 'vue-router';\n"

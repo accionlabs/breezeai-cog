@@ -95,3 +95,16 @@ def test_ids_are_disambiguated_in_emit_order() -> None:
     assert [(s.id, s.endpoint) for s in record.statements[1:]] == [
         ("a.ts:2:2#2", "/1"), ("a.ts:2:2#3", "/2"),
     ]
+
+
+def test_own_enriches_only_the_construct_s_own_statement() -> None:
+    post, get = _calls()
+    # The statement spans line 2 — the outer call's own span — so it may be enriched by it…
+    record = _record()
+    apply(record, [Emit(post, {"semanticType": "navigation"}, enrich="own")], SOURCE, "a.ts")
+    assert [s.semanticType for s in record.statements] == ["navigation"]
+    # …but not by a construct whose span differs (here: an emit pinned to other lines).
+    record = _record()
+    apply(record, [Emit(get, {"semanticType": "navigation"}, enrich="own", end_line=3)],
+          SOURCE, "a.ts")
+    assert [s.semanticType for s in record.statements] == [None, "navigation"]

@@ -169,7 +169,6 @@ def test_v7_prefix_is_wiring(analyze_files) -> None:
     assert [r.endpoint for r in _eps(st, "app/routes.ts")] == ["/projects/:id"]
 
 
-@pytest.mark.xfail(strict=True, reason="<Link to> is not captured as navigation")
 def test_link_is_outbound_navigation(analyze_files) -> None:
     src = (
         "import React from 'react';\nimport { Link } from 'react-router-dom';\n"
@@ -180,7 +179,6 @@ def test_link_is_outbound_navigation(analyze_files) -> None:
     assert [s.endpoint for s in st if s.semanticType == "navigation"] == ["/orders"]
 
 
-@pytest.mark.xfail(strict=True, reason="useNavigate() calls are not captured as navigation")
 def test_navigate_call_is_outbound_navigation(analyze_files) -> None:
     src = (
         "import React from 'react';\nimport { useNavigate } from 'react-router-dom';\n"

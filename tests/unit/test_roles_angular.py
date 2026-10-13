@@ -208,7 +208,6 @@ def test_router_link_is_outbound_navigation(analyze_files) -> None:
     assert [s.endpoint for s in st if s.semanticType == "navigation"] == ["/users"]
 
 
-@pytest.mark.xfail(strict=True, reason="router.navigate / navigateByUrl are not captured")
 def test_router_navigate_is_outbound_navigation(analyze_files) -> None:
     svc = (
         "import { Injectable } from '@angular/core';\n"

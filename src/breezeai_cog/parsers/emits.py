@@ -37,8 +37,10 @@ from .treesitter import first_line, node_text
 
 #: Which captured statement an emit may enrich in place:
 #: ``never`` — always append; ``unclassified`` — one with no ``semanticType`` (or one of
-#: ``reclassify``); ``any`` — whatever statement is there.
-Enrich = Literal["never", "unclassified", "any"]
+#: ``reclassify``); ``own`` — an unclassified one that is the construct itself (exactly its line
+#: span), so a call nested in a larger statement gets a record of its own; ``any`` — whatever
+#: statement is there.
+Enrich = Literal["never", "unclassified", "own", "any"]
 
 
 @dataclass(slots=True)
@@ -67,10 +69,16 @@ class Emit:
     def start_line(self) -> int:
         return self.line if self.line is not None else self.node.start_point[0] + 1
 
+    @property
+    def last_line(self) -> int:
+        return self.end_line if self.end_line is not None else self.node.end_point[0] + 1
+
 
 def _eligible(stmt: Statement, emit: Emit) -> bool:
     if emit.enrich == "any":
         return True
+    if emit.enrich == "own" and (stmt.startLine, stmt.endLine) != (emit.start_line, emit.last_line):
+        return False
     return stmt.semanticType is None or stmt.semanticType in emit.reclassify
 
 
@@ -102,7 +110,7 @@ def apply(record: FileRecord, emits: list[Emit], source: bytes, path: str) -> No
             nodeType=emit.node_type or node.type,
             text=emit.text if emit.text is not None else first_line(node_text(node, source)),
             startLine=line,
-            endLine=emit.end_line if emit.end_line is not None else node.end_point[0] + 1,
+            endLine=emit.last_line,
             path=path,
             **emit.fields,
             **emit.fill,
