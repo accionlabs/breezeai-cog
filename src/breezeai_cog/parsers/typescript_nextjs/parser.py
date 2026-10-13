@@ -11,6 +11,7 @@ import re
 
 from ...schemas import FileRecord
 from ..base import ParseContext
+from ..emits import apply
 from ..treesitter import parse_source
 from ..typescript.parser import TypeScriptParser
 from .routes import detect_nextjs_routes, is_app_router_route_file, is_pages_api_file
@@ -44,14 +45,9 @@ class NextJSParser(TypeScriptParser):
         record = self.extract(root, ctx)  # inherited base extraction (one parse)
         if ctx.capture_statements and not self.is_fixture_file(ctx.path):  # gated; skip fixtures
             routes = detect_nextjs_routes(
-                root,
-                ctx.source,
-                ctx.path,
-                record,
-                seen_ids={s.id for s in record.statements},
-                index=ctx.resolution_index,
+                root, ctx.source, ctx.path, record, index=ctx.resolution_index,
             )
             if routes:
-                record.statements.extend(routes)
+                apply(record, routes, ctx.source, ctx.path)
                 record.framework = "nextjs"
         return record

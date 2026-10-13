@@ -14,7 +14,7 @@ literal (``[id]``), as on the API-route records. ``layout`` / ``template`` / ``l
 
 **Additive** (like Express): a page file is usually owned by the React parser (it imports
 ``react``), so this runs for every TS file and records the page whatever parser owns it. Only
-files inside a Next.js app (``TsAliasIndex.next_apps``) count — Gatsby also routes
+files inside a Next.js app (the ``next.apps`` fact) count — Gatsby also routes
 ``src/pages/*.tsx``. The app's ``basePath`` and ``middleware.ts`` guards apply, as for API
 routes."""
 
@@ -28,6 +28,7 @@ from ..additive import DetectContext, Detection, Detector, Gate, register_detect
 from ..emits import Emit
 from ..treesitter import first_line, node_text
 from ..typescript.imports import router_root
+from .facts import next_apps
 from .routes import _middleware_guards, _served, _url_segments
 
 _PAGE_EXTS = (".tsx", ".jsx", ".ts", ".js")
@@ -126,8 +127,7 @@ def detect_nextjs_page(dc: DetectContext) -> Emit | None:
     if found is None:
         return None
     router_dir, local = found
-    apps = getattr(dc.ctx.resolution_index, "next_apps", None) or frozenset()
-    if router_root(dc.path, router_dir) not in apps:
+    if router_root(dc.path, router_dir) not in next_apps(dc.ctx.resolution_index):
         return None
     export = _default_export(dc.root)
     if export is None:

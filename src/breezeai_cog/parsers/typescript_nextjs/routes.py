@@ -44,10 +44,12 @@ from __future__ import annotations
 
 from tree_sitter import Node
 
-from ...emit import disambiguate, file_id, function_id, statement_id
-from ...schemas import FileRecord, Statement
+from ...emit import file_id, function_id
+from ...schemas import FileRecord
+from ..emits import Emit
 from ..treesitter import node_text
 from ..typescript.imports import app_base_path
+from .facts import next_middlewares
 
 _VERBS = {"GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"}
 _ROUTE_STEMS = {"route"}  # App Router API handler file; page/layout are UI, not verb handlers
@@ -215,7 +217,7 @@ def _middleware_guards(index: object | None, path: str, local: str) -> list[str]
     the route's app directory (the deepest directory above it holding a ``next.config`` or a
     middleware) has a middleware, and it has no matcher or one of its patterns covers every URL
     of the route (``local``: the file-system address, before ``basePath``)."""
-    mws = getattr(index, "next_middlewares", None) or {}
+    mws = next_middlewares(index)
     if not mws:
         return []
     configs = (getattr(index, "app_base_paths", None) or {}).get("nextjs") or {}
@@ -231,8 +233,8 @@ def _middleware_guards(index: object | None, path: str, local: str) -> list[str]
     return []
 
 
-def _make_route(
-    path: str,
+def _route(
+    root: Node,
     endpoint: str | None,
     method: str,
     handler: str | None,
@@ -240,36 +242,33 @@ def _make_route(
     handler_line: int,
     end_line: int,
     *,
-    seen_ids: set[str],
     local: str,
     guards: list[str] | None = None,
-) -> Statement:
-    return Statement(
-        id=disambiguate(statement_id(path, handler_line, 0), seen_ids),
-        parentId=parent,
-        nodeType="synthetic",
-        text=f"{method} {local}",
-        semanticType="route",
-        framework="nextjs",  # pending spec §4.1 enum ratification — see module docstring
-        method=method,
-        endpoint=endpoint,
-        handler=handler,
-        handlerLine=handler_line,
-        guards=guards or None,
-        routeKind="route",
-        isRegex=False,
-        startLine=handler_line,
-        endLine=end_line,
-        path=path,
+) -> Emit:
+    return Emit(
+        root,
+        {
+            "semanticType": "route",
+            "framework": "nextjs",  # pending spec §4.1 enum ratification — see module docstring
+            "method": method,
+            "endpoint": endpoint,
+            "handler": handler,
+            "handlerLine": handler_line,
+            "guards": guards or None,
+            "routeKind": "route",
+            "isRegex": False,
+        },
+        parent=parent, node_type="synthetic", text=f"{method} {local}",
+        line=handler_line, col=0, end_line=end_line,
     )
 
 
 def detect_nextjs_routes(
-    root: Node, source: bytes, path: str, record: FileRecord, *, seen_ids: set[str],
-    index: object | None = None,
-) -> list[Statement]:
-    """``index`` is the repo's ``TsAliasIndex``: it carries each app's ``next.config``
-    ``basePath``, joined in front of the route's file-system address."""
+    root: Node, source: bytes, path: str, record: FileRecord, *, index: object | None = None,
+) -> list[Emit]:
+    """The route handlers of an App Router ``route.*`` or Pages Router ``pages/api`` file, for
+    :func:`~..emits.apply`. ``index`` is the repo's ``TsAliasIndex``: it carries each app's
+    ``next.config`` ``basePath``, joined in front of the route's file-system address."""
     fid = file_id(path)
     # authoritative handler ids from the base extraction (top-level functions only)
     fn_by_name = {f.name: f for f in record.functions if f.parentId == fid}
@@ -277,7 +276,7 @@ def detect_nextjs_routes(
     if is_app_router_route_file(path):
         verb_lines = _exported_verb_lines(root, source)
         endpoint = endpoint_from_path(path)
-        routes: list[Statement] = []
+        routes: list[Emit] = []
         for verb, line in verb_lines.items():
             fn = fn_by_name.get(verb)
             # Match the base parser's id when the handler was extracted; otherwise fall back
@@ -286,15 +285,14 @@ def detect_nextjs_routes(
             handler_line = fn.startLine if fn is not None else line
             end_line = fn.endLine if fn is not None else handler_line
             routes.append(
-                _make_route(
-                    path,
+                _route(
+                    root,
                     _served(endpoint, path, index),
                     verb,
                     verb,
                     parent,
                     handler_line,
                     end_line,
-                    seen_ids=seen_ids,
                     local=endpoint,
                     guards=_middleware_guards(index, path, endpoint),
                 )
@@ -319,15 +317,14 @@ def detect_nextjs_routes(
         end_line = fn.endLine if fn is not None else handler_line
         # Pages Router handlers branch on req.method internally — no declared verb → ANY.
         return [
-            _make_route(
-                path,
+            _route(
+                root,
                 _served(pages_api_endpoint(path), path, index),
                 "ANY",
                 name,
                 parent,
                 handler_line,
                 end_line,
-                seen_ids=seen_ids,
                 local=pages_api_endpoint(path),
                 guards=_middleware_guards(index, path, pages_api_endpoint(path)),
             )
