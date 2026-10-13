@@ -16,13 +16,11 @@ from tree_sitter import Node
 from ...emit import file_id
 from ...schemas import SCHEMA_VERSION, FileRecord, Function, Statement
 from ...utils import count_loc
+from ..additive import run_additive
 from ..base import BaseParser, ParseContext
 from ..treesitter import node_text, parse_source
 from .classes import build_class
 from ..callresolve import make_resolver
-from .aws_events import detect_aws_events
-from ..detection.sdk_calls import detect_sdk_calls
-from ..typescript_express.routes import detect_express
 from .decorators import extract_decorators
 from .functions import (
     build_function,
@@ -65,16 +63,45 @@ _TS_FIXTURE_MARKERS = (".stories.", ".cy.", ".e2e.", ".mock.")
 
 
 _FUNC_VALUES = ("arrow_function", "function_expression")
+#: `namespace X {…}` and the legacy `module X {…}` — a declaration scope, not a value.
+_MODULE_TYPES = ("internal_module", "module")
 
 
 def _unwrap_export(node: Node) -> tuple[Node | None, list[Node]]:
-    if node.type == "export_statement":
+    if node.type in ("export_statement", "ambient_declaration"):
+        # `ambient_declaration` is the `declare …` wrapper: `declare const enum E {…}` holds
+        # its enum_declaration directly. A body-less `declare function f(): void` is a
+        # `function_signature` — not in _DECLS, so it is skipped rather than turned into a
+        # Function with no body.
         decs = [c for c in node.named_children if c.type == "decorator"]
         decl = next((c for c in node.named_children if c.type in _DECLS), None)
         return decl, decs
     if node.type in _DECLS:
         return node, []
     return None, []
+
+
+def _module_block(node: Node) -> Node | None:
+    """The ``statement_block`` body of a namespace/module wrapper, else ``None``.
+
+    TypeScript spells this five ways, none of them a plain declaration: ``namespace X {…}``
+    (wrapped in an ``expression_statement``), ``export namespace X {…}`` (in an
+    ``export_statement``), ``module X {…}`` (a bare ``module`` node), ``declare
+    namespace/module X {…}`` (in an ``ambient_declaration``) and ``declare global {…}``
+    (an ``ambient_declaration`` straight to the block). Members inside are extracted as
+    if they were top-level — the model's only class containment edge is File→Class, so a
+    namespace is flattened exactly like a C++ one."""
+    if node.type in ("expression_statement", "export_statement", "ambient_declaration"):
+        inner = next(
+            (c for c in node.named_children if c.type in _MODULE_TYPES or c.type == "statement_block"),
+            None,
+        )
+        return _module_block(inner) if inner is not None else None
+    if node.type in _MODULE_TYPES:
+        return next((c for c in node.named_children if c.type == "statement_block"), None)
+    if node.type == "statement_block":  # `declare global { … }`
+        return node
+    return None
 
 
 def _bears_function(obj: Node) -> bool:
@@ -155,57 +182,77 @@ class TypeScriptParser(BaseParser):
         classes = []
         statements: list[Statement] = []
 
-        pending: list[Node] = []
-        for child in root.named_children:
-            if child.type == "decorator":
-                pending.append(child)
-                continue
-            if child.type == "comment":
-                continue  # keep pending decorators across a comment before the declaration
-            decl, exp_decs = _unwrap_export(child)
-            decorators = pending + exp_decs
-            pending = []
-            if decl is None:
-                # `export default <expr>` is not a declaration, so it isn't handled above —
-                # but it commonly wraps a named function: `export default React.memo(function
-                # Foo(){…})`, `export default function bar(){}`. Descend it with the named-only
-                # collector so the component (and, via build_function's recursion, its nested
-                # handlers) are seeded. Anonymous `export default () => …` yields nothing.
-                if child.type == "export_statement":
-                    for value_node, nested_name, nested_kind in collect_nested_functions(
-                        child, source
-                    ):
-                        fns, fn_stmts = build_function(
-                            value_node,
-                            name=nested_name or "default",
-                            kind=nested_kind,
-                            decorators=[],
-                            source=source,
-                            path=path,
-                            parent_id=fid,
-                            class_name=None,
-                            seen_ids=seen_ids,
-                            capture=capture,
-                            limit=limit,
-                            resolve=resolve,
+        def walk(scope: Node) -> None:
+            """Dispatch every declaration in ``scope``, descending into namespace/module
+            bodies so their members are extracted as if they were top-level (they parent to
+            the file — see :func:`_module_block`). Namespaces nest, hence the recursion."""
+            pending: list[Node] = []
+            for child in scope.named_children:
+                if child.type == "decorator":
+                    pending.append(child)
+                    continue
+                if child.type == "comment":
+                    continue  # keep pending decorators across a comment before the declaration
+                block = _module_block(child)
+                if block is not None:
+                    pending = []
+                    walk(block)
+                    # The namespace body is a barrier for the file-root statement pass (see
+                    # NESTED_SCOPES), so collect its own declarations here — they parent to
+                    # the file, like the classes/functions `walk` just dispatched.
+                    statements.extend(
+                        extract_statements(
+                            block, source, path, parent_id=fid, capture=capture,
+                            limit=limit, seen_ids=seen_ids,
                         )
-                        functions.extend(fns)
-                        statements.extend(fn_stmts)
-                continue
-            self._handle(
-                decl,
-                decorators,
-                source,
-                path,
-                fid,
-                seen_ids,
-                capture,
-                limit,
-                functions,
-                classes,
-                statements,
-                resolve,
-            )
+                    )
+                    continue
+                decl, exp_decs = _unwrap_export(child)
+                decorators = pending + exp_decs
+                pending = []
+                if decl is None:
+                    # `export default <expr>` is not a declaration, so it isn't handled above —
+                    # but it commonly wraps a named function: `export default React.memo(function
+                    # Foo(){…})`, `export default function bar(){}`. Descend it with the named-only
+                    # collector so the component (and, via build_function's recursion, its nested
+                    # handlers) are seeded. Anonymous `export default () => …` yields nothing.
+                    if child.type == "export_statement":
+                        for value_node, nested_name, nested_kind in collect_nested_functions(
+                            child, source
+                        ):
+                            fns, fn_stmts = build_function(
+                                value_node,
+                                name=nested_name or "default",
+                                kind=nested_kind,
+                                decorators=[],
+                                source=source,
+                                path=path,
+                                parent_id=fid,
+                                class_name=None,
+                                seen_ids=seen_ids,
+                                capture=capture,
+                                limit=limit,
+                                resolve=resolve,
+                            )
+                            functions.extend(fns)
+                            statements.extend(fn_stmts)
+                    continue
+                self._handle(
+                    decl,
+                    decorators,
+                    source,
+                    path,
+                    fid,
+                    seen_ids,
+                    capture,
+                    limit,
+                    functions,
+                    classes,
+                    statements,
+                    resolve,
+                )
+
+        walk(root)
 
         statements.extend(
             extract_statements(
@@ -235,55 +282,13 @@ class TypeScriptParser(BaseParser):
             classes=classes,
             statements=statements,
         )
-        # Additive route/event detection — gated by --capture-statements and layered on top
-        # of base + framework extraction (runs for every TS parser that inherits extract, so
-        # it also fires in files owned by another framework). Each detector self-guards on a
-        # cheap marker. A more-specific framework label set by a subclass afterwards wins.
-        if capture:
-            if not self.is_fixture_file(path) and detect_express(
-                root, source, path, record, ctx.resolution_index, bindings
-            ):
-                if record.framework is None:
-                    record.framework = "express"
-            aws_fw = detect_aws_events(
-                root, source, path, record, is_fixture=self.is_fixture_file(path)
-            )
-            if aws_fw and record.framework is None:
-                record.framework = aws_fw
-            sdk_fw = detect_sdk_calls(
-                root,
-                source,
-                path,
-                record,
-                getattr(ctx.resolution_index, "class_heritage", None),
-            )
-            if sdk_fw and record.framework is None:
-                record.framework = sdk_fw
-            # Deferred import: typescript_graphql.parser subclasses this module, so a
-            # top-level import would cycle. routes.py itself has no such dependency.
-            from ..typescript_graphql.routes import detect_graphql_client
-
-            if not self.is_fixture_file(path) and detect_graphql_client(
-                root, source, path, record, ctx.parse_timeout_micros
-            ):
-                if record.framework is None:
-                    record.framework = "graphql"
-            # Vue route configs are plain-data {path, component} arrays that often live in a
-            # file importing nothing from vue-router (a default-export array, a router/modules/*
-            # fragment), so — unlike React/Angular — they can't be caught by a claims-gated
-            # parser and must be detected additively here. Self-guards structurally on the array
-            # shape; defers to Angular/React. Deferred import: typescript_vue subclasses this
-            # module (would cycle at import time).
-            from ..typescript_vue.routes import detect_vue_routes
-
-            if not self.is_fixture_file(path):
-                vue_routes = detect_vue_routes(
-                    root, source, path, seen_ids={s.id for s in record.statements}
-                )
-                if vue_routes:
-                    record.statements.extend(vue_routes)
-                    if record.framework is None:
-                        record.framework = "vue"
+        # Additive detectors (parsers/additive.py) — layered on top of base + framework
+        # extraction for every TS parser that inherits extract, so they also fire in files owned
+        # by another framework. A more-specific framework label set by a subclass afterwards wins.
+        run_additive(
+            "typescript", root, ctx, record,
+            is_fixture=self.is_fixture_file(path), bindings=bindings,
+        )
         return record
 
     def _handle(

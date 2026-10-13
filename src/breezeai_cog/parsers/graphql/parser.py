@@ -7,7 +7,7 @@ document is not valid TypeScript, so it needs its own parser: it parses the whol
 the ``graphql`` tree-sitter grammar and emits a ``Statement`` per construct (entities,
 routes, value types, operations, fragments) — see :mod:`.sdl`.
 
-Semantic capture is gated behind ``--capture-statements`` (the whole GraphQL surface is
+Semantic capture is gated behind statement capture (the whole GraphQL surface is
 semantic); the shared comment pass adds ``# …`` comments when capture is on.
 """
 
@@ -46,7 +46,7 @@ class GraphQLParser(BaseParser):
         statements: list[Statement] = []
 
         # The GraphQL surface is entirely semantic (types → Class nodes, operations →
-        # statements), so gate it on --capture-statements like every route/db/event emitter;
+        # statements), so gate it on statement capture like every route/db/event emitter;
         # skip fixture dirs.
         if ctx.capture_statements and not self.is_fixture_file(path):
             classes, statements = extract_graphql(

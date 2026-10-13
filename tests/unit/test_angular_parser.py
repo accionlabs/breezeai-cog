@@ -42,7 +42,7 @@ def _parse(tmp_path, *, capture=True) -> FileRecord:
 
 
 def test_routes_require_capture_statements(tmp_path) -> None:
-    # Routes are statements — only emitted with --capture-statements (spec A4).
+    # Routes are statements — only emitted with statement capture (spec A4).
     rec = _parse(tmp_path, capture=False)
     assert [s for s in rec.statements if s.semanticType == "route"] == []
     # framework is the parser's identity (set unconditionally on any @angular/ file), not a
@@ -468,7 +468,7 @@ def test_decorator_ui_roles(tmp_path) -> None:
 
 
 def test_ui_roles_without_capture_statements(tmp_path) -> None:
-    # Classes are always captured, so uiRole marking does not depend on --capture-statements.
+    # Classes are always captured, so uiRole marking does not depend on statement capture.
     p = tmp_path / "widgets.ts"
     p.write_bytes(UIROLE_SRC)
     ctx = ParseContext(path="widgets.ts", abs_path=p, source=UIROLE_SRC, repo_root=tmp_path,

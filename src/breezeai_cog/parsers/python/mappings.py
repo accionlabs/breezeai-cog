@@ -35,7 +35,7 @@ DECLARATIONS = {
     "assert_statement",
 }
 
-#: Node types emitted as Statements (flat) when --capture-statements is on.
+#: Node types emitted as Statements (flat) when statement capture is on.
 EMIT_TYPES = CONTROL_FLOW | JUMP | DECLARATIONS
 
 #: Scopes whose inner statements belong to that nested scope, not the enclosing one.

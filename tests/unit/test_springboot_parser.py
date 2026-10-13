@@ -53,7 +53,7 @@ def _parse(tmp_path, src: bytes, name: str, *, capture: bool = True) -> FileReco
 
 
 def test_routes_require_capture_statements(tmp_path) -> None:
-    # Routes are statements — only emitted with --capture-statements (spec A4).
+    # Routes are statements — only emitted with statement capture (spec A4).
     rec = _parse(tmp_path, SRC_V3, "OrderController.java", capture=False)
     assert [s for s in rec.statements if s.semanticType == "route"] == []
     assert rec.framework is None

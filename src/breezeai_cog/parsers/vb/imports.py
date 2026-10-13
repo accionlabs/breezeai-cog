@@ -5,7 +5,7 @@ import is recorded external and calls resolve same-file only (precision-first).
 
 The one cross-file fact we *do* index is class heritage (:func:`build_vb_index`): a
 controller can inherit its ``<Route>``/``<Authorize>`` from a base declared in another
-file, and the shared :func:`~breezeai_cog.parsers.csharp_aspnet.routes.detect_controller_routes`
+file, and the shared :func:`~breezeai_cog.parsers.aspnet_common.detect_controller_routes`
 walks that chain via ``index.class_heritage``."""
 
 from __future__ import annotations

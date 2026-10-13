@@ -111,6 +111,59 @@ def test_enum_entries_captured_as_statements(tmp_path) -> None:
     assert KotlinParser().parse_file(ctx2).statements == []
 
 
+def test_file_level_constants_and_type_alias_captured(tmp_path) -> None:
+    # Kotlin allows constants and type aliases outside any class; they parent to the FILE.
+    # Class-scope members keep parenting to their own Class (no duplication at file scope).
+    src = b'''\
+const val APP_NAME = "BreezeAI"
+val MAX_RETRIES = 3
+typealias Handler = (Int) -> Unit
+
+object Config {
+    const val BASE_URL = "https://x"
+}
+'''
+    p = tmp_path / "Constants.kt"
+    p.write_bytes(src)
+    ctx = ParseContext(path="Constants.kt", abs_path=p, source=src, repo_root=tmp_path,
+                       capture_statements=True)
+    rec = KotlinParser().parse_file(ctx)
+    at_file = [(s.name, s.nodeType, s.text, s.semanticType)
+               for s in rec.statements if s.parentId == rec.id]
+    assert at_file == [
+        ("APP_NAME", "property_declaration", 'const val APP_NAME = "BreezeAI"', None),
+        ("MAX_RETRIES", "property_declaration", "val MAX_RETRIES = 3", None),
+        ("Handler", "type_alias", "typealias Handler = (Int) -> Unit", None),
+    ]
+    cfg = next(c for c in rec.classes if c.name == "Config")
+    assert [(s.name, s.nodeType) for s in rec.statements if s.parentId == cfg.id] == [
+        ("BASE_URL", "property_declaration"),
+    ]
+    ctx2 = ParseContext(path="Constants.kt", abs_path=p, source=src, repo_root=tmp_path,
+                        capture_statements=False)
+    assert KotlinParser().parse_file(ctx2).statements == []
+
+
+def test_file_level_constant_comments_match_class_scope(tmp_path) -> None:
+    # The file-scope pass runs before the comment pass, so a top-level constant registers
+    # its absorbing span: the same-line trailing comment rides on the statement's `text`
+    # and is not also emitted as its own node. The leading KDoc parents to the enclosing
+    # scope (the File) — identical to how a class-scope constant's KDoc parents to the Class.
+    src = b'''\
+/** The product name. */
+const val APP_NAME = "BreezeAI"  // trailing note
+'''
+    p = tmp_path / "Doc.kt"
+    p.write_bytes(src)
+    ctx = ParseContext(path="Doc.kt", abs_path=p, source=src, repo_root=tmp_path,
+                       capture_statements=True)
+    rec = KotlinParser().parse_file(ctx)
+    const = next(s for s in rec.statements if s.name == "APP_NAME")
+    assert const.text == 'const val APP_NAME = "BreezeAI"  // trailing note'
+    comments = [(s.text, s.parentId) for s in rec.statements if s.semanticType == "comment"]
+    assert comments == [("/** The product name. */", rec.id)]
+
+
 # BREEZEAI-839: companion members, method typing, suspend/receiver metadata,
 # implements type args, and sealed marking.
 _GAPS_SRC = b'''\

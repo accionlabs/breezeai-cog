@@ -1,7 +1,7 @@
 """VertxParser — a Java framework parser. Selected (one parser per file) over JavaParser
 when ``claims`` finds a Vert.x import; reuses ``JavaParser.extract`` (single parse),
 then detects Vert.x event/messaging/route statements. Like all route/event detection,
-gated by ``--capture-statements``.
+gated by statement capture.
 
 Both Vert.x package roots are recognised: ``io.vertx`` (Vert.x 3.x+) and ``org.vertx.java``
 (Vert.x 2.x). Without the 2.x root a 2.x verticle fell through to the plain ``JavaParser``
@@ -30,7 +30,7 @@ class VertxParser(JavaParser):
     def parse_file(self, ctx: ParseContext) -> FileRecord:
         root = parse_source("java", ctx.source, ctx.parse_timeout_micros).root_node
         record = self.extract(root, ctx)  # inherited Java extraction (one parse)
-        if ctx.capture_statements:  # events/routes are statements — gated by --capture-statements
+        if ctx.capture_statements:  # events/routes are statements — gated by statement capture
             idx = ctx.resolution_index
             cross = idx.consts if isinstance(idx, JavaIndex) else {}  # repo-wide constants
             consts = resolve_all(collect_constants(root, ctx.source), base=cross)

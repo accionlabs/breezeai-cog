@@ -30,6 +30,15 @@ SETTINGS = json.dumps({
     }}}
 })
 
+# A bare (unwrapped) single-index body, e.g. a `PUT /<index>` create-index
+# request — `mappings` sits directly at the top level, with no index-name key.
+BARE_MAPPING = json.dumps({
+    "mappings": {"properties": {
+        "title": {"type": "text"},
+        "reviews": {"type": "nested", "properties": {"author": {"type": "keyword"}}},
+    }}
+})
+
 
 class _Captured:
     def __init__(self) -> None:
@@ -89,8 +98,22 @@ def test_mapping_upload(client: TestClient, captured: _Captured) -> None:
     assert next(f for f in rec["fields"] if f["fullPath"] == "title.raw")["isMultiField"] is True
     path, payload = captured.notifications[0]
     assert path == "/db-ontology/stream-ingest-s3"
-    assert payload == {"s3Key": out["storage_key"], "projectUuid": "P1", "dataLakeId": "D1",
+    assert payload == {"storage_key": out["storage_key"], "projectUuid": "P1", "dataLakeId": "D1",
                        "repositoryName": "products.json"}
+
+
+def test_bare_mapping_upload(client: TestClient, captured: _Captured) -> None:
+    r = client.post(
+        "/api/analyze-es",
+        files={"file": ("products-mapping.json", BARE_MAPPING, "application/json")},
+        data={"projectUuid": "P1", "dataLakeId": "D1"},
+    )
+    assert r.status_code == 202
+    out = r.json()
+    assert out["mode"] == "mapping" and out["indexCount"] == 1
+    rec = captured.records[0]
+    assert rec["__type"] == "es_index" and rec["indexName"] == "products-mapping"
+    assert {f["fullPath"] for f in rec["fields"]} == {"title", "reviews", "reviews.author"}
 
 
 def test_settings_only_upload(client: TestClient, captured: _Captured) -> None:

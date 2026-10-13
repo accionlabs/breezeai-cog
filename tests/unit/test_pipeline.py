@@ -97,3 +97,66 @@ def test_run_reports_progress(tmp_path) -> None:
     assert seen[-1] == (5, 5)                       # ends at total
     assert [d for d, _ in seen] == sorted(d for d, _ in seen)  # monotonic
     assert all(t == 5 for _, t in seen)             # total stable
+
+
+def _make_markup_repo(root) -> None:
+    (root / "app.py").write_text("def top():\n    return 1\n")
+    (root / "page.html").write_text("<div *ngFor='let x of xs'>{{ x }}</div>\n")
+    (root / "Default.aspx").write_text("<%@ Page %>\n")
+
+
+def test_templates_skipped_by_default(tmp_path) -> None:
+    repo = tmp_path / "markup"
+    repo.mkdir()
+    _make_markup_repo(repo)
+
+    records = list(iter_file_records(repo))
+    assert sorted(r.path for r in records) == ["app.py"]
+
+
+def test_capture_templates_includes_markup(tmp_path) -> None:
+    repo = tmp_path / "markup"
+    repo.mkdir()
+    _make_markup_repo(repo)
+
+    records = list(iter_file_records(repo, capture_templates=True))
+    assert sorted(r.path for r in records) == ["Default.aspx", "app.py", "page.html"]
+
+
+def test_template_skips_are_counted_and_reconcile(tmp_path) -> None:
+    """A `template` skip joins the reason tally and keeps
+    `scanned == parsed + failed + skipped` intact."""
+    from breezeai_cog.config import Settings
+    from breezeai_cog.core import pipeline
+    from breezeai_cog.core.skips import SkipReport
+
+    repo = tmp_path / "markup"
+    repo.mkdir()
+    _make_markup_repo(repo)
+
+    report = SkipReport()
+    entries = list(pipeline._scan_entries(repo, Settings(repo=repo), report))
+    assert report.counts["template"] == 2  # page.html + Default.aspx
+    assert len(entries) == 1
+    # markup is not misfiled as an unsupported extension
+    assert ".html" not in report.extensions and ".aspx" not in report.extensions
+
+
+def test_vue_import_edges_never_dangle(tmp_path) -> None:
+    """A `.ts` importing a skipped `.vue` must not keep an edge to a File node that was
+    never emitted (parsers/typescript/imports.py resolves `.vue` on purpose)."""
+    repo = tmp_path / "vue"
+    (repo / "src").mkdir(parents=True)
+    (repo / "src" / "Avatar.vue").write_text("<template><b/></template>\n")
+    (repo / "src" / "router.ts").write_text(
+        "import { createRouter } from 'vue-router'\nimport Avatar from './Avatar.vue'\n"
+        "export const router = createRouter({ routes: [{ path: '/a', component: Avatar }] })\n"
+    )
+
+    default = {r.path: r for r in iter_file_records(repo)}
+    assert "src/Avatar.vue" not in default
+    assert default["src/router.ts"].importFiles == []  # pruned, not dangling
+
+    opted_in = {r.path: r for r in iter_file_records(repo, capture_templates=True)}
+    assert "src/Avatar.vue" in opted_in
+    assert opted_in["src/router.ts"].importFiles == ["src/Avatar.vue"]

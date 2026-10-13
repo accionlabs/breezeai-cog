@@ -41,7 +41,7 @@ class GraphQLParser(TypeScriptParser):
         record = self.extract(root, ctx)  # inherited base extraction (one parse)
         if ctx.capture_statements and not self.is_fixture_file(
             ctx.path
-        ):  # gated by --capture-statements; skip fixtures (R4)
+        ):  # gated by statement capture; skip fixtures (R4)
             gql_classes, routes = detect_graphql(
                 root,
                 ctx.source,

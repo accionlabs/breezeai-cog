@@ -690,7 +690,7 @@ def test_server_controls_captured_plain_html_skipped(tmp_path) -> None:
 def test_markup_requires_capture(tmp_path) -> None:
     rec = _parse_markup(tmp_path, "Enrollment.aspx", _ASPX_MARKUP, capture=False)
     assert rec.uiRole == "template"  # File role is structural, not gated
-    assert rec.statements == []  # markup statements are gated on --capture-statements
+    assert rec.statements == []  # markup statements are gated on statement capture
 
 
 def test_markup_selected_over_base(tmp_path) -> None:

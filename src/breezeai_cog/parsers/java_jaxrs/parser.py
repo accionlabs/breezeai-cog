@@ -23,7 +23,7 @@ class JaxRsParser(JavaParser):
     def parse_file(self, ctx: ParseContext) -> FileRecord:
         root = parse_source("java", ctx.source, ctx.parse_timeout_micros).root_node
         record = self.extract(root, ctx)  # inherited Java extraction (one parse)
-        if ctx.capture_statements:  # routes are statements — gated by --capture-statements
+        if ctx.capture_statements:  # routes are statements — gated by statement capture
             routes = detect_jaxrs_routes(record)  # off the record — no AST re-walk
             if routes:
                 record.statements.extend(routes)

@@ -2,7 +2,7 @@
 Selected over the base :class:`~..groovy.parser.GroovyParser` when a Vert.x import is present
 (``io.vertx`` 3.x or ``org.vertx`` 2.x — the latter is ``org.vertx.groovy``). Reuses
 ``GroovyParser.extract`` (single parse), then runs Groovy-AST Vert.x detection; gated by
-``--capture-statements`` like all route/event work.
+statement capture like all route/event work.
 
 Why this exists: Vert.x 2.x API modules written in **Groovy** register HTTP routes via
 ``RouteMatcher`` — ``route.get("${prefix}/x", handler)`` or a bare
@@ -34,7 +34,7 @@ class GroovyVertxParser(GroovyParser):
     def parse_file(self, ctx: ParseContext) -> FileRecord:
         root = parse_source("groovy", ctx.source, ctx.parse_timeout_micros).root_node
         record = self.extract(root, ctx)  # inherited Groovy extraction (one parse)
-        if ctx.capture_statements:  # routes/events are statements — gated by --capture-statements
+        if ctx.capture_statements:  # routes/events are statements — gated by statement capture
             idx = ctx.resolution_index
             cross = idx.consts if isinstance(idx, GroovyIndex) else {}  # repo-wide constants
             consts = resolve_all(collect_constants(root, ctx.source), base=cross)

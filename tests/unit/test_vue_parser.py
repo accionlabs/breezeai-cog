@@ -44,7 +44,7 @@ export default createRouter({ history: createWebHistory(), routes })
 
 
 def test_routes_require_capture_statements(tmp_path) -> None:
-    # Routes are statements — only emitted with --capture-statements.
+    # Routes are statements — only emitted with statement capture.
     rec = _parse("src/router/index.ts", _V3_ROUTER, tmp_path, capture=False)
     assert [s for s in rec.statements if s.semanticType == "route"] == []
     # framework is the parser's identity (set unconditionally on any file it claims), not a

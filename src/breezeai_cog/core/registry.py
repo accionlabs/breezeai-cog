@@ -15,6 +15,7 @@ import pkgutil
 from pathlib import Path
 
 from ..errors import RegistryError
+from ..parsers.additive import all_detectors
 from ..parsers.base import LanguageParser
 from ..schemas import SCHEMA_VERSION
 
@@ -52,26 +53,32 @@ def base_parser_for(path: str | Path) -> LanguageParser | None:
     return min(candidates, key=lambda p: p.priority) if candidates else None
 
 
+def template_extensions() -> frozenset[str]:
+    """Every extension any registered parser declares as markup/view, lowercased.
+
+    The scanner drops these before classification unless ``--capture-templates`` is on.
+    Read via ``getattr`` because ``template_extensions`` is an optional ``BaseParser``
+    capability, not part of the ``LanguageParser`` Protocol."""
+    return frozenset(
+        ext.lower() for p in _REGISTRY for ext in getattr(p, "template_extensions", ())
+    )
+
+
 def select(
-    path: str | Path, source: bytes, repo_root: str | Path | None = None
+    path: str | Path, source: bytes, parse_timeout_micros: int = 0
 ) -> LanguageParser | None:
     """The single parser that handles this file: the highest-priority candidate whose
     ``claims(path, source, repo_root=...)`` is True (the base language parser is the priority-0 fallback)."""
     candidates = parsers_for(path)
-
-    def claims(parser: LanguageParser) -> bool:
-        if repo_root is not None:
-            parameters = inspect.signature(parser.claims).parameters.values()
-            accepts_root = any(
-                parameter.name == "repo_root"
-                or parameter.kind is inspect.Parameter.VAR_KEYWORD
-                for parameter in parameters
-            )
-            if accepts_root:
-                return parser.claims(str(path), source, repo_root=repo_root)
-        return parser.claims(str(path), source)
-
-    claiming = [parser for parser in candidates if claims(parser)]
+    claiming = [
+        p
+        for p in candidates
+        if (
+            p.claims(str(path), source, parse_timeout_micros)
+            if getattr(p, "claims_accepts_timeout", False)
+            else p.claims(str(path), source)
+        )
+    ]
     if not claiming:
         return None
     return max(claiming, key=lambda p: p.priority)
@@ -82,8 +89,15 @@ def capabilities() -> dict[str, object]:
         "schemaVersion": SCHEMA_VERSION,
         "languages": sorted({p.name for p in _REGISTRY}),
         "extensions": sorted({e for p in _REGISTRY for e in p.extensions}),
-        "frameworks": sorted({f for p in _REGISTRY for f in p.frameworks}),
+        "templateExtensions": sorted(template_extensions()),
+        "frameworks": sorted(
+            {f for p in _REGISTRY for f in p.frameworks}
+            | {f for ds in all_detectors().values() for d in ds for f in d.frameworks}
+        ),
         "statementTypes": sorted({s for p in _REGISTRY for s in p.statement_types}),
+        "additiveDetectors": {
+            lang: [d.name for d in ds] for lang, ds in all_detectors().items()
+        },
     }
 
 

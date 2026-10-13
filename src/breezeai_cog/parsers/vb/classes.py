@@ -144,7 +144,7 @@ def build_class(
         )
 
     # Enum members become flat statements parented to the enum Class (their `text` — incl.
-    # any `= value` — is queryable). Gated by --capture-statements like every other statement.
+    # any `= value` — is queryable). Gated by statement capture like every other statement.
     if capture and node.type == "enum_block":
         statements.extend(
             emit_enum_members(
