@@ -44,7 +44,7 @@ import re
 
 from tree_sitter import Node
 
-from ...emit import disambiguate, file_id, statement_id
+from ...emit import file_id
 from ...schemas import Class, Statement
 from ..additive import DetectContext, Detection, Detector, Gate, register_detector
 from ..emits import Emit
@@ -102,10 +102,12 @@ def _handler(field: Node, source: bytes, op: str) -> tuple[str | None, int | Non
     return None, None
 
 
-def _detect_resolver_maps(
-    root: Node, source: bytes, path: str, seen: set[str], index: object = None
-) -> list[Statement]:
-    routes: list[Statement] = []
+def detect_resolver_maps(
+    root: Node, source: bytes, path: str, index: object = None
+) -> list[Emit]:
+    """Resolver-map operations (``Query: { books: … }``) and federation ``__resolveReference``
+    bindings, for :func:`~..emits.apply`."""
+    routes: list[Emit] = []
 
     def walk(node: Node) -> None:
         if node.type == "pair":
@@ -117,17 +119,12 @@ def _detect_resolver_maps(
                     op = _key_text(field, source)
                     if op is None:
                         continue
-                    sl, sc = field.start_point[0] + 1, field.start_point[1]
                     handler, handler_line = _handler(field, source, op)
                     # The DTOs are declared by the SDL, often in another file (.graphql).
                     request_dto, response_dto = root_field_dto(index, key, op)
                     routes.append(
-                        Statement(
-                            id=disambiguate(statement_id(path, sl, sc), seen),
-                            parentId=file_id(path),
-                            nodeType=field.type,
+                        Emit(field, dict(
                             semanticType="route",
-                            text=first_line(node_text(field, source))[:120],
                             method=kind.upper(),
                             endpoint=op,
                             requestDTO=request_dto,
@@ -136,10 +133,8 @@ def _detect_resolver_maps(
                             handler=handler,
                             handlerLine=handler_line,
                             routeKind=kind,
-                            startLine=sl,
-                            endLine=field.end_point[0] + 1,
-                            path=path,
-                        )
+                        ), parent=file_id(path),
+                            text=first_line(node_text(field, source))[:120])
                     )
             elif key and value is not None and value.type == "object":
                 # Federation: a type's __resolveReference is what the gateway's _entities field
@@ -147,25 +142,18 @@ def _detect_resolver_maps(
                 for field in _operation_fields(value):
                     if _key_text(field, source) != _RESOLVE_REFERENCE:
                         continue
-                    sl, sc = field.start_point[0] + 1, field.start_point[1]
                     handler, handler_line = _handler(field, source, _RESOLVE_REFERENCE)
                     routes.append(
-                        Statement(
-                            id=disambiguate(statement_id(path, sl, sc), seen),
-                            parentId=file_id(path),
-                            nodeType=field.type,
+                        Emit(field, dict(
                             semanticType="route",
-                            text=first_line(node_text(field, source))[:120],
                             method="RESOLVE_REFERENCE",
                             endpoint=key,
                             framework="graphql",
                             handler=handler,
                             handlerLine=handler_line,
                             routeKind="query",
-                            startLine=sl,
-                            endLine=field.end_point[0] + 1,
-                            path=path,
-                        )
+                        ), parent=file_id(path),
+                            text=first_line(node_text(field, source))[:120])
                     )
         for c in node.named_children:
             walk(c)
@@ -219,9 +207,13 @@ def _parse_sdl_fragment(
     routes.extend(frag_stmts)
 
 
-def _detect_sdl(
+def detect_embedded_sdl(
     root: Node, source: bytes, path: str, seen: set[str], timeout_micros: int, limit: int
 ) -> tuple[list[Class], list[Statement]]:
+    """Server SDL embedded in template strings: the GraphQL language's own extraction
+    (:func:`~..graphql.sdl.extract_graphql`) — the type system as ``Class`` nodes plus its
+    statements — not a framework detection, so it builds its records itself; ``seen`` is the
+    record's ids at that point."""
     classes: list[Class] = []
     routes: list[Statement] = []
 
@@ -423,26 +415,6 @@ def _detect_client_ops(
 
 
 # ---- entry point ------------------------------------------------------------
-
-
-def detect_graphql(
-    root: Node,
-    source: bytes,
-    path: str,
-    *,
-    seen_ids: set[str],
-    timeout_micros: int = 0,
-    limit: int = 8000,
-    index: object = None,
-) -> tuple[list[Class], list[Statement]]:
-    """Server-side GraphQL — resolver-map operations (statements, with handlers) and embedded
-    SDL (the type system as ``Class`` nodes plus route/entity/member statements). ``timeout_micros``
-    bounds the secondary ``graphql`` parse of embedded SDL; ``limit`` bounds statement ``text``.
-    Returns ``(classes, statements)`` to append to the record. (Client operations are handled
-    additively for every TS file by :func:`detect_graphql_client`, not here.)"""
-    routes = _detect_resolver_maps(root, source, path, seen_ids, index)
-    classes, sdl_stmts = _detect_sdl(root, source, path, seen_ids, timeout_micros, limit)
-    return classes, routes + sdl_stmts
 
 
 # Client ops appear in ANY TS file that imports a gql tag — most of which are owned by the
