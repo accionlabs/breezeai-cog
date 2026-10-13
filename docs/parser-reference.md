@@ -408,7 +408,7 @@ register_detector(Detector(
 - The base language parser's `extract` ends with `run_additive(<language>, …)`; discovery
   imports every module under `parsers/` containing `register_detector(` or `register_fact(`, in
   each worker.
-- The language must be in `HOOKED_LANGUAGES` (`typescript`, `csharp`, `scala`); `order` must be
+- The language must be in `HOOKED_LANGUAGES` (`typescript`, `csharp`, `java`, `scala`); `order` must be
   unique per language. Both are checked at registration.
 - `DetectContext` carries `root`, `ctx` (`source`, `path`, `resolution_index`,
   `parse_timeout_micros`), `record` (read it; do not write it from `detect`), `is_fixture`, and
