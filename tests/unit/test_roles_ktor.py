@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import pytest
-
 EP = {"route", "eventbus_consumer", "timer"}
 SRC = "src/main/kotlin/a/App.kt"
 HEAD = """package a
@@ -83,15 +81,29 @@ def test_route_block_is_wiring(analyze_files) -> None:
     assert (r.method, r.endpoint) == ("POST", "/api/orders")
 
 
-@pytest.mark.xfail(strict=True, reason="Ktor webSocket routes are not recorded")
 def test_websocket_is_binding(analyze_files) -> None:
     st = analyze_files(
         _app("""    routing {
         webSocket("/ws") { }
+        route("/chat") {
+            webSocket { }
+        }
     }""")
     )
-    [r] = _eps(st)
-    assert (r.semanticType, r.routeKind, r.endpoint) == ("route", "ws", "/ws")
+    assert sorted((r.semanticType, r.method, r.routeKind, r.endpoint) for r in _eps(st)) == [
+        ("route", "WEBSOCKET", "ws", "/chat"),
+        ("route", "WEBSOCKET", "ws", "/ws"),
+    ]
+
+
+def test_client_websocket_session_is_not_a_binding(analyze_files) -> None:
+    st = analyze_files(
+        _app("""    routing { }
+    runBlocking {
+        client.webSocket(host = "example.com", path = "/ws") { }
+    }""")
+    )
+    assert _eps(st) == []
 
 
 def test_authenticate_block_has_no_record(analyze_files) -> None:

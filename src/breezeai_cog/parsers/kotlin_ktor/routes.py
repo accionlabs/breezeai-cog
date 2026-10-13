@@ -1,4 +1,4 @@
-"""Ktor HTTP route detection from the routing DSL.
+"""Ktor HTTP and WebSocket route detection from the routing DSL.
 
 Ktor registers routes via a lambda DSL:
     routing {
@@ -23,6 +23,9 @@ from ...schemas import Statement
 from ..treesitter import node_text
 
 _HTTP_VERBS = frozenset({"get", "post", "put", "delete", "patch", "head", "options"})
+#: ``webSocket("/ws") { … }`` / ``webSocketRaw(…)``: a WebSocket upgrade (method ``WEBSOCKET``,
+#: ``routeKind: ws``). A client session is ``client.webSocket(…)`` — a member call, never matched.
+_WS_BUILDERS = frozenset({"webSocket", "webSocketRaw"})
 
 
 #: An argument that is a path expression whose value cannot be resolved (a constant from elsewhere,
@@ -206,10 +209,11 @@ def _collect_routes(
                 )
             continue
 
-        if verb not in _HTTP_VERBS:
+        if verb not in _HTTP_VERBS and verb not in _WS_BUILDERS:
             out.extend(_collect_routes(child, source, path, parent_id, seen_ids, limit, prefix, base, guards, consts))
             continue
 
+        method, kind = ("WEBSOCKET", "ws") if verb in _WS_BUILDERS else (verb.upper(), "route")
         arg = _first_arg(child, source, consts)
         full_endpoint: str | None
         if arg is _SENTINEL_NO_ARGS:
@@ -235,9 +239,9 @@ def _collect_routes(
         if captured is not None:  # the base parser captured this call: enrich it in place
             captured.semanticType = "route"
             captured.framework = "ktor"
-            captured.method = verb.upper()
+            captured.method = method
             captured.endpoint = full_endpoint
-            captured.routeKind = "route"
+            captured.routeKind = kind
             captured.handlerLine = handler_line
             if guards:
                 captured.guards = list(guards)
@@ -252,10 +256,10 @@ def _collect_routes(
             semanticType="route",
             framework="ktor",
             text=text[:limit] if limit else text,
-            method=verb.upper(),
+            method=method,
             endpoint=full_endpoint,
             handlerLine=handler_line,
-            routeKind="route",
+            routeKind=kind,
             guards=list(guards) or None,
             authRequired=True if guards else None,
             startLine=start_line,
