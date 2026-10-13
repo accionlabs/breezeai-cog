@@ -13,12 +13,11 @@ from __future__ import annotations
 
 from tree_sitter import Node
 
-from ...emit import disambiguate, statement_id
-from ...schemas import FileRecord, Statement
+from ...schemas import FileRecord
 from ...schemas.enums import SemanticType
+from ..additive import DetectContext, Detection, Detector, Gate, register_detector
 from ..base import ParseContext
-from ..additive import DetectContext, Detector, Gate, register_detector
-from ..enclosing import Enclosing
+from ..emits import Emit
 from ..treesitter import node_text
 from .functions import type_map
 from .statements import _call_details, find_enclosing_parent_id
@@ -115,68 +114,47 @@ def detect_spark_calls(
     ctx: ParseContext,
     record: FileRecord,
     types: dict[str, str] | None = None,
-) -> None:
-    """Detect Spark .read/.write calls and enrich or append statements."""
-    if not ctx.capture_statements:
-        return
+) -> list[Emit]:
+    """Spark .read / .write calls: enrich the unclassified statement on the call's line, or append
+    one parented to the innermost function (else class) around it."""
     source = ctx.source
     if b"org.apache.spark" not in source:
-        return
+        return []
 
-    seen_ids = {s.id for s in record.statements}
     spark_types = _spark_types(root, source, base_types=types)
-    enclosing = Enclosing(record)
-    found_any = False
+    found: list[Emit] = []
 
     def walk(node: Node) -> None:
-        nonlocal found_any
         if node.type == "call_expression":
             details = _call_details(node, source)
             if details is not None:
                 callee, method, endpoint = details
                 op = _spark_op_for_call(callee, method, spark_types)
                 if op is not None:
-                    found_any = True
                     sem_type, hint, op_method = _SPARK_OPS[op]
                     start = node.start_point[0] + 1
-                    stmt = enclosing.statement(start)
-                    if stmt is not None and stmt.semanticType is None:
-                        stmt.semanticType = sem_type
-                        stmt.dataAccessHint = hint
-                        stmt.method = op_method
-                        stmt.endpoint = endpoint
-                    else:
-                        end = node.end_point[0] + 1
-                        parent_id = find_enclosing_parent_id(start, record)
-                        record.statements.append(
-                            Statement(
-                                id=disambiguate(statement_id(ctx.path, start, node.start_point[1]), seen_ids),
-                                parentId=parent_id,
-                                nodeType="call_expression",
-                                semanticType=sem_type,
-                                text=node_text(node, source),
-                                dataAccessHint=hint,
-                                method=op_method,
-                                endpoint=endpoint,
-                                startLine=start,
-                                endLine=end,
-                                path=ctx.path,
-                            )
-                        )
+                    found.append(Emit(
+                        node,
+                        {"semanticType": sem_type, "dataAccessHint": hint, "method": op_method,
+                         "endpoint": endpoint},
+                        enrich="unclassified",
+                        parent=find_enclosing_parent_id(start, record),
+                        node_type="call_expression",
+                        text=node_text(node, source),
+                    ))
 
         for c in node.named_children:
             walk(c)
 
     walk(root)
-    if found_any and not record.framework:
-        record.framework = "spark"
+    return found
 
 
-def _run(dc: DetectContext) -> str | None:
-    detect_spark_calls(dc.root, dc.ctx, dc.record, types=dc.types)  # labels the record itself
-    return None
+def _detect(dc: DetectContext) -> Detection | None:
+    found = detect_spark_calls(dc.root, dc.ctx, dc.record, types=dc.types)
+    return Detection(found, label="spark") if found else None
 
 
 register_detector(Detector(
-    name="spark", gate=Gate("scala", order=20), run=_run, frameworks=("spark",),
+    name="spark", gate=Gate("scala", order=20), detect=_detect, frameworks=("spark",),
 ))

@@ -21,9 +21,8 @@ from __future__ import annotations
 
 from tree_sitter import Node
 
-from ...schemas import FileRecord
+from ..additive import DetectContext, Detection, Detector, Gate, register_detector
 from ..base import ParseContext
-from ..additive import DetectContext, Detector, Gate, register_detector
 from ..treesitter import node_text
 from .functions import type_map
 
@@ -54,13 +53,13 @@ def _is_receive_message_call(call: Node, source: bytes) -> bool:
 
 
 def detect_scala_events(
-    root: Node, ctx: ParseContext, record: FileRecord, types: dict[str, str] | None = None
-) -> None:
-    if not ctx.capture_statements:
-        return
+    root: Node, ctx: ParseContext, types: dict[str, str] | None = None
+) -> bool:
+    """Whether the file does Akka / Pekko actor messaging (a label only: actors are not entry
+    points, Q7)."""
     source = ctx.source
     if b"akka" not in source and b"pekko" not in source:
-        return
+        return False
     declared_types = dict(types) if types is not None else type_map(root, source)
 
     def collect_actor_assignments(node: Node) -> None:
@@ -129,15 +128,14 @@ def detect_scala_events(
             walk(c)
 
     walk(root)
-    if found_any and not record.framework:
-        record.framework = "akka"
+    return found_any
 
 
-def _run(dc: DetectContext) -> str | None:
-    detect_scala_events(dc.root, dc.ctx, dc.record, types=dc.types)  # labels the record itself
-    return None
+def _detect(dc: DetectContext) -> Detection | None:
+    return Detection([], label="akka") if detect_scala_events(dc.root, dc.ctx, types=dc.types) \
+        else None
 
 
 register_detector(Detector(
-    name="akka-events", gate=Gate("scala", order=10), run=_run, frameworks=("akka",),
+    name="akka-events", gate=Gate("scala", order=10), detect=_detect, frameworks=("akka",),
 ))
