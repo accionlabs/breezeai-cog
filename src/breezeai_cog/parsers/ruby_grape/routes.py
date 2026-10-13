@@ -6,10 +6,11 @@ from collections.abc import Iterator
 
 from tree_sitter import Node
 
-from ...emit import disambiguate, file_id, statement_id
-from ...schemas import FileRecord, Statement
+from ...emit import file_id
+from ...schemas import FileRecord
+from ..emits import Emit
 from ..ruby.ownership import owner_id
-from ..treesitter import first_line, node_text
+from ..treesitter import node_text
 
 _HTTP_METHODS = {"get", "post", "put", "patch", "delete", "head", "options"}
 _ROUTE_PREFIXES = {"namespace", "resource", "resources", "route_param"}
@@ -189,12 +190,12 @@ def _join_path(prefix: str, local: str | None) -> str | None:
     return "/" + "/".join(parts) if parts else "/"
 
 
-def detect_grape_routes(root: Node, source: bytes, path: str, record: FileRecord) -> bool:
-    """Append Grape routes whose class and path are syntactically verifiable. The address is
-    prefix / version (path strategy) / namespaces / path; an unresolved part → empty endpoint."""
-    seen = {statement.id for statement in record.statements}
+def detect_grape_routes(root: Node, source: bytes, path: str, record: FileRecord) -> list[Emit]:
+    """The Grape routes whose class and path are syntactically verifiable, for
+    :func:`~..emits.apply`. The address is prefix / version (path strategy) / namespaces / path;
+    an unresolved part → empty endpoint."""
     fallback = file_id(path)
-    matched = False
+    found: list[Emit] = []
 
     for call in _calls(root):
         method = _method(call, source)
@@ -214,13 +215,9 @@ def detect_grape_routes(root: Node, source: bytes, path: str, record: FileRecord
         line = call.start_point[0] + 1
         block = call.child_by_field_name("block")  # the handler: an anonymous block
         guards = _guards(call, source)
-        record.statements.append(
-            Statement(
-                id=disambiguate(statement_id(path, line, call.start_point[1]), seen),
-                parentId=owner_id(line, record.functions, record.classes, fallback),
-                nodeType="call",
+        found.append(
+            Emit(call, dict(
                 semanticType="route",
-                text=first_line(node_text(call, source)),
                 method=method.upper(),
                 endpoint=endpoint,
                 framework="grape",
@@ -230,10 +227,6 @@ def detect_grape_routes(root: Node, source: bytes, path: str, record: FileRecord
                 authRequired=True if guards else None,
                 routeKind="route",
                 isRegex=False,
-                startLine=line,
-                endLine=call.end_point[0] + 1,
-                path=path,
-            )
+            ), parent=owner_id(line, record.functions, record.classes, fallback), node_type="call")
         )
-        matched = True
-    return matched
+    return found
