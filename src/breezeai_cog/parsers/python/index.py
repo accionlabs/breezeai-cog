@@ -16,10 +16,13 @@ wiring facts (:mod:`.fastapi_facts`) are collected once per repository and compo
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import Sequence
+from typing import Any, Sequence
 
+from ..additive import (
+    collect_additive, collect_fact_sources, facts_for, resolve_additive, split_fact_sources,
+)
 from ..index_common import parallel_map
 from ..treesitter import parse_source
 from .fastapi_facts import FileFacts, PrefixSpec, file_facts, module_constants
@@ -37,6 +40,9 @@ class PythonIndex:
     fastapi_wiring: dict[str, dict[str, Wiring]] = field(default_factory=dict)
     #: File → {app variable → global middleware names}.
     fastapi_middleware: dict[str, dict[str, list[str]]] = field(default_factory=dict)
+    #: Facts registered with ``register_fact`` (fact name → fact), resolved once before
+    #: parsing. Read with :func:`~..additive.index_fact`; see ``parsers/additive.py``.
+    facts: dict[str, Any] = field(default_factory=dict)
 
 
 def _facts(args: tuple[Path, Path]) -> tuple[str, FileFacts] | None:
@@ -66,9 +72,40 @@ def _constants(args: tuple[Path, str]) -> tuple[str, dict[str, str]]:
     return rel, module_constants(root, source)
 
 
+def _registered(args: tuple[Path, Path]) -> dict[str, Any]:
+    """Picklable per-file worker: what registered facts collect from one file. Only files
+    matching a fact's gate are parsed."""
+    repo_root, abs_path = args
+    try:
+        source = abs_path.read_bytes()
+    except OSError:
+        return {}
+    if not any(g in source for spec in facts_for("python") for g in spec.gate):
+        return {}
+    try:
+        root = parse_source("python", source).root_node
+    except ValueError:  # bounded-parse failure — skip this file only
+        return {}
+    return collect_additive("python", root, source, abs_path.relative_to(repo_root).as_posix(),
+                            repo_root)
+
+
 def build_python_index(repo_root: Path, files: Sequence[Path], jobs: int = 1) -> PythonIndex:
     root = Path(repo_root)
+    files, fact_files = split_fact_sources("python", list(files))
     py_files = [f for f in files if f.suffix == ".py"]
+    # registered fact name → per-file values: fact-source files (another parser's), then our own
+    collected: dict[str, list[Any]] = collect_fact_sources("python", fact_files, root, jobs)
+    if facts_for("python"):
+        for per_file_facts in parallel_map([(root, f) for f in py_files], _registered, jobs):
+            for name, value in per_file_facts.items():
+                collected.setdefault(name, []).append(value)
+    index = _fastapi_index(root, py_files, jobs)
+    # Registered facts may need the whole index, so they resolve after it is built.
+    return replace(index, facts=resolve_additive("python", collected, index))
+
+
+def _fastapi_index(root: Path, py_files: list[Path], jobs: int) -> PythonIndex:
     per_file = [r for r in parallel_map([(root, f) for f in py_files], _facts, jobs) if r]
     if not per_file:
         return PythonIndex()

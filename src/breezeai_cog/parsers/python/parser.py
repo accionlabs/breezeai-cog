@@ -10,6 +10,7 @@ from tree_sitter import Node
 from ...emit import file_id
 from ...schemas import SCHEMA_VERSION, FileRecord, Function, Statement
 from ...utils import count_loc
+from ..additive import run_additive
 from ..base import BaseParser, ParseContext
 from ..comments_common import comment_statements_for
 from ..treesitter import parse_source
@@ -91,7 +92,7 @@ class PythonParser(BaseParser):
                 )
             )
 
-        return FileRecord(
+        record = FileRecord(
             id=fid,
             path=path,
             type="code",
@@ -104,3 +105,8 @@ class PythonParser(BaseParser):
             classes=classes,
             statements=statements,  # flat: file + class + function-scoped, linked by parentId
         )
+        # Additive detectors (parsers/additive.py) — layered on top of the base extraction, before
+        # any framework subclass adds its own (a Celery task co-exists with a FastAPI route).
+        run_additive("python", root, ctx, record, is_fixture=self.is_fixture_file(path),
+                     bindings=bindings)
+        return record

@@ -216,13 +216,15 @@ def _marked(**overrides) -> FactSpec:
 
 @pytest.mark.parametrize("language", sorted(INDEX_HOOKED_LANGUAGES))
 def test_index_hooked_languages_call_the_collector(language: str) -> None:
-    source = (PARSERS_DIR / language / "imports.py").read_text()
+    # The index is built in imports.py (index.py for Python).
+    source = "".join((PARSERS_DIR / language / f).read_text()
+                     for f in ("imports.py", "index.py") if (PARSERS_DIR / language / f).exists())
     assert f'collect_additive("{language}"' in source and f'resolve_additive("{language}"' in source
 
 
 def test_fact_for_an_unhooked_language_rejected(isolated) -> None:
     with pytest.raises(RegistryError, match="no index hook"):
-        register_fact(_marked(language="python"))
+        register_fact(_marked(language="ruby"))
 
 
 def test_fact_needs_a_gate(isolated) -> None:
