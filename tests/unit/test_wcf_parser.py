@@ -127,10 +127,50 @@ def test_rest_over_wcf() -> None:
     get = routes["GetPrice"]
     assert get.method == "GET"  # [WebGet]
     assert get.routeKind == "route"
-    assert get.endpoint == "/pricing?input={jsonInput}"  # UriTemplate wins
+    # no .svc for this contract → the address is unknown: empty, never the bare UriTemplate
+    assert get.endpoint is None
     put = routes["Save"]
     assert put.method == "PUT"  # [WebInvoke(Method="PUT")]
-    assert put.endpoint == "/pricing/save"
+    assert put.endpoint is None
+
+
+_SVC_CB = """using System.ServiceModel;
+using System.ServiceModel.Web;
+
+namespace Shop.Import
+{
+    [ServiceContract]
+    public class Rest
+    {
+        [OperationContract]
+        [WebInvoke(Method = "POST", BodyStyle = WebMessageBodyStyle.WrappedRequest)]
+        public string GetImportItem(string id) { return ""; }
+
+        [OperationContract]
+        [WebGet(UriTemplate = "/items/{id}?fmt={fmt}")]
+        public string FindItem(string id, string fmt) { return ""; }
+
+        [OperationContract]
+        public string Ping() { return ""; }
+    }
+}
+"""
+
+
+def test_rest_endpoint_is_under_the_svc(analyze_files) -> None:
+    stmts = analyze_files({
+        "Import/Rest.svc": '<%@ ServiceHost Service="Shop.Import.Rest" CodeBehind="Rest.svc.cs" %>',
+        "Import/Rest.svc.cs": _SVC_CB,
+        # same class shape, but its .svc names another class → host unknown
+        "Other/Rest.svc": '<%@ ServiceHost Service="Shop.Other.Service" %>',
+        "Other/Rest.svc.cs": _SVC_CB.replace("Shop.Import", "Shop.Other"),
+    })
+    got = {(s.path, s.handler): (s.method, s.endpoint)
+           for s in stmts if s.framework == "wcf" and s.semanticType == "route" and s.handler}
+    assert got[("Import/Rest.svc.cs", "GetImportItem")] == ("POST", "/Import/Rest.svc/GetImportItem")
+    assert got[("Import/Rest.svc.cs", "FindItem")] == ("GET", "/Import/Rest.svc/items/{id}")
+    assert got[("Import/Rest.svc.cs", "Ping")] == ("RPC", "Rest/Ping")  # SOAP: <Contract>/<Operation>
+    assert got[("Other/Rest.svc.cs", "GetImportItem")] == ("POST", None)
 
 
 def test_default_service_name_strips_leading_i() -> None:

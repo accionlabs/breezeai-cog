@@ -34,7 +34,9 @@ class WcfParser(CSharpParser):
         root = parse_source("csharp", ctx.source, ctx.parse_timeout_micros).root_node
         record = self.extract(root, ctx)  # inherited C# extraction (one parse)
         if ctx.capture_statements:  # routes are statements — gated (spec A4)
-            routes = detect_wcf_services(record) or detect_asmx_services(record, ctx.repo_root)
+            routes = detect_wcf_services(record, ctx.repo_root) or detect_asmx_services(
+                record, ctx.repo_root
+            )
             if routes:
                 record.statements.extend(routes)
                 record.framework = routes[0].framework  # "wcf" or "asmx"

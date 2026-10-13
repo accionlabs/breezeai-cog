@@ -8,7 +8,8 @@ the ``FileRecord`` — no AST re-walk, no new grammar.
 
 Emitted as ``route`` statements:
 * ``semanticType=route``, ``framework=wcf``, ``handler`` = the operation method.
-* ``endpoint`` = ``ServiceName/OperationName`` (SOAP/RPC) or the ``UriTemplate`` (REST-over-WCF).
+* ``endpoint`` = ``ServiceName/OperationName`` (SOAP/RPC); for REST-over-WCF the served address
+  ``<.svc path>/<UriTemplate or Operation>`` when the class's ``.svc`` is found, else empty.
 * ``method`` = ``RPC`` for SOAP operations; the HTTP verb for ``[WebGet]``/``[WebInvoke]``.
 * ``routeKind`` = ``rpc`` (SOAP) or ``route`` (REST-over-WCF).
 """
@@ -32,6 +33,8 @@ _GENERATED_ATTR = "GeneratedCode"  # svcutil-generated client proxy — NOT a se
 _HTTP_VERBS = {"GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS"}
 #: ``Class="Ns.Type"`` inside an ``.asmx`` ``<%@ WebService … %>`` directive.
 _ASMX_CLASS_RE = re.compile(rb'<%@\s*WebService\b[^%]*?\bClass\s*=\s*["\']([^"\']+)["\']', re.IGNORECASE)
+#: ``Service="Ns.Type"`` inside a ``.svc`` ``<%@ ServiceHost … %>`` directive.
+_SVC_SERVICE_RE = re.compile(rb'<%@\s*ServiceHost\b[^%]*?\bService\s*=\s*["\']([^"\']+)["\']', re.IGNORECASE)
 
 
 def _has_attr(decorators: list[Decorator], name: str) -> bool:
@@ -86,16 +89,21 @@ def _service_name(decorators: list[Decorator], class_name: str) -> str:
     return class_name
 
 
-def detect_wcf_services(record: FileRecord) -> list[Statement]:
+def detect_wcf_services(record: FileRecord, repo_root: Path | None = None) -> list[Statement]:
     """One ``route`` statement per ``[OperationContract]`` under a ``[ServiceContract]`` type
-    (WCF / CoreWCF; tolerant of the full ``…Attribute`` form)."""
-    services: dict[str, str] = {
-        cls.id: _service_name(cls.decorators, cls.name)
-        for cls in record.classes
+    (WCF / CoreWCF; tolerant of the full ``…Attribute`` form). A REST operation's endpoint is
+    its served address under the class's ``.svc`` (:func:`svc_host`), empty when that host is
+    not known — a bare ``UriTemplate`` or a service name is not an address."""
+    contracts = [
+        cls for cls in record.classes
         if _has_attr(cls.decorators, _SERVICE_ATTR) and not _has_attr(cls.decorators, _GENERATED_ATTR)
-    }
-    if not services:
+    ]
+    if not contracts:
         return []
+    services: dict[str, str] = {cls.id: _service_name(cls.decorators, cls.name) for cls in contracts}
+    hosts: dict[str, str | None] = {
+        cls.id: svc_host(cls.path or record.path, repo_root, cls.name) for cls in contracts
+    }
 
     seen = {s.id for s in record.statements}
     routes: list[Statement] = []
@@ -106,7 +114,8 @@ def detect_wcf_services(record: FileRecord) -> list[Statement]:
         web = next((d for d in fn.decorators if simple_attr_name(d.name) in (_WEB_GET, _WEB_INVOKE)), None)
         if web is not None:  # REST-over-WCF (WebHttpBinding)
             method = "GET" if simple_attr_name(web.name) == _WEB_GET else (_verb_arg(web) or "POST")
-            endpoint = _uri_arg(web) or f"{svc}/{fn.name}"
+            host = hosts.get(fn.parentId)
+            endpoint = _rest_address(host, _uri_arg(web), fn.name) if host is not None else None
             route_kind = "route"
         else:  # SOAP / net.tcp RPC
             method, endpoint, route_kind = "RPC", f"{svc}/{fn.name}", "rpc"
@@ -133,20 +142,43 @@ def detect_wcf_services(record: FileRecord) -> list[Statement]:
     return routes
 
 
-def asmx_host(path: str, repo_root: Path | None, cls_name: str) -> str | None:
-    """The ``.asmx`` file that serves class ``cls_name`` declared in ``path`` — the code-behind
-    convention ``X.asmx.cs`` beside ``X.asmx`` — when that file exists and its ``WebService``
-    directive's ``Class=`` names the class. Anything else → None (the host is not known)."""
-    if repo_root is None or not path.lower().endswith(".asmx.cs"):
+def _code_behind_host(
+    path: str, repo_root: Path | None, cls_name: str, ext: str, directive: re.Pattern[bytes]
+) -> str | None:
+    """The host file (``X.asmx`` / ``X.svc``) that serves class ``cls_name`` declared in
+    ``path`` — the code-behind convention ``X<ext>.cs`` beside ``X<ext>`` — when that file exists
+    and its directive's class attribute names the class. Anything else → None (host unknown)."""
+    if repo_root is None or not path.lower().endswith(ext + ".cs"):
         return None
     host = path[: -len(".cs")]
     try:
         body = (repo_root / host).read_bytes()
     except OSError:
         return None
-    m = _ASMX_CLASS_RE.search(body)
+    m = directive.search(body)
     simple = m.group(1).decode("utf-8", "replace").rsplit(".", 1)[-1] if m else None
     return host if simple == cls_name else None
+
+
+def asmx_host(path: str, repo_root: Path | None, cls_name: str) -> str | None:
+    """The ``.asmx`` file serving class ``cls_name`` (``X.asmx.cs`` beside ``X.asmx``), or None."""
+    return _code_behind_host(path, repo_root, cls_name, ".asmx", _ASMX_CLASS_RE)
+
+
+def svc_host(path: str, repo_root: Path | None, cls_name: str) -> str | None:
+    """The ``.svc`` file serving class ``cls_name`` (``X.svc.cs`` beside ``X.svc``, its
+    ``ServiceHost Service=`` naming the class), or None. An interface contract, or a class whose
+    ``.svc`` is elsewhere, has no known host here."""
+    return _code_behind_host(path, repo_root, cls_name, ".svc", _SVC_SERVICE_RE)
+
+
+def _rest_address(host: str, template: str | None, operation: str) -> str:
+    """``/<.svc path>/<UriTemplate>`` (its query part dropped — those are query bindings, not the
+    path), or ``/<.svc path>/<Operation>`` when the operation has no ``UriTemplate`` (WCF's default
+    for WebGet / WebInvoke). REST over WCF is HTTP, so the address is a path with a leading
+    ``/``, like a Web Forms page's (contract §6); SOAP keeps ``<Service>.asmx/<Operation>``."""
+    tail = template.split("?", 1)[0].strip("/") if template else operation
+    return "/" + (f"{host}/{tail}" if tail else host).lstrip("/")
 
 
 def detect_asmx_services(record: FileRecord, repo_root: Path | None = None) -> list[Statement]:
