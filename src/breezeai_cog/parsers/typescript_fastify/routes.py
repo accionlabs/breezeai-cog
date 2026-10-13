@@ -25,7 +25,8 @@ from tree_sitter import Node
 from ...emit import disambiguate, file_id, statement_id
 from ...schemas import FileRecord, Function, Statement
 from ..additive import DetectContext, Detector, register_detector
-from ..statements_common import url_placeholder
+from ..enclosing import Enclosing
+from ..statements_common import strip_leading_base, url_placeholder
 from ..treesitter import node_text
 
 
@@ -541,18 +542,25 @@ def detect_fastify_routes(
     for statement in record.statements:
         statements_by_span.setdefault((statement.id, statement.endLine), []).append(statement)
 
+    enclosing = Enclosing(record)
     unmatched: list[Statement] = []
     enriched_ids: set[str] = set()
     span_positions: dict[tuple[str, int], int] = {}
     for route in statements:
         if route.parentId == fid:
-            route.parentId = _owner_function(route.startLine, record.functions, fid)
+            route.parentId = enclosing.function_id(route.startLine, fid)
 
         source_id = _source_statement_id(route.id)
         span = (source_id, route.endLine)
         candidates = statements_by_span.get(span, ())
         position = span_positions.get(span, 0)
-        existing = candidates[position] if position < len(candidates) else None
+        existing = None
+        if position == 0 and position < len(candidates):
+            line_statement = enclosing.statement(route.startLine)
+            if line_statement is not None and line_statement.id == candidates[position].id:
+                existing = line_statement
+        if existing is None and position < len(candidates):
+            existing = candidates[position]
         while existing is not None and existing.id in enriched_ids:
             position += 1
             existing = candidates[position] if position < len(candidates) else None
@@ -581,17 +589,6 @@ def _source_statement_id(route_id: str) -> str:
     """Remove the collision suffix added when a route overlays its captured statement."""
     base, separator, suffix = route_id.rpartition("#")
     return base if separator and suffix.isdecimal() else route_id
-
-
-def _owner_function(line: int, functions: list[Function], fallback: str) -> str:
-    owner: Optional[Function] = None
-    owner_span: Optional[int] = None
-    for function in functions:
-        if function.startLine <= line <= function.endLine:
-            span = function.endLine - function.startLine
-            if owner_span is None or span < owner_span:
-                owner, owner_span = function, span
-    return owner.id if owner is not None else fallback
 
 
 def _first_param_name(
@@ -1478,24 +1475,23 @@ def _resolve_route_string(
 ) -> Optional[str]:
     """Resolve route paths, rendering dynamic template substitutions as placeholders."""
     if node.type == "template_string":
-        return _template_value(node, source)
+        parts: list[str] = []
+        for child in node.named_children:
+            if child.type == "string_fragment":
+                parts.append(node_text(child, source))
+            elif child.type == "template_substitution":
+                expression = child.named_children[0] if child.named_children else None
+                if expression is None:
+                    parts.append("{param}")
+                    continue
+                resolved = _resolve_static_string(expression, source, file_index)
+                parts.append(
+                    resolved
+                    if resolved is not None
+                    else url_placeholder(node_text(expression, source))
+                )
+        return strip_leading_base("".join(parts))
     return _resolve_static_string(node, source, file_index)
-
-
-def _template_value(node: Node, source: bytes) -> str:
-    """Render template substitutions as route placeholders (e.g. ``${user.id}`` → ``{id}``)."""
-    parts: list[str] = []
-    for child in node.named_children:
-        if child.type == "string_fragment":
-            parts.append(node_text(child, source))
-        elif child.type == "template_substitution":
-            expression = child.named_children[0] if child.named_children else None
-            parts.append(
-                url_placeholder(node_text(expression, source))
-                if expression is not None
-                else "{param}"
-            )
-    return "".join(parts)
 
 
 def _string_literal(

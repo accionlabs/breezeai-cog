@@ -54,12 +54,20 @@ def _detect_routes(
     path: str = "app.ts",
     *,
     inject_factory_import: bool = True,
+    resolution_index=None,
 ):
     if inject_factory_import:
         source = _with_factory_import_for_fixture(source)
     root = parse_source("typescript", source).root_node
     record = FileRecord(id=path, path=path, type="code", language="typescript", loc=1)
-    return detect_fastify_routes(root, source, path, record, seen_ids=set())
+    return detect_fastify_routes(
+        root,
+        source,
+        path,
+        record,
+        seen_ids=set(),
+        resolution_index=resolution_index,
+    )
 
 
 def test_detects_route_from_known_fastify_instance() -> None:
@@ -166,6 +174,25 @@ def test_template_route_paths_use_parameter_placeholders() -> None:
 
     assert [(route.method, route.endpoint, route.semanticType) for route in routes] == [
         ("GET", "/users/{userId}/posts/{id}", "route")
+    ]
+
+
+def test_template_route_path_resolves_constants_and_falls_back_to_placeholders() -> None:
+    source = (
+        b"const BASE = '/api';\n"
+        b"const app = Fastify();\n"
+        b"app.get(`${BASE}/users`, handler);\n"
+        b"app.get(`${REPO_BASE}/admin`, handler);\n"
+        b"app.get(`${DYNAMIC_BASE}/public`, handler);"
+    )
+
+    resolution_index = TsAliasIndex(base_dir=".", paths={}, const_values={"REPO_BASE": "/internal"})
+    routes = _detect_routes(source, resolution_index=resolution_index)
+
+    assert [(route.method, route.endpoint) for route in routes] == [
+        ("GET", "/api/users"),
+        ("GET", "/internal/admin"),
+        ("GET", "/public"),
     ]
 
 
