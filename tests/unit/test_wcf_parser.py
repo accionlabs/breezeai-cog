@@ -287,3 +287,61 @@ def test_asmx_endpoint_is_the_asmx_file_and_method(analyze_files) -> None:
         "Other/Wrong.asmx.cs": None,   # the .asmx serves another class
         "App_Code/Loose.cs": None,     # no .asmx beside it
     }
+
+
+_CONTRACT = """using System.ServiceModel;
+namespace Shop {
+[ServiceContract]
+public interface IOrderService {
+    [OperationContract] Order GetOrder(int id);
+    [OperationContract] void Cancel(int id);
+}
+}
+"""
+
+
+def _wcf_handlers(stmts) -> dict[str, tuple[str | None, int | None]]:
+    return {s.endpoint: (s.handler, s.handlerLine)
+            for s in stmts if s.framework == "wcf" and s.semanticType == "route"}
+
+
+def test_interface_contract_handler_is_the_implementing_method(analyze_files) -> None:
+    # One implementer in another file: the method with a body runs → Class.Method, no line
+    # (the record is in the interface's file; handlerPath does not exist yet).
+    stmts = analyze_files({
+        "IOrderService.cs": _CONTRACT,
+        "OrderService.svc.cs": (
+            "namespace Shop {\npublic class OrderService : ServiceBase, IOrderService {\n"
+            "    public Order GetOrder(int id) { return null; }\n"
+            "    void IOrderService.Cancel(int id) { }\n}\n}\n"  # explicit implementation
+        ),
+    })
+    assert _wcf_handlers(stmts) == {
+        "OrderService/GetOrder": ("OrderService.GetOrder", None),
+        "OrderService/Cancel": ("OrderService.Cancel", None),
+    }
+
+
+def test_interface_contract_with_two_implementers_keeps_the_interface_method(analyze_files) -> None:
+    stmts = analyze_files({
+        "IOrderService.cs": _CONTRACT,
+        "A.cs": "namespace Shop { public class A : IOrderService { public Order GetOrder(int id) => null; public void Cancel(int id) {} } }\n",
+        "B.cs": "namespace Shop { public class B : IOrderService { public Order GetOrder(int id) => null; public void Cancel(int id) {} } }\n",
+    })
+    assert _wcf_handlers(stmts)["OrderService/GetOrder"] == ("GetOrder", 5)
+
+
+def test_implementer_in_the_same_file_gets_its_line(analyze_files) -> None:
+    src = _CONTRACT.replace("}\n}\n", "}\npublic class OrderService : IOrderService {\n"
+                            "    public Order GetOrder(int id) => null;\n"
+                            "    public void Cancel(int id) { }\n}\n}\n", 1)
+    stmts = analyze_files({"OrderService.cs": src})
+    assert _wcf_handlers(stmts)["OrderService/GetOrder"] == ("OrderService.GetOrder", 9)
+
+
+def test_concrete_service_contract_is_unchanged(analyze_files) -> None:
+    stmts = analyze_files({
+        "Svc.cs": "using System.ServiceModel;\nnamespace Shop {\n[ServiceContract]\npublic class Svc {\n"
+                  "    [OperationContract] public void Ping() { }\n}\n}\n",
+    })
+    assert _wcf_handlers(stmts) == {"Svc/Ping": ("Ping", 5)}
