@@ -461,7 +461,7 @@ classDiagram
 > file and needed in another. A registered fact keeps it in the framework's own module and in the
 > same registry as every other add-on, instead of a framework field on the language index or a new
 > parser-selection hook. **Cost:** a language must call `collect_additive` / `resolve_additive`
-> from its `build_index` to offer it (`INDEX_HOOKED_LANGUAGES`: C#, TypeScript), and a detector that
+> from its `build_index` to offer it (`INDEX_HOOKED_LANGUAGES`: C#, Java, TypeScript), and a detector that
 > emits for files with no marker cannot use a byte guard. Details:
 > [cross-file resolution §8](architecture/cross-file-resolution.md#a-framework-fact-from-another-file-a-registered-fact).
 

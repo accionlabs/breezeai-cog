@@ -8,12 +8,16 @@ file's ``package.ClassName`` → repo-relative path). Wildcard imports stay exte
 from __future__ import annotations
 
 from collections.abc import Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
+from typing import Any
 
 from tree_sitter import Node
 
 from ...utils import repo_relative
+from ..additive import (
+    collect_additive, collect_fact_sources, resolve_additive, split_fact_sources,
+)
 from ..constfold import Token, resolve_all
 from ..index_common import parallel_map, record_distinct, seed_same_package
 from ..treesitter import node_text, parse_source
@@ -59,10 +63,15 @@ class JavaIndex:
     #: disagree) — resolves ``${…}`` placeholders in annotation values such as a
     #: ``@KafkaListener`` topic. See ``config.py``.
     module_properties: dict[str, dict[str, str | None]] = field(default_factory=dict)
+    #: Facts registered with ``register_fact`` (fact name → fact), resolved once before
+    #: parsing. Read with :func:`~..additive.index_fact`; see ``parsers/additive.py``.
+    facts: dict[str, Any] = field(default_factory=dict)
 
 
-#: One file's contribution: ``{package.TypeName: rel}`` and ``{Class.FIELD: tokens}``.
-_IndexFrag = tuple[dict[str, str], dict[str, list[Token]], JaxrsFacts | None, GuardFacts | None]
+#: One file's contribution: ``{package.TypeName: rel}``, ``{Class.FIELD: tokens}``, its JAX-RS
+#: and guard facts, and what registered facts collect from it.
+_IndexFrag = tuple[dict[str, str], dict[str, list[Token]], JaxrsFacts | None, GuardFacts | None,
+                   dict[str, Any]]
 
 
 def _fqcn_index_one(args: tuple[str, str]) -> _IndexFrag | None:
@@ -70,6 +79,7 @@ def _fqcn_index_one(args: tuple[str, str]) -> _IndexFrag | None:
     ``static final String`` constants as ``{Class.FIELD: tokens}`` (qualified only — a bare
     field name is meaningless cross-file). Pure, picklable worker; ``None`` on read failure."""
     file_s, rel = args
+    repo_root = Path(file_s[: -len(rel) - 1]) if file_s.endswith("/" + rel) else None
     try:
         source = Path(file_s).read_bytes()
     except OSError:
@@ -93,7 +103,8 @@ def _fqcn_index_one(args: tuple[str, str]) -> _IndexFrag | None:
         # Qualified `Class.FIELD` keys only (drop bare names — they collide across files).
         const_frag = {k: v for k, v in collect_constants(root, source).items() if "." in k}
         return (fqcn_frag, const_frag, collect_jaxrs_facts(root, source, rel),
-                collect_guard_facts(root, source, rel))
+                collect_guard_facts(root, source, rel),
+                collect_additive("java", root, source, rel, repo_root))
     except Exception as exc:  # parse OR a pathologically deep AST walk (RecursionError) — skip this file
         from ...logging import get_logger
         get_logger("breezeai_cog.index").warning(
@@ -108,7 +119,10 @@ def build_fqcn_index(repo_root: Path, files: Sequence[Path], jobs: int = 1) -> J
     plus the repo-wide ``Class.FIELD → value`` constant map for address folding. A name
     declared in >1 file with a differing value collapses to ``None`` (ambiguous → honest-null;
     the constant is then simply not folded)."""
+    files, fact_files = split_fact_sources("java", list(files))
     args = [(str(f), repo_relative(f, repo_root)) for f in files]
+    # registered fact name → per-file values: fact-source files (another parser's), then our own
+    collected: dict[str, list[Any]] = collect_fact_sources("java", fact_files, repo_root, jobs)
     fqcn: FqcnIndex = {}
     raw_consts: dict[str, list[Token] | None] = {}
     jaxrs: list[JaxrsFacts] = []
@@ -117,7 +131,9 @@ def build_fqcn_index(repo_root: Path, files: Sequence[Path], jobs: int = 1) -> J
     for frag in parallel_map(args, _fqcn_index_one, jobs):
         if frag is None:
             continue
-        fqcn_frag, const_frag, jaxrs_frag, guard_frag = frag
+        fqcn_frag, const_frag, jaxrs_frag, guard_frag, facts = frag
+        for name, value in facts.items():
+            collected.setdefault(name, []).append(value)
         if jaxrs_frag is not None:
             jaxrs.append(jaxrs_frag)
         if guard_frag is not None:
@@ -130,13 +146,15 @@ def build_fqcn_index(repo_root: Path, files: Sequence[Path], jobs: int = 1) -> J
             record_distinct(raw_consts, name, tokens)
     consts = resolve_all(raw_consts)
     app_paths, sub_bases = resolve_jaxrs(jaxrs, consts, simple_names)
-    return JavaIndex(
+    index = JavaIndex(
         fqcn=fqcn, consts=consts,
         context_paths=spring_context_paths(repo_root, (rel for _, rel in args)),
         jaxrs_app_paths=app_paths, jaxrs_sub_bases=sub_bases,
         module_guards=resolve_guards(guard_facts),
         module_properties=spring_properties(repo_root, (rel for _, rel in args)),
     )
+    # Registered facts may need the whole index, so they resolve after it is built.
+    return replace(index, facts=resolve_additive("java", collected, index))
 
 
 def _package_of(root: Node, source: bytes) -> str:
