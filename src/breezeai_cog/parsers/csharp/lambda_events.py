@@ -26,9 +26,10 @@ from __future__ import annotations
 
 from tree_sitter import Node
 
-from ...emit import disambiguate, file_id, statement_id
-from ...schemas import FileRecord, SemanticType, Statement
-from ..additive import DetectContext, Detector, Gate, register_detector
+from ...emit import file_id
+from ...schemas import SemanticType
+from ..additive import DetectContext, Detection, Detector, Gate, register_detector
+from ..emits import Emit
 from ..treesitter import first_line, node_text
 
 # The .NET context parameter every real handler carries — the primary marker.
@@ -102,15 +103,14 @@ def _handler_kind(method: Node, source: bytes) -> tuple[SemanticType, str, str |
     return None
 
 
-def detect_lambda_handlers(root: Node, source: bytes, path: str, record: FileRecord) -> bool:
-    """Add AWS Lambda handler entry-point statements to ``record``; return True if any matched.
-    Additive — invoked from ``CSharpParser.extract`` for every C# file, self-guarded by a cheap
-    byte check, layering on top of whatever framework already owns the file. Each handler is a
-    convention over a method (parented to the file, like the ASP.NET route detectors)."""
+def detect_lambda_handlers(root: Node, source: bytes, path: str) -> list[Emit]:
+    """AWS Lambda handler entry points in a C# file. Additive — invoked for every C# file,
+    self-guarded by a cheap byte check, layering on top of whatever framework already owns the
+    file. Each handler is a convention over a method (parented to the file, like the ASP.NET
+    route detectors)."""
     if b"ILambdaContext" not in source:
-        return False
-    seen = {s.id for s in record.statements}
-    found = False
+        return []
+    found: list[Emit] = []
     for method in _all(root, "method_declaration"):
         info = _handler_kind(method, source)
         if info is None:
@@ -119,34 +119,25 @@ def detect_lambda_handlers(root: Node, source: bytes, path: str, record: FileRec
         name_node = method.child_by_field_name("name")
         name = node_text(name_node, source) if name_node is not None else None
         sl = method.start_point[0] + 1
-        new_id = disambiguate(statement_id(path, sl, method.start_point[1]), seen)
-        seen.add(new_id)
-        record.statements.append(Statement(
-            id=new_id,
-            parentId=file_id(path),
-            nodeType="synthetic",
-            semanticType=semantic,
+        found.append(Emit(
+            method,
+            {"semanticType": semantic, "framework": framework, "handler": name,
+             "handlerLine": sl, "routeKind": route_kind,
+             "method": "PERIODIC" if semantic == "timer" else None},
+            parent=file_id(path), node_type="synthetic",
             text=first_line(node_text(method, source))[:120],
-            framework=framework,
-            handler=name,
-            handlerLine=sl,
-            routeKind=route_kind,
-            method="PERIODIC" if semantic == "timer" else None,
-            startLine=sl,
-            endLine=method.end_point[0] + 1,
-            path=path,
         ))
-        found = True
     return found
 
 
-def _run(dc: DetectContext) -> str | None:
-    return "aws-lambda" if detect_lambda_handlers(dc.root, dc.source, dc.path, dc.record) else None
+def _detect(dc: DetectContext) -> Detection | None:
+    found = detect_lambda_handlers(dc.root, dc.source, dc.path)
+    return Detection(found, label="aws-lambda") if found else None
 
 
 # An entry-point emitter, so fixture/test files are skipped.
 register_detector(Detector(
-    name="lambda-handlers", gate=Gate("csharp", order=10, skip_fixtures=True), run=_run,
+    name="lambda-handlers", gate=Gate("csharp", order=10, skip_fixtures=True), detect=_detect,
     frameworks=(
         "aws-lambda", "aws-s3", "aws-sqs", "aws-sns", "aws-eventbridge", "aws-dynamodb",
         "aws-kinesis", "aws-ses", "aws-apigw",
