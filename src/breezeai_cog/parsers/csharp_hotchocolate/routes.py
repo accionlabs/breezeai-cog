@@ -39,7 +39,16 @@ from .mappings import (
     ROOT_SCHEMA_NAMES,
     TOPIC_ATTR,
 )
-from .descriptor import configure_method, descriptor_target, field_declarations
+from .descriptor import (
+    configure_method,
+    descriptor_target,
+    field_authorizations,
+    field_declarations,
+    named_target,
+    resolve_reads_parent,
+    resolve_with_method,
+    type_authorizations,
+)
 from .naming import field_name
 
 
@@ -109,17 +118,22 @@ def is_infrastructure_param(p_type: str | None, decorators: list[Decorator]) -> 
     return base in INFRA_PARAM_TYPES or base.startswith(DATALOADER_TYPES)
 
 
+def _guard_labels(authorizations: list[list[str]]) -> list[str]:
+    """One label per authorization, by its arguments, deduped: ``Authorize`` /
+    ``Authorize(Admin)``. Shared by the attribute and fluent styles so the same guard reads the
+    same whichever way it was declared."""
+    out: list[str] = []
+    for args in authorizations:
+        label = f"{AUTHORIZE_ATTR}({', '.join(args)})" if args else AUTHORIZE_ATTR
+        if label not in out:
+            out.append(label)
+    return out
+
+
 def guards_of(cls: Class, fn: Function) -> list[str]:
     """``[Authorize]`` guards inherited from the class plus the method's own, deduped."""
-    out: list[str] = []
-    for decorators in (cls.decorators, fn.decorators):
-        for dec in decorators:
-            if simple_attr_name(dec.name) != AUTHORIZE_ATTR:
-                continue
-            label = f"{AUTHORIZE_ATTR}({', '.join(dec.args)})" if dec.args else AUTHORIZE_ATTR
-            if label not in out:
-                out.append(label)
-    return out
+    return _guard_labels([dec.args for decorators in (cls.decorators, fn.decorators)
+                          for dec in decorators if simple_attr_name(dec.name) == AUTHORIZE_ATTR])
 
 
 
@@ -326,20 +340,28 @@ def extend_target(cls: Class) -> str | None:
     return None
 
 
-def _root_kind_of_name(name: str, record: FileRecord, heritage: dict[str, object]) -> str | None:
+def _root_kind_of_name(
+    name: str,
+    record: FileRecord,
+    heritage: dict[str, object],
+    hc_root_types: dict[str, str] | None = None,
+) -> str | None:
     """Operation kind for a *named* type, from enforced signals only.
 
     The schema name (``"Query"`` / ``OperationTypeNames.Query``) names the root directly. A CLR
-    class name only counts when that class is seen carrying a root attribute — in this file, or
-    via the repo heritage index. A class named ``Query`` that is registered in ``Program.cs`` and
-    attributed nowhere stays unresolved: root-ness is declared at the registration site, which
-    this parser does not read.
+    class name only counts when that class carries a root attribute (in this file or via the repo
+    heritage index), or when it is registered via ``AddQueryType<T>()`` in the composition root
+    (supplied via ``hc_root_types`` from the registered-roots detector's fact on the C# index).
     """
     kind = ROOT_SCHEMA_NAMES.get(name)
     if kind is not None:
         return kind
     for cls in record.classes:
         if cls.name == name and (kind := root_kind(cls)) is not None:
+            return kind
+    if hc_root_types is not None:
+        kind = hc_root_types.get(name)
+        if kind is not None:
             return kind
     entry = heritage.get(name)  # None means "declared by >1 class, ambiguous" — honest-null
     decorators = getattr(entry, "decorators", None) if entry is not None else None
@@ -364,11 +386,12 @@ def _extension_routes(
     heritage: dict[str, object], path: str, seen: set[str],
     anchors: dict[tuple[str, int], Anchor],
     generated_loaders: dict[str, str | None] | None = None,
+    hc_root_types: dict[str, str] | None = None,
 ) -> list[Statement]:
     """Routes for one ``[ExtendObjectType(target)]`` class: operations when the target is a
     resolved root, field resolvers when it is a data type whose parent binding is visible, and
     nothing at all when the target cannot be classified."""
-    kind = _root_kind_of_name(target, record, heritage)
+    kind = _root_kind_of_name(target, record, heritage, hc_root_types)
     if kind is not None:
         return [s for fn in methods
                 for s in _operation_records(
@@ -387,48 +410,102 @@ def _extension_routes(
 
 
 def descriptor_field_statement(
-    configure: Function, kind: str, name: str, call: Node, source: bytes, seen: set[str]
+    configure: Function, kind: str, name: str, call: Node, source: bytes, seen: set[str],
+    guards: list[str] | None = None, *, target: str | None = None,
+    resolver: Function | None = None, generated_loaders: dict[str, str | None] | None = None,
 ) -> Statement:
     """One field declared fluently inside ``Configure``. Unlike the attribute-derived routes this
     has a real backing node — the ``d.Field(...)`` call — so it keeps that ``nodeType``, matching
-    how ``csharp_graphql`` records its builder calls."""
+    how ``csharp_graphql`` records its builder calls.
+
+    ``kind="field_resolver"`` records a data type's resolver the way the attribute style does:
+    ``RESOLVE_FIELD``, addressed ``Target.field``. When the resolver is a method in this file
+    (``ResolveWith``), it is the handler and supplies the response type and loaders."""
     line, col = call.start_point[0] + 1, call.start_point[1]
+    resolves_field = kind == "field_resolver"
     return Statement(
         id=disambiguate(statement_id(configure.path or "", line, col), seen),
         parentId=configure.id,
         nodeType="invocation_expression",
         semanticType="route",
         text=first_line(node_text(call, source))[:120],
-        method=kind.upper(),
-        endpoint=name,
+        method="RESOLVE_FIELD" if resolves_field else kind.upper(),
+        endpoint=f"{target}.{name}" if resolves_field else name,
         framework="graphql",
-        handler=name,
-        handlerLine=line,
+        handler=resolver.name if resolver is not None else name,
+        handlerLine=resolver.startLine if resolver is not None else line,
         routeKind=kind,
         isRegex=False,
+        authRequired=bool(guards) or None,
+        guards=guards or None,
+        responseDTO=response_dto(resolver.returnType) if resolver is not None else None,
+        dataLoaders=data_loaders(resolver, generated_loaders) if resolver is not None else None,
         startLine=line,
         endLine=call.end_point[0] + 1,
         path=configure.path,
     )
 
 
+def _resolver_method(record: FileRecord, resolver_cls: str, method: str) -> Function | None:
+    """The method ``resolver_cls.method`` declared in this file, or None — absent, in another
+    file, or ambiguous (two classes or overloads of that name)."""
+    classes = [c for c in record.classes if c.name == resolver_cls]
+    if len(classes) != 1:
+        return None
+    fns = [f for f in record.functions if f.parentId == classes[0].id and f.name == method]
+    return fns[0] if len(fns) == 1 else None
+
+
+def _parent_bound_resolvers(
+    configure: Function, target: str, record: FileRecord, body: Node, source: bytes,
+    receiver: str, seen: set[str], type_level: list[list[str]],
+    generated_loaders: dict[str, str | None] | None,
+) -> list[Statement]:
+    """Field resolvers of a **data type**'s fluent descriptor — only those that visibly read the
+    object they resolve a field of, the same evidence the attribute style requires
+    (:func:`resolves_parent`).
+
+    A root's fields have no meaningful parent, so reading one is what tells a data type's
+    resolver apart from the field of a root we failed to recognise; without that evidence the
+    field is left out (honest-null) rather than possibly mislabelling a client entry point.
+    Plain fields (no resolver) are the type's shape and are never recorded.
+    """
+    out: list[Statement] = []
+    for name, call in field_declarations(body, source, receiver):
+        resolver: Function | None = None
+        ref = resolve_with_method(call, source)
+        if ref is not None:
+            resolver = _resolver_method(record, *ref)
+            if resolver is None or not resolves_parent(resolver, target):
+                continue
+        elif not resolve_reads_parent(call, source, target):
+            continue
+        out.append(descriptor_field_statement(
+            configure, "field_resolver", name, call, source, seen,
+            _guard_labels(type_level + field_authorizations(call, source)),
+            target=target, resolver=resolver, generated_loaders=generated_loaders))
+    return out
+
+
 def _descriptor_routes(
     cls: Class, record: FileRecord, nodes: dict[tuple[str, int], Node], source: bytes,
-    heritage: dict[str, object], seen: set[str],
+    heritage: dict[str, object], seen: set[str], hc_root_types: dict[str, str] | None = None,
+    generated_loaders: dict[str, str | None] | None = None,
 ) -> list[Statement]:
-    """Fields declared fluently by ``cls``, when the type it describes is a resolved root.
+    """Fields declared fluently by ``cls``: operations when the type it describes is a resolved
+    root; otherwise only the data type's parent-bound resolvers (:func:`_parent_bound_resolvers`).
 
-    A non-root descriptor declares that type's *shape*: those fields are not endpoints, and
+    A non-root descriptor's plain fields are that type's *shape*: they are not endpoints, and
     emitting them is the over-capture the sibling graphql-dotnet parser measured.
+
+    The target comes from a generic argument when there is one; the non-generic
+    ``ObjectTypeExtension`` names it with ``d.Name(...)`` instead. ``hc_root_types`` resolves a
+    root registered only at ``AddQueryType<T>()`` — the descriptor class itself, or the type it
+    describes. Guards are the descriptor's own
+    ``d.Authorize(…)`` (every field) plus each field chain's ``.Authorize(…)``.
     """
     configure = configure_method(record.functions, cls)
     if configure is None:
-        return []
-    target = descriptor_target(cls, configure)
-    if target is None:
-        return []
-    kind = _root_kind_of_name(target, record, heritage)
-    if kind is None:
         return []
     node = nodes.get((configure.name, configure.startLine))
     body = node.child_by_field_name("body") if node is not None else None
@@ -437,18 +514,35 @@ def _descriptor_routes(
     receiver = configure.params[0].name if configure.params else None
     if receiver is None:
         return []
-    return [descriptor_field_statement(configure, kind, name, call, source, seen)
+    # A descriptor registered itself (AddQueryType<QueryType>()) is a root whatever it describes.
+    kind = (hc_root_types or {}).get(cls.name)
+    target: str | None = None
+    if kind is None:
+        target = descriptor_target(cls, configure) or named_target(body, source, receiver)
+        if target is None:
+            return []
+        kind = _root_kind_of_name(target, record, heritage, hc_root_types)
+    type_level = type_authorizations(body, source, receiver)
+    if kind is None:
+        assert target is not None
+        return _parent_bound_resolvers(configure, target, record, body, source, receiver, seen,
+                                       type_level, generated_loaders)
+    return [descriptor_field_statement(
+                configure, kind, name, call, source, seen,
+                _guard_labels(type_level + field_authorizations(call, source)))
             for name, call in field_declarations(body, source, receiver)]
 
 
 def detect_hotchocolate_routes(
-    record: FileRecord, root: Node, source: bytes, seen: set[str], index: Any = None
+    record: FileRecord, root: Node, source: bytes, seen: set[str], index: Any = None,
+    hc_root_types: dict[str, str] | None = None,
 ) -> list[Statement]:
     """Every operation and field resolver declared in this file.
 
     Two declaration sites: a class carrying a root attribute, and a class extending another type
     with ``[ExtendObjectType]``. ``index`` supplies the repo heritage map so a root attributed in
-    another file still resolves.
+    another file still resolves. ``hc_root_types`` supplies registration-only roots: classes
+    registered via ``AddQueryType<T>()`` in the composition root but carrying no root attribute.
     """
     heritage: dict[str, object] = getattr(index, "class_heritage", None) or {}
     generated_loaders: dict[str, str | None] = getattr(index, "data_loaders", None) or {}
@@ -463,8 +557,10 @@ def detect_hotchocolate_routes(
     for cls in record.classes:
         own = methods.get(cls.id, [])
         kind = root_kind(cls)
+        if kind is None and hc_root_types is not None:
+            kind = hc_root_types.get(cls.name)
         if kind is not None and own:
-            attr = next(name for name, k in ROOT_ATTRS.items() if k == kind)
+            attr = next((name for name, k in ROOT_ATTRS.items() if k == kind), kind.capitalize() + "Type")
             routes.extend(s for fn in own
                           for s in _operation_records(
                               cls, fn, kind, f"[{attr}] {fn.name}", seen, anchors,
@@ -475,7 +571,8 @@ def detect_hotchocolate_routes(
             if own:
                 routes.extend(_extension_routes(
                     cls, target, own, record, heritage, record.path, seen, anchors,
-                    generated_loaders))
+                    generated_loaders, hc_root_types=hc_root_types))
             continue
-        routes.extend(_descriptor_routes(cls, record, nodes, source, heritage, seen))
+        routes.extend(_descriptor_routes(
+            cls, record, nodes, source, heritage, seen, hc_root_types, generated_loaders))
     return routes

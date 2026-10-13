@@ -79,6 +79,6 @@ def _run(dc: DetectContext) -> str | None:
 
 # An entry-point emitter, so fixture/test files are skipped.
 register_detector(Detector(
-    name="generic-handlers", language="csharp", order=30, run=_run,
+    name="generic-handlers", language="csharp", order=40, run=_run,
     guard=b"Handler", skip_fixtures=True, frameworks=("aspnet-webforms",),
 ))

@@ -47,6 +47,23 @@ FIELD_CALL = "Field"
 IGNORE_CALL = "Ignore"
 NAME_CALL = "Name"
 
+#: Resolver calls on a fluent field chain: an inline ``Resolve(ctx => …)``, or
+#: ``ResolveWith<TResolvers>(t => t.Method(…))`` pointing at a method of a resolver class.
+RESOLVE_CALL = "Resolve"
+RESOLVE_WITH_CALL = "ResolveWith"
+
+#: ``ctx.Parent<T>()`` — how an inline resolver reads the object it resolves a field of.
+PARENT_CALL = "Parent"
+
+#: Fluent authorization: on a field chain it guards that field, called on the descriptor itself
+#: it guards every field of the type — the fluent counterpart of method- and class-level
+#: ``[Authorize]``.
+AUTHORIZE_CALL = "Authorize"
+
+#: Holder of the schema root names (``OperationTypeNames.Query``) — the one non-literal form a
+#: fluent ``Name(...)`` target is accepted in, as it names the root as directly as ``"Query"``.
+OPERATION_TYPE_NAMES = "OperationTypeNames"
+
 #: Declarative subscription: the method resolves an event pushed to a topic.
 SUBSCRIBE_ATTR = "Subscribe"
 
@@ -107,3 +124,17 @@ MARKERS: tuple[bytes, ...] = (
 COMPOSITION_ROOT_MARKERS: tuple[bytes, ...] = (
     b"AddGraphQLServer", b"MapGraphQL", b"UseGraphQL",
 )
+
+#: graphql-dotnet's marker. A file declaring one is that library's, not this one's.
+GRAPHQL_DOTNET_MARKER = b"ObjectGraphType"
+
+
+def owned_by_hotchocolate(source: bytes) -> bool:
+    """Whether the HotChocolate parser claims a file, from its bytes alone: a schema declaration,
+    and neither a graphql-dotnet type nor the composition root. Shared by the parser's ``claims``
+    and the registered-roots detector, which must never emit for a file the parser owns."""
+    if GRAPHQL_DOTNET_MARKER in source:
+        return False  # graphql-dotnet owns it; keep the two guards mutually exclusive
+    if any(m in source for m in COMPOSITION_ROOT_MARKERS):
+        return False  # the composition root stays with csharp-aspnet
+    return any(m in source for m in MARKERS)

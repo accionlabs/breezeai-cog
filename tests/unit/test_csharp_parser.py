@@ -373,6 +373,54 @@ def test_same_project_type_wins(tmp_path) -> None:
     assert calls2.get("Do") is None
 
 
+def test_type_in_an_unreferenced_project_does_not_bind(tmp_path) -> None:
+    # Two samples in one repo: the 2021 one declares no Grade, the 2020 one does. The 2021 project
+    # does not reference the 2020 one, so the compiler could never see that Grade - no edge.
+    files = {
+        "New/New.csproj": "<Project></Project>",
+        "New/Models.cs": "using School;\nnamespace App;\npublic class Enrollment { public Grade G; }\n",
+        "Old/Old.csproj": "<Project></Project>",
+        "Old/Grade.cs": "namespace School;\npublic class Grade { }\n",
+    }
+    assert _parse_repo(tmp_path, files, "New/Models.cs").importFiles == []
+
+
+def test_type_in_a_referenced_project_binds_transitively(tmp_path) -> None:
+    files = {
+        "Web/Web.csproj": '<Project><ItemGroup><ProjectReference Include="..\\Core\\Core.csproj" /></ItemGroup></Project>',
+        "Web/Page.cs": "using School;\nnamespace App;\npublic class Page { public Grade G; }\n",
+        "Core/Core.csproj": '<Project><ItemGroup><ProjectReference Include="../Lib/Lib.csproj" /></ItemGroup></Project>',
+        "Core/Marker.cs": "namespace Core;\npublic class Marker { }\n",
+        "Lib/Lib.csproj": "<Project></Project>",
+        "Lib/Grade.cs": "namespace School;\npublic class Grade { }\n",
+    }
+    assert _parse_repo(tmp_path, files, "Web/Page.cs").importFiles == ["Lib/Grade.cs"]
+
+
+def test_msbuild_using_brings_a_namespace_into_scope(tmp_path) -> None:
+    # Program.cs has no using: the namespace comes from <Using Include> in the project file.
+    files = {
+        "App/App.csproj": '<Project><ItemGroup><Using Include="Acme.Data" /></ItemGroup></Project>',
+        "App/Program.cs": "var repo = new OrderRepo();\n",
+        "App/Data/OrderRepo.cs": "namespace Acme.Data;\npublic class OrderRepo { }\n",
+    }
+    assert _parse_repo(tmp_path, files, "App/Program.cs").importFiles == ["App/Data/OrderRepo.cs"]
+
+
+def test_own_declaration_does_not_hide_a_same_named_base(tmp_path) -> None:
+    # A control declares its own MassUpdate and derives from the shared SplendidCRM.MassUpdate,
+    # both seen as the simple name MassUpdate. The file's own type is never an import target, so
+    # the base still resolves.
+    files = {
+        "_code/MassUpdate.cs": "namespace SplendidCRM {\npublic class MassUpdate { }\n}\n",
+        "Admin/Currencies/MassUpdate.ascx.cs":
+            "namespace SplendidCRM.Administration.Currencies {\n"
+            "public class MassUpdate : SplendidCRM.MassUpdate { }\n}\n",
+    }
+    rec = _parse_repo(tmp_path, files, "Admin/Currencies/MassUpdate.ascx.cs")
+    assert rec.importFiles == ["_code/MassUpdate.cs"]
+
+
 # --- inherited base-class & extension-method call resolution --------------------------
 
 def test_inherited_base_method_resolves(tmp_path) -> None:
