@@ -17,10 +17,12 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-from ...emit import disambiguate, statement_id
-from ...schemas import FileRecord, Statement
-from ..additive import DetectContext, Detector, Gate, register_detector
+from tree_sitter import Node
+
+from ...schemas import FileRecord
+from ..additive import DetectContext, Detection, Detector, Gate, register_detector
 from ..dotnet_common import code_behind_host
+from ..emits import Emit
 
 _WEBHANDLER_CLASS_RE = re.compile(
     rb'<%@\s*WebHandler\b[^%]*?\bClass\s*=\s*["\']([^"\']+)["\']', re.IGNORECASE
@@ -33,11 +35,14 @@ _HANDLER_BASES = {
 }
 
 
-def detect_generic_handlers(path: str, record: FileRecord, repo_root: object) -> bool:
-    """Add one ``route`` per generic-handler class whose ``.ashx`` is found; True if any."""
+def detect_generic_handlers(
+    anchor: Node, path: str, record: FileRecord, repo_root: object
+) -> list[Emit]:
+    """One ``route`` per generic-handler class whose ``.ashx`` is found. The record is built from
+    the class and method records, so ``anchor`` (the file's root) only carries the emit; every
+    span field is given explicitly."""
     root = repo_root if isinstance(repo_root, Path) else None
-    seen = {s.id for s in record.statements}
-    found = False
+    found: list[Emit] = []
     for cls in record.classes:
         bases = [b.split("<", 1)[0].rsplit(".", 1)[-1] for b in [cls.extends or "", *cls.implements]]
         entry = next((_HANDLER_BASES[b] for b in bases if b in _HANDLER_BASES), None)
@@ -48,37 +53,33 @@ def detect_generic_handlers(path: str, record: FileRecord, repo_root: object) ->
         method = next((f for f in record.functions
                        if f.parentId == cls.id and f.name == entry), None)
         line = method.startLine if method is not None else cls.startLine
-        new_id = disambiguate(statement_id(path, line, 0), seen)
-        seen.add(new_id)
-        record.statements.append(Statement(
-            id=new_id,
-            parentId=method.id if method is not None else cls.id,
-            nodeType="synthetic",
-            semanticType="route",
-            text=host.rsplit("/", 1)[-1],
-            method="ANY",
-            endpoint="/" + host.lstrip("/"),
-            framework="aspnet-webforms",
-            routeKind="route",
-            handler=entry if method is not None else None,
-            handlerLine=method.startLine if method is not None else None,
-            startLine=line,
-            endLine=method.endLine if method is not None else cls.endLine,
-            path=path,
+        found.append(Emit(
+            anchor,
+            {
+                "semanticType": "route",
+                "method": "ANY",
+                "endpoint": "/" + host.lstrip("/"),
+                "framework": "aspnet-webforms",
+                "routeKind": "route",
+                "handler": entry if method is not None else None,
+                "handlerLine": method.startLine if method is not None else None,
+            },
+            parent=method.id if method is not None else cls.id, node_type="synthetic",
+            text=host.rsplit("/", 1)[-1], line=line, col=0,
+            end_line=method.endLine if method is not None else cls.endLine,
         ))
-        found = True
     return found
 
 
-def _run(dc: DetectContext) -> str | None:
+def _detect(dc: DetectContext) -> Detection | None:
     if not dc.path.lower().endswith(".ashx.cs"):
         return None
-    return "aspnet-webforms" if detect_generic_handlers(dc.path, dc.record, dc.ctx.repo_root) \
-        else None
+    found = detect_generic_handlers(dc.root, dc.path, dc.record, dc.ctx.repo_root)
+    return Detection(found, label="aspnet-webforms") if found else None
 
 
 # An entry-point emitter, so fixture/test files are skipped.
 register_detector(Detector(
     name="generic-handlers", gate=Gate("csharp", order=40, guard=b"Handler", skip_fixtures=True),
-    run=_run, frameworks=("aspnet-webforms",),
+    detect=_detect, frameworks=("aspnet-webforms",),
 ))
