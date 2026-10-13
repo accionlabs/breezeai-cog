@@ -734,14 +734,14 @@ LOADER_DECLARATION = b'''namespace Catalog {
 
 
 def test_generated_loader_is_recognised_via_the_index() -> None:
-    from breezeai_cog.parsers.csharp.imports import _index_data_loaders
+    from breezeai_cog.parsers.csharp_hotchocolate.data_loaders import FACT, _collect
     from breezeai_cog.parsers.treesitter import parse_source
 
-    # Build the index entry the repo pre-pass would produce from the declaring file.
+    # Build the fact the repo pre-pass would produce from the declaring file.
     index = CSharpIndex()
     root = parse_source("csharp", LOADER_DECLARATION, 0).root_node
-    _index_data_loaders(root, LOADER_DECLARATION, "SessionDataLoaders.cs", index)
-    assert "ISessionByIdDataLoader" in index.data_loaders
+    index.facts[FACT] = _collect(root, LOADER_DECLARATION, "SessionDataLoaders.cs", None)
+    assert "ISessionByIdDataLoader" in index.facts[FACT]
 
     rec = _parse_with_index(GENERATED_LOADER_USE, "SessionQueries.cs", index)
     assert _by_endpoint(rec)["sessionById"].dataLoaders == ["ISessionByIdDataLoader"]
@@ -778,12 +778,12 @@ LOADER_FOR_EXTENSION = b'''namespace Shop {
 
 
 def test_field_resolver_resolves_a_generated_loader() -> None:
-    from breezeai_cog.parsers.csharp.imports import _index_data_loaders
+    from breezeai_cog.parsers.csharp_hotchocolate.data_loaders import FACT, _collect
     from breezeai_cog.parsers.treesitter import parse_source
 
     index = CSharpIndex()
     root = parse_source("csharp", LOADER_FOR_EXTENSION, 0).root_node
-    _index_data_loaders(root, LOADER_FOR_EXTENSION, "OrderDataLoaders.cs", index)
+    index.facts[FACT] = _collect(root, LOADER_FOR_EXTENSION, "OrderDataLoaders.cs", None)
 
     rec = _parse_with_index(EXTENSION_WITH_LOADER, "OrderTypeExtensions.cs", index)
     op = _by_endpoint(rec)["Order.customer"]

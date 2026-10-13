@@ -71,11 +71,6 @@ class CSharpIndex:
     #: transitively (SDK-style projects flow references by default). Only projects in
     #: ``project_roots`` are recorded; a reference outside the scanned repo binds nothing.
     project_refs: dict[str, set[str]] = field(default_factory=dict)
-    #: Source-generated DataLoader type name → the file declaring the ``[DataLoader]`` method it
-    #: is generated from, or ``None`` when two files generate the same name (ambiguous). The
-    #: generated types do not exist in the repo, so a parameter typed ``ISessionByIdDataLoader``
-    #: can only be recognised as a loader through this map.
-    data_loaders: dict[str, str | None] = field(default_factory=dict)
     #: simple class name → its heritage (base + decorators + method→file), for cross-file
     #: base-class resolution. Value is ``None`` when the name is declared by >1 class with
     #: differing bases (ambiguous → callers must not resolve through it: honest-null).
@@ -268,8 +263,6 @@ def _index_file(
             kind, name, _ = _classify_using(child, source)
             if kind == "global" and name:
                 index.global_usings.add(name)
-    if b"[DataLoader" in source:  # same idiom: only scan a file that can declare one
-        _index_data_loaders(root, source, rel, index)
 
     def walk(node: Node, ns: str) -> None:
         local_ns = ns
@@ -297,33 +290,6 @@ def _index_file(
                     walk(body, local_ns)  # nested types share the enclosing namespace
 
     walk(root, "")
-
-
-def _index_data_loaders(root: Node, source: bytes, rel: str, index: CSharpIndex) -> None:
-    """Record the DataLoader types HotChocolate's source generator will emit for this file.
-
-    A ``[DataLoader]`` method produces a loader named after it — ``SessionByIdAsync`` becomes
-    ``ISessionByIdDataLoader`` (and the concrete ``SessionByIdDataLoader``). Consumers declare the
-    generated *interface* as a parameter type, and that interface exists nowhere in the source, so
-    without this map a loader parameter is indistinguishable from any other service. Attribute
-    arguments only ever carry options (``MaxBatchSize``, ``ServiceScope``), never a rename.
-    """
-    stack = [root]
-    while stack:
-        node = stack.pop()
-        stack.extend(node.named_children)
-        if node.type != "method_declaration":
-            continue
-        if not any(d.name.split("<", 1)[0] == "DataLoader" for d in extract_attributes(node, source)):
-            continue
-        name_node = node.child_by_field_name("name")
-        if name_node is None:
-            continue
-        base = node_text(name_node, source)
-        if base.endswith("Async") and len(base) > len("Async"):
-            base = base[: -len("Async")]
-        for generated in (f"I{base}DataLoader", f"{base}DataLoader"):
-            record_distinct(index.data_loaders, generated, rel)
 
 
 #: HotChocolate root registration calls → operation kind.
@@ -549,8 +515,6 @@ def _merge_fragment(
         index.types.setdefault(tname, set()).update(tfiles)
     for ekey, efile in fidx.ext_methods.items():
         record_distinct(index.ext_methods, ekey, efile)
-    for lname, lfile in fidx.data_loaders.items():
-        record_distinct(index.data_loaders, lname, lfile)
     for iface, impl in fidx.implementers.items():
         if impl is None:
             index.implementers[iface] = None  # ambiguous within the file → refuse

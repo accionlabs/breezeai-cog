@@ -29,6 +29,7 @@ from typing import Any
 
 from ...schemas import FileRecord
 from ..base import ParseContext
+from ..emits import apply
 from ..csharp.parser import CSharpParser
 from ..treesitter import parse_source
 from .mappings import owned_by_hotchocolate
@@ -55,11 +56,10 @@ class CSharpHotChocolateParser(CSharpParser):
         root = parse_source("csharp", ctx.source, ctx.parse_timeout_micros).root_node
         record = self.extract(root, ctx)  # inherited C# extraction (one parse)
         if ctx.capture_statements and not self.is_fixture_file(ctx.path):
-            seen = {s.id for s in record.statements}
             routes = detect_hotchocolate_routes(
-                record, root, ctx.source, seen, ctx.resolution_index,
+                record, root, ctx.source, ctx.resolution_index,
                 hc_root_types=_root_types(ctx.resolution_index, ctx.path))
             if routes:
-                record.statements.extend(routes)
+                apply(record, routes, ctx.source, ctx.path)
                 record.framework = "graphql"
         return record

@@ -13,8 +13,8 @@ it is an API. The fact lives in another file, so the module registers a fact bes
   records every registration with the namespaces in scope at the registering file, and
   ``_resolve`` binds each one to the file that declares the class, using the C# binding rules
   in :mod:`..csharp.imports`;
-* **run** — while ``BookQueries.cs`` is parsed (by whichever parser owns it), ``_emit`` adds its
-  operations from that fact.
+* **detector** — while ``BookQueries.cs`` is parsed (by whichever parser owns it), ``_detect``
+  finds its operations from that fact.
 
 A file the HotChocolate parser owns is left to the parser, which reads the same fact; the two
 never both emit for one file.
@@ -29,7 +29,8 @@ from typing import Any
 from tree_sitter import Node
 
 from ..additive import (
-    DetectContext, Detector, FactSpec, Gate, index_fact, register_detector, register_fact,
+    DetectContext, Detection, Detector, FactSpec, Gate, index_fact, register_detector,
+    register_fact,
 )
 from ..csharp.imports import CSharpIndex, declared_files_by_name, in_scope_namespaces, type_files
 from ..treesitter import node_text
@@ -112,7 +113,7 @@ def _resolve(collected: list[Any], index: CSharpIndex) -> RegisteredRoots:
     """Bind each registration to the class it names. A class registered under two different
     kinds (two composition roots disagreeing) is dropped: one is wrong and nothing says which.
 
-    A registering file is never listed in ``files`` (which is what ``_emit`` and the parser emit
+    A registering file is never listed in ``files`` (which is what ``_detect`` and the parser emit
     routes for): it is the composition root, which stays with its own parser and keeps its REST
     routes. A root declared beside its registration still counts for the name-only ``types``
     lookup.
@@ -139,7 +140,7 @@ def _resolve(collected: list[Any], index: CSharpIndex) -> RegisteredRoots:
     return roots
 
 
-def _emit(dc: DetectContext) -> str | None:
+def _detect(dc: DetectContext) -> Detection | None:
     """Operations of the registered roots declared in this file, unless the HotChocolate parser
     owns the file (it emits them itself, from the same fact)."""
     if owned_by_hotchocolate(dc.source):
@@ -148,14 +149,10 @@ def _emit(dc: DetectContext) -> str | None:
     own = roots.files.get(dc.path)
     if not own:  # the cheap check for every other C# file: one dictionary lookup
         return None
-    seen = {s.id for s in dc.record.statements}
     routes = detect_hotchocolate_routes(
-        dc.record, dc.root, dc.source, seen, dc.ctx.resolution_index,
+        dc.record, dc.root, dc.source, dc.ctx.resolution_index,
         hc_root_types={**roots.types, **own})
-    if not routes:
-        return None
-    dc.record.statements.extend(routes)
-    return "graphql"
+    return Detection(routes, label="graphql") if routes else None
 
 
 register_fact(FactSpec(
@@ -166,7 +163,7 @@ register_fact(FactSpec(
 
 register_detector(Detector(
     name=NAME,
-    # No byte guard: the marker is in another file; _emit's first check is a dictionary lookup.
+    # No byte guard: the marker is in another file; _detect's first check is a dictionary lookup.
     gate=Gate("csharp", order=30, skip_fixtures=True),
-    run=_emit, frameworks=("graphql",),
+    detect=_detect, frameworks=("graphql",),
 ))
