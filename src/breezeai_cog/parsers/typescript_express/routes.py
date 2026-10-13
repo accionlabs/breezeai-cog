@@ -24,6 +24,8 @@ from ..additive import DetectContext, Detection, Detector, Gate, register_detect
 from ..emits import Emit
 from ..treesitter import node_text
 from ..typescript.imports import relative_requires, resolve_const_value, router_locals
+from ..wiring import compose_guards
+from .mounts import express_mounts
 
 # HTTP-verb methods that register a route handler on an app/router.
 _HTTP_VERBS = {"get", "post", "put", "delete", "patch", "options", "head", "all"}
@@ -486,13 +488,14 @@ def detect_express(
     """Express route statements of this file (``record`` is read for its functions only).
 
     Additive: run for every TS file (whatever parser owns it), self-guarded by
-    :func:`_has_express`, and enriching the base parser's existing statement in place — so it captures Express routes even in files owned by another
-    framework (Angular SSR, NestJS) without duplicating or displacing that owner.
+    :func:`_has_express`, and enriching the base parser's existing statement in place — so it
+    captures Express routes even in files owned by another framework (Angular SSR, NestJS)
+    without duplicating or displacing that owner.
 
-    ``index`` is the repo-wide ``TsAliasIndex`` (or None). When this file is a router factory
-    mounted elsewhere (``app.use('/users', usersRouter())``), ``index.express_mounts`` maps its
-    path to the base it is served under, so a router-local ``route.get('/:id')`` is recorded at
-    its real URL ``/users/:id`` instead of the bare ``/:id``.
+    ``index`` is the repo-wide ``TsAliasIndex`` (or None). Its ``express.router-mounts`` fact
+    (:mod:`.mounts`) gives the base this file's routers are served under when another file mounts
+    them (``app.use('/users', usersRouter())``), so a router-local ``route.get('/:id')`` is
+    recorded at its real URL ``/users/:id`` instead of the bare ``/:id``.
 
     ``bindings`` (in-repo imported name → file) lets a mount separate its sub-router from its
     guard middleware, so route-level auth (``requireAuth()``) lands in ``guards`` rather than
@@ -502,13 +505,12 @@ def detect_express(
     found: list[Emit] = []
     fid = file_id(path)
     binds = bindings or {}
+    mounts = express_mounts(index)
     # The base this file's routes are served under, if it is a factory mounted elsewhere.
-    mounts = getattr(index, "express_mounts", None)
-    mount_base = mounts.get(path) if isinstance(mounts, dict) else None
+    mount_base = mounts.factories.get(path)
     # Per router variable: routers this file exports that another file mounts, and routers
     # mounted in this file.
-    instance = getattr(index, "express_router_mounts", None)
-    imported = instance.get(path, {}) if isinstance(instance, dict) else {}
+    imported = mounts.routers.get(path, {})
     receiver_base = _receiver_bases(root, source, mount_base, imported)
     routers = frozenset(router_locals(root, source)) if b"Router" in source else frozenset()
     index_consts = getattr(index, "const_values", None)
@@ -541,7 +543,7 @@ def detect_express(
             # Middleware registered earlier on this receiver (or its parents) runs first. It does
             # not set authRequired: app-wide middleware is often a body parser, not auth.
             outer = global_guards(_receiver(call, source), call.start_byte)
-            guards = (outer + (guards or [])) or None
+            guards = compose_guards(outer, guards)
         # Enrich the base statement on the call's line (a top-level route call); a second route in
         # one statement (route(path).get(a).post(b)) or one inside a handler/callback (the base
         # skips nested scopes) gets its own record.

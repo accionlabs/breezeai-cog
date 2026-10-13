@@ -56,20 +56,6 @@ class TsAliasIndex:
     #: :func:`build_ts_index`; a symbol mounted at >1 prefix (or with an unresolved chain) → not
     #: present (honest-null — the child then falls back to its own bare path).
     route_mounts: dict[str, str] = field(default_factory=dict)
-    #: Express mount linkage: a mounted router-factory's defining FILE (repo-relative) → the base
-    #: path it is served under (``app.use('/users', usersRouter())`` → ``users-router.ts`` maps
-    #: to ``/users``). A factory file mounted at >1 distinct base collapses to None and is
-    #: dropped (honest-null — its routes then keep their own bare path); test/fixture mounts are
-    #: not collected. Consumed by ``detect_express`` to prefix a factory's router-local routes
-    #: with their real base — the Express analogue of ``route_mounts`` for Angular lazy routes.
-    express_mounts: dict[str, str] = field(default_factory=dict)
-    #: Express router-instance mount linkage: a router file (repo-relative) → {the router's
-    #: local variable in that file → the base it is served under}. ``app.use('/matches',
-    #: matchRouter)`` with ``import { matchRouter } from './routes/matches'`` maps
-    #: ``routes/matches.ts`` → ``{"matchRouter": "/matches"}``. Recorded only when the target file
-    #: confirms the import is a ``Router()`` it exports (a middleware import is never a prefix);
-    #: a router mounted at >1 distinct base is dropped (honest-null).
-    express_router_mounts: dict[str, dict[str, str]] = field(default_factory=dict)
     #: NestJS global prefix per app: the directory of a bootstrap file (``NestFactory.create`` /
     #: ``app.setGlobalPrefix``) → (prefix, exclude). prefix ``""`` = the app sets none, ``None`` =
     #: set but unresolvable (config/env); exclude = ``((path, METHOD | None), …)``, ``None`` when
@@ -555,7 +541,7 @@ def require_specifier(node: Node | None, source: bytes) -> str | None:
 
 
 def relative_requires(root: Node, source: bytes) -> dict[str, tuple[str, str]]:
-    """CommonJS counterpart of :func:`_relative_import_exports` — top-level
+    """CommonJS counterpart of ES ``import`` bindings — top-level
     ``const x = require('./a')`` → ``x: ('./a', 'default')`` (``module.exports`` is the default)
     and ``const { r, s: t } = require('./a')`` → ``r: ('./a', 'r')``, ``t: ('./a', 's')``."""
     out: dict[str, tuple[str, str]] = {}
@@ -601,48 +587,6 @@ def _relative_import_map(root: Node, source: bytes) -> dict[str, str]:
     return out
 
 
-def _mount_receiver_ok(obj_text: str) -> bool:
-    """Whether a ``X.use(...)`` receiver looks like an Express app/router — mirrors the runtime
-    detector's ``_is_router_obj`` heuristic (duplicated to keep the framework parser out of the
-    index module's imports)."""
-    tail = obj_text.lower().rsplit(".", 1)[-1].strip()
-    return tail in {"app", "router", "server", "api", "route"} or tail.endswith(("router", "app"))
-
-
-def _factory_call_name(arg: Node, source: bytes) -> str | None:
-    """If ``arg`` is a bare ``factory()`` call, its callee identifier name; else None. Member
-    calls (``Auth.check()``) and non-calls are skipped."""
-    if arg.type != "call_expression":
-        return None
-    fn = arg.child_by_field_name("function")
-    return node_text(fn, source) if fn is not None and fn.type == "identifier" else None
-
-
-def _relative_import_exports(root: Node, source: bytes) -> dict[str, tuple[str, str]]:
-    """local imported name → (relative module specifier, the name the module exports it as):
-    ``import x from './a'`` → ``x: ('./a', 'default')``; ``import { r as s } from './a'`` →
-    ``s: ('./a', 'r')``. Namespace imports and non-relative specifiers are omitted."""
-    out: dict[str, tuple[str, str]] = {}
-    for node in root.named_children:
-        if node.type != "import_statement":
-            continue
-        module = _module_of(node, source)
-        clause = next((c for c in node.named_children if c.type == "import_clause"), None)
-        if module is None or not module.startswith(".") or clause is None:
-            continue
-        for c in clause.named_children:
-            if c.type == "identifier":
-                out[node_text(c, source)] = (module, "default")
-            elif c.type == "named_imports":
-                for spec in c.named_children:
-                    idents = [x for x in spec.named_children if x.type == "identifier"]
-                    if spec.type == "import_specifier" and idents:
-                        out[node_text(idents[-1], source)] = (module, node_text(idents[0], source))
-    for nm, imp in relative_requires(root, source).items():
-        out.setdefault(nm, imp)
-    return out
-
-
 def _is_router_call(node: Node | None, source: bytes) -> bool:
     """``Router(...)`` / ``express.Router(...)`` (optionally ``new``) — an Express router instance."""
     if node is not None and node.type == "new_expression":
@@ -672,56 +616,6 @@ def router_locals(root: Node, source: bytes) -> set[str]:
     return out
 
 
-def _collect_router_exports(root: Node, source: bytes) -> dict[str, str]:
-    """Exported name → local variable, for each top-level router instance this file exports:
-    ``export const r = Router()`` (``r → r``), ``export default r`` (``default → r``),
-    ``export { r as s }`` (``s → r``). Only variables bound to ``Router()`` count."""
-    if b"Router" not in source:
-        return {}
-    routers = router_locals(root, source)
-    out: dict[str, str] = {}
-    for node in root.named_children:
-        if node.type != "export_statement" or not routers:
-            continue
-        for c in node.named_children:
-            if c.type == "lexical_declaration":
-                for d in c.named_children:
-                    name = d.child_by_field_name("name") if d.type == "variable_declarator" else None
-                    if name is not None and node_text(name, source) in routers:
-                        out[node_text(name, source)] = node_text(name, source)
-            elif c.type == "identifier" and node_text(c, source) in routers:  # export default r
-                out["default"] = node_text(c, source)
-            elif c.type == "export_clause":
-                for spec in c.named_children:
-                    idents = [x for x in spec.named_children if x.type == "identifier"]
-                    if spec.type == "export_specifier" and idents and node_text(idents[0], source) in routers:
-                        out[node_text(idents[-1], source)] = node_text(idents[0], source)
-    for node in root.named_children:  # CommonJS: module.exports = r / exports.x = r / { r }
-        expr = node.named_children[0] if node.type == "expression_statement" and node.named_children else None
-        if expr is None or expr.type != "assignment_expression" or not routers:
-            continue
-        left, right = expr.child_by_field_name("left"), expr.child_by_field_name("right")
-        target = node_text(left, source) if left is not None else ""
-        if right is None:
-            continue
-        if target == "module.exports":
-            if right.type == "identifier" and node_text(right, source) in routers:
-                out["default"] = node_text(right, source)
-            elif right.type == "object":
-                for p in right.named_children:
-                    if p.type == "shorthand_property_identifier" and node_text(p, source) in routers:
-                        out[node_text(p, source)] = node_text(p, source)
-                    elif p.type == "pair":
-                        key, value = p.child_by_field_name("key"), p.child_by_field_name("value")
-                        if (key is not None and value is not None and value.type == "identifier"
-                                and node_text(value, source) in routers):
-                            out[node_text(key, source)] = node_text(value, source)
-        elif target.startswith(("module.exports.", "exports.")) and right.type == "identifier" \
-                and node_text(right, source) in routers:
-            out[target.rsplit(".", 1)[-1]] = node_text(right, source)
-    return out
-
-
 #: A NestJS ``setGlobalPrefix`` exclude list: ``((path, METHOD | None), …)``.
 NestExclude = tuple[tuple[str, str | None], ...]
 #: One file's NestJS facts: (bootstrap: (prefix pieces | ``[]`` none | None dynamic, exclude) or
@@ -731,11 +625,6 @@ _NestRaw = tuple[
     dict[str, list[str]],
     list[tuple[str, str | None, list[tuple[str, str]] | None]],
 ]
-
-#: An Express router-instance mount candidate: (mount site ``file:line``, target file, the name
-#: the target exports, base). Confirmed against the target's router exports in the reduce.
-_InstanceMount = tuple[str, str, str, str]
-
 
 _NEST_BOOT = (b"NestFactory", b"setGlobalPrefix")
 
@@ -1032,92 +921,6 @@ def _nest_prefixes(
     return by_dir, controllers
 
 
-def _confirm_instance_mounts(
-    candidates: list[_InstanceMount], router_exports: dict[str, dict[str, str]]
-) -> dict[str, dict[str, str]]:
-    """Keep the router-instance mounts the target file confirms: the imported name is a
-    ``Router()`` that file exports. A mount site with more than one confirmed router is skipped,
-    and a router mounted at >1 distinct base is dropped (honest-null: its routes keep their own
-    bare path)."""
-    confirmed: dict[str, list[tuple[str, str, str]]] = {}
-    for site, target, exported, base in candidates:
-        router_var = router_exports.get(target, {}).get(exported)
-        if router_var is not None:
-            confirmed.setdefault(site, []).append((target, router_var, base))
-    base_of: dict[tuple[str, str], str | None] = {}
-    for hits in confirmed.values():
-        if len(hits) == 1:
-            target, local, base = hits[0]
-            record_distinct(base_of, (target, local), base)
-    out: dict[str, dict[str, str]] = {}
-    for (target, router_var), served in base_of.items():
-        if served is not None:
-            out.setdefault(target, {})[router_var] = served
-    return out
-
-
-def _collect_express_mounts(
-    root: Node, source: bytes, rel: str, repo_root: Path
-) -> tuple[list[tuple[str, str]], list[_InstanceMount]]:
-    """Express mounts in this file: (mounted-factory file, base path) for each
-    ``app.use('/base', factory())``, and router-instance candidates for each
-    ``app.use('/base', importedName)``. The identifier is resolved to its defining file via this
-    file's relative imports. A mount whose base is not a plain string, or with more than one
-    imported factory, is skipped — honest-null, never a guessed link. Instance candidates are only
-    candidates: the reduce keeps one when the target file exports that name as a ``Router()``.
-    Test/fixture files are not a mount source (their throwaway bases must not define a router's
-    real prefix)."""
-    if b".use(" not in source or _is_fixture_path(rel):
-        return [], []
-    import_map = _relative_import_map(root, source)
-    if not import_map and b"require(" not in source:
-        return [], []
-    exports_of = _relative_import_exports(root, source)
-    mount_dir = (repo_root / rel).parent
-    out: list[tuple[str, str]] = []
-    instances: list[_InstanceMount] = []
-
-    def walk(node: Node) -> None:
-        if node.type == "call_expression":
-            fn = node.child_by_field_name("function")
-            if fn is not None and fn.type == "member_expression":
-                prop = fn.child_by_field_name("property")
-                obj = fn.child_by_field_name("object")
-                if (prop is not None and node_text(prop, source) == "use"
-                        and obj is not None and _mount_receiver_ok(node_text(obj, source))):
-                    args = node.child_by_field_name("arguments")
-                    arg_nodes = list(args.named_children) if args is not None else []
-                    base = _string_literal(arg_nodes[0], source) if arg_nodes else None
-                    if base is not None and base.startswith("/"):
-                        specs = [
-                            import_map[name]
-                            for a in arg_nodes[1:]
-                            if (name := _factory_call_name(a, source)) is not None
-                            and name in import_map
-                        ] + [  # require('./r')() — an inline required factory
-                            spec for a in arg_nodes[1:] if a.type == "call_expression"
-                            and (spec := require_specifier(a.child_by_field_name("function"), source))
-                        ]
-                        if len(specs) == 1:  # exactly one imported factory arg → unambiguous
-                            resolved = _try_paths(mount_dir / specs[0], repo_root)
-                            if resolved is not None:
-                                out.append((resolved, base))
-                        elif not specs:  # router instances: every imported identifier is a candidate
-                            site = f"{rel}:{node.start_point[0] + 1}"
-                            for a in arg_nodes[1:]:
-                                inline = require_specifier(a, source)  # app.use('/x', require('./r'))
-                                imp = ((inline, "default") if inline is not None else
-                                       exports_of.get(node_text(a, source)) if a.type == "identifier" else None)
-                                target = _try_paths(mount_dir / imp[0], repo_root) if imp else None
-                                if imp is not None and target is not None:
-                                    instances.append((site, target, imp[1], base))
-        for c in node.named_children:
-            walk(c)
-
-    walk(root)
-    return out, instances
-
-
 _CLASS_NODES_SET = frozenset(_CLASS_NODES)
 
 
@@ -1187,11 +990,11 @@ def _collect_ngmodule_imports(root: Node, source: bytes) -> dict[str, list[str]]
 
 def _ts_index_one(
     args: tuple[str, str, str]
-) -> tuple[dict[str, str | None], dict[str, ClassHeritage], list[str], list[_MountRaw], dict[str, list[str]], list[tuple[str, str]], list[_InstanceMount], tuple[str, dict[str, str]], _NestRaw | None, _BasePathRaw | None, _MiddlewareRaw | None, dict[str, Any]] | None:
+) -> tuple[dict[str, str | None], dict[str, ClassHeritage], list[str], list[_MountRaw], dict[str, list[str]], str, _NestRaw | None, _BasePathRaw | None, _MiddlewareRaw | None, dict[str, Any]] | None:
     """Parse one TS/JS file into its partials (string-constant map, class-heritage map, the
-    classes it declares, its lazy-route mounts, NgModule imports, Express factory and
-    router-instance mounts, the routers it exports, its NestJS wiring, an application
-    base path it sets, its Next.js middleware matcher, and what registered facts collect) —
+    classes it declares, its lazy-route mounts, NgModule imports, its path, its NestJS wiring, an
+    application base path it sets, its Next.js middleware matcher, and what registered facts
+    collect) —
     pure, picklable worker for :func:`parallel_map`. Returns ``None`` on read/parse failure."""
     file_s, rel, repo_root_s = args
     if not Path(file_s).is_file():
@@ -1207,10 +1010,8 @@ def _ts_index_one(
         _collect_const_values(root, src, const_values)
         classes, mounts = _collect_route_mounts(root, src)
         ngmodule_imports = _collect_ngmodule_imports(root, src)
-        express_mounts, instance_mounts = _collect_express_mounts(root, src, rel, Path(repo_root_s))
         return (const_values, _collect_heritage(root, src, rel), classes, mounts,
-                ngmodule_imports, express_mounts, instance_mounts,
-                (rel, _collect_router_exports(root, src)), _collect_nest(root, src),
+                ngmodule_imports, rel, _collect_nest(root, src),
                 _collect_base_path(root, src, rel), _collect_next_middleware(root, src, rel),
                 collect_additive("typescript", root, src, rel, Path(repo_root_s)))
     except Exception as exc:  # parse OR a pathologically deep AST walk (RecursionError) — skip this file
@@ -1286,11 +1087,6 @@ def build_ts_index(repo_root: Path, files: Sequence[Path], jobs: int = 1) -> TsA
     parent_of: dict[str, str | None] = {}
     file_mounts: list[tuple[frozenset[str], list[_MountRaw]]] = []
     all_ngmodule_imports: dict[str, list[str]] = {}
-    # Express: mounted-factory file → its base path. A factory file mounted at >1 distinct base
-    # collapses to None (honest-null) via record_distinct; the None entries are dropped below.
-    express_mount_of: dict[str, str | None] = {}
-    instance_mounts: list[_InstanceMount] = []
-    router_exports: dict[str, dict[str, str]] = {}  # file → exported name → local router variable
     nest_boots: list[tuple[str, tuple[list[tuple[str, str]] | None, NestExclude | None]]] = []
     nest_modules: dict[str, list[str] | None] = {}  # @Module class → controllers (name clash → None)
     nest_register: list[tuple[str, str | None, list[tuple[str, str]] | None]] = []
@@ -1301,8 +1097,8 @@ def build_ts_index(repo_root: Path, files: Sequence[Path], jobs: int = 1) -> TsA
     for frag in parallel_map(args, _ts_index_one, jobs):
         if not frag:
             continue
-        (cv, heritage, classes, mounts, ngmodule_imports, file_express_mounts, file_instances,
-         (frag_rel, file_router_exports), nest, base_path, middleware, facts) = frag
+        (cv, heritage, classes, mounts, ngmodule_imports, frag_rel, nest, base_path, middleware,
+         facts) = frag
         for name, value in facts.items():
             collected.setdefault(name, []).append(value)
         if middleware is not None:
@@ -1329,11 +1125,6 @@ def build_ts_index(repo_root: Path, files: Sequence[Path], jobs: int = 1) -> TsA
         if mounts:
             file_mounts.append((frozenset(classes), mounts))
         all_ngmodule_imports.update(ngmodule_imports)
-        for factory_file, base in file_express_mounts:
-            record_distinct(express_mount_of, factory_file, base)
-        instance_mounts.extend(file_instances)
-        if file_router_exports:
-            router_exports[frag_rel] = file_router_exports
 
     # Now const_values is complete: resolve each mount's path and wire the graph. A module
     # symbol mounted at >1 distinct prefix (or an unresolved path) collapses to None — the
@@ -1373,8 +1164,6 @@ def build_ts_index(repo_root: Path, files: Sequence[Path], jobs: int = 1) -> TsA
 
     # Drop ambiguous (None) Express mounts — a factory mounted at conflicting bases keeps its
     # own bare paths rather than being wrongly attributed to one of them (honest-null).
-    express_mounts = {k: v for k, v in express_mount_of.items() if v is not None}
-    express_router_mounts = _confirm_instance_mounts(instance_mounts, router_exports)
     nest_global_prefixes, nest_controller_prefixes = _nest_prefixes(
         nest_boots, nest_modules, nest_register, const_values
     )
@@ -1388,8 +1177,6 @@ def build_ts_index(repo_root: Path, files: Sequence[Path], jobs: int = 1) -> TsA
         const_values=const_values,
         class_heritage=class_heritage,
         route_mounts=route_mounts,
-        express_mounts=express_mounts,
-        express_router_mounts=express_router_mounts,
         nest_global_prefixes=nest_global_prefixes,
         nest_controller_prefixes=nest_controller_prefixes,
         app_base_paths=app_base_paths,
@@ -1399,7 +1186,7 @@ def build_ts_index(repo_root: Path, files: Sequence[Path], jobs: int = 1) -> TsA
     # Registered facts may need the whole index, so they resolve after it is built.
     facts = resolve_additive("typescript", collected, index)
     if (alias is None and not const_values and not class_heritage and not route_mounts
-            and not express_mounts and not express_router_mounts and not nest_global_prefixes
+            and not nest_global_prefixes
             and not nest_controller_prefixes and not app_base_paths and not next_middlewares
             and not next_apps and not any(v is not None for v in facts.values())):
         return None

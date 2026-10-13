@@ -92,7 +92,7 @@ What each index holds:
 | Kotlin, Scala | fully-qualified class name → file | imports, same-package types |
 | C# | type → files; global `using`s; project roots (`.csproj`), their MSBuild `using`s and project references; class heritage incl. methods; extension methods; page routes; **registered facts** (`index.facts`) | type resolution, inherited calls, extension calls, routes |
 | VB | class heritage (base class + attributes) | inherited controller routes |
-| TypeScript / JavaScript | `tsconfig`/`jsconfig` path aliases (per config scope); constant values; class heritage; Angular and Express route mounts; **registered facts** (`index.facts`) | aliased imports, inherited calls, route prefixes |
+| TypeScript / JavaScript | `tsconfig`/`jsconfig` path aliases (per config scope); constant values; class heritage; Angular route mounts; **registered facts** (`index.facts`: Express mounts `express.router-mounts`, NestJS stub parents `nest.stub-parents`) | aliased imports, inherited calls, route prefixes |
 | C++ | header basename → file; free functions; `Class::method`; `Class::field` types; heritage | `#include`, calls |
 | Ruby | ActiveRecord model names; controller `before_action` callbacks | recognising DB calls; Rails route guards |
 | HCL / Terraform | folder → `.tf` files | local `module` sources |
@@ -316,7 +316,7 @@ Some frameworks build a route from pieces in several files. These use the index 
 
 | Framework | Pieces | Source of the cross-file data |
 |---|---|---|
-| Express | `app.use("/api", router)` in one file + `router.get("/orders")` in another → `/api/orders`. The router is a factory call (`usersRouter()`) or an imported `Router()` instance — kept only when the router's file confirms it exports a `Router()`, so an imported middleware is never a prefix. A router mounted at two bases keeps its own path | TypeScript index: Express mounts |
+| Express | `app.use("/api", router)` in one file + `router.get("/orders")` in another → `/api/orders`. The router is a factory call (`usersRouter()`) or an imported `Router()` instance — kept only when the router's file confirms it exports a `Router()`, so an imported middleware is never a prefix. A router mounted at two bases keeps its own path | registered fact `express.router-mounts` (`typescript_express/mounts.py`), one base per router via the shared `resolve_wiring` |
 | Angular | lazy-loaded child routes under a parent path | TypeScript index: route mounts |
 | FastAPI | `app.include_router(orders.router, prefix="/api")` in one file + `router = APIRouter(prefix="/orders")` in another → `/api/orders/…`. A constant prefix (`API_PREFIX = "/v1"`) is resolved; a settings attribute is not (the environment can override it) → endpoint empty. A router included at two places keeps its own path | Python index: FastAPI wiring |
 | ASP.NET | base controller route prefix + action route | heritage ([§6](#6-inheritance-heritage)) |

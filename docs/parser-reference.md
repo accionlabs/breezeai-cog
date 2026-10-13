@@ -444,6 +444,11 @@ def _detect(dc: DetectContext) -> Detection | None:
   are checked at registration.
 - The fact is stored as `index.facts[<fact name>]`, built once before parsing, read-only after.
   `index_fact()` returns `None` without an index (single-file parsing), so the reader must cope.
+- Wiring (a prefix, a guard, a registration, a host from another construct) is collected as the
+  shared `Wiring` type (`parsers/wiring.py`) and resolved with `resolve_wiring`: one value per
+  scope, a scope with two different values or an unresolved one dropped — never a guessed prefix.
+  A binding's guards are joined with `compose_guards` (outermost first, no repeats).
+  `typescript_express/mounts.py` (`express.router-mounts`) is the worked example.
 - Bind names with the language's own rules (for C#: `in_scope_namespaces`, `type_files`), and
   leave a name unbound when it is ambiguous.
 - If the framework's own parser can also own such a file, make sure the two never both emit

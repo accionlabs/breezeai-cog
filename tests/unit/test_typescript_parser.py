@@ -1067,7 +1067,7 @@ def test_class_method_overloads_not_duplicated(tmp_path) -> None:
 # --- Express router-factory mount join ------------------------------------------------------
 # A factory (`() => { const r = Router(); r.get('/:id'); return r }`) is mounted elsewhere with
 # `app.use('/users', factory())`. The base path and the routes live in different files, so the
-# join resolves through the repo index (TsAliasIndex.express_mounts): the factory's own routes
+# join resolves through the repo index (the express.router-mounts fact): the factory's own routes
 # are recorded at their real served URL, not the bare router-local path.
 
 def _express_routes(rec) -> dict:
