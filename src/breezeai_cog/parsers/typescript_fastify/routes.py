@@ -769,12 +769,12 @@ def _walk(
         allowed_plugin: Optional[tuple[int, int, str]] = None,
     ) -> None:
         candidates = file_index.calls_in(root)
-        suppressed: list[tuple[int, int]] = []
+        suppressed_starts: list[int] = []
+        suppressed_max_ends: list[int] = []
 
         for current in candidates:
-            if any(
-                start < current.start_byte and current.end_byte < end for start, end in suppressed
-            ):
+            previous = bisect_left(suppressed_starts, current.start_byte) - 1
+            if previous >= 0 and current.end_byte < suppressed_max_ends[previous]:
                 continue
 
             ancestor = current.parent
@@ -812,7 +812,10 @@ def _walk(
                     out=out,
                     file_index=file_index,
                 )
-                suppressed.append((current.start_byte, current.end_byte))
+                suppressed_starts.append(current.start_byte)
+                suppressed_max_ends.append(
+                    max(suppressed_max_ends[-1] if suppressed_max_ends else 0, current.end_byte)
+                )
                 if chained is not None and chained.type == "call_expression":
                     visit_calls(chained, current_prefix, chain, allowed_plugin)
                 continue
@@ -830,7 +833,10 @@ def _walk(
                     out=out,
                     file_index=file_index,
                 )
-                suppressed.append((current.start_byte, current.end_byte))
+                suppressed_starts.append(current.start_byte)
+                suppressed_max_ends.append(
+                    max(suppressed_max_ends[-1] if suppressed_max_ends else 0, current.end_byte)
+                )
                 if chained is not None and chained.type == "call_expression":
                     visit_calls(chained, current_prefix, chain, allowed_plugin)
                 continue
@@ -848,7 +854,10 @@ def _walk(
                     seen_ids=seen_ids,
                     out=out,
                 )
-                suppressed.append((current.start_byte, current.end_byte))
+                suppressed_starts.append(current.start_byte)
+                suppressed_max_ends.append(
+                    max(suppressed_max_ends[-1] if suppressed_max_ends else 0, current.end_byte)
+                )
                 for child, child_prefix in children:
                     child_key = file_index.node_key(child)
                     if child_key not in chain:
