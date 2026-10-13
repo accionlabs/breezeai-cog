@@ -61,9 +61,6 @@ def test_named_views_default_component_is_handler(analyze_files) -> None:
     assert r.handler == "Home"
 
 
-@pytest.mark.xfail(
-    strict=True, reason="a layout (component + empty-path child) is recorded as a page"
-)
 def test_layout_with_empty_path_child_is_wiring(analyze_files) -> None:
     st = _routes(
         analyze_files,
@@ -85,9 +82,6 @@ def test_component_with_children_and_no_empty_child_is_also_binding(analyze_file
     assert [r.handler for r in _at(st, "/orders/:id")] == ["OrderDetail"]
 
 
-@pytest.mark.xfail(
-    strict=True, reason="a path-only parent { path, children } is recorded as a page"
-)
 def test_children_only_parent_is_wiring(analyze_files) -> None:
     st = _routes(
         analyze_files,
@@ -164,3 +158,17 @@ def test_create_app_is_none(analyze_files) -> None:
     src = "import { createApp } from 'vue';\nimport App from './App.vue';\ncreateApp(App).mount('#app');\n"
     st = analyze_files({"package.json": PKG, "src/main.js": src})
     assert _eps(st, "src/main.js") == []
+
+
+def test_parent_before_enter_guards_its_children(analyze_files) -> None:
+    st = _routes(
+        analyze_files,
+        "  { path: '/admin', component: AdminShell, beforeEnter: requireAdmin, children: [\n"
+        "    { path: '', component: AdminHome },\n"
+        "    { path: 'users', component: AdminUsers, beforeEnter: audit },\n  ] },\n",
+    )
+    # The shell is a layout (an empty-path child): no record; entering a child enters it first.
+    assert [(r.handler, r.guards) for r in _at(st, "/admin")] == [("AdminHome", ["requireAdmin"])]
+    assert [(r.handler, r.guards) for r in _at(st, "/admin/users")] == [
+        ("AdminUsers", ["requireAdmin", "audit"]),
+    ]

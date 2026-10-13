@@ -13,7 +13,7 @@ Parser: `src/breezeai_cog/parsers/typescript_vue/` (`routes.py` route configs, `
 | `{ path, component, children }` with a child `path: ''` | Wiring | statement stays plain; prefix for the children | A layout: a child always fills its `<router-view>` |
 | `{ path, component, children }` with no empty-path child | Binding (and wiring for the children) | `route`, `page`, `handler` = component | Its own URL shows it with an empty outlet |
 | `{ path, redirect }` (no component) | None | — | An alias; no handler |
-| `beforeEnter` on a route | Guard | names in `guards` of that route | Runs before its page |
+| `beforeEnter` on a route | Guard | names in `guards` of that route and of its child routes (after `beforeEach`, parent first) | Runs before its page; entering a child enters its parents first |
 | `router.beforeEach(...)` | Guard | — | Runs before every page |
 | `fetch` / `axios` calls | Outbound | `api_call` | |
 | `<router-link to>` / `<RouterLink :to>` | Outbound | `semanticType: navigation`, `endpoint` = target path | A link to a page |

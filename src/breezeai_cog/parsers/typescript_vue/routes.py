@@ -218,29 +218,46 @@ def _router_guards(root: Node, source: bytes) -> dict[int, _RouterGuards]:
     return out
 
 
+def _has_empty_path_child(children: Node | None, source: bytes) -> bool:
+    """Whether a ``children`` array holds a route object with ``path: ''``."""
+    if children is None or children.type != "array":
+        return False
+    for child in children.named_children:
+        if child.type == "object":
+            p = _pairs(child, source).get("path")
+            if p is not None and p.type == "string" and _string_val(p, source) == "":
+                return True
+    return False
+
+
 def _emit(
     elem: Node, prefix: str, source: bytes, path: str, routes: list[Emit],
-    outer: _RouterGuards = _NO_ROUTER_GUARDS,
+    outer: _RouterGuards = _NO_ROUTER_GUARDS, inherited: tuple[str, ...] = (),
 ) -> None:
     """Emit ONE route object (if it isn't a pure redirect) and recurse into its ``children``.
     Shared by the array walk (``_process``) and the single-object module form. ``outer`` are the
     router's global guards: ``beforeEach`` runs before the route's ``beforeEnter``,
-    ``beforeResolve`` after it (vue-router's navigation order)."""
+    ``beforeResolve`` after it (vue-router's navigation order). ``inherited`` are the ancestors'
+    ``beforeEnter``: entering a child enters its parents first, so theirs run before its own.
+
+    Only a route that shows a component of its own has a record (contract §4): a path-only
+    parent ``{ path, children }`` and a layout (a component whose children include an
+    empty-path child, which always fills its outlet) are wiring — their path prefixes the
+    children and their ``beforeEnter`` guards them."""
     if elem.type != "object":
         return
     pairs = _pairs(elem, source)
     if "path" not in pairs:
         return
     full = _join(prefix, _string_val(pairs["path"], source))
-    # Emit unless this is a PURE redirect (a redirect with no component of its own is an
-    # alias, not a page — like Angular's redirectTo). A Vue LAYOUT route idiomatically has
-    # BOTH a component (the shell) and a redirect (its default child): it is a real page,
-    # and — critically — its `children` are the whole app subtree. We must still recurse
-    # into them even when the parent is a pure redirect, so the skip only gates emission.
-    is_pure_redirect = (
-        "redirect" in pairs and "component" not in pairs and "components" not in pairs
-    )
-    if not is_pure_redirect:
+    # Emit only a route with a component of its own (a pure redirect is an alias, like
+    # Angular's redirectTo; a path-only parent is a prefix) that is not a layout. A shell with
+    # a component and a redirect (its default child) is still a page. The children are walked
+    # in every case — they are often the whole app subtree.
+    has_component = "component" in pairs or "components" in pairs
+    children = pairs.get("children")
+    own = _before_enter(pairs.get("beforeEnter"), source)
+    if has_component and not _has_empty_path_child(children, source):
         routes.append(Emit(
             elem,
             {
@@ -251,15 +268,13 @@ def _emit(
                 "handler": _handler(
                     pairs.get("component") or _default_view(pairs.get("components"), source), source
                 ),
-                "guards": (outer[0] + _before_enter(pairs.get("beforeEnter"), source) + outer[1])
-                or None,
+                "guards": (outer[0] + list(inherited) + own + outer[1]) or None,
             },
             parent=file_id(path), text=entry_text(elem, source), node_type="synthetic",
         ))
-    children = pairs.get("children")
     if children is not None and children.type == "array":
         for child in children.named_children:
-            _emit(child, full, source, path, routes, outer)
+            _emit(child, full, source, path, routes, outer, (*inherited, *own))
 
 
 def _process(
