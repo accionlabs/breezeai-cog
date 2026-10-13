@@ -17,7 +17,7 @@ from ...emit import disambiguate, statement_id
 from ...schemas import FileRecord, Statement
 from ...schemas.enums import SemanticType
 from ..base import ParseContext
-from ..additive import DetectContext, Detector, register_detector
+from ..additive import DetectContext, Detector, Gate, register_detector
 from ..enclosing import Enclosing
 from ..treesitter import node_text
 from .functions import type_map
@@ -178,5 +178,5 @@ def _run(dc: DetectContext) -> str | None:
 
 
 register_detector(Detector(
-    name="spark", language="scala", order=20, run=_run, frameworks=("spark",),
+    name="spark", gate=Gate("scala", order=20), run=_run, frameworks=("spark",),
 ))

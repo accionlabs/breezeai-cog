@@ -24,7 +24,7 @@ from tree_sitter import Node
 
 from ...emit import disambiguate, file_id, statement_id
 from ...schemas import FileRecord, Statement
-from ..additive import DetectContext, Detector, register_detector
+from ..additive import DetectContext, Detector, Gate, register_detector
 from ..treesitter import first_line, node_text
 from ..typescript.imports import router_root
 from .routes import _middleware_guards, _served, _url_segments
@@ -167,6 +167,6 @@ def _run(dc: DetectContext) -> str | None:
 
 
 register_detector(Detector(
-    name="nextjs-pages", language="typescript", order=60, run=_run,
-    skip_fixtures=True, frameworks=("nextjs",),
+    name="nextjs-pages", gate=Gate("typescript", order=60, skip_fixtures=True), run=_run,
+    frameworks=("nextjs",),
 ))

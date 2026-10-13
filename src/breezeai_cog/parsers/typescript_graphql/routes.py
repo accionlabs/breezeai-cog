@@ -46,7 +46,7 @@ from tree_sitter import Node
 
 from ...emit import disambiguate, file_id, statement_id
 from ...schemas import Class, FileRecord, Statement
-from ..additive import DetectContext, Detector, register_detector
+from ..additive import DetectContext, Detector, Gate, register_detector
 from ..graphql.sdl import base_type_name, child_of_type, extract_graphql
 from ..treesitter import first_line, node_text, parse_source
 
@@ -438,6 +438,6 @@ def _run(dc: DetectContext) -> str | None:
 
 
 register_detector(Detector(
-    name="graphql-client", language="typescript", order=40, run=_run,
-    skip_fixtures=True, frameworks=("graphql",),
+    name="graphql-client", gate=Gate("typescript", order=40, skip_fixtures=True), run=_run,
+    frameworks=("graphql",),
 ))

@@ -90,7 +90,7 @@ What each index holds:
 |---|---|---|
 | Java, Groovy | fully-qualified class name → file; `Class.FIELD` → constant value | imports, same-package types, event addresses / route paths |
 | Kotlin, Scala | fully-qualified class name → file | imports, same-package types |
-| C# | type → files; global `using`s; project roots (`.csproj`), their MSBuild `using`s and project references; class heritage incl. methods; extension methods; page routes; **facts from additive detectors' index stage** (`index.facts`) | type resolution, inherited calls, extension calls, routes |
+| C# | type → files; global `using`s; project roots (`.csproj`), their MSBuild `using`s and project references; class heritage incl. methods; extension methods; page routes; **registered facts** (`index.facts`) | type resolution, inherited calls, extension calls, routes |
 | VB | class heritage (base class + attributes) | inherited controller routes |
 | TypeScript / JavaScript | `tsconfig`/`jsconfig` path aliases (per config scope); constant values; class heritage; Angular and Express route mounts | aliased imports, inherited calls, route prefixes |
 | C++ | header basename → file; free functions; `Class::method`; `Class::field` types; heritage | `#include`, calls |
@@ -321,10 +321,10 @@ Some frameworks build a route from pieces in several files. These use the index 
 | FastAPI | `app.include_router(orders.router, prefix="/api")` in one file + `router = APIRouter(prefix="/orders")` in another → `/api/orders/…`. A constant prefix (`API_PREFIX = "/v1"`) is resolved; a settings attribute is not (the environment can override it) → endpoint empty. A router included at two places keeps its own path | Python index: FastAPI wiring |
 | ASP.NET | base controller route prefix + action route | heritage ([§6](#6-inheritance-heritage)) |
 | WebForms | `MapPageRoute` URL → `.aspx` page | C# index: page routes |
-| HotChocolate | `AddQueryType<BookQueries>()` in `Program.cs` → `BookQueries.cs` is a query root | additive detector's index stage ([below](#a-framework-fact-from-another-file-the-additive-index-stage)) |
+| HotChocolate | `AddQueryType<BookQueries>()` in `Program.cs` → `BookQueries.cs` is a query root | registered fact ([below](#a-framework-fact-from-another-file-a-registered-fact)) |
 | Terraform | local `module` source → the `.tf` files it loads | HCL index |
 
-### A framework fact from another file: the additive index stage
+### A framework fact from another file: a registered fact
 
 Sometimes a file is framework code only because **another** file says so. In HotChocolate
 v11/v12, a plain class becomes a GraphQL root when the composition root registers it:
@@ -338,22 +338,23 @@ namespace Catalog { public class BookQueries { public Book GetBookById(int id) =
 ```
 
 No `claims()` check can see this, and the HotChocolate parser never owns `BookQueries.cs`. The
-**additive detector** registry handles it: a detector can add an optional *index stage* that
-runs inside the language's `build_index`, next to its usual read-time `run`.
+**additive detector** registry handles it: the detector's module registers a **fact**
+(`FactSpec`) that is built inside the language's `build_index`, and the detector reads it while
+the file is parsed.
 
 ```mermaid
 flowchart TD
   subgraph IDX["build_index (once, main process, parallel over files)"]
-    F["every .cs file"] --> G{"index_gate matches?<br/>b'AddQueryType&lt;' …"}
+    F["every .cs file"] --> G{"fact gate matches?<br/>b'AddQueryType&lt;' …"}
     G -- no --> X[skip]
-    G -- yes --> C["detector.collect()<br/>(Program.cs, query, 'BookQueries', namespaces in scope)"]
-    C --> R["detector.resolve() once, after all files:<br/>bind each name to its declaring file"]
-    R --> FACT["index.facts['hotchocolate-registered-roots']<br/>{ 'Api/BookQueries.cs': {'BookQueries': 'query'} }"]
+    G -- yes --> C["fact.collect()<br/>(Program.cs, query, 'BookQueries', namespaces in scope)"]
+    C --> R["fact.resolve() once, after all files:<br/>bind each name to its declaring file"]
+    R --> FACT["index.facts['hotchocolate.registered-roots']<br/>{ 'Api/BookQueries.cs': {'BookQueries': 'query'} }"]
   end
   FACT --> W["every worker: ctx.resolution_index"]
   subgraph PARSE["parse BookQueries.cs (owned by the plain C# parser)"]
     E["extract()"] --> RA["run_additive('csharp')"]
-    RA --> RUN["detector.run(): path in the fact?<br/>→ add route QUERY bookById"]
+    RA --> RUN["detector: path in the fact?<br/>→ add route QUERY bookById"]
   end
   W --> RUN
 ```
@@ -375,8 +376,8 @@ How a registered name is bound to a file uses the C# rules — the same ones imp
 | A root declared inside the registering file itself | not emitted from that file (it stays with its owner, e.g. `csharp-aspnet`, and keeps its REST routes); it still resolves by name for an `[ExtendObjectType(typeof(...))]` elsewhere |
 | A file the HotChocolate parser owns | the parser emits from the same fact; the detector stays out (one shared ownership check) |
 
-> **Decision —** cross-file framework facts use the additive detector registry's optional index
-> stage, not a framework-specific field on the language index or a new selection hook.
+> **Decision —** cross-file framework facts are registered facts (`register_fact`) in the additive
+> detector registry, not a framework-specific field on the language index or a new selection hook.
 > **Why:** one registry for framework add-ons, with the same discovery, validation and
 > `capabilities` listing; the language index keeps only language rules; parser selection is
 > unchanged, so no file can be taken from its owner. **Cost:** a detector that emits for files
@@ -424,8 +425,8 @@ the link would point at nothing. After each file is parsed, `core/executor.py::_
 - Put repo-wide facts in `build_index`. Build it with `parallel_map`, merge with
   `record_distinct` (or the heritage helpers) so the result doesn't depend on order, and keep it
   picklable.
-- A **framework** fact that comes from another file goes in an additive detector's index stage
-  (`collect` / `resolve`), not in the language's index code. The language index offers only
+- A **framework** fact that comes from another file is a registered fact (`FactSpec` with
+  `collect` / `resolve`), not language index code. The language index offers only
   language rules (for C#: `in_scope_namespaces`, `type_files`).
 - Reuse `make_resolver`, `walk_heritage` and `constfold` rather than writing new resolvers.
 - `calls[].path` and `importFiles` must be repo-relative paths of files that are actually captured.

@@ -23,7 +23,7 @@ from tree_sitter import Node
 
 from ...schemas import FileRecord
 from ..base import ParseContext
-from ..additive import DetectContext, Detector, register_detector
+from ..additive import DetectContext, Detector, Gate, register_detector
 from ..treesitter import node_text
 from .functions import type_map
 
@@ -139,5 +139,5 @@ def _run(dc: DetectContext) -> str | None:
 
 
 register_detector(Detector(
-    name="akka-events", language="scala", order=10, run=_run, frameworks=("akka",),
+    name="akka-events", gate=Gate("scala", order=10), run=_run, frameworks=("akka",),
 ))

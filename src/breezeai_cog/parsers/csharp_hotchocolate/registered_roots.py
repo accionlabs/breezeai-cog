@@ -6,12 +6,13 @@ A class can be a GraphQL root solely because the composition root registers it::
     public class BookQueries { public Book GetBookById(int id) => …; }  // BookQueries.cs
 
 ``BookQueries.cs`` carries nothing HotChocolate, so no parser claims it and nothing in the file says
-it is an API. The fact lives in another file, so this detector has two stages
+it is an API. The fact lives in another file, so the module registers a fact beside the detector
 (see :mod:`..additive`):
 
-* **index stage** — while the C# index is built, ``_collect`` records every registration with the
-  namespaces in scope at the registering file, and ``_resolve`` binds each one to the file that
-  declares the class, using the C# binding rules in :mod:`..csharp.imports`;
+* **fact** ``hotchocolate.registered-roots`` — while the C# index is built, ``_collect``
+  records every registration with the namespaces in scope at the registering file, and
+  ``_resolve`` binds each one to the file that declares the class, using the C# binding rules
+  in :mod:`..csharp.imports`;
 * **run** — while ``BookQueries.cs`` is parsed (by whichever parser owns it), ``_emit`` adds its
   operations from that fact.
 
@@ -27,7 +28,9 @@ from typing import Any
 
 from tree_sitter import Node
 
-from ..additive import DetectContext, Detector, index_fact, register_detector
+from ..additive import (
+    DetectContext, Detector, FactSpec, Gate, index_fact, register_detector, register_fact,
+)
 from ..csharp.imports import CSharpIndex, declared_files_by_name, in_scope_namespaces, type_files
 from ..treesitter import node_text
 from .mappings import owned_by_hotchocolate
@@ -38,8 +41,11 @@ _REGISTRATIONS = {
     "AddQueryType": "query", "AddMutationType": "mutation", "AddSubscriptionType": "subscription",
 }
 
-#: The detector's name, which is also the name its fact is stored under on the C# index.
+#: The detector's name.
 NAME = "hotchocolate-registered-roots"
+
+#: The name its fact is stored under on the C# index.
+FACT = "hotchocolate.registered-roots"
 
 
 @dataclass(frozen=True)
@@ -59,7 +65,7 @@ class RegisteredRoots:
 
 def registered_roots(index: Any | None) -> RegisteredRoots:
     """The resolved fact, or an empty one (no index, e.g. single-file parsing)."""
-    roots = index_fact(index, NAME)
+    roots = index_fact(index, FACT)
     return roots if isinstance(roots, RegisteredRoots) else RegisteredRoots()
 
 
@@ -152,10 +158,15 @@ def _emit(dc: DetectContext) -> str | None:
     return "graphql"
 
 
-register_detector(Detector(
-    name=NAME, language="csharp", order=30, run=_emit,
-    guard=None,  # the marker is in another file; _emit's first check is a dictionary lookup
-    skip_fixtures=True, frameworks=("graphql",),
-    index_gate=tuple(f"{call}<".encode() for call in _REGISTRATIONS),
+register_fact(FactSpec(
+    name=FACT, language="csharp",
+    gate=tuple(f"{call}<".encode() for call in _REGISTRATIONS),
     collect=_collect, resolve=_resolve,
+))
+
+register_detector(Detector(
+    name=NAME,
+    # No byte guard: the marker is in another file; _emit's first check is a dictionary lookup.
+    gate=Gate("csharp", order=30, skip_fixtures=True),
+    run=_emit, frameworks=("graphql",),
 ))

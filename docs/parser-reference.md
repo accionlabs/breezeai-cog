@@ -200,8 +200,8 @@ The pipeline runs it once in the main process (before the parse pool), passing t
 
 Only the **language** parser's `build_index` runs; a framework parser's own `build_index`, or
 state kept on its instance, never reaches the workers. A framework that needs a fact declared in
-another file uses an additive detector's **index stage** instead (see
-[Additive detectors](#additive-detectors-internal--cross-cutting-frameworks), "Index stage").
+another file registers a **fact** instead (see
+[Additive detectors](#additive-detectors-internal--cross-cutting-frameworks), "Facts from other files").
 
 **Parallelize a full-parse index.** If `build_index` parses every file, don't loop serially —
 split it map/reduce so it scales with `jobs`:
@@ -362,69 +362,101 @@ frameworks (ORM, validation, messaging SDK) is detected **additively** — see
 shared `parsers/detection/` classifiers (call-shaped signals) or add a `detect_*` pass
 (structure-shaped signals) that enriches/appends without displacing the file's parser.
 
-A `detect_*` pass is registered, not called. At the bottom of the detector's module:
+A `detect_*` pass is registered, not called. It **finds** statements and returns them; the
+registry **writes** them. At the bottom of the detector's module:
 
 ```python
-from ..additive import DetectContext, Detector, register_detector
+from ..additive import DetectContext, Detection, Detector, Gate, register_detector
+from ..emits import Emit
 
-def _run(dc: DetectContext) -> str | None:
-    found = detect_kafka(dc.root, dc.source, dc.path, dc.record)
-    return "kafka" if found else None          # file-level label, or None
+def _detect(dc: DetectContext) -> Detection | None:
+    found = [
+        Emit(call, {"semanticType": "eventbus_send", "framework": "kafka", "endpoint": topic},
+             enrich="unclassified")
+        for call, topic in _producers(dc.root, dc.source)
+    ]
+    return Detection(found, label="kafka") if found else None   # label: file-level, optional
 
 register_detector(Detector(
-    name="kafka", language="csharp", order=30, run=_run,
-    guard=b"Confluent.Kafka",                   # optional cheap byte check
-    skip_fixtures=True,                         # route / entry-point emitters only
-    frameworks=("kafka",),                      # advertised by `capabilities`
+    name="kafka",
+    gate=Gate("csharp", order=30,
+              guard=b"Confluent.Kafka",          # optional cheap byte check
+              skip_fixtures=True),               # route / entry-point emitters only
+    detect=_detect,
+    frameworks=("kafka",),                       # advertised by `capabilities`
 ))
 ```
 
+- **When it runs** is the `Gate` and nothing else: only with statement capture, not on fixture
+  files when `skip_fixtures`, only when `guard` is in the source, in ascending `order`.
+  `gate.admits(source, is_fixture=…)` answers "would it run on this file?" without running it.
+- **What it writes** is decided by `apply` (`parsers/emits.py`), not by the detector. Each `Emit`
+  names its node and the `Statement` fields it sets:
+  - `enrich="never"` (default) always appends; `"unclassified"` writes onto the smallest
+    statement already captured on the node's line when that statement has no `semanticType`
+    (or one listed in `reclassify`); `"any"` writes onto whatever statement is there.
+  - `fields` are always written; `fill` fields are written when enriching only if truthy.
+  - A statement is written at most once per run: a second emit on the same statement appends
+    its own record (`route(p).get(a).post(b)` gives two routes).
+  - An appended statement's id is `path:line:col`, disambiguated (`#2`) in emit order; its parent
+    is `parent`, else the smallest function on the line, else the file. `text`, `node_type`,
+    `line`, `col` and `end_line` override what the node gives.
+- A detector not yet moved to `detect` sets `run` instead: it mutates `dc.record` and returns
+  the label. Exactly one of `detect` and `run` is set; checked at registration.
 - The base language parser's `extract` ends with `run_additive(<language>, …)`; discovery
-  imports every module under `parsers/` containing `register_detector(`, in each worker.
-- `language` must be in `HOOKED_LANGUAGES` (`typescript`, `csharp`, `scala`); `order` must be
+  imports every module under `parsers/` containing `register_detector(` or `register_fact(`, in
+  each worker.
+- The language must be in `HOOKED_LANGUAGES` (`typescript`, `csharp`, `scala`); `order` must be
   unique per language. Both are checked at registration.
 - `DetectContext` carries `root`, `ctx` (`source`, `path`, `resolution_index`,
-  `parse_timeout_micros`), `record`, `is_fixture`, and language extras (`bindings` for
-  TypeScript, `types` for Scala).
+  `parse_timeout_micros`), `record` (read it; do not write it from `detect`), `is_fixture`, and
+  language extras (`bindings` for TypeScript, `types` for Scala).
 - Add the detector to the inventory in `tests/unit/test_additive.py`.
 
-**Index stage (optional).** When the detection needs a fact that lives in *another* file — a
+**Facts from other files.** When the detection needs a fact that lives in *another* file — a
 class is a GraphQL root only because `Program.cs` registers it with `AddQueryType<BookQueries>()`
-— the detector also declares `collect` and `resolve`. The language's `build_index` runs them, and
-`run` reads the result back:
+— the module also registers a `FactSpec`. The language's `build_index` runs its `collect` and
+`resolve`, and the detector (or a parser) reads the result back by name:
 
 ```python
-from ..additive import DetectContext, Detector, index_fact, register_detector
+from ..additive import FactSpec, index_fact, register_fact
 
-def _collect(root, source, rel, repo_root):     # per file, in the index pass, behind index_gate
+def _collect(root, source, rel, repo_root):     # per file, in the index pass, behind the gate
     return [(rel, name) for name in _registrations(root, source)] or None   # picklable, or None
 
 def _resolve(values, index):                    # once, after every file is indexed
     return _bind(values, index)                 # must not depend on the order of `values`
 
-def _run(dc: DetectContext) -> str | None:
-    roots = index_fact(dc.ctx.resolution_index, "my-detector") or {}
-    if dc.path not in roots:                     # the cheap check when no byte guard fits
-        return None
-    ...                                          # emit statements as usual
-
-register_detector(Detector(
-    name="my-detector", language="csharp", order=40, run=_run,
-    index_gate=(b"AddQueryType<",), collect=_collect, resolve=_resolve,
+register_fact(FactSpec(
+    name="myframework.roots", language="csharp",  # `framework.concern`
+    gate=(b"AddQueryType<",), collect=_collect, resolve=_resolve,
 ))
+
+def _detect(dc: DetectContext) -> Detection | None:
+    roots = index_fact(dc.ctx.resolution_index, "myframework.roots") or {}
+    if dc.path not in roots:                      # the cheap check when no byte guard fits
+        return None
+    ...
 ```
 
-- `language` must also be in `INDEX_HOOKED_LANGUAGES` (`csharp` today): those are the languages
-  whose `build_index` calls `collect_additive` / `resolve_additive`. `collect` and `resolve` come
-  together, and `index_gate` is required. All three are checked at registration.
-- The fact is stored as `index.facts[<detector name>]`, built once before parsing, read-only after.
-  `index_fact()` returns `None` without an index (single-file parsing), so `run` must cope.
+- The language must be in `INDEX_HOOKED_LANGUAGES` (`csharp` today): those are the languages
+  whose `build_index` calls `collect_additive` / `resolve_additive`. The gate is required. Both
+  are checked at registration.
+- The fact is stored as `index.facts[<fact name>]`, built once before parsing, read-only after.
+  `index_fact()` returns `None` without an index (single-file parsing), so the reader must cope.
 - Bind names with the language's own rules (for C#: `in_scope_namespaces`, `type_files`), and
   leave a name unbound when it is ambiguous.
 - If the framework's own parser can also own such a file, make sure the two never both emit
   (share one ownership check — `owned_by_hotchocolate` is the worked example).
 - Test it end to end through `analyze_repo` with `jobs` 1 and 2: a test over a hand-built index
   cannot catch a fact that never reaches the workers.
+
+**Contract check.** `parsers/contract.py` `validate(record)` checks every emitted entry point
+against the [entry-point contract](architecture/entry-points.md): value sets, resolved-or-empty
+addresses, one record per binding, guards, and a handler for every record. A wrong value is an
+**error**; a missing handler is a **gap** (honest-null, like an empty `endpoint`). The
+`analyze_files` test fixture fails on errors; `--verbose` logs every violation as
+`contract.violation`. It never changes output.
 
 ### Selection: one parser per file
 A file is parsed by **exactly one** parser. `registry.select(path, source)` picks the

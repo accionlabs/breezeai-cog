@@ -1,4 +1,4 @@
-"""Registry and runner for **additive detectors**.
+"""Registry and runner for **additive detectors** and the **facts** they read.
 
 An additive detector captures a cross-cutting library (messaging SDK, search index, vendor
 SDK, a route style that can appear in any file) on top of whichever parser owns the file. It
@@ -9,29 +9,38 @@ framework parser that subclasses the language parser.
 A detector registers itself from its own module::
 
     register_detector(Detector(
-        name="kafka", language="csharp", order=30, run=_run,
-        guard=b"Confluent.Kafka", skip_fixtures=True, frameworks=("kafka",),
+        name="kafka",
+        gate=Gate("csharp", order=30, guard=b"Confluent.Kafka", skip_fixtures=True),
+        detect=_detect, frameworks=("kafka",),
     ))
 
 No parser is edited to add one. Discovery finds modules under ``parsers/`` whose source
-contains the ``register_detector(`` marker and imports them (:func:`discover_detectors`), so
-a detector module does not have to be imported by anything else to be found.
+contains a registration marker and imports them (:func:`discover_detectors`), so a detector
+module does not have to be imported by anything else to be found.
 
-The runner owns the shared rules: run only with statement capture, skip fixture files when
-``skip_fixtures`` is set, apply the optional byte ``guard``, run in ascending ``order``, and
-let a returned framework label set ``record.framework`` only while it is still ``None``.
+**When it runs** is the detector's :class:`Gate` and nothing else: only with statement capture,
+not on fixture files when ``skip_fixtures`` is set, only when the byte ``guard`` is present, in
+ascending ``order``.
 
-**Optional index stage.** Some detections need a fact that lives in *another* file — a class is a
-GraphQL root only because the composition root registers it (``AddQueryType<BookQueries>()``). A
-detector can therefore also declare ``collect`` and ``resolve``: the language's ``build_index``
-calls :func:`collect_additive` for every file (behind ``index_gate``, with the tree it already
-parsed) and :func:`resolve_additive` once after the reduce. The result is stored on the language
-index under the detector's name, and ``run`` reads it back with :func:`index_fact`. The fact is
-built once before parsing and is read-only afterwards, like every other index entry.
+**What it produces.** ``detect`` returns a :class:`Detection`: the statements it found as
+:class:`~.emits.Emit` values and an optional file-level framework label. The runner applies the
+emits with :func:`~.emits.apply`, which owns the shared output rules (enrich in place or append,
+statement ids, parents), and sets the label only while ``record.framework`` is still ``None``.
+A detector not yet moved to ``detect`` sets ``run`` instead, which mutates the record itself
+and returns the label. Exactly one of the two is set.
 
-Run order is part of the output: a detector disambiguates new statement ids against the
-statements already on the record, so swapping two detectors can swap ids (the backend's
-``captureId``). ``order`` is therefore explicit and unique per language.
+**Facts from other files.** Some detections need a fact that lives in *another* file: a class
+is a GraphQL root only because the composition root registers it (``AddQueryType<BookQueries>()``).
+A :class:`FactSpec` declares one. The language's ``build_index`` calls :func:`collect_additive`
+for every file (behind the fact's ``gate``, with the tree it already parsed) and
+:func:`resolve_additive` once after the reduce. The result is stored on the language index under
+the fact's name (``framework.concern``), and a detector or a parser reads it back with
+:func:`index_fact`. A fact is built once before parsing and is read-only afterwards, like every
+other index entry.
+
+Run order is part of the output: new statement ids are disambiguated against the statements
+already on the record, so swapping two detectors can swap ids (the backend's ``captureId``).
+``order`` is therefore explicit and unique per language.
 """
 
 from __future__ import annotations
@@ -47,18 +56,19 @@ from tree_sitter import Node
 from ..errors import RegistryError
 from ..schemas import FileRecord
 from .base import ParseContext
+from .emits import Emit, apply
 
 #: Languages whose base parser calls :func:`run_additive`. Registering a detector for any
 #: other language is an error: nothing would ever run it.
 HOOKED_LANGUAGES: frozenset[str] = frozenset({"typescript", "csharp", "scala"})
 
 #: Languages whose ``build_index`` calls :func:`collect_additive` / :func:`resolve_additive`.
-#: A detector with an index stage for any other language is an error: its fact would never be
-#: built, and its ``run`` would silently find nothing.
+#: A fact for any other language is an error: it would never be built, and the detector
+#: reading it would silently find nothing.
 INDEX_HOOKED_LANGUAGES: frozenset[str] = frozenset({"csharp"})
 
-#: Source marker that makes a module a detector module for :func:`discover_detectors`.
-_MARKER = b"register_detector("
+#: Source markers that make a module a registering module for :func:`discover_detectors`.
+_MARKERS = (b"register_detector(", b"register_fact(")
 
 
 @dataclass(slots=True)
@@ -85,35 +95,74 @@ class DetectContext:
 
 
 @dataclass(frozen=True, slots=True)
-class Detector:
-    name: str
+class Gate:
+    """When a detector runs. The registry evaluates it; the detector never re-checks it."""
+
     language: str
     #: Ascending run order within the language; must be unique per language.
     order: int
-    #: Enrich/append statements on ``dc.record``; return a file-level framework label or None.
-    run: Callable[[DetectContext], str | None]
     #: Cheap byte check; the detector is skipped when the marker is absent. ``None`` = the
     #: detector guards itself (e.g. a structural check, or several markers).
     guard: bytes | None = None
     #: Skip route-only fixture files (stories, mocks). Set for entry-point/route emitters.
     skip_fixtures: bool = False
+
+    def admits(self, source: bytes, *, is_fixture: bool) -> bool:
+        """Would the detector run on a file with this source?"""
+        if self.skip_fixtures and is_fixture:
+            return False
+        return self.guard is None or self.guard in source
+
+
+@dataclass(slots=True)
+class Detection:
+    """What a detector found in one file."""
+
+    emits: list[Emit]
+    #: File-level framework label; set on the record only while it has none.
+    label: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class Detector:
+    name: str
+    gate: Gate
+    #: Find the file's statements; the runner applies them. ``None`` = nothing found.
+    detect: Callable[[DetectContext], Detection | None] | None = None
+    #: Not yet moved to ``detect``: enrich/append on ``dc.record`` directly and return a
+    #: file-level framework label or None.
+    run: Callable[[DetectContext], str | None] | None = None
     #: Framework labels this detector can emit (statement or file level), for ``capabilities``.
     frameworks: tuple[str, ...] = ()
-    #: Optional index stage. ``collect(root, source, rel, repo_root)`` runs during the language's
-    #: ``build_index`` on files containing one of ``index_gate`` and returns a picklable value
-    #: (or None); ``resolve(values, index)`` runs once after every file is indexed, gets the
-    #: values in file order, must not depend on that order, and returns the fact ``run`` reads
-    #: via :func:`index_fact`. Both or neither.
-    index_gate: tuple[bytes, ...] = ()
-    collect: Callable[[Node, bytes, str, Path | None], Any] | None = None
-    resolve: Callable[[list[Any], Any], Any] | None = None
 
     @property
-    def has_index_stage(self) -> bool:
-        return self.collect is not None
+    def language(self) -> str:
+        return self.gate.language
+
+    @property
+    def order(self) -> int:
+        return self.gate.order
+
+
+@dataclass(frozen=True, slots=True)
+class FactSpec:
+    """A fact built from many files while the language index is built.
+
+    ``collect(root, source, rel, repo_root)`` runs during the language's ``build_index`` on
+    files containing one of ``gate`` and returns a picklable value (or None). ``resolve(values,
+    index)`` runs once after every file is indexed, gets the values in file order, must not
+    depend on that order, and returns the fact read back with :func:`index_fact`."""
+
+    #: ``framework.concern``, e.g. ``hotchocolate.registered-roots``; unique per language.
+    name: str
+    language: str
+    gate: tuple[bytes, ...]
+    collect: Callable[[Node, bytes, str, Path | None], Any]
+    resolve: Callable[[list[Any], Any], Any]
 
 
 _DETECTORS: dict[str, list[Detector]] = {}
+_FACTS: dict[str, list[FactSpec]] = {}
 _discovered = False
 _lock = threading.Lock()
 
@@ -124,16 +173,8 @@ def register_detector(detector: Detector) -> Detector:
             f"detector {detector.name!r}: language {detector.language!r} has no additive "
             f"hook (one of {sorted(HOOKED_LANGUAGES)})"
         )
-    if (detector.collect is None) != (detector.resolve is None):
-        raise RegistryError(f"detector {detector.name!r}: index stage needs both collect and resolve")
-    if detector.has_index_stage:
-        if detector.language not in INDEX_HOOKED_LANGUAGES:
-            raise RegistryError(
-                f"detector {detector.name!r}: language {detector.language!r} has no index "
-                f"hook (one of {sorted(INDEX_HOOKED_LANGUAGES)})"
-            )
-        if not detector.index_gate:
-            raise RegistryError(f"detector {detector.name!r}: index stage needs an index_gate")
+    if (detector.detect is None) == (detector.run is None):
+        raise RegistryError(f"detector {detector.name!r}: set exactly one of detect and run")
     existing = _DETECTORS.setdefault(detector.language, [])
     for other in existing:
         if other.name == detector.name:
@@ -148,8 +189,25 @@ def register_detector(detector: Detector) -> Detector:
     return detector
 
 
+def register_fact(spec: FactSpec) -> FactSpec:
+    if spec.language not in INDEX_HOOKED_LANGUAGES:
+        raise RegistryError(
+            f"fact {spec.name!r}: language {spec.language!r} has no index hook "
+            f"(one of {sorted(INDEX_HOOKED_LANGUAGES)})"
+        )
+    if not spec.gate:
+        raise RegistryError(f"fact {spec.name!r}: needs a gate")
+    existing = _FACTS.setdefault(spec.language, [])
+    for other in existing:
+        if other.name == spec.name:
+            return other  # idempotent re-import
+    existing.append(spec)
+    existing.sort(key=lambda f: f.name)
+    return spec
+
+
 def discover_detectors() -> None:
-    """Import every module under ``parsers/`` that registers a detector (idempotent).
+    """Import every module under ``parsers/`` that registers a detector or a fact (idempotent).
 
     Runs lazily on first use in each process — worker processes are spawned, so each one
     discovers for itself."""
@@ -163,7 +221,8 @@ def discover_detectors() -> None:
         for py in sorted(root.rglob("*.py")):
             if py.name == "additive.py" or "__pycache__" in py.parts:
                 continue
-            if _MARKER not in py.read_bytes():
+            text = py.read_bytes()
+            if not any(m in text for m in _MARKERS):
                 continue
             rel = py.relative_to(root).with_suffix("")
             parts = [p for p in rel.parts if p != "__init__"]
@@ -182,6 +241,12 @@ def all_detectors() -> dict[str, list[Detector]]:
     return {lang: list(ds) for lang, ds in sorted(_DETECTORS.items())}
 
 
+def facts_for(language: str) -> list[FactSpec]:
+    """Registered facts for ``language``, by name."""
+    discover_detectors()
+    return list(_FACTS.get(language, ()))
+
+
 def run_additive(
     language: str,
     root: Node,
@@ -197,11 +262,16 @@ def run_additive(
         return
     dc = DetectContext(root, ctx, record, is_fixture, bindings=bindings, types=types)
     for detector in detectors_for(language):
-        if detector.skip_fixtures and is_fixture:
+        if not detector.gate.admits(ctx.source, is_fixture=is_fixture):
             continue
-        if detector.guard is not None and detector.guard not in ctx.source:
-            continue
-        label = detector.run(dc)
+        if detector.detect is not None:
+            found = detector.detect(dc)
+            if found is None:
+                continue
+            apply(record, found.emits, ctx.source, ctx.path)
+            label = found.label
+        else:
+            label = detector.run(dc)  # type: ignore[misc]
         if label and record.framework is None:
             record.framework = label
 
@@ -209,31 +279,30 @@ def run_additive(
 def collect_additive(
     language: str, root: Node, source: bytes, rel: str, repo_root: Path | None
 ) -> dict[str, Any]:
-    """Run every index-stage ``collect`` registered for ``language`` on one file, from the
-    language's ``build_index`` per-file pass. Returns detector name → collected value, for the
-    detectors whose gate matched and that found something."""
+    """Run every fact ``collect`` registered for ``language`` on one file, from the language's
+    ``build_index`` per-file pass. Returns fact name → collected value, for the facts whose
+    gate matched and that found something."""
     out: dict[str, Any] = {}
-    for detector in detectors_for(language):
-        if not detector.has_index_stage or not any(g in source for g in detector.index_gate):
+    for spec in facts_for(language):
+        if not any(g in source for g in spec.gate):
             continue
-        value = detector.collect(root, source, rel, repo_root)  # type: ignore[misc]
+        value = spec.collect(root, source, rel, repo_root)
         if value is not None:
-            out[detector.name] = value
+            out[spec.name] = value
     return out
 
 
 def resolve_additive(language: str, collected: dict[str, list[Any]], index: Any) -> dict[str, Any]:
-    """Resolve every index-stage detector for ``language`` once, after the language's index is
-    reduced. ``collected`` maps detector name → its per-file values in file order. Returns
-    detector name → fact, to be stored on the index for :func:`index_fact`."""
+    """Resolve every fact for ``language`` once, after the language's index is reduced.
+    ``collected`` maps fact name → its per-file values in file order. Returns fact name →
+    fact, to be stored on the index for :func:`index_fact`."""
     return {
-        d.name: d.resolve(collected.get(d.name, []), index)  # type: ignore[misc]
-        for d in detectors_for(language)
-        if d.has_index_stage
+        spec.name: spec.resolve(collected.get(spec.name, []), index)
+        for spec in facts_for(language)
     }
 
 
 def index_fact(index: Any | None, name: str) -> Any | None:
-    """The fact the index-stage detector ``name`` resolved, or None (no index, e.g. single-file
-    parsing, or a language whose index carries no facts)."""
+    """The fact named ``name``, or None (no index, e.g. single-file parsing, or a language whose
+    index carries no facts)."""
     return (getattr(index, "facts", None) or {}).get(name)

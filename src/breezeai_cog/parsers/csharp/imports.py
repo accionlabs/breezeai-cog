@@ -93,8 +93,8 @@ class CSharpIndex:
     #: honest-null). Lets a contract declared on an interface (WCF ``[ServiceContract]``) reach
     #: the method with a body that runs.
     implementers: dict[str, str | None] = field(default_factory=dict)
-    #: Facts resolved by additive detectors' index stage (detector name → fact), built once
-    #: before parsing. Read with :func:`~..additive.index_fact`; see ``parsers/additive.py``.
+    #: Facts registered with ``register_fact`` (fact name → fact), resolved once before
+    #: parsing. Read with :func:`~..additive.index_fact`; see ``parsers/additive.py``.
     facts: dict[str, Any] = field(default_factory=dict)
 
     def project_of(self, path: str) -> str | None:

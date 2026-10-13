@@ -200,8 +200,8 @@ Some facts can't be known from one file. For example, which file defines
 `com.acme.OrderService`? A language parser can provide `build_index`, which runs **once, before
 parsing**, and returns data that every worker receives. Today it is used for things like Java
 fully-qualified names and constants, TypeScript path aliases, and C#/VB class inheritance.
-Additive detectors can add their own facts to it through an optional index stage
-([§6](#6-the-parser-model)), so framework rules never have to live in the language's index code.
+Additive detectors can add their own facts to it by registering them (`register_fact`,
+[§6](#6-the-parser-model)), so framework rules never have to live in the language's index code.
 
 > **Decision —** cross-file data is built once in a separate pre-pass, not shared between workers while parsing.
 > **Why:** workers then share no mutable state, so files can be parsed in any order, in
@@ -454,16 +454,30 @@ classDiagram
 > output (new statement ids are disambiguated against the ones already on the record), so
 > `order` is explicit and unique per language, and a reorder is a reviewed change.
 
-> **Decision —** a detector that needs a fact from another file declares an optional **index
-> stage** (`collect` / `resolve`), which the language's `build_index` runs; `run` reads the result
-> with `index_fact`.
+> **Decision —** a detector that needs a fact from another file registers a named **fact**
+> (`FactSpec`: `collect` / `resolve`, named `framework.concern`), which the language's `build_index`
+> builds; the detector reads it with `index_fact`.
 > **Why:** a fact like "`Program.cs` registers `BookQueries` as a GraphQL root" is declared in one
-> file and needed in another. The index stage keeps it in the framework's own module and in the
+> file and needed in another. A registered fact keeps it in the framework's own module and in the
 > same registry as every other add-on, instead of a framework field on the language index or a new
 > parser-selection hook. **Cost:** a language must call `collect_additive` / `resolve_additive`
 > from its `build_index` to offer it (`INDEX_HOOKED_LANGUAGES`, C# today), and a detector that
 > emits for files with no marker cannot use a byte guard. Details:
-> [cross-file resolution §8](architecture/cross-file-resolution.md#a-framework-fact-from-another-file-the-additive-index-stage).
+> [cross-file resolution §8](architecture/cross-file-resolution.md#a-framework-fact-from-another-file-a-registered-fact).
+
+> **Decision —** a detector returns what it found (`Detection` of `Emit`s); one applier
+> (`parsers/emits.py` `apply`) writes it onto the record, and one validator (`parsers/contract.py`)
+> checks every entry point against the [entry-point contract](architecture/entry-points.md).
+> **Why:** each detector used to edit `record.statements` itself, with its own rule for "enrich the
+> statement already there, or append one", its own id disambiguation and its own parent lookup;
+> most output bugs were one of those done differently in one place. With one applier the rules are
+> written once (enrich only an eligible statement, once per run; ids disambiguated in emit order;
+> parent = smallest enclosing function). The validator turns the contract into a check: a wrong
+> value (unknown `method`, missing `routeKind`, a `${…}` address, two records for one binding)
+> fails the role tests; a missing handler is counted as a gap, because an honest empty value is
+> allowed. **Cost:** a detector can no longer read back what it wrote earlier in the same run; the
+> validator runs only in tests, golden comparisons and under `--verbose`, never on normal output.
+> Detectors move to `detect` one per commit, byte-identical; until then `run` keeps working.
 
 > **Decision —** API, database and query detection is shared across languages (`parsers/detection/`).
 > **Why:** "is `axios.get` an HTTP call?" has the same answer everywhere; one table, improved
@@ -955,7 +969,8 @@ from another.
 | Parsers | Framework parsers subclass their language parser | [§6](#6-the-parser-model) |
 | Parsers | Cross-cutting libraries are additive detectors | [§6](#6-the-parser-model) |
 | Parsers | Additive detectors self-register; the language parser calls one runner | [§6](#6-the-parser-model) |
-| Parsers | A fact from another file comes from a detector's index stage, run by `build_index` | [§6](#6-the-parser-model) |
+| Parsers | A fact from another file is a registered fact, built by `build_index` | [§6](#6-the-parser-model) |
+| Parsers | Detectors return emits; one applier writes them; one validator checks the contract | [§6](#6-the-parser-model) |
 | Parsers | API / DB / query detection is shared across languages | [§6](#6-the-parser-model) |
 | Parsers | Route emitters skip fixture files | [§6](#6-the-parser-model) |
 | Statements | Flat list linked by `parentId` | [§7](#7-the-statement-model) |

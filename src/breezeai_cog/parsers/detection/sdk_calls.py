@@ -57,7 +57,7 @@ from tree_sitter import Node
 
 from ...emit import disambiguate, file_id, statement_id
 from ...schemas import FileRecord, Statement
-from ..additive import DetectContext, Detector, register_detector
+from ..additive import DetectContext, Detector, Gate, register_detector
 from ..enclosing import Enclosing
 from ..index_common import ClassHeritage
 from ..treesitter import first_line, node_text
@@ -1039,7 +1039,7 @@ def _run(dc: DetectContext) -> str | None:
 
 
 register_detector(Detector(
-    name="sdk-calls", language="typescript", order=30, run=_run,
+    name="sdk-calls", gate=Gate("typescript", order=30), run=_run,
     frameworks=(
         "hubspot", "chargebee", "salesforce", "graphql", "aws-s3", "aws-cognito", "aws-ssm",
     ),

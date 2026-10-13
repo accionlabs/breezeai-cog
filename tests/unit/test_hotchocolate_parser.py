@@ -19,7 +19,7 @@ from breezeai_cog.parsers.csharp.parser import CSharpParser
 from breezeai_cog.parsers.index_common import ClassHeritage
 from breezeai_cog.parsers.csharp_hotchocolate.parser import CSharpHotChocolateParser
 from breezeai_cog.parsers.csharp_hotchocolate.registered_roots import (
-    NAME as REGISTERED_ROOTS,
+    FACT as REGISTERED_ROOTS,
     RegisteredRoots,
     registered_roots,
 )

@@ -17,6 +17,7 @@ from typing import Callable, Iterator
 from .._version import __version__
 from ..emit import split_oversized_statements
 from ..logging import DETAIL_LOGGER, get_logger
+from ..parsers.contract import validate as validate_contract
 from ..schemas import FileRecord, ProjectMetaData
 from . import executor
 from .ignore import IgnoreEngine
@@ -276,6 +277,11 @@ def _assemble(
                 functions=len(record.functions), classes=len(record.classes),
                 statements=len(record.statements),
             )
+            for v in validate_contract(record):  # entry-point contract check; output unchanged
+                log.debug(
+                    "contract.violation", path=record.path, statement=v.statement_id,
+                    rule=v.rule, severity=v.severity, detail=v.detail,
+                )
 
     meta = ProjectMetaData(
         repositoryPath=str(repo_root.resolve()),

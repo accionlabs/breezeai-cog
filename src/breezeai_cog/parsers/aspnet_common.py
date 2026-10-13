@@ -61,6 +61,9 @@ _GRAPHQL_UIS = {
     "UseGraphQLGraphiQL": "/ui/graphiql",
     "UseGraphQLAltair": "/ui/altair",
 }
+#: Calls that register a URL served by framework code, with no handler of ours: its binding is
+#: recorded with an empty handler (contract §4).
+FRAMEWORK_SERVED: frozenset[str] = frozenset(_HEALTH_METHODS | _GRAPHQL_UIS.keys())
 # MapControllers()/MapControllerRoute() only *enable* attribute/conventional routing; the
 # concrete controller endpoints come from detect_controller_routes, so they emit nothing
 # here (a conventional-route pattern like "{controller}/{action}" is not a callable path).

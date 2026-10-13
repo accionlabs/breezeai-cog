@@ -159,24 +159,26 @@ a one-per-file parser. There are **two hook points** — choose by the shape of 
   (`parsers/additive.py`). Do **not** edit the language parser: its `extract` already ends
   with `run_additive(<language>, …)`, which runs every registered detector for that language,
   so it fires for every file of the language and layers underneath whichever framework won.
-  It **enriches statements in place or appends new ones**; it never replaces the file's
-  parser. The runner applies the shared rules: it runs only with `ctx.capture_statements`,
-  skips fixture files when `skip_fixtures=True` (set it for route / entry-point emitters),
-  applies the cheap byte `guard` when one is given (otherwise guard inside the detector), and
-  lets a returned framework label fill `record.framework` only while it is unset. Pick a
-  unique `order` — it fixes the run order, which decides statement-id disambiguation — declare
+  Its `detect` **returns** what it found (`Detection` of `Emit`s: node + fields + whether it
+  may enrich the statement already there); the registry writes it (`parsers/emits.py` `apply`:
+  enrich in place or append, ids, parents). It never replaces the file's parser. Its `Gate`
+  decides when it runs: only with `ctx.capture_statements`, not on fixture files when
+  `skip_fixtures=True` (set it for route / entry-point emitters), only when the cheap byte
+  `guard` is present (otherwise guard inside the detector); a returned framework label fills
+  `record.framework` only while it is unset. Pick a unique `order` — it fixes the run order, which decides statement-id disambiguation — declare
   the `frameworks` labels it can emit, and add it to the inventory in
   `tests/unit/test_additive.py`. A language without the hook (see `HOOKED_LANGUAGES`) needs a
   one-time `run_additive` call in its base `extract` first — that one is a language-parser
   change.
 - **A fact from another file** (a class is an API only because the composition root registers
-  it; a URL prefix set by a mount elsewhere) → give the same detector an **index stage**:
-  `collect` / `resolve` plus an `index_gate`. The language's `build_index` runs it once before
-  parsing, and `run` reads the result with `index_fact`. Do not add a framework field to the
+  it; a URL prefix set by a mount elsewhere) → register a **fact** beside the
+  detector: `register_fact(FactSpec(name="framework.concern", gate=…, collect=…, resolve=…))`.
+  The language's `build_index` builds it once before parsing, and the detector reads it with
+  `index_fact`. Do not add a framework field to the
   language index or a new selection hook — the file keeps its owner and the detector adds to it.
   Bind names with the language's rules and leave ambiguous ones unbound. Recipe and worked
-  example: the parser reference ("Additive detectors", index stage) and
-  [`docs/architecture/cross-file-resolution.md`](../../docs/architecture/cross-file-resolution.md#a-framework-fact-from-another-file-the-additive-index-stage).
+  example: the parser reference ("Additive detectors", facts from other files) and
+  [`docs/architecture/cross-file-resolution.md`](../../docs/architecture/cross-file-resolution.md#a-framework-fact-from-another-file-a-registered-fact).
 
 Some "internal frameworks" only describe data models. Often the base parser already
 captures the class, its base class, and its fields — so the only thing to add is a **role
@@ -227,7 +229,7 @@ schema-wide commitment — ask.
   sits fully in memory; parsing is per-file and parallelized, so keep parsers free of
   cross-file mutable state (use the repo-wide index hook for shared data, returning a
   picklable value). Only the **language** parser's `build_index` runs — a framework's facts
-  reach it through an additive detector's index stage, never through the framework parser's
+  reach it through a registered fact (`register_fact`), never through the framework parser's
   own `build_index` or instance state. When that hook (`build_index`) parses every file, structure it as a
   picklable per-file worker plus a deterministic (order-independent) reduce and run it
   through the shared `parallel_map(files, fn, jobs)` — so it honours `--jobs` (serial at

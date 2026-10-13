@@ -20,7 +20,7 @@ from tree_sitter import Node
 
 from ...emit import disambiguate, file_id, statement_id
 from ...schemas import FileRecord, Statement
-from ..additive import DetectContext, Detector, register_detector
+from ..additive import DetectContext, Detector, Gate, register_detector
 from ..enclosing import Enclosing
 from ..treesitter import first_line, node_text
 from ..typescript.imports import relative_requires, resolve_const_value, router_locals
@@ -597,6 +597,6 @@ def _run(dc: DetectContext) -> str | None:
 
 
 register_detector(Detector(
-    name="express", language="typescript", order=10, run=_run,
-    skip_fixtures=True, frameworks=("express",),
+    name="express", gate=Gate("typescript", order=10, skip_fixtures=True), run=_run,
+    frameworks=("express",),
 ))

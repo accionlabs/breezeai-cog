@@ -19,7 +19,7 @@ from pathlib import Path
 
 from ...emit import disambiguate, statement_id
 from ...schemas import FileRecord, Statement
-from ..additive import DetectContext, Detector, register_detector
+from ..additive import DetectContext, Detector, Gate, register_detector
 from ..dotnet_common import code_behind_host
 
 _WEBHANDLER_CLASS_RE = re.compile(
@@ -79,6 +79,6 @@ def _run(dc: DetectContext) -> str | None:
 
 # An entry-point emitter, so fixture/test files are skipped.
 register_detector(Detector(
-    name="generic-handlers", language="csharp", order=40, run=_run,
-    guard=b"Handler", skip_fixtures=True, frameworks=("aspnet-webforms",),
+    name="generic-handlers", gate=Gate("csharp", order=40, guard=b"Handler", skip_fixtures=True),
+    run=_run, frameworks=("aspnet-webforms",),
 ))

@@ -1,0 +1,70 @@
+"""The entry-point contract validator (parsers/contract.py)."""
+
+from __future__ import annotations
+
+from breezeai_cog.parsers.contract import validate
+from breezeai_cog.schemas import FileRecord, Statement
+
+
+def _route(line: int = 1, **fields) -> Statement:
+    base = dict(
+        id=f"a.ts:{line}:0", parentId="a.ts", nodeType="call_expression", text="app.get('/x', h)",
+        startLine=line, endLine=line, semanticType="route", framework="express", method="GET",
+        routeKind="route", endpoint="/x", handler="h", handlerLine=line,
+    )
+    base.update(fields)
+    return Statement(**base)
+
+
+def _rules(*statements: Statement) -> list[tuple[str, str]]:
+    record = FileRecord(id="a.ts", path="a.ts", type="code", language="typescript", loc=1,
+                        statements=list(statements))
+    return [(v.rule, v.severity) for v in validate(record)]
+
+
+def test_a_conforming_route_has_no_violation() -> None:
+    assert _rules(_route()) == []
+
+
+def test_wrong_values_are_errors() -> None:
+    assert _rules(_route(method="FETCH")) == [("method", "error")]
+    assert _rules(_route(routeKind=None)) == [("routeKind", "error")]
+    assert _rules(_route(routeKind="rest")) == [("routeKind", "error")]
+    assert _rules(_route(framework=None)) == [("framework", "error")]
+    assert _rules(_route(endpoint="${BASE}/x")) == [("endpoint", "error")]
+    assert _rules(_route(endpoint="")) == [("endpoint", "error")]
+    assert _rules(_route(guards=[])) == [("guards", "error")]
+    assert _rules(_route(guards=["auth", "auth"])) == [("guards", "error")]
+
+
+def test_an_unresolved_endpoint_is_allowed() -> None:
+    assert _rules(_route(endpoint=None)) == []
+
+
+def test_a_missing_handler_is_a_gap() -> None:
+    assert _rules(_route(handler=None, handlerLine=None)) == [("handler", "gap")]
+    # An anonymous handler: no name, its line.
+    assert _rules(_route(handler=None)) == []
+
+
+def test_a_framework_served_url_needs_no_handler() -> None:
+    served = _route(text='app.MapHealthChecks("/health")', handler=None, handlerLine=None,
+                    framework="aspnet")
+    assert _rules(served) == []
+
+
+def test_one_record_per_binding() -> None:
+    assert _rules(_route(), _route(id="a.ts:1:0#2")) == [("one-record", "error")]
+    assert _rules(_route(), _route(id="a.ts:1:0#2", method="POST")) == []
+
+
+def test_only_entry_points_are_checked() -> None:
+    assert _rules(_route(routeKind="field_resolver", method="RESOLVE_FIELD")) == []
+    assert _rules(_route(routeKind="mount", handler=None, handlerLine=None)) == []
+    assert _rules(_route(semanticType="api_call", routeKind=None)) == []
+
+
+def test_consumers_and_timers_have_their_own_route_kinds() -> None:
+    assert _rules(_route(semanticType="eventbus_consumer", routeKind=None, method=None)) == []
+    assert _rules(_route(semanticType="eventbus_consumer", routeKind="message")) == []
+    assert _rules(_route(semanticType="timer", routeKind="page")) == [("routeKind", "error")]

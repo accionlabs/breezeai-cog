@@ -11,13 +11,18 @@ from breezeai_cog.parsers import additive
 from breezeai_cog.parsers.additive import (
     HOOKED_LANGUAGES,
     INDEX_HOOKED_LANGUAGES,
+    Detection,
     Detector,
+    FactSpec,
+    Gate,
     all_detectors,
     index_fact,
     register_detector,
+    register_fact,
     run_additive,
 )
 from breezeai_cog.parsers.base import ParseContext
+from breezeai_cog.parsers.emits import Emit
 from breezeai_cog.schemas import FileRecord
 
 PARSERS_DIR = Path(additive.__file__).parent
@@ -29,6 +34,7 @@ def isolated(monkeypatch):
     additive.discover_detectors()
     snapshot = {lang: list(ds) for lang, ds in additive._DETECTORS.items()}
     monkeypatch.setattr(additive, "_DETECTORS", snapshot)
+    monkeypatch.setattr(additive, "_FACTS", {k: list(v) for k, v in additive._FACTS.items()})
     return snapshot
 
 
@@ -66,25 +72,25 @@ def test_hooked_language_parsers_call_the_runner(language: str, parser_file: str
 
 def test_unhooked_language_rejected(isolated) -> None:
     with pytest.raises(RegistryError, match="no additive hook"):
-        register_detector(Detector(name="x", language="c#", order=999, run=lambda dc: None))
+        register_detector(Detector(name="x", gate=Gate("c#", order=999), run=lambda dc: None))
 
 
 def test_duplicate_order_rejected(isolated) -> None:
     with pytest.raises(RegistryError, match="order 10 already used"):
-        register_detector(Detector(name="x", language="csharp", order=10, run=lambda dc: None))
+        register_detector(Detector(name="x", gate=Gate("csharp", order=10), run=lambda dc: None))
 
 
 def test_reregistering_same_name_is_idempotent(isolated) -> None:
     before = [d.name for d in isolated["csharp"]]
-    register_detector(Detector(name="lucene", language="csharp", order=999, run=lambda dc: None))
+    register_detector(Detector(name="lucene", gate=Gate("csharp", order=999), run=lambda dc: None))
     assert [d.name for d in isolated["csharp"]] == before
 
 
 def _probe(isolated, **kw) -> list[str]:
     calls: list[str] = []
     isolated["typescript"] = [
-        Detector(name="probe", language="typescript", order=1,
-                 run=lambda dc: calls.append(dc.path), **kw)
+        Detector(name="probe", gate=Gate("typescript", order=1, **kw),
+                 run=lambda dc: calls.append(dc.path))
     ]
     return calls
 
@@ -114,7 +120,7 @@ def test_runner_applies_byte_guard(isolated) -> None:
 
 def test_label_only_fills_an_empty_framework(isolated) -> None:
     isolated["typescript"] = [
-        Detector(name="probe", language="typescript", order=1, run=lambda dc: "kafka")
+        Detector(name="probe", gate=Gate("typescript", order=1), run=lambda dc: "kafka")
     ]
     record = _record()
     run_additive("typescript", None, _ctx(b"x"), record, is_fixture=False)
@@ -152,9 +158,43 @@ def test_detectors_run_in_spawned_workers(tmp_path) -> None:
     serial = routes(1)
     assert len(serial) == 4
     assert routes(2) == serial
+def test_gate_admits() -> None:
+    gate = Gate("typescript", order=1, guard=b"kafkajs", skip_fixtures=True)
+    assert gate.admits(b"import 'kafkajs'", is_fixture=False)
+    assert not gate.admits(b"plain", is_fixture=False)
+    assert not gate.admits(b"import 'kafkajs'", is_fixture=True)
+    assert Gate("typescript", order=1).admits(b"plain", is_fixture=True)
 
 
-# ---- index stage: a fact from other files, collected while the language index is built ----------
+def test_detector_sets_exactly_one_of_detect_and_run(isolated) -> None:
+    with pytest.raises(RegistryError, match="exactly one of detect and run"):
+        register_detector(Detector(name="x", gate=Gate("csharp", order=999)))
+    with pytest.raises(RegistryError, match="exactly one of detect and run"):
+        register_detector(Detector(
+            name="x", gate=Gate("csharp", order=999),
+            detect=lambda dc: None, run=lambda dc: None,
+        ))
+
+
+def test_detection_is_applied_and_labels_the_file(isolated) -> None:
+    from breezeai_cog.parsers.treesitter import parse_source
+
+    source = b"app.get('/x', h);\n"
+    root = parse_source("typescript", source, 0).root_node
+    call = root.named_children[0].named_children[0]
+
+    def detect(dc):
+        return Detection([Emit(call, {"semanticType": "route", "endpoint": "/x"})], label="express")
+
+    isolated["typescript"] = [Detector(name="probe", gate=Gate("typescript", order=1), detect=detect)]
+    record = _record()
+    run_additive("typescript", root, _ctx(source), record, is_fixture=False)
+    [s] = record.statements
+    assert (s.id, s.semanticType, s.endpoint, s.text) == ("a.ts:1:0", "route", "/x", "app.get('/x', h)")
+    assert record.framework == "express"
+
+
+# ---- facts: built from other files while the language index is built ----------------------------
 
 def _collect_marked(root, source: bytes, rel: str, repo_root) -> str:
     return rel
@@ -166,15 +206,11 @@ def _resolve_marked(values: list, index) -> list:
     return sorted(v for v in values if v in declaring)
 
 
-def _noop(dc) -> None:
-    return None
-
-
-def _marked(**overrides) -> Detector:
-    fields = dict(name="test-marked", language="csharp", order=990, run=_noop,
-                  index_gate=(b"// MARK",), collect=_collect_marked, resolve=_resolve_marked)
+def _marked(**overrides) -> FactSpec:
+    fields = dict(name="test.marked", language="csharp", gate=(b"// MARK",),
+                  collect=_collect_marked, resolve=_resolve_marked)
     fields.update(overrides)
-    return Detector(**fields)
+    return FactSpec(**fields)
 
 
 @pytest.mark.parametrize("language", sorted(INDEX_HOOKED_LANGUAGES))
@@ -183,26 +219,21 @@ def test_index_hooked_languages_call_the_collector(language: str) -> None:
     assert f'collect_additive("{language}"' in source and f'resolve_additive("{language}"' in source
 
 
-def test_index_stage_needs_collect_and_resolve(isolated) -> None:
-    with pytest.raises(RegistryError, match="both collect and resolve"):
-        register_detector(_marked(resolve=None))
-
-
-def test_index_stage_for_an_unhooked_language_rejected(isolated) -> None:
+def test_fact_for_an_unhooked_language_rejected(isolated) -> None:
     with pytest.raises(RegistryError, match="no index hook"):
-        register_detector(_marked(language="typescript"))
+        register_fact(_marked(language="typescript"))
 
 
-def test_index_stage_needs_a_gate(isolated) -> None:
-    with pytest.raises(RegistryError, match="index_gate"):
-        register_detector(_marked(index_gate=()))
+def test_fact_needs_a_gate(isolated) -> None:
+    with pytest.raises(RegistryError, match="needs a gate"):
+        register_fact(_marked(gate=()))
 
 
 @pytest.mark.parametrize("jobs", [1, 2])
-def test_index_stage_fact_is_resolved_on_the_index(isolated, tmp_path, jobs) -> None:
+def test_fact_is_resolved_on_the_index(isolated, tmp_path, jobs) -> None:
     from breezeai_cog.parsers.csharp.imports import build_csharp_index
 
-    register_detector(_marked())
+    register_fact(_marked())
     files = {
         "a/Marked.cs": b"// MARK\nnamespace A { class Marked {} }",
         "b/Plain.cs": b"namespace B { class Plain {} }",          # gate does not match
@@ -216,7 +247,7 @@ def test_index_stage_fact_is_resolved_on_the_index(isolated, tmp_path, jobs) -> 
         paths.append(f)
     index = build_csharp_index(tmp_path, paths, jobs)
     # Collected behind the gate, resolved once against the full index, the same for any --jobs.
-    assert index_fact(index, "test-marked") == ["a/Marked.cs"]
+    assert index_fact(index, "test.marked") == ["a/Marked.cs"]
 
 
 def test_index_fact_tolerates_a_missing_index() -> None:
