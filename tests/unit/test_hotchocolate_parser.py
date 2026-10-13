@@ -847,7 +847,9 @@ BOOK_MUTATIONS = b"""namespace Catalog {
 
 
 def _repo_index(tmp_path, files: dict[str, bytes]) -> CSharpIndex:
-    """Write ``files`` under ``tmp_path`` and build the real C# repo index over them."""
+    """Write ``files`` under ``tmp_path`` and build the real C# repo index over them. Fills the
+    parser registry too, as the pipeline does first: the tests select parsers from it."""
+    registry.discover_builtin()
     paths = []
     for rel, src in files.items():
         f = tmp_path / rel
