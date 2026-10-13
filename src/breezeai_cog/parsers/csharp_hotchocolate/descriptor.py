@@ -345,6 +345,38 @@ def resolve_with_method(field_call: Node, source: bytes) -> tuple[str, str] | No
     return None
 
 
+def field_handler(field_call: Node, source: bytes) -> tuple[str | None, int | None]:
+    """``(handler, handlerLine)`` of a fluent field whose resolver is not a method of this file:
+
+    * ``.ResolveWith<R>(r => r.GetBooks())`` → ``GetBooks``, no line (declared on ``R``);
+    * ``.Resolve(ctx => …)`` → anonymous: no name, the lambda's line;
+    * ``Field(t => t.GetBooks())`` / ``Field(t => t.Books)`` → the member, no line (declared on
+      the runtime type);
+    * anything else → nothing — never the field's GraphQL name, which is not a code name.
+    """
+    ref = resolve_with_method(field_call, source)
+    if ref is not None:
+        return ref[1], None
+    for name, call in _chained_calls(field_call, source):
+        if name == RESOLVE_CALL:
+            lam = next((a for a in _arguments(call)
+                        if a is not None and a.type.endswith("lambda_expression")), None)
+            return (None, lam.start_point[0] + 1) if lam is not None else (None, None)
+    for arg in _arguments(field_call):
+        if arg is None or not arg.type.endswith("lambda_expression"):
+            continue
+        body = arg.child_by_field_name("body")
+        param = _lambda_param(arg, source)
+        if body is not None and body.type == "invocation_expression":
+            body = body.child_by_field_name("function")
+        if body is not None and body.type == "member_access_expression" and \
+                _receiver_name(body, source) == param and param is not None:
+            last = body.named_children[-1] if body.named_children else None
+            if last is not None and last.type == "identifier":
+                return node_text(last, source), None
+    return None, None
+
+
 def resolve_reads_parent(field_call: Node, source: bytes, target: str) -> bool:
     """Whether this field's inline ``.Resolve(…)`` reads the object it belongs to:
     ``ctx.Parent<Target>()`` somewhere in the resolver, with exactly the described type."""

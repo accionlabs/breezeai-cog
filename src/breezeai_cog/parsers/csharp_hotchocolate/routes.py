@@ -45,6 +45,7 @@ from .descriptor import (
     descriptor_target,
     entity_resolver_calls,
     field_authorizations,
+    field_handler,
     field_declarations,
     named_target,
     resolve_reads_parent,
@@ -449,6 +450,7 @@ def descriptor_field_statement(
     (``ResolveWith``), it is the handler and supplies the response type and loaders."""
     line, col = call.start_point[0] + 1, call.start_point[1]
     resolves_field = kind == "field_resolver"
+    handler, handler_line = field_handler(call, source) if resolver is None else (None, None)
     return Statement(
         id=disambiguate(statement_id(configure.path or "", line, col), seen),
         parentId=configure.id,
@@ -458,8 +460,8 @@ def descriptor_field_statement(
         method="RESOLVE_FIELD" if resolves_field else kind.upper(),
         endpoint=f"{target}.{name}" if resolves_field else name,
         framework="graphql",
-        handler=resolver.name if resolver is not None else name,
-        handlerLine=resolver.startLine if resolver is not None else line,
+        handler=resolver.name if resolver is not None else handler,
+        handlerLine=resolver.startLine if resolver is not None else handler_line,
         routeKind=kind,
         isRegex=False,
         authRequired=bool(guards) or None,
@@ -589,10 +591,15 @@ def _descriptor_routes(
                                         type_level, generated_loaders)
                 + _descriptor_entity_resolvers(configure, target, record, body, source, receiver,
                                                seen))
-    return [descriptor_field_statement(
-                configure, kind, name, call, source, seen,
-                _guard_labels(type_level + field_authorizations(call, source)))
-            for name, call in field_declarations(body, source, receiver)]
+    out: list[Statement] = []
+    for name, call in field_declarations(body, source, receiver):
+        ref = resolve_with_method(call, source)
+        out.append(descriptor_field_statement(
+            configure, kind, name, call, source, seen,
+            _guard_labels(type_level + field_authorizations(call, source)),
+            resolver=_resolver_method(record, *ref) if ref is not None else None,
+            generated_loaders=generated_loaders))
+    return out
 
 
 def detect_hotchocolate_routes(

@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import pytest
-
 EP = {"route", "eventbus_consumer", "timer"}
 
 QUERIES = """using HotChocolate;
@@ -82,7 +80,8 @@ public class AuthorQueries
 }
 """
 
-PROGRAM = """using Microsoft.AspNetCore.Builder;
+PROGRAM = """using Books;
+using Microsoft.AspNetCore.Builder;
 using Microsoft.Extensions.DependencyInjection;
 
 var builder = WebApplication.CreateBuilder(args);
@@ -163,9 +162,6 @@ def test_extend_root_is_wiring_members_are_bindings(analyze_files) -> None:
     )
 
 
-@pytest.mark.xfail(
-    strict=True, reason="root registered by AddQueryType<T>() in another file not resolved"
-)
 def test_add_query_type_registration_is_wiring(analyze_files) -> None:
     stmts = analyze_files({"AuthorQueries.cs": REGISTERED, "Program.cs": PROGRAM})
     [r] = [s for s in _eps(stmts) if s.path == "AuthorQueries.cs"]
@@ -183,11 +179,45 @@ def test_descriptor_field_on_root_is_binding(analyze_files) -> None:
     assert (r.method, r.routeKind, r.endpoint) == ("QUERY", "query", "books")
 
 
-@pytest.mark.xfail(strict=True, reason="inline descriptor resolver: handler holds the field name")
+def test_registration_binds_only_a_type_in_scope(analyze_files) -> None:
+    # Without `using Books;` the registration cannot name Books.AuthorQueries (it would not
+    # compile): no binding is made rather than a guessed one.
+    program = PROGRAM.replace("using Books;\n", "")
+    stmts = analyze_files({"AuthorQueries.cs": REGISTERED, "Program.cs": program})
+    assert [s for s in _eps(stmts) if s.path == "AuthorQueries.cs"] == []
+
+
 def test_descriptor_inline_resolver_is_anonymous(analyze_files) -> None:
     stmts = analyze_files({"QueryType.cs": DESCRIPTOR})
     [r] = _eps(stmts)
     assert not r.handler and r.handlerLine == _line(DESCRIPTOR, 'descriptor.Field("books")')
+
+
+def test_descriptor_field_handler_is_never_the_field_name(analyze_files) -> None:
+    src = """using HotChocolate.Types;
+namespace Books;
+public class QueryType : ObjectType<Query>
+{
+    protected override void Configure(IObjectTypeDescriptor<Query> descriptor)
+    {
+        descriptor.Field(q => q.GetAuthors());
+        descriptor.Field("byId").ResolveWith<BookResolvers>(r => r.GetById(default));
+        descriptor.Field("titles").ResolveWith<TitleResolvers>(r => r.All());
+        descriptor.Field("plain");
+    }
+}
+public class BookResolvers
+{
+    public Book GetById(int id) => new Book();
+}
+"""
+    got = {r.endpoint: (r.handler, r.handlerLine) for r in _eps(analyze_files({"QueryType.cs": src}))}
+    assert got == {
+        "authors": ("GetAuthors", None),          # the runtime type's member, declared elsewhere
+        "byId": ("GetById", _line(src, "public Book GetById")),
+        "titles": ("All", None),                  # a resolver class in another file
+        "plain": (None, None),                    # resolved by convention: not in front of us
+    }
 
 
 def test_data_type_field_is_none(analyze_files) -> None:
