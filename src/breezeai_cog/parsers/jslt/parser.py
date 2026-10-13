@@ -1,28 +1,28 @@
 """JsltParser — a standalone-file **language parser** owning ``.jslt``.
 
 JSLT (github.com/schibsted/jslt), a JSON query/transform language, has no tree-sitter
-grammar in this project's language pack. The plan's Decisions table records the rejected
-alternative (adopting the only public third-party grammar, an unmaintained single-author
-repository) and why: it fails this project's Vet Before Reuse bar. Structure is instead
-extracted by a hand-rolled line-scan (see :mod:`.statements`) over JSLT's small,
-line-oriented top-level surface — ``import``/``def``/``let`` declarations plus the trailing
-module (output) expression.
+grammar in this project's language pack, and the only public third-party grammar is an
+unmaintained single-author repository with no PyPI package or verified Python bindings — not
+safe to build on. Structure is instead extracted by a hand-rolled line-scan (see
+:mod:`.statements`) over JSLT's small, line-oriented top-level surface — ``import``/``def``/
+``let`` declarations plus the trailing module (output) expression.
 
 Unlike every tree-sitter-backed parser in this project, there is no grammar tree to run the
 shared ``comments_common.py`` pass over, so ``//`` comments are not captured as their own
-statements in this v1 (out of scope — see the plan).
+statements.
 
-Semantic capture is gated behind ``--capture-statements``, same as every other parser.
+Semantic capture is on by default (gated behind ``ctx.capture_statements``; the CLI's
+``--no-capture-statements`` turns it off), same as every other parser.
 """
 
 from __future__ import annotations
 
 from ...emit import file_id
-from ...schemas import SCHEMA_VERSION, FileRecord
+from ...schemas import SCHEMA_VERSION, FileRecord, Function, Statement
 from ...utils import count_loc
 from ..base import BaseParser, ParseContext
 from .mappings import FRAMEWORKS, STATEMENT_TYPES
-from .statements import collect_jslt_statements
+from .statements import collect_jslt_declarations
 
 
 class JsltParser(BaseParser):
@@ -42,11 +42,13 @@ class JsltParser(BaseParser):
         fid = file_id(path)
         seen_ids: set[str] = set()
 
-        statements = (
-            collect_jslt_statements(text, path, seen_ids)
-            if ctx.capture_statements and not self.is_fixture_file(path)
-            else []
-        )
+        # No is_fixture_file gate: that check exists only for route/entry-point emitters
+        # (base.py), and JSLT emits no routes — a fixture .jslt still has real declarations
+        # worth capturing.
+        statements: list[Statement] = []
+        functions: list[Function] = []
+        if ctx.capture_statements:
+            statements, functions = collect_jslt_declarations(text, path, seen_ids)
 
         return FileRecord(
             id=fid,
@@ -55,5 +57,6 @@ class JsltParser(BaseParser):
             language="jslt",
             loc=count_loc(text),
             statements=statements,
-            framework="jslt" if statements else None,
+            functions=functions,
+            framework="jslt" if (statements or functions) else None,
         )
