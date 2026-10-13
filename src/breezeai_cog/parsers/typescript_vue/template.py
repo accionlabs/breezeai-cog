@@ -79,7 +79,8 @@ def _handler(value_text: str) -> str | None:
 
 
 _QUOTED_RE = re.compile(r"""^(['"`])([^'"`$]*)\1$""")
-_OBJ_PATH_RE = re.compile(r"""\bpath\s*:\s*(['"`])([^'"`$]*)\1""")
+# The literal must be the whole value (``path: '/users/' + id`` is not a path: never partial).
+_OBJ_PATH_RE = re.compile(r"""\bpath\s*:\s*(['"`])([^'"`$]*)\1(?=\s*[,}])""")
 
 
 def _nav_endpoint(value_text: str, bound: bool) -> str | None:
@@ -87,17 +88,21 @@ def _nav_endpoint(value_text: str, bound: bool) -> str | None:
     a bound ``:to`` is a path only when it is a string literal (``:to="'/users'"``) or an object
     with a literal ``path`` (``:to="{ path: '/users' }"``). A named route (``{ name: 'users' }``),
     a variable or an expression is not a path → None (the endpoint is an address, never a route
-    name or a code name)."""
+    name or a code name). A relative path (no leading ``/``) depends on the current route → None."""
     value = value_text.strip()
     if not bound:
-        return value or None
+        return _absolute(value)
     m = _QUOTED_RE.match(value)
     if m:
-        return m.group(2) or None
+        return _absolute(m.group(2))
     if value.startswith("{"):
         m = _OBJ_PATH_RE.search(value)
-        return m.group(2) if m else None
+        return _absolute(m.group(2)) if m else None
     return None
+
+
+def _absolute(path: str | None) -> str | None:
+    return path if path and path.startswith("/") else None
 
 
 def _interpolation_name(node: Node, source: bytes) -> str:

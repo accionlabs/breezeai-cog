@@ -247,9 +247,12 @@ def test_router_link_is_navigation_route(tmp_path) -> None:
     assert routes, "routerLink should produce navigation statements"
     for r in routes:
         assert r.routeKind is None and r.framework == "angular" and r.name == "routerLink"
-    endpoints = {r.endpoint for r in routes}
-    assert "/orders" in endpoints  # plain attr + array base both resolve to /orders
-    assert "/home" in endpoints  # quoted string literal
+    by_text = {r.text: r.endpoint for r in routes}
+    assert by_text['routerLink="/orders"'] == "/orders"  # plain attribute
+    assert by_text["[routerLink]=\"'/home'\""] == "/home"  # quoted string literal
+    # ['/orders', id]: a segment is not a literal → the address is unknown (empty), never the
+    # partial '/orders'
+    assert by_text["[routerLink]=\"['/orders', id]\""] is None
 
 
 def test_router_link_dynamic_is_honest_null(tmp_path) -> None:
