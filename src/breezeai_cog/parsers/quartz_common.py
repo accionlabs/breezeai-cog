@@ -49,6 +49,10 @@ _INTERVALS = {
     "repeatsecondlyforevertotalcount": 1000, "repeatminutelyforevertotalcount": 60_000,
     "repeathourlyforevertotalcount": 3_600_000,
 }
+#: Calls only a trigger builder has: the chain they are on builds a trigger.
+_TRIGGER_CALLS = frozenset({"forjob", "withschedule", "withsimpleschedule", "startnow", "startat",
+                            "withcronschedule", "withdailytimeintervalschedule",
+                            "withcalendarintervalschedule", "endat"})
 #: Periodic schedules whose expression is not one value.
 _OTHER_PERIODIC = frozenset({
     "withdailytimeintervalschedule", "dailytimeintervalschedule",
@@ -165,6 +169,18 @@ class _File:
             return self.key(c.args)
         return None
 
+    def is_trigger(self, node: Node) -> bool:
+        """Whether ``node`` visibly builds a trigger: its chain starts a trigger builder
+        (``newTrigger()`` / ``TriggerBuilder.Create()``) or configures one. A value from a
+        call we cannot follow (``jobContext.getTrigger()``) is not one: its schedule is unknown,
+        not absent."""
+        for c in self.chain(node):
+            if c.name == "newtrigger" or c.name in _TRIGGER_CALLS or (
+                    c.name == "create" and c.receiver is not None
+                    and self.text(c.receiver).endswith("TriggerBuilder")):
+                return True
+        return False
+
     def schedule(self, node: Node) -> tuple[str | None, str | None]:
         """``(method, endpoint)`` of the trigger built in ``node``."""
         found: set[tuple[str, str | None]] = set()
@@ -245,6 +261,7 @@ def detect_quartz(root: Node, source: bytes, record: FileRecord, syntax: Syntax)
             found.append(emit(c.node, c.type_arg, c.args[0]))
         elif len(c.args) == 2:  # scheduler.scheduleJob(job, trigger)
             trigger = f.deref(c.args[1])
+            trigger = trigger if trigger is not None and f.is_trigger(trigger) else None
             if trigger is not None:
                 done.add(_top(f, trigger).start_byte)
             found.append(emit(c.node, f.job_class(c.args[0]), trigger))

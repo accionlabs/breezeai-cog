@@ -114,6 +114,7 @@ def test_schedule_values(analyze_files) -> None:
     sched.scheduleJob(job, newTrigger().withSchedule(cronSchedule(CRON)).build());
     sched.scheduleJob(job, newTrigger().withSchedule(DailyTimeIntervalScheduleBuilder.dailyTimeIntervalSchedule()).build());
     sched.scheduleJob(job, unknownTrigger);
+    sched.scheduleJob(ctx.getDetail(), ctx.getTrigger());
   }
 """
     got = [(r.method, r.endpoint) for r in sorted(_java(analyze_files, body), key=lambda r: r.startLine)]
@@ -122,6 +123,7 @@ def test_schedule_values(analyze_files) -> None:
         ("PERIODIC", None),   # a constant cron: not read → empty, never the name
         ("PERIODIC", None),   # a daily-time interval has no one value
         (None, None),         # a trigger that cannot be traced: neither kind nor schedule known
+        (None, None),         # nor one from a call we cannot follow (it may well be a cron)
     ]
 
 
