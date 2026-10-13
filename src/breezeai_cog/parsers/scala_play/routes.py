@@ -17,7 +17,6 @@ from ...schemas import Statement
 _VERB_RE = re.compile(
     r"^\s*(?P<verb>GET|POST|PUT|DELETE|PATCH|HEAD|OPTIONS)\s+(?P<path>\S+)\s+(?P<handler>.+?)\s*$"
 )
-_MOUNT_RE = re.compile(r"^\s*->\s+(?P<prefix>\S+)\s+(?P<router>\S+)\s*$")
 #: A regex path part, e.g. ``$id<[0-9]+>``.
 _REGEX_PART_RE = re.compile(r"\$\w+<[^>]*>")
 
@@ -61,22 +60,5 @@ def extract_routes(text: str, path: str) -> list[Statement]:
                 path=path,
             ))
             continue
-        m = _MOUNT_RE.match(raw_line)
-        if m is not None:
-            routes.append(Statement(
-                id=disambiguate(statement_id(path, lineno, 0), seen),
-                parentId=fid,
-                nodeType="synthetic",
-                semanticType="route",
-                text=raw_line.strip(),
-                method=None,
-                endpoint=m["prefix"],
-                handler=m["router"],
-                framework="play",
-                routeKind="mount",
-                isRegex=False,
-                startLine=lineno,
-                endLine=lineno,
-                path=path,
-            ))
+        # ``-> /prefix router.Routes`` includes another router: wiring (contract §4) — no record.
     return routes

@@ -174,12 +174,10 @@ def test_verified_line_shapes_parse(tmp_path: Path) -> None:
     assert ("POST", "/login", "controllers.AuthController.login") in got
 
 
-def test_mount_include_has_null_method(tmp_path: Path) -> None:
+def test_router_include_has_no_record(tmp_path: Path) -> None:
+    # `-> /v1/posts v1.post.PostRouter` includes another router: wiring, no record.
     rec = _parse_routes(tmp_path)
-    mounts = {(s.endpoint, s.handler): s for s in rec.statements if s.routeKind == "mount"}
-    assert ("/v1/posts", "v1.post.PostRouter") in mounts
-    assert ("/webjars", "webjars.Routes") in mounts
-    assert all(s.method is None for s in mounts.values())
+    assert not any(s.endpoint in ("/v1/posts", "/webjars") for s in rec.statements)
 
 
 def test_regex_path_part_sets_is_regex(tmp_path: Path) -> None:

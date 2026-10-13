@@ -60,7 +60,6 @@ def test_routes_line_records_handler(analyze_files) -> None:
     )
 
 
-@pytest.mark.xfail(strict=True, reason="'->' router include is recorded as a route (mount)")
 def test_router_include_is_wiring(analyze_files) -> None:
     st = analyze_files({"conf/routes": "->      /admin           admin.Routes\n"})
     assert _eps(st) == []
