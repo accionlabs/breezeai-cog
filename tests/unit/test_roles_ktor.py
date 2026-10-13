@@ -81,6 +81,18 @@ def test_route_block_is_wiring(analyze_files) -> None:
     assert (r.method, r.endpoint) == ("POST", "/api/orders")
 
 
+def test_route_block_with_a_non_path_argument_makes_the_address_unknown(analyze_files) -> None:
+    st = analyze_files(
+        _app("""    routing {
+        route("/api") {
+            route(prefixFromEnv()) { get("/x") { call.respondText("x") } }
+        }
+    }""")
+    )
+    [r] = _eps(st)  # never the partial /api/x
+    assert (r.method, r.endpoint) == ("GET", None)
+
+
 def test_websocket_is_binding(analyze_files) -> None:
     st = analyze_files(
         _app("""    routing {

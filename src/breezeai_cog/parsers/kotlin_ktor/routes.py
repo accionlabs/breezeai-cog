@@ -192,9 +192,10 @@ def _collect_routes(
 
         if verb == "route":
             # Prefix block — push path segment and recurse into lambda body. An unresolved
-            # segment makes every nested address unknown (prefix None).
+            # segment — a path expression that does not resolve, or an argument that is not one
+            # (``route(prefixFromEnv())``) — makes every nested address unknown (prefix None).
             sub = _first_arg(child, source, consts)
-            new_prefix = (None if prefix is None or sub is _UNKNOWN
+            new_prefix = (None if prefix is None or sub is _UNKNOWN or sub is None
                           else prefix + (sub if isinstance(sub, str) else ""))
             body = _lambda_body(child)
             if body is not None:

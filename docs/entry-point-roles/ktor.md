@@ -6,7 +6,7 @@ Parser: `src/breezeai_cog/parsers/kotlin_ktor/` · Rules: [entry-point contract]
 |---|---|---|---|
 | `get("/x") { … }` / `post` / `put` / `delete` / `patch` / `head` / `options` inside `routing { }` | Binding | `route`, HTTP verb, `routeKind: route`, full path, `handlerLine` = the lambda (anonymous) | One handler, inbound API |
 | Verb without a path inside `route("/p") { get { … } }` | Binding | `endpoint` = the enclosing prefix | Same, addressed by the prefix |
-| `route("/p") { … }` | Wiring | statement stays plain; prefix on the nested bindings | Points at no handler |
+| `route("/p") { … }` | Wiring | statement stays plain; prefix on the nested bindings — a prefix that does not resolve (an unknown constant, `route(prefixFromEnv())`) leaves their `endpoint` empty | Points at no handler |
 | `webSocket("/ws") { … }` / `webSocketRaw` | Binding | `route`, `method: WEBSOCKET`, `routeKind: ws`, path (with enclosing `route(...)` prefixes) | One handler, inbound WebSocket |
 | `authenticate("name") { … }` | Guard | name in `guards` on the nested bindings | Runs before many handlers |
 | `install(Plugin)` | None | — | Start-up configuration |
