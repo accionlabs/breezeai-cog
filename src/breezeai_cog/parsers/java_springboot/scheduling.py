@@ -17,8 +17,8 @@ from __future__ import annotations
 
 from tree_sitter import Node
 
-from ...emit import disambiguate, statement_id
-from ...schemas import FileRecord, Function, Statement
+from ...schemas import FileRecord, Function
+from ..emits import Emit
 from ..treesitter import first_line, node_text
 from .messaging import _address, _ann_name, _annotations, _classes
 
@@ -58,11 +58,10 @@ def _schedule(ann: Node, source: bytes, consts: dict[str, str],
 def detect_spring_scheduled(
     root: Node, source: bytes, path: str, record: FileRecord, consts: dict[str, str],
     props: dict[str, str | None],
-) -> list[Statement]:
-    """One ``timer`` per ``@Scheduled`` annotation on a method."""
+) -> list[Emit]:
+    """One ``timer`` per ``@Scheduled`` annotation on a method, for :func:`~..emits.apply`."""
     functions: dict[tuple[str, int], Function] = {(f.name, f.startLine): f for f in record.functions}
-    seen = {s.id for s in record.statements}
-    out: list[Statement] = []
+    out: list[Emit] = []
     for cls in _classes(root):
         body = cls.child_by_field_name("body")
         for member in body.named_children if body is not None else []:
@@ -76,19 +75,14 @@ def detect_spring_scheduled(
             for ann in _annotations(member):
                 if _ann_name(ann, source) != "Scheduled":
                     continue
-                out.append(Statement(
-                    id=disambiguate(statement_id(path, fn.startLine, 0), seen),
-                    parentId=fn.id,
-                    nodeType="synthetic",
+                out.append(Emit(ann, dict(
                     semanticType="timer",
-                    text=first_line(node_text(ann, source))[:200],
                     method="PERIODIC",
                     endpoint=_schedule(ann, source, consts, props),
                     framework="spring",
                     handler=fn.name,
                     handlerLine=fn.startLine,
-                    startLine=fn.startLine,
-                    endLine=fn.endLine,
-                    path=path,
-                ))
+                ), parent=fn.id, node_type="synthetic",
+                    text=first_line(node_text(ann, source))[:200],
+                    line=fn.startLine, col=0, end_line=fn.endLine))
     return out

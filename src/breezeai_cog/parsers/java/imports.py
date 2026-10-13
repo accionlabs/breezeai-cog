@@ -21,7 +21,6 @@ from ..additive import (
 from ..constfold import Token, resolve_all
 from ..index_common import parallel_map, record_distinct, seed_same_package
 from ..treesitter import node_text, parse_source
-from .config import spring_context_paths, spring_properties
 from .web_guards import GuardFacts, ModuleGuards, collect_guard_facts, resolve_guards
 from .constants import collect_constants
 from .jaxrs_index import JaxrsFacts, collect_jaxrs_facts, resolve_jaxrs
@@ -44,10 +43,6 @@ class JavaIndex:
 
     fqcn: FqcnIndex = field(default_factory=dict)
     consts: dict[str, str] = field(default_factory=dict)
-    #: Spring Boot servlet context path per module root (``""`` = repo root): the prefix of
-    #: every HTTP route in that module. None = set in config but unresolvable (the base files
-    #: disagree, or a ``${…}`` placeholder). A module without one is absent. See ``config.py``.
-    context_paths: dict[str, str | None] = field(default_factory=dict)
     #: JAX-RS ``@ApplicationPath`` per module root: the base of every resource of that module.
     #: None = present but unresolvable (or two differ). Absent = none. See ``jaxrs_index.py``.
     jaxrs_app_paths: dict[str, str | None] = field(default_factory=dict)
@@ -59,10 +54,6 @@ class JavaIndex:
     #: (decision Q9 — their names go on every binding they certainly cover). See
     #: ``web_guards.py``.
     module_guards: dict[str, ModuleGuards] = field(default_factory=dict)
-    #: Base-config properties per module root (``key → value``; None = the base files
-    #: disagree) — resolves ``${…}`` placeholders in annotation values such as a
-    #: ``@KafkaListener`` topic. See ``config.py``.
-    module_properties: dict[str, dict[str, str | None]] = field(default_factory=dict)
     #: Facts registered with ``register_fact`` (fact name → fact), resolved once before
     #: parsing. Read with :func:`~..additive.index_fact`; see ``parsers/additive.py``.
     facts: dict[str, Any] = field(default_factory=dict)
@@ -148,10 +139,8 @@ def build_fqcn_index(repo_root: Path, files: Sequence[Path], jobs: int = 1) -> J
     app_paths, sub_bases = resolve_jaxrs(jaxrs, consts, simple_names)
     index = JavaIndex(
         fqcn=fqcn, consts=consts,
-        context_paths=spring_context_paths(repo_root, (rel for _, rel in args)),
         jaxrs_app_paths=app_paths, jaxrs_sub_bases=sub_bases,
         module_guards=resolve_guards(guard_facts),
-        module_properties=spring_properties(repo_root, (rel for _, rel in args)),
     )
     # Registered facts may need the whole index, so they resolve after it is built.
     return replace(index, facts=resolve_additive("java", collected, index))

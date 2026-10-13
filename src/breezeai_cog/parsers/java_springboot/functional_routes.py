@@ -26,9 +26,9 @@ from __future__ import annotations
 
 from tree_sitter import Node
 
-from ...emit import disambiguate, statement_id
-from ...schemas import FileRecord, Statement
-from ..treesitter import first_line, node_text
+from ...schemas import FileRecord
+from ..emits import Emit
+from ..treesitter import node_text
 
 _FN_VERBS = {"GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"}
 _ROUTE_CALLS = {"route", "andRoute", "andNest"}
@@ -141,9 +141,8 @@ def _handler_for(
 
 def detect_spring_functional_routes(
     root: Node, source: bytes, path: str, record: FileRecord
-) -> list[Statement]:
-    seen = {s.id for s in record.statements}
-    routes: list[Statement] = []
+) -> list[Emit]:
+    routes: list[Emit] = []
     methods: dict[str, int | None] = {}  # method name → declaration line (declared twice → None)
     for f in record.functions:
         methods[f.name] = f.startLine if f.name not in methods else None
@@ -156,16 +155,11 @@ def detect_spring_functional_routes(
                 args = n.child_by_field_name("arguments")
                 p = _first_string_arg(args, source)
                 if p is not None:
-                    sl, sc = n.start_point[0] + 1, n.start_point[1]
                     handler, handler_line = _handler_for(n, args, source, methods)
                     prefix = _nest_prefix(n, source)
                     routes.append(
-                        Statement(
-                            id=disambiguate(statement_id(path, sl, sc), seen),
-                            parentId=record.id,
-                            nodeType="method_invocation",
+                        Emit(n, dict(
                             semanticType="route",
-                            text=first_line(node_text(n, source)),
                             method=name,
                             endpoint=_join(prefix, p) if prefix is not None else None,
                             framework="spring",
@@ -173,10 +167,7 @@ def detect_spring_functional_routes(
                             handlerLine=handler_line,
                             routeKind="route",
                             isRegex=False,
-                            startLine=sl,
-                            endLine=n.end_point[0] + 1,
-                            path=path,
-                        )
+                        ), parent=record.id)
                     )
         for c in n.named_children:
             visit(c)

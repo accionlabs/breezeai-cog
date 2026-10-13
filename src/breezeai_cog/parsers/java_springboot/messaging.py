@@ -33,6 +33,7 @@ from tree_sitter import Node
 
 from ...emit import disambiguate, file_id, statement_id
 from ...schemas import FileRecord, Function, Statement
+from ..emits import Emit
 from ..enclosing import Enclosing
 from ..java.config import resolve_placeholders
 from ..java.constants import fold_arg
@@ -142,31 +143,25 @@ def _classes(root: Node) -> list[Node]:
 def detect_spring_listeners(
     root: Node, source: bytes, path: str, record: FileRecord, consts: dict[str, str],
     props: dict[str, str | None],
-) -> list[Statement]:
-    """One ``eventbus_consumer`` per listener method and address."""
+) -> list[Emit]:
+    """One ``eventbus_consumer`` per listener method and address, for :func:`~..emits.apply`."""
     functions: dict[tuple[str, int], Function] = {(f.name, f.startLine): f for f in record.functions}
-    seen = {s.id for s in record.statements}
-    out: list[Statement] = []
+    out: list[Emit] = []
 
     def emit(fn: Function, ann: Node, framework: str, method: str,
              addresses: list[str | None]) -> None:
         for address in addresses:
-            out.append(Statement(
-                id=disambiguate(statement_id(path, fn.startLine, 0), seen),
-                parentId=fn.id,
-                nodeType="synthetic",
+            out.append(Emit(ann, dict(
                 semanticType="eventbus_consumer",
-                text=first_line(node_text(ann, source))[:200],
                 method=method,
                 endpoint=address,
                 framework=framework,
                 handler=fn.name,
                 handlerLine=fn.startLine,
                 routeKind="message",
-                startLine=fn.startLine,
-                endLine=fn.endLine,
-                path=path,
-            ))
+            ), parent=fn.id, node_type="synthetic",
+                text=first_line(node_text(ann, source))[:200],
+                line=fn.startLine, col=0, end_line=fn.endLine))
 
     for cls in _classes(root):
         body = cls.child_by_field_name("body")

@@ -9,10 +9,13 @@ inferred from imports (:func:`spring_version`) when present.
 
 from __future__ import annotations
 
-from ...emit import disambiguate, statement_id
-from ...schemas import Decorator, FileRecord, Function, Statement
+from tree_sitter import Node
+
+from ...schemas import Decorator, FileRecord, Function
+from ..emits import Emit
 from ..java.guards import security_guards
 from ..java.web_guards import ModuleGuards, spring_global_guards
+from ..treesitter import node_text
 
 _METHOD_MAPPINGS = {
     "GetMapping": "GET", "PostMapping": "POST", "PutMapping": "PUT",
@@ -85,25 +88,41 @@ def _join(base: str, sub: str) -> str:
     return "/" + "/".join(parts) if parts else "/"
 
 
-def apply_global_guards(routes: list[Statement], module_guards: ModuleGuards) -> None:
+def apply_global_guards(routes: list[Emit], module_guards: ModuleGuards) -> None:
     """Prepend the servlet filters and MVC interceptors that run before each HTTP route
     (decision Q9). They do not set ``authRequired``: a filter is often logging or CORS."""
     for r in routes:
-        if r.semanticType != "route":
+        if r.fields.get("semanticType") != "route":
             continue
-        outer = spring_global_guards(module_guards, r.endpoint)
+        outer = spring_global_guards(module_guards, r.fields.get("endpoint"))
         if outer:
-            r.guards = outer + (r.guards or [])
+            r.fields["guards"] = outer + (r.fields.get("guards") or [])
 
 
-def apply_context_path(routes: list[Statement], context_path: str | None) -> None:
+def apply_context_path(routes: list[Emit], context_path: str | None) -> None:
     """Join the application's servlet context path onto each HTTP route's endpoint. ``None``
     (set in config but unresolvable) leaves every endpoint empty: the address is unknown."""
     for r in routes:
-        if r.semanticType != "route":
+        if r.fields.get("semanticType") != "route":
             continue
-        r.endpoint = (_join(context_path, r.endpoint)
-                      if context_path is not None and r.endpoint is not None else None)
+        endpoint = r.fields.get("endpoint")
+        r.fields["endpoint"] = (_join(context_path, endpoint)
+                                if context_path is not None and endpoint is not None else None)
+
+
+def method_nodes(root: Node, source: bytes) -> dict[tuple[str, int], Node]:
+    """``(name, start line)`` → the method's declaration, the key the Java parser's
+    ``Function`` records carry (``name``, ``startLine``)."""
+    out: dict[tuple[str, int], Node] = {}
+    stack = [root]
+    while stack:
+        n = stack.pop()
+        if n.type in ("method_declaration", "constructor_declaration"):
+            name = n.child_by_field_name("name")
+            if name is not None:
+                out[(node_text(name, source), n.start_point[0] + 1)] = n
+        stack.extend(n.named_children)
+    return out
 
 
 def _request_dto(fn: Function) -> str | None:
@@ -114,7 +133,9 @@ def _request_dto(fn: Function) -> str | None:
     return None
 
 
-def detect_spring_routes(record: FileRecord) -> list[Statement]:
+def detect_spring_routes(record: FileRecord, root: Node, source: bytes) -> list[Emit]:
+    """One route per mapping annotation (and per path of an array mapping) of a controller
+    method, for :func:`~..emits.apply`: read off the record, placed on the method."""
     controllers: dict[str, str] = {}  # class id -> base path
     class_decorators: dict[str, list[Decorator]] = {}
     for cls in record.classes:
@@ -124,8 +145,8 @@ def detect_spring_routes(record: FileRecord) -> list[Statement]:
     if not controllers:
         return []
 
-    seen = {s.id for s in record.statements}
-    routes: list[Statement] = []
+    nodes = method_nodes(root, source)
+    routes: list[Emit] = []
     for fn in record.functions:
         base = controllers.get(fn.parentId)
         if base is None:
@@ -136,12 +157,8 @@ def detect_spring_routes(record: FileRecord) -> list[Statement]:
             if verb is None:
                 continue
             for sub in subs:  # the array form @GetMapping({"/a","/b"}) yields one route each
-                routes.append(Statement(
-                    id=disambiguate(statement_id(fn.path, fn.startLine, 0), seen),
-                    parentId=fn.id,
-                    nodeType="synthetic",
+                routes.append(Emit(nodes.get((fn.name, fn.startLine), root), dict(
                     semanticType="route",
-                    text=f"@{dec.name}",
                     method=verb,
                     endpoint=_join(base, sub),
                     framework="spring",
@@ -153,8 +170,6 @@ def detect_spring_routes(record: FileRecord) -> list[Statement]:
                     authRequired=True if guards else None,
                     requestDTO=_request_dto(fn),
                     responseDTO=fn.returnType or None,
-                    startLine=fn.startLine,
-                    endLine=fn.endLine,
-                    path=fn.path,
-                ))
+                ), parent=fn.id, node_type="synthetic", text=f"@{dec.name}",
+                    line=fn.startLine, col=0, end_line=fn.endLine))
     return routes
