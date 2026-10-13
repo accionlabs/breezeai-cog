@@ -116,6 +116,23 @@ def test_detects_route_from_require_default_fastify_factory() -> None:
     assert [(route.method, route.endpoint) for route in routes] == [("GET", "/users")]
 
 
+@pytest.mark.parametrize("factory_name", ["Fastify", "fastify"])
+def test_detects_route_from_commonjs_fastify_factory_binding(factory_name: str) -> None:
+    source = (
+        f'const {factory_name} = require("fastify");\n'
+        f"const app = {factory_name}();\n"
+        "app.get('/users', handler);\n"
+    ).encode()
+
+    record = _parse_typescript(source, "app.js")
+    routes = [statement for statement in record.statements if statement.semanticType == "route"]
+
+    assert [(route.method, route.endpoint, route.framework) for route in routes] == [
+        ("GET", "/users", "fastify")
+    ]
+    assert record.framework == "fastify"
+
+
 def test_fastify_route_enriches_existing_expression_statement() -> None:
     source = (
         b'import Fastify from "fastify";\n'

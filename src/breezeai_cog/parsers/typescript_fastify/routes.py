@@ -6,8 +6,8 @@ by calling an HTTP-verb method on a Fastify instance:
   fastify.route({ method, url, handler })                               → route
 
 Per the capture contract, detection enriches the owning parser's statements
-in place. Fastify detection is additive and is invoked from
-``TypeScriptParser.extract`` for every TS/JS file, allowing Fastify routes to
+in place. Fastify detection is registered as an additive detector and runs
+through the detector registry for TypeScript files, allowing Fastify routes to
 coexist with routes detected by other TypeScript framework parsers.
 
 Mutates ``record`` (mirrors the other call-based route detectors).
@@ -460,6 +460,9 @@ class _FileIndex:
                 and value_node.type in {"arrow_function", "function_expression", "function"}
                 else None
             ),
+            is_fastify_factory=(
+                value_node is not None and _is_fastify_require_call(value_node, source)
+            ),
             factory_call=value_node if value_node is not None and value_node.type == "call_expression" else None,
         )
 
@@ -595,9 +598,6 @@ def detect_fastify_routes(
 
     Detects shorthand routes, `route()` configurations, and `register()`
     mounts, including inherited prefixes and resolvable variable values.
-
-    Known limitation: instances assigned after declaration (for example,
-    `let app; app = Fastify()`) are not detected.
     """
     # Cheap guard because Fastify detection is additive and runs for every
     # TypeScript/JavaScript file.
@@ -823,17 +823,22 @@ def _is_fastify_factory_call(
         return imported_factory is True
 
     if callee.type == "call_expression":
-        inner_callee = callee.child_by_field_name("function")
-        inner_args = callee.child_by_field_name("arguments")
-        if (
-            inner_callee is not None
-            and node_text(inner_callee, source) == "require"
-            and inner_args is not None
-        ):
-            arg_nodes = list(inner_args.named_children)
-            return bool(arg_nodes and _string_literal(arg_nodes[0], source) == "fastify")
+        return _is_fastify_require_call(callee, source)
 
     return False
+
+
+def _is_fastify_require_call(node: Node, source: bytes) -> bool:
+    if node.type != "call_expression":
+        return False
+
+    callee = node.child_by_field_name("function")
+    arguments = node.child_by_field_name("arguments")
+    if callee is None or node_text(callee, source) != "require" or arguments is None:
+        return False
+
+    argument_nodes = list(arguments.named_children)
+    return bool(argument_nodes and _string_literal(argument_nodes[0], source) == "fastify")
 
 
 def _walk(
