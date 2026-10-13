@@ -544,6 +544,8 @@ the file:
   │                                                                                  │
   │  java            10   quartz           java/quartz.py                    ✔       │
   │                                                                                  │
+  │  python          10   celery           python/celery.py                  ✔       │
+  │                                                                                  │
   │  scala           10   akka-events      scala/events.py                           │
   │                  20   spark            scala/spark.py                            │
   │                                                                                  │

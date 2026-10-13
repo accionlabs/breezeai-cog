@@ -57,6 +57,7 @@ def test_inventory_in_run_order() -> None:
         "csharp": ["lambda-handlers", "lucene", "hotchocolate-registered-roots",
                    "generic-handlers", "hangfire", "quartz"],
         "java": ["quartz"],
+        "python": ["celery"],
         "scala": ["akka-events", "spark"],
         "typescript": ["express", "aws-events", "sdk-calls", "graphql-client", "vue-routes",
                        "nextjs-pages", "navigation"],
