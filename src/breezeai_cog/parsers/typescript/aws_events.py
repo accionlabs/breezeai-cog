@@ -25,11 +25,15 @@ Consumers / entry points (``aws-lambda`` handler types on an exported const):
 
 **Endpoint honesty:** the address (TopicArn/QueueUrl) is usually an injected config
 symbol (``this.topicArn``), and the queue→Lambda binding lives in infra (Terraform/CDK),
-not the code — so ``endpoint`` is set only from a *string literal*, else left ``None``. A
+not the code — so ``endpoint`` is set only from a *string literal*, else left ``None``. A literal
+queue URL / topic ARN / bus ARN is written by name (:func:`address_name`), the form a consumer
+records, so the two meet on one address. A
 symbol is never passed off as a resolved address (the producer→consumer edge is a backend
 enrichment concern, not this parser's). Mutates ``record``; returns a file framework label."""
 
 from __future__ import annotations
+
+import re
 
 from tree_sitter import Node
 
@@ -146,6 +150,26 @@ def _walk(root: Node, types: frozenset[str]) -> list[Node]:
     return out
 
 
+#: A literal SQS queue URL — ``https://sqs.<region>.amazonaws.com/<account>/<queue>`` or the legacy
+#: ``https://<region>.queue.amazonaws.com/<account>/<queue>``.
+_QUEUE_URL = re.compile(
+    r"^https?://(?:sqs\.[\w-]+|[\w-]+\.queue)\.amazonaws\.com(?:\.cn)?/\d+/(?P<name>[\w.-]+)/?$"
+)
+#: A literal SNS topic / EventBridge bus ARN.
+_TOPIC_ARN = re.compile(r"^arn:aws[\w-]*:sns:[\w-]+:\d+:(?P<name>[\w.-]+)$")
+_BUS_ARN = re.compile(r"^arn:aws[\w-]*:events:[\w-]+:\d+:event-bus/(?P<name>[\w.-]+)$")
+_NAME_FORMS = {"QueueUrl": _QUEUE_URL, "TopicArn": _TOPIC_ARN, "EventBusName": _BUS_ARN}
+
+
+def address_name(key: str, value: str) -> str:
+    """The name a literal address stands for, written as its consumer writes it: a queue URL →
+    the queue (``…amazonaws.com/123/orders`` → ``orders``), a topic or bus ARN → the topic /
+    bus. Anything not exactly in that form is kept as written."""
+    form = _NAME_FORMS.get(key)
+    m = form.match(value) if form is not None else None
+    return m["name"] if m is not None else value
+
+
 def _address(args: Node | None, source: bytes) -> tuple[str | None, str | None]:
     """(literal endpoint, matched address key) from an SDK call's first object argument.
     Endpoint is set only from a plain string literal — a symbol (``this.topicArn``) stays
@@ -170,7 +194,8 @@ def _address(args: Node | None, source: bytes) -> tuple[str | None, str | None]:
             value = pair.child_by_field_name("value")
             if value is not None and value.type == "string":
                 frag = next((c for c in value.named_children if c.type == "string_fragment"), None)
-                return (node_text(frag, source) if frag is not None else ""), matched_key
+                text = node_text(frag, source) if frag is not None else ""
+                return address_name(matched_key, text), matched_key
             return None, matched_key  # address present but an unresolved symbol
     return None, None
 

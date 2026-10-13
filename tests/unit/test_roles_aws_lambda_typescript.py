@@ -417,3 +417,25 @@ Resources:
     got = {r.handler: r.endpoint for r in _eps(st)}
     # !Ref QueueArn is a template parameter, not a resource: unknown
     assert got == {"q1": "orders", "q2": None, "t1": "alerts"}
+
+
+def test_sender_address_is_written_as_its_consumer_writes_it(analyze_files) -> None:
+    # A literal queue URL / topic ARN is recorded by name, as the consumer's config gives it, so
+    # sender and consumer meet on one address; a form that is not exactly AWS's stays as written.
+    sender = (
+        "import { SQSClient, SendMessageCommand } from '@aws-sdk/client-sqs';\n"
+        "import { SNSClient, PublishCommand } from '@aws-sdk/client-sns';\n"
+        "const sqs = new SQSClient({});\nconst sns = new SNSClient({});\n"
+        "export async function run() {\n"
+        "  await sqs.send(new SendMessageCommand({ QueueUrl: 'https://sqs.eu-west-1.amazonaws.com/123456789012/orders', MessageBody: '' }));\n"
+        "  await sns.send(new PublishCommand({ TopicArn: 'arn:aws:sns:eu-west-1:123456789012:alerts', Message: '' }));\n"
+        "  await sqs.send(new SendMessageCommand({ QueueUrl: 'http://localhost:4566/000000000000/orders', MessageBody: '' }));\n"
+        "}\n"
+        "export const onOrder = async (event) => {};\n"
+    )
+    config = ("service: shop\nfunctions:\n  onOrder:\n    handler: src/handler.onOrder\n"
+              "    events:\n      - sqs: arn:aws:sqs:eu-west-1:123456789012:orders\n")
+    st = _run(analyze_files, sender, **{"serverless.yml": config})
+    out = [s.endpoint for s in st if s.semanticType in ("eventbus_send", "eventbus_publish")]
+    assert out == ["orders", "alerts", "http://localhost:4566/000000000000/orders"]
+    assert [r.endpoint for r in _eps(st)] == ["orders"]
