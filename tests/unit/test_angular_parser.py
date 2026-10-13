@@ -512,6 +512,7 @@ def test_route_guards_can_match_and_can_activate_child(analyze_files) -> None:
     guards = {s.endpoint: s.guards for s in st if s.semanticType == "route"}
     assert guards == {
         "/admin": ["RoleGuard", "AuthGuard"],          # own guards in source order
-        "/admin/users": ["ChildGuard", "UsersGuard"],  # parent's canActivateChild first
-        "/admin/users/:id": ["ChildGuard", "DeepGuard"],
+        # the parent's own guards run first, then its canActivateChild, then the child's own
+        "/admin/users": ["RoleGuard", "AuthGuard", "ChildGuard", "UsersGuard"],
+        "/admin/users/:id": ["RoleGuard", "AuthGuard", "ChildGuard", "UsersGuard", "DeepGuard"],
     }

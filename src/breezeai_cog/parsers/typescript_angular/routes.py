@@ -204,8 +204,10 @@ def _is_children_value(arr: Node, source: bytes) -> bool:
 
 def _process(arr: Node, prefix: str | None, source: bytes, path: str, seen: set[str],
              routes: list[Statement], index: object, inherited: tuple[str, ...] = ()) -> None:
-    """``inherited``: ``canActivateChild`` guards of the ancestor routes — they guard every child
-    binding, not the route that declares them."""
+    """``inherited``: guards of the ancestor routes that run before this route — each ancestor's
+    own ``canMatch`` / ``canActivate`` (Angular matches and activates the parent first) and then
+    its ``canActivateChild``, which guards every child binding, not the route that declares it.
+    Lazy ``loadChildren`` routes in other files do not inherit (not linked here)."""
     for elem in arr.named_children:
         if elem.type != "object":
             continue
@@ -220,6 +222,7 @@ def _process(arr: Node, prefix: str | None, source: bytes, path: str, seen: set[
         if "name" in pairs:
             continue
         full = _compose(prefix, _resolve_path(pairs["path"], source, index))
+        own = _own_guards(elem, source)
         load = pairs.get("loadChildren")  # lazy route group -> mount
         component = pairs.get("component")
         load_component = pairs.get("loadComponent")  # lazy standalone component -> page
@@ -242,14 +245,14 @@ def _process(arr: Node, prefix: str | None, source: bytes, path: str, seen: set[
             framework="angular",
             routeKind="mount" if load is not None else "page",
             handler=handler,
-            guards=[*inherited, *_own_guards(elem, source)] or None,
+            guards=[*inherited, *own] or None,
             startLine=sl,
             endLine=elem.end_point[0] + 1,
             path=path,
         ))
         children = pairs.get("children")
         if children is not None and children.type == "array":
-            child_guards = (*inherited, *_guards(pairs.get("canActivateChild"), source))
+            child_guards = (*inherited, *own, *_guards(pairs.get("canActivateChild"), source))
             _process(children, full, source, path, seen, routes, index, child_guards)
 
 

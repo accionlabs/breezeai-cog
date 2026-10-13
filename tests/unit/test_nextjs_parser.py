@@ -298,3 +298,55 @@ def test_base_path_from_a_constant(analyze_files) -> None:
         "app/cart/route.ts": _ROUTE,
     })
     assert got == {"app/cart/route.ts": "/shop/cart"}
+
+
+def _next_guards(analyze_files, files: dict[str, str]) -> dict[str, list[str] | None]:
+    return {
+        s.endpoint: s.guards
+        for s in analyze_files({"package.json": _NEXT_PKG, **files})
+        if s.semanticType == "route" and s.framework == "nextjs"
+    }
+
+
+_MW = "import { NextResponse } from 'next/server';\nexport function middleware(req) {\n  return NextResponse.next();\n}\n"
+_GET = "export async function GET() {\n  return Response.json([]);\n}\n"
+
+
+def test_middleware_guards_matched_routes(analyze_files) -> None:
+    guards = _next_guards(analyze_files, {
+        "next.config.js": "module.exports = {};\n",
+        "src/middleware.ts": _MW + "export const config = { matcher: ['/api/:path*', '/admin/:id'] };\n",
+        "src/app/api/users/[id]/route.ts": _GET,     # under /api/:path* → covered
+        "src/app/admin/[slug]/route.ts": _GET,       # :id covers one dynamic segment
+        "src/app/admin/[slug]/x/route.ts": _GET,     # one segment too many → not covered
+        "src/app/public/route.ts": _GET,             # not matched
+    })
+    assert guards == {
+        "/api/users/[id]": ["middleware"],
+        "/admin/[slug]": ["middleware"],
+        "/admin/[slug]/x": None,
+        "/public": None,
+    }
+
+
+def test_middleware_without_matcher_guards_every_route(analyze_files) -> None:
+    guards = _next_guards(analyze_files, {
+        "middleware.ts": _MW,
+        "app/a/route.ts": _GET,
+        "pages/api/b.ts": "export default function handler(req, res) { res.json([]); }\n",
+    })
+    assert guards == {"/a": ["middleware"], "/api/b": ["middleware"]}
+
+
+def test_middleware_uncertain_coverage_adds_nothing(analyze_files) -> None:
+    guards = _next_guards(analyze_files, {
+        # a regex-like matcher, a literal segment over a dynamic one, a has-condition source
+        "middleware.ts": _MW + "export const config = { matcher: ['/((?!_next).*)', '/users/me',"
+        " { source: '/orders/:p*', has: [{ type: 'header', key: 'x' }] }] };\n",
+        "app/users/[id]/route.ts": _GET,
+        "app/orders/route.ts": _GET,
+        # another app (its own next.config) is not covered by the root middleware
+        "apps/web/next.config.js": "module.exports = {};\n",
+        "apps/web/app/x/route.ts": _GET,
+    })
+    assert guards == {"/users/[id]": None, "/orders": None, "/x": None}

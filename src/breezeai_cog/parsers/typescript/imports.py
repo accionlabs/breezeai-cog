@@ -85,6 +85,12 @@ class TsAliasIndex:
     #: unresolvable (env, a conditional, values that disagree). A route belongs to the deepest
     #: app directory above it — see :func:`app_base_path`.
     app_base_paths: dict[str, dict[str, str | None]] = field(default_factory=dict)
+    #: Next.js ``middleware.(ts|js)``: app directory → its ``config.matcher`` patterns, or
+    #: ``None`` when it has no matcher (runs on every route). A matcher that cannot be read
+    #: (non-literal, a regex, has/missing conditions) contributes no pattern; an app directory
+    #: with two middleware files maps to ``()`` (covers nothing for certain). The app directory
+    #: is the middleware file's directory (its parent when that is ``src``).
+    next_middlewares: dict[str, tuple[str, ...] | None] = field(default_factory=dict)
 
 
 def _load_jsonc(path: Path) -> dict | None:
@@ -658,6 +664,71 @@ def _collect_base_path(root: Node, source: bytes, rel: str) -> _BasePathRaw | No
     return framework, found
 
 
+#: A Next.js middleware file's facts: (its ``config.matcher`` patterns, or ``None`` = no matcher).
+_MiddlewareRaw = tuple[tuple[str, ...] | None]
+
+_MIDDLEWARE_FILES = frozenset({"middleware.ts", "middleware.js", "middleware.mjs"})
+
+
+def _matcher_patterns(value: Node, source: bytes) -> tuple[str, ...]:
+    """Literal ``config.matcher`` patterns: a string, an array of strings, or ``{ source }``
+    objects without ``has`` / ``missing`` conditions. Anything else contributes no pattern."""
+    items = value.named_children if value.type == "array" else [value]
+    out: list[str] = []
+    for item in items:
+        if item.type == "object":
+            pairs = {node_text(k, source).strip("'\""): pr.child_by_field_name("value")
+                     for pr in item.named_children if pr.type == "pair"
+                     and (k := pr.child_by_field_name("key")) is not None}
+            if "has" in pairs or "missing" in pairs:
+                continue
+            item = pairs.get("source")  # type: ignore[assignment]
+        lit = _string_literal(item, source)
+        if lit is not None:
+            out.append(lit)
+    return tuple(out)
+
+
+def _collect_next_middleware(root: Node, source: bytes, rel: str) -> _MiddlewareRaw | None:
+    """A Next.js ``middleware.(ts|js)`` that exports its middleware (``export function
+    middleware`` / ``export const middleware`` / ``export default``) → its matcher facts; None
+    for any other file. No ``config.matcher`` → ``(None,)`` (runs on every route)."""
+    if rel.rsplit("/", 1)[-1] not in _MIDDLEWARE_FILES:
+        return None
+    exported = False
+    matcher: tuple[str, ...] | None = None
+    for node in root.named_children:
+        if node.type != "export_statement":
+            continue
+        if any(c.type == "default" or node_text(c, source) == "default" for c in node.children):
+            exported = True
+        for decl in node.named_children:
+            if decl.type == "function_declaration":
+                name = decl.child_by_field_name("name")
+                exported = exported or (name is not None and node_text(name, source) == "middleware")
+            if decl.type not in ("lexical_declaration", "variable_declaration"):
+                continue
+            for vd in decl.named_children:
+                name, value = vd.child_by_field_name("name"), vd.child_by_field_name("value")
+                if name is None or value is None:
+                    continue
+                if node_text(name, source) == "middleware":
+                    exported = True
+                elif node_text(name, source) == "config":
+                    matcher = ()  # a config that is not a literal object covers nothing for certain
+                    for pair in value.named_children if value.type == "object" else []:
+                        key = pair.child_by_field_name("key") if pair.type == "pair" else None
+                        v = pair.child_by_field_name("value") if key is not None else None
+                        if key is not None and node_text(key, source).strip("'\"") == "matcher" \
+                                and v is not None:
+                            matcher = _matcher_patterns(v, source)
+                            break
+                    else:
+                        if value.type == "object":
+                            matcher = None  # config without a matcher: every route
+    return (matcher,) if exported else None
+
+
 def _app_base_paths(
     raw: list[tuple[str, str, list[list[tuple[str, str]] | None]]],
     const_values: dict[str, str | None],
@@ -991,11 +1062,11 @@ def _collect_ngmodule_imports(root: Node, source: bytes) -> dict[str, list[str]]
 
 def _ts_index_one(
     args: tuple[str, str, str]
-) -> tuple[dict[str, str | None], dict[str, ClassHeritage], list[str], list[_MountRaw], dict[str, list[str]], list[tuple[str, str]], list[_InstanceMount], tuple[str, dict[str, str]], _NestRaw | None, _BasePathRaw | None] | None:
+) -> tuple[dict[str, str | None], dict[str, ClassHeritage], list[str], list[_MountRaw], dict[str, list[str]], list[tuple[str, str]], list[_InstanceMount], tuple[str, dict[str, str]], _NestRaw | None, _BasePathRaw | None, _MiddlewareRaw | None] | None:
     """Parse one TS/JS file into its partials (string-constant map, class-heritage map, the
     classes it declares, its lazy-route mounts, NgModule imports, Express factory and
-    router-instance mounts, the routers it exports, its NestJS wiring, and an application
-    base path it sets) —
+    router-instance mounts, the routers it exports, its NestJS wiring, an application
+    base path it sets, and its Next.js middleware matcher) —
     pure, picklable worker for :func:`parallel_map`. Returns ``None`` on read/parse failure."""
     file_s, rel, repo_root_s = args
     if not Path(file_s).is_file():
@@ -1015,7 +1086,7 @@ def _ts_index_one(
         return (const_values, _collect_heritage(root, src, rel), classes, mounts,
                 ngmodule_imports, express_mounts, instance_mounts,
                 (rel, _collect_router_exports(root, src)), _collect_nest(root, src),
-                _collect_base_path(root, src, rel))
+                _collect_base_path(root, src, rel), _collect_next_middleware(root, src, rel))
     except Exception as exc:  # parse OR a pathologically deep AST walk (RecursionError) — skip this file
         from ...logging import get_logger
         get_logger("breezeai_cog.index").warning(
@@ -1098,12 +1169,19 @@ def build_ts_index(repo_root: Path, files: Sequence[Path], jobs: int = 1) -> TsA
     nest_modules: dict[str, list[str] | None] = {}  # @Module class → controllers (name clash → None)
     nest_register: list[tuple[str, str | None, list[tuple[str, str]] | None]] = []
     base_paths_raw: list[tuple[str, str, list[list[tuple[str, str]] | None]]] = []
+    next_middlewares: dict[str, tuple[str, ...] | None] = {}
     args = [(str(f), repo_relative(f, repo_root), str(repo_root)) for f in files]
     for frag in parallel_map(args, _ts_index_one, jobs):
         if not frag:
             continue
         (cv, heritage, classes, mounts, ngmodule_imports, file_express_mounts, file_instances,
-         (frag_rel, file_router_exports), nest, base_path) = frag
+         (frag_rel, file_router_exports), nest, base_path, middleware) = frag
+        if middleware is not None:
+            mw_dir = Path(frag_rel).parent
+            if mw_dir.name == "src":
+                mw_dir = mw_dir.parent
+            key = "" if mw_dir.as_posix() == "." else mw_dir.as_posix()
+            next_middlewares[key] = () if key in next_middlewares else middleware[0]
         if base_path is not None:
             anchor = Path(frag_rel).parent.as_posix()
             base_paths_raw.append((base_path[0], "" if anchor == "." else anchor, base_path[1]))
@@ -1175,7 +1253,7 @@ def build_ts_index(repo_root: Path, files: Sequence[Path], jobs: int = 1) -> TsA
 
     if (alias is None and not const_values and not class_heritage and not route_mounts
             and not express_mounts and not express_router_mounts and not nest_global_prefixes
-            and not nest_controller_prefixes and not app_base_paths):
+            and not nest_controller_prefixes and not app_base_paths and not next_middlewares):
         return None
     return TsAliasIndex(
         base_dir=alias.base_dir if alias else str(repo_root),
@@ -1189,6 +1267,7 @@ def build_ts_index(repo_root: Path, files: Sequence[Path], jobs: int = 1) -> TsA
         nest_global_prefixes=nest_global_prefixes,
         nest_controller_prefixes=nest_controller_prefixes,
         app_base_paths=app_base_paths,
+        next_middlewares=next_middlewares,
     )
 
 

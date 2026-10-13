@@ -134,11 +134,85 @@ def _before_enter(value: Node | None, source: bytes) -> list[str]:
     return [node_text(i, source) for i in items if i.type in ("identifier", "member_expression")]
 
 
+#: Router-level guards of one routes array: (beforeEach names, beforeResolve names).
+_RouterGuards = tuple[list[str], list[str]]
+_NO_ROUTER_GUARDS: _RouterGuards = ([], [])
+
+
+def _guard_names(arg: Node | None, source: bytes) -> list[str]:
+    """A guard function reference's name; an inline function has none (contributes nothing)."""
+    if arg is not None and arg.type in ("identifier", "member_expression"):
+        return [node_text(arg, source)]
+    return []
+
+
+def _router_guards(root: Node, source: bytes) -> dict[int, _RouterGuards]:
+    """Global guards of the routers created in this file, keyed by the start byte of the routes
+    array each router serves. ``const router = createRouter({ routes })`` (or ``new
+    VueRouter({ routes })``) + ``router.beforeEach(fn)`` / ``router.beforeResolve(fn)`` →
+    ``fn`` guards every route of that array. Only a routes array that is inline or a ``const``
+    of this file is linked, and only guards registered on the router variable in this file
+    count — a guard added in another file (``main.js``) is not certain coverage."""
+    if b"beforeEach" not in source and b"beforeResolve" not in source:
+        return {}
+    arrays: dict[str, Node] = {}  # top-level const name → its array value
+    for vd in _all(root, "variable_declarator"):
+        name, value = vd.child_by_field_name("name"), vd.child_by_field_name("value")
+        if name is not None and value is not None and value.type == "array":
+            arrays[node_text(name, source)] = value
+    served: dict[str, Node] = {}  # router variable → routes array
+    for vd in _all(root, "variable_declarator"):
+        name, value = vd.child_by_field_name("name"), vd.child_by_field_name("value")
+        if name is None or value is None:
+            continue
+        if value.type == "call_expression":
+            fn = value.child_by_field_name("function")
+            ok = fn is not None and node_text(fn, source) == "createRouter"
+        elif value.type == "new_expression":
+            fn = value.child_by_field_name("constructor")
+            ok = fn is not None and node_text(fn, source) == "VueRouter"
+        else:
+            ok = False
+        args = value.child_by_field_name("arguments") if ok else None
+        config = next((a for a in args.named_children if a.type == "object"), None) if args else None
+        if config is None:
+            continue
+        for c in config.named_children:
+            if c.type == "shorthand_property_identifier" and node_text(c, source) == "routes":
+                target: Node | None = arrays.get("routes")
+            elif c.type == "pair" and _key(c, source) == "routes":
+                v = c.child_by_field_name("value")
+                target = v if v is not None and v.type == "array" else (
+                    arrays.get(node_text(v, source)) if v is not None and v.type == "identifier" else None)
+            else:
+                continue
+            if target is not None:
+                served[node_text(name, source)] = target
+    out: dict[int, _RouterGuards] = {}
+    for call in _all(root, "call_expression"):
+        fn = call.child_by_field_name("function")
+        if fn is None or fn.type != "member_expression":
+            continue
+        obj, prop = fn.child_by_field_name("object"), fn.child_by_field_name("property")
+        hook = node_text(prop, source) if prop is not None else ""
+        target = served.get(node_text(obj, source)) if obj is not None else None
+        if hook not in ("beforeEach", "beforeResolve") or target is None:
+            continue
+        args = call.child_by_field_name("arguments")
+        names = _guard_names(args.named_children[0] if args and args.named_children else None, source)
+        before, after = out.setdefault(target.start_byte, ([], []))
+        (before if hook == "beforeEach" else after).extend(names)
+    return out
+
+
 def _emit(
-    elem: Node, prefix: str, source: bytes, path: str, seen: set[str], routes: list[Statement]
+    elem: Node, prefix: str, source: bytes, path: str, seen: set[str], routes: list[Statement],
+    outer: _RouterGuards = _NO_ROUTER_GUARDS,
 ) -> None:
     """Emit ONE route object (if it isn't a pure redirect) and recurse into its ``children``.
-    Shared by the array walk (``_process``) and the single-object module form."""
+    Shared by the array walk (``_process``) and the single-object module form. ``outer`` are the
+    router's global guards: ``beforeEach`` runs before the route's ``beforeEnter``,
+    ``beforeResolve`` after it (vue-router's navigation order)."""
     if elem.type != "object":
         return
     pairs = _pairs(elem, source)
@@ -166,7 +240,8 @@ def _emit(
                 framework="vue",
                 routeKind="page",
                 handler=_handler(pairs.get("component"), source),
-                guards=_before_enter(pairs.get("beforeEnter"), source) or None,
+                guards=(outer[0] + _before_enter(pairs.get("beforeEnter"), source) + outer[1])
+                or None,
                 startLine=sl,
                 endLine=elem.end_point[0] + 1,
                 path=path,
@@ -175,14 +250,15 @@ def _emit(
     children = pairs.get("children")
     if children is not None and children.type == "array":
         for child in children.named_children:
-            _emit(child, full, source, path, seen, routes)
+            _emit(child, full, source, path, seen, routes, outer)
 
 
 def _process(
-    arr: Node, prefix: str, source: bytes, path: str, seen: set[str], routes: list[Statement]
+    arr: Node, prefix: str, source: bytes, path: str, seen: set[str], routes: list[Statement],
+    outer: _RouterGuards = _NO_ROUTER_GUARDS,
 ) -> None:
     for elem in arr.named_children:
-        _emit(elem, prefix, source, path, seen, routes)
+        _emit(elem, prefix, source, path, seen, routes, outer)
 
 
 def _is_route_object(obj: Node, source: bytes) -> bool:
@@ -240,9 +316,11 @@ def detect_vue_routes(
     if b"path" not in source or (b"component" not in source and b"beforeEnter" not in source):
         return []
     routes: list[Statement] = []
+    router_guards = _router_guards(root, source)
     for arr in _all(root, "array"):
         if _is_route_array(arr, source) and not _is_children_value(arr, source):
-            _process(arr, "", source, path, seen_ids, routes)
+            _process(arr, "", source, path, seen_ids, routes,
+                     router_guards.get(arr.start_byte, _NO_ROUTER_GUARDS))
     # Single route OBJECT modules (const r = {…}; export default r) — not reachable via the
     # array walk. Elements referenced by identifier inside a routes array are skipped there
     # (not objects), and captured here from their own declaration, so there is no double-emit.

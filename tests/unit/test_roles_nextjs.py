@@ -124,9 +124,6 @@ def test_middleware_has_no_record(analyze_files) -> None:
     assert _eps(st) == []
 
 
-@pytest.mark.xfail(
-    strict=True, reason="middleware is not added to the guards of the routes it matches"
-)
 def test_middleware_is_a_guard(analyze_files) -> None:
     st = _run(
         analyze_files,

@@ -182,6 +182,55 @@ def _served(endpoint: str, path: str, index: object | None) -> str | None:
     return "/" + "/".join(parts) if parts else "/"
 
 
+def _pattern_covers(pattern: str, endpoint: str) -> bool:
+    """Whether a middleware ``matcher`` pattern matches EVERY URL of a route. Supports Next's
+    simple forms — literal segments, ``:name``, ``:name?`` and a final ``:name*`` / ``:name+``.
+    A regex-like pattern, or a route dynamic segment (``[id]``) under a literal pattern
+    segment (only some of its URLs match), is not certain coverage → False."""
+    if not pattern.startswith("/") or any(c in pattern for c in "()[]{}\\") or ".*" in pattern:
+        return False
+    psegs = [s for s in pattern.split("/") if s]
+    rsegs = [s for s in endpoint.split("/") if s]
+    for i, ps in enumerate(psegs):
+        last = i == len(psegs) - 1
+        if ps.startswith(":") and ps.endswith(("*", "+")):
+            if not last:
+                return False
+            rest = rsegs[i:]
+            return ps.endswith("*") or (bool(rest) and not rest[0].startswith("[[..."))
+        if i >= len(rsegs):
+            return last and ps.startswith(":") and ps.endswith("?")
+        rs = rsegs[i]
+        if rs.startswith(("[...", "[[...")):  # catch-all: only a final :x* / :x+ covers it
+            return False
+        if ps.startswith(":"):
+            continue
+        if rs.startswith("[") or rs != ps:  # literal pattern vs dynamic / different segment
+            return False
+    return len(psegs) == len(rsegs)
+
+
+def _middleware_guards(index: object | None, path: str, local: str) -> list[str]:
+    """``["middleware"]`` when the app's ``middleware.(ts|js)`` certainly runs before this route:
+    the route's app directory (the deepest directory above it holding a ``next.config`` or a
+    middleware) has a middleware, and it has no matcher or one of its patterns covers every URL
+    of the route (``local``: the file-system address, before ``basePath``)."""
+    mws = getattr(index, "next_middlewares", None) or {}
+    if not mws:
+        return []
+    configs = (getattr(index, "app_base_paths", None) or {}).get("nextjs") or {}
+    anchors = [d for d in {*mws, *configs} if d == "" or path.startswith(d + "/")]
+    if not anchors:
+        return []
+    app = max(anchors, key=len)
+    if app not in mws:
+        return []
+    patterns = mws[app]
+    if patterns is None or any(_pattern_covers(p, local) for p in patterns):
+        return ["middleware"]
+    return []
+
+
 def _make_route(
     path: str,
     endpoint: str | None,
@@ -193,6 +242,7 @@ def _make_route(
     *,
     seen_ids: set[str],
     local: str,
+    guards: list[str] | None = None,
 ) -> Statement:
     return Statement(
         id=disambiguate(statement_id(path, handler_line, 0), seen_ids),
@@ -205,6 +255,7 @@ def _make_route(
         endpoint=endpoint,
         handler=handler,
         handlerLine=handler_line,
+        guards=guards or None,
         routeKind="route",
         isRegex=False,
         startLine=handler_line,
@@ -245,6 +296,7 @@ def detect_nextjs_routes(
                     end_line,
                     seen_ids=seen_ids,
                     local=endpoint,
+                    guards=_middleware_guards(index, path, endpoint),
                 )
             )
         return routes
@@ -277,6 +329,7 @@ def detect_nextjs_routes(
                 end_line,
                 seen_ids=seen_ids,
                 local=pages_api_endpoint(path),
+                guards=_middleware_guards(index, path, pages_api_endpoint(path)),
             )
         ]
 

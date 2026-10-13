@@ -713,3 +713,35 @@ export default createRouter({ history: createWebHistory(), routes })
     rec = _parse("src/router/index.js", src, tmp_path)
     guards = {s.endpoint: s.guards for s in rec.statements if s.semanticType == "route"}
     assert guards == {"/a": ["requireAuth"], "/b": ["requireAuth", "guards.admin"], "/c": None}
+
+
+def test_router_global_guards(tmp_path) -> None:
+    # beforeEach runs before beforeEnter, beforeResolve after; children inherit; inline → no name.
+    src = b"""import { createRouter, createWebHistory } from 'vue-router'
+const routes = [
+  { path: '/a', component: A, beforeEnter: requireAuth },
+  { path: '/s', component: S, children: [ { path: 'x', component: X } ] },
+]
+const router = createRouter({ history: createWebHistory(), routes })
+router.beforeEach(trackPage)
+router.beforeEach((to) => true)
+router.beforeResolve(loadData)
+export default router
+"""
+    rec = _parse("src/router/index.js", src, tmp_path)
+    guards = {s.endpoint: s.guards for s in rec.statements if s.semanticType == "route"}
+    assert guards == {
+        "/a": ["trackPage", "requireAuth", "loadData"],
+        "/s": ["trackPage", "loadData"],
+        "/s/x": ["trackPage", "loadData"],
+    }
+
+
+def test_router_guards_need_a_router_of_this_file(tmp_path) -> None:
+    # Routes array not linked to a router created here, or a guard on another object → nothing.
+    src = b"""const routes = [ { path: '/a', component: A } ]
+export default routes
+other.beforeEach(trackPage)
+"""
+    rec = _parse("src/router/routes.js", src, tmp_path)
+    assert [s.guards for s in rec.statements if s.semanticType == "route"] == [None]
