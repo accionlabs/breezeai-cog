@@ -30,6 +30,9 @@ _METHOD_DECORATORS = {
 }
 # @nestjs/microservices message consumers → eventbus_consumer semanticType.
 _MESSAGING_DECORATORS = {"EventPattern": "EVENT", "MessagePattern": "MESSAGE"}
+# @nestjs/schedule jobs → timer: the schedule (cron expression, or interval / delay in ms) is
+# the endpoint. Gated on the import: Cron / Interval / Timeout are common names.
+_SCHEDULE_DECORATORS = {"Cron": "PERIODIC", "Interval": "PERIODIC", "Timeout": "TIMER"}
 # @nestjs/graphql code-first operations. Gated on the class being an @Resolver — @Query is
 # also a @nestjs/common *param* decorator, but that lives on a parameter, not in the method's
 # decorator list, so a method-level @Query on a resolver is unambiguously the GraphQL one.
@@ -112,6 +115,21 @@ def _pattern(dec: Node, source: bytes, consts: dict[str, str | None]) -> str | N
     args = call.child_by_field_name("arguments") if call is not None else None
     first = next((c for c in args.named_children if c.type != "comment"), None) if args else None
     return message_pattern(first, source, consts) if first is not None else None
+
+
+def _schedule(dec: Node, name: str, source: bytes, consts: dict[str, str | None]) -> str | None:
+    """Schedule of ``@Cron(expr)`` (the first argument) or ``@Interval([name,] ms)`` /
+    ``@Timeout([name,] ms)`` (the last): a literal or a constant; anything else (a
+    ``CronExpression`` member, a runtime value) → None."""
+    call = next((c for c in dec.named_children if c.type == "call_expression"), None)
+    args = call.child_by_field_name("arguments") if call is not None else None
+    values = [c for c in args.named_children if c.type != "comment"] if args is not None else []
+    if not values:
+        return None
+    arg = values[0] if name == "Cron" else values[-1]
+    if arg.type == "object":  # @Cron(expr, { name, timeZone }) never puts options first
+        return None
+    return message_pattern(arg, source, consts)
 
 
 def _guards(decs: list[Node], source: bytes, *, interceptors: bool = False) -> list[str]:
@@ -367,6 +385,7 @@ def detect_nest_routes(
     index_consts = getattr(index, "const_values", None)
     consts: dict[str, str | None] = index_consts if isinstance(index_consts, dict) else {}
     routes: list[Statement] = []
+    schedules = framework == "nestjs" and b"@nestjs/schedule" in source
     for cls, decs in _class_with_decorators(root):
         base = _controller_base(decs, source)  # None when the class is not a @Controller
         is_controller = base is not None
@@ -405,7 +424,8 @@ def detect_nest_routes(
                     msg = _MESSAGING_DECORATORS.get(d.name)
                     gql = _GRAPHQL_OPS.get(d.name) if is_resolver else None
                     fld = d.name if (is_resolver and d.name in _FIELD_RESOLVERS) else None
-                    if verb is None and msg is None and gql is None and fld is None:
+                    job = _SCHEDULE_DECORATORS.get(d.name) if schedules else None
+                    if verb is None and msg is None and gql is None and fld is None and job is None:
                         continue
                     sl, sc = dec.start_point[0] + 1, dec.start_point[1]
                     common = dict(
@@ -437,6 +457,13 @@ def detect_nest_routes(
                             requestDTO=_request_dto(member, source),
                             responseDTO=_response_dto(pending, source) or _return_dto(member, source),
                             **common,
+                        ))
+                    elif job is not None:  # @Cron / @Interval / @Timeout scheduled job
+                        routes.append(Statement(
+                            **{**common, "isRegex": None, "authRequired": None, "guards": None},
+                            semanticType="timer",
+                            method=job,
+                            endpoint=_schedule(dec, d.name, source, consts),
                         ))
                     elif msg is not None:  # @EventPattern / @MessagePattern microservice consumer
                         routes.append(Statement(

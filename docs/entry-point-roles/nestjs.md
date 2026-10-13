@@ -13,7 +13,7 @@ Parser: `src/breezeai_cog/parsers/typescript_nestjs/` (also routing-controllers 
 | `@UseInterceptors(...)` on a class or method | Guard | names in `guards` | Run before the handlers |
 | `@EventPattern(pattern)` | Binding | `eventbus_consumer`, `EVENT`, `routeKind: message`, pattern as `endpoint` (object → canonical JSON, as above) | Event consumer on a transport |
 | `@MessagePattern(pattern)` | Binding | `eventbus_consumer`, `MESSAGE`, `routeKind: message`, pattern as `endpoint` — a string as written, an object as canonical JSON with sorted keys (`{"cmd":"sum"}`) | Request-response message consumer |
-| `@Cron(expr)` / `@Interval(ms)` (`@nestjs/schedule`) | Binding | `timer`, schedule as `endpoint` | Scheduled job |
+| `@Cron(expr)` / `@Interval(ms)` / `@Timeout(ms)` (`@nestjs/schedule`) | Binding | `timer`, `PERIODIC` (`TIMER` for `@Timeout`), schedule as `endpoint` (a `CronExpression` member → empty), `handler` = method | Scheduled job |
 | `@Resolver()` on a class | Wiring | — | Container of GraphQL operations |
 | `@Query` / `@Mutation` / `@Subscription` on a resolver method | Binding | `route`, `framework: graphql`, `QUERY` / `MUTATION` / `SUBSCRIPTION`, `routeKind` the same in lower case, operation name as `endpoint` | One GraphQL operation |
 | `@ResolveField` on a data-type resolver (`@Resolver(() => Book)`) | None | `route`, `RESOLVE_FIELD`, `routeKind: field_resolver` (not an entry point) | No address of its own |

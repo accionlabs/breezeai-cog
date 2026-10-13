@@ -131,7 +131,6 @@ def test_message_pattern_is_a_consumer(analyze_files) -> None:
     )
 
 
-@pytest.mark.xfail(strict=True, reason="@nestjs/schedule jobs are not recorded as timer")
 def test_cron_and_interval_are_timers(analyze_files) -> None:
     st = analyze_files(
         {
@@ -145,6 +144,24 @@ def test_cron_and_interval_are_timers(analyze_files) -> None:
     )
     got = {(r.semanticType, r.endpoint, r.handler) for r in _eps(st)}
     assert got == {("timer", "0 2 * * *", "nightly"), ("timer", "5000", "poll")}
+
+
+def test_named_interval_timeout_and_library_cron(analyze_files) -> None:
+    st = analyze_files(
+        {
+            "package.json": PKG,
+            "src/jobs.service.ts": "import { Injectable } from '@nestjs/common';\n"
+            "import { Cron, CronExpression, Interval, Timeout } from '@nestjs/schedule';\n"
+            "@Injectable()\nexport class JobsService {\n"
+            "  @Interval('sync', 60000)\n  sync() {}\n"
+            "  @Timeout(3000)\n  warmup() {}\n"
+            "  @Cron(CronExpression.EVERY_HOUR, { name: 'h' })\n  hourly() {}\n}\n",
+        }
+    )
+    got = {(r.method, r.endpoint, r.handler) for r in _eps(st)}
+    # A library enum member is not resolved: empty, never the member name.
+    assert got == {("PERIODIC", "60000", "sync"), ("TIMER", "3000", "warmup"),
+                   ("PERIODIC", None, "hourly")}
 
 
 GQL = "import { Resolver, Query, Mutation, Subscription, ResolveField, ResolveReference, Parent } from '@nestjs/graphql';\n"
