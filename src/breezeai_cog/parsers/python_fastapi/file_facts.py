@@ -1,9 +1,6 @@
 """FastAPI wiring facts read from one Python file — shared by the FastAPI route detector (one
-file) and the Python repo index (``index.py``, across files), so both read ``APIRouter`` /
-``include_router`` / middleware the same way.
-
-Lives in the base ``python`` package (not ``python_fastapi``) so the base parser's index can use
-it without importing the framework parser.
+file) and the ``fastapi.wiring`` fact (:mod:`.wiring`, across files), so both read
+``APIRouter`` / ``include_router`` / middleware the same way.
 """
 
 from __future__ import annotations

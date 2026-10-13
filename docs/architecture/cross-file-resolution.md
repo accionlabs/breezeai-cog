@@ -99,7 +99,7 @@ What each index holds:
 | Ruby | ActiveRecord model names; controller `before_action` callbacks | recognising DB calls; Rails route guards |
 | HCL / Terraform | folder → `.tf` files | local `module` sources |
 | HTML | template → owning component | linking templates to components |
-| Python | FastAPI wiring: `APIRouter` variables (own prefix, dependencies), `include_router` sites (also routers imported from other files), app middleware, module-level string constants used as prefixes | route prefixes and guards of routers mounted in another file |
+| Python | **registered facts** (`index.facts`): FastAPI wiring `fastapi.wiring` — `APIRouter` variables (own prefix, dependencies), `include_router` sites (also routers imported from other files), app middleware, module-level string constants used as prefixes; Celery task names `celery.tasks` | route prefixes and guards of routers mounted in another file |
 
 > **Decision —** indexes are built once, before parsing, and are read-only afterwards.
 > **Why:** workers share nothing, so files can be parsed in any order and in parallel, with the
@@ -323,7 +323,7 @@ Some frameworks build a route from pieces in several files. These use the index 
 |---|---|---|
 | Express | `app.use("/api", router)` in one file + `router.get("/orders")` in another → `/api/orders`. The router is a factory call (`usersRouter()`) or an imported `Router()` instance — kept only when the router's file confirms it exports a `Router()`, so an imported middleware is never a prefix. A router mounted at two bases keeps its own path | registered fact `express.router-mounts` (`typescript_express/mounts.py`), one base per router via the shared `resolve_wiring` |
 | Angular | lazy-loaded child routes under a parent path | TypeScript index: route mounts |
-| FastAPI | `app.include_router(orders.router, prefix="/api")` in one file + `router = APIRouter(prefix="/orders")` in another → `/api/orders/…`. A constant prefix (`API_PREFIX = "/v1"`) is resolved; a settings attribute is not (the environment can override it) → endpoint empty. A router included at two places keeps its own path | Python index: FastAPI wiring |
+| FastAPI | `app.include_router(orders.router, prefix="/api")` in one file + `router = APIRouter(prefix="/orders")` in another → `/api/orders/…`. A constant prefix (`API_PREFIX = "/v1"`) is resolved; a settings attribute is not (the environment can override it) → endpoint empty. A router included at two places keeps its own path | Python index: `fastapi.wiring` fact |
 | ASP.NET | base controller route prefix + action route | heritage ([§6](#6-inheritance-heritage)) |
 | WebForms | `MapPageRoute` URL → `.aspx` page | C# index: page routes |
 | HotChocolate | `AddQueryType<BookQueries>()` in `Program.cs` → `BookQueries.cs` is a query root | registered fact ([below](#a-framework-fact-from-another-file-a-registered-fact)) |

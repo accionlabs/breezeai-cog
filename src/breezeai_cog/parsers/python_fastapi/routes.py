@@ -8,16 +8,17 @@ from __future__ import annotations
 
 from tree_sitter import Node
 
-from ...emit import disambiguate, function_id, statement_id
-from ...schemas import Statement
-from ..python.fastapi_facts import ROUTERS as _ROUTERS
-from ..python.fastapi_facts import UNKNOWN as _UNKNOWN
-from ..python.fastapi_facts import app_middleware as _app_middleware
-from ..python.fastapi_facts import calls as _calls
-from ..python.fastapi_facts import dependencies as _dependencies
-from ..python.fastapi_facts import literal as _literal
-from ..python.fastapi_facts import prefix_kwarg as _prefix_kwarg
+from ...emit import function_id
+from ..emits import Emit
 from ..treesitter import node_text
+from .file_facts import ROUTERS as _ROUTERS
+from .file_facts import UNKNOWN as _UNKNOWN
+from .file_facts import app_middleware as _app_middleware
+from .file_facts import calls as _calls
+from .file_facts import dependencies as _dependencies
+from .file_facts import literal as _literal
+from .file_facts import prefix_kwarg as _prefix_kwarg
+from .wiring import fastapi_wiring
 
 # HTTP verbs (+ websocket) exposed as decorator methods on FastAPI app/router objects.
 _VERBS = {"get", "post", "put", "patch", "delete", "options", "head", "trace", "websocket"}
@@ -123,9 +124,9 @@ def _router_bases(
 
 
 def _routes(dec: Node, fdef: Node, source: bytes, path: str, class_name: str | None,
-            seen_ids: set[str], bases: dict[str, str | object],
+            bases: dict[str, str | object],
             router_guards: dict[str, list[str]], roots: dict[str, str],
-            middleware: dict[str, list[str]]) -> list[Statement]:
+            middleware: dict[str, list[str]]) -> list[Emit]:
     call = dec.named_children[0] if dec.named_children else None
     if call is None or call.type != "call":
         return []
@@ -146,7 +147,6 @@ def _routes(dec: Node, fdef: Node, source: bytes, path: str, class_name: str | N
 
     name = _name(fdef, source)
     handler_line = fdef.start_point[0] + 1
-    start_line, start_col = dec.start_point[0] + 1, dec.start_point[1]
     endpoint = _endpoint(call, source)
     receiver = func.child_by_field_name("object")
     receiver_name = node_text(receiver, source) if receiver is not None else ""
@@ -160,15 +160,10 @@ def _routes(dec: Node, fdef: Node, source: bytes, path: str, class_name: str | N
         endpoint = None  # a prefix we cannot resolve: the address is unknown
     elif endpoint is not None and isinstance(served, str):
         endpoint = (served + endpoint) or None
-    text = node_text(dec, source).split("\n", 1)[0]
     parent = function_id(path, name, handler_line, class_name=class_name)
     return [
-        Statement(
-            id=disambiguate(statement_id(path, start_line, start_col), seen_ids),
-            parentId=parent,
-            nodeType="synthetic",
+        Emit(dec, dict(
             semanticType="route",
-            text=text,
             method=m,
             endpoint=endpoint,
             framework="fastapi",
@@ -178,10 +173,7 @@ def _routes(dec: Node, fdef: Node, source: bytes, path: str, class_name: str | N
             # Honest-null: assert auth only when a guard is present; absence is unknown.
             authRequired=True if scoped else None,
             routeKind="ws" if m == "WEBSOCKET" else "route",
-            startLine=start_line,
-            endLine=dec.end_point[0] + 1,
-            path=path,
-        )
+        ), parent=parent, node_type="synthetic")
         for m in methods
     ]
 
@@ -189,15 +181,15 @@ def _routes(dec: Node, fdef: Node, source: bytes, path: str, class_name: str | N
 def _from_index(
     index: object | None, path: str
 ) -> tuple[dict[str, str | object], dict[str, list[str]], dict[str, str], dict[str, list[str]]] | None:
-    """This file's router wiring from the repo index (``PythonIndex``), which also follows
+    """This file's router wiring from the ``fastapi.wiring`` fact, which also follows
     ``include_router`` across files: (bases, inherited guards, roots, middleware by root).
     A root in another file is keyed ``file::var`` so it never collides with a local name. None
     when there is no index or it has no entry for this file."""
-    wiring = getattr(index, "fastapi_wiring", None)
-    mine = wiring.get(path) if isinstance(wiring, dict) else None
-    if not mine:
+    wiring = fastapi_wiring(index)
+    mine = wiring.routers.get(path) if wiring is not None else None
+    if wiring is None or not mine:
         return None
-    all_middleware = getattr(index, "fastapi_middleware", None) or {}
+    all_middleware = wiring.middleware
     bases: dict[str, str | object] = {}
     guards: dict[str, list[str]] = {}
     roots: dict[str, str] = {}
@@ -212,12 +204,13 @@ def _from_index(
 
 
 def detect_routes(
-    root: Node, source: bytes, path: str, *, seen_ids: set[str], index: object | None = None
-) -> list[Statement]:
-    """Walk the tree (tracking the enclosing class) and emit route statements. ``index`` is the
-    Python repo index: when given, router wiring comes from it (it also follows
-    ``include_router`` across files); without it, only this file's wiring is seen."""
-    routes: list[Statement] = []
+    root: Node, source: bytes, path: str, *, index: object | None = None
+) -> list[Emit]:
+    """Walk the tree (tracking the enclosing class) and return its routes, for
+    :func:`~..emits.apply`. ``index`` is the Python repo index: when given, router wiring comes
+    from its ``fastapi.wiring`` fact (which also follows ``include_router`` across files);
+    without it, only this file's wiring is seen."""
+    routes: list[Emit] = []
     from_index = _from_index(index, path)
     if from_index is not None:
         bases, router_guards, roots, middleware = from_index
@@ -243,7 +236,7 @@ def detect_routes(
                         walk(body, _name(cdef, source))
                 elif fdef is not None:
                     for dec in (c for c in child.named_children if c.type == "decorator"):
-                        routes.extend(_routes(dec, fdef, source, path, class_name, seen_ids,
+                        routes.extend(_routes(dec, fdef, source, path, class_name,
                                               bases, router_guards, roots, middleware))
                     body = fdef.child_by_field_name("body")
                     if body is not None:
