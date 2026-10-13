@@ -61,7 +61,6 @@ _CONSUMER_HANDLERS = {
     "SQSHandler": "aws-sqs",
     "SNSHandler": "aws-sns",
     "EventBridgeHandler": "aws-eventbridge",
-    "ScheduledHandler": "aws-eventbridge",
     "DynamoDBStreamHandler": "aws-dynamodb",
     "KinesisStreamHandler": "aws-kinesis",
     "S3Handler": "aws-s3",
@@ -71,6 +70,10 @@ _CONSUMER_HANDLERS = {
 }
 # HTTP-facing Lambda handler types → route (not an event consumer).
 _ROUTE_HANDLERS = {"APIGatewayProxyHandler", "APIGatewayProxyHandlerV2", "ALBHandler"}
+# A scheduled-event handler is triggered by a schedule (an EventBridge rule): a timer. Its
+# schedule lives in deployment config, so the endpoint stays empty.
+_TIMER_HANDLERS = {"ScheduledHandler"}
+_TIMER_PARAM_TYPES = {"ScheduledEvent"}
 # Keys in an SDK argument object that name the destination address.
 _ADDRESS_KEYS = {"TopicArn", "TargetArn", "QueueUrl", "EventBusName", "PhoneNumber"}
 # Subset of the above that also *proves* the call is AWS — needed by the ``publish`` guard
@@ -101,7 +104,6 @@ _EVENT_PARAM_TYPES = {
     "DynamoDBStreamEvent": "aws-dynamodb",
     "KinesisStreamEvent": "aws-kinesis",
     "EventBridgeEvent": "aws-eventbridge",
-    "ScheduledEvent": "aws-eventbridge",
     "SESEvent": "aws-ses",
     "CloudFrontRequestEvent": "aws-cloudfront",
     "CloudFrontResponseEvent": "aws-cloudfront",
@@ -236,6 +238,8 @@ def _handler(
         return None
     name_node = decl.child_by_field_name("name")
     hname = node_text(name_node, source) if name_node is not None else None
+    if tname in _TIMER_HANDLERS:
+        return "timer", "aws-eventbridge", None, hname
     if tname in _CONSUMER_HANDLERS:
         return "eventbus_consumer", _CONSUMER_HANDLERS[tname], None, hname
     if tname in _ROUTE_HANDLERS:
@@ -288,6 +292,8 @@ def _untyped_handler(node: Node, source: bytes) -> tuple[SemanticType, str, str 
     if fn is None:
         return None
     ptype = _first_param_type(fn, source)
+    if ptype in _TIMER_PARAM_TYPES:
+        return "timer", "aws-eventbridge", None, hname
     if ptype in _EVENT_PARAM_TYPES:
         return "eventbus_consumer", _EVENT_PARAM_TYPES[ptype], None, hname
     if ptype in _ROUTE_PARAM_TYPES:
@@ -388,6 +394,7 @@ def detect_aws_events(
             nodeType=decl.type, semanticType=sem, text=first_line(node_text(decl, source)),
             # The handler is declared by this declarator/assignment: its line is the handler's.
             framework=fw, handler=hname, handlerLine=line if hname else None, routeKind=route_kind,
+            method="PERIODIC" if sem == "timer" else None,
             startLine=line, endLine=decl.end_point[0] + 1, path=path,
         ))
         is_lambda = True

@@ -53,7 +53,6 @@ def test_http_event_handler_is_route(analyze_files) -> None:
     assert (r.semanticType, r.routeKind, r.handler) == ("route", "route", "FunctionHandler")
 
 
-@pytest.mark.xfail(strict=True, reason="scheduled event typed eventbus_consumer, not timer")
 def test_scheduled_event_handler_is_timer(analyze_files) -> None:
     stmts = analyze_files(
         {

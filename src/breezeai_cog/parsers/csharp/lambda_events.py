@@ -42,9 +42,11 @@ _EVENT_TYPES: dict[str, str] = {
     "DynamoDBEvent": "aws-dynamodb",
     "KinesisEvent": "aws-kinesis",
     "CloudWatchEvent": "aws-eventbridge",
-    "ScheduledEvent": "aws-eventbridge",
     "SimpleEmailEvent": "aws-ses",
 }
+# A scheduled event is triggered by a schedule (an EventBridge rule): a timer. Its schedule lives
+# in deployment config, so the endpoint stays empty.
+_TIMER_EVENT_TYPES = {"ScheduledEvent"}
 # HTTP-facing event types → route (not an event consumer).
 _ROUTE_EVENT_TYPES: dict[str, str] = {
     "APIGatewayProxyRequest": "aws-apigw",
@@ -91,6 +93,8 @@ def _handler_kind(method: Node, source: bytes) -> tuple[SemanticType, str, str |
     if _CONTEXT_TYPE not in types:
         return None
     for t in types:
+        if t in _TIMER_EVENT_TYPES:
+            return "timer", "aws-eventbridge", None
         if t in _EVENT_TYPES:
             return "eventbus_consumer", _EVENT_TYPES[t], None
         if t in _ROUTE_EVENT_TYPES:
@@ -127,6 +131,7 @@ def detect_lambda_handlers(root: Node, source: bytes, path: str, record: FileRec
             handler=name,
             handlerLine=sl,
             routeKind=route_kind,
+            method="PERIODIC" if semantic == "timer" else None,
             startLine=sl,
             endLine=method.end_point[0] + 1,
             path=path,

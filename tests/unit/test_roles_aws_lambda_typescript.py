@@ -54,9 +54,6 @@ def test_event_parameter_handler_is_a_consumer(analyze_files) -> None:
     assert (r.semanticType, r.framework, r.handler) == ("eventbus_consumer", "aws-s3", "handler")
 
 
-@pytest.mark.xfail(
-    strict=True, reason="scheduled Lambda handlers are recorded as eventbus_consumer, not timer"
-)
 def test_scheduled_handler_is_a_timer(analyze_files) -> None:
     st = _run(
         analyze_files,
@@ -65,6 +62,17 @@ def test_scheduled_handler_is_a_timer(analyze_files) -> None:
     )
     [r] = _eps(st)
     assert (r.semanticType, r.framework, r.handler) == ("timer", "aws-eventbridge", "nightly")
+
+
+def test_untyped_scheduled_event_handler_is_a_timer(analyze_files) -> None:
+    st = _run(
+        analyze_files,
+        "import { ScheduledEvent } from 'aws-lambda';\n"
+        "export const handler = async (event: ScheduledEvent) => {\n  return;\n};\n",
+    )
+    [r] = _eps(st)
+    # The schedule is in deployment config, not the code: empty.
+    assert (r.semanticType, r.method, r.endpoint, r.handler) == ("timer", "PERIODIC", None, "handler")
 
 
 def test_api_gateway_handler_is_a_route(analyze_files) -> None:
