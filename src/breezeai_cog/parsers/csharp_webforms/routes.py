@@ -7,8 +7,11 @@ is convention-based: for each code-behind file it emits ONE synthetic, file-pare
 ``route`` statement, mirroring how the React detector treats config/markup routes.
 
 * ``.aspx.cs`` → ``routeKind=page``   (a navigable page)
-* ``.ascx.cs`` → ``routeKind=mount``  (a composable UI fragment / user control)
-* ``.master.cs`` → skipped            (a layout, not a route)
+* ``.ascx.cs`` → no record            (a user control: part of the pages that load it)
+* ``.master.cs`` → no record          (a layout, not a route)
+
+A page's links to its master page and to the controls it loads are structural links, recorded in
+``importFiles`` by the parser — never as route records (contract §5).
 
 ``endpoint`` is derived from the code-behind path (``CMS/Enrollment.aspx.cs`` →
 ``/CMS/Enrollment.aspx``); ``handler`` is the code-behind class. Because no AST node backs
@@ -26,7 +29,6 @@ from ..dotnet_common import simple_attr_name
 #: (no backing AST node — the markup isn't parsed); the page/control distinction lives in routeKind.
 _KIND_BY_SUFFIX: dict[str, tuple[str, str]] = {
     ".aspx.cs": ("page", "synthetic"),
-    ".ascx.cs": ("mount", "synthetic"),
 }
 
 
@@ -47,8 +49,8 @@ def _page_class(record: FileRecord, path: str) -> Class | None:
 def detect_webforms_pages(
     record: FileRecord, path: str, page_routes: dict[str, list[str]] | None = None
 ) -> list[Statement]:
-    """Emit file-parented ``route`` statement(s) for a Web Forms page / user control.
-    Returns ``[]`` for anything else (e.g. ``.master.cs`` or a plain base-class file).
+    """Emit file-parented ``route`` statement(s) for a Web Forms page. Returns ``[]`` for
+    anything else (a user control, a ``.master.cs``, a plain base-class file).
 
     When ``page_routes`` (from the C# index) maps this page's physical ``.aspx`` to friendly
     ``MapPageRoute`` URLs, the endpoint is **enriched** with the real routed URL(s) — one
@@ -130,36 +132,3 @@ def _page_methods(
                 path=path,
             ))
     return out
-
-
-def detect_master_layout(
-    record: FileRecord, path: str, master_endpoint: str | None
-) -> list[Statement]:
-    """A ``routeKind=layout`` route statement recording that this page/control/master composes
-    into ``master_endpoint`` (its ``MasterPageFile``). Returns ``[]`` when there is no master
-    (BREEZEAI-765 item 3). No HTTP ``method`` — a layout is a composition, not a served verb;
-    the backend joins ``endpoint`` ↔ the master's path to materialise the page→master link."""
-    if master_endpoint is None:
-        return []
-    cls = _page_class(record, path)
-    start = cls.startLine if cls is not None else 1
-    end = cls.endLine if cls is not None else 1
-    seen = {s.id for s in record.statements}
-    return [
-        Statement(
-            id=disambiguate(
-                statement_id(path, start, 1), seen
-            ),  # col 1 → distinct from the page route (col 0)
-            parentId=file_id(path),
-            nodeType="synthetic",
-            semanticType="route",
-            text=master_endpoint,
-            endpoint=master_endpoint,
-            framework="aspnet-webforms",
-            routeKind="layout",
-            handler=cls.name if cls is not None else None,
-            startLine=start,
-            endLine=end,
-            path=path,
-        )
-    ]

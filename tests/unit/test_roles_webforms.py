@@ -123,12 +123,10 @@ def test_map_page_route_is_wiring(analyze_files) -> None:
     assert page.endpoint == "/shop/orders"
 
 
-@pytest.mark.xfail(strict=True, reason="user control recorded as a route (routeKind mount)")
 def test_user_control_is_none(site) -> None:
     assert [s for s in _eps(site) if s.path == "Controls/Nav.ascx.cs"] == []
 
 
-@pytest.mark.xfail(strict=True, reason="Register Src recorded as a route (routeKind mount)")
 def test_register_src_is_wiring(site) -> None:
     assert [s for s in _eps(site) if s.path == "Orders.aspx"] == []
 
@@ -138,7 +136,6 @@ def test_register_src_keeps_structural_link(site, tmp_path) -> None:
     assert "Controls/Nav.ascx.cs" in records["Orders.aspx.cs"].importFiles
 
 
-@pytest.mark.xfail(strict=True, reason="master page link recorded as a route (routeKind layout)")
 def test_master_page_file_is_wiring(site) -> None:
     assert [s for s in _eps(site) if s.routeKind == "layout"] == []
 
