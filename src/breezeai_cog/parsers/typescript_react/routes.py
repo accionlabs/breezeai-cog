@@ -27,8 +27,8 @@ from __future__ import annotations
 
 from tree_sitter import Node
 
-from ...emit import disambiguate, file_id, statement_id
-from ...schemas import Statement
+from ...emit import file_id
+from ..emits import Emit
 from ..treesitter import entry_text, node_text
 from ..typescript.imports import resolve_const_value
 
@@ -132,8 +132,8 @@ def _fills_outlet(attrs: dict[str, Node], source: bytes) -> bool:
         "path" in attrs and _string_val(attrs["path"], source) == "")
 
 
-def _process_jsx(el: Node, prefix: str, source: bytes, path: str, seen: set[str],
-                 routes: list[Statement], inherited: tuple[str, ...] = ()) -> None:
+def _process_jsx(el: Node, prefix: str, source: bytes, path: str,
+                 routes: list[Emit], inherited: tuple[str, ...] = ()) -> None:
     attrs = _jsx_attrs(el, source)
     has_path = "path" in attrs
     is_index = "index" in attrs and not has_path  # <Route index .../> -> parent's path
@@ -149,26 +149,18 @@ def _process_jsx(el: Node, prefix: str, source: bytes, path: str, seen: set[str]
     wiring = bool(nested) and (guard_layout or not shows or any(
         _fills_outlet(_jsx_attrs(c, source), source) for c in nested))
     if (has_path or is_index) and handler not in _REDIRECTS and not wiring:
-        sl, sc = el.start_point[0] + 1, el.start_point[1]
-        routes.append(Statement(
-            id=disambiguate(statement_id(path, sl, sc), seen),
-            parentId=file_id(path),
-            nodeType="jsx_element",
+        routes.append(Emit(el, dict(
             semanticType="route",
-            text=entry_text(_opening(el), source),
             endpoint=full,
             framework="react",
             routeKind="page",  # a lazy route is a page too, its component loaded on demand
             handler=handler,
             guards=list(inherited) or None,
-            startLine=sl,
-            endLine=el.end_point[0] + 1,
-            path=path,
-        ))
+        ), parent=file_id(path), node_type="jsx_element", text=entry_text(_opening(el), source)))
     child_guards = (*inherited, handler) if guard_layout and handler else inherited
     # Recurse into nested <Route> children (paired elements only), joining paths.
     for child in nested:
-        _process_jsx(child, full if has_path else prefix, source, path, seen, routes, child_guards)
+        _process_jsx(child, full if has_path else prefix, source, path, routes, child_guards)
 
 
 # ---- config-object form -----------------------------------------------------
@@ -206,8 +198,8 @@ def _is_children_value(arr: Node, source: bytes) -> bool:
     return p is not None and p.type == "pair" and _key(p, source) == "children"
 
 
-def _process_config(arr: Node, prefix: str, source: bytes, path: str, seen: set[str],
-                    routes: list[Statement], inherited: tuple[str, ...] = ()) -> None:
+def _process_config(arr: Node, prefix: str, source: bytes, path: str,
+                    routes: list[Emit], inherited: tuple[str, ...] = ()) -> None:
     for elem in arr.named_children:
         if elem.type != "object":
             continue
@@ -225,7 +217,7 @@ def _process_config(arr: Node, prefix: str, source: bytes, path: str, seen: set[
             if children is not None and nested:
                 guards = (*inherited, handler) if handler and _is_guard_element(handler) \
                     else inherited
-                _process_config(children, prefix, source, path, seen, routes, guards)
+                _process_config(children, prefix, source, path, routes, guards)
             continue
         full = _join(prefix, "" if is_index else _string_val(pairs["path"], source))
         if handler in _REDIRECTS:
@@ -236,26 +228,18 @@ def _process_config(arr: Node, prefix: str, source: bytes, path: str, seen: set[
             _fills_outlet(_pairs(c, source), source) for c in nested))
         if wiring and children is not None:
             guards = (*inherited, handler) if guard_layout and handler else inherited
-            _process_config(children, full, source, path, seen, routes, guards)
+            _process_config(children, full, source, path, routes, guards)
             continue
-        sl, sc = elem.start_point[0] + 1, elem.start_point[1]
-        routes.append(Statement(
-            id=disambiguate(statement_id(path, sl, sc), seen),
-            parentId=file_id(path),
-            nodeType="synthetic",
+        routes.append(Emit(elem, dict(
             semanticType="route",
-            text=entry_text(elem, source),
             endpoint=full,
             framework="react",
             routeKind="page",  # a lazy route is a page too, its component loaded on demand
             handler=handler,
             guards=list(inherited) or None,
-            startLine=sl,
-            endLine=elem.end_point[0] + 1,
-            path=path,
-        ))
+        ), parent=file_id(path), node_type="synthetic", text=entry_text(elem, source)))
         if children is not None and nested:
-            _process_config(children, full, source, path, seen, routes, inherited)
+            _process_config(children, full, source, path, routes, inherited)
 
 
 # ---- entry point ------------------------------------------------------------
@@ -311,22 +295,15 @@ def _collect_consts(root: Node, source: bytes) -> dict[str, Node]:
 
 
 def _emit_v7(call: Node, kind: str, endpoint: str, handler_arg: Node | None,
-             source: bytes, path: str, seen: set[str], routes: list[Statement]) -> None:
-    sl, sc = call.start_point[0] + 1, call.start_point[1]
-    routes.append(Statement(
-        id=disambiguate(statement_id(path, sl, sc), seen),
-        parentId=file_id(path),
-        nodeType="call_expression",
+             source: bytes, path: str, routes: list[Emit]) -> None:
+    routes.append(Emit(call, dict(
         semanticType="route",
-        text=node_text(call, source).split("\n", 1)[0][:120],
         endpoint=endpoint,
         framework="react",
         routeKind="page",
         handler=_string_val(handler_arg, source) or None,
-        startLine=sl,
-        endLine=call.end_point[0] + 1,
-        path=path,
-    ))
+    ), parent=file_id(path), node_type="call_expression",
+        text=node_text(call, source).split("\n", 1)[0][:120]))
 
 
 def _path_arg(node: Node | None, source: bytes, const_values: dict[str, str | None] | None) -> str:
@@ -341,26 +318,26 @@ def _path_arg(node: Node | None, source: bytes, const_values: dict[str, str | No
     return _string_val(node, source)
 
 
-def _process_v7(node: Node, prefix: str, source: bytes, path: str, seen: set[str],
-                routes: list[Statement], consts: dict[str, Node],
+def _process_v7(node: Node, prefix: str, source: bytes, path: str,
+                routes: list[Emit], consts: dict[str, Node],
                 guard: frozenset[str], const_values: dict[str, str | None] | None) -> None:
     """Recursively resolve a v7 route node under the accumulated ``prefix``. Handles the
     array / spread / const-identifier / helper-call forms; ``guard`` breaks const cycles.
     ``const_values`` folds a path built from a ``{…} as const`` object into its literal URL."""
     if node.type == "array":
         for child in node.named_children:
-            _process_v7(child, prefix, source, path, seen, routes, consts, guard, const_values)
+            _process_v7(child, prefix, source, path, routes, consts, guard, const_values)
         return
     if node.type == "spread_element":
         inner = node.named_children[0] if node.named_children else None
         if inner is not None:
-            _process_v7(inner, prefix, source, path, seen, routes, consts, guard, const_values)
+            _process_v7(inner, prefix, source, path, routes, consts, guard, const_values)
         return
     if node.type == "identifier":  # ...groupConst -> resolve to its definition (once)
         name = node_text(node, source)
         target = consts.get(name)
         if target is not None and name not in guard:
-            _process_v7(target, prefix, source, path, seen, routes, consts, guard | {name}, const_values)
+            _process_v7(target, prefix, source, path, routes, consts, guard | {name}, const_values)
         return
     if node.type != "call_expression":
         return
@@ -371,18 +348,18 @@ def _process_v7(node: Node, prefix: str, source: bytes, path: str, seen: set[str
     if kind == "route":  # route(path, file, opts?)
         seg = _path_arg(args[0], source, const_values) if args else ""
         handler = args[1] if len(args) > 1 else None
-        _emit_v7(node, kind, _join(prefix, seg), handler, source, path, seen, routes)
+        _emit_v7(node, kind, _join(prefix, seg), handler, source, path, routes)
     elif kind == "index":  # index(file, opts?) -> renders at the parent path
-        _emit_v7(node, kind, _join(prefix, ""), args[0] if args else None, source, path, seen, routes)
+        _emit_v7(node, kind, _join(prefix, ""), args[0] if args else None, source, path, routes)
     elif kind == "layout":  # layout(file, [children]) -> wiring: no record, no path segment
         children = _last_array(args)
         if children is not None:
-            _process_v7(children, prefix, source, path, seen, routes, consts, guard, const_values)
+            _process_v7(children, prefix, source, path, routes, consts, guard, const_values)
     elif kind == "prefix":  # prefix(base, [children]) -> add base, no node of its own
         base = _path_arg(args[0], source, const_values) if args else ""
         children = _last_array(args)
         if children is not None:
-            _process_v7(children, _join(prefix, base), source, path, seen, routes, consts, guard, const_values)
+            _process_v7(children, _join(prefix, base), source, path, routes, consts, guard, const_values)
 
 
 def _v7_entry(root: Node, source: bytes) -> Node | None:
@@ -399,7 +376,7 @@ def _v7_entry(root: Node, source: bytes) -> Node | None:
     return None
 
 
-def _detect_v7(root: Node, source: bytes, path: str, seen: set[str], routes: list[Statement],
+def _detect_v7(root: Node, source: bytes, path: str, routes: list[Emit],
                const_values: dict[str, str | None] | None) -> None:
     # Gate: the route/index/layout/prefix call helpers exist only in v7 framework mode.
     # Keying on the import keeps this inert on v5/v6 (react-router-dom) code.
@@ -407,26 +384,28 @@ def _detect_v7(root: Node, source: bytes, path: str, seen: set[str], routes: lis
         return
     entry = _v7_entry(root, source)
     if entry is not None:
-        _process_v7(entry, "", source, path, seen, routes,
+        _process_v7(entry, "", source, path, routes,
                     _collect_consts(root, source), frozenset(), const_values)
 
 
-def detect_react_routes(root: Node, source: bytes, path: str, *, seen_ids: set[str],
-                        const_values: dict[str, str | None] | None = None) -> list[Statement]:
-    routes: list[Statement] = []
+def detect_react_routes(root: Node, source: bytes, path: str, *,
+                        const_values: dict[str, str | None] | None = None) -> list[Emit]:
+    """This file's React Router page routes (JSX, config objects, v7 route modules), for
+    :func:`~..emits.apply`."""
+    routes: list[Emit] = []
     # JSX <Route>: start only at top-level Routes (no <Route> ancestor); recursion handles nesting.
     jsx: list[Node] = []
     _walk(root, "jsx_element", jsx)
     _walk(root, "jsx_self_closing_element", jsx)
     for el in jsx:
         if _is_route(el, source) and not _has_route_ancestor(el, source):
-            _process_jsx(el, "", source, path, seen_ids, routes)
+            _process_jsx(el, "", source, path, routes)
     # Config objects: route arrays that are not a nested ``children:`` value.
     arrays: list[Node] = []
     _walk(root, "array", arrays)
     for arr in arrays:
         if _is_route_array(arr, source) and not _is_children_value(arr, source):
-            _process_config(arr, "", source, path, seen_ids, routes)
+            _process_config(arr, "", source, path, routes)
     # v7 framework-mode config DSL (gated on the @react-router/dev import).
-    _detect_v7(root, source, path, seen_ids, routes, const_values)
+    _detect_v7(root, source, path, routes, const_values)
     return routes
