@@ -9,6 +9,7 @@ from ...schemas import FileRecord
 from ..base import ParseContext
 from ..java.config import module_of
 from ..java.imports import JavaIndex
+from ..java.jaxrs_index import declared_paths
 from ..java.parser import JavaParser
 from ..treesitter import parse_source
 from .routes import detect_jaxrs_routes
@@ -34,7 +35,8 @@ class JaxRsParser(JavaParser):
             # off the record — no AST re-walk
             mg = idx.module_guards.get(module) if isinstance(idx, JavaIndex) and module is not None else None
             routes = detect_jaxrs_routes(
-                record, app_path, sub_bases, mg.jaxrs_filters if mg is not None else []
+                record, app_path, sub_bases, mg.jaxrs_filters if mg is not None else [],
+                declared_paths(root, ctx.source, idx.consts if isinstance(idx, JavaIndex) else {}),
             )
             if routes:
                 record.statements.extend(routes)

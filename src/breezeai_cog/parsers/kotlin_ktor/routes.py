@@ -14,6 +14,8 @@ these call_expression nodes and emit them as Statement records.
 
 from __future__ import annotations
 
+from collections.abc import Callable
+
 from tree_sitter import Node
 
 from ...emit import disambiguate, statement_id
@@ -23,37 +25,86 @@ from ..treesitter import node_text
 _HTTP_VERBS = frozenset({"get", "post", "put", "delete", "patch", "head", "options"})
 
 
-def _string_content(node: Node, source: bytes) -> str | None:
-    if node.type != "string_literal":
-        return None
-    parts: list[str] = []
-    for child in node.named_children:
-        if child.type == "string_content":
-            parts.append(node_text(child, source))
-        elif child.type in {"string_interpolation", "multiline_string_interpolation"}:
-            expr = next(iter(child.named_children), None)
-            if expr is not None and expr.type == "simple_identifier":
-                parts.append("{" + node_text(expr, source) + "}")
-            else:
-                parts.append("{param}")
-    if parts:
-        return "".join(parts)
-    # Fallback: strip surrounding quotes from raw text
-    raw = node_text(node, source)
-    return raw.strip('"') if raw.startswith('"') else None
-
-
+#: An argument that is a path expression whose value cannot be resolved (a constant from elsewhere,
+#: an env value): the route is kept with an empty endpoint — never a ``{NAME}`` placeholder.
+_UNKNOWN = object()
 _SENTINEL_NO_ARGS = object()
+_PATH_EXPRS = frozenset({
+    "string_literal", "simple_identifier", "navigation_expression", "additive_expression",
+})
 
 
-def _first_arg(call: Node, source: bytes) -> object:
-    """Return the first argument value from a call_expression.
+def string_constants(root: Node, source: bytes) -> dict[str, str | None]:
+    """``val`` / ``const val`` string properties of this file → their value, by simple name
+    (``object Paths { const val USERS = "/users" }`` → ``USERS``). A value may interpolate another
+    constant. A name declared twice with different values, or with a value that does not
+    resolve, maps to None."""
+    raw: dict[str, list[Node]] = {}
 
-    Returns:
-        A string if the arg is a string literal or constant identifier.
-        _SENTINEL_NO_ARGS if no value_arguments node exists (trailing-lambda only call).
-        None if value_arguments exists but is empty or unresolvable.
-    """
+    def walk(n: Node) -> None:
+        if n.type == "property_declaration":
+            var = next((c for c in n.named_children if c.type == "variable_declaration"), None)
+            name = var.named_children[0] if var is not None and var.named_children else None
+            value = next((c for c in n.named_children if c.type in _PATH_EXPRS), None)
+            if name is not None and name.type == "simple_identifier" and value is not None:
+                raw.setdefault(node_text(name, source), []).append(value)
+        for c in n.named_children:
+            walk(c)
+
+    walk(root)
+    out: dict[str, str | None] = {}
+
+    def value_of(name: str, depth: int) -> str | None:
+        if name in out:
+            return out[name]
+        nodes = raw.get(name)
+        if not nodes or depth > 8:
+            return None
+        values = {_resolve(v, source, lambda n: value_of(n, depth + 1)) for v in nodes}
+        out[name] = values.pop() if len(values) == 1 else None
+        return out[name]
+
+    for name in raw:
+        value_of(name, 0)
+    return out
+
+
+def _resolve(node: Node, source: bytes, lookup: Callable[[str], str | None]) -> str | None:
+    """A path expression → its literal string, or None when any part is not a known constant.
+    String content is kept verbatim (Ktor path parameters are written ``{id}`` inside it)."""
+    if node.type == "string_literal":
+        parts: list[str] = []
+        for child in node.named_children:
+            if child.type == "string_content":
+                parts.append(node_text(child, source))
+            elif child.type in ("interpolated_identifier", "interpolated_expression"):
+                expr = child if child.type == "interpolated_identifier" else (
+                    child.named_children[0] if child.named_children else None)
+                value = lookup(node_text(expr, source)) if expr is not None and expr.type in (
+                    "interpolated_identifier", "simple_identifier") else None
+                if value is None:
+                    return None
+                parts.append(value)
+        return "".join(parts)
+    if node.type == "simple_identifier":
+        return lookup(node_text(node, source))
+    if node.type == "navigation_expression":  # Paths.USERS → USERS
+        names = [c for c in node.named_children if c.type == "simple_identifier"]
+        suffix = next((c for c in node.named_children if c.type == "navigation_suffix"), None)
+        last = suffix.named_children[0] if suffix is not None and suffix.named_children else None
+        if not names or last is None or last.type != "simple_identifier":
+            return None
+        return lookup(node_text(last, source))
+    if node.type == "additive_expression" and len(node.named_children) == 2:
+        left, right = (_resolve(c, source, lookup) for c in node.named_children)
+        return left + right if left is not None and right is not None else None
+    return None
+
+
+def _first_arg(call: Node, source: bytes, consts: dict[str, str | None]) -> object:
+    """The first argument of a call_expression as a path: a resolved string; ``_UNKNOWN`` for a
+    path expression (string, constant, ``A + "/x"``) that does not resolve; ``_SENTINEL_NO_ARGS``
+    for a trailing-lambda-only call; None when there is no usable argument."""
     for suffix in call.named_children:
         if suffix.type != "call_suffix":
             continue
@@ -61,26 +112,13 @@ def _first_arg(call: Node, source: bytes) -> object:
         if val_args is None:
             continue
         first_arg = next((c for c in val_args.named_children if c.type == "value_argument"), None)
-        if first_arg is None:
+        expr = next((c for c in first_arg.named_children if c.type in _PATH_EXPRS), None) \
+            if first_arg is not None else None
+        if expr is None:
             return None
-        # String literal → extract value
-        str_lit = next((c for c in first_arg.named_children if c.type == "string_literal"), None)
-        if str_lit is not None:
-            return _string_content(str_lit, source)
-        # Constant reference → wrap as placeholder
-        ident = next((c for c in first_arg.named_children if c.type == "simple_identifier"), None)
-        if ident is not None:
-            return "{" + node_text(ident, source) + "}"
-        return None
+        value = _resolve(expr, source, consts.get)
+        return _UNKNOWN if value is None else value
     return _SENTINEL_NO_ARGS
-
-
-def _first_string_arg(call: Node, source: bytes) -> str | None:
-    """Return the first string-like argument from a call_expression (string or constant)."""
-    result = _first_arg(call, source)
-    if result is _SENTINEL_NO_ARGS or result is None:
-        return None
-    return str(result)
 
 
 def _lambda_body(call: Node) -> Node | None:
@@ -123,24 +161,26 @@ def _collect_routes(
     parent_id: str,
     seen_ids: set[str],
     limit: int,
-    prefix: str = "",
+    prefix: str | None = "",
     existing: dict[str, Statement] | None = None,
     guards: tuple[str, ...] = (),
+    consts: dict[str, str | None] | None = None,
 ) -> list[Statement]:
     """Recursively collect Ktor route statements from a subtree. A route whose call the base
     parser already captured (``existing``: id → statement, same start line and column) is
     enriched in place; only routes with no base statement are returned to be appended.
     ``guards`` are the enclosing ``authenticate(...)`` blocks, outermost first."""
     base = existing if existing is not None else {}
+    consts = consts if consts is not None else {}
     out: list[Statement] = []
     for child in node.named_children:
         if child.type != "call_expression":
-            out.extend(_collect_routes(child, source, path, parent_id, seen_ids, limit, prefix, base, guards))
+            out.extend(_collect_routes(child, source, path, parent_id, seen_ids, limit, prefix, base, guards, consts))
             continue
 
         verb = _callee_name(child, source)
         if verb is None:
-            out.extend(_collect_routes(child, source, path, parent_id, seen_ids, limit, prefix, base, guards))
+            out.extend(_collect_routes(child, source, path, parent_id, seen_ids, limit, prefix, base, guards, consts))
             continue
 
         if verb == "authenticate":
@@ -149,34 +189,39 @@ def _collect_routes(
             if body is not None:
                 out.extend(_collect_routes(
                     body, source, path, parent_id, seen_ids, limit, prefix, base,
-                    (*guards, _guard_name(child, source)),
+                    (*guards, _guard_name(child, source)), consts,
                 ))
             continue
 
         if verb == "route":
-            # Prefix block — push path segment and recurse into lambda body
-            sub_path = _first_string_arg(child, source) or ""
-            new_prefix = prefix + sub_path
+            # Prefix block — push path segment and recurse into lambda body. An unresolved
+            # segment makes every nested address unknown (prefix None).
+            sub = _first_arg(child, source, consts)
+            new_prefix = (None if prefix is None or sub is _UNKNOWN
+                          else prefix + (sub if isinstance(sub, str) else ""))
             body = _lambda_body(child)
             if body is not None:
                 out.extend(
-                    _collect_routes(body, source, path, parent_id, seen_ids, limit, new_prefix, base, guards)
+                    _collect_routes(body, source, path, parent_id, seen_ids, limit, new_prefix, base, guards, consts)
                 )
             continue
 
         if verb not in _HTTP_VERBS:
-            out.extend(_collect_routes(child, source, path, parent_id, seen_ids, limit, prefix, base, guards))
+            out.extend(_collect_routes(child, source, path, parent_id, seen_ids, limit, prefix, base, guards, consts))
             continue
 
-        arg = _first_arg(child, source)
+        arg = _first_arg(child, source, consts)
+        full_endpoint: str | None
         if arg is _SENTINEL_NO_ARGS:
             # Trailing-lambda only — e.g. `post { }` inside route("/path")
             # Endpoint is just the inherited prefix.
-            if not prefix:
+            if prefix == "":
                 continue
             full_endpoint = prefix
         elif arg is None:
             continue
+        elif arg is _UNKNOWN or prefix is None:
+            full_endpoint = None  # the address exists but is not known (decision Q8)
         else:
             full_endpoint = prefix + str(arg)
 
@@ -198,7 +243,7 @@ def _collect_routes(
                 captured.authRequired = True
             continue
         sid = disambiguate(statement_id(path, start_line, col), seen_ids)
-        text = f"{verb}(\"{full_endpoint}\")"
+        text = node_text(child, source).split("\n", 1)[0]
         out.append(Statement(
             id=sid,
             parentId=parent_id,
@@ -233,4 +278,5 @@ def detect_ktor_routes(
     is one statement, not a base statement plus an ``…#2`` copy. Returns the routes that had no
     base statement, to be appended."""
     existing = {s.id: s for s in statements or [] if s.nodeType == "call_expression"}
-    return _collect_routes(root, source, file_path, file_id, seen_ids, limit, existing=existing)
+    return _collect_routes(root, source, file_path, file_id, seen_ids, limit, existing=existing,
+                           consts=string_constants(root, source))

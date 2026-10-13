@@ -48,10 +48,12 @@ def _invocations(root: Node) -> list[Node]:
     return out
 
 
-def _render_path(node: Node, source: bytes) -> str | None:
-    """Render a Groovy ``string_literal`` (possibly a GString) to a path, interpolations
-    collapsed to ``{name}`` placeholders: ``"${prefix}/:platformId/empno"`` →
-    ``{prefix}/:platformId/empno``; ``"${config.'path'}/:filterId"`` → ``{config.path}/:filterId``."""
+def _render_path(node: Node, source: bytes, consts: dict[str, str] | None = None) -> str | None:
+    """Render a Groovy ``string_literal`` (possibly a GString) to a path. An interpolated
+    constant (``consts``) is substituted; any other interpolation is collapsed to a ``{name}``
+    placeholder: ``"${prefix}/:platformId/empno"`` → ``{prefix}/:platformId/empno``;
+    ``"${config.'path'}/:filterId"`` → ``{config.path}/:filterId``. A placeholder marks an
+    unknown part — the route's endpoint is then left empty (``classify_call``)."""
     if node.type != "string_literal":
         return None
     parts: list[str] = []
@@ -65,11 +67,38 @@ def _render_path(node: Node, source: bytes) -> str | None:
             elif inner.startswith("$"):
                 inner = inner[1:]
             inner = inner.replace("'", "").replace('"', "").strip()
-            parts.append("{" + inner + "}")
+            known = (consts or {}).get(inner)
+            parts.append(known if known is not None else "{" + inner + "}")
     if parts:
         return "".join(parts) or None
     text = node_text(node, source).strip("\"'")  # plain literal, no child fragments
     return text or None
+
+
+def _local_literals(root: Node, source: bytes) -> dict[str, str]:
+    """Variables of this file bound once to a plain string literal and never reassigned
+    (``def prefix = '/api'``) → their value: a GString path may interpolate them."""
+    values: dict[str, list[str | None]] = {}
+    assigned: set[str] = set()
+
+    def walk(n: Node) -> None:
+        name, value = n.child_by_field_name("name"), n.child_by_field_name("value")
+        if n.type in ("variable_declarator", "local_variable_declaration") and name is not None \
+                and value is not None and name.type == "identifier":
+            literal = (_render_path(value, source)
+                       if value.type == "string_literal" and "interpolation" not in str(
+                           [c.type for c in value.named_children]) else None)
+            values.setdefault(node_text(name, source), []).append(literal)
+        if n.type == "assignment_expression":
+            left = n.child_by_field_name("left")
+            if left is not None and left.type == "identifier":
+                assigned.add(node_text(left, source))
+        for c in n.named_children:
+            walk(c)
+
+    walk(root)
+    return {k: v[0] for k, v in values.items()
+            if len(v) == 1 and v[0] is not None and k not in assigned}
 
 
 def _parts(
@@ -95,7 +124,9 @@ def _parts(
     if args is not None and args.named_children:
         first_node = args.named_children[0]
         first_arg = node_text(first_node, source)
-        path = render_address(first_node, source, consts, _render_path)
+        path = render_address(
+            first_node, source, consts, lambda n, s: _render_path(n, s, consts)
+        )
     return method, path, first_arg, obj
 
 
@@ -155,7 +186,7 @@ def detect_vertx_groovy(
     matched = False
     fid = file_id(path)
     seen = {s.id for s in record.statements}
-    consts = consts or {}
+    consts = {**_local_literals(root, source), **(consts or {})}
     # Vert.x 2.x RouteMatcher: bare `get("/x", h)` calls (no receiver) inside `rm.with {}`
     # are routes only when the file actually builds a RouteMatcher — a cheap file-level gate
     # that keeps a stray `map.get(...)` from being mistaken for a route.

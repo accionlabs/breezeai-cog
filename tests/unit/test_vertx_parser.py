@@ -126,8 +126,8 @@ def test_vertx2_sendWithTimeout_is_eventbus_send(tmp_path) -> None:
 
 
 def test_dynamic_prefix_address_renders_placeholder(tmp_path) -> None:
-    # A route/address that concatenates a runtime variable with a literal renders the runtime
-    # part as a placeholder (matching GString rendering) instead of being dropped.
+    # A route that concatenates a runtime variable with a literal is kept with an empty endpoint
+    # (unknown address, never a code name); an outbound send keeps its placeholder form.
     src = (
         b"package x;\nimport io.vertx.ext.web.Router;\n"
         b"public class V {\n"
@@ -140,7 +140,7 @@ def test_dynamic_prefix_address_renders_placeholder(tmp_path) -> None:
                        capture_statements=True)
     rec = VertxParser().parse_file(ctx)
     by = {(s.semanticType, s.method, s.endpoint) for s in rec.statements if s.semanticType}
-    assert ("route", "POST", "{base}/job") in by
+    assert ("route", "POST", None) in by
     assert ("eventbus_send", None, "{prefix}/audit") in by
 
 

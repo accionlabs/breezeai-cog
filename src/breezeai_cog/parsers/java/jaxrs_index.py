@@ -17,6 +17,8 @@ ambiguous and keeps its own path (absent).
 
 from __future__ import annotations
 
+import re
+
 from collections.abc import Iterable
 from dataclasses import dataclass, field
 
@@ -27,9 +29,57 @@ from .config import module_of
 
 _HTTP_VERBS = frozenset({"GET", "POST", "PUT", "DELETE", "HEAD", "OPTIONS", "PATCH"})
 
-#: An annotation value: ``("lit", "/x")``, a constant reference ``("ref", "Class.FIELD")``, or
-#: ``("unknown", "")`` for anything else (a concatenation, a method call).
+#: An annotation value: ``("lit", "/x")``, a constant reference ``("ref", "Class.FIELD")``, a
+#: concatenation ``("expr", "<owner>\0<source>")`` resolved once constants are known, or
+#: ``("unknown", "")`` for anything else (a method call).
 PathValue = tuple[str, str]
+
+_IDENT = re.compile(r"[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*")
+
+
+def _split_plus(text: str) -> list[str]:
+    """Split a Java string expression on ``+`` outside string literals."""
+    parts, cur, quoted, i = [], [], False, 0
+    while i < len(text):
+        ch = text[i]
+        if ch == "\\" and quoted and i + 1 < len(text):
+            cur.append(text[i:i + 2])
+            i += 2
+            continue
+        if ch == '"':
+            quoted = not quoted
+        if ch == "+" and not quoted:
+            parts.append("".join(cur))
+            cur = []
+        else:
+            cur.append(ch)
+        i += 1
+    parts.append("".join(cur))
+    return parts
+
+
+def resolve_path_text(text: str, owner: str, consts: dict[str, str]) -> str | None:
+    """An annotation path argument as written (``"/x"``, ``value = "/x"``, ``P``, ``Api.BASE``,
+    ``Api.BASE + "/x"``) → its literal string. A bare name is a constant of ``owner``; a dotted
+    name is looked up by its last two segments (``Class.FIELD``). None when any part is not a
+    string literal or a known constant — the address is then unknown, never a code name."""
+    body = text.strip()
+    if body.startswith("value") and "=" in body.split('"', 1)[0]:
+        body = body.split("=", 1)[1].strip()
+    out: list[str] = []
+    for part in _split_plus(body):
+        part = part.strip()
+        if len(part) >= 2 and part[0] == '"' and part[-1] == '"':
+            out.append(part[1:-1])
+        elif _IDENT.fullmatch(part):
+            key = ".".join(part.split(".")[-2:]) if "." in part else f"{owner}.{part}"
+            value = consts.get(key)
+            if value is None:
+                return None
+            out.append(value)
+        else:
+            return None
+    return "".join(out)
 
 
 @dataclass
@@ -78,7 +128,52 @@ def _value(ann: Node, source: bytes, owner: str) -> PathValue:
         return ("ref", node_text(v, source))
     if v.type == "identifier":  # a constant of the declaring class
         return ("ref", f"{owner}.{node_text(v, source)}")
+    if v.type == "binary_expression":  # Api.BASE + "/x": resolved once constants are known
+        return ("expr", f"{owner}\x00{node_text(v, source)}")
     return ("unknown", "")
+
+
+def resolve_value(v: PathValue, consts: dict[str, str]) -> str | None:
+    """A collected annotation value → its literal string, or None when it does not resolve."""
+    kind, text = v
+    if kind == "lit":
+        return text
+    if kind == "ref":  # Class.FIELD (a qualified reference keeps its last two segments)
+        return consts.get(".".join(text.split(".")[-2:]))
+    if kind == "expr":
+        owner, expr = text.split("\x00", 1)
+        return resolve_path_text(expr, owner, consts)
+    return None
+
+
+def declared_paths(root: Node, source: bytes, consts: dict[str, str]) -> dict[tuple[str, int], str | None]:
+    """``@Path`` of every class and method in a file → its literal value (None = present but
+    unresolved), keyed by (class simple name, 1-based line where the declaration starts). Read
+    from the syntax tree: the captured decorator text drops the quotes of a plain string, so
+    ``@Path("users")`` and ``@Path(users)`` (a constant) look the same there."""
+    out: dict[tuple[str, int], str | None] = {}
+
+    def visit(node: Node, owner: str | None) -> None:
+        for child in node.named_children:
+            if child.type in ("class_declaration", "interface_declaration", "enum_declaration"):
+                name_node = child.child_by_field_name("name")
+                cls = node_text(name_node, source) if name_node is not None else None
+                if cls is not None:
+                    for ann in _annotations(child):
+                        if _ann_name(ann, source) == "Path":
+                            out[(cls, child.start_point[0] + 1)] = resolve_value(
+                                _value(ann, source, cls), consts)
+                visit(child, cls)
+            elif child.type == "method_declaration" and owner is not None:
+                for ann in _annotations(child):
+                    if _ann_name(ann, source) == "Path":
+                        out[(owner, child.start_point[0] + 1)] = resolve_value(
+                            _value(ann, source, owner), consts)
+            else:
+                visit(child, owner)
+
+    visit(root, None)
+    return out
 
 
 def _type_name(method: Node, source: bytes) -> str | None:
@@ -154,12 +249,7 @@ def resolve_jaxrs(
     reached at two different bases (ambiguous), or not reached from a resource at all."""
 
     def value(v: PathValue) -> str | None:
-        kind, text = v
-        if kind == "lit":
-            return text
-        if kind == "ref":
-            return consts.get(text)
-        return None
+        return resolve_value(v, consts)
 
     app: dict[str, str | None] = {}
     class_paths: dict[str, PathValue] = {}

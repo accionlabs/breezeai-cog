@@ -97,10 +97,17 @@ def classify_call(
     if method == "setAddress" and path is not None:
         return "service_proxy", None, path, None
     if method in HTTP_VERBS and path and (is_route_receiver(obj_l) or route_scope):
-        return "route", method.upper(), path, "route"
+        return "route", method.upper(), _known_path(path), "route"
     if method == "route" and path and is_route_receiver(obj_l):
-        return "route", None, path, "route"
+        return "route", None, _known_path(path), "route"
     return None
+
+
+def _known_path(path: str) -> str | None:
+    """A route path, or None when a part is unknown. Vert.x path parameters are ``:id``, so a
+    ``{…}`` in a rendered path is a placeholder for an unresolved code value (a GString
+    interpolation or a runtime concatenation): the address is unknown — never a code name."""
+    return None if "{" in path else path
 
 
 def _addr_leaf(node: Node, source: bytes, consts: dict[str, str], string_render: StringRender) -> str | None:

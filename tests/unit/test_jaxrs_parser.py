@@ -210,3 +210,31 @@ def test_provider_request_filters_guard_bound_and_unbound_routes(analyze_files) 
         "one": (("AuthFilter", "LogFilter", "RolesAllowed(admin)"), True),  # bound on the method
         "stats": (("AuthFilter", "LogFilter"), None),                    # bound on the class
     }
+
+
+def test_path_values_resolve_or_leave_the_endpoint_empty(analyze_files) -> None:
+    # value =, a constant of the class, a constant of another class, a concatenation: resolved.
+    # A constant that is not in the repo: endpoint empty — never the constant's name.
+    st = analyze_files({
+        "src/main/java/demo/Api.java": (
+            "package demo;\npublic class Api {\n  public static final String BASE = \"/api\";\n}\n"
+        ),
+        "src/main/java/demo/Users.java": (
+            "package demo;\nimport javax.ws.rs.*;\n"
+            "@Path(value = \"users\")\n"
+            "public class Users {\n"
+            "  static final String ONE = \"{id}\";\n"
+            "  @GET public String list() { return \"\"; }\n"
+            "  @GET @Path(ONE) public String one() { return \"\"; }\n"
+            "  @GET @Path(Api.BASE + \"/x\") public String x() { return \"\"; }\n"
+            "  @GET @Path(Missing.PATH) public String gone() { return \"\"; }\n"
+            "}\n"
+        ),
+    })
+    got = {s.handler: s.endpoint for s in st if s.semanticType == "route"}
+    assert got == {
+        "list": "/users",
+        "one": "/users/{id}",
+        "x": "/users/api/x",
+        "gone": None,
+    }
