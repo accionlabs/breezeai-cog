@@ -104,9 +104,7 @@ def _csharp(n: int) -> str:
 
 def _xsd(n: int) -> str:
     body = "".join(
-        f"  <!-- field {i} -->\n"
-        f'  <xs:element name="f{i}" type="xs:string"/>\n'
-        for i in range(n)
+        f'  <!-- field {i} -->\n  <xs:element name="f{i}" type="xs:string"/>\n' for i in range(n)
     )
     return (
         '<?xml version="1.0"?>\n'
