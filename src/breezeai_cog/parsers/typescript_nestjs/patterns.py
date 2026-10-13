@@ -4,11 +4,15 @@
 NestJS serialises an object pattern as JSON with its keys sorted, so spacing, quote style and key
 order do not matter. Both sides are written that way here — ``{"cmd":"sum"}`` — so the endpoints
 compare equal. A string pattern is the string. Any part that is not a literal (a runtime
-variable, a computed key, a spread) leaves the pattern unknown: ``None``, never source text."""
+variable, a computed key, a spread) leaves the pattern unknown: ``None``, never source text.
+
+A constant inside an object or array is unknown when its value is a number's digits: the constant
+index holds ``5`` and ``'5'`` alike as ``"5"``, and JSON writes them differently (``5`` / ``"5"``)."""
 
 from __future__ import annotations
 
 import json
+import re
 from typing import Any
 
 from tree_sitter import Node
@@ -17,9 +21,11 @@ from ..treesitter import node_text
 from ..typescript.imports import resolve_const_value
 
 _UNKNOWN = object()
+#: What the constant index holds for a number (``number_literal``): ``5000``, ``1.5``.
+_NUMERIC_RE = re.compile(r"^[0-9]+(\.[0-9]+)?$")
 
 
-def _value(node: Node, source: bytes, consts: dict[str, str | None]) -> Any:
+def _value(node: Node, source: bytes, consts: dict[str, str | None], nested: bool = False) -> Any:
     t = node.type
     if t == "object":
         out: dict[str, Any] = {}
@@ -37,10 +43,10 @@ def _value(node: Node, source: bytes, consts: dict[str, str | None]) -> Any:
                     name = str(_value(key, source, consts))
                 else:  # computed key [x]
                     return _UNKNOWN
-                v = _value(value, source, consts)
+                v = _value(value, source, consts, nested=True)
             elif c.type == "shorthand_property_identifier":  # { cmd } → the variable cmd
                 name = node_text(c, source)
-                v = _value(c, source, consts)
+                v = _value(c, source, consts, nested=True)
             else:  # spread, method
                 return _UNKNOWN
             if v is _UNKNOWN:
@@ -48,7 +54,8 @@ def _value(node: Node, source: bytes, consts: dict[str, str | None]) -> Any:
             out[name] = v
         return out
     if t == "array":
-        items = [_value(c, source, consts) for c in node.named_children if c.type != "comment"]
+        items = [_value(c, source, consts, nested=True)
+                 for c in node.named_children if c.type != "comment"]
         return _UNKNOWN if any(i is _UNKNOWN for i in items) else items
     if t == "number":
         text = node_text(node, source)
@@ -66,9 +73,12 @@ def _value(node: Node, source: bytes, consts: dict[str, str | None]) -> Any:
             resolved = consts.get(node_text(node, source))
         else:
             resolved = resolve_const_value(node, source, consts)
-        return resolved if resolved is not None else _UNKNOWN
+        if resolved is None or (nested and t not in ("string", "template_string")
+                                 and _NUMERIC_RE.match(resolved)):
+            return _UNKNOWN
+        return resolved
     if t == "parenthesized_expression" and node.named_children:
-        return _value(node.named_children[0], source, consts)
+        return _value(node.named_children[0], source, consts, nested)
     return _UNKNOWN
 
 

@@ -145,6 +145,21 @@ def test_cron_and_interval_are_timers(analyze_files) -> None:
     assert got == {("timer", "0 2 * * *", "nightly"), ("timer", "5000", "poll")}
 
 
+def test_interval_from_a_numeric_constant(analyze_files) -> None:
+    st = analyze_files(
+        {
+            "package.json": PKG,
+            "src/timing.ts": "export const EVERY = 5000;\n",
+            "src/jobs.service.ts": "import { Injectable } from '@nestjs/common';\n"
+            "import { Interval } from '@nestjs/schedule';\n"
+            "import { EVERY } from './timing';\n"
+            "@Injectable()\nexport class JobsService {\n"
+            "  @Interval(EVERY)\n  poll() {}\n}\n",
+        }
+    )
+    assert {(r.endpoint, r.handler) for r in _eps(st)} == {("5000", "poll")}
+
+
 def test_named_interval_timeout_and_library_cron(analyze_files) -> None:
     st = analyze_files(
         {

@@ -770,3 +770,23 @@ export class MathController {
     ]
     sends = [s.endpoint for s in rec.statements if s.semanticType == "eventbus_send"]
     assert sends == ['{"a":1,"cmd":"sum"}', None]  # matches its consumer; a spread → unknown
+
+
+def test_object_pattern_with_a_numeric_constant_is_unknown(analyze_files) -> None:
+    # The constant index holds 2 and '2' alike as "2"; inside an object JSON writes them
+    # differently ({"v":2} / {"v":"2"}), so such a part is unknown — never a guessed type.
+    # At the top level both serialise to "2", so the pattern is known.
+    st = analyze_files({
+        "package.json": '{"dependencies": {"@nestjs/core": "10", "@nestjs/microservices": "10"}}',
+        "src/math.controller.ts": (
+            "import { Controller } from '@nestjs/common';\n"
+            "import { MessagePattern } from '@nestjs/microservices';\n"
+            "const VERSION = 2;\nconst NAME = 'sum';\n"
+            "@Controller()\nexport class MathController {\n"
+            "  @MessagePattern({ cmd: NAME, v: VERSION })\n  versioned() { return 0; }\n"
+            "  @MessagePattern({ cmd: NAME })\n  named() { return 0; }\n"
+            "  @MessagePattern(VERSION)\n  top() { return 0; }\n}\n"
+        ),
+    })
+    got = {s.handler: s.endpoint for s in st if s.semanticType == "eventbus_consumer"}
+    assert got == {"versioned": None, "named": '{"cmd":"sum"}', "top": "2"}

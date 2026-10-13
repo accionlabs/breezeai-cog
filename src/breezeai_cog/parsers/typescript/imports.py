@@ -35,9 +35,10 @@ _INDEXES = ("index.ts", "index.tsx", "index.js", "index.jsx", "index.vue")
 class TsAliasIndex:
     """Repo-wide TS resolution index (picklable — crosses the process boundary).
 
-    Holds tsconfig path aliases plus a **string-constant value map**: repo-wide
-    ``symbol → literal`` for top-level ``const``s, string ``enum`` members, and
-    ``static readonly`` class fields (keyed ``NAME`` or ``Type.MEMBER``). A symbol
+    Holds tsconfig path aliases plus a **constant value map**: repo-wide
+    ``symbol → literal`` for top-level ``const``s, ``enum`` members with an initializer, and
+    ``static readonly`` class fields (keyed ``NAME`` or ``Type.MEMBER``) whose value is a string
+    or a number (as JavaScript writes it in a string: ``5_000`` → ``5000``). A symbol
     declared with differing literals in >1 place maps to ``None`` (ambiguous → do not
     resolve through it — precision-first, mirroring the C# type index)."""
 
@@ -224,6 +225,30 @@ def _string_literal(node: Node | None, source: bytes) -> str | None:
     return node_text(frag, source) if frag is not None else ""
 
 
+_DECIMAL_RE = re.compile(r"^(0|[1-9][0-9]*)\.[0-9]*[1-9]$")
+
+
+def number_literal(node: Node | None, source: bytes) -> str | None:
+    """A ``number`` node as JavaScript renders it in a string (`` `${n}` ``): an integer in any
+    base (``5_000`` / ``0x10`` → ``5000`` / ``16``) or a plain decimal (``1.5``); anything
+    else (an exponent, ``1.0``, a legacy octal ``010``) → None rather than a guess."""
+    if node is None or node.type != "number":
+        return None
+    text = node_text(node, source).replace("_", "")
+    try:
+        return str(int(text, 0))
+    except ValueError:
+        return text if _DECIMAL_RE.match(text) else None
+
+
+def _literal(node: Node | None, source: bytes, *, constant: bool) -> str | None:
+    """A string literal's value, or a number literal's (see :func:`number_literal`) when the
+    declaration is ``constant`` (``const`` / ``readonly``): a ``let`` number is often a counter."""
+    if node is not None and node.type == "number":
+        return number_literal(node, source) if constant else None
+    return _string_literal(node, source)
+
+
 # ── reusable constant-value resolution ─────────────────────────────────────────
 # These resolve a value that is built from a *constant* (a symbol, a member path into a
 # ``{…} as const`` object, or a template of those) to its literal string — the general primitive
@@ -288,7 +313,9 @@ def _resolve_template(node: Node, source: bytes, consts: dict[str, str | None]) 
             out.append(node_text(c, source))
         elif c.type == "template_substitution":
             inner = c.named_children[0] if c.named_children else None
-            val = resolve_const_value(inner, source, consts) if inner is not None else None
+            val = None if inner is None else (
+                number_literal(inner, source) if inner.type == "number"
+                else resolve_const_value(inner, source, consts))
             if val is None:
                 return None  # any unresolved substitution → whole template unresolved
             out.append(val)
@@ -343,8 +370,10 @@ def flatten_const_object(
 def _collect_const_values(root: Node, source: bytes, const_values: dict[str, str | None]) -> None:
     """Record ``symbol → literal`` from one file's top-level constants: ``const NAME = 'x'``,
     ``enum E { M = 'x' }`` (→ ``E.M``), ``static readonly M = 'x'`` (→ ``C.M``), and the leaves of
-    a ``const X = {…} as const`` object (→ ``X.a.b``, folding templates + const refs). Non-string
-    values are skipped; a symbol seen with >1 distinct literal collapses to ``None`` (honest-null)."""
+    a ``const X = {…} as const`` object (→ ``X.a.b``, folding templates + const refs). Values
+    other than a string or a number are skipped, and a number only counts when declared constant
+    (``const`` / ``readonly`` / an enum member); a symbol seen with >1 distinct literal collapses
+    to ``None`` (honest-null)."""
     def add(sym: str, val: str | None) -> None:
         if val is not None:
             record_distinct(const_values, sym, val)
@@ -359,12 +388,13 @@ def _collect_const_values(root: Node, source: bytes, const_values: dict[str, str
         if node is None:
             continue
         if node.type in ("lexical_declaration", "variable_declaration"):
+            constant = bool(node.children) and node.children[0].type == "const"
             for d in node.named_children:
                 if d.type == "variable_declarator":
                     nm = d.child_by_field_name("name")
                     if nm is not None and nm.type == "identifier":
                         value = _unwrap_const_expr(d.child_by_field_name("value"))
-                        add(node_text(nm, source), _string_literal(value, source))
+                        add(node_text(nm, source), _literal(value, source, constant=constant))
                         if value is not None and value.type == "object":
                             obj_consts[node_text(nm, source)] = value
         elif node.type == "enum_declaration":
@@ -374,9 +404,9 @@ def _collect_const_values(root: Node, source: bytes, const_values: dict[str, str
                 for m in body.named_children:
                     if m.type == "enum_assignment":
                         mn = next((c for c in m.named_children if c.type == "property_identifier"), None)
-                        mv = next((c for c in m.named_children if c.type == "string"), None)
+                        mv = next((c for c in m.named_children if c.type in ("string", "number")), None)
                         if mn is not None:
-                            add(f"{node_text(ename, source)}.{node_text(mn, source)}", _string_literal(mv, source))
+                            add(f"{node_text(ename, source)}.{node_text(mn, source)}", _literal(mv, source, constant=True))
         elif node.type == "class_declaration":
             cname = next((c for c in node.named_children if c.type in ("type_identifier", "identifier")), None)
             body = next((c for c in node.named_children if c.type == "class_body"), None)
@@ -384,9 +414,11 @@ def _collect_const_values(root: Node, source: bytes, const_values: dict[str, str
                 for f in body.named_children:
                     if f.type == "public_field_definition":
                         fn = next((c for c in f.named_children if c.type == "property_identifier"), None)
-                        fv = next((c for c in f.named_children if c.type == "string"), None)
+                        fv = next((c for c in f.named_children if c.type in ("string", "number")), None)
+                        readonly = any(c.type == "readonly" for c in f.children)
                         if fn is not None:
-                            add(f"{node_text(cname, source)}.{node_text(fn, source)}", _string_literal(fv, source))
+                            add(f"{node_text(cname, source)}.{node_text(fn, source)}",
+                                _literal(fv, source, constant=readonly))
 
     # Pass 2: flatten object consts now that flat consts are collected (their leaves may reference
     # a sibling flat const via a `${…}` template, e.g. `root: `/${segment}``).

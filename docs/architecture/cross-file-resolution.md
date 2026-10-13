@@ -299,8 +299,11 @@ How (`parsers/constfold.py`):
 - Mixed literal and runtime parts are joined with `{name}` placeholders.
 
 Used by: the Java and Groovy indexes, and the Vert.x parsers (Java and Groovy). TypeScript has its
-own constant map in its index (top-level `const`s, string enums, `static readonly`), used for
-Angular, React and Express route paths.
+own constant map in its index (top-level `const`s, enum members, `static readonly`), used for
+Angular, React and Express route paths, URLs and NestJS patterns and schedules. It holds strings,
+and numbers as JavaScript writes them in a string (`` `/api/v${VERSION}` `` with `const VERSION =
+2` → `/api/v2`) — a number only from a constant declaration (`const`, an enum member, a
+`readonly` field), as a `let` number is often a counter.
 
 **Guard for generated code:** very long `+` chains (generated HTML/JS builders, hundreds of
 levels deep) would overflow Python's stack. Past `max_concat_depth` (default 100) cog leaves the
