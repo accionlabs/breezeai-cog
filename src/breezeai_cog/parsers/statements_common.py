@@ -91,6 +91,10 @@ def summarize_skipped_concats(path: str) -> str | None:
 # (callee, method, first_string_arg) or None for a single call node.
 CallDetails = Callable[[Node, bytes], "tuple[str, str, str | None] | None"]
 NameOf = Callable[[Node, bytes], "str | None"]
+# (semanticType, method, endpoint, dataAccessHint) or None for one call-like node. A language
+# whose constructs the shared heuristics cannot classify (Apex DML / inline SOQL) supplies this
+# instead of ``call_details``; it replaces ``classify_call`` for that language.
+ClassifyNode = Callable[[Node, bytes], "tuple[str, str | None, str | None, str | None] | None"]
 
 
 def _trailing_comment_end(node: Node, source: bytes) -> int:
@@ -298,6 +302,7 @@ def classify_statement(
     typed_db_ids: "frozenset[str] | None" = None,
     decorators: "list[Decorator] | None" = None,
     local_names: Collection[str] = (),
+    classify: ClassifyNode | None = None,
 ) -> list[Statement]:
     # ``code_text`` (comment-free) drives query/semantic detection; ``display_text`` is what
     # lands on the record — for a normal statement it folds in a same-line trailing comment
@@ -312,9 +317,18 @@ def classify_statement(
     end = node.end_point[0] + 1
 
     # All api/db/query hits in this statement's own expression, deduped by (kind, method).
-    hits: list[tuple[str, str, str | None, str | None, Node]] = []
-    seen_hit: set[tuple[str, str]] = set()
+    hits: list[tuple[str, str | None, str | None, str | None, Node]] = []
+    seen_hit: set[tuple[str, str | None]] = set()
     for call in _calls_in_statement(node, emit_types, call_type, stmt_expr, container_types):
+        if classify is not None:
+            node_hit = classify(call, source)
+            if node_hit is None:
+                continue
+            sem, meth, ep, dh = node_hit
+            if (sem, meth) not in seen_hit:
+                seen_hit.add((sem, meth))
+                hits.append((sem, meth, ep, dh, call))
+            continue
         det = call_details(call, source)
         if det is None:
             continue
