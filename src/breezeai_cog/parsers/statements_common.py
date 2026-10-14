@@ -146,6 +146,32 @@ def strip_leading_base(url: str) -> str:
     return url
 
 
+def render_template_url(
+    node: Node,
+    source: bytes,
+    resolve_substitution: Callable[[Node], str | None] | None = None,
+) -> str:
+    """Render a TypeScript/JavaScript template literal as a URL or route path.
+
+    Shared by framework parsers so known substitutions can be resolved before
+    unresolved expressions become placeholders.
+    """
+    parts: list[str] = []
+    for child in node.named_children:
+        if child.type == "string_fragment":
+            parts.append(node_text(child, source))
+        elif child.type == "template_substitution":
+            expression = child.named_children[0] if child.named_children else None
+            if expression is None:
+                parts.append("{param}")
+                continue
+            resolved = resolve_substitution(expression) if resolve_substitution else None
+            parts.append(
+                resolved if resolved is not None else url_placeholder(node_text(expression, source))
+            )
+    return strip_leading_base("".join(parts))
+
+
 #: Max binary-expression nesting ``render_concat`` will fold. String concatenation is
 #: left-associative, so ``a + b + … + z`` is a deeply *nested* tree; folding it recurses
 #: once per ``+`` (``render_concat`` ↔ the language ``_render_url``). Generated HTML/JS

@@ -20,7 +20,7 @@ from ...emit import disambiguate, file_id, statement_id
 from ...schemas import FileRecord, Statement
 from ..additive import DetectContext, Detector, register_detector
 from ..enclosing import Enclosing
-from ..statements_common import strip_leading_base, url_placeholder
+from ..statements_common import render_template_url
 from ..treesitter import first_line, node_text
 
 # HTTP-verb methods that register a route handler on an app/router.
@@ -63,14 +63,7 @@ def _template_value(node: Node, source: bytes) -> str:
     """Render a ``template_string`` path to a route path, turning each ``${expr}`` into a
     ``{name}`` placeholder (``/sitemaps/${key}.txt`` → ``/sitemaps/{key}.txt``). A leading
     interpolated base/host segment is dropped so the path matches inbound routes."""
-    parts: list[str] = []
-    for c in node.named_children:
-        if c.type == "string_fragment":
-            parts.append(node_text(c, source))
-        elif c.type == "template_substitution":
-            expr = c.named_children[0] if c.named_children else None
-            parts.append(url_placeholder(node_text(expr, source)) if expr is not None else "{param}")
-    return strip_leading_base("".join(parts))
+    return render_template_url(node, source)
 
 
 def _path_value(node: Node, source: bytes) -> str | None:
