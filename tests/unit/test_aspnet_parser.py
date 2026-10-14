@@ -326,11 +326,11 @@ def test_mvc_route_registration() -> None:
     routes = {s.endpoint: s for s in rec.statements if s.semanticType == "route"}
     assert routes["/products/{id}"].method == "ANY"
     assert routes["/products/{id}"].handler == "Catalog.Details"
-    # The default convention template identifies no single action: wiring, no route record.
-    assert "/{controller}/{action}/{id}" not in routes
+    assert "/{controller}/{action}/{id}" in routes            # default template captured
+    assert routes["/{controller}/{action}/{id}"].handler == "Home.Index"
 
 
-def test_mvc_route_registration_binding_vs_convention() -> None:
+def test_mvc_route_registrations_are_all_recorded() -> None:
     src = (b"using System.Web.Mvc;\nnamespace A {\npublic class RouteConfig {\n"
            b"public static void RegisterRoutes(RouteCollection routes) {\n"
            b'routes.MapRoute("About", "about", new { controller = "Home", action = "About" });\n'
@@ -340,7 +340,9 @@ def test_mvc_route_registration_binding_vs_convention() -> None:
            b"} } }")
     rec = _parse(AspNetCoreParser(), src, "App_Start/RouteConfig.cs")
     routes = {s.endpoint: s.handler for s in rec.statements if s.semanticType == "route"}
-    assert routes == {"/about": "Home.About"}  # only the template that names one action
+    # Every template is a route (the Target Spec's current form); the handler is its defaults.
+    assert routes == {"/about": "Home.About", "/admin/{action}": "Admin.Index",
+                      "/shop/{id}": "Shop", "/api/{controller}/{id}": None}
 
 
 def test_csharp_minimal_apis() -> None:
@@ -377,8 +379,8 @@ def test_csharp_endpoint_registrations() -> None:
     rec = _parse(AspNetCoreParser(), STARTUP, "Startup.cs")
     routes = {(s.method, s.endpoint): s for s in rec.statements if s.semanticType == "route"}
     assert ("GET", "/health") in routes and routes[("GET", "/health")].framework == "aspnet"
-    # The GraphQL transport mount is wiring (it serves every operation): no record
-    assert ("POST", "/graphql") not in routes
+    # GraphQL HTTP mount: verb POST, path resolved from the _graphQlEndpoint field
+    assert ("POST", "/graphql") in routes and routes[("POST", "/graphql")].framework == "graphql"
     # dev UIs at their library-default paths
     assert ("GET", "/ui/playground") in routes
     assert ("GET", "/ui/voyager") in routes
@@ -386,11 +388,12 @@ def test_csharp_endpoint_registrations() -> None:
     assert not any("{controller" in (e or "") for _, e in routes)
 
 
-def test_graphql_transport_mount_is_wiring() -> None:
+def test_graphql_mount_defaults_when_no_arg() -> None:
     src = b'''using Microsoft.AspNetCore.Builder;
 namespace A { class S { void C(IApplicationBuilder app){ app.UseGraphQL<ISchema>(); } } }'''
     rec = _parse(AspNetCoreParser(), src, "S.cs")
-    assert [s for s in rec.statements if s.semanticType == "route"] == []
+    routes = {(s.method, s.endpoint) for s in rec.statements if s.semanticType == "route"}
+    assert ("POST", "/graphql") in routes  # graphql-dotnet convention default
 
 
 def test_vb_controller_routes() -> None:
@@ -565,7 +568,7 @@ End Module
 
 
 def test_wiring_only_route_config_keeps_aspnet_label(tmp_path) -> None:
-    # A RouteConfig with only a convention template has no route record, but is still ASP.NET.
+    # A RouteConfig with only a convention template is ASP.NET, with the template as a route.
     from breezeai_cog import iter_file_records
 
     (tmp_path / "RouteConfig.cs").write_text(
@@ -577,4 +580,5 @@ def test_wiring_only_route_config_keeps_aspnet_label(tmp_path) -> None:
     )
     [rec] = list(iter_file_records(tmp_path))
     assert rec.framework == "aspnet"
-    assert [s for s in rec.statements if s.semanticType == "route"] == []
+    assert [s.endpoint for s in rec.statements if s.semanticType == "route"] == [
+        "/{controller}/{action}/{id}"]

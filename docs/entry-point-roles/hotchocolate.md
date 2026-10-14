@@ -16,5 +16,5 @@ Parser: `src/breezeai_cog/parsers/csharp_hotchocolate/` · Rules: [entry-point c
 | `[NodeResolver]` on a `[Node]` type (Relay); on a query root it is also a query field (two records) | Binding | `route`, `RESOLVE_REFERENCE`, `routeKind: query`, type name as `endpoint` | Called by the generated `node` field |
 | `descriptor.ImplementsNode().ResolveNode(…)` / `ResolveNodeWith<T>(…)` / `ResolveReferenceWith(…)` | Binding | `route`, `RESOLVE_REFERENCE`, `routeKind: query`, the descriptor's type as `endpoint`; inline lambda → `handlerLine` only | Fluent form of the two rows above |
 | `[Authorize]` / `.Authorize(...)` | Guard | name in `guards` | |
-| `MapGraphQL("/graphql")` | Wiring | statement stays plain | Transport path; operations are addressed by name |
+| `MapGraphQL("/graphql")` | Wiring | `route`, `POST /graphql`, `framework: graphql`, no handler — the Target Spec's current form | Transport path; operations are addressed by name |
 | `AddGraphQLServer()` | None | — | Start-up |

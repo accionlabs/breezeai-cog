@@ -314,9 +314,10 @@ public class AttendeeType : ObjectType<Attendee>
         "RESOLVE_REFERENCE", "query", "Attendee", None, line, line,
     )
 
-def test_map_graphql_is_wiring(analyze_files) -> None:
+def test_map_graphql_is_a_post_route(analyze_files) -> None:
+    # The Target Spec's current form: the transport mount is a POST route with no handler.
     stmts = analyze_files({"Program.cs": PROGRAM})
-    assert _eps(stmts) == []
+    assert [(s.method, s.endpoint, s.handler) for s in _eps(stmts)] == [("POST", "/graphql", None)]
 
 
 def test_add_graphql_server_is_none(analyze_files) -> None:

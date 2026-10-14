@@ -50,10 +50,11 @@ _MAP_METHODS = {
 }
 # Health-check endpoint: MapHealthChecks("/path", …) → GET at the literal path.
 _HEALTH_METHODS = {"MapHealthChecks"}
-# The GraphQL HTTP transport mount — UseGraphQL<TSchema>(path) / MapGraphQL(path) — serves every
-# operation of the schema: wiring (contract §4), so it has no record; the operations (resolvers)
-# are the bindings.
-GRAPHQL_TRANSPORT_RE = re.compile(rb"\.(?:UseGraphQL|MapGraphQL)\s*[<(]")
+# GraphQL HTTP transport mount: UseGraphQL<TSchema>(path) / MapGraphQL(path) → POST, the Target
+# Spec's current form. The path is often an identifier/omitted; graphql-dotnet's convention
+# default is /graphql. It serves every operation of the schema: framework code, no handler.
+_GRAPHQL_MOUNTS = {"UseGraphQL", "MapGraphQL"}
+_GRAPHQL_MOUNT_DEFAULT = "/graphql"
 # GraphQL dev-UI middleware, each with a documented default path when called with no path.
 _GRAPHQL_UIS = {
     "UseGraphQLPlayground": "/ui/playground",
@@ -63,7 +64,7 @@ _GRAPHQL_UIS = {
 }
 #: Calls that register a URL served by framework code, with no handler of ours: its binding is
 #: recorded with an empty handler (contract §4).
-FRAMEWORK_SERVED: frozenset[str] = frozenset(_HEALTH_METHODS | _GRAPHQL_UIS.keys())
+FRAMEWORK_SERVED: frozenset[str] = frozenset(_HEALTH_METHODS | _GRAPHQL_MOUNTS | _GRAPHQL_UIS.keys())
 # MapControllers()/MapControllerRoute() only *enable* attribute/conventional routing; the
 # concrete controller endpoints come from detect_controller_routes, so they emit nothing
 # here (a conventional-route pattern like "{controller}/{action}" is not a callable path).
@@ -292,9 +293,9 @@ def detect_minimal_api_routes(
     member_type: str,
 ) -> list[Emit]:
     """AST-walk for endpoint registrations on an ``app``/``endpoints`` object:
-    ``MapGet/MapPost/…`` minimal APIs, ``MapHealthChecks`` and the GraphQL dev-UI middleware
-    (``UseGraphQLPlayground``/…). The GraphQL transport mount (``UseGraphQL``/``MapGraphQL``) is
-    wiring and has no record. Grammar-specific node/field names are supplied by the C#/VB caller."""
+    ``MapGet/MapPost/…`` minimal APIs, ``MapHealthChecks``, and the GraphQL HTTP mount +
+    dev-UI middleware (``UseGraphQL``/``MapGraphQL``/``UseGraphQLPlayground``/…). Grammar-
+    specific node/field names are supplied by the C#/VB caller."""
     routes: list[Emit] = []
     name_field = "name" if member_type == "member_access_expression" else "member"
     fn_field = "function" if invocation_type == "invocation_expression" else "target"
@@ -523,6 +524,8 @@ def _endpoint_spec(
     if method in _HEALTH_METHODS:
         endpoint = _minimal_path(call, source)
         return ("GET", "aspnet", endpoint) if endpoint is not None else None
+    if method in _GRAPHQL_MOUNTS:
+        return "POST", "graphql", _graphql_mount_path(call, root, source)
     if method in _GRAPHQL_UIS:
         endpoint = _ui_path(call, source, _GRAPHQL_UIS[method])
         return ("GET", "graphql", endpoint) if endpoint is not None else None
@@ -539,6 +542,42 @@ def _positional_args(call: Node) -> list[Node]:
         if inner is not None:
             out.append(inner)
     return out
+
+
+def _graphql_mount_path(call: Node, root: Node, source: bytes) -> str:
+    """Endpoint of a GraphQL HTTP mount: a literal path, an in-file resolved string
+    identifier, else graphql-dotnet's ``/graphql`` convention (also used when no path arg)."""
+    args = _positional_args(call)
+    if not args:
+        return _GRAPHQL_MOUNT_DEFAULT
+    first = args[0]
+    if first.type == "string_literal":
+        return _literal(first, source)
+    if first.type == "identifier":
+        return _resolve_str(node_text(first, source), root, source) or _GRAPHQL_MOUNT_DEFAULT
+    return _GRAPHQL_MOUNT_DEFAULT
+
+
+def _resolve_str(name: str, root: Node, source: bytes) -> str | None:
+    """In-file value of a string field/local (``private readonly string _x = "…";`` or
+    ``var x = "…";``) — the first ``variable_declarator`` binding ``name`` to a string."""
+    found: str | None = None
+
+    def walk(n: Node) -> None:
+        nonlocal found
+        if found is not None:
+            return
+        if n.type == "variable_declarator":
+            nm = n.child_by_field_name("name") or (n.named_children[0] if n.named_children else None)
+            val = next((c for c in n.named_children if c.type == "string_literal"), None)
+            if nm is not None and val is not None and node_text(nm, source) == name:
+                found = _literal(val, source)
+                return
+        for c in n.named_children:
+            walk(c)
+
+    walk(root)
+    return found
 
 
 def _ui_path(call: Node, source: bytes, default: str) -> str | None:
@@ -615,15 +654,11 @@ def detect_route_registrations(
 ) -> tuple[list[Emit], bool]:
     """AST-walk for MVC / Web-API **convention-route registrations** —
     ``routes.MapRoute(name, url, defaults)`` / ``config.Routes.MapHttpRoute(…)`` declared in
-    ``RouteConfig`` / ``Global.asax`` / an ``AreaRegistration``. A template that names one
-    action — no ``{controller}`` / ``{action}`` placeholder, and a literal default ``controller``
-    and ``action`` — is a binding: a ``route`` (method ``ANY``, since a convention route matches
-    any verb) with ``Controller.Action`` as the handler. A convention template
-    (``{controller}/{action}/{id}``, Web API ``api/{controller}/{id}`` where the verb picks the
-    action) identifies no single handler: it is wiring and its statement stays plain.
-    Grammar-specific node/field names are supplied by the C#/VB caller. Returns the bindings and
-    whether any registration was seen — a wiring-only file (``RouteConfig.cs``) is still ASP.NET
-    code and keeps its ``aspnet`` label."""
+    ``RouteConfig`` / ``Global.asax`` / an ``AreaRegistration``. Emits the declared URL template
+    as a ``route`` (method ``ANY``, since a convention route matches any verb), with the default
+    ``controller``[.``action``] as the handler — the Target Spec's current form, a convention
+    template (``{controller}/{action}/{id}``) included. Grammar-specific node/field names are
+    supplied by the C#/VB caller. Returns the records and whether any registration was seen."""
     routes: list[Emit] = []
     seen_registration = False
     name_field = "name" if member_type == "member_access_expression" else "member"
@@ -641,10 +676,9 @@ def detect_route_registrations(
                     text = node_text(child, source) if url else ""
                     seen_registration = seen_registration or url is not None
                     ctrl, action = _CTRL_RE.search(text), _ACTION_RE.search(text)
-                    one_action = (url is not None and ctrl is not None and action is not None
-                                  and "{controller}" not in url and "{action}" not in url)
-                    if url and one_action and ctrl is not None and action is not None:
-                        handler = f"{ctrl.group(1)}.{action.group(1)}"
+                    if url:
+                        handler = (f"{ctrl.group(1)}.{action.group(1)}" if ctrl and action
+                                   else ctrl.group(1) if ctrl else None)
                         routes.append(Emit(child, dict(
                             semanticType="route",
                             method="ANY",

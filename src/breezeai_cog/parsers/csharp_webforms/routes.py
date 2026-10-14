@@ -7,11 +7,13 @@ is convention-based: for each code-behind file it emits ONE synthetic, file-pare
 ``route`` statement, mirroring how the React detector treats config/markup routes.
 
 * ``.aspx.cs`` → ``routeKind=page``   (a navigable page)
-* ``.ascx.cs`` → no record            (a user control: part of the pages that load it)
+* ``.ascx.cs`` → ``routeKind=mount``  (a user control — the Target Spec's current form)
 * ``.master.cs`` → no record          (a layout, not a route)
 
-A page's links to its master page and to the controls it loads are structural links, recorded in
-``importFiles`` by the parser — never as route records (contract §5).
+A page or control composed into a master page also gets a ``routeKind=layout`` record
+(:func:`detect_master_layout`), and a host markup file a ``mount`` record per control it
+registers (the parser) — the Target Spec's current form for these links. The same links are
+also in ``importFiles``.
 
 ``endpoint`` is derived from the code-behind path (``CMS/Enrollment.aspx.cs`` →
 ``/CMS/Enrollment.aspx``); ``handler`` is the code-behind class. Because no AST node backs
@@ -32,6 +34,7 @@ from ..emits import Emit
 #: (no backing AST node — the markup isn't parsed); the page/control distinction lives in routeKind.
 _KIND_BY_SUFFIX: dict[str, tuple[str, str]] = {
     ".aspx.cs": ("page", "synthetic"),
+    ".ascx.cs": ("mount", "synthetic"),
 }
 
 
@@ -54,8 +57,9 @@ def detect_webforms_pages(
 ) -> list[Emit]:
     """File-parented ``route`` record(s) for a Web Forms page, for :func:`~..emits.apply` —
     read off the record and the path, so the file's root stands in for a node and the span is
-    set explicitly. Returns ``[]`` for anything else (a user control, a ``.master.cs``, a plain
-    base-class file).
+    set explicitly. A user control (``.ascx.cs``) is a ``routeKind="mount"`` record, the Target
+    Spec's current form. Returns ``[]`` for anything else (a ``.master.cs``, a plain base-class
+    file).
 
     When ``page_routes`` (the ``webforms.page-routes`` fact) maps this page's physical ``.aspx`` to friendly
     ``MapPageRoute`` URLs, the endpoint is **enriched** with the real routed URL(s) — one
@@ -124,3 +128,26 @@ def _page_methods(
             ), parent=fn.id, node_type="synthetic", text=f"[WebMethod] {cls.name}.{fn.name}",
                 line=fn.startLine, col=0, end_line=fn.endLine))
     return out
+
+
+def detect_master_layout(
+    record: FileRecord, root: Node, path: str, master_endpoint: str | None
+) -> list[Emit]:
+    """A ``routeKind="layout"`` record (the Target Spec's current form) saying that this page,
+    control or master composes into ``master_endpoint`` (its ``MasterPageFile``); ``[]`` when there
+    is no master. No HTTP ``method`` — a layout is a composition, not a served verb. The backend
+    joins ``endpoint`` to the master's path for the page → master link; the link is also in
+    ``importFiles``."""
+    if master_endpoint is None:
+        return []
+    cls = _page_class(record, path)
+    start = cls.startLine if cls is not None else 1
+    end = cls.endLine if cls is not None else 1
+    return [Emit(root, dict(
+        semanticType="route",
+        endpoint=master_endpoint,
+        framework="aspnet-webforms",
+        routeKind="layout",
+        handler=cls.name if cls is not None else None,
+    ), parent=file_id(path), node_type="synthetic", text=master_endpoint,
+        line=start, col=1, end_line=end)]  # col 1 → distinct from the page record (col 0)

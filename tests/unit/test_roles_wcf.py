@@ -138,8 +138,10 @@ def test_svc_without_implementer_leaves_the_address_empty(wcf) -> None:
     assert r.endpoint is None
 
 
-def test_svc_host_directive_is_wiring(wcf) -> None:
-    assert [s for s in _eps(wcf) if s.path == "Services/OrderService.svc"] == []
+def test_svc_host_directive_is_an_rpc_route(wcf) -> None:
+    # The Target Spec's current form: the directive is a route, RPC, endpoint = the .svc file.
+    [r] = [s for s in _eps(wcf) if s.path == "Services/OrderService.svc"]
+    assert (r.method, r.routeKind, r.endpoint) == ("RPC", "rpc", "Services/OrderService.svc")
 
 
 def test_svc_host_keeps_codebehind_link(analyze_files, tmp_path) -> None:
@@ -172,14 +174,16 @@ def test_asmx_endpoint_uses_asmx_file(analyze_files) -> None:
     assert r.endpoint == "Orders.asmx/GetOrder"
 
 
-def test_asmx_host_directive_is_wiring(analyze_files) -> None:
+def test_asmx_host_directive_is_an_rpc_route(analyze_files) -> None:
+    # The Target Spec's current form: the directive is a route, RPC, endpoint = the .asmx file.
     stmts = analyze_files(
         {
             "Orders.asmx": '<%@ WebService Class="Shop.Orders" CodeBehind="Orders.asmx.cs" %>',
             "Orders.asmx.cs": ASMX_CB,
         }
     )
-    assert [s for s in _eps(stmts) if s.path == "Orders.asmx"] == []
+    [r] = [s for s in _eps(stmts) if s.path == "Orders.asmx"]
+    assert (r.method, r.routeKind, r.endpoint, r.handler) == ("RPC", "rpc", "Orders.asmx", "Shop.Orders")
 
 
 def test_generated_client_proxy_is_outbound(analyze_files) -> None:

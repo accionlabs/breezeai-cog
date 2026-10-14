@@ -115,9 +115,12 @@ def test_conventional_mvc_action_is_binding(analyze_files) -> None:
     assert (r.method, r.endpoint, r.handler) == ("GET", "/Home/About", "About")
 
 
-def test_maproute_registration_is_wiring(analyze_files) -> None:
+def test_maproute_registration_is_an_any_route(analyze_files) -> None:
+    # The Target Spec's current form: the template is a route, method ANY, handler = its defaults.
     stmts = analyze_files({"RouteConfig.cs": ROUTE_CONFIG})
-    assert _eps(stmts) == []
+    assert [(s.method, s.endpoint, s.handler) for s in _eps(stmts)] == [
+        ("ANY", "/{controller}/{action}/{id}", "Home.Index"),
+    ]
 
 
 def test_authorize_attribute_is_guard(analyze_files) -> None:
@@ -160,8 +163,10 @@ def test_health_checks_is_binding_without_handler(program) -> None:
     assert (r.semanticType, r.endpoint, r.handler) == ("route", "/health", None)
 
 
-def test_map_graphql_is_wiring(program) -> None:
-    assert _at(program, "Program.cs", _program_line("app.MapGraphQL()")) == []
+def test_map_graphql_is_a_post_route(program) -> None:
+    # The Target Spec's current form: the transport mount is a POST route with no handler.
+    [r] = _at(program, "Program.cs", _program_line("app.MapGraphQL()"))
+    assert (r.method, r.endpoint, r.handler) == ("POST", "/graphql", None)
 
 
 def test_graphql_ui_is_binding_without_handler(program) -> None:

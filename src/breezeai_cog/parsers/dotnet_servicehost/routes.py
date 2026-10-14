@@ -109,11 +109,12 @@ def detect_service_host(
     """Parse the ServiceHost/WebService directive of a ``.svc``/``.asmx`` file. Returns
     ``(directive statement or None, framework label or None, import paths)``.
 
-    The directive is wiring (contract §4): it names the class that serves the address, and the
-    operations — recorded from the class (``csharp_wcf``) under this file's path — are the
-    bindings. So its statement stays **plain**: the directive text, no ``semanticType``,
-    endpoint, handler or ``routeKind``. Nothing when the path is neither type, the file has no
-    directive, or the directive names no concrete class (honest-null)."""
+    The directive names the class that serves the address; the operations are recorded from
+    the class (``csharp_wcf``) under this file's path. The directive itself is a ``route``
+    record in the Target Spec's current form: ``method="RPC"``, ``routeKind="rpc"`` (the spec's
+    WCF / ASMX kind, a REST / OData host included), ``endpoint`` = the file, ``handler`` = the
+    class. Nothing when the path is neither type, the file has no directive, or the directive
+    names no concrete class (honest-null)."""
     spec = spec_for(rel_path)
     if spec is None:
         return None, None, []
@@ -144,9 +145,16 @@ def detect_service_host(
     col = m.start() - (source.rfind(b"\n", 0, m.start()) + 1)
     stmt = Statement(
         id=disambiguate(statement_id(rel_path, line, col), seen_ids),
-        parentId=file_id(rel_path),  # the host file (no functions here)
+        parentId=file_id(rel_path),  # the host file owns the endpoint (no functions here)
         nodeType="synthetic",  # directive-derived, no backing AST node
+        semanticType="route",
         text=m.group(0).decode("utf-8", "replace"),  # the full <%@ … %> directive (searchable)
+        framework=framework,  # spec default (wcf/asmx), or a Factory-derived protocol (odata/wcf-rest)
+        method="RPC",  # host-level marker — addressed by name, not a per-request HTTP verb
+        endpoint=rel_path,  # the served endpoint (physical path)
+        handler=cls,  # the concrete impl FQN — resolves interface/URL → concrete class
+        routeKind="rpc",
+        isRegex=False,
         startLine=line,
         endLine=source[: m.end()].count(b"\n") + 1,
         path=rel_path,

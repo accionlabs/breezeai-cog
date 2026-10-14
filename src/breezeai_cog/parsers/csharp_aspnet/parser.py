@@ -12,7 +12,6 @@ from ..emits import apply
 from ..csharp.parser import CSharpParser
 from ..treesitter import parse_source
 from ..aspnet_common import (
-    GRAPHQL_TRANSPORT_RE,
     detect_controller_routes,
     detect_minimal_api_routes,
     detect_route_registrations,
@@ -43,10 +42,7 @@ class AspNetCoreParser(CSharpParser):
                 invocation_type="invocation_expression", member_type="member_access_expression",
             )
             routes += registrations
-            # A wiring-only RouteConfig, or a composition root whose only endpoint is the GraphQL
-            # transport mount (wiring, no record), is still ASP.NET code.
-            wiring = wiring or GRAPHQL_TRANSPORT_RE.search(ctx.source) is not None
-            if routes or wiring:
+            if routes or wiring:  # a wiring-only RouteConfig is still ASP.NET code
                 apply(record, routes, ctx.source, ctx.path)
                 record.framework = "aspnet"
         return record

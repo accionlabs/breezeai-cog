@@ -1,5 +1,4 @@
-"""ServiceHost parser (WCF ``.svc`` + ASMX ``.asmx``): directive parsing, the directive as a plain
-(wiring) statement + the file's framework label,
+"""ServiceHost parser (WCF ``.svc`` + ASMX ``.asmx``): directive parsing, route(rpc) emission,
 CodeBehind IMPORTS resolution, capture-gating, honest-null cases, selection, schema validation."""
 
 from __future__ import annotations
@@ -64,12 +63,7 @@ def _parse_repo(
 
 
 def _routes(rec: FileRecord):
-    """The directive statement(s). The directive is wiring (contract §4): a plain statement —
-    the operations are recorded from the class."""
-    out = [s for s in rec.statements if s.nodeType == "synthetic"]
-    assert all(s.semanticType is None and s.endpoint is None and s.handler is None
-               and s.routeKind is None for s in out)
-    return out
+    return [s for s in rec.statements if s.semanticType == "route"]
 
 
 # --- .svc (WCF) ------------------------------------------------------------------
@@ -79,20 +73,22 @@ def test_svc_language_and_route() -> None:
     rec = _parse(SVC_FULL, "Services/OrderService.svc")
     assert rec.type == "code" and rec.language == "svc"  # own artifact, not csharp
     r = _routes(rec)[0]
-    assert 'Service="Acme.Services.OrderService"' in r.text  # the concrete impl, in the directive
+    assert (r.framework, r.method, r.routeKind, r.nodeType) == ("wcf", "RPC", "rpc", "synthetic")
+    assert r.handler == "Acme.Services.OrderService"  # concrete impl FQN (interface→impl)
+    assert r.endpoint == "Services/OrderService.svc"
     assert r.parentId == rec.id
     assert rec.framework == "wcf"
 
 
 def test_svc_attribute_order_and_no_codebehind() -> None:
     rec = _parse(SVC_NO_CODEBEHIND, "Services/Order.svc")
-    assert 'Service="A.B.OrderService"' in _routes(rec)[0].text
+    assert _routes(rec)[0].handler == "A.B.OrderService"
     assert rec.importFiles == []  # no CodeBehind → no import edge
 
 
 def test_svc_multiline_lowercase() -> None:
     rec = _parse(SVC_MULTILINE, "Services/Multi.svc")
-    assert 'service="A.B.MultiSvc"' in _routes(rec)[0].text
+    assert _routes(rec)[0].handler == "A.B.MultiSvc"
 
 
 def test_svc_codebehind_resolves_to_import(tmp_path: Path) -> None:
@@ -109,7 +105,7 @@ def test_svc_codebehind_resolves_to_import(tmp_path: Path) -> None:
 
 def test_svc_codebehind_missing_is_honest_null(tmp_path: Path) -> None:
     rec = _parse_repo(tmp_path, "Services/Multi.svc", {"Services/Multi.svc": SVC_MULTILINE})
-    assert _routes(rec)  # the directive statement is still there
+    assert _routes(rec)[0].handler == "A.B.MultiSvc"  # route still emitted
     assert rec.importFiles == []  # unresolved CodeBehind → honest-null
 
 
@@ -160,9 +156,9 @@ def test_svc_multiline_text_preserved_verbatim() -> None:
     assert r.startLine == 1 and r.endLine == 3
 
 
-# --- Factory= → protocol (BREEZEAI-966) ------------------------------------------
-# A recognised host factory changes the endpoint's real protocol away from SOAP: it becomes the
-# file's framework label; unknown/absent → SOAP (wcf).
+# --- Factory= → protocol reclassification (BREEZEAI-966) -------------------------
+# A recognised host factory changes the endpoint's real protocol away from SOAP. The signal
+# rides the existing framework/routeKind vocabulary (no new field); unknown/absent → SOAP.
 
 # WCF REST (WebHttpBinding) host — the AJAX/WebScript factory maps the same way.
 SVC_WEBHTTP_FACTORY = (
@@ -173,28 +169,33 @@ SVC_WEBHTTP_FACTORY = (
 
 def test_svc_dataservice_factory_reclassifies_to_odata_rest() -> None:
     # DataServiceHostFactory → the .svc is actually an OData REST endpoint, not SOAP RPC.
-    rec = _parse(SVC_VIRTUAL_CODEBEHIND, "grid-odata-crud/Products.svc")
-    assert rec.framework == "odata"
-    assert "Factory=" in _routes(rec)[0].text
+    r = _routes(_parse(SVC_VIRTUAL_CODEBEHIND, "grid-odata-crud/Products.svc"))[0]
+    assert (r.framework, r.routeKind) == ("odata", "rpc")  # v36 has no REST kind
+    assert r.handler == "Products"  # handler/text unchanged by reclassification
+    assert "Factory=" in r.text
 
 
 def test_svc_webservicehost_factory_reclassifies_to_wcf_rest() -> None:
-    assert _parse(SVC_WEBHTTP_FACTORY, "Api/CatalogService.svc").framework == "wcf-rest"
+    r = _routes(_parse(SVC_WEBHTTP_FACTORY, "Api/CatalogService.svc"))[0]
+    assert (r.framework, r.routeKind) == ("wcf-rest", "rpc")
 
 
 def test_svc_unknown_factory_stays_soap() -> None:
     # An unrecognised/custom (e.g. DI) factory must NOT be reclassified — honest-null.
     # SVC_NO_CODEBEHIND carries Factory="X.Y.F".
-    assert _parse(SVC_NO_CODEBEHIND, "Services/Order.svc").framework == "wcf"
+    r = _routes(_parse(SVC_NO_CODEBEHIND, "Services/Order.svc"))[0]
+    assert (r.framework, r.routeKind) == ("wcf", "rpc")
 
 
 def test_svc_default_soap_factory_stays_soap() -> None:
     # The plain ServiceHostFactory (SOAP) is a no-op for reclassification.
-    assert _parse(SVC_FULL, "Services/OrderService.svc").framework == "wcf"
+    r = _routes(_parse(SVC_FULL, "Services/OrderService.svc"))[0]
+    assert (r.framework, r.routeKind) == ("wcf", "rpc")
 
 
 def test_svc_no_factory_stays_soap() -> None:
-    assert _parse(SVC_MULTILINE, "Services/Multi.svc").framework == "wcf"
+    r = _routes(_parse(SVC_MULTILINE, "Services/Multi.svc"))[0]
+    assert (r.framework, r.routeKind) == ("wcf", "rpc")
 
 
 # --- .asmx (ASMX) ----------------------------------------------------------------
@@ -204,7 +205,10 @@ def test_asmx_language_and_route() -> None:
     rec = _parse(ASMX_FULL, "Services/PricingService.asmx")
     assert rec.type == "code" and rec.language == "asmx"  # distinct from svc and csharp
     r = _routes(rec)[0]
-    assert 'Class="Acme.Services.PricingService"' in r.text
+    # ASMX shares the rpc shape but framework=asmx; handler = Class= (concrete impl → endpoint URL)
+    assert (r.framework, r.method, r.routeKind, r.nodeType) == ("asmx", "RPC", "rpc", "synthetic")
+    assert r.handler == "Acme.Services.PricingService"
+    assert r.endpoint == "Services/PricingService.asmx"
     assert rec.framework == "asmx"
 
 

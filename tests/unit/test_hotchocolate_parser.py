@@ -638,8 +638,8 @@ def test_composition_root_keeps_its_routes() -> None:
     routes = {(s.method, s.endpoint, s.framework) for s in _routes(rec)}
     assert ("GET", "/health", "aspnet") in routes
     assert ("POST", "/webhook/{id}", "aspnet") in routes
-    # The GraphQL transport mount is wiring: no record (the operations are the bindings).
-    assert not any(e == "/graphql" for _, e, _ in routes)
+    # The GraphQL mount is captured there too, so nothing is lost by declining the file.
+    assert ("POST", "/graphql", "graphql") in routes
 
 
 def test_library_mention_alone_does_not_claim() -> None:
