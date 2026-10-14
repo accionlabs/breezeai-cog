@@ -670,8 +670,10 @@ statements under their enum class.
 > **Decision —** entry points are decided by the role of a framework construct, not by how the code runs.
 > **Why:** a parser sees constructs, not execution. Every construct a parser recognises is a
 > binding, wiring, guard, outbound or none; only a binding (one handler, directly addressable)
-> becomes an entry-point record (`route`, `eventbus_consumer`, `timer`), and wiring stays a plain
-> statement. One binding, one record, so "all entry points" is an accurate count across languages
+> becomes an entry-point record (`route`, `eventbus_consumer`, `timer`). Wiring the Target Spec
+> records today (mounts, layouts, links) is written in its current form, `route` with `routeKind`
+> `mount` / `layout` / `navigation`, until the spec's entry-point proposal is approved
+> ([entry-point contract §5](architecture/entry-points.md#how-wiring-is-written-today)). One binding, one record, so "all entry points" is an accurate count across languages
 > and Breeze components. **Cost:** each entry-point parser keeps a role table, and wiring in
 > another file must reach the binding through the repository index.
 

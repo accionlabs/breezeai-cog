@@ -44,9 +44,9 @@ Every framework construct a parser recognises has **exactly one** role:
 | Role | The construct… | The parser records | Examples |
 |---|---|---|---|
 | **Binding** | names **one** handler as the target of an inbound trigger | **one entry-point record** | `@GetMapping("/x")` on a method · `r.get('/x', h)` · `{ path, component }` · `@KafkaListener` · `@Scheduled` |
-| **Wiring** | adds part of an address (a prefix, a kind, a queue name) to **other** bindings, or marks a container whose members are bindings | **no entry-point record** — its value is copied into the bindings' records; its own code stays a plain statement ([§5](#wiring-keeps-its-statement)) | `app.use('/users', router)` · `loadChildren` · `@RequestMapping` on a class · `AddQueryType<T>()` · `serverless.yml` events |
+| **Wiring** | adds part of an address (a prefix, a kind, a queue name) to **other** bindings, or marks a container whose members are bindings | **no entry-point record** — its value is copied into the bindings' records; where the Target Spec records it today, it is also written in the spec's form ([§5](#how-wiring-is-written-today)) | `app.use('/users', router)` · `loadChildren` · `@RequestMapping` on a class · `AddQueryType<T>()` · `serverless.yml` events |
 | **Guard** | attaches code that runs before **many** handlers | the guard's name in `guards` on each affected record | `app.use(auth)` · `canActivate` · `[Authorize]` · a `<ProtectedRoute/>` layout element |
-| **Outbound** | is our code calling something outside | an outbound record at the call (`api_call`, `eventbus_send`, `navigation`, …) — not an entry point | `fetch(...)` · `sqs.sendMessage(...)` · `<Link to="/orders">` |
+| **Outbound** | is our code calling something outside | an outbound record at the call (`api_call`, `eventbus_send`, a `route` link with `routeKind: navigation`, …) — not an entry point | `fetch(...)` · `sqs.sendMessage(...)` · `<Link to="/orders">` |
 | **None** | is not inbound, or names one handler that has no address of its own | nothing | start-up calls, GraphQL data-type fields, everything else |
 
 The **handler** is the declaration a binding points at: a method, a function or a component —
@@ -104,7 +104,7 @@ targets them.
 |---|---|
 | HTTP route on a handler (decorator, route call, route-table entry with a component) | Binding |
 | SOAP / WCF / gRPC operation | Binding |
-| GraphQL query / mutation / subscription field | Binding — in schema-first code, the resolver-map entry (`Query: { books: … }`) is the binding; the SDL root field (`type Query { books }`) is captured as a plain statement, never an entry point |
+| GraphQL query / mutation / subscription field | Binding — in schema-first code, the resolver-map entry (`Query: { books: … }`) is the binding; the SDL root field (`type Query { books }`) is also written as a `route` in the spec's current form ([§5](#how-wiring-is-written-today)) |
 | Subscription that is also fed by a topic (HotChocolate `[Subscribe] [Topic("orders")]`) | Two bindings: the subscription (`route`) and the topic (`eventbus_consumer`) — one method, two triggers |
 | GraphQL entity or node resolver (federation `__resolveReference`, Relay node lookup) | Binding (`route`, `method: RESOLVE_REFERENCE`, `routeKind: query`) — the framework's generated root field (`_entities`, `node`) calls it directly, addressed by type |
 | GraphQL data-type field resolver (`Book.author`) | None — no address of its own (§3) |
@@ -120,7 +120,7 @@ targets them.
 | Route with a `component` **and** `children` | Wiring (a layout) when one child has an empty path; otherwise **also** a Binding — its own URL shows the parent with an empty outlet |
 | Middleware, filters, auth guards, interceptors | Guard |
 | HTTP client call, message publish/send, DB query | Outbound |
-| Link or programmatic navigation to a page (`<Link to>`, `routerLink`, `router.navigate`) | Outbound (`semanticType: navigation`) |
+| Link or programmatic navigation to a page (`<Link to>`, `routerLink`, `router.navigate`) | Outbound (`route`, `routeKind: navigation`) |
 | Application start-up (`main`, `Program.cs`, `app.listen`) | None |
 | Internal service / façade methods (only our own code calls them) | None |
 | In-process actor messaging (Akka `receive`, local `!` / `tell`) | None — the message comes from our own code |
@@ -173,68 +173,66 @@ is wrapped in elements (`<Suspense><Dashboard/></Suspense>`), the handler is the
 component** (`Dashboard`). A guard element used as a layout (`<ProtectedRoute/>`) is not a handler:
 its name goes into `guards` on each child page.
 
-### Wiring keeps its statement
+### How wiring is written today
 
-Wiring loses only its entry-point meaning, never its code. The statement the language extractor
-emits for it stays, as a **plain statement** with the same id:
+The roles above are the contract. How some of them are **written** is still the Target Spec's
+current form (v36): the spec's entry-point proposal — wiring as plain statements, links as their
+own `semanticType` — is waiting for approval, and output keeps the spec's values until it is
+approved. So a wiring construct the spec records is written as a `route`, with the value it adds
+also copied into the bindings' records:
 
-```js
-// src/index.js:25: wiring
-app.use('/matches', matchRouter);
-// src/routes/matches.js:12: binding
-matchRouter.get('/', async (req, res) => { ... });
-```
+| Construct (role) | Written as | `routeKind` |
+|---|---|---|
+| Router mount, lazy route group, Play `->` include, React v7 `layout()` (Wiring) | `route`, `endpoint` = the full prefix, `handler` = the router / module | `mount` |
+| Web Forms user control (`.ascx.cs`), and each control a host registers (`<%@ Register %>`) | `route`, `endpoint` = the control's `.ascx` path | `mount` |
+| Page, control or master composed into a master page (`MasterPageFile`) | `route`, `endpoint` = the master page | `layout` |
+| Link or programmatic navigation (Outbound) | `route`, `endpoint` = the target page | `navigation` |
+| Path-only parent and layout route (Angular, Vue, React) | `route`, `handler` = its component, if any | `page` |
+| GraphQL transport mount (`MapGraphQL`, Apollo `expressMiddleware`) | `route`, `POST`, `framework: graphql`, no handler | `route` |
+| `MapRoute` / `MapHttpRoute` convention template | `route`, `ANY`, `handler` = the default `Controller.Action` | `route` |
+| `.svc` / `.asmx` host directive | `route`, `RPC`, `endpoint` = the file, `handler` = the class | `rpc` |
+| GraphQL SDL root field (`type Query { books }`) | `route`, operation kind, field name, DTOs, no handler | `query` / `mutation` / `subscription` |
 
-```jsonc
-// src/index.js: a plain statement: no semanticType, endpoint, handler or routeKind
-{ "id": "src/index.js:25:0", "nodeType": "expression_statement",
-  "text": "app.use('/matches', matchRouter);", "startLine": 25, "endLine": 25, "path": "src/index.js" }
+The validator (`parsers/contract.py`) does not count `mount`, `layout` and `navigation` records
+as entry points, and checks a `navigation` record's address like any outbound one. The other rows
+are filed exactly like bindings, so a query on `semanticType` and `routeKind` alone counts them
+too; they drop out once the proposal is approved and parsers write wiring as plain statements.
 
-// src/routes/matches.js: the entry point, with the mount's prefix applied
-{ "id": "src/routes/matches.js:12:0", "nodeType": "expression_statement",
-  "text": "matchRouter.get('/', async (req, res) => {", "startLine": 12, "endLine": 32,
-  "semanticType": "route", "path": "src/routes/matches.js", "framework": "express",
-  "method": "GET", "endpoint": "/matches", "handlerLine": 12, "routeKind": "route" }
-```
+Wiring that the spec does not record — a class-level prefix, a root-type registration, a
+deployment-config trigger, `route(path)` before its verbs — has no record of its own: its code
+stays in the statement the language extractor emits for it.
 
-- A detector **never enriches** a wiring statement with an entry-point `semanticType`.
-- A detector **never appends** a synthetic record for wiring. Wiring inside a larger construct
-  (an entry in a route table) is already covered by the statement for that construct — for
-  example the `const routes: Routes = [ … ]` declaration.
-- A **structural link** that wiring expresses — a page and its master page or layout, a host page
-  and the user control it loads — stays recorded as a structural link (for example in
-  `importFiles`), not as an entry point.
-
-**Which records are entry points.** `semanticType: route` means **inbound** only. Each outbound
-kind has its own `semanticType`, so it is never mistaken for an entry point:
+**Which records are outbound.** Each outbound kind is matched to the entry point it reaches:
 
 | Entry point (inbound) | Its outbound counterpart | Matched on |
 |---|---|---|
 | `route` (HTTP, RPC, GraphQL) | `api_call` | `endpoint` (+ `method`) |
-| `route` with `routeKind: page` | `navigation` — a link or programmatic navigation, e.g. `<Link to="/orders">` | `endpoint` |
+| `route` with `routeKind: page` | `route` with `routeKind: navigation` — a link or programmatic navigation, e.g. `<Link to="/orders">` | `endpoint` |
 | `eventbus_consumer` | `eventbus_send` / `eventbus_publish` | `endpoint` |
 | `timer` | — | — |
 
-One record is recorded under `route` without being an entry point:
+Records filed under `route` that are not entry points:
 
 | `routeKind` | What it is | Why it is not an entry point |
 |---|---|---|
 | `field_resolver` (`method: RESOLVE_FIELD`) | A GraphQL data-type field resolver, e.g. `Book.author` | No address of its own (§3); recorded because it shows where a field's data comes from |
+| `mount`, `layout` | Wiring in the spec's current form | Names no handler; its prefix is on the bindings |
+| `navigation` | A link | Outbound |
 
-The entry points are exactly the `route`, `eventbus_consumer` and `timer` records whose
-`routeKind` is not `field_resolver`.
+The entry points are the `route`, `eventbus_consumer` and `timer` records whose `routeKind` is
+not `field_resolver`, `mount`, `layout` or `navigation`.
 
-> **Decision —** the record lives at the binding construct, never at the wiring.
+> **Decision —** the entry-point record lives at the binding construct, never at the wiring.
 > **Why:** the binding is the one construct that names exactly one handler, so one binding is
 > one record and "all entry points" is an accurate count. Wiring contributes to many records (a
-> prefix) or sits in another file (a registration, a config), so it can never own one.
-> **Cost:** wiring in another file must reach the binding's record through the repository
+> prefix) or sits in another file (a registration, a config), so it can never own an entry
+> point. **Cost:** wiring in another file must reach the binding's record through the repository
 > index ([cross-file route composition](cross-file-resolution.md#8-cross-file-route-composition)).
 
 ## 6. Address format (`endpoint`)
 
 The same format is used on both sides: an outbound record's `endpoint` (`api_call`,
-`navigation`, `eventbus_send`) is written exactly like the entry point it reaches, so the two
+a `route` link, `eventbus_send`) is written exactly like the entry point it reaches, so the two
 match.
 
 | Trigger | `endpoint` contains | Example |
@@ -261,7 +259,7 @@ class OrderController {
 ```ts
 app.use(authenticate);                             // GUARD → guards: [authenticate] on every route
 app.use('/users', usersRouter());                  // WIRING: prefix /users for usersRouter's bindings;
-                                                   //   stays a plain statement
+                                                   //   written as route / mount today (§5)
 r.get('/:id', getUser);                            // BINDING → route, GET, /users/:id, handler getUser
 r.post('/', async (req, res) => { ... });          // BINDING → route, POST, /users, handler empty,
                                                    //   handlerLine = this line (anonymous)
@@ -292,8 +290,8 @@ public Task FunctionHandler(SQSEvent e, ILambdaContext c)
   is empty on both sides — consumer and sender — rather than the symbol it was read from.
 - **When unsure of a role, choose the one that records less.** A construct that might be a
   router or a middleware is wiring, not a guard; a construct that might not be inbound is None.
-- **One binding, one record.** Wiring and guards never produce entry-point records; their code
-  stays as plain statements.
+- **One binding, one record.** Wiring and guards never produce entry-point records (wiring the
+  Target Spec records today is written in its form, §5).
 - **Every record leads to its handler** (`handler` + `handlerLine` + `handlerPath`; for an
   anonymous handler, `handlerLine` alone) — that is where the rest of the flow starts.
 
@@ -359,5 +357,5 @@ there.
 | `{ path, redirectTo }` | None | An alias; no handler |
 | `canActivate` / `canMatch` / `canActivateChild` | Guard | |
 | `HttpClient` calls | Outbound | |
-| `routerLink` / `router.navigate(...)` | Outbound | `semanticType: navigation` |
+| `routerLink` / `router.navigate(...)` | Outbound | `route`, `routeKind: navigation` |
 | `bootstrapApplication(...)` / `platformBrowserDynamic().bootstrapModule(...)` | None | Start-up |
