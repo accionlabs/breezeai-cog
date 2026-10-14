@@ -163,6 +163,14 @@ a one-per-file parser. There are **two hook points** — choose by the shape of 
   `tests/unit/test_additive.py`. A language without the hook (see `HOOKED_LANGUAGES`) needs a
   one-time `run_additive` call in its base `extract` first — that one is a language-parser
   change.
+- **A fact from another file** (a class is an API only because the composition root registers
+  it; a URL prefix set by a mount elsewhere) → give the same detector an **index stage**:
+  `collect` / `resolve` plus an `index_gate`. The language's `build_index` runs it once before
+  parsing, and `run` reads the result with `index_fact`. Do not add a framework field to the
+  language index or a new selection hook — the file keeps its owner and the detector adds to it.
+  Bind names with the language's rules and leave ambiguous ones unbound. Recipe and worked
+  example: the parser reference ("Additive detectors", index stage) and
+  [`docs/architecture/cross-file-resolution.md`](../../docs/architecture/cross-file-resolution.md#a-framework-fact-from-another-file-the-additive-index-stage).
 
 Some "internal frameworks" only describe data models. Often the base parser already
 captures the class, its base class, and its fields — so the only thing to add is a **role
@@ -212,13 +220,17 @@ schema-wide commitment — ask.
 - **Design for scale without gold-plating.** Capture streams NDJSON so a large repo never
   sits fully in memory; parsing is per-file and parallelized, so keep parsers free of
   cross-file mutable state (use the repo-wide index hook for shared data, returning a
-  picklable value). When that hook (`build_index`) parses every file, structure it as a
+  picklable value). Only the **language** parser's `build_index` runs — a framework's facts
+  reach it through an additive detector's index stage, never through the framework parser's
+  own `build_index` or instance state. When that hook (`build_index`) parses every file, structure it as a
   picklable per-file worker plus a deterministic (order-independent) reduce and run it
   through the shared `parallel_map(files, fn, jobs)` — so it honours `--jobs` (serial at
   `jobs<=1`) like the parse stage, instead of looping single-threaded.
 - **Test every behavioral change** — happy path, edges, failure modes. For parser work,
   also validate emitted records against the schema and dogfood on a real repository; a unit
-  test passing is not enough.
+  test passing is not enough. Anything that crosses files is also tested end to end through
+  `analyze_repo` with `jobs` 1 and 2 — a hand-built index cannot catch a fact that never
+  reaches the workers.
 
 ## 7. Setup & workflow
 
