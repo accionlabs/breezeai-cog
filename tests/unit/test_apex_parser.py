@@ -249,3 +249,74 @@ def test_trigger_statements_are_classified(tmp_path) -> None:
     assert [(s.semanticType, s.method) for s in rec.statements if s.semanticType] == [
         ("db_method_call", "insert")]
     assert all(s.parentId == rec.functions[0].id for s in rec.statements)
+
+
+SRC_ROUTES = b'''
+@RestResource(urlMapping='/v1/accounts/*')
+global class AccountApi {
+    @HttpGet global static Account doGet() { return null; }
+    @HTTPPOST global static String doPost(String n) { return n; }
+    @HttpPut global static void doPut() {}
+    @HttpPatch global static void doPatch() {}
+    @HttpDelete global static void doDelete() {}
+    global static void helper() {}
+    @AuraEnabled public static List<Account> list() { return null; }
+    @AuraEnabled public String prop { get; set; }
+    webservice static Id soap(String a) { return null; }
+}
+'''
+
+
+def _routes(rec: FileRecord):
+    return [(s.method, s.endpoint, s.framework, s.routeKind, s.handler, s.responseDTO)
+            for s in rec.statements if s.semanticType == "route"]
+
+
+def test_rest_aura_and_soap_routes(tmp_path) -> None:
+    rec = _parse(tmp_path, SRC_ROUTES, "AccountApi.cls")
+    rest = "/services/apexrest/v1/accounts/*"
+    assert _routes(rec) == [
+        ("GET", rest, "apex-rest", "route", "doGet", "Account"),
+        ("POST", rest, "apex-rest", "route", "doPost", "String"),
+        ("PUT", rest, "apex-rest", "route", "doPut", "void"),
+        ("PATCH", rest, "apex-rest", "route", "doPatch", "void"),
+        ("DELETE", rest, "apex-rest", "route", "doDelete", "void"),
+        (None, "AccountApi.list", "apex-aura", "aura", "list", "List<Account>"),
+        (None, "AccountApi.soap", "apex-soap", "soap", "soap", "Id"),
+    ]
+    assert rec.framework == "apex-rest"
+
+
+def test_route_shape(tmp_path) -> None:
+    rec = _parse(tmp_path, SRC_ROUTES, "AccountApi.cls")
+    fns = {f.id: f for f in rec.functions}
+    for s in (s for s in rec.statements if s.semanticType == "route"):
+        assert s.nodeType == "synthetic" and s.isRegex is False
+        assert fns[s.parentId].name == s.handler and fns[s.parentId].startLine == s.handlerLine
+
+
+def test_test_classes_emit_no_routes(tmp_path) -> None:
+    src = b"""@IsTest private class T {
+        @AuraEnabled public static void a() {}
+        @IsTest class Inner { @AuraEnabled public static void b() {} }
+    }
+    public class P { @IsTest static void t() {} @isTest @AuraEnabled static void u() {} }"""
+    assert _routes(_parse(tmp_path, src, "T.cls")) == []
+
+
+def test_routes_need_capture(tmp_path) -> None:
+    rec = _parse(tmp_path, SRC_ROUTES, "AccountApi.cls", capture=False)
+    assert rec.statements == [] and rec.framework is None
+
+
+def test_aura_without_rest_resource(tmp_path) -> None:
+    rec = _parse(tmp_path, b"public with sharing class C { @auraenabled(cacheable=true) public static void m() {} }", "C.cls")
+    assert _routes(rec) == [(None, "C.m", "apex-aura", "aura", "m", "void")]
+    assert rec.framework == "apex-aura"
+
+
+def test_route_output_validates(tmp_path) -> None:
+    rec = _parse(tmp_path, SRC_ROUTES, "AccountApi.cls")
+    errors = list(Draft202012Validator(FileRecord.model_json_schema(by_alias=True))
+                  .iter_errors(json.loads(to_line(rec))))
+    assert not errors, errors

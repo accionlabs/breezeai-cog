@@ -25,6 +25,7 @@ from .classes import build_class
 from .detect import reset_var_types, set_var_types
 from .functions import build_trigger, defined_names, type_map
 from .index import ApexIndex, build_class_index
+from .routes import detect_apex_routes
 from .mappings import COMMENT_TYPES, CONTROL_FLOW, FRAMEWORKS, STATEMENT_TYPES, TYPE_DECLARATIONS
 
 
@@ -93,7 +94,7 @@ class ApexParser(BaseParser):
                 )
             )
 
-        return FileRecord(
+        record = FileRecord(
             id=fid,
             path=path,
             type="code",
@@ -103,3 +104,9 @@ class ApexParser(BaseParser):
             classes=classes,
             statements=statements,
         )
+        if capture:
+            routes = detect_apex_routes(record)
+            if routes:
+                record.statements.extend(routes)
+                record.framework = routes[0].framework
+        return record

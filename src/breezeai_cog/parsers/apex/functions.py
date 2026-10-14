@@ -138,6 +138,7 @@ def build_method(
         returnType=node_text(ret, source) if ret is not None else None,
         startLine=start,
         endLine=end,
+        metadata={"webservice": True} if "webservice" in keywords else None,
         calls=_calls(body, source, resolve),
     )
     statements = extract_statements(
