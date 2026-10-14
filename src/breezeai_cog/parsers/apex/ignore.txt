@@ -1,0 +1,4 @@
+# Apex per-language ignore defaults (layer 2).
+.sfdx/
+.sf/
+.localdevserver/
