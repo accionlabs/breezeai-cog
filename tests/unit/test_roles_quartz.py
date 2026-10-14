@@ -160,6 +160,48 @@ def test_cancellation_token_is_not_a_job_or_a_trigger(analyze_files) -> None:
     ]
 
 
+def test_trigger_read_through_a_cast_is_traced(analyze_files) -> None:
+    body = """  public async Task Run(IScheduler scheduler) {
+    IJobDetail job = JobBuilder.Create<HelloJob>().Build();
+    ICronTrigger a = (ICronTrigger) TriggerBuilder.Create().WithCronSchedule("0 0/5 * * * ?").Build();
+    await scheduler.ScheduleJob(job, a);
+    var b = TriggerBuilder.Create().WithCronSchedule("0 0 1 * * ?").Build() as ICronTrigger;
+    await scheduler.ScheduleJob(job, b);
+  }
+"""
+    got = [(r.method, r.endpoint, r.handler) for r in _cs(analyze_files, body)]
+    assert got == [("PERIODIC", "0 0/5 * * * ?", "Execute"), ("PERIODIC", "0 0 1 * * ?", "Execute")]
+
+    java_body = """  public void run(Scheduler sched) throws SchedulerException {
+    JobDetail job = newJob(HelloJob.class).build();
+    CronTrigger t = (CronTrigger) newTrigger().withSchedule(cronSchedule("0 0 2 * * ?")).build();
+    sched.scheduleJob(job, t);
+  }
+"""
+    [r] = _java(analyze_files, java_body)
+    assert (r.method, r.endpoint, r.handler) == ("PERIODIC", "0 0 2 * * ?", "execute")
+
+
+def test_timespan_interval_is_milliseconds(analyze_files) -> None:
+    body = """  public async Task Run(IScheduler scheduler, TimeSpan every) {
+    IJobDetail job = JobBuilder.Create<HelloJob>().Build();
+    await scheduler.ScheduleJob(job, TriggerBuilder.Create().WithSimpleSchedule(x => x.WithInterval(TimeSpan.FromSeconds(40)).RepeatForever()).Build());
+    await scheduler.ScheduleJob(job, TriggerBuilder.Create().WithSimpleSchedule(x => x.WithInterval(TimeSpan.FromHours(2))).Build());
+    await scheduler.ScheduleJob(job, TriggerBuilder.Create().WithSimpleSchedule(x => x.WithInterval(TimeSpan.FromSeconds(2.5))).Build());
+    await scheduler.ScheduleJob(job, TriggerBuilder.Create().WithSimpleSchedule(x => x.WithInterval(every)).Build());
+    await scheduler.ScheduleJob(job, TriggerBuilder.Create().WithDailyTimeIntervalSchedule(x => x.WithInterval(10, IntervalUnit.Second)).Build());
+  }
+"""
+    got = [(r.method, r.endpoint) for r in sorted(_cs(analyze_files, body), key=lambda r: r.startLine)]
+    assert got == [
+        ("PERIODIC", "40000"),
+        ("PERIODIC", "7200000"),
+        ("PERIODIC", None),   # not a whole number
+        ("PERIODIC", None),   # a variable: not read
+        ("PERIODIC", None),   # a count and a unit on a daily-time schedule: not one value
+    ]
+
+
 def test_job_class_is_none(analyze_files) -> None:
     assert _java(analyze_files, "") == []
     assert _cs(analyze_files, "") == []

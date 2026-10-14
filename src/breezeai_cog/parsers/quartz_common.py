@@ -16,9 +16,12 @@ The job class (``implements Job`` / ``: IJob``) has no address of its own, and b
   the file. Its line when the class is declared in the file. A job that cannot be traced → empty.
 * **Schedule** (``endpoint``). A cron expression (``withCronSchedule`` / ``cronSchedule``), or a
   fixed interval in milliseconds (``withIntervalInSeconds(40)`` → ``40000``,
-  ``repeatMinutelyForever(5)`` → ``300000``), as for Spring ``fixedRate``. ``method`` is
+  ``repeatMinutelyForever(5)`` → ``300000``, Quartz.NET ``WithInterval(TimeSpan.FromSeconds(40))``
+  → ``40000``), as for Spring ``fixedRate``. ``method`` is
   ``PERIODIC``; a trigger with no schedule fires once (``TIMER``, endpoint empty). Daily-time and
   calendar intervals, a non-literal argument or two different schedules → ``PERIODIC``, empty.
+* **Casts.** A trigger or job read through a cast (``(ICronTrigger) TriggerBuilder.Create()…``,
+  ``… as ISimpleTrigger``) is the value it casts.
 
 Names are compared case-insensitively: Java writes ``forJob``, Quartz.NET ``ForJob``. Each
 language supplies a :class:`Syntax` that reads its tree.
@@ -56,8 +59,11 @@ _TRIGGER_CALLS = frozenset({"forjob", "withschedule", "withsimpleschedule", "sta
 #: Periodic schedules whose expression is not one value.
 _OTHER_PERIODIC = frozenset({
     "withdailytimeintervalschedule", "dailytimeintervalschedule",
-    "withcalendarintervalschedule", "calendarintervalschedule", "withinterval",
+    "withcalendarintervalschedule", "calendarintervalschedule",
 })
+#: ``withInterval(…)``: a duration on a simple schedule (Quartz.NET ``TimeSpan``); a count and a
+#: unit on a daily-time or calendar schedule, which is not one value.
+_WITH_INTERVAL = "withinterval"
 
 
 @dataclass(frozen=True)
@@ -81,6 +87,8 @@ class Syntax(Protocol):
     def string(self, node: Node) -> str | None: ...
     def integer(self, node: Node) -> int | None: ...
     def class_ref(self, node: Node) -> str | None: ...  # ``R.class`` / ``typeof(R)``
+    def cast_value(self, node: Node) -> Node | None: ...  # ``(T) v`` / ``v as T`` → ``v``
+    def duration(self, node: Node) -> int | None: ...  # a literal duration, in milliseconds
     def new_object(self, node: Node) -> tuple[str, list[Node]] | None: ...  # ``new JobKey(…)``
     def variables(self, root: Node) -> dict[str, Node | None]: ...  # name → initializer
     #: no-argument method, lower-cased → the value it returns
@@ -122,6 +130,9 @@ class _File:
         """A variable or a no-argument method call → the value it stands for (else ``node``)."""
         if depth > 4:
             return None
+        cast = self.syntax.cast_value(node)
+        if cast is not None:
+            return self.deref(cast, depth + 1)
         if node.type == "identifier":
             init = self.variables.get(self.text(node))
             return self.deref(init, depth + 1) if init is not None else None
@@ -191,6 +202,9 @@ class _File:
                 n = self.syntax.integer(c.args[0]) if c.args else (
                     1 if c.name.startswith("repeat") else None)
                 found.add(("PERIODIC", str(n * _INTERVALS[c.name]) if n is not None else None))
+            elif c.name == _WITH_INTERVAL:
+                ms = self.syntax.duration(c.args[0]) if len(c.args) == 1 else None
+                found.add(("PERIODIC", str(ms) if ms is not None else None))
             elif c.name in _OTHER_PERIODIC:
                 found.add(("PERIODIC", None))
         if not found:

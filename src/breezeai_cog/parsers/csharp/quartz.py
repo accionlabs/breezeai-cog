@@ -19,6 +19,10 @@ from ..treesitter import node_text
 _TOKENS = frozenset({"cancellationtoken", "ct", "token", "stoppingtoken",
                      "cancellationtoken.none", "default", "default(cancellationtoken)"})
 
+#: ``TimeSpan.From…`` → milliseconds per unit.
+_TIMESPAN_UNITS = {"FromMilliseconds": 1, "FromSeconds": 1000, "FromMinutes": 60_000,
+                   "FromHours": 3_600_000, "FromDays": 86_400_000}
+
 
 class _CSharp:
     handler = "Execute"
@@ -79,6 +83,29 @@ class _CSharp:
         if node.type != "typeof_expression" or not node.named_children:
             return None
         return node_text(node.named_children[0], self.source)
+
+    def cast_value(self, node: Node) -> Node | None:
+        if node.type == "cast_expression":
+            return node.child_by_field_name("value")
+        if node.type == "as_expression":
+            return node.child_by_field_name("left")
+        return None
+
+    def duration(self, node: Node) -> int | None:
+        """``TimeSpan.FromSeconds(40)`` → ``40000``: a ``TimeSpan.From…`` call of a whole number."""
+        if node.type != "invocation_expression":
+            return None
+        fn = node.child_by_field_name("function")
+        if fn is None or fn.type != "member_access_expression":
+            return None
+        receiver, name = fn.child_by_field_name("expression"), fn.child_by_field_name("name")
+        if receiver is None or name is None \
+                or node_text(receiver, self.source) not in ("TimeSpan", "System.TimeSpan"):
+            return None
+        unit = _TIMESPAN_UNITS.get(node_text(name, self.source))
+        args = self._arguments(node, "")
+        n = self.integer(args[0]) if len(args) == 1 else None
+        return n * unit if unit is not None and n is not None else None
 
     def new_object(self, node: Node) -> tuple[str, list[Node]] | None:
         if node.type != "object_creation_expression":

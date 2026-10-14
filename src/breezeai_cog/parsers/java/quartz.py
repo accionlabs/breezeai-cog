@@ -53,6 +53,12 @@ class _Java:
             return None
         return node_text(node.named_children[0], self.source)
 
+    def cast_value(self, node: Node) -> Node | None:
+        return node.child_by_field_name("value") if node.type == "cast_expression" else None
+
+    def duration(self, node: Node) -> int | None:
+        return None  # Java Quartz takes intervals as numbers (``withIntervalInSeconds``)
+
     def new_object(self, node: Node) -> tuple[str, list[Node]] | None:
         if node.type != "object_creation_expression":
             return None
