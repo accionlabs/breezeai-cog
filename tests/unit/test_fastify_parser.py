@@ -974,7 +974,7 @@ def test_fastify_plugin_wrapper_and_wildcard_routes() -> None:
     endpoints = [(r.method, r.endpoint) for r in _detect_routes(source)]
 
     assert ("GET", "/u") in endpoints
-    assert (None, "/") in endpoints
+    assert (None, None) in endpoints
     assert ("GET", "/*") in endpoints
 
 
@@ -992,7 +992,7 @@ def test_fastify_plugin_wrapper_ignores_prefix_but_plain_plugin_uses_it() -> Non
     plain_routes = _detect_routes(plain_source)
 
     assert [(route.method, route.endpoint) for route in wrapped_routes] == [
-        (None, "/"),
+        (None, None),
         ("GET", "/health"),
     ]
     assert [(route.method, route.endpoint) for route in plain_routes] == [

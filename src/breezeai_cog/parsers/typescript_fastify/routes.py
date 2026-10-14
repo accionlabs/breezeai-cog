@@ -1461,7 +1461,7 @@ def _fastify_register(
     opts_node = args[1] if len(args) > 1 else None
 
     child_prefix = prefix
-    mount_endpoint = (prefix or "/") if prefix is not None else None
+    mount_endpoint: Optional[str] = None
 
     if not wrapped and opts_node is not None and opts_node.type == "object":
         pairs = _object_pairs(opts_node, source)
@@ -1632,7 +1632,6 @@ def _run(dc: DetectContext) -> str | None:
     return "fastify" if found else None
 
 
-# The detector has two byte markers, `fastify` and `Fastify`, so it keeps its own guard.
 register_detector(
     Detector(
         name="fastify",

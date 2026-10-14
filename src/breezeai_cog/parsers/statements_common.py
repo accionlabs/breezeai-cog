@@ -151,7 +151,11 @@ def render_template_url(
     source: bytes,
     resolve_substitution: Callable[[Node], str | None] | None = None,
 ) -> str:
-    """Render template URL fragments, resolving known substitutions before placeholders."""
+    """Render a TypeScript/JavaScript template literal as a URL or route path.
+
+    Shared by framework parsers so known substitutions can be resolved before
+    unresolved expressions become placeholders.
+    """
     parts: list[str] = []
     for child in node.named_children:
         if child.type == "string_fragment":
