@@ -129,6 +129,68 @@ def _is_internal_factory_call(node: Node, source: bytes, bindings: dict[str, str
     return fn is not None and fn.type == "identifier" and node_text(fn, source) in bindings
 
 
+def _mount_parts(
+    chain: list[Node], source: bytes, bindings: dict[str, str]
+) -> tuple[str | None, int | None, list[str] | None]:
+    """Split a mount's arg chain (everything after the path) into (handler, handlerLine, guards):
+    the mounted sub-router — the single bare internally-imported ``factory()`` call — is the
+    handler, and the surrounding middleware are guards. When the router is not cleanly
+    identifiable (0 or >1 such calls), fall back to the Express default (last arg is the handler,
+    the rest are guards)."""
+    routers = [n for n in chain if _is_internal_factory_call(n, source, bindings)]
+    if len(routers) == 1:
+        router = routers[0]
+        fn = router.child_by_field_name("function")
+        handler = node_text(fn, source) if fn is not None else None
+        guards = _guard_names([n for n in chain if n is not router], source)
+        return handler, router.start_point[0] + 1, guards
+    if not chain:
+        return None, None, None
+    name = mw_name(chain[-1], source)  # ambiguous → Express default: last arg is the handler
+    line = chain[-1].start_point[0] + 1 if name is not None else None
+    return name, line, _guard_names(chain[:-1], source)
+
+
+# The Apollo → Express adapter (``@apollo/server/express4``). ``app.use(path, expressMiddleware(server))``
+# mounts the GraphQL transport endpoint.
+_APOLLO_MIDDLEWARE = "expressMiddleware"
+
+
+def _has_apollo_middleware(arg_nodes: list[Node], source: bytes) -> bool:
+    for a in arg_nodes:
+        if a.type == "call_expression":
+            callee = a.child_by_field_name("function")
+            if callee is not None and node_text(callee, source).rsplit(".", 1)[-1] == _APOLLO_MIDDLEWARE:
+                return True
+    return False
+
+
+def _resolve_str_identifier(name: str, root: Node, source: bytes) -> str | None:
+    """An identifier used as a mount path → its string literal: a param default
+    (``graphqlPath = '/graphql'``) or a ``const graphqlPath = '/x'``."""
+    found: str | None = None
+
+    def walk(n: Node) -> None:
+        nonlocal found
+        if found is not None:
+            return
+        if n.type in ("required_parameter", "optional_parameter"):
+            pat, val = n.child_by_field_name("pattern"), n.child_by_field_name("value")
+            if pat is not None and node_text(pat, source) == name and val is not None and val.type == "string":
+                found = _string_value(val, source)
+                return
+        if n.type == "variable_declarator":
+            nm, val = n.child_by_field_name("name"), n.child_by_field_name("value")
+            if nm is not None and node_text(nm, source) == name and val is not None and val.type == "string":
+                found = _string_value(val, source)
+                return
+        for c in n.named_children:
+            walk(c)
+
+    walk(root)
+    return found
+
+
 def _classify(
     call: Node, source: bytes, root: Node, bindings: dict[str, str],
     routers: frozenset[str] = frozenset(), decl_lines: dict[str, int | None] | None = None,
@@ -172,12 +234,26 @@ def _classify(
             guards = _guard_names(chain[:-1], source)
             return _verb(method), path, handler, handler_line, guards, "express", "route"
         return None
-    # ``app.use(path, …)`` is wiring: a router mount (its prefix and middleware reach the
-    # mounted router's routes through the express.router-mounts fact and the same-file mount
-    # composition), a static handler, or the Apollo transport ``expressMiddleware(server)``,
-    # which serves many operations (contract §4). Its statement stays plain. ``app.use(mw)``
-    # is a guard. ``route(path)`` is wiring for its chained verbs.
-    return None
+    if method == "use":
+        # ``app.use(path, expressMiddleware(server))`` mounts the GraphQL endpoint: a POST route.
+        # The path is often a variable (``graphqlPath``) — resolve it, else the ``/graphql``
+        # convention.
+        if _has_apollo_middleware(arg_nodes, source):
+            arg0 = arg_nodes[0] if arg_nodes else None
+            endpoint = path
+            if endpoint is None and arg0 is not None and arg0.type == "identifier":
+                endpoint = _resolve_str_identifier(node_text(arg0, source), root, source)
+            return "POST", endpoint or "/graphql", None, None, None, "graphql", "route"
+        if has_path and (path is None or path.startswith("/")):
+            # ``app.use('/mount', ...guards, subRouter, ...guards)`` mounts a sub-router: a
+            # ``route`` / ``mount`` record (the Target Spec's form for wiring), whose handler is the
+            # mounted router and whose guards are the surrounding middleware. Its prefix and
+            # middleware also reach the mounted routes (the express.router-mounts fact and the
+            # same-file mount composition). Bare ``app.use(mw)`` is a guard, not a mount.
+            handler, handler_line, guards = _mount_parts(chain, source, bindings)
+            return None, path, handler, handler_line, guards, "express", "mount"
+        return None
+    return None  # includes ``route(path)``: wiring for its chained verbs
 
 
 def _route_root(obj: Node | None, source: bytes) -> Node | None:
@@ -259,10 +335,10 @@ def _apply_base(
     base: str | None, framework: str, route_kind: str, endpoint: str | None
 ) -> str | None:
     """Prefix a router-local Express route with the base its factory is mounted at, when the
-    repo index resolved one for this file. Only express ``route`` statements are joined — a
-    ``mount`` keeps its own base, and other frameworks are untouched. No resolved mount (or a
+    repo index resolved one for this file. Express ``route`` and ``mount`` statements are joined
+    (a nested mount's address is its full prefix); other frameworks are untouched. No resolved mount (or a
     dynamic endpoint) → endpoint unchanged (honest-null; today's behavior)."""
-    if base is None or endpoint is None or framework != "express" or route_kind != "route":
+    if base is None or endpoint is None or framework != "express" or route_kind not in ("route", "mount"):
         return endpoint
     return _join_base(base, endpoint)
 

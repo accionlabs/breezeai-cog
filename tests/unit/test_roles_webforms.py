@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from breezeai_cog.parsers.contract import is_entry_point
+
 import pytest
 
 from breezeai_cog import iter_file_records
@@ -73,7 +75,7 @@ public class Export : IHttpHandler
 
 
 def _eps(stmts):
-    return [s for s in stmts if s.semanticType in EP and s.routeKind != "field_resolver"]
+    return [s for s in stmts if is_entry_point(s)]
 
 
 def _site(global_asax: bool = False) -> dict[str, str]:
@@ -151,17 +153,17 @@ def test_master_page_is_none(site) -> None:
 
 def test_server_control_event_is_none(site) -> None:
     on_click = [s for s in site if s.path == "Orders.aspx" and s.handler == "Save_Click"]
-    assert on_click and all(s.semanticType not in EP for s in on_click)
+    assert on_click and not any(is_entry_point(s) for s in on_click)
 
 
 def test_redirect_is_outbound_navigation(site) -> None:
     nav = [s for s in site if s.endpoint == "/Done.aspx"]
-    assert [s.semanticType for s in nav] == ["navigation"]
+    assert [(s.semanticType, s.routeKind) for s in nav] == [("route", "navigation")]
 
 
 def test_navigate_url_is_outbound_navigation(site) -> None:
     nav = [s for s in site if s.endpoint == "/Help.aspx"]
-    assert [s.semanticType for s in nav] == ["navigation"]
+    assert [(s.semanticType, s.routeKind) for s in nav] == [("route", "navigation")]
 
 
 def test_application_start_is_none(analyze_files) -> None:

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from breezeai_cog.parsers.contract import is_entry_point
+
 EP = {"route", "eventbus_consumer", "timer"}
 SRC = "src/main/java/a/"
 RS = "import javax.ws.rs.*;"
@@ -11,8 +13,7 @@ def _eps(stmts, file: str | None = None):
     return [
         s
         for s in stmts
-        if s.semanticType in EP
-        and s.routeKind != "field_resolver"
+        if is_entry_point(s)
         and (file is None or s.path == SRC + file)
     ]
 

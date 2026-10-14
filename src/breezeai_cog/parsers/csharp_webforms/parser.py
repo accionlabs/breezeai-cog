@@ -111,7 +111,7 @@ class WebFormsParser(CSharpParser):
             # A page, a user control, or a file composed into a master page is Web Forms code.
             if routes or master_ep is not None or ctx.path.endswith(".ascx.cs"):
                 record.framework = "aspnet-webforms"
-            # Page→page navigation → navigation statements (item 4).
+            # Page→page navigation → routeKind=navigation statements (item 4).
             nav = detect_navigation(record, ctx.path, root, ctx.source, markup, ctx.repo_root)
             if nav:
                 apply(record, nav, ctx.source, ctx.path)

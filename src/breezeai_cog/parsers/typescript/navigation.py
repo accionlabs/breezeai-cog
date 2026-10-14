@@ -1,4 +1,5 @@
-"""Additive detector: programmatic navigation and React ``<Link>`` are outbound ``navigation``.
+"""Additive detector: programmatic navigation and React ``<Link>`` are outbound links,
+``route`` / ``routeKind: navigation``.
 
 A link or a router call moves the user to a page: the UI's outbound call, matched to a page
 (``route`` / ``routeKind: page``) on ``endpoint``, as ``api_call`` is to ``route``::
@@ -124,7 +125,8 @@ def _detect(dc: DetectContext) -> Detection | None:
 
     def add(node: Node, framework: str, endpoint: str | None, *, enrich: bool) -> None:
         found.append(Emit(
-            node, {"semanticType": "navigation", "framework": framework, "endpoint": endpoint},
+            node, {"semanticType": "route", "routeKind": "navigation", "framework": framework,
+             "endpoint": endpoint},
             enrich="own" if enrich else "never",
         ))
         frameworks.append(framework)

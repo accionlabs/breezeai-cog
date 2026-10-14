@@ -10,8 +10,10 @@ is worse than missing (§8): a parser leaves a handler empty when it cannot name
 ``endpoint`` empty. Tests fail on errors; gaps are counted, as a completeness measure.
 
 The entry points are the ``route``, ``eventbus_consumer`` and ``timer`` records whose
-``routeKind`` is not ``field_resolver`` (contract §5). Wiring has no record at all, so a ``route``
-with ``routeKind`` ``mount`` or ``layout`` is an error like any other unknown kind.
+``routeKind`` is not ``field_resolver``, ``mount``, ``layout`` or ``navigation`` (contract §5).
+Mounts, layouts and links are written in the Target Spec's current form — ``route`` with that
+``routeKind`` — until its entry-point proposal is approved; they are not entry points. A link
+(``routeKind: navigation``) is outbound and checked like one.
 
 =============== ======== =================================================================
 Rule            Severity Violation
@@ -29,8 +31,9 @@ Rule            Severity Violation
 ``guards``      error    an empty list, an empty name or a repeated name (§5)
 ``handler``     gap      neither ``handler`` nor ``handlerLine``, except for a URL served
                          by framework code (§4, §8 "every record leads to its handler")
-``outbound``    error    an outbound record (``api_call``, ``navigation``,
-                         ``eventbus_send`` / ``_publish``) whose ``endpoint`` is an empty
+``outbound``    error    an outbound record (``api_call``, a ``route`` link with
+                         ``routeKind: navigation``, ``eventbus_send`` / ``_publish``)
+                         whose ``endpoint`` is an empty
                          string or a code placeholder — it must be written like the entry
                          point it reaches (§6)
 =============== ======== =================================================================
@@ -47,7 +50,7 @@ from .aspnet_common import FRAMEWORK_SERVED
 ENTRY_POINT_TYPES = frozenset({"route", "eventbus_consumer", "timer"})
 
 #: ``routeKind`` values filed under ``route`` that are not entry points (see the docstring).
-NOT_ENTRY_POINT_KINDS = frozenset({"field_resolver"})
+NOT_ENTRY_POINT_KINDS = frozenset({"field_resolver", "mount", "layout", "navigation"})
 
 HTTP_METHODS = frozenset({"GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS"})
 METHODS = HTTP_METHODS | frozenset({
@@ -80,7 +83,7 @@ class Violation:
 
 
 #: Outbound semantic types: their address is written like the entry point they reach (§6).
-OUTBOUND_TYPES = frozenset({"api_call", "navigation", "eventbus_send", "eventbus_publish"})
+OUTBOUND_TYPES = frozenset({"api_call", "eventbus_send", "eventbus_publish"})
 
 
 def _bad_address(endpoint: str | None) -> str | None:
@@ -125,7 +128,7 @@ def validate(record: FileRecord) -> list[Violation]:
     out: list[Violation] = []
     seen: Counter[tuple[int, str | None, str | None, str | None]] = Counter()
     for s in record.statements:
-        if s.semanticType in OUTBOUND_TYPES:
+        if s.semanticType in OUTBOUND_TYPES or s.routeKind == "navigation":
             bad = _bad_address(s.endpoint)
             if bad is not None:
                 out.append(Violation("outbound", "error", s.id, bad))

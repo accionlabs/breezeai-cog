@@ -2,13 +2,15 @@
 
 from __future__ import annotations
 
+from breezeai_cog.parsers.contract import is_entry_point
+
 
 EP = {"route", "eventbus_consumer", "timer"}
 SRC = "src/main/scala/a/Worker.scala"
 
 
 def _eps(stmts):
-    return [s for s in stmts if s.semanticType in EP and s.routeKind != "field_resolver"]
+    return [s for s in stmts if is_entry_point(s)]
 
 
 def test_actor_receive_is_none(analyze_files) -> None:

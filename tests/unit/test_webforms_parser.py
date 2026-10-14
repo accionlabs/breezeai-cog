@@ -499,7 +499,7 @@ namespace Acme { public partial class Nav1 : Page {
 
 
 def _navs(rec: FileRecord) -> list:
-    return [s for s in rec.statements if s.semanticType == "navigation"]
+    return [s for s in rec.statements if s.routeKind == "navigation"]
 
 
 def test_navigation_redirect_real_node() -> None:
@@ -512,7 +512,7 @@ def test_navigation_redirect_real_node() -> None:
     assert len(navs) == 1
     assert navs[0].endpoint == "/Login.aspx"  # query stripped
     assert navs[0].nodeType == "invocation_expression"  # real call, not synthetic
-    assert navs[0].semanticType == "navigation"
+    assert (navs[0].semanticType, navs[0].routeKind) == ("route", "navigation")
 
 
 def test_navigation_server_transfer() -> None:

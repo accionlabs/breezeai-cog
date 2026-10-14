@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from breezeai_cog.parsers.contract import is_entry_point
+
 import pytest
 
 EP = {"route", "eventbus_consumer", "timer"}
@@ -68,7 +70,7 @@ static string GetOrders() => "orders";
 
 
 def _eps(stmts):
-    return [s for s in stmts if s.semanticType in EP and s.routeKind != "field_resolver"]
+    return [s for s in stmts if is_entry_point(s)]
 
 
 def _at(stmts, path, line):

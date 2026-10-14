@@ -12,6 +12,6 @@ Parser: `src/breezeai_cog/parsers/csharp_webforms/` · Rules: [entry-point contr
 | `MasterPageFile="~/Site.master"` | Wiring | statement stays plain; page → master stays in `importFiles` | Structural link (a layout), no handler |
 | `.master` page | None | — | A layout, never reached by URL |
 | Server-control event (`OnClick="Save_Click"`) | None | plain statement with `handler` = the code-behind method | Runs inside the page's postback |
-| `Response.Redirect` / `Server.Transfer` / `NavigateUrl` / `PostBackUrl` to a page | Outbound | `navigation`, `endpoint` = the target page | Our code moving the user to a page |
+| `Response.Redirect` / `Server.Transfer` / `NavigateUrl` / `PostBackUrl` to a page | Outbound | `route`, `routeKind: navigation`, `endpoint` = the target page | Our code moving the user to a page |
 | `.ashx` generic handler (`IHttpHandler.ProcessRequest`) | Binding | `route`, `/<path>.ashx`, `handler: ProcessRequest` | One handler reached by URL |
 | `Global.asax` `Application_Start` | None | — | Start-up |

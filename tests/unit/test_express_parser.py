@@ -64,7 +64,9 @@ def test_routes_detected(tmp_path) -> None:
         ("POST", "/book"),       # ... .post(postBook); route('/book') itself is wiring
         ("DELETE", "/orders/:id"),
         ("GET", "/ping"),        # express.Router().get(...) direct-constructor receiver
+        (None, "/api"),          # app.use('/api', router): a route / mount record
     }
+    assert routes[(None, "/api")].routeKind == "mount"
     assert routes[("POST", "/api/users")].handler == "createUser"
     assert routes[("DELETE", "/orders/:id")].handler == "deleteOrder"
     assert (routes[("GET", "/book")].handler, routes[("POST", "/book")].handler) == (
@@ -130,7 +132,7 @@ def test_template_literal_paths(tmp_path) -> None:
     assert ("GET", None, "sitemapHandler") in routes
     assert ("GET", "/plain", "plainHandler") in routes  # a template with no substitution
     assert ("GET", None, "assetHandler") in routes
-    assert not any(m is None for m, _, _ in routes)     # a mount is wiring: no record
+    assert (None, None, "router") in routes             # a mount whose template path is unknown
 
 
 def test_template_path_resolves_through_constants(analyze_files) -> None:
@@ -160,20 +162,24 @@ export function createServer(graphqlPath = '/graphql') {
 '''
 
 
-def test_apollo_graphql_mount_is_wiring(tmp_path) -> None:
+def test_apollo_graphql_mount_detected(tmp_path) -> None:
     p = tmp_path / "server.ts"
     p.write_bytes(APOLLO_SRC)
     ctx = ParseContext(path="server.ts", abs_path=p, source=APOLLO_SRC,
                        repo_root=tmp_path, capture_statements=True)
     rec = TypeScriptParser().parse_file(ctx)
     routes = {(s.method, s.endpoint): s for s in rec.statements if s.semanticType == "route"}
-    # /health is a route. The /api router mount and the expressMiddleware transport mount are
-    # wiring (the transport serves many operations; the resolvers are the bindings): no record.
-    assert set(routes) == {("GET", "/health")}
-    assert routes[("GET", "/health")].framework == "express"
+    # /health stays a plain express route; /api stays an express mount.
+    assert ("GET", "/health") in routes and routes[("GET", "/health")].framework == "express"
+    assert (None, "/api") in routes and routes[(None, "/api")].routeKind == "mount"
+    # the expressMiddleware mount is a POST /graphql route tagged graphql (path resolved
+    # from the graphqlPath param default).
+    gql = routes[("POST", "/graphql")]
+    assert gql.framework == "graphql" and gql.routeKind == "route"
 
 
-def test_apollo_mount_with_unresolved_path_is_wiring_too(tmp_path) -> None:
+def test_apollo_mount_path_falls_back_to_convention(tmp_path) -> None:
+    # If the mount path can't be resolved to a literal, default to the /graphql convention.
     src = b'''import { expressMiddleware } from '@apollo/server/express4';
 app.use(cfg.gqlPath, expressMiddleware(server));
 '''
@@ -181,7 +187,8 @@ app.use(cfg.gqlPath, expressMiddleware(server));
     p.write_bytes(src)
     ctx = ParseContext(path="s.ts", abs_path=p, source=src, repo_root=tmp_path, capture_statements=True)
     rec = TypeScriptParser().parse_file(ctx)
-    assert [s for s in rec.statements if s.semanticType == "route"] == []
+    eps = {(s.method, s.endpoint) for s in rec.statements if s.semanticType == "route"}
+    assert ("POST", "/graphql") in eps
 
 
 def test_express_is_additive_not_a_selecting_parser(tmp_path) -> None:

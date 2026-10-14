@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from breezeai_cog.parsers.contract import is_entry_point
+
 EP = {"route", "eventbus_consumer", "timer"}
 
 JAVA = "src/main/java/app/Jobs.java"
@@ -28,7 +30,7 @@ public class HelloJob : IJob {
 
 
 def _eps(stmts, path: str):
-    return [s for s in stmts if s.semanticType in EP and s.path == path]
+    return [s for s in stmts if is_entry_point(s) and s.path == path]
 
 
 def _java(analyze_files, body: str):

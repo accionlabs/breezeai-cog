@@ -11,15 +11,15 @@ Parser: `src/breezeai_cog/parsers/typescript_react/` · Rules:
 | `const X = lazy(() => import(…))` used as the element | Binding | `handler` = `X` | One component, loaded lazily |
 | `<Route path lazy={() => import(…)}>` / `{ path, lazy }` | Binding | `route`, `page`; `handler` = the module's component, empty if unknown | One route module, loaded lazily |
 | `<Route index element>` / `{ index: true, element }` | Binding | `endpoint` = the parent's path | Renders at the parent's URL |
-| Path-only parent `<Route path>` / `{ path, children }` (no element) | Wiring | statement stays plain; `path` prefixes the children | No handler of its own |
-| Element + children with an index (or empty-path) child | Wiring | statement stays plain; prefix for the children | A layout: a child always fills its outlet |
+| Path-only parent `<Route path>` / `{ path, children }` (no element) | Wiring | `route`, `routeKind: page`, no handler (the Target Spec's current form); `path` prefixes the children | No handler of its own |
+| Element + children with an index (or empty-path) child | Wiring | `route`, `routeKind: page`, `handler` = the element (the Target Spec's current form); prefix for the children | A layout: a child always fills its outlet |
 | Element + children with no index child | Binding (and wiring for the children) | `route`, `page`, `handler` = the element | Its own URL shows it with an empty outlet |
-| Guard element as a layout (`<Route element={<ProtectedRoute/>}>` + children) | Guard | name in `guards` of each child | Runs before the children's pages |
+| Guard element as a layout (`<Route element={<ProtectedRoute/>}>` + children) | Guard | name in `guards` of each child; with a path, also a `route`, `routeKind: page` record (the Target Spec's current form) | Runs before the children's pages |
 | `<Route path element={<Navigate to/>}>` | None | — | A redirect; no page |
 | v7 `route(path, file)` / `index(file)` | Binding | `route`, `page`; `handler` = the module's component, never the file path | One route module |
-| v7 `layout(file, [...])` | Wiring | statement stays plain | A layout around its children |
+| v7 `layout(file, [...])` | Wiring | `route`, `routeKind: mount`, `handler` = the file (the Target Spec's current form) | A layout around its children |
 | v7 `prefix(base, [...])` | Wiring | statement stays plain; `base` prefixes the children | Prefix only |
 | `fetch` / `axios` calls | Outbound | `api_call` | |
-| `<Link to>` / `<NavLink to>` | Outbound | `semanticType: navigation`, `endpoint` = target path | A link to a page |
-| `navigate(path)` from `useNavigate()` | Outbound | `semanticType: navigation`, `endpoint` = target path | Programmatic navigation |
+| `<Link to>` / `<NavLink to>` | Outbound | `route`, `routeKind: navigation`, `endpoint` = target path | A link to a page |
+| `navigate(path)` from `useNavigate()` | Outbound | `route`, `routeKind: navigation`, `endpoint` = target path | Programmatic navigation |
 | `createRoot(...).render(<App/>)` / `ReactDOM.render` | None | — | Start-up |

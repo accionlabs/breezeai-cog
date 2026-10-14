@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from breezeai_cog.parsers.contract import is_entry_point
+
 EP = {"route", "eventbus_consumer", "timer"}
 SRC = "src/main/scala/a/R.scala"
 HEAD = """package a
@@ -17,7 +19,7 @@ def _routes(body: str) -> dict[str, str]:
 
 
 def _eps(stmts):
-    return [s for s in stmts if s.semanticType in EP and s.routeKind != "field_resolver"]
+    return [s for s in stmts if is_entry_point(s)]
 
 
 ORDERS = """    pathPrefix("orders") {

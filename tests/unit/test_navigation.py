@@ -7,7 +7,7 @@ PKG = '{"dependencies": {"vue": "3", "vue-router": "4", "react": "18", "react-ro
 
 def _nav(stmts, path: str) -> list[tuple[str, str | None]]:
     return sorted((s.framework, s.endpoint or "")
-                  for s in stmts if s.semanticType == "navigation" and s.path == path)
+                  for s in stmts if s.routeKind == "navigation" and s.path == path)
 
 
 def test_vue_push_forms(analyze_files) -> None:
@@ -42,7 +42,7 @@ def test_a_call_nested_in_a_larger_statement_gets_its_own_record(analyze_files) 
         "  return (\n    <button onClick={() => navigate('/reports')}>Go</button>\n  );\n}\n"
     )
     st = analyze_files({"package.json": PKG, "src/Go.tsx": src})
-    [r] = [s for s in st if s.semanticType == "navigation"]
+    [r] = [s for s in st if s.routeKind == "navigation"]
     assert (r.startLine, r.endpoint, r.text) == (6, "/reports", "navigate('/reports')")
 
 

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from breezeai_cog.parsers.contract import is_entry_point
+
 
 EP = {"route", "eventbus_consumer", "timer"}
 PKG = '{"dependencies": {"express": "4"}}'
@@ -9,7 +11,7 @@ HEAD = "import express from 'express';\nconst app = express();\n"
 
 
 def _eps(stmts):
-    return [s for s in stmts if s.semanticType in EP and s.routeKind != "field_resolver"]
+    return [s for s in stmts if is_entry_point(s)]
 
 
 def _at(stmts, path, line):
@@ -125,7 +127,8 @@ def test_ambiguous_use_is_wiring(analyze_files) -> None:
     assert _eps(st) == []
 
 
-def test_apollo_transport_mount_is_wiring(analyze_files) -> None:
+def test_apollo_transport_mount_is_a_post_route(analyze_files) -> None:
+    # The Target Spec's current form: the transport mount is a POST /graphql route.
     st = analyze_files(
         {
             "package.json": PKG,
@@ -133,7 +136,7 @@ def test_apollo_transport_mount_is_wiring(analyze_files) -> None:
             "app.use('/graphql', expressMiddleware(server));\n",
         }
     )
-    assert _eps(st) == []
+    assert [(s.method, s.endpoint, s.framework) for s in _eps(st)] == [("POST", "/graphql", "graphql")]
 
 
 def test_unresolved_path_part_leaves_endpoint_empty(analyze_files) -> None:

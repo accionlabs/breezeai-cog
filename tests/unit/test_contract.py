@@ -62,8 +62,9 @@ def test_one_record_per_binding() -> None:
 
 def test_only_entry_points_are_checked() -> None:
     assert _rules(_route(routeKind="field_resolver", method="RESOLVE_FIELD")) == []
-    # Wiring has no record: a mount / layout route is an unknown kind.
-    assert _rules(_route(routeKind="mount")) == [("routeKind", "error")]
+    # Mounts, layouts and links (the spec's current form) are not entry points.
+    assert _rules(_route(routeKind="mount", handler=None)) == []
+    assert _rules(_route(routeKind="layout", handler=None)) == []
     assert _rules(_route(semanticType="api_call", routeKind=None)) == []
 
 
@@ -75,5 +76,5 @@ def test_consumers_and_timers_have_their_own_route_kinds() -> None:
 
 def test_outbound_addresses_are_written_like_entry_points() -> None:
     assert _rules(_route(semanticType="api_call", routeKind=None, endpoint="/users/{id}")) == []
-    assert _rules(_route(semanticType="navigation", endpoint="${BASE}/x")) == [("outbound", "error")]
+    assert _rules(_route(routeKind="navigation", endpoint="${BASE}/x")) == [("outbound", "error")]
     assert _rules(_route(semanticType="eventbus_send", endpoint="")) == [("outbound", "error")]

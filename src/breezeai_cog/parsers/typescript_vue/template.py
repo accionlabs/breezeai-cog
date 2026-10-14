@@ -11,7 +11,7 @@ The ``vue`` grammar models every directive as one ``directive_attribute`` node (
 Angular's typed ``event_binding`` / ``property_binding`` nodes), so ``nodeType`` is
 ``directive_attribute`` uniformly — the raw grammar type, per the graph-boundary spec. The
 binding *kind* rides on ``name`` (the directive argument/name) and ``handler`` (set only for
-events). ``<router-link>`` navigation becomes a ``navigation`` statement (outbound),
+events). ``<router-link>`` navigation becomes a ``route`` statement (``routeKind="navigation"``),
 reusing the Angular navigation model.
 """
 
@@ -121,7 +121,7 @@ def collect_vue_template_statements(
     emit_routes: bool = True,
 ) -> list[Statement]:
     """Walk each ``<template>`` block and emit one flat Statement per binding / interpolation.
-    ``<router-link>`` ``to`` becomes a ``navigation`` statement (outbound), gated by
+    ``<router-link>`` ``to`` becomes a ``route`` statement (``routeKind="navigation"``), gated by
     ``emit_routes`` (off for fixture files)."""
     out: list[Statement] = []
     stack: list[Node] = [c for c in root.named_children if c.type == "template_element"]
@@ -158,8 +158,9 @@ def collect_vue_template_statements(
             if emit_routes and name == "to" and tag in _NAV_TAGS:
                 _emit(
                     nodeType=node.type,
-                    semanticType="navigation",
+                    semanticType="route",
                     framework=framework,
+                    routeKind="navigation",
                     endpoint=_nav_endpoint(value, node.type == "directive_attribute"),
                     name="to",
                 )

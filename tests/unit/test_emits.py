@@ -101,13 +101,13 @@ def test_own_enriches_only_the_construct_s_own_statement() -> None:
     post, get = _calls()
     # The statement spans line 2 — the outer call's own span — so it may be enriched by it…
     record = _record()
-    apply(record, [Emit(post, {"semanticType": "navigation"}, enrich="own")], SOURCE, "a.ts")
-    assert [s.semanticType for s in record.statements] == ["navigation"]
+    apply(record, [Emit(post, {"semanticType": "api_call"}, enrich="own")], SOURCE, "a.ts")
+    assert [s.semanticType for s in record.statements] == ["api_call"]
     # …but not by a construct whose span differs (here: an emit pinned to other lines).
     record = _record()
-    apply(record, [Emit(get, {"semanticType": "navigation"}, enrich="own", end_line=3)],
+    apply(record, [Emit(get, {"semanticType": "api_call"}, enrich="own", end_line=3)],
           SOURCE, "a.ts")
-    assert [s.semanticType for s in record.statements] == [None, "navigation"]
+    assert [s.semanticType for s in record.statements] == [None, "api_call"]
 
 
 def test_starts_enriches_the_statement_the_construct_begins() -> None:

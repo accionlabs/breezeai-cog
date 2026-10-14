@@ -103,7 +103,7 @@ def detect_navigation(
         dedup.add(key)
         out.append(Emit(
             root,
-            {"semanticType": "navigation", "endpoint": endpoint,
+            {"semanticType": "route", "routeKind": "navigation", "endpoint": endpoint,
              "framework": "aspnet-webforms", "handler": cname},
             parent=file_id(path), node_type=node_type, text=endpoint,
             line=start, col=2, end_line=end,  # col 2 → distinct from page(0)/layout(1)

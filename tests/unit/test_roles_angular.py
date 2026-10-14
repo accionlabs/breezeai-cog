@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from breezeai_cog.parsers.contract import is_entry_point
+
 import pytest
 
 EP = {"route", "eventbus_consumer", "timer"}
@@ -19,7 +21,7 @@ def _eps(stmts, path: str = "src/app/app.routes.ts"):
     return [
         s
         for s in stmts
-        if s.semanticType in EP and s.routeKind != "field_resolver" and s.path == path
+        if is_entry_point(s) and s.path == path
     ]
 
 
@@ -91,14 +93,15 @@ def test_load_children_prefixes_the_loaded_routes(analyze_files) -> None:
     assert r.handler == "ReportsComponent"
 
 
-def test_children_only_parent_is_wiring(analyze_files) -> None:
+def test_children_only_parent_is_recorded_as_a_page(analyze_files) -> None:
+    # The Target Spec's current form: a path-only parent is a page record with no handler.
     st = _routes(
         analyze_files,
         "export const routes: Routes = [\n"
         "  { path: 'home', component: HomeComponent },\n"
         "  { path: 'shop', children: [ { path: 'cart', component: CartComponent } ] },\n];\n",
     )
-    assert _at(st, "/shop") == []
+    assert [(r.routeKind, r.handler) for r in _at(st, "/shop")] == [("page", None)]
 
 
 def test_children_only_parent_prefixes_children(analyze_files) -> None:
@@ -112,7 +115,8 @@ def test_children_only_parent_prefixes_children(analyze_files) -> None:
     assert r.handler == "CartComponent"
 
 
-def test_layout_with_empty_path_child_is_wiring(analyze_files) -> None:
+def test_layout_with_empty_path_child_is_recorded_as_a_page(analyze_files) -> None:
+    # The Target Spec's current form: the layout and its '' child are both pages at its URL.
     st = _routes(
         analyze_files,
         "export const routes: Routes = [\n"
@@ -120,7 +124,7 @@ def test_layout_with_empty_path_child_is_wiring(analyze_files) -> None:
         "    { path: '', component: SettingsHome },\n"
         "    { path: 'profile', component: Profile },\n  ] },\n];\n",
     )
-    assert [r.handler for r in _at(st, "/settings")] == ["SettingsHome"]
+    assert sorted(r.handler for r in _at(st, "/settings")) == ["SettingsHome", "SettingsShell"]
     assert [r.handler for r in _at(st, "/settings/profile")] == ["Profile"]
 
 
@@ -205,7 +209,7 @@ def test_router_link_is_outbound_navigation(analyze_files) -> None:
         templates=True,
     )
     assert _eps(st, "src/app/nav.component.html") == []
-    assert [s.endpoint for s in st if s.semanticType == "navigation"] == ["/users"]
+    assert [s.endpoint for s in st if s.routeKind == "navigation"] == ["/users"]
 
 
 def test_router_navigate_is_outbound_navigation(analyze_files) -> None:
@@ -217,7 +221,7 @@ def test_router_navigate_is_outbound_navigation(analyze_files) -> None:
     )
     st = analyze_files({"package.json": PKG, "src/app/go.service.ts": svc})
     assert _eps(st, "src/app/go.service.ts") == []
-    assert [s.endpoint for s in st if s.semanticType == "navigation"] == ["/users"]
+    assert [s.endpoint for s in st if s.routeKind == "navigation"] == ["/users"]
 
 
 def test_bootstrap_is_none(analyze_files) -> None:

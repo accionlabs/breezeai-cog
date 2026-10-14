@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from breezeai_cog.parsers.contract import is_entry_point
+
 import pytest
 
 EP = {"route", "eventbus_consumer", "timer"}
@@ -20,8 +22,7 @@ def _eps(stmts, path: str | None = None):
     return [
         s
         for s in stmts
-        if s.semanticType in EP
-        and s.routeKind != "field_resolver"
+        if is_entry_point(s)
         and (path is None or s.path == path)
     ]
 

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from breezeai_cog.parsers.contract import is_entry_point
+
 
 EP = {"route", "eventbus_consumer", "timer"}
 PKG = '{"dependencies": {"@nestjs/core": "10", "@nestjs/common": "10"}}'
@@ -11,7 +13,7 @@ COMMON = (
 
 
 def _eps(stmts):
-    return [s for s in stmts if s.semanticType in EP and s.routeKind != "field_resolver"]
+    return [s for s in stmts if is_entry_point(s)]
 
 
 def _ctrl(analyze_files, body: str, *, decorators: str = "", imports: str = "", **extra: str):
