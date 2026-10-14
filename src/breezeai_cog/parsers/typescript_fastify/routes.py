@@ -250,6 +250,27 @@ def _imported_fastify_factory_names(node: Node, source: bytes) -> set[str]:
     return names
 
 
+def _is_fastify_file_marker(node: Node, source: bytes) -> bool:
+    if node.type == "import_statement":
+        source_node = node.child_by_field_name("source")
+        return source_node is not None and _string_literal(source_node, source) == "fastify"
+
+    if node.type != "call_expression":
+        return False
+
+    callee = node.child_by_field_name("function")
+    if callee is None or callee.type != "identifier":
+        return False
+    name = node_text(callee, source)
+    if name in _FASTIFY_FACTORY_NAMES:
+        return True
+    if name != "require":
+        return False
+    args = node.child_by_field_name("arguments")
+    first_arg = args.named_children[0] if args is not None and args.named_children else None
+    return first_arg is not None and _string_literal(first_arg, source) == "fastify"
+
+
 class _FileIndex:
     """Per-file lexical scopes and declarations used by route and path lookup."""
 
@@ -262,6 +283,7 @@ class _FileIndex:
         self._plugin_parameter_candidates: list[tuple[tuple[int, int, str], str, int, Node]] = []
         self._class_factory_fields: list[tuple[tuple[int, int, str], str, Node]] = []
         self.fastify_class_fields: dict[tuple[int, int, str], set[str]] = {}
+        self.has_fastify_marker = False
         self.root_scope = self._build(root, source)
         self.call_nodes.sort(key=lambda call: call.start_byte)
         self.call_starts = [call.start_byte for call in self.call_nodes]
@@ -306,6 +328,8 @@ class _FileIndex:
         while pending:
             node, parent_scope, nested_function = pending.pop()
             scope = parent_scope
+            if _is_fastify_file_marker(node, source):
+                self.has_fastify_marker = True
             if node.type in _LEXICAL_SCOPE_NODE_TYPES:
                 key = self.node_key(node)
                 scope = _Scope(key, node.type, parent_scope)
@@ -456,6 +480,15 @@ class _FileIndex:
 
     def _resolve_exported_plugin_parameters(self, source: bytes) -> None:
         for scope_key, name, position, function in self._plugin_parameter_candidates:
+            params = function.child_by_field_name("parameters")
+            first_parameter = (
+                params.named_children[0] if params is not None and params.named_children else None
+            )
+            if not self.has_fastify_marker and (
+                first_parameter is None
+                or not _has_fastify_instance_type(first_parameter, source)
+            ):
+                continue
             scope = self.scopes[scope_key]
             if not any(
                 _is_fastify_parameter_route_call(call, name, function, source)

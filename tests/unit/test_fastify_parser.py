@@ -643,6 +643,38 @@ def test_fastify_plugin_names_do_not_leak_to_sibling_functions() -> None:
     assert detect_fastify_routes(root, source, "app.ts", record, seen_ids=set()) == []
 
 
+@pytest.mark.parametrize("parameter", ["app", "instance", "server"])
+def test_generic_exported_parameter_requires_fastify_marker(parameter: str) -> None:
+    source = (
+        f"export function clearCache({parameter}, key) {{ "
+        f"{parameter}.get('/not-a-route', handler); }}"
+    ).encode()
+
+    assert _detect_routes(source, inject_factory_import=False) == []
+
+
+def test_generic_exported_parameter_is_promoted_with_fastify_import() -> None:
+    source = (
+        b'import type { FastifyInstance } from "fastify";\n'
+        b"export function routes(server) { server.get('/users', handler); }"
+    )
+
+    routes = _detect_routes(source, inject_factory_import=False)
+
+    assert [(route.method, route.endpoint) for route in routes] == [("GET", "/users")]
+
+
+def test_generic_exported_parameter_is_promoted_with_fastify_instance_annotation() -> None:
+    source = (
+        b"export function routes(server: FastifyInstance) { "
+        b"server.get('/users', handler); }"
+    )
+
+    routes = _detect_routes(source, inject_factory_import=False)
+
+    assert [(route.method, route.endpoint) for route in routes] == [("GET", "/users")]
+
+
 def test_nested_helper_in_exported_non_plugin_is_not_a_plugin() -> None:
     source = (
         b"export function ordinary() { "
