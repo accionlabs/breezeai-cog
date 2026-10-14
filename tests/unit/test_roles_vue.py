@@ -1,0 +1,180 @@
+"""vue-router role table: docs/entry-point-roles/vue.md — one test per row."""
+
+from __future__ import annotations
+
+from breezeai_cog.parsers.contract import is_entry_point
+
+import pytest
+
+EP = {"route", "eventbus_consumer", "timer"}
+
+PKG = '{"dependencies": {"vue": "3", "vue-router": "4"}}'
+ROUTER = "src/router/index.js"
+
+
+def _routes(analyze_files, body: str, tail: str = ""):
+    src = (
+        "import { createRouter, createWebHistory } from 'vue-router';\n"
+        f"const routes = [\n{body}];\n"
+        "const router = createRouter({ history: createWebHistory(), routes });\n"
+        f"{tail}export default router;\n"
+    )
+    return analyze_files({"package.json": PKG, ROUTER: src}, templates=True)
+
+
+def _eps(stmts, path: str = ROUTER):
+    return [
+        s
+        for s in stmts
+        if is_entry_point(s) and s.path == path
+    ]
+
+
+def _at(stmts, endpoint: str, path: str = ROUTER):
+    return [s for s in _eps(stmts, path) if s.endpoint == endpoint]
+
+
+def test_path_component_is_binding(analyze_files) -> None:
+    st = _routes(analyze_files, "  { path: '/users', name: 'users', component: UserList },\n")
+    [r] = _at(st, "/users")
+    assert (r.semanticType, r.routeKind, r.framework, r.handler) == (
+        "route",
+        "page",
+        "vue",
+        "UserList",
+    )
+
+
+@pytest.mark.xfail(strict=True, reason="a lazy component import: handler is the import path")
+def test_lazy_component_is_binding(analyze_files) -> None:
+    st = _routes(
+        analyze_files, "  { path: '/reports', component: () => import('../views/Reports.vue') },\n"
+    )
+    [r] = _at(st, "/reports")
+    assert r.routeKind == "page"
+    assert not r.handler or "/" not in r.handler
+
+
+def test_named_views_default_component_is_handler(analyze_files) -> None:
+    st = _routes(
+        analyze_files, "  { path: '/home', components: { default: Home, sidebar: Side } },\n"
+    )
+    [r] = _at(st, "/home")
+    assert r.handler == "Home"
+
+
+def test_layout_with_empty_path_child_is_recorded_as_a_page(analyze_files) -> None:
+    # The Target Spec's current form: the layout and its '' child are both pages at its URL.
+    st = _routes(
+        analyze_files,
+        "  { path: '/settings', component: SettingsShell, children: [\n"
+        "    { path: '', component: SettingsHome },\n"
+        "    { path: 'profile', component: Profile },\n  ] },\n",
+    )
+    assert sorted(r.handler for r in _at(st, "/settings")) == ["SettingsHome", "SettingsShell"]
+    assert [r.handler for r in _at(st, "/settings/profile")] == ["Profile"]
+
+
+def test_component_with_children_and_no_empty_child_is_also_binding(analyze_files) -> None:
+    st = _routes(
+        analyze_files,
+        "  { path: '/orders', component: OrderList, children: [\n"
+        "    { path: ':id', component: OrderDetail },\n  ] },\n",
+    )
+    assert [r.handler for r in _at(st, "/orders")] == ["OrderList"]
+    assert [r.handler for r in _at(st, "/orders/:id")] == ["OrderDetail"]
+
+
+def test_children_only_parent_is_recorded_as_a_page(analyze_files) -> None:
+    # The Target Spec's current form: a path-only parent is a page record with no handler.
+    st = _routes(
+        analyze_files,
+        "  { path: '/home', component: Home },\n"
+        "  { path: '/admin', children: [ { path: 'users', component: AdminUsers } ] },\n",
+    )
+    assert [(r.routeKind, r.handler) for r in _at(st, "/admin")] == [("page", None)]
+
+
+def test_children_only_parent_prefixes_children(analyze_files) -> None:
+    st = _routes(
+        analyze_files,
+        "  { path: '/home', component: Home },\n"
+        "  { path: '/admin', children: [ { path: 'users', component: AdminUsers } ] },\n",
+    )
+    assert [r.handler for r in _at(st, "/admin/users")] == ["AdminUsers"]
+
+
+def test_redirect_is_none(analyze_files) -> None:
+    st = _routes(
+        analyze_files,
+        "  { path: '/', redirect: '/users' },\n  { path: '/users', component: UserList },\n",
+    )
+    assert [r.endpoint for r in _eps(st)] == ["/users"]
+
+
+def test_before_enter_is_guard(analyze_files) -> None:
+    st = _routes(
+        analyze_files, "  { path: '/users', component: UserList, beforeEnter: requireAuth },\n"
+    )
+    [r] = _at(st, "/users")
+    assert r.guards == ["requireAuth"]
+
+
+def test_global_before_each_is_guard(analyze_files) -> None:
+    st = _routes(
+        analyze_files,
+        "  { path: '/users', component: UserList },\n",
+        tail="router.beforeEach((to, from) => true);\n",
+    )
+    assert [r.endpoint for r in _eps(st)] == ["/users"]
+
+
+def test_router_link_is_outbound_navigation(analyze_files) -> None:
+    sfc = (
+        '<template>\n  <nav><router-link to="/users">Users</router-link></nav>\n</template>\n'
+        "<script>\nexport default {};\n</script>\n"
+    )
+    st = analyze_files({"package.json": PKG, "src/views/Nav.vue": sfc}, templates=True)
+    assert _eps(st, "src/views/Nav.vue") == []
+    assert [s.endpoint for s in st if s.routeKind == "navigation"] == ["/users"]
+
+
+def test_router_push_is_outbound_navigation(analyze_files) -> None:
+    src = (
+        "import { useRouter } from 'vue-router';\n"
+        "export function useGo() {\n  const router = useRouter();\n"
+        "  return () => router.push('/reports');\n}\n"
+    )
+    st = analyze_files({"package.json": PKG, "src/go.js": src})
+    assert _eps(st, "src/go.js") == []
+    assert [s.endpoint for s in st if s.routeKind == "navigation"] == ["/reports"]
+
+
+def test_fetch_is_outbound(analyze_files) -> None:
+    src = "export async function loadUsers() { return fetch('/api/users'); }\n"
+    st = analyze_files({"package.json": PKG, "src/api.js": src})
+    assert _eps(st, "src/api.js") == []
+    assert [s.endpoint for s in st if s.semanticType == "api_call"] == ["/api/users"]
+
+
+def test_create_app_is_none(analyze_files) -> None:
+    src = "import { createApp } from 'vue';\nimport App from './App.vue';\ncreateApp(App).mount('#app');\n"
+    st = analyze_files({"package.json": PKG, "src/main.js": src})
+    assert _eps(st, "src/main.js") == []
+
+
+def test_parent_before_enter_guards_its_children(analyze_files) -> None:
+    st = _routes(
+        analyze_files,
+        "  { path: '/admin', component: AdminShell, beforeEnter: requireAdmin, children: [\n"
+        "    { path: '', component: AdminHome },\n"
+        "    { path: 'users', component: AdminUsers, beforeEnter: audit },\n  ] },\n",
+    )
+    # Entering a child enters the shell first, so its beforeEnter runs first. The shell itself is
+    # also a page (the Target Spec's current form).
+    assert sorted((r.handler, r.guards) for r in _at(st, "/admin")) == [
+        ("AdminHome", ["requireAdmin"]), ("AdminShell", ["requireAdmin"]),
+    ]
+    assert [(r.handler, r.guards) for r in _at(st, "/admin/users")] == [
+        ("AdminUsers", ["requireAdmin", "audit"]),
+    ]

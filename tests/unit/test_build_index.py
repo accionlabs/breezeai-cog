@@ -152,3 +152,45 @@ def test_build_index_survives_deeply_nested_file(tmp_path, capsys) -> None:
     # the skip is logged with the offending file's name (so it is diagnosable, not silent)
     out = capsys.readouterr().out
     assert "index.file.skipped" in out and "deep.ts" in out
+
+
+def test_csharp_index_records_interface_implementers(tmp_path) -> None:
+    from breezeai_cog.parsers.csharp.imports import build_csharp_index
+
+    files = {
+        "IOrders.cs": "namespace S { public interface IOrders { } public interface IShared { } }",
+        "Orders.cs": "namespace S { public class Orders : Base, IOrders, IShared { } }",
+        "Other.cs": "namespace S { public class Other : IShared { } }",
+        "Partial1.cs": "namespace S { public partial class P : IPart { } }",
+        "Partial2.cs": "namespace S { public partial class P : IPart { } }",
+    }
+    paths = []
+    for name, src in files.items():
+        (tmp_path / name).write_text(src)
+        paths.append(tmp_path / name)
+    index = build_csharp_index(tmp_path, paths)
+    assert index.implementers["IOrders"] == "S.Orders"
+    assert index.implementers["IShared"] is None  # two implementers → ambiguous
+    assert index.implementers["IPart"] == "S.P"     # partial class parts agree
+    assert "IOrders" not in {k for k, v in index.implementers.items() if v == "S.IOrders"}
+
+
+def test_numeric_constants_count_only_when_constant() -> None:
+    # A number is recorded as JavaScript writes it in a string, and only from a constant
+    # declaration: a `let` number or a mutable field is often a counter.
+    from breezeai_cog.parsers.treesitter import parse_source
+    from breezeai_cog.parsers.typescript.imports import _collect_const_values
+
+    src = (
+        b"const EVERY = 5_000;\n"
+        b"const HEX = 0x10;\n"
+        b"const RATIO = 1.5;\n"
+        b"const BIG = 1e3;\n"            # an exponent: not rendered → not recorded
+        b"let retries = 0;\n"
+        b"enum Port { Api = 8080, Auto }\n"
+        b"class Cfg { static readonly TIMEOUT = 30; static count = 0; }\n"
+    )
+    cv: dict[str, str | None] = {}
+    _collect_const_values(parse_source("typescript", src).root_node, src, cv)
+    assert cv == {"EVERY": "5000", "HEX": "16", "RATIO": "1.5", "Port.Api": "8080",
+                  "Cfg.TIMEOUT": "30"}

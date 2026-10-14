@@ -27,7 +27,7 @@ export function App() {
 }
 '''
 
-# Data-router config-object form (with nesting + lazy mount).
+# Data-router config-object form (with nesting + a lazy route).
 CONFIG_SRC = b'''import { createBrowserRouter } from 'react-router-dom';
 
 export const router = createBrowserRouter([
@@ -66,12 +66,12 @@ def test_jsx_routes_detected_and_nested(tmp_path) -> None:
     assert rec.framework == "react"
 
 
-def test_config_routes_detected_with_lazy_mount(tmp_path) -> None:
+def test_config_routes_detected_with_lazy_page(tmp_path) -> None:
     rec = _parse(tmp_path, CONFIG_SRC, "router.tsx")
     routes = {s.endpoint: s for s in rec.statements if s.semanticType == "route"}
     assert set(routes) == {"/", "/team", "/reports"}
     assert routes["/team"].handler == "Team"
-    assert routes["/reports"].routeKind == "mount"  # lazy code-split
+    assert routes["/reports"].routeKind == "page"  # lazy code-split: still a page (Q10)
     assert routes["/team"].routeKind == "page"
     assert rec.framework == "react"
 
@@ -402,3 +402,55 @@ def test_jsx_file_is_javascript_language(tmp_path) -> None:
     rec = _parse(tmp_path, src, "Widget.jsx")
     assert rec.framework == "react" and rec.language == "javascript"
     assert {f.name: f.uiRole for f in rec.functions}["Widget"] == "component"
+
+
+# ── The page behind wrapper elements ─────────────────────────────────────────────────────────
+def test_wrapped_page_handler_is_the_innermost_component(analyze_files) -> None:
+    st = analyze_files({
+        "package.json": '{"dependencies": {"react-router-dom": "6"}}',
+        "src/App.tsx": (
+            "import { Routes, Route } from 'react-router-dom';\n"
+            "export const App = () => (\n  <Routes>\n"
+            '    <Route path="/a" element={<Suspense fallback={<Spinner />}><Dash /></Suspense>} />\n'
+            '    <Route path="/b" element={<ErrorBoundary><Shell><Reports /></Shell></ErrorBoundary>} />\n'
+            '    <Route path="/c" element={<><Settings /></>} />\n'
+            '    <Route path="/d" element={<Split><Left /><Right /></Split>} />\n'
+            '    <Route path="/e" element={<Plain>text</Plain>} />\n'
+            "  </Routes>\n);\n"
+        ),
+    })
+    handlers = {s.endpoint: s.handler for s in st if s.semanticType == "route"}
+    assert handlers == {"/a": "Dash", "/b": "Reports", "/c": "Settings", "/d": None, "/e": "Plain"}
+
+
+def test_config_element_variable_is_not_a_component_name(analyze_files) -> None:
+    st = analyze_files({
+        "package.json": '{"dependencies": {"react-router-dom": "6"}}',
+        "src/router.tsx": (
+            "import { createBrowserRouter } from 'react-router-dom';\n"
+            "const page = <Home />;\n"
+            "export const router = createBrowserRouter([\n"
+            "  { path: '/', element: page },\n  { path: '/about', Component: About },\n"
+            "  { path: '/team', element: (\n    <Suspense fallback={<Spin />}>\n      <Provider>\n"
+            "        <Team />\n      </Provider>\n    </Suspense>\n  ) },\n]);\n"
+        ),
+    })
+    handlers = {s.endpoint: s.handler for s in st if s.semanticType == "route"}
+    assert handlers == {"/": None, "/about": "About", "/team": "Team"}
+
+
+def test_redirect_route_has_no_record(analyze_files) -> None:
+    st = analyze_files({
+        "package.json": '{"dependencies": {"react-router-dom": "6"}}',
+        "src/App.tsx": (
+            "import { Routes, Route, Navigate, createBrowserRouter } from 'react-router-dom';\n"
+            "export const App = () => (\n  <Routes>\n"
+            '    <Route path="/old" element={<Navigate to="/" replace />} />\n'
+            '    <Route path="/home" element={<Home />} />\n'
+            "  </Routes>\n);\n"
+            "export const router = createBrowserRouter([\n"
+            "  { path: '/legacy', element: <Navigate to='/home' /> },\n"
+            "  { path: '/about', element: <About /> },\n]);\n"
+        ),
+    })
+    assert sorted(s.endpoint for s in st if s.semanticType == "route") == ["/about", "/home"]

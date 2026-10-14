@@ -14,21 +14,31 @@ detector so the backend joins them uniformly."""
 from __future__ import annotations
 
 import re
+from typing import Any
 
 from tree_sitter import Node
 
-from ...emit import disambiguate, function_id, statement_id
-from ...schemas import Decorator, Statement
+from ...emit import function_id
+from ...schemas import Decorator
 from ...parsers.typescript.decorators import decorator
 from ...parsers.typescript.functions import _type_text, extract_params
+from ..additive import FactSpec, index_fact, register_fact
+from ..emits import Emit
+from ..index_common import record_distinct
+from .cron_expressions import CRON_EXPRESSIONS
+from .patterns import message_pattern
+from .prefixes import nest_prefixes
 from ..treesitter import node_text
 
 _METHOD_DECORATORS = {
     "Get": "GET", "Post": "POST", "Put": "PUT", "Patch": "PATCH",
-    "Delete": "DELETE", "Options": "OPTIONS", "Head": "HEAD", "All": "ALL",
+    "Delete": "DELETE", "Options": "OPTIONS", "Head": "HEAD", "All": "ANY",
 }
 # @nestjs/microservices message consumers → eventbus_consumer semanticType.
 _MESSAGING_DECORATORS = {"EventPattern": "EVENT", "MessagePattern": "MESSAGE"}
+# @nestjs/schedule jobs → timer: the schedule (cron expression, or interval / delay in ms) is
+# the endpoint. Gated on the import: Cron / Interval / Timeout are common names.
+_SCHEDULE_DECORATORS = {"Cron": "PERIODIC", "Interval": "PERIODIC", "Timeout": "TIMER"}
 # @nestjs/graphql code-first operations. Gated on the class being an @Resolver — @Query is
 # also a @nestjs/common *param* decorator, but that lives on a parameter, not in the method's
 # decorator list, so a method-level @Query on a resolver is unambiguously the GraphQL one.
@@ -103,21 +113,43 @@ def _unquote(text: str) -> str:
     return text.strip().strip("'\"`")
 
 
-def _pattern(d) -> str | None:
-    """Address/topic of ``@EventPattern('x')`` / ``@MessagePattern({cmd:'y'})``."""
-    if not d.args:
+def _pattern(dec: Node, source: bytes, consts: dict[str, str | None]) -> str | None:
+    """Address/topic of ``@EventPattern('x')`` / ``@MessagePattern({cmd:'y'})``: the string, or
+    canonical JSON for an object pattern (:func:`.patterns.message_pattern`, shared with the
+    ``ClientProxy`` sender so the two match); unresolved → None."""
+    call = next((c for c in dec.named_children if c.type == "call_expression"), None)
+    args = call.child_by_field_name("arguments") if call is not None else None
+    first = next((c for c in args.named_children if c.type != "comment"), None) if args else None
+    return message_pattern(first, source, consts) if first is not None else None
+
+
+def _schedule(dec: Node, name: str, source: bytes, consts: dict[str, str | None]) -> str | None:
+    """Schedule of ``@Cron(expr)`` (the first argument) or ``@Interval([name,] ms)`` /
+    ``@Timeout([name,] ms)`` (the last): a literal, a constant or a ``CronExpression`` member
+    (its value is fixed by the library); anything else (a runtime value) → None."""
+    call = next((c for c in dec.named_children if c.type == "call_expression"), None)
+    args = call.child_by_field_name("arguments") if call is not None else None
+    values = [c for c in args.named_children if c.type != "comment"] if args is not None else []
+    if not values:
         return None
-    raw = d.args[0].strip()
-    return _unquote(raw) if raw[:1] in "'\"`" else (raw or None)
+    arg = values[0] if name == "Cron" else values[-1]
+    if arg.type == "object":  # @Cron(expr, { name, timeZone }) never puts options first
+        return None
+    member = node_text(arg, source)
+    if name == "Cron" and member.startswith("CronExpression."):
+        return CRON_EXPRESSIONS.get(member.removeprefix("CronExpression."))
+    return message_pattern(arg, source, consts)
 
 
-def _guards(decs: list[Node], source: bytes) -> list[str]:
+def _guards(decs: list[Node], source: bytes, *, interceptors: bool = False) -> list[str]:
     """Guard/auth names: ``@UseGuards(...)`` args (NestJS) and ``@Authorized`` (routing-
-    controllers). Presence of any drives ``authRequired``."""
+    controllers). Presence of any drives ``authRequired``. With ``interceptors``, also
+    ``@UseInterceptors(...)`` args in decorator order — they run before the handler too (a guard
+    in the contract's sense) but say nothing about auth, so they don't drive ``authRequired``."""
     out: list[str] = []
     for dec in decs:
         d = decorator(dec, source)
-        if d.name == "UseGuards":
+        if d.name == "UseGuards" or (interceptors and d.name == "UseInterceptors"):
             out.extend(_unquote(a) for a in d.args)
         elif d.name == "Authorized":  # routing-controllers auth decorator
             out.append("Authorized")
@@ -167,16 +199,55 @@ def _resolver_type_arg(decs: list[Node], source: bytes) -> str | None:
     return None
 
 
-def _parent_op_for_grouping(
-    body: Node, source: bytes, grouping_type: str
-) -> tuple[str, str] | None:
-    """Scan the class body for a ``@Query``/``@Mutation`` that returns a **singleton**
-    ``grouping_type`` — e.g. ``@Mutation(() => NotificationsMutation)`` (no ``[``).
-    Returns ``(op_name, 'MUTATION'|'QUERY')`` or ``None``.
+def _returns_empty_object(member: Node, source: bytes) -> bool:
+    """Whether every ``return`` in a method returns an empty object — ``{}``, ``{} as T``,
+    ``new T()`` with no arguments. That is what a stub parent's root operation does: the object
+    only exists so its fields can be resolved. A method with no return, or one that returns
+    anything else (a service call, ``null``, an entity), is not a stub."""
+    body = member.child_by_field_name("body")
+    returns: list[Node] = []
 
-    Distinguishes grouping resolvers (singleton shell, ``@Mutation(() => T)``) from
-    entity resolvers (array return, ``@Query(() => [T])``): ``_SINGLETON_RETURN_RE``
-    does not match when ``[`` follows ``=>`` because ``[`` is not in ``[A-Za-z_$]``."""
+    def walk(n: Node) -> None:
+        if n.type == "return_statement":
+            returns.append(n)
+        elif n.type in ("function_expression", "arrow_function", "function_declaration"):
+            return  # a nested function's returns are not this method's
+        for c in n.named_children:
+            walk(c)
+
+    if body is not None:
+        walk(body)
+
+    def empty(v: Node | None) -> bool:
+        while v is not None and v.type in ("as_expression", "parenthesized_expression",
+                                           "type_assertion", "satisfies_expression"):
+            v = v.named_children[0] if v.named_children else None
+        if v is None:
+            return False
+        if v.type == "object":
+            return not v.named_children
+        if v.type == "new_expression":
+            args = v.child_by_field_name("arguments")
+            return args is None or not args.named_children
+        return False
+
+    return bool(returns) and all(
+        empty(r.named_children[0] if r.named_children else None) for r in returns
+    )
+
+
+def _stub_ops(body: Node, source: bytes) -> list[tuple[str, str]]:
+    """``(stub type, 'MUTATION'|'QUERY')`` for each ``@Query``/``@Mutation`` in the class body that
+    returns a **singleton** type as an **empty object** — e.g. ``@Mutation(() =>
+    NotificationsMutation) notifications() { return {}; }``. That type is a stub parent: its
+    fields are the operations.
+
+    Distinguishes grouping resolvers (a stub shell) from entity resolvers: an array return
+    (``@Query(() => [T])``) does not match ``_SINGLETON_RETURN_RE`` (``[`` is not in
+    ``[A-Za-z_$]``), and a singleton op that returns a real entity (``@Mutation(() => Book)
+    addBook(...) { return this.books.create(...); }``) is not a stub — its type's fields are data
+    fields, not operations."""
+    out: list[tuple[str, str]] = []
     pending: list[Node] = []
     for member in body.named_children:
         if member.type == "decorator":
@@ -191,11 +262,39 @@ def _parent_op_for_grouping(
             if gql_method is None or not d.args:
                 continue
             m = _SINGLETON_RETURN_RE.search(d.args[0])
-            if m and m.group(1) == grouping_type:
-                mname = node_text(member.child_by_field_name("name"), source)
-                return _graphql_op_name(d, mname), gql_method.upper()
+            if m and _returns_empty_object(member, source):
+                out.append((m.group(1), gql_method.upper()))
         pending = []
-    return None
+    return out
+
+
+#: Fact: stub type → the operation kind (``MUTATION`` / ``QUERY``) of the root op that returns it,
+#: from every resolver in the repo — so a stub's fields declared in another resolver class (often
+#: another file) are recorded as operations too. A type returned as a stub by both kinds → absent.
+STUB_PARENTS = "nest.stub-parents"
+
+
+def _collect_stub_parents(
+    root: Node, source: bytes, rel: str, repo_root: object
+) -> list[tuple[str, str]] | None:
+    found = [op for cls, decs in _class_with_decorators(root)
+             if any(decorator(dec, source).name in _RESOLVER_DECORATORS for dec in decs)
+             and (body := cls.child_by_field_name("body")) is not None
+             for op in _stub_ops(body, source)]
+    return found or None
+
+
+def _resolve_stub_parents(values: list[list[tuple[str, str]]], index: object) -> dict[str, str]:
+    kinds: dict[str, str | None] = {}
+    for stub, kind in sorted(op for per_file in values for op in per_file):
+        record_distinct(kinds, stub, kind)
+    return {stub: kind for stub, kind in kinds.items() if kind is not None}
+
+
+register_fact(FactSpec(
+    name=STUB_PARENTS, language="typescript", gate=(b"@Resolver",),
+    collect=_collect_stub_parents, resolve=_resolve_stub_parents,
+))
 
 
 def _args_dto(member: Node, source: bytes) -> str | None:
@@ -267,10 +366,68 @@ def _class_with_decorators(root: Node):
             yield cls, decs
 
 
+def _excluded(local: str, verb: str, exclude: tuple[tuple[str, str | None], ...]) -> bool | None:
+    """Whether a route (its path without the global prefix) is in ``setGlobalPrefix``'s exclude
+    list. A ``:param`` / ``*`` / ``(.*)`` pattern matches by segment; any other pattern syntax
+    cannot be decided → None."""
+    target = local.strip("/")
+    for pat, method in exclude:
+        if method is not None and method != verb:
+            continue
+        p = pat.strip("/")
+        if re.search(r"[^\w\-/:.*()]", p):
+            return None
+        rx = re.escape(p).replace(r"\(\.\*\)", ".*").replace(r"\*", ".*")
+        rx = re.sub(r":\w+", "[^/]+", rx)
+        if re.fullmatch(rx, target):
+            return True
+    return False
+
+
+def _served(local: str, verb: str, class_name: str, path: str, index: object | None) -> str | None:
+    """A NestJS HTTP route's full address: the app's ``setGlobalPrefix`` (unless excluded), then
+    its ``RouterModule`` path, then the controller and method paths (``local``). A prefix that is
+    set but cannot be resolved — or a controller that cannot be tied to its app when one of the
+    repo's apps sets a prefix — makes the address unknown → None (contract §8: never a partial
+    address)."""
+    prefixes = nest_prefixes(index)
+    if prefixes is None:
+        return local
+    ctrl_prefixes = prefixes.controller_prefixes
+    if class_name in ctrl_prefixes:
+        mp = ctrl_prefixes[class_name]
+        if mp is None:
+            return None
+        local = _join(mp, local)
+    boots = prefixes.global_prefixes
+    if not boots:
+        return local
+    anchors = [d for d in boots if d == "" or path.startswith(d + "/")]
+    if not anchors:  # not under any app's bootstrap
+        return local if all(b == ("", ()) for b in boots.values()) else None
+    prefix, exclude = boots[max(anchors, key=len)]  # the deepest app above this controller
+    if prefix == "":
+        return local
+    if prefix is None or exclude is None:
+        return None
+    hit = _excluded(local, verb, exclude)
+    if hit is None:
+        return None
+    return local if hit else _join(prefix, local)
+
+
 def detect_nest_routes(
-    root: Node, source: bytes, path: str, *, seen_ids: set[str], framework: str = "nestjs"
-) -> list[Statement]:
-    routes: list[Statement] = []
+    root: Node, source: bytes, path: str, *, framework: str = "nestjs",
+    index: object | None = None,
+) -> list[Emit]:
+    """The bindings of this file's controllers and resolvers, for :func:`~..emits.apply`.
+    ``index`` is the repo's ``TsAliasIndex``: its ``nest.prefixes`` fact gives the global prefix
+    of each app and the ``RouterModule`` path of each registered controller (NestJS only)."""
+    index_consts = getattr(index, "const_values", None)
+    consts: dict[str, str | None] = index_consts if isinstance(index_consts, dict) else {}
+    routes: list[Emit] = []
+    schedules = framework == "nestjs" and b"@nestjs/schedule" in source
+    stub_parents: dict[str, str] = index_fact(index, STUB_PARENTS) or {}
     for cls, decs in _class_with_decorators(root):
         base = _controller_base(decs, source)  # None when the class is not a @Controller
         is_controller = base is not None
@@ -279,15 +436,19 @@ def detect_nest_routes(
         body = cls.child_by_field_name("body")
         if body is None:
             continue
-        ctrl_guards = _guards(decs, source) if is_controller else []
+        ctrl_guards = _guards(decs, source, interceptors=True) if is_controller else []
+        ctrl_auth = bool(_guards(decs, source)) if is_controller else False
         ctrl_version = _version(decs, source) if is_controller else None
-        # Grouping resolver: @Resolver(() => T) where a @Mutation/@Query on the class
-        # returns a singleton T — @ResolveField methods inherit the parent op's identity.
-        parent_op_info: tuple[str, str] | None = None
+        # Stub parent: @Resolver(() => T) where a root @Mutation/@Query (in this class or any
+        # other resolver of the repo) returns T as an empty object — T's @ResolveField methods
+        # are that kind's operations, addressed <T>.<field>.
+        stub_type: str | None = None
+        stub_method: str | None = None
         if is_resolver:
-            grouping_type = _resolver_type_arg(decs, source)
-            if grouping_type:
-                parent_op_info = _parent_op_for_grouping(body, source, grouping_type)
+            stub_type = _resolver_type_arg(decs, source)
+            if stub_type:
+                stub_method = next((k for t, k in _stub_ops(body, source) if t == stub_type),
+                                   None) or stub_parents.get(stub_type)
         pending: list[Node] = []
         for member in body.named_children:
             if member.type == "decorator":
@@ -299,79 +460,95 @@ def detect_nest_routes(
                 mname = node_text(member.child_by_field_name("name"), source)
                 mline = member.start_point[0] + 1
                 parent = function_id(path, mname, mline, class_name=class_name)
-                guards = ctrl_guards + _guards(pending, source)  # merge controller + method
+                # merge controller + method; interceptors are guards but not auth
+                guards = ctrl_guards + _guards(pending, source, interceptors=True)
+                auth_required = ctrl_auth or bool(_guards(pending, source))
                 for dec in pending:
                     d = decorator(dec, source)
                     verb = _METHOD_DECORATORS.get(d.name) if is_controller else None
                     msg = _MESSAGING_DECORATORS.get(d.name)
                     gql = _GRAPHQL_OPS.get(d.name) if is_resolver else None
                     fld = d.name if (is_resolver and d.name in _FIELD_RESOLVERS) else None
-                    if verb is None and msg is None and gql is None and fld is None:
+                    job = _SCHEDULE_DECORATORS.get(d.name) if schedules else None
+                    ref = is_resolver and d.name == "ResolveReference"
+                    if (verb is None and msg is None and gql is None and fld is None
+                            and job is None and not ref):
                         continue
-                    sl, sc = dec.start_point[0] + 1, dec.start_point[1]
-                    common = dict(
-                        id=disambiguate(statement_id(path, sl, sc), seen_ids),
-                        parentId=parent,
-                        nodeType="synthetic",
-                        text=node_text(dec, source).split("\n", 1)[0],
+                    common: dict[str, Any] = dict(
                         framework=framework,
                         handler=mname,
                         handlerLine=mline,
                         isRegex=False,
-                        authRequired=bool(guards),
+                        authRequired=auth_required,
                         guards=guards or None,
-                        startLine=sl,
-                        endLine=dec.end_point[0] + 1,
-                        path=path,
                     )
+                    fields: dict[str, Any]
                     if verb is not None:  # HTTP route
-                        routes.append(Statement(
+                        local = _join(base, _unquote(d.args[0]) if d.args else "")
+                        fields = dict(
                             semanticType="route",
                             method=verb,
-                            endpoint=_join(base, _unquote(d.args[0]) if d.args else ""),
+                            endpoint=(
+                                _served(local, verb, class_name, path, index)
+                                if framework == "nestjs" else local
+                            ),
                             routeKind="route",
                             version=_version(pending, source) or ctrl_version,
                             requestDTO=_request_dto(member, source),
                             responseDTO=_response_dto(pending, source) or _return_dto(member, source),
                             **common,
-                        ))
+                        )
+                    elif ref:  # @ResolveReference: the gateway's _entities fetch of this type
+                        fields = dict(
+                            **{**common, "framework": "graphql"},
+                            semanticType="route",
+                            method="RESOLVE_REFERENCE",
+                            endpoint=_resolver_type_arg(decs, source),
+                            routeKind="query",
+                        )
+                    elif job is not None:  # @Cron / @Interval / @Timeout scheduled job
+                        fields = dict(
+                            **{**common, "isRegex": None, "authRequired": None, "guards": None},
+                            semanticType="timer",
+                            method=job,
+                            endpoint=_schedule(dec, d.name, source, consts),
+                        )
                     elif msg is not None:  # @EventPattern / @MessagePattern microservice consumer
-                        routes.append(Statement(
+                        fields = dict(
                             semanticType="eventbus_consumer",
                             method=msg,
-                            endpoint=_pattern(d),
+                            endpoint=_pattern(dec, source, consts),
                             routeKind="message",
                             **common,
-                        ))
+                        )
                     elif gql is not None:  # @Query/@Mutation/@Subscription code-first GraphQL op
-                        routes.append(Statement(
+                        fields = dict(
                             **{**common, "framework": "graphql"},
                             semanticType="route",
                             method=gql.upper(),
                             endpoint=_graphql_op_name(d, mname),
                             routeKind=gql,
                             responseDTO=_field_resolver_return_dto(d) or _return_dto(member, source),
-                        ))
+                        )
                     elif fld is not None:  # @ResolveField/@ResolveProperty field resolver
-                        if parent_op_info is not None:
-                            # Grouping resolver: inherit parent @Mutation/@Query identity.
-                            op_name, op_method = parent_op_info
-                            routes.append(Statement(
+                        if stub_method is not None:
+                            # A stub parent's field: an operation of the stub's kind.
+                            fields = dict(
                                 **{**common, "framework": "graphql"},
                                 semanticType="route",
-                                method=op_method,
-                                endpoint=f"{op_name}.{mname}",
-                                routeKind=op_method.lower(),
+                                method=stub_method,
+                                endpoint=f"{stub_type}.{mname}",
+                                routeKind=stub_method.lower(),
                                 requestDTO=_args_dto(member, source),
                                 responseDTO=_field_resolver_return_dto(d) or _return_dto(member, source),
-                            ))
+                            )
                         else:
                             # `Parent.field` when @Resolver(() => T) names the parent type, else
                             # the bare field name: a bare `author` does not say which type it
                             # hangs off, and many types have one. Same form csharp-hotchocolate
                             # emits. RESOLVE_FIELD is the spec's verb for this (not QUERY).
                             parent_type = _resolver_type_arg(decs, source)
-                            routes.append(Statement(
+                            fields = dict(
                                 **{**common, "framework": "graphql"},
                                 semanticType="route",
                                 method="RESOLVE_FIELD",
@@ -379,6 +556,7 @@ def detect_nest_routes(
                                 routeKind="field_resolver",
                                 requestDTO=_args_dto(member, source),
                                 responseDTO=_field_resolver_return_dto(d) or _return_dto(member, source),
-                            ))
+                            )
+                    routes.append(Emit(dec, fields, parent=parent, node_type="synthetic"))
             pending = []
     return routes

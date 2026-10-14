@@ -5,26 +5,26 @@ to the method (Data-access view)."""
 
 from __future__ import annotations
 
-from ...emit import disambiguate, statement_id
-from ...schemas import FileRecord, Statement
+from tree_sitter import Node
+
+from ...schemas import FileRecord
+from ..emits import Emit
+from ..java.functions import method_nodes
 
 
-def detect_spring_queries(record: FileRecord) -> list[Statement]:
-    seen = {s.id for s in record.statements}
-    out: list[Statement] = []
+def detect_spring_queries(record: FileRecord, root: Node, source: bytes) -> list[Emit]:
+    if not any(d.name == "Query" for fn in record.functions for d in fn.decorators):
+        return []
+    nodes = method_nodes(root, source)
+    out: list[Emit] = []
     for fn in record.functions:
         q = next((d for d in fn.decorators if d.name == "Query"), None)
         if q is None:
             continue
         sql = next((a for a in q.args if a and not a.strip().lower().startswith("nativequery")), "")
-        out.append(Statement(
-            id=disambiguate(statement_id(fn.path, fn.startLine, 0), seen),
-            parentId=fn.id,
-            nodeType="synthetic",
-            semanticType="query_statement",
-            text=sql or "@Query",
-            startLine=fn.startLine,
-            endLine=fn.startLine,
-            path=fn.path,
+        out.append(Emit(
+            nodes.get((fn.name, fn.startLine), root), {"semanticType": "query_statement"},
+            parent=fn.id, node_type="synthetic", text=sql or "@Query",
+            line=fn.startLine, col=0, end_line=fn.startLine,
         ))
     return out

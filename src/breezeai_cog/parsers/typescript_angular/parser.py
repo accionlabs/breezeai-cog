@@ -6,6 +6,7 @@ from __future__ import annotations
 
 from ...schemas import FileRecord
 from ..base import ParseContext
+from ..emits import apply
 from ..treesitter import parse_source
 from ..typescript.parser import TypeScriptParser
 from .components import mark_angular_ui_roles
@@ -32,10 +33,6 @@ class AngularParser(TypeScriptParser):
         # JS/TS distinction lives on the orthogonal `language` axis, set by the base extractor.
         record.framework = "angular"
         if ctx.capture_statements and not self.is_fixture_file(ctx.path):  # gated by statement capture; skip fixtures (R4)
-            routes = detect_angular_routes(
-                root, ctx.source, ctx.path, seen_ids={s.id for s in record.statements},
-                index=ctx.resolution_index,
-            )
-            if routes:
-                record.statements.extend(routes)  # framework already stamped above
+            routes = detect_angular_routes(root, ctx.source, ctx.path, index=ctx.resolution_index)
+            apply(record, routes, ctx.source, ctx.path)  # framework already stamped above
         return record

@@ -25,19 +25,23 @@ Consumers / entry points (``aws-lambda`` handler types on an exported const):
 
 **Endpoint honesty:** the address (TopicArn/QueueUrl) is usually an injected config
 symbol (``this.topicArn``), and the queue→Lambda binding lives in infra (Terraform/CDK),
-not the code — so ``endpoint`` is set only from a *string literal*, else left ``None``. A
+not the code — so ``endpoint`` is set only from a *string literal*, else left ``None``. A literal
+queue URL / topic ARN / bus ARN is written by name (:func:`address_name`), the form a consumer
+records, so the two meet on one address. A
 symbol is never passed off as a resolved address (the producer→consumer edge is a backend
 enrichment concern, not this parser's). Mutates ``record``; returns a file framework label."""
 
 from __future__ import annotations
 
+import re
+
 from tree_sitter import Node
 
-from ...emit import disambiguate, file_id, statement_id
-from ...schemas import FileRecord, SemanticType, Statement
-from ..additive import DetectContext, Detector, register_detector
-from ..enclosing import Enclosing
-from ..treesitter import first_line, node_text
+from ...schemas import SemanticType
+from ..additive import DetectContext, Detection, Detector, Gate, register_detector
+from ..aws_deploy import deployed_handlers
+from ..emits import Emit
+from ..treesitter import node_text
 
 # SDK v3 ``new XxxCommand({...})`` → (semanticType, framework).
 _V3_COMMANDS: dict[str, tuple[SemanticType, str]] = {
@@ -61,7 +65,6 @@ _CONSUMER_HANDLERS = {
     "SQSHandler": "aws-sqs",
     "SNSHandler": "aws-sns",
     "EventBridgeHandler": "aws-eventbridge",
-    "ScheduledHandler": "aws-eventbridge",
     "DynamoDBStreamHandler": "aws-dynamodb",
     "KinesisStreamHandler": "aws-kinesis",
     "S3Handler": "aws-s3",
@@ -71,6 +74,10 @@ _CONSUMER_HANDLERS = {
 }
 # HTTP-facing Lambda handler types → route (not an event consumer).
 _ROUTE_HANDLERS = {"APIGatewayProxyHandler", "APIGatewayProxyHandlerV2", "ALBHandler"}
+# A scheduled-event handler is triggered by a schedule (an EventBridge rule): a timer. Its
+# schedule lives in deployment config, so the endpoint stays empty.
+_TIMER_HANDLERS = {"ScheduledHandler"}
+_TIMER_PARAM_TYPES = {"ScheduledEvent"}
 # Keys in an SDK argument object that name the destination address.
 _ADDRESS_KEYS = {"TopicArn", "TargetArn", "QueueUrl", "EventBusName", "PhoneNumber"}
 # Subset of the above that also *proves* the call is AWS — needed by the ``publish`` guard
@@ -101,7 +108,6 @@ _EVENT_PARAM_TYPES = {
     "DynamoDBStreamEvent": "aws-dynamodb",
     "KinesisStreamEvent": "aws-kinesis",
     "EventBridgeEvent": "aws-eventbridge",
-    "ScheduledEvent": "aws-eventbridge",
     "SESEvent": "aws-ses",
     "CloudFrontRequestEvent": "aws-cloudfront",
     "CloudFrontResponseEvent": "aws-cloudfront",
@@ -144,6 +150,26 @@ def _walk(root: Node, types: frozenset[str]) -> list[Node]:
     return out
 
 
+#: A literal SQS queue URL — ``https://sqs.<region>.amazonaws.com/<account>/<queue>`` or the legacy
+#: ``https://<region>.queue.amazonaws.com/<account>/<queue>``.
+_QUEUE_URL = re.compile(
+    r"^https?://(?:sqs\.[\w-]+|[\w-]+\.queue)\.amazonaws\.com(?:\.cn)?/\d+/(?P<name>[\w.-]+)/?$"
+)
+#: A literal SNS topic / EventBridge bus ARN.
+_TOPIC_ARN = re.compile(r"^arn:aws[\w-]*:sns:[\w-]+:\d+:(?P<name>[\w.-]+)$")
+_BUS_ARN = re.compile(r"^arn:aws[\w-]*:events:[\w-]+:\d+:event-bus/(?P<name>[\w.-]+)$")
+_NAME_FORMS = {"QueueUrl": _QUEUE_URL, "TopicArn": _TOPIC_ARN, "EventBusName": _BUS_ARN}
+
+
+def address_name(key: str, value: str) -> str:
+    """The name a literal address stands for, written as its consumer writes it: a queue URL →
+    the queue (``…amazonaws.com/123/orders`` → ``orders``), a topic or bus ARN → the topic /
+    bus. Anything not exactly in that form is kept as written."""
+    form = _NAME_FORMS.get(key)
+    m = form.match(value) if form is not None else None
+    return m["name"] if m is not None else value
+
+
 def _address(args: Node | None, source: bytes) -> tuple[str | None, str | None]:
     """(literal endpoint, matched address key) from an SDK call's first object argument.
     Endpoint is set only from a plain string literal — a symbol (``this.topicArn``) stays
@@ -168,7 +194,8 @@ def _address(args: Node | None, source: bytes) -> tuple[str | None, str | None]:
             value = pair.child_by_field_name("value")
             if value is not None and value.type == "string":
                 frag = next((c for c in value.named_children if c.type == "string_fragment"), None)
-                return (node_text(frag, source) if frag is not None else ""), matched_key
+                text = node_text(frag, source) if frag is not None else ""
+                return address_name(matched_key, text), matched_key
             return None, matched_key  # address present but an unresolved symbol
     return None, None
 
@@ -236,6 +263,8 @@ def _handler(
         return None
     name_node = decl.child_by_field_name("name")
     hname = node_text(name_node, source) if name_node is not None else None
+    if tname in _TIMER_HANDLERS:
+        return "timer", "aws-eventbridge", None, hname
     if tname in _CONSUMER_HANDLERS:
         return "eventbus_consumer", _CONSUMER_HANDLERS[tname], None, hname
     if tname in _ROUTE_HANDLERS:
@@ -288,6 +317,8 @@ def _untyped_handler(node: Node, source: bytes) -> tuple[SemanticType, str, str 
     if fn is None:
         return None
     ptype = _first_param_type(fn, source)
+    if ptype in _TIMER_PARAM_TYPES:
+        return "timer", "aws-eventbridge", None, hname
     if ptype in _EVENT_PARAM_TYPES:
         return "eventbus_consumer", _EVENT_PARAM_TYPES[ptype], None, hname
     if ptype in _ROUTE_PARAM_TYPES:
@@ -326,19 +357,17 @@ def _untyped_cjs_handler(
 
 
 def detect_aws_events(
-    root: Node, source: bytes, path: str, record: FileRecord, *, is_fixture: bool = False
-) -> str | None:
-    """Enrich/add AWS event statements on ``record``. Returns a file-level framework label
-    (``aws-lambda`` for a handler file, else the first producer transport) or ``None``.
+    root: Node, source: bytes, path: str, *, is_fixture: bool = False
+) -> Detection | None:
+    """AWS event statements, with a file-level framework label (``aws-lambda`` for a handler
+    file, else the first producer transport).
 
     ``is_fixture`` gates only the untyped-CommonJS handler fallback (:func:`_untyped_cjs_handler`),
     whose looser signature would otherwise match a mocked ``exports.handler`` in a test file — the
     detector is not fixture-guarded at the call site, so the guard is applied here."""
     if not _has_aws(source):
         return None
-    fid = file_id(path)
-    seen = {s.id for s in record.statements}
-    enclosing = Enclosing(record)
+    found: list[Emit] = []
     file_fw: str | None = None
     is_lambda = False
 
@@ -347,23 +376,12 @@ def detect_aws_events(
         if info is None:
             continue
         sem, method, endpoint, fw = info
-        line = call.start_point[0] + 1
-        stmt = enclosing.statement(line)
-        if stmt is not None and stmt.semanticType is None:  # enrich the base statement in place
-            stmt.semanticType = sem
-            stmt.framework = fw
-            stmt.method = method
-            if endpoint:
-                stmt.endpoint = endpoint
-        else:  # inside a lambda the base skipped, or the span is already classified → add
-            new_id = disambiguate(statement_id(path, line, call.start_point[1]), seen)
-            seen.add(new_id)
-            record.statements.append(Statement(
-                id=new_id, parentId=enclosing.function_id(line, fid),
-                nodeType=call.type, semanticType=sem, text=first_line(node_text(call, source)),
-                method=method, endpoint=endpoint, framework=fw,
-                startLine=line, endLine=call.end_point[0] + 1, path=path,
-            ))
+        # Enrich the base statement in place when it is unclassified; inside a lambda the base
+        # skipped, or on a span already classified → its own statement.
+        found.append(Emit(
+            call, {"semanticType": sem, "framework": fw, "method": method},
+            fill={"endpoint": endpoint}, enrich="unclassified",
+        ))
         file_fw = file_fw or fw
 
     # Handler entry points, most-precise first: a typed const (``const h: SQSHandler = …``), an
@@ -381,26 +399,100 @@ def detect_aws_events(
             continue
         sem, fw, route_kind, hname = hinfo
         line = decl.start_point[0] + 1
-        new_id = disambiguate(statement_id(path, line, decl.start_point[1]), seen)
-        seen.add(new_id)
-        record.statements.append(Statement(
-            id=new_id, parentId=enclosing.function_id(line, fid),
-            nodeType=decl.type, semanticType=sem, text=first_line(node_text(decl, source)),
-            framework=fw, handler=hname, routeKind=route_kind,
-            startLine=line, endLine=decl.end_point[0] + 1, path=path,
-        ))
+        found.append(Emit(decl, {
+            "semanticType": sem,
+            # The handler is declared by this declarator/assignment: its line is the handler's.
+            "framework": fw, "handler": hname, "handlerLine": line if hname else None,
+            "routeKind": route_kind, "method": "PERIODIC" if sem == "timer" else None,
+        }))
         is_lambda = True
 
-    return "aws-lambda" if is_lambda else file_fw
+    if not found:
+        return None
+    return Detection(found, label="aws-lambda" if is_lambda else file_fw)
 
 
-def _run(dc: DetectContext) -> str | None:
-    return detect_aws_events(dc.root, dc.source, dc.path, dc.record, is_fixture=dc.is_fixture)
+_ENTRY_TYPES = frozenset({"route", "eventbus_consumer", "timer"})
+
+
+def _exported_functions(root: Node, source: bytes) -> dict[str, Node]:
+    """Exported functions by name — ``export const n = () => …``, ``export function n``,
+    ``exports.n = …`` / ``module.exports.n = …`` — at the node a handler record sits on."""
+    out: dict[str, Node] = {}
+    for child in root.named_children:
+        if child.type == "export_statement":
+            for decl in child.named_children:
+                if decl.type == "function_declaration":
+                    name = decl.child_by_field_name("name")
+                    if name is not None:
+                        out.setdefault(node_text(name, source), decl)
+                elif decl.type in ("lexical_declaration", "variable_declaration"):
+                    for v in decl.named_children:
+                        name = v.child_by_field_name("name") if v.type == "variable_declarator" else None
+                        if name is not None and _fn_value(v) is not None:
+                            out.setdefault(node_text(name, source), v)
+        elif child.type == "expression_statement" and child.named_children:
+            assign = child.named_children[0]
+            left = assign.child_by_field_name("left") if assign.type == "assignment_expression" else None
+            obj = left.child_by_field_name("object") if left is not None and \
+                left.type == "member_expression" else None
+            prop = left.child_by_field_name("property") if left is not None and \
+                left.type == "member_expression" else None
+            if obj is not None and prop is not None and node_text(obj, source) in \
+                    _CJS_EXPORT_RECEIVERS and _fn_value(assign) is not None:
+                out.setdefault(node_text(prop, source), assign)
+    return out
+
+
+def _apply_deployed(found: list[Emit], root: Node, source: bytes, path: str,
+                    index: object) -> list[Emit]:
+    """Copy the deployment config's triggers (:mod:`..aws_deploy`) onto this file's handlers:
+    the first trigger onto the handler's record, one more record per further trigger. A handler
+    the config names but the code does not type gets its records at its declaration."""
+    fact = deployed_handlers(index)
+    stem = path.rsplit(".", 1)[0]
+    handlers = fact.modules.get(stem, {}) if fact is not None else {}
+    if not handlers:
+        return found
+    out: list[Emit] = []
+    seen: set[str] = set()
+    for emit in found:
+        name = emit.fields.get("handler")
+        triggers = handlers.get(name, ()) if isinstance(name, str) and \
+            emit.fields.get("semanticType") in _ENTRY_TYPES else ()
+        if not isinstance(name, str) or not triggers or name in seen:
+            out.append(emit)
+            continue
+        seen.add(name)
+        for t in triggers:
+            out.append(Emit(emit.node, {**emit.fields, **t.fields()}))
+    exported = None
+    for name in sorted(set(handlers) - seen):
+        exported = exported if exported is not None else _exported_functions(root, source)
+        node = exported.get(name)
+        if node is None:
+            continue
+        for t in handlers[name]:
+            out.append(Emit(node, {"handler": name, "handlerLine": node.start_point[0] + 1,
+                                   **t.fields()}))
+    return out
+
+
+def _detect(dc: DetectContext) -> Detection | None:
+    detection = detect_aws_events(dc.root, dc.source, dc.path, is_fixture=dc.is_fixture)
+    found = list(detection.emits) if detection is not None else []
+    if not dc.is_fixture:
+        found = _apply_deployed(found, dc.root, dc.source, dc.path, dc.ctx.resolution_index)
+    if not found:
+        return None
+    lambda_handler = any(e.fields.get("semanticType") in _ENTRY_TYPES for e in found)
+    return Detection(found, label="aws-lambda" if lambda_handler else
+                     (detection.label if detection is not None else None))
 
 
 # Not fixture-skipped: only the loose CommonJS handler fallback is fixture-gated, inside.
 register_detector(Detector(
-    name="aws-events", language="typescript", order=20, run=_run,
+    name="aws-events", gate=Gate("typescript", order=20), detect=_detect,
     frameworks=(
         "aws-lambda", "aws-sdk", "aws-sns", "aws-sqs", "aws-eventbridge", "aws-kinesis",
         "aws-dynamodb", "aws-ses", "aws-cloudfront", "aws-apigw",

@@ -39,9 +39,8 @@ from typing import Iterator
 
 from tree_sitter import Node
 
-from ...emit import disambiguate, file_id, statement_id
-from ...schemas import FileRecord, Statement
-from ..additive import DetectContext, Detector, register_detector
+from ..additive import DetectContext, Detection, Detector, Gate, register_detector
+from ..emits import Emit
 from ..treesitter import first_line, node_text
 
 #: Cheap byte guard — the namespace every Lucene.NET file imports.
@@ -126,37 +125,21 @@ def _call_parts(call: Node, source: bytes) -> tuple[str, str] | None:
     return node_text(parts[0], source), node_text(parts[-1], source)
 
 
-def _owner_id(line: int, record: FileRecord, path: str) -> str:
-    """The capture id of the innermost function containing ``line``, else the file.
+def detect_lucene_access(root: Node, source: bytes) -> list[Emit]:
+    """Lucene index reads and writes, as data access.
 
-    A statement parents to its most specific owner; the enclosing function is found by line
-    containment, which is how the model expresses nesting everywhere else.
-    """
-    best: tuple[int, str] | None = None
-    for fn in record.functions:
-        if fn.startLine <= line <= fn.endLine:
-            span = fn.endLine - fn.startLine
-            if best is None or span < best[0]:
-                best = (span, fn.id)
-    return best[1] if best is not None else file_id(path)
-
-
-def detect_lucene_access(root: Node, source: bytes, path: str, record: FileRecord) -> bool:
-    """Mark Lucene index reads and writes as data access. Returns whether any were found.
-
-    Appends one record per qualifying call, keeping the call's real ``nodeType`` — there is a
-    backing AST node, so nothing is synthetic. A second record on a line the base parser already
+    One record per qualifying call, parented to the innermost function containing it, keeping
+    the call's real ``nodeType`` — there is a backing AST node, so nothing is synthetic. A second record on a line the base parser already
     captured is the established shape for a line that carries two facts (``semanticType`` holds
     one value); see ``.todo/statement-id-position-collisions.md``.
     """
     if _MARKER not in source:
-        return False
+        return []
     declared = _declared_index_names(root, source)
     if not declared and not any(t.encode() in source for t in _INDEX_TYPES):
-        return False
+        return []
 
-    seen = {s.id for s in record.statements}
-    found = False
+    found: list[Emit] = []
     for call in _iter(root, {"invocation_expression"}):
         parts = _call_parts(call, source)
         if parts is None:
@@ -168,29 +151,18 @@ def detect_lucene_access(root: Node, source: bytes, path: str, record: FileRecor
         # itself for a static factory call.
         if receiver not in declared and receiver not in _INDEX_TYPES:
             continue
-        line, col = call.start_point[0] + 1, call.start_point[1]
-        new_id = disambiguate(statement_id(path, line, col), seen)
-        seen.add(new_id)
-        record.statements.append(Statement(
-            id=new_id,
-            parentId=_owner_id(line, record, path),
-            nodeType=call.type,
-            semanticType="db_method_call",
+        found.append(Emit(
+            call, {"semanticType": "db_method_call", "method": method},
             text=first_line(node_text(call, source))[:120],
-            method=method,
-            startLine=line,
-            endLine=call.end_point[0] + 1,
-            path=path,
         ))
-        found = True
     return found
 
 
-def _run(dc: DetectContext) -> str | None:
-    detect_lucene_access(dc.root, dc.source, dc.path, dc.record)
-    return None
+def _detect(dc: DetectContext) -> Detection | None:
+    found = detect_lucene_access(dc.root, dc.source)
+    return Detection(found) if found else None
 
 
 # Index access is data access, not an entry point, so it is not fixture-skipped: a statement
 # inside a test file is still a real read of the index.
-register_detector(Detector(name="lucene", language="csharp", order=20, run=_run))
+register_detector(Detector(name="lucene", gate=Gate("csharp", order=20), detect=_detect))

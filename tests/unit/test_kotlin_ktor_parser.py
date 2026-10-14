@@ -155,22 +155,47 @@ fun Application.configureRouting() {
 
 
 def test_ktor_constant_route_prefix():
-    """`route(CONSTANT)` uses `{CONSTANT}` as the prefix placeholder."""
+    """`route(CONSTANT)` resolves the file's `const val` — never a `{CONSTANT}` placeholder."""
     rec = _parse(_CONST_ROUTE_SRC)
-    routes = [s for s in rec.statements if s.semanticType == "route"]
-    endpoints = [s.endpoint for s in routes]
-    assert any("{API_PATH}" in ep for ep in endpoints), (
-        f"Expected {{API_PATH}} placeholder in an endpoint; got {endpoints}"
-    )
+    endpoints = sorted(s.endpoint for s in rec.statements if s.semanticType == "route")
+    assert endpoints == ["/graphql", "/graphql/graphql/async"]
 
 
 def test_ktor_no_arg_post_inherits_prefix():
-    """`post {{ }}` inside `route(CONSTANT)` emits route with prefix as endpoint."""
+    """`post { }` inside `route(CONSTANT)` emits a route at the resolved prefix."""
     rec = _parse(_CONST_ROUTE_SRC)
-    routes = [s for s in rec.statements if s.semanticType == "route" and s.method == "POST"]
-    # One route should be exactly "{API_PATH}" (no suffix), another "{API_PATH}{ASYNC_PATH}"
-    endpoints = {s.endpoint for s in routes}
-    assert "{API_PATH}" in endpoints, f"Expected plain-prefix POST route; got {endpoints}"
+    endpoints = {s.endpoint for s in rec.statements if s.semanticType == "route" and s.method == "POST"}
+    assert "/graphql" in endpoints
+
+
+_UNRESOLVED_SRC = b'''\
+import io.ktor.server.routing.*
+import io.ktor.server.application.*
+
+object Paths { const val USERS = "/users" }
+const val API = "/api"
+
+fun Application.configureRouting() {
+    routing {
+        get("$API/items/{id}") { }
+        get(Paths.USERS) { }
+        get(API + "/b") { }
+        get(Config.EXTERNAL) { }
+        get("${env.base}/x") { }
+        route(ELSEWHERE) {
+            get("/nested") { }
+        }
+    }
+}
+'''
+
+
+def test_ktor_unresolved_path_leaves_endpoint_empty():
+    # Resolved constants (interpolated, qualified, concatenated) give the literal; a constant from
+    # elsewhere or an expression gives an empty endpoint, never a {NAME} placeholder (Q8).
+    rec = _parse(_UNRESOLVED_SRC)
+    endpoints = [s.endpoint for s in rec.statements if s.semanticType == "route"]
+    assert endpoints == ["/api/items/{id}", "/users", "/api/b", None, None, None]
 
 
 def test_ktor_framework_set_regardless_of_routes():
@@ -206,3 +231,77 @@ def test_qualified_call_not_a_route() -> None:
     assert any(s.endpoint == "/profile" for s in routes), (
         f"Expected /profile route; got: {[(s.method, s.endpoint) for s in routes]}"
     )
+
+
+def test_ktor_route_handler_is_the_trailing_lambda():
+    # The handler is the anonymous trailing lambda: no name, handlerLine where it starts.
+    src = (
+        b"import io.ktor.server.routing.*\n"
+        b"fun Application.module() {\n"
+        b"    routing {\n"
+        b"        get(\"/a\") {\n"
+        b"            call.respondText(\"a\")\n"
+        b"        }\n"
+        b"        route(\"/b\") {\n"
+        b"            post { call.respondText(\"b\") }\n"
+        b"        }\n"
+        b"    }\n"
+        b"}\n"
+    )
+    rec = _parse(src)
+    got = {
+        s.endpoint: (s.handler, s.handlerLine)
+        for s in rec.statements
+        if s.semanticType == "route" and s.framework == "ktor" and s.method
+    }
+    assert got == {"/a": (None, 4), "/b": (None, 8)}
+
+
+def test_ktor_route_enriches_the_base_statement():
+    # One route = one statement: the base parser's statement for the call is enriched in place
+    # (same id, its source text), not duplicated as a second `…#2` record on the same span.
+    src = b'''import io.ktor.server.routing.*
+fun Application.module() {
+    routing {
+        get("/a") { call.respond("a") }
+        route("/b") {
+            post { call.respond("b") }
+        }
+    }
+}
+'''
+    rec = _parse(src)
+    routes = [s for s in rec.statements if s.semanticType == "route"]
+    assert [(s.method, s.endpoint, s.startLine) for s in routes] == [("GET", "/a", 4), ("POST", "/b", 6)]
+    assert all("#" not in s.id.rsplit(":", 1)[-1] for s in routes)
+    assert routes[0].text.startswith('get("/a") {')
+    spans = [(s.startLine, s.endLine, s.id.split("#")[0]) for s in rec.statements]
+    assert len(spans) == len(set(spans))  # no two statements on the same span
+
+
+def test_authenticate_blocks_are_guards(analyze_files) -> None:
+    st = analyze_files({"src/main/kotlin/a/App.kt": """package a
+import io.ktor.server.application.*
+import io.ktor.server.routing.*
+import io.ktor.server.response.*
+import io.ktor.server.auth.*
+fun Application.module() {
+    routing {
+        get("/open") { call.respondText("o") }
+        authenticate("jwt") {
+            get("/me") { call.respondText("me") }
+            authenticate {
+                route("/admin") {
+                    post("/purge") { call.respondText("p") }
+                }
+            }
+        }
+    }
+}
+"""})
+    got = {s.endpoint: s.guards for s in st if s.semanticType == "route"}
+    assert got == {
+        "/open": None,
+        "/me": ['authenticate("jwt")'],
+        "/admin/purge": ['authenticate("jwt")', "authenticate"],
+    }

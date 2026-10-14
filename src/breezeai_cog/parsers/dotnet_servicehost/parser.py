@@ -44,9 +44,10 @@ class ServiceHostParser(BaseParser):
             loc=count_loc(text),
         )
         if ctx.capture_statements:  # the route is a semantic statement — gated (spec A4)
-            stmt, imports = detect_service_host(ctx.source, ctx.path, ctx.repo_root, seen_ids=set())
+            stmt, framework, imports = detect_service_host(
+                ctx.source, ctx.path, ctx.repo_root, seen_ids=set())
             if stmt is not None:
                 record.statements.append(stmt)
-                record.framework = stmt.framework
+                record.framework = framework
             record.importFiles = imports
         return record

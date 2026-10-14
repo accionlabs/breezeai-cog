@@ -13,7 +13,6 @@ by line containment, like every other language.
 
 from __future__ import annotations
 
-import re
 
 from tree_sitter import Node
 
@@ -35,8 +34,6 @@ _CAPTURED = _BINDINGS | _CONTROL_FLOW | {"interpolation"}
 #: directive, not navigation) is not treated as a link. Written ``routerLink`` (plain string
 #: target) or ``[routerLink]`` (an expression / commands array).
 _NAV_DIRECTIVE = "routerLink"
-#: The first string literal in a ``routerLink`` value — the static base of the target route.
-_LITERAL_RE = re.compile(r"""['"]([^'"]+)['"]""")
 
 
 def _child(node: Node, kind: str) -> Node | None:
@@ -55,24 +52,43 @@ def _is_navigation(node: Node, source: bytes) -> bool:
     return False
 
 
+def _quoted(text: str) -> str | None:
+    text = text.strip()
+    if len(text) >= 2 and text[0] == text[-1] and text[0] in "'\"":
+        return text[1:-1]
+    return None
+
+
+def _absolute(path: str | None) -> str | None:
+    """A template link resolves from the current route unless it starts with ``/``: a relative
+    link's address depends on the page it is on → None."""
+    return path if path is not None and path.startswith("/") else None
+
+
 def _nav_endpoint(node: Node, source: bytes) -> str | None:
-    """The target route of a ``routerLink`` — honest-null unless it resolves to a literal.
-    ``routerLink="/orders"`` → ``/orders``; ``[routerLink]="'/home'"`` → ``/home``;
-    ``[routerLink]="['/orders', id]"`` → ``/orders`` (the static base); a bare dynamic
-    expression (``[routerLink]="target"``) → ``None`` (never the symbol name)."""
+    """The target route of a ``routerLink`` — honest-null unless it resolves to a literal
+    absolute path. ``routerLink="/orders"`` → ``/orders``; ``[routerLink]="'/home'"`` →
+    ``/home``; ``[routerLink]="['/orders', 'new']"`` → ``/orders/new``. A link array with any
+    non-literal segment (``['/orders', id]``), a relative link (``"details"``) or a dynamic
+    expression (``[routerLink]="target"``) → ``None`` — never a partial address or a symbol."""
     if node.type == "attribute":
         av = _child(node, "quoted_attribute_value")
         val = _child(av, "attribute_value") if av is not None else None
-        return node_text(val, source) if val is not None else None
+        return _absolute(node_text(val, source)) if val is not None else None
     expr = _child(node, "expression")
     if expr is None:
         return None
     text = node_text(expr, source).strip()
-    # A pure string literal, or an array/commands literal whose first element is a string.
-    if text.startswith(("'", '"', "[")):
-        m = _LITERAL_RE.search(text)
-        return m.group(1) if m else None
-    return None
+    if text.startswith("[") and text.endswith("]"):
+        # Each segment must be a quoted literal (a comma inside one would leave unquoted pieces
+        # → not literal → None, the honest answer).
+        parts = [_quoted(p) for p in text[1:-1].split(",")]
+        literal = [p for p in parts if p is not None]
+        if not parts or len(literal) != len(parts):
+            return None
+        return _absolute("/" + "/".join(p.strip("/") for p in literal if p)
+                         if literal[0].startswith("/") else literal[0])
+    return _absolute(_quoted(text))
 
 
 def _binding_name(node: Node, source: bytes) -> str | None:

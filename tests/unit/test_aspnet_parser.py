@@ -330,12 +330,28 @@ def test_mvc_route_registration() -> None:
     assert routes["/{controller}/{action}/{id}"].handler == "Home.Index"
 
 
+def test_mvc_route_registrations_are_all_recorded() -> None:
+    src = (b"using System.Web.Mvc;\nnamespace A {\npublic class RouteConfig {\n"
+           b"public static void RegisterRoutes(RouteCollection routes) {\n"
+           b'routes.MapRoute("About", "about", new { controller = "Home", action = "About" });\n'
+           b'routes.MapRoute("Area", "admin/{action}", new { controller = "Admin", action = "Index" });\n'
+           b'routes.MapRoute("NoAction", "shop/{id}", new { controller = "Shop" });\n'
+           b'config.Routes.MapHttpRoute("Api", "api/{controller}/{id}", new { id = 1 });\n'
+           b"} } }")
+    rec = _parse(AspNetCoreParser(), src, "App_Start/RouteConfig.cs")
+    routes = {s.endpoint: s.handler for s in rec.statements if s.semanticType == "route"}
+    # Every template is a route (the Target Spec's current form); the handler is its defaults.
+    assert routes == {"/about": "Home.About", "/admin/{action}": "Admin.Index",
+                      "/shop/{id}": "Shop", "/api/{controller}/{id}": None}
+
+
 def test_csharp_minimal_apis() -> None:
     rec = _parse(AspNetCoreParser(), CS, "Orders.cs")
-    minimal = {(s.method, s.endpoint) for s in rec.statements
-               if s.semanticType == "route" and s.handler is None}
-    assert ("GET", "/hello") in minimal
-    assert ("POST", "/items") in minimal
+    # minimal-API routes are parented to the file (controller actions to their method)
+    minimal = {(s.method, s.endpoint): s.handler for s in rec.statements
+               if s.semanticType == "route" and s.parentId == "Orders.cs"}
+    assert minimal[("GET", "/hello")] is None        # inline lambda: no name
+    assert minimal[("POST", "/items")] == "Handler"  # method group: its name
 
 
 # The Startup.cs registration block that the benchmark found uncaptured (grounded shape):
@@ -458,3 +474,111 @@ def test_selection() -> None:
     assert registry.select("Orders.vb", VB).name == "vb-aspnet"
     assert registry.select("plain.vb", b"Class C\nEnd Class").name == "vb"
     registry.clear()
+
+
+_MINIMAL_HANDLERS = b'''using Microsoft.AspNetCore.Builder;
+var app = WebApplication.CreateBuilder(args).Build();
+app.MapGet("/inline", () => "x");
+app.MapPost("/anon", delegate { return "y"; });
+app.MapGet("/local", GetOrders);
+app.MapGet("/static", Handlers.List);
+app.MapGet("/remote", Remote.Get);
+app.MapDelete("/twice", Twice);
+app.Run();
+
+static string GetOrders() => "o";
+
+static class Handlers
+{
+    public static string List() => "l";
+    public static string Twice() => "a";
+    public static string Twice(int x) => "b";
+}
+'''
+
+
+def test_minimal_api_handler_and_line() -> None:
+    # Inline delegate: no name, its line. Method group: its name; the declaration line only
+    # when declared once in this file (Remote.Get is elsewhere; Twice is overloaded).
+    rec = _parse(AspNetCoreParser(), _MINIMAL_HANDLERS, "Program.cs")
+    got = {s.endpoint: (s.handler, s.handlerLine)
+           for s in rec.statements if s.semanticType == "route"}
+    assert got == {
+        "/inline": (None, 3),
+        "/anon": (None, 4),
+        "/local": ("GetOrders", 11),
+        "/static": ("Handlers.List", 15),
+        "/remote": ("Remote.Get", None),
+        "/twice": ("Twice", None),
+    }
+
+
+_MAP_GROUPS = b'''var app = WebApplication.Create(args);
+var api = app.MapGroup("/api").RequireAuthorization();
+RouteGroupBuilder v1 = api.MapGroup("/v1");
+v1.MapGet("/items", () => "items");
+api.MapPost("/", () => "root");
+app.MapGroup("/chained").WithTags("x").MapGet("/c", () => "c");
+var dyn = app.MapGroup(Config.Prefix);
+dyn.MapGet("/d", () => "d");
+var twice = app.MapGroup("/a");
+twice = app.MapGroup("/b");
+twice.MapGet("/t", () => "t");
+app.MapGet(PathOf("x"), () => "computed");
+app.MapGet("/plain", () => "plain");
+
+static class Ext
+{
+    public static void MapMore(this RouteGroupBuilder group) => group.MapGet("/more", () => "m");
+}
+'''
+
+
+def test_map_group_prefixes_compose() -> None:
+    # Group prefixes compose (builder calls such as RequireAuthorization pass the group through);
+    # a group prefix that exists but cannot be resolved — non-literal, reassigned, or a
+    # RouteGroupBuilder parameter set by a caller elsewhere — leaves the endpoint empty (Q8).
+    rec = _parse(AspNetCoreParser(), _MAP_GROUPS, "Program.cs")
+    got = sorted((s.startLine, s.endpoint) for s in rec.statements if s.semanticType == "route")
+    assert got == [
+        (4, "/api/v1/items"),
+        (5, "/api"),
+        (6, "/chained/c"),
+        (8, None),      # app.MapGroup(Config.Prefix)
+        (11, None),     # `twice` holds two different groups
+        (12, None),     # non-literal route pattern
+        (13, "/plain"),
+        (17, None),     # RouteGroupBuilder parameter: prefix set in the caller
+    ]
+
+
+def test_vb_minimal_api_pattern_must_be_a_literal() -> None:
+    src = b'''Imports Microsoft.AspNetCore.Builder
+Module Program
+    Sub Main(args As String())
+        Dim app = WebApplication.Create(args)
+        app.MapGet("/hello", Function() "hi")
+        app.MapGet(PathOf("x"), Function() "hi")
+    End Sub
+End Module
+'''
+    rec = _parse(VbAspNetParser(), src, "Program.vb")
+    got = sorted((s.startLine, s.endpoint) for s in rec.statements if s.semanticType == "route")
+    assert got == [(5, "/hello"), (6, None)]  # a literal inside a call is not the pattern
+
+
+def test_wiring_only_route_config_keeps_aspnet_label(tmp_path) -> None:
+    # A RouteConfig with only a convention template is ASP.NET, with the template as a route.
+    from breezeai_cog import iter_file_records
+
+    (tmp_path / "RouteConfig.cs").write_text(
+        "using System.Web.Mvc;\nusing System.Web.Routing;\n"
+        "public class RouteConfig {\n  public static void RegisterRoutes(RouteCollection routes) {\n"
+        '    routes.MapRoute("Default", "{controller}/{action}/{id}",\n'
+        '      new { controller = "Home", action = "Index", id = UrlParameter.Optional });\n'
+        "  }\n}\n"
+    )
+    [rec] = list(iter_file_records(tmp_path))
+    assert rec.framework == "aspnet"
+    assert [s.endpoint for s in rec.statements if s.semanticType == "route"] == [
+        "/{controller}/{action}/{id}"]

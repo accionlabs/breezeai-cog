@@ -457,23 +457,23 @@ export class BrandEntityResolver {
 
 
 def test_grouping_resolver_resolve_fields_inherit_parent_op(tmp_path) -> None:
-    # Gap 1: @ResolveField on a grouping resolver inherits the parent @Mutation/@Query
-    # identity: endpoint = "<op>.<field>", method = MUTATION/QUERY, routeKind = mutation/query.
+    # A stub parent's @ResolveField is an operation of the stub's kind: endpoint
+    # "<StubType>.<field>", method = MUTATION/QUERY, routeKind = mutation/query.
     p = tmp_path / "notifications-mutation.resolver.ts"
     p.write_text(_GROUPING_RESOLVER_SRC.decode())
     ctx = ParseContext(path="notifications-mutation.resolver.ts", abs_path=p,
                        source=_GROUPING_RESOLVER_SRC, repo_root=tmp_path, capture_statements=True)
     rec = NestJSParser().parse_file(ctx)
     by_ep = {s.endpoint: s for s in rec.statements if s.semanticType == "route"}
-    # Grouping @Mutation fields: endpoint = "<op>.<field>", method = MUTATION
-    assert "notifications.create" in by_ep
-    assert "notifications.markAsRead" in by_ep
-    assert by_ep["notifications.create"].method == "MUTATION"
-    assert by_ep["notifications.create"].routeKind == "mutation"
-    assert by_ep["notifications.create"].framework == "graphql"
-    assert by_ep["notifications.create"].responseDTO == "NotificationDto"
-    assert by_ep["notifications.create"].requestDTO == "CreateNotificationInput"
-    assert by_ep["notifications.markAsRead"].method == "MUTATION"
+    # Stub-parent fields: endpoint = "<StubType>.<field>", method = MUTATION
+    assert "NotificationsMutation.create" in by_ep
+    assert "NotificationsMutation.markAsRead" in by_ep
+    assert by_ep["NotificationsMutation.create"].method == "MUTATION"
+    assert by_ep["NotificationsMutation.create"].routeKind == "mutation"
+    assert by_ep["NotificationsMutation.create"].framework == "graphql"
+    assert by_ep["NotificationsMutation.create"].responseDTO == "NotificationDto"
+    assert by_ep["NotificationsMutation.create"].requestDTO == "CreateNotificationInput"
+    assert by_ep["NotificationsMutation.markAsRead"].method == "MUTATION"
     # Entity resolver (@Query returning an array): @ResolveField stays a field_resolver,
     # addressed <ParentType>.<field> with no method.
     assert "Brand.all" in by_ep
@@ -510,3 +510,283 @@ export class UserResolver {
     assert by_ep["createUser"].responseDTO == "UserDto"
     # @Query(() => String) — scalar → responseDTO None
     assert by_ep["ping"].responseDTO is None
+
+
+def _resolver_routes(tmp_path, src: bytes) -> dict[str, tuple[str | None, str | None]]:
+    p = tmp_path / "x.resolver.ts"
+    p.write_bytes(src)
+    ctx = ParseContext(path="x.resolver.ts", abs_path=p, source=src, repo_root=tmp_path,
+                       capture_statements=True)
+    rec = NestJSParser().parse_file(ctx)
+    return {s.endpoint: (s.method, s.routeKind) for s in rec.statements if s.semanticType == "route"}
+
+
+def test_crud_resolver_field_stays_a_field_resolver(tmp_path) -> None:
+    # @Mutation(() => Book) returns a real Book: Book is an entity, `author` is its data field.
+    routes = _resolver_routes(tmp_path, b'''import { Resolver, Mutation, Query, ResolveField, Args } from '@nestjs/graphql';
+@Resolver(() => Book)
+export class BookResolver {
+  @Query(() => Book)
+  book(@Args('id') id: string) { return this.books.find(id); }
+
+  @Mutation(() => Book)
+  addBook(@Args('input') input: BookInput) { return this.books.create(input); }
+
+  @ResolveField(() => Author)
+  author(@Parent() book: Book) { return this.authors.find(book.authorId); }
+}
+''')
+    assert routes["Book.author"] == ("RESOLVE_FIELD", "field_resolver")
+    assert routes["addBook"] == ("MUTATION", "mutation")
+    assert "addBook.author" not in routes and "book.author" not in routes
+
+
+def test_stub_parent_accepts_empty_object_forms(tmp_path) -> None:
+    for ret in (b"return {};", b"return {} as OrdersQuery;", b"return new OrdersQuery();"):
+        routes = _resolver_routes(tmp_path, b'''import { Resolver, Query, ResolveField } from '@nestjs/graphql';
+@Resolver(() => OrdersQuery)
+export class OrdersQueryResolver {
+  @Query(() => OrdersQuery)
+  orders() { ''' + ret + b''' }
+
+  @ResolveField(() => [Order])
+  list() { return []; }
+}
+''')
+        assert routes["OrdersQuery.list"] == ("QUERY", "query"), ret
+
+
+# ── Global prefix (setGlobalPrefix) and RouterModule paths ─────────────────────────────────────
+_NEST_PKG = '{"dependencies": {"@nestjs/core": "10", "@nestjs/common": "10"}}'
+
+
+def _ctrl_src(name: str, base: str, body: str) -> str:
+    return (
+        "import { Controller, Get, Post } from '@nestjs/common';\n"
+        "import { MessagePattern } from '@nestjs/microservices';\n"
+        f"@Controller('{base}')\nexport class {name} {{\n{body}}}\n"
+    )
+
+
+def _main(prefix_call: str) -> str:
+    return (
+        "import { NestFactory } from '@nestjs/core';\nimport { AppModule } from './app.module';\n"
+        "async function bootstrap() {\n  const app = await NestFactory.create(AppModule);\n"
+        f"  {prefix_call}\n  await app.listen(3000);\n}}\nbootstrap();\n"
+    )
+
+
+def _http(stmts) -> dict[tuple[str | None, str], str | None]:
+    """(method, handler) → endpoint for NestJS HTTP routes."""
+    return {(s.method, s.handler): s.endpoint for s in stmts
+            if s.semanticType == "route" and s.framework == "nestjs"}
+
+
+def test_global_prefix_and_exclude(analyze_files) -> None:
+    st = analyze_files({
+        "package.json": _NEST_PKG,
+        "src/main.ts": _main(
+            "app.setGlobalPrefix('api', { exclude: ['health', "
+            "{ path: 'users/:id', method: RequestMethod.POST }] });"
+        ),
+        "src/users.controller.ts": _ctrl_src("UsersController", "users", (
+            "  @Get(':id')\n  one() { return 1; }\n"
+            "  @Post(':id')\n  touch() { return 1; }\n"
+            "  @MessagePattern('users.created')\n  created() { return 1; }\n"
+        )),
+        "src/health.controller.ts": _ctrl_src("HealthController", "health", "  @Get()\n  ok() {}\n"),
+    })
+    assert _http(st) == {
+        ("GET", "one"): "/api/users/:id",
+        ("POST", "touch"): "/users/:id",  # excluded for POST only
+        ("GET", "ok"): "/health",          # excluded
+    }
+    [msg] = [s for s in st if s.semanticType == "eventbus_consumer"]
+    assert msg.endpoint == "users.created"  # message patterns take no HTTP prefix
+
+
+def test_global_prefix_from_a_constant(analyze_files) -> None:
+    st = analyze_files({
+        "package.json": _NEST_PKG,
+        "src/config.ts": "export const API_PREFIX = 'v1';\n",
+        "src/main.ts": "import { API_PREFIX } from './config';\n" + _main("app.setGlobalPrefix(API_PREFIX);"),
+        "src/users.controller.ts": _ctrl_src("UsersController", "users", "  @Get()\n  list() {}\n"),
+    })
+    assert _http(st) == {("GET", "list"): "/v1/users"}
+
+
+def test_unresolvable_global_prefix_leaves_endpoint_empty(analyze_files) -> None:
+    # The prefix exists but comes from runtime config: the address is unknown (decision Q8).
+    st = analyze_files({
+        "package.json": _NEST_PKG,
+        "src/main.ts": _main("app.setGlobalPrefix(config.values.globalPrefix);"),
+        "src/users.controller.ts": _ctrl_src("UsersController", "users", "  @Get()\n  list() {}\n"),
+    })
+    [r] = [s for s in st if s.semanticType == "route"]
+    assert (r.method, r.endpoint, r.handler) == ("GET", None, "list")
+
+
+def test_global_prefix_per_app_in_a_monorepo(analyze_files) -> None:
+    st = analyze_files({
+        "package.json": _NEST_PKG,
+        "apps/admin/src/main.ts": _main("app.setGlobalPrefix('admin-api');"),
+        "apps/admin/src/a.controller.ts": _ctrl_src("AController", "a", "  @Get()\n  a() {}\n"),
+        "apps/shop/src/main.ts": _main("// no prefix"),
+        "apps/shop/src/b.controller.ts": _ctrl_src("BController", "b", "  @Get()\n  b() {}\n"),
+        "libs/shared/c.controller.ts": _ctrl_src("CController", "c", "  @Get()\n  c() {}\n"),
+    })
+    assert _http(st) == {
+        ("GET", "a"): "/admin-api/a",
+        ("GET", "b"): "/b",
+        ("GET", "c"): None,  # belongs to no app: the admin prefix may or may not apply
+    }
+
+
+def test_no_bootstrap_leaves_routes_unchanged(analyze_files) -> None:
+    st = analyze_files({
+        "package.json": _NEST_PKG,
+        "src/users.controller.ts": _ctrl_src("UsersController", "users", "  @Get()\n  list() {}\n"),
+    })
+    assert _http(st) == {("GET", "list"): "/users"}
+
+
+def test_router_module_children_compose(analyze_files) -> None:
+    st = analyze_files({
+        "package.json": _NEST_PKG,
+        "src/main.ts": _main("app.setGlobalPrefix('api');"),
+        "src/app.module.ts": (
+            "import { Module } from '@nestjs/common';\nimport { RouterModule } from '@nestjs/core';\n"
+            "@Module({ controllers: [ReportsController] })\nexport class ReportsModule {}\n"
+            "@Module({ controllers: [] })\nexport class AdminModule {}\n"
+            "@Module({ imports: [RouterModule.register([\n"
+            "  { path: 'admin', module: AdminModule, children: [{ path: 'reports', module: ReportsModule }] },\n"
+            "])] })\nexport class AppModule {}\n"
+        ),
+        "src/reports.controller.ts": _ctrl_src("ReportsController", "daily", "  @Get()\n  daily() {}\n"),
+    })
+    assert _http(st) == {("GET", "daily"): "/api/admin/reports/daily"}
+
+
+def test_interceptors_are_guards_but_not_auth(tmp_path) -> None:
+    src = b'''import { Controller, Get, UseGuards, UseInterceptors } from '@nestjs/common';
+@Controller('items')
+@UseInterceptors(LoggingInterceptor)
+export class ItemsController {
+  @Get()
+  @UseInterceptors(CacheInterceptor)
+  list() { return []; }
+
+  @Get(':id')
+  @UseGuards(AuthGuard)
+  @UseInterceptors(TimingInterceptor)
+  one() { return null; }
+}
+'''
+    p = tmp_path / "items.controller.ts"
+    p.write_bytes(src)
+    ctx = ParseContext(path="items.controller.ts", abs_path=p, source=src, repo_root=tmp_path,
+                       capture_statements=True)
+    rec = NestJSParser().parse_file(ctx)
+    got = {s.endpoint: (s.guards, s.authRequired)
+           for s in rec.statements if s.semanticType == "route"}
+    assert got == {
+        "/items": (["LoggingInterceptor", "CacheInterceptor"], False),  # interceptors: not auth
+        "/items/:id": (["LoggingInterceptor", "AuthGuard", "TimingInterceptor"], True),
+    }
+
+
+def test_client_proxy_send_and_emit_are_outbound(analyze_files) -> None:
+    st = analyze_files({
+        "package.json": '{"dependencies": {"@nestjs/core": "10", "@nestjs/microservices": "10"}}',
+        "src/constants.ts": "export const AUDIT = 'audit.write';\n",
+        "src/orders.service.ts": (
+            "import { Inject, Injectable } from '@nestjs/common';\n"
+            "import { ClientProxy, ClientProxyFactory } from '@nestjs/microservices';\n"
+            "import { AUDIT } from './constants';\n"
+            "@Injectable()\nexport class OrdersService {\n"
+            "  private events = ClientProxyFactory.create({});\n"
+            "  constructor(@Inject('MATH') private readonly math: ClientProxy, private mailer: Mailer) {}\n"
+            "  run(topic: string) {\n"
+            "    this.math.send({ cmd: 'sum' }, [1, 2]);\n"
+            "    this.math.send(AUDIT, {});\n"
+            "    this.events.emit('order.created', {});\n"
+            "    this.events.emit(topic, {});\n"
+            "    return this.mailer.send('x', {});\n"
+            "  }\n}\n"
+        ),
+        "src/math.controller.ts": (
+            "import { Controller } from '@nestjs/common';\n"
+            "import { MessagePattern } from '@nestjs/microservices';\n"
+            "@Controller()\nexport class MathController {\n"
+            "  @MessagePattern({ cmd: 'sum' })\n  sum(data: number[]) { return 3; }\n}\n"
+        ),
+    })
+    out = sorted((s.semanticType, s.endpoint or "")
+                 for s in st if s.semanticType in ("eventbus_send", "eventbus_publish"))
+    assert out == [
+        ("eventbus_publish", ""),               # topic is a parameter → empty, never the symbol
+        ("eventbus_publish", "order.created"),
+        ("eventbus_send", "audit.write"),       # constant resolved
+        ("eventbus_send", '{"cmd":"sum"}'),     # canonical JSON, like the consumer (Q12)
+    ]                                           # this.mailer.send: not a ClientProxy → nothing
+    consumer = [s.endpoint for s in st if s.semanticType == "eventbus_consumer"]
+    assert consumer == ['{"cmd":"sum"}']
+
+
+def test_object_patterns_are_canonical_json_on_both_sides(tmp_path) -> None:
+    # NestJS sorts the keys of an object pattern and serialises it as JSON, so spacing, quotes
+    # and key order do not matter: both sides are written {"a":1,"cmd":"sum"}.
+    src = b"""import { Controller } from '@nestjs/common';
+import { MessagePattern, EventPattern, ClientProxy } from '@nestjs/microservices';
+const RUNTIME = process.env.X;
+@Controller()
+export class MathController {
+  constructor(private readonly client: ClientProxy) {}
+  @MessagePattern({ cmd: 'sum', a: 1 })
+  sum() { return 0; }
+  @MessagePattern({ role: 'user', nested: { b: [1, true, null] } })
+  nested() { return 0; }
+  @MessagePattern({ cmd: RUNTIME })
+  unknown() { return 0; }
+  @EventPattern('order.created')
+  created() { return 0; }
+  run() {
+    this.client.send({a:1,"cmd":"sum"}, []);
+    this.client.send({ ...base, cmd: 'x' }, []);
+  }
+}
+"""
+    p = tmp_path / "math.controller.ts"
+    p.write_bytes(src)
+    ctx = ParseContext(path="math.controller.ts", abs_path=p, source=src, repo_root=tmp_path,
+                       capture_statements=True)
+    rec = NestJSParser().parse_file(ctx)
+    consumers = [s.endpoint for s in rec.statements if s.semanticType == "eventbus_consumer"]
+    assert consumers == [
+        '{"a":1,"cmd":"sum"}',
+        '{"nested":{"b":[1,true,null]},"role":"user"}',
+        None,                      # a runtime value → unknown
+        "order.created",           # a string pattern is the string
+    ]
+    sends = [s.endpoint for s in rec.statements if s.semanticType == "eventbus_send"]
+    assert sends == ['{"a":1,"cmd":"sum"}', None]  # matches its consumer; a spread → unknown
+
+
+def test_object_pattern_with_a_numeric_constant_is_unknown(analyze_files) -> None:
+    # The constant index holds 2 and '2' alike as "2"; inside an object JSON writes them
+    # differently ({"v":2} / {"v":"2"}), so such a part is unknown — never a guessed type.
+    # At the top level both serialise to "2", so the pattern is known.
+    st = analyze_files({
+        "package.json": '{"dependencies": {"@nestjs/core": "10", "@nestjs/microservices": "10"}}',
+        "src/math.controller.ts": (
+            "import { Controller } from '@nestjs/common';\n"
+            "import { MessagePattern } from '@nestjs/microservices';\n"
+            "const VERSION = 2;\nconst NAME = 'sum';\n"
+            "@Controller()\nexport class MathController {\n"
+            "  @MessagePattern({ cmd: NAME, v: VERSION })\n  versioned() { return 0; }\n"
+            "  @MessagePattern({ cmd: NAME })\n  named() { return 0; }\n"
+            "  @MessagePattern(VERSION)\n  top() { return 0; }\n}\n"
+        ),
+    })
+    got = {s.handler: s.endpoint for s in st if s.semanticType == "eventbus_consumer"}
+    assert got == {"versioned": None, "named": '{"cmd":"sum"}', "top": "2"}

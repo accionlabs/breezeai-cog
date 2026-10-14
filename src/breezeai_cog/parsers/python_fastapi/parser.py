@@ -7,6 +7,7 @@ from __future__ import annotations
 
 from ...schemas import FileRecord
 from ..base import ParseContext
+from ..emits import apply
 from ..python.parser import PythonParser
 from ..treesitter import parse_source
 from .routes import detect_routes
@@ -24,10 +25,8 @@ class FastAPIParser(PythonParser):
         root = parse_source("python", ctx.source, ctx.parse_timeout_micros).root_node
         record = self.extract(root, ctx)  # inherited base extraction (one parse)
         if ctx.capture_statements:  # routes are statements — gated by statement capture
-            routes = detect_routes(
-                root, ctx.source, ctx.path, seen_ids={s.id for s in record.statements}
-            )
+            routes = detect_routes(root, ctx.source, ctx.path, index=ctx.resolution_index)
             if routes:
-                record.statements.extend(routes)
+                apply(record, routes, ctx.source, ctx.path)
                 record.framework = "fastapi"
         return record

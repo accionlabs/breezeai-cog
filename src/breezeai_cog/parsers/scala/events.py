@@ -1,7 +1,14 @@
-"""Akka / Pekko messaging detection (``ref ! msg`` / ``ref ? msg`` / receive handlers).
+"""Akka / Pekko actor detection (``ref ! msg`` / ``ref ? msg`` / receive handlers).
+
+A local actor's ``receive`` runs when *our own* code sends it a message through an
+``ActorRef`` (``ref ! msg``, ``tell``, ``ask``) — the trigger is inside the application, so
+neither side is an entry point or an outbound call (entry-point contract, decision Q7: a
+local actor message is closer to a method call than to a queue). The detector therefore emits
+no statements: the sends and handlers stay plain, and it only labels the file ``akka`` when it
+uses actors. Remote actors (Akka Cluster / Remoting paths) would need their own rule.
 
 Wired into the base ``ScalaParser.extract`` — not ``scala_play`` — so an Akka-using Play
-controller keeps both its routes and its messaging.
+controller keeps both its routes and its label.
 
 Pekko does not contain the substring "akka" (its root package is ``org.apache.pekko``),
 so the byte guard checks both spellings. Unary ``!x`` is a ``prefix_expression``, a
@@ -14,14 +21,10 @@ from __future__ import annotations
 
 from tree_sitter import Node
 
-from ...emit import disambiguate, statement_id
-from ...schemas import FileRecord, Statement
-from ...schemas.enums import SemanticType
+from ..additive import DetectContext, Detection, Detector, Gate, register_detector
 from ..base import ParseContext
-from ..additive import DetectContext, Detector, register_detector
 from ..treesitter import node_text
 from .functions import type_map
-from .statements import find_enclosing_parent_id
 
 
 def _is_receive_handler(fn_node: Node, source: bytes) -> bool:
@@ -50,14 +53,13 @@ def _is_receive_message_call(call: Node, source: bytes) -> bool:
 
 
 def detect_scala_events(
-    root: Node, ctx: ParseContext, record: FileRecord, types: dict[str, str] | None = None
-) -> None:
-    if not ctx.capture_statements:
-        return
+    root: Node, ctx: ParseContext, types: dict[str, str] | None = None
+) -> bool:
+    """Whether the file does Akka / Pekko actor messaging (a label only: actors are not entry
+    points, Q7)."""
     source = ctx.source
     if b"akka" not in source and b"pekko" not in source:
-        return
-    seen_ids = {s.id for s in record.statements}
+        return False
     declared_types = dict(types) if types is not None else type_map(root, source)
 
     def collect_actor_assignments(node: Node) -> None:
@@ -105,23 +107,9 @@ def detect_scala_events(
                     return True
         return False
 
-    def emit(node: Node, semantic: SemanticType, method: str | None) -> None:
+    def mark(node: Node) -> None:  # actor messaging seen: label the file, record nothing
         nonlocal found_any
         found_any = True
-        start = node.start_point[0] + 1
-        parent_id = find_enclosing_parent_id(start, record)
-        record.statements.append(Statement(
-            id=disambiguate(statement_id(ctx.path, start, node.start_point[1]), seen_ids),
-            parentId=parent_id,
-            nodeType=node.type,
-            semanticType=semantic,
-            text=node_text(node, source),
-            method=method,
-            framework="akka",
-            startLine=start,
-            endLine=node.end_point[0] + 1,
-            path=ctx.path,
-        ))
 
     def walk(n: Node) -> None:
         for c in n.named_children:
@@ -131,24 +119,23 @@ def detect_scala_events(
                 right = c.child_by_field_name("right")
                 if op is not None and left is not None and right is not None:
                     if node_text(op, source) in ("!", "?") and is_actor_ref(left):
-                        emit(c, "eventbus_send", "SEND")
+                        mark(c)
             elif (
                 c.type in ("function_definition", "function_declaration")
                 and _is_receive_handler(c, source)
             ) or (c.type == "call_expression" and _is_receive_message_call(c, source)):
-                emit(c, "eventbus_consumer", None)
+                mark(c)
             walk(c)
 
     walk(root)
-    if found_any and not record.framework:
-        record.framework = "akka"
+    return found_any
 
 
-def _run(dc: DetectContext) -> str | None:
-    detect_scala_events(dc.root, dc.ctx, dc.record, types=dc.types)  # labels the record itself
-    return None
+def _detect(dc: DetectContext) -> Detection | None:
+    return Detection([], label="akka") if detect_scala_events(dc.root, dc.ctx, types=dc.types) \
+        else None
 
 
 register_detector(Detector(
-    name="akka-events", language="scala", order=10, run=_run, frameworks=("akka",),
+    name="akka-events", gate=Gate("scala", order=10), detect=_detect, frameworks=("akka",),
 ))

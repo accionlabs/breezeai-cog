@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from ...schemas import FileRecord
 from ..base import ParseContext
+from ..emits import apply
 from ..treesitter import parse_source
 from ..typescript.parser import TypeScriptParser
 from .components import mark_react_components, mark_react_hooks
@@ -44,9 +45,8 @@ class ReactParser(TypeScriptParser):
         record.framework = "react"
         if ctx.capture_statements and not self.is_fixture_file(ctx.path):  # gated by statement capture; skip fixtures (R4)
             routes = detect_react_routes(
-                root, ctx.source, ctx.path, seen_ids={s.id for s in record.statements},
+                root, ctx.source, ctx.path,
                 const_values=getattr(ctx.resolution_index, "const_values", None),
             )
-            if routes:
-                record.statements.extend(routes)  # framework already stamped above
+            apply(record, routes, ctx.source, ctx.path)  # framework already stamped above
         return record

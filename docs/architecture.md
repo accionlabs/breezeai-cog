@@ -200,6 +200,8 @@ Some facts can't be known from one file. For example, which file defines
 `com.acme.OrderService`? A language parser can provide `build_index`, which runs **once, before
 parsing**, and returns data that every worker receives. Today it is used for things like Java
 fully-qualified names and constants, TypeScript path aliases, and C#/VB class inheritance.
+Additive detectors can add their own facts to it by registering them (`register_fact`,
+[§6](#6-the-parser-model)), so framework rules never have to live in the language's index code.
 
 > **Decision —** cross-file data is built once in a separate pre-pass, not shared between workers while parsing.
 > **Why:** workers then share no mutable state, so files can be parsed in any order, in
@@ -452,6 +454,33 @@ classDiagram
 > output (new statement ids are disambiguated against the ones already on the record), so
 > `order` is explicit and unique per language, and a reorder is a reviewed change.
 
+> **Decision —** a detector that needs a fact from another file registers a named **fact**
+> (`FactSpec`: `collect` / `resolve`, named `framework.concern`), which the language's `build_index`
+> builds; the detector reads it with `index_fact`.
+> **Why:** a fact like "`Program.cs` registers `BookQueries` as a GraphQL root" is declared in one
+> file and needed in another. A registered fact keeps it in the framework's own module and in the
+> same registry as every other add-on, instead of a framework field on the language index or a new
+> parser-selection hook. **Cost:** a language must call `collect_additive` / `resolve_additive`
+> from its `build_index` to offer it (`INDEX_HOOKED_LANGUAGES`: C#, Java, Python, Ruby, Scala, TypeScript), and a detector that
+> emits for files with no marker cannot use a byte guard. Details:
+> [cross-file resolution §8](architecture/cross-file-resolution.md#a-framework-fact-from-another-file-a-registered-fact).
+
+> **Decision —** a detector returns what it found (`Detection` of `Emit`s); one applier
+> (`parsers/emits.py` `apply`) writes it onto the record, and one validator (`parsers/contract.py`)
+> checks every entry point against the [entry-point contract](architecture/entry-points.md).
+> **Why:** each detector used to edit `record.statements` itself, with its own rule for "enrich the
+> statement already there, or append one", its own id disambiguation and its own parent lookup;
+> most output bugs were one of those done differently in one place. With one applier the rules are
+> written once (enrich only an eligible statement, once per run; ids disambiguated in emit order;
+> parent = smallest enclosing function). The validator turns the contract into a check: a wrong
+> value (unknown `method`, missing `routeKind`, a `${…}` address, two records for one binding)
+> fails the role tests; a missing handler is counted as a gap, because an honest empty value is
+> allowed. **Cost:** a detector can no longer read back what it wrote earlier in the same run; the
+> validator runs only in tests, golden comparisons and under `--verbose`, never on normal output.
+> Every detector and framework parser writes through `apply`; the framework parsers that read text
+> rather than a syntax tree and build a record of their own (Play `conf/routes`, the `.svc` /
+> `.asmx` ServiceHost directive, Web Forms markup) build it directly.
+
 > **Decision —** API, database and query detection is shared across languages (`parsers/detection/`).
 > **Why:** "is `axios.get` an HTTP call?" has the same answer everywhere; one table, improved
 > once, benefits every language. **Cost:** the shared rules must stay conservative so they
@@ -496,7 +525,8 @@ the file:
   │ ADDITIVE DETECTORS   base extract() ends with run_additive(<language>, …)        │
   │   registry: parsers/additive.py; each detector registers itself in its own       │
   │   module and is found by discovery; no parser edit to add one                    │
-  │   runner: capture gate · skip_fixtures · optional byte guard · run by `order`    │
+  │   Gate: capture · skip_fixtures · optional byte guard · run by `order`;          │
+  │   a `detect` detector returns Emits, written by `apply` (parsers/emits.py)       │
   │                                                                                  │
   │  typescript    order  detector         code in                    [skips tests]  │
   │                  10   express          typescript_express/routes.py      ✔       │
@@ -504,14 +534,24 @@ the file:
   │                  30   sdk-calls        detection/sdk_calls.py                    │
   │                  40   graphql-client   typescript_graphql/routes.py      ✔       │
   │                  50   vue-routes       typescript_vue/routes.py          ✔       │
+  │                  60   nextjs-pages     typescript_nextjs/pages.py        ✔       │
+  │                  70   navigation       typescript/navigation.py          ✔       │
   │                                                                                  │
   │  csharp          10   lambda-handlers  csharp/lambda_events.py           ✔       │
   │                  20   lucene           csharp/lucene.py                          │
+  │                  30   hotchocolate-…   csharp_hotchocolate/…roots.py     ✔       │
+  │                  40   generic-handlers csharp_webforms/handlers.py       ✔       │
+  │                  50   hangfire         csharp/hangfire.py                ✔       │
+  │                  60   quartz           csharp/quartz.py                  ✔       │
+  │                                                                                  │
+  │  java            10   quartz           java/quartz.py                    ✔       │
+  │                                                                                  │
+  │  python          10   celery           python/celery.py                  ✔       │
   │                                                                                  │
   │  scala           10   akka-events      scala/events.py                           │
   │                  20   spark            scala/spark.py                            │
   │                                                                                  │
-  │  Java · Kotlin · Groovy · Python · PHP · Ruby · VB · C++ · HCL                   │
+  │  Kotlin · Groovy · PHP · Ruby · VB · C++ · HCL                                   │
   │   └─ no additive hook yet: shared classifiers only                               │
   └──────────────────────────────────────┬───────────────────────────────────────────┘
                                          │
@@ -627,7 +667,19 @@ statements under their enum class.
 > faster. **Cost:** with the flag off there are no routes, API/DB calls, events, comments or enum
 > members either. Every detector must check the flag; reviews check this.
 
+> **Decision —** entry points are decided by the role of a framework construct, not by how the code runs.
+> **Why:** a parser sees constructs, not execution. Every construct a parser recognises is a
+> binding, wiring, guard, outbound or none; only a binding (one handler, directly addressable)
+> becomes an entry-point record (`route`, `eventbus_consumer`, `timer`). Wiring the Target Spec
+> records today (mounts, layouts, links) is written in its current form, `route` with `routeKind`
+> `mount` / `layout` / `navigation`, until the spec's entry-point proposal is approved
+> ([entry-point contract §5](architecture/entry-points.md#how-wiring-is-written-today)). One binding, one record, so "all entry points" is an accurate count across languages
+> and Breeze components. **Cost:** each entry-point parser keeps a role table, and wiring in
+> another file must reach the binding through the repository index.
+
 Detail page: [Statement model](architecture/statement-model.md).
+What counts as an entry point and how one is recorded:
+[Entry-point contract](architecture/entry-points.md).
 
 ---
 
@@ -932,11 +984,14 @@ from another.
 | Parsers | Framework parsers subclass their language parser | [§6](#6-the-parser-model) |
 | Parsers | Cross-cutting libraries are additive detectors | [§6](#6-the-parser-model) |
 | Parsers | Additive detectors self-register; the language parser calls one runner | [§6](#6-the-parser-model) |
+| Parsers | A fact from another file is a registered fact, built by `build_index` | [§6](#6-the-parser-model) |
+| Parsers | Detectors return emits; one applier writes them; one validator checks the contract | [§6](#6-the-parser-model) |
 | Parsers | API / DB / query detection is shared across languages | [§6](#6-the-parser-model) |
 | Parsers | Route emitters skip fixture files | [§6](#6-the-parser-model) |
 | Statements | Flat list linked by `parentId` | [§7](#7-the-statement-model) |
 | Statements | Syntax (`nodeType`) and meaning (`semanticType`) are separate | [§7](#7-the-statement-model) |
 | Statements | All statements are gated by `capture_statements` | [§7](#7-the-statement-model) |
+| Statements | Entry points are decided by construct roles; one binding, one record | [§7](#7-the-statement-model) |
 | Ids | Deterministic ids computed from the source | [§8](#8-ids-and-linking) |
 | Contract | Open `File`/`Class`, allow-listed `Function`/`Statement` | [§9](#9-the-capture-contract-and-the-graph) |
 | Contract | Unknown values are omitted | [§9](#9-the-capture-contract-and-the-graph) |
@@ -965,6 +1020,7 @@ from another.
 | [Parser Review & Gap Analysis Guide](parser-review-guide.md) | Reviewing a parser and reporting its gaps |
 | [Template Capture](template-capture.md) | How markup files are handled |
 | [Statement model](architecture/statement-model.md) | Emission rules, enrichment, comments, enum members, splitting |
+| [Entry-point contract](architecture/entry-points.md) | What an entry point is, construct roles, what a binding records |
 | [Cross-file resolution](architecture/cross-file-resolution.md) | Indexes, call resolution, inheritance, constant folding |
 | [Capture-to-graph mapping](architecture/graph-mapping.md) | How each capture field becomes a Neo4j node, property or edge |
 | [Target Spec (Confluence)](https://accionlabs.atlassian.net/wiki/spaces/~5cfa0cffd898610dbf3bacf1/pages/2483453956/Code+Ontology+Parser+Target+Spec+Neo4j+Graph+Model) | The graph model the backend ingests |

@@ -170,14 +170,14 @@ SVC_WEBHTTP_FACTORY = (
 def test_svc_dataservice_factory_reclassifies_to_odata_rest() -> None:
     # DataServiceHostFactory → the .svc is actually an OData REST endpoint, not SOAP RPC.
     r = _routes(_parse(SVC_VIRTUAL_CODEBEHIND, "grid-odata-crud/Products.svc"))[0]
-    assert (r.framework, r.routeKind) == ("odata", "rest")
+    assert (r.framework, r.routeKind) == ("odata", "rpc")  # v36 has no REST kind
     assert r.handler == "Products"  # handler/text unchanged by reclassification
     assert "Factory=" in r.text
 
 
 def test_svc_webservicehost_factory_reclassifies_to_wcf_rest() -> None:
     r = _routes(_parse(SVC_WEBHTTP_FACTORY, "Api/CatalogService.svc"))[0]
-    assert (r.framework, r.routeKind) == ("wcf-rest", "rest")
+    assert (r.framework, r.routeKind) == ("wcf-rest", "rpc")
 
 
 def test_svc_unknown_factory_stays_soap() -> None:

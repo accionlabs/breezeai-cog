@@ -55,12 +55,11 @@ from dataclasses import dataclass
 
 from tree_sitter import Node
 
-from ...emit import disambiguate, file_id, statement_id
-from ...schemas import FileRecord, Statement
-from ..additive import DetectContext, Detector, register_detector
-from ..enclosing import Enclosing
+from ...schemas import FileRecord
+from ..additive import DetectContext, Detection, Detector, Gate, register_detector
+from ..emits import Emit
 from ..index_common import ClassHeritage
-from ..treesitter import first_line, node_text
+from ..treesitter import node_text
 
 
 @dataclass(frozen=True)
@@ -257,50 +256,29 @@ def _client_identifiers(root: Node, source: bytes, sdk: _Sdk) -> set[str]:
 
 def _emit_outbound(
     call: Node,
-    line: int,
     endpoint: str,
     framework: str,
-    source: bytes,
-    path: str,
-    record: FileRecord,
-    seen: set[str],
-    enclosing: Enclosing,
+    out: list[Emit],
     *,
     reclassify_db: bool = False,
 ) -> None:
-    """Enrich the enclosing statement in place, or append a fresh ``api_call``. Enriches when
-    the enclosing statement is unclassified — or, for SDKs whose calls the generic ORM
-    classifier grabs first (ts-force → ``db_method_call``), when ``reclassify_db`` and the
-    statement is that ORM mis-tag; otherwise appends (so a genuinely different classified
-    span is never overwritten)."""
-    stmt = enclosing.statement(line)
-    enrichable = stmt is not None and (
-        stmt.semanticType is None or (reclassify_db and stmt.semanticType == "db_method_call")
-    )
-    ep = endpoint or None  # empty → honest-null (unresolved SObject); never a blank string
-    if enrichable and stmt is not None:
-        stmt.semanticType = "api_call"
-        stmt.framework = framework
-        stmt.endpoint = ep
-        stmt.method = None  # SDK call carries no HTTP verb (honest-null)
-        stmt.dataAccessHint = None  # clear the ORM hint if we reclassified a db_method_call
-    else:
-        new_id = disambiguate(statement_id(path, line, call.start_point[1]), seen)
-        seen.add(new_id)
-        record.statements.append(
-            Statement(
-                id=new_id,
-                parentId=enclosing.function_id(line, file_id(path)),
-                nodeType=call.type,
-                semanticType="api_call",
-                text=first_line(node_text(call, source)),
-                endpoint=ep,
-                framework=framework,
-                startLine=line,
-                endLine=call.end_point[0] + 1,
-                path=path,
-            )
-        )
+    """An ``api_call`` for ``call``: enriches the enclosing statement in place when it is
+    unclassified — or, for SDKs whose calls the generic ORM classifier grabs first (ts-force →
+    ``db_method_call``), when ``reclassify_db`` and the statement is that ORM mis-tag; otherwise
+    appends (so a genuinely different classified span is never overwritten)."""
+    out.append(Emit(
+        call,
+        {
+            "semanticType": "api_call",
+            "framework": framework,
+            # empty → honest-null (unresolved SObject); never a blank string
+            "endpoint": endpoint or None,
+            "method": None,  # SDK call carries no HTTP verb (honest-null)
+            "dataAccessHint": None,  # clear the ORM hint if we reclassified a db_method_call
+        },
+        enrich="unclassified",
+        reclassify=frozenset({"db_method_call"}) if reclassify_db else frozenset(),
+    ))
 
 
 _APOLLO_BYTE_GUARDS = (
@@ -440,8 +418,7 @@ def _detect_apollo_calls(
     source: bytes,
     path: str,
     record: FileRecord,
-    seen: set[str],
-    enclosing: Enclosing,
+    out: list[Emit],
 ) -> bool:
     """Detect Apollo GraphQL calls in two patterns:
 
@@ -473,10 +450,7 @@ def _detect_apollo_calls(
                 field, method = result
                 if field in direct_fields and method in _APOLLO_METHODS:
                     endpoint = _apollo_endpoint(call, source) or f"{field}.{method}"
-                    _emit_outbound(
-                        call, call.start_point[0] + 1, endpoint, "graphql", source, path,
-                        record, seen, enclosing,
-                    )
+                    _emit_outbound(call, endpoint, "graphql", out)
                     emitted = True
                     continue
 
@@ -487,10 +461,7 @@ def _detect_apollo_calls(
                 outer, inner, method = deep
                 if outer in accessor_fields and method in _APOLLO_METHODS:
                     endpoint = _apollo_endpoint(call, source) or f"{inner}.{method}"
-                    _emit_outbound(
-                        call, call.start_point[0] + 1, endpoint, "graphql", source, path,
-                        record, seen, enclosing,
-                    )
+                    _emit_outbound(call, endpoint, "graphql", out)
                     emitted = True
 
     return emitted
@@ -660,8 +631,7 @@ def _detect_send_command_calls(
     source: bytes,
     path: str,
     record: FileRecord,
-    seen: set[str],
-    enclosing: Enclosing,
+    out: list[Emit],
     *,
     byte_guard: bytes,
     client_types: frozenset[str],
@@ -712,10 +682,7 @@ def _detect_send_command_calls(
                 if receiver in free_clients and tail == "send":
                     command_name = _extract_command_name(call, source, cmd_vars)
         if command_name is not None and command_name in sdk_commands:
-            _emit_outbound(
-                call, call.start_point[0] + 1, command_name, framework,
-                source, path, record, seen, enclosing,
-            )
+            _emit_outbound(call, command_name, framework, out)
             emitted = True
     return emitted
 
@@ -726,9 +693,9 @@ def detect_sdk_calls(
     path: str,
     record: FileRecord,
     class_heritage: dict[str, ClassHeritage | None] | None = None,
-) -> str | None:
-    """Enrich/add vendor-SDK ``api_call`` statements on ``record``. Returns the first vendor
-    framework label seen (for the file-level rollup), or ``None``.
+) -> Detection | None:
+    """Vendor-SDK ``api_call`` statements, labelled with the first vendor framework seen (for the
+    file-level rollup).
 
     ``class_heritage`` is the repo-wide simple-name → heritage index (from the parser's
     ``build_index`` pre-pass). ts-force needs it because the real read call sites
@@ -736,8 +703,7 @@ def detect_sdk_calls(
     the generated ``class Account extends RestObject`` entity — so the SObject set has to be
     resolved repo-wide, not just from this file's classes. Omitting it (``None``) degrades
     gracefully to file-local resolution."""
-    seen = {s.id for s in record.statements}
-    enclosing = Enclosing(record)
+    out: list[Emit] = []
     file_fw: str | None = None
 
     for sdk in _sdks_in(source):
@@ -751,29 +717,19 @@ def detect_sdk_calls(
             callee, receiver, tail = chain
             if receiver not in clients or tail not in sdk.operations:
                 continue
-            _emit_outbound(
-                call,
-                call.start_point[0] + 1,
-                callee,
-                sdk.framework,
-                source,
-                path,
-                record,
-                seen,
-                enclosing,
-            )
+            _emit_outbound(call, callee, sdk.framework, out)
             file_fw = file_fw or sdk.framework
 
     if _detect_tsforce(
-        root, source, path, record, seen, enclosing, _repo_entities(class_heritage)
+        root, source, path, record, out, _repo_entities(class_heritage)
     ):
         file_fw = file_fw or "salesforce"
 
-    if _detect_apollo_calls(root, source, path, record, seen, enclosing):
+    if _detect_apollo_calls(root, source, path, record, out):
         file_fw = file_fw or "graphql"
 
     if _detect_send_command_calls(
-        root, source, path, record, seen, enclosing,
+        root, source, path, record, out,
         byte_guard=_S3_BYTE_GUARD,
         client_types=_S3_CLIENT_TYPES,
         framework="aws-s3",
@@ -781,7 +737,7 @@ def detect_sdk_calls(
         file_fw = file_fw or "aws-s3"
 
     if _detect_send_command_calls(
-        root, source, path, record, seen, enclosing,
+        root, source, path, record, out,
         byte_guard=_COGNITO_BYTE_GUARD,
         client_types=_COGNITO_CLIENT_TYPES,
         framework="aws-cognito",
@@ -789,14 +745,14 @@ def detect_sdk_calls(
         file_fw = file_fw or "aws-cognito"
 
     if _detect_send_command_calls(
-        root, source, path, record, seen, enclosing,
+        root, source, path, record, out,
         byte_guard=_SSM_BYTE_GUARD,
         client_types=_SSM_CLIENT_TYPES,
         framework="aws-ssm",
     ):
         file_fw = file_fw or "aws-ssm"
 
-    return file_fw
+    return Detection(out, label=file_fw) if out else None
 
 
 def _restobject_entities(record: FileRecord) -> set[str]:
@@ -928,8 +884,7 @@ def _detect_tsforce(
     source: bytes,
     path: str,
     record: FileRecord,
-    seen: set[str],
-    enclosing: Enclosing,
+    out: list[Emit],
     repo_entities: set[str],
 ) -> bool:
     """ts-force outbound detection. Two read shapes + instance writes, endpoint = SObject:
@@ -1011,24 +966,13 @@ def _detect_tsforce(
         else:
             continue
 
-        _emit_outbound(
-            call,
-            call.start_point[0] + 1,
-            endpoint or "",
-            "salesforce",
-            source,
-            path,
-            record,
-            seen,
-            enclosing,
-            reclassify_db=True,
-        )
+        _emit_outbound(call, endpoint or "", "salesforce", out, reclassify_db=True)
         emitted = True
 
     return emitted
 
 
-def _run(dc: DetectContext) -> str | None:
+def _detect(dc: DetectContext) -> Detection | None:
     return detect_sdk_calls(
         dc.root,
         dc.source,
@@ -1039,7 +983,7 @@ def _run(dc: DetectContext) -> str | None:
 
 
 register_detector(Detector(
-    name="sdk-calls", language="typescript", order=30, run=_run,
+    name="sdk-calls", gate=Gate("typescript", order=30), detect=_detect,
     frameworks=(
         "hubspot", "chargebee", "salesforce", "graphql", "aws-s3", "aws-cognito", "aws-ssm",
     ),

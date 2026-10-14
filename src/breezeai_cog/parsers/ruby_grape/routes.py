@@ -6,10 +6,11 @@ from collections.abc import Iterator
 
 from tree_sitter import Node
 
-from ...emit import disambiguate, file_id, statement_id
-from ...schemas import FileRecord, Statement
+from ...emit import file_id
+from ...schemas import FileRecord
+from ..emits import Emit
 from ..ruby.ownership import owner_id
-from ..treesitter import first_line, node_text
+from ..treesitter import node_text
 
 _HTTP_METHODS = {"get", "post", "put", "patch", "delete", "head", "options"}
 _ROUTE_PREFIXES = {"namespace", "resource", "resources", "route_param"}
@@ -86,6 +87,102 @@ def _prefix_for(call: Node, source: bytes) -> str | None:
     return "/" + "/".join(part.strip("/") for part in reversed(prefixes) if part.strip("/"))
 
 
+#: ``version … using:`` strategies that keep the version out of the path.
+_NON_PATH_VERSIONING = {"header", "param", "accept_version_header"}
+
+
+def _version_path(stmt: Node, source: bytes) -> str | None:
+    """What a ``version`` call adds to the path: the version with the ``:path`` strategy (Grape's
+    default), ``""`` with a header / param strategy, None when it cannot be resolved (a
+    non-literal value, several versions, an unknown strategy)."""
+    args = _arguments(stmt)
+    using = "path"
+    for a in args:
+        key = a.child_by_field_name("key") if a.type == "pair" else None
+        if key is not None and node_text(key, source).rstrip(":") == "using":
+            value = a.child_by_field_name("value")
+            using = node_text(value, source).lstrip(":").strip("'\"") if value is not None else ""
+    if using in _NON_PATH_VERSIONING:
+        return ""
+    if using != "path":
+        return None
+    positional = [a for a in args if a.type != "pair"]
+    return _literal_path(positional[0], source) if len(positional) == 1 else None
+
+
+def _api_settings(call: Node, source: bytes) -> str | None:
+    """The path Grape's ``prefix`` and ``version`` settings put in front of a route
+    (``/prefix/version``, ``""`` for none), or None when one is set but cannot be resolved.
+
+    ``prefix`` is read from the API class body; ``version`` is the last ``version`` call before
+    the route in the class body or an enclosing block."""
+    prefix = ""
+    version: str | None = ""
+    version_at = -1
+    node = call.parent
+    while node is not None:
+        if node.type == "body_statement":
+            in_class_body = node.parent is not None and _is_grape_api_class(node.parent, source)
+            for stmt in node.named_children:
+                if stmt.type != "call" or stmt.child_by_field_name("block") is not None:
+                    continue
+                name = _method(stmt, source)
+                if name == "prefix" and in_class_body:
+                    args = _arguments(stmt)
+                    value = _literal_path(args[0], source) if args else None
+                    if value is None:
+                        return None
+                    prefix = value
+                elif name == "version" and version_at < stmt.start_byte < call.start_byte:
+                    version_at = stmt.start_byte
+                    version = _version_path(stmt, source)
+        if _is_grape_api_class(node, source):
+            break
+        node = node.parent
+    if version is None:
+        return None
+    parts = [p.strip("/") for p in (prefix, version) if p and p.strip("/")]
+    return "/" + "/".join(parts) if parts else ""
+
+
+def _before_name(stmt: Node, source: bytes) -> str | None:
+    """The guard a ``before { authenticate! }`` / ``before do … end`` hook names: its block's only
+    statement when that is a receiver-less method call. Anything else (several statements, inline
+    logic) has no single name → None (no fabricated guard)."""
+    block = stmt.child_by_field_name("block")
+    body = next((c for c in block.named_children if c.type in ("block_body", "body_statement")),
+                None) if block is not None else None
+    stmts = list(body.named_children) if body is not None else []
+    if len(stmts) != 1:
+        return None
+    only = stmts[0]
+    if only.type == "identifier":
+        return node_text(only, source)
+    return _method(only, source) if only.type == "call" else None
+
+
+def _guards(call: Node, source: bytes) -> list[str]:
+    """``before`` hooks in scope for a route: each enclosing API class body / namespace block that
+    declares a ``before`` ahead of the route, outermost scope first. Grape callbacks apply to the
+    endpoints defined after them in the same namespace and its children."""
+    levels: list[list[str]] = []
+    node = call.parent
+    while node is not None:
+        if node.type in ("body_statement", "block_body"):
+            names = [
+                name for stmt in node.named_children
+                if stmt.type == "call" and stmt.start_byte < call.start_byte
+                and _method(stmt, source) == "before"
+                and stmt.child_by_field_name("block") is not None
+                and (name := _before_name(stmt, source)) is not None
+            ]
+            levels.append(names)
+        if _is_grape_api_class(node, source):
+            break
+        node = node.parent
+    return [name for names in reversed(levels) for name in names]
+
+
 def _join_path(prefix: str, local: str | None) -> str | None:
     if local is None:
         return None
@@ -93,11 +190,12 @@ def _join_path(prefix: str, local: str | None) -> str | None:
     return "/" + "/".join(parts) if parts else "/"
 
 
-def detect_grape_routes(root: Node, source: bytes, path: str, record: FileRecord) -> bool:
-    """Append Grape routes whose class and path are syntactically verifiable."""
-    seen = {statement.id for statement in record.statements}
+def detect_grape_routes(root: Node, source: bytes, path: str, record: FileRecord) -> list[Emit]:
+    """The Grape routes whose class and path are syntactically verifiable, for
+    :func:`~..emits.apply`. The address is prefix / version (path strategy) / namespaces / path;
+    an unresolved part → empty endpoint."""
     fallback = file_id(path)
-    matched = False
+    found: list[Emit] = []
 
     for call in _calls(root):
         method = _method(call, source)
@@ -105,29 +203,30 @@ def detect_grape_routes(root: Node, source: bytes, path: str, record: FileRecord
             continue
         args = _arguments(call)
         local = _literal_path(args[0], source) if args else ""
+        if local is None:
+            continue
+        settings = _api_settings(call, source)
         prefix = _prefix_for(call, source)
-        if prefix is None:
-            continue
-        endpoint = _join_path(prefix, local)
-        if endpoint is None:
-            continue
+        # An unresolved prefix, version or namespace leaves the address unknown: the route is kept
+        # with an empty endpoint, never recorded at a path missing that part.
+        endpoint = (
+            _join_path(settings + prefix, local) if settings is not None and prefix is not None else None
+        )
         line = call.start_point[0] + 1
-        record.statements.append(
-            Statement(
-                id=disambiguate(statement_id(path, line, call.start_point[1]), seen),
-                parentId=owner_id(line, record.functions, record.classes, fallback),
-                nodeType="call",
+        block = call.child_by_field_name("block")  # the handler: an anonymous block
+        guards = _guards(call, source)
+        found.append(
+            Emit(call, dict(
                 semanticType="route",
-                text=first_line(node_text(call, source)),
                 method=method.upper(),
                 endpoint=endpoint,
                 framework="grape",
+                handlerLine=block.start_point[0] + 1 if block is not None else None,
+                guards=guards or None,
+                # Honest-null: assert auth only when a guard is present; absence is unknown.
+                authRequired=True if guards else None,
                 routeKind="route",
                 isRegex=False,
-                startLine=line,
-                endLine=call.end_point[0] + 1,
-                path=path,
-            )
+            ), parent=owner_id(line, record.functions, record.classes, fallback), node_type="call")
         )
-        matched = True
-    return matched
+    return found

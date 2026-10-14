@@ -127,10 +127,50 @@ def test_rest_over_wcf() -> None:
     get = routes["GetPrice"]
     assert get.method == "GET"  # [WebGet]
     assert get.routeKind == "route"
-    assert get.endpoint == "/pricing?input={jsonInput}"  # UriTemplate wins
+    # no .svc for this contract → the address is unknown: empty, never the bare UriTemplate
+    assert get.endpoint is None
     put = routes["Save"]
     assert put.method == "PUT"  # [WebInvoke(Method="PUT")]
-    assert put.endpoint == "/pricing/save"
+    assert put.endpoint is None
+
+
+_SVC_CB = """using System.ServiceModel;
+using System.ServiceModel.Web;
+
+namespace Shop.Import
+{
+    [ServiceContract]
+    public class Rest
+    {
+        [OperationContract]
+        [WebInvoke(Method = "POST", BodyStyle = WebMessageBodyStyle.WrappedRequest)]
+        public string GetImportItem(string id) { return ""; }
+
+        [OperationContract]
+        [WebGet(UriTemplate = "/items/{id}?fmt={fmt}")]
+        public string FindItem(string id, string fmt) { return ""; }
+
+        [OperationContract]
+        public string Ping() { return ""; }
+    }
+}
+"""
+
+
+def test_rest_endpoint_is_under_the_svc(analyze_files) -> None:
+    stmts = analyze_files({
+        "Import/Rest.svc": '<%@ ServiceHost Service="Shop.Import.Rest" CodeBehind="Rest.svc.cs" %>',
+        "Import/Rest.svc.cs": _SVC_CB,
+        # same class shape, but its .svc names another class → host unknown
+        "Other/Rest.svc": '<%@ ServiceHost Service="Shop.Other.Service" %>',
+        "Other/Rest.svc.cs": _SVC_CB.replace("Shop.Import", "Shop.Other"),
+    })
+    got = {(s.path, s.handler): (s.method, s.endpoint)
+           for s in stmts if s.framework == "wcf" and s.semanticType == "route" and s.handler}
+    assert got[("Import/Rest.svc.cs", "GetImportItem")] == ("POST", "/Import/Rest.svc/GetImportItem")
+    assert got[("Import/Rest.svc.cs", "FindItem")] == ("GET", "/Import/Rest.svc/items/{id}")
+    assert got[("Import/Rest.svc.cs", "Ping")] == ("RPC", "Rest/Ping")  # SOAP: <Contract>/<Operation>
+    assert got[("Other/Rest.svc.cs", "GetImportItem")] == ("POST", None)
 
 
 def test_default_service_name_strips_leading_i() -> None:
@@ -193,7 +233,7 @@ def test_asmx_webmethod() -> None:
     r = routes["GetData"]
     assert r.framework == "asmx"
     assert r.method == "RPC" and r.routeKind == "rpc"
-    assert r.endpoint == "LegacyService/GetData"  # [WebService] Name absent → class name
+    assert r.endpoint is None  # no .asmx host file in this test: the address is not known
     assert r.responseDTO == "Report"  # Task<Report> unwrapped
     assert rec.framework == "asmx"
 
@@ -229,3 +269,79 @@ def test_selection() -> None:
     )
     assert registry.select("plain.cs", b"class C {}").name == "csharp"
     registry.clear()
+
+
+def test_asmx_endpoint_is_the_asmx_file_and_method(analyze_files) -> None:
+    # <.asmx path>/<Method> when X.asmx sits beside X.asmx.cs and its Class= names the class;
+    # otherwise empty (a service or class name is not an address).
+    stmts = analyze_files({
+        "Svc/Legacy.asmx": '<%@ WebService Language="C#" CodeBehind="Legacy.asmx.cs" Class="K.LegacyService" %>',
+        "Svc/Legacy.asmx.cs": ASMX.decode(),
+        "Other/Wrong.asmx": '<%@ WebService Class="K.SomethingElse" %>',
+        "Other/Wrong.asmx.cs": ASMX.decode(),
+        "App_Code/Loose.cs": ASMX.decode(),
+    })
+    got = {s.path: s.endpoint for s in stmts if s.framework == "asmx" and s.path.endswith(".cs")}
+    assert got == {
+        "Svc/Legacy.asmx.cs": "Svc/Legacy.asmx/GetData",
+        "Other/Wrong.asmx.cs": None,   # the .asmx serves another class
+        "App_Code/Loose.cs": None,     # no .asmx beside it
+    }
+
+
+_CONTRACT = """using System.ServiceModel;
+namespace Shop {
+[ServiceContract]
+public interface IOrderService {
+    [OperationContract] Order GetOrder(int id);
+    [OperationContract] void Cancel(int id);
+}
+}
+"""
+
+
+def _wcf_handlers(stmts) -> dict[str, tuple[str | None, int | None]]:
+    return {s.endpoint: (s.handler, s.handlerLine)
+            for s in stmts if s.framework == "wcf" and s.semanticType == "route"}
+
+
+def test_interface_contract_handler_is_the_implementing_method(analyze_files) -> None:
+    # One implementer in another file: the method with a body runs → Class.Method, no line
+    # (the record is in the interface's file; handlerPath does not exist yet).
+    stmts = analyze_files({
+        "IOrderService.cs": _CONTRACT,
+        "OrderService.svc.cs": (
+            "namespace Shop {\npublic class OrderService : ServiceBase, IOrderService {\n"
+            "    public Order GetOrder(int id) { return null; }\n"
+            "    void IOrderService.Cancel(int id) { }\n}\n}\n"  # explicit implementation
+        ),
+    })
+    assert _wcf_handlers(stmts) == {
+        "OrderService/GetOrder": ("OrderService.GetOrder", None),
+        "OrderService/Cancel": ("OrderService.Cancel", None),
+    }
+
+
+def test_interface_contract_with_two_implementers_keeps_the_interface_method(analyze_files) -> None:
+    stmts = analyze_files({
+        "IOrderService.cs": _CONTRACT,
+        "A.cs": "namespace Shop { public class A : IOrderService { public Order GetOrder(int id) => null; public void Cancel(int id) {} } }\n",
+        "B.cs": "namespace Shop { public class B : IOrderService { public Order GetOrder(int id) => null; public void Cancel(int id) {} } }\n",
+    })
+    assert _wcf_handlers(stmts)["OrderService/GetOrder"] == ("GetOrder", 5)
+
+
+def test_implementer_in_the_same_file_gets_its_line(analyze_files) -> None:
+    src = _CONTRACT.replace("}\n}\n", "}\npublic class OrderService : IOrderService {\n"
+                            "    public Order GetOrder(int id) => null;\n"
+                            "    public void Cancel(int id) { }\n}\n}\n", 1)
+    stmts = analyze_files({"OrderService.cs": src})
+    assert _wcf_handlers(stmts)["OrderService/GetOrder"] == ("OrderService.GetOrder", 9)
+
+
+def test_concrete_service_contract_is_unchanged(analyze_files) -> None:
+    stmts = analyze_files({
+        "Svc.cs": "using System.ServiceModel;\nnamespace Shop {\n[ServiceContract]\npublic class Svc {\n"
+                  "    [OperationContract] public void Ping() { }\n}\n}\n",
+    })
+    assert _wcf_handlers(stmts) == {"Svc/Ping": ("Ping", 5)}

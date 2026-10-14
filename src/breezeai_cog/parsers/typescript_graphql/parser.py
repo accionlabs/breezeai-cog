@@ -10,9 +10,10 @@ from __future__ import annotations
 
 from ...schemas import FileRecord
 from ..base import ParseContext
+from ..emits import apply
 from ..treesitter import parse_source
 from ..typescript.parser import TypeScriptParser
-from .routes import detect_graphql
+from .routes import detect_embedded_sdl, detect_resolver_maps
 
 
 class GraphQLParser(TypeScriptParser):
@@ -42,16 +43,16 @@ class GraphQLParser(TypeScriptParser):
         if ctx.capture_statements and not self.is_fixture_file(
             ctx.path
         ):  # gated by statement capture; skip fixtures (R4)
-            gql_classes, routes = detect_graphql(
-                root,
-                ctx.source,
-                ctx.path,
-                seen_ids={s.id for s in record.statements},
-                timeout_micros=ctx.parse_timeout_micros,
-                limit=ctx.statement_text_limit,
+            # Resolver-map operations first, then the embedded SDL — the order their ids are
+            # given in (the SDL extractor disambiguates against the record as it then is).
+            routes = detect_resolver_maps(root, ctx.source, ctx.path, ctx.resolution_index)
+            apply(record, routes, ctx.source, ctx.path)
+            gql_classes, sdl = detect_embedded_sdl(
+                root, ctx.source, ctx.path, {s.id for s in record.statements},
+                ctx.parse_timeout_micros, ctx.statement_text_limit,
             )
-            if gql_classes or routes:
+            if gql_classes or routes or sdl:
                 record.classes.extend(gql_classes)
-                record.statements.extend(routes)
+                record.statements.extend(sdl)
                 record.framework = "graphql"
         return record

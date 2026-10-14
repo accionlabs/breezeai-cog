@@ -10,13 +10,16 @@ from __future__ import annotations
 import json
 import os
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import Iterator, Sequence
+from typing import Any, Iterator, Sequence
 
 from tree_sitter import Node
 
 from ...utils import repo_relative
+from ..additive import (
+    collect_additive, collect_fact_sources, resolve_additive, split_fact_sources,
+)
 from ..index_common import ClassHeritage, parallel_map, record_distinct
 from ..treesitter import node_text, parse_source
 
@@ -32,9 +35,10 @@ _INDEXES = ("index.ts", "index.tsx", "index.js", "index.jsx", "index.vue")
 class TsAliasIndex:
     """Repo-wide TS resolution index (picklable — crosses the process boundary).
 
-    Holds tsconfig path aliases plus a **string-constant value map**: repo-wide
-    ``symbol → literal`` for top-level ``const``s, string ``enum`` members, and
-    ``static readonly`` class fields (keyed ``NAME`` or ``Type.MEMBER``). A symbol
+    Holds tsconfig path aliases plus a **constant value map**: repo-wide
+    ``symbol → literal`` for top-level ``const``s, ``enum`` members with an initializer, and
+    ``static readonly`` class fields (keyed ``NAME`` or ``Type.MEMBER``) whose value is a string
+    or a number (as JavaScript writes it in a string: ``5_000`` → ``5000``). A symbol
     declared with differing literals in >1 place maps to ``None`` (ambiguous → do not
     resolve through it — precision-first, mirroring the C# type index)."""
 
@@ -49,19 +53,22 @@ class TsAliasIndex:
     #: simple class name → heritage (base + method→file), for resolving inherited `this.M()`
     #: calls to the declaring base file. A name declared in >1 file → ``None`` (ambiguous).
     class_heritage: dict[str, ClassHeritage | None] = field(default_factory=dict)
-    #: Angular lazy-route mount linkage: a routing-module symbol → its **fully composed**
-    #: effective mount prefix (parent chain prepended), so a child module parsed in its own
-    #: file can start at that prefix instead of "". Chain-composed and ambiguity-collapsed in
-    #: :func:`build_ts_index`; a symbol mounted at >1 prefix (or with an unresolved chain) → not
-    #: present (honest-null — the child then falls back to its own bare path).
-    route_mounts: dict[str, str] = field(default_factory=dict)
-    #: Express mount linkage: a mounted router-factory's defining FILE (repo-relative) → the base
-    #: path it is served under (``app.use('/users', usersRouter())`` → ``users-router.ts`` maps
-    #: to ``/users``). A factory file mounted at >1 distinct base collapses to None and is
-    #: dropped (honest-null — its routes then keep their own bare path); test/fixture mounts are
-    #: not collected. Consumed by ``detect_express`` to prefix a factory's router-local routes
-    #: with their real base — the Express analogue of ``route_mounts`` for Angular lazy routes.
-    express_mounts: dict[str, str] = field(default_factory=dict)
+    #: Facts registered with ``register_fact`` (fact name → fact), resolved once before
+    #: parsing. Read with :func:`~..additive.index_fact`; see ``parsers/additive.py``.
+    facts: dict[str, Any] = field(default_factory=dict)
+
+
+def router_root(path: str, router_dir: str) -> str | None:
+    """The app root of a file under a file-based ``router_dir`` (``app`` / ``pages``): the
+    directory holding it, or its parent when that is ``src`` (``src/app``, ``src/pages``).
+    ``""`` is the repo root; None when ``router_dir`` is not on the path."""
+    dirs = path.replace("\\", "/").split("/")[:-1]
+    if router_dir not in dirs:
+        return None
+    before = dirs[: dirs.index(router_dir)]
+    if before and before[-1] == "src":
+        before = before[:-1]
+    return "/".join(before)
 
 
 def _load_jsonc(path: Path) -> dict | None:
@@ -157,6 +164,30 @@ def _string_literal(node: Node | None, source: bytes) -> str | None:
     return node_text(frag, source) if frag is not None else ""
 
 
+_DECIMAL_RE = re.compile(r"^(0|[1-9][0-9]*)\.[0-9]*[1-9]$")
+
+
+def number_literal(node: Node | None, source: bytes) -> str | None:
+    """A ``number`` node as JavaScript renders it in a string (`` `${n}` ``): an integer in any
+    base (``5_000`` / ``0x10`` → ``5000`` / ``16``) or a plain decimal (``1.5``); anything
+    else (an exponent, ``1.0``, a legacy octal ``010``) → None rather than a guess."""
+    if node is None or node.type != "number":
+        return None
+    text = node_text(node, source).replace("_", "")
+    try:
+        return str(int(text, 0))
+    except ValueError:
+        return text if _DECIMAL_RE.match(text) else None
+
+
+def _literal(node: Node | None, source: bytes, *, constant: bool) -> str | None:
+    """A string literal's value, or a number literal's (see :func:`number_literal`) when the
+    declaration is ``constant`` (``const`` / ``readonly``): a ``let`` number is often a counter."""
+    if node is not None and node.type == "number":
+        return number_literal(node, source) if constant else None
+    return _string_literal(node, source)
+
+
 # ── reusable constant-value resolution ─────────────────────────────────────────
 # These resolve a value that is built from a *constant* (a symbol, a member path into a
 # ``{…} as const`` object, or a template of those) to its literal string — the general primitive
@@ -221,7 +252,9 @@ def _resolve_template(node: Node, source: bytes, consts: dict[str, str | None]) 
             out.append(node_text(c, source))
         elif c.type == "template_substitution":
             inner = c.named_children[0] if c.named_children else None
-            val = resolve_const_value(inner, source, consts) if inner is not None else None
+            val = None if inner is None else (
+                number_literal(inner, source) if inner.type == "number"
+                else resolve_const_value(inner, source, consts))
             if val is None:
                 return None  # any unresolved substitution → whole template unresolved
             out.append(val)
@@ -276,8 +309,10 @@ def flatten_const_object(
 def _collect_const_values(root: Node, source: bytes, const_values: dict[str, str | None]) -> None:
     """Record ``symbol → literal`` from one file's top-level constants: ``const NAME = 'x'``,
     ``enum E { M = 'x' }`` (→ ``E.M``), ``static readonly M = 'x'`` (→ ``C.M``), and the leaves of
-    a ``const X = {…} as const`` object (→ ``X.a.b``, folding templates + const refs). Non-string
-    values are skipped; a symbol seen with >1 distinct literal collapses to ``None`` (honest-null)."""
+    a ``const X = {…} as const`` object (→ ``X.a.b``, folding templates + const refs). Values
+    other than a string or a number are skipped, and a number only counts when declared constant
+    (``const`` / ``readonly`` / an enum member); a symbol seen with >1 distinct literal collapses
+    to ``None`` (honest-null)."""
     def add(sym: str, val: str | None) -> None:
         if val is not None:
             record_distinct(const_values, sym, val)
@@ -292,12 +327,13 @@ def _collect_const_values(root: Node, source: bytes, const_values: dict[str, str
         if node is None:
             continue
         if node.type in ("lexical_declaration", "variable_declaration"):
+            constant = bool(node.children) and node.children[0].type == "const"
             for d in node.named_children:
                 if d.type == "variable_declarator":
                     nm = d.child_by_field_name("name")
                     if nm is not None and nm.type == "identifier":
                         value = _unwrap_const_expr(d.child_by_field_name("value"))
-                        add(node_text(nm, source), _string_literal(value, source))
+                        add(node_text(nm, source), _literal(value, source, constant=constant))
                         if value is not None and value.type == "object":
                             obj_consts[node_text(nm, source)] = value
         elif node.type == "enum_declaration":
@@ -307,9 +343,9 @@ def _collect_const_values(root: Node, source: bytes, const_values: dict[str, str
                 for m in body.named_children:
                     if m.type == "enum_assignment":
                         mn = next((c for c in m.named_children if c.type == "property_identifier"), None)
-                        mv = next((c for c in m.named_children if c.type == "string"), None)
+                        mv = next((c for c in m.named_children if c.type in ("string", "number")), None)
                         if mn is not None:
-                            add(f"{node_text(ename, source)}.{node_text(mn, source)}", _string_literal(mv, source))
+                            add(f"{node_text(ename, source)}.{node_text(mn, source)}", _literal(mv, source, constant=True))
         elif node.type == "class_declaration":
             cname = next((c for c in node.named_children if c.type in ("type_identifier", "identifier")), None)
             body = next((c for c in node.named_children if c.type == "class_body"), None)
@@ -317,9 +353,11 @@ def _collect_const_values(root: Node, source: bytes, const_values: dict[str, str
                 for f in body.named_children:
                     if f.type == "public_field_definition":
                         fn = next((c for c in f.named_children if c.type == "property_identifier"), None)
-                        fv = next((c for c in f.named_children if c.type == "string"), None)
+                        fv = next((c for c in f.named_children if c.type in ("string", "number")), None)
+                        readonly = any(c.type == "readonly" for c in f.children)
                         if fn is not None:
-                            add(f"{node_text(cname, source)}.{node_text(fn, source)}", _string_literal(fv, source))
+                            add(f"{node_text(cname, source)}.{node_text(fn, source)}",
+                                _literal(fv, source, constant=readonly))
 
     # Pass 2: flatten object consts now that flat consts are collected (their leaves may reference
     # a sibling flat const via a `${…}` template, e.g. `root: `/${segment}``).
@@ -360,18 +398,6 @@ def _collect_heritage(root: Node, source: bytes, rel: str) -> dict[str, ClassHer
     return out
 
 
-# --- Angular lazy-route mount extraction (picklable worker side) ---------------------------
-#
-# A path expression is returned as UNRESOLVED pieces — ``("lit", text)`` for a string literal
-# and ``("sym", "RouteNames.X")`` for a const reference — because ``RouteNames.*`` is defined
-# cross-file, so the pieces are resolved against the repo-wide ``const_values`` in the reduce
-# (:func:`_resolve_pieces`), not here.
-_MountRaw = tuple[str, list[tuple[str, str]]]  # (target module symbol, path pieces)
-
-# `.then(m => m.OrganisationsRoutingModule)` — the mounted module's exported class symbol.
-_MOUNT_TARGET_RE = re.compile(r"=>\s*[\w$]+\.([A-Za-z_$][\w$]*)")
-
-
 def _path_pieces(node: Node | None, source: bytes) -> list[tuple[str, str]] | None:
     """A route ``path`` value → ordered resolvable pieces, or None if any piece is dynamic
     (a call, a template substitution that isn't a plain member/identifier). Mirrors the
@@ -407,44 +433,13 @@ def _path_pieces(node: Node | None, source: bytes) -> list[tuple[str, str]] | No
     return None
 
 
-def _collect_route_mounts(root: Node, source: bytes) -> tuple[list[str], list[_MountRaw]]:
-    """(top-level class names declared here, lazy mounts declared here). A mount is a
-    ``loadChildren`` pair inside a route object; its target is the ``.then(m => m.X)`` symbol
-    and its own path is the sibling ``path:`` value (as unresolved pieces)."""
-    classes: list[str] = []
-    mounts: list[_MountRaw] = []
-
-    def walk(node: Node) -> None:
-        if node.type in _CLASS_NODES:
-            nm = node.child_by_field_name("name")
-            if nm is not None:
-                classes.append(node_text(nm, source))
-        if node.type == "object":  # a route config object literal
-            pairs = {}
-            for c in node.named_children:
-                if c.type == "pair":
-                    k = c.child_by_field_name("key")
-                    if k is not None:
-                        pairs[node_text(k, source).strip("'\"")] = c.child_by_field_name("value")
-            if "loadChildren" in pairs and "path" in pairs:
-                lc = pairs["loadChildren"]
-                m = _MOUNT_TARGET_RE.search(node_text(lc, source)) if lc is not None else None
-                pieces = _path_pieces(pairs["path"], source)
-                if m is not None and pieces is not None:
-                    mounts.append((m.group(1), pieces))
-        for c in node.named_children:
-            walk(c)
-
-    walk(root)
-    return classes, mounts
-
-
 # --- Express mount extraction (picklable worker side) --------------------------------------
 #
 # An Express router factory (``const r = () => { const route = Router(); route.get(...); return
 # route }``) lives in its own file and is mounted elsewhere with ``app.use('/base', factory())``.
 # The base path and the factory's routes sit in different files, so — like the Angular lazy
-# mounts above — the linkage resolves through the repo-wide index: this collector records, at
+# mounts (``angular.route-mounts``) — the linkage resolves through the repo-wide index: this
+# collector records, at
 # each mount site, ``defining-file → base`` so the factory file can later prefix its own routes.
 
 # Filename infixes / dirs whose mounts are test scaffolding, not the wired app (mirrors
@@ -462,6 +457,49 @@ def _is_fixture_path(rel: str) -> bool:
     return any(seg in _FIXTURE_MOUNT_DIRS for seg in parts[:-1])
 
 
+def require_specifier(node: Node | None, source: bytes) -> str | None:
+    """``require('./x')`` → ``'./x'`` when the specifier is relative; else None."""
+    if node is None or node.type != "call_expression":
+        return None
+    fn = node.child_by_field_name("function")
+    args = node.child_by_field_name("arguments")
+    if fn is None or node_text(fn, source) != "require" or args is None:
+        return None
+    first = args.named_children[0] if args.named_children else None
+    spec = _string_literal(first, source)
+    return spec if spec is not None and spec.startswith(".") else None
+
+
+def relative_requires(root: Node, source: bytes) -> dict[str, tuple[str, str]]:
+    """CommonJS counterpart of ES ``import`` bindings — top-level
+    ``const x = require('./a')`` → ``x: ('./a', 'default')`` (``module.exports`` is the default)
+    and ``const { r, s: t } = require('./a')`` → ``r: ('./a', 'r')``, ``t: ('./a', 's')``."""
+    out: dict[str, tuple[str, str]] = {}
+    if b"require(" not in source:
+        return out
+    for node in root.named_children:
+        if node.type not in ("lexical_declaration", "variable_declaration"):
+            continue
+        for d in node.named_children:
+            if d.type != "variable_declarator":
+                continue
+            module = require_specifier(d.child_by_field_name("value"), source)
+            name = d.child_by_field_name("name")
+            if module is None or name is None:
+                continue
+            if name.type == "identifier":
+                out[node_text(name, source)] = (module, "default")
+            elif name.type == "object_pattern":
+                for p in name.named_children:
+                    if p.type == "shorthand_property_identifier_pattern":
+                        out[node_text(p, source)] = (module, node_text(p, source))
+                    elif p.type == "pair_pattern":
+                        key, value = p.child_by_field_name("key"), p.child_by_field_name("value")
+                        if key is not None and value is not None and value.type == "identifier":
+                            out[node_text(value, source)] = (module, node_text(key, source))
+    return out
+
+
 def _relative_import_map(root: Node, source: bytes) -> dict[str, str]:
     """local imported name → its **relative** module specifier (only ``.``-prefixed, since a
     factory mount is resolved file-to-file in the reduce). Bare/aliased specifiers are omitted."""
@@ -474,64 +512,33 @@ def _relative_import_map(root: Node, source: bytes) -> dict[str, str]:
             continue
         for nm in _imported_names(node, source):
             out[nm] = module
+    for nm, (module, _) in relative_requires(root, source).items():
+        out.setdefault(nm, module)
     return out
 
 
-def _mount_receiver_ok(obj_text: str) -> bool:
-    """Whether a ``X.use(...)`` receiver looks like an Express app/router — mirrors the runtime
-    detector's ``_is_router_obj`` heuristic (duplicated to keep the framework parser out of the
-    index module's imports)."""
-    tail = obj_text.lower().rsplit(".", 1)[-1].strip()
-    return tail in {"app", "router", "server", "api", "route"} or tail.endswith(("router", "app"))
+def _is_router_call(node: Node | None, source: bytes) -> bool:
+    """``Router(...)`` / ``express.Router(...)`` (optionally ``new``) — an Express router instance."""
+    if node is not None and node.type == "new_expression":
+        fn = node.child_by_field_name("constructor")
+    elif node is not None and node.type == "call_expression":
+        fn = node.child_by_field_name("function")
+    else:
+        return False
+    return fn is not None and node_text(fn, source) in {"Router", "express.Router"}
 
 
-def _factory_call_name(arg: Node, source: bytes) -> str | None:
-    """If ``arg`` is a bare ``factory()`` call, its callee identifier name; else None. Member
-    calls (``Auth.check()``) and non-calls are skipped."""
-    if arg.type != "call_expression":
-        return None
-    fn = arg.child_by_field_name("function")
-    return node_text(fn, source) if fn is not None and fn.type == "identifier" else None
-
-
-def _collect_express_mounts(
-    root: Node, source: bytes, rel: str, repo_root: Path
-) -> list[tuple[str, str]]:
-    """(mounted-factory file, base path) for each ``app.use('/base', factory())`` in this file.
-    The factory identifier is resolved to its defining file via this file's relative imports. A
-    mount whose base is not a plain string, or whose factory is not a single relative-imported
-    bare call, is skipped — honest-null, never a guessed link. Test/fixture files are not a mount
-    source (their throwaway bases must not define a factory's real prefix)."""
-    if b".use(" not in source or _is_fixture_path(rel):
-        return []
-    import_map = _relative_import_map(root, source)
-    if not import_map:
-        return []
-    mount_dir = (repo_root / rel).parent
-    out: list[tuple[str, str]] = []
+def router_locals(root: Node, source: bytes) -> set[str]:
+    """Variables bound to an Express router instance anywhere in the file
+    (``const r = Router()`` / ``express.Router()``)."""
+    out: set[str] = set()
 
     def walk(node: Node) -> None:
-        if node.type == "call_expression":
-            fn = node.child_by_field_name("function")
-            if fn is not None and fn.type == "member_expression":
-                prop = fn.child_by_field_name("property")
-                obj = fn.child_by_field_name("object")
-                if (prop is not None and node_text(prop, source) == "use"
-                        and obj is not None and _mount_receiver_ok(node_text(obj, source))):
-                    args = node.child_by_field_name("arguments")
-                    arg_nodes = list(args.named_children) if args is not None else []
-                    base = _string_literal(arg_nodes[0], source) if arg_nodes else None
-                    if base is not None and base.startswith("/"):
-                        specs = [
-                            import_map[name]
-                            for a in arg_nodes[1:]
-                            if (name := _factory_call_name(a, source)) is not None
-                            and name in import_map
-                        ]
-                        if len(specs) == 1:  # exactly one imported factory arg → unambiguous
-                            resolved = _try_paths(mount_dir / specs[0], repo_root)
-                            if resolved is not None:
-                                out.append((resolved, base))
+        if node.type == "variable_declarator":
+            name = node.child_by_field_name("name")
+            if (name is not None and name.type == "identifier"
+                    and _is_router_call(node.child_by_field_name("value"), source)):
+                out.add(node_text(name, source))
         for c in node.named_children:
             walk(c)
 
@@ -539,78 +546,17 @@ def _collect_express_mounts(
     return out
 
 
-_CLASS_NODES_SET = frozenset(_CLASS_NODES)
 
 
-def _ngmodule_import_names(dec: Node, source: bytes) -> list[str] | None:
-    """Given a ``decorator`` node, return the list of identifier names from its
-    ``@NgModule({imports: [...]})`` array, or None if it is not an NgModule decorator."""
-    call = next((c for c in dec.named_children if c.type == "call_expression"), None)
-    if call is None:
-        return None
-    fn = call.child_by_field_name("function")
-    if fn is None or node_text(fn, source) != "NgModule":
-        return None
-    args = call.child_by_field_name("arguments")
-    if args is None:
-        return None
-    config = next((c for c in args.named_children if c.type == "object"), None)
-    if config is None:
-        return None
-    for pair in config.named_children:
-        if pair.type != "pair":
-            continue
-        k = pair.child_by_field_name("key")
-        v = pair.child_by_field_name("value")
-        if k is None or node_text(k, source).strip("'\"") != "imports":
-            continue
-        if v is None or v.type != "array":
-            continue
-        return [node_text(c, source) for c in v.named_children if c.type == "identifier"]
-    return None
 
-
-def _collect_ngmodule_imports(root: Node, source: bytes) -> dict[str, list[str]]:
-    """Return a map of class name → list of identifier names from the class's
-    ``@NgModule({imports: [...]})`` decorator. Only top-level class declarations
-    are considered (the Angular module pattern). Returns empty dict if no NgModule found."""
-    if b"NgModule" not in source:
-        return {}
-    result: dict[str, list[str]] = {}
-    pending: list[str] | None = None  # imports from the most recent @NgModule decorator
-
-    for child in root.named_children:
-        if child.type == "decorator":
-            pending = _ngmodule_import_names(child, source)
-            continue
-        if child.type == "comment":
-            continue  # comments don't clear pending decorators (mirrors TypeScriptParser.extract)
-
-        # inline decorator inside export_statement (export @NgModule class Foo {})
-        if child.type == "export_statement":
-            inner_dec = next((c for c in child.named_children if c.type == "decorator"), None)
-            if inner_dec is not None:
-                imports = _ngmodule_import_names(inner_dec, source)
-                if imports is not None:
-                    pending = imports
-            cls_node = next((c for c in child.named_children if c.type in _CLASS_NODES_SET), None)
-        else:
-            cls_node = child if child.type in _CLASS_NODES_SET else None
-
-        if cls_node is not None and pending is not None:
-            nm = cls_node.child_by_field_name("name")
-            if nm is not None:
-                result[node_text(nm, source)] = pending
-        pending = None
-
-    return result
 
 
 def _ts_index_one(
     args: tuple[str, str, str]
-) -> tuple[dict[str, str | None], dict[str, ClassHeritage], list[str], list[_MountRaw], dict[str, list[str]], list[tuple[str, str]]] | None:
+) -> tuple[dict[str, str | None], dict[str, ClassHeritage], dict[str, Any]] | None:
     """Parse one TS/JS file into its partials (string-constant map, class-heritage map, the
-    classes it declares, its lazy-route mounts, NgModule imports, and Express factory mounts) —
+    and what
+    registered facts collect) —
     pure, picklable worker for :func:`parallel_map`. Returns ``None`` on read/parse failure."""
     file_s, rel, repo_root_s = args
     if not Path(file_s).is_file():
@@ -624,11 +570,8 @@ def _ts_index_one(
         root = parse_source(grammar, src, 0).root_node
         const_values: dict[str, str | None] = {}
         _collect_const_values(root, src, const_values)
-        classes, mounts = _collect_route_mounts(root, src)
-        ngmodule_imports = _collect_ngmodule_imports(root, src)
-        express_mounts = _collect_express_mounts(root, src, rel, Path(repo_root_s))
-        return (const_values, _collect_heritage(root, src, rel), classes, mounts,
-                ngmodule_imports, express_mounts)
+        return (const_values, _collect_heritage(root, src, rel),
+                collect_additive("typescript", root, src, rel, Path(repo_root_s)))
     except Exception as exc:  # parse OR a pathologically deep AST walk (RecursionError) — skip this file
         from ...logging import get_logger
         get_logger("breezeai_cog.index").warning(
@@ -660,118 +603,41 @@ def _join_segments(base: str, sub: str) -> str:
     return "/" + "/".join(parts) if parts else "/"
 
 
-def _compose_route_mounts(
-    raw: dict[str, str | None], parent_of: dict[str, str | None]
-) -> dict[str, str]:
-    """Chain-compose each mount's own prefix with its ancestors' prefixes to a full effective
-    path. ``raw[sym]`` is the module's OWN mount prefix (None if ambiguous/unresolved);
-    ``parent_of[sym]`` is the module symbol whose mount encloses it (None if none/ambiguous).
-    A module reached through an unresolved link → dropped (honest-null). Iterates to a fixpoint,
-    bounded by chain length; a cycle (shouldn't happen in routing) just stops resolving."""
-    composed: dict[str, str] = {}
-    for _ in range(len(raw) + 1):  # bounded: converges in <= chain-depth passes
-        progressed = False
-        for sym, own in raw.items():
-            if sym in composed or own is None:
-                continue
-            parent = parent_of.get(sym)
-            # A root boundary: no parent, an ambiguous parent (None), or a parent that is not
-            # itself a mounted module (e.g. the top AppRoutingModule) → own prefix IS the path.
-            if parent is None or parent not in raw:
-                composed[sym] = own
-                progressed = True
-            elif parent in composed:  # ancestor resolved → prepend its full chain
-                composed[sym] = _join_segments(composed[parent], own)
-                progressed = True
-        if not progressed:
-            break
-    return composed
-
-
 def build_ts_index(repo_root: Path, files: Sequence[Path], jobs: int = 1) -> TsAliasIndex | None:
     """Repo-level pre-pass: tsconfig aliases, a string-constant value map, class heritage
-    (for inherited-call resolution), and Angular lazy-route mount linkage — parses each file
-    once, across ``jobs`` processes. Returns None only when there is nothing to resolve with."""
+    (for inherited-call resolution) and the registered facts — parses each file once, across
+    ``jobs`` processes. Returns None only when there is nothing to resolve with."""
     alias = build_alias_index(repo_root)  # repo-level (tsconfig) — computed once in main
+    files, fact_files = split_fact_sources("typescript", list(files))
     const_values: dict[str, str | None] = {}
     class_heritage: dict[str, ClassHeritage | None] = {}
-    # Mount graph, collected raw then resolved after const_values is complete (paths reference
-    # cross-file consts). ``own_prefix``: module symbol → its own mount prefix (ambiguity via
-    # record_distinct). ``parent_of``: module symbol → the module whose file declared its mount.
-    own_prefix: dict[str, str | None] = {}
-    parent_of: dict[str, str | None] = {}
-    file_mounts: list[tuple[frozenset[str], list[_MountRaw]]] = []
-    all_ngmodule_imports: dict[str, list[str]] = {}
-    # Express: mounted-factory file → its base path. A factory file mounted at >1 distinct base
-    # collapses to None (honest-null) via record_distinct; the None entries are dropped below.
-    express_mount_of: dict[str, str | None] = {}
+    # registered fact name → per-file values: fact-source files (another parser's), then our own
+    collected: dict[str, list[Any]] = collect_fact_sources("typescript", fact_files, repo_root, jobs)
     args = [(str(f), repo_relative(f, repo_root), str(repo_root)) for f in files]
     for frag in parallel_map(args, _ts_index_one, jobs):
         if not frag:
             continue
-        cv, heritage, classes, mounts, ngmodule_imports, file_express_mounts = frag
+        (cv, heritage, facts) = frag
+        for name, value in facts.items():
+            collected.setdefault(name, []).append(value)
         for sym, literal in cv.items():
             record_distinct(const_values, sym, literal)
         for cname, ch in heritage.items():  # same class name in >1 file → None (distinct types)
             record_distinct(class_heritage, cname, ch, same=lambda a, b: False)
-        if mounts:
-            file_mounts.append((frozenset(classes), mounts))
-        all_ngmodule_imports.update(ngmodule_imports)
-        for factory_file, base in file_express_mounts:
-            record_distinct(express_mount_of, factory_file, base)
 
-    # Now const_values is complete: resolve each mount's path and wire the graph. A module
-    # symbol mounted at >1 distinct prefix (or an unresolved path) collapses to None — the
-    # child then keeps its own bare path (honest-null), never a wrongly-attributed prefix.
-    for classes, mounts in file_mounts:
-        enclosing = next(iter(classes), None)  # the routing module this file declares (its mount owner)
-        for target, pieces in mounts:
-            record_distinct(own_prefix, target, _resolve_pieces(pieces, const_values))
-            if enclosing is not None:
-                record_distinct(parent_of, target, enclosing)
-    # Pre-composition NgModule propagation: if BrandModule is a loadChildren target and its
-    # @NgModule imports BrandRoutingModule, inject BrandRoutingModule into own_prefix/parent_of
-    # with the same own-path and parent as BrandModule BEFORE _compose_route_mounts runs.
-    # This makes BrandRoutingModule a proper node in the composition graph, so that
-    # ProductsModule (whose parent_of entry is BrandRoutingModule) chains correctly all the
-    # way up to /company/:brandId/products instead of stopping at /products.
-    for class_name, ngmod_imports in all_ngmodule_imports.items():
-        own = own_prefix.get(class_name)
-        if own is None:
-            continue  # class not a loadChildren target, or path is ambiguous
-        parent = parent_of.get(class_name)
-        for imported in ngmod_imports:
-            if imported not in own_prefix:
-                record_distinct(own_prefix, imported, own)
-                if parent is not None:
-                    record_distinct(parent_of, imported, parent)
-
-    route_mounts = _compose_route_mounts(own_prefix, parent_of)
-
-    # Post-composition NgModule propagation: for modules that are now in route_mounts after
-    # composition (e.g. ProductsModule → /company/:brandId/products), also add their NgModule-
-    # imported routing modules (e.g. ProductsRoutingModule) so _mount_prefix() finds them.
-    for class_name, prefix in list(route_mounts.items()):
-        for imported_name in all_ngmodule_imports.get(class_name, []):
-            if imported_name not in route_mounts:
-                route_mounts[imported_name] = prefix
-
-    # Drop ambiguous (None) Express mounts — a factory mounted at conflicting bases keeps its
-    # own bare paths rather than being wrongly attributed to one of them (honest-null).
-    express_mounts = {k: v for k, v in express_mount_of.items() if v is not None}
-
-    if (alias is None and not const_values and not class_heritage and not route_mounts
-            and not express_mounts):
-        return None
-    return TsAliasIndex(
+    index = TsAliasIndex(
         base_dir=alias.base_dir if alias else str(repo_root),
         paths=alias.paths if alias else {},
         alias_scopes=alias.alias_scopes if alias else (),
         const_values=const_values,
         class_heritage=class_heritage,
-        route_mounts=route_mounts,
-        express_mounts=express_mounts,
     )
+    # Registered facts may need the whole index, so they resolve after it is built.
+    facts = resolve_additive("typescript", collected, index)
+    if (alias is None and not const_values and not class_heritage
+            and not any(v is not None for v in facts.values())):
+        return None
+    return replace(index, facts=facts)
 
 
 #: ESM / NodeNext specifiers name the *emitted* file (`./x.js`) while the source on disk is
@@ -978,6 +844,68 @@ def _dynamic_import_specifiers(root: Node, source: bytes) -> list[str]:
     return out
 
 
+# CommonJS ``require('x')`` — read like a static import. A ``require`` with a string literal can
+# sit anywhere (top level, inside a function, a side-effect ``require('./polyfill')``), so the
+# edges come from a tree walk; bindings only from top-level declarations, like ESM imports.
+_REQUIRE_GUARD = b"require("
+
+
+def _require_module(node: Node | None, source: bytes) -> str | None:
+    """``require('x')`` / ``require('x').member`` → ``'x'`` (any literal specifier); else None.
+    A dynamic ``require(name)`` has no literal and yields nothing (honest-null)."""
+    if node is not None and node.type == "member_expression":
+        node = node.child_by_field_name("object")
+    if node is None or node.type != "call_expression":
+        return None
+    fn = node.child_by_field_name("function")
+    args = node.child_by_field_name("arguments")
+    if fn is None or fn.type != "identifier" or node_text(fn, source) != "require" or args is None:
+        return None
+    first = args.named_children[0] if args.named_children else None
+    return _string_literal(first, source) or None
+
+
+def _require_specifiers(root: Node, source: bytes) -> list[str]:
+    """Every literal ``require('x')`` specifier in the tree, in source order."""
+    out: list[str] = []
+    stack = [root]
+    while stack:
+        n = stack.pop()
+        if n.type == "call_expression":
+            spec = _require_module(n, source)
+            if spec:
+                out.append(spec)
+        stack.extend(reversed(n.named_children))
+    return out
+
+
+def _require_bindings(root: Node, source: bytes) -> dict[str, str]:
+    """Local name → module for top-level CommonJS bindings: ``const x = require('m')``,
+    ``const x = require('m').y``, ``const { a, b: c } = require('m')`` (``var`` / ``let`` too)."""
+    out: dict[str, str] = {}
+    for node in root.named_children:
+        if node.type not in ("lexical_declaration", "variable_declaration"):
+            continue
+        for d in node.named_children:
+            if d.type != "variable_declarator":
+                continue
+            module = _require_module(d.child_by_field_name("value"), source)
+            name = d.child_by_field_name("name")
+            if module is None or name is None:
+                continue
+            if name.type == "identifier":
+                out[node_text(name, source)] = module
+            elif name.type == "object_pattern":
+                for p in name.named_children:
+                    if p.type == "shorthand_property_identifier_pattern":
+                        out[node_text(p, source)] = module
+                    elif p.type == "pair_pattern":
+                        value = p.child_by_field_name("value")
+                        if value is not None and value.type == "identifier":
+                            out[node_text(value, source)] = module
+    return out
+
+
 def extract_imports(
     root: Node, source: bytes, file_path: str, repo_root: str | Path, index: TsAliasIndex | None = None
 ) -> tuple[list[str], list[str], list[str], dict[str, str]]:
@@ -1009,6 +937,20 @@ def extract_imports(
                 if module:
                     resolved = _resolve(module, file_path, repo_root, index)
                     (internal if resolved else external).setdefault(resolved or module, None)
+
+    # CommonJS `require('x')` — the same edges as an ESM import; top-level `const x = require(…)`
+    # also binds `x` to the resolved file, so calls[].path resolves through it.
+    if _REQUIRE_GUARD in source:
+        resolved_of: dict[str, str | None] = {}
+        for module in _require_specifiers(root, source):
+            if module not in resolved_of:
+                resolved_of[module] = _resolve(module, file_path, repo_root, index)
+            resolved = resolved_of[module]
+            (internal if resolved else external).setdefault(resolved or module, None)
+        for nm, module in _require_bindings(root, source).items():
+            resolved = resolved_of.get(module)
+            if resolved and nm not in bindings:
+                bindings[nm] = resolved
 
     # Dynamic imports (`import('x')`) — lazy pages / code-split components. Resolved into the
     # same file-level edge set as static imports (no binding: a dynamic import binds a Promise,

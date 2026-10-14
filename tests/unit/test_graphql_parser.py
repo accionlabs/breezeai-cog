@@ -135,8 +135,8 @@ def test_resolver_map_operations_detected(tmp_path) -> None:
     assert routes["procurementItem"].routeKind == "query"
     assert routes["createProcurementItem"].routeKind == "mutation"
     assert all(r.framework == "graphql" for r in routes.values())
-    # handler = operation name, with the arrow function's line; parented to file.
-    assert routes["procurementItem"].handler == "procurementItem"
+    # an inline arrow is anonymous: no handler, the arrow's line; parented to file.
+    assert routes["procurementItem"].handler is None
     assert routes["procurementItem"].handlerLine is not None
     assert all(r.parentId == rec.id for r in routes.values())
     assert rec.framework == "graphql"

@@ -104,3 +104,137 @@ def test_claims_selects_jaxrs() -> None:
     assert registry.select("X.java", b"import javax.ws.rs.Path;").name == "java-jaxrs"
     assert registry.select("X.java", b"package x;").name == "java"  # plain Java -> base
     registry.clear()
+
+
+# ── Prefixes from outside the resource class: @ApplicationPath, sub-resource locators ─────────
+_RS = "package a;\nimport javax.ws.rs.*;\n"
+_MAIN = "src/main/java/a/"
+
+
+def _eps(analyze_files, files: dict[str, str]) -> dict[tuple[str, str | None], str | None]:
+    """(file, handler) → endpoint of every JAX-RS route."""
+    return {(s.path.rsplit("/", 1)[-1], s.handler): s.endpoint
+            for s in analyze_files({_MAIN + k: _RS + v for k, v in files.items()})
+            if s.semanticType == "route" and s.framework == "jaxrs"}
+
+
+def test_application_path_and_nested_locators_compose(analyze_files) -> None:
+    got = _eps(analyze_files, {
+        "App.java": '@ApplicationPath(App.BASE)\npublic class App extends javax.ws.rs.core.Application {\n'
+                    '  static final String BASE = "/api";\n}\n',
+        "Orders.java": '@Path("/orders")\npublic class Orders {\n'
+                       '  @GET public String list() { return ""; }\n'
+                       '  @Path("/{id}/items") public Items items() { return new Items(); }\n}\n',
+        "Items.java": 'public class Items {\n  @GET public String all() { return ""; }\n'
+                      '  @Path("/{n}/notes") public Notes notes() { return new Notes(); }\n}\n',
+        "Notes.java": 'public class Notes {\n  @POST public void add(String n) {}\n}\n',
+    })
+    assert got == {
+        ("Orders.java", "list"): "/api/orders",
+        ("Items.java", "all"): "/api/orders/{id}/items",
+        ("Notes.java", "add"): "/api/orders/{id}/items/{n}/notes",
+    }
+
+
+def test_unresolved_application_or_locator_path_leaves_endpoint_empty(analyze_files) -> None:
+    got = _eps(analyze_files, {
+        "App.java": "@ApplicationPath(Config.ROOT)\npublic class App extends javax.ws.rs.core.Application {}\n",
+        "Orders.java": '@Path("/orders")\npublic class Orders {\n  @GET public String list() { return ""; }\n}\n',
+    })
+    assert got == {("Orders.java", "list"): None}
+
+
+def test_sub_resource_reached_twice_keeps_its_own_path(analyze_files) -> None:
+    got = _eps(analyze_files, {
+        "A.java": '@Path("/a")\npublic class A {\n  @Path("/x") public Shared x() { return null; }\n}\n',
+        "B.java": '@Path("/b")\npublic class B {\n  @Path("/y") public Shared y() { return null; }\n}\n',
+        "Shared.java": 'public class Shared {\n  @GET public String get() { return ""; }\n}\n',
+    })
+    assert got == {("Shared.java", "get"): "/"}
+
+
+def test_locator_on_a_root_resource_class_does_not_move_it(analyze_files) -> None:
+    # A returned class with its own @Path is a root resource: it keeps its own path.
+    got = _eps(analyze_files, {
+        "A.java": '@Path("/a")\npublic class A {\n  @Path("/x") public Root x() { return null; }\n}\n',
+        "Root.java": '@Path("/root")\npublic class Root {\n  @GET public String get() { return ""; }\n}\n',
+    })
+    assert got == {("Root.java", "get"): "/root"}
+
+
+def test_security_annotations_are_guards(analyze_files) -> None:
+    st = analyze_files({"src/main/java/a/Res.java": """package a;
+import javax.ws.rs.*;
+import javax.annotation.security.*;
+
+@Path("/orders")
+@RolesAllowed({"user"})
+public class Res {
+  @GET
+  public String list() { return ""; }
+
+  @DELETE
+  @DenyAll
+  public void purge() {}
+
+  @POST
+  @PermitAll
+  public void create(String o) {}
+}
+"""})
+    got = {s.method: s.guards for s in st if s.semanticType == "route"}
+    assert got == {
+        "GET": ['RolesAllowed({"user"})'],
+        "DELETE": ['RolesAllowed({"user"})', "DenyAll"],
+        "POST": ['RolesAllowed({"user"})'],  # @PermitAll opens nothing up front: not a guard
+    }
+
+
+def test_provider_request_filters_guard_bound_and_unbound_routes(analyze_files) -> None:
+    st = analyze_files({_MAIN + k: _RS + v for k, v in {
+        "Secured.java": "@NameBinding\npublic @interface Secured {}\n",
+        "LogFilter.java": "@Provider\npublic class LogFilter implements ContainerRequestFilter {}\n",
+        "AuthFilter.java": "@Provider\n@Secured\npublic class AuthFilter implements ContainerRequestFilter {}\n",
+        "Orders.java": (
+            '@Path("/orders")\npublic class Orders {\n'
+            '  @GET public String list() { return ""; }\n'
+            '  @GET @Path("/{id}") @Secured @RolesAllowed("admin") public String one() { return ""; }\n}\n'
+        ),
+        "Admin.java": '@Path("/admin")\n@Secured\npublic class Admin {\n  @GET public String stats() { return ""; }\n}\n',
+    }.items()})
+    got = {s.handler: (tuple(s.guards or ()), s.authRequired)
+           for s in st if s.semanticType == "route" and s.framework == "jaxrs"}
+    assert got == {
+        "list": (("LogFilter",), None),                                  # unbound filter only
+        # filters in a deterministic order (by file; JAX-RS orders by @Priority, unset here)
+        "one": (("AuthFilter", "LogFilter", "RolesAllowed(admin)"), True),  # bound on the method
+        "stats": (("AuthFilter", "LogFilter"), None),                    # bound on the class
+    }
+
+
+def test_path_values_resolve_or_leave_the_endpoint_empty(analyze_files) -> None:
+    # value =, a constant of the class, a constant of another class, a concatenation: resolved.
+    # A constant that is not in the repo: endpoint empty — never the constant's name.
+    st = analyze_files({
+        "src/main/java/demo/Api.java": (
+            "package demo;\npublic class Api {\n  public static final String BASE = \"/api\";\n}\n"
+        ),
+        "src/main/java/demo/Users.java": (
+            "package demo;\nimport javax.ws.rs.*;\n"
+            "@Path(value = \"users\")\n"
+            "public class Users {\n"
+            "  static final String ONE = \"{id}\";\n"
+            "  @GET public String list() { return \"\"; }\n"
+            "  @GET @Path(ONE) public String one() { return \"\"; }\n"
+            "  @GET @Path(Api.BASE + \"/x\") public String x() { return \"\"; }\n"
+            "  @GET @Path(Missing.PATH) public String gone() { return \"\"; }\n"
+            "}\n"
+        ),
+    })
+    got = {s.handler: s.endpoint for s in st if s.semanticType == "route"}
+    assert got == {
+        "list": "/users",
+        "one": "/users/{id}",
+        "x": "/users/api/x",
+        "gone": None,
+    }

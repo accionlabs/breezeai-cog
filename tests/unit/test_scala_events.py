@@ -76,29 +76,16 @@ def _parse(tmp_path: Path, src: bytes, name: str = "Worker.scala") -> FileRecord
     return ScalaParser().parse_file(ctx)
 
 
-def test_tell_and_ask_detected_unary_not_prefix(tmp_path: Path) -> None:
-    rec = _parse(tmp_path, AKKA_SRC)
-    sends = [s for s in rec.statements if s.semanticType == "eventbus_send"]
-    methods = {s.method for s in sends}
-    assert methods == {"SEND"}
-    assert all(s.framework == "akka" for s in sends)
-    # parented to the enclosing function run(), not the file
-    run_fn = next(f for f in rec.functions if f.name == "run")
-    assert all(s.parentId == run_fn.id for s in sends)
-    # distinction stays in text
-    texts = {s.text for s in sends}
-    assert "ref ! msg" in texts
-    assert "ref ? msg" in texts
-    # unary `!flag` is a prefix_expression, structurally excluded — no extra send
-    assert len(sends) == 2
+def _eventbus(rec: FileRecord) -> list:
+    return [s for s in rec.statements if s.semanticType and s.semanticType.startswith("eventbus")]
 
 
-def test_receive_handler_detected_as_consumer(tmp_path: Path) -> None:
+def test_actor_sends_and_receive_are_not_entry_points(tmp_path: Path) -> None:
+    # Decision Q7: a local actor message comes from our own code — `ref ! msg`, `ref ? msg` are
+    # not outbound and `receive` is not an entry point. The file is still labelled akka.
     rec = _parse(tmp_path, AKKA_SRC)
-    consumers = [s for s in rec.statements if s.semanticType == "eventbus_consumer"]
-    assert len(consumers) == 1
+    assert _eventbus(rec) == []
     assert rec.framework == "akka"
-    assert consumers[0].parentId != rec.id
 
 
 def test_byte_guard_suppresses_non_akka_files(tmp_path: Path) -> None:
@@ -110,27 +97,24 @@ def test_byte_guard_suppresses_non_akka_files(tmp_path: Path) -> None:
 
 def test_pekko_only_file_detected_no_akka_substring(tmp_path: Path) -> None:
     # verified fact F: `org.apache.pekko` does not contain the substring "akka" —
-    # the byte guard must check both spellings.
+    # the byte guard must check both spellings (the file is labelled; no actor records).
     assert b"akka" not in PEKKO_SRC
     rec = _parse(tmp_path, PEKKO_SRC, "Worker.scala")
-    semantics = {s.semanticType for s in rec.statements}
-    assert "eventbus_send" in semantics
-    assert "eventbus_consumer" in semantics  # Behaviors.receiveMessage
-    sends = [s for s in rec.statements if s.semanticType == "eventbus_send"]
-    assert all(s.method == "SEND" for s in sends)
-    run_fn = next(f for f in rec.functions if f.name == "run")
-    assert all(s.parentId == run_fn.id for s in sends)
+    assert _eventbus(rec) == []
+    assert rec.framework == "akka"
 
 
-def test_play_controller_emits_route_and_eventbus_send(tmp_path: Path) -> None:
+def test_play_controller_labels_play_and_actor_sends_stay_plain(tmp_path: Path) -> None:
     p = tmp_path / "NotifyController.scala"
     p.write_bytes(PLAY_AKKA_SRC)
     ctx = ParseContext(path="NotifyController.scala", abs_path=p, source=PLAY_AKKA_SRC,
                         repo_root=tmp_path, capture_statements=True)
     rec = ScalaPlayParser().parse_file(ctx)
     semantics = {s.semanticType for s in rec.statements}
-    assert "route" in semantics
-    assert "eventbus_send" in semantics
+    # The controller Action is the handler of a conf/routes binding, not an entry point itself.
+    assert "route" not in semantics
+    assert rec.framework == "play"
+    assert "eventbus_send" not in semantics  # a local actor send is not outbound (Q7)
 
 
 def test_events_output_validates(tmp_path: Path) -> None:
@@ -157,10 +141,5 @@ class MyActor extends Actor {
 
 def test_idiomatic_akka_receivers(tmp_path: Path) -> None:
     rec = _parse(tmp_path, IDIOMATIC_AKKA_SRC, "MyActor.scala")
-    sends = [s for s in rec.statements if s.semanticType == "eventbus_send"]
-    assert len(sends) == 3
-    texts = {s.text for s in sends}
-    assert 'child ! "work"' in texts
-    assert 'sender() ! "done"' in texts
-    assert 'self ! "loop"' in texts
-
+    assert _eventbus(rec) == []  # child / sender() / self sends are local (Q7)
+    assert rec.framework == "akka"

@@ -12,7 +12,7 @@ behaviour → ``Statement``s. Node types verified empirically against the ``grap
 | ``type`` (non-root) / ``interface`` / ``enum`` / ``union`` / ``input`` (+ ``extend`` of each) | ``Class`` (class/interface/enum/union/record) |
 | ``type X @key(fields:…)`` | the Class **plus** a ``graphql_entity`` statement with ``keyFields`` |
 | object/interface/input fields, enum values, union members | child ``Statement``s parented to the Class |
-| ``type Query/Mutation/Subscription`` (or a ``schema{}``-declared root) field | ``route`` statement |
+| ``type Query/Mutation/Subscription`` (or a ``schema{}``-declared root) field | ``route`` statement (the Target Spec's current form; the resolver is recorded too) |
 | ``scalar`` / ``directive`` / ``schema`` | plain ``Statement`` (name + text) |
 | ``query/mutation/subscription`` op / ``fragment`` | ``api_call`` / plain statement |
 
@@ -250,6 +250,29 @@ def _resolve_roots(root: Node, src: bytes) -> dict[str, str]:
                     roots[tname] = kind
         stack.extend(n.named_children)
     return roots
+
+
+def root_field_dtos(root: Node, src: bytes) -> list[tuple[str, str, str | None, str | None]]:
+    """``(root type, field, requestDTO, responseDTO)`` for every field of a root operation type
+    in this document (definitions and ``extend type`` alike) — the same DTOs a root field's own
+    statement carries, for a resolver in another file to take."""
+    roots = _resolve_roots(root, src)
+    out: list[tuple[str, str, str | None, str | None]] = []
+    stack = [root]
+    while stack:
+        n = stack.pop()
+        if n.type in ("object_type_definition", "object_type_extension"):
+            type_name = _name(n, src)
+            fields_def = child_of_type(n, "fields_definition")
+            if type_name is not None and type_name in roots and fields_def is not None:
+                for field in fields_def.named_children:
+                    name = _name(field, src) if field.type == "field_definition" else None
+                    if name is not None:
+                        out.append((type_name, name, request_dto(field, src),
+                                    base_type_name(child_of_type(field, "type"), src)))
+            continue
+        stack.extend(n.named_children)
+    return out
 
 
 # ---- extraction -------------------------------------------------------------

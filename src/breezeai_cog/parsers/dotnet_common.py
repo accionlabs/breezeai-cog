@@ -8,13 +8,16 @@ nodes) so C# and VB parsers share them verbatim:
   ``HttpGet``) and :func:`response_dto` (``Task<ActionResult<Foo>>`` → ``Foo``);
 * **IIS virtual paths** — :func:`web_app_root` (the ``web.config`` application root),
   :func:`to_repo_path` (``~/Controls/Nav.ascx`` → repo-relative) and :func:`ci_resolve`
-  (case-insensitive lookup returning the real on-disk casing).
+  (case-insensitive lookup returning the real on-disk casing);
+* **code-behind hosts** — :func:`code_behind_host` (the ``.asmx`` / ``.svc`` / ``.ashx`` file
+  that serves a code-behind class).
 """
 
 from __future__ import annotations
 
 import os
 import posixpath
+import re
 from pathlib import Path
 
 
@@ -135,3 +138,22 @@ def to_repo_path(src: str, cur_dir: str, app_root: str) -> str | None:
     else:
         rel = posixpath.normpath(posixpath.join(cur_dir, s))
     return None if rel.startswith("..") else rel
+
+
+def code_behind_host(
+    path: str, repo_root: Path | None, cls_name: str, ext: str, directive: re.Pattern[bytes]
+) -> str | None:
+    """The host file (``X.asmx`` / ``X.svc`` / ``X.ashx``) that serves class ``cls_name``
+    declared in ``path`` — the code-behind convention ``X<ext>.cs`` beside ``X<ext>`` — when that
+    file exists and its directive's class attribute names the class. Anything else → None (host
+    unknown)."""
+    if repo_root is None or not path.lower().endswith(ext + ".cs"):
+        return None
+    host = path[: -len(".cs")]
+    try:
+        body = (repo_root / host).read_bytes()
+    except OSError:
+        return None
+    m = directive.search(body)
+    simple = m.group(1).decode("utf-8", "replace").rsplit(".", 1)[-1] if m else None
+    return host if simple == cls_name else None

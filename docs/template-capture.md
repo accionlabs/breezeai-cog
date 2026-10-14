@@ -274,7 +274,7 @@ src/TodoItem.vue   framework=vue  uiRole=component
 
 This is the clearest argument for the flag on a Vue codebase: the `<script>` block is **real
 code**, so `edit` is a genuine Function. `@click` records `handler=edit`, wiring the markup
-back to the method beside it, and `<router-link>` becomes a `route` so navigation stays
+back to the method beside it, and `<router-link>` becomes a `navigation` record so navigation stays
 discoverable. Skip `.vue` and all of that goes with it.
 
 ---
