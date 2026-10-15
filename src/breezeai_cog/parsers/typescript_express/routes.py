@@ -711,11 +711,12 @@ def detect_express(
         line = call.start_point[0] + 1
 
         stmt = _enclosing_statement(line, record.statements)
-        if chained:
-            if call.start_byte in chained_roots:
+        if chained and stmt is not None:
+            # One statement can hold one route; later chain segments/chains get their own.
+            if stmt.id in claimed:
                 stmt = None
             else:
-                chained_roots.add(call.start_byte)
+                claimed.add(stmt.id)
         if stmt is not None:  # detection on the same span → enrich in place
             stmt.semanticType = "route"
             stmt.framework = framework
