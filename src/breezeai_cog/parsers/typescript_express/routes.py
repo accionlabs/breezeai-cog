@@ -161,10 +161,97 @@ def _unwrap_expression(node: Node) -> Node:
     return node
 
 
-def _is_express_constructor(node: Node | None, source: bytes) -> bool | None:
+def _is_require_express(node: Node | None, source: bytes) -> bool:
+    if node is None:
+        return False
+    node = _unwrap_expression(node)
+    if node.type != "call_expression":
+        return False
+    fn = node.child_by_field_name("function")
+    args = node.child_by_field_name("arguments")
+    items = list(args.named_children) if args is not None else []
+    return (
+        fn is not None
+        and fn.type == "identifier"
+        and node_text(fn, source) == "require"
+        and len(items) == 1
+        and _string_value(items[0], source) == "express"
+    )
+
+
+def _express_imports(root: Node, source: bytes) -> tuple[set[str], set[str]]:
+    """Local names bound to the express module (factory/namespace) and to its ``Router``."""
+    modules: set[str] = set()
+    routers: set[str] = set()
+
+    def walk(n: Node) -> None:
+        if n.type == "import_statement":
+            src = n.child_by_field_name("source")
+            if src is not None and _string_value(src, source) == "express":
+                for clause in n.named_children:
+                    if clause.type == "import_clause":
+                        for part in clause.named_children:
+                            if part.type == "identifier":
+                                modules.add(node_text(part, source))
+                            elif part.type == "namespace_import":
+                                for c in part.named_children:
+                                    modules.add(node_text(c, source))
+                            elif part.type == "named_imports":
+                                for spec in part.named_children:
+                                    nm = spec.child_by_field_name("name")
+                                    alias = spec.child_by_field_name("alias")
+                                    if nm is not None and node_text(nm, source) == "Router":
+                                        routers.add(node_text(alias or nm, source))
+                    elif clause.type == "import_require_clause":  # import express = require('express')
+                        ident = next((c for c in clause.named_children if c.type == "identifier"), None)
+                        if ident is not None:
+                            modules.add(node_text(ident, source))
+        elif n.type == "variable_declarator":
+            name = n.child_by_field_name("name")
+            value = n.child_by_field_name("value")
+            if name is not None and value is not None:
+                if _is_require_express(value, source):
+                    if name.type == "identifier":
+                        modules.add(node_text(name, source))
+                    elif name.type == "object_pattern":
+                        for prop in name.named_children:
+                            if prop.type == "shorthand_property_identifier_pattern":
+                                if node_text(prop, source) == "Router":
+                                    routers.add("Router")
+                            elif prop.type == "pair_pattern":
+                                key = prop.child_by_field_name("key")
+                                val = prop.child_by_field_name("value")
+                                if (
+                                    key is not None and val is not None
+                                    and node_text(key, source) == "Router"
+                                    and val.type == "identifier"
+                                ):
+                                    routers.add(node_text(val, source))
+                else:
+                    value = _unwrap_expression(value)
+                    if value.type == "member_expression" and name.type == "identifier":
+                        prop = value.child_by_field_name("property")
+                        if (
+                            prop is not None
+                            and node_text(prop, source) == "Router"
+                            and _is_require_express(value.child_by_field_name("object"), source)
+                        ):
+                            routers.add(node_text(name, source))
+        if n.type in {"program", "lexical_declaration", "variable_declaration", "export_statement"}:
+            for c in n.named_children:
+                walk(c)
+
+    walk(root)
+    return modules, routers
+
+
+def _is_express_constructor(
+    node: Node | None, source: bytes, imports: tuple[set[str], set[str]]
+) -> bool | None:
     """True for known Express constructors, False for known non-routers, else unknown."""
     if node is None:
         return None
+    modules, router_names = imports
     node = _unwrap_expression(node)
     if node.type in {
         "object", "array", "string", "template_string", "number", "true", "false",
@@ -178,27 +265,18 @@ def _is_express_constructor(node: Node | None, source: bytes) -> bool | None:
         return None
     fn = _unwrap_expression(fn)
     if fn.type == "identifier":
-        return True if node_text(fn, source) in {"express", "Router"} else None
+        text = node_text(fn, source)
+        return True if text in modules or text in router_names else None
     if fn.type == "member_expression":
         prop = fn.child_by_field_name("property")
         obj = fn.child_by_field_name("object")
         if prop is None or obj is None or node_text(prop, source) != "Router":
             return None
         obj = _unwrap_expression(obj)
-        if obj.type == "identifier" and node_text(obj, source) == "express":
+        if obj.type == "identifier" and node_text(obj, source) in modules:
             return True
-        if obj.type == "call_expression":
-            require_fn = obj.child_by_field_name("function")
-            require_args = obj.child_by_field_name("arguments")
-            args = list(require_args.named_children) if require_args is not None else []
-            if (
-                require_fn is not None
-                and require_fn.type == "identifier"
-                and node_text(require_fn, source) == "require"
-                and len(args) == 1
-                and _string_value(args[0], source) == "express"
-            ):
-                return True
+        if _is_require_express(obj, source):
+            return True
         return None
     return None
 
@@ -570,15 +648,16 @@ def detect_express(
     seen = {s.id for s in record.statements}
     enclosing = Enclosing(record)
     binds = bindings or {}
-    router_bindings = _router_bindings(root, source)
-    chained_roots: set[int] = set()
+    router_bindings, invocations = _router_bindings(root, source)
+    imports = _express_imports(root, source)
+    claimed: set[str] = set()
     # The base this file's routes are served under, if it is a factory mounted elsewhere.
     mounts = getattr(index, "express_mounts", None)
     mount_base = mounts.get(path) if isinstance(mounts, dict) else None
 
-    calls = sorted(_invocations(root), key=_invocation_order_byte)
+    calls = sorted(invocations, key=_invocation_order_byte)
     for call in calls:
-        info = _classify(call, source, root, router_bindings, binds)
+        info = _classify(call, source, root, router_bindings, binds, imports)
         if info is None:
             continue
         method, endpoint, handler, handler_line, guards, framework, route_kind, chained = info
