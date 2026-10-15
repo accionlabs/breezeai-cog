@@ -320,3 +320,13 @@ def test_route_output_validates(tmp_path) -> None:
     errors = list(Draft202012Validator(FileRecord.model_json_schema(by_alias=True))
                   .iter_errors(json.loads(to_line(rec))))
     assert not errors, errors
+
+
+def test_system_namespace_prefix(tmp_path) -> None:
+    src = b"""public class Q { public void f(List<Account> xs) {
+        System.Database.insert(xs, AccessLevel.SYSTEM_MODE);
+        System.EventBus.publish(xs);
+        System.System.debug('x');
+    } }"""
+    kinds = [(sem, m) for sem, m, _, _, _ in _sem(_parse(tmp_path, src, "Q.cls"))]
+    assert kinds == [("db_method_call", "insert"), ("eventbus_publish", "publish")]

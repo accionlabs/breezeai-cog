@@ -45,8 +45,11 @@ def reset_var_types(token: "contextvars.Token[dict[str, str]]") -> None:
 
 
 def _receiver(call: Node, source: bytes) -> str:
+    """Lower-cased receiver text with an explicit ``System.`` namespace removed, so
+    ``System.Database.insert`` reads the same as ``Database.insert``."""
     obj = call.child_by_field_name("object")
-    return node_text(obj, source).lower() if obj is not None else ""
+    text = "".join(node_text(obj, source).lower().split()) if obj is not None else ""
+    return text.removeprefix("system.") if text != "system" else text
 
 
 def _is_http_receiver(call: Node, source: bytes) -> bool:
