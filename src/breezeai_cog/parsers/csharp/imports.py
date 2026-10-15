@@ -30,6 +30,7 @@ from pathlib import Path
 from tree_sitter import Node
 
 from ...utils import repo_relative
+from ..dotnet_common import web_app_root
 from ..index_common import (
     ClassHeritage, merge_heritage, parallel_map, project_heritage, record_distinct,
 )
@@ -226,22 +227,11 @@ def _string_literal(node: Node | None, source: bytes) -> str | None:
     return None
 
 
-_WEB_CONFIG = ("web.config", "Web.config")
-
-
 def _aspx_app_root(rel: str, repo_root: Path | None) -> str:
     """Application root for a file in a Web Forms repo: the shallowest ancestor directory
     (repo-root downward) containing ``web.config``. Falls back to ``""`` (repo root) when
-    ``repo_root`` is absent or no ``web.config`` is found. Mirrors ``mounts._app_root``."""
-    if repo_root is None:
-        return ""
-    dirname = posixpath.dirname(rel)
-    parts = dirname.split("/") if dirname else []
-    for i in range(len(parts) + 1):
-        d = "/".join(parts[:i])
-        if any((repo_root / d / c).is_file() for c in _WEB_CONFIG):
-            return d
-    return ""
+    ``repo_root`` is absent or no ``web.config`` is found."""
+    return web_app_root(rel, repo_root) if repo_root is not None else ""
 
 
 def _physical_aspx_key(physical: str, app_root: str = "") -> str | None:

@@ -12,7 +12,7 @@ The C# method name is kept separately on the statement's ``handler``, so nothing
 from __future__ import annotations
 
 from ...schemas import Decorator
-from ..csharp_aspnet.routes import simple_attr_name
+from ..dotnet_common import simple_attr_name
 from .mappings import NAME_ATTR
 
 _GET = "Get"

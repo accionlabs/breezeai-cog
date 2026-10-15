@@ -18,6 +18,8 @@ from tree_sitter import Node
 
 from ...emit import disambiguate, file_id, statement_id
 from ...schemas import FileRecord, Statement
+from ..additive import DetectContext, Detector, register_detector
+from ..enclosing import Enclosing
 from ..statements_common import strip_leading_base, url_placeholder
 from ..treesitter import first_line, node_text
 
@@ -566,6 +568,7 @@ def detect_express(
     matched = False
     fid = file_id(path)
     seen = {s.id for s in record.statements}
+    enclosing = Enclosing(record)
     binds = bindings or {}
     router_bindings = _router_bindings(root, source)
     chained_roots: set[int] = set()
@@ -610,7 +613,7 @@ def detect_express(
             new_id = disambiguate(statement_id(path, line, call.start_point[1]), seen)
             record.statements.append(Statement(
                 id=new_id,
-                parentId=_owner_function(line, record.functions, fid),
+                parentId=enclosing.function_id(line, fid),
                 nodeType=call.type,
                 semanticType="route",
                 text=(
@@ -634,3 +637,16 @@ def detect_express(
         matched = True
 
     return matched
+
+
+def _run(dc: DetectContext) -> str | None:
+    matched = detect_express(
+        dc.root, dc.source, dc.path, dc.record, dc.ctx.resolution_index, dc.bindings
+    )
+    return "express" if matched else None
+
+
+register_detector(Detector(
+    name="express", language="typescript", order=10, run=_run,
+    skip_fixtures=True, frameworks=("express",),
+))

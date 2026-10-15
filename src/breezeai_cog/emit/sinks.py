@@ -1,5 +1,5 @@
 """Output sinks: the gzipped-NDJSON file sink and the in-memory sink. (The streaming
-S3 upload lives in ``emit/s3.py``.)
+S3 upload lives in ``infra/aws/s3.py``.)
 
 The file sink implements the ``projectMetaData``-first strategy: body ``FileRecord`` lines stream to a temp NDJSON while totals accumulate;
 ``finalize`` writes the ``projectMetaData`` line first, then streams the body in,

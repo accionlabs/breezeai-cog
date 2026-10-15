@@ -17,52 +17,11 @@ always preferred to a wrong one (spec §3.1: the backend silently skips a dangli
 
 from __future__ import annotations
 
-import os
 import posixpath
 import re
 from pathlib import Path
 
-#: per-process cache of ``abs-dir → {lowercased-name: real-name}`` for case-insensitive
-#: resolution (repo is static during a run; each spawn worker builds its own). A value of
-#: ``None`` marks a **case-only collision** — two entries with the same lowercased name (only
-#: possible on a case-sensitive FS) — so the name resolves to honest-null, never a guess.
-_CI_DIR_CACHE: dict[str, dict[str, str | None]] = {}
-
-
-def _ci_listing(d: Path) -> dict[str, str | None]:
-    key = str(d)
-    cached = _CI_DIR_CACHE.get(key)
-    if cached is None:
-        cached = {}
-        try:
-            for e in os.scandir(d):
-                low = e.name.lower()
-                cached[low] = None if low in cached else e.name  # collision → ambiguous
-        except OSError:
-            cached = {}
-        _CI_DIR_CACHE[key] = cached
-    return cached
-
-
-def ci_resolve(repo_root: Path, rel: str) -> str | None:
-    """A repo-relative path → its **real on-disk casing** (matched case-insensitively), or
-    ``None`` if absent — or **ambiguous**. Web Forms path refs are routinely mis-cased vs. the
-    checked-out tree (they target a case-insensitive Windows/IIS filesystem), so we match
-    ignoring case *and* return the actual path — the backend's join is case-sensitive, so the
-    emitted path must carry the true casing to connect the nodes. If a directory holds two
-    entries differing only in case, that name is ambiguous → ``None`` (honest-null, no guess)."""
-    cur = repo_root
-    real: list[str] = []
-    for seg in rel.split("/"):
-        if not seg or seg == ".":
-            continue
-        actual = _ci_listing(cur).get(seg.lower())  # None: missing OR case-only collision
-        if actual is None:
-            return None
-        real.append(actual)
-        cur = cur / actual
-    return "/".join(real) if real else None
-
+from ..dotnet_common import ci_resolve, to_repo_path, web_app_root
 
 # ``<%@ Register … Src="~/Controls/Nav.ascx" … %>``. TagPrefix/Namespace/Assembly Register
 # variants carry no ``Src`` and are skipped (they register assembly controls, not a file).
@@ -78,9 +37,6 @@ _MASTER_FILE = re.compile(
     rb"<%@\s*(?:Page|Master|Control)\b[^%]*?\bMasterPageFile\s*=\s*[\"']([^\"']+)[\"']",
     re.IGNORECASE,
 )
-
-_WEB_CONFIG = ("web.config", "Web.config")
-
 
 def read_sibling_markup(abs_path: Path | None) -> bytes:
     """The page/control/master markup bytes beside a code-behind (``Page.aspx.cs`` →
@@ -100,36 +56,10 @@ def read_sibling_markup(abs_path: Path | None) -> bytes:
         return b""
 
 
-def _app_root(rel_path: str, repo_root: Path) -> str:
-    """Application root for ``~/`` resolution: the **shallowest** ancestor directory (repo
-    root downward) holding a ``web.config``; falls back to the repo root (``""``)."""
-    dirname = posixpath.dirname(rel_path)
-    parts = dirname.split("/") if dirname else []
-    for i in range(len(parts) + 1):
-        d = "/".join(parts[:i])
-        if any((repo_root / d / c).is_file() for c in _WEB_CONFIG):
-            return d
-    return ""
-
-
-def _to_repo_path(src: str, cur_dir: str, app_root: str) -> str | None:
-    """A markup virtual path → normalized repo-relative path. ``~/``/``/`` resolve against
-    the app root, a bare path against the host's own directory; ``None`` if it escapes the
-    repo root."""
-    s = src.strip().replace("\\", "/")
-    if s.startswith("~/"):
-        rel = posixpath.normpath(posixpath.join(app_root, s[2:]))
-    elif s.startswith("/"):
-        rel = posixpath.normpath(posixpath.join(app_root, s[1:]))
-    else:
-        rel = posixpath.normpath(posixpath.join(cur_dir, s))
-    return None if rel.startswith("..") else rel
-
-
 def _resolve_mount(src: str, cur_dir: str, app_root: str, repo_root: Path) -> str | None:
     """A ``Src`` / ``LoadControl`` path → the control's repo-relative ``.ascx.cs`` path in its
     real on-disk casing, only when it exists (else the ``IMPORTS`` edge would dangle)."""
-    rel = _to_repo_path(src, cur_dir, app_root)
+    rel = to_repo_path(src, cur_dir, app_root)
     if rel is None or not rel.lower().endswith(".ascx"):  # only user controls are mounts
         return None
     return ci_resolve(repo_root, rel + ".cs")
@@ -145,7 +75,7 @@ def resolve_mounts(
     if repo_root is None:
         return []
     raw = _REGISTER_SRC.findall(markup) + _LOADCONTROL.findall(source)
-    app_root = _app_root(rel_path, repo_root)
+    app_root = web_app_root(rel_path, repo_root)
     cur_dir = posixpath.dirname(rel_path)
     out: set[str] = set()
     for b in raw:
@@ -165,10 +95,10 @@ def resolve_master(markup: bytes, rel_path: str, repo_root: Path | None) -> str 
     m = _MASTER_FILE.search(markup)
     if m is None:
         return None
-    rel = _to_repo_path(
+    rel = to_repo_path(
         m.group(1).decode("utf-8", "replace"),
         posixpath.dirname(rel_path),
-        _app_root(rel_path, repo_root),
+        web_app_root(rel_path, repo_root),
     )
     if rel is None or not rel.lower().endswith(".master"):
         return None
