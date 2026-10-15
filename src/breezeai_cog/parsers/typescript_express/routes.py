@@ -60,11 +60,15 @@ def _scope_path(node: Node) -> list[Node]:
 
 def _router_bindings(
     root: Node, source: bytes
-) -> dict[str, list[tuple[int, list[Node], Node | None, bool]]]:
-    """Index declarations and direct assignments by name and lexical scope."""
+) -> tuple[dict[str, list[tuple[int, list[Node], Node | None, bool]]], list[Node]]:
+    """Index declarations and direct assignments by name and lexical scope; the same walk
+    also collects every call expression."""
     bindings: dict[str, list[tuple[int, list[Node], Node | None, bool]]] = {}
+    calls: list[Node] = []
 
     def walk(node: Node) -> None:
+        if node.type == "call_expression":
+            calls.append(node)
         if node.type == "variable_declarator":
             binding = node.child_by_field_name("name")
             if binding is not None and binding.type == "identifier":
@@ -78,7 +82,18 @@ def _router_bindings(
         elif node.type == "assignment_expression":
             binding = node.child_by_field_name("left")
             value = node.child_by_field_name("right")
-            if binding is not None and binding.type == "identifier":
+            if (
+                binding is not None
+                and binding.type == "member_expression"
+                and value is not None
+                and source[binding.end_byte:value.start_byte].strip() == b"="
+            ):
+                # Member receivers (``this.router = ...``) are keyed by their full text and
+                # are not lexically scoped: any assignment in the file identifies the receiver.
+                bindings.setdefault(node_text(binding, source), []).append((
+                    node.start_byte, _scope_path(node), value, True,
+                ))
+            elif binding is not None and binding.type == "identifier":
                 operator = (
                     source[binding.end_byte:value.start_byte].strip()
                     if value is not None
@@ -96,7 +111,7 @@ def _router_bindings(
             walk(child)
 
     walk(root)
-    return bindings
+    return bindings, calls
 
 
 def _router_initializer(
@@ -108,7 +123,7 @@ def _router_initializer(
     """Resolve a visible declaration and its latest preceding direct assignment."""
     candidates: list[tuple[int, list[Node], Node | None, bool]] = []
     for entry in bindings.get(name, ()):
-        start_byte, binding_scope, _, is_assignment = entry
+        binding_scope, is_assignment = entry[1], entry[3]
         if (
             not is_assignment
             and len(binding_scope) <= len(scope)
@@ -120,6 +135,9 @@ def _router_initializer(
 
     visible_depth = max(len(entry[1]) for entry in candidates)
     visible = [entry for entry in candidates if len(entry[1]) == visible_depth]
+    # Byte order only matters within the declaring scope; a nested function may run after
+    # an enclosing declaration that appears later in the file.
+    same_scope = visible_depth == len(scope)
     preceding = [entry for entry in visible if entry[0] < before_byte]
     declaration = (
         max(preceding, key=lambda entry: entry[0])
@@ -127,8 +145,21 @@ def _router_initializer(
         else min(visible, key=lambda entry: entry[0])
     )
     start_byte, binding_scope, initializer, _ = declaration
-    if start_byte >= before_byte:
+    if initializer is None:
+        # ``let router; function init() { router = express.Router(); }`` — an assignment
+        # from any function under the declaring scope identifies the receiver.
+        for _, assignment_scope, value, is_assignment in bindings.get(name, ()):
+            if (
+                is_assignment
+                and value is not None
+                and len(binding_scope) <= len(assignment_scope)
+                and all(left == right for left, right in zip(binding_scope, assignment_scope))
+            ):
+                return True, value, True
+    if same_scope and start_byte >= before_byte:
         return True, None, False
+    if not same_scope:
+        return True, initializer, initializer is not None
 
     latest_assignment: tuple[int, Node] | None = None
     for assigned_byte, assignment_scope, value, is_assignment in bindings.get(name, ()):
@@ -286,22 +317,34 @@ def _is_router_obj(
     source: bytes,
     router_bindings: dict[str, list[tuple[int, list[Node], Node | None, bool]]],
     before_byte: int,
+    imports: tuple[set[str], set[str]],
 ) -> bool:
     """Accept known Express constructors, unresolved router names, and reject local plain objects."""
     obj_text = node_text(obj, source)
     if obj.type == "call_expression":
-        return _is_express_constructor(obj, source) is True
+        return _is_express_constructor(obj, source, imports) is True
 
     name = obj_text.rsplit(".", 1)[-1].strip()
-    declared, initializer, initialized = _router_initializer(
-        name, before_byte, router_bindings, _scope_path(obj)
-    )
-    if declared:
-        router = _is_express_constructor(initializer, source)
-        if router is not None:
-            return router
-        if not initialized:
+    if obj.type == "member_expression":
+        # ``this.router`` is resolved by its own assignments, never by a same-named local.
+        verdicts = [
+            _is_express_constructor(value, source, imports)
+            for _, _, value, _ in router_bindings.get(obj_text, ())
+        ]
+        if True in verdicts:
+            return True
+        if verdicts and all(v is False for v in verdicts):
             return False
+    else:
+        declared, initializer, initialized = _router_initializer(
+            name, before_byte, router_bindings, _scope_path(obj)
+        )
+        if declared:
+            router = _is_express_constructor(initializer, source, imports)
+            if router is not None:
+                return router
+            if not initialized:
+                return False
 
     low = name.lower()
     return low in {"app", "router", "server", "api", "route"} or low.endswith(
@@ -510,7 +553,7 @@ def _classify(
             route_method, chained_path, handler, handler_line, guards, "express", "route", True
         )
 
-    if not _is_router_obj(obj, source, router_bindings, call.start_byte):
+    if not _is_router_obj(obj, source, router_bindings, call.start_byte, imports):
         return None
 
     path = _path_value(arg_nodes[0], source) if arg_nodes else None
