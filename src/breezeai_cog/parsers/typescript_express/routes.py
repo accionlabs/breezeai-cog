@@ -334,9 +334,7 @@ def _is_router_obj(
                 return False
 
     low = name.lower()
-    return low in {"app", "router", "server", "api", "route"} or low.endswith(
-        ("router", "app")
-    )
+    return low in {"app", "router", "server", "api"} or low.endswith(("router", "app"))
 
 
 def _string_value(node: Node, source: bytes) -> str | None:
@@ -679,6 +677,8 @@ def detect_express(
         if info is None:
             continue
         method, endpoint, handler, handler_line, guards, framework, route_kind, chained = info
+        if route_kind == "mount":
+            method = "ANY"
         served = _apply_base(mount_base, framework, route_kind, endpoint)
         # Honest-null: assert auth only when a route-level guard is present. Absence is
         # "unknown" (None), not "open" — app-level middleware may still protect the route.
@@ -697,10 +697,9 @@ def detect_express(
             stmt.framework = framework
             stmt.routeKind = route_kind
             stmt.endpoint = served
+            stmt.method = method
             if chained:
                 stmt.text = _verb_segment(call, source)
-            if method:
-                stmt.method = method
             if handler:
                 stmt.handler = handler
                 stmt.handlerLine = handler_line

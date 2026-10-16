@@ -4,14 +4,12 @@ linkage, base reuse, override, settings-getter disambiguation."""
 from __future__ import annotations
 
 import json
-from unittest.mock import patch
 
 from jsonschema import Draft202012Validator
 
 from breezeai_cog.core import registry
 from breezeai_cog.emit import to_line
 from breezeai_cog.parsers.base import ParseContext
-from breezeai_cog.parsers.typescript_express import routes as express_routes
 from breezeai_cog.parsers.typescript.parser import TypeScriptParser
 from breezeai_cog.schemas import FileRecord
 
@@ -80,9 +78,8 @@ def test_routes_detected(tmp_path) -> None:
         ("GET", "/router-instance"),
         ("GET", "/imported-router"),
         ("GET", "/parameter-router"),
+        # Spec method enum uses ANY for indeterminate methods (`all` and mounts).
         ("ANY", "/health"),
-        # Spec example: app.use('/api', router) → method ANY, routeKind mount,
-        # endpoint /api. ANY is the method-enum value for an indeterminate verb.
         ("ANY", "/api"),         # includes app.use / Router().use mounts
         ("GET", "/book"),
         ("POST", "/book"),
@@ -116,7 +113,7 @@ def test_routes_detected(tmp_path) -> None:
     assert len(book_routes) == 2
 
 
-def test_non_route_member_calls_skip_receiver_resolution(tmp_path) -> None:
+def test_non_route_member_calls_are_not_extracted_as_routes(tmp_path) -> None:
     src = b'''import express from 'express';
 const app = express();
 function handler(req, res) {
@@ -130,22 +127,11 @@ function handler(req, res) {
     p.write_bytes(src)
     ctx = ParseContext(path="server.ts", abs_path=p, source=src, repo_root=tmp_path,
                        capture_statements=True)
-    with (
-        patch.object(express_routes, "_router_bindings", wraps=express_routes._router_bindings)
-        as binding_index,
-        patch.object(
-            express_routes,
-            "_router_initializer",
-            wraps=express_routes._router_initializer,
-        ) as initializer_lookup,
-    ):
-        rec = TypeScriptParser().parse_file(ctx)
+    rec = TypeScriptParser().parse_file(ctx)
 
-    assert binding_index.call_count == 1
-    assert [call.args[0] for call in initializer_lookup.call_args_list] == ["app"]
-    assert ("GET", "/ok") in {
+    assert {
         (s.method, s.endpoint) for s in rec.statements if s.semanticType == "route"
-    }
+    } == {("GET", "/ok")}
 
 
 def test_receiver_constructor_expression_forms(tmp_path) -> None:
@@ -203,10 +189,18 @@ const objectApp = {};
 const arrayApp = [];
 const literalApp = 1;
 const functionApp = () => {};
+const route = createRoute();
+const userApp = {};
+const myRouter = {};
+const api = {};
 objectApp.get('/object', handler);
 arrayApp.get('/array', handler);
 literalApp.get('/literal', handler);
 functionApp.get('/function', handler);
+route.get('/route', handler);
+userApp.get('/user-app', handler);
+myRouter.post('/my-router', handler);
+api.put('/api', handler);
 '''
     rec = _parse_source(tmp_path, "non-router-receivers.ts", src)
     assert not [s for s in rec.statements if s.semanticType == "route"]
@@ -285,6 +279,47 @@ router.route('/secure').all(requireAuth, auditLog, finalHandler);
     assert routes[0].text == ".all(requireAuth, auditLog, finalHandler)"
 
 
+def test_all_and_mount_routes_use_any_method(tmp_path) -> None:
+    src = b'''import express from 'express';
+const app = express();
+const router = express.Router();
+app.all('/x', handler);
+app.use('/api', router);
+'''
+    rec = _parse_source(tmp_path, "any-routes.ts", src)
+    routes = {
+        (s.method, s.endpoint): s
+        for s in rec.statements
+        if s.semanticType == "route"
+    }
+    assert routes[("ANY", "/x")].routeKind == "route"
+    assert routes[("ANY", "/api")].routeKind == "mount"
+
+
+def test_middleware_mount_uses_any_method(tmp_path) -> None:
+    src = b'''var express = require('../../');
+var app = express();
+var repos = [{ name: 'express' }];
+app.use('/api', function(req, res, next) { next(); });
+'''
+    rec = _parse_source(tmp_path, "middleware-mount.js", src)
+    routes = [s for s in rec.statements if s.semanticType == "route"]
+    assert len(routes) == 1
+    assert (routes[0].method, routes[0].endpoint, routes[0].routeKind) == (
+        "ANY", "/api", "mount",
+    )
+    assert json.loads(to_line(routes[0]))["method"] == "ANY"
+
+
+def test_bare_route_without_chained_verbs_is_not_detected(tmp_path) -> None:
+    src = b'''import express from 'express';
+const router = express.Router();
+router.route('/not-registered');
+'''
+    rec = _parse_source(tmp_path, "bare-route.ts", src)
+    assert not [s for s in rec.statements if s.semanticType == "route"]
+
+
 def test_multiple_chained_verbs_inside_function_remain_distinct(tmp_path) -> None:
     src = b'''import express from 'express';
 const router = express.Router();
@@ -298,6 +333,27 @@ function register() {
         ("GET", "/nested", ".get(readNested)"),
         ("POST", "/nested", ".post(writeNested)"),
     ]
+
+
+def test_app_and_router_route_chains_keep_each_handler(tmp_path) -> None:
+    src = b'''import express from 'express';
+const app = express();
+const router = express.Router();
+app.route('/book').get(getBook).post(createBook);
+router.route('/:id').put(updateItem).delete(deleteItem);
+'''
+    rec = _parse_source(tmp_path, "route-chains.ts", src)
+    routes = {
+        (s.method, s.endpoint): s.handler
+        for s in rec.statements
+        if s.semanticType == "route"
+    }
+    assert routes == {
+        ("GET", "/book"): "getBook",
+        ("POST", "/book"): "createBook",
+        ("PUT", "/:id"): "updateItem",
+        ("DELETE", "/:id"): "deleteItem",
+    }
 
 
 def test_non_router_route_chain_is_not_detected(tmp_path) -> None:
@@ -315,6 +371,7 @@ def test_settings_getter_not_a_route(tmp_path) -> None:
     endpoints = {s.endpoint for s in rec.statements if s.semanticType == "route"}
     assert "title" not in endpoints
     assert "view engine" not in endpoints
+    assert "loggerMiddleware" not in endpoints
 
 
 def test_parentid_linkage(tmp_path) -> None:
