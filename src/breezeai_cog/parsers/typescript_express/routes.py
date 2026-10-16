@@ -25,31 +25,316 @@ from ..treesitter import first_line, node_text
 
 # HTTP-verb methods that register a route handler on an app/router.
 _HTTP_VERBS = {"get", "post", "put", "delete", "patch", "options", "head", "all"}
+_ROUTE_METHODS = _HTTP_VERBS | {"use"}
 
 
-def _invocations(root: Node) -> list[Node]:
-    out: list[Node] = []
+_SCOPE_TYPES = {
+    "arrow_function", "class_body", "function_declaration", "function_expression",
+    "method_definition", "program", "statement_block",
+}
 
-    def walk(n: Node) -> None:
-        if n.type == "call_expression":
-            out.append(n)
-        for c in n.named_children:
-            walk(c)
+
+def _scope_path(node: Node) -> list[Node]:
+    scopes: list[Node] = []
+    parent = node.parent
+    while parent is not None:
+        if parent.type in _SCOPE_TYPES:
+            scopes.append(parent)
+        parent = parent.parent
+    scopes.reverse()
+    return scopes
+
+
+def _router_bindings(
+    root: Node, source: bytes
+) -> tuple[dict[str, list[tuple[int, list[Node], Node | None, bool]]], list[Node]]:
+    """Index declarations and direct assignments by name and lexical scope; the same walk
+    also collects every call expression."""
+    bindings: dict[str, list[tuple[int, list[Node], Node | None, bool]]] = {}
+    calls: list[Node] = []
+
+    def walk(node: Node) -> None:
+        if node.type == "call_expression":
+            calls.append(node)
+        if node.type == "variable_declarator":
+            binding = node.child_by_field_name("name")
+            if binding is not None and binding.type == "identifier":
+                name = node_text(binding, source)
+                bindings.setdefault(name, []).append((
+                    node.start_byte,
+                    _scope_path(node),
+                    node.child_by_field_name("value"),
+                    False,
+                ))
+        elif node.type == "assignment_expression":
+            binding = node.child_by_field_name("left")
+            value = node.child_by_field_name("right")
+            if (
+                binding is not None
+                and binding.type == "member_expression"
+                and value is not None
+                and source[binding.end_byte:value.start_byte].strip() == b"="
+            ):
+                # Member receivers (``this.router = ...``) are keyed by their full text and
+                # are not lexically scoped: any assignment in the file identifies the receiver.
+                bindings.setdefault(node_text(binding, source), []).append((
+                    node.start_byte, _scope_path(node), value, True,
+                ))
+            elif binding is not None and binding.type == "identifier":
+                operator = (
+                    source[binding.end_byte:value.start_byte].strip()
+                    if value is not None
+                    else b""
+                )
+                if operator == b"=":
+                    name = node_text(binding, source)
+                    bindings.setdefault(name, []).append((
+                        node.start_byte,
+                        _scope_path(node),
+                        value,
+                        True,
+                    ))
+        for child in node.named_children:
+            walk(child)
 
     walk(root)
-    return out
+    return bindings, calls
 
 
-def _is_router_obj(obj_text: str) -> bool:
-    """Cheap heuristic: is this call's receiver an Express app / router?
-    Handles the named-variable forms (``app`` / ``router`` / ``this.router`` /
-    ``userRouter`` / ``apiApp``) and the direct-constructor forms
-    (``Router().use(...)`` / ``express.Router().get(...)``)."""
-    low = obj_text.lower()
-    tail = low.rsplit(".", 1)[-1].strip()
-    if tail in {"app", "router", "server", "api", "route"} or tail.endswith(("router", "app")):
-        return True
-    return "router()" in low or "express()" in low
+def _router_initializer(
+    name: str,
+    before_byte: int,
+    bindings: dict[str, list[tuple[int, list[Node], Node | None, bool]]],
+    scope: list[Node],
+) -> tuple[bool, Node | None, bool]:
+    """Resolve a visible declaration and its latest preceding direct assignment."""
+    candidates: list[tuple[int, list[Node], Node | None, bool]] = []
+    for entry in bindings.get(name, ()):
+        binding_scope, is_assignment = entry[1], entry[3]
+        if (
+            not is_assignment
+            and len(binding_scope) <= len(scope)
+            and all(left == right for left, right in zip(binding_scope, scope))
+        ):
+            candidates.append(entry)
+    if not candidates:
+        return False, None, False
+
+    visible_depth = max(len(entry[1]) for entry in candidates)
+    visible = [entry for entry in candidates if len(entry[1]) == visible_depth]
+    # Byte order only matters within the declaring scope; a nested function may run after
+    # an enclosing declaration that appears later in the file.
+    same_scope = visible_depth == len(scope)
+    preceding = [entry for entry in visible if entry[0] < before_byte]
+    declaration = (
+        max(preceding, key=lambda entry: entry[0])
+        if preceding
+        else min(visible, key=lambda entry: entry[0])
+    )
+    start_byte, binding_scope, initializer, _ = declaration
+    if initializer is None:
+        # ``let router; function init() { router = express.Router(); }`` — an assignment
+        # from any function under the declaring scope identifies the receiver.
+        for _, assignment_scope, value, is_assignment in bindings.get(name, ()):
+            if (
+                is_assignment
+                and value is not None
+                and len(binding_scope) <= len(assignment_scope)
+                and all(left == right for left, right in zip(binding_scope, assignment_scope))
+            ):
+                return True, value, True
+    if same_scope and start_byte >= before_byte:
+        return True, None, False
+    if not same_scope:
+        return True, initializer, initializer is not None
+
+    latest_assignment: tuple[int, Node] | None = None
+    for assigned_byte, assignment_scope, value, is_assignment in bindings.get(name, ()):
+        if (
+            is_assignment
+            and start_byte < assigned_byte < before_byte
+            and len(binding_scope) <= len(assignment_scope) <= len(scope)
+            and all(left == right for left, right in zip(binding_scope, assignment_scope))
+            and all(left == right for left, right in zip(assignment_scope, scope))
+            and value is not None
+            and (latest_assignment is None or assigned_byte > latest_assignment[0])
+        ):
+            latest_assignment = (assigned_byte, value)
+    if latest_assignment is not None:
+        return True, latest_assignment[1], True
+    return True, initializer, initializer is not None
+
+
+def _unwrap_expression(node: Node) -> Node:
+    """Remove transparent TypeScript and parenthesis wrappers around an expression."""
+    while node.type in {
+        "as_expression", "non_null_expression", "parenthesized_expression",
+    }:
+        expression = node.child_by_field_name("expression")
+        if expression is None and node.named_children:
+            expression = node.named_children[0]
+        if expression is None:
+            break
+        node = expression
+    return node
+
+
+def _is_require_express(node: Node | None, source: bytes) -> bool:
+    if node is None:
+        return False
+    node = _unwrap_expression(node)
+    if node.type != "call_expression":
+        return False
+    fn = node.child_by_field_name("function")
+    args = node.child_by_field_name("arguments")
+    items = list(args.named_children) if args is not None else []
+    return (
+        fn is not None
+        and fn.type == "identifier"
+        and node_text(fn, source) == "require"
+        and len(items) == 1
+        and _string_value(items[0], source) == "express"
+    )
+
+
+def _express_imports(root: Node, source: bytes) -> tuple[set[str], set[str]]:
+    """Local names bound to the express module (factory/namespace) and to its ``Router``."""
+    modules: set[str] = set()
+    routers: set[str] = set()
+
+    def walk(n: Node) -> None:
+        if n.type == "import_statement":
+            src = n.child_by_field_name("source")
+            if src is not None and _string_value(src, source) == "express":
+                for clause in n.named_children:
+                    if clause.type == "import_clause":
+                        for part in clause.named_children:
+                            if part.type == "identifier":
+                                modules.add(node_text(part, source))
+                            elif part.type == "namespace_import":
+                                for c in part.named_children:
+                                    modules.add(node_text(c, source))
+                            elif part.type == "named_imports":
+                                for spec in part.named_children:
+                                    nm = spec.child_by_field_name("name")
+                                    alias = spec.child_by_field_name("alias")
+                                    if nm is not None and node_text(nm, source) == "Router":
+                                        routers.add(node_text(alias or nm, source))
+                    elif clause.type == "import_require_clause":  # import express = require('express')
+                        ident = next((c for c in clause.named_children if c.type == "identifier"), None)
+                        if ident is not None:
+                            modules.add(node_text(ident, source))
+        elif n.type == "variable_declarator":
+            name = n.child_by_field_name("name")
+            value = n.child_by_field_name("value")
+            if name is not None and value is not None:
+                if _is_require_express(value, source):
+                    if name.type == "identifier":
+                        modules.add(node_text(name, source))
+                    elif name.type == "object_pattern":
+                        for prop in name.named_children:
+                            if prop.type == "shorthand_property_identifier_pattern":
+                                if node_text(prop, source) == "Router":
+                                    routers.add("Router")
+                            elif prop.type == "pair_pattern":
+                                key = prop.child_by_field_name("key")
+                                val = prop.child_by_field_name("value")
+                                if (
+                                    key is not None and val is not None
+                                    and node_text(key, source) == "Router"
+                                    and val.type == "identifier"
+                                ):
+                                    routers.add(node_text(val, source))
+                else:
+                    value = _unwrap_expression(value)
+                    if value.type == "member_expression" and name.type == "identifier":
+                        prop = value.child_by_field_name("property")
+                        if (
+                            prop is not None
+                            and node_text(prop, source) == "Router"
+                            and _is_require_express(value.child_by_field_name("object"), source)
+                        ):
+                            routers.add(node_text(name, source))
+        if n.type in {"program", "lexical_declaration", "variable_declaration", "export_statement"}:
+            for c in n.named_children:
+                walk(c)
+
+    walk(root)
+    return modules, routers
+
+
+def _is_express_constructor(
+    node: Node | None, source: bytes, imports: tuple[set[str], set[str]]
+) -> bool | None:
+    """True for known Express constructors, False for known non-routers, else unknown."""
+    if node is None:
+        return None
+    modules, router_names = imports
+    node = _unwrap_expression(node)
+    if node.type in {
+        "object", "array", "string", "template_string", "number", "true", "false",
+        "null", "regex", "arrow_function", "function_expression", "class",
+    }:
+        return False
+    if node.type != "call_expression":
+        return None
+    fn = node.child_by_field_name("function")
+    if fn is None:
+        return None
+    fn = _unwrap_expression(fn)
+    if fn.type == "identifier":
+        text = node_text(fn, source)
+        return True if text in modules or text in router_names else None
+    if fn.type == "member_expression":
+        prop = fn.child_by_field_name("property")
+        obj = fn.child_by_field_name("object")
+        if prop is None or obj is None or node_text(prop, source) != "Router":
+            return None
+        obj = _unwrap_expression(obj)
+        if obj.type == "identifier" and node_text(obj, source) in modules:
+            return True
+        if _is_require_express(obj, source):
+            return True
+        return None
+    return None
+
+
+def _is_router_obj(
+    obj: Node,
+    source: bytes,
+    router_bindings: dict[str, list[tuple[int, list[Node], Node | None, bool]]],
+    before_byte: int,
+    imports: tuple[set[str], set[str]],
+) -> bool:
+    """Accept known Express constructors, unresolved router names, and reject local plain objects."""
+    obj_text = node_text(obj, source)
+    if obj.type == "call_expression":
+        return _is_express_constructor(obj, source, imports) is True
+
+    name = obj_text.rsplit(".", 1)[-1].strip()
+    if obj.type == "member_expression":
+        # ``this.router`` is resolved by its own assignments, never by a same-named local.
+        verdicts = [
+            _is_express_constructor(value, source, imports)
+            for _, _, value, _ in router_bindings.get(obj_text, ())
+        ]
+        if True in verdicts:
+            return True
+        if verdicts and all(v is False for v in verdicts):
+            return False
+    else:
+        declared, initializer, initialized = _router_initializer(
+            name, before_byte, router_bindings, _scope_path(obj)
+        )
+        if declared:
+            router = _is_express_constructor(initializer, source, imports)
+            if router is not None:
+                return router
+            if not initialized:
+                return False
+
+    low = name.lower()
+    return low in {"app", "router", "server", "api"} or low.endswith(("router", "app"))
 
 
 def _string_value(node: Node, source: bytes) -> str | None:
@@ -80,6 +365,33 @@ def _path_value(node: Node, source: bytes) -> str | None:
     if node.type == "template_string":
         return _template_value(node, source)
     return _string_value(node, source)
+
+
+def _chained_route_path(
+    call: Node,
+    source: bytes,
+    router_bindings: dict[str, list[tuple[int, list[Node], Node | None, bool]]],
+    imports: tuple[set[str], set[str]],
+) -> str | None:
+    """Find the path of the ``.route(path)`` at the base of a chained verb call."""
+    fn = call.child_by_field_name("function")
+    if fn is None or fn.type != "member_expression":
+        return None
+    obj = fn.child_by_field_name("object")
+    prop = fn.child_by_field_name("property")
+    if obj is None or prop is None:
+        return None
+
+    method = node_text(prop, source)
+    if method == "route":
+        if not _is_router_obj(obj, source, router_bindings, call.start_byte, imports):
+            return None
+        args = call.child_by_field_name("arguments")
+        route_args = list(args.named_children) if args is not None else []
+        return _path_value(route_args[0], source) if route_args else None
+    if method in _HTTP_VERBS and obj.type == "call_expression":
+        return _chained_route_path(obj, source, router_bindings, imports)
+    return None
 
 
 def _handler(arg_nodes: list[Node], source: bytes) -> tuple[str | None, int | None]:
@@ -185,11 +497,18 @@ def _resolve_str_identifier(name: str, root: Node, source: bytes) -> str | None:
 
 
 def _classify(
-    call: Node, source: bytes, root: Node, bindings: dict[str, str]
-) -> tuple[str | None, str, str | None, int | None, list[str] | None, str, str] | None:
-    """→ (method, endpoint, handler, handlerLine, guards, framework, routeKind), or None if not
-    a route. ``guards`` are the named route/mount middleware (auth/interceptor stack); ``bindings``
-    (in-repo imported name → file) lets a mount tell its sub-router from its guard middleware."""
+    call: Node,
+    source: bytes,
+    root: Node,
+    router_bindings: dict[str, list[tuple[int, list[Node], Node | None, bool]]],
+    bindings: dict[str, str],
+    imports: tuple[set[str], set[str]],
+) -> tuple[str | None, str, str | None, int | None, list[str] | None, str, str, bool] | None:
+    """Return route details, chained-call status, or None if the call is not a route.
+
+    ``guards`` are the named route/mount middleware (auth/interceptor stack); ``bindings``
+    (in-repo imported name → file) lets a mount tell its sub-router from its guard middleware.
+    """
     fn = call.child_by_field_name("function")
     if fn is None or fn.type != "member_expression":
         return None
@@ -198,12 +517,30 @@ def _classify(
     if obj is None or prop is None:
         return None
     method = node_text(prop, source)
-    obj_text = node_text(obj, source)
-    if not _is_router_obj(obj_text):
+    if method not in _ROUTE_METHODS:
         return None
-
     args = call.child_by_field_name("arguments")
     arg_nodes = list(args.named_children) if args is not None else []
+    chained_path = (
+        _chained_route_path(call, source, router_bindings, imports)
+        if method in _HTTP_VERBS
+        else None
+    )
+    if method in _HTTP_VERBS and chained_path is not None and arg_nodes:
+        last = arg_nodes[-1]
+        handler = node_text(last, source) if last.type in (
+            "identifier", "member_expression"
+        ) else None
+        handler_line = last.start_point[0] + 1 if handler is not None else None
+        guards = _guard_names(arg_nodes[:-1], source)
+        route_method = "ANY" if method == "all" else method.upper()
+        return (
+            route_method, chained_path, handler, handler_line, guards, "express", "route", True
+        )
+
+    if not _is_router_obj(obj, source, router_bindings, call.start_byte, imports):
+        return None
+
     path = _path_value(arg_nodes[0], source) if arg_nodes else None
     chain = arg_nodes[1:]  # everything after the path — the middleware + handler/router stack
 
@@ -214,7 +551,8 @@ def _classify(
         if path is not None and len(arg_nodes) >= 2:
             handler, handler_line = _handler(arg_nodes, source)
             guards = _guard_names(chain[:-1], source)
-            return method.upper(), path, handler, handler_line, guards, "express", "route"
+            route_method = "ANY" if method == "all" else method.upper()
+            return route_method, path, handler, handler_line, guards, "express", "route", False
         return None
     if method == "use":
         # ``app.use(path, expressMiddleware(server))`` mounts the GraphQL endpoint (R3):
@@ -225,24 +563,53 @@ def _classify(
             endpoint = path
             if endpoint is None and arg0 is not None and arg0.type == "identifier":
                 endpoint = _resolve_str_identifier(node_text(arg0, source), root, source)
-            return "POST", endpoint or "/graphql", None, None, None, "graphql", "route"
+            return "POST", endpoint or "/graphql", None, None, None, "graphql", "route", False
         if path is not None and path.startswith("/"):
             # ``app.use('/mount', ...guards, subRouter, ...guards)`` mounts a sub-router: the
             # mounted router is the handler, the surrounding middleware are guards. Bare
             # ``app.use(mw)`` (no leading path) is middleware, not a mount.
             handler, handler_line, guards = _mount_parts(chain, source, bindings)
-            return None, path, handler, handler_line, guards, "express", "mount"
+            return "ANY", path, handler, handler_line, guards, "express", "mount", False
         return None
-    if method == "route" and path is not None:
-        return None, path, None, None, None, "express", "route"
     return None
 
 
+def _enclosing_statement(line: int, statements: list[Statement]) -> Statement | None:
+    best: Statement | None = None
+    best_span: int | None = None
+    for s in statements:
+        if s.startLine <= line <= s.endLine:
+            span = s.endLine - s.startLine
+            if best_span is None or span < best_span:
+                best, best_span = s, span
+    return best
+
+
+def _invocation_order_byte(call: Node) -> int:
+    """Order calls by their called member, not by an enclosing chained call's start."""
+    fn = call.child_by_field_name("function")
+    if fn is not None and fn.type == "member_expression":
+        prop = fn.child_by_field_name("property")
+        if prop is not None:
+            return prop.start_byte
+    return call.start_byte
+
+
+def _verb_segment(call: Node, source: bytes) -> str:
+    """Return the chained verb segment, e.g. ``.get(getBook)``."""
+    fn = call.child_by_field_name("function")
+    prop = fn.child_by_field_name("property") if fn is not None else None
+    args = call.child_by_field_name("arguments")
+    if prop is None or args is None:
+        return first_line(node_text(call, source))
+    start = prop.start_byte - 1 if source[prop.start_byte - 1:prop.start_byte] == b"." else prop.start_byte
+    return source[start:args.end_byte].decode("utf-8", "replace")
+
 def _has_express(source: bytes) -> bool:
     """Cheap correctness gate: the file imports ``express`` (either quote style). The
-    ``app``/``router``/``route`` receiver heuristic in ``_is_router_obj`` is only safe on
-    files that actually use Express, so this guard — not selection — bounds it now that
-    detection runs additively for every TS file (see TypeScriptParser.extract)."""
+    receiver-name fallback in :func:`_is_router_obj` is only safe on files that actually use
+    Express, so this guard — not selection — bounds it now that detection runs additively for
+    every TS file (see TypeScriptParser.extract)."""
     return (b"'express'" in source or b'"express"' in source
             or b"expressMiddleware" in source)  # Apollo → Express adapter mount
 
@@ -297,29 +664,42 @@ def detect_express(
     seen = {s.id for s in record.statements}
     enclosing = Enclosing(record)
     binds = bindings or {}
+    router_bindings, invocations = _router_bindings(root, source)
+    imports = _express_imports(root, source)
+    claimed: set[str] = set()
     # The base this file's routes are served under, if it is a factory mounted elsewhere.
     mounts = getattr(index, "express_mounts", None)
     mount_base = mounts.get(path) if isinstance(mounts, dict) else None
 
-    for call in _invocations(root):
-        info = _classify(call, source, root, binds)
+    calls = sorted(invocations, key=_invocation_order_byte)
+    for call in calls:
+        info = _classify(call, source, root, router_bindings, binds, imports)
         if info is None:
             continue
-        method, endpoint, handler, handler_line, guards, framework, route_kind = info
+        method, endpoint, handler, handler_line, guards, framework, route_kind, chained = info
+        if route_kind == "mount":
+            method = "ANY"
         served = _apply_base(mount_base, framework, route_kind, endpoint)
         # Honest-null: assert auth only when a route-level guard is present. Absence is
         # "unknown" (None), not "open" — app-level middleware may still protect the route.
         auth_required = True if guards else None
         line = call.start_point[0] + 1
 
-        stmt = enclosing.statement(line)
+        stmt = _enclosing_statement(line, record.statements)
+        if chained and stmt is not None:
+            # One statement can hold one route; later chain segments/chains get their own.
+            if stmt.id in claimed:
+                stmt = None
+            else:
+                claimed.add(stmt.id)
         if stmt is not None:  # detection on the same span → enrich in place
             stmt.semanticType = "route"
             stmt.framework = framework
             stmt.routeKind = route_kind
             stmt.endpoint = served
-            if method:
-                stmt.method = method
+            stmt.method = method
+            if chained:
+                stmt.text = _verb_segment(call, source)
             if handler:
                 stmt.handler = handler
                 stmt.handlerLine = handler_line
@@ -333,7 +713,11 @@ def detect_express(
                 parentId=enclosing.function_id(line, fid),
                 nodeType=call.type,
                 semanticType="route",
-                text=first_line(node_text(call, source)),
+                text=(
+                    _verb_segment(call, source)
+                    if chained
+                    else first_line(node_text(call, source))
+                ),
                 method=method,
                 endpoint=served,
                 framework=framework,
