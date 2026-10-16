@@ -17,7 +17,7 @@ SRC = b'''const express = require('express');
 import externalRouter from './my-router';
 const app = express();
 const router = express.Router();
-const r = Router();
+const r = express.Router();
 
 app.get('/users/:id', (req, res) => { res.send('ok'); });
 router.post('/users', createUser);
