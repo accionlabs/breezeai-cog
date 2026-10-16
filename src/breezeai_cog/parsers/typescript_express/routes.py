@@ -386,6 +386,7 @@ def _chained_route_path(
     call: Node,
     source: bytes,
     router_bindings: dict[str, list[tuple[int, list[Node], Node | None, bool]]],
+    imports: tuple[set[str], set[str]],
 ) -> str | None:
     """Find the path of the ``.route(path)`` at the base of a chained verb call."""
     fn = call.child_by_field_name("function")
@@ -398,13 +399,13 @@ def _chained_route_path(
 
     method = node_text(prop, source)
     if method == "route":
-        if not _is_router_obj(obj, source, router_bindings, call.start_byte):
+        if not _is_router_obj(obj, source, router_bindings, call.start_byte, imports):
             return None
         args = call.child_by_field_name("arguments")
         route_args = list(args.named_children) if args is not None else []
         return _path_value(route_args[0], source) if route_args else None
     if method in _HTTP_VERBS and obj.type == "call_expression":
-        return _chained_route_path(obj, source, router_bindings)
+        return _chained_route_path(obj, source, router_bindings, imports)
     return None
 
 
@@ -516,6 +517,7 @@ def _classify(
     root: Node,
     router_bindings: dict[str, list[tuple[int, list[Node], Node | None, bool]]],
     bindings: dict[str, str],
+    imports: tuple[set[str], set[str]],
 ) -> tuple[str | None, str, str | None, int | None, list[str] | None, str, str, bool] | None:
     """Return route details, chained-call status, or None if the call is not a route.
 
@@ -532,12 +534,10 @@ def _classify(
     method = node_text(prop, source)
     if method not in _ROUTE_METHODS:
         return None
-    if method == "route":
-        return None
     args = call.child_by_field_name("arguments")
     arg_nodes = list(args.named_children) if args is not None else []
     chained_path = (
-        _chained_route_path(call, source, router_bindings)
+        _chained_route_path(call, source, router_bindings, imports)
         if method in _HTTP_VERBS
         else None
     )
