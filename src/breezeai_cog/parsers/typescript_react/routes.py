@@ -17,6 +17,8 @@ routes are config/markup, not handler methods), mirroring the Angular detector."
 
 from __future__ import annotations
 
+import re
+
 from tree_sitter import Node
 
 from ...emit import disambiguate, file_id, statement_id
@@ -348,10 +350,35 @@ def _detect_v7(root: Node, source: bytes, path: str, seen: set[str], routes: lis
                     _collect_consts(root, source), frozenset(), const_values)
 
 
+# _REACT_ROUTER_MODULE = re.compile(r"^(?:react-router(?:-[^/]+)?|@react-router/[^/]+)(?:/.*)?$")
+
+
+# def _uses_react_router(root: Node, source: bytes) -> bool:
+#     imports: list[Node] = []
+#     _walk(root, "import_statement", imports)
+#     _walk(root, "export_statement", imports)
+#     for statement in imports:
+#         match = re.search(r"""(?:\bfrom\s*|\bimport\s*)['"]([^'"]+)['"]""",
+#                           node_text(statement, source))
+#         if match is not None and _REACT_ROUTER_MODULE.fullmatch(match.group(1)):
+#             return True
+
+#     calls: list[Node] = []
+#     _walk(root, "call_expression", calls)
+#     for call in calls:
+#         function = call.child_by_field_name("function")
+#         if function is None or node_text(function, source) not in ("import", "require"):
+#             continue
+#         args = _call_args(call)
+#         if args and _REACT_ROUTER_MODULE.fullmatch(_string_val(args[0], source)):
+#             return True
+#     return False
+
+
 def detect_react_routes(root: Node, source: bytes, path: str, *, seen_ids: set[str],
                         const_values: dict[str, str | None] | None = None) -> list[Statement]:
-    if b"react-router" not in source:
-        return []
+    # if not _uses_react_router(root, source):
+    #     return []
     routes: list[Statement] = []
     # JSX <Route>: start only at top-level Routes (no <Route> ancestor); recursion handles nesting.
     jsx: list[Node] = []
