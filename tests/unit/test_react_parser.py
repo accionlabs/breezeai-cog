@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 
+import pytest
 from jsonschema import Draft202012Validator
 
 from breezeai_cog.core import registry
@@ -61,6 +62,12 @@ def test_jsx_routes_detected_and_nested(tmp_path) -> None:
     assert set(routes) == {"/", "/users", "/users/:id"}  # nested path joined onto parent
     assert routes["/users/:id"].handler == "UserDetail"
     assert routes["/"].handler == "Home"
+    assert {endpoint: route.nodeType for endpoint, route in routes.items()} == {
+        "/": "jsx_self_closing_element",
+        "/users": "jsx_element",
+        "/users/:id": "jsx_self_closing_element",
+    }
+    assert all(route.nodeType != "synthetic" for route in routes.values())
     assert all(r.framework == "react" and r.routeKind == "page" for r in routes.values())
     assert all(r.parentId == rec.id for r in routes.values())  # parented to file
     assert rec.framework == "react"
@@ -74,6 +81,75 @@ def test_config_routes_detected_with_lazy_mount(tmp_path) -> None:
     assert routes["/reports"].routeKind == "mount"  # lazy code-split
     assert routes["/team"].routeKind == "page"
     assert rec.framework == "react"
+
+
+def test_config_objects_need_a_router_discriminating_key(tmp_path) -> None:
+    src = b'''import { createBrowserRouter } from 'react-router-dom';
+
+const breadcrumbs = [
+  { path: '/home', label: 'Home' },
+  { path: '/about', label: 'About' },
+];
+
+export const router = createBrowserRouter([
+  { path: '/', element: <Home/> },
+  { path: '/crumb', label: 'Breadcrumb' },
+  { path: '/nav', name: 'Navigation item', children: [] },
+  { path: '/step', title: 'Step', children: [] },
+]);
+'''
+    rec = _parse(tmp_path, src, "router.tsx")
+    routes = [s.endpoint for s in rec.statements if s.semanticType == "route"]
+    assert routes == ["/"]
+
+
+@pytest.mark.parametrize("item", [
+    "{ path: '/home', label: 'Home' }",
+    "{ path: '/projects', title: 'Projects', children: [] }",
+    "{ path: '/profile', name: 'Profile', icon: 'user', children: [] }",
+    "{ path: '/settings', icon: 'settings', children: [] }",
+    "{ path: '/help', href: '/help', children: [] }",
+])
+def test_navigation_items_with_route_like_keys_are_not_routes(tmp_path, item: str) -> None:
+    src = (
+        "import { useRoutes } from 'react-router-dom';\n"
+        f"const navigation = [{item}];\n"
+    ).encode()
+    rec = _parse(tmp_path, src, "navigation.tsx")
+    assert [s for s in rec.statements if s.semanticType == "route"] == []
+
+
+def test_config_routes_keep_supported_discriminating_keys(tmp_path) -> None:
+    src = b'''import { useRoutes } from 'react-router-dom';
+
+const routes = useRoutes([
+  { path: '/Component', Component: Home },
+  { path: '/component', component: Home },
+  { path: '/lazy', lazy: async () => ({ Component: Home }) },
+  { path: '/loader', loader: async () => null },
+  { path: '/children', children: [] },
+  { path: '/index', index: true },
+  { path: '/action', action: async () => null },
+  { path: '/error', errorElement: <ErrorPage/> },
+  { path: '/handle', handle: {} },
+  { path: '/case', caseSensitive: true },
+]);
+'''
+    rec = _parse(tmp_path, src, "routes.tsx")
+    endpoints = {s.endpoint for s in rec.statements if s.semanticType == "route"}
+    assert endpoints == {
+        "/Component", "/component", "/lazy", "/loader", "/children",
+        "/index", "/action", "/error", "/handle", "/case",
+    }
+
+
+def test_config_routes_require_react_router_bytes(tmp_path) -> None:
+    src = b'''const routes = [
+  { path: '/home', element: <Home/> },
+];
+'''
+    rec = _parse(tmp_path, src, "router.tsx")
+    assert [s for s in rec.statements if s.semanticType == "route"] == []
 
 
 INDEX_JSX_SRC = b'''import { Routes, Route } from 'react-router-dom';
@@ -402,3 +478,140 @@ def test_jsx_file_is_javascript_language(tmp_path) -> None:
     rec = _parse(tmp_path, src, "Widget.jsx")
     assert rec.framework == "react" and rec.language == "javascript"
     assert {f.name: f.uiRole for f in rec.functions}["Widget"] == "component"
+
+
+def test_navigation_objects_with_path_are_not_routes(tmp_path) -> None:
+    src = b'''import { createBrowserRouter } from "react-router-dom";
+
+const navigation = [
+  { path: "/home", label: "Home" },
+  { path: "/projects", title: "Projects" },
+  { path: "/settings", name: "Settings", icon: "settings" },
+  { path: "/help", href: "/help" },
+];
+
+const router = createBrowserRouter([
+  { path: "/", element: <Home /> },
+]);
+'''
+
+    rec = _parse(tmp_path, src, "App.tsx")
+
+    routes = [
+        s.endpoint
+        for s in rec.statements
+        if s.semanticType == "route"
+    ]
+
+    assert routes == ["/"]
+
+
+def test_valid_react_router_config_is_detected(tmp_path) -> None:
+    src = b'''import { useRoutes } from "react-router-dom";
+
+const routes = useRoutes([
+  { path: "/component", Component: ComponentPage },
+  { path: "/lazy", lazy: loadPage },
+  { path: "/loader", loader: loadData },
+  { path: "/children", children: [] },
+  { path: "/action", action: handleAction },
+  { path: "/error", errorElement: <ErrorPage /> },
+  { path: "/handle", handle: {} },
+  { path: "/case", caseSensitive: true },
+]);
+
+'''
+
+    rec = _parse(tmp_path, src, "routes.tsx")
+
+    endpoints = {
+        s.endpoint
+        for s in rec.statements
+        if s.semanticType == "route"
+    }
+
+    assert endpoints == {
+        "/component",
+        "/lazy",
+        "/loader",
+        "/children",
+        "/action",
+        "/error",
+        "/handle",
+        "/case",
+    }
+
+
+def test_config_routes_require_react_router_reference(tmp_path) -> None:
+    src = b'''const routes = [
+  { path: "/home", element: <Home /> },
+];
+'''
+
+    rec = _parse(tmp_path, src, "routes.tsx")
+
+    assert [
+        s for s in rec.statements
+        if s.semanticType == "route"
+    ] == []
+
+
+def test_jsx_routes_preserve_actual_node_type(tmp_path) -> None:
+    src = b'''import { Routes, Route } from "react-router-dom";
+
+<Routes>
+  <Route path="/" element={<Home />} />
+  <Route path="/users">
+    <Users />
+  </Route>
+  <Route path="/users/:id" element={<UserDetail />} />
+</Routes>
+'''
+
+    rec = _parse(tmp_path, src, "App.tsx")
+
+    routes = {
+        s.endpoint: s
+        for s in rec.statements
+        if s.semanticType == "route"
+    }
+
+    assert routes["/"].nodeType == "jsx_self_closing_element"
+    assert routes["/users"].nodeType == "jsx_element"
+    assert routes["/users/:id"].nodeType == "jsx_self_closing_element"
+
+    assert all(
+        route.nodeType != "synthetic"
+        for route in routes.values()
+    )
+
+
+
+def test_nav_item_mixed_into_route_array_is_not_a_route(tmp_path) -> None:
+    src = b'''import { createBrowserRouter } from "react-router-dom";
+export const router = createBrowserRouter([
+  { path: "/", element: <Home />, children: [
+    { path: "team", element: <Team /> },
+    { path: "crumb", label: "Crumb" },
+  ]},
+  { path: "/nav", label: "Nav" },
+]);
+'''
+    rec = _parse(tmp_path, src, "router.tsx")
+    eps = [s.endpoint for s in rec.statements if s.semanticType == "route"]
+    assert eps == ["/", "/team"]
+
+
+def test_jsx_mixed_forms_report_real_node_type_per_record(tmp_path) -> None:
+    src = b'''import { Route } from "react-router-dom";
+const app = (
+  <Route path="/a" element={<A />}>
+    <Route path="b" element={<B />} />
+    <Route index element={<C />} />
+  </Route>
+);
+'''
+    rec = _parse(tmp_path, src, "App.tsx")
+    types = {s.endpoint + s.handler: s.nodeType for s in rec.statements if s.semanticType == "route"}
+    assert types == {"/aA": "jsx_element", "/a/bB": "jsx_self_closing_element",
+                     "/aC": "jsx_self_closing_element"}

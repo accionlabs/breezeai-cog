@@ -17,6 +17,8 @@ routes are config/markup, not handler methods), mirroring the Angular detector."
 
 from __future__ import annotations
 
+import re
+
 from tree_sitter import Node
 
 from ...emit import disambiguate, file_id, statement_id
@@ -92,7 +94,7 @@ def _process_jsx(el: Node, prefix: str, source: bytes, path: str, seen: set[str]
         routes.append(Statement(
             id=disambiguate(statement_id(path, sl, sc), seen),
             parentId=file_id(path),
-            nodeType="jsx_element",
+            nodeType=el.type,
             semanticType="route",
             text=node_text(_opening(el), source).split("\n", 1)[0][:120],
             endpoint=full,
@@ -128,8 +130,32 @@ def _pairs(obj: Node, source: bytes) -> dict[str, Node]:
     return out
 
 
+_ROUTE_DISCRIMINATING_KEYS = frozenset({
+    "element", "Component", "component", "children", "lazy", "loader", "action",
+    "errorElement", "index", "handle", "caseSensitive",
+})
+
+
+# Keys of breadcrumb/nav/menu items. ``children`` is the one router key that nav trees share, so
+# it only counts when no nav key sits beside it (Angular's explicit breadcrumb ``name`` exclusion).
+_NAV_KEYS = frozenset({"label", "title", "name", "icon", "href"})
+
+
+def _has_route_key(pairs: dict[str, Node]) -> bool:
+    keys = pairs.keys()
+    if keys & (_ROUTE_DISCRIMINATING_KEYS - {"children"}):
+        return True
+    return "children" in keys and not keys & _NAV_KEYS
+
+
 def _is_route_array(arr: Node, source: bytes) -> bool:
-    return any(e.type == "object" and "path" in _pairs(e, source) for e in arr.named_children)
+    for e in arr.named_children:
+        if e.type != "object":
+            continue
+        pairs = _pairs(e, source)
+        if "path" in pairs and _has_route_key(pairs):
+            return True
+    return False
 
 
 def _is_children_value(arr: Node, source: bytes) -> bool:
@@ -142,6 +168,8 @@ def _process_config(arr: Node, prefix: str, source: bytes, path: str, seen: set[
         if elem.type != "object":
             continue
         pairs = _pairs(elem, source)
+        if not _has_route_key(pairs):
+            continue  # breadcrumb/nav item sitting in a route array: path alone is not a route
         is_index = "index" in pairs and "path" not in pairs  # index route -> parent's path
         if "path" not in pairs and not is_index:
             continue
@@ -322,8 +350,35 @@ def _detect_v7(root: Node, source: bytes, path: str, seen: set[str], routes: lis
                     _collect_consts(root, source), frozenset(), const_values)
 
 
+# _REACT_ROUTER_MODULE = re.compile(r"^(?:react-router(?:-[^/]+)?|@react-router/[^/]+)(?:/.*)?$")
+
+
+# def _uses_react_router(root: Node, source: bytes) -> bool:
+#     imports: list[Node] = []
+#     _walk(root, "import_statement", imports)
+#     _walk(root, "export_statement", imports)
+#     for statement in imports:
+#         match = re.search(r"""(?:\bfrom\s*|\bimport\s*)['"]([^'"]+)['"]""",
+#                           node_text(statement, source))
+#         if match is not None and _REACT_ROUTER_MODULE.fullmatch(match.group(1)):
+#             return True
+
+#     calls: list[Node] = []
+#     _walk(root, "call_expression", calls)
+#     for call in calls:
+#         function = call.child_by_field_name("function")
+#         if function is None or node_text(function, source) not in ("import", "require"):
+#             continue
+#         args = _call_args(call)
+#         if args and _REACT_ROUTER_MODULE.fullmatch(_string_val(args[0], source)):
+#             return True
+#     return False
+
+
 def detect_react_routes(root: Node, source: bytes, path: str, *, seen_ids: set[str],
                         const_values: dict[str, str | None] | None = None) -> list[Statement]:
+    # if not _uses_react_router(root, source):
+    #     return []
     routes: list[Statement] = []
     # JSX <Route>: start only at top-level Routes (no <Route> ancestor); recursion handles nesting.
     jsx: list[Node] = []
