@@ -25,20 +25,7 @@ from ..treesitter import first_line, node_text
 
 # HTTP-verb methods that register a route handler on an app/router.
 _HTTP_VERBS = {"get", "post", "put", "delete", "patch", "options", "head", "all"}
-_ROUTE_METHODS = _HTTP_VERBS | {"use", "route"}
-
-
-def _invocations(root: Node) -> list[Node]:
-    out: list[Node] = []
-
-    def walk(n: Node) -> None:
-        if n.type == "call_expression":
-            out.append(n)
-        for c in n.named_children:
-            walk(c)
-
-    walk(root)
-    return out
+_ROUTE_METHODS = _HTTP_VERBS | {"use"}
 
 
 _SCOPE_TYPES = {
@@ -619,18 +606,6 @@ def _verb_segment(call: Node, source: bytes) -> str:
         return first_line(node_text(call, source))
     start = prop.start_byte - 1 if source[prop.start_byte - 1:prop.start_byte] == b"." else prop.start_byte
     return source[start:args.end_byte].decode("utf-8", "replace")
-
-
-def _owner_function(line: int, functions, fallback: str) -> str:
-    best = None
-    best_span: int | None = None
-    for f in functions:
-        if f.startLine <= line <= f.endLine:
-            span = f.endLine - f.startLine
-            if best_span is None or span < best_span:
-                best, best_span = f, span
-    return best.id if best is not None else fallback
-
 
 def _has_express(source: bytes) -> bool:
     """Cheap correctness gate: the file imports ``express`` (either quote style). The
