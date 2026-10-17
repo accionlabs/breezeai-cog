@@ -9,10 +9,13 @@ because C# ``using`` names a namespace (not a file), cross-file edges resolve fr
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Sequence
 
 from tree_sitter import Node
+
+from .preproc import members
 
 from ...emit import file_id
 from ...schemas import SCHEMA_VERSION, FileRecord, Function, Statement
@@ -41,9 +44,10 @@ _CLASS_TYPES = (
 _NAMESPACE_TYPES = ("namespace_declaration", "file_scoped_namespace_declaration")
 
 
-def iter_type_declarations(root: Node):
-    """Yield every top-level type declaration, descending through namespaces."""
-    for child in root.named_children:
+def iter_type_declarations(root: Node) -> Iterator[Node]:
+    """Yield every top-level type declaration, descending through namespaces and ``#if``
+    blocks."""
+    for child in members(root):
         if child.type in _CLASS_TYPES:
             yield child
         elif child.type in _NAMESPACE_TYPES:

@@ -715,3 +715,30 @@ def test_http_client_calls_are_api_calls(tmp_path) -> None:
         (9, "DELETE", "api/items/1"),
         (10, "GET", "api/x"),
     }
+
+
+_PREPROC = """#if DEBUG
+using System;
+namespace Tests
+{
+    public class Generator
+    {
+        public string Next() { return ""; }
+#if TRACE
+        public void Dump() { }
+#endif
+    }
+}
+#elif RELEASE
+public class ReleaseOnly { public void Run() { } }
+#else
+public class Fallback { }
+#endif
+"""
+
+
+def test_declarations_inside_conditional_compilation_are_captured(tmp_path) -> None:
+    # `#if` / `#elif` / `#else` wrap declarations; every branch is source code.
+    rec = _parse_repo(tmp_path, {"Gen.cs": _PREPROC}, "Gen.cs")
+    assert sorted(c.name for c in rec.classes) == ["Fallback", "Generator", "ReleaseOnly"]
+    assert sorted(f.name for f in rec.functions) == ["Dump", "Next", "Run"]

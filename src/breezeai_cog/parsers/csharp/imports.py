@@ -31,6 +31,8 @@ from typing import Any
 
 from tree_sitter import Node
 
+from .preproc import members
+
 from ...utils import repo_relative
 from ..additive import (
     collect_additive, collect_fact_sources, resolve_additive, split_fact_sources,
@@ -196,7 +198,7 @@ def _index_members(
 ) -> None:
     """Record the class's declared methods (``(fqn, method) → file``, for inherited-call
     resolution) and any extension methods it defines (``(method, this-type) → file``)."""
-    for member in body.named_children:
+    for member in members(body):
         if member.type != "method_declaration":
             continue
         mn = member.child_by_field_name("name")
@@ -266,7 +268,7 @@ def _index_file(
 
     def walk(node: Node, ns: str) -> None:
         local_ns = ns
-        for child in node.named_children:
+        for child in members(node):  # `#if` blocks opened
             t = child.type
             if t == "file_scoped_namespace_declaration":
                 local_ns = _join(ns, _decl_name(child, source))  # applies to later siblings
@@ -576,7 +578,7 @@ def _file_scopes(root: Node, source: bytes) -> set[str]:
 
     def walk(node: Node, ns: str) -> None:
         local_ns = ns
-        for child in node.named_children:
+        for child in members(node):  # `#if` blocks opened
             t = child.type
             if t == "file_scoped_namespace_declaration":
                 local_ns = _join(ns, _decl_name(child, source))
