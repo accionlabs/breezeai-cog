@@ -104,8 +104,9 @@ export const router = createHashRouter([
 def test_jsx_index_route_captured(tmp_path) -> None:
     rec = _parse(tmp_path, INDEX_JSX_SRC, "App.tsx")
     routes = [(s.endpoint, s.handler) for s in rec.statements if s.semanticType == "route"]
-    # index route renders at the parent path ("/") alongside the layout route
-    assert ("/", "Home") in routes and ("/", "Layout") in routes and ("/about", "About") in routes
+    # the index route renders at the parent path ("/"); the parent is a layout (wiring, no record)
+    assert ("/", "Home") in routes and ("/about", "About") in routes
+    assert ("/", "Layout") not in routes
 
 
 # React Router v7 framework-mode config DSL (route/index/layout/prefix helper calls),
@@ -144,10 +145,9 @@ def test_v7_config_dsl_routes_detected(tmp_path) -> None:
     # index() renders at the enclosing prefix path (no own segment).
     assert "/procurements/:itemId" in routes
     assert routes["/procurements/:itemId"].handler == "routes/procurement/index.tsx"
-    # layout() is a pathless wrapper (mount) and its children keep the parent path.
+    # layout() is a pathless wrapper (wiring, no record); its children keep the parent path.
     assert "/chat" in routes and routes["/chat"].handler == "routes/chat.tsx"
-    main = next(s for s in rec.statements if s.handler == "routes/layouts/main.tsx")
-    assert main.routeKind == "mount"
+    assert not any(s.handler == "routes/layouts/main.tsx" for s in rec.statements)
     # catch-all is a real route, not filtered.
     assert "/*" in routes
     assert routes["/procurements/:itemId/tender/new"].framework == "react"
@@ -211,7 +211,8 @@ def test_config_index_route_captured(tmp_path) -> None:
     # createHashRouter is handled like createBrowserRouter (config-object walker)
     rec = _parse(tmp_path, INDEX_CONFIG_SRC, "router.tsx")
     routes = [(s.endpoint, s.handler) for s in rec.statements if s.semanticType == "route"]
-    assert ("/", "Home") in routes and ("/", "Layout") in routes and ("/about", "About") in routes
+    assert ("/", "Home") in routes and ("/about", "About") in routes
+    assert ("/", "Layout") not in routes  # a layout (an index child fills its outlet)
 
 
 def test_base_extraction_reused(tmp_path) -> None:

@@ -63,15 +63,14 @@ def test_named_views_default_component_is_handler(analyze_files) -> None:
     assert r.handler == "Home"
 
 
-def test_layout_with_empty_path_child_is_recorded_as_a_page(analyze_files) -> None:
-    # The Target Spec's current form: the layout and its '' child are both pages at its URL.
+def test_layout_with_empty_path_child_is_wiring(analyze_files) -> None:
     st = _routes(
         analyze_files,
         "  { path: '/settings', component: SettingsShell, children: [\n"
         "    { path: '', component: SettingsHome },\n"
         "    { path: 'profile', component: Profile },\n  ] },\n",
     )
-    assert sorted(r.handler for r in _at(st, "/settings")) == ["SettingsHome", "SettingsShell"]
+    assert [r.handler for r in _at(st, "/settings")] == ["SettingsHome"]
     assert [r.handler for r in _at(st, "/settings/profile")] == ["Profile"]
 
 
@@ -85,14 +84,13 @@ def test_component_with_children_and_no_empty_child_is_also_binding(analyze_file
     assert [r.handler for r in _at(st, "/orders/:id")] == ["OrderDetail"]
 
 
-def test_children_only_parent_is_recorded_as_a_page(analyze_files) -> None:
-    # The Target Spec's current form: a path-only parent is a page record with no handler.
+def test_children_only_parent_is_wiring(analyze_files) -> None:
     st = _routes(
         analyze_files,
         "  { path: '/home', component: Home },\n"
         "  { path: '/admin', children: [ { path: 'users', component: AdminUsers } ] },\n",
     )
-    assert [(r.routeKind, r.handler) for r in _at(st, "/admin")] == [("page", None)]
+    assert _at(st, "/admin") == []
 
 
 def test_children_only_parent_prefixes_children(analyze_files) -> None:
@@ -170,11 +168,8 @@ def test_parent_before_enter_guards_its_children(analyze_files) -> None:
         "    { path: '', component: AdminHome },\n"
         "    { path: 'users', component: AdminUsers, beforeEnter: audit },\n  ] },\n",
     )
-    # Entering a child enters the shell first, so its beforeEnter runs first. The shell itself is
-    # also a page (the Target Spec's current form).
-    assert sorted((r.handler, r.guards) for r in _at(st, "/admin")) == [
-        ("AdminHome", ["requireAdmin"]), ("AdminShell", ["requireAdmin"]),
-    ]
+    # The shell is a layout (an empty-path child): no record; entering a child enters it first.
+    assert [(r.handler, r.guards) for r in _at(st, "/admin")] == [("AdminHome", ["requireAdmin"])]
     assert [(r.handler, r.guards) for r in _at(st, "/admin/users")] == [
         ("AdminUsers", ["requireAdmin", "audit"]),
     ]

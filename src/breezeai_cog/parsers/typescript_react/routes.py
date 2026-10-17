@@ -16,12 +16,12 @@ Emits ``semanticType="route"`` statements with ``routeKind="page"`` — element 
 Angular ``loadComponent``). Routes are parented to the file (React routes are config/markup, not
 handler methods), mirroring the Angular detector.
 
-Wiring is written in the Target Spec's current form: a path-only parent (nested routes, no
-element) and a layout (an element whose children include an index or empty-path child) are page
-records like any route with a path; v7 ``layout()`` is a ``routeKind="mount"`` record. A pathless
-layout route and v7 ``prefix()`` have no record of their own. A layout whose element is a guard
-(``<Route element={<ProtectedRoute/>}>``, with or without a path) also puts its name in the
-children's ``guards``; an element counts as a guard only by its name (:func:`_is_guard_element`)."""
+Wiring has no record (contract §4): a path-only parent (nested routes, no element), a layout (an
+element whose children include an index or empty-path child, which always fills its outlet), a
+pathless layout route, and v7 ``layout()`` / ``prefix()``. A layout whose element is a guard
+(``<Route element={<ProtectedRoute/>}>``, with or without a path) puts its name in the children's
+``guards``; an element counts as a guard only by its name (:func:`_is_guard_element`) — any other
+layout is plain wiring (when unsure, record less)."""
 
 from __future__ import annotations
 
@@ -122,6 +122,16 @@ def _jsx_attrs(el: Node, source: bytes) -> dict[str, Node]:
     return out
 
 
+#: Attributes / keys through which a route shows a component of its own.
+_ELEMENT_KEYS = ("element", "Component", "component", "render", "lazy")
+
+
+def _fills_outlet(attrs: dict[str, Node], source: bytes) -> bool:
+    """An index route, or one with ``path=""`` — it renders at its parent's URL."""
+    return ("index" in attrs and "path" not in attrs) or (
+        "path" in attrs and _string_val(attrs["path"], source) == "")
+
+
 def _process_jsx(el: Node, prefix: str, source: bytes, path: str,
                  routes: list[Emit], inherited: tuple[str, ...] = ()) -> None:
     attrs = _jsx_attrs(el, source)
@@ -131,9 +141,14 @@ def _process_jsx(el: Node, prefix: str, source: bytes, path: str,
     full = _join(prefix, sub)
     handler = _component_name(attrs.get("element"), source)
     nested = [c for c in el.named_children if _is_route(c, source)] if el.type == "jsx_element" else []
+    shows = any(k in attrs for k in _ELEMENT_KEYS)
     # A guard element around nested routes runs before each of them (it renders their outlet).
     guard_layout = bool(nested) and bool(handler) and _is_guard_element(handler)
-    if (has_path or is_index) and handler not in _REDIRECTS:
+    # Wiring: nested routes under a path with no element, a layout (a child fills the outlet),
+    # or a guard layout.
+    wiring = bool(nested) and (guard_layout or not shows or any(
+        _fills_outlet(_jsx_attrs(c, source), source) for c in nested))
+    if (has_path or is_index) and handler not in _REDIRECTS and not wiring:
         routes.append(Emit(el, dict(
             semanticType="route",
             endpoint=full,
@@ -207,7 +222,14 @@ def _process_config(arr: Node, prefix: str, source: bytes, path: str,
         full = _join(prefix, "" if is_index else _string_val(pairs["path"], source))
         if handler in _REDIRECTS:
             continue
+        shows = any(k in pairs for k in _ELEMENT_KEYS)
         guard_layout = bool(nested) and bool(handler) and _is_guard_element(handler)
+        wiring = bool(nested) and (guard_layout or not shows or any(
+            _fills_outlet(_pairs(c, source), source) for c in nested))
+        if wiring and children is not None:
+            guards = (*inherited, handler) if guard_layout and handler else inherited
+            _process_config(children, full, source, path, routes, guards)
+            continue
         routes.append(Emit(elem, dict(
             semanticType="route",
             endpoint=full,
@@ -217,8 +239,7 @@ def _process_config(arr: Node, prefix: str, source: bytes, path: str,
             guards=list(inherited) or None,
         ), parent=file_id(path), node_type="synthetic", text=entry_text(elem, source)))
         if children is not None and nested:
-            guards = (*inherited, handler) if guard_layout and handler else inherited
-            _process_config(children, full, source, path, routes, guards)
+            _process_config(children, full, source, path, routes, inherited)
 
 
 # ---- entry point ------------------------------------------------------------
@@ -279,7 +300,7 @@ def _emit_v7(call: Node, kind: str, endpoint: str, handler_arg: Node | None,
         semanticType="route",
         endpoint=endpoint,
         framework="react",
-        routeKind="page" if kind in ("route", "index") else "mount",
+        routeKind="page",
         handler=_string_val(handler_arg, source) or None,
     ), parent=file_id(path), node_type="call_expression",
         text=node_text(call, source).split("\n", 1)[0][:120]))
@@ -330,8 +351,7 @@ def _process_v7(node: Node, prefix: str, source: bytes, path: str,
         _emit_v7(node, kind, _join(prefix, seg), handler, source, path, routes)
     elif kind == "index":  # index(file, opts?) -> renders at the parent path
         _emit_v7(node, kind, _join(prefix, ""), args[0] if args else None, source, path, routes)
-    elif kind == "layout":  # layout(file, [children]) -> a mount record, no path segment; recurse
-        _emit_v7(node, kind, _join(prefix, ""), args[0] if args else None, source, path, routes)
+    elif kind == "layout":  # layout(file, [children]) -> wiring: no record, no path segment
         children = _last_array(args)
         if children is not None:
             _process_v7(children, prefix, source, path, routes, consts, guard, const_values)

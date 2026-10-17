@@ -502,7 +502,9 @@ export default [{
 def test_signalless_route_array_captured_by_base_parser(tmp_path) -> None:
     rec = _parse_base("src/router/router.js", _SIGNALLESS_ROUTES, tmp_path)
     routes = {s.endpoint: s for s in rec.statements if s.semanticType == "route"}
-    assert {"/", "/home", "/city/:cityid"} <= set(routes)
+    assert {"/home", "/city/:cityid"} <= set(routes)
+    # '/' is a layout (App, with an empty-path child that redirects to /home): wiring, no record.
+    assert "/" not in routes
     assert routes["/home"].handler == "home" and routes["/home"].framework == "vue"
     assert rec.framework == "vue"
     # the redirect-only child is still skipped

@@ -218,6 +218,18 @@ def _router_guards(root: Node, source: bytes) -> dict[int, _RouterGuards]:
     return out
 
 
+def _has_empty_path_child(children: Node | None, source: bytes) -> bool:
+    """Whether a ``children`` array holds a route object with ``path: ''``."""
+    if children is None or children.type != "array":
+        return False
+    for child in children.named_children:
+        if child.type == "object":
+            p = _pairs(child, source).get("path")
+            if p is not None and p.type == "string" and _string_val(p, source) == "":
+                return True
+    return False
+
+
 def _emit(
     elem: Node, prefix: str, source: bytes, path: str, routes: list[Emit],
     outer: _RouterGuards = _NO_ROUTER_GUARDS, inherited: tuple[str, ...] = (),
@@ -228,24 +240,24 @@ def _emit(
     ``beforeResolve`` after it (vue-router's navigation order). ``inherited`` are the ancestors'
     ``beforeEnter``: entering a child enters its parents first, so theirs run before its own.
 
-    Every route object except a pure redirect has a record, in the Target Spec's current form: a
-    path-only parent ``{ path, children }`` and a layout (a component whose children include an
-    empty-path child) are pages too. Their path also prefixes the children and their
-    ``beforeEnter`` guards them."""
+    Only a route that shows a component of its own has a record (contract §4): a path-only
+    parent ``{ path, children }`` and a layout (a component whose children include an
+    empty-path child, which always fills its outlet) are wiring — their path prefixes the
+    children and their ``beforeEnter`` guards them."""
     if elem.type != "object":
         return
     pairs = _pairs(elem, source)
     if "path" not in pairs:
         return
     full = _join(prefix, _string_val(pairs["path"], source))
-    # Emit unless this is a PURE redirect (a redirect with no component of its own is an
-    # alias, not a page — like Angular's redirectTo). A shell with a component and a redirect
-    # (its default child) is a page. The children are walked in every case — they are often
-    # the whole app subtree.
+    # Emit only a route with a component of its own (a pure redirect is an alias, like
+    # Angular's redirectTo; a path-only parent is a prefix) that is not a layout. A shell with
+    # a component and a redirect (its default child) is still a page. The children are walked
+    # in every case — they are often the whole app subtree.
     has_component = "component" in pairs or "components" in pairs
     children = pairs.get("children")
     own = _before_enter(pairs.get("beforeEnter"), source)
-    if has_component or "redirect" not in pairs:
+    if has_component and not _has_empty_path_child(children, source):
         routes.append(Emit(
             elem,
             {

@@ -82,8 +82,7 @@ def test_guard_layout_element_is_guard(analyze_files) -> None:
     assert [s.handler for s in _eps(st)] == ["Account"]
 
 
-def test_layout_with_index_child_is_recorded_as_a_page(analyze_files) -> None:
-    # The Target Spec's current form: the layout and its index child are both pages at its URL.
+def test_layout_with_index_child_is_wiring(analyze_files) -> None:
     st = _jsx(
         analyze_files,
         '      <Route path="/settings" element={<SettingsLayout />}>\n'
@@ -91,7 +90,7 @@ def test_layout_with_index_child_is_recorded_as_a_page(analyze_files) -> None:
         '        <Route path="profile" element={<Profile />} />\n'
         "      </Route>\n",
     )
-    assert sorted(r.handler for r in _at(st, "/settings")) == ["SettingsHome", "SettingsLayout"]
+    assert [r.handler for r in _at(st, "/settings")] == ["SettingsHome"]
     assert [r.handler for r in _at(st, "/settings/profile")] == ["Profile"]
 
 
@@ -212,15 +211,14 @@ def test_create_root_is_none(analyze_files) -> None:
     assert _eps(st, "src/main.tsx") == []
 
 
-def test_path_only_parent_is_recorded_as_a_page(analyze_files) -> None:
-    # The Target Spec's current form: a path-only parent is a page record with no handler.
+def test_path_only_parent_is_wiring(analyze_files) -> None:
     st = _jsx(
         analyze_files,
         '      <Route path="/admin">\n'
         '        <Route path="users" element={<AdminUsers />} />\n'
         "      </Route>\n",
     )
-    assert [(r.routeKind, r.handler) for r in _at(st, "/admin")] == [("page", None)]
+    assert _at(st, "/admin") == []
     assert [r.handler for r in _at(st, "/admin/users")] == ["AdminUsers"]
 
 
@@ -257,6 +255,4 @@ def test_guard_layout_with_a_path_guards_its_children(analyze_files) -> None:
     )
     st = analyze_files({"package.json": PKG, "src/router.tsx": src})
     got = sorted((r.endpoint, r.handler, tuple(r.guards or ())) for r in _eps(st, "src/router.tsx"))
-    # The guard layout is also a page record (the Target Spec's current form).
-    assert got == [("/", "Dashboard", ("ProtectedRoute",)), ("/", "ProtectedRoute", ()),
-                   ("/orders", "Orders", ("ProtectedRoute",))]
+    assert got == [("/", "Dashboard", ("ProtectedRoute",)), ("/orders", "Orders", ("ProtectedRoute",))]

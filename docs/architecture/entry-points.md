@@ -183,9 +183,9 @@ also copied into the bindings' records:
 
 | Construct (role) | Written as | `routeKind` |
 |---|---|---|
-| Router mount, lazy route group, Play `->` include, React v7 `layout()` (Wiring) | `route`, `endpoint` = the full prefix, `handler` = the router / module | `mount` |
+| Router mount, lazy route group, Play `->` include (Wiring) | `route`, `endpoint` = the full prefix, `handler` = the router / module | `mount` |
 | Link or programmatic navigation (Outbound) | `route`, `endpoint` = the target page | `navigation` |
-| Path-only parent and layout route (Angular, Vue, React) | `route`, `handler` = its component, if any | `page` |
+| Path-only parent and layout route (Angular) | `route`, `handler` = its component, if any | `page` |
 | GraphQL transport mount (`MapGraphQL`, Apollo `expressMiddleware`) | `route`, `POST`, `framework: graphql`, no handler | `route` |
 | `MapRoute` / `MapHttpRoute` convention template | `route`, `ANY` on the `MapRoute(…)` statement; `handler` = the default `Controller.Action`, empty when the template has `{controller}` or `{action}` | `route` |
 | GraphQL SDL root field (`type Query { books }`) | `route`, operation kind, field name, DTOs, no handler | `query` / `mutation` / `subscription` |
