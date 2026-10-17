@@ -1,19 +1,26 @@
 """Angular lazy-route mounts as a registered fact on the TypeScript index,
 ``angular.route-mounts``.
 
-A lazy child module's routes are served under the path its parent mounts it at, in another
-file::
+A lazy child's routes are served under the path its parent mounts it at, in another file. The
+child is reached either through a class (an NgModule, ``.then(m => m.X)``) or, for a standalone
+default-export routes array, through the file the import loads::
 
     // app-routing.module.ts
     { path: 'company/:brandId', loadChildren: () => import('./brand/brand.module')
         .then(m => m.BrandModule) }
     // brand.module.ts:  @NgModule({ imports: [BrandRoutingModule] }) export class BrandModule {}
 
-The fact maps a routing-module class name to its **fully composed** mount prefix (the parent
-chain prepended, ``NgModule`` imports propagated), so a child module parsed in its own file
-starts at that prefix instead of ``""``. A symbol mounted at more than one prefix, or with an
-unresolved chain, is absent (honest-null — the child keeps its own bare paths). Paths may name
-constants of other files (``RouteNames.X``), so they resolve against the index's constant map.
+    // app.routes.ts
+    { path: 'admin', loadChildren: () => import('./admin/admin.routes') }
+    // admin/admin.routes.ts:  export default [ { path: 'docs', … } ]   → /admin/docs
+
+The fact maps each target, ``("symbol", "BrandModule")`` or ``("file", "src/app/admin/admin.routes.ts")``,
+to its **fully composed** mount prefix (the parent chain prepended, ``NgModule`` imports
+propagated), so a child parsed in its own file starts at that prefix instead of ``""``. A target
+mounted at more than one prefix, or reached through an unresolved path, maps to ``None``: its
+routes' full address is unknown, so they get a null endpoint (honest-null), never their bare path.
+Paths may name constants of other files (``RouteNames.X``), so they resolve against the index's
+constant map.
 """
 
 from __future__ import annotations
@@ -27,24 +34,48 @@ from tree_sitter import Node
 from ..additive import FactSpec, index_fact, register_fact
 from ..index_common import record_distinct
 from ..treesitter import node_text
-from ..typescript.imports import _CLASS_NODES, _join_segments, _path_pieces, _resolve_pieces
+from ..typescript.imports import (
+    _CLASS_NODES, _join_segments, _path_pieces, _resolve_pieces, _try_paths,
+)
 
 FACT = "angular.route-mounts"
+
+#: A lazy mount's target: ``("symbol", "AdminModule")`` or ``("file", "src/app/admin/x.ts")``.
+Target = tuple[str, str]
 
 # A path expression is returned as UNRESOLVED pieces — ``("lit", text)`` for a string literal
 # and ``("sym", "RouteNames.X")`` for a const reference — because ``RouteNames.*`` is defined
 # cross-file, so the pieces are resolved against the repo-wide ``const_values`` in the reduce
 # (:func:`~..typescript.imports._resolve_pieces`), not here.
-_MountRaw = tuple[str, list[tuple[str, str]]]  # (target module symbol, path pieces)
+_MountRaw = tuple[list[Target], list[tuple[str, str]] | None]  # (targets, path pieces)
 
 # `.then(m => m.OrganisationsRoutingModule)` — the mounted module's exported class symbol.
 _MOUNT_TARGET_RE = re.compile(r"=>\s*[\w$]+\.([A-Za-z_$][\w$]*)")
+# `import('./admin/admin.routes')` — the loaded file.
+_MOUNT_IMPORT_RE = re.compile(r"""import\(\s*['"]([^'"]+)['"]""")
 
 
-def _collect_route_mounts(root: Node, source: bytes) -> tuple[list[str], list[_MountRaw]]:
+def _targets(load: Node, source: bytes, rel: str, repo_root: Path | None) -> list[Target]:
+    """What a ``loadChildren`` loads: the ``.then(m => m.X)`` class and the imported file,
+    each when it can be read. A child is looked up by its file first, then by its classes."""
+    text = node_text(load, source)
+    found: list[Target] = []
+    m = _MOUNT_IMPORT_RE.search(text)
+    if m is not None and repo_root is not None and m.group(1).startswith("."):
+        resolved = _try_paths((repo_root / rel).parent / m.group(1), repo_root)
+        if resolved is not None:
+            found.append(("file", resolved))
+    m = _MOUNT_TARGET_RE.search(text)
+    if m is not None:
+        found.append(("symbol", m.group(1)))
+    return found
+
+
+def _collect_route_mounts(root: Node, source: bytes, rel: str,
+                          repo_root: Path | None) -> tuple[list[str], list[_MountRaw]]:
     """(top-level class names declared here, lazy mounts declared here). A mount is a
-    ``loadChildren`` pair inside a route object; its target is the ``.then(m => m.X)`` symbol
-    and its own path is the sibling ``path:`` value (as unresolved pieces)."""
+    ``loadChildren`` pair inside a route object; its targets are the loaded file and class,
+    and its own path is the sibling ``path:`` value (as unresolved pieces, None if dynamic)."""
     classes: list[str] = []
     mounts: list[_MountRaw] = []
 
@@ -60,12 +91,11 @@ def _collect_route_mounts(root: Node, source: bytes) -> tuple[list[str], list[_M
                     k = c.child_by_field_name("key")
                     if k is not None:
                         pairs[node_text(k, source).strip("'\"")] = c.child_by_field_name("value")
-            if "loadChildren" in pairs and "path" in pairs:
-                lc = pairs["loadChildren"]
-                m = _MOUNT_TARGET_RE.search(node_text(lc, source)) if lc is not None else None
-                pieces = _path_pieces(pairs["path"], source)
-                if m is not None and pieces is not None:
-                    mounts.append((m.group(1), pieces))
+            lc = pairs.get("loadChildren")
+            if lc is not None and "path" in pairs:
+                targets = _targets(lc, source, rel, repo_root)
+                if targets:
+                    mounts.append((targets, _path_pieces(pairs["path"], source)))
         for c in node.named_children:
             walk(c)
 
@@ -141,93 +171,87 @@ def _collect_ngmodule_imports(root: Node, source: bytes) -> dict[str, list[str]]
 
 
 def _compose_route_mounts(
-    raw: dict[str, str | None], parent_of: dict[str, str | None]
-) -> dict[str, str]:
-    """Chain-compose each mount's own prefix with its ancestors' prefixes to a full effective
-    path. ``raw[sym]`` is the module's OWN mount prefix (None if ambiguous/unresolved);
-    ``parent_of[sym]`` is the module symbol whose mount encloses it (None if none/ambiguous).
-    A module reached through an unresolved link → dropped (honest-null). Iterates to a fixpoint,
-    bounded by chain length; a cycle (shouldn't happen in routing) just stops resolving."""
-    composed: dict[str, str] = {}
-    for _ in range(len(raw) + 1):  # bounded: converges in <= chain-depth passes
-        progressed = False
-        for sym, own in raw.items():
-            if sym in composed or own is None:
-                continue
-            parent = parent_of.get(sym)
-            # A root boundary: no parent, an ambiguous parent (None), or a parent that is not
-            # itself a mounted module (e.g. the top AppRoutingModule) → own prefix IS the path.
-            if parent is None or parent not in raw:
-                composed[sym] = own
-                progressed = True
-            elif parent in composed:  # ancestor resolved → prepend its full chain
-                composed[sym] = _join_segments(composed[parent], own)
-                progressed = True
-        if not progressed:
-            break
-    return composed
+    own: dict[Target, str | None], parent: dict[Target, tuple[Target, ...] | None]
+) -> dict[Target, str | None]:
+    """Chain-compose each target's own prefix with its ancestors' to a full path. ``own[t]`` is
+    the target's own mount prefix (None if ambiguous / unresolved); ``parent[t]`` is the keys of
+    the file that mounts it (its file and its classes; None if mounted from two files). The
+    first of those keys that is itself mounted is the enclosing mount; none mounted → ``t`` is
+    mounted from a routing root and its own prefix is the path. Anything reached through an
+    unresolved link is None. A mount cycle (shouldn't happen in routing) resolves to None."""
+    out: dict[Target, str | None] = {}
+
+    def resolve(target: Target, seen: frozenset[Target]) -> str | None:
+        if target in out:
+            return out[target]
+        prefix = own.get(target)
+        keys = parent.get(target)
+        if prefix is None or keys is None or target in seen:
+            return None
+        outer = next((k for k in keys if k in own), None)
+        if outer is not None:
+            above = resolve(outer, seen | {target})
+            prefix = None if above is None else _join_segments(above, prefix)
+        out[target] = prefix
+        return prefix
+
+    for target in sorted(own):
+        out[target] = resolve(target, frozenset())
+    return out
 
 
-def route_mounts(index: Any | None) -> dict[str, str]:
+def route_mounts(index: Any | None) -> dict[Target, str | None]:
     return index_fact(index, FACT) or {}
 
 
-#: One file's mount facts: (top-level classes, lazy mounts, @NgModule class → imports).
-_FileMounts = tuple[list[str], list[_MountRaw], dict[str, list[str]]]
+#: One file's mount facts: (its path, top-level classes, lazy mounts, @NgModule class → imports).
+_FileMounts = tuple[str, list[str], list[_MountRaw], dict[str, list[str]]]
 
 
 def _collect(root: Node, source: bytes, rel: str, repo_root: Path | None) -> _FileMounts | None:
-    classes, mounts = _collect_route_mounts(root, source)
+    classes, mounts = _collect_route_mounts(root, source, rel, repo_root)
     ngmodule_imports = _collect_ngmodule_imports(root, source)
     if not mounts and not ngmodule_imports:
         return None
-    return classes, mounts, ngmodule_imports
+    return rel, classes, mounts, ngmodule_imports
 
 
-def _resolve(values: list[_FileMounts], index: Any) -> dict[str, str] | None:
+def _resolve(values: list[_FileMounts], index: Any) -> dict[Target, str | None] | None:
     const_values: dict[str, str | None] = getattr(index, "const_values", None) or {}
-    # ``own_prefix``: module symbol → its own mount prefix (ambiguity via record_distinct).
-    # ``parent_of``: module symbol → the module whose file declared its mount.
-    own_prefix: dict[str, str | None] = {}
-    parent_of: dict[str, str | None] = {}
+    # ``own``: target → its own mount prefix; ``parent``: target → the keys of the file that
+    # mounts it. A target mounted at >1 distinct prefix or from >1 file, or with an unresolved
+    # path, collapses to None (record_distinct): its routes get no address, never a wrong one.
+    own: dict[Target, str | None] = {}
+    parent: dict[Target, tuple[Target, ...] | None] = {}
     all_ngmodule_imports: dict[str, list[str]] = {}
-    for classes, mounts, ngmodule_imports in values:
-        # Resolve each mount's path and wire the graph. A module symbol mounted at >1 distinct
-        # prefix (or an unresolved path) collapses to None — the child then keeps its own bare
-        # path (honest-null), never a wrongly-attributed prefix.
-        enclosing = next(iter(frozenset(classes)), None)  # the routing module declared here
-        for target, pieces in mounts:
-            record_distinct(own_prefix, target, _resolve_pieces(pieces, const_values))
-            if enclosing is not None:
-                record_distinct(parent_of, target, enclosing)
+    for rel, classes, mounts, ngmodule_imports in values:
+        here: tuple[Target, ...] = (("file", rel), *(("symbol", c) for c in classes))
+        for targets, pieces in mounts:
+            prefix = _resolve_pieces(pieces, const_values) if pieces is not None else None
+            for target in targets:
+                record_distinct(own, target, prefix)
+                record_distinct(parent, target, here)
         all_ngmodule_imports.update(ngmodule_imports)
-    # Pre-composition NgModule propagation: if BrandModule is a loadChildren target and its
-    # @NgModule imports BrandRoutingModule, inject BrandRoutingModule into own_prefix/parent_of
-    # with the same own-path and parent as BrandModule BEFORE _compose_route_mounts runs.
-    # This makes BrandRoutingModule a proper node in the composition graph, so that
-    # ProductsModule (whose parent_of entry is BrandRoutingModule) chains correctly all the
-    # way up to /company/:brandId/products instead of stopping at /products.
-    for class_name, ngmod_imports in all_ngmodule_imports.items():
-        own = own_prefix.get(class_name)
-        if own is None:
-            continue  # class not a loadChildren target, or path is ambiguous
-        parent = parent_of.get(class_name)
-        for imported in ngmod_imports:
-            if imported not in own_prefix:
-                record_distinct(own_prefix, imported, own)
-                if parent is not None:
-                    record_distinct(parent_of, imported, parent)
+    # NgModule propagation: when BrandModule is a loadChildren target and its @NgModule imports
+    # BrandRoutingModule, BrandRoutingModule is mounted at the same place (same own prefix and
+    # parent). Repeated to a fixpoint so a routing module imported through another module is
+    # reached too; ProductsModule mounted by BrandRoutingModule then chains up to
+    # /company/:brandId/products instead of stopping at /products.
+    changed = True
+    while changed:
+        changed = False
+        for class_name, ngmod_imports in all_ngmodule_imports.items():
+            target = ("symbol", class_name)
+            if target not in own:
+                continue
+            for imported in ngmod_imports:
+                key = ("symbol", imported)
+                if key not in own:
+                    own[key] = own[target]
+                    parent[key] = parent.get(target)
+                    changed = True
 
-    mounts_out = _compose_route_mounts(own_prefix, parent_of)
-
-    # Post-composition NgModule propagation: for modules that are now composed (e.g.
-    # ProductsModule → /company/:brandId/products), also add their NgModule-imported routing
-    # modules (e.g. ProductsRoutingModule) so the route detector finds them.
-    for class_name, prefix in list(mounts_out.items()):
-        for imported_name in all_ngmodule_imports.get(class_name, []):
-            if imported_name not in mounts_out:
-                mounts_out[imported_name] = prefix
-    return mounts_out or None
+    return _compose_route_mounts(own, parent) or None
 
 
 register_fact(FactSpec(

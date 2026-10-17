@@ -300,8 +300,8 @@ export class BrandRoutingModule {}
 
 
 def test_lazy_multi_mount_module_is_honest_null(tmp_path) -> None:
-    # A module mounted at TWO different prefixes → ambiguous → child keeps its own bare path
-    # (never wrongly attributed to one parent).
+    # A module mounted at TWO different prefixes → ambiguous → its routes get no address
+    # (never wrongly attributed to one parent, never the bare path it is not served at).
     app = b'''import { RouterModule, Routes } from '@angular/router';
 export const routes: Routes = [
   { path: 'a', loadChildren: () => import('./shared.module').then(m => m.SharedModule) },
@@ -316,7 +316,73 @@ export class SharedModule {}
     rec = _parse_with_index({"app.module.ts": app, "shared.module.ts": shared},
                             "shared.module.ts", tmp_path)
     eps = {s.handler: s.endpoint for s in rec.statements if s.semanticType == "route"}
-    assert eps["XComponent"] == "/x"  # bare path, not /a/x or /b/x
+    assert eps["XComponent"] is None  # not /a/x or /b/x, and not the bare /x
+
+
+# ── Standalone lazy routes: the mount reaches the loaded file (G42) ─────────────
+_STANDALONE_APP = b'''import { Routes } from '@angular/router';
+const routes: Routes = [
+  { path: 'admin', canActivate: [AuthGuard], loadChildren: () => import('./admin/admin.routes') },
+  { path: '', loadChildren: () => import('./entities/entity.routes') },
+  { path: 'shop', loadChildren: () => import('./shop/shop.routes').then(m => m.SHOP_ROUTES) },
+];
+export default routes;
+'''
+_STANDALONE_ADMIN = b'''import { Routes } from '@angular/router';
+const routes: Routes = [ { path: 'docs', loadComponent: () => import('./docs/docs') } ];
+export default routes;
+'''
+_STANDALONE_ENTITIES = b'''import { Routes } from '@angular/router';
+const routes: Routes = [ { path: 'label', loadChildren: () => import('./label/label.routes') } ];
+export default routes;
+'''
+_STANDALONE_LABEL = b'''import { Routes } from '@angular/router';
+const routes: Routes = [ { path: ':id/view', component: LabelDetail } ];
+export default routes;
+'''
+_STANDALONE_SHOP = b'''import { Routes } from '@angular/router';
+export const SHOP_ROUTES: Routes = [ { path: 'cart', component: CartComponent } ];
+'''
+
+
+def _standalone_files(tmp_path) -> dict:
+    for d in ("admin", "entities/label", "shop"):
+        (tmp_path / d).mkdir(parents=True, exist_ok=True)
+    return {"app.routes.ts": _STANDALONE_APP, "admin/admin.routes.ts": _STANDALONE_ADMIN,
+            "entities/entity.routes.ts": _STANDALONE_ENTITIES,
+            "entities/label/label.routes.ts": _STANDALONE_LABEL,
+            "shop/shop.routes.ts": _STANDALONE_SHOP}
+
+
+def test_standalone_default_export_gets_mount_prefix(tmp_path) -> None:
+    rec = _parse_with_index(_standalone_files(tmp_path), "admin/admin.routes.ts", tmp_path)
+    docs = next(s for s in rec.statements if s.semanticType == "route")
+    assert docs.endpoint == "/admin/docs"
+    assert docs.guards == ["AuthGuard"]  # unchanged: the mount guard already reached it
+
+
+def test_standalone_named_export_gets_mount_prefix(tmp_path) -> None:
+    # `.then(m => m.SHOP_ROUTES)` names a const, not a class: the loaded file carries the prefix.
+    rec = _parse_with_index(_standalone_files(tmp_path), "shop/shop.routes.ts", tmp_path)
+    eps = {s.handler: s.endpoint for s in rec.statements if s.semanticType == "route"}
+    assert eps["CartComponent"] == "/shop/cart"
+
+
+def test_standalone_chain_composes_through_files(tmp_path) -> None:
+    # app → entities ('') → label ('label'): the grandchild gets the whole chain.
+    rec = _parse_with_index(_standalone_files(tmp_path), "entities/label/label.routes.ts",
+                            tmp_path)
+    eps = {s.handler: s.endpoint for s in rec.statements if s.semanticType == "route"}
+    assert eps["LabelDetail"] == "/label/:id/view"
+
+
+def test_standalone_unresolved_mount_path_is_honest_null(tmp_path) -> None:
+    # The mount's path can't be resolved, so the loaded routes' full address is unknown.
+    files = _standalone_files(tmp_path)
+    files["app.routes.ts"] = _STANDALONE_APP.replace(b"path: 'admin'", b"path: adminPath()")
+    rec = _parse_with_index(files, "admin/admin.routes.ts", tmp_path)
+    docs = next(s for s in rec.statements if s.semanticType == "route")
+    assert docs.endpoint is None
 
 
 def test_breadcrumb_objects_not_captured_as_routes(tmp_path) -> None:

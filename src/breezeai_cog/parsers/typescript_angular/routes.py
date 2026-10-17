@@ -266,23 +266,16 @@ def _process(arr: Node, prefix: str | None, source: bytes, path: str,
 _CLASS_NODE_TYPES = ("class_declaration", "class", "abstract_class_declaration")
 
 
-def _mount_prefix(root: Node, source: bytes, index: object) -> str:
+def _mount_prefix(path: str, classes: list[str], index: object) -> str | None:
     """The lazy-mount prefix this file's routes hang under, from the repo mount index — the
-    fully-composed parent prefix keyed by a class this file declares (a lazy child module is
-    reached via ``.then(m => m.XModule)``). Empty string when this file is a routing root, its
-    module isn't mounted, or the mount is ambiguous/unresolved (honest-null → own bare paths)."""
+    fully-composed parent prefix of this file (a standalone routes file loaded by
+    ``import('./x.routes')``) or of a class it declares (``.then(m => m.XModule)``). Empty string
+    when nothing mounts this file (a routing root); None when it is mounted but the prefix is
+    ambiguous or unresolved, so its routes' full address is unknown (honest-null)."""
     mounts = route_mounts(index)
-    if not mounts:
-        return ""
-    # Search all class node shapes (grammar may emit "class" or "class_declaration" depending
-    # on context — cover both to avoid missing a module class in an export_statement).
-    for cls_type in _CLASS_NODE_TYPES:
-        for cls in _all(root, cls_type):
-            name = cls.child_by_field_name("name")
-            if name is not None:
-                prefix = mounts.get(node_text(name, source))
-                if prefix is not None:
-                    return prefix
+    for key in [("file", path), *(("symbol", c) for c in classes)]:
+        if key in mounts:
+            return mounts[key]
     return ""
 
 
@@ -297,9 +290,10 @@ def detect_angular_routes(root: Node, source: bytes, path: str, *,
     if not any(guard in source for guard in _ROUTER_BYTE_GUARDS):
         return []
     routes: list[Emit] = []
-    prefix = _mount_prefix(root, source, index)  # parent mount prefix (cross-file), else ""
+    classes = declared_classes(root, source)
+    prefix = _mount_prefix(path, classes, index)  # parent mount prefix (cross-file), else ""
     # Guards of the lazy mount that loads this file's routes (cross-file), else none.
-    incoming = tuple(incoming_guards(index, path, declared_classes(root, source)))
+    incoming = tuple(incoming_guards(index, path, classes))
     for arr in _all(root, "array"):
         if _is_route_array(arr, source) and not _is_children_value(arr, source):
             _process(arr, prefix, source, path, routes, index, incoming)
