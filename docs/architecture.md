@@ -533,6 +533,7 @@ the file:
   │                  20   aws-events       typescript/aws_events.py                  │
   │                  30   sdk-calls        detection/sdk_calls.py                    │
   │                  40   graphql-client   typescript_graphql/routes.py      ✔       │
+  │                  45   graphql-resol…   typescript_graphql/…modules.py    ✔       │
   │                  50   vue-routes       typescript_vue/routes.py          ✔       │
   │                  60   nextjs-pages     typescript_nextjs/pages.py        ✔       │
   │                  70   navigation       typescript/navigation.py          ✔       │

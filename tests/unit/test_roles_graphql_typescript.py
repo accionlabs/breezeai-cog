@@ -204,3 +204,53 @@ def test_conflicting_sdl_leaves_the_dtos_empty(analyze_files) -> None:
     )
     [r] = [r for r in _eps(st) if r.path == "src/resolvers.ts"]
     assert (r.requestDTO, r.responseDTO) == (None, None)
+
+
+SERVER_NS = (
+    "import { ApolloServer } from '@apollo/server';\n"
+    "import * as queries from './resolvers/queries';\n"
+    "import * as mutations from './resolvers/mutations';\n"
+    "const resolvers = {\n"
+    "  Mutation: mutations,\n"
+    "  Query: queries,\n"
+    "};\n"
+    "export const server = new ApolloServer({ typeDefs, resolvers });\n"
+)
+
+
+def test_resolver_map_root_from_a_namespace_import(analyze_files) -> None:
+    # `Query: queries`: every name the module exports is one operation — through a barrel's
+    # `default as` re-export, a direct `export const`, and an `export *`.
+    st = _run(
+        analyze_files,
+        {
+            "src/server.ts": SERVER_NS,
+            "src/resolvers/queries/index.ts":
+                "export { default as dummyQuery } from './dummyQuery';\n"
+                "export * from './more';\n",
+            "src/resolvers/queries/dummyQuery.ts":
+                "async function dummyQuery(_: any, args: any) { return null; }\n"
+                "export default dummyQuery;\n",
+            "src/resolvers/queries/more.ts":
+                "export const books = async () => [];\n",
+            "src/resolvers/mutations/index.ts":
+                "export async function addBook(_: any, { input }: any) { return null; }\n",
+        },
+    )
+    got = {
+        (r.id.split(":", 1)[1], r.method, r.routeKind, r.endpoint, r.handler, r.handlerLine)
+        for r in _eps(st)
+    }
+    # One record per operation on the root key; handlerLine is empty because the function is
+    # declared in another file (handlerPath isn't emitted yet).
+    assert got == {
+        ("5:2", "MUTATION", "mutation", "addBook", "addBook", None),
+        ("6:2", "QUERY", "query", "dummyQuery", "dummyQuery", None),
+        ("6:2#2", "QUERY", "query", "books", "books", None),
+    }
+
+
+def test_resolver_map_root_from_a_missing_module_is_none(analyze_files) -> None:
+    # The imported module isn't in the repo: no operations are invented.
+    st = _run(analyze_files, {"src/server.ts": SERVER_NS})
+    assert _eps(st) == []
