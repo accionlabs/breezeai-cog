@@ -95,7 +95,13 @@ def _resolve(values: list[tuple[str, str, FileFacts]], index: Any) -> FastapiWir
     sites: dict[Node_, set[tuple[Node_, str | None, tuple[str, ...]]]] = {}
     for rel, f in facts.items():
         for receiver, child, spec, deps in f.includes:
-            target: Node_ = (rel, child[1]) if child[0] == "local" else (child[1], child[2])
+            if child[0] == "factory":  # the router the factory function creates and returns
+                made = facts[child[1]].factories.get(child[2]) if child[1] in facts else None
+                if made is None:
+                    continue
+                target: Node_ = (child[1], made)
+            else:
+                target = (rel, child[1]) if child[0] == "local" else (child[1], child[2])
             if target in own:
                 sites.setdefault(target, set()).add(((rel, receiver), value(spec), deps))
 
@@ -106,8 +112,12 @@ def _resolve(values: list[tuple[str, str, FileFacts]], index: Any) -> FastapiWir
             return memo[node]
         prefix, deps = own.get(node, ("", ()))
         at = sites.get(node, set())
-        if len(at) != 1 or node in seen:  # not included anywhere, ambiguous, or a cycle
-            result: Wiring = (prefix, deps, node)
+        if not at and node[1] in facts[node[0]].local_routers:
+            # Made inside a function and not found included: served wherever the function's
+            # result is mounted — unknown, never the bare path.
+            result: Wiring = (None, deps, node)
+        elif len(at) != 1 or node in seen:  # not included anywhere, ambiguous, or a cycle
+            result = (prefix, deps, node)
         else:
             (parent, mount, mount_deps), = at
             parent_base, parent_deps, top = wiring(parent, seen | {node})

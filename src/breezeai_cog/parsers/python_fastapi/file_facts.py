@@ -22,7 +22,9 @@ ROUTERS = frozenset({"APIRouter", "fastapi.APIRouter", "FastAPI", "fastapi.FastA
 #: A prefix as recorded in the index (picklable): ``("lit", "/x")``, ``("const", file, name)``
 #: for a module-level string constant (this file or another), or ``("unknown",)``.
 PrefixSpec = tuple[str, ...]
-#: The router an include site mounts: ``("local", var)`` or ``("ext", file, var)``.
+#: The router an include site mounts: ``("local", var)``, ``("ext", file, var)``, or
+#: ``("factory", file, function)`` — the router a factory function returns
+#: (``include_router(make_router(), …)``).
 RouterRef = tuple[str, ...]
 
 
@@ -143,6 +145,11 @@ class FileFacts:
     middleware: dict[str, list[str]] = field(default_factory=dict)
     #: Module-level string constants of this file (``API_PREFIX = "/api/v1"``).
     constants: dict[str, str] = field(default_factory=dict)
+    #: Router factories: top-level function → the router variable it creates and returns.
+    factories: dict[str, str] = field(default_factory=dict)
+    #: Router variables created inside a function: served only where the function's result
+    #: is included, so unknown when no include is found.
+    local_routers: set[str] = field(default_factory=set)
 
 
 def module_constants(root: Node, source: bytes) -> dict[str, str]:
@@ -228,6 +235,43 @@ def _imports(root: Node, source: bytes, repo_root: Path, rel: str) -> dict[str, 
     return out
 
 
+def _enclosing_function(node: Node) -> Node | None:
+    parent = node.parent
+    while parent is not None and parent.type != "function_definition":
+        parent = parent.parent
+    return parent
+
+
+def _top_functions(root: Node) -> list[Node]:
+    out = []
+    for c in root.named_children:
+        if c.type == "decorated_definition":
+            c = c.child_by_field_name("definition") or c
+        if c.type == "function_definition":
+            out.append(c)
+    return out
+
+
+def _returned_names(fdef: Node, source: bytes) -> list[str]:
+    """Identifiers returned by ``fdef``'s own ``return`` statements (nested functions skipped)."""
+    out: list[str] = []
+
+    def walk(n: Node) -> None:
+        for c in n.named_children:
+            if c.type == "function_definition":
+                continue
+            if c.type == "return_statement":
+                value = next(iter(c.named_children), None)
+                if value is not None and value.type == "identifier":
+                    out.append(node_text(value, source))
+            walk(c)
+
+    body = fdef.child_by_field_name("body")
+    if body is not None:
+        walk(body)
+    return out
+
+
 def file_facts(root: Node, source: bytes, repo_root: Path, rel: str) -> FileFacts:
     """The FastAPI wiring facts of one file (see :class:`FileFacts`)."""
     facts = FileFacts(constants=module_constants(root, source))
@@ -262,6 +306,14 @@ def file_facts(root: Node, source: bytes, repo_root: Path, rel: str) -> FileFact
             target = parent.child_by_field_name("left")
             if target is not None and target.type == "identifier":
                 facts.routers[node_text(target, source)] = (spec(node), tuple(dependencies(node, source)))
+                if _enclosing_function(node) is not None:
+                    facts.local_routers.add(node_text(target, source))
+    for fdef in _top_functions(root):
+        fname = fdef.child_by_field_name("name")
+        returned = _returned_names(fdef, source)
+        routers = [r for r in returned if r in facts.local_routers]
+        if fname is not None and len(set(routers)) == 1:
+            facts.factories[node_text(fname, source)] = routers[0]
     for node in calls(root):
         fn = node.child_by_field_name("function")
         if fn is None or fn.type != "attribute":
@@ -285,6 +337,21 @@ def file_facts(root: Node, source: bytes, repo_root: Path, rel: str) -> FileFact
             ref = imports.get(node_text(mod, source)) if mod is not None and mod.type == "identifier" else None
             if ref is not None and ref[0] == "module" and var is not None:
                 child = ("ext", ref[1], node_text(var, source))
+        elif first.type == "call":  # include_router(make_router(), …): the factory's router
+            callee = first.child_by_field_name("function")
+            if callee is not None and callee.type == "identifier":
+                cname = node_text(callee, source)
+                cref = imports.get(cname)
+                if cref is not None and cref[0] == "symbol":
+                    child = ("factory", cref[1], cref[2])
+                elif cref is None:
+                    child = ("factory", rel, cname)
+            elif callee is not None and callee.type == "attribute":
+                mod, fn_name = callee.child_by_field_name("object"), callee.child_by_field_name("attribute")
+                cref = imports.get(node_text(mod, source)) \
+                    if mod is not None and mod.type == "identifier" else None
+                if cref is not None and cref[0] == "module" and fn_name is not None:
+                    child = ("factory", cref[1], node_text(fn_name, source))
         if child is not None:
             facts.includes.append(
                 (node_text(obj, source), child, spec(node), tuple(dependencies(node, source))))

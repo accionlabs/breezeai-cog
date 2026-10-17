@@ -152,3 +152,26 @@ def test_http_client_is_outbound(analyze_files) -> None:
     )
     assert _eps(st) == []
     assert [s.endpoint for s in st if s.semanticType == "api_call"] == ["https://svc.example/api/b"]
+
+
+def test_router_from_a_factory_gets_the_include_prefix(analyze_files) -> None:
+    # include_router(make_router(), prefix=…): the router the factory returns is served there.
+    factory = ("from fastapi import APIRouter\n"
+               "def make_router():\n    r = APIRouter()\n"
+               "    @r.get('/{uid}')\n    def get_user(uid: int):\n        return {}\n"
+               "    return r\n")
+    st = analyze_files({
+        "app/__init__.py": "",
+        "app/main.py": "from fastapi import FastAPI\nfrom app.users import make_router\n"
+                       "app = FastAPI()\napp.include_router(make_router(), prefix='/users')\n",
+        "app/users.py": factory,
+    })
+    assert _one(st, "GET", "/users/{uid}").handler == "get_user"
+
+
+def test_router_from_a_factory_not_found_included_has_no_address(analyze_files) -> None:
+    # Where the factory's router is served is unknown: no address, never the bare `/{uid}`.
+    st = analyze_files({"app/__init__.py": "", "app/users.py": (
+        "from fastapi import APIRouter\ndef make_router():\n    r = APIRouter()\n"
+        "    @r.get('/{uid}')\n    def get_user(uid: int):\n        return {}\n    return r\n")})
+    assert [(s.method, s.endpoint) for s in _eps(st)] == [("GET", None)]
