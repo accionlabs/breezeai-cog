@@ -272,3 +272,20 @@ public interface OrderService {
         ("eventbus_consumer", "svc.orders", "listOrders"),
         ("eventbus_consumer", "svc.orders", "getOrder"),
     ]
+
+
+def test_service_method_leads_to_the_implementing_class(analyze_files) -> None:
+    # One consumer per interface method; the code that runs is the implementation's method.
+    files = _verticle(
+        "    OrderService svc = new OrderServiceImpl();\n"
+        '    new ServiceBinder(vertx).setAddress("svc.orders").register(OrderService.class, svc);'
+    )
+    files["src/main/java/a/OrderService.java"] = (
+        "package a;\nimport io.vertx.codegen.annotations.ProxyGen;\n"
+        "@ProxyGen\npublic interface OrderService {\n  void listOrders(Object h);\n}\n")
+    files["src/main/java/a/OrderServiceImpl.java"] = (
+        "package a;\npublic class OrderServiceImpl implements OrderService {\n"
+        "  public void listOrders(Object h) {}\n}\n")
+    [r] = _eps(analyze_files(files))
+    assert (r.handler, r.handlerPath, r.handlerLine) == (
+        "listOrders", "src/main/java/a/OrderServiceImpl.java", 3)

@@ -294,3 +294,20 @@ public class C {
         )
     )
     assert [r.handler for r in _eps(st)] == ["x"]
+
+
+def test_functional_route_handler_in_another_class_is_located(analyze_files) -> None:
+    # `h::list` is a method of the parameter's type, declared in another file.
+    files = _java(
+        "Routes",
+        "import org.springframework.context.annotation.Bean;\n"
+        "import org.springframework.web.servlet.function.RouterFunction;\n"
+        "import static org.springframework.web.servlet.function.RouterFunctions.route;\n"
+        "import static org.springframework.web.servlet.function.RequestPredicates.GET;",
+        "public class Routes {\n  @Bean\n  public RouterFunction<?> r(OrderHandler h) {\n"
+        "    return route(GET(\"/orders\"), h::list);\n  }\n}",
+    )
+    files.update(_java("OrderHandler", "", "public class OrderHandler {\n"
+                       "  public Object list(Object req) { return null; }\n}"))
+    [r] = _eps(analyze_files(files), "Routes.java")
+    assert (r.handler, r.handlerPath, r.handlerLine) == ("list", SRC + "OrderHandler.java", 4)

@@ -44,6 +44,7 @@ from tree_sitter import Node
 
 from ...schemas import FileRecord, SemanticType
 from ..emits import Emit
+from ..method_lines import locate_method
 from .service_interfaces import service_methods
 from ..treesitter import node_text
 from ..vertx_common import (
@@ -267,6 +268,54 @@ def _registered_interface(call: Node, source: bytes) -> str | None:
     return None
 
 
+def _registered_impl(call: Node, source: bytes) -> str | None:
+    """``….register(OrderService.class, impl)`` → the implementing class: ``new OrderServiceImpl(…)``
+    passed directly, or the local variable it was assigned to in the enclosing method."""
+    node = call
+    while (parent := node.parent) is not None and parent.type == "method_invocation" \
+            and parent.child_by_field_name("object") == node:
+        name = parent.child_by_field_name("name")
+        if name is not None and node_text(name, source) in ("register", "registerLocal"):
+            args = parent.child_by_field_name("arguments")
+            impl = args.named_children[1] if args is not None and len(args.named_children) > 1 \
+                else None
+            if impl is not None and impl.type == "identifier":
+                impl = _local_value(impl, node_text(impl, source), source)
+            if impl is not None and impl.type == "object_creation_expression":
+                typ = impl.child_by_field_name("type")
+                return node_text(typ, source) if typ is not None else None
+            return None
+        node = parent
+    return None
+
+
+def _local_value(at: Node, name: str, source: bytes) -> Node | None:
+    """The value given to ``name`` in the method enclosing ``at`` — a local initializer or an
+    assignment (``impl = new Impl()``, also to a field) — when exactly one is found."""
+    method: Node | None = at
+    while method is not None and method.type not in ("method_declaration",
+                                                     "constructor_declaration"):
+        method = method.parent
+    found: list[Node] = []
+
+    def walk(n: Node) -> None:
+        if n.type == "variable_declarator":
+            nm, value = n.child_by_field_name("name"), n.child_by_field_name("value")
+            if nm is not None and value is not None and node_text(nm, source) == name:
+                found.append(value)
+        elif n.type == "assignment_expression":
+            left, right = n.child_by_field_name("left"), n.child_by_field_name("right")
+            if left is not None and right is not None and \
+                    node_text(left, source).removeprefix("this.") == name:
+                found.append(right)
+        for c in n.named_children:
+            walk(c)
+
+    if method is not None:
+        walk(method)
+    return found[0] if len(found) == 1 else None
+
+
 def _qualified(type_name: str, root: Node, source: bytes) -> str:
     """A type as written in this file → its fully-qualified name: a single-type import that
     names it, else this file's package (a dotted name is taken as written)."""
@@ -333,20 +382,36 @@ def detect_vertx(
         # A service registration: every method of the interface is a binding on the address
         # (the message's `action` header picks it) — one consumer per method, handler = method.
         handlers: list[str | None] = [handler]
+        impl: str | None = None
         call_name = call.child_by_field_name("name")
         if semantic == "eventbus_consumer" and call_name is not None \
                 and node_text(call_name, source) == "setAddress":
             iface = _registered_interface(call, source)
             names = service_methods(index, _qualified(iface, root, source)) if iface else ()
             handlers = list(names) or [handler]
-        handler = handlers[0]
+            # The code that runs is the implementing class's method (usually another file).
+            impl = _registered_impl(call, source) if names else None
 
+        def site(name: str | None) -> tuple[int | None, str | None]:
+            found_at = locate_method(index, "java", impl, name) if impl else None
+            if found_at is None:
+                return None, None
+            return found_at[1], (found_at[0] if found_at[0] != path else None)
+
+        handler = handlers[0]
+        if impl:
+            handler_line, first_path = site(handler)
+        else:
+            first_path = None
         found.append(vertx_emit(call, semantic, method, endpoint, route_kind, handler,
-                                handler_line, unknown_base=unknown_base))
+                                handler_line, unknown_base=unknown_base,
+                                handler_path=first_path))
         for extra in handlers[1:]:  # the others: their own records on the same span
+            line, extra_path = site(extra)
             found.append(Emit(call, {
                 "semanticType": semantic, "method": method, "endpoint": endpoint,
                 "framework": "vertx", "routeKind": route_kind, "handler": extra,
+                "handlerLine": line, "handlerPath": extra_path,
             }))
 
     return found

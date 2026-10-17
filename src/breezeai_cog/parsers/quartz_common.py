@@ -29,6 +29,8 @@ language supplies a :class:`Syntax` that reads its tree.
 
 from __future__ import annotations
 
+from collections.abc import Callable
+
 from collections.abc import Iterator
 from dataclasses import dataclass, field
 from typing import Protocol
@@ -251,8 +253,10 @@ def _top(f: _File, node: Node) -> Node:
     return top
 
 
-def detect_quartz(root: Node, source: bytes, record: FileRecord, syntax: Syntax) -> list[Emit]:
-    """The Quartz ``timer`` bindings of one file (see the module docstring)."""
+def detect_quartz(root: Node, source: bytes, record: FileRecord, syntax: Syntax,
+                  locate: Callable[[str], tuple[str, int] | None] | None = None) -> list[Emit]:
+    """The Quartz ``timer`` bindings of one file (see the module docstring). ``locate`` finds a
+    job class's handler method declared in another file (``(file, line)``, from the index)."""
     f = _File(syntax, root, source, syntax.variables(root), syntax.returns(root))
     _register_keys(f)
     handler_lines = _handler_lines(record, syntax.handler)
@@ -260,10 +264,15 @@ def detect_quartz(root: Node, source: bytes, record: FileRecord, syntax: Syntax)
     def emit(node: Node, job: str | None, trigger: Node | None) -> Emit:
         # A trigger that cannot be traced: neither its kind nor its schedule is known.
         method, endpoint = f.schedule(trigger) if trigger is not None else (None, None)
+        line = handler_lines.get(job) if job else None
+        site = locate(job) if job and line is None and locate is not None else None
+        if site is not None:
+            line = site[1]
         return Emit(node, {
             "semanticType": "timer", "framework": "quartz", "method": method,
             "endpoint": endpoint, "handler": syntax.handler if job else None,
-            "handlerLine": handler_lines.get(job) if job else None,
+            "handlerLine": line,
+            "handlerPath": site[0] if site is not None and site[0] != record.path else None,
         }, enrich="unclassified")
 
     found: list[Emit] = []

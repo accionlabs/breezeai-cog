@@ -884,7 +884,7 @@ def test_registrations_bind_to_the_declaring_files(tmp_path) -> None:
                                    "Api/BookMutations.cs": {"BookMutations": "mutation"}}
     assert _roots(index).types == {"BookQueries": "query", "BookMutations": "mutation"}
     # Only the resolved fact reaches the workers, not the raw registrations.
-    assert set(index.facts) == {REGISTERED_ROOTS}
+    assert set(index.facts) == {REGISTERED_ROOTS, "csharp.method-lines"}
 
 
 def test_registration_only_root_emits_operations_through_the_detector(tmp_path) -> None:

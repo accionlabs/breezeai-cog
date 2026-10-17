@@ -298,14 +298,14 @@ def method_lines(functions: Iterable[Function]) -> dict[str, int | None]:
 def vertx_emit(
     call: Node, semantic: str, method: str | None, endpoint: str | None,
     route_kind: str | None, handler: str | None, handler_line: int | None,
-    *, unknown_base: bool = False,
+    *, unknown_base: bool = False, handler_path: str | None = None,
 ) -> Emit:
     """A Vert.x detection for :func:`~.emits.apply`: it enriches whatever statement is on the
     call's line (``any``) — the type and framework always, the rest only where known — else
     it is a new record (a call inside a lambda, which the base parser skips). An unresolvable
     sub-router mount clears the address (unknown)."""
     fill: dict[str, Any] = {"method": method, "routeKind": route_kind, "handler": handler,
-                            "handlerLine": handler_line}
+                            "handlerLine": handler_line, "handlerPath": handler_path}
     fields: dict[str, Any] = {"semanticType": semantic, "framework": "vertx"}
     if unknown_base:
         fields["endpoint"] = None

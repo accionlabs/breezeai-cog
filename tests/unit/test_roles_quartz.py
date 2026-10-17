@@ -224,3 +224,17 @@ def test_trigger_without_a_job_is_none(analyze_files) -> None:
     body = """  public Trigger trigger() { return newTrigger().withSchedule(cronSchedule("0 0 2 * * ?")).build(); }
 """
     assert _java(analyze_files, body) == []
+
+
+def test_job_class_in_another_file_leads_to_its_handler(analyze_files) -> None:
+    # The job class is declared in its own file: the record leads there (handlerPath + line).
+    body = '''  void Configure(IServiceCollectionQuartzConfigurator q) {
+    q.ScheduleJob<ReportJob>(t => t.WithCronSchedule("0 0 1 * * ?"));
+  }
+}
+'''
+    st = analyze_files({CS: CS_HEAD + body, "Api/Jobs/ReportJob.cs": (
+        "using Quartz;\npublic class ReportJob : IJob {\n"
+        "  public Task Execute(IJobExecutionContext context) { return Task.CompletedTask; }\n}\n")})
+    [r] = _eps(st, CS)
+    assert (r.handler, r.handlerPath, r.handlerLine) == ("Execute", "Api/Jobs/ReportJob.cs", 3)

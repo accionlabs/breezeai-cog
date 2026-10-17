@@ -11,6 +11,7 @@ from tree_sitter import Node
 
 from ..additive import DetectContext, Detection, Detector, Gate, register_detector
 from ..index_common import record_distinct
+from ..method_lines import locate_method
 from ..quartz_common import Call, detect_quartz
 from ..treesitter import node_text
 
@@ -96,7 +97,9 @@ class _Java:
 
 
 def _detect(dc: DetectContext) -> Detection | None:
-    found = detect_quartz(dc.root, dc.source, dc.record, _Java(dc.source))
+    index = dc.ctx.resolution_index
+    found = detect_quartz(dc.root, dc.source, dc.record, _Java(dc.source),
+                          lambda job: locate_method(index, "java", job, _Java.handler))
     return Detection(found, label="quartz") if found else None
 
 

@@ -24,10 +24,13 @@ cannot match.
 
 from __future__ import annotations
 
+from typing import Any
+
 from tree_sitter import Node
 
 from ...schemas import FileRecord
 from ..emits import Emit
+from ..method_lines import locate_method
 from ..treesitter import node_text
 
 _FN_VERBS = {"GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"}
@@ -123,24 +126,56 @@ def _handler_arg(call: Node, args: Node | None, source: bytes) -> Node | None:
     return None
 
 
+def _receiver_type(ref: Node, receiver: str, source: bytes) -> str | None:
+    """The declared type of a method reference's receiver: ``h`` in ``h::list`` is a parameter
+    of the enclosing method or a field of the class (``ProductHandler h``); ``ProductHandler``
+    in ``ProductHandler::list`` is the type itself."""
+    if receiver[:1].isupper() and receiver.replace(".", "").isidentifier():
+        return receiver
+    node: Node | None = ref.parent
+    while node is not None:
+        if node.type in ("method_declaration", "constructor_declaration"):
+            params = node.child_by_field_name("parameters")
+            for p in params.named_children if params is not None else []:
+                nm, typ = p.child_by_field_name("name"), p.child_by_field_name("type")
+                if nm is not None and typ is not None and node_text(nm, source) == receiver:
+                    return node_text(typ, source)
+        elif node.type == "class_body":
+            for member in node.named_children:
+                if member.type != "field_declaration":
+                    continue
+                typ = member.child_by_field_name("type")
+                for d in member.named_children:
+                    nm = d.child_by_field_name("name") if d.type == "variable_declarator" else None
+                    if nm is not None and typ is not None and node_text(nm, source) == receiver:
+                        return node_text(typ, source)
+        node = node.parent
+    return None
+
+
 def _handler_for(
-    call: Node, args: Node | None, source: bytes, methods: dict[str, int | None]
-) -> tuple[str | None, int | None]:
-    """(handler, handlerLine). A method reference names the handler; its line is known only for
-    ``this::m`` with ``m`` declared once in this file (``h::list`` is a method of another class).
-    A lambda has no name; its line is where it starts."""
+    call: Node, args: Node | None, source: bytes, methods: dict[str, int | None],
+    index: Any | None = None,
+) -> tuple[str | None, int | None, str | None]:
+    """(handler, handlerLine, handlerPath). A method reference names the handler: ``this::m`` is
+    a method of this file; ``h::list`` a method of the receiver's class, found through the index
+    (``java.method-lines``) when declared elsewhere. A lambda has no name; its line is where it
+    starts."""
     arg = _handler_arg(call, args, source)
     if arg is None:
-        return None, None
+        return None, None, None
     if arg.type == "lambda_expression":
-        return None, arg.start_point[0] + 1
+        return None, arg.start_point[0] + 1, None
     name = _ref_name(arg, source)
     receiver = node_text(arg, source).rsplit("::", 1)[0].strip()
-    return name, methods.get(name) if receiver == "this" else None
+    if receiver == "this":
+        return name, methods.get(name), None
+    site = locate_method(index, "java", _receiver_type(arg, receiver, source), name)
+    return (name, site[1], site[0]) if site is not None else (name, None, None)
 
 
 def detect_spring_functional_routes(
-    root: Node, source: bytes, path: str, record: FileRecord
+    root: Node, source: bytes, path: str, record: FileRecord, index: Any | None = None
 ) -> list[Emit]:
     routes: list[Emit] = []
     methods: dict[str, int | None] = {}  # method name → declaration line (declared twice → None)
@@ -155,7 +190,8 @@ def detect_spring_functional_routes(
                 args = n.child_by_field_name("arguments")
                 p = _first_string_arg(args, source)
                 if p is not None:
-                    handler, handler_line = _handler_for(n, args, source, methods)
+                    handler, handler_line, handler_path = _handler_for(
+                        n, args, source, methods, index)
                     prefix = _nest_prefix(n, source)
                     routes.append(
                         Emit(n, dict(
@@ -165,6 +201,7 @@ def detect_spring_functional_routes(
                             framework="spring",
                             handler=handler,
                             handlerLine=handler_line,
+                            handlerPath=handler_path if handler_path != path else None,
                             routeKind="route",
                             isRegex=False,
                         ), parent=record.id)

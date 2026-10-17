@@ -24,6 +24,7 @@ from ...logging import get_logger
 from ...schemas import Class, Decorator, FileRecord, Function
 from ..dotnet_common import response_dto, simple_attr_name
 from ..emits import Emit
+from ..method_lines import locate_method
 from ..treesitter import first_line, node_text
 from .data_loaders import generated_loaders as generated_loaders_of
 from .mappings import (
@@ -429,6 +430,7 @@ def descriptor_field_statement(
     configure: Function, kind: str, name: str, call: Node, source: bytes, root: Node,
     guards: list[str] | None = None, *, target: str | None = None,
     resolver: Function | None = None, generated_loaders: dict[str, str | None] | None = None,
+    located: tuple[str | None, int] | None = None,
 ) -> Emit:
     """One field declared fluently inside ``Configure``. Unlike the attribute-derived routes this
     has a real backing node — the ``d.Field(...)`` call — so it keeps that ``nodeType``, matching
@@ -439,6 +441,9 @@ def descriptor_field_statement(
     (``ResolveWith``), it is the handler and supplies the response type and loaders."""
     resolves_field = kind == "field_resolver"
     handler, handler_line = field_handler(call, source) if resolver is None else (None, None)
+    handler_path = None
+    if located is not None and resolver is None:  # the resolver method, in another file
+        handler_path, handler_line = located
     return Emit(call, dict(
         semanticType="route",
         method="RESOLVE_FIELD" if resolves_field else kind.upper(),
@@ -446,6 +451,7 @@ def descriptor_field_statement(
         framework="graphql",
         handler=resolver.name if resolver is not None else handler,
         handlerLine=resolver.startLine if resolver is not None else handler_line,
+        handlerPath=handler_path,
         routeKind=kind,
         isRegex=False,
         authRequired=bool(guards) or None,
@@ -528,7 +534,7 @@ def _descriptor_entity_resolvers(
 def _descriptor_routes(
     cls: Class, record: FileRecord, nodes: dict[tuple[str, int], Node], source: bytes,
     heritage: dict[str, object], root: Node, hc_root_types: dict[str, str] | None = None,
-    generated_loaders: dict[str, str | None] | None = None,
+    generated_loaders: dict[str, str | None] | None = None, index: Any = None,
 ) -> list[Emit]:
     """Fields declared fluently by ``cls``: operations when the type it describes is a resolved
     root; otherwise only the data type's parent-bound resolvers (:func:`_parent_bound_resolvers`).
@@ -570,11 +576,20 @@ def _descriptor_routes(
     out: list[Emit] = []
     for name, call in field_declarations(body, source, receiver):
         ref = resolve_with_method(call, source)
+        resolver = _resolver_method(record, *ref) if ref is not None else None
+        # The resolver method in another file, through the index: `ResolveWith<R>(r => r.M())`
+        # → `R.M`; `Field(t => t.M(…))` → `M` of the type this descriptor describes.
+        if ref is not None:
+            site = locate_method(index, "csharp", *ref) if resolver is None else None
+        else:
+            member, member_line = field_handler(call, source)
+            site = locate_method(index, "csharp", target, member) \
+                if member and member_line is None else None
         out.append(descriptor_field_statement(
             configure, kind, name, call, source, root,
             _guard_labels(type_level + field_authorizations(call, source)),
-            resolver=_resolver_method(record, *ref) if ref is not None else None,
-            generated_loaders=generated_loaders))
+            resolver=resolver, generated_loaders=generated_loaders,
+            located=(None if site[0] == record.path else site[0], site[1]) if site else None))
     return out
 
 
@@ -616,7 +631,7 @@ def detect_hotchocolate_routes(
                    if not _attr_names(fn.decorators) & set(ENTITY_RESOLVER_ATTRS)]
         routes.extend(_class_routes(
             cls, kind, own, record, nodes, source, heritage, root, anchors,
-            generated_loaders, hc_root_types))
+            generated_loaders, hc_root_types, index))
         routes.extend(entity_resolver_statements(
             cls, record, root, on_root=on_root, generated_loaders=generated_loaders))
     return routes
@@ -627,6 +642,7 @@ def _class_routes(
     nodes: dict[tuple[str, int], Node], source: bytes, heritage: dict[str, object],
     root: Node, anchors: dict[tuple[str, int], Anchor],
     generated_loaders: dict[str, str | None], hc_root_types: dict[str, str] | None,
+    index: Any = None,
 ) -> list[Emit]:
     """Operations and field resolvers of one class (see :func:`detect_hotchocolate_routes`)."""
     if kind is not None and own:
@@ -642,4 +658,4 @@ def _class_routes(
             cls, target, own, record, heritage, record.path, root, anchors,
             generated_loaders, hc_root_types=hc_root_types)
     return _descriptor_routes(
-        cls, record, nodes, source, heritage, root, hc_root_types, generated_loaders)
+        cls, record, nodes, source, heritage, root, hc_root_types, generated_loaders, index)

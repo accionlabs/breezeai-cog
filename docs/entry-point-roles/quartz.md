@@ -6,7 +6,7 @@ A job class says what runs, a trigger says when. The binding is the first constr
 
 | Construct | Role | Record | Why |
 |---|---|---|---|
-| `scheduler.scheduleJob(job, trigger)` / `ScheduleJob(job, trigger)` | Binding | `timer`, `framework: quartz`, schedule as `endpoint`, `handler` = `execute` / `Execute` of the job's class (its line when declared in the file) | Names one job and its schedule |
+| `scheduler.scheduleJob(job, trigger)` / `ScheduleJob(job, trigger)` | Binding | `timer`, `framework: quartz`, schedule as `endpoint`, `handler` = `execute` / `Execute` of the job's class; `handlerLine` its line, and `handlerPath` when the job class is in another file | Names one job and its schedule |
 | A trigger built with `forJob(…)` — `newTrigger().forJob(reportJob())…build()` (also a Spring `@Bean`), `q.AddTrigger(t => t.ForJob(key)…)` | Binding | as above; the job found through the key (`withIdentity` ↔ `forJob`), a job variable or a no-argument method returning the job | Names one job and its schedule |
 | `q.ScheduleJob<ReportJob>(t => …)` (Quartz.NET DI) | Binding | as above | Names one job and its schedule |
 | Schedule | — | cron (`withCronSchedule` / `cronSchedule`) → `PERIODIC`, the expression; fixed interval (`withIntervalInSeconds(40)`, `repeatMinutelyForever(5)`, `WithInterval(TimeSpan.FromSeconds(40))`) → `PERIODIC`, milliseconds (`40000`); none → `TIMER` (fires once), empty; daily-time / calendar interval, a non-literal → `PERIODIC`, empty. A trigger or job read through a cast (`(ICronTrigger) TriggerBuilder.Create()…`, `… as ISimpleTrigger`) is the value it casts | |

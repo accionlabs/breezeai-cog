@@ -42,7 +42,7 @@ class SpringBootParser(JavaParser):
             module = module_of(ctx.path)
             routes = detect_spring_routes(record, root, ctx.source)  # annotated controllers
             if b"RouterFunction" in ctx.source:  # functional routing needs the AST
-                routes += detect_spring_functional_routes(root, ctx.source, ctx.path, record)
+                routes += detect_spring_functional_routes(root, ctx.source, ctx.path, record, idx)
             if routes:
                 # Servlet filters and MVC interceptors of this module run first (matched within
                 # the servlet context, so before the context path is joined).
