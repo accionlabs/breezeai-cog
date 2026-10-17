@@ -63,6 +63,39 @@ def _is_router_obj(obj_text: str) -> bool:
     return "router()" in low or "express()" in low
 
 
+#: Values that can't be an Express app or router: a variable bound only to one of these is not a
+#: route receiver, whatever its name (``const userApp = { get: … }``).
+_PLAIN_VALUES = frozenset({
+    "object", "array", "string", "template_string", "number", "true", "false", "null",
+    "arrow_function", "function_expression", "function", "class",
+})
+
+
+def plain_locals(root: Node, source: bytes) -> frozenset[str]:
+    """Names every binding of which in this file is a plain value (:data:`_PLAIN_VALUES`, or
+    ``new X()`` of a class other than ``Router``). A name bound to a call (``createApp()``,
+    ``express()``) or never bound here (a parameter, an import) is not in the set."""
+    kinds: dict[str, set[bool]] = {}
+
+    def walk(node: Node) -> None:
+        if node.type == "variable_declarator":
+            name, value = node.child_by_field_name("name"), node.child_by_field_name("value")
+            if name is not None and name.type == "identifier" and value is not None:
+                plain = value.type in _PLAIN_VALUES or (
+                    value.type == "new_expression" and not _is_router_ctor(value, source))
+                kinds.setdefault(node_text(name, source), set()).add(plain)
+        for c in node.named_children:
+            walk(c)
+
+    walk(root)
+    return frozenset(n for n, k in kinds.items() if k == {True})
+
+
+def _is_router_ctor(node: Node, source: bytes) -> bool:
+    fn = node.child_by_field_name("constructor")
+    return fn is not None and node_text(fn, source) in {"Router", "express.Router"}
+
+
 def _string_value(node: Node, source: bytes) -> str | None:
     if node.type != "string":
         return None
@@ -275,6 +308,7 @@ def _classify(
     routers: frozenset[str] = frozenset(), decl_lines: dict[str, int | None] | None = None,
     consts: dict[str, str | None] | None = None,
     packages: dict[str, tuple[str, str]] | None = None,
+    plain: frozenset[str] | None = None,
 ) -> tuple[str | None, str | None, str | None, int | None, list[str] | None, str, str] | None:
     """→ (method, endpoint, handler, handlerLine, guards, framework, routeKind), or None if not
     a route. ``guards`` are the named route/mount middleware (auth/interceptor stack); ``bindings``
@@ -295,6 +329,8 @@ def _classify(
         return _classify_route_verb(call, route_call, method, source, routers, decl_lines, consts)
     obj_text = node_text(obj, source)
     if not _is_router_obj(obj_text) and obj_text not in routers:
+        return None
+    if obj_text in (plain or frozenset()):  # bound here to an object / value: not a router
         return None
 
     args = call.child_by_field_name("arguments")
@@ -611,10 +647,11 @@ def detect_express(
     )
 
     packages = package_locals(root, source)
+    plain = plain_locals(root, source)
     # Routers mounted in this file whose base resolved: their routes carry the mount's prefix.
     local_served = {r for r in routers if r in receiver_base and r not in imported}
     for call in _invocations(root):
-        info = _classify(call, source, root, binds, routers, decl_lines, consts, packages)
+        info = _classify(call, source, root, binds, routers, decl_lines, consts, packages, plain)
         if info is None:
             continue
         method, endpoint, handler, handler_line, guards, framework, route_kind = info

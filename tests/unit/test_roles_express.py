@@ -205,3 +205,16 @@ def test_mount_middleware_guards_the_mounted_routes_in_another_file(analyze_file
     # The mount is wiring; its middleware certainly runs before the router's routes (Q9).
     assert (r.endpoint, r.guards) == ("/users/:id", ["requireAuth"])
     assert [s for s in _eps(st) if s.path == "src/app.js"] == []
+
+
+def test_object_named_like_a_router_is_not_a_receiver(analyze_files) -> None:
+    # A plain object that happens to be named like an app or router declares no routes.
+    st = _app(analyze_files, "const userApp = { get: (a, b) => 0 };\nuserApp.get('/fake', h);\n"
+              "const myRouter = { post: () => 0 };\nmyRouter.post('/fake2', h);\n"
+              "const r = express.Router();\nr.get('/real', h);\napp.get('/also', h);\n")
+    assert sorted(s.endpoint for s in _eps(st)) == ["/also", "/real"]
+    # A router passed in (no binding in this file) still declares routes, by its name.
+    st = analyze_files({"package.json": PKG, "src/routes.js":
+                        "import express from 'express';\n"
+                        "export function register(router) { router.get('/p', h); }\n"})
+    assert [s.endpoint for s in _eps(st) if s.path == "src/routes.js"] == ["/p"]
