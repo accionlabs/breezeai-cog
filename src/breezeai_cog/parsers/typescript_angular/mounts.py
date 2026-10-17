@@ -26,6 +26,7 @@ constant map.
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -47,7 +48,8 @@ Target = tuple[str, str]
 # and ``("sym", "RouteNames.X")`` for a const reference — because ``RouteNames.*`` is defined
 # cross-file, so the pieces are resolved against the repo-wide ``const_values`` in the reduce
 # (:func:`~..typescript.imports._resolve_pieces`), not here.
-_MountRaw = tuple[list[Target], list[tuple[str, str]] | None]  # (targets, path pieces)
+#: (the mount object's line and column, targets, path pieces).
+_MountRaw = tuple[tuple[int, int], list[Target], list[tuple[str, str]] | None]
 
 # `.then(m => m.OrganisationsRoutingModule)` — the mounted module's exported class symbol.
 _MOUNT_TARGET_RE = re.compile(r"=>\s*[\w$]+\.([A-Za-z_$][\w$]*)")
@@ -95,7 +97,8 @@ def _collect_route_mounts(root: Node, source: bytes, rel: str,
             if lc is not None and "path" in pairs:
                 targets = _targets(lc, source, rel, repo_root)
                 if targets:
-                    mounts.append((targets, _path_pieces(pairs["path"], source)))
+                    mounts.append(((node.start_point[0] + 1, node.start_point[1]), targets,
+                                   _path_pieces(pairs["path"], source)))
         for c in node.named_children:
             walk(c)
 
@@ -200,23 +203,46 @@ def _compose_route_mounts(
     return out
 
 
+@dataclass(frozen=True)
+class RouteMounts:
+    """``prefixes``: each lazy target → its composed mount prefix (None: ambiguous / unresolved).
+    ``served``: the mount sites ``(file, line, column)`` whose loaded routes are in the repo and
+    get the prefix — a target whose file has route records (or an NgModule importing such a
+    module) and whose prefix resolves. Only such a mount is wiring with nothing left to say; any other keeps its record,
+    since its address would be recorded nowhere else."""
+
+    prefixes: dict[Target, str | None] = field(default_factory=dict)
+    served: frozenset[tuple[str, int, int]] = frozenset()
+
+
 def route_mounts(index: Any | None) -> dict[Target, str | None]:
-    return index_fact(index, FACT) or {}
+    fact: RouteMounts | None = index_fact(index, FACT)
+    return fact.prefixes if fact is not None else {}
 
 
-#: One file's mount facts: (its path, top-level classes, lazy mounts, @NgModule class → imports).
-_FileMounts = tuple[str, list[str], list[_MountRaw], dict[str, list[str]]]
+def mount_served(index: Any | None, path: str, line: int, col: int) -> bool:
+    """Whether the lazy mount at ``path:line:col`` reaches loaded routes that get its prefix."""
+    fact: RouteMounts | None = index_fact(index, FACT)
+    return fact is not None and (path, line, col) in fact.served
 
 
-def _collect(root: Node, source: bytes, rel: str, repo_root: Path | None) -> _FileMounts | None:
+#: One file's mount facts: (its path, top-level classes, lazy mounts, @NgModule class → imports,
+#: whether the Angular detector finds route records of its own here).
+_FileMounts = tuple[str, list[str], list[_MountRaw], dict[str, list[str]], bool]
+
+
+def _collect(root: Node, source: bytes, rel: str, repo_root: Path | None) -> _FileMounts:
+    from .routes import detect_angular_routes
+
     classes, mounts = _collect_route_mounts(root, source, rel, repo_root)
     ngmodule_imports = _collect_ngmodule_imports(root, source)
-    if not mounts and not ngmodule_imports:
-        return None
-    return rel, classes, mounts, ngmodule_imports
+    # Every gated file is kept, mounts or not: it may be a lazy target (a standalone routes
+    # file, a routing module), and a mount is served only when its target has routes here.
+    has_routes = bool(detect_angular_routes(root, source, rel))
+    return rel, classes, mounts, ngmodule_imports, has_routes
 
 
-def _resolve(values: list[_FileMounts], index: Any) -> dict[Target, str | None] | None:
+def _resolve(values: list[_FileMounts], index: Any) -> RouteMounts | None:
     const_values: dict[str, str | None] = getattr(index, "const_values", None) or {}
     # ``own``: target → its own mount prefix; ``parent``: target → the keys of the file that
     # mounts it. A target mounted at >1 distinct prefix or from >1 file, or with an unresolved
@@ -224,9 +250,9 @@ def _resolve(values: list[_FileMounts], index: Any) -> dict[Target, str | None] 
     own: dict[Target, str | None] = {}
     parent: dict[Target, tuple[Target, ...] | None] = {}
     all_ngmodule_imports: dict[str, list[str]] = {}
-    for rel, classes, mounts, ngmodule_imports in values:
+    for rel, classes, mounts, ngmodule_imports, _ in values:
         here: tuple[Target, ...] = (("file", rel), *(("symbol", c) for c in classes))
-        for targets, pieces in mounts:
+        for _, targets, pieces in mounts:
             prefix = _resolve_pieces(pieces, const_values) if pieces is not None else None
             for target in targets:
                 record_distinct(own, target, prefix)
@@ -251,10 +277,27 @@ def _resolve(values: list[_FileMounts], index: Any) -> dict[Target, str | None] 
                     parent[key] = parent.get(target)
                     changed = True
 
-    return _compose_route_mounts(own, parent) or None
+    prefixes = _compose_route_mounts(own, parent)
+    # A target has routes when the detector finds route records in its file, or — an NgModule —
+    # in the file of a module it imports (followed through further imports).
+    has_routes = {("file", rel) for rel, _, _, _, found in values if found}
+    has_routes |= {("symbol", c) for rel, classes, _, _, found in values if found for c in classes}
+    changed = True
+    while changed:
+        changed = False
+        for class_name, ngmod_imports in all_ngmodule_imports.items():
+            key = ("symbol", class_name)
+            if key not in has_routes and any(("symbol", i) in has_routes for i in ngmod_imports):
+                has_routes.add(key)
+                changed = True
+    served = frozenset(
+        (rel, line, col)
+        for rel, _, mounts, _, _ in values for (line, col), targets, _ in mounts
+        if any(t in has_routes and prefixes.get(t) is not None for t in targets))
+    return RouteMounts(prefixes, served) if prefixes or served else None
 
 
 register_fact(FactSpec(
-    name=FACT, language="typescript", gate=(b"loadChildren", b"NgModule"),
+    name=FACT, language="typescript", gate=(b"loadChildren", b"NgModule", b"@angular/router"),
     collect=_collect, resolve=_resolve,
 ))

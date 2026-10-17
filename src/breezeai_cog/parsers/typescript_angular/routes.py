@@ -5,10 +5,13 @@ for the route objects (handler = ``component`` / ``loadComponent``), parented to
 (Angular routes are config, not handler methods). Nested ``children`` paths are joined onto the
 parent path.
 
-Wiring is written in the Target Spec's current form: a ``loadChildren`` lazy mount is a
-``routeKind="mount"`` record (its prefix and guards also reach the loaded routes: the repo mount
-index and the ``angular.mount-guards`` fact); a path-only parent ``{ path, children }`` and a
-layout are page records, as every route object with a path."""
+Wiring has no record (contract §4): a ``loadChildren`` lazy mount whose loaded routes are in the
+repo and get its prefix (the repo mount index; its guards reach them through the
+``angular.mount-guards`` fact), a path-only parent ``{ path, children }``, and a layout — a
+component whose children include an empty-path child (a redirect included), which always fills
+its outlet, so the parent's URL is that child's page. A mount whose loaded routes aren't reached
+(a module outside the repo, an ambiguous or unresolved prefix) keeps a ``routeKind="mount"``
+record in the Target Spec's current form, since its address is recorded nowhere else."""
 
 from __future__ import annotations
 
@@ -20,7 +23,7 @@ from ...emit import file_id
 from ..emits import Emit
 from ..treesitter import entry_text, node_text
 from .mount_guards import incoming_guards
-from .mounts import route_mounts
+from .mounts import mount_served, route_mounts
 
 # Lazy-load target extraction (Tier 1): capture what a route loads so the mount is a
 # traversable edge, not a dead end. Covers every Angular version's syntax:
@@ -209,6 +212,19 @@ def _is_children_value(arr: Node, source: bytes) -> bool:
     return p is not None and p.type == "pair" and _key(p, source) == "children"
 
 
+def _has_empty_path_child(children: Node | None, source: bytes) -> bool:
+    """Whether a ``children`` array holds a route object with ``path: ''`` (a redirect too: it
+    fills the outlet at the parent's URL by sending the user to another child)."""
+    if children is None or children.type != "array":
+        return False
+    for child in children.named_children:
+        if child.type == "object":
+            p = _pairs(child, source).get("path")
+            if p is not None and p.type == "string" and _string_val(p, source) == "":
+                return True
+    return False
+
+
 def _process(arr: Node, prefix: str | None, source: bytes, path: str,
              routes: list[Emit], index: object, inherited: tuple[str, ...] = (),
              mounts: list[tuple[Node, list[str]]] | None = None) -> None:
@@ -239,26 +255,31 @@ def _process(arr: Node, prefix: str | None, source: bytes, path: str,
         child_guards = (*inherited, *own, *_guards(pairs.get("canActivateChild"), source))
         if load is not None and mounts is not None:
             mounts.append((load, list(child_guards)))
-        # Every route object is recorded in the Target Spec's current form: a lazy mount as
-        # ``routeKind: mount`` (handler = the loaded module / routes), any other route as a page —
-        # a layout or a path-only parent included. A mount's prefix and guards also reach the
-        # loaded routes (the repo mount index and the ``angular.mount-guards`` fact).
+        # Wiring has no record: a lazy mount whose loaded routes get its prefix, a path-only
+        # parent, and a layout (a child with path '' always fills the outlet). A mount the repo
+        # doesn't serve keeps a mount record (its address is nowhere else), handler = the loaded
+        # module / routes symbol, empty for a bare import path (a file, not a name).
+        row, col = elem.start_point
         if load is not None:
-            handler = _lazy_target(load, source)
-        elif component is not None:
-            handler = node_text(component, source)
-        elif load_component is not None:
-            handler = _lazy_target(load_component, source)
+            kind = None if mount_served(index, path, row + 1, col) else "mount"
+            target = _lazy_target(load, source)
+            handler = None if target is None or "/" in target else target
+        elif (component is not None or load_component is not None) and \
+                not _has_empty_path_child(children, source):
+            kind = "page"
+            handler = (node_text(component, source) if component is not None
+                       else _lazy_target(load_component, source))
         else:
-            handler = None
-        routes.append(Emit(elem, dict(
-            semanticType="route",
-            endpoint=full,
-            framework="angular",
-            routeKind="mount" if load is not None else "page",
-            handler=handler,
-            guards=[*inherited, *own] or None,
-        ), parent=file_id(path), node_type="synthetic", text=entry_text(elem, source)))
+            kind = None
+        if kind is not None:
+            routes.append(Emit(elem, dict(
+                semanticType="route",
+                endpoint=full,
+                framework="angular",
+                routeKind=kind,
+                handler=handler,
+                guards=[*inherited, *own] or None,
+            ), parent=file_id(path), node_type="synthetic", text=entry_text(elem, source)))
         if children is not None and children.type == "array":
             _process(children, full, source, path, routes, index, child_guards, mounts)
 

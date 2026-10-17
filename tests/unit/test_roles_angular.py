@@ -91,17 +91,62 @@ def test_load_children_prefixes_the_loaded_routes(analyze_files) -> None:
     )
     [r] = _at(st, "/admin/reports", "src/app/admin/admin.module.ts")
     assert r.handler == "ReportsComponent"
+    # The mount is wiring: its loaded routes are in the repo and carry its prefix.
+    assert _at(st, "/admin") == []
 
 
-def test_children_only_parent_is_recorded_as_a_page(analyze_files) -> None:
-    # The Target Spec's current form: a path-only parent is a page record with no handler.
+def test_load_children_outside_the_repo_keeps_a_mount_record(analyze_files) -> None:
+    # Nothing in the repo is served under these prefixes, so the mount is the only record of
+    # them (the Target Spec's current form). A bare import path is a file, not a handler name.
+    st = _routes(
+        analyze_files,
+        "export const routes: Routes = [\n"
+        "  { path: 'billing', loadChildren: () => import('@acme/billing').then(m => m.BillingModule) },\n"
+        "  { path: 'help', loadChildren: () => import('./help/help.routes') },\n];\n",
+    )
+    got = [(s.endpoint, s.routeKind, s.handler) for s in st
+           if s.semanticType == "route" and s.path == "src/app/app.routes.ts"]
+    assert got == [("/billing", "mount", "BillingModule"), ("/help", "mount", None)]
+    assert _eps(st) == []  # a mount is not an entry point
+
+
+def test_load_children_of_a_file_with_no_route_records_keeps_a_mount_record(analyze_files) -> None:
+    # The loaded array is built from imported route objects, which give no records of their
+    # own: the mount is the only record of `/account`.
+    st = _routes(
+        analyze_files,
+        "export const routes: Routes = [\n"
+        "  { path: 'account', loadChildren: () => import('./account/account.route') },\n];\n",
+        **{"src/app/account/account.route.ts": (
+            "import { Routes } from '@angular/router';\n"
+            "import settingsRoute from './settings.route';\n"
+            "const accountRoutes: Routes = [settingsRoute];\nexport default accountRoutes;\n")},
+    )
+    got = [(s.endpoint, s.routeKind) for s in st
+           if s.semanticType == "route" and s.path == "src/app/app.routes.ts"]
+    assert got == [("/account", "mount")]
+
+
+def test_shell_with_a_redirect_child_is_wiring(analyze_files) -> None:
+    # The '' child redirects, so the shell's own URL always shows a child page.
+    st = _routes(
+        analyze_files,
+        "export const routes: Routes = [\n"
+        "  { path: 'auth', component: AuthShell, children: [\n"
+        "    { path: '', redirectTo: 'login', pathMatch: 'full' },\n"
+        "    { path: 'login', component: LoginComponent },\n  ] },\n];\n",
+    )
+    assert [(r.endpoint, r.handler) for r in _eps(st)] == [("/auth/login", "LoginComponent")]
+
+
+def test_children_only_parent_is_wiring(analyze_files) -> None:
     st = _routes(
         analyze_files,
         "export const routes: Routes = [\n"
         "  { path: 'home', component: HomeComponent },\n"
         "  { path: 'shop', children: [ { path: 'cart', component: CartComponent } ] },\n];\n",
     )
-    assert [(r.routeKind, r.handler) for r in _at(st, "/shop")] == [("page", None)]
+    assert _at(st, "/shop") == []
 
 
 def test_children_only_parent_prefixes_children(analyze_files) -> None:
@@ -115,8 +160,7 @@ def test_children_only_parent_prefixes_children(analyze_files) -> None:
     assert r.handler == "CartComponent"
 
 
-def test_layout_with_empty_path_child_is_recorded_as_a_page(analyze_files) -> None:
-    # The Target Spec's current form: the layout and its '' child are both pages at its URL.
+def test_layout_with_empty_path_child_is_wiring(analyze_files) -> None:
     st = _routes(
         analyze_files,
         "export const routes: Routes = [\n"
@@ -124,7 +168,7 @@ def test_layout_with_empty_path_child_is_recorded_as_a_page(analyze_files) -> No
         "    { path: '', component: SettingsHome },\n"
         "    { path: 'profile', component: Profile },\n  ] },\n];\n",
     )
-    assert sorted(r.handler for r in _at(st, "/settings")) == ["SettingsHome", "SettingsShell"]
+    assert [r.handler for r in _at(st, "/settings")] == ["SettingsHome"]
     assert [r.handler for r in _at(st, "/settings/profile")] == ["Profile"]
 
 
