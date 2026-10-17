@@ -644,6 +644,20 @@ def _maproute_url(call: Node, source: bytes) -> str | None:
     return strings[1] if len(strings) >= 2 else None
 
 
+#: Statement nodes that are just a call (``routes.MapRoute(…);``), in C# and VB.
+_CALL_STATEMENTS = frozenset({"expression_statement", "call_statement"})
+
+
+def _call_statement(call: Node) -> Node:
+    """The statement that is just ``call`` (through VB's ``expression`` wrapper), else ``call``."""
+    node = call
+    while node.parent is not None and node.parent.start_byte == call.start_byte:
+        node = node.parent
+        if node.type in _CALL_STATEMENTS:
+            return node
+    return call
+
+
 def detect_route_registrations(
     root: Node,
     source: bytes,
@@ -657,7 +671,9 @@ def detect_route_registrations(
     ``RouteConfig`` / ``Global.asax`` / an ``AreaRegistration``. Emits the declared URL template
     as a ``route`` (method ``ANY``, since a convention route matches any verb), with the default
     ``controller``[.``action``] as the handler — the Target Spec's current form, a convention
-    template (``{controller}/{action}/{id}``) included. Grammar-specific node/field names are
+    template (``{controller}/{action}/{id}``) included; there the handler is empty, since the
+    URL picks it. The record is the ``MapRoute(…)`` statement itself when the base parser
+    captured one, else a new one on the call. Grammar-specific node/field names are
     supplied by the C#/VB caller. Returns the records and whether any registration was seen."""
     routes: list[Emit] = []
     seen_registration = False
@@ -677,9 +693,16 @@ def detect_route_registrations(
                     seen_registration = seen_registration or url is not None
                     ctrl, action = _CTRL_RE.search(text), _ACTION_RE.search(text)
                     if url:
-                        handler = (f"{ctrl.group(1)}.{action.group(1)}" if ctrl and action
+                        # A `{controller}` / `{action}` segment picks the handler per request:
+                        # the defaults only fill an absent segment, so there is no one handler.
+                        variable = "{controller" in url.lower() or "{action" in url.lower()
+                        handler = (None if variable
+                                   else f"{ctrl.group(1)}.{action.group(1)}" if ctrl and action
                                    else ctrl.group(1) if ctrl else None)
-                        routes.append(Emit(child, dict(
+                        # The record is the registration statement itself when the base
+                        # parser captured it (C# `expression_statement`, VB `call_statement`).
+                        stmt = _call_statement(child)
+                        routes.append(Emit(stmt, dict(
                             semanticType="route",
                             method="ANY",
                             endpoint="/" + url.strip("/"),
@@ -687,7 +710,7 @@ def detect_route_registrations(
                             handler=handler,
                             routeKind="route",
                             isRegex=False,
-                        ), parent=path, text=text.split("\n", 1)[0][:200]))
+                        ), parent=path, text=text.split("\n", 1)[0][:200], enrich="same"))
             visit(child)
 
     visit(root)

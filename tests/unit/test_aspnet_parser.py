@@ -327,7 +327,11 @@ def test_mvc_route_registration() -> None:
     assert routes["/products/{id}"].method == "ANY"
     assert routes["/products/{id}"].handler == "Catalog.Details"
     assert "/{controller}/{action}/{id}" in routes            # default template captured
-    assert routes["/{controller}/{action}/{id}"].handler == "Home.Index"
+    # The URL picks the controller and action; the defaults only fill an absent segment.
+    assert routes["/{controller}/{action}/{id}"].handler is None
+    # Each template is the MapRoute statement itself, not a second record on it.
+    assert all("#" not in s.id for s in routes.values())
+    assert routes["/products/{id}"].parentId.endswith("#RegisterRoutes@4")
 
 
 def test_mvc_route_registrations_are_all_recorded() -> None:
@@ -341,8 +345,32 @@ def test_mvc_route_registrations_are_all_recorded() -> None:
     rec = _parse(AspNetCoreParser(), src, "App_Start/RouteConfig.cs")
     routes = {s.endpoint: s.handler for s in rec.statements if s.semanticType == "route"}
     # Every template is a route (the Target Spec's current form); the handler is its defaults.
-    assert routes == {"/about": "Home.About", "/admin/{action}": "Admin.Index",
+    assert routes == {"/about": "Home.About", "/admin/{action}": None,
                       "/shop/{id}": "Shop", "/api/{controller}/{id}": None}
+
+
+def test_mvc_catch_all_route_keeps_its_fixed_handler() -> None:
+    # `{*slug}` is a parameter, not the controller or action: the defaults name the handler.
+    src = (b"using System.Web.Mvc;\nnamespace A {\npublic class RouteConfig {\n"
+           b"public static void RegisterRoutes(RouteCollection routes) {\n"
+           b'routes.MapRoute("Pages", "{*slug}", new { controller = "PageContent", action = "Index" });\n'
+           b"} } }")
+    rec = _parse(AspNetCoreParser(), src, "App_Start/RouteConfig.cs")
+    [r] = [s for s in rec.statements if s.semanticType == "route"]
+    assert (r.method, r.endpoint, r.handler) == ("ANY", "/{*slug}", "PageContent.Index")
+
+
+def test_vb_mvc_route_registration() -> None:
+    src = (b"Imports System.Web.Mvc\nPublic Module RouteConfig\n"
+           b"  Public Sub RegisterRoutes(routes As RouteCollection)\n"
+           b'    routes.MapRoute("About", "about", New With {.controller = "Home", .action = "About"})\n'
+           b'    routes.MapRoute("Default", "{controller}/{action}/{id}", New With {.controller = "Home", .action = "Index"})\n'
+           b"  End Sub\nEnd Module\n")
+    rec = _parse(VbAspNetParser(), src, "App_Start/RouteConfig.vb")
+    routes = {s.endpoint: s for s in rec.statements if s.semanticType == "route"}
+    assert {e: r.handler for e, r in routes.items()} == {
+        "/about": "Home.About", "/{controller}/{action}/{id}": None}
+    assert all("#" not in r.id for r in routes.values())
 
 
 def test_csharp_minimal_apis() -> None:

@@ -116,10 +116,11 @@ def test_conventional_mvc_action_is_binding(analyze_files) -> None:
 
 
 def test_maproute_registration_is_an_any_route(analyze_files) -> None:
-    # The Target Spec's current form: the template is a route, method ANY, handler = its defaults.
+    # The Target Spec's current form: the template is a route, method ANY, on the MapRoute
+    # statement. The URL picks the controller and action, so there is no one handler.
     stmts = analyze_files({"RouteConfig.cs": ROUTE_CONFIG})
-    assert [(s.method, s.endpoint, s.handler) for s in _eps(stmts)] == [
-        ("ANY", "/{controller}/{action}/{id}", "Home.Index"),
+    assert [(s.id, s.method, s.endpoint, s.handler) for s in _eps(stmts)] == [
+        ("RouteConfig.cs:8:8", "ANY", "/{controller}/{action}/{id}", None),
     ]
 
 
