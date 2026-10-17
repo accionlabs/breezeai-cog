@@ -88,6 +88,8 @@ def test_router_factory_mount_prefixes_its_routes(analyze_files) -> None:
     )
     [r] = [s for s in _eps(st) if s.path == "src/users.js"]
     assert r.endpoint == "/users/:id"
+    # A confirmed router's mount is wiring: plain, its prefix is on the router's routes.
+    assert not [s for s in st if s.path == "src/app.js" and s.semanticType == "route"]
 
 
 def test_router_instance_mount_prefixes_its_routes(analyze_files) -> None:
@@ -101,6 +103,7 @@ def test_router_instance_mount_prefixes_its_routes(analyze_files) -> None:
     )
     [r] = [s for s in _eps(st) if s.path == "src/items.js"]
     assert r.endpoint == "/items"
+    assert not [s for s in st if s.path == "src/app.js" and s.semanticType == "route"]
 
 
 def test_same_file_router_mount_prefixes_its_routes(analyze_files) -> None:
@@ -122,8 +125,34 @@ def test_app_level_middleware_is_a_guard_on_later_routes(analyze_files) -> None:
     assert r.guards == ["authenticate"]
 
 
-def test_ambiguous_use_is_wiring(analyze_files) -> None:
+def test_static_files_mount_is_a_route(analyze_files) -> None:
+    # express.static serves the files itself: a route at the path, every verb, no handler of ours.
     st = _app(analyze_files, "app.use('/static', express.static('public'));\n")
+    assert [(s.method, s.endpoint, s.handler, s.routeKind) for s in _eps(st)] == [
+        ("ANY", "/static", None, "route")]
+
+
+def test_swagger_ui_mount_is_a_route(analyze_files) -> None:
+    st = _app(analyze_files, "import swaggerUi from 'swagger-ui-express';\n"
+              "app.use('/api-docs', swaggerUi.serve, swaggerUi.setup(spec));\n")
+    assert [(s.method, s.endpoint, s.handler, s.framework) for s in _eps(st)] == [
+        ("ANY", "/api-docs", None, "express")]
+
+
+def test_graphql_http_handler_mount_is_a_route(analyze_files) -> None:
+    st = _app(analyze_files, "const { graphqlHTTP } = require('express-graphql');\n"
+              "app.use('/graphql', graphqlHTTP({ schema }));\n")
+    assert [(s.method, s.endpoint, s.framework) for s in _eps(st)] == [
+        ("ANY", "/graphql", "graphql")]
+
+
+def test_unknown_router_mount_keeps_a_mount_record(analyze_files) -> None:
+    # A router from a package: nothing in the repo is served under /billing but this record.
+    st = _app(analyze_files, "import { billingRouter } from '@acme/billing';\n"
+              "app.use('/billing', billingRouter);\n")
+    got = [(s.method, s.endpoint, s.handler, s.routeKind) for s in st
+           if s.semanticType == "route" and s.path == "src/app.js"]
+    assert got == [("ANY", "/billing", "billingRouter", "mount")]
     assert _eps(st) == []
 
 

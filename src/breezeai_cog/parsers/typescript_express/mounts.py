@@ -66,6 +66,9 @@ class ExpressMounts:
     routers: dict[str, dict[str, str]] = field(default_factory=dict)
     factory_guards: dict[str, tuple[str, ...]] = field(default_factory=dict)
     router_guards: dict[str, dict[str, tuple[str, ...]]] = field(default_factory=dict)
+    #: The mount sites (``file:line``) whose router is confirmed and keeps their base: its
+    #: routes are recorded at the mount's prefix, so the mount itself is wiring, nothing more.
+    served: frozenset[str] = frozenset()
 
 
 def mw_name(node: Node, source: bytes) -> str | None:
@@ -190,7 +193,7 @@ def _distinct_guards(items: Any) -> dict[Any, tuple[str, ...]]:
 
 def _confirm_instance_mounts(
     candidates: list[_InstanceMount], router_exports: dict[str, dict[str, str]]
-) -> tuple[dict[str, dict[str, str]], dict[str, dict[str, tuple[str, ...]]]]:
+) -> tuple[dict[str, dict[str, str]], dict[str, dict[str, tuple[str, ...]]], set[str]]:
     """Keep the router-instance mounts the target file confirms: the imported name is a
     ``Router()`` that file exports. A mount site with more than one confirmed router is skipped,
     and a router mounted at >1 distinct base is dropped (honest-null: its routes keep their own
@@ -204,14 +207,15 @@ def _confirm_instance_mounts(
     wiring = [Wiring((target, local), "prefix", base, site)
               for site, (target, local, base, _) in hits]
     out: dict[str, dict[str, str]] = {}
-    for (target, router_var), served in resolve_wiring(wiring).items():
-        out.setdefault(target, {})[router_var] = served
+    for (target, router_var), base in resolve_wiring(wiring).items():
+        out.setdefault(target, {})[router_var] = base
+    served = {site for site, (target, local, _, _) in hits if local in out.get(target, {})}
     guards_out: dict[str, dict[str, tuple[str, ...]]] = {}
     for (target, router_var), guards in _distinct_guards(
         ((target, local), guards) for _, (target, local, _, guards) in hits
     ).items():
         guards_out.setdefault(target, {})[router_var] = guards
-    return out, guards_out
+    return out, guards_out, served
 
 
 def _collect_express_mounts(
@@ -302,13 +306,16 @@ def _resolve(values: list[_FileMounts], index: object) -> ExpressMounts | None:
         candidates.extend(file_instances)
         if exports:
             router_exports[rel] = exports
-    routers, router_guards = _confirm_instance_mounts(candidates, router_exports)
+    routers, router_guards, served = _confirm_instance_mounts(candidates, router_exports)
+    factory_bases = {scope[0]: base
+                     for scope, base in resolve_wiring(w for w, _ in factories).items()}
+    served |= {w.site for w, _ in factories if w.scope[0] in factory_bases}
     mounts = ExpressMounts(
-        factories={scope[0]: base
-                   for scope, base in resolve_wiring(w for w, _ in factories).items()},
+        factories=factory_bases,
         routers=routers,
         factory_guards=_distinct_guards((w.scope[0], g) for w, g in factories),
         router_guards=router_guards,
+        served=frozenset(served),
     )
     return mounts if mounts.factories or mounts.routers else None
 

@@ -23,7 +23,9 @@ from ...schemas import FileRecord
 from ..additive import DetectContext, Detection, Detector, Gate, register_detector
 from ..emits import Emit
 from ..treesitter import node_text
-from ..typescript.imports import relative_requires, resolve_const_value, router_locals
+from ..typescript.imports import (
+    _module_of, _require_module, relative_requires, resolve_const_value, router_locals,
+)
 from ..wiring import compose_guards
 from .mounts import express_mounts, mw_name
 
@@ -191,10 +193,88 @@ def _resolve_str_identifier(name: str, root: Node, source: bytes) -> str | None:
     return found
 
 
+# Framework middleware mounted at a path serves requests itself — it is a route, not a router
+# mount: (package, export) → framework label. ``*`` is the package's default / namespace binding.
+_SERVING_MIDDLEWARE: dict[tuple[str, str], str] = {
+    ("swagger-ui-express", "serve"): "express",
+    ("swagger-ui-express", "setup"): "express",
+    ("swagger-ui-express", "serveFiles"): "express",
+    ("express", "static"): "express",
+    ("serve-static", "*"): "express",
+    ("express-graphql", "graphqlHTTP"): "graphql",
+    ("graphql-http/lib/use/express", "createHandler"): "graphql",
+}
+
+
+def package_locals(root: Node, source: bytes) -> dict[str, tuple[str, str]]:
+    """Local name → (package, the export it binds; ``*`` for the default / namespace) for the
+    file's package imports and top-level ``require``s: ``import swaggerUi from
+    'swagger-ui-express'`` → ``swaggerUi: ('swagger-ui-express', '*')``; ``const { graphqlHTTP }
+    = require('express-graphql')`` → ``graphqlHTTP: ('express-graphql', 'graphqlHTTP')``.
+    Relative imports are left out (they are the repo's own code)."""
+    out: dict[str, tuple[str, str]] = {}
+    for node in root.named_children:
+        if node.type == "import_statement":
+            module = _module_of(node, source)
+            clause = next((c for c in node.named_children if c.type == "import_clause"), None)
+            if module is None or module.startswith(".") or clause is None:
+                continue
+            for c in clause.named_children:
+                if c.type == "identifier":
+                    out[node_text(c, source)] = (module, "*")
+                elif c.type == "namespace_import":
+                    ident = next((x for x in c.named_children if x.type == "identifier"), None)
+                    if ident is not None:
+                        out[node_text(ident, source)] = (module, "*")
+                elif c.type == "named_imports":
+                    for spec in c.named_children:
+                        idents = [x for x in spec.named_children if x.type == "identifier"]
+                        if spec.type == "import_specifier" and idents:
+                            out[node_text(idents[-1], source)] = (module, node_text(idents[0], source))
+        elif node.type in ("lexical_declaration", "variable_declaration"):
+            for d in node.named_children:
+                name = d.child_by_field_name("name") if d.type == "variable_declarator" else None
+                value = d.child_by_field_name("value")
+                module = _require_module(value, source) \
+                    if name is not None and value is not None and value.type == "call_expression" \
+                    else None
+                if name is None or module is None or module.startswith("."):
+                    continue
+                if name.type == "identifier":
+                    out[node_text(name, source)] = (module, "*")
+                elif name.type == "object_pattern":
+                    for prop in name.named_children:
+                        if prop.type == "shorthand_property_identifier_pattern":
+                            out[node_text(prop, source)] = (module, node_text(prop, source))
+    return out
+
+
+def _serving_middleware(chain: list[Node], source: bytes,
+                        packages: dict[str, tuple[str, str]]) -> str | None:
+    """The framework label when a mount's args are known serving middleware
+    (:data:`_SERVING_MIDDLEWARE`) — ``swaggerUi.serve``, ``express.static('public')`` — else None."""
+    for arg in chain:
+        ref = arg.child_by_field_name("function") if arg.type == "call_expression" else arg
+        if ref is None:
+            continue
+        if ref.type == "member_expression":
+            obj, prop = ref.child_by_field_name("object"), ref.child_by_field_name("property")
+            pkg = packages.get(node_text(obj, source)) if obj is not None else None
+            key = (pkg[0], node_text(prop, source)) if pkg and pkg[1] == "*" and prop else None
+        elif ref.type == "identifier":
+            key = packages.get(node_text(ref, source))
+        else:
+            key = None
+        if key is not None and key in _SERVING_MIDDLEWARE:
+            return _SERVING_MIDDLEWARE[key]
+    return None
+
+
 def _classify(
     call: Node, source: bytes, root: Node, bindings: dict[str, str],
     routers: frozenset[str] = frozenset(), decl_lines: dict[str, int | None] | None = None,
     consts: dict[str, str | None] | None = None,
+    packages: dict[str, tuple[str, str]] | None = None,
 ) -> tuple[str | None, str | None, str | None, int | None, list[str] | None, str, str] | None:
     """→ (method, endpoint, handler, handlerLine, guards, framework, routeKind), or None if not
     a route. ``guards`` are the named route/mount middleware (auth/interceptor stack); ``bindings``
@@ -245,13 +325,19 @@ def _classify(
                 endpoint = _resolve_str_identifier(node_text(arg0, source), root, source)
             return "POST", endpoint or "/graphql", None, None, None, "graphql", "route"
         if has_path and (path is None or path.startswith("/")):
-            # ``app.use('/mount', ...guards, subRouter, ...guards)`` mounts a sub-router: a
-            # ``route`` / ``mount`` record (the Target Spec's form for wiring), whose handler is the
-            # mounted router and whose guards are the surrounding middleware. Its prefix and
-            # middleware also reach the mounted routes (the express.router-mounts fact and the
-            # same-file mount composition). Bare ``app.use(mw)`` is a guard, not a mount.
+            # Framework middleware that serves requests itself (Swagger UI, static files, a
+            # GraphQL HTTP handler) is a route at the path, every verb, no handler of ours.
+            serving = _serving_middleware(chain, source, packages or {})
+            if serving is not None:
+                return "ANY", path, None, None, None, serving, "route"
+            # ``app.use('/mount', ...guards, subRouter, ...guards)`` mounts a sub-router: its
+            # prefix and middleware reach the mounted routes (the express.router-mounts fact and
+            # the same-file mount composition), so a confirmed router's mount is plain (the
+            # detector drops it). Any other is a ``route`` / ``mount`` record, every verb (the
+            # Target Spec's current form), its address recorded nowhere else. Bare ``app.use(mw)``
+            # is a guard, not a mount.
             handler, handler_line, guards = _mount_parts(chain, source, bindings)
-            return None, path, handler, handler_line, guards, "express", "mount"
+            return "ANY", path, handler, handler_line, guards, "express", "mount"
         return None
     return None  # includes ``route(path)``: wiring for its chained verbs
 
@@ -524,11 +610,17 @@ def detect_express(
         {n for n, ln in decl_lines.items() if ln is not None},
     )
 
+    packages = package_locals(root, source)
+    # Routers mounted in this file whose base resolved: their routes carry the mount's prefix.
+    local_served = {r for r in routers if r in receiver_base and r not in imported}
     for call in _invocations(root):
-        info = _classify(call, source, root, binds, routers, decl_lines, consts)
+        info = _classify(call, source, root, binds, routers, decl_lines, consts, packages)
         if info is None:
             continue
         method, endpoint, handler, handler_line, guards, framework, route_kind = info
+        if route_kind == "mount" and _mounts_served_router(
+                call, source, path, mounts.served, local_served):
+            continue  # wiring: its prefix and middleware are on the router's routes
         served = _apply_base(
             receiver_base.get(_receiver(call, source), mount_base), framework, route_kind, endpoint
         )
@@ -554,6 +646,19 @@ def detect_express(
             enrich="any",
         ))
     return found
+
+
+def _mounts_served_router(call: Node, source: bytes, path: str, served: frozenset[str],
+                          local_served: set[str]) -> bool:
+    """Whether a mount's router is confirmed and keeps its base — another file's router or
+    factory (``express.router-mounts``), or a ``Router()`` of this file — so its routes record
+    the prefix and the mount adds nothing."""
+    if f"{path}:{call.start_point[0] + 1}" in served:
+        return True
+    args = call.child_by_field_name("arguments")
+    return args is not None and any(
+        a.type == "identifier" and node_text(a, source) in local_served
+        for a in args.named_children[1:])
 
 
 def _detect(dc: DetectContext) -> Detection | None:

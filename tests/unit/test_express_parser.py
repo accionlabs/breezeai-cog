@@ -64,9 +64,14 @@ def test_routes_detected(tmp_path) -> None:
         ("POST", "/book"),       # ... .post(postBook); route('/book') itself is wiring
         ("DELETE", "/orders/:id"),
         ("GET", "/ping"),        # express.Router().get(...) direct-constructor receiver
-        (None, "/api"),          # app.use('/api', router): a route / mount record
+        ("ANY", "/api"),         # Router().use('/api', apiRouter): apiRouter is unknown
     }
-    assert routes[(None, "/api")].routeKind == "mount"
+    # app.use('/api', router) mounts this file's router, whose routes carry /api: plain.
+    # Router().use('/api', apiRouter) mounts a router found nowhere: a route / mount record.
+    assert (routes[("ANY", "/api")].routeKind, routes[("ANY", "/api")].handler) == (
+        "mount", "apiRouter")
+    [mount] = [st for st in rec.statements if st.text == "app.use('/api', router);"]
+    assert mount.semanticType is None
     assert routes[("POST", "/api/users")].handler == "createUser"
     assert routes[("DELETE", "/orders/:id")].handler == "deleteOrder"
     assert (routes[("GET", "/book")].handler, routes[("POST", "/book")].handler) == (
@@ -132,7 +137,7 @@ def test_template_literal_paths(tmp_path) -> None:
     assert ("GET", None, "sitemapHandler") in routes
     assert ("GET", "/plain", "plainHandler") in routes  # a template with no substitution
     assert ("GET", None, "assetHandler") in routes
-    assert (None, None, "router") in routes             # a mount whose template path is unknown
+    assert ("ANY", None, "router") in routes            # a mount whose template path is unknown
 
 
 def test_template_path_resolves_through_constants(analyze_files) -> None:
@@ -169,9 +174,9 @@ def test_apollo_graphql_mount_detected(tmp_path) -> None:
                        repo_root=tmp_path, capture_statements=True)
     rec = TypeScriptParser().parse_file(ctx)
     routes = {(s.method, s.endpoint): s for s in rec.statements if s.semanticType == "route"}
-    # /health stays a plain express route; /api stays an express mount.
+    # /health stays a plain express route; /api (a router found nowhere) stays an express mount.
     assert ("GET", "/health") in routes and routes[("GET", "/health")].framework == "express"
-    assert (None, "/api") in routes and routes[(None, "/api")].routeKind == "mount"
+    assert ("ANY", "/api") in routes and routes[("ANY", "/api")].routeKind == "mount"
     # the expressMiddleware mount is a POST /graphql route tagged graphql (path resolved
     # from the graphqlPath param default).
     gql = routes[("POST", "/graphql")]

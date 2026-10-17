@@ -183,7 +183,7 @@ also copied into the bindings' records:
 
 | Construct (role) | Written as | `routeKind` |
 |---|---|---|
-| Router mount, Angular lazy route group whose loaded routes aren't in the repo, Play `->` include (Wiring) | `route`, `endpoint` = the full prefix, `handler` = the router / module | `mount` |
+| Express router mount and Angular lazy route group whose routes aren't in the repo, Play `->` include (Wiring) | `route`, `endpoint` = the full prefix, `handler` = the router / module | `mount` |
 | Link or programmatic navigation (Outbound) | `route`, `endpoint` = the target page | `navigation` |
 | GraphQL transport mount (`MapGraphQL`, Apollo `expressMiddleware`) | `route`, `POST`, `framework: graphql`, no handler | `route` |
 | `MapRoute` / `MapHttpRoute` convention template | `route`, `ANY` on the `MapRoute(…)` statement; `handler` = the default `Controller.Action`, empty when the template has `{controller}` or `{action}` | `route` |
