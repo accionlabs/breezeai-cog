@@ -30,10 +30,15 @@ Rule            Severity Violation
                          handler (§8); one address serving several handlers (a Vert.x
                          service proxy's methods) is several bindings
 ``guards``      error    an empty list, an empty name or a repeated name (§5)
+``handlerPath`` error    an empty string, the record's own file, an absolute path, or a path
+                         with no ``handler`` (an anonymous handler is always in its own file)
+                         (§5)
 ``handler``     gap      neither ``handler`` nor ``handlerLine``, except for a URL served
                          by framework code — health checks, GraphQL transports and UIs,
                          Swagger UI, static files, WebJars, Relay ``node`` fields (§4, §8
                          "every record leads to its handler")
+``handlerLine`` gap      a named ``handler`` with no ``handlerLine``: declared elsewhere and
+                         not located (no ``handlerPath``), so the record cannot lead to it
 ``outbound``    error    an outbound record (``api_call``, a ``route`` link with
                          ``routeKind: navigation``, ``eventbus_send`` / ``_publish``)
                          whose ``endpoint`` is an empty
@@ -73,7 +78,7 @@ ROUTE_KINDS: dict[str, frozenset[str | None]] = {
 _PLACEHOLDERS = ("${", "#{", "`")
 
 #: Rules whose violation is a missing value, not a wrong one.
-_GAPS = frozenset({"handler"})
+_GAPS = frozenset({"handler", "handlerLine"})
 
 
 @dataclass(frozen=True, slots=True)
@@ -128,6 +133,13 @@ def _check(s: Statement) -> list[tuple[str, str]]:
         found.append(("endpoint", bad))
     if not s.handler and s.handlerLine is None and not _framework_served(s):
         found.append(("handler", "no handler and no handlerLine"))
+    if s.handler and s.handlerLine is None:
+        found.append(("handlerLine", f"{s.handler!r} not located"))
+    if s.handlerPath is not None and (
+        not s.handlerPath or s.handlerPath == s.path or s.handlerPath.startswith("/")
+        or not s.handler
+    ):
+        found.append(("handlerPath", repr(s.handlerPath)))
     if s.guards is not None and (
         not s.guards or not all(s.guards) or len(set(s.guards)) != len(s.guards)
     ):

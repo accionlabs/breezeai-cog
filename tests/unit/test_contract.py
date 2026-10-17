@@ -9,6 +9,7 @@ from breezeai_cog.schemas import FileRecord, Statement
 def _route(line: int = 1, **fields) -> Statement:
     base = dict(
         id=f"a.ts:{line}:0", parentId="a.ts", nodeType="call_expression", text="app.get('/x', h)",
+        path="a.ts",
         startLine=line, endLine=line, semanticType="route", framework="express", method="GET",
         routeKind="route", endpoint="/x", handler="h", handlerLine=line,
     )
@@ -45,6 +46,20 @@ def test_a_missing_handler_is_a_gap() -> None:
     assert _rules(_route(handler=None, handlerLine=None)) == [("handler", "gap")]
     # An anonymous handler: no name, its line.
     assert _rules(_route(handler=None)) == []
+
+
+def test_a_handler_that_cannot_be_located_is_a_gap() -> None:
+    # Named, declared in another file, but neither its file nor its line is known.
+    assert _rules(_route(handlerLine=None)) == [("handlerLine", "gap")]
+    # Located in another file: its path and its line there.
+    assert _rules(_route(handlerPath="src/handlers.ts", handlerLine=12)) == []
+
+
+def test_a_wrong_handler_path_is_an_error() -> None:
+    for bad in ("", "a.ts", "/abs/src/handlers.ts"):  # empty, the record's own file, absolute
+        assert ("handlerPath", "error") in _rules(_route(handlerPath=bad))
+    # An anonymous handler is always in the record's own file.
+    assert ("handlerPath", "error") in _rules(_route(handler=None, handlerPath="src/h.ts"))
 
 
 def test_a_framework_served_url_needs_no_handler() -> None:
