@@ -174,13 +174,14 @@ def test_verified_line_shapes_parse(tmp_path: Path) -> None:
     assert ("POST", "/login", "controllers.AuthController.login") in got
 
 
-def test_mount_include_has_null_method(tmp_path: Path) -> None:
-    # `-> /v1/posts v1.post.PostRouter` includes another router: a route / mount record.
+def test_include_of_a_router_not_in_the_routes_files_is_a_mount(tmp_path: Path) -> None:
+    # `-> /v1/posts v1.post.PostRouter` names no routes file of the repo: a route / mount record,
+    # every verb. `-> /webjars webjars.Routes` serves the WebJars assets: a GET route.
     rec = _parse_routes(tmp_path)
-    mounts = {(s.endpoint, s.handler): s for s in rec.statements if s.routeKind == "mount"}
-    assert ("/v1/posts", "v1.post.PostRouter") in mounts
-    assert ("/webjars", "webjars.Routes") in mounts
-    assert all(s.method is None for s in mounts.values())
+    got = {(s.endpoint, s.method, s.handler, s.routeKind) for s in rec.statements
+           if s.text.startswith("->")}
+    assert got == {("/v1/posts", "ANY", "v1.post.PostRouter", "mount"),
+                   ("/webjars", "GET", None, "route")}
 
 
 def test_regex_path_part_sets_is_regex(tmp_path: Path) -> None:

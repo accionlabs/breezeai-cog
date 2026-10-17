@@ -79,6 +79,23 @@ def test_included_routes_file_is_served_under_the_include_prefix(analyze_files) 
         }
     )
     assert _served(st) == [("conf/admin.routes", "/admin"), ("conf/admin.routes", "/admin/users")]
+    # The include is wiring: its prefix is on the included routes, so it has no record.
+    assert not [s for s in st if s.path == "conf/routes" and s.semanticType == "route"]
+
+
+def test_include_of_an_empty_routes_file_keeps_a_mount_record(analyze_files) -> None:
+    # conf/admin.routes has no binding: the include is the only record of /admin.
+    st = analyze_files({"conf/routes": "->      /admin           admin.Routes\n",
+                        "conf/admin.routes": "# nothing yet\n"})
+    got = [(s.endpoint, s.routeKind) for s in st if s.path == "conf/routes"]
+    assert got == [("/admin", "mount")]
+
+
+def test_grpc_router_include_keeps_a_mount_record(analyze_files) -> None:
+    # A generated gRPC router is not in the repo's sources: the include is its only record.
+    st = analyze_files({"conf/routes": "->      /                routers.HelloWorldRouter\n"})
+    got = [(s.endpoint, s.method, s.handler, s.routeKind) for s in st if s.path == "conf/routes"]
+    assert got == [("/", "ANY", "routers.HelloWorldRouter", "mount")]
 
 
 def test_includes_chain(analyze_files) -> None:

@@ -36,6 +36,8 @@ FACT = "play.router-includes"
 #: The router Play compiles ``conf/routes`` into; it is served at the root.
 MAIN_ROUTER = "router.Routes"
 
+#: A binding line (``GET /users controllers.Users.list``).
+ROUTE_LINE_RE = re.compile(r"^\s*(GET|POST|PUT|DELETE|PATCH|HEAD|OPTIONS)\s+\S+\s+\S")
 INCLUDE_RE = re.compile(r"^\s*->\s+(?P<prefix>\S+)\s+(?P<router>[\w.$]+)\s*$")
 
 
@@ -61,9 +63,20 @@ def join(prefix: str, path: str) -> str:
 
 @dataclass(frozen=True)
 class RouterIncludes:
-    """``prefixes``: router name → the prefix it is served under (``""`` for the main router)."""
+    """``prefixes``: router name → the prefix it is served under (``""`` for the main router).
+    ``defined``: the routers the repo's routes files define (``conf/admin.routes`` →
+    ``admin.Routes``) with at least one binding or include."""
 
     prefixes: dict[str, str] = field(default_factory=dict)
+    defined: frozenset[str] = frozenset()
+
+
+def served_routers(index: Any | None) -> frozenset[str]:
+    """The routers a routes file of the repo defines and whose prefix resolves: an include of
+    one is wiring with nothing left to say (its routes carry the prefix)."""
+    fact: RouterIncludes | None = index_fact(index, FACT)
+    return frozenset(r for r in fact.defined if r in fact.prefixes) if fact is not None \
+        else frozenset()
 
 
 def router_prefix(index: Any | None, router: str) -> str | None:
@@ -72,8 +85,8 @@ def router_prefix(index: Any | None, router: str) -> str | None:
     return fact.prefixes.get(router) if fact is not None else None
 
 
-#: One routes file: its router name, and its includes as (wiring, includer router).
-_FileIncludes = tuple[str, list[Wiring]]
+#: One routes file: its router name, its includes, and whether it has any binding or include.
+_FileIncludes = tuple[str, list[Wiring], bool]
 
 
 def collect_includes(source: bytes, rel: str) -> _FileIncludes | None:
@@ -86,7 +99,8 @@ def collect_includes(source: bytes, rel: str) -> _FileIncludes | None:
         m = INCLUDE_RE.match(line)
         if m is not None:
             wiring.append(Wiring((m["router"],), "prefix", m["prefix"], f"{rel}:{lineno}"))
-    return router_name(rel), wiring
+    has_routes = bool(wiring) or any(ROUTE_LINE_RE.match(line) for line in text.splitlines())
+    return router_name(rel), wiring, has_routes
 
 
 def resolve_includes(values: list[_FileIncludes]) -> RouterIncludes | None:
@@ -94,8 +108,9 @@ def resolve_includes(values: list[_FileIncludes]) -> RouterIncludes | None:
     includer: dict[str, str | None] = {}
     wiring: list[Wiring] = []
     defined: set[str] = set()
-    for router, items in values:
-        defined.add(router)
+    for router, items, has_routes in values:
+        if has_routes:
+            defined.add(router)
         for w in items:
             wiring.append(w)
             record_distinct(includer, w.scope[0], router)
@@ -118,7 +133,7 @@ def resolve_includes(values: list[_FileIncludes]) -> RouterIncludes | None:
 
     for router in sorted(relative):
         full(router)
-    return RouterIncludes(prefixes) if prefixes else None
+    return RouterIncludes(prefixes, frozenset(defined)) if prefixes else None
 
 
 def _collect(root: object, source: bytes, rel: str, repo_root: Path | None) -> _FileIncludes | None:

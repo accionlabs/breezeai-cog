@@ -26,6 +26,7 @@ from ..treesitter import parse_source
 from .actions import detect_play_actions, detect_play_sird_routes
 from .includes import (
     FACT, collect_includes, is_routes_file, resolve_includes, router_name, router_prefix,
+    served_routers,
 )
 from .routes import extract_routes
 
@@ -81,7 +82,8 @@ class PlayRoutesParser(BaseParser):
     def parse_file(self, ctx: ParseContext) -> FileRecord:
         text = ctx.source.decode("utf-8", "replace")
         prefix = router_prefix(ctx.resolution_index, router_name(ctx.path))
-        statements = extract_routes(text, ctx.path, prefix) if ctx.capture_statements else []
+        statements = (extract_routes(text, ctx.path, prefix, served_routers(ctx.resolution_index))
+                      if ctx.capture_statements else [])
         return FileRecord(
             id=file_id(ctx.path),
             path=ctx.path,
