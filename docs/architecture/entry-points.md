@@ -187,7 +187,7 @@ also copied into the bindings' records:
 | Link or programmatic navigation (Outbound) | `route`, `endpoint` = the target page | `navigation` |
 | GraphQL transport mount (`MapGraphQL`, Apollo `expressMiddleware`) | `route`, `POST`, `framework: graphql`, no handler | `route` |
 | `MapRoute` / `MapHttpRoute` convention template | `route`, `ANY` on the `MapRoute(…)` statement; `handler` = the default `Controller.Action`, empty when the template has `{controller}` or `{action}` | `route` |
-| GraphQL SDL root field (`type Query { books }`) | `route`, operation kind, field name, DTOs, no handler | `query` / `mutation` / `subscription` |
+| GraphQL SDL Relay field (`node` / `nodes` on `Query`) of a server's schema | `route`, `QUERY`, field name, DTOs, no handler (framework-served) | `query` |
 
 The validator (`parsers/contract.py`) does not count `mount`, `layout` and `navigation` records
 as entry points, and checks a `navigation` record's address like any outbound one. The other rows

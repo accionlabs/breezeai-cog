@@ -26,16 +26,17 @@ they live in two shapes, in separate files:
       `;
 
   The SDL lives in an opaque ``template_string``; we re-parse it with the dedicated
-  ``graphql`` grammar and walk the SDL AST, so each field yields a route with
+  ``graphql`` grammar and walk the SDL AST, so each field yields a plain statement with
   ``requestDTO`` (an ``input:``/first arg type) and ``responseDTO`` (the return type),
   wrappers stripped. ``extend type Query`` is also matched.
 
-Both emit ``semanticType="route"``, ``framework="graphql"``, ``routeKind ∈ {query, mutation,
+The resolver-map entry is the entry point (it names the code that runs): it emits
+``semanticType="route"``, ``framework="graphql"``, ``routeKind ∈ {query, mutation,
 subscription}``, ``method`` the upper-cased operation kind (GraphQL has no per-operation
 HTTP verb — the transport is a single ``POST /graphql``, detected separately by the Express
-mount). The resolver-map entry names the code that runs; the SDL root field declares the
-operation and its DTOs — the Target Spec's current form records both. Routes are parented to
-the file (config/markup, not handler methods), mirroring the React/Angular config detectors."""
+mount). The SDL root field only declares the operation: it is captured as a plain statement,
+never an entry point, so one operation has one record. Routes are parented to the file
+(config/markup, not handler methods), mirroring the React/Angular config detectors."""
 
 from __future__ import annotations
 

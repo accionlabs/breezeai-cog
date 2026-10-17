@@ -143,8 +143,11 @@ def test_resolver_map_operations_detected(tmp_path) -> None:
 
 
 def test_sdl_operations_detected_with_dtos(tmp_path) -> None:
+    # SDL root fields declare operations; the resolver map is the entry point, so each root
+    # field is a plain statement (name, text, DTOs) — never a route.
     rec = _parse(tmp_path, SDL_SRC, "schema.ts")
-    routes = {s.endpoint: s for s in rec.statements if s.semanticType == "route"}
+    assert [s for s in rec.statements if s.semanticType == "route"] == []
+    routes = {s.name: s for s in rec.statements if s.requestDTO or s.responseDTO}
     assert set(routes) == {
         "procurementItem",
         "procurementItems",
@@ -202,12 +205,11 @@ def test_client_ops_ignore_plain_template_and_server_sdl(tmp_path) -> None:
     assert [s for s in rec.statements if s.semanticType in ("route", "api_call")] == []
     assert rec.framework is None
 
-    # Server SDL is handled by the SDL pass (semanticType=route, routeKind query/mutation),
-    # never emitted as a client ``api_call`` — SDL and client passes are disjoint by GraphQL
-    # node type.
+    # Server SDL is handled by the SDL pass (plain statements, no route — the resolver is the
+    # entry point), never emitted as a client ``api_call`` — SDL and client passes are
+    # disjoint by GraphQL node type.
     rec_sdl = _parse(tmp_path, SDL_SRC, "schema.ts")
-    kinds = {s.routeKind for s in rec_sdl.statements if s.semanticType == "route"}
-    assert kinds == {"query", "mutation"}
+    assert [s for s in rec_sdl.statements if s.semanticType == "route"] == []
     assert [
         s for s in rec_sdl.statements if s.semanticType == "api_call"
     ] == []  # no client-op leakage
@@ -227,9 +229,8 @@ def test_key_entities_detected(tmp_path) -> None:
     assert entities["ProcurementItem"].keyFields == ["id"]  # selectionSet "{ id }"
     assert entities["Tenderer"].keyFields == ["id", "contactId"]  # fields "id contactId"
     assert entities["ProcurementItem"].nodeType == "synthetic"  # embedded → synthetic
-    # the root Query field still emits its route (entities don't displace routes).
-    routes = {s.endpoint for s in rec.statements if s.semanticType == "route"}
-    assert "procurementItems" in routes
+    # the root Query field is still captured (entities don't displace it), as a plain statement.
+    assert "procurementItems" in {s.name for s in rec.statements if s.semanticType is None}
 
 
 SDL_TYPES_SRC = b"""import gql from 'graphql-tag';

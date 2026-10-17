@@ -2,7 +2,7 @@
 
 Parsers: `src/breezeai_cog/parsers/typescript_graphql/` (Apollo / graphql-tools resolver maps, embedded SDL, client operations) and `src/breezeai_cog/parsers/typescript_graphql_codefirst/` (in-house code-first decorators) · Rules: [entry-point contract](../architecture/entry-points.md) · Tests: `tests/unit/test_roles_graphql_typescript.py`
 
-NestJS resolvers are in [nestjs.md](nestjs.md); SDL root fields — in `.graphql` files and in `gql` `typeDefs` templates — are `route` records with their DTOs and no handler, the Target Spec's current form (the resolver-map entry is the binding)
+NestJS resolvers are in [nestjs.md](nestjs.md); SDL root fields — in `.graphql` files and in `gql` `typeDefs` templates — are plain statements, never entry points (the resolver-map entry is the binding)
 follows [graphql-sdl.md](graphql-sdl.md); the Apollo transport mount is in [express.md](express.md).
 
 | Construct | Role | Record | Why |

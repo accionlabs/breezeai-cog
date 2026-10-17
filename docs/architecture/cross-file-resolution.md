@@ -100,6 +100,7 @@ What each index holds:
 | HCL / Terraform | folder → `.tf` files | local `module` sources |
 | HTML | template → owning component | linking templates to components |
 | Python | **registered facts** (`index.facts`): FastAPI wiring `fastapi.wiring` — `APIRouter` variables (own prefix, dependencies), `include_router` sites (also routers imported from other files), app middleware, module-level string constants used as prefixes; Celery task names `celery.tasks` | route prefixes and guards of routers mounted in another file |
+| GraphQL | **registered facts** (`index.facts`: client projects `graphql.client-configs` — the folders holding a `.graphqlrc.json`, read from those files, which no GraphQL parser owns) | telling a client's copy of a remote schema from a server's own |
 
 > **Decision —** indexes are built once, before parsing, and are read-only afterwards.
 > **Why:** workers share nothing, so files can be parsed in any order and in parallel, with the
