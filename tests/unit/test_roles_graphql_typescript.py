@@ -238,15 +238,16 @@ def test_resolver_map_root_from_a_namespace_import(analyze_files) -> None:
         },
     )
     got = {
-        (r.id.split(":", 1)[1], r.method, r.routeKind, r.endpoint, r.handler, r.handlerLine)
+        (r.id.split(":", 1)[1], r.method, r.routeKind, r.endpoint, r.handler, r.handlerPath,
+         r.handlerLine)
         for r in _eps(st)
     }
-    # One record per operation on the root key; handlerLine is empty because the function is
-    # declared in another file (handlerPath isn't emitted yet).
+    # One record per operation on the root key, leading to the function in its own file.
     assert got == {
-        ("5:2", "MUTATION", "mutation", "addBook", "addBook", None),
-        ("6:2", "QUERY", "query", "dummyQuery", "dummyQuery", None),
-        ("6:2#2", "QUERY", "query", "books", "books", None),
+        ("5:2", "MUTATION", "mutation", "addBook", "addBook", "src/resolvers/mutations/index.ts", 1),
+        ("6:2", "QUERY", "query", "dummyQuery", "dummyQuery",
+         "src/resolvers/queries/dummyQuery.ts", 1),
+        ("6:2#2", "QUERY", "query", "books", "books", "src/resolvers/queries/more.ts", 1),
     }
 
 
