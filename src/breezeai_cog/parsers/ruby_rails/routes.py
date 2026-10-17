@@ -10,6 +10,7 @@ from ...emit import file_id
 from ...schemas import FileRecord
 from ..emits import Emit
 from ..ruby.ownership import owner_id
+from ..method_lines import locate_method
 from ..treesitter import node_text
 from .callbacks import callbacks_of, controller_class, guards_for
 
@@ -395,13 +396,24 @@ def detect_rails_routes(
 
     def emit(call: Node, verb: str | None, endpoint: str | None, handler: str | None) -> None:
         line = call.start_point[0] + 1
-        guards = _route_guards(handler, _route_module(call, source), index)
+        module = _route_module(call, source)
+        guards = _route_guards(handler, module, index)
+        # `users#show` → the `show` action of `UsersController`, where it is declared (Q14).
+        target = controller_class(f"{module}/{handler}" if module else handler) \
+            if handler is not None and module is not None else None
+        site = locate_method(index, "ruby", *target) if target is not None else None
+        handler_line = handler_path = None
+        if site is not None and target is not None:
+            handler, handler_line = target[1], site[1]
+            handler_path = site[0] if site[0] != path else None
         found.append(
             Emit(call, dict(
                 semanticType="route",
                 method=verb,
                 endpoint=endpoint,
                 handler=handler,
+                handlerLine=handler_line,
+                handlerPath=handler_path,
                 guards=guards or None,
                 # Honest-null: assert auth only when a guard is present; absence is unknown.
                 authRequired=True if guards else None,

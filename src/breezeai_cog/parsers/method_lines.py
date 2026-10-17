@@ -1,8 +1,9 @@
-"""Where each class's methods are declared — registered facts on the C# and Java indexes,
-``csharp.method-lines`` and ``java.method-lines``.
+"""Where each class's methods are declared — registered facts on the C#, Java and Ruby indexes,
+``csharp.method-lines``, ``java.method-lines`` and ``ruby.method-lines``.
 
 An entry point's handler is often a method of a class declared in another file: a Quartz job's
-``Execute``, a Spring functional route's ``handler::list``, a HotChocolate resolver class. The
+``Execute``, a Spring functional route's ``handler::list``, a HotChocolate resolver class, a
+Rails controller action. The
 detector knows the class and the method; the fact says where that method is::
 
     // ExampleJob.cs
@@ -37,6 +38,7 @@ _SHAPES: dict[str, tuple[frozenset[str], frozenset[str]]] = {
                frozenset({"method_declaration"})),
     "java": (frozenset({"class_declaration", "record_declaration", "enum_declaration"}),
              frozenset({"method_declaration"})),
+    "ruby": (frozenset({"class"}), frozenset({"method"})),
 }
 
 _Key = tuple[str, str]  # (class simple name, method name)
@@ -56,7 +58,7 @@ def _collector(language: str) -> _Collect:
         def walk(node: Node, cls: str | None) -> None:
             if node.type in classes:
                 nm = node.child_by_field_name("name")
-                cls = node_text(nm, source) if nm is not None else None
+                cls = _simple(node_text(nm, source)) if nm is not None else None
             elif node.type in methods and cls is not None:
                 nm = node.child_by_field_name("name")
                 if nm is not None:
@@ -79,6 +81,11 @@ def _resolve(values: list[list[tuple[_Key, _Site]]], index: Any) -> dict[_Key, _
     return out or None
 
 
+def _simple(name: str) -> str:
+    """A class's simple name: ``Ns.T<X>`` / ``Admin::UsersController`` → ``T`` / ``UsersController``."""
+    return name.split("<", 1)[0].rsplit("::", 1)[-1].rsplit(".", 1)[-1].strip()
+
+
 def fact_name(language: str) -> str:
     return f"{language}.method-lines"
 
@@ -89,7 +96,7 @@ def locate_method(index: Any | None, language: str, cls: str | None,
     if not cls or not method:
         return None
     fact: dict[_Key, _Site | None] = index_fact(index, fact_name(language)) or {}
-    return fact.get((cls.split("<", 1)[0].rsplit(".", 1)[-1].strip(), method))  # Ns.T<X> → T
+    return fact.get((_simple(cls), method))
 
 
 for _language in _SHAPES:

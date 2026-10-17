@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from breezeai_cog.parsers.contract import is_entry_point
 
-import pytest
 
 EP = {"route", "eventbus_consumer", "timer"}
 CONTROLLER = (
@@ -35,10 +34,6 @@ def test_verb_route_is_binding(analyze_files) -> None:
     )
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="handler is 'users#show' with no handlerLine: the action's file is not linked yet",
-)
 def test_binding_leads_to_action(analyze_files) -> None:
     st = _routes(
         analyze_files,
@@ -46,7 +41,9 @@ def test_binding_leads_to_action(analyze_files) -> None:
         **{"app/controllers/users_controller.rb": CONTROLLER},
     )
     (r,) = _eps(st)
-    assert (r.handler, r.handlerLine) == ("show", 3)
+    # `users#show` is the `show` action of UsersController, in its own file (Q14).
+    assert (r.handler, r.handlerPath, r.handlerLine) == (
+        "show", "app/controllers/users_controller.rb", 3)
 
 
 def test_relative_path_is_normalised(analyze_files) -> None:

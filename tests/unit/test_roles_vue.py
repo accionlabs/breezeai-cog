@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from breezeai_cog.parsers.contract import is_entry_point
 
-import pytest
 
 EP = {"route", "eventbus_consumer", "timer"}
 
