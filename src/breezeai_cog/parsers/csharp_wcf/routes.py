@@ -49,11 +49,22 @@ def _has_attr(decorators: list[Decorator], name: str) -> bool:
 # looked up by key; we recover them by the *shape* of the value instead.
 
 
+#: The other named arguments of ``[WebGet]`` / ``[WebInvoke]`` are enum values.
+_WEB_ENUMS = ("WebMessageFormat.", "WebMessageBodyStyle.")
+
+
 def _uri_arg(dec: Decorator) -> str | None:
-    """The ``UriTemplate`` value of a WebGet/WebInvoke — the arg shaped like a path."""
+    """The ``UriTemplate`` value of a WebGet/WebInvoke. Its other arguments are ``Method`` (an
+    HTTP verb) and the format / body-style enums, so the template is the one argument that is
+    neither — ``"orders/{id}"``, ``"/status"`` or a bare ``"status"``."""
     for a in dec.args:
         s = a.strip()
-        if s.startswith("/") or "{" in s:
+        name, eq, value = s.partition("=")
+        if eq and name.strip().isidentifier():  # kept in `Name = value` form
+            if name.strip() == "UriTemplate":
+                return value.strip().strip('"')
+            continue
+        if s and s.upper() not in _HTTP_VERBS and not s.startswith(_WEB_ENUMS):
             return s
     return None
 
@@ -161,6 +172,7 @@ def detect_wcf_services(
         for cls in contracts
     }
     interfaces = {cls.id: cls.name for cls in contracts if cls.type == "interface"}
+    web_hosts = {cid: _web_host(host, repo_root) for cid, host in hosts.items()}
 
     routes: list[Emit] = []
     for fn in record.functions:
@@ -173,6 +185,9 @@ def detect_wcf_services(
             host = hosts.get(fn.parentId)
             endpoint = _rest_address(host, _uri_arg(web), fn.name) if host is not None else None
             route_kind = "route"
+        elif web_hosts.get(fn.parentId):  # an HTTP host: POST <file>.svc/<Operation>
+            method, route_kind = "POST", "route"
+            endpoint = _rest_address(hosts[fn.parentId] or "", None, fn.name)
         else:  # SOAP / net.tcp RPC
             method, endpoint, route_kind = "RPC", f"{svc}/{fn.name}", "rpc"
         handler: str = fn.name
@@ -207,6 +222,24 @@ def svc_host(path: str, repo_root: Path | None, cls_name: str) -> str | None:
     ``ServiceHost Service=`` naming the class), or None. An interface contract, or a class whose
     ``.svc`` is elsewhere, has no known host here."""
     return code_behind_host(path, repo_root, cls_name, ".svc", SVC_SERVICE_RE)
+
+
+#: ``Factory="…WebScriptServiceHostFactory"`` (AJAX-enabled WCF) / ``WebServiceHostFactory``
+#: (REST): the host serves every operation over HTTP — ``POST <file>.svc/<Operation>`` unless
+#: ``[WebGet]`` / ``[WebInvoke]`` says otherwise (WCF's default for these hosts).
+_WEB_FACTORY_RE = re.compile(
+    rb'<%@\s*ServiceHost\b[^%]*?\bFactory\s*=\s*["\'][\w.]*\bWeb(?:Script)?ServiceHostFactory["\']',
+    re.IGNORECASE)
+
+
+def _web_host(host: str | None, repo_root: Path | None) -> bool:
+    """Whether the ``.svc`` at ``host`` serves its operations over HTTP (:data:`_WEB_FACTORY_RE`)."""
+    if host is None or repo_root is None:
+        return False
+    try:
+        return _WEB_FACTORY_RE.search((repo_root / host).read_bytes()) is not None
+    except OSError:
+        return False
 
 
 def _rest_address(host: str, template: str | None, operation: str) -> str:

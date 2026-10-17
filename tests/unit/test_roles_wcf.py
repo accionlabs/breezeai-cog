@@ -185,3 +185,46 @@ def test_asmx_host_directive_is_wiring(analyze_files) -> None:
 def test_generated_client_proxy_is_outbound(analyze_files) -> None:
     stmts = analyze_files({"Client/Reference.cs": PROXY})
     assert _eps(stmts) == []
+
+
+AJAX = """using System.ServiceModel;
+using System.ServiceModel.Web;
+
+namespace Shop.Campaigns
+{
+    [ServiceContract]
+    public class Rest
+    {
+        [OperationContract]
+        public string SendTest(string id) { return ""; }
+
+        [OperationContract]
+        [WebGet(UriTemplate = "status")]
+        public string Status() { return ""; }
+    }
+}
+"""
+
+
+def test_ajax_host_operation_is_an_http_post(analyze_files) -> None:
+    # A .svc hosted with WebScriptServiceHostFactory (AJAX-enabled WCF) serves every operation
+    # over HTTP: POST <file>.svc/<Operation> unless [WebGet] / [WebInvoke] says otherwise.
+    st = analyze_files({
+        "Campaigns/Rest.svc": '<%@ ServiceHost Language="C#" Service="Shop.Campaigns.Rest" '
+                              'CodeBehind="Rest.svc.cs" '
+                              'Factory="System.ServiceModel.Activation.WebScriptServiceHostFactory" %>',
+        "Campaigns/Rest.svc.cs": AJAX,
+    })
+    got = {s.handler: (s.method, s.routeKind, s.endpoint) for s in _eps(st)}
+    assert got == {"SendTest": ("POST", "route", "/Campaigns/Rest.svc/SendTest"),
+                   "Status": ("GET", "route", "/Campaigns/Rest.svc/status")}
+
+
+def test_soap_host_operation_stays_rpc(analyze_files) -> None:
+    # No web factory: a SOAP service, addressed by contract and operation.
+    st = analyze_files({
+        "Campaigns/Rest.svc": '<%@ ServiceHost Service="Shop.Campaigns.Rest" %>',
+        "Campaigns/Rest.svc.cs": AJAX,
+    })
+    [r] = [s for s in _eps(st) if s.handler == "SendTest"]
+    assert (r.method, r.routeKind, r.endpoint) == ("RPC", "rpc", "Rest/SendTest")
