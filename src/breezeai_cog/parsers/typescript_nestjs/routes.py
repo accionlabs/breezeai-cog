@@ -113,6 +113,20 @@ def _unquote(text: str) -> str:
     return text.strip().strip("'\"`")
 
 
+_STRING_ITEM_RE = re.compile(r"""^\s*(['"`])([^'"`]*)\1\s*$""")
+
+
+def _paths(arg: str) -> list[str | None]:
+    """A route path argument as the paths it declares: ``'users'`` → one; an array
+    ``[':id', ':slug']`` → one per element (Nest serves each). An array element that is not a
+    plain string (a constant, a call) is unknown → None, never its source text."""
+    text = arg.strip()
+    if not (text.startswith("[") and text.endswith("]")):
+        return [_unquote(text)]
+    items = [i for i in text[1:-1].split(",") if i.strip()]
+    return [m.group(2) if (m := _STRING_ITEM_RE.match(i)) else None for i in items] or [""]
+
+
 def _pattern(dec: Node, source: bytes, consts: dict[str, str | None]) -> str | None:
     """Address/topic of ``@EventPattern('x')`` / ``@MessagePattern({cmd:'y'})``: the string, or
     canonical JSON for an object pattern (:func:`.patterns.message_pattern`, shared with the
@@ -335,7 +349,7 @@ def _controller_base(decorators: list[Node], source: bytes) -> str | None:
             if arg.startswith("{"):  # object form: @Controller({ path: 'x', host: ... })
                 m = _PATH_PROP_RE.search(arg)
                 return m.group(1) if m else ""
-            return _unquote(arg)
+            return arg if arg.startswith("[") else _unquote(arg)  # an array: see _paths
     return None
 
 
@@ -483,21 +497,27 @@ def detect_nest_routes(
                         guards=guards or None,
                     )
                     fields: dict[str, Any]
-                    if verb is not None:  # HTTP route
-                        local = _join(base, _unquote(d.args[0]) if d.args else "")
-                        fields = dict(
-                            semanticType="route",
-                            method=verb,
-                            endpoint=(
-                                _served(local, verb, class_name, path, index)
-                                if framework == "nestjs" else local
-                            ),
-                            routeKind="route",
-                            version=_version(pending, source) or ctrl_version,
-                            requestDTO=_request_dto(member, source),
-                            responseDTO=_response_dto(pending, source) or _return_dto(member, source),
-                            **common,
-                        )
+                    if verb is not None:  # HTTP route: one per controller path × method path
+                        for b in _paths(base or ""):
+                            for sub in (_paths(d.args[0]) if d.args else [""]):
+                                local = _join(b, sub) if b is not None and sub is not None \
+                                    else None
+                                routes.append(Emit(dec, dict(
+                                    semanticType="route",
+                                    method=verb,
+                                    endpoint=(
+                                        _served(local, verb, class_name, path, index)
+                                        if framework == "nestjs" and local is not None
+                                        else local
+                                    ),
+                                    routeKind="route",
+                                    version=_version(pending, source) or ctrl_version,
+                                    requestDTO=_request_dto(member, source),
+                                    responseDTO=(_response_dto(pending, source)
+                                                 or _return_dto(member, source)),
+                                    **common,
+                                ), parent=parent, node_type="synthetic"))
+                        continue
                     elif ref:  # @ResolveReference: the gateway's _entities fetch of this type
                         fields = dict(
                             **{**common, "framework": "graphql"},

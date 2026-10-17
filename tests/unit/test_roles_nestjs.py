@@ -298,3 +298,14 @@ def test_client_proxy_is_outbound(analyze_files) -> None:
         if s.semanticType and s.semanticType.startswith("eventbus_")
     }
     assert got == {("eventbus_publish", "user.created"), ("eventbus_send", "audit")}
+
+
+def test_array_route_path_is_one_binding_per_path(analyze_files) -> None:
+    # Nest serves the handler at each path of the array: one record per path, same handler.
+    st = _ctrl(analyze_files, "  @Get([':id', ':slug'])\n  find() {}\n")
+    got = sorted((r.method, r.endpoint, r.handler) for r in _eps(st))
+    assert got == [("GET", "/users/:id", "find"), ("GET", "/users/:slug", "find")]
+    # An element that is not a string literal is unknown: no source text in the address.
+    st = _ctrl(analyze_files, "  @Get(['a', PATHS.B])\n  two() {}\n")
+    got = sorted((r.endpoint or "") for r in _eps(st) if r.handler == "two")
+    assert got == ["", "/users/a"]
