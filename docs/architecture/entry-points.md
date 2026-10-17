@@ -190,7 +190,6 @@ also copied into the bindings' records:
 | Path-only parent and layout route (Angular, Vue, React) | `route`, `handler` = its component, if any | `page` |
 | GraphQL transport mount (`MapGraphQL`, Apollo `expressMiddleware`) | `route`, `POST`, `framework: graphql`, no handler | `route` |
 | `MapRoute` / `MapHttpRoute` convention template | `route`, `ANY` on the `MapRoute(…)` statement; `handler` = the default `Controller.Action`, empty when the template has `{controller}` or `{action}` | `route` |
-| `.svc` / `.asmx` host directive | `route`, `RPC`, `endpoint` = the file, `handler` = the class | `rpc` |
 | GraphQL SDL root field (`type Query { books }`) | `route`, operation kind, field name, DTOs, no handler | `query` / `mutation` / `subscription` |
 
 The validator (`parsers/contract.py`) does not count `mount`, `layout` and `navigation` records

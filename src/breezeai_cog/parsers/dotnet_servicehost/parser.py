@@ -9,8 +9,8 @@ value is the class FQN (``Service=``/``Class=``): the concrete impl wired to the
 which resolves the interface/URL → concrete-class ambiguity ``.cs`` alone cannot.
 
 This parser owns both extensions so the scanner stops dropping them as ``unsupported``. The
-per-type differences live in :data:`~.routes.DIRECTIVES`; directive parse + ``route`` emission
-is in :mod:`.routes`.
+per-type differences live in :data:`~.routes.DIRECTIVES`; the directive is wiring, recorded as a
+plain statement (:mod:`.routes`).
 """
 
 from __future__ import annotations
@@ -21,7 +21,7 @@ from ...utils import count_loc
 from ..base import BaseParser, ParseContext
 from .routes import DIRECTIVES, detect_service_host, spec_for
 
-_STATEMENT_TYPES = ["route"]
+_STATEMENT_TYPES: list[str] = []
 
 
 class ServiceHostParser(BaseParser):
