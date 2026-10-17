@@ -16,7 +16,7 @@ Parser: `src/breezeai_cog/parsers/csharp_aspnet/`, `vb_aspnet/` (shared detector
 | `app.MapHealthChecks(path)` | Binding | `route`, `GET`, `endpoint` = path, `handler` empty | A real URL outside callers hit; the framework's handler runs, none of ours |
 | `MapGraphQL()` / `UseGraphQL<T>()` | Wiring | `route`, `POST`, `endpoint` = the path (else `/graphql`), `framework: graphql`, no handler — the Target Spec's current form | Transport path for many GraphQL operations |
 | `UseGraphQLPlayground()` / `Voyager` / `GraphiQL` / `Altair` | Binding | `route`, `GET`, `endpoint` = the UI path, `handler` empty | A real URL; the framework serves it, no handler of ours |
-| `@page "/path"` in a `.cshtml` / `.razor` file | Binding | `route`, `routeKind: page`, path, `handler` = the `@model` PageModel class (`.cshtml`, declared in another file: no `handlerLine` until `handlerPath`) or the component named by the file (`.razor`) | One page reached by URL |
+| `@page "/path"` in a `.cshtml` / `.razor` file | Binding | `route`, `routeKind: page`, path, `handler` = the `@model` PageModel class (`.cshtml`, declared in another file; not located yet: no `handlerLine` / `handlerPath`) or the component named by the file (`.razor`, `handlerLine` 1: the component is the whole file) | One page reached by URL |
 | `RecurringJob.AddOrUpdate(...)` (Hangfire) | Binding | `timer`, cron as `endpoint`, `handler` = the job method | One handler, started by a schedule |
 | `HttpClient` calls | Outbound | `api_call` | Our code calling out |
 | `WebApplication.CreateBuilder(...)` / `app.Run()` / `Program.Main` | None | — | Start-up |

@@ -6,8 +6,9 @@ Angular/Vue/Web-Forms template capture:
 
 * ``@page "/orders/{id}"`` → a ``route`` statement (``routeKind=page``), endpoint = the path,
   ``handler`` = the page: a Blazor component (``.razor``) is its file's component
-  (``Counter.razor`` → ``Counter``); a Razor Page (``.cshtml``) is its ``@model`` PageModel
-  class (declared in another file, so no ``handlerLine``); neither → empty.
+  (``Counter.razor`` → ``Counter``, ``handlerLine`` 1: the component is the whole file); a
+  Razor Page (``.cshtml``) is its ``@model`` PageModel class (declared in another file, so no
+  ``handlerLine``); neither → empty.
 * ``@onclick="Remove"`` (Blazor event) → the event on ``name``, the referenced method on
   ``handler`` — the P1–P3 handler model.
 * ``@Model.Title`` / ``@expr`` → an interpolation-like reference (``semanticType=null``, like
@@ -120,7 +121,9 @@ def collect_razor_statements(
                     framework=framework,
                     routeKind="page",
                     endpoint=_page_endpoint(node, source),
-                    handler=_page_handler(root, source, path),
+                    handler=(handler := _page_handler(root, source, path)),
+                    # A Blazor component is its whole file: the handler starts at line 1.
+                    handlerLine=1 if handler and path.endswith(".razor") else None,
                 )
         elif t == "razor_html_attribute":
             name = _attr_name(node, source)

@@ -127,3 +127,14 @@ def test_handler_resolves_to_code_method(tmp_path) -> None:
 def test_code_functions_require_capture(tmp_path) -> None:
     rec = _parse(tmp_path, "Counter.razor", _BLAZOR, capture=False)
     assert rec.functions == []
+
+
+def test_blazor_page_handler_is_its_own_file(tmp_path) -> None:
+    # A Blazor component is its whole file: the page's handler starts at line 1, in this file.
+    rec = _parse(tmp_path, "Counter.razor", _BLAZOR)
+    [r] = [s for s in rec.statements if s.routeKind == "page"]
+    assert (r.endpoint, r.handler, r.handlerLine, r.handlerPath) == ("/counter", "Counter", 1, None)
+    # A Razor Page's @model class is in another file, not located yet: no line.
+    rec = _parse(tmp_path, "Orders.cshtml", _RAZOR)
+    [r] = [s for s in rec.statements if s.routeKind == "page"]
+    assert r.handlerLine is None
