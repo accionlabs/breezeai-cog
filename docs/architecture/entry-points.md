@@ -44,7 +44,7 @@ Every framework construct a parser recognises has **exactly one** role:
 | Role | The construct… | The parser records | Examples |
 |---|---|---|---|
 | **Binding** | names **one** handler as the target of an inbound trigger | **one entry-point record** | `@GetMapping("/x")` on a method · `r.get('/x', h)` · `{ path, component }` · `@KafkaListener` · `@Scheduled` |
-| **Wiring** | adds part of an address (a prefix, a kind, a queue name) to **other** bindings, or marks a container whose members are bindings | **no entry-point record** — its value is copied into the bindings' records; where the Target Spec records it today, it is also written in the spec's form ([§5](#how-wiring-is-written-today)) | `app.use('/users', router)` · `loadChildren` · `@RequestMapping` on a class · `AddQueryType<T>()` · `serverless.yml` events |
+| **Wiring** | adds part of an address (a prefix, a kind, a queue name) to **other** bindings, or marks a container whose members are bindings | **no entry-point record** — its value is copied into the bindings' records; a record is written only when what it carries is recorded nowhere else ([§5](#how-wiring-is-written-today)) | `app.use('/users', router)` · `loadChildren` · `@RequestMapping` on a class · `AddQueryType<T>()` · `serverless.yml` events |
 | **Guard** | attaches code that runs before **many** handlers | the guard's name in `guards` on each affected record | `app.use(auth)` · `canActivate` · `[Authorize]` · a `<ProtectedRoute/>` layout element |
 | **Outbound** | is our code calling something outside | an outbound record at the call (`api_call`, `eventbus_send`, a `route` link with `routeKind: navigation`, …) — not an entry point | `fetch(...)` · `sqs.sendMessage(...)` · `<Link to="/orders">` |
 | **None** | is not inbound, or names one handler that has no address of its own | nothing | start-up calls, GraphQL data-type fields, everything else |
@@ -104,7 +104,7 @@ targets them.
 |---|---|
 | HTTP route on a handler (decorator, route call, route-table entry with a component) | Binding |
 | SOAP / WCF / gRPC operation | Binding |
-| GraphQL query / mutation / subscription field | Binding — in schema-first code, the resolver-map entry (`Query: { books: … }`) is the binding; the SDL root field (`type Query { books }`) is also written as a `route` in the spec's current form ([§5](#how-wiring-is-written-today)) |
+| GraphQL query / mutation / subscription field | Binding — in schema-first code, the resolver-map entry (`Query: { books: … }`) is the binding; the SDL root field (`type Query { books }`) is a plain statement with the DTOs; a Relay `node` / `nodes` field, which the framework serves, is a `route` ([§5](#how-wiring-is-written-today)) |
 | Subscription that is also fed by a topic (HotChocolate `[Subscribe] [Topic("orders")]`) | Two bindings: the subscription (`route`) and the topic (`eventbus_consumer`) — one method, two triggers |
 | GraphQL entity or node resolver (federation `__resolveReference`, Relay node lookup) | Binding (`route`, `method: RESOLVE_REFERENCE`, `routeKind: query`) — the framework's generated root field (`_entities`, `node`) calls it directly, addressed by type |
 | GraphQL data-type field resolver (`Book.author`) | None — no address of its own (§3) |
@@ -175,24 +175,31 @@ its name goes into `guards` on each child page.
 
 ### How wiring is written today
 
-The roles above are the contract. How some of them are **written** is still the Target Spec's
-current form (v36): the spec's entry-point proposal — wiring as plain statements, links as their
-own `semanticType` — is waiting for approval, and output keeps the spec's values until it is
-approved. So a wiring construct the spec records is written as a `route`, with the value it adds
-also copied into the bindings' records:
+The roles above are the contract, and wiring has no record of its own: its value is copied into
+the bindings' records and its code stays a plain statement. **A wiring record is written only
+when what it carries is recorded nowhere else** — the address would otherwise be lost. Those
+records, and links, use the Target Spec's current form (v36) until its entry-point proposal is
+approved:
 
 | Construct (role) | Written as | `routeKind` |
 |---|---|---|
-| Express router mount and Angular lazy route group whose routes aren't in the repo, Play `->` include (Wiring) | `route`, `endpoint` = the full prefix, `handler` = the router / module | `mount` |
+| Router mount whose routes aren't in the repo: an Express router from a package or ambiguous, an Angular lazy route group whose loaded routes have no records (a module outside the repo, an array of imported route objects), a Play `->` include of a SIRD class or a generated gRPC router (Wiring) | `route`, `ANY` (Express, Play), `endpoint` = the full prefix, `handler` = the router / module, empty for a bare import path | `mount` |
 | Link or programmatic navigation (Outbound) | `route`, `endpoint` = the target page | `navigation` |
-| GraphQL transport mount (`MapGraphQL`, Apollo `expressMiddleware`) | `route`, `POST`, `framework: graphql`, no handler | `route` |
+| GraphQL transport (`MapGraphQL`, Apollo `expressMiddleware`) | `route`, `POST`, `framework: graphql`, no handler (framework-served) | `route` |
+| Framework middleware mounted at a path: Swagger UI, static files, `graphqlHTTP` / `createHandler`; Play `-> /webjars webjars.Routes` | `route`, `ANY` (`GET` for WebJars), no handler (framework-served) | `route` |
 | `MapRoute` / `MapHttpRoute` convention template | `route`, `ANY` on the `MapRoute(…)` statement; `handler` = the default `Controller.Action`, empty when the template has `{controller}` or `{action}` | `route` |
 | GraphQL SDL Relay field (`node` / `nodes` on `Query`) of a server's schema | `route`, `QUERY`, field name, DTOs, no handler (framework-served) | `query` |
 
-The validator (`parsers/contract.py`) does not count `mount`, `layout` and `navigation` records
-as entry points, and checks a `navigation` record's address like any outbound one. The other rows
-are filed exactly like bindings, so a query on `semanticType` and `routeKind` alone counts them
-too; they drop out once the proposal is approved and parsers write wiring as plain statements.
+A mount whose routes **are** in the repo has no record: an Express router this file defines or
+`express.router-mounts` confirms, an Angular lazy route group whose loaded file has route records
+under the resolved prefix, a Play include of a routes file of the repo. So do the parents and
+layouts of route trees (Angular, Vue, React, React Router v7 `layout()`), a Web Forms user control
+and the master page a page uses (both in `importFiles`), a `.svc` / `.asmx` host directive (its
+operations carry the address) and an SDL root field (its resolver is the binding).
+
+The validator (`parsers/contract.py`) does not count `mount` and `navigation` records as entry
+points, and checks a `navigation` record's address like any outbound one. The other rows are
+filed exactly like bindings.
 
 Wiring that the spec does not record — a class-level prefix, a root-type registration, a
 deployment-config trigger, `route(path)` before its verbs — has no record of its own: its code
@@ -212,7 +219,7 @@ Records filed under `route` that are not entry points:
 | `routeKind` | What it is | Why it is not an entry point |
 |---|---|---|
 | `field_resolver` (`method: RESOLVE_FIELD`) | A GraphQL data-type field resolver, e.g. `Book.author` | No address of its own (§3); recorded because it shows where a field's data comes from |
-| `mount`, `layout` | Wiring in the spec's current form | Names no handler; its prefix is on the bindings |
+| `mount` | A router mount whose routes aren't in the repo, in the spec's current form (§5); `layout` is no longer written | Names no handler of its own |
 | `navigation` | A link | Outbound |
 
 The entry points are the `route`, `eventbus_consumer` and `timer` records whose `routeKind` is

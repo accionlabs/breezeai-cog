@@ -51,6 +51,17 @@ def test_a_framework_served_url_needs_no_handler() -> None:
     served = _route(text='app.MapHealthChecks("/health")', handler=None, handlerLine=None,
                     framework="aspnet")
     assert _rules(served) == []
+    for text in ("app.use('/api-docs', swaggerUi.serve, swaggerUi.setup(spec));",
+                 "app.use('/static', express.static('public'));",
+                 "->      /webjars                webjars.Routes"):
+        assert _rules(_route(text=text, handler=None, handlerLine=None, method="ANY")) == []
+    relay = _route(text="node(id: ID!): Node", handler=None, handlerLine=None, framework="graphql",
+                   method="QUERY", routeKind="query", endpoint="node", responseDTO="Node")
+    assert _rules(relay) == []
+    # An ordinary root field with no handler is still a gap.
+    assert _rules(_route(text="me: User", handler=None, handlerLine=None, framework="graphql",
+                         method="QUERY", routeKind="query", endpoint="me",
+                         responseDTO="User")) == [("handler", "gap")]
 
 
 def test_one_record_per_binding() -> None:

@@ -182,9 +182,10 @@ A parser or detector that emits entry points (`route`, `eventbus_consumer`, `tim
 - Emit **one record per binding**, at the binding: `endpoint` is the fully resolved address or
   empty, `handler` / `handlerLine` point at the handler (an anonymous handler has
   `handlerLine` only).
-- **Never** turn wiring (mounts, prefixes, registrations, layouts) into an entry point: its prefix
-  goes into the bindings' `endpoint`. Wiring the Target Spec records today is written in its form
-  (`route` / `mount`, `layout`; [entry-point contract §5](architecture/entry-points.md#how-wiring-is-written-today)).
+- **Never** turn wiring (mounts, prefixes, registrations, layouts) into a record: its statement
+  stays plain, and its prefix goes into the bindings' `endpoint`. Only a mount whose routes
+  aren't in the repo keeps a `route` / `mount` record, since its address is recorded nowhere else
+  ([entry-point contract §5](architecture/entry-points.md#how-wiring-is-written-today)).
 - Outbound records (`api_call`, `eventbus_send`, a `route` link with `routeKind: navigation`) use
   the same `endpoint` format as the entry point they reach.
 

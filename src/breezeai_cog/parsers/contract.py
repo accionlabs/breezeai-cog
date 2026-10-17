@@ -11,9 +11,10 @@ is worse than missing (§8): a parser leaves a handler empty when it cannot name
 
 The entry points are the ``route``, ``eventbus_consumer`` and ``timer`` records whose
 ``routeKind`` is not ``field_resolver``, ``mount``, ``layout`` or ``navigation`` (contract §5).
-Mounts, layouts and links are written in the Target Spec's current form — ``route`` with that
-``routeKind`` — until its entry-point proposal is approved; they are not entry points. A link
-(``routeKind: navigation``) is outbound and checked like one.
+Wiring has no record, except a mount whose routes aren't in the repo (``route`` / ``mount``, the
+Target Spec's current form: its address is recorded nowhere else); ``layout`` is no longer
+written. Neither is an entry point. A link (``route`` / ``navigation``) is outbound and checked
+like one.
 
 =============== ======== =================================================================
 Rule            Severity Violation
@@ -30,7 +31,9 @@ Rule            Severity Violation
                          service proxy's methods) is several bindings
 ``guards``      error    an empty list, an empty name or a repeated name (§5)
 ``handler``     gap      neither ``handler`` nor ``handlerLine``, except for a URL served
-                         by framework code (§4, §8 "every record leads to its handler")
+                         by framework code — health checks, GraphQL transports and UIs,
+                         Swagger UI, static files, WebJars, Relay ``node`` fields (§4, §8
+                         "every record leads to its handler")
 ``outbound``    error    an outbound record (``api_call``, a ``route`` link with
                          ``routeKind: navigation``, ``eventbus_send`` / ``_publish``)
                          whose ``endpoint`` is an empty
@@ -98,8 +101,17 @@ def is_entry_point(s: Statement) -> bool:
     return s.semanticType in ENTRY_POINT_TYPES and s.routeKind not in NOT_ENTRY_POINT_KINDS
 
 
+#: Framework code that answers a mounted path itself (Express middleware, Play's WebJars router).
+_SERVING_MIDDLEWARE = ("expressMiddleware", "swaggerUi.", "express.static", "serveStatic",
+                       "graphqlHTTP", "createHandler", "webjars.Routes")
+
+
 def _framework_served(s: Statement) -> bool:
-    return any(name in s.text for name in FRAMEWORK_SERVED)
+    if any(name in s.text for name in (*FRAMEWORK_SERVED, *_SERVING_MIDDLEWARE)):
+        return True
+    # A Relay node field of a server's schema: the GraphQL server resolves it.
+    return (s.framework == "graphql" and s.routeKind == "query" and s.responseDTO == "Node"
+            and s.endpoint in ("node", "nodes"))
 
 
 def _check(s: Statement) -> list[tuple[str, str]]:
