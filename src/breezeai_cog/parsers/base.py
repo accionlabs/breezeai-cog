@@ -113,6 +113,11 @@ class BaseParser:
     ) -> Any | None:  # optional pre-pass
         return None
 
+    def link_handlers(self, record: FileRecord, ctx: ParseContext) -> None:
+        """After ``parse_file``: lead each entry point whose handler is declared elsewhere to that
+        declaration (``handlerLine``, and ``handlerPath`` for another file) through the repo
+        index. Languages that can do it override this; the default leaves the record as is."""
+
     def ignore_patterns(self) -> list[str]:
         """Per-language ignore defaults (layer 2) — from sibling ``ignore.txt``."""
         return _read_sibling_lines(self, "ignore.txt")

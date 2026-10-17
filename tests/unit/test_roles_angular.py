@@ -53,16 +53,21 @@ def test_load_component_is_binding(analyze_files) -> None:
     assert (r.routeKind, r.handler) == ("page", "AboutComponent")
 
 
-@pytest.mark.xfail(strict=True, reason="default-export loadComponent: handler is the import path")
 def test_load_component_default_export_handler_is_not_a_path(analyze_files) -> None:
-    st = _routes(
-        analyze_files,
-        "export const routes: Routes = [\n"
-        "  { path: 'help', loadComponent: () => import('./help.component') },\n];\n",
-    )
+    # The handler is the loaded component's name, with its file and line — never the path.
+    body = ("export const routes: Routes = [\n"
+            "  { path: 'help', loadComponent: () => import('./help.component') },\n];\n")
+    st = _routes(analyze_files, body, **{"src/app/help.component.ts": (
+        "import { Component } from '@angular/core';\n"
+        "@Component({ selector: 'app-help', template: '' })\n"
+        "export default class HelpComponent {}\n")})
     [r] = _at(st, "/help")
-    assert r.routeKind == "page"
-    assert not r.handler or "/" not in r.handler
+    assert (r.routeKind, r.handler, r.handlerPath, r.handlerLine) == (
+        "page", "HelpComponent", "src/app/help.component.ts", 3)
+    # The module is not in the repo: the name is unknown, so the handler is empty.
+    missing = body.replace("./help.component", "./missing.component").replace("'help'", "'gone'")
+    [r] = _at(_routes(analyze_files, missing), "/gone")
+    assert (r.handler, r.handlerPath) == (None, None)
 
 
 def test_load_children_is_wiring(analyze_files) -> None:

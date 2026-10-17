@@ -762,4 +762,6 @@ def test_named_views_default_is_the_page(analyze_files) -> None:
         ),
     })
     got = {s.endpoint: s.handler for s in st if s.semanticType == "route" and s.routeKind == "page"}
-    assert got == {"/home": "Home", "/lazy": "./views/Lazy.vue", "/split": None, "/one": "One"}
+    # '/lazy' loads a module that is not in the repo: its name is unknown, so no handler (never
+    # the import path).
+    assert got == {"/home": "Home", "/lazy": None, "/split": None, "/one": "One"}

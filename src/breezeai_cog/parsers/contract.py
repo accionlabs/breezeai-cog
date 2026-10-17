@@ -30,9 +30,7 @@ Rule            Severity Violation
                          handler (§8); one address serving several handlers (a Vert.x
                          service proxy's methods) is several bindings
 ``guards``      error    an empty list, an empty name or a repeated name (§5)
-``handlerPath`` error    an empty string, the record's own file, an absolute path, or a path
-                         with no ``handler`` (an anonymous handler is always in its own file)
-                         (§5)
+``handlerPath`` error    an empty string, the record's own file, or an absolute path (§5)
 ``handler``     gap      neither ``handler`` nor ``handlerLine``, except for a URL served
                          by framework code — health checks, GraphQL transports and UIs,
                          Swagger UI, static files, WebJars, Relay ``node`` fields (§4, §8
@@ -137,7 +135,6 @@ def _check(s: Statement) -> list[tuple[str, str]]:
         found.append(("handlerLine", f"{s.handler!r} not located"))
     if s.handlerPath is not None and (
         not s.handlerPath or s.handlerPath == s.path or s.handlerPath.startswith("/")
-        or not s.handler
     ):
         found.append(("handlerPath", repr(s.handlerPath)))
     if s.guards is not None and (

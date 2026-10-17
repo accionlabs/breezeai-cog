@@ -58,8 +58,8 @@ def test_a_handler_that_cannot_be_located_is_a_gap() -> None:
 def test_a_wrong_handler_path_is_an_error() -> None:
     for bad in ("", "a.ts", "/abs/src/handlers.ts"):  # empty, the record's own file, absolute
         assert ("handlerPath", "error") in _rules(_route(handlerPath=bad))
-    # An anonymous handler is always in the record's own file.
-    assert ("handlerPath", "error") in _rules(_route(handler=None, handlerPath="src/h.ts"))
+    # An anonymous default export in another module: no name, its file and line.
+    assert _rules(_route(handler=None, handlerPath="src/h.ts", handlerLine=3)) == []
 
 
 def test_a_framework_served_url_needs_no_handler() -> None:

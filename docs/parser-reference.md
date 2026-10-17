@@ -236,6 +236,24 @@ build indexes at `jobs=1`). `fn` and every item must be picklable. The merge mus
   that omits the base clause yields to a concrete base) plus fully-qualified → simple-name
   projection (distinct types sharing a short name collapse to `None`).
 
+### Step 6b — `link_handlers` (when handlers are declared in other files)
+An entry point leads to its handler: `handler`, `handlerLine`, and `handlerPath` when the handler
+is declared in another file ([entry-point contract §5](architecture/entry-points.md)). Detectors
+name the handler as the code writes it; the language parser's `link_handlers(record, ctx)` runs
+once per file right after `parse_file` and looks each unlocated name up through the repo index:
+
+```python
+def link_handlers(self, record, ctx):
+    if not needs_location(record):        # cheap: most files have nothing to look up
+        return
+    ...                                   # import bindings + the index's declarations fact
+```
+
+TypeScript implements it (`parsers/typescript/handlers.py`, fact `typescript.declarations`);
+the default leaves the record as is. A name that can't be found, or is declared twice, keeps
+`handlerPath` and `handlerLine` empty — and a `handler` written as a module path becomes empty,
+never the path.
+
 ### Step 7 — Register
 ```python
 # parsers/<lang>/__init__.py

@@ -12,14 +12,14 @@ PKG = '{"dependencies": {"vue": "3", "vue-router": "4"}}'
 ROUTER = "src/router/index.js"
 
 
-def _routes(analyze_files, body: str, tail: str = ""):
+def _routes(analyze_files, body: str, tail: str = "", **extra: str):
     src = (
         "import { createRouter, createWebHistory } from 'vue-router';\n"
         f"const routes = [\n{body}];\n"
         "const router = createRouter({ history: createWebHistory(), routes });\n"
         f"{tail}export default router;\n"
     )
-    return analyze_files({"package.json": PKG, ROUTER: src}, templates=True)
+    return analyze_files({"package.json": PKG, ROUTER: src, **extra}, templates=True)
 
 
 def _eps(stmts, path: str = ROUTER):
@@ -45,14 +45,27 @@ def test_path_component_is_binding(analyze_files) -> None:
     )
 
 
-@pytest.mark.xfail(strict=True, reason="a lazy component import: handler is the import path")
 def test_lazy_component_is_binding(analyze_files) -> None:
+    # A lazily imported component module: its default export, in its file.
     st = _routes(
-        analyze_files, "  { path: '/reports', component: () => import('../views/Reports.vue') },\n"
+        analyze_files, "  { path: '/reports', component: () => import('../views/Reports') },\n",
+        **{"src/views/Reports.js": "export default function Reports() { return null; }\n"},
     )
     [r] = _at(st, "/reports")
-    assert r.routeKind == "page"
-    assert not r.handler or "/" not in r.handler
+    assert (r.routeKind, r.handler, r.handlerPath, r.handlerLine) == (
+        "page", "Reports", "src/views/Reports.js", 1)
+    # A single-file component: its `name` option, else (Vue's rule) its file name.
+    st = _routes(
+        analyze_files, "  { path: '/a', component: () => import('../views/About.vue') },\n",
+        **{"src/views/About.vue": "<template><p/></template>\n<script setup>\n"
+           "defineOptions({ name: 'AboutPage' })\n</script>\n"},
+    )
+    [r] = _at(st, "/a")
+    assert (r.handler, r.handlerPath, r.handlerLine) == ("AboutPage", "src/views/About.vue", 2)
+    # A module that can't be read: no name rather than the import path.
+    st = _routes(analyze_files, "  { path: '/x', component: () => import('../views/X.vue') },\n")
+    [r] = _at(st, "/x")
+    assert not r.handler
 
 
 def test_named_views_default_component_is_handler(analyze_files) -> None:

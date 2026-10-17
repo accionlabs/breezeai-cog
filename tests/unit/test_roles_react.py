@@ -143,20 +143,21 @@ def test_config_object_component_reference_is_binding(analyze_files) -> None:
     assert r.handler == "About"
 
 
-def _v7(analyze_files, body: str):
+def _v7(analyze_files, body: str, **extra: str):
     src = (
         "import { type RouteConfig, route, index, layout, prefix } from "
         "'@react-router/dev/routes';\nexport default [\n" + body + "] satisfies RouteConfig;\n"
     )
-    return analyze_files({"package.json": V7_PKG, "app/routes.ts": src})
+    return analyze_files({"package.json": V7_PKG, "app/routes.ts": src, **extra})
 
 
-@pytest.mark.xfail(strict=True, reason="v7 route(path, file): handler is the module file path")
 def test_v7_route_is_binding(analyze_files) -> None:
-    st = _v7(analyze_files, "  route('about', 'routes/about.tsx'),\n")
+    # The route module's default export (the file is relative to app/routes.ts).
+    st = _v7(analyze_files, "  route('about', 'routes/about.tsx'),\n",
+             **{"app/routes/about.tsx": "export default function About() { return null; }\n"})
     [r] = _at(st, "/about", "app/routes.ts")
-    assert r.routeKind == "page"
-    assert not r.handler or "/" not in r.handler
+    assert (r.routeKind, r.handler, r.handlerPath, r.handlerLine) == (
+        "page", "About", "app/routes/about.tsx", 1)
 
 
 def test_v7_layout_is_wiring(analyze_files) -> None:

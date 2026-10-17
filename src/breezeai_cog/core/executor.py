@@ -114,6 +114,7 @@ def _parse_entry(path: str, repo_root: str, options: dict) -> FileRecord | None:
             resolution_index=index,
         )
         record = parser.parse_file(ctx)
+        parser.link_handlers(record, ctx)
     except Exception as exc:  # per-file isolation (incl. parse timeout)
         get_logger("breezeai_cog.worker").warning(
             "parse.file.failed", path=path, parser=parser.name, error=str(exc)
