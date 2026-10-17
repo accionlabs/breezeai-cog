@@ -48,8 +48,10 @@ Target = tuple[str, str]
 # and ``("sym", "RouteNames.X")`` for a const reference — because ``RouteNames.*`` is defined
 # cross-file, so the pieces are resolved against the repo-wide ``const_values`` in the reduce
 # (:func:`~..typescript.imports._resolve_pieces`), not here.
-#: (the mount object's line and column, targets, path pieces).
-_MountRaw = tuple[tuple[int, int], list[Target], list[tuple[str, str]] | None]
+#: (the mount object's line and column, targets, the path pieces of each route from the
+#: outermost enclosing route of this file down to the mount — None for a dynamic one).
+_Pieces = list[tuple[str, str]] | None
+_MountRaw = tuple[tuple[int, int], list[Target], tuple[_Pieces, ...]]
 
 # `.then(m => m.OrganisationsRoutingModule)` — the mounted module's exported class symbol.
 _MOUNT_TARGET_RE = re.compile(r"=>\s*[\w$]+\.([A-Za-z_$][\w$]*)")
@@ -76,16 +78,20 @@ def _targets(load: Node, source: bytes, rel: str, repo_root: Path | None) -> lis
 def _collect_route_mounts(root: Node, source: bytes, rel: str,
                           repo_root: Path | None) -> tuple[list[str], list[_MountRaw]]:
     """(top-level class names declared here, lazy mounts declared here). A mount is a
-    ``loadChildren`` pair inside a route object; its targets are the loaded file and class,
-    and its own path is the sibling ``path:`` value (as unresolved pieces, None if dynamic)."""
+    ``loadChildren`` pair inside a route object; its targets are the loaded file and class, and
+    its path is the sibling ``path:`` value joined under the paths of the routes whose
+    ``children`` enclose it in this file (``{ path: 'a', children: [{ path: 'b',
+    loadChildren }] }`` → ``a`` / ``b``), as unresolved pieces (None if dynamic)."""
     classes: list[str] = []
     mounts: list[_MountRaw] = []
 
-    def walk(node: Node) -> None:
+    def walk(node: Node, outer: tuple[_Pieces, ...]) -> None:
         if node.type in _CLASS_NODES:
             nm = node.child_by_field_name("name")
             if nm is not None:
                 classes.append(node_text(nm, source))
+        inner = outer
+        children_value: Node | None = None
         if node.type == "object":  # a route config object literal
             pairs = {}
             for c in node.named_children:
@@ -98,11 +104,18 @@ def _collect_route_mounts(root: Node, source: bytes, rel: str,
                 targets = _targets(lc, source, rel, repo_root)
                 if targets:
                     mounts.append(((node.start_point[0] + 1, node.start_point[1]), targets,
-                                   _path_pieces(pairs["path"], source)))
+                                   (*outer, _path_pieces(pairs["path"], source))))
+            if "path" in pairs and pairs.get("children") is not None:
+                children_value = pairs["children"]
+                inner = (*outer, _path_pieces(pairs["path"], source))
         for c in node.named_children:
-            walk(c)
+            if children_value is not None and c.type == "pair" \
+                    and c.child_by_field_name("value") == children_value:
+                walk(c, inner)  # the child routes are under this route's path
+            else:
+                walk(c, outer)
 
-    walk(root)
+    walk(root, ())
     return classes, mounts
 
 
@@ -171,6 +184,18 @@ def _collect_ngmodule_imports(root: Node, source: bytes) -> dict[str, list[str]]
         pending = None
 
     return result
+
+
+def _joined_prefix(paths: tuple[_Pieces, ...], const_values: dict[str, str | None]) -> str | None:
+    """The mount's path in its file: each enclosing route's path joined, then its own; None
+    when any is dynamic or names an unresolved constant."""
+    joined = ""
+    for pieces in paths:
+        value = _resolve_pieces(pieces, const_values) if pieces is not None else None
+        if value is None:
+            return None
+        joined = _join_segments(joined, value) if joined else value
+    return joined
 
 
 def _compose_route_mounts(
@@ -252,8 +277,8 @@ def _resolve(values: list[_FileMounts], index: Any) -> RouteMounts | None:
     all_ngmodule_imports: dict[str, list[str]] = {}
     for rel, classes, mounts, ngmodule_imports, _ in values:
         here: tuple[Target, ...] = (("file", rel), *(("symbol", c) for c in classes))
-        for _, targets, pieces in mounts:
-            prefix = _resolve_pieces(pieces, const_values) if pieces is not None else None
+        for _, targets, paths in mounts:
+            prefix = _joined_prefix(paths, const_values)
             for target in targets:
                 record_distinct(own, target, prefix)
                 record_distinct(parent, target, here)

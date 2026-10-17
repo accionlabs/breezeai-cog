@@ -583,3 +583,24 @@ def test_route_guards_can_match_and_can_activate_child(analyze_files) -> None:
         "/admin/users": ["RoleGuard", "AuthGuard", "ChildGuard", "UsersGuard"],
         "/admin/users/:id": ["RoleGuard", "AuthGuard", "ChildGuard", "UsersGuard", "DeepGuard"],
     }
+
+
+def test_mount_inside_a_children_parent_gets_the_parent_path(tmp_path) -> None:
+    # The loaded routes are served under every enclosing route's path: /shop/admin/docs.
+    files = {
+        "app.routes.ts": b"""import { Routes } from '@angular/router';
+const routes: Routes = [
+  { path: 'shop', component: Shell, children: [
+    { path: 'admin', loadChildren: () => import('./admin.routes') },
+  ] },
+];
+export default routes;
+""",
+        "admin.routes.ts": b"""import { Routes } from '@angular/router';
+const routes: Routes = [ { path: 'docs', component: DocsComponent } ];
+export default routes;
+""",
+    }
+    rec = _parse_with_index(files, "admin.routes.ts", tmp_path)
+    eps = {s.handler: s.endpoint for s in rec.statements if s.semanticType == "route"}
+    assert eps["DocsComponent"] == "/shop/admin/docs"
