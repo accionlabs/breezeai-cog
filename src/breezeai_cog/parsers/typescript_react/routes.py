@@ -156,7 +156,7 @@ def _process_jsx(el: Node, prefix: str, source: bytes, path: str,
             routeKind="page",  # a lazy route is a page too, its component loaded on demand
             handler=handler,
             guards=list(inherited) or None,
-        ), parent=file_id(path), node_type="jsx_element", text=entry_text(_opening(el), source)))
+        ), parent=file_id(path), node_type=el.type, text=entry_text(_opening(el), source)))
     child_guards = (*inherited, handler) if guard_layout and handler else inherited
     # Recurse into nested <Route> children (paired elements only), joining paths.
     for child in nested:
@@ -181,14 +181,25 @@ def _pairs(obj: Node, source: bytes) -> dict[str, Node]:
     return out
 
 
+#: Keys only a React Router route object has. A ``path`` alone is not enough: breadcrumb, menu
+#: and step lists (``{ path: '/home', label: 'Home' }``) have one too.
+_ROUTER_KEYS = frozenset({
+    "element", "Component", "component", "children", "lazy", "loader", "action",
+    "errorElement", "ErrorBoundary", "index", "handle", "caseSensitive", "HydrateFallback",
+    "shouldRevalidate",
+})
+
+
 def _is_route_array(arr: Node, source: bytes) -> bool:
-    """An array of route objects: one has a ``path``, or is a pathless layout route (an element
-    or component with ``children``) — the shape of a router whose top level is a layout."""
+    """An array of route objects: one has a ``path`` and a React Router key
+    (:data:`_ROUTER_KEYS`), or is a pathless layout route (an element or component with
+    ``children``) — the shape of a router whose top level is a layout."""
     for e in arr.named_children:
         if e.type != "object":
             continue
         keys = _pairs(e, source).keys()
-        if "path" in keys or ("children" in keys and keys & {"element", "Component"}):
+        if ("path" in keys and keys & _ROUTER_KEYS) or (
+                "children" in keys and keys & {"element", "Component"}):
             return True
     return False
 

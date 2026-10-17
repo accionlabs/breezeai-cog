@@ -256,3 +256,22 @@ def test_guard_layout_with_a_path_guards_its_children(analyze_files) -> None:
     st = analyze_files({"package.json": PKG, "src/router.tsx": src})
     got = sorted((r.endpoint, r.handler, tuple(r.guards or ())) for r in _eps(st, "src/router.tsx"))
     assert got == [("/", "Dashboard", ("ProtectedRoute",)), ("/orders", "Orders", ("ProtectedRoute",))]
+
+
+
+def test_breadcrumb_array_in_a_router_file_is_not_routes(analyze_files) -> None:
+    # `path` alone is not a route: a breadcrumb list has one too.
+    src = (HEAD + "import { createBrowserRouter } from 'react-router-dom';\n"
+           "export const crumbs = [{ path: '/c', label: 'C' }, { path: '/d', title: 'D', icon: 'x' }];\n"
+           "export const r = createBrowserRouter([{ path: '/x', element: <X /> }]);\n")
+    st = analyze_files({"package.json": PKG, "src/App.tsx": src})
+    assert [r.endpoint for r in _eps(st)] == ["/x"]
+
+
+def test_jsx_route_node_type_is_the_real_one(analyze_files) -> None:
+    st = _jsx(analyze_files,
+              '      <Route path="u" element={<U />} />\n'
+              '      <Route path="p" element={<P />}><Route path="q" element={<Q />} /></Route>\n')
+    got = {r.endpoint: r.nodeType for r in _eps(st)}
+    assert got == {"/u": "jsx_self_closing_element", "/p": "jsx_element",
+                   "/p/q": "jsx_self_closing_element"}
