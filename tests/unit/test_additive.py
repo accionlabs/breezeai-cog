@@ -58,6 +58,7 @@ def test_inventory_in_run_order() -> None:
                    "generic-handlers", "hangfire", "quartz"],
         "java": ["quartz"],
         "python": ["celery"],
+        "php": ["wordpress-hooks"],
         "scala": ["akka-events", "spark"],
         "typescript": ["express", "fastify", "aws-events", "sdk-calls", "graphql-client",
                        "graphql-resolver-modules", "vue-routes",
