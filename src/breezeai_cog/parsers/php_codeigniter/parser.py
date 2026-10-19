@@ -29,6 +29,7 @@ _VERBS = {
     "options": "OPTIONS",
     "head": "HEAD",
     "any": "ANY",
+    "add": "ANY"
 }
 
 
