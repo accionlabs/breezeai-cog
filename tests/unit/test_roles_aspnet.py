@@ -253,3 +253,103 @@ public class OrdersController : ControllerBase
     stmts = analyze_files({"OrdersController.cs": src})
     got = sorted((r.method, r.endpoint) for r in _eps(stmts))
     assert got == [("OPTIONS", "/api/orders/filter"), ("POST", "/api/orders/filter")]
+
+
+MVC_USING = "using System.Web.Mvc;\n"
+
+
+def _routes_of(stmts, path):
+    return sorted(((s.method, s.endpoint, s.handler) for s in _eps(stmts) if s.path == path),
+                  key=lambda r: (r[0] or "", r[1] or "", r[2] or ""))
+
+
+def test_route_area_prefixes_attribute_routes(analyze_files) -> None:
+    # MVC 5 attribute routing: [RouteArea] (here a constant) prefixes the controller's
+    # [Route]s; an empty [Route("")] is the area root, not a convention route.
+    st = analyze_files({
+        "Kore/CmsConstants.cs": "namespace Kore { public static class CmsConstants {\n"
+        "  public static class Areas { public const string Blog = \"Admin/Blog\"; } } }\n",
+        "Kore/Areas/Admin/Blog/Controllers/BlogController.cs": MVC_USING +
+        "namespace Kore.Areas.Admin.Blog.Controllers {\n"
+        "  [RouteArea(CmsConstants.Areas.Blog)]\n  public class BlogController : Controller {\n"
+        "    [Route(\"\")]\n    public ActionResult Index() { return null; }\n"
+        "    [Route(\"get-translations\")]\n    public JsonResult GetTranslations() { return null; }\n"
+        "  } }\n",
+    })
+    assert _routes_of(st, "Kore/Areas/Admin/Blog/Controllers/BlogController.cs") == [
+        ("GET", "/Admin/Blog", "Index"), ("GET", "/Admin/Blog/get-translations", "GetTranslations")]
+
+
+def test_route_area_prefix_argument_wins(analyze_files) -> None:
+    st = analyze_files({"C/ShopController.cs": MVC_USING +
+        "[RouteArea(\"Shop\", AreaPrefix = \"store\")]\npublic class ShopController : Controller {\n"
+        "  [Route(\"cart\")] public ActionResult Cart() { return null; } }\n"})
+    assert _routes_of(st, "C/ShopController.cs") == [("GET", "/store/cart", "Cart")]
+
+
+def test_area_registration_serves_its_controllers_under_its_template(analyze_files) -> None:
+    # MVC 5 convention routing: the AreaRegistration's template, for its namespaces.
+    st = analyze_files({
+        "Areas/Tests/TestsAreaRegistration.cs": MVC_USING +
+        "namespace App.Areas.Tests { public class TestsAreaRegistration : AreaRegistration {\n"
+        "  public override string AreaName { get { return \"Tests\"; } }\n"
+        "  public override void RegisterArea(AreaRegistrationContext context) {\n"
+        "    context.MapRoute(\"t\", \"Tests/{controller}/{action}/{id}\", new { action = \"Index\" },"
+        " new [] { \"App.Areas.Tests.Controllers\" }); } } }\n",
+        "Areas/Tests/Controllers/StaticController.cs": MVC_USING +
+        "namespace App.Areas.Tests.Controllers { public class StaticController : Controller {\n"
+        "  public ActionResult Index() { return null; } } }\n",
+    })
+    assert _routes_of(st, "Areas/Tests/Controllers/StaticController.cs") == [
+        ("GET", "/Tests/Static/Index", "Index")]
+
+
+def test_area_folder_alone_is_not_an_area_prefix(analyze_files) -> None:
+    # Under an Areas/ folder with nothing in code naming its area: the convention address is
+    # unknown — never /Static/Index as if outside an area, never /Admin/… from the folder.
+    # An explicit attribute route stays as written.
+    st = analyze_files({"Areas/Admin/Controllers/StaticController.cs": MVC_USING +
+        "namespace App.Areas.Admin.Controllers { public class StaticController : Controller {\n"
+        "  public ActionResult Index() { return null; }\n"
+        "  [Route(\"health\")] public ActionResult Health() { return null; } } }\n"})
+    assert _routes_of(st, "Areas/Admin/Controllers/StaticController.cs") == [
+        ("GET", None, "Index"), ("GET", "/health", "Health")]
+
+
+def test_core_area_fills_the_area_token(analyze_files) -> None:
+    st = analyze_files({"Areas/Admin/Controllers/OrdersController.cs":
+        "using Microsoft.AspNetCore.Mvc;\n[Area(\"Admin\")]\n[Route(\"[area]/[controller]\")]\n"
+        "public class OrdersController : Controller {\n"
+        "  [HttpGet(\"{id}\")] public IActionResult Get(int id) { return null; } }\n"})
+    assert _routes_of(st, "Areas/Admin/Controllers/OrdersController.cs") == [
+        ("GET", "/Admin/Orders/{id}", "Get")]
+
+
+def test_unresolved_route_area_leaves_the_address_unknown(analyze_files) -> None:
+    st = analyze_files({"C/XController.cs": MVC_USING +
+        "[RouteArea(Settings.AreaName)]\npublic class XController : Controller {\n"
+        "  [Route(\"a\")] public ActionResult A() { return null; } }\n"})
+    assert _routes_of(st, "C/XController.cs") == [("GET", None, "A")]
+
+
+def test_controller_outside_any_area_is_unchanged(analyze_files) -> None:
+    st = analyze_files({"Controllers/HomeController.cs": MVC_USING +
+        "public class HomeController : Controller { public ActionResult Index() { return null; } }\n"})
+    assert _routes_of(st, "Controllers/HomeController.cs") == [("GET", "/Home/Index", "Index")]
+
+
+def test_route_area_constant_binds_in_its_own_namespace(analyze_files) -> None:
+    # Two plugins each declare Constants.RouteArea: each controller gets its own namespace's.
+    def plugin(name: str, area: str) -> dict[str, str]:
+        ns = f"Kore.Plugins.{name}"
+        return {
+            f"Plugins/{name}/Constants.cs": f"namespace {ns} {{ public static class Constants {{\n"
+            f"  public const string RouteArea = \"{area}\"; }} }}\n",
+            f"Plugins/{name}/Controllers/{name}Controller.cs": MVC_USING +
+            f"namespace {ns}.Controllers {{\n  [RouteArea(Constants.RouteArea)]\n"
+            f"  public class {name}Controller : Controller {{\n"
+            "    [Route(\"\")] public ActionResult Index() { return null; } } }\n",
+        }
+    st = analyze_files({**plugin("Watchdog", "Plugins/Watchdog"), **plugin("Forums", "Plugins/Forums")})
+    got = {s.path.rsplit("/", 1)[-1]: s.endpoint for s in _eps(st)}
+    assert got == {"WatchdogController.cs": "/Plugins/Watchdog", "ForumsController.cs": "/Plugins/Forums"}

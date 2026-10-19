@@ -33,7 +33,7 @@ class AspNetCoreParser(CSharpParser):
         root = parse_source("csharp", ctx.source, ctx.parse_timeout_micros).root_node
         record = self.extract(root, ctx)  # inherited C# extraction (one parse)
         if ctx.capture_statements:  # routes are statements — gated by statement capture
-            routes = detect_controller_routes(record, root, ctx.resolution_index)
+            routes = detect_controller_routes(record, root, ctx.resolution_index, ctx.source)
             routes += detect_minimal_api_routes(
                 root, ctx.source, ctx.path,
                 invocation_type="invocation_expression", member_type="member_access_expression",

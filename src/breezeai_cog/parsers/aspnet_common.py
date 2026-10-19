@@ -31,6 +31,9 @@ from .emits import Emit
 from ..schemas import Decorator, FileRecord, Function
 from .dotnet_common import response_dto, simple_attr_name
 from .index_common import walk_heritage
+from .aspnet_areas import (
+    NO_AREA, UNKNOWN, Area, controller_area, convention_endpoint,
+)
 from .treesitter import node_text
 
 _HTTP_ATTRS = {
@@ -195,7 +198,7 @@ def _is_conventional_action(fn: Function) -> bool:
 
 
 def _route_statement(
-    root: Node, fn: Function, method: str, endpoint: str, text: str,
+    root: Node, fn: Function, method: str, endpoint: str | None, text: str,
     auth_required: bool | None, guards: list[str] | None,
 ) -> Emit:
     """One controller route (``nodeType="synthetic"`` — attribute/convention derived, read off
@@ -218,16 +221,65 @@ def _route_statement(
         end_line=fn.endLine)
 
 
-def detect_controller_routes(record: FileRecord, root: Node, index: Any = None) -> list[Emit]:
-    # (prefix, chain guards, chain-resolved, has-any-[Route], class name, is-[ApiController]) per id
-    controllers: dict[str, tuple[str, list[str], bool, bool, str, bool]] = {}
+def _class_nodes(root: Node, source: bytes) -> dict[tuple[str, int], Node]:
+    """C# class declarations by (name, start line) — the line a Class record starts at."""
+    out: dict[tuple[str, int], Node] = {}
+    stack = [root]
+    while stack:
+        node = stack.pop()
+        if node.type == "class_declaration":
+            nm = node.child_by_field_name("name")
+            if nm is not None:
+                out[(node_text(nm, source), node.start_point[0] + 1)] = node
+        stack.extend(node.named_children)
+    return out
+
+
+def _with_area(endpoint: str | None, area: Area, sub_absolute: bool) -> str | None:
+    """An attribute-route address under the controller's area: the ``[RouteArea]`` prefix in
+    front (not for an absolute ``~/`` template), the ``[area]`` token filled. Unknown area
+    value → unknown address."""
+    if endpoint is None:
+        return None
+    if "[area]" in endpoint.lower():
+        if area.token is None or area.token is UNKNOWN:
+            return None
+        endpoint = re.sub(r"\[area\]", str(area.token), endpoint, flags=re.IGNORECASE)
+    if area.route_prefix is UNKNOWN and not sub_absolute:
+        return None
+    if isinstance(area.route_prefix, str) and not sub_absolute:
+        return _join(area.route_prefix, endpoint)
+    return endpoint
+
+
+def _area_convention(area: Area, cls_name: str, action: str) -> str | None:
+    """The convention address of an area controller's action: from its area's registration
+    template, or unknown when the controller is in an area with no known route."""
+    if area.convention is not None:
+        ctrl = cls_name[: -len("Controller")] if cls_name.endswith("Controller") else cls_name
+        return convention_endpoint(area.convention, ctrl, action)
+    if area.convention_unknown:
+        return None
+    return _convention_endpoint(cls_name, action)
+
+
+def detect_controller_routes(record: FileRecord, root: Node, index: Any = None,
+                             source: bytes | None = None) -> list[Emit]:
+    """Attribute and convention routes of this file's controllers. ``source`` (C#) lets an
+    area controller's actions be served under its area (:mod:`.aspnet_areas`)."""
+    # (prefix, chain guards, chain-resolved, has-any-[Route], class name, is-[ApiController],
+    # area) per id
+    controllers: dict[str, tuple[str, list[str], bool, bool, str, bool, Area]] = {}
+    nodes = _class_nodes(root, source) if source is not None else {}
     for cls in record.classes:
         if not _is_controller(cls):
             continue
         route, guards, resolved = _resolve_chain(cls, index)
         base = _controller_token(route, cls.name) if route is not None else ""
         is_api = "ApiController" in {simple_attr_name(d.name) for d in cls.decorators}
-        controllers[cls.id] = (base, guards, resolved, route is not None, cls.name, is_api)
+        area = (controller_area(nodes.get((cls.name, cls.startLine)), source, record.path, index)
+                if source is not None else NO_AREA)
+        controllers[cls.id] = (base, guards, resolved, route is not None, cls.name, is_api, area)
     if not controllers:
         return []
 
@@ -236,7 +288,7 @@ def detect_controller_routes(record: FileRecord, root: Node, index: Any = None) 
         info = controllers.get(fn.parentId)
         if info is None:
             continue
-        base, cls_guards, resolved, has_class_route, cls_name, is_api = info
+        base, cls_guards, resolved, has_class_route, cls_name, is_api, area = info
         prefix_unknown = not has_class_route and not resolved  # inherited base we can't see
         method_route = _route_template(fn.decorators)
         fn_guards = _guards(fn.decorators)
@@ -250,18 +302,20 @@ def detect_controller_routes(record: FileRecord, root: Node, index: Any = None) 
         for dec in verb_attrs:
             verb = _HTTP_ATTRS[simple_attr_name(dec.name)]
             for sub in _method_templates(_first_arg(dec), method_route):
+                endpoint: str | None
                 if _is_absolute(sub):
-                    endpoint = _absolute_endpoint(sub)  # overrides the prefix → base-independent
+                    endpoint = _with_area(_absolute_endpoint(sub), area, True)
                 elif prefix_unknown:
                     # honest-null: a relative path needs the (unknowable) inherited prefix.
                     # Emit nothing rather than a fabricated endpoint — but only for this
                     # relative sub; an absolute sibling above is still emitted.
                     continue
-                elif base or sub:
-                    endpoint = _join(base, sub)
+                elif base or sub or has_class_route or method_route is not None:
+                    # an attribute route (a present-but-empty `[Route("")]` is the prefix root)
+                    endpoint = _with_area(_join(base, sub), area, False)
                 else:
                     # verb attribute but no route anywhere → MVC convention /{controller}/{action}
-                    endpoint = _convention_endpoint(cls_name, _action_name(fn))
+                    endpoint = _area_convention(area, cls_name, _action_name(fn))
                 if (verb, endpoint) in bound:
                     continue
                 bound.add((verb, endpoint))
@@ -274,11 +328,12 @@ def detect_controller_routes(record: FileRecord, root: Node, index: Any = None) 
         if not verb_attrs and not is_api and not prefix_unknown and _is_conventional_action(fn):
             sub = method_route or ""
             if _is_absolute(sub):
-                endpoint = _absolute_endpoint(sub)
-            elif base or sub:
-                endpoint = _join(base, sub)
+                endpoint = _with_area(_absolute_endpoint(sub), area, True)
+            elif base or sub or method_route is not None:
+                # an attribute route (a present-but-empty `[Route("")]` is the prefix root)
+                endpoint = _with_area(_join(base, sub), area, False)
             else:
-                endpoint = _convention_endpoint(cls_name, _action_name(fn))
+                endpoint = _area_convention(area, cls_name, _action_name(fn))
             routes.append(_route_statement(
                 root, fn, "GET", endpoint, f"(convention) {fn.name}", auth_required, all_guards))
     return routes
