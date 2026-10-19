@@ -379,6 +379,19 @@ def match_db(callee: str, method: str, language: str | None = None,
         if receiver and any(receiver.endswith(s) for s in _NON_DB_RECEIVERS):
             return None  # a cache/collection/UI-state/etc. receiver — not data access
         return "orm"
+
+    if language == "php":
+        ci_builder_methods = {
+            "select", "where", "orwhere", "wherein", "wherenotin",
+            "like", "orlike", "notlike", "ornotlike",
+            "insert", "insertbatch", "update", "updatebatch",
+            "delete", "emptyrecord", "truncate", "get", "getwhere",
+            "countallresults", "countall", "groupstart", "groupend",
+            "orwheregroupstart", "orwheregroupend",
+        }
+        if m in ci_builder_methods:
+            if "builder" in low or "db.table" in low:
+                return "codeigniter-builder"
     if m in _DJANGO_VERBS and (language is None or language in _PYTHON) and (
         ".objects." in low or low.startswith("objects.") or "queryset" in low
     ):
