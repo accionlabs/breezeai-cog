@@ -83,8 +83,8 @@ def detect_codeigniter_routes(root: Node, source: bytes, path: str, record: File
                         endpoint=join_endpoint(prefix, endpoint), method=verb,
                         handler_node=args[handler_index] if handler_index is not None else None,
                         guards=guards,
-                        is_regex=bool("(:num)" in endpoint or "(:segment)" in endpoint or "(.*)" in endpoint),
-                    )
+                        is_regex=bool("(:num)" in endpoint or "(:segment)" in endpoint or "(:any)" in endpoint or "(.*)" in
+                        endpoint)                    )
         for child in node.named_children:
             visit(child, prefix, guards)
 
