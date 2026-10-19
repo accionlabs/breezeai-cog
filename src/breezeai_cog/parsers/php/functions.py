@@ -185,7 +185,7 @@ def build_function(
     }.get(node.type, "function")
     visibility = next(
         (node_text(child, source) for child in node.children
-         if child.type in {"public", "private", "protected"}),
+         if child.type == "visibility_modifier" or child.type in {"public", "private", "protected"}),
         None,
     )
     is_static = any(child.type == "static_modifier" for child in node.named_children)
