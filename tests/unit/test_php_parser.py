@@ -116,14 +116,17 @@ class Employees {
 """
     index = PhpIndex(fqcn={"App\\Models\\Employee": "app/Models/Employee.php"})
 
-    for parser in (
-        PhpParser(),
-        CodeIgniterParser(),
-        LaravelParser(),
-        SlimParser(),
-        SymfonyParser(),
-    ):
+    expected_frameworks = [
+        (PhpParser(), None),
+        (CodeIgniterParser(), "codeigniter"),
+        (LaravelParser(), "laravel"),
+        (SlimParser(), "slim"),
+        (SymfonyParser(), "symfony"),
+    ]
+
+    for parser, expected_framework in expected_frameworks:
         record = _parse(parser, source, index=index)
+        assert record.framework == expected_framework
         assert record.importFiles == ["app/Models/Employee.php"]
         assert [(param.name, param.type) for param in record.classes[0].constructorParams] == [
             ("employee", "Employee")
@@ -306,4 +309,26 @@ class Item {
     assert len(db_calls) >= 2
     assert any(s.method == "where" and s.dataAccessHint == "codeigniter-builder" for s in db_calls)
     assert any(s.method == "get" and s.dataAccessHint == "codeigniter-builder" for s in db_calls)
+
+
+def test_route_handler_binary_concatenation_and_formats() -> None:
+    source = """<?php
+use Slim\\Factory\\AppFactory;
+$app = AppFactory::create();
+$app->get('/', HomeController::class . ':index');
+$app->get('/status', ApiController::class . ':status');
+$app->post('/users', [UserController::class, 'store']);
+$app->get('/colon', 'OtherController:show');
+$app->get('/invokable', SingleAction::class);
+"""
+    record = _parse(SlimParser(), source, path="routes/web.php")
+    routes = [s for s in record.statements if s.semanticType == "route"]
+    assert len(routes) == 5
+    handlers = {r.endpoint: r.handler for r in routes}
+    assert handlers["/"] == "HomeController@index"
+    assert handlers["/status"] == "ApiController@status"
+    assert handlers["/users"] == "UserController@store"
+    assert handlers["/colon"] == "OtherController@show"
+    assert handlers["/invokable"] == "SingleAction"
+
 

@@ -111,7 +111,7 @@ class LaravelParser(PhpParser):
     def parse_file(self, ctx: ParseContext) -> FileRecord:
         root = parse_source("php", ctx.source, ctx.parse_timeout_micros).root_node
         record = self.extract(root, ctx)
+        record.framework = "laravel"
         if ctx.capture_statements and not self.is_fixture_file(ctx.path):
-            if detect_laravel_routes(root, ctx.source, ctx.path, record):
-                record.framework = "laravel"
+            detect_laravel_routes(root, ctx.source, ctx.path, record)
         return record

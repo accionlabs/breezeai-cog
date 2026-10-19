@@ -103,7 +103,7 @@ class SlimParser(PhpParser):
     def parse_file(self, ctx: ParseContext) -> FileRecord:
         root = parse_source("php", ctx.source, ctx.parse_timeout_micros).root_node
         record = self.extract(root, ctx)
+        record.framework = "slim"
         if ctx.capture_statements and not self.is_fixture_file(ctx.path):
-            if detect_slim_routes(root, ctx.source, ctx.path, record):
-                record.framework = "slim"
+            detect_slim_routes(root, ctx.source, ctx.path, record)
         return record

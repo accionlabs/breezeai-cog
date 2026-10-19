@@ -44,6 +44,7 @@ def build_class(
          if child.type in {"public", "protected", "private"}),
         None,
     )
+    is_abstract = any(child.type == "abstract_modifier" for child in node.children)
     constructor_params: list[ConstructorParam] = []
     body = node.child_by_field_name("body")
     if body is not None:
@@ -138,6 +139,7 @@ def build_class(
         name=name,
         type=_CLASS_TYPES[node.type],
         visibility=visibility,
+        isAbstract=is_abstract or None,
         extends=extends,
         implements=implements,
         constructorParams=constructor_params,
