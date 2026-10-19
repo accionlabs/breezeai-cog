@@ -61,6 +61,7 @@ class Controller extends BaseController {
     assert [fn.type for fn in record.functions] == [
         "method", "function_expression", "arrow_function",
     ]
+    assert [fn.visibility for fn in record.functions] == ["public", None, None]
     assert [statement.name for statement in record.statements
             if statement.nodeType in {"property_declaration", "const_declaration"}] == [
         "VERSION", "name",

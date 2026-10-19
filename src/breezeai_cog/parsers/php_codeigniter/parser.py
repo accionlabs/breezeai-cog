@@ -102,7 +102,7 @@ class CodeIgniterParser(PhpParser):
     def parse_file(self, ctx: ParseContext) -> FileRecord:
         root = parse_source("php", ctx.source, ctx.parse_timeout_micros).root_node
         record = self.extract(root, ctx)
+        record.framework = "codeigniter"
         if ctx.capture_statements and not self.is_fixture_file(ctx.path):
-            if detect_codeigniter_routes(root, ctx.source, ctx.path, record):
-                record.framework = "codeigniter"
+            detect_codeigniter_routes(root, ctx.source, ctx.path, record)
         return record
