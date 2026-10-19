@@ -288,3 +288,22 @@ class Plugin {
     ]
     assert record.framework == "wordpress"
     assert not any(s.semanticType == "route" for s in record.statements)
+
+
+def test_codeigniter_query_builder_db_method_calls() -> None:
+    source = """<?php
+namespace App\\Models;
+class Item {
+    public function get_items($id) {
+        $builder = $this->db->table('items');
+        $builder->where('item_id', $id);
+        return $builder->get()->getResult();
+    }
+}
+"""
+    record = _parse(CodeIgniterParser(), source, path="app/Models/Item.php")
+    db_calls = [s for s in record.statements if s.semanticType == "db_method_call"]
+    assert len(db_calls) >= 2
+    assert any(s.method == "where" and s.dataAccessHint == "codeigniter-builder" for s in db_calls)
+    assert any(s.method == "get" and s.dataAccessHint == "codeigniter-builder" for s in db_calls)
+
