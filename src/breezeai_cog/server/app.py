@@ -23,7 +23,10 @@ def create_app(settings: Settings | None = None, deps: ServerDeps | None = None)
 
     @app.exception_handler(ApiError)
     async def _api_error(_request: Request, exc: ApiError) -> JSONResponse:
-        return JSONResponse(status_code=exc.status_code, content={"error": str(exc)})
+        content: dict[str, str] = {"error": str(exc)}
+        if exc.failed_step:
+            content["failedStep"] = exc.failed_step
+        return JSONResponse(status_code=exc.status_code, content=content)
 
     @app.exception_handler(RequestValidationError)
     async def _validation(_request: Request, exc: RequestValidationError) -> JSONResponse:

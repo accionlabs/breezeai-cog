@@ -473,6 +473,29 @@ def test_s3_command_pattern_detected(tmp_path) -> None:
     assert all(c.method is None for c in calls)
 
 
+S3_CLASS_FIELD_SRC = b"""import { S3Client, PutObjectCommand, DeleteObjectCommand } from '@aws-sdk/client-s3';
+
+export class Storage {
+  private readonly a = new S3Client({});
+  private b: S3Client;
+
+  async put() { await this.a.send(new PutObjectCommand({ Bucket: 'b', Key: 'k' })); }
+  async drop() { await this.b.send(new DeleteObjectCommand({ Bucket: 'b', Key: 'k' })); }
+}
+"""
+
+
+def test_s3_class_field_clients_detected(tmp_path) -> None:
+    # Class-field clients (`private readonly a = new S3Client({})` / `private b: S3Client`)
+    # were invisible while S3 had its own field scanner; the shared detector resolves them,
+    # matching what Cognito and SSM already did.
+    rec = _parse(tmp_path, S3_CLASS_FIELD_SRC, "src/storage.fields.service.ts")
+    calls = _api_calls(rec)
+    assert len(calls) == 2
+    assert all(c.framework == "aws-s3" for c in calls)
+    assert {c.endpoint for c in calls} == {"PutObjectCommand", "DeleteObjectCommand"}
+
+
 def test_s3_no_false_positive_without_import(tmp_path) -> None:
     src = b"""export class Svc {
   constructor(private s3: S3Client) {}
@@ -480,6 +503,374 @@ def test_s3_no_false_positive_without_import(tmp_path) -> None:
 }
 """
     rec = _parse(tmp_path, src, "src/x.ts")
+    assert _api_calls(rec) == []
+
+
+COGNITO_DI_SRC = b"""import { CognitoIdentityProviderClient, AdminCreateUserCommand, AdminGetUserCommand } from '@aws-sdk/client-cognito-identity-provider';
+
+@Injectable()
+export class UserPoolService {
+  constructor(private cognito: CognitoIdentityProviderClient) {}
+
+  async createUser(email: string) {
+    await this.cognito.send(new AdminCreateUserCommand({ UserPoolId: 'us-east-1_example', Username: email }));
+  }
+
+  async getUser(username: string) {
+    return await this.cognito.send(new AdminGetUserCommand({ UserPoolId: 'us-east-1_example', Username: username }));
+  }
+}
+"""
+
+COGNITO_FIELD_SRC = b"""import { CognitoIdentityProviderClient, AdminGetUserCommand } from '@aws-sdk/client-cognito-identity-provider';
+
+export class Svc {
+  private a: CognitoIdentityProviderClient;
+  private readonly b = new CognitoIdentityProviderClient({});
+  private c: CognitoIdentityProviderClient = new CognitoIdentityProviderClient({});
+
+  async fa() { return await this.a.send(new AdminGetUserCommand({})); }
+  async fb() { return await this.b.send(new AdminGetUserCommand({})); }
+  async fc() { return await this.c.send(new AdminGetUserCommand({})); }
+}
+"""
+
+COGNITO_FREEVAR_SRC = b"""import { CognitoIdentityProviderClient, InitiateAuthCommand } from '@aws-sdk/client-cognito-identity-provider';
+
+export async function login(username: string, password: string) {
+  const client = new CognitoIdentityProviderClient({ region: 'us-east-1' });
+  return await client.send(new InitiateAuthCommand({
+    AuthFlow: 'USER_PASSWORD_AUTH',
+    ClientId: 'abc',
+    AuthParameters: { USERNAME: username, PASSWORD: password },
+  }));
+}
+"""
+
+COGNITO_JS_SRC = b"""const { CognitoIdentityProviderClient, SignUpCommand } = require('@aws-sdk/client-cognito-identity-provider');
+const c = new CognitoIdentityProviderClient({});
+exports.f = async () => c.send(new SignUpCommand({}));
+"""
+
+
+def test_cognito_di_field_command_detected(tmp_path) -> None:
+    rec = _parse(tmp_path, COGNITO_DI_SRC, "src/user-pool.service.ts")
+    calls = _api_calls(rec)
+    assert len(calls) == 2
+    assert all(c.framework == "aws-cognito" for c in calls)
+    endpoints = {c.endpoint for c in calls}
+    assert endpoints == {"AdminCreateUserCommand", "AdminGetUserCommand"}
+    assert all(c.method is None for c in calls)
+
+
+def test_cognito_class_field_clients_detected(tmp_path) -> None:
+    rec = _parse(tmp_path, COGNITO_FIELD_SRC, "src/cognito.fields.service.ts")
+    calls = _api_calls(rec)
+    assert len(calls) == 3
+    assert all(c.framework == "aws-cognito" for c in calls)
+    assert all(c.endpoint == "AdminGetUserCommand" for c in calls)
+
+
+def test_cognito_free_variable_client_detected(tmp_path) -> None:
+    rec = _parse(tmp_path, COGNITO_FREEVAR_SRC, "src/cognito.client.ts")
+    calls = _api_calls(rec)
+    assert len(calls) == 1
+    assert calls[0].framework == "aws-cognito"
+    assert calls[0].endpoint == "InitiateAuthCommand"
+    assert calls[0].method is None
+
+
+def test_cognito_js_require_free_variable_detected(tmp_path) -> None:
+    rec = _parse(tmp_path, COGNITO_JS_SRC, "src/cognito.js")
+    calls = _api_calls(rec)
+    assert len(calls) == 1
+    assert calls[0].endpoint == "SignUpCommand"
+
+
+def test_cognito_command_variable_resolved(tmp_path) -> None:
+    src = b"""import { CognitoIdentityProviderClient, SignUpCommand } from '@aws-sdk/client-cognito-identity-provider';
+
+export async function signUp(client: CognitoIdentityProviderClient, email: string, password: string) {
+  const cmd = new SignUpCommand({ ClientId: 'abc', Username: email, Password: password });
+  return await client.send(cmd);
+}
+"""
+    rec = _parse(tmp_path, src, "src/signup.ts")
+    calls = _api_calls(rec)
+    assert len(calls) == 1
+    assert calls[0].endpoint == "SignUpCommand"
+
+
+def test_cognito_endpoint_keeps_command_suffix(tmp_path) -> None:
+    # endpoint is the Command class name verbatim — the token the source contains. Same
+    # convention as S3 and SSM, so one query shape covers every command-pattern SDK.
+    rec = _parse(tmp_path, COGNITO_DI_SRC, "src/user-pool.service.ts")
+    endpoints = {c.endpoint for c in _api_calls(rec)}
+    assert "AdminCreateUserCommand" in endpoints
+    assert "AdminCreateUser" not in endpoints
+
+
+def test_cognito_no_false_positive_without_import(tmp_path) -> None:
+    src = b"""export class Svc {
+  constructor(private cognito: CognitoIdentityProviderClient) {}
+  async f() { await this.cognito.send(new AdminCreateUserCommand({})); }
+}
+"""
+    rec = _parse(tmp_path, src, "src/x.ts")
+    assert _api_calls(rec) == []
+
+
+def test_cognito_send_on_non_client_not_tagged(tmp_path) -> None:
+    src = b"""import { CognitoIdentityProviderClient } from '@aws-sdk/client-cognito-identity-provider';
+
+export class Svc {
+  constructor(private repo: MyRepo) {}
+  async f() { await this.repo.send(new AdminCreateUserCommand({})); }
+}
+"""
+    rec = _parse(tmp_path, src, "src/x.ts")
+    assert _api_calls(rec) == []
+
+
+def test_cognito_send_non_command_argument_is_absent(tmp_path) -> None:
+    src = b"""import { CognitoIdentityProviderClient } from '@aws-sdk/client-cognito-identity-provider';
+
+export class Svc {
+  constructor(private cognito: CognitoIdentityProviderClient) {}
+  async f(payload: unknown) { await this.cognito.send(payload); }
+}
+"""
+    rec = _parse(tmp_path, src, "src/x.ts")
+    assert _api_calls(rec) == []
+
+
+def test_cognito_file_framework_rollup(tmp_path) -> None:
+    rec = _parse(tmp_path, COGNITO_DI_SRC, "src/user-pool.service.ts")
+    assert rec.framework == "aws-cognito"
+
+
+SSM_DI_SRC = b"""import { SSMClient, GetParameterCommand, PutParameterCommand } from '@aws-sdk/client-ssm';
+
+@Injectable()
+export class ConfigService {
+  constructor(private ssm: SSMClient) {}
+
+  async getDbUrl() {
+    return await this.ssm.send(new GetParameterCommand({ Name: '/app/db/url', WithDecryption: true }));
+  }
+
+  async setFeatureFlag(value: string) {
+    await this.ssm.send(new PutParameterCommand({ Name: '/app/feature-flag', Value: value, Overwrite: true }));
+  }
+}
+"""
+
+SSM_FIELD_SRC = b"""import { SSMClient, GetParametersCommand } from '@aws-sdk/client-ssm';
+
+export class Svc {
+  private readonly ssm = new SSMClient({});
+
+  async f() { return await this.ssm.send(new GetParametersCommand({ Names: ['/app/a', '/app/b'] })); }
+}
+"""
+
+SSM_FREEVAR_SRC = b"""import { SSMClient, GetParametersByPathCommand } from '@aws-sdk/client-ssm';
+
+export async function listParams() {
+  const ssm = new SSMClient({});
+  return await ssm.send(new GetParametersByPathCommand({ Path: '/app' }));
+}
+"""
+
+
+def test_ssm_di_field_command_detected(tmp_path) -> None:
+    rec = _parse(tmp_path, SSM_DI_SRC, "src/config.service.ts")
+    calls = _api_calls(rec)
+    assert len(calls) == 2
+    assert all(c.framework == "aws-ssm" for c in calls)
+    endpoints = {c.endpoint for c in calls}
+    assert endpoints == {"GetParameterCommand", "PutParameterCommand"}
+    assert all(c.method is None for c in calls)
+
+
+def test_ssm_class_field_client_detected(tmp_path) -> None:
+    rec = _parse(tmp_path, SSM_FIELD_SRC, "src/ssm.fields.service.ts")
+    calls = _api_calls(rec)
+    assert len(calls) == 1
+    assert calls[0].framework == "aws-ssm"
+    assert calls[0].endpoint == "GetParametersCommand"
+
+
+def test_ssm_free_variable_client_detected(tmp_path) -> None:
+    rec = _parse(tmp_path, SSM_FREEVAR_SRC, "src/ssm.client.ts")
+    calls = _api_calls(rec)
+    assert len(calls) == 1
+    assert calls[0].endpoint == "GetParametersByPathCommand"
+    assert calls[0].method is None
+
+
+def test_ssm_no_false_positive_without_import(tmp_path) -> None:
+    src = b"""export class Svc {
+  constructor(private ssm: SSMClient) {}
+  async f() { await this.ssm.send(new GetParameterCommand({})); }
+}
+"""
+    rec = _parse(tmp_path, src, "src/x.ts")
+    assert _api_calls(rec) == []
+
+
+def test_ssm_sibling_package_not_misdetected(tmp_path) -> None:
+    src = b"""import { SSMIncidentsClient, StartIncidentCommand } from '@aws-sdk/client-ssm-incidents';
+
+export async function f() {
+  const c = new SSMIncidentsClient({});
+  return await c.send(new StartIncidentCommand({}));
+}
+"""
+    rec = _parse(tmp_path, src, "src/x.ts")
+    assert _api_calls(rec) == []
+
+
+def test_ssm_send_on_non_client_not_tagged(tmp_path) -> None:
+    src = b"""import { SSMClient } from '@aws-sdk/client-ssm';
+
+export class Svc {
+  constructor(private repo: MyRepo) {}
+  async f() { await this.repo.send(new GetParameterCommand({})); }
+}
+"""
+    rec = _parse(tmp_path, src, "src/x.ts")
+    assert _api_calls(rec) == []
+
+
+def test_ssm_file_framework_rollup(tmp_path) -> None:
+    rec = _parse(tmp_path, SSM_DI_SRC, "src/config.service.ts")
+    assert rec.framework == "aws-ssm"
+
+
+def test_cognito_and_ssm_in_same_file_both_detected(tmp_path) -> None:
+    src = b"""import { CognitoIdentityProviderClient, InitiateAuthCommand } from '@aws-sdk/client-cognito-identity-provider';
+import { SSMClient, GetParameterCommand } from '@aws-sdk/client-ssm';
+
+export async function f(username: string, password: string) {
+  const cognito = new CognitoIdentityProviderClient({});
+  const ssm = new SSMClient({});
+  await cognito.send(new InitiateAuthCommand({
+    AuthFlow: 'USER_PASSWORD_AUTH',
+    ClientId: 'abc',
+    AuthParameters: { USERNAME: username, PASSWORD: password },
+  }));
+  await ssm.send(new GetParameterCommand({ Name: '/app/db/url' }));
+}
+"""
+    rec = _parse(tmp_path, src, "src/mixed.ts")
+    calls = _api_calls(rec)
+    assert len(calls) == 2
+    got = {(c.framework, c.endpoint) for c in calls}
+    assert got == {("aws-cognito", "InitiateAuthCommand"), ("aws-ssm", "GetParameterCommand")}
+    assert rec.framework == "aws-cognito"  # first-wins: Cognito is registered before SSM
+
+
+# --- command-provenance guard -------------------------------------------------------------
+# `*Command` is only a naming convention, and client identifiers are collected file-wide, so
+# without a provenance check a `.send(new XCommand())` on an unrelated object was emitted with
+# a fabricated endpoint. The command must now be imported from the client's own SDK package.
+
+
+def test_command_from_another_package_not_tagged(tmp_path) -> None:
+    # A CQRS command on a genuine SSM client: real client, real `.send`, foreign command.
+    src = b"""import { SSMClient } from '@aws-sdk/client-ssm';
+import { CreateUserCommand } from './cqrs/commands';
+
+export class Svc {
+  constructor(private ssm: SSMClient) {}
+  async f() { return await this.ssm.send(new CreateUserCommand({ email: 'a@b.c' })); }
+}
+"""
+    rec = _parse(tmp_path, src, "src/svc.ts")
+    assert _api_calls(rec) == []
+
+
+def test_cross_scope_client_name_collision_not_tagged(tmp_path) -> None:
+    # Two different `client`s in one file: an SSM client in one function, a mail queue in
+    # another. Only the SSM call is captured; the mail queue is left alone.
+    src = b"""import { SSMClient, GetParameterCommand } from '@aws-sdk/client-ssm';
+import { MailQueue, SendDigestCommand } from './mail';
+
+export async function loadConfig() {
+  const client = new SSMClient({});
+  return await client.send(new GetParameterCommand({ Name: '/a' }));
+}
+
+export async function digest(client: MailQueue) {
+  return await client.send(new SendDigestCommand({ id: 1 }));
+}
+"""
+    rec = _parse(tmp_path, src, "src/config.ts")
+    calls = _api_calls(rec)
+    assert [(c.framework, c.endpoint) for c in calls] == [("aws-ssm", "GetParameterCommand")]
+
+
+def test_s3_cross_scope_client_name_collision_not_tagged(tmp_path) -> None:
+    # Same collision on S3 — it shares the detector, so it needs the same guard.
+    src = b"""import { S3Client, PutObjectCommand } from '@aws-sdk/client-s3';
+import { Mailer, SendWelcomeCommand } from './mail';
+
+export async function upload() {
+  const c = new S3Client({});
+  await c.send(new PutObjectCommand({ Bucket: 'b', Key: 'k' }));
+}
+
+export async function welcome(c: Mailer) {
+  await c.send(new SendWelcomeCommand({ to: 'x' }));
+}
+"""
+    rec = _parse(tmp_path, src, "src/storage.ts")
+    calls = _api_calls(rec)
+    assert [(c.framework, c.endpoint) for c in calls] == [("aws-s3", "PutObjectCommand")]
+
+
+def test_command_from_sibling_aws_package_not_tagged(tmp_path) -> None:
+    # Both packages are real AWS SDKs, but the command belongs to the other one — so the
+    # endpoint would name an operation the receiving client cannot perform.
+    src = b"""import { SSMClient } from '@aws-sdk/client-ssm';
+import { S3Client, GetObjectCommand } from '@aws-sdk/client-s3';
+
+export async function f(ssm: SSMClient) {
+  return await ssm.send(new GetObjectCommand({ Bucket: 'b', Key: 'k' }));
+}
+"""
+    rec = _parse(tmp_path, src, "src/mixed.ts")
+    assert _api_calls(rec) == []
+
+
+def test_command_via_barrel_reexport_is_a_known_gap(tmp_path) -> None:
+    # Documented cost of the provenance check: the command's true origin is in another file,
+    # which a single-file detector cannot see, so the call is not captured. A gap, not a
+    # wrong fact — recoverable later via the repo-wide index.
+    src = b"""import { SSMClient } from '@aws-sdk/client-ssm';
+import { GetParameterCommand } from '@app/aws';
+
+export async function f(ssm: SSMClient) {
+  return await ssm.send(new GetParameterCommand({ Name: '/a' }));
+}
+"""
+    rec = _parse(tmp_path, src, "src/barrel.ts")
+    assert _api_calls(rec) == []
+
+
+def test_cognito_command_via_barrel_reexport_is_a_known_gap(tmp_path) -> None:
+    # The provenance check is in the shared detector, so the gap is the same for every
+    # command-pattern SDK. Pinned per service too: a registration that got the byte guard
+    # or client type wrong could otherwise pass the SSM case and silently skip this one.
+    src = b"""import { CognitoIdentityProviderClient } from '@aws-sdk/client-cognito-identity-provider';
+import { AdminCreateUserCommand } from '@app/aws';
+
+export async function f(cognito: CognitoIdentityProviderClient) {
+  return await cognito.send(new AdminCreateUserCommand({ UserPoolId: 'us-east-1_example', Username: 'a@b.c' }));
+}
+"""
+    rec = _parse(tmp_path, src, "src/cognito.barrel.ts")
     assert _api_calls(rec) == []
 
 
@@ -493,6 +884,12 @@ def test_output_validates(tmp_path) -> None:
         (APOLLO_ACCESSOR_SRC, "src/user2.service.ts"),
         (APICLIENT_SRC, "src/data.service.ts"),
         (S3_SRC, "src/storage.service.ts"),
+        (S3_CLASS_FIELD_SRC, "src/storage.fields.service.ts"),
+        (COGNITO_DI_SRC, "src/user-pool.service.ts"),
+        (COGNITO_FIELD_SRC, "src/cognito.fields.service.ts"),
+        (COGNITO_FREEVAR_SRC, "src/cognito.client.ts"),
+        (COGNITO_JS_SRC, "src/cognito.js"),
+        (SSM_DI_SRC, "src/config.service.ts"),
     ):
         rec = _parse(tmp_path, src, rel)
         errors = list(

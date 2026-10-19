@@ -397,9 +397,11 @@ def test_nested_named_functions_extracted(tmp_path) -> None:
     # the component plus all three nested handlers are present
     assert {"OpportunityDetail", "onClose", "handleSubmit", "onKey"} <= set(by_name)
     parent = by_name["OpportunityDetail"]
-    # nested handlers are parented to the enclosing function, not the file
+    # A function parents to a class or the file -- never to another function. "Nested inside
+    # OpportunityDetail" is read from line containment.
     for h in ("onClose", "handleSubmit", "onKey"):
-        assert by_name[h].parentId == parent.id, h
+        assert by_name[h].parentId == rec.id, h
+        assert parent.startLine <= by_name[h].startLine <= parent.endLine, h
     # a handler's OWN calls stay on the handler (barrier), NOT folded into the parent
     assert {"validateForm", "saveOpportunity"} <= {c.name for c in by_name["handleSubmit"].calls}
     assert "validateForm" not in {c.name for c in parent.calls}
@@ -442,9 +444,12 @@ def test_object_property_and_named_expression_functions_extracted(tmp_path) -> N
     rec = TypeScriptParser().parse_file(ctx)
     by_name = {f.name: f for f in rec.functions}
     assert {"connectConsumer", "eachMessage", "step"} <= set(by_name)
-    # object-property arrow and named FE are parented to the enclosing method
-    assert by_name["eachMessage"].parentId == by_name["connectConsumer"].id
-    assert by_name["step"].parentId == by_name["connectConsumer"].id
+    # An object-property arrow and a named function expression parent to a class or the file --
+    # never to another function; "declared inside connectConsumer" comes from line containment.
+    enclosing = by_name["connectConsumer"]
+    for nested in ("eachMessage", "step"):
+        assert by_name[nested].parentId == rec.id, nested
+        assert enclosing.startLine <= by_name[nested].startLine <= enclosing.endLine, nested
     # barrier: each callback's own calls stay on it, not folded into the method
     assert "handleRecord" in {c.name for c in by_name["eachMessage"].calls}
     assert "visitStep" in {c.name for c in by_name["step"].calls}
@@ -904,12 +909,101 @@ def test_enum_members_captured_as_statements(tmp_path) -> None:
     assert TypeScriptParser().parse_file(ctx2).statements == []
 
 
+def test_var_declarations_carry_their_name(tmp_path) -> None:
+    # `var` (variable_declaration) and `let`/`const` (lexical_declaration) share one shape,
+    # so both name the same way — otherwise every pre-ES6 constant is reachable only by
+    # text search. A destructuring bind has no single declared name and stays nameless.
+    src = (b'var APP_NAME = "BreezeAI";\n'
+           b"var a = 1, b = 2;\n"
+           b"var { x, y } = pt;\n"
+           b"var noInit;\n"
+           b"const KA = 4;\n")
+    p = tmp_path / "legacy.js"
+    p.write_bytes(src)
+    ctx = ParseContext(path="legacy.js", abs_path=p, source=src, repo_root=tmp_path,
+                       capture_statements=True)
+    rec = TypeScriptParser().parse_file(ctx)
+    assert [(s.name, s.nodeType) for s in rec.statements] == [
+        ("APP_NAME", "variable_declaration"),
+        ("a", "variable_declaration"),          # multi-declarator: first name, all in text
+        (None, "variable_declaration"),         # `var {x, y} = pt` — no single name
+        ("noInit", "variable_declaration"),
+        ("KA", "lexical_declaration"),
+    ]
+    assert next(s for s in rec.statements if s.name == "a").text == "var a = 1, b = 2;"
+
+
+def test_namespace_members_extracted_flat(tmp_path) -> None:
+    # A namespace is a declaration scope, not a value: its members are extracted as if they
+    # were top-level and parent to the FILE (the model's only class containment edge is
+    # File->Class), so an enum inside a namespace yields a real Class plus its members.
+    # The namespace wrapper itself is NOT emitted as a statement (it would carry the whole
+    # body a second time as one nameless node).
+    src = (b"namespace Config {\n"
+           b'    export enum Status { Active = "active" }\n'
+           b"    export const RETRIES = 3;\n"
+           b"    export class Loader { load() {} }\n"
+           b"}\n")
+    p = tmp_path / "c.ts"
+    p.write_bytes(src)
+    ctx = ParseContext(path="c.ts", abs_path=p, source=src, repo_root=tmp_path,
+                       capture_statements=True)
+    rec = TypeScriptParser().parse_file(ctx)
+    assert [(c.name, c.type, c.parentId) for c in rec.classes] == [
+        ("Status", "enum", rec.id),
+        ("Loader", "class", rec.id),
+    ]
+    status = next(c for c in rec.classes if c.name == "Status")
+    assert [(s.name, s.text, s.semanticType) for s in rec.statements
+            if s.parentId == status.id] == [("Active", 'Active = "active"', "enum_member")]
+    # The namespace-level constant still lands, parented to the file.
+    assert [(s.name, s.nodeType) for s in rec.statements
+            if s.parentId == rec.id] == [("RETRIES", "lexical_declaration")]
+    assert "load" in [f.name for f in rec.functions]
+
+
+def test_namespace_wrapper_forms_and_nesting(tmp_path) -> None:
+    # TypeScript spells a namespace five ways, none of them a plain declaration; all are
+    # descended, including nested namespaces and the `declare` (ambient) wrapper.
+    src = (b"namespace A { export enum E1 { X = 1 } }\n"
+           b"export namespace B { export enum E2 { Y = 2 } }\n"
+           b"module C { export enum E3 { Z = 3 } }\n"
+           b"declare namespace D { enum E4 { W = 4 } }\n"
+           b"declare const enum E5 { Q = 1 }\n"
+           b"namespace Outer { export namespace Inner { export enum Deep { V = 9 } } }\n")
+    p = tmp_path / "w.ts"
+    p.write_bytes(src)
+    ctx = ParseContext(path="w.ts", abs_path=p, source=src, repo_root=tmp_path,
+                       capture_statements=True)
+    rec = TypeScriptParser().parse_file(ctx)
+    assert [c.name for c in rec.classes] == ["E1", "E2", "E3", "E4", "E5", "Deep"]
+    assert [s.name for s in rec.statements if s.semanticType == "enum_member"] == [
+        "X", "Y", "Z", "W", "Q", "V",
+    ]
+    assert not [s for s in rec.statements if s.nodeType == "expression_statement"]
+
+
+def test_ambient_function_signature_not_a_function(tmp_path) -> None:
+    # `declare function f(): void` and a signature inside `declare module "pkg"` have no
+    # body — they declare a shape, so they must not seed a Function node (absent beats a
+    # fabricated empty one), exactly like a C++ prototype.
+    src = (b"declare function bare(): void;\n"
+           b'declare module "ext" { export function f(): void; }\n')
+    p = tmp_path / "a.ts"
+    p.write_bytes(src)
+    ctx = ParseContext(path="a.ts", abs_path=p, source=src, repo_root=tmp_path,
+                       capture_statements=True)
+    rec = TypeScriptParser().parse_file(ctx)
+    assert rec.functions == []
+    assert rec.classes == []
+
+
 def test_interface_members_captured(tmp_path) -> None:
     # An interface's members mirror an implementing class: a method signature becomes a
     # Function (no body → calls:[]) so callers resolve to implementers via IMPLEMENTS +
     # name match. Every other member — the data field and the type-level call/construct/
     # index signatures — becomes a flat Statement (raw nodeType + full text), gated by
-    # --capture-statements. Nothing is dropped; the nameless signatures carry name=None.
+    # statement capture. Nothing is dropped; the nameless signatures carry name=None.
     src = (
         b"export interface Notifier {\n"
         b"  channel: string;\n"

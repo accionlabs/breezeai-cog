@@ -213,6 +213,7 @@ def build_function(
     limit: int,
     resolve: CallResolver = noop_resolver,
     class_name: str | None = None,
+    id_owner: str | None = None,
     kind: str = "function",
 ) -> tuple[Function, list[Statement]]:
     """A ``function_definition`` → a ``Function`` (+ its flat statements). ``kind`` is
@@ -227,7 +228,10 @@ def build_function(
         name = node_text(inner, source) if inner is not None else ""
 
     start, end = line_span(node)
-    fid = disambiguate(function_id(path, name, start, class_name=class_name), seen_ids)
+    # The id carries the qualified owner (`Outer.Inner`) so a nested type's methods are
+    # identified unambiguously; `class_name` stays simple for call resolution.
+    fid = disambiguate(
+        function_id(path, name, start, class_name=id_owner or class_name), seen_ids)
     ret = node.child_by_field_name("type")
     body = node.child_by_field_name("body")
     params = fd.child_by_field_name("parameters") if fd is not None else None
@@ -262,6 +266,7 @@ def build_member_function(
     capture: bool,
     limit: int,
     resolve: CallResolver = noop_resolver,
+    id_owner: str | None = None,
 ) -> tuple[Function, list[Statement]]:
     """An in-class member-function **declaration** (``field_declaration`` with a
     ``function_declarator``, no body) → a flat method ``Function``. An inline
@@ -270,7 +275,10 @@ def build_member_function(
     name_node = fd.child_by_field_name("declarator") if fd is not None else None
     name = node_text(name_node, source) if name_node is not None else ""
     start, end = line_span(field_decl)
-    fid = disambiguate(function_id(path, name, start, class_name=class_name), seen_ids)
+    # The id carries the qualified owner (`Outer.Inner`) so a nested type's methods are
+    # identified unambiguously; `class_name` stays simple for call resolution.
+    fid = disambiguate(
+        function_id(path, name, start, class_name=id_owner or class_name), seen_ids)
     ret = field_decl.child_by_field_name("type")
     body = field_decl.child_by_field_name("body")  # present only for an inline definition
     params = fd.child_by_field_name("parameters") if fd is not None else None

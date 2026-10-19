@@ -37,7 +37,8 @@ def _settings(**kwargs) -> Settings:
 def test_defaults(env) -> None:
     s = _settings()
     assert s.repo is None and s.languages is None and s.jobs is None
-    assert s.capture_statements is False and s.upload is False
+    assert s.capture_statements is True and s.upload is False
+    assert s.capture_templates is False
     assert s.log_level == "INFO" and s.log_format == "plaintext" and s.log_to_file is True
     assert s.port == 3000
     assert s.statement_text_limit == 8000 and s.max_file_size == 2_000_000
@@ -64,11 +65,11 @@ def test_upload_tuning_env_and_bounds(env) -> None:
 
 
 def test_env_prefix(env) -> None:
-    env.setenv("BREEZEAI_COG_CAPTURE_STATEMENTS", "true")
+    env.setenv("BREEZEAI_COG_CAPTURE_STATEMENTS", "false")
     env.setenv("BREEZEAI_COG_JOBS", "8")
     env.setenv("BREEZEAI_COG_PORT", "9000")
     s = _settings()
-    assert s.capture_statements is True and s.jobs == 8 and s.port == 9000
+    assert s.capture_statements is False and s.jobs == 8 and s.port == 9000
 
 
 def test_legacy_aliases(env) -> None:
@@ -118,3 +119,52 @@ def test_secret_not_leaked(env) -> None:
     assert isinstance(s.user_api_key, SecretStr)
     assert "topsecret" not in repr(s)
     assert s.user_api_key.get_secret_value() == "topsecret"
+
+
+# --- SCM provider settings (integrations/scm/) ---
+
+
+def test_scm_defaults(env) -> None:
+    s = _settings()
+    assert s.github_api_base_url == "https://api.github.com"
+    assert s.gitlab_api_base_url == "https://gitlab.com/api/v4"
+    assert s.bitbucket_api_base_url == "https://api.bitbucket.org/2.0"
+    assert s.azure_devops_api_base_url == "https://dev.azure.com"
+    assert (s.scm_api_timeout, s.scm_api_retry_max, s.scm_api_retry_backoff_seconds) == (60.0, 3, 2.0)
+    assert s.scm_max_pages == 100
+    assert s.scm_token_github is None and s.scm_token_azure_devops is None
+    assert s.scm_instances == {} and s.scm_instance_base_url_mapping == {}
+
+
+def test_scm_env_json_maps_and_secret_tokens(env) -> None:
+    env.setenv("BREEZEAI_COG_SCM_INSTANCES", '{"Git.Acme.COM/": "GitLab"}')
+    env.setenv("BREEZEAI_COG_SCM_INSTANCE_BASE_URL_MAPPING", '{"git.acme.com": "https://git.acme.com/api/v4"}')
+    env.setenv("BREEZEAI_COG_SCM_TOKEN_GITHUB", "ghp_secret")
+    env.setenv("BREEZEAI_COG_SCM_API_RETRY_MAX", "0")
+    s = _settings()
+    assert s.scm_instances == {"git.acme.com": "gitlab"}  # normalised host + slug
+    assert s.scm_instance_base_url_mapping == {"git.acme.com": "https://git.acme.com/api/v4"}
+    assert isinstance(s.scm_token_github, SecretStr)
+    assert "ghp_secret" not in repr(s)
+    assert s.scm_api_retry_max == 0
+
+
+def test_scm_instances_rejects_unknown_provider(env) -> None:
+    with pytest.raises(ValidationError, match="unknown provider"):
+        _settings(scm_instances={"git.acme.com": "svn"})
+
+
+@pytest.mark.parametrize("field, bad", [
+    ("scm_api_timeout", 0), ("scm_api_retry_max", -1),
+    ("scm_api_retry_backoff_seconds", -0.5), ("scm_max_pages", 0),
+])
+def test_scm_bounds(env, field, bad) -> None:
+    with pytest.raises(ValidationError):
+        _settings(**{field: bad})
+
+
+def test_capture_templates_from_env(env) -> None:
+    env.setenv("BREEZEAI_COG_CAPTURE_TEMPLATES", "true")
+    assert _settings().capture_templates is True
+    # init kwargs outrank env — which is why the CLI forwards the flag only when given
+    assert _settings(capture_templates=False).capture_templates is False

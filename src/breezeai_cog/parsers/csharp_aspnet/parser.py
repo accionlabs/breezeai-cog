@@ -10,7 +10,7 @@ from ...schemas import FileRecord
 from ..base import ParseContext
 from ..csharp.parser import CSharpParser
 from ..treesitter import parse_source
-from .routes import detect_controller_routes, detect_minimal_api_routes, detect_route_registrations
+from ..aspnet_common import detect_controller_routes, detect_minimal_api_routes, detect_route_registrations
 
 _MARKERS = (b"Microsoft.AspNetCore", b"System.Web.Mvc", b"System.Web.Http")
 
@@ -26,7 +26,7 @@ class AspNetCoreParser(CSharpParser):
     def parse_file(self, ctx: ParseContext) -> FileRecord:
         root = parse_source("csharp", ctx.source, ctx.parse_timeout_micros).root_node
         record = self.extract(root, ctx)  # inherited C# extraction (one parse)
-        if ctx.capture_statements:  # routes are statements — gated by --capture-statements
+        if ctx.capture_statements:  # routes are statements — gated by statement capture
             routes = detect_controller_routes(record, ctx.resolution_index)
             seen = {s.id for s in record.statements} | {r.id for r in routes}
             routes += detect_minimal_api_routes(

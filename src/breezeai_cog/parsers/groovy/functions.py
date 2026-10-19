@@ -197,6 +197,7 @@ def build_method(
     *,
     parent_id: str,
     class_name: str | None,
+    id_owner: str | None = None,
     seen_ids: set[str],
     capture: bool,
     limit: int,
@@ -204,7 +205,10 @@ def build_method(
 ) -> tuple[Function, list[Statement]]:
     name = node_text(node.child_by_field_name("name"), source)
     start, end = line_span(node)
-    fid = disambiguate(function_id(path, name, start, class_name=class_name), seen_ids)
+    # The id carries the qualified owner (`Outer.Inner`) so a nested type's methods are
+    # identified unambiguously; `class_name` stays simple for call resolution.
+    fid = disambiguate(
+        function_id(path, name, start, class_name=id_owner or class_name), seen_ids)
     visibility, is_static, _ = _flags(node)
     ret = node.child_by_field_name("return_type")
     body = node.child_by_field_name("body")

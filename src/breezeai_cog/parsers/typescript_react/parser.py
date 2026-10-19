@@ -42,7 +42,7 @@ class ReactParser(TypeScriptParser):
         # JS/TS distinction lives on the orthogonal `language` axis (.tsx -> typescript,
         # .jsx -> javascript), set by the base extractor.
         record.framework = "react"
-        if ctx.capture_statements and not self.is_fixture_file(ctx.path):  # gated by --capture-statements; skip fixtures (R4)
+        if ctx.capture_statements and not self.is_fixture_file(ctx.path):  # gated by statement capture; skip fixtures (R4)
             routes = detect_react_routes(
                 root, ctx.source, ctx.path, seen_ids={s.id for s in record.statements},
                 const_values=getattr(ctx.resolution_index, "const_values", None),

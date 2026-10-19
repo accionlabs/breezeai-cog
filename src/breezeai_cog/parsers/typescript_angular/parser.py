@@ -25,13 +25,13 @@ class AngularParser(TypeScriptParser):
         root = parse_source(grammar, ctx.source, ctx.parse_timeout_micros).root_node
         record = self.extract(root, ctx)  # full TS extraction (one parse)
         # @Component / @Directive / @Pipe classes -> uiRole (classes are always captured, so
-        # this runs regardless of --capture-statements).
+        # this runs regardless of statement capture).
         mark_angular_ui_roles(record)
         # framework axis: every file this parser claims IS an Angular file — stamp it
         # unconditionally so "list Angular files" is answerable, not only on route files. The
         # JS/TS distinction lives on the orthogonal `language` axis, set by the base extractor.
         record.framework = "angular"
-        if ctx.capture_statements and not self.is_fixture_file(ctx.path):  # gated by --capture-statements; skip fixtures (R4)
+        if ctx.capture_statements and not self.is_fixture_file(ctx.path):  # gated by statement capture; skip fixtures (R4)
             routes = detect_angular_routes(
                 root, ctx.source, ctx.path, seen_ids={s.id for s in record.statements},
                 index=ctx.resolution_index,

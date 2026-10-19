@@ -93,6 +93,7 @@ def build_class(
     capture: bool,
     limit: int,
     resolve: CallResolver = noop_resolver,
+    owner: str | None = None,
 ) -> tuple[list[Class], list[Function], list[Statement]]:
     """Return ([this class, *nested classes], methods, statements). Classes,
     methods and statements are flat — the caller collects them onto
@@ -101,7 +102,8 @@ def build_class(
     blocks (``if``/``with``/``try`` …) are included via ``iter_definitions``."""
     name = node_text(cnode.child_by_field_name("name"), source)
     start, end = line_span(cnode)
-    cid = disambiguate(class_id(path, name), seen_ids)
+    qualified = f"{owner}.{name}" if owner else name
+    cid = disambiguate(class_id(path, qualified), seen_ids)
 
     supers = cnode.child_by_field_name("superclasses")
     bases = [node_text(b, source) for b in supers.named_children] if supers is not None else []
@@ -134,7 +136,7 @@ def build_class(
             if defn.type == "function_definition":
                 fns, fn_statements = build_function(
                     defn, extract_decorators(decs, source), source, path,
-                    parent_id=cid, class_name=name, seen_ids=seen_ids,
+                    parent_id=cid, class_name=name, id_owner=qualified, seen_ids=seen_ids,
                     capture=capture, limit=limit, resolve=resolve,
                 )
                 methods.extend(fns)
@@ -147,7 +149,8 @@ def build_class(
             else:  # class_definition — nested class, extracted parented to this one
                 sub_classes, sub_methods, sub_statements = build_class(
                     defn, decs, source, path,
-                    parent_id=cid, seen_ids=seen_ids, capture=capture, limit=limit, resolve=resolve,
+                    parent_id=parent_id, seen_ids=seen_ids, capture=capture, limit=limit,
+                    resolve=resolve, owner=qualified,
                 )
                 nested_classes.extend(sub_classes)
                 methods.extend(sub_methods)

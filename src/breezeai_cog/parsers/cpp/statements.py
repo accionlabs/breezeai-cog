@@ -1,4 +1,4 @@
-"""Flat statement capture for C++ (gated by --capture-statements) + shared API/DB
+"""Flat statement capture for C++ (gated by statement capture) + shared API/DB
 call detection.
 
 C++ has comparatively few HTTP/DB calls, but detection is wired the same as every

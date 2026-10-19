@@ -63,12 +63,12 @@ _PLAIN = frozenset(
 # ---- small AST helpers ------------------------------------------------------
 
 
-def _child(node: Node, typ: str) -> Node | None:
+def child_of_type(node: Node, typ: str) -> Node | None:
     return next((c for c in node.named_children if c.type == typ), None)
 
 
 def _name(node: Node, src: bytes) -> str | None:
-    n = _child(node, "name")
+    n = child_of_type(node, "name")
     return node_text(n, src) if n is not None else None
 
 
@@ -84,14 +84,14 @@ def _deep_name(node: Node, src: bytes) -> str | None:
     return None
 
 
-def _base_type_name(node: Node | None, src: bytes) -> str | None:
+def base_type_name(node: Node | None, src: bytes) -> str | None:
     """Underlying type name, stripping ``!``/``[]`` wrappers (``[Post!]!`` -> ``Post``)."""
     if node is None:
         return None
     if node.type == "named_type":
         return _name(node, src)
     for c in node.named_children:
-        found = _base_type_name(c, src)
+        found = base_type_name(c, src)
         if found is not None:
             return found
     return None
@@ -114,13 +114,13 @@ def _named_types(node: Node, src: bytes) -> list[str]:
 
 def _string_arg(directive: Node, arg_name: str, src: bytes) -> str | None:
     """The string value of a directive argument (``@key(fields: "id")`` -> ``id``)."""
-    args = _child(directive, "arguments")
+    args = child_of_type(directive, "arguments")
     if args is None:
         return None
     for arg in args.named_children:
         if arg.type != "argument" or _name(arg, src) != arg_name:
             continue
-        value = _child(arg, "value")
+        value = child_of_type(arg, "value")
         return node_text(value, src).strip('"').strip() if value is not None else None
     return None
 
@@ -153,7 +153,7 @@ def parse_key_selection(raw: str) -> list[str]:
 
 def _key_fields(node: Node, src: bytes) -> list[str] | None:
     """Key field names from a type's ``@key`` directive, or None if it has no ``@key``."""
-    directives = _child(node, "directives")
+    directives = child_of_type(node, "directives")
     if directives is None:
         return None
     key = next(
@@ -171,7 +171,7 @@ def _directives(
 ) -> list[Decorator]:
     """Applied directives as ``{name, args}`` decorators (``@auth(role: ADMIN)`` -> name
     ``auth``, args ``["role: ADMIN"]``). ``exclude`` skips names handled elsewhere (``key``)."""
-    d = _child(node, "directives")
+    d = child_of_type(node, "directives")
     if d is None:
         return []
     out: list[Decorator] = []
@@ -181,7 +181,7 @@ def _directives(
         nm = _name(directive, src)
         if nm is None or nm in exclude:
             continue
-        args_node = _child(directive, "arguments")
+        args_node = child_of_type(directive, "arguments")
         args = (
             [node_text(a, src) for a in args_node.named_children if a.type == "argument"]
             if args_node is not None
@@ -192,14 +192,14 @@ def _directives(
 
 
 def _implements(node: Node, src: bytes) -> list[str]:
-    ii = _child(node, "implements_interfaces")
+    ii = child_of_type(node, "implements_interfaces")
     return _named_types(ii, src) if ii is not None else []
 
 
 def _selection_fields(op: Node) -> list[Node]:
     """Top-level invoked ``field`` nodes of an operation (``selection_set -> selection ->
     field``; a bare ``field`` child is also tolerated)."""
-    sel = _child(op, "selection_set")
+    sel = child_of_type(op, "selection_set")
     if sel is None:
         return []
     fields: list[Node] = []
@@ -207,27 +207,27 @@ def _selection_fields(op: Node) -> list[Node]:
         if child.type == "field":
             fields.append(child)
         elif child.type == "selection":
-            f = _child(child, "field")
+            f = child_of_type(child, "field")
             if f is not None:
                 fields.append(f)
     return fields
 
 
 def _fragment_name(n: Node, src: bytes) -> str | None:
-    fn = _child(n, "fragment_name")
+    fn = child_of_type(n, "fragment_name")
     return _name(fn, src) if fn is not None else None
 
 
-def _request_dto(field: Node, src: bytes) -> str | None:
+def request_dto(field: Node, src: bytes) -> str | None:
     """A root field's request DTO — the ``input``/``data`` arg (else the first) base type."""
-    args = _child(field, "arguments_definition")
+    args = child_of_type(field, "arguments_definition")
     if args is None:
         return None
     inputs = [c for c in args.named_children if c.type == "input_value_definition"]
     if not inputs:
         return None
     chosen = next((i for i in inputs if _name(i, src) in ("input", "data")), inputs[0])
-    return _base_type_name(_child(chosen, "type"), src)
+    return base_type_name(child_of_type(chosen, "type"), src)
 
 
 def _resolve_roots(root: Node, src: bytes) -> dict[str, str]:
@@ -242,8 +242,8 @@ def _resolve_roots(root: Node, src: bytes) -> dict[str, str]:
             for rot in n.named_children:
                 if rot.type != "root_operation_type_definition":
                     continue
-                ot = _child(rot, "operation_type")
-                nt = _child(rot, "named_type")
+                ot = child_of_type(rot, "operation_type")
+                nt = child_of_type(rot, "named_type")
                 kind = _OP_KINDS.get(node_text(ot, src)) if ot is not None else None
                 tname = _name(nt, src) if nt is not None else None
                 if kind and tname:
@@ -300,7 +300,7 @@ def extract_graphql(
         )
 
     def emit_root_fields(obj: Node, kind: str) -> None:
-        fields_def = _child(obj, "fields_definition")
+        fields_def = child_of_type(obj, "fields_definition")
         if fields_def is None:
             return
         for field in fields_def.named_children:
@@ -320,14 +320,14 @@ def extract_graphql(
                     method=kind.upper(),
                     endpoint=name,
                     routeKind=kind,
-                    requestDTO=_request_dto(field, source),
-                    responseDTO=_base_type_name(_child(field, "type"), source),
+                    requestDTO=request_dto(field, source),
+                    responseDTO=base_type_name(child_of_type(field, "type"), source),
                 )
             )
 
     def emit_members(n: Node, classtype: str, cid: str) -> None:
         if classtype == "enum":
-            vals = _child(n, "enum_values_definition")
+            vals = child_of_type(n, "enum_values_definition")
             for v in vals.named_children if vals is not None else []:
                 if v.type != "enum_value_definition":
                     continue
@@ -343,7 +343,7 @@ def extract_graphql(
                 )
             return
         if classtype == "union":
-            umt = _child(n, "union_member_types")
+            umt = child_of_type(n, "union_member_types")
             if umt is None:
                 return
             # _named_types walks the left-recursive union_member_types nesting for all members
@@ -363,7 +363,7 @@ def extract_graphql(
                 )
             return
         # object / interface / input fields
-        fields_def = _child(n, "fields_definition") or _child(n, "input_fields_definition")
+        fields_def = child_of_type(n, "fields_definition") or child_of_type(n, "input_fields_definition")
         for f in fields_def.named_children if fields_def is not None else []:
             if f.type not in ("field_definition", "input_value_definition"):
                 continue
@@ -432,7 +432,7 @@ def extract_graphql(
         )
 
     def emit_operation(n: Node) -> None:
-        ot = _child(n, "operation_type")
+        ot = child_of_type(n, "operation_type")
         kind = _OP_KINDS.get(node_text(ot, source)) if ot is not None else "query"
         op_name = _name(n, source)
         method = (kind or "query").upper()
@@ -473,14 +473,14 @@ def extract_graphql(
             )
 
     def emit_fragment(n: Node) -> None:
-        cond = _child(n, "type_condition")
+        cond = child_of_type(n, "type_condition")
         statements.append(
             mk(
                 n,
                 fid,
                 nodeType=nt("fragment_definition"),
                 name=_fragment_name(n, source),
-                endpoint=_base_type_name(cond, source) if cond is not None else None,
+                endpoint=base_type_name(cond, source) if cond is not None else None,
                 text=node_text(n, source)[:limit],
             )
         )

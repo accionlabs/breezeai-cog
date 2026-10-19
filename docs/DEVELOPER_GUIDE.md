@@ -34,10 +34,23 @@ src/breezeai_cog/
     detection/    #   shared, language-agnostic API/DB/route classification
     <lang>/       #   base language parser (python, typescript, java, csharp, vb, kotlin, groovy, cpp, …)
     <lang>_<fw>/  #   framework parser (e.g. python_fastapi, typescript_nestjs, java_springboot, csharp_wcf) — run `breezeai-cog capabilities` for the live list
-  emit/           # id convention · ndjson · gzip · sinks (file/memory) · s3 streaming
+  emit/           # id convention · ndjson · gzip · sinks (file/memory)
+  infra/          # object-storage providers behind the InfraStream interface
+    interface.py  #   InfraStream — the provider-agnostic contract
+    provider.py   #   open_stream(key, settings) — the entry point callers use
+    factory.py    #   ProviderFactory maps ProviderType -> implementation
+    aws/s3.py     #   AWSStreamUpload — streaming gzip upload to S3
+  integrations/   # external services (server-only)
+    scm/          #   git-hosting providers behind the AbstractSCMClient interface
+      base.py     #     AbstractSCMClient · RepoRef · ChangeSet · SUPPORTED_PROVIDERS
+      factory.py  #     SCMClientFactory.for_repo(ref, settings, token) — the entry point
+      http.py     #     SCMHttpClient — shared httpx wrapper: retry, page cap, error mapping
+      retry.py    #     request_with_retry (429/502/503/504 + transport errors, jittered backoff)
+      repository.py #   parse_repo_url → RepoRef (public clouds + configured self-hosted hosts)
+      github.py · bitbucket.py · gitlab.py · azure_devops.py   # one class per provider
   analyzers/      # non-AST: sql (DDL via sqlglot), es (Elasticsearch mappings)
   services/       # analysis · inprocess · diff · notify
-  server/         # FastAPI app · routes · deps · git acquisition · errors
+  server/         # FastAPI app · routes · git_routes (/api/git/* for the backend) · deps · git orchestration (clone / REST diff) · errors
   cli.py          # Typer CLI
 ```
 
@@ -83,6 +96,101 @@ In short:
   parser, sets `priority` + `claims`, and adds only its detection (single parse, no duplication).
 - Register by exporting `PARSERS = [...]` from the subpackage's `__init__.py` (auto-discovered).
 - Cross-language API/DB call recognition is shared in `parsers/detection/` — feed it, don't fork it.
+
+---
+
+## Object storage providers
+
+The server streams NDJSON.gz to object storage, then notifies the backend with only the
+**storage key** — the backend downloads and ingests that object later. Callers never touch a
+cloud SDK; they use the provider-agnostic `InfraStream`:
+
+```python
+stream = open_stream(key, settings)   # infra/provider.py
+for record in records:
+    stream.write_line(json.dumps(record) + "\n")
+storage_key = stream.close()          # the key is proof the object is complete
+```
+
+`open_stream` resolves `settings.infra_provider` through `ProviderConfig`, and `ProviderFactory`
+returns the implementation for that `ProviderType`.
+
+**Two rules any implementation must honour** (see the contract on `InfraStream`):
+
+1. **Retries belong to the provider SDK.** The upload streams from an OS pipe, which cannot be
+   rewound — retrying a whole upload would re-send only the unconsumed tail and store a truncated
+   object. Configure the SDK to retry at a granularity where it buffers the bytes itself (botocore
+   replays an individual multipart part), and never wrap the upload in a retry loop.
+2. **`close()` must raise if the object is incomplete, and must not return a key.** Callers treat a
+   returned key as proof the object is readable, so swallowing an upload error would point the
+   backend at corrupt data. Failing loudly means the route returns 500 *before* the notification
+   fires.
+
+### Adding a provider
+
+1. Add the member to `ProviderType` (`infra/provider_type.py`).
+2. Widen the `Literal` on `infra_provider` in `config.py` (e.g. `Literal["aws", "azure"]`).
+3. Create `infra/<provider>/` implementing `InfraStream` (`write_line` + `close`). Keep the SDK,
+   client construction, auth, and retry configuration inside that package.
+4. Add the `case` to `ProviderFactory.create_stream()` — the `case _` guard exists so a forgotten
+   case raises instead of silently returning `None`.
+5. Reuse the generic `storage_*` settings for retries and timeouts rather than adding
+   provider-prefixed twins.
+
+---
+
+## Git providers (`/api/analyze-diff`)
+
+`server/git.py` is orchestration only: it decides between a shallow **clone** and an
+**incremental REST diff**, materialises the temp tree, and maps errors. Everything
+provider-specific lives in `integrations/scm/` behind one contract:
+
+```python
+ref = parse_repo_url(body["repoUrl"], settings.scm_instances)        # -> RepoRef | None
+client = SCMClientFactory.for_repo(ref, settings, request_token=body.get("gitToken"))
+with client:
+    client.branch_head(ref, branch)          # CommitInfo(sha, message, author, date) at the tip
+    client.tree(ref, commit)                 # every blob path at a commit
+    client.pull_request(ref, number)         # PullRequestInfo: normalised state, full base/head SHAs
+    client.post_pr_comment(ref, number, body) # PrComment(id, url) — the only write; not retried
+    client.compare(ref, base, head)          # ChangeSet(changed, deleted, files: list[FileDiff])
+    client.file_content(ref, path, commit)   # UTF-8 text; SCMAPIError for binary/unreadable
+    client.clone_url(ref)                    # https URL with the credential embedded
+```
+
+Rules every provider honours:
+
+1. **Go through `SCMHttpClient`.** It owns the `httpx.Client`, the retry policy, the pagination
+   ceiling (`scm_max_pages`) and error conversion. Reads use `get*` (retried); the single write uses
+   `post_json`, which is **never retried** because a repeated POST can create a duplicate. Never raise with a response body in the
+   message — bodies can echo the credential; the wrapper logs them at DEBUG only.
+2. **Return repo-relative paths without a leading slash** (Azure DevOps sends `/src/a.cs`).
+3. **A rename marks the old path deleted** and the new path changed.
+4. **Decode file content strictly.** `get_text` raises on non-UTF-8 so a binary is skipped by the
+   orchestration rather than written as replacement characters and handed to a parser.
+5. **Build URLs from `RepoRef.host`**, never from a hard-coded public host, so self-hosted
+   instances work. The REST base comes from the factory (`scm_instance_base_url_mapping`, else
+   `<provider>_api_base_url`).
+6. **`supports_incremental`** is the gate `acquire_diff` reads. Set it `False` only for a provider
+   whose tree / compare / content calls are not implemented.
+
+Credential order in `resolve_scm_token`: request `gitToken` → `scm_token_<provider>` → anonymous
+(allowed; public repos work and the client logs a warning).
+
+### Adding a git provider
+
+1. Create `integrations/scm/<provider>.py` with a class deriving `AbstractSCMClient`; set
+   `provider` and `supports_incremental`; take `(token, settings, api_base_url=None, *,
+   transport=None, sleep=time.sleep)` so tests can inject `httpx.MockTransport`.
+2. Register its dotted path in `_PROVIDER_CLASSES` (`factory.py`) and add the slug to
+   `SUPPORTED_PROVIDERS` (`base.py`) — the module asserts the two agree.
+3. Add `<provider>_api_base_url` and `scm_token_<provider>` to `Settings`, `.env.example` and the
+   user guide table.
+4. Teach `repository.py` its URL grammar: a public-host pattern in `_public`, and the
+   self-hosted path grammar in `_instance`.
+5. Add `tests/unit/integrations/test_scm_<provider>.py` using the `router` fixture; pin the
+   request shapes (path, query, headers), the change mapping incl. renames, binary rejection,
+   and the clone URL for public and self-hosted hosts.
 
 ---
 

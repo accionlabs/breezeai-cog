@@ -19,6 +19,7 @@ JUMP = {
 
 DECLARATIONS = {
     "property_declaration",
+    "type_alias",        # `typealias H = (Int) -> Unit` — a value-bearing declaration
     "expression_statement",
     "call_expression",   # bare call at statement level
 }

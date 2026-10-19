@@ -1,4 +1,4 @@
-"""Flat statement capture for Kotlin (gated by --capture-statements)."""
+"""Flat statement capture for Kotlin (gated by statement capture)."""
 
 from __future__ import annotations
 
@@ -24,6 +24,12 @@ def _name_of(node: Node, source: bytes) -> str | None:
             ident = next((c for c in var_decl.named_children if c.type == "simple_identifier"), None)
             if ident is not None:
                 return node_text(ident, source)
+    elif node.type == "type_alias":
+        # `typealias H = (Int) -> Unit` -> H (the alias name is the first type_identifier;
+        # the aliased type follows it and stays on the statement's `text`).
+        ident = next((c for c in node.named_children if c.type == "type_identifier"), None)
+        if ident is not None:
+            return node_text(ident, source)
     return None
 
 

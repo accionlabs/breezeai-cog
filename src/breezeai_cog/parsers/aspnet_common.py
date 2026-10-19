@@ -1,4 +1,4 @@
-"""ASP.NET route detection.
+"""ASP.NET route detection, shared by the ``csharp_aspnet`` and ``vb_aspnet`` parsers.
 
 Two idioms, both emitted as ``route`` statements:
 
@@ -6,7 +6,7 @@ Two idioms, both emitted as ``route`` statements:
   ``[ApiController]`` / ``[Route]`` / ``[HttpGet]`` onto ``Class.decorators`` /
   ``Function.decorators`` / ``Parameter.decorators``, so :func:`detect_controller_routes`
   reads the ``FileRecord`` directly (no AST re-walk). Because it only touches the
-  language-agnostic record shape, the VB ASP.NET parser reuses it verbatim.
+  language-agnostic record shape, C# and VB use it verbatim.
 
   The full route template is composed from three places, so all three are resolved:
   the controller ``[Route]`` prefix (possibly **inherited from a base/abstract
@@ -27,10 +27,11 @@ from typing import Any
 
 from tree_sitter import Node
 
-from ...emit import disambiguate, statement_id
-from ...schemas import Decorator, FileRecord, Function, Statement
-from ..index_common import walk_heritage
-from ..treesitter import node_text
+from ..emit import disambiguate, statement_id
+from ..schemas import Decorator, FileRecord, Function, Statement
+from .dotnet_common import response_dto, simple_attr_name
+from .index_common import walk_heritage
+from .treesitter import node_text
 
 _HTTP_ATTRS = {
     "HttpGet": "GET", "HttpPost": "POST", "HttpPut": "PUT",
@@ -63,13 +64,6 @@ _GRAPHQL_UIS = {
 # MapControllers()/MapControllerRoute() only *enable* attribute/conventional routing; the
 # concrete controller endpoints come from detect_controller_routes, so they emit nothing
 # here (a conventional-route pattern like "{controller}/{action}" is not a callable path).
-
-
-def simple_attr_name(name: str) -> str:
-    """Normalize a C#/VB attribute name to its short form: an attribute may be written
-    ``[HttpGet]`` or ``[HttpGetAttribute]`` (and svcutil emits the full form) — both bind to
-    the same class, so drop a trailing ``Attribute``."""
-    return name[: -len("Attribute")] if name.endswith("Attribute") and name != "Attribute" else name
 
 
 def _first_arg(dec: Decorator) -> str:
@@ -165,23 +159,6 @@ def _method_templates(http_tmpl: str, method_route: str | None) -> list[str]:
     return [""]
 
 
-def _response_dto(return_type: str | None) -> str | None:
-    """Unwrap ``Task<…>`` / ``ActionResult<…>`` / ``Task(Of …)`` to the payload type;
-    bare action results (``IActionResult``/``ActionResult``/``void``) → None."""
-    if not return_type:
-        return None
-    t = return_type.strip()
-    # C# generic: Foo<Bar> → Bar
-    while "<" in t and t.endswith(">"):
-        t = t[t.index("<") + 1: -1].strip()
-    # VB generic: Foo(Of Bar) → Bar
-    while t.startswith(("Task(Of ", "ValueTask(Of ", "ActionResult(Of ")) and t.endswith(")"):
-        t = t[t.index("(Of ") + 4: -1].strip()
-    if t in ("IActionResult", "ActionResult", "void", "Void", "Task", "ValueTask", ""):
-        return None
-    return t
-
-
 def _request_dto(fn: Function) -> str | None:
     for p in fn.params:
         if any(simple_attr_name(d.name) == "FromBody" for d in p.decorators):
@@ -235,7 +212,7 @@ def _route_statement(
         authRequired=auth_required,
         guards=guards,
         requestDTO=_request_dto(fn),
-        responseDTO=_response_dto(fn.returnType),
+        responseDTO=response_dto(fn.returnType),
         startLine=fn.startLine,
         endLine=fn.endLine,
         path=fn.path,

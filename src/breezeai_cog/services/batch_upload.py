@@ -3,8 +3,9 @@ several repos concurrently.
 
 This module is deliberately **console-free** — it reports progress through a
 :class:`UploadTracker` (a thread-safe snapshot source) and logs raw backend responses to
-the file logger, so it can be unit-tested without a TTY. The Rich rendering layer lives in
-``cli.py`` and reads ``tracker`` snapshots.
+the file-only detail logger (the app logger under ``--verbose``), so it can be unit-tested
+without a TTY. The Rich rendering layer lives in ``cli.py`` and reads ``tracker``
+snapshots.
 
 Resume: :class:`UploadState` persists the set of repos that have reached the backend's
 terminal ``active`` status to ``<workspace>/.cog/batch-upload-state.json``. An interrupted
@@ -24,7 +25,7 @@ from pathlib import Path
 
 from ..config import Settings
 from ..errors import UploadError
-from ..logging import get_logger
+from ..logging import DETAIL_LOGGER, get_logger
 from ..utils.paths import cog_dir
 from .upload import extract_ontology_id, poll_ontology_status, upload_ontology
 
@@ -197,11 +198,17 @@ def run_batch_uploads(
 ) -> list[str]:
     """Upload every task (up to ``settings.upload_parallelism`` concurrently), polling each
     for backend processing. A repo is marked done in ``state`` only after its poll returns
-    ``active``. Raw upload/poll responses are logged to the file logger, never the console.
+    ``active``. Raw upload/poll responses go to the file logger only — never the plain
+    console — unless the run is verbose (``log_level=DEBUG``), which prints them too.
 
     Returns the list of repo names that failed (empty when all succeeded).
     """
     log = get_logger()
+    # Raw backend payloads are file-only by default: DETAIL_LOGGER carries the file handler but
+    # never a console one, so that holds regardless of TTY-ness (a piped/CI run has no Rich
+    # display to quiet the console for it). ``--verbose`` is the escape hatch — then they go to
+    # the app logger and show on the terminal too.
+    raw_log = log if settings.log_level == "DEBUG" else get_logger(DETAIL_LOGGER)
     total = len(tasks)
 
     def _worker(task: UploadTask) -> None:
@@ -214,11 +221,13 @@ def run_batch_uploads(
                 repository_name=name,
                 on_attempt=lambda n: tracker.set_attempt(name, n),
             )
-            log.info("upload.response", repo=name, response=resp)
+            raw_log.info("upload.response", repo=name, response=resp)
 
             ontology_id = extract_ontology_id(resp)
             if not ontology_id:
-                log.warning("upload.no_id", repo=name, response=resp)
+                # No payload here: this is a WARNING, so it survives any console threshold —
+                # the raw response is already in the ``upload.response`` record above.
+                log.warning("upload.no_id", repo=name)
                 tracker.finish(name, ok=False, error="upload response missing '_id' — cannot confirm backend status")
                 return
 
@@ -226,7 +235,7 @@ def run_batch_uploads(
                 settings,
                 ontology_id,
                 overall_timeout=settings.upload_timeout,  # bound the processing wait, not just the POST
-                on_response=lambda p: log.info("upload.poll", repo=name, response=p),
+                on_response=lambda p: raw_log.info("upload.poll", repo=name, response=p),
                 on_waiting=lambda s: log.info(
                     "upload.poll.waiting", repo=name, status=s or "pending"
                 ),

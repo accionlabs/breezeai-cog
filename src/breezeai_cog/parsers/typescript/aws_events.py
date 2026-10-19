@@ -12,6 +12,7 @@ functions identified by their ``aws-lambda`` handler *type annotation*.
 
 Producers (SDK v3 command objects and v2 methods):
   ``client.send(new PublishCommand({TopicArn}))``     → eventbus_publish  (aws-sns)
+  ``client.send(new PublishCommand({PhoneNumber}))``  → eventbus_send     (aws-sns, SMS)
   ``client.send(new SendMessageCommand({QueueUrl}))`` → eventbus_send     (aws-sqs)
   ``client.send(new PutEventsCommand({...}))``        → eventbus_publish  (aws-eventbridge)
   ``sqs.sendMessage({QueueUrl})`` / ``sendMessageBatch`` → eventbus_send  (aws-sqs)
@@ -33,7 +34,9 @@ from __future__ import annotations
 from tree_sitter import Node
 
 from ...emit import disambiguate, file_id, statement_id
-from ...schemas import FileRecord, Function, SemanticType, Statement
+from ...schemas import FileRecord, SemanticType, Statement
+from ..additive import DetectContext, Detector, register_detector
+from ..enclosing import Enclosing
 from ..treesitter import first_line, node_text
 
 # SDK v3 ``new XxxCommand({...})`` → (semanticType, framework).
@@ -69,7 +72,22 @@ _CONSUMER_HANDLERS = {
 # HTTP-facing Lambda handler types → route (not an event consumer).
 _ROUTE_HANDLERS = {"APIGatewayProxyHandler", "APIGatewayProxyHandlerV2", "ALBHandler"}
 # Keys in an SDK argument object that name the destination address.
-_ADDRESS_KEYS = {"TopicArn", "TargetArn", "QueueUrl", "EventBusName"}
+_ADDRESS_KEYS = {"TopicArn", "TargetArn", "QueueUrl", "EventBusName", "PhoneNumber"}
+# Subset of the above that also *proves* the call is AWS — needed by the ``publish`` guard
+# below. ``PhoneNumber`` is excluded: every SMS vendor (Twilio, Vonage, MessageBird) names
+# that field the same way, so it identifies a destination but not a provider. The remaining
+# keys are AWS-specific strings, so for them naming a destination and proving AWS coincide.
+_AWS_EVIDENCE_KEYS = _ADDRESS_KEYS - {"PhoneNumber"}
+# Address keys that reach exactly one recipient. SNS names its API ``Publish`` for every
+# destination, but only a *topic* fans out, so an SMS is point-to-point — the distinction
+# Vert.x draws between ``publish()`` and ``send()``. Nothing can subscribe to a phone
+# number, so calling it a publish would assert a one-to-many relationship that cannot exist.
+#
+# ``TargetArn`` is deliberately absent: the Publish API accepts *either* a platform-endpoint
+# ARN (one device) *or* a topic ARN (fan-out) there, and the value is usually an injected
+# symbol, so its cardinality is not knowable from the call site. It keeps the fan-out
+# default rather than being guessed — a coarse classification beats a wrong one.
+_DIRECT_ADDRESS_KEYS = {"PhoneNumber"}
 
 # AWS Lambda *event* parameter types → framework. Used to recognise an UNTYPED handler
 # (``export const handler = async (event: S3Event) => …`` / ``exports.handler = …``) — the
@@ -126,12 +144,17 @@ def _walk(root: Node, types: frozenset[str]) -> list[Node]:
     return out
 
 
-def _address(args: Node | None, source: bytes) -> tuple[str | None, bool]:
-    """(literal endpoint, has-address-key) from an SDK call's first object argument.
+def _address(args: Node | None, source: bytes) -> tuple[str | None, str | None]:
+    """(literal endpoint, matched address key) from an SDK call's first object argument.
     Endpoint is set only from a plain string literal — a symbol (``this.topicArn``) stays
-    ``None`` (honest); ``has_key`` reports whether an address key was present at all."""
+    ``None`` (honest); the second element is the address key that matched (e.g.
+    ``"PhoneNumber"``), else ``None`` when no address key is present.
+
+    Only ``pair`` nodes are inspected, so a shorthand property (``{ PhoneNumber, Message }``)
+    is not seen and yields ``(None, None)`` — conservative, and the same answer the caller
+    would reach for an unresolved symbol."""
     if args is None:
-        return None, False
+        return None, None
     for a in args.named_children:
         if a.type != "object":
             continue
@@ -141,12 +164,13 @@ def _address(args: Node | None, source: bytes) -> tuple[str | None, bool]:
             key = pair.child_by_field_name("key")
             if key is None or node_text(key, source) not in _ADDRESS_KEYS:
                 continue
+            matched_key = node_text(key, source)
             value = pair.child_by_field_name("value")
             if value is not None and value.type == "string":
                 frag = next((c for c in value.named_children if c.type == "string_fragment"), None)
-                return (node_text(frag, source) if frag is not None else ""), True
-            return None, True  # address present but an unresolved symbol
-    return None, False
+                return (node_text(frag, source) if frag is not None else ""), matched_key
+            return None, matched_key  # address present but an unresolved symbol
+    return None, None
 
 
 def _producer(call: Node, source: bytes) -> tuple[SemanticType, str, str | None, str] | None:
@@ -168,15 +192,21 @@ def _producer(call: Node, source: bytes) -> tuple[SemanticType, str, str | None,
         if info is None:
             return None
         sem, fw = info
-        endpoint, _ = _address(first.child_by_field_name("arguments"), source)
+        endpoint, key = _address(first.child_by_field_name("arguments"), source)
+        # framework stays aws-sns either way — the transport is unchanged, and an SMS send
+        # must remain visible to "what talks to SNS?"; only the delivery shape differs.
+        if cname == "PublishCommand" and key in _DIRECT_ADDRESS_KEYS:
+            sem = "eventbus_send"
         return sem, cname, endpoint, fw
 
     info2 = _V2_METHODS.get(method)
     if info2 is not None:
         sem, fw, needs_hint = info2
-        endpoint, has_key = _address(args, source)
-        if needs_hint and not has_key and "sns" not in receiver:
+        endpoint, key = _address(args, source)
+        if needs_hint and key not in _AWS_EVIDENCE_KEYS and "sns" not in receiver:
             return None
+        if method == "publish" and key in _DIRECT_ADDRESS_KEYS:
+            sem = "eventbus_send"
         return sem, method, endpoint, fw
     return None
 
@@ -295,28 +325,6 @@ def _untyped_cjs_handler(
     return "eventbus_consumer", "aws-lambda", None, hname
 
 
-def _enclosing_statement(line: int, statements: list[Statement]) -> Statement | None:
-    best: Statement | None = None
-    best_span: int | None = None
-    for s in statements:
-        if s.startLine <= line <= s.endLine:
-            span = s.endLine - s.startLine
-            if best_span is None or span < best_span:
-                best, best_span = s, span
-    return best
-
-
-def _owner_function(line: int, functions: list[Function], fallback: str) -> str:
-    best = None
-    best_span: int | None = None
-    for f in functions:
-        if f.startLine <= line <= f.endLine:
-            span = f.endLine - f.startLine
-            if best_span is None or span < best_span:
-                best, best_span = f, span
-    return best.id if best is not None else fallback
-
-
 def detect_aws_events(
     root: Node, source: bytes, path: str, record: FileRecord, *, is_fixture: bool = False
 ) -> str | None:
@@ -330,6 +338,7 @@ def detect_aws_events(
         return None
     fid = file_id(path)
     seen = {s.id for s in record.statements}
+    enclosing = Enclosing(record)
     file_fw: str | None = None
     is_lambda = False
 
@@ -339,7 +348,7 @@ def detect_aws_events(
             continue
         sem, method, endpoint, fw = info
         line = call.start_point[0] + 1
-        stmt = _enclosing_statement(line, record.statements)
+        stmt = enclosing.statement(line)
         if stmt is not None and stmt.semanticType is None:  # enrich the base statement in place
             stmt.semanticType = sem
             stmt.framework = fw
@@ -350,7 +359,7 @@ def detect_aws_events(
             new_id = disambiguate(statement_id(path, line, call.start_point[1]), seen)
             seen.add(new_id)
             record.statements.append(Statement(
-                id=new_id, parentId=_owner_function(line, record.functions, fid),
+                id=new_id, parentId=enclosing.function_id(line, fid),
                 nodeType=call.type, semanticType=sem, text=first_line(node_text(call, source)),
                 method=method, endpoint=endpoint, framework=fw,
                 startLine=line, endLine=call.end_point[0] + 1, path=path,
@@ -375,7 +384,7 @@ def detect_aws_events(
         new_id = disambiguate(statement_id(path, line, decl.start_point[1]), seen)
         seen.add(new_id)
         record.statements.append(Statement(
-            id=new_id, parentId=_owner_function(line, record.functions, fid),
+            id=new_id, parentId=enclosing.function_id(line, fid),
             nodeType=decl.type, semanticType=sem, text=first_line(node_text(decl, source)),
             framework=fw, handler=hname, routeKind=route_kind,
             startLine=line, endLine=decl.end_point[0] + 1, path=path,
@@ -383,3 +392,17 @@ def detect_aws_events(
         is_lambda = True
 
     return "aws-lambda" if is_lambda else file_fw
+
+
+def _run(dc: DetectContext) -> str | None:
+    return detect_aws_events(dc.root, dc.source, dc.path, dc.record, is_fixture=dc.is_fixture)
+
+
+# Not fixture-skipped: only the loose CommonJS handler fallback is fixture-gated, inside.
+register_detector(Detector(
+    name="aws-events", language="typescript", order=20, run=_run,
+    frameworks=(
+        "aws-lambda", "aws-sdk", "aws-sns", "aws-sqs", "aws-eventbridge", "aws-kinesis",
+        "aws-dynamodb", "aws-ses", "aws-cloudfront", "aws-apigw",
+    ),
+))

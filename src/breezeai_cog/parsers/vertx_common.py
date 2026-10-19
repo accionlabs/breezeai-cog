@@ -18,7 +18,7 @@ from collections.abc import Callable
 
 from tree_sitter import Node
 
-from ..schemas import Function, SemanticType, Statement
+from ..schemas import SemanticType
 from .constfold import init_tokens, resolve_tokens
 from .statements_common import render_concat
 from .treesitter import node_text
@@ -132,27 +132,3 @@ def render_address(
     if node.type == "binary_expression":
         return render_concat(node, source, lambda n, s: _addr_leaf(n, s, consts, string_render))
     return None
-
-
-def enclosing_statement(line: int, statements: list[Statement]) -> Statement | None:
-    """The smallest already-captured statement spanning ``line`` (to enrich in place)."""
-    best: Statement | None = None
-    best_span: int | None = None
-    for s in statements:
-        if s.startLine <= line <= s.endLine:
-            span = s.endLine - s.startLine
-            if best_span is None or span < best_span:
-                best, best_span = s, span
-    return best
-
-
-def owner_function(line: int, functions: list[Function], fallback: str) -> str:
-    """Id of the smallest function spanning ``line`` (parent for a synthesized statement)."""
-    best = None
-    best_span: int | None = None
-    for f in functions:
-        if f.startLine <= line <= f.endLine:
-            span = f.endLine - f.startLine
-            if best_span is None or span < best_span:
-                best, best_span = f, span
-    return best.id if best is not None else fallback

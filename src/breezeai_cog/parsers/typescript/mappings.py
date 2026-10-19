@@ -59,6 +59,11 @@ NESTED_SCOPES = {
     "method_definition",
     "class_declaration",
     "class",
+    # `namespace X {…}` / `module X {…}` — a declaration scope. Its members are dispatched
+    # by the parser's own walk (flattened onto the file), so descending here as well would
+    # carry the whole namespace body a second time as one nameless expression_statement.
+    "internal_module",
+    "module",
 }
 
 STATEMENT_TYPES = sorted(EMIT_TYPES)
@@ -72,4 +77,6 @@ FRAMEWORKS = [
     # AWS messaging / Lambda (see aws_events.py) — transport carried on statement.framework.
     "aws-sns", "aws-sqs", "aws-eventbridge", "aws-lambda", "aws-apigw",
     "aws-dynamodb", "aws-kinesis", "aws-s3", "aws-ses",
+    # AWS vendor-SDK api_call (see detection/sdk_calls.py) — same transport field.
+    "aws-cognito", "aws-ssm",
 ]
