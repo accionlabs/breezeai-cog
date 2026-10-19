@@ -25,9 +25,9 @@ class SymfonyParser(PhpParser):
     def parse_file(self, ctx: ParseContext) -> FileRecord:
         root = parse_source("php", ctx.source, ctx.parse_timeout_micros).root_node
         record = self.extract(root, ctx)
+        record.framework = "symfony"
         if ctx.capture_statements and not self.is_fixture_file(ctx.path):
             index = ctx.resolution_index if isinstance(ctx.resolution_index, PhpIndex) else None
             if detect_symfony_routes(root, ctx.source, ctx.path, record, index):
                 strip_route_decorators(record)
-                record.framework = "symfony"
         return record

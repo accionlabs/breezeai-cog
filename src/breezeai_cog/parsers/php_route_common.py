@@ -24,9 +24,14 @@ def walk(node: Node) -> Iterator[Node]:
         yield from walk(child)
 
 
-def unwrap(node: Node) -> Node:
-    if node.type == "argument" and len(node.named_children) == 1:
-        return node.named_children[0]
+def unwrap(node: Node | None) -> Node | None:
+    while node is not None:
+        if node.type == "argument" and len(node.named_children) == 1:
+            node = node.named_children[0]
+        elif node.type == "parenthesized_expression" and len(node.named_children) == 1:
+            node = node.named_children[0]
+        else:
+            break
     return node
 
 
@@ -44,7 +49,7 @@ def string_value(node: Node | None, source: bytes) -> str | None:
     if node is None:
         return None
     node = unwrap(node)
-    if node.type != "string":
+    if node is None or node.type != "string":
         return None
     if any(child.type != "string_content" for child in node.named_children):
         return None
@@ -55,6 +60,8 @@ def strings_in_array(node: Node | None, source: bytes) -> list[str]:
     if node is None:
         return []
     node = unwrap(node)
+    if node is None:
+        return []
     if node.type != "array_creation_expression":
         value = string_value(node, source)
         return [value] if value is not None else []
@@ -80,26 +87,61 @@ def route_handler(node: Node | None, source: bytes) -> tuple[str | None, int | N
     if node is None:
         return None, None
     node = unwrap(node)
+    if node is None:
+        return None, None
+
+    if node.type == "binary_expression":
+        left = unwrap(node.child_by_field_name("left"))
+        right = unwrap(node.child_by_field_name("right"))
+        cls: str | None = None
+        if left is not None:
+            if left.type == "class_constant_access_expression":
+                cls = node_text(left, source).rsplit("::", 1)[0].lstrip("\\")
+            else:
+                s = string_value(left, source)
+                cls = s.lstrip("\\") if s else None
+        method = string_value(right, source) if right is not None else None
+        if cls and method:
+            clean_method = method.lstrip(":").lstrip("@")
+            return f"{cls}@{clean_method}", node.start_point[0] + 1
+
     literal = string_value(node, source)
     if literal is not None:
+        literal = literal.lstrip("\\")
         if "::" in literal:
             cls, method = literal.rsplit("::", 1)
             return f"{cls}@{method}", node.start_point[0] + 1
+        if "@" in literal:
+            cls, method = literal.rsplit("@", 1)
+            return f"{cls}@{method}", node.start_point[0] + 1
+        if ":" in literal:
+            cls, method = literal.rsplit(":", 1)
+            return f"{cls}@{method}", node.start_point[0] + 1
         return literal, node.start_point[0] + 1
+
+    if node.type == "class_constant_access_expression":
+        cls = node_text(node, source).rsplit("::", 1)[0].lstrip("\\")
+        return cls, node.start_point[0] + 1
+
     if node.type != "array_creation_expression":
         return None, None
     elements = list(node.named_children)
     if len(elements) < 2:
         return None, None
-    values = [next(iter(e.named_children), None) for e in elements]
+    values = [unwrap(next(iter(e.named_children), None)) for e in elements]
     method_name = string_value(values[1], source)
     if method_name is None:
         return None, None
+    clean_method = method_name.lstrip(":").lstrip("@")
     target = values[0]
     class_name: str | None = None
-    if target is not None and target.type == "class_constant_access_expression":
-        class_name = node_text(target, source).rsplit("::", 1)[0]
-    return (f"{class_name}@{method_name}" if class_name else method_name), node.start_point[0] + 1
+    if target is not None:
+        if target.type == "class_constant_access_expression":
+            class_name = node_text(target, source).rsplit("::", 1)[0].lstrip("\\")
+        else:
+            s = string_value(target, source)
+            class_name = s.lstrip("\\") if s else None
+    return (f"{class_name}@{clean_method}" if class_name else clean_method), node.start_point[0] + 1
 
 
 def enrich_route(
