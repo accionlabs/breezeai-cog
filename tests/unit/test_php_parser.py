@@ -255,6 +255,10 @@ def test_all_php_framework_parser_claims_are_specific_and_blade_stays_unsupporte
         assert registry.select(path, source.encode()).name == expected
     slim_entrypoint = b"<?php $app->get('/hello/{name}', $handler);"
     assert registry.select("sl/public/index.php", slim_entrypoint).name == "php-slim"
+    slim_delegated_entrypoint = b"<?php $app = init(); registerRoutes($app); $app->run();"
+    assert registry.select("public/index.php", slim_delegated_entrypoint).name == "php-slim"
+    assert registry.select("app/Middlewares/Auth.php", b"<?php use Slim\\Psr7\\Response;").name == "php-slim"
+    assert registry.select("app/Exceptions/H.php", b"<?php use Slim\\Exception\\HttpNotFoundException;").name == "php-slim"
     assert registry.select("templates/home.blade.php", b"<?php echo 'x';") is None
     assert PhpParser().matches("templates/home.blade.php") is False
 
