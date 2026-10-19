@@ -86,19 +86,21 @@ class SlimParser(PhpParser):
     frameworks = ["slim"]
 
     def claims(self, path: str, source: bytes) -> bool:
-        explicit_marker = (
-            b"Slim\\App" in source
-            or b"Slim\\Factory\\AppFactory" in source
-            or b"Slim\\Routing\\" in source
-        )
+        explicit_marker = b"Slim\\" in source
         normalized_path = path.lower().replace("\\", "/")
         entrypoint = normalized_path.endswith(
             ("/public/index.php", "/index.php", "/routes.php")
         )
         slim_route_call = b"$app" in source and any(
-            token in source for token in (b"->get", b"->post", b"->put", b"->map")
+            token in source for token in (
+                b"->get", b"->post", b"->put", b"->patch", b"->delete",
+                b"->options", b"->map", b"->run",
+            )
         )
-        return explicit_marker or (entrypoint and slim_route_call)
+        other_framework = any(
+            marker in source for marker in (b"CodeIgniter\\", b"Illuminate\\", b"Symfony\\")
+        )
+        return explicit_marker or (entrypoint and slim_route_call and not other_framework)
 
     def parse_file(self, ctx: ParseContext) -> FileRecord:
         root = parse_source("php", ctx.source, ctx.parse_timeout_micros).root_node
