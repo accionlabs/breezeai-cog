@@ -92,31 +92,55 @@ _GENERIC = {
     "persist", "merge", "query", "execute",
 }
 
-# ActiveRecord verbs, split by how much they prove on their own. Every Ruby class name is
-# capitalized, so a constant receiver is NOT evidence of a model — the receiver has to be
-# identified from the declarations (``typed_db_ids``, built by ruby/models.py) or the verb
-# has to be one that effectively only exists in ActiveRecord.
-#
-# DISTINCTIVE verbs are safe without an identified receiver: no stdlib or common gem API
-# uses them. GENERIC verbs collide with ordinary Ruby (``Tempfile.create``, ``Date.first``,
-# ``Settings.all``) and are therefore only honoured on an identified model receiver.
-_ACTIVE_RECORD_DISTINCTIVE = frozenset({
-    "find_by", "find_by!", "find_each", "find_in_batches", "where", "where_not",
-    "joins", "includes", "pluck", "destroy_all", "update_all", "left_outer_joins", "take",
+# Go ORM/database libraries are only valid DB-method matches in a Go file; a generic
+# method name such as ``First``/``Where``/``Exec`` in another language should not be
+# promoted into a DB call by name alone. This is the language gate the spec calls for.
+_GO_DB_METHODS = frozenset({
+    "where", "first", "find", "create", "save", "updates", "update", "delete",
+    "select", "get", "namedexec", "exec", "query", "queryrow", "raw", "scan",
+    "scanrow", "pluck", "only", "all", "edges",
 })
-_ACTIVE_RECORD_GENERIC = frozenset({
-    "find", "all", "create", "create!", "first", "last", "exists",
-})
-#: Verbs that write through a model *instance* (``user.save``), where the receiver is
-#: conventionally lowercase. Always require an identified receiver — ``config.save`` and
-#: ``image.update`` are ordinary Ruby.
-_ACTIVE_RECORD_INSTANCE_METHODS = frozenset({
-    "save", "save!", "update", "update!", "destroy", "destroy!", "update_attributes",
-})
-_ACTIVE_RECORD_METHODS = (
-    _ACTIVE_RECORD_DISTINCTIVE | _ACTIVE_RECORD_GENERIC | _ACTIVE_RECORD_INSTANCE_METHODS
-)
-_RUBY_CONSTANT_RECEIVER = re.compile(r"[A-Z][A-Za-z0-9_]*(?:::[A-Z][A-Za-z0-9_]*)*")
+
+_GO_ONLY_DB_METHODS = frozenset({"findone", "remove"})
+
+_GO_DB_HINTS: dict[str, str] = {
+    "where": "gorm",
+    "first": "gorm",
+    "find": "gorm",
+    "create": "gorm",
+    "save": "gorm",
+    "updates": "gorm",
+    "update": "gorm",
+    "delete": "gorm",
+    "select": "sqlx",
+    "get": "sqlx",
+    "namedexec": "sqlx",
+    "only": "ent",
+    "all": "ent",
+    "edges": "ent",
+    "scan": "pgx",
+    "scanrow": "pgx",
+}
+
+_GO_DB_RECEIVER_HINTS: dict[str, tuple[str, ...]] = {
+    "gorm": ("db", "gorm", "tx", "model", "repo", "repository"),
+    "sqlx": ("db", "sqlx", "tx", "conn", "connection", "query"),
+    "ent": ("ent", "client", "query", "selector"),
+    "pgx": ("pgx", "row", "rows", "conn", "connection", "tx"),
+}
+
+
+def _go_db_hint(callee: str, method: str) -> str | None:
+    hint = _GO_DB_HINTS.get(method.lower())
+    if hint is None:
+        return None
+    receiver = callee.lower().rsplit(".", 1)[0].rsplit(".", 1)[-1] if "." in callee else ""
+    if receiver and any(
+        receiver == candidate or receiver.endswith(candidate)
+        for candidate in _GO_DB_RECEIVER_HINTS[hint]
+    ):
+        return hint
+    return None
 
 # Receiver substring -> hint (refines _GENERIC).
 # Needles checked via `needle in low` (full lowercased callee). Ambiguous short tokens
@@ -311,6 +335,14 @@ def match_db(callee: str, method: str, language: str | None = None,
     low = callee.lower()
     if m in _PRISMA_VERBS and _is_prisma_chain(low):
         return "prisma"
+    if m in _GO_DB_METHODS and language is not None and language != "go":
+        return None
+    if language == "go":
+        go_hint = _go_db_hint(callee, m)
+        if go_hint is not None:
+            return go_hint
+        if m in _GO_DB_METHODS or m in _GO_ONLY_DB_METHODS:
+            return None
     if m in _DISTINCTIVE:
         db = _DISTINCTIVE[m]
         # A receiverless distinctive verb is a local/helper call, not a database access.
