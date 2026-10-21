@@ -149,5 +149,5 @@ def test_builtin_template_extensions() -> None:
 
     discover_builtin()
     assert registry.template_extensions() == {
-        ".html", ".htm", ".cshtml", ".razor", ".aspx", ".ascx", ".master", ".vue",
+        ".html", ".htm", ".cshtml", ".razor", ".aspx", ".ascx", ".master", ".vue", ".twig",
     }
