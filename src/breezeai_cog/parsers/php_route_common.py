@@ -153,18 +153,25 @@ def enrich_route(
     seen_ids: set[str],
     *,
     framework: str,
-    endpoint: str,
-    method: str,
+    endpoint: str | None,
+    method: str | None,
     handler_node: Node | None,
     name: str | None = None,
     guards: list[str] | None = None,
     is_regex: bool | None = False,
+    route_kind: str = "route",
+    closure_handler: str | None = None,
 ) -> bool:
     line, column = call.start_point[0] + 1, call.start_point[1]
     statement = statements.get(statement_id(path, line, column))
     if statement is None:
         return False
     handler, handler_line = route_handler(handler_node, source)
+    if handler is None and closure_handler and handler_node is not None:
+        closure = unwrap(handler_node)
+        if closure is not None and closure.type in {"anonymous_function", "arrow_function"}:
+            handler = closure_handler
+            handler_line = closure.start_point[0] + 1
     if statement.semanticType == "route":
         if statement.method == method:
             changed = False
@@ -189,7 +196,7 @@ def enrich_route(
                 handlerLine=handler_line,
                 name=name or statement.name,
                 framework=framework,
-                routeKind="route",
+                routeKind=route_kind,
                 isRegex=is_regex,
                 guards=list(dict.fromkeys([*(statement.guards or []), *(guards or [])])) or None,
                 startLine=line,
@@ -203,11 +210,11 @@ def enrich_route(
     statement.semanticType = "route"
     statement.framework = framework
     statement.method = method
-    statement.endpoint = normalize_endpoint(endpoint)
+    statement.endpoint = normalize_endpoint(endpoint) if endpoint is not None else None
     statement.handler = handler
     statement.handlerLine = handler_line
     statement.name = name
-    statement.routeKind = "route"
+    statement.routeKind = route_kind
     statement.isRegex = is_regex
     statement.guards = list(dict.fromkeys(guards or [])) or None
     return True

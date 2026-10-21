@@ -458,6 +458,62 @@ class Item {
     assert any(s.method == "get" and s.dataAccessHint == "codeigniter-builder" for s in db_calls)
 
 
+def test_php_enum_members_are_captured_as_child_statements() -> None:
+    record = _parse(PhpParser(), """<?php
+enum FileSizeUnit: int {
+    case B = 0;
+    case KB = 1;
+}
+""")
+    members = [s for s in record.statements if s.semanticType == "enum_member"]
+
+    assert [(s.name, s.nodeType, s.text) for s in members] == [
+        ("B", "enum_case", "case B = 0;"),
+        ("KB", "enum_case", "case KB = 1;"),
+    ]
+    assert all(s.parentId == record.classes[0].id for s in members)
+
+
+def test_codeigniter_events_service_routes_and_convenience_routes_are_semantic() -> None:
+    record = _parse(CodeIgniterParser(), """<?php
+use CodeIgniter\\Events\\Events;
+Events::on('pre_system', 'Boot::run');
+Events::trigger('cache.clear');
+service('routes')->get('__hot-reload', 'HotReload::index');
+$routes->resource('photos', ['only' => ['index', 'show']]);
+""", path="app/Config/Routes.php")
+
+    events = [s for s in record.statements if s.semanticType.startswith("eventbus_")]
+    routes = [s for s in record.statements if s.semanticType == "route"]
+
+    assert [(s.semanticType, s.endpoint, s.method) for s in events] == [
+        ("eventbus_consumer", "pre_system", "CONSUMER"),
+        ("eventbus_publish", "cache.clear", "PUBLISH"),
+    ]
+    assert ("GET", "/__hot-reload", "HotReload@index") in [
+        (s.method, s.endpoint, s.handler) for s in routes
+    ]
+    assert {s.endpoint for s in routes if s.routeKind == "resource"} == {
+        "/photos", "/photos/(:segment)",
+    }
+
+
+def test_codeigniter_claims_do_not_use_diagnostic_strings_and_repairs_php_db_hints() -> None:
+    parser = CodeIgniterParser()
+    assert not parser.claims(
+        "structarmed-baseline.php",
+        b"<?php return ['class' => 'CodeIgniter\\Config\\BaseService'];",
+    )
+    record = _parse(CodeIgniterParser(), """<?php
+namespace CodeIgniter\\Database;
+class BaseBuilder {
+    public function save($data) { return $this->upsert($data); }
+}
+""", path="system/Database/BaseBuilder.php")
+    upsert = [s for s in record.statements if s.method == "upsert"]
+    assert upsert and all(s.dataAccessHint == "codeigniter-builder" for s in upsert)
+
+
 def test_route_handler_binary_concatenation_and_formats() -> None:
     source = """<?php
 use Slim\\Factory\\AppFactory;
