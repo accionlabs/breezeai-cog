@@ -12,6 +12,7 @@ from breezeai_cog.parsers.php_codeigniter.parser import CodeIgniterParser
 from breezeai_cog.parsers.php_laravel.parser import LaravelParser
 from breezeai_cog.parsers.php_slim.parser import SlimParser
 from breezeai_cog.parsers.php_symfony.parser import SymfonyParser
+from breezeai_cog.parsers.php_twig.parser import TwigParser, TwigTemplateIndex
 from breezeai_cog.schemas import FileRecord
 
 
@@ -315,6 +316,62 @@ class OrderController {
     route_unresolved = next(s for s in unresolved.statements if s.semanticType == "route")
     assert route_unresolved.requestDTO is None
     assert route_unresolved.responseDTO is None
+
+
+def test_php_twig_templates_capture_ast_and_resolve_static_template_references() -> None:
+    source = """{% extends 'layouts/app.twig' %}
+{% block content %}
+  <p>{{ content_title | default('Hello') }}</p>
+  {% include 'partials/content.twig' %}
+  {% from 'partials/forms.twig' import field %}
+  {{ include('partials/aside.twig') }}
+{% endblock %}
+{# page comment #}
+"""
+    index = TwigTemplateIndex(frozenset({
+        "resources/views/index.twig",
+        "resources/views/layouts/app.twig",
+        "resources/views/partials/content.twig",
+        "resources/views/partials/forms.twig",
+        "resources/views/partials/aside.twig",
+    }))
+    record = _parse(
+        TwigParser(),
+        source,
+        path="resources/views/index.twig",
+        index=index,
+    )
+
+    assert record.language == "twig"
+    assert record.framework == "twig"
+    assert record.uiRole == "template"
+    assert record.importFiles == [
+        "resources/views/layouts/app.twig",
+        "resources/views/partials/content.twig",
+        "resources/views/partials/forms.twig",
+        "resources/views/partials/aside.twig",
+    ]
+    assert {"tag_statement", "output_directive", "comment"} <= {
+        statement.nodeType for statement in record.statements
+    }
+    assert any(statement.name == "extends" for statement in record.statements)
+    assert any(statement.name == "content" for statement in record.statements)
+    assert all(statement.semanticType is None for statement in record.statements)
+    assert FileRecord.model_validate(record.model_dump(by_alias=True))
+
+
+def test_php_twig_is_registered_and_template_capture_respects_statement_gate() -> None:
+    registry.discover_builtin()
+    parser = registry.select("resources/views/index.twig", b"{% block body %}Hello{% endblock %}")
+
+    assert parser is not None
+    assert parser.name == "twig"
+    assert ".twig" in parser.template_extensions
+    assert not _parse(
+        parser,
+        "{% block body %}Hello{% endblock %}",
+        capture=False,
+    ).statements
 
 
 def test_all_php_framework_parser_claims_are_specific_and_blade_stays_unsupported() -> None:
