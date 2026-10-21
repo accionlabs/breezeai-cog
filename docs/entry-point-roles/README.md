@@ -13,7 +13,7 @@ When you add a framework construct to a parser, add its row here and its test.
 
 | Language | Tables |
 |---|---|
-| TypeScript / JavaScript — servers | [Express](express.md) · [NestJS](nestjs.md) · [Next.js](nextjs.md) · [LoopBack](loopback.md) · [GraphQL](graphql-typescript.md) · [AWS Lambda](aws-lambda-typescript.md) |
+| TypeScript / JavaScript — servers | [Express](express.md) · [Fastify](fastify.md) · [NestJS](nestjs.md) · [Next.js](nextjs.md) · [LoopBack](loopback.md) · [GraphQL](graphql-typescript.md) · [AWS Lambda](aws-lambda-typescript.md) |
 | TypeScript / JavaScript — frontends | [Angular](angular.md) · [React Router](react.md) · [Vue](vue.md) |
 | GraphQL schema files | [SDL](graphql-sdl.md) |
 | Java / Groovy / Kotlin | [Spring](spring.md) · [JAX-RS](jaxrs.md) · [Vert.x](vertx.md) · [Ktor](ktor.md) · [Quartz](quartz.md) |

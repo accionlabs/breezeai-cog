@@ -59,7 +59,7 @@ def test_inventory_in_run_order() -> None:
         "java": ["quartz"],
         "python": ["celery"],
         "scala": ["akka-events", "spark"],
-        "typescript": ["express", "aws-events", "sdk-calls", "graphql-client",
+        "typescript": ["express", "fastify", "aws-events", "sdk-calls", "graphql-client",
                        "graphql-resolver-modules", "vue-routes",
                        "nextjs-pages", "navigation"],
     }

@@ -125,7 +125,9 @@ def _string_fragment(node: Node, source: bytes) -> str:
 def _is_http_config_object(obj: Node, source: bytes) -> bool:
     """True if an object literal is an HTTP request config — carries both a URL-family key
     and a ``method`` key. A ``method`` given as a string literal must be an HTTP verb (a
-    non-verb literal rules it out); a non-literal ``method`` (a variable) is allowed."""
+    non-verb literal rules it out); a non-literal ``method`` (a variable) is allowed. An object
+    with a ``handler`` declares a route (Fastify ``route({ method, url, handler })``, hapi
+    ``server.route({ method, path, handler })``) — it receives requests, it doesn't send one."""
     has_url = has_method = False
     for pair in obj.named_children:
         if pair.type != "pair":
@@ -134,6 +136,8 @@ def _is_http_config_object(obj: Node, source: bytes) -> bool:
         if key is None:
             continue
         kname = node_text(key, source).strip("'\"")
+        if kname == "handler":
+            return False
         if kname in _URL_KEYS:
             has_url = True
         elif kname == "method":
