@@ -156,6 +156,7 @@ def enrich_route(
     endpoint: str,
     method: str,
     handler_node: Node | None,
+    name: str | None = None,
     guards: list[str] | None = None,
     is_regex: bool | None = False,
 ) -> bool:
@@ -166,7 +167,15 @@ def enrich_route(
     handler, handler_line = route_handler(handler_node, source)
     if statement.semanticType == "route":
         if statement.method == method:
-            return False
+            changed = False
+            if name and statement.name != name:
+                statement.name = name
+                changed = True
+            merged_guards = list(dict.fromkeys([*(statement.guards or []), *(guards or [])]))
+            if merged_guards and statement.guards != merged_guards:
+                statement.guards = merged_guards
+                changed = True
+            return changed
         all_statements.append(
             Statement(
                 id=disambiguate(statement_id(path, line, column), seen_ids),
@@ -178,10 +187,11 @@ def enrich_route(
                 endpoint=normalize_endpoint(endpoint),
                 handler=handler,
                 handlerLine=handler_line,
+                name=name or statement.name,
                 framework=framework,
                 routeKind="route",
                 isRegex=is_regex,
-                guards=guards or None,
+                guards=list(dict.fromkeys([*(statement.guards or []), *(guards or [])])) or None,
                 startLine=line,
                 endLine=statement.endLine,
                 path=path,
@@ -196,16 +206,17 @@ def enrich_route(
     statement.endpoint = normalize_endpoint(endpoint)
     statement.handler = handler
     statement.handlerLine = handler_line
+    statement.name = name
     statement.routeKind = "route"
     statement.isRegex = is_regex
-    statement.guards = guards or None
+    statement.guards = list(dict.fromkeys(guards or [])) or None
     return True
 
 
 def closure_argument(call: Node) -> Node | None:
     for arg in args_of(call):
         node = unwrap(arg)
-        if node.type in {"anonymous_function", "arrow_function"}:
+        if node is not None and node.type in {"anonymous_function", "arrow_function"}:
             return node
     return None
 
@@ -227,11 +238,123 @@ def chain_prefix(node: Node | None, source: bytes) -> str | None:
     return None
 
 
+def chained_route_metadata(
+    call: Node,
+    source: bytes,
+    *,
+    name_methods: set[str],
+    guard_methods: set[str],
+) -> tuple[str | None, list[str]]:
+    """Collect literal name and middleware/guard values on a route's fluent chain."""
+    route_name: str | None = None
+    guards: list[str] = []
+    current = call
+
+    while current.parent is not None:
+        parent = current.parent
+        if parent.type == "parenthesized_expression" and len(parent.named_children) == 1:
+            current = parent
+            continue
+        if parent.type not in PHP_CALL_TYPES:
+            break
+        receiver = unwrap(parent.child_by_field_name("object"))
+        if receiver is None or (
+            receiver.start_byte != current.start_byte
+            or receiver.end_byte != current.end_byte
+        ):
+            break
+
+        method = method_of(parent, source)
+        args = args_of(parent)
+        if args and method in name_methods:
+            route_name = string_value(args[0], source) or route_name
+        elif args and method in guard_methods:
+            guards.extend(route_guard_values(args[0], source))
+        current = parent
+
+    return route_name, list(dict.fromkeys(guards))
+
+
+def receiver_chain_metadata(
+    call: Node,
+    source: bytes,
+    *,
+    name_methods: set[str],
+    guard_methods: set[str],
+) -> tuple[str | None, list[str]]:
+    """Collect literal metadata from calls that configure a fluent receiver."""
+    route_names: list[str] = []
+    guards: list[str] = []
+    current = unwrap(call.child_by_field_name("object"))
+    while current is not None and current.type in PHP_CALL_TYPES:
+        method = method_of(current, source)
+        args = args_of(current)
+        if args and method in name_methods:
+            name = string_value(args[0], source)
+            if name is not None:
+                route_names.insert(0, name)
+        elif args and method in guard_methods:
+            guards.extend(route_guard_values(args[0], source))
+        current = unwrap(current.child_by_field_name("object"))
+    return "".join(route_names) or None, list(dict.fromkeys(guards))
+
+
+def route_guard_values(node: Node | None, source: bytes) -> list[str]:
+    """Return literal middleware identifiers without guessing dynamic expressions."""
+    if node is None:
+        return []
+    node = unwrap(node)
+    if node is None:
+        return []
+    if node.type == "array_creation_expression":
+        return list(dict.fromkeys(
+            value
+            for item in node.named_children
+            for value in route_guard_values(item, source)
+        ))
+    if node.type == "array_element_initializer":
+        child = next(iter(node.named_children), None)
+        return route_guard_values(child, source)
+    value = string_value(node, source)
+    if value is not None:
+        return [value]
+    if node.type == "class_constant_access_expression":
+        text = node_text(node, source)
+        class_name, separator, constant = text.rpartition("::")
+        if separator and constant.lower() == "class":
+            return [class_name.lstrip("\\")]
+    if node.type == "object_creation_expression":
+        class_node = next(iter(node.named_children), None)
+        if class_node is not None and class_node.type in {"name", "qualified_name"}:
+            return [node_text(class_node, source).lstrip("\\")]
+    return []
+
+
+def route_options(
+    node: Node | None, source: bytes
+) -> tuple[str | None, list[str]]:
+    node = unwrap(node)
+    if node is None or node.type != "array_creation_expression":
+        return None, []
+    route_name: str | None = None
+    guards: list[str] = []
+    for item in node.named_children:
+        values = list(item.named_children)
+        if len(values) < 2:
+            continue
+        key = node_text(values[0], source).strip("'\"")
+        if key in {"as", "name"}:
+            route_name = string_value(values[-1], source) or route_name
+        elif key in {"filter", "filters", "middleware"}:
+            guards.extend(route_guard_values(values[-1], source))
+    return route_name, list(dict.fromkeys(guards))
+
+
 def group_filters(node: Node | None, source: bytes) -> list[str]:
     if node is None:
         return []
     node = unwrap(node)
-    if node.type != "array_creation_expression":
+    if node is None or node.type != "array_creation_expression":
         return []
     filters: list[str] = []
     for item in node.named_children:

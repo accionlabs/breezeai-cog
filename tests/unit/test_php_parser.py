@@ -152,6 +152,37 @@ Route::prefix('/admin')->group(function () {
     assert sum(statement.semanticType is None for statement in record.statements) == 1
 
 
+def test_php_laravel_routes_capture_name_and_chained_middleware() -> None:
+    source = """<?php
+use Illuminate\\Support\\Facades\\Route;
+Route::get('/admin', [AdminController::class, 'index'])
+    ->name('admin.index')
+    ->middleware(['auth', AdminMiddleware::class]);
+"""
+    record = _parse(LaravelParser(), source, path="routes/web.php")
+    routes = [s for s in record.statements if s.semanticType == "route"]
+
+    assert len(routes) == 1
+    assert routes[0].name == "admin.index"
+    assert routes[0].guards == ["auth", "AdminMiddleware"]
+
+
+def test_php_laravel_route_groups_capture_name_and_middleware_prefixes() -> None:
+    source = """<?php
+use Illuminate\\Support\\Facades\\Route;
+Route::name('admin.')->middleware('auth')->prefix('/admin')->group(function () {
+    Route::get('/users', [AdminController::class, 'users'])->name('users.index');
+});
+"""
+    record = _parse(LaravelParser(), source, path="routes/web.php")
+    routes = [s for s in record.statements if s.semanticType == "route"]
+
+    assert len(routes) == 1
+    assert routes[0].endpoint == "/admin/users"
+    assert routes[0].name == "admin.users.index"
+    assert routes[0].guards == ["auth"]
+
+
 def test_codeigniter_three_argument_group_retains_nested_route_and_filter() -> None:
     source = """<?php
 use CodeIgniter\\Router\\RouteCollection;
@@ -166,6 +197,22 @@ $routes->group('admin', ['filter' => 'auth'], function ($routes) {
     assert routes[0].endpoint == "/admin/users"
     assert routes[0].handler == "AdminController@index"
     assert routes[0].guards == ["auth"]
+
+
+def test_codeigniter_route_options_capture_name_and_filters() -> None:
+    source = """<?php
+use CodeIgniter\\Router\\RouteCollection;
+$routes->get('users/(:num)', 'UserController::show/$1', [
+    'as' => 'users.show',
+    'filter' => ['auth', AuthFilter::class],
+]);
+"""
+    record = _parse(CodeIgniterParser(), source, path="app/Config/Routes.php")
+    routes = [s for s in record.statements if s.semanticType == "route"]
+
+    assert len(routes) == 1
+    assert routes[0].name == "users.show"
+    assert routes[0].guards == ["auth", "AuthFilter"]
 
 
 def test_slim_group_prefix_and_container_get_do_not_confuse_routes() -> None:
@@ -183,6 +230,23 @@ $app->group('/api', function ($group) {
     assert len(routes) == 1
     assert routes[0].endpoint == "/api/hello/{name}"
     assert routes[0].handler == "HelloAction"
+
+
+def test_slim_routes_capture_name_and_chained_middleware() -> None:
+    source = """<?php
+use Slim\\Factory\\AppFactory;
+$app = AppFactory::create();
+$app->get('/admin', AdminController::class . ':index')
+    ->setName('admin.index')
+    ->add(AuthMiddleware::class)
+    ->add(new AuditMiddleware());
+"""
+    record = _parse(SlimParser(), source, path="public/index.php")
+    routes = [s for s in record.statements if s.semanticType == "route"]
+
+    assert len(routes) == 1
+    assert routes[0].name == "admin.index"
+    assert routes[0].guards == ["AuthMiddleware", "AuditMiddleware"]
 
 
 def test_symfony_attributes_use_ast_paths_and_any_default() -> None:
@@ -204,6 +268,28 @@ class LegacyController {
     assert routes[0].nodeType == "synthetic"
     assert routes[0].text == "#[Route('/legacy:format', priority: 10)]"
     assert record.functions[0].decorators == []
+
+
+def test_symfony_routes_capture_name_prefix_and_authorization_attributes() -> None:
+    source = """<?php
+namespace App\\Controller;
+use Symfony\\Component\\Routing\\Attribute\\Route;
+use Symfony\\Component\\Security\\Http\\Attribute\\IsGranted;
+#[IsGranted('ROLE_ADMIN')]
+#[Route('/admin', name: 'admin_')]
+class AdminController {
+    #[Route('/users', name: 'users.list', methods: ['GET'])]
+    #[IsGranted('ROLE_USER')]
+    public function users(): Response {}
+}
+"""
+    record = _parse(SymfonyParser(), source, path="src/AdminController.php")
+    routes = [s for s in record.statements if s.semanticType == "route"]
+
+    assert len(routes) == 1
+    assert routes[0].name == "admin_users.list"
+    assert routes[0].guards == ["IsGranted:ROLE_ADMIN", "IsGranted:ROLE_USER"]
+    assert routes[0].authRequired is True
 
 
 def test_symfony_dto_types_are_only_emitted_when_indexed() -> None:
@@ -334,5 +420,3 @@ $app->get('/invokable', SingleAction::class);
     assert handlers["/users"] == "UserController@store"
     assert handlers["/colon"] == "OtherController@show"
     assert handlers["/invokable"] == "SingleAction"
-
-

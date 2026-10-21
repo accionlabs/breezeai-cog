@@ -47,7 +47,11 @@ def _args(attr: Node, source: bytes) -> list[tuple[str | None, Node]]:
     for argument in params.named_children:
         name = argument.child_by_field_name("name")
         value = next(
-            (child for child in argument.named_children if child is not name),
+            (
+                child for child in argument.named_children
+                if name is None
+                or (child.start_byte, child.end_byte) != (name.start_byte, name.end_byte)
+            ),
             None,
         )
         if value is not None:
@@ -55,20 +59,35 @@ def _args(attr: Node, source: bytes) -> list[tuple[str | None, Node]]:
     return result
 
 
-def _route_values(attr: Node, source: bytes) -> tuple[str, list[str], bool]:
+def _route_values(attr: Node, source: bytes) -> tuple[str, list[str], bool, str | None]:
     path: str | None = None
     methods: list[str] = []
     is_regex = False
-    for name, value in _args(attr, source):
-        if name is None and path is None:
+    route_name: str | None = None
+    for argument_name, value in _args(attr, source):
+        if argument_name is None and path is None:
             path = string_value(value, source)
-        elif name in {"path", "value"}:
+        elif argument_name in {"path", "value"}:
             path = string_value(value, source)
-        elif name == "methods":
+        elif argument_name == "methods":
             methods = [verb.upper() for verb in strings_in_array(value, source)]
-        elif name == "requirements":
+        elif argument_name == "requirements":
             is_regex = True
-    return path or "", methods or ["ANY"], is_regex
+        elif argument_name == "name":
+            route_name = string_value(value, source)
+    return path or "", methods or ["ANY"], is_regex, route_name
+
+
+def _security_guards(node: Node, source: bytes) -> list[str]:
+    guards: list[str] = []
+    for attr in _attribute_nodes(node):
+        name = _route_name(attr, source)
+        if name not in {"IsGranted", "Security"}:
+            continue
+        args = _args(attr, source)
+        value = string_value(args[0][1], source) if args else None
+        guards.append(f"{name}:{value}" if value is not None else name)
+    return list(dict.fromkeys(guards))
 
 
 def _dto_type(value: str | None, index: PhpIndex | None) -> str | None:
@@ -101,13 +120,20 @@ def detect_symfony_routes(
             "class_declaration", "interface_declaration", "trait_declaration", "enum_declaration",
         }
     ]
-    class_routes: dict[tuple[int, int], list[tuple[str, bool]]] = {}
+    class_routes: dict[tuple[int, int], list[tuple[str, bool, str | None, list[str]]]] = {}
     for cls_node in classes:
         attrs = _route_decorators(cls_node, source)
         if attrs:
-            class_routes[(cls_node.start_byte, cls_node.end_byte)] = [
-                _route_values(attr, source)[::2] for attr in attrs
-            ]
+            routes = []
+            for attr in attrs:
+                route_path, _, is_regex, route_name = _route_values(attr, source)
+                routes.append((
+                    route_path,
+                    is_regex,
+                    route_name,
+                    _security_guards(cls_node, source),
+                ))
+            class_routes[(cls_node.start_byte, cls_node.end_byte)] = routes
 
     seen = {statement.id for statement in record.statements}
     emitted = 0
@@ -116,7 +142,7 @@ def detect_symfony_routes(
         if node.type in {"method_declaration", "function_definition", "anonymous_function", "arrow_function"}
     ]
     for fn, fn_node in zip(record.functions, fn_nodes):
-        prefixes: list[tuple[str, bool]] = [("", False)]
+        prefixes: list[tuple[str, bool, str | None, list[str]]] = [("", False, None, [])]
         parent = fn_node.parent
         while parent is not None:
             key = (parent.start_byte, parent.end_byte)
@@ -125,8 +151,9 @@ def detect_symfony_routes(
                 break
             parent = parent.parent
         for attr in _route_decorators(fn_node, source):
-            subpath, methods, is_regex = _route_values(attr, source)
-            for prefix, parent_regex in prefixes:
+            subpath, methods, is_regex, route_name = _route_values(attr, source)
+            method_guards = _security_guards(fn_node, source)
+            for prefix, parent_regex, name_prefix, class_guards in prefixes:
                 for method in methods:
                     source_node = (
                         attr.parent
@@ -145,10 +172,13 @@ def detect_symfony_routes(
                         method=method,
                         endpoint=join_endpoint(prefix, subpath),
                         framework="symfony",
+                        name=f"{name_prefix or ''}{route_name}" if route_name else None,
                         handler=fn.name,
                         handlerLine=fn.startLine,
                         routeKind="route",
                         isRegex=is_regex or parent_regex,
+                        guards=list(dict.fromkeys([*class_guards, *method_guards])) or None,
+                        authRequired=bool(class_guards or method_guards) or None,
                         requestDTO=_request_dto(fn, index),
                         responseDTO=_dto_type(fn.returnType, index),
                         startLine=start,
