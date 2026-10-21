@@ -15,6 +15,7 @@ from ..additive import run_additive
 from ..base import BaseParser, ParseContext
 from ..callresolve import make_resolver
 from ..comments_common import comment_statements_for
+from ..statements_common import emit_enum_members
 from ..treesitter import node_text, parse_source
 from .classes import build_class
 from .functions import build_function, function_node_type, function_parent_id
@@ -132,6 +133,22 @@ class PhpParser(BaseParser):
                 extract_scope(child)
 
         extract_scope(root)
+        if ctx.capture_statements:
+            for enum_node in (node for node in _walk(root) if node.type == "enum_declaration"):
+                body = enum_node.child_by_field_name("body")
+                enum_id = class_ids.get((enum_node.start_byte, enum_node.end_byte))
+                if body is not None and enum_id is not None:
+                    statements.extend(
+                        emit_enum_members(
+                            body,
+                            source,
+                            path,
+                            member_types={"enum_case"},
+                            parent_id=enum_id,
+                            limit=ctx.statement_text_limit,
+                            seen_ids=seen_ids,
+                        )
+                    )
         statements.extend(
             extract_statements(
                 root, source, path, parent_id=fid, capture=ctx.capture_statements,
