@@ -530,6 +530,7 @@ the file:
   │                                                                                  │
   │  typescript    order  detector         code in                    [skips tests]  │
   │                  10   express          typescript_express/routes.py      ✔       │
+  │                  15   fastify          typescript_fastify/routes.py      ✔       │
   │                  20   aws-events       typescript/aws_events.py                  │
   │                  30   sdk-calls        detection/sdk_calls.py                    │
   │                  40   graphql-client   typescript_graphql/routes.py      ✔       │
