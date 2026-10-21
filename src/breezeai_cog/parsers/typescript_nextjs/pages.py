@@ -27,8 +27,7 @@ from ...schemas import FileRecord
 from ..additive import DetectContext, Detection, Detector, Gate, register_detector
 from ..emits import Emit
 from ..treesitter import first_line, node_text
-from ..typescript.imports import router_root
-from .facts import next_apps
+from .facts import next_apps, router_root
 from .routes import _middleware_guards, _served, _url_segments
 
 _PAGE_EXTS = (".tsx", ".jsx", ".ts", ".js")

@@ -30,7 +30,7 @@ from tree_sitter import Node
 from ..additive import FactSpec, index_fact, register_fact
 from ..treesitter import node_text
 from ..typescript.base_paths import BasePathRaw, collect_base_path, resolve_base_paths
-from ..typescript.imports import _load_jsonc, _string_literal, router_root
+from ..typescript.imports import _load_jsonc, _string_literal
 
 APPS = "next.apps"
 MIDDLEWARES = "next.middlewares"
@@ -38,6 +38,19 @@ BASE_PATHS = "next.base-paths"
 
 _NEXT_CONFIGS = ("next.config.js", "next.config.mjs", "next.config.ts", "next.config.cjs")
 _MIDDLEWARE_FILES = frozenset({"middleware.ts", "middleware.js", "middleware.mjs"})
+
+
+def router_root(path: str, router_dir: str) -> str | None:
+    """The app root of a file under a file-based ``router_dir`` (``app`` / ``pages``): the
+    directory holding it, or its parent when that is ``src`` (``src/app``, ``src/pages``).
+    ``""`` is the repo root; None when ``router_dir`` is not on the path."""
+    dirs = path.replace("\\", "/").split("/")[:-1]
+    if router_dir not in dirs:
+        return None
+    before = dirs[: dirs.index(router_dir)]
+    if before and before[-1] == "src":
+        before = before[:-1]
+    return "/".join(before)
 
 
 def next_apps(index: Any | None) -> frozenset[str]:

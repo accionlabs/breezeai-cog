@@ -24,10 +24,10 @@ from ..additive import DetectContext, Detection, Detector, Gate, register_detect
 from ..emits import Emit
 from ..treesitter import node_text
 from ..typescript.imports import (
-    _module_of, _require_module, relative_requires, resolve_const_value, router_locals,
+    _module_of, _require_module, relative_requires, resolve_const_value,
 )
 from ..wiring import compose_guards
-from .mounts import express_mounts, mw_name
+from .mounts import express_mounts, mw_name, router_locals
 
 # HTTP-verb methods that register a route handler on an app/router.
 _HTTP_VERBS = {"get", "post", "put", "delete", "patch", "options", "head", "all"}

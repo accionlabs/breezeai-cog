@@ -58,19 +58,6 @@ class TsAliasIndex:
     facts: dict[str, Any] = field(default_factory=dict)
 
 
-def router_root(path: str, router_dir: str) -> str | None:
-    """The app root of a file under a file-based ``router_dir`` (``app`` / ``pages``): the
-    directory holding it, or its parent when that is ``src`` (``src/app``, ``src/pages``).
-    ``""`` is the repo root; None when ``router_dir`` is not on the path."""
-    dirs = path.replace("\\", "/").split("/")[:-1]
-    if router_dir not in dirs:
-        return None
-    before = dirs[: dirs.index(router_dir)]
-    if before and before[-1] == "src":
-        before = before[:-1]
-    return "/".join(before)
-
-
 def _load_jsonc(path: Path) -> dict | None:
     """Tolerant JSON-with-comments loader for tsconfig files."""
     try:
@@ -400,8 +387,8 @@ def _collect_heritage(root: Node, source: bytes, rel: str) -> dict[str, ClassHer
 
 def _path_pieces(node: Node | None, source: bytes) -> list[tuple[str, str]] | None:
     """A route ``path`` value → ordered resolvable pieces, or None if any piece is dynamic
-    (a call, a template substitution that isn't a plain member/identifier). Mirrors the
-    angular detector's resolution but yields pieces to resolve later against ``const_values``."""
+    (a call, a template substitution that isn't a plain member/identifier). The pieces resolve
+    later against ``const_values``, once every file's constants are known."""
     if node is None:
         return None
     if node.type == "string":
@@ -432,15 +419,6 @@ def _path_pieces(node: Node | None, source: bytes) -> list[tuple[str, str]] | No
         return pieces
     return None
 
-
-# --- Express mount extraction (picklable worker side) --------------------------------------
-#
-# An Express router factory (``const r = () => { const route = Router(); route.get(...); return
-# route }``) lives in its own file and is mounted elsewhere with ``app.use('/base', factory())``.
-# The base path and the factory's routes sit in different files, so — like the Angular lazy
-# mounts (``angular.route-mounts``) — the linkage resolves through the repo-wide index: this
-# collector records, at
-# each mount site, ``defining-file → base`` so the factory file can later prefix its own routes.
 
 # Filename infixes / dirs whose mounts are test scaffolding, not the wired app (mirrors
 # base._GLOBAL_FIXTURE_MARKERS + TypeScriptParser._TS_FIXTURE_MARKERS; kept in sync by hand to
@@ -517,40 +495,6 @@ def _relative_import_map(root: Node, source: bytes) -> dict[str, str]:
     return out
 
 
-def _is_router_call(node: Node | None, source: bytes) -> bool:
-    """``Router(...)`` / ``express.Router(...)`` (optionally ``new``) — an Express router instance."""
-    if node is not None and node.type == "new_expression":
-        fn = node.child_by_field_name("constructor")
-    elif node is not None and node.type == "call_expression":
-        fn = node.child_by_field_name("function")
-    else:
-        return False
-    return fn is not None and node_text(fn, source) in {"Router", "express.Router"}
-
-
-def router_locals(root: Node, source: bytes) -> set[str]:
-    """Variables bound to an Express router instance anywhere in the file
-    (``const r = Router()`` / ``express.Router()``)."""
-    out: set[str] = set()
-
-    def walk(node: Node) -> None:
-        if node.type == "variable_declarator":
-            name = node.child_by_field_name("name")
-            if (name is not None and name.type == "identifier"
-                    and _is_router_call(node.child_by_field_name("value"), source)):
-                out.add(node_text(name, source))
-        for c in node.named_children:
-            walk(c)
-
-    walk(root)
-    return out
-
-
-
-
-
-
-
 def _ts_index_one(
     args: tuple[str, str, str]
 ) -> tuple[dict[str, str | None], dict[str, ClassHeritage], dict[str, Any]] | None:
@@ -597,8 +541,8 @@ def _resolve_pieces(pieces: list[tuple[str, str]], const_values: dict[str, str |
 
 
 def _join_segments(base: str, sub: str) -> str:
-    """Join two route segments with a single slash, ignoring empties (mirrors the angular
-    detector's ``_join`` so composed prefixes match within-file composition)."""
+    """Join two route segments with a single slash, ignoring empties (``/api`` + ``users/`` →
+    ``/api/users``)."""
     parts = [p.strip("/") for p in (base, sub) if p and p.strip("/")]
     return "/" + "/".join(parts) if parts else "/"
 

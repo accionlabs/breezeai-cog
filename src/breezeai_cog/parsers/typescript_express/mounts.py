@@ -35,7 +35,6 @@ from ..typescript.imports import (
     _string_literal,
     relative_requires,
     require_specifier,
-    router_locals,
 )
 from ..wiring import Wiring, resolve_wiring
 
@@ -47,6 +46,35 @@ FACT = "express.router-mounts"
 _InstanceMount = tuple[str, str, str, str, tuple[str, ...]]
 #: A router-factory mount: its prefix, and the mount's own middleware.
 _FactoryMount = tuple[Wiring, tuple[str, ...]]
+
+
+def _is_router_call(node: Node | None, source: bytes) -> bool:
+    """``Router(...)`` / ``express.Router(...)`` (optionally ``new``) — an Express router instance."""
+    if node is not None and node.type == "new_expression":
+        fn = node.child_by_field_name("constructor")
+    elif node is not None and node.type == "call_expression":
+        fn = node.child_by_field_name("function")
+    else:
+        return False
+    return fn is not None and node_text(fn, source) in {"Router", "express.Router"}
+
+
+def router_locals(root: Node, source: bytes) -> set[str]:
+    """Variables bound to an Express router instance anywhere in the file
+    (``const r = Router()`` / ``express.Router()``)."""
+    out: set[str] = set()
+
+    def walk(node: Node) -> None:
+        if node.type == "variable_declarator":
+            name = node.child_by_field_name("name")
+            if (name is not None and name.type == "identifier"
+                    and _is_router_call(node.child_by_field_name("value"), source)):
+                out.add(node_text(name, source))
+        for c in node.named_children:
+            walk(c)
+
+    walk(root)
+    return out
 
 
 @dataclass(frozen=True)
