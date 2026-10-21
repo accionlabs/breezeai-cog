@@ -309,3 +309,71 @@ def test_array_route_path_is_one_binding_per_path(analyze_files) -> None:
     st = _ctrl(analyze_files, "  @Get(['a', PATHS.B])\n  two() {}\n")
     got = sorted((r.endpoint or "") for r in _eps(st) if r.handler == "two")
     assert got == ["", "/users/a"]
+
+
+def test_sse_decorator_is_a_get_binding(analyze_files) -> None:
+    st = _ctrl(
+        analyze_files,
+        "  @Sse('stream')\n  stream() { return null; }\n",
+        imports="import { Sse } from '@nestjs/common';\n",
+        **{
+            "src/main.ts": "import { NestFactory } from '@nestjs/core';\n"
+            "async function bootstrap() {\n  const app = await NestFactory.create(AppModule);\n"
+            "  app.setGlobalPrefix('api');\n}\nbootstrap();\n"
+        },
+    )
+    [r] = _eps(st)
+    assert (r.method, r.routeKind, r.endpoint, r.handler, r.handlerLine) == (
+        "GET", "route", "/api/users/stream", "stream", 6)
+
+
+GATEWAY = "import { SubscribeMessage, WebSocketGateway } from '@nestjs/websockets';\n"
+
+
+def _gateway(analyze_files, args: str, body: str, *, decorators: str = ""):
+    src = (COMMON + GATEWAY + f"{decorators}@WebSocketGateway({args})\n"
+           "export class ChatGateway {\n" + body + "}\n")
+    return analyze_files({"package.json": PKG, "src/chat.gateway.ts": src})
+
+
+def test_gateway_message_handler_is_a_ws_binding(analyze_files) -> None:
+    st = _gateway(analyze_files, "", "  @SubscribeMessage('msg')\n  onMsg() { return 1; }\n")
+    [r] = _eps(st)
+    assert (r.semanticType, r.method, r.routeKind, r.endpoint, r.handler, r.handlerLine,
+            r.framework) == ("route", "MESSAGE", "ws", "msg", "onMsg", 6, "nestjs")
+
+
+def test_gateway_namespace_is_part_of_the_address(analyze_files) -> None:
+    # A namespace is written as a client writes it, io('http://host/chat'); `#` keeps the
+    # address from reading as a URL path. The port and the engine path are not part of it.
+    st = _gateway(
+        analyze_files, "8080, { namespace: 'chat', path: '/ws', cors: { origin: '*' } }",
+        "  @SubscribeMessage('msg')\n  onMsg() { return 1; }\n",
+    )
+    assert [r.endpoint for r in _eps(st)] == ["/chat#msg"]
+
+
+def test_gateway_default_namespace_adds_nothing(analyze_files) -> None:
+    st = _gateway(analyze_files, "{ namespace: '/' }",
+                  "  @SubscribeMessage('msg')\n  onMsg() { return 1; }\n")
+    assert [r.endpoint for r in _eps(st)] == ["msg"]
+
+
+def test_gateway_dynamic_namespace_is_unknown(analyze_files) -> None:
+    st = _gateway(analyze_files, "{ namespace: /^\\/room-\\d+$/ }",
+                  "  @SubscribeMessage('msg')\n  onMsg() { return 1; }\n")
+    [r] = _eps(st)
+    assert (r.endpoint, r.handler) == (None, "onMsg")
+
+
+def test_gateway_guards(analyze_files) -> None:
+    st = _gateway(analyze_files, "", "  @SubscribeMessage('msg')\n  onMsg() { return 1; }\n",
+                  decorators="@UseGuards(WsAuthGuard)\n")
+    [r] = _eps(st)
+    assert (r.guards, r.authRequired) == (["WsAuthGuard"], True)
+
+
+def test_subscribe_message_outside_a_gateway_is_none(analyze_files) -> None:
+    st = _ctrl(analyze_files, "  @SubscribeMessage('msg')\n  onMsg() { return 1; }\n",
+               imports=GATEWAY)
+    assert _eps(st) == []

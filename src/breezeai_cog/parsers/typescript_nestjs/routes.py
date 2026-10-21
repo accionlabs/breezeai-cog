@@ -33,12 +33,16 @@ from ..treesitter import node_text
 _METHOD_DECORATORS = {
     "Get": "GET", "Post": "POST", "Put": "PUT", "Patch": "PATCH",
     "Delete": "DELETE", "Options": "OPTIONS", "Head": "HEAD", "All": "ANY",
+    "Sse": "GET",  # server-sent events travel as a GET
 }
 # @nestjs/microservices message consumers → eventbus_consumer semanticType.
 _MESSAGING_DECORATORS = {"EventPattern": "EVENT", "MessagePattern": "MESSAGE"}
 # @nestjs/schedule jobs → timer: the schedule (cron expression, or interval / delay in ms) is
 # the endpoint. Gated on the import: Cron / Interval / Timeout are common names.
 _SCHEDULE_DECORATORS = {"Cron": "PERIODIC", "Interval": "PERIODIC", "Timeout": "TIMER"}
+# @nestjs/websockets: @SubscribeMessage(event) on a @WebSocketGateway class → a ws message
+# handler, addressed `<event>` or `<namespace>#<event>` (not a URL: see _gateway_namespace).
+_GATEWAY_DECORATORS = {"WebSocketGateway"}
 # @nestjs/graphql code-first operations. Gated on the class being an @Resolver — @Query is
 # also a @nestjs/common *param* decorator, but that lives on a parameter, not in the method's
 # decorator list, so a method-level @Query on a resolver is unambiguously the GraphQL one.
@@ -135,6 +139,35 @@ def _pattern(dec: Node, source: bytes, consts: dict[str, str | None]) -> str | N
     args = call.child_by_field_name("arguments") if call is not None else None
     first = next((c for c in args.named_children if c.type != "comment"), None) if args else None
     return message_pattern(first, source, consts) if first is not None else None
+
+
+def _gateway_namespace(
+    decs: list[Node], source: bytes, consts: dict[str, str | None],
+) -> str | None:
+    """The socket.io namespace of a ``@WebSocketGateway([port,] { namespace })`` class, written
+    as a client writes it in ``io('http://host/chat')``: ``'chat'`` → ``/chat``. No namespace
+    (or ``'/'``, the default one) → ``""``; one that is not a literal or constant (a regex, a
+    function, a runtime value) → None. The port and the engine ``path`` are connection settings
+    shared by every handler, so they are not part of a handler's address."""
+    for dec in decs:
+        if decorator(dec, source).name not in _GATEWAY_DECORATORS:
+            continue
+        call = next((c for c in dec.named_children if c.type == "call_expression"), None)
+        args = call.child_by_field_name("arguments") if call is not None else None
+        opts = next((c for c in args.named_children if c.type == "object"), None) \
+            if args is not None else None
+        if opts is None:
+            return ""
+        for pair in opts.named_children:
+            key = pair.child_by_field_name("key") if pair.type == "pair" else None
+            if key is not None and node_text(key, source).strip("'\"") == "namespace":
+                value = pair.child_by_field_name("value")
+                ns = message_pattern(value, source, consts) if value is not None else None
+                if ns is None or ns.startswith(("{", "[")):
+                    return None
+                return "" if ns.strip("/") == "" else "/" + ns.strip("/")
+        return ""
+    return ""
 
 
 def _schedule(dec: Node, name: str, source: bytes, consts: dict[str, str | None]) -> str | None:
@@ -446,12 +479,16 @@ def detect_nest_routes(
         base = _controller_base(decs, source)  # None when the class is not a @Controller
         is_controller = base is not None
         is_resolver = any(decorator(dec, source).name in _RESOLVER_DECORATORS for dec in decs)
+        is_gateway = framework == "nestjs" and any(
+            decorator(dec, source).name in _GATEWAY_DECORATORS for dec in decs)
+        namespace = _gateway_namespace(decs, source, consts) if is_gateway else None
         class_name = node_text(cls.child_by_field_name("name"), source)
         body = cls.child_by_field_name("body")
         if body is None:
             continue
-        ctrl_guards = _guards(decs, source, interceptors=True) if is_controller else []
-        ctrl_auth = bool(_guards(decs, source)) if is_controller else False
+        ctrl_guards = (_guards(decs, source, interceptors=True)
+                       if is_controller or is_gateway else [])
+        ctrl_auth = bool(_guards(decs, source)) if is_controller or is_gateway else False
         ctrl_version = _version(decs, source) if is_controller else None
         # Stub parent: @Resolver(() => T) where a root @Mutation/@Query (in this class or any
         # other resolver of the repo) returns T as an empty object — T's @ResolveField methods
@@ -485,8 +522,9 @@ def detect_nest_routes(
                     fld = d.name if (is_resolver and d.name in _FIELD_RESOLVERS) else None
                     job = _SCHEDULE_DECORATORS.get(d.name) if schedules else None
                     ref = is_resolver and d.name == "ResolveReference"
+                    ws = is_gateway and d.name == "SubscribeMessage"
                     if (verb is None and msg is None and gql is None and fld is None
-                            and job is None and not ref):
+                            and job is None and not ref and not ws):
                         continue
                     common: dict[str, Any] = dict(
                         framework=framework,
@@ -525,6 +563,16 @@ def detect_nest_routes(
                             method="RESOLVE_REFERENCE",
                             endpoint=_resolver_type_arg(decs, source),
                             routeKind="query",
+                        )
+                    elif ws:  # @SubscribeMessage on a gateway: a WebSocket message handler
+                        event = _pattern(dec, source, consts)
+                        fields = dict(
+                            semanticType="route",
+                            method="MESSAGE",
+                            endpoint=(None if event is None or namespace is None
+                                      else f"{namespace}#{event}" if namespace else event),
+                            routeKind="ws",
+                            **common,
                         )
                     elif job is not None:  # @Cron / @Interval / @Timeout scheduled job
                         fields = dict(

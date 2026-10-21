@@ -104,6 +104,7 @@ targets them.
 |---|---|
 | HTTP route on a handler (decorator, route call, route-table entry with a component) | Binding |
 | SOAP / WCF / gRPC operation | Binding |
+| WebSocket endpoint: a connection handler (Ktor `webSocket`, FastAPI `@app.websocket`) or a message handler on a gateway (NestJS `@SubscribeMessage` in a `@WebSocketGateway` class) | Binding (`route`, `routeKind: ws`; `method: WEBSOCKET` for a connection, `MESSAGE` for one event) |
 | GraphQL query / mutation / subscription field | Binding — in schema-first code, the resolver-map entry (`Query: { books: … }`) is the binding; the SDL root field (`type Query { books }`) is a plain statement with the DTOs; a Relay `node` / `nodes` field, which the framework serves, is a `route` ([§5](#how-wiring-is-written-today)) |
 | Subscription that is also fed by a topic (HotChocolate `[Subscribe] [Topic("orders")]`) | Two bindings: the subscription (`route`) and the topic (`eventbus_consumer`) — one method, two triggers |
 | GraphQL entity or node resolver (federation `__resolveReference`, Relay node lookup) | Binding (`route`, `method: RESOLVE_REFERENCE`, `routeKind: query`) — the framework's generated root field (`_entities`, `node`) calls it directly, addressed by type |
@@ -245,6 +246,7 @@ match.
 | gRPC | `<Service>/<Method>` | `OrderService/GetOrder` |
 | GraphQL | Operation field name (type goes in `method`); for a field under a stub parent, `<StubType>.<field>` | `bookById`, `NotificationsMutation.create` |
 | GraphQL entity / node resolver | The type it resolves | `Book` |
+| WebSocket message | The event name; `<namespace>#<event>` when the gateway sets a socket.io namespace, written as a client writes it in `io('http://host/chat')`. Not a URL: the connection URL and port are shared by every handler, and `#` keeps the address from reading as a path | `msg`, `/chat#msg` |
 | Message / event | Queue, topic or address name; an object pattern as canonical JSON with sorted keys (the form the transport matches on) | `billing`, `orders.created`, `{"cmd":"sum"}` |
 | Schedule | Cron or interval expression | `0 2 * * *` |
 | Page | URL path, with parent prefixes applied | `/settings/profile` |

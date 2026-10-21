@@ -6,12 +6,15 @@ Parser: `src/breezeai_cog/parsers/typescript_nestjs/` (also routing-controllers 
 |---|---|---|---|
 | `@Get(path)` / `@Post` / `@Put` / `@Patch` / `@Delete` / `@All` … on a controller method | Binding | `route`, HTTP verb, `routeKind: route`, full path as `endpoint`, `handler` = method, `handlerLine` = its declaration | One handler, inbound API |
 | `@Get([':id', ':slug'])` — an array of paths (method or `@Controller`) | Binding, one per path | as above, one record per controller path × method path, same handler; an element that is not a string literal → that record's `endpoint` empty | Nest serves the handler at each path |
+| `@Sse(path)` on a controller method | Binding | `route`, `GET`, `routeKind: route`, addressed like `@Get` | Server-sent events travel as a GET |
 | `@Controller(path)` / `@JsonController(path)` on a class | Wiring | — (prefix for the class's bindings) | Container, no handler |
 | `app.setGlobalPrefix(prefix)` in the bootstrap | Wiring | — (prefix for every HTTP binding) | Applies to all handlers |
 | `RouterModule.register([{ path, module }])` | Wiring | — (prefix for the module's controllers) | Points at a module |
 | `@Version(v)` on a method or controller | Wiring | — (`version` on the bindings; part of the path under URI versioning) | Adds to other bindings |
 | `@UseGuards(...)` / `@Authorized()` on a class or method | Guard | names in `guards` | Run before the handlers |
 | `@UseInterceptors(...)` on a class or method | Guard | names in `guards` | Run before the handlers |
+| `@WebSocketGateway([port,] { namespace })` on a class | Wiring | — (namespace for the class's message handlers; the port and the engine `path` are connection settings) | Container, no handler |
+| `@SubscribeMessage(event)` on a gateway method | Binding | `route`, `MESSAGE`, `routeKind: ws`, `endpoint` = the event, or `<namespace>#<event>` (`/chat#msg`) when the gateway sets a namespace; a namespace or event that is not a literal → empty `endpoint`. Outside a gateway → nothing. `@UseGuards` on the gateway or method → `guards` | One handler for one client event |
 | `@EventPattern(pattern)` | Binding | `eventbus_consumer`, `EVENT`, `routeKind: message`, pattern as `endpoint` (object → canonical JSON, as above) | Event consumer on a transport |
 | `@MessagePattern(pattern)` | Binding | `eventbus_consumer`, `MESSAGE`, `routeKind: message`, pattern as `endpoint` — a string as written, an object as canonical JSON with sorted keys (`{"cmd":"sum"}`) | Request-response message consumer |
 | `@Cron(expr)` / `@Interval(ms)` / `@Timeout(ms)` (`@nestjs/schedule`) | Binding | `timer`, `PERIODIC` (`TIMER` for `@Timeout`), schedule as `endpoint` (a `CronExpression` member → its expression, fixed by the library; a numeric constant → its value), `handler` = method | Scheduled job |
