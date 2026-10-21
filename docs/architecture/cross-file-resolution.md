@@ -88,16 +88,19 @@ What each index holds:
 
 | Language | Holds | Used for |
 |---|---|---|
-| Java, Groovy | fully-qualified class name → file; `Class.FIELD` → constant value | imports, same-package types, event addresses / route paths |
-| Kotlin, Scala | fully-qualified class name → file | imports, same-package types |
-| C# | type → files; global `using`s; project roots (`.csproj`); class heritage incl. methods; extension methods; page routes | type resolution, inherited calls, extension calls, routes |
+| Java, Groovy | fully-qualified class name → file; `Class.FIELD` → constant value; **registered facts** (method declarations `java.method-lines` — (class, method) → file and line, for `handlerPath`; Java: `index.facts` — Vert.x service interfaces `vertx.service-interfaces`, Spring context paths `spring.context-paths` and module properties `spring.properties`, JAX-RS application paths and sub-resource bases `jaxrs.prefixes`, servlet filters / interceptors / JAX-RS request filters `java.web-guards`) | imports, same-package types, event addresses / route paths |
+| Kotlin | fully-qualified class name → file | imports, same-package types |
+| Scala | fully-qualified class name → file; **registered facts** (`index.facts`: Play router includes `play.router-includes` — read from the routes files, which the Play routes parser owns) | imports, same-package types, SIRD router prefixes |
+| Play routes files | the `->` router includes, resolved to each router's prefix | route prefixes of included routes files |
+| C# | type → files; global `using`s; project roots (`.csproj`), their MSBuild `using`s and project references; class heritage incl. methods; extension methods; implemented interfaces; **registered facts** (string constants `csharp.string-constants` and MVC area registrations `aspnet.area-registrations`, for area route prefixes; method declarations `csharp.method-lines` — (class, method) → file and line, for `handlerPath`; `index.facts`: HotChocolate registered roots, WCF `.svc` hosts — read from `.svc` files, which the ServiceHost parser owns — Web Forms `MapPageRoute` URLs `webforms.page-routes`, HotChocolate source-generated DataLoaders `hotchocolate.data-loaders`) | type resolution, inherited calls, extension calls, routes |
 | VB | class heritage (base class + attributes) | inherited controller routes |
-| TypeScript / JavaScript | `tsconfig`/`jsconfig` path aliases (per config scope); constant values; class heritage; Angular and Express route mounts | aliased imports, inherited calls, route prefixes |
+| TypeScript / JavaScript | `tsconfig`/`jsconfig` path aliases (per config scope); constant values; class heritage; **registered facts** (`index.facts`: Angular lazy-route mounts `angular.route-mounts`, Express mounts `express.router-mounts`, Fastify plugin prefixes `fastify.plugin-prefixes`, NestJS stub parents `nest.stub-parents` and prefixes `nest.prefixes`, Next.js apps `next.apps`, middleware matchers `next.middlewares` and base paths `next.base-paths`, LoopBack base paths `loopback.base-paths`, GraphQL root-field DTOs `graphql.sdl-root-fields` — read from `.graphql` files too, which the GraphQL parser owns; module exports and their declarations `typescript.declarations` — each file's exported names with the declared name and line, re-exports followed, for `handlerPath`) | aliased imports, inherited calls, route prefixes |
 | C++ | header basename → file; free functions; `Class::method`; `Class::field` types; heritage | `#include`, calls |
-| Ruby | ActiveRecord model names | recognising DB calls |
+| Ruby | ActiveRecord model names; **registered facts** (`index.facts`: Rails controller `before_action` callbacks `rails.controller-callbacks`) | recognising DB calls; Rails route guards |
 | HCL / Terraform | folder → `.tf` files | local `module` sources |
 | HTML | template → owning component | linking templates to components |
-| Python | *(no index)* | — |
+| Python | **registered facts** (`index.facts`): FastAPI wiring `fastapi.wiring` — `APIRouter` variables (own prefix, dependencies), `include_router` sites (also routers imported from other files), app middleware, module-level string constants used as prefixes; Celery task names `celery.tasks` | route prefixes and guards of routers mounted in another file |
+| GraphQL | **registered facts** (`index.facts`: client projects `graphql.client-configs` — the folders holding a `.graphqlrc.json`, read from those files, which no GraphQL parser owns) | telling a client's copy of a remote schema from a server's own |
 
 > **Decision —** indexes are built once, before parsing, and are read-only afterwards.
 > **Why:** workers share nothing, so files can be parsed in any order and in parallel, with the
@@ -128,10 +131,10 @@ How each language turns an import into a file:
 |---|---|---|
 | Java, Groovy, Kotlin | Look up the fully-qualified name in the index. Same-package classes are bound without an import. Groovy `as` aliases are bound. | wildcards, unknown or ambiguous names |
 | Scala | As Java, plus selector groups `{A, B}`, renames `{A => B}` and relative package imports | wildcards, unknown names |
-| C# | A `using` names a namespace, not a file. Each **type used** in the file is looked up under the namespaces in scope (own namespace and parents, `using`s, `global using`s). Bound only if exactly one file matches; on a tie, a file in the same `.csproj` wins. | every namespace `using`; unresolved static / alias targets |
+| C# | A `using` names a namespace, not a file. Each **type used** in the file is looked up under the namespaces in scope (own namespace and parents, `using`s, `global using`s, and `<Using Include>` from the project's `.csproj` or a `Directory.Build.props` above it). A type in another project counts only if this project references it (`<ProjectReference>`, transitively). Bound only if exactly one other file matches; on a tie between types, the one in the same `.csproj` wins. A type declared only in this file is ignored, so `class MassUpdate : SplendidCRM.MassUpdate` still links to the base. The same rules (`type_files`) bind additive detectors' names. | every namespace `using`; unresolved static / alias targets |
 | VB | Not resolved (`Imports` names namespaces) | every `Imports` |
-| TypeScript / JavaScript | Relative paths from the file's folder; otherwise the nearest `tsconfig`/`jsconfig` path alias. Tries the exact file, `.js`→`.ts` rewrites, known extensions, then `index.*`. Re-exports and literal dynamic `import()` count too. | anything not found on disk |
-| Python | `import a.b` / `from a.b import x` from the repo root; relative imports walk up folders. Tries `a/b.py`, then `a/b/__init__.py`. | anything not found |
+| TypeScript / JavaScript | Relative paths from the file's folder; otherwise the nearest `tsconfig`/`jsconfig` path alias. Tries the exact file, `.js`→`.ts` rewrites, known extensions, then `index.*`. Re-exports, literal dynamic `import()` and CommonJS `require('…')` (anywhere in the file; a top-level `const x = require(…)` / `const { a } = require(…)` also binds the names for `calls[].path`) count too. | anything not found on disk |
+| Python | `import a.b` / `from a.b import x` from the repo root first; relative imports walk up folders. Tries `a/b.py`, then `a/b/__init__.py`. Then the folders Python could find it in from the file (an app run from its own folder): a dotted import under a non-package folder above the file (a `sys.path` entry), a single name only in a script's own folder; either under a declared project (`pyproject.toml` / `setup.py` / `setup.cfg`) and its `src/`. Only ancestors, never a sibling app; found at two places → not linked | anything not found, or ambiguous |
 | Ruby | Only `require_relative` | every `require`; unresolved `require_relative` |
 | C++ | `#include "x.h"` looked up by file **basename** in the index | `<system>` includes; unknown or ambiguous basenames |
 
@@ -297,8 +300,11 @@ How (`parsers/constfold.py`):
 - Mixed literal and runtime parts are joined with `{name}` placeholders.
 
 Used by: the Java and Groovy indexes, and the Vert.x parsers (Java and Groovy). TypeScript has its
-own constant map in its index (top-level `const`s, string enums, `static readonly`), used for
-Angular, React and Express route paths.
+own constant map in its index (top-level `const`s, enum members, `static readonly`), used for
+Angular, React and Express route paths, URLs and NestJS patterns and schedules. It holds strings,
+and numbers as JavaScript writes them in a string (`` `/api/v${VERSION}` `` with `const VERSION =
+2` → `/api/v2`) — a number only from a constant declaration (`const`, an enum member, a
+`readonly` field), as a `let` number is often a counter.
 
 **Guard for generated code:** very long `+` chains (generated HTML/JS builders, hundreds of
 levels deep) would overflow Python's stack. Past `max_concat_depth` (default 100) cog leaves the
@@ -316,11 +322,77 @@ Some frameworks build a route from pieces in several files. These use the index 
 
 | Framework | Pieces | Source of the cross-file data |
 |---|---|---|
-| Express | `app.use("/api", router)` in one file + `router.get("/orders")` in another → `/api/orders` | TypeScript index: Express mounts |
+| Express | `app.use("/api", router)` in one file + `router.get("/orders")` in another → `/api/orders`. The router is a factory call (`usersRouter()`) or an imported `Router()` instance — kept only when the router's file confirms it exports a `Router()`, so an imported middleware is never a prefix. A router mounted at two bases keeps its own path | registered fact `express.router-mounts` (`typescript_express/mounts.py`), one base per router via the shared `resolve_wiring` |
+| Fastify | `app.register(users, { prefix: "/users" })` in one file + `fastify.get("/:id")` in the plugin's file → `/users/:id`; registrations chain, and a `fastify-plugin` plugin ignores the prefix. `@fastify/autoload` gives each file in its folder a prefix from the folder path, `options.prefix` and the file's `autoPrefix`, the same way the package walks the folder. A plugin registered at two prefixes, or with one that can't be read, has an empty endpoint | registered fact `fastify.plugin-prefixes` (`typescript_fastify/plugins.py`) |
 | Angular | lazy-loaded child routes under a parent path | TypeScript index: route mounts |
+| FastAPI | `app.include_router(orders.router, prefix="/api")` in one file + `router = APIRouter(prefix="/orders")` in another → `/api/orders/…`. A constant prefix (`API_PREFIX = "/v1"`) is resolved; a settings attribute is not (the environment can override it) → endpoint empty. A router included at two places keeps its own path | Python index: `fastapi.wiring` fact |
 | ASP.NET | base controller route prefix + action route | heritage ([§6](#6-inheritance-heritage)) |
-| WebForms | `MapPageRoute` URL → `.aspx` page | C# index: page routes |
+| WebForms | `MapPageRoute` URL → `.aspx` page | C# index: `webforms.page-routes` fact |
+| HotChocolate | `AddQueryType<BookQueries>()` in `Program.cs` → `BookQueries.cs` is a query root | registered fact ([below](#a-framework-fact-from-another-file-a-registered-fact)) |
+| WCF REST | `<%@ ServiceHost Service="Shop.OrderService" %>` in any `.svc` → the class's (or, for an interface contract, its one implementer's) `[WebGet]` operations are served under that `.svc` path. Matched by fully-qualified type name; a type named by two `.svc` files → no host | registered fact `wcf.svc-hosts`, collected from another parser's files (`FactSpec.sources`) |
+| Play | `-> /admin admin.Routes` in `conf/routes` + `GET /users …` in `conf/admin.routes` → `/admin/users`; `-> /v1/posts v1.post.PostRouter` + a SIRD `case GET(p"/$id")` in that class → `/v1/posts/{id}`. A routes file defines the router named after it (`conf/routes` → `router.Routes`, served at the root), so includes chain. A router included twice, or not included at all, keeps its own paths | `scala_play/includes.py`: the routes parser's own index for routes files; registered fact `play.router-includes` on the Scala index for SIRD classes (matched by fully-qualified name) |
+| AWS Lambda (TypeScript, C#) | `serverless.yml` `functions:` and SAM templates (`AWS::Serverless::Function`, YAML or JSON `serverless.template`) → each handler (`src/handler.onOrder`, `Assembly::Namespace.Type::Method`) gets its events' addresses (queue, topic, schedule, HTTP path); one record per event; a variable or reference leaves the address empty | registered fact `aws.deployed-handlers` (`parsers/aws_deploy.py`) on the TypeScript and C# indexes, collected from `.yml` / `.yaml` / `.json` / `.template` (`FactSpec.sources`) |
 | Terraform | local `module` source → the `.tf` files it loads | HCL index |
+
+### A framework fact from another file: a registered fact
+
+Sometimes a file is framework code only because **another** file says so. In HotChocolate
+v11/v12, a plain class becomes a GraphQL root when the composition root registers it:
+
+```csharp
+// Api/Program.cs
+builder.Services.AddGraphQLServer().AddQueryType<BookQueries>();
+
+// Api/BookQueries.cs — nothing HotChocolate in this file
+namespace Catalog { public class BookQueries { public Book GetBookById(int id) => …; } }
+```
+
+No `claims()` check can see this, and the HotChocolate parser never owns `BookQueries.cs`. The
+**additive detector** registry handles it: the detector's module registers a **fact**
+(`FactSpec`) that is built inside the language's `build_index`, and the detector reads it while
+the file is parsed.
+
+```mermaid
+flowchart TD
+  subgraph IDX["build_index (once, main process, parallel over files)"]
+    F["every .cs file"] --> G{"fact gate matches?<br/>b'AddQueryType&lt;' …"}
+    G -- no --> X[skip]
+    G -- yes --> C["fact.collect()<br/>(Program.cs, query, 'BookQueries', namespaces in scope)"]
+    C --> R["fact.resolve() once, after all files:<br/>bind each name to its declaring file"]
+    R --> FACT["index.facts['hotchocolate.registered-roots']<br/>{ 'Api/BookQueries.cs': {'BookQueries': 'query'} }"]
+  end
+  FACT --> W["every worker: ctx.resolution_index"]
+  subgraph PARSE["parse BookQueries.cs (owned by the plain C# parser)"]
+    E["extract()"] --> RA["run_additive('csharp')"]
+    RA --> RUN["detector: path in the fact?<br/>→ add route QUERY bookById"]
+  end
+  W --> RUN
+```
+
+How a registered name is bound to a file uses the C# rules — the same ones import resolution uses
+([§4](#4-import-resolution)) — so the binding is the one the compiler would make:
+- the namespaces in scope at the registering file: its own namespace and parents, its `using`s,
+  `global using`s, and `<Using Include>` from its `.csproj` or a `Directory.Build.props` above it;
+- a type in another project counts only if the registering project **references** it
+  (`<ProjectReference>`, transitively). Two unrelated projects that reuse a namespace declare
+  different types;
+- a partial class binds all of its files; anything still ambiguous binds nothing.
+
+| Case | Result |
+|---|---|
+| `Shop/Program.cs` and `Admin/Program.cs` each register their own `BookQueries` | each binds to its own project's class |
+| An unregistered `Legacy.BookQueries` elsewhere | not a root |
+| A class registered as a query in one composition root and a mutation in another | dropped |
+| A root declared inside the registering file itself | not emitted from that file (it stays with its owner, e.g. `csharp-aspnet`, and keeps its REST routes); it still resolves by name for an `[ExtendObjectType(typeof(...))]` elsewhere |
+| A file the HotChocolate parser owns | the parser emits from the same fact; the detector stays out (one shared ownership check) |
+
+> **Decision —** cross-file framework facts are registered facts (`register_fact`) in the additive
+> detector registry, not a framework-specific field on the language index or a new selection hook.
+> **Why:** one registry for framework add-ons, with the same discovery, validation and
+> `capabilities` listing; the language index keeps only language rules; parser selection is
+> unchanged, so no file can be taken from its owner. **Cost:** a detector that emits for files
+> with no marker cannot use a byte guard — its first check is a dictionary lookup instead; and the
+> framework's own parser must share an ownership check with the detector so the two never both emit.
 
 ---
 
@@ -351,6 +423,8 @@ the link would point at nothing. After each file is parsed, `core/executor.py::_
 | VB: no import resolution and no inherited calls | Few `CALLS` edges in VB repos |
 | Kotlin and Scala indexes have a constants field that is never filled | No cross-file constant folding there |
 | Values from config files / environment | Routes and addresses built from them stay empty |
+| HotChocolate root registrations made inside a helper method in another file, or registered by name only (`AddQueryType(d => d.Name("Query"))` with no class) | Not bound to a class; such roots are found only through attributes or descriptors |
+| MSBuild conditions on `<Using>` / `<ProjectReference>` are not evaluated | A conditional using or reference is treated as always on |
 | The C++ resolver's docstring says `super`/`base` returns `None`, but the code resolves it | Docstring is out of date |
 
 ---
@@ -361,6 +435,9 @@ the link would point at nothing. After each file is parsed, `core/executor.py::_
 - Put repo-wide facts in `build_index`. Build it with `parallel_map`, merge with
   `record_distinct` (or the heritage helpers) so the result doesn't depend on order, and keep it
   picklable.
+- A **framework** fact that comes from another file is a registered fact (`FactSpec` with
+  `collect` / `resolve`), not language index code. The language index offers only
+  language rules (for C#: `in_scope_namespaces`, `type_files`).
 - Reuse `make_resolver`, `walk_heritage` and `constfold` rather than writing new resolvers.
 - `calls[].path` and `importFiles` must be repo-relative paths of files that are actually captured.
 - Leave `extends` / `implements` as written in the source; don't put a guessed qualified name there.

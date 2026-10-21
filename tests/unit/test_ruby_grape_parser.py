@@ -39,7 +39,9 @@ def test_grape_dynamic_prefix_is_not_guessed(tmp_path: Path) -> None:
     source = b'''require "grape"\nclass API < Grape::API\n  namespace API_NAMESPACE do\n    get "/users" do\n    end\n  end\nend\n'''
     record = GrapeParser().parse_file(_context(tmp_path, "api.rb", source))
 
-    assert not any(item.semanticType == "route" for item in record.statements)
+    # The route is kept; its prefix exists but cannot be resolved, so the address is unknown.
+    routes = [item for item in record.statements if item.semanticType == "route"]
+    assert [(r.method, r.endpoint) for r in routes] == [("GET", None)]
 
 
 def test_grape_routes_ignore_receiver_qualified_http_calls(tmp_path: Path) -> None:
@@ -73,3 +75,72 @@ def test_grape_routes_are_gated_and_claims_are_specific(tmp_path: Path) -> None:
     assert not parser.claims("plain.rb", b'DOC = "Grape::API is documented here"')
     assert not parser.claims("plain.rb", b"# Grape::Endpoint is mentioned here\nclass PlainRuby; end")
     assert parser.frameworks == ["grape"]
+
+
+def test_grape_block_handler_has_line_only(tmp_path: Path) -> None:
+    # The handler is the route's anonymous block: no name, handlerLine = where the block starts.
+    source = b'''require "grape"\n\nclass API < Grape::API\n  get "/a" do\n    1\n  end\n  namespace :n do\n    post "/b" do\n      2\n    end\n  end\nend\n'''
+    record = GrapeParser().parse_file(_context(tmp_path, "api.rb", source))
+    got = {s.endpoint: (s.handler, s.handlerLine) for s in record.statements if s.semanticType == "route"}
+    assert got == {"/a": (None, 4), "/n/b": (None, 8)}
+
+
+def test_grape_prefix_and_version(tmp_path: Path) -> None:
+    source = b'''require "grape"
+class API < Grape::API
+  prefix :api
+  get "/before" do
+  end
+  version "v1"
+  namespace :users do
+    get "/list" do
+    end
+  end
+  version "v2", using: :header, vendor: "acme"
+  get "/hdr" do
+  end
+end
+class Other < Grape::API
+  prefix API_PREFIX
+  get "/x" do
+  end
+end
+'''
+    record = GrapeParser().parse_file(_context(tmp_path, "api.rb", source))
+    got = {r.startLine: r.endpoint for r in record.statements if r.semanticType == "route"}
+    assert got == {
+        4: "/api/before",          # prefix applies; no version yet
+        8: "/api/v1/users/list",   # prefix / version (path strategy) / namespace / path
+        12: "/api/hdr",            # header versioning adds no path
+        17: None,                  # unresolved prefix → address unknown
+    }
+
+
+def test_grape_before_hooks_are_guards(tmp_path: Path) -> None:
+    source = b'''require "grape"
+class Api < Grape::API
+  before { authenticate! }
+  get '/early' do
+    1
+  end
+  before do
+    check_scope(:read)
+  end
+  namespace :admin do
+    before { require_admin! }
+    before do
+      log; audit
+    end
+    get '/stats' do
+      2
+    end
+  end
+end
+'''
+    record = GrapeParser().parse_file(_context(tmp_path, "api.rb", source))
+    got = {s.endpoint: (s.guards, s.authRequired) for s in record.statements if s.semanticType == "route"}
+    assert got == {
+        "/early": (["authenticate!"], True),
+        # outer scope first; a hook with more than one statement names no guard
+        "/admin/stats": (["authenticate!", "check_scope", "require_admin!"], True),
+    }

@@ -10,12 +10,13 @@ from __future__ import annotations
 
 from tree_sitter import Node
 
-from ...emit import disambiguate, function_id, statement_id
+from ...emit import function_id
 from ...parsers.typescript.decorators import decorator
 from ...parsers.typescript.functions import dto_from_type, extract_params, return_dto
-from ...schemas import Statement
-from ..statements_common import render_concat, url_placeholder
+from ..emits import Emit
 from ..treesitter import node_text
+from ..typescript.base_paths import app_base_path
+from .facts import loopback_base_paths
 
 # LoopBack method decorators -> HTTP verb. ``del`` (not ``delete``) is LoopBack's
 # DELETE decorator because ``delete`` is a reserved word.
@@ -32,6 +33,15 @@ def _unquote(text: str) -> str:
 def _join(base: str, sub: str) -> str:
     parts = [p.strip("/") for p in (base, sub) if p and p.strip("/")]
     return "/" + "/".join(parts) if parts else "/"
+
+
+def _served(base: str, sub: str | None, found: bool, app_base: str | None) -> str | None:
+    """Controller ``base`` + route ``sub``, under the application's ``basePath`` when one was
+    seen: a literal is joined in front; set-but-unresolved (``app_base`` None) → unknown."""
+    if sub is None or (found and app_base is None):
+        return None
+    local = _join(base, sub)
+    return _join(app_base, local) if found and app_base else local
 
 
 def _api_base_path(decorators: list[Node], source: bytes) -> str:
@@ -81,31 +91,27 @@ def _decorator_args(dec: Node) -> list[Node]:
 
 
 def _render_literal(node: Node, source: bytes) -> str | None:
-    """A path expression -> string, with interpolations/variables as ``{name}`` placeholders;
-    ``None`` if not a renderable literal (caller placeholders it). Handles string literals,
-    template literals, and ``+`` concatenation — so ``appConfig.apiPathV2 + '/x'`` renders as
-    the well-formed ``{apiPathV2}/x`` instead of a malformed ``+``-spliced string. Route
-    prefixes are kept (no leading-base stripping — the api-version segment is meaningful)."""
+    """A path expression -> its literal string, or ``None`` when any part is not a literal.
+    Handles string literals, template literals without ``${…}``, and ``+`` concatenation of
+    those (``'/api' + '/x'``). A variable part (``appConfig.apiPath + '/x'``, ``${version}``) is
+    unknown: the whole path is ``None`` — never a ``{name}`` placeholder, which would read as a
+    LoopBack path parameter. Route prefixes are kept (no leading-base stripping)."""
     if node.type == "string":
         frag = next((c for c in node.named_children if c.type == "string_fragment"), None)
         return node_text(frag, source) if frag is not None else ""
     if node.type == "template_string":
-        parts: list[str] = []
-        for c in node.named_children:
-            if c.type == "string_fragment":
-                parts.append(node_text(c, source))
-            elif c.type == "template_substitution":
-                expr = c.named_children[0] if c.named_children else None
-                parts.append(url_placeholder(node_text(expr, source)) if expr is not None else "{param}")
-        return "".join(parts)
+        if any(c.type == "template_substitution" for c in node.named_children):
+            return None
+        return "".join(node_text(c, source) for c in node.named_children
+                       if c.type == "string_fragment")
     if node.type == "binary_expression":  # string concatenation
-        return render_concat(node, source, _render_literal)
+        op = node.child_by_field_name("operator")
+        left, right = node.child_by_field_name("left"), node.child_by_field_name("right")
+        if op is None or node_text(op, source) != "+" or left is None or right is None:
+            return None
+        lv, rv = _render_literal(left, source), _render_literal(right, source)
+        return lv + rv if lv is not None and rv is not None else None
     return None
-
-
-def _render_path(node: Node, source: bytes) -> str:
-    r = _render_literal(node, source)
-    return r if r is not None else url_placeholder(node_text(node, source))
 
 
 def _auth(decs: list[Node], source: bytes) -> tuple[bool, list[str]]:
@@ -151,8 +157,15 @@ def _class_with_decorators(root: Node):
             yield cls, decs
 
 
-def detect_loopback_routes(root: Node, source: bytes, path: str, *, seen_ids: set[str]) -> list[Statement]:
-    routes: list[Statement] = []
+def detect_loopback_routes(
+    root: Node, source: bytes, path: str, *, index: object | None = None
+) -> list[Emit]:
+    """This file's controller routes, for :func:`~..emits.apply`. ``index`` is the repo's
+    ``TsAliasIndex``: its ``loopback.base-paths`` fact gives the application's ``rest.basePath``,
+    joined in front of every controller route of that app (unknown when it cannot be
+    resolved)."""
+    routes: list[Emit] = []
+    found, app_base = app_base_path(loopback_base_paths(index), path)
     for cls, decs in _class_with_decorators(root):
         base = _api_base_path(decs, source)
         ctrl_auth, ctrl_guards = _auth(decs, source)  # class-level @authenticate applies to all methods
@@ -181,16 +194,13 @@ def detect_loopback_routes(root: Node, source: bytes, path: str, *, seen_ids: se
                         continue
                     verb, idx = vi
                     arg_nodes = _decorator_args(dec)
-                    sub = _render_path(arg_nodes[idx], source) if idx < len(arg_nodes) else ""
-                    sl, sc = dec.start_point[0] + 1, dec.start_point[1]
-                    routes.append(Statement(
-                        id=disambiguate(statement_id(path, sl, sc), seen_ids),
-                        parentId=function_id(path, mname, mline, class_name=class_name),
-                        nodeType="synthetic",
+                    sub: str | None = (
+                        _render_literal(arg_nodes[idx], source) if idx < len(arg_nodes) else ""
+                    )
+                    routes.append(Emit(dec, dict(
                         semanticType="route",
-                        text=node_text(dec, source).split("\n", 1)[0],
                         method=verb,
-                        endpoint=_join(base, sub),
+                        endpoint=_served(base, sub, found, app_base),
                         framework="loopback",
                         handler=mname,
                         handlerLine=mline,
@@ -199,9 +209,7 @@ def detect_loopback_routes(root: Node, source: bytes, path: str, *, seen_ids: se
                         authRequired=auth_required,
                         requestDTO=_request_dto(member, source),
                         responseDTO=return_dto(member, source),
-                        startLine=sl,
-                        endLine=dec.end_point[0] + 1,
-                        path=path,
-                    ))
+                    ), parent=function_id(path, mname, mline, class_name=class_name),
+                        node_type="synthetic"))
             pending = []
     return routes

@@ -13,6 +13,9 @@ semantic); the shared comment pass adds ``# …`` comments when capture is on.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
+from pathlib import Path
+
 from tree_sitter import Node
 
 from ...emit import file_id
@@ -22,6 +25,8 @@ from ..base import BaseParser, ParseContext
 from ..comments_common import comment_statements_for
 from ..treesitter import parse_source
 from .mappings import COMMENT_TYPES, FRAMEWORKS, STATEMENT_TYPES
+from .client_configs import is_client_copy
+from .index import GraphQLIndex, build_graphql_index
 from .sdl import extract_graphql
 
 
@@ -33,6 +38,9 @@ class GraphQLParser(BaseParser):
     schema_version = SCHEMA_VERSION
     statement_types = STATEMENT_TYPES
     frameworks = FRAMEWORKS
+
+    def build_index(self, repo_root: Path, files: Sequence[Path], jobs: int = 1) -> GraphQLIndex | None:
+        return build_graphql_index(repo_root, files, jobs)
 
     def parse_file(self, ctx: ParseContext) -> FileRecord:
         root = parse_source("graphql", ctx.source, ctx.parse_timeout_micros).root_node
@@ -49,8 +57,13 @@ class GraphQLParser(BaseParser):
         # statements), so gate it on statement capture like every route/db/event emitter;
         # skip fixture dirs.
         if ctx.capture_statements and not self.is_fixture_file(path):
+            # A server's schema: its Relay node fields are routes. Not in a client project's copy
+            # of a remote schema, nor in a test snapshot of the schema.
+            server = not is_client_copy(ctx.resolution_index, path) and \
+                "__snapshots__" not in path.split("/")
             classes, statements = extract_graphql(
-                root, source, path, seen_ids=seen_ids, limit=ctx.statement_text_limit
+                root, source, path, seen_ids=seen_ids, limit=ctx.statement_text_limit,
+                relay_routes=server,
             )
 
         record = FileRecord(

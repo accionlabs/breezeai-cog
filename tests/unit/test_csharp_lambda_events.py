@@ -57,7 +57,8 @@ def _parse(tmp_path, rel: str, src: bytes, parser=None, capture=True) -> FileRec
 
 
 def _routes(rec: FileRecord) -> dict[str, object]:
-    return {s.handler: s for s in rec.statements if s.framework == "aws-lambda"}
+    return {s.handler: s for s in rec.statements
+            if s.semanticType in ("eventbus_consumer", "route") and (s.framework or "").startswith("aws-")}
 
 
 def test_event_handler_detected(tmp_path) -> None:
@@ -66,11 +67,11 @@ def test_event_handler_detected(tmp_path) -> None:
     # only the FunctionHandler (event type + ILambdaContext) is an entry point.
     assert set(handlers) == {"FunctionHandler"}
     fh = handlers["FunctionHandler"]
-    assert fh.framework == "aws-lambda"
+    assert fh.framework == "aws-s3"  # the trigger's service; the file is labelled aws-lambda
     # S3-event trigger → eventbus_consumer (aligned with TS aws_events), not a route.
     assert fh.semanticType == "eventbus_consumer"
     assert fh.routeKind is None
-    assert fh.endpoint == "FunctionHandler"
+    assert fh.endpoint is None  # the bucket is in deployment config; the method is not an address
     assert fh.handlerLine == fh.startLine
     assert fh.parentId == rec.id
     assert rec.framework == "aws-lambda"
@@ -81,7 +82,7 @@ def test_helper_methods_not_tagged(tmp_path) -> None:
     rec = _parse(tmp_path, "Function.cs", LAMBDA)
     fn_names = {f.name for f in rec.functions}
     assert {"ImportData", "CleanUpTempFiles"} <= fn_names  # captured as functions
-    tagged = {s.handler for s in rec.statements if s.framework == "aws-lambda"}
+    tagged = set(_routes(rec))
     assert "ImportData" not in tagged and "CleanUpTempFiles" not in tagged
 
 
@@ -92,19 +93,20 @@ def test_apigateway_handler_is_route(tmp_path) -> None:
     # HTTP-facing event → route (matches TS aws_events APIGateway handling), not a consumer.
     assert handlers["Handle"].semanticType == "route"
     assert handlers["Handle"].routeKind == "route"
-    assert handlers["Handle"].framework == "aws-lambda"
+    assert handlers["Handle"].framework == "aws-apigw"
+    assert handlers["Handle"].endpoint is None
 
 
 def test_requires_capture_statements(tmp_path) -> None:
     rec = _parse(tmp_path, "Function.cs", LAMBDA, capture=False)
-    assert [s for s in rec.statements if s.framework == "aws-lambda"] == []
+    assert _routes(rec) == {}
 
 
 def test_fixture_files_skipped(tmp_path) -> None:
     # Entry-point emitters skip fixture files (per the reliability checklist) — a handler in a
     # .test./.spec. file must not be captured as a live entry point.
     rec = _parse(tmp_path, "Function.test.cs", LAMBDA)
-    assert [s for s in rec.statements if s.framework == "aws-lambda"] == []
+    assert _routes(rec) == {}
     # base extraction still runs — the class/method are captured, just not the entry point.
     assert "Function" in {c.name for c in rec.classes}
 
@@ -132,7 +134,7 @@ public class OrdersController : ControllerBase {
     rec = _parse(tmp_path, "OrdersController.cs", src, parser=AspNetCoreParser())
     tagged = {(s.semanticType, s.framework) for s in rec.statements if s.semanticType}
     assert ("route", "aspnet") in tagged                 # controller route preserved
-    assert ("eventbus_consumer", "aws-lambda") in tagged  # SQS Lambda handler ALSO captured
+    assert ("eventbus_consumer", "aws-sqs") in tagged     # SQS Lambda handler ALSO captured
 
 
 def test_no_registry_parser_for_lambda() -> None:

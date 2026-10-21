@@ -20,15 +20,18 @@ from typing import Any
 
 from tree_sitter import Node
 
-from ...emit import disambiguate, statement_id
 from ...logging import get_logger
-from ...schemas import Class, Decorator, FileRecord, Function, Statement
+from ...schemas import Class, Decorator, FileRecord, Function
 from ..dotnet_common import response_dto, simple_attr_name
+from ..emits import Emit
+from ..method_lines import locate_method
 from ..treesitter import first_line, node_text
+from .data_loaders import generated_loaders as generated_loaders_of
 from .mappings import (
     ARG_MARKER_ATTRS,
     AUTHORIZE_ATTR,
     DATALOADER_TYPES,
+    ENTITY_RESOLVER_ATTRS,
     EXTEND_ATTR,
     IGNORE_ATTR,
     INFRA_PARAM_ATTRS,
@@ -39,7 +42,18 @@ from .mappings import (
     ROOT_SCHEMA_NAMES,
     TOPIC_ATTR,
 )
-from .descriptor import configure_method, descriptor_target, field_declarations
+from .descriptor import (
+    configure_method,
+    descriptor_target,
+    entity_resolver_calls,
+    field_authorizations,
+    field_handler,
+    field_declarations,
+    named_target,
+    resolve_reads_parent,
+    resolve_with_method,
+    type_authorizations,
+)
 from .naming import field_name
 
 
@@ -109,33 +123,34 @@ def is_infrastructure_param(p_type: str | None, decorators: list[Decorator]) -> 
     return base in INFRA_PARAM_TYPES or base.startswith(DATALOADER_TYPES)
 
 
+def _guard_labels(authorizations: list[list[str]]) -> list[str]:
+    """One label per authorization, by its arguments, deduped: ``Authorize`` /
+    ``Authorize(Admin)``. Shared by the attribute and fluent styles so the same guard reads the
+    same whichever way it was declared."""
+    out: list[str] = []
+    for args in authorizations:
+        label = f"{AUTHORIZE_ATTR}({', '.join(args)})" if args else AUTHORIZE_ATTR
+        if label not in out:
+            out.append(label)
+    return out
+
+
 def guards_of(cls: Class, fn: Function) -> list[str]:
     """``[Authorize]`` guards inherited from the class plus the method's own, deduped."""
-    out: list[str] = []
-    for decorators in (cls.decorators, fn.decorators):
-        for dec in decorators:
-            if simple_attr_name(dec.name) != AUTHORIZE_ATTR:
-                continue
-            label = f"{AUTHORIZE_ATTR}({', '.join(dec.args)})" if dec.args else AUTHORIZE_ATTR
-            if label not in out:
-                out.append(label)
-    return out
+    return _guard_labels([dec.args for decorators in (cls.decorators, fn.decorators)
+                          for dec in decorators if simple_attr_name(dec.name) == AUTHORIZE_ATTR])
 
 
 
 def _statement(
-    cls: Class, fn: Function, *, kind: str, method: str, endpoint: str, text: str,
-    seen: set[str], generated_loaders: dict[str, str | None] | None = None,
-) -> Statement:
+    cls: Class, fn: Function, *, kind: str, method: str, endpoint: str | None, text: str,
+    root: Node, generated_loaders: dict[str, str | None] | None = None,
+) -> Emit:
     """One route record for a resolver method. ``endpoint`` is the field address the framework
     serves; ``handler`` keeps the C# method name."""
     guards = guards_of(cls, fn)
-    return Statement(
-        id=disambiguate(statement_id(fn.path or "", fn.startLine, 0), seen),
-        parentId=fn.id,
-        nodeType="synthetic",
+    return Emit(root, dict(
         semanticType="route",
-        text=text,
         method=method,
         endpoint=endpoint,
         framework="graphql",
@@ -148,37 +163,59 @@ def _statement(
         requestDTO=request_dto(fn),
         responseDTO=response_dto(fn.returnType),
         dataLoaders=data_loaders(fn, generated_loaders),
-        startLine=fn.startLine,
-        endLine=fn.endLine,
-        path=fn.path,
-    )
+    ), parent=fn.id, node_type="synthetic", text=text, line=fn.startLine, col=0,
+        end_line=fn.endLine)
 
 
 def operation_statement(
-    cls: Class, fn: Function, kind: str, text: str, seen: set[str],
+    cls: Class, fn: Function, kind: str, text: str, root: Node,
     generated_loaders: dict[str, str | None] | None = None,
-) -> Statement:
+) -> Emit:
     """A client-callable operation on a schema root."""
     return _statement(
         cls, fn, kind=kind, method=kind.upper(),
-        endpoint=field_name(fn.name, fn.decorators), text=text, seen=seen,
+        endpoint=field_name(fn.name, fn.decorators), text=text, root=root,
         generated_loaders=generated_loaders,
     )
 
 
 def field_resolver_statement(
-    cls: Class, fn: Function, target: str, text: str, seen: set[str],
+    cls: Class, fn: Function, target: str, text: str, root: Node,
     generated_loaders: dict[str, str | None] | None = None,
-) -> Statement:
+) -> Emit:
     """A resolver for one field of a data type. Not client-callable — it runs once per parent
     object when that field is selected — so it carries its own ``routeKind`` and an address that
     names the edge it resolves (``Book.author``). ``method`` is ``RESOLVE_FIELD`` — the spec's
     documented GraphQL verb for this case (§2.4), rather than the ``QUERY`` it is not."""
     return _statement(
         cls, fn, kind="field_resolver", method="RESOLVE_FIELD",
-        endpoint=f"{target}.{field_name(fn.name, fn.decorators)}", text=text, seen=seen,
+        endpoint=f"{target}.{field_name(fn.name, fn.decorators)}", text=text, root=root,
         generated_loaders=generated_loaders,
     )
+
+
+def entity_resolver_statements(
+    cls: Class, record: FileRecord, root: Node, *, on_root: bool,
+    generated_loaders: dict[str, str | None] | None = None,
+) -> list[Emit]:
+    """One ``RESOLVE_REFERENCE`` binding per ``[ReferenceResolver]`` / ``[NodeResolver]`` method of
+    ``cls``, addressed by the type it resolves: the extended type of an ``[ExtendObjectType(T)]``
+    class, else the resolver's payload type (``Task<Session>`` → ``Session``). On a root the
+    method stays a query field too — one method, two triggers."""
+    out: list[Emit] = []
+    for fn in record.functions:
+        if fn.parentId != cls.id:
+            continue
+        attr = next((a for a in ENTITY_RESOLVER_ATTRS if a in _attr_names(fn.decorators)), None)
+        if attr is None:
+            continue
+        target = None if on_root else extend_target(cls)
+        entity = target or response_dto(fn.returnType)
+        out.append(_statement(
+            cls, fn, kind="query", method="RESOLVE_REFERENCE", endpoint=entity,
+            text=f"[{attr}] {fn.name}", root=root, generated_loaders=generated_loaders,
+        ))
+    return out
 
 
 def subscription_topic(fn: Function) -> str | None:
@@ -263,8 +300,8 @@ def topic_anchors(
 
 
 def topic_consumer_statement(
-    fn: Function, topic: str, seen: set[str], anchor: Anchor | None = None
-) -> Statement:
+    fn: Function, topic: str, root: Node, anchor: Anchor | None = None
+) -> Emit:
     """The server-side half of a subscription: it consumes ``topic`` to push to subscribers.
 
     A subscription has two addresses — clients name the *field*, the server reads a *topic* — so
@@ -273,37 +310,31 @@ def topic_consumer_statement(
     an event inventory each see exactly one of them, so nothing is double-counted.
     """
     line, col = anchor if anchor is not None else (fn.startLine, 0)
-    return Statement(
-        id=disambiguate(statement_id(fn.path or "", line, col), seen),
-        parentId=fn.id,
-        nodeType="synthetic",
+    return Emit(root, dict(
         semanticType="eventbus_consumer",
-        text=f"[{TOPIC_ATTR}] {topic}",
         method="CONSUMER",
         endpoint=topic,
         framework="graphql",
         handler=fn.name,
         handlerLine=fn.startLine,
-        startLine=line,
-        endLine=line,
-        path=fn.path,
-    )
+    ), parent=fn.id, node_type="synthetic", text=f"[{TOPIC_ATTR}] {topic}", line=line, col=col,
+        end_line=line)
 
 
 def _operation_records(
-    cls: Class, fn: Function, kind: str, text: str, seen: set[str],
+    cls: Class, fn: Function, kind: str, text: str, root: Node,
     anchors: dict[tuple[str, int], Anchor],
     generated_loaders: dict[str, str | None] | None = None,
-) -> list[Statement]:
+) -> list[Emit]:
     """The route for one operation, plus a topic consumer when it is a resolvable subscription."""
-    route = operation_statement(cls, fn, kind, text, seen, generated_loaders)
+    route = operation_statement(cls, fn, kind, text, root, generated_loaders)
     if kind != "subscription":
         return [route]
     topic = subscription_topic(fn)
     if topic is None:
         return [route]
     anchor = anchors.get((fn.name, fn.startLine))
-    return [route, topic_consumer_statement(fn, topic, seen, anchor)]
+    return [route, topic_consumer_statement(fn, topic, root, anchor)]
 
 
 def extend_target(cls: Class) -> str | None:
@@ -326,20 +357,28 @@ def extend_target(cls: Class) -> str | None:
     return None
 
 
-def _root_kind_of_name(name: str, record: FileRecord, heritage: dict[str, object]) -> str | None:
+def _root_kind_of_name(
+    name: str,
+    record: FileRecord,
+    heritage: dict[str, object],
+    hc_root_types: dict[str, str] | None = None,
+) -> str | None:
     """Operation kind for a *named* type, from enforced signals only.
 
     The schema name (``"Query"`` / ``OperationTypeNames.Query``) names the root directly. A CLR
-    class name only counts when that class is seen carrying a root attribute — in this file, or
-    via the repo heritage index. A class named ``Query`` that is registered in ``Program.cs`` and
-    attributed nowhere stays unresolved: root-ness is declared at the registration site, which
-    this parser does not read.
+    class name only counts when that class carries a root attribute (in this file or via the repo
+    heritage index), or when it is registered via ``AddQueryType<T>()`` in the composition root
+    (supplied via ``hc_root_types`` from the registered-roots detector's fact on the C# index).
     """
     kind = ROOT_SCHEMA_NAMES.get(name)
     if kind is not None:
         return kind
     for cls in record.classes:
         if cls.name == name and (kind := root_kind(cls)) is not None:
+            return kind
+    if hc_root_types is not None:
+        kind = hc_root_types.get(name)
+        if kind is not None:
             return kind
     entry = heritage.get(name)  # None means "declared by >1 class, ambiguous" — honest-null
     decorators = getattr(entry, "decorators", None) if entry is not None else None
@@ -361,18 +400,19 @@ def resolves_parent(fn: Function, target: str) -> bool:
 
 def _extension_routes(
     cls: Class, target: str, methods: list[Function], record: FileRecord,
-    heritage: dict[str, object], path: str, seen: set[str],
+    heritage: dict[str, object], path: str, root: Node,
     anchors: dict[tuple[str, int], Anchor],
     generated_loaders: dict[str, str | None] | None = None,
-) -> list[Statement]:
+    hc_root_types: dict[str, str] | None = None,
+) -> list[Emit]:
     """Routes for one ``[ExtendObjectType(target)]`` class: operations when the target is a
     resolved root, field resolvers when it is a data type whose parent binding is visible, and
     nothing at all when the target cannot be classified."""
-    kind = _root_kind_of_name(target, record, heritage)
+    kind = _root_kind_of_name(target, record, heritage, hc_root_types)
     if kind is not None:
         return [s for fn in methods
                 for s in _operation_records(
-                    cls, fn, kind, f"[{EXTEND_ATTR}] {fn.name}", seen, anchors,
+                    cls, fn, kind, f"[{EXTEND_ATTR}] {fn.name}", root, anchors,
                     generated_loaders)]
     resolvers = [fn for fn in methods if resolves_parent(fn, target)]
     if not resolvers:
@@ -382,53 +422,134 @@ def _extension_routes(
         )
         return []
     return [field_resolver_statement(
-                cls, fn, target, f"[{EXTEND_ATTR}({target})] {fn.name}", seen, generated_loaders)
+                cls, fn, target, f"[{EXTEND_ATTR}({target})] {fn.name}", root, generated_loaders)
             for fn in resolvers]
 
 
 def descriptor_field_statement(
-    configure: Function, kind: str, name: str, call: Node, source: bytes, seen: set[str]
-) -> Statement:
+    configure: Function, kind: str, name: str, call: Node, source: bytes, root: Node,
+    guards: list[str] | None = None, *, target: str | None = None,
+    resolver: Function | None = None, generated_loaders: dict[str, str | None] | None = None,
+    located: tuple[str | None, int] | None = None,
+) -> Emit:
     """One field declared fluently inside ``Configure``. Unlike the attribute-derived routes this
     has a real backing node — the ``d.Field(...)`` call — so it keeps that ``nodeType``, matching
-    how ``csharp_graphql`` records its builder calls."""
-    line, col = call.start_point[0] + 1, call.start_point[1]
-    return Statement(
-        id=disambiguate(statement_id(configure.path or "", line, col), seen),
-        parentId=configure.id,
-        nodeType="invocation_expression",
+    how ``csharp_graphql`` records its builder calls.
+
+    ``kind="field_resolver"`` records a data type's resolver the way the attribute style does:
+    ``RESOLVE_FIELD``, addressed ``Target.field``. When the resolver is a method in this file
+    (``ResolveWith``), it is the handler and supplies the response type and loaders."""
+    resolves_field = kind == "field_resolver"
+    handler, handler_line = field_handler(call, source) if resolver is None else (None, None)
+    handler_path = None
+    if located is not None and resolver is None:  # the resolver method, in another file
+        handler_path, handler_line = located
+    return Emit(call, dict(
         semanticType="route",
-        text=first_line(node_text(call, source))[:120],
-        method=kind.upper(),
-        endpoint=name,
+        method="RESOLVE_FIELD" if resolves_field else kind.upper(),
+        endpoint=f"{target}.{name}" if resolves_field else name,
         framework="graphql",
-        handler=name,
-        handlerLine=line,
+        handler=resolver.name if resolver is not None else handler,
+        handlerLine=resolver.startLine if resolver is not None else handler_line,
+        handlerPath=handler_path,
         routeKind=kind,
         isRegex=False,
-        startLine=line,
-        endLine=call.end_point[0] + 1,
-        path=configure.path,
-    )
+        authRequired=bool(guards) or None,
+        guards=guards or None,
+        responseDTO=response_dto(resolver.returnType) if resolver is not None else None,
+        dataLoaders=data_loaders(resolver, generated_loaders) if resolver is not None else None,
+    ), parent=configure.id, node_type="invocation_expression",
+        text=first_line(node_text(call, source))[:120])
+
+
+def _resolver_method(record: FileRecord, resolver_cls: str, method: str) -> Function | None:
+    """The method ``resolver_cls.method`` declared in this file, or None — absent, in another
+    file, or ambiguous (two classes or overloads of that name)."""
+    classes = [c for c in record.classes if c.name == resolver_cls]
+    if len(classes) != 1:
+        return None
+    fns = [f for f in record.functions if f.parentId == classes[0].id and f.name == method]
+    return fns[0] if len(fns) == 1 else None
+
+
+def _parent_bound_resolvers(
+    configure: Function, target: str, record: FileRecord, body: Node, source: bytes,
+    receiver: str, root: Node, type_level: list[list[str]],
+    generated_loaders: dict[str, str | None] | None,
+) -> list[Emit]:
+    """Field resolvers of a **data type**'s fluent descriptor — only those that visibly read the
+    object they resolve a field of, the same evidence the attribute style requires
+    (:func:`resolves_parent`).
+
+    A root's fields have no meaningful parent, so reading one is what tells a data type's
+    resolver apart from the field of a root we failed to recognise; without that evidence the
+    field is left out (honest-null) rather than possibly mislabelling a client entry point.
+    Plain fields (no resolver) are the type's shape and are never recorded.
+    """
+    out: list[Emit] = []
+    for name, call in field_declarations(body, source, receiver):
+        resolver: Function | None = None
+        ref = resolve_with_method(call, source)
+        if ref is not None:
+            resolver = _resolver_method(record, *ref)
+            if resolver is None or not resolves_parent(resolver, target):
+                continue
+        elif not resolve_reads_parent(call, source, target):
+            continue
+        out.append(descriptor_field_statement(
+            configure, "field_resolver", name, call, source, root,
+            _guard_labels(type_level + field_authorizations(call, source)),
+            target=target, resolver=resolver, generated_loaders=generated_loaders))
+    return out
+
+
+def _descriptor_entity_resolvers(
+    configure: Function, target: str, record: FileRecord, body: Node, source: bytes,
+    receiver: str, root: Node,
+) -> list[Emit]:
+    """``RESOLVE_REFERENCE`` bindings registered fluently on a data type's descriptor
+    (``.ImplementsNode().ResolveNode(…)``), at the resolver call, addressed by the type."""
+    declared: dict[str, int | None] = {}
+    for f in record.functions:
+        declared[f.name] = f.startLine if f.name not in declared else None
+    out: list[Emit] = []
+    for name_node, handler, handler_line in entity_resolver_calls(body, source, receiver):
+        line = name_node.start_point[0] + 1
+        call = name_node.parent.parent if name_node.parent is not None else None
+        call_end = call.end_byte if call is not None else name_node.end_byte
+        out.append(Emit(name_node, dict(
+            semanticType="route",
+            method="RESOLVE_REFERENCE",
+            endpoint=target,
+            framework="graphql",
+            handler=handler,
+            handlerLine=handler_line if handler is None else declared.get(handler),
+            routeKind="query",
+        ), parent=configure.id, node_type="invocation_expression", end_line=line,
+            # From the resolver call's name to the end of its first line: .ResolveNode(…
+            text=first_line(source[name_node.start_byte:call_end].decode("utf-8", "replace"))))
+    return out
 
 
 def _descriptor_routes(
     cls: Class, record: FileRecord, nodes: dict[tuple[str, int], Node], source: bytes,
-    heritage: dict[str, object], seen: set[str],
-) -> list[Statement]:
-    """Fields declared fluently by ``cls``, when the type it describes is a resolved root.
+    heritage: dict[str, object], root: Node, hc_root_types: dict[str, str] | None = None,
+    generated_loaders: dict[str, str | None] | None = None, index: Any = None,
+) -> list[Emit]:
+    """Fields declared fluently by ``cls``: operations when the type it describes is a resolved
+    root; otherwise only the data type's parent-bound resolvers (:func:`_parent_bound_resolvers`).
 
-    A non-root descriptor declares that type's *shape*: those fields are not endpoints, and
+    A non-root descriptor's plain fields are that type's *shape*: they are not endpoints, and
     emitting them is the over-capture the sibling graphql-dotnet parser measured.
+
+    The target comes from a generic argument when there is one; the non-generic
+    ``ObjectTypeExtension`` names it with ``d.Name(...)`` instead. ``hc_root_types`` resolves a
+    root registered only at ``AddQueryType<T>()`` — the descriptor class itself, or the type it
+    describes. Guards are the descriptor's own
+    ``d.Authorize(…)`` (every field) plus each field chain's ``.Authorize(…)``.
     """
     configure = configure_method(record.functions, cls)
     if configure is None:
-        return []
-    target = descriptor_target(cls, configure)
-    if target is None:
-        return []
-    kind = _root_kind_of_name(target, record, heritage)
-    if kind is None:
         return []
     node = nodes.get((configure.name, configure.startLine))
     body = node.child_by_field_name("body") if node is not None else None
@@ -437,21 +558,56 @@ def _descriptor_routes(
     receiver = configure.params[0].name if configure.params else None
     if receiver is None:
         return []
-    return [descriptor_field_statement(configure, kind, name, call, source, seen)
-            for name, call in field_declarations(body, source, receiver)]
+    # A descriptor registered itself (AddQueryType<QueryType>()) is a root whatever it describes.
+    kind = (hc_root_types or {}).get(cls.name)
+    target: str | None = None
+    if kind is None:
+        target = descriptor_target(cls, configure) or named_target(body, source, receiver)
+        if target is None:
+            return []
+        kind = _root_kind_of_name(target, record, heritage, hc_root_types)
+    type_level = type_authorizations(body, source, receiver)
+    if kind is None:
+        assert target is not None
+        return (_parent_bound_resolvers(configure, target, record, body, source, receiver, root,
+                                        type_level, generated_loaders)
+                + _descriptor_entity_resolvers(configure, target, record, body, source, receiver,
+                                               root))
+    out: list[Emit] = []
+    for name, call in field_declarations(body, source, receiver):
+        ref = resolve_with_method(call, source)
+        resolver = _resolver_method(record, *ref) if ref is not None else None
+        # The resolver method in another file, through the index: `ResolveWith<R>(r => r.M())`
+        # → `R.M`; `Field(t => t.M(…))` → `M` of the type this descriptor describes.
+        if ref is not None:
+            site = locate_method(index, "csharp", *ref) if resolver is None else None
+        else:
+            member, member_line = field_handler(call, source)
+            site = locate_method(index, "csharp", target, member) \
+                if member and member_line is None else None
+        out.append(descriptor_field_statement(
+            configure, kind, name, call, source, root,
+            _guard_labels(type_level + field_authorizations(call, source)),
+            resolver=resolver, generated_loaders=generated_loaders,
+            located=(None if site[0] == record.path else site[0], site[1]) if site else None))
+    return out
 
 
 def detect_hotchocolate_routes(
-    record: FileRecord, root: Node, source: bytes, seen: set[str], index: Any = None
-) -> list[Statement]:
-    """Every operation and field resolver declared in this file.
+    record: FileRecord, root: Node, source: bytes, index: Any = None,
+    hc_root_types: dict[str, str] | None = None,
+) -> list[Emit]:
+    """Every operation, field resolver and entity / node resolver declared in this file, for
+    :func:`~..emits.apply`. A record read off the parsed record (an attribute-declared resolver)
+    has no node of its own: the file's ``root`` stands in and its span is the method's.
 
     Two declaration sites: a class carrying a root attribute, and a class extending another type
     with ``[ExtendObjectType]``. ``index`` supplies the repo heritage map so a root attributed in
-    another file still resolves.
+    another file still resolves. ``hc_root_types`` supplies registration-only roots: classes
+    registered via ``AddQueryType<T>()`` in the composition root but carrying no root attribute.
     """
     heritage: dict[str, object] = getattr(index, "class_heritage", None) or {}
-    generated_loaders: dict[str, str | None] = getattr(index, "data_loaders", None) or {}
+    generated_loaders = generated_loaders_of(index)
     nodes = method_nodes(root, source)
     anchors = topic_anchors(nodes, source)
     methods: dict[str, list[Function]] = {}
@@ -459,23 +615,47 @@ def detect_hotchocolate_routes(
         if is_operation(fn):
             methods.setdefault(fn.parentId, []).append(fn)
 
-    routes: list[Statement] = []
+    routes: list[Emit] = []
     for cls in record.classes:
         own = methods.get(cls.id, [])
         kind = root_kind(cls)
-        if kind is not None and own:
-            attr = next(name for name, k in ROOT_ATTRS.items() if k == kind)
-            routes.extend(s for fn in own
-                          for s in _operation_records(
-                              cls, fn, kind, f"[{attr}] {fn.name}", seen, anchors,
-                              generated_loaders))
-            continue
+        if kind is None and hc_root_types is not None:
+            kind = hc_root_types.get(cls.name)
         target = extend_target(cls)
-        if target is not None:
-            if own:
-                routes.extend(_extension_routes(
-                    cls, target, own, record, heritage, record.path, seen, anchors,
-                    generated_loaders))
-            continue
-        routes.extend(_descriptor_routes(cls, record, nodes, source, heritage, seen))
+        on_root = kind is not None or (
+            target is not None
+            and _root_kind_of_name(target, record, heritage, hc_root_types) is not None
+        )
+        if not on_root:  # off a root, an entity resolver is not a field
+            own = [fn for fn in own
+                   if not _attr_names(fn.decorators) & set(ENTITY_RESOLVER_ATTRS)]
+        routes.extend(_class_routes(
+            cls, kind, own, record, nodes, source, heritage, root, anchors,
+            generated_loaders, hc_root_types, index))
+        routes.extend(entity_resolver_statements(
+            cls, record, root, on_root=on_root, generated_loaders=generated_loaders))
     return routes
+
+
+def _class_routes(
+    cls: Class, kind: str | None, own: list[Function], record: FileRecord,
+    nodes: dict[tuple[str, int], Node], source: bytes, heritage: dict[str, object],
+    root: Node, anchors: dict[tuple[str, int], Anchor],
+    generated_loaders: dict[str, str | None], hc_root_types: dict[str, str] | None,
+    index: Any = None,
+) -> list[Emit]:
+    """Operations and field resolvers of one class (see :func:`detect_hotchocolate_routes`)."""
+    if kind is not None and own:
+        attr = next((name for name, k in ROOT_ATTRS.items() if k == kind), kind.capitalize() + "Type")
+        return [s for fn in own
+                for s in _operation_records(
+                    cls, fn, kind, f"[{attr}] {fn.name}", root, anchors, generated_loaders)]
+    target = extend_target(cls)
+    if target is not None:
+        if not own:
+            return []
+        return _extension_routes(
+            cls, target, own, record, heritage, record.path, root, anchors,
+            generated_loaders, hc_root_types=hc_root_types)
+    return _descriptor_routes(
+        cls, record, nodes, source, heritage, root, hc_root_types, generated_loaders, index)

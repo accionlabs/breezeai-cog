@@ -9,8 +9,8 @@ value is the class FQN (``Service=``/``Class=``): the concrete impl wired to the
 which resolves the interface/URL → concrete-class ambiguity ``.cs`` alone cannot.
 
 This parser owns both extensions so the scanner stops dropping them as ``unsupported``. The
-per-type differences live in :data:`~.routes.DIRECTIVES`; directive parse + ``route`` emission
-is in :mod:`.routes`.
+per-type differences live in :data:`~.routes.DIRECTIVES`; the directive is wiring, recorded as a
+plain statement (:mod:`.routes`).
 """
 
 from __future__ import annotations
@@ -21,7 +21,7 @@ from ...utils import count_loc
 from ..base import BaseParser, ParseContext
 from .routes import DIRECTIVES, detect_service_host, spec_for
 
-_STATEMENT_TYPES = ["route"]
+_STATEMENT_TYPES: list[str] = []
 
 
 class ServiceHostParser(BaseParser):
@@ -44,9 +44,10 @@ class ServiceHostParser(BaseParser):
             loc=count_loc(text),
         )
         if ctx.capture_statements:  # the route is a semantic statement — gated (spec A4)
-            stmt, imports = detect_service_host(ctx.source, ctx.path, ctx.repo_root, seen_ids=set())
+            stmt, framework, imports = detect_service_host(
+                ctx.source, ctx.path, ctx.repo_root, seen_ids=set())
             if stmt is not None:
                 record.statements.append(stmt)
-                record.framework = stmt.framework
+                record.framework = framework
             record.importFiles = imports
         return record

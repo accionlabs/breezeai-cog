@@ -42,7 +42,7 @@ The other fields depend on the meaning:
 | `id`, `parentId`, `nodeType`, `text`, `startLine`, `endLine`, `path` | Every statement |
 | `name` | Declarations (`int retries = 3` → `retries`), enum members |
 | `method`, `endpoint`, `framework` | Routes, API calls, events |
-| `handler`, `handlerLine`, `routeKind`, `isRegex`, `authRequired`, `guards`, `requestDTO`, `responseDTO`, `version`, `dataLoaders` | Routes |
+| `handler`, `handlerLine`, `handlerPath`, `routeKind`, `isRegex`, `authRequired`, `guards`, `requestDTO`, `responseDTO`, `version`, `dataLoaders` | Routes |
 | `dataAccessHint` | `db_method_call` (which ORM / database) |
 | `keyFields` | `graphql_entity` |
 | `platform` | `iac_*` |
@@ -188,6 +188,10 @@ if (await prisma.order.findUnique({ where: { id } })) {
 ---
 
 ## 4. Framework detectors: enrich or append
+
+Detectors that record **entry points** (routes, consumers, schedules) follow the
+[entry-point contract](entry-points.md): what is and isn't an entry point, where its record
+lives and what `endpoint` must hold.
 
 Framework detectors (routes, event buses, schedulers) run after the language extraction, on the
 same tree. For each thing they find, they look for an existing statement covering that line:

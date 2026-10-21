@@ -373,6 +373,54 @@ def test_same_project_type_wins(tmp_path) -> None:
     assert calls2.get("Do") is None
 
 
+def test_type_in_an_unreferenced_project_does_not_bind(tmp_path) -> None:
+    # Two samples in one repo: the 2021 one declares no Grade, the 2020 one does. The 2021 project
+    # does not reference the 2020 one, so the compiler could never see that Grade - no edge.
+    files = {
+        "New/New.csproj": "<Project></Project>",
+        "New/Models.cs": "using School;\nnamespace App;\npublic class Enrollment { public Grade G; }\n",
+        "Old/Old.csproj": "<Project></Project>",
+        "Old/Grade.cs": "namespace School;\npublic class Grade { }\n",
+    }
+    assert _parse_repo(tmp_path, files, "New/Models.cs").importFiles == []
+
+
+def test_type_in_a_referenced_project_binds_transitively(tmp_path) -> None:
+    files = {
+        "Web/Web.csproj": '<Project><ItemGroup><ProjectReference Include="..\\Core\\Core.csproj" /></ItemGroup></Project>',
+        "Web/Page.cs": "using School;\nnamespace App;\npublic class Page { public Grade G; }\n",
+        "Core/Core.csproj": '<Project><ItemGroup><ProjectReference Include="../Lib/Lib.csproj" /></ItemGroup></Project>',
+        "Core/Marker.cs": "namespace Core;\npublic class Marker { }\n",
+        "Lib/Lib.csproj": "<Project></Project>",
+        "Lib/Grade.cs": "namespace School;\npublic class Grade { }\n",
+    }
+    assert _parse_repo(tmp_path, files, "Web/Page.cs").importFiles == ["Lib/Grade.cs"]
+
+
+def test_msbuild_using_brings_a_namespace_into_scope(tmp_path) -> None:
+    # Program.cs has no using: the namespace comes from <Using Include> in the project file.
+    files = {
+        "App/App.csproj": '<Project><ItemGroup><Using Include="Acme.Data" /></ItemGroup></Project>',
+        "App/Program.cs": "var repo = new OrderRepo();\n",
+        "App/Data/OrderRepo.cs": "namespace Acme.Data;\npublic class OrderRepo { }\n",
+    }
+    assert _parse_repo(tmp_path, files, "App/Program.cs").importFiles == ["App/Data/OrderRepo.cs"]
+
+
+def test_own_declaration_does_not_hide_a_same_named_base(tmp_path) -> None:
+    # A control declares its own MassUpdate and derives from the shared SplendidCRM.MassUpdate,
+    # both seen as the simple name MassUpdate. The file's own type is never an import target, so
+    # the base still resolves.
+    files = {
+        "_code/MassUpdate.cs": "namespace SplendidCRM {\npublic class MassUpdate { }\n}\n",
+        "Admin/Currencies/MassUpdate.ascx.cs":
+            "namespace SplendidCRM.Administration.Currencies {\n"
+            "public class MassUpdate : SplendidCRM.MassUpdate { }\n}\n",
+    }
+    rec = _parse_repo(tmp_path, files, "Admin/Currencies/MassUpdate.ascx.cs")
+    assert rec.importFiles == ["_code/MassUpdate.cs"]
+
+
 # --- inherited base-class & extension-method call resolution --------------------------
 
 def test_inherited_base_method_resolves(tmp_path) -> None:
@@ -632,3 +680,65 @@ def test_operator_overload_and_conversions_are_captured_and_named(tmp_path) -> N
     assert all(f.isStatic and f.visibility == "public" for f in by_name.values())
     assert all(f.parentId == rec.classes[0].id for f in by_name.values())
     assert by_name["implicit operator decimal"].startLine == 12
+
+
+_HTTP_CLIENTS = b'''using System.Net.Http;
+public class OrdersGateway {
+  private readonly HttpClient _http = new HttpClient();
+  private readonly HttpClient api;
+  public OrdersGateway(IHttpClientFactory factory) { var named = factory.CreateClient("x"); }
+  async Task Run(HttpClient client) {
+    await _http.GetStringAsync("/api/orders");
+    await api.PostAsJsonAsync("api/items", 1);
+    await client.SendAsync(new HttpRequestMessage(HttpMethod.Delete, "api/items/1"));
+    await this.api.GetFromJsonAsync<int>("api/x");
+    var other = new Repository();
+    await other.GetAsync("not/http");
+  }
+}
+'''
+
+
+def test_http_client_calls_are_api_calls(tmp_path) -> None:
+    # Receivers typed HttpClient (field, property, parameter, factory-created) are clients
+    # whatever their name; .NET convenience methods and SendAsync(HttpRequestMessage) map to
+    # their verb; a GetAsync on something else is not an outbound call.
+    p = tmp_path / "OrdersGateway.cs"
+    p.write_bytes(_HTTP_CLIENTS)
+    ctx = ParseContext(path="OrdersGateway.cs", abs_path=p, source=_HTTP_CLIENTS,
+                       repo_root=tmp_path, capture_statements=True)
+    rec = CSharpParser().parse_file(ctx)
+    got = {(s.startLine, s.method, s.endpoint) for s in rec.statements if s.semanticType == "api_call"}
+    assert got == {
+        (7, "GET", "/api/orders"),
+        (8, "POST", "api/items"),
+        (9, "DELETE", "api/items/1"),
+        (10, "GET", "api/x"),
+    }
+
+
+_PREPROC = """#if DEBUG
+using System;
+namespace Tests
+{
+    public class Generator
+    {
+        public string Next() { return ""; }
+#if TRACE
+        public void Dump() { }
+#endif
+    }
+}
+#elif RELEASE
+public class ReleaseOnly { public void Run() { } }
+#else
+public class Fallback { }
+#endif
+"""
+
+
+def test_declarations_inside_conditional_compilation_are_captured(tmp_path) -> None:
+    # `#if` / `#elif` / `#else` wrap declarations; every branch is source code.
+    rec = _parse_repo(tmp_path, {"Gen.cs": _PREPROC}, "Gen.cs")
+    assert sorted(c.name for c in rec.classes) == ["Fallback", "Generator", "ReleaseOnly"]
+    assert sorted(f.name for f in rec.functions) == ["Dump", "Next", "Run"]

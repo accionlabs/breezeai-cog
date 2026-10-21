@@ -396,3 +396,12 @@ def test_untyped_cjs_handler_without_aws_import(tmp_path) -> None:
     rec = _parse(tmp_path, "index.ts", src)
     fw = {(c.framework, c.handler) for c in _by_semantic(rec).get("eventbus_consumer", [])}
     assert ("aws-lambda", "handler") in fw
+
+
+def test_handler_line_is_the_declaration(tmp_path) -> None:
+    # Every handler shape is a named declaration of the function: handlerLine is its line.
+    rec = _parse(tmp_path, "index.ts", UNTYPED_CJS)
+    got = {s.handler: s.handlerLine for s in _by_semantic(rec).get("eventbus_consumer", [])}
+    assert got == {"handler": 3, "edge": 4}
+    rec = _parse(tmp_path, "index.ts", UNTYPED)
+    assert [s.handlerLine for s in _by_semantic(rec)["eventbus_consumer"]] == [4]

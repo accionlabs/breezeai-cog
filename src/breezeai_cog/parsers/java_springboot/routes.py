@@ -9,8 +9,13 @@ inferred from imports (:func:`spring_version`) when present.
 
 from __future__ import annotations
 
-from ...emit import disambiguate, statement_id
-from ...schemas import Decorator, FileRecord, Function, Statement
+from tree_sitter import Node
+
+from ...schemas import Decorator, FileRecord, Function
+from ..emits import Emit
+from ..java.functions import method_nodes
+from ..java.guards import security_guards
+from ..java.web_guards import ModuleGuards, spring_global_guards
 
 _METHOD_MAPPINGS = {
     "GetMapping": "GET", "PostMapping": "POST", "PutMapping": "PUT",
@@ -83,6 +88,28 @@ def _join(base: str, sub: str) -> str:
     return "/" + "/".join(parts) if parts else "/"
 
 
+def apply_global_guards(routes: list[Emit], module_guards: ModuleGuards) -> None:
+    """Prepend the servlet filters and MVC interceptors that run before each HTTP route
+    (decision Q9). They do not set ``authRequired``: a filter is often logging or CORS."""
+    for r in routes:
+        if r.fields.get("semanticType") != "route":
+            continue
+        outer = spring_global_guards(module_guards, r.fields.get("endpoint"))
+        if outer:
+            r.fields["guards"] = outer + (r.fields.get("guards") or [])
+
+
+def apply_context_path(routes: list[Emit], context_path: str | None) -> None:
+    """Join the application's servlet context path onto each HTTP route's endpoint. ``None``
+    (set in config but unresolvable) leaves every endpoint empty: the address is unknown."""
+    for r in routes:
+        if r.fields.get("semanticType") != "route":
+            continue
+        endpoint = r.fields.get("endpoint")
+        r.fields["endpoint"] = (_join(context_path, endpoint)
+                                if context_path is not None and endpoint is not None else None)
+
+
 def _request_dto(fn: Function) -> str | None:
     """Declared type of the ``@RequestBody`` parameter → requestDTO."""
     for p in fn.params:
@@ -91,31 +118,32 @@ def _request_dto(fn: Function) -> str | None:
     return None
 
 
-def detect_spring_routes(record: FileRecord) -> list[Statement]:
+def detect_spring_routes(record: FileRecord, root: Node, source: bytes) -> list[Emit]:
+    """One route per mapping annotation (and per path of an array mapping) of a controller
+    method, for :func:`~..emits.apply`: read off the record, placed on the method."""
     controllers: dict[str, str] = {}  # class id -> base path
+    class_decorators: dict[str, list[Decorator]] = {}
     for cls in record.classes:
         if {d.name for d in cls.decorators} & _CONTROLLER_ANNOTATIONS:
             controllers[cls.id] = _mapping_path(cls.decorators)
+            class_decorators[cls.id] = cls.decorators
     if not controllers:
         return []
 
-    seen = {s.id for s in record.statements}
-    routes: list[Statement] = []
+    nodes = method_nodes(root, source)
+    routes: list[Emit] = []
     for fn in record.functions:
         base = controllers.get(fn.parentId)
         if base is None:
             continue
+        guards = security_guards(class_decorators[fn.parentId], fn.decorators)
         for dec in fn.decorators:
             verb, subs = _routes_of(dec)
             if verb is None:
                 continue
             for sub in subs:  # the array form @GetMapping({"/a","/b"}) yields one route each
-                routes.append(Statement(
-                    id=disambiguate(statement_id(fn.path, fn.startLine, 0), seen),
-                    parentId=fn.id,
-                    nodeType="synthetic",
+                routes.append(Emit(nodes.get((fn.name, fn.startLine), root), dict(
                     semanticType="route",
-                    text=f"@{dec.name}",
                     method=verb,
                     endpoint=_join(base, sub),
                     framework="spring",
@@ -123,10 +151,10 @@ def detect_spring_routes(record: FileRecord) -> list[Statement]:
                     handlerLine=fn.startLine,
                     routeKind="route",
                     isRegex=False,
+                    guards=guards,
+                    authRequired=True if guards else None,
                     requestDTO=_request_dto(fn),
                     responseDTO=fn.returnType or None,
-                    startLine=fn.startLine,
-                    endLine=fn.endLine,
-                    path=fn.path,
-                ))
+                ), parent=fn.id, node_type="synthetic", text=f"@{dec.name}",
+                    line=fn.startLine, col=0, end_line=fn.endLine))
     return routes

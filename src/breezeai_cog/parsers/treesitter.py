@@ -14,6 +14,8 @@ real structural grammar. See ``.todo/groovy-grammar-evaluation.md``.
 
 from __future__ import annotations
 
+from collections.abc import Collection
+
 import warnings
 from functools import lru_cache
 from typing import Callable
@@ -60,6 +62,10 @@ def parse_source(language: str, source: bytes, timeout_micros: int = 0) -> Tree:
     input, so it can't be used here.)
     """
     parser = get_parser(language)
+    # The parser is cached per process. A parse halted by the timeout keeps its state, and the
+    # next parse() would resume it — building a tree from the previous file's bytes for this
+    # file's source (garbled statements, wrong offsets). Start every parse from a clean state.
+    parser.reset()
     with warnings.catch_warnings():  # timeout_micros is deprecated but is the only bytes-path option
         warnings.simplefilter("ignore", DeprecationWarning)
         parser.timeout_micros = int(timeout_micros) if timeout_micros and timeout_micros > 0 else 0
@@ -77,3 +83,38 @@ def line_span(node: Node) -> tuple[int, int]:
 
 def first_line(text: str) -> str:
     return text.split("\n", 1)[0]
+
+
+#: Cap for a route-table entry's one-line text.
+ENTRY_TEXT_LIMIT = 240
+
+
+def entry_text(node: Node, source: bytes, nested: Collection[str] = ("children",)) -> str:
+    """One-line text of a route-table entry (``{ path: 'x', component: X, … }``): whitespace runs
+    collapsed to one space, comments dropped (on one line a ``//`` would swallow the code after
+    it), the value of a ``nested`` key (child routes, recorded on their own) shown as ``[…]``,
+    capped at :data:`ENTRY_TEXT_LIMIT`. The first line of a multi-line object literal is just
+    ``{`` — useless as search text."""
+    cuts: list[tuple[int, int, bytes]] = []  # (start, end, replacement) byte ranges in source
+
+    def walk(n: Node) -> None:
+        if n.type == "comment":
+            cuts.append((n.start_byte, n.end_byte, b" "))
+            return
+        if n.type == "pair" and n.parent == node:
+            key, value = n.child_by_field_name("key"), n.child_by_field_name("value")
+            if (key is not None and value is not None
+                    and node_text(key, source).strip("'\"") in nested):
+                cuts.append((value.start_byte, value.end_byte, "[\u2026]".encode()))
+                return
+        for c in n.children:
+            walk(c)
+
+    walk(node)
+    raw, pos = b"", node.start_byte
+    for s, e, rep in sorted(cuts):
+        raw += source[pos:s] + rep
+        pos = e
+    raw += source[pos:node.end_byte]
+    one = " ".join(raw.decode("utf-8", "replace").split())
+    return one if len(one) <= ENTRY_TEXT_LIMIT else one[:ENTRY_TEXT_LIMIT - 1] + "\u2026"

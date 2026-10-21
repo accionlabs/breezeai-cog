@@ -12,7 +12,7 @@ behaviour → ``Statement``s. Node types verified empirically against the ``grap
 | ``type`` (non-root) / ``interface`` / ``enum`` / ``union`` / ``input`` (+ ``extend`` of each) | ``Class`` (class/interface/enum/union/record) |
 | ``type X @key(fields:…)`` | the Class **plus** a ``graphql_entity`` statement with ``keyFields`` |
 | object/interface/input fields, enum values, union members | child ``Statement``s parented to the Class |
-| ``type Query/Mutation/Subscription`` (or a ``schema{}``-declared root) field | ``route`` statement |
+| ``type Query/Mutation/Subscription`` (or a ``schema{}``-declared root) field | plain ``Statement`` (name, text, DTOs) — the resolver is the entry point |
 | ``scalar`` / ``directive`` / ``schema`` | plain ``Statement`` (name + text) |
 | ``query/mutation/subscription`` op / ``fragment`` | ``api_call`` / plain statement |
 
@@ -252,7 +252,36 @@ def _resolve_roots(root: Node, src: bytes) -> dict[str, str]:
     return roots
 
 
+def root_field_dtos(root: Node, src: bytes) -> list[tuple[str, str, str | None, str | None]]:
+    """``(root type, field, requestDTO, responseDTO)`` for every field of a root operation type
+    in this document (definitions and ``extend type`` alike) — the same DTOs a root field's own
+    statement carries, for a resolver in another file to take."""
+    roots = _resolve_roots(root, src)
+    out: list[tuple[str, str, str | None, str | None]] = []
+    stack = [root]
+    while stack:
+        n = stack.pop()
+        if n.type in ("object_type_definition", "object_type_extension"):
+            type_name = _name(n, src)
+            fields_def = child_of_type(n, "fields_definition")
+            if type_name is not None and type_name in roots and fields_def is not None:
+                for field in fields_def.named_children:
+                    name = _name(field, src) if field.type == "field_definition" else None
+                    if name is not None:
+                        out.append((type_name, name, request_dto(field, src),
+                                    base_type_name(child_of_type(field, "type"), src)))
+            continue
+        stack.extend(n.named_children)
+    return out
+
+
 # ---- extraction -------------------------------------------------------------
+
+
+def _is_relay_field(name: str, request: str | None, response: str | None) -> bool:
+    """The Relay Global Object Identification fields: ``node(id: ID!): Node`` and
+    ``nodes(ids: [ID!]!): [Node]!``."""
+    return name in ("node", "nodes") and request == "ID" and response == "Node"
 
 
 def extract_graphql(
@@ -265,11 +294,13 @@ def extract_graphql(
     row_offset: int = 0,
     col_offset: int = 0,
     synthetic: bool = False,
+    relay_routes: bool = False,
 ) -> tuple[list[Class], list[Statement]]:
     """Walk a parsed GraphQL document → ``(classes, statements)``. ``row_offset``/``col_offset``
     map line/col back to the host file when the document was re-parsed out of a ``gql`` template
     (0 for a standalone file); ``synthetic`` sets ``nodeType="synthetic"`` on emitted statements
-    for that embedded case."""
+    for that embedded case. ``relay_routes``: the document is a server's schema, so its Relay
+    ``node`` / ``nodes`` Query fields are routes (:func:`_is_relay_field`)."""
     classes: list[Class] = []
     statements: list[Statement] = []
     fid = file_id(path)
@@ -309,19 +340,23 @@ def extract_graphql(
             name = _name(field, source)
             if name is None:
                 continue
+            req = request_dto(field, source)
+            resp = base_type_name(child_of_type(field, "type"), source)
+            # A Relay node field is served by the server framework itself (Hot Chocolate,
+            # graphql-relay): no resolver of ours declares it, so the SDL is its only record.
+            served = relay_routes and kind == "query" and _is_relay_field(name, req, resp)
+            route = dict(semanticType="route", method="QUERY", endpoint=name,
+                         routeKind="query") if served else {}
             statements.append(
                 mk(
                     field,
                     fid,
                     nodeType=nt("field_definition"),
-                    semanticType="route",
                     name=name,
                     text=node_text(field, source)[:limit],
-                    method=kind.upper(),
-                    endpoint=name,
-                    routeKind=kind,
-                    requestDTO=request_dto(field, source),
-                    responseDTO=base_type_name(child_of_type(field, "type"), source),
+                    requestDTO=req,
+                    responseDTO=resp,
+                    **route,
                 )
             )
 
@@ -383,7 +418,7 @@ def extract_graphql(
         if name is None:
             return
         if n.type in ("object_type_definition", "object_type_extension") and name in roots:
-            emit_root_fields(n, roots[name])  # a root operation type: fields are routes
+            emit_root_fields(n, roots[name])  # a root operation type: fields are plain statements
             return
         cid = emitted_class.get(name)
         if cid is None:  # first declaration of this type in the file → emit the Class node

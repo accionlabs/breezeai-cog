@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from ...schemas import FileRecord
 from ..base import ParseContext
+from ..emits import apply
 from ..scala.parser import ScalaParser
 from ..treesitter import parse_source
 from .routes import detect_akkahttp_routes
@@ -23,6 +24,6 @@ class ScalaAkkaHttpParser(ScalaParser):
         if ctx.capture_statements and not self.is_fixture_file(ctx.path):
             routes = detect_akkahttp_routes(root, ctx.source, ctx.path, record)
             if routes:
-                record.statements.extend(routes)
+                apply(record, routes, ctx.source, ctx.path)
                 record.framework = "akka-http"
         return record

@@ -176,3 +176,35 @@ export class BrokenResolver {
     rec = _parse(src, "broken.resolver.ts")
     op = next(s for s in _routes(rec) if s.endpoint == "brokenOp")
     assert op.requestDTO is None and op.responseDTO is None
+
+
+_TYPE_GRAPHQL = b"""import { Resolver, Query, Mutation, FieldResolver, Authorized, Arg, Root } from 'type-graphql';
+
+@Resolver(() => Recipe)
+export class RecipeResolver {
+  @Query(() => [Recipe], { name: 'allRecipes' })
+  recipes() { return []; }
+
+  @Authorized('ADMIN')
+  @Mutation(returns => Recipe)
+  addRecipe(@Arg('data') data: RecipeInput) { return null; }
+
+  @Query(() => String)
+  ping() { return 'pong'; }
+
+  @FieldResolver()
+  ratings(@Root() r: Recipe) { return []; }
+}
+"""
+
+
+def test_type_graphql_resolvers() -> None:
+    assert GraphQLCodeFirstParser().claims("recipe.resolver.ts", _TYPE_GRAPHQL)
+    rec = _parse(_TYPE_GRAPHQL, "recipe.resolver.ts")
+    got = {s.endpoint: (s.method, s.handler, s.responseDTO, s.requestDTO, s.guards)
+           for s in rec.statements if s.semanticType == "route"}
+    assert got == {
+        "allRecipes": ("QUERY", "recipes", "Recipe", None, None),          # { name } option
+        "addRecipe": ("MUTATION", "addRecipe", "Recipe", "RecipeInput", ["Authorized"]),
+        "ping": ("QUERY", "ping", None, None, None),                       # scalar → no DTO
+    }                                                                       # @FieldResolver: none

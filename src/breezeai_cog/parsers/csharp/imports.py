@@ -24,13 +24,19 @@ recorded as external (the namespace itself is not a single file)."""
 from __future__ import annotations
 
 import posixpath
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 from tree_sitter import Node
 
+from .preproc import members
+
 from ...utils import repo_relative
-from ..dotnet_common import web_app_root
+from ..additive import (
+    collect_additive, collect_fact_sources, resolve_additive, split_fact_sources,
+)
 from ..index_common import (
     ClassHeritage, merge_heritage, parallel_map, project_heritage, record_distinct,
 )
@@ -58,11 +64,15 @@ class CSharpIndex:
     #: repo-relative dirs containing a ``.csproj`` (an assembly boundary), sorted
     #: longest-first so the nearest ancestor of a file is its owning project.
     project_roots: list[str] = field(default_factory=list)
-    #: Source-generated DataLoader type name → the file declaring the ``[DataLoader]`` method it
-    #: is generated from, or ``None`` when two files generate the same name (ambiguous). The
-    #: generated types do not exist in the repo, so a parameter typed ``ISessionByIdDataLoader``
-    #: can only be recognised as a loader through this map.
-    data_loaders: dict[str, str | None] = field(default_factory=dict)
+    #: project dir (as in ``project_roots``) → namespaces its MSBuild files bring into scope with
+    #: ``<Using Include="Ns" />`` — the project's ``.csproj`` and every ``Directory.Build.props``
+    #: from the project dir up to the repo root. Invisible in ``.cs`` files, yet ``Program.cs``
+    #: with no ``using`` sees ``Ns.Query`` through it.
+    project_usings: dict[str, set[str]] = field(default_factory=dict)
+    #: project dir → every project dir it can see types from through ``<ProjectReference>``,
+    #: transitively (SDK-style projects flow references by default). Only projects in
+    #: ``project_roots`` are recorded; a reference outside the scanned repo binds nothing.
+    project_refs: dict[str, set[str]] = field(default_factory=dict)
     #: simple class name → its heritage (base + decorators + method→file), for cross-file
     #: base-class resolution. Value is ``None`` when the name is declared by >1 class with
     #: differing bases (ambiguous → callers must not resolve through it: honest-null).
@@ -71,11 +81,14 @@ class CSharpIndex:
     #: same (name, type) is defined in >1 file (ambiguous → honest-null). Drives the resolver's
     #: extension-method tier (``recv.M()`` where ``M`` is ``static M(this T …)``).
     ext_methods: dict[tuple[str, str], str | None] = field(default_factory=dict)
-    #: physical ``.aspx`` repo path (``~/`` stripped) → its friendly ``MapPageRoute`` URLs,
-    #: sorted. Web Forms routing (BREEZEAI-765 item 2): the Web Forms parser overrides a page's
-    #: physical endpoint with these real routed URLs. Registrations are central (Global.asax /
-    #: RouteConfig), so they cross files — hence they ride this repo-level index.
-    page_routes: dict[str, list[str]] = field(default_factory=dict)
+    #: interface simple name → the fully-qualified name of the one class / struct / record that
+    #: lists it in its base list, or ``None`` when more than one type implements it (ambiguous →
+    #: honest-null). Lets a contract declared on an interface (WCF ``[ServiceContract]``) reach
+    #: the method with a body that runs.
+    implementers: dict[str, str | None] = field(default_factory=dict)
+    #: Facts registered with ``register_fact`` (fact name → fact), resolved once before
+    #: parsing. Read with :func:`~..additive.index_fact`; see ``parsers/additive.py``.
+    facts: dict[str, Any] = field(default_factory=dict)
 
     def project_of(self, path: str) -> str | None:
         """The owning project (nearest ancestor ``.csproj`` dir) of a repo-relative file."""
@@ -143,6 +156,18 @@ def _base_name(node: Node, source: bytes) -> str | None:
     return short
 
 
+def _base_types(node: Node, source: bytes) -> list[str]:
+    """Simple names of every type in a declaration's ``base_list`` (base class and interfaces
+    alike — C# lists them together), namespace qualifier and generics stripped."""
+    base = node.child_by_field_name("base_list") or next(
+        (c for c in node.named_children if c.type == "base_list"), None)
+    if base is None:
+        return []
+    return [node_text(c, source).rsplit(".", 1)[-1].split("<", 1)[0]
+            for c in base.named_children
+            if c.type in ("identifier", "qualified_name", "generic_name")]
+
+
 def _record_heritage(
     by_fqn: dict[str, ClassHeritage | None], fqn: str, node: Node, source: bytes,
 ) -> None:
@@ -173,7 +198,7 @@ def _index_members(
 ) -> None:
     """Record the class's declared methods (``(fqn, method) → file``, for inherited-call
     resolution) and any extension methods it defines (``(method, this-type) → file``)."""
-    for member in body.named_children:
+    for member in members(body):
         if member.type != "method_declaration":
             continue
         mn = member.child_by_field_name("name")
@@ -227,60 +252,6 @@ def _string_literal(node: Node | None, source: bytes) -> str | None:
     return None
 
 
-def _aspx_app_root(rel: str, repo_root: Path | None) -> str:
-    """Application root for a file in a Web Forms repo: the shallowest ancestor directory
-    (repo-root downward) containing ``web.config``. Falls back to ``""`` (repo root) when
-    ``repo_root`` is absent or no ``web.config`` is found."""
-    return web_app_root(rel, repo_root) if repo_root is not None else ""
-
-
-def _physical_aspx_key(physical: str, app_root: str = "") -> str | None:
-    """A ``MapPageRoute`` physical arg → repo-relative ``.aspx`` key.
-
-    ``~/CMS/E.aspx`` with ``app_root="SubDir/App"`` → ``SubDir/App/CMS/E.aspx``.
-    When ``app_root`` is ``""`` (repo root = app root, or unknown), the result is just the
-    ``~/``-stripped path — matching the pre-existing behaviour for flat repos."""
-    p = physical.strip().replace("\\", "/")
-    if p.startswith("~/"):
-        p = p[2:]
-    elif p.startswith("/"):
-        p = p[1:]
-    p = posixpath.normpath(p)
-    if not p.lower().endswith(".aspx") or p.startswith(".."):
-        return None
-    return posixpath.join(app_root, p) if app_root else p
-
-
-def _index_map_page_routes(
-    root: Node, source: bytes, rel: str, repo_root: Path | None, index: CSharpIndex
-) -> None:
-    """Collect ``routes.MapPageRoute(name, url, "~/physical.aspx")`` mappings from the AST
-    (not raw text — so matches in comments/strings are excluded). Only string-literal
-    ``url``/``physical`` args are recorded; the physical ``.aspx`` keys the friendly url.
-
-    ``rel`` + ``repo_root`` resolve ``~/`` relative to the **app root** (the shallowest
-    ancestor directory that holds a ``web.config``), producing a full repo-relative key that
-    matches the path used by ``detect_webforms_pages``. For repos where the app root equals
-    the repo root (or when ``repo_root`` is absent), the key reduces to the bare ``.aspx``
-    path — identical to the previous behaviour.
-
-    Iterative walk (no recursion — deep ASTs can't blow the stack)."""
-    app_root = _aspx_app_root(rel, repo_root)
-    stack = [root]
-    while stack:
-        n = stack.pop()
-        if n.type == "invocation_expression" and _called_name(n, source) == "MapPageRoute":
-            args = _positional_args(n)
-            if len(args) >= 3:
-                url = _string_literal(args[1], source)
-                key = _physical_aspx_key(_string_literal(args[2], source) or "", app_root)
-                if url is not None and key is not None:
-                    urls = index.page_routes.setdefault(key, [])
-                    if url not in urls:
-                        urls.append(url)
-        stack.extend(n.named_children)
-
-
 def _index_file(
     root: Node, source: bytes, rel: str, index: CSharpIndex,
     by_fqn: dict[str, ClassHeritage | None],
@@ -294,14 +265,10 @@ def _index_file(
             kind, name, _ = _classify_using(child, source)
             if kind == "global" and name:
                 index.global_usings.add(name)
-    if b"MapPageRoute" in source:  # cheap gate — full-tree scan only where it can match
-        _index_map_page_routes(root, source, rel, repo_root, index)
-    if b"[DataLoader" in source:  # same idiom: only scan a file that can declare one
-        _index_data_loaders(root, source, rel, index)
 
     def walk(node: Node, ns: str) -> None:
         local_ns = ns
-        for child in node.named_children:
+        for child in members(node):  # `#if` blocks opened
             t = child.type
             if t == "file_scoped_namespace_declaration":
                 local_ns = _join(ns, _decl_name(child, source))  # applies to later siblings
@@ -316,6 +283,9 @@ def _index_file(
                     fqn = _join(local_ns, nm)
                     index.types.setdefault(fqn, set()).add(rel)
                     _record_heritage(by_fqn, fqn, child, source)
+                    if t != "interface_declaration":
+                        for iface in _base_types(child, source):
+                            record_distinct(index.implementers, iface, fqn)
                     if body is not None:
                         _index_members(fqn, body, source, rel, index, method_files)
                 if body is not None:
@@ -324,31 +294,155 @@ def _index_file(
     walk(root, "")
 
 
-def _index_data_loaders(root: Node, source: bytes, rel: str, index: CSharpIndex) -> None:
-    """Record the DataLoader types HotChocolate's source generator will emit for this file.
+#: HotChocolate root registration calls → operation kind.
+def in_scope_namespaces(root: Node, source: bytes) -> set[str]:
+    """Namespaces a type name in this file can bind under: the file's own namespaces and their
+    ancestors, the global namespace, and its ``using`` / ``global using`` directives. Add the
+    repo's ``index.global_usings`` when resolving (they are known only after the reduce)."""
+    scopes = _file_scopes(root, source)
+    for child in root.named_children:
+        if child.type == "using_directive":
+            kind, name, _ = _classify_using(child, source)
+            if kind in ("using", "global") and name:
+                scopes.add(name)
+    return scopes
 
-    A ``[DataLoader]`` method produces a loader named after it — ``SessionByIdAsync`` becomes
-    ``ISessionByIdDataLoader`` (and the concrete ``SessionByIdDataLoader``). Consumers declare the
-    generated *interface* as a parameter type, and that interface exists nowhere in the source, so
-    without this map a loader parameter is indistinguishable from any other service. Attribute
-    arguments only ever carry options (``MaxBatchSize``, ``ServiceScope``), never a rename.
+
+def type_files(
+    name: str, scopes: set[str], index: CSharpIndex, from_path: str, *,
+    elsewhere_only: bool = False,
+) -> set[str]:
+    """Files declaring the type ``name`` binds to from ``from_path``, or empty when it binds to
+    nothing or is ambiguous.
+
+    Binds by **type**, not file, so a partial class split over several files yields all of
+    them. ``name`` may be simple, partly or fully qualified, and is looked up under ``scopes``
+    plus the namespaces ``from_path``'s project brings in through MSBuild (``project_usings``).
+
+    Project boundaries are respected the way the compiler sees them: a type is visible as
+    declared in ``from_path``'s own project, or in a project it references (``project_refs``).
+    Two unrelated projects that reuse a namespace (or both use the global one) are different
+    types, not one type split over two files. Of several in-scope types, the one in the own
+    project wins (CS0436); any other tie refuses.
+
+    ``elsewhere_only`` ignores a type declared only in ``from_path`` itself before checking for
+    ambiguity — what an import edge needs: ``MassUpdate.ascx.cs`` declares its own
+    ``MassUpdate`` and refers to the base ``SplendidCRM.MassUpdate`` by the same simple name.
     """
-    stack = [root]
-    while stack:
-        node = stack.pop()
-        stack.extend(node.named_children)
-        if node.type != "method_declaration":
+    proj = index.project_of(from_path)
+    if proj is not None:
+        scopes = scopes | index.project_usings.get(proj, set())
+    candidates: dict[str, set[str]] = {}
+    if "." in name and name in index.types:
+        fqns = [name]  # already fully qualified (a static/alias target): exactly that type
+    else:
+        # Under any namespace in scope (simple or partly qualified name).
+        fqns = sorted(({name} | {_join(ns, name) for ns in scopes}) & index.types.keys())
+    for fqn in fqns:
+        visible = _visible_from(index.types[fqn], proj, index)
+        if elsewhere_only and visible <= {from_path}:
             continue
-        if not any(d.name.split("<", 1)[0] == "DataLoader" for d in extract_attributes(node, source)):
-            continue
-        name_node = node.child_by_field_name("name")
-        if name_node is None:
-            continue
-        base = node_text(name_node, source)
-        if base.endswith("Async") and len(base) > len("Async"):
-            base = base[: -len("Async")]
-        for generated in (f"I{base}DataLoader", f"{base}DataLoader"):
-            record_distinct(index.data_loaders, generated, rel)
+        if visible:
+            candidates[fqn] = visible
+    if len(candidates) > 1 and proj is not None:
+        candidates = {q: f for q, f in candidates.items()
+                      if any(index.project_of(x) == proj for x in f)}
+    return next(iter(candidates.values())) if len(candidates) == 1 else set()
+
+
+def _visible_from(files: set[str], proj: str | None, index: CSharpIndex) -> set[str]:
+    """The declaring files of one fully-qualified type that project ``proj`` can see: its own
+    project's; else those in the projects it references, if they all belong to one of them;
+    else none. Without project information (no ``.csproj``) every file counts, as before."""
+    if proj is None:
+        return set(files)
+    own = {f for f in files if index.project_of(f) == proj}
+    if own:
+        return own
+    refs = index.project_refs.get(proj, set())
+    referenced = {f for f in files if index.project_of(f) in refs}
+    return referenced if len({index.project_of(f) for f in referenced}) == 1 else set()
+
+
+def declared_files_by_name(index: CSharpIndex) -> dict[str, set[str]]:
+    """Simple type name → every file declaring a type of that name, across namespaces."""
+    out: dict[str, set[str]] = {}
+    for fqn, tfiles in index.types.items():
+        out.setdefault(fqn.rsplit(".", 1)[-1], set()).update(tfiles)
+    return out
+
+
+#: ``<Using Include="Ns" />``. A ``Static``/``Alias`` attribute makes it a type import or an
+#: alias, not a namespace in scope, so those are excluded.
+_MSBUILD_USING = re.compile(r"<Using\s+([^>]*?)/?>")
+_MSBUILD_PROJECT_REF = re.compile(r'<ProjectReference\s+[^>]*?\bInclude\s*=\s*"([^"]+)"')
+_MSBUILD_INCLUDE = re.compile(r'\bInclude\s*=\s*"([^"]+)"')
+
+
+def _msbuild_text(path: Path) -> str:
+    try:
+        return path.read_text("utf-8", errors="replace")
+    except OSError:
+        return ""
+
+
+def _msbuild_usings(text: str) -> set[str]:
+    """Namespaces an MSBuild file brings into scope. MSBuild conditions are not evaluated: a
+    using only widens where a name is looked up, and a binding still needs exactly one match."""
+    out: set[str] = set()
+    for m in _MSBUILD_USING.finditer(text):
+        attrs = m.group(1)
+        inc = _MSBUILD_INCLUDE.search(attrs)
+        if inc and "Static" not in attrs and "Alias" not in attrs:
+            out.add(inc.group(1).strip())
+    return out
+
+
+def _discover_project_msbuild(
+    repo_root: Path, project_roots: list[str],
+) -> tuple[dict[str, set[str]], dict[str, set[str]]]:
+    """``(project_usings, project_refs)`` from each project's MSBuild files.
+
+    Usings come from the project's ``.csproj`` plus every ``Directory.Build.props`` between the
+    project dir and the repo root (MSBuild imports those implicitly). References come from
+    ``<ProjectReference Include="..\\Lib\\Lib.csproj" />`` and are closed transitively."""
+    known = set(project_roots)
+    usings: dict[str, set[str]] = {}
+    direct: dict[str, set[str]] = {}
+    for proj in project_roots:
+        pdir = repo_root / proj if proj else repo_root
+        found: set[str] = set()
+        refs: set[str] = set()
+        for csproj in sorted(pdir.glob("*.csproj")):
+            text = _msbuild_text(csproj)
+            found |= _msbuild_usings(text)
+            for m in _MSBUILD_PROJECT_REF.finditer(text):
+                target = posixpath.normpath(posixpath.join(proj, m.group(1).replace("\\", "/")))
+                ref_dir = posixpath.dirname(target)
+                ref_dir = "" if ref_dir == "." else ref_dir
+                if ref_dir in known and ref_dir != proj:
+                    refs.add(ref_dir)
+        parts = proj.split("/") if proj else []
+        for i in range(len(parts), -1, -1):
+            props = repo_root.joinpath(*parts[:i], "Directory.Build.props")
+            if props.is_file():
+                found |= _msbuild_usings(_msbuild_text(props))
+        if found:
+            usings[proj] = found
+        direct[proj] = refs
+    closed: dict[str, set[str]] = {}
+    for proj in project_roots:  # transitive closure, cycle-safe
+        seen: set[str] = set()
+        stack = list(direct.get(proj, ()))
+        while stack:
+            ref = stack.pop()
+            if ref in seen or ref == proj:
+                continue
+            seen.add(ref)
+            stack.extend(direct.get(ref, ()))
+        if seen:
+            closed[proj] = seen
+    return usings, closed
 
 
 def _discover_project_roots(repo_root: Path, live_dirs: set[str]) -> list[str]:
@@ -371,7 +465,12 @@ def _discover_project_roots(repo_root: Path, live_dirs: set[str]) -> list[str]:
     return sorted(roots, key=len, reverse=True)
 
 
-_Fragment = tuple[CSharpIndex, dict[str, ClassHeritage | None], dict[tuple[str, str], str | None]]
+_Fragment = tuple[
+    CSharpIndex,
+    dict[str, ClassHeritage | None],
+    dict[tuple[str, str], str | None],
+    dict[str, Any],  # additive detector name → the value its index-stage collect returned
+]
 
 
 def _index_one(args: tuple[str, str]) -> _Fragment | None:
@@ -379,8 +478,8 @@ def _index_one(args: tuple[str, str]) -> _Fragment | None:
     safe to run in a worker process (module-level + picklable, for :func:`parallel_map`).
     Returns ``None`` on read error."""
     file_s, rel = args
-    # Derive repo_root from the absolute path and the repo-relative path so that
-    # _index_map_page_routes can resolve ~/… against the correct app-root directory.
+    # Derive repo_root from the absolute path and the repo-relative path (registered facts
+    # resolve paths against it — e.g. ``~/`` in a MapPageRoute against its app root).
     repo_root: Path | None = None
     if file_s.endswith("/" + rel):
         repo_root = Path(file_s[: -len(rel) - 1])
@@ -394,7 +493,7 @@ def _index_one(args: tuple[str, str]) -> _Fragment | None:
         by_fqn: dict[str, ClassHeritage | None] = {}
         method_files: dict[tuple[str, str], str | None] = {}
         _index_file(root, source, rel, frag, by_fqn, method_files, repo_root)
-        return frag, by_fqn, method_files
+        return frag, by_fqn, method_files, collect_additive("csharp", root, source, rel, repo_root)
     except Exception as exc:  # parse OR a pathologically deep AST walk (RecursionError) — skip this file
         from ...logging import get_logger
         get_logger("breezeai_cog.index").warning(
@@ -412,17 +511,17 @@ def _merge_fragment(
 ) -> None:
     """Reduce one file fragment into the shared index using the same collapse rules as the
     serial build (so the result is identical regardless of fragment order)."""
-    fidx, fby, fmf = frag
+    fidx, fby, fmf, _ = frag
     index.global_usings |= fidx.global_usings
     for tname, tfiles in fidx.types.items():
         index.types.setdefault(tname, set()).update(tfiles)
-    for pkey, purls in fidx.page_routes.items():
-        dst = index.page_routes.setdefault(pkey, [])
-        dst.extend(u for u in purls if u not in dst)
     for ekey, efile in fidx.ext_methods.items():
         record_distinct(index.ext_methods, ekey, efile)
-    for lname, lfile in fidx.data_loaders.items():
-        record_distinct(index.data_loaders, lname, lfile)
+    for iface, impl in fidx.implementers.items():
+        if impl is None:
+            index.implementers[iface] = None  # ambiguous within the file → refuse
+        else:
+            record_distinct(index.implementers, iface, impl)
     for mkey, mfile in fmf.items():
         record_distinct(method_files, mkey, mfile)
     for fqn, ch in fby.items():
@@ -437,21 +536,29 @@ def build_csharp_index(repo_root: Path, files, jobs: int = 1) -> CSharpIndex:
     project (``.csproj``) roots for the same-project tiebreak. Files are parsed into partial
     fragments across ``jobs`` processes and reduced deterministically (``jobs<=1`` → serial)."""
     repo_root = Path(repo_root)
+    files, fact_files = split_fact_sources("csharp", list(files))
     rels = [repo_relative(f, repo_root) for f in files]
     live_dirs = {""}  # every ancestor dir of a scanned file (its owning-project candidates)
     for rel in rels:
         parts = rel.split("/")[:-1]
         for i in range(1, len(parts) + 1):
             live_dirs.add("/".join(parts[:i]))
-    index = CSharpIndex(project_roots=_discover_project_roots(repo_root, live_dirs))
+    project_roots = _discover_project_roots(repo_root, live_dirs)
+    project_usings, project_refs = _discover_project_msbuild(repo_root, project_roots)
+    index = CSharpIndex(project_roots=project_roots, project_usings=project_usings,
+                        project_refs=project_refs)
     by_fqn: dict[str, ClassHeritage | None] = {}   # partials merged per fully-qualified name
     method_files: dict[tuple[str, str], str | None] = {}
     # MAP: parse each file into a pure partial fragment (parallel over ``jobs`` processes).
     fragments = parallel_map([(str(f), rel) for f, rel in zip(files, rels)], _index_one, jobs)
     # REDUCE: fold fragments into the shared index (deterministic, order-independent).
+    # registered fact name → per-file values: fact-source files (another parser's), then our own
+    collected: dict[str, list[Any]] = collect_fact_sources("csharp", fact_files, repo_root, jobs)
     for frag in fragments:
         if frag is not None:
             _merge_fragment(index, by_fqn, method_files, frag)
+            for name, value in frag[3].items():
+                collected.setdefault(name, []).append(value)
     # attach each class's method→file map to its (unambiguous) heritage record, then project
     # fully-qualified heritage down to simple names (distinct types sharing a name → None)
     for (fqn, mname), mfile in method_files.items():
@@ -459,8 +566,8 @@ def build_csharp_index(repo_root: Path, files, jobs: int = 1) -> CSharpIndex:
         if heritage is not None:
             heritage.methods[mname] = mfile
     index.class_heritage = project_heritage(by_fqn)
-    # canonicalise friendly-url lists so output is fragment-order-independent (deterministic).
-    index.page_routes = {k: sorted(set(v)) for k, v in index.page_routes.items()}
+    # Additive detectors' facts may need every declared type, so they resolve after the reduce.
+    index.facts = resolve_additive("csharp", collected, index)
     return index
 
 
@@ -471,7 +578,7 @@ def _file_scopes(root: Node, source: bytes) -> set[str]:
 
     def walk(node: Node, ns: str) -> None:
         local_ns = ns
-        for child in node.named_children:
+        for child in members(node):  # `#if` blocks opened
             t = child.type
             if t == "file_scoped_namespace_declaration":
                 local_ns = _join(ns, _decl_name(child, source))
@@ -525,29 +632,19 @@ def _referenced_types(root: Node, source: bytes) -> set[str]:
 
 
 def _resolve(name: str, scopes: set[str], index: CSharpIndex | None, self_path: str) -> str | None:
-    """A fully-qualified or simple type name → its declaring file, or ``None`` when
-    external / unresolved / **ambiguous** (a tie no rule can break)."""
+    """A fully-qualified or simple type name → the **other** file declaring it, or ``None`` when
+    external / unresolved / **ambiguous**.
+
+    The C# binding rules live in one place, :func:`type_files` — namespaces in scope (including
+    MSBuild ``<Using>``), project boundaries through ``<ProjectReference>``, the same-project
+    tiebreak (CS0436) — so an import edge and a detector's binding always agree. An import edge
+    is cross-file and names one file: a type whose other declaration is split over several files
+    (a partial class) is ambiguous for an edge.
+    """
     if index is None or not name:
         return None
-    if "." in name and name in index.types:  # already fully qualified (static/alias target)
-        hits = set(index.types[name])
-    else:
-        hits = set()
-        for ns in scopes:
-            hits |= index.types.get(_join(ns, name), set())
-    hits.discard(self_path)  # cross-file edges only
-    if len(hits) == 1:
-        return next(iter(hits))
-    if len(hits) > 1:
-        # Same-project wins (C# CS0436: a type in the consumer's own assembly
-        # beats an identically-named one imported from another project). A tie purely
-        # between *other* projects is CS0433, which the compiler errors on — so we refuse.
-        proj = index.project_of(self_path)
-        if proj is not None:
-            same = [h for h in hits if index.project_of(h) == proj]
-            if len(same) == 1:
-                return same[0]
-    return None
+    files = type_files(name, scopes, index, self_path, elsewhere_only=True) - {self_path}
+    return next(iter(files)) if len(files) == 1 else None
 
 
 def bind_static_import_members(

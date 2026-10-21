@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from ...schemas import FileRecord
 from ..base import ParseContext
+from ..emits import apply
 from ..csharp.parser import CSharpParser
 from ..treesitter import parse_source
 from .routes import detect_asmx_services, detect_wcf_services
@@ -34,8 +35,10 @@ class WcfParser(CSharpParser):
         root = parse_source("csharp", ctx.source, ctx.parse_timeout_micros).root_node
         record = self.extract(root, ctx)  # inherited C# extraction (one parse)
         if ctx.capture_statements:  # routes are statements — gated (spec A4)
-            routes = detect_wcf_services(record) or detect_asmx_services(record)
+            routes = detect_wcf_services(
+                record, root, ctx.repo_root, ctx.resolution_index,
+            ) or detect_asmx_services(record, root, ctx.repo_root)
             if routes:
-                record.statements.extend(routes)
-                record.framework = routes[0].framework  # "wcf" or "asmx"
+                apply(record, routes, ctx.source, ctx.path)
+                record.framework = routes[0].fields["framework"]  # "wcf" or "asmx"
         return record

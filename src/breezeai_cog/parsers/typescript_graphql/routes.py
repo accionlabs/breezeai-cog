@@ -13,8 +13,9 @@ they live in two shapes, in separate files:
 
   Each field of the ``Query`` / ``Mutation`` / ``Subscription`` object is one
   operation. The value is (usually) an anonymous arrow function that the base
-  parser skips as a nested scope, so we surface it here — ``handler`` is the
-  operation name, ``handlerLine`` the arrow's line. Type-level field resolvers
+  parser skips as a nested scope, so we surface it here — an inline arrow has no
+  ``handler`` (anonymous) and ``handlerLine`` the arrow's line; shorthand methods and
+  function references name their handler. Type-level field resolvers
   (``ProcurementItem: { tenders: … }``) are **not** routes and are ignored.
 
 * **SDL** (the interface, carries request/response DTOs)::
@@ -25,18 +26,17 @@ they live in two shapes, in separate files:
       `;
 
   The SDL lives in an opaque ``template_string``; we re-parse it with the dedicated
-  ``graphql`` grammar and walk the SDL AST, so each field yields a route with
+  ``graphql`` grammar and walk the SDL AST, so each field yields a plain statement with
   ``requestDTO`` (an ``input:``/first arg type) and ``responseDTO`` (the return type),
   wrappers stripped. ``extend type Query`` is also matched.
 
-Both emit ``semanticType="route"``, ``framework="graphql"``,
-``routeKind ∈ {query, mutation, subscription}``, ``method`` the upper-cased
-operation kind (GraphQL has no per-operation HTTP verb — the transport is a
-single ``POST /graphql``, detected separately by the Express mount). Resolver
-and SDL routes for the same operation live in different files; the backend joins
-them on ``(framework, routeKind, endpoint)`` — the handler from the resolver, the
-DTOs from the SDL. Routes are parented to the file (config/markup, not handler
-methods), mirroring the React/Angular config detectors."""
+The resolver-map entry is the entry point (it names the code that runs): it emits
+``semanticType="route"``, ``framework="graphql"``, ``routeKind ∈ {query, mutation,
+subscription}``, ``method`` the upper-cased operation kind (GraphQL has no per-operation
+HTTP verb — the transport is a single ``POST /graphql``, detected separately by the Express
+mount). The SDL root field only declares the operation: it is captured as a plain statement,
+never an entry point, so one operation has one record. Routes are parented to the file
+(config/markup, not handler methods), mirroring the React/Angular config detectors."""
 
 from __future__ import annotations
 
@@ -44,15 +44,18 @@ import re
 
 from tree_sitter import Node
 
-from ...emit import disambiguate, file_id, statement_id
-from ...schemas import Class, FileRecord, Statement
-from ..additive import DetectContext, Detector, register_detector
+from ...emit import file_id
+from ...schemas import Class, Statement
+from ..additive import DetectContext, Detection, Detector, Gate, register_detector
+from ..emits import Emit
+from .sdl_fields import root_field_dto
 from ..graphql.sdl import base_type_name, child_of_type, extract_graphql
 from ..treesitter import first_line, node_text, parse_source
 
 # The three root operation types. Everything else keyed in a resolver map
 # (``ProcurementItem``, ``Tender``, scalars, …) is a field/scalar resolver, not a route.
 _ROOT_TYPES = {"Query": "query", "Mutation": "mutation", "Subscription": "subscription"}
+_RESOLVE_REFERENCE = "__resolveReference"
 
 # Client-side operation keywords (lowercase) -> kind. Mirrors _ROOT_TYPES for the caller
 # side (``query Foo {…}`` in a ``gql`` template) rather than the schema side.
@@ -79,15 +82,32 @@ def _operation_fields(group_obj: Node) -> list[Node]:
     return [c for c in group_obj.named_children if c.type in ("pair", "method_definition")]
 
 
-def _handler_line(field: Node) -> int:
-    """Line of the field's implementation — the value node for a pair, else the field."""
+def _handler(field: Node, source: bytes, op: str) -> tuple[str | None, int | None]:
+    """(handler, handlerLine) of a resolver-map entry. Shorthand ``books() {…}`` is a method named
+    after the field; an inline ``books: () => …`` is anonymous (no name, the function's line); a
+    reference ``books: getBooks`` names the function declared elsewhere (no line); a subscription
+    object ``{ subscribe: … }`` is handled by its ``subscribe`` function."""
     value = field.child_by_field_name("value")
-    node = value if value is not None else field
-    return node.start_point[0] + 1
+    if value is None:  # method_definition shorthand
+        return op, field.start_point[0] + 1
+    if value.type == "object":  # subscription: { subscribe: … } (or { resolve: … })
+        inner = next((c for c in value.named_children
+                      if c.type in ("pair", "method_definition")
+                      and _key_text(c, source) in ("subscribe", "resolve")), None)
+        return _handler(inner, source, "subscribe") if inner is not None else (None, None)
+    if value.type in ("arrow_function", "function_expression", "function"):
+        return None, value.start_point[0] + 1
+    if value.type in ("identifier", "member_expression"):
+        return node_text(value, source), None
+    return None, None
 
 
-def _detect_resolver_maps(root: Node, source: bytes, path: str, seen: set[str]) -> list[Statement]:
-    routes: list[Statement] = []
+def detect_resolver_maps(
+    root: Node, source: bytes, path: str, index: object = None
+) -> list[Emit]:
+    """Resolver-map operations (``Query: { books: … }``) and federation ``__resolveReference``
+    bindings, for :func:`~..emits.apply`."""
+    routes: list[Emit] = []
 
     def walk(node: Node) -> None:
         if node.type == "pair":
@@ -99,24 +119,41 @@ def _detect_resolver_maps(root: Node, source: bytes, path: str, seen: set[str]) 
                     op = _key_text(field, source)
                     if op is None:
                         continue
-                    sl, sc = field.start_point[0] + 1, field.start_point[1]
+                    handler, handler_line = _handler(field, source, op)
+                    # The DTOs are declared by the SDL, often in another file (.graphql).
+                    request_dto, response_dto = root_field_dto(index, key, op)
                     routes.append(
-                        Statement(
-                            id=disambiguate(statement_id(path, sl, sc), seen),
-                            parentId=file_id(path),
-                            nodeType=field.type,
+                        Emit(field, dict(
                             semanticType="route",
-                            text=first_line(node_text(field, source))[:120],
                             method=kind.upper(),
                             endpoint=op,
+                            requestDTO=request_dto,
+                            responseDTO=response_dto,
                             framework="graphql",
-                            handler=op,
-                            handlerLine=_handler_line(field),
+                            handler=handler,
+                            handlerLine=handler_line,
                             routeKind=kind,
-                            startLine=sl,
-                            endLine=field.end_point[0] + 1,
-                            path=path,
-                        )
+                        ), parent=file_id(path),
+                            text=first_line(node_text(field, source))[:120])
+                    )
+            elif key and value is not None and value.type == "object":
+                # Federation: a type's __resolveReference is what the gateway's _entities field
+                # calls to fetch one object by key — a binding addressed by the type.
+                for field in _operation_fields(value):
+                    if _key_text(field, source) != _RESOLVE_REFERENCE:
+                        continue
+                    handler, handler_line = _handler(field, source, _RESOLVE_REFERENCE)
+                    routes.append(
+                        Emit(field, dict(
+                            semanticType="route",
+                            method="RESOLVE_REFERENCE",
+                            endpoint=key,
+                            framework="graphql",
+                            handler=handler,
+                            handlerLine=handler_line,
+                            routeKind="query",
+                        ), parent=file_id(path),
+                            text=first_line(node_text(field, source))[:120])
                     )
         for c in node.named_children:
             walk(c)
@@ -170,9 +207,13 @@ def _parse_sdl_fragment(
     routes.extend(frag_stmts)
 
 
-def _detect_sdl(
+def detect_embedded_sdl(
     root: Node, source: bytes, path: str, seen: set[str], timeout_micros: int, limit: int
 ) -> tuple[list[Class], list[Statement]]:
+    """Server SDL embedded in template strings: the GraphQL language's own extraction
+    (:func:`~..graphql.sdl.extract_graphql`) — the type system as ``Class`` nodes plus its
+    statements — not a framework detection, so it builds its records itself; ``seen`` is the
+    record's ids at that point."""
     classes: list[Class] = []
     routes: list[Statement] = []
 
@@ -299,8 +340,7 @@ def _emit_client_ops(
     row_base: int,
     col_base: int,
     path: str,
-    seen: set[str],
-    routes: list[Statement],
+    routes: list[Emit],
 ) -> None:
     op_name_node = child_of_type(op_def, "name")
     op_name = node_text(op_name_node, sdl) if op_name_node is not None else None
@@ -311,32 +351,30 @@ def _emit_client_ops(
         # Column only shifts on the template's first row (body starts after the backtick);
         # later rows begin at column 0 within the body.
         col = name.start_point[1] + (col_base if name.start_point[0] == 0 else 0)
-        routes.append(
-            Statement(
-                id=disambiguate(statement_id(path, line, col), seen),
-                parentId=file_id(path),
-                nodeType="synthetic",
-                semanticType="api_call",
-                text=first_line(node_text(field, sdl))[:120],
-                method=kind.upper(),
+        # The field sits in the template's own GraphQL tree, so its span is given in TS terms.
+        routes.append(Emit(
+            field,
+            {
+                "semanticType": "api_call",
+                "method": kind.upper(),
                 # endpoint = invoked API field (joins to a server route); operation name is the
                 # client-side label, kept in handler.
-                endpoint=node_text(name, source=sdl),
-                framework="graphql",
-                routeKind=kind,
-                handler=op_name,
-                requestDTO=request_dto,
-                startLine=line,
-                endLine=row_base + field.end_point[0] + 1,
-                path=path,
-            )
-        )
+                "endpoint": node_text(name, source=sdl),
+                "framework": "graphql",
+                "routeKind": kind,
+                "handler": op_name,
+                "requestDTO": request_dto,
+            },
+            parent=file_id(path), node_type="synthetic",
+            text=first_line(node_text(field, sdl))[:120],
+            line=line, col=col, end_line=row_base + field.end_point[0] + 1,
+        ))
 
 
 def _detect_client_ops(
-    root: Node, source: bytes, path: str, seen: set[str], timeout_micros: int
-) -> list[Statement]:
-    routes: list[Statement] = []
+    root: Node, source: bytes, path: str, timeout_micros: int
+) -> list[Emit]:
+    routes: list[Emit] = []
 
     def walk(n: Node) -> None:
         # Walk whole ``template_string`` nodes, NOT individual ``string_fragment`` children:
@@ -364,7 +402,7 @@ def _detect_client_ops(
                         # operation_type may be omitted for a shorthand anonymous query (``{ … }``)
                         kind = _OP_KINDS.get(node_text(ot, body)) if ot is not None else "query"
                         if kind is not None:
-                            _emit_client_ops(g, kind, body, row_base, col_base, path, seen, routes)
+                            _emit_client_ops(g, kind, body, row_base, col_base, path, routes)
                     for c in g.named_children:
                         gwalk(c)
 
@@ -379,51 +417,26 @@ def _detect_client_ops(
 # ---- entry point ------------------------------------------------------------
 
 
-def detect_graphql(
-    root: Node,
-    source: bytes,
-    path: str,
-    *,
-    seen_ids: set[str],
-    timeout_micros: int = 0,
-    limit: int = 8000,
-) -> tuple[list[Class], list[Statement]]:
-    """Server-side GraphQL — resolver-map operations (statements, with handlers) and embedded
-    SDL (the type system as ``Class`` nodes plus route/entity/member statements). ``timeout_micros``
-    bounds the secondary ``graphql`` parse of embedded SDL; ``limit`` bounds statement ``text``.
-    Returns ``(classes, statements)`` to append to the record. (Client operations are handled
-    additively for every TS file by :func:`detect_graphql_client`, not here.)"""
-    routes = _detect_resolver_maps(root, source, path, seen_ids)
-    classes, sdl_stmts = _detect_sdl(root, source, path, seen_ids, timeout_micros, limit)
-    return classes, routes + sdl_stmts
-
-
 # Client ops appear in ANY TS file that imports a gql tag — most of which are owned by the
 # base TypeScriptParser (or Angular/NestJS), not GraphQLParser (whose ``claims`` fires only
 # on resolver-maps / server SDL). So expose the client pass as an additive detector, run for
 # every TS file from ``TypeScriptParser.extract`` (like ``detect_express``/``detect_sdk_calls``).
 def detect_graphql_client(
-    root: Node, source: bytes, path: str, record: FileRecord, timeout_micros: int = 0
-) -> bool:
-    """Add client-side GraphQL operation statements (``gql`` tagged templates) to ``record``.
-    Returns True if any were found. Cheap byte-guard first so non-GraphQL files skip the walk."""
+    root: Node, source: bytes, path: str, timeout_micros: int = 0
+) -> list[Emit]:
+    """Client-side GraphQL operation statements (``gql`` tagged templates). Cheap byte-guard
+    first so non-GraphQL files skip the walk."""
     if not any(m in source for m in (b"gql`", b"graphql`", b"gql(", b"graphql(")):
-        return False
-    routes = _detect_client_ops(
-        root, source, path, {s.id for s in record.statements}, timeout_micros
-    )
-    record.statements.extend(routes)
-    return bool(routes)
+        return []
+    return _detect_client_ops(root, source, path, timeout_micros)
 
 
-def _run(dc: DetectContext) -> str | None:
-    matched = detect_graphql_client(
-        dc.root, dc.source, dc.path, dc.record, dc.ctx.parse_timeout_micros
-    )
-    return "graphql" if matched else None
+def _detect(dc: DetectContext) -> Detection | None:
+    ops = detect_graphql_client(dc.root, dc.source, dc.path, dc.ctx.parse_timeout_micros)
+    return Detection(ops, label="graphql") if ops else None
 
 
 register_detector(Detector(
-    name="graphql-client", language="typescript", order=40, run=_run,
-    skip_fixtures=True, frameworks=("graphql",),
+    name="graphql-client", gate=Gate("typescript", order=40, skip_fixtures=True),
+    detect=_detect, frameworks=("graphql",),
 ))

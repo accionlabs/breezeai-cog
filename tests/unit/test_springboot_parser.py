@@ -153,6 +153,35 @@ def test_functional_router_routes(tmp_path) -> None:
     assert all(s.framework == "spring" for s in rec.statements if s.semanticType == "route")
 
 
+_FN_HANDLERS = b"""package demo;
+import org.springframework.context.annotation.Bean;
+import org.springframework.web.servlet.function.RouterFunction;
+import static org.springframework.web.servlet.function.RouterFunctions.route;
+import static org.springframework.web.servlet.function.RequestPredicates.*;
+
+public class Routes {
+    @Bean
+    public RouterFunction<?> r(Handler h) {
+        return route(GET("/a"), this::own)
+                .andRoute(GET("/b"), h::other)
+                .andRoute(GET("/c"), req -> ok().build());
+    }
+
+    ServerResponse own(ServerRequest req) { return null; }
+}
+"""
+
+
+def test_functional_handler_line_is_the_declaration_or_the_lambda(tmp_path) -> None:
+    rec = _parse(tmp_path, _FN_HANDLERS, "Routes.java")
+    got = {s.endpoint: (s.handler, s.handlerLine) for s in rec.statements if s.semanticType == "route"}
+    assert got == {
+        "/a": ("own", 15),     # this::own — declared in this class
+        "/b": ("other", None),  # h::other — a method of another class: no line
+        "/c": (None, 12),      # lambda: no name, its line
+    }
+
+
 def test_functional_routing_gated(tmp_path) -> None:
     # A Spring file without RouterFunction must not trigger the functional walk.
     src = b"package x; import org.springframework.stereotype.Service;\n@Service class S { void GET(String p){} }"
@@ -186,3 +215,321 @@ def test_array_path_mapping_splits(tmp_path) -> None:
     assert ("GET", "/orders/report/{fmt}") in eps
     assert ("GET", "/orders/x/{id:[0-9]{1,3}}") in eps   # single path, comma preserved
     assert not any('{"' in ep or ", " in ep for _, ep in eps)  # no raw array literal leaked
+
+
+# ── Context path (server.servlet.context-path) and functional nest prefixes ──────────────────
+_CTRL = (
+    "package a;\nimport org.springframework.web.bind.annotation.*;\n"
+    "@RestController\npublic class C {\n  @GetMapping(\"/x\")\n  public String x() { return \"\"; }\n}\n"
+)
+
+
+def _endpoints(stmts) -> dict[str, str | None]:
+    return {s.path: s.endpoint for s in stmts if s.semanticType == "route"}
+
+
+def test_context_path_prefixes_routes_of_its_module(analyze_files) -> None:
+    st = analyze_files({
+        # module "app": properties in resources and the same value in resources/config
+        "app/src/main/java/a/C.java": _CTRL,
+        "app/src/main/resources/application.properties": "server.port=8080\nserver.servlet.context-path=/shop\n",
+        "app/src/main/resources/config/application.properties": "server.servlet.context-path = /shop\n",
+        "app/src/main/resources/application-dev.properties": "server.servlet.context-path=/dev\n",
+        "app/src/test/resources/application.properties": "server.servlet.context-path=/test\n",
+        # module "yml": nested YAML; a profile document is ignored
+        "yml/src/main/java/a/C.java": _CTRL,
+        "yml/src/main/resources/application.yml": (
+            "server:\n  servlet:\n    context-path: /api\n---\n"
+            "spring:\n  config:\n    activate:\n      on-profile: dev\nserver:\n  servlet:\n    context-path: /x\n"
+        ),
+        # module "legacy": Spring Boot 1.x key
+        "legacy/src/main/java/a/C.java": _CTRL,
+        "legacy/src/main/resources/application.properties": "server.context-path=/old\n",
+        # module "plain": no context path → unchanged
+        "plain/src/main/java/a/C.java": _CTRL,
+    })
+    assert _endpoints(st) == {
+        "app/src/main/java/a/C.java": "/shop/x",
+        "yml/src/main/java/a/C.java": "/api/x",
+        "legacy/src/main/java/a/C.java": "/old/x",
+        "plain/src/main/java/a/C.java": "/x",
+    }
+
+
+def test_unresolvable_context_path_leaves_endpoint_empty(analyze_files) -> None:
+    st = analyze_files({
+        # base files disagree
+        "a/src/main/java/a/C.java": _CTRL,
+        "a/src/main/resources/application.properties": "server.servlet.context-path=/one\n",
+        "a/src/main/resources/config/application.yml": "server:\n  servlet:\n    context-path: /two\n",
+        # a placeholder cog does not resolve
+        "b/src/main/java/a/C.java": _CTRL,
+        "b/src/main/resources/application.properties": "server.servlet.context-path=${CTX:/b}\n",
+    })
+    routes = [s for s in st if s.semanticType == "route"]
+    assert {s.path: s.endpoint for s in routes} == {
+        "a/src/main/java/a/C.java": None, "b/src/main/java/a/C.java": None,
+    }
+    assert all(s.handler == "x" and s.method == "GET" for s in routes)  # the rest is kept
+
+
+_FN_NEST = b"""package demo;
+import org.springframework.context.annotation.Bean;
+import org.springframework.web.servlet.function.RouterFunction;
+import static org.springframework.web.servlet.function.RouterFunctions.*;
+import static org.springframework.web.servlet.function.RequestPredicates.*;
+
+public class Routes {
+    @Bean
+    public RouterFunction<?> r(Handler h) {
+        return route()
+            .nest(path("/v2").and(accept(JSON)), b -> b
+                .GET("/catalog", h::list)
+                .nest(path("/admin"), a -> a.DELETE("/items/{id}", h::delete)))
+            .nest(accept(JSON), b -> b.GET("/plain", h::plain))
+            .path("/v3", b -> b.POST("/orders", h::create))
+            .nest(path(PREFIX), b -> b.GET("/dyn", h::dyn))
+            .build();
+    }
+
+    @Bean
+    public RouterFunction<?> s(Handler h) {
+        return nest(path("/static"), route(GET("/s"), h::s));
+    }
+}
+"""
+
+
+def test_functional_nest_prefixes_compose(tmp_path) -> None:
+    rec = _parse(tmp_path, _FN_NEST, "Routes.java")
+    got = {s.handler: s.endpoint for s in rec.statements if s.semanticType == "route"}
+    assert got == {
+        "list": "/v2/catalog",
+        "delete": "/v2/admin/items/{id}",   # nested nests compose
+        "plain": "/plain",                  # accept(...) adds nothing
+        "create": "/v3/orders",             # builder .path(prefix, ...)
+        "dyn": None,                        # path(PREFIX): unresolved prefix → empty
+        "s": "/static/s",                   # static RouterFunctions.nest
+    }
+
+
+def test_security_annotations_are_guards(analyze_files) -> None:
+    # Class-level guards first, then the method's; @PermitAll / @PostAuthorize are not guards.
+    st = analyze_files({"src/main/java/a/Admin.java": """package a;
+import org.springframework.web.bind.annotation.*;
+import org.springframework.security.access.prepost.*;
+import org.springframework.security.access.annotation.Secured;
+
+@RestController
+@PreAuthorize("isAuthenticated()")
+public class Admin {
+  @Secured("ROLE_ADMIN")
+  @DeleteMapping("/users/{id}")
+  public void delete(String id) {}
+
+  @PostAuthorize("returnObject != null")
+  @GetMapping("/users/{id}")
+  public String get(String id) { return id; }
+}
+"""})
+    got = {(s.method, tuple(s.guards or ()), s.authRequired)
+           for s in st if s.semanticType == "route"}
+    assert got == {
+        ("DELETE", ("PreAuthorize(isAuthenticated())", "Secured(ROLE_ADMIN)"), True),
+        ("GET", ("PreAuthorize(isAuthenticated())",), True),
+    }
+
+
+def test_no_security_annotation_leaves_guards_unset(analyze_files) -> None:
+    st = analyze_files({"src/main/java/a/Open.java": """package a;
+import org.springframework.web.bind.annotation.*;
+@RestController
+public class Open {
+  @GetMapping("/ping")
+  public String ping() { return "ok"; }
+}
+"""})
+    [r] = [s for s in st if s.semanticType == "route"]
+    assert (r.guards, r.authRequired) == (None, None)
+
+
+# ── Global guards: servlet filters and MVC interceptors (decision Q9) ─────────────────────────
+_SPRING = "package a;\nimport org.springframework.stereotype.Component;\nimport org.springframework.web.filter.OncePerRequestFilter;\n"
+
+
+def test_filters_and_interceptors_guard_the_routes_they_cover(analyze_files) -> None:
+    m = "app/src/main/java/a/"
+    st = analyze_files({
+        "app/src/main/resources/application.properties": "server.servlet.context-path=/shop\n",
+        m + "AuthFilter.java": _SPRING + "@Component\npublic class AuthFilter extends OncePerRequestFilter {}\n",
+        m + "AuditFilter.java": (
+            "package a;\nimport jakarta.servlet.Filter;\n"
+            '@WebFilter(urlPatterns = {"/api/*"})\npublic class AuditFilter implements Filter {}\n'
+        ),
+        # a bean filter registered on /admin/* only; another registered on a non-literal pattern
+        m + "LegacyFilter.java": _SPRING + "@Component\npublic class LegacyFilter extends OncePerRequestFilter {}\n",
+        m + "DynFilter.java": _SPRING + "@Component\npublic class DynFilter extends OncePerRequestFilter {}\n",
+        m + "Filters.java": (
+            "package a;\nimport org.springframework.boot.web.servlet.FilterRegistrationBean;\n"
+            "public class Filters {\n"
+            "  FilterRegistrationBean<LegacyFilter> legacy() {\n"
+            "    FilterRegistrationBean<LegacyFilter> r = new FilterRegistrationBean<>(new LegacyFilter());\n"
+            '    r.addUrlPatterns("/admin/*");\n    return r;\n  }\n'
+            "  FilterRegistrationBean<DynFilter> dyn() {\n"
+            "    FilterRegistrationBean<DynFilter> r = new FilterRegistrationBean<>(new DynFilter());\n"
+            "    r.addUrlPatterns(props.path());\n    return r;\n  }\n}\n"
+        ),
+        m + "Web.java": (
+            "package a;\nimport org.springframework.web.servlet.config.annotation.*;\n"
+            "public class Web implements WebMvcConfigurer {\n"
+            "  private AuthInterceptor authInterceptor;\n"
+            "  public void addInterceptors(InterceptorRegistry registry) {\n"
+            '    registry.addInterceptor(new LogInterceptor()).addPathPatterns("/api/**")'
+            '.excludePathPatterns("/api/public/**");\n'
+            "    registry.addInterceptor(authInterceptor);\n"
+            "    registry.addInterceptor(new DynInterceptor()).addPathPatterns(paths);\n"
+            "  }\n}\n"
+        ),
+        m + "C.java": (
+            "package a;\nimport org.springframework.web.bind.annotation.*;\n"
+            "@RestController\npublic class C {\n"
+            '  @GetMapping("/api/orders/{id}") public String order() { return ""; }\n'
+            '  @GetMapping("/api/public/info") public String info() { return ""; }\n'
+            '  @GetMapping("/admin/stats") public String stats() { return ""; }\n'
+            '  @GetMapping("/home") public String home() { return ""; }\n}\n'
+        ),
+        # another module: none of app's filters or interceptors
+        "other/src/main/java/a/D.java": _CTRL,
+    })
+    got = {(s.endpoint, tuple(s.guards or ()), s.authRequired)
+           for s in st if s.semanticType == "route"}
+    assert got == {
+        ("/shop/api/orders/{id}", ("AuditFilter", "AuthFilter", "LogInterceptor", "AuthInterceptor"), None),
+        ("/shop/api/public/info", ("AuditFilter", "AuthFilter", "AuthInterceptor"), None),
+        ("/shop/admin/stats", ("AuthFilter", "LegacyFilter", "AuthInterceptor"), None),
+        ("/shop/home", ("AuthFilter", "AuthInterceptor"), None),
+        ("/x", (), None),
+    }
+
+
+def test_registration_bean_filter_through_a_local_variable(analyze_files) -> None:
+    m = "app/src/main/java/a/"
+    st = analyze_files({
+        m + "Web.java": (
+            "package a;\nimport org.springframework.boot.web.servlet.FilterRegistrationBean;\n"
+            "public class Web {\n  FilterRegistrationBean timing() {\n"
+            "    FilterRegistrationBean registration = new FilterRegistrationBean();\n"
+            "    Filter f = new TimingFilter();\n    registration.setFilter(f);\n"
+            '    registration.addUrlPatterns("/*");\n    return registration;\n  }\n'
+            "  FilterRegistrationBean ctx() {\n"
+            "    FilterRegistrationBean registration = new FilterRegistrationBean();\n"
+            "    Filter f = new ContextFilter();\n    registration.setFilter(f);\n"
+            '    registration.addUrlPatterns(Paths.SERVICES + "/*");\n    return registration;\n  }\n}\n'
+        ),
+        m + "C.java": _CTRL,
+    })
+    [r] = [s for s in st if s.semanticType == "route"]
+    assert r.guards == ["TimingFilter"]  # ContextFilter's pattern is not a literal → not added
+
+
+# ── Messaging: broker listeners (inbound) and template sends (outbound) ──────────────────────
+_MSG = "src/main/java/m/"
+
+
+def _msg(analyze_files, files: dict[str, str]):
+    st = analyze_files(files)
+    eps = {(s.handler, s.endpoint, s.framework, s.method, s.routeKind)
+           for s in st if s.semanticType == "eventbus_consumer"}
+    sends = {(s.path.rsplit("/", 1)[-1], s.startLine, s.endpoint, s.framework)
+             for s in st if s.semanticType == "eventbus_send"}
+    return eps, sends
+
+
+def test_listeners_one_binding_per_address(analyze_files) -> None:
+    eps, _ = _msg(analyze_files, {
+        "src/main/resources/application.yml": "app:\n  topics:\n    orders: orders.v1\n",
+        f"{_MSG}Topics.java": (
+            "package m;\npublic class Topics {\n"
+            '  public static final String BILLING = "billing";\n}\n'
+        ),
+        f"{_MSG}L.java": (
+            "package m;\n"
+            "import org.springframework.kafka.annotation.KafkaListener;\n"
+            "import org.springframework.amqp.rabbit.annotation.RabbitListener;\n"
+            "import org.springframework.jms.annotation.JmsListener;\n"
+            "import io.awspring.cloud.sqs.annotation.SqsListener;\n"
+            "import org.springframework.stereotype.Component;\n"
+            "@Component\npublic class L {\n"
+            '  private static final String AUDIT = "audit";\n'
+            '  @KafkaListener(topics = {"a", "b"}, groupId = "g")\n  public void two(String m) {}\n'
+            '  @KafkaListener(topics = "${app.topics.orders}")\n  public void prop(String m) {}\n'
+            '  @KafkaListener(topics = "${missing.key}")\n  public void unknown(String m) {}\n'
+            '  @KafkaListener(topicPattern = "evt.*")\n  public void pattern(String m) {}\n'
+            "  @RabbitListener(queues = Topics.BILLING)\n  public void bill(String m) {}\n"
+            "  @JmsListener(destination = AUDIT)\n  public void audit(String m) {}\n"
+            '  @SqsListener("jobs")\n  public void job(String m) {}\n'
+            "}\n"
+        ),
+    })
+    assert eps == {
+        ("two", "a", "kafka", "EVENT", "message"),
+        ("two", "b", "kafka", "EVENT", "message"),
+        ("prop", "orders.v1", "kafka", "EVENT", "message"),   # ${property} from base config
+        ("unknown", None, "kafka", "EVENT", "message"),       # unresolved → empty, never the key
+        ("pattern", None, "kafka", "EVENT", "message"),       # a pattern is not one address
+        ("bill", "billing", "rabbitmq", "MESSAGE", "message"),  # Class.FIELD constant
+        ("audit", "audit", "jms", "MESSAGE", "message"),        # same-class constant
+        ("job", "jobs", "aws-sqs", "MESSAGE", "message"),
+    }
+
+
+def test_class_level_listener_binds_its_handler_methods(analyze_files) -> None:
+    eps, _ = _msg(analyze_files, {
+        f"{_MSG}C.java": (
+            "package m;\n"
+            "import org.springframework.kafka.annotation.KafkaHandler;\n"
+            "import org.springframework.kafka.annotation.KafkaListener;\n"
+            '@KafkaListener(topics = "multi")\npublic class C {\n'
+            "  @KafkaHandler\n  public void onA(String a) {}\n"
+            "  @KafkaHandler\n  public void onB(Integer b) {}\n"
+            "  public void helper() {}\n}\n"
+        ),
+    })
+    assert {(h, e) for h, e, *_ in eps} == {("onA", "multi"), ("onB", "multi")}
+
+
+def test_template_sends(analyze_files) -> None:
+    _, sends = _msg(analyze_files, {
+        f"{_MSG}S.java": (
+            "package m;\n"
+            "import org.springframework.kafka.core.KafkaTemplate;\n"
+            "import org.springframework.amqp.rabbit.core.RabbitTemplate;\n"
+            "import org.springframework.jms.core.JmsTemplate;\n"
+            "import org.springframework.stereotype.Service;\n"
+            "@Service\npublic class S {\n"
+            "  private final KafkaTemplate<String, String> kafka;\n"
+            "  private final RabbitTemplate rabbit;\n"
+            "  private final JmsTemplate jms;\n"
+            "  S(KafkaTemplate<String, String> kafka, RabbitTemplate rabbit, JmsTemplate jms) {\n"
+            "    this.kafka = kafka; this.rabbit = rabbit; this.jms = jms;\n  }\n"
+            "  void go(String topic, Other other) {\n"
+            '    kafka.send("orders", "x");\n'                      # 15
+            "    kafka.send(topic, \"x\");\n"                       # 16 runtime → empty
+            "    kafka.sendDefault(\"x\");\n"                        # 17 default → empty
+            '    rabbit.convertAndSend("billing", "x");\n'          # 18 default exchange
+            '    rabbit.convertAndSend("", "billing", "x");\n'      # 19 "" exchange → queue
+            '    rabbit.convertAndSend("events", "rk", "x");\n'     # 20 exchange
+            '    this.jms.convertAndSend("audit", "x");\n'          # 21
+            '    other.send("orders", "x");\n'                      # 22 not a template → none
+            "  }\n}\n"
+        ),
+    })
+    assert sends == {
+        ("S.java", 15, "orders", "kafka"),
+        ("S.java", 16, None, "kafka"),
+        ("S.java", 17, None, "kafka"),
+        ("S.java", 18, "billing", "rabbitmq"),
+        ("S.java", 19, "billing", "rabbitmq"),
+        ("S.java", 20, "events", "rabbitmq"),
+        ("S.java", 21, "audit", "jms"),
+    }

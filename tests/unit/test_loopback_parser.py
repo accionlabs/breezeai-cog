@@ -115,9 +115,10 @@ def test_comment_between_decorator_and_handler(tmp_path) -> None:
     assert routes[("GET", "/timezones/{id}")].handler == "findById"
 
 
-def test_computed_path_rendered_wellformed(tmp_path) -> None:
-    # R1(a): a route path built by concatenation / template literal must render as a
-    # well-formed `{placeholder}` path, not a malformed `+`-spliced string.
+def test_computed_path_is_empty_unless_literal(tmp_path) -> None:
+    # A path built from a variable (concatenation or ${…}) is unknown: endpoint empty — never a
+    # `+`-spliced string or a `{name}` placeholder (it would read as a path parameter). A
+    # concatenation of literals is still a path.
     src = (
         b"import {get, post} from '@loopback/rest';\n"
         b"import appConfig from './config';\n"
@@ -128,6 +129,8 @@ def test_computed_path_rendered_wellformed(tmp_path) -> None:
         b"  async setting() {}\n"
         b"  @get('/api/v2/plain/literal')\n"
         b"  async plain() {}\n"
+        b"  @get('/api' + '/joined')\n"
+        b"  async joined() {}\n"
         b"}\n"
     )
     p = tmp_path / "c.controller.ts"
@@ -136,13 +139,10 @@ def test_computed_path_rendered_wellformed(tmp_path) -> None:
                        repo_root=tmp_path, capture_statements=True)
     eps = {s.handler: s.endpoint for s in LoopBackParser().parse_file(ctx).statements
            if s.semanticType == "route"}
-    # concat: no '+' and no dangling quote — a clean placeholder for the config var
-    assert "+" not in eps["count"] and "'" not in eps["count"]
-    assert eps["count"].endswith("/tender-status/count") and "{apiPathV2}" in eps["count"]
-    # template literal: ${...} normalized to {...}
-    assert eps["setting"] == "/{apiPathV2}/subscriber-setting"
-    # plain literal unchanged
+    assert eps["count"] is None
+    assert eps["setting"] is None
     assert eps["plain"] == "/api/v2/plain/literal"
+    assert eps["joined"] == "/api/joined"
 
 
 def test_request_and_response_dto(tmp_path) -> None:
@@ -208,3 +208,38 @@ def test_claims_selects_loopback() -> None:
     assert registry.select("x.ts", b"import {get} from '@loopback/rest';").name == "typescript-loopback"
     assert registry.select("x.ts", b"const x = 1;").name == "typescript"  # plain TS -> base
     registry.clear()
+
+
+# ── Application rest.basePath (app-level wiring) ──────────────────────────────────────────────
+_LB_CTRL = ("import { get } from '@loopback/rest';\nexport class ProductController {\n"
+            "  @get('/products')\n  find() { return []; }\n}\n")
+
+
+def _lb_endpoints(analyze_files, files: dict[str, str]) -> list[str | None]:
+    return [s.endpoint for s in analyze_files({"src/controllers/product.controller.ts": _LB_CTRL, **files})
+            if s.semanticType == "route" and s.framework == "loopback"]
+
+
+def test_rest_base_path_option_prefixes_routes(analyze_files) -> None:
+    app = ("import { RestApplication } from '@loopback/rest';\n"
+           "export class ShopApplication extends RestApplication {\n"
+           "  constructor() {\n    super({ rest: { port: 3000, basePath: '/api' } });\n  }\n}\n")
+    assert _lb_endpoints(analyze_files, {"src/application.ts": app}) == ["/api/products"]
+
+
+def test_base_path_call_prefixes_routes(analyze_files) -> None:
+    app = ("import { RestApplication } from '@loopback/rest';\n"
+           "export class ShopApplication extends RestApplication {\n"
+           "  constructor() {\n    super();\n    this.basePath('/v1');\n  }\n}\n")
+    assert _lb_endpoints(analyze_files, {"src/application.ts": app}) == ["/v1/products"]
+
+
+def test_unresolvable_base_path_leaves_endpoint_empty(analyze_files) -> None:
+    app = ("import { RestApplication } from '@loopback/rest';\n"
+           "export class ShopApplication extends RestApplication {\n"
+           "  constructor(opts) {\n    super({ rest: { basePath: opts.base } });\n  }\n}\n")
+    assert _lb_endpoints(analyze_files, {"src/application.ts": app}) == [None]
+
+
+def test_no_base_path_leaves_routes_unchanged(analyze_files) -> None:
+    assert _lb_endpoints(analyze_files, {}) == ["/products"]

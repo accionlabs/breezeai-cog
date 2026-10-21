@@ -13,15 +13,18 @@ Two signals — matching how the runtime is wired, and grounded on the real
 
 * **base type** — an operation root/namespace derives from the **non-generic**
   ``ObjectGraphType``. ``ObjectGraphType<T>`` (generic) is a result/data wrapper → excluded.
-* **name convention** — the class is a root (``Query``/``Mutation``/``Subscription``) or a
-  namespace group ending in one of those (``ProductQuery``, ``AdminMutations``, …). This is
-  the same convention the schema wiring relies on; the framework itself is name-agnostic, so
-  a root registered under an off-convention class name is a known blind spot (honest gap, not
-  a wrong route — see the task notes). HotChocolate (attribute-based) is not handled here.
+* **schema wiring** — the schema assigns the class as a root (``Query = sp.GetRequiredService<
+  RootQueries>()`` in a ``Schema`` subclass, possibly in another file): the registered fact
+  ``graphql-dotnet.schema-roots`` (:mod:`.schema_roots`) gives its kind, whatever its name;
+* **name convention** — otherwise, the class is a root (``Query``/``Mutation``/``Subscription``)
+  or a namespace group ending in one of those (``ProductQuery``, ``AdminMutations``, …).
+  HotChocolate (attribute-based) is not handled here.
 
 Emits ``semanticType="route"``, ``framework="graphql"``, ``routeKind ∈ {query, mutation,
-subscription}``, ``method`` = the upper-cased kind, ``endpoint``/``handler`` = the operation
-name — mirroring the TypeScript GraphQL detector so the backend joins them uniformly.
+subscription}``, ``method`` = the upper-cased kind, ``endpoint`` = the operation name —
+mirroring the TypeScript GraphQL detector so the backend joins them uniformly. ``handler`` is the
+resolver: a method group's name (``handlerLine`` its declaration), or empty with ``handlerLine``
+at the lambda for an inline resolver.
 """
 
 from __future__ import annotations
@@ -30,9 +33,9 @@ from typing import Any, Iterator
 
 from tree_sitter import Node
 
-from ...emit import disambiguate, statement_id
-from ...schemas import Statement
+from ..emits import Emit
 from ..treesitter import first_line, node_text
+from .schema_roots import schema_roots
 
 _FIELD_CALLS = {"Field", "FieldAsync"}      # name is the first positional string arg
 _ADDFIELD_CALLS = {"AddField"}              # name is a `Name = "…"` object-initializer entry
@@ -52,16 +55,17 @@ def _name_kind(name: str) -> str | None:
     return None
 
 
-def _operation_kind(cls: Any) -> str | None:
+def _operation_kind(cls: Any, schema_roots: dict[str, str]) -> str | None:
     """Operation kind if ``cls`` is a graphql-dotnet operation type (non-generic
-    ``ObjectGraphType`` whose name follows the query/mutation/subscription convention),
-    else None. A generic base (``ObjectGraphType<T>``) is a result/data wrapper → excluded."""
+    ``ObjectGraphType`` the schema assigns as a root, or whose name follows the
+    query/mutation/subscription convention), else None. A generic base (``ObjectGraphType<T>``)
+    is a result/data wrapper → excluded."""
     ext = cls.extends or ""
     if "<" in ext:  # ObjectGraphType<T> — a data/result type, not an operation root
         return None
     if ext.rsplit(".", 1)[-1] != "ObjectGraphType":
         return None
-    return _name_kind(cls.name)
+    return schema_roots.get(cls.name) or _name_kind(cls.name)
 
 
 def _bare_call_name(func: Node, source: bytes) -> str | None:
@@ -139,15 +143,77 @@ def _field_operations(class_node: Node, source: bytes) -> Iterator[tuple[str, No
     yield from walk(class_node)
 
 
+_RESOLVE_CALLS = frozenset({"Resolve", "ResolveAsync", "ResolveScopedAsync", "ResolveStream"})
+_RESOLVE_ARGS = frozenset({"resolve", "resolver"})
+_LAMBDAS = frozenset({"lambda_expression", "anonymous_method_expression"})
+
+
+def _resolver_arg(field_call: Node, source: bytes) -> Node | None:
+    """The resolver expression of a ``Field`` declaration: the argument of a chained
+    ``.Resolve(...)`` (``Field<T>("x").Description(…).Resolve(ctx => …)``) or a ``resolve:``
+    named argument (``Field<T>("x", resolve: ctx => …)``). None when the field has no resolver
+    (graphql-dotnet then reads the property of the source object)."""
+    args = field_call.child_by_field_name("arguments")
+    for a in args.named_children if args is not None else []:
+        name = a.child_by_field_name("name")
+        if a.type == "argument" and name is not None and node_text(name, source) in _RESOLVE_ARGS:
+            return a.named_children[-1]
+    node = field_call
+    while (parent := node.parent) is not None and parent.type == "member_access_expression":
+        call = parent.parent
+        if call is None or call.type != "invocation_expression":
+            break
+        member = parent.child_by_field_name("name")
+        if member is not None and node_text(member, source) in _RESOLVE_CALLS:
+            arg_list = call.child_by_field_name("arguments")
+            first = next((c for c in arg_list.named_children if c.type == "argument"), None) \
+                if arg_list is not None else None
+            return first.named_children[-1] if first is not None and first.named_children else None
+        node = call
+    return None
+
+
+def _method_lines(class_node: Node, source: bytes) -> dict[str, int | None]:
+    """Method name → declaration line for the methods of one class (overloads → None)."""
+    out: dict[str, int | None] = {}
+    body = class_node.child_by_field_name("body")
+    for m in body.named_children if body is not None else []:
+        name = m.child_by_field_name("name") if m.type == "method_declaration" else None
+        if name is not None:
+            key = node_text(name, source)
+            out[key] = m.start_point[0] + 1 if key not in out else None
+    return out
+
+
+def _handler(field_call: Node, source: bytes, methods: dict[str, int | None]
+             ) -> tuple[str | None, int | None]:
+    """(handler, handlerLine) of a field: an inline lambda has no name, only its line; a method
+    group is the method (line of its declaration in this class, else none); no resolver → none."""
+    arg = _resolver_arg(field_call, source)
+    if arg is None:
+        return None, None
+    if arg.type in _LAMBDAS:
+        return None, arg.start_point[0] + 1
+    if arg.type == "identifier":
+        name = node_text(arg, source)
+        return name, methods.get(name)
+    if arg.type == "member_access_expression":
+        return node_text(arg, source), None
+    return None, None
+
+
 def detect_graphql_dotnet_routes(
-    record: Any, root: Node, source: bytes, path: str, seen: set[str]
-) -> list[Statement]:
+    record: Any, root: Node, source: bytes, path: str, index: Any = None,
+) -> list[Emit]:
+    """Each root field (``Field<T>("name", …)``) of a query / mutation / subscription type, for
+    :func:`~..emits.apply`."""
+    roots = schema_roots(index, path)
     op_types = {cls.name: (cls.id, kind) for cls in record.classes
-                if (kind := _operation_kind(cls)) is not None}
+                if (kind := _operation_kind(cls, roots)) is not None}
     if not op_types:
         return []
 
-    routes: list[Statement] = []
+    routes: list[Emit] = []
 
     def visit(node: Node) -> None:
         for child in node.named_children:
@@ -156,7 +222,7 @@ def detect_graphql_dotnet_routes(
                 name = node_text(name_node, source) if name_node is not None else None
                 info = op_types.get(name) if name is not None else None
                 if info is not None:
-                    _emit(child, info, source, path, seen, routes)
+                    _emit(child, info, source, routes)
                     continue  # its Field calls are consumed here — don't recurse into it
             visit(child)
 
@@ -164,25 +230,19 @@ def detect_graphql_dotnet_routes(
     return routes
 
 
-def _emit(class_node: Node, info: tuple[str, str], source: bytes, path: str,
-          seen: set[str], routes: list[Statement]) -> None:
+def _emit(class_node: Node, info: tuple[str, str], source: bytes, routes: list[Emit]) -> None:
     parent_id, kind = info
+    methods = _method_lines(class_node, source)
     for op, node in _field_operations(class_node, source):
-        sl, sc = node.start_point[0] + 1, node.start_point[1]
-        routes.append(Statement(
-            id=disambiguate(statement_id(path, sl, sc), seen),
-            parentId=parent_id,
-            nodeType="invocation_expression",
+        handler, handler_line = _handler(node, source, methods)
+        routes.append(Emit(node, dict(
             semanticType="route",
-            text=first_line(node_text(node, source))[:120],
             method=kind.upper(),
             endpoint=op,
             framework="graphql",
-            handler=op,
-            handlerLine=sl,
+            handler=handler,
+            handlerLine=handler_line,
             routeKind=kind,
             isRegex=False,
-            startLine=sl,
-            endLine=node.end_point[0] + 1,
-            path=path,
-        ))
+        ), parent=parent_id, node_type="invocation_expression",
+            text=first_line(node_text(node, source))[:120]))

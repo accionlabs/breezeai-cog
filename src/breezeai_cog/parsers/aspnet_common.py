@@ -27,10 +27,13 @@ from typing import Any
 
 from tree_sitter import Node
 
-from ..emit import disambiguate, statement_id
-from ..schemas import Decorator, FileRecord, Function, Statement
+from .emits import Emit
+from ..schemas import Decorator, FileRecord, Function
 from .dotnet_common import response_dto, simple_attr_name
 from .index_common import walk_heritage
+from .aspnet_areas import (
+    NO_AREA, UNKNOWN, Area, controller_area, convention_endpoint,
+)
 from .treesitter import node_text
 
 _HTTP_ATTRS = {
@@ -50,8 +53,9 @@ _MAP_METHODS = {
 }
 # Health-check endpoint: MapHealthChecks("/path", …) → GET at the literal path.
 _HEALTH_METHODS = {"MapHealthChecks"}
-# GraphQL HTTP transport mount: UseGraphQL<TSchema>(path) / MapGraphQL(path) → POST. The
-# path is often an identifier/omitted; graphql-dotnet's convention default is /graphql.
+# GraphQL HTTP transport mount: UseGraphQL<TSchema>(path) / MapGraphQL(path) → POST, the Target
+# Spec's current form. The path is often an identifier/omitted; graphql-dotnet's convention
+# default is /graphql. It serves every operation of the schema: framework code, no handler.
 _GRAPHQL_MOUNTS = {"UseGraphQL", "MapGraphQL"}
 _GRAPHQL_MOUNT_DEFAULT = "/graphql"
 # GraphQL dev-UI middleware, each with a documented default path when called with no path.
@@ -61,6 +65,9 @@ _GRAPHQL_UIS = {
     "UseGraphQLGraphiQL": "/ui/graphiql",
     "UseGraphQLAltair": "/ui/altair",
 }
+#: Calls that register a URL served by framework code, with no handler of ours: its binding is
+#: recorded with an empty handler (contract §4).
+FRAMEWORK_SERVED: frozenset[str] = frozenset(_HEALTH_METHODS | _GRAPHQL_MOUNTS | _GRAPHQL_UIS.keys())
 # MapControllers()/MapControllerRoute() only *enable* attribute/conventional routing; the
 # concrete controller endpoints come from detect_controller_routes, so they emit nothing
 # here (a conventional-route pattern like "{controller}/{action}" is not a callable path).
@@ -191,17 +198,14 @@ def _is_conventional_action(fn: Function) -> bool:
 
 
 def _route_statement(
-    fn: Function, method: str, endpoint: str, text: str,
-    auth_required: bool | None, guards: list[str] | None, seen: set[str],
-) -> Statement:
-    """Build one controller-route ``Statement`` (``nodeType="synthetic"`` — attribute/convention
-    derived, no backing AST node). Shared by the attribute-route and convention-route paths."""
-    return Statement(
-        id=disambiguate(statement_id(fn.path, fn.startLine, 0), seen),
-        parentId=fn.id,
-        nodeType="synthetic",
+    root: Node, fn: Function, method: str, endpoint: str | None, text: str,
+    auth_required: bool | None, guards: list[str] | None,
+) -> Emit:
+    """One controller route (``nodeType="synthetic"`` — attribute/convention derived, read off
+    the record, so the file's root stands in for a node and the span is the action's). Shared
+    by the attribute-route and convention-route paths."""
+    return Emit(root, dict(
         semanticType="route",
-        text=text,
         method=method,
         endpoint=endpoint,
         framework="aspnet",
@@ -213,32 +217,78 @@ def _route_statement(
         guards=guards,
         requestDTO=_request_dto(fn),
         responseDTO=response_dto(fn.returnType),
-        startLine=fn.startLine,
-        endLine=fn.endLine,
-        path=fn.path,
-    )
+    ), parent=fn.id, node_type="synthetic", text=text, line=fn.startLine, col=0,
+        end_line=fn.endLine)
 
 
-def detect_controller_routes(record: FileRecord, index: Any = None) -> list[Statement]:
-    # (prefix, chain guards, chain-resolved, has-any-[Route], class name, is-[ApiController]) per id
-    controllers: dict[str, tuple[str, list[str], bool, bool, str, bool]] = {}
+def _class_nodes(root: Node, source: bytes) -> dict[tuple[str, int], Node]:
+    """C# class declarations by (name, start line) — the line a Class record starts at."""
+    out: dict[tuple[str, int], Node] = {}
+    stack = [root]
+    while stack:
+        node = stack.pop()
+        if node.type == "class_declaration":
+            nm = node.child_by_field_name("name")
+            if nm is not None:
+                out[(node_text(nm, source), node.start_point[0] + 1)] = node
+        stack.extend(node.named_children)
+    return out
+
+
+def _with_area(endpoint: str | None, area: Area, sub_absolute: bool) -> str | None:
+    """An attribute-route address under the controller's area: the ``[RouteArea]`` prefix in
+    front (not for an absolute ``~/`` template), the ``[area]`` token filled. Unknown area
+    value → unknown address."""
+    if endpoint is None:
+        return None
+    if "[area]" in endpoint.lower():
+        if area.token is None or area.token is UNKNOWN:
+            return None
+        endpoint = re.sub(r"\[area\]", str(area.token), endpoint, flags=re.IGNORECASE)
+    if area.route_prefix is UNKNOWN and not sub_absolute:
+        return None
+    if isinstance(area.route_prefix, str) and not sub_absolute:
+        return _join(area.route_prefix, endpoint)
+    return endpoint
+
+
+def _area_convention(area: Area, cls_name: str, action: str) -> str | None:
+    """The convention address of an area controller's action: from its area's registration
+    template, or unknown when the controller is in an area with no known route."""
+    if area.convention is not None:
+        ctrl = cls_name[: -len("Controller")] if cls_name.endswith("Controller") else cls_name
+        return convention_endpoint(area.convention, ctrl, action)
+    if area.convention_unknown:
+        return None
+    return _convention_endpoint(cls_name, action)
+
+
+def detect_controller_routes(record: FileRecord, root: Node, index: Any = None,
+                             source: bytes | None = None) -> list[Emit]:
+    """Attribute and convention routes of this file's controllers. ``source`` (C#) lets an
+    area controller's actions be served under its area (:mod:`.aspnet_areas`)."""
+    # (prefix, chain guards, chain-resolved, has-any-[Route], class name, is-[ApiController],
+    # area) per id
+    controllers: dict[str, tuple[str, list[str], bool, bool, str, bool, Area]] = {}
+    nodes = _class_nodes(root, source) if source is not None else {}
     for cls in record.classes:
         if not _is_controller(cls):
             continue
         route, guards, resolved = _resolve_chain(cls, index)
         base = _controller_token(route, cls.name) if route is not None else ""
         is_api = "ApiController" in {simple_attr_name(d.name) for d in cls.decorators}
-        controllers[cls.id] = (base, guards, resolved, route is not None, cls.name, is_api)
+        area = (controller_area(nodes.get((cls.name, cls.startLine)), source, record.path, index)
+                if source is not None else NO_AREA)
+        controllers[cls.id] = (base, guards, resolved, route is not None, cls.name, is_api, area)
     if not controllers:
         return []
 
-    seen = {s.id for s in record.statements}
-    routes: list[Statement] = []
+    routes: list[Emit] = []
     for fn in record.functions:
         info = controllers.get(fn.parentId)
         if info is None:
             continue
-        base, cls_guards, resolved, has_class_route, cls_name, is_api = info
+        base, cls_guards, resolved, has_class_route, cls_name, is_api, area = info
         prefix_unknown = not has_class_route and not resolved  # inherited base we can't see
         method_route = _route_template(fn.decorators)
         fn_guards = _guards(fn.decorators)
@@ -248,23 +298,29 @@ def detect_controller_routes(record: FileRecord, index: Any = None) -> list[Stat
                          and ("Authorize" in cls_guards or "Authorize" in fn_guards)) or None
         all_guards = (cls_guards + fn_guards) or None
         verb_attrs = [d for d in fn.decorators if simple_attr_name(d.name) in _HTTP_ATTRS]
+        bound: set[tuple[str, str]] = set()  # one binding per (verb, endpoint): [HttpPost] twice is one
         for dec in verb_attrs:
             verb = _HTTP_ATTRS[simple_attr_name(dec.name)]
             for sub in _method_templates(_first_arg(dec), method_route):
+                endpoint: str | None
                 if _is_absolute(sub):
-                    endpoint = _absolute_endpoint(sub)  # overrides the prefix → base-independent
+                    endpoint = _with_area(_absolute_endpoint(sub), area, True)
                 elif prefix_unknown:
                     # honest-null: a relative path needs the (unknowable) inherited prefix.
                     # Emit nothing rather than a fabricated endpoint — but only for this
                     # relative sub; an absolute sibling above is still emitted.
                     continue
-                elif base or sub:
-                    endpoint = _join(base, sub)
+                elif base or sub or has_class_route or method_route is not None:
+                    # an attribute route (a present-but-empty `[Route("")]` is the prefix root)
+                    endpoint = _with_area(_join(base, sub), area, False)
                 else:
                     # verb attribute but no route anywhere → MVC convention /{controller}/{action}
-                    endpoint = _convention_endpoint(cls_name, _action_name(fn))
+                    endpoint = _area_convention(area, cls_name, _action_name(fn))
+                if (verb, endpoint) in bound:
+                    continue
+                bound.add((verb, endpoint))
                 routes.append(_route_statement(
-                    fn, verb, endpoint, f"[{dec.name}]", auth_required, all_guards, seen))
+                    root, fn, verb, endpoint, f"[{dec.name}]", auth_required, all_guards))
         # Classic MVC convention: a public action with NO [HttpX] attribute defaults to a GET at
         # /{controller}/{action} (or a bare method-level [Route], if any). Skipped for
         # [ApiController] (attribute routing is required there) and when the inherited prefix is
@@ -272,13 +328,14 @@ def detect_controller_routes(record: FileRecord, index: Any = None) -> list[Stat
         if not verb_attrs and not is_api and not prefix_unknown and _is_conventional_action(fn):
             sub = method_route or ""
             if _is_absolute(sub):
-                endpoint = _absolute_endpoint(sub)
-            elif base or sub:
-                endpoint = _join(base, sub)
+                endpoint = _with_area(_absolute_endpoint(sub), area, True)
+            elif base or sub or method_route is not None:
+                # an attribute route (a present-but-empty `[Route("")]` is the prefix root)
+                endpoint = _with_area(_join(base, sub), area, False)
             else:
-                endpoint = _convention_endpoint(cls_name, _action_name(fn))
+                endpoint = _area_convention(area, cls_name, _action_name(fn))
             routes.append(_route_statement(
-                fn, "GET", endpoint, f"(convention) {fn.name}", auth_required, all_guards, seen))
+                root, fn, "GET", endpoint, f"(convention) {fn.name}", auth_required, all_guards))
     return routes
 
 
@@ -286,20 +343,22 @@ def detect_minimal_api_routes(
     root: Node,
     source: bytes,
     path: str,
-    seen_ids: set[str],
     *,
     invocation_type: str,
     member_type: str,
-) -> list[Statement]:
+) -> list[Emit]:
     """AST-walk for endpoint registrations on an ``app``/``endpoints`` object:
     ``MapGet/MapPost/…`` minimal APIs, ``MapHealthChecks``, and the GraphQL HTTP mount +
     dev-UI middleware (``UseGraphQL``/``MapGraphQL``/``UseGraphQLPlayground``/…). Grammar-
     specific node/field names are supplied by the C#/VB caller."""
-    routes: list[Statement] = []
+    routes: list[Emit] = []
     name_field = "name" if member_type == "member_access_expression" else "member"
     fn_field = "function" if invocation_type == "invocation_expression" else "target"
+    decls: dict[str, dict[str, int | None]] | None = None  # built lazily, only for Map* calls
+    groups: _Groups | None = None  # built lazily, only for Map* calls
 
     def visit(node: Node) -> None:
+        nonlocal decls, groups
         for child in node.named_children:
             if child.type == invocation_type:
                 func = child.child_by_field_name(fn_field)
@@ -307,27 +366,194 @@ def detect_minimal_api_routes(
                     method = _member_method_name(func, source, name_field)
                     spec = _endpoint_spec(method, child, root, source)
                     if spec is not None:
-                        verb, framework, endpoint = spec
-                        start = child.start_point[0] + 1
-                        routes.append(Statement(
-                            id=disambiguate(statement_id(path, start, child.start_point[1]), seen_ids),
-                            parentId=path,
-                            nodeType=child.type,
+                        verb, framework, spec_endpoint = spec
+                        endpoint: str | None = spec_endpoint
+                        handler: str | None = None
+                        handler_line: int | None = None
+                        if method in _MAP_METHODS:
+                            if decls is None:
+                                decls = _declaration_lines(root, source)
+                            handler, handler_line = _minimal_handler(
+                                child, source, invocation_type, member_type, decls)
+                            if groups is None:
+                                groups = _Groups(root, source, invocation_type, member_type,
+                                                 fn_field, name_field)
+                            prefix = groups.prefix(_receiver(func, name_field), frozenset())
+                            path_part = _minimal_path(child, source)
+                            # Group prefix + route pattern. A group whose prefix exists but
+                            # cannot be resolved, or a non-literal pattern → empty (Q8).
+                            endpoint = (_join(prefix, path_part)
+                                        if prefix is not None and path_part is not None else None)
+                        routes.append(Emit(child, dict(
                             semanticType="route",
-                            text=node_text(child, source).split("\n", 1)[0][:200],
                             method=verb,
                             endpoint=endpoint,
                             framework=framework,
+                            handler=handler,
+                            handlerLine=handler_line,
                             routeKind="route",
                             isRegex=False,
-                            startLine=start,
-                            endLine=child.end_point[0] + 1,
-                            path=path,
-                        ))
+                        ), parent=path,
+                            text=node_text(child, source).split("\n", 1)[0][:200]))
             visit(child)
 
     visit(root)
     return routes
+
+
+#: Inline handler delegates: no name; ``handlerLine`` is where they start.
+_INLINE_DELEGATES = frozenset({"lambda_expression", "anonymous_method_expression"})
+#: Declarations a method-group handler can name (C# methods and top-level local functions).
+_DECLARATIONS = frozenset({"method_declaration", "local_function_statement"})
+
+
+def _declaration_lines(root: Node, source: bytes) -> dict[str, dict[str, int | None]]:
+    """Enclosing class name (``""`` for top-level local functions) → {method name → declaration
+    line}. A name declared twice in the same scope (overloads) → None (honest-null)."""
+    out: dict[str, dict[str, int | None]] = {}
+
+    def walk(node: Node, owner: str) -> None:
+        for c in node.named_children:
+            if c.type in _DECLARATIONS:
+                name = c.child_by_field_name("name")
+                if name is not None:
+                    scope = out.setdefault(owner, {})
+                    key = node_text(name, source)
+                    scope[key] = c.start_point[0] + 1 if key not in scope else None
+                continue  # a nested local function is not addressable as a method group here
+            if c.type == "class_declaration":
+                name = c.child_by_field_name("name")
+                walk(c, node_text(name, source) if name is not None else "?")
+            else:
+                walk(c, owner)
+
+    walk(root, "")
+    return out
+
+
+def _minimal_handler(
+    call: Node, source: bytes, invocation_type: str, member_type: str,
+    decls: dict[str, dict[str, int | None]],
+) -> tuple[str | None, int | None]:
+    """(handler, handlerLine) of a ``MapGet``/``MapPost``/… call — its LAST argument (the
+    delegate follows the route pattern in every minimal-API overload).
+
+    - an inline lambda / anonymous method: no name; ``handlerLine`` is where it starts;
+    - a method group (``GetOrders`` / ``Handlers.GetOrders``): its text as the name;
+      ``handlerLine`` is its declaration when declared once in this file (a bare name: a
+      top-level local function or a method of a class here; ``Type.Method``: a method of class
+      ``Type`` here), else empty;
+    - a wrapper call: unwrapped to its last argument. Anything else: (None, None)."""
+    args = _positional_args(call)
+    if len(args) < 2:
+        return None, None
+    last: Node | None = args[-1]
+    while last is not None and last.type == invocation_type:
+        inner = _positional_args(last)
+        last = inner[-1] if inner else None
+    if last is None:
+        return None, None
+    if last.type in _INLINE_DELEGATES:
+        return None, last.start_point[0] + 1
+    if last.type == "identifier":
+        name = node_text(last, source)
+        hits = [scope[name] for scope in decls.values() if name in scope]
+        return name, hits[0] if len(hits) == 1 else None
+    if last.type == member_type:
+        text = node_text(last, source)
+        owner, _, member = text.rpartition(".")
+        return text, decls.get(owner.rsplit(".", 1)[-1], {}).get(member)
+    return None, None
+
+
+def _receiver(func: Node, name_field: str) -> Node | None:
+    """The object a member call is made on (``api`` in ``api.MapGet``)."""
+    obj = func.child_by_field_name("expression")
+    if obj is not None:
+        return obj
+    name = func.child_by_field_name(name_field)
+    return next((c for c in func.named_children if c != name), None)
+
+
+class _Groups:
+    """Route-group prefixes of one file: ``var api = app.MapGroup("/api")`` (nested groups,
+    chained ``app.MapGroup("/x").MapGet(...)``, builder calls such as ``.RequireAuthorization()``
+    in between). :meth:`prefix` → ``""`` for the app itself, the composed prefix of a group, or
+    None when a group's prefix exists but cannot be resolved (a non-literal ``MapGroup`` argument,
+    a variable assigned two different groups, a ``RouteGroupBuilder`` parameter whose caller is in
+    another file)."""
+
+    def __init__(self, root: Node, source: bytes, invocation_type: str, member_type: str,
+                 fn_field: str, name_field: str) -> None:
+        self.source, self.invocation_type, self.member_type = source, invocation_type, member_type
+        self.fn_field, self.name_field = fn_field, name_field
+        self.values: dict[str, Node | None] = {}  # variable → its group expression (None: ambiguous)
+        self.params: set[str] = set()  # RouteGroupBuilder parameters (prefix set by the caller)
+        self._collect(root)
+
+    def _collect(self, node: Node) -> None:
+        for c in node.named_children:
+            if c.type == "variable_declarator":
+                name = c.child_by_field_name("name")
+                value = c.named_children[-1] if len(c.named_children) > 1 else None
+                if name is not None and value is not None and self._is_group(value):
+                    self._assign(node_text(name, self.source), value)
+            elif c.type == "assignment_expression":
+                left, right = c.child_by_field_name("left"), c.child_by_field_name("right")
+                if left is not None and right is not None and left.type == "identifier" \
+                        and self._is_group(right):
+                    self._assign(node_text(left, self.source), right)
+            elif c.type == "parameter":
+                ptype, pname = c.child_by_field_name("type"), c.child_by_field_name("name")
+                if ptype is not None and pname is not None \
+                        and node_text(ptype, self.source).rsplit(".", 1)[-1] == "RouteGroupBuilder":
+                    self.params.add(node_text(pname, self.source))
+            self._collect(c)
+
+    def _assign(self, name: str, value: Node) -> None:
+        prev = self.values.get(name, value)
+        same = prev is not None and node_text(prev, self.source) == node_text(value, self.source)
+        self.values[name] = value if name not in self.values or same else None
+
+    def _call_name(self, call: Node) -> str:
+        func = call.child_by_field_name(self.fn_field)
+        if func is None or func.type != self.member_type:
+            return ""
+        return _member_method_name(func, self.source, self.name_field)
+
+    def _is_group(self, expr: Node) -> bool:
+        """Whether an expression is a ``MapGroup`` call (possibly followed by builder calls)."""
+        while expr.type == self.invocation_type:
+            if self._call_name(expr) == "MapGroup":
+                return True
+            func = expr.child_by_field_name(self.fn_field)
+            inner = _receiver(func, self.name_field) if func is not None else None
+            if inner is None:
+                return False
+            expr = inner
+        return False
+
+    def prefix(self, expr: Node | None, seen: frozenset[str]) -> str | None:
+        if expr is None:
+            return ""
+        if expr.type == self.invocation_type:
+            func = expr.child_by_field_name(self.fn_field)
+            inner = _receiver(func, self.name_field) if func is not None else None
+            base = self.prefix(inner, seen)
+            if self._call_name(expr) != "MapGroup":
+                return base  # .RequireAuthorization() / .WithTags(...) return the same group
+            sub = _minimal_path(expr, self.source)
+            return _join(base, sub) if base is not None and sub is not None else None
+        if expr.type == "identifier":
+            name = node_text(expr, self.source)
+            if name in self.params:
+                return None
+            if name not in self.values:
+                return ""  # the app / endpoint builder itself
+            value = self.values[name]
+            return self.prefix(value, seen | {name}) if value is not None and name not in seen \
+                else None
+        return ""
 
 
 def _member_method_name(func: Node, source: bytes, name_field: str) -> str:
@@ -387,18 +613,6 @@ def _graphql_mount_path(call: Node, root: Node, source: bytes) -> str:
     return _GRAPHQL_MOUNT_DEFAULT
 
 
-def _ui_path(call: Node, source: bytes, default: str) -> str | None:
-    """Endpoint of a GraphQL dev-UI middleware: a literal path arg, else the library default
-    when called with no args. An unparseable options object → None (path may be overridden;
-    do not guess)."""
-    args = _positional_args(call)
-    if not args:
-        return default
-    if args[0].type == "string_literal":
-        return _literal(args[0], source)
-    return None
-
-
 def _resolve_str(name: str, root: Node, source: bytes) -> str | None:
     """In-file value of a string field/local (``private readonly string _x = "…";`` or
     ``var x = "…";``) — the first ``variable_declarator`` binding ``name`` to a string."""
@@ -421,16 +635,31 @@ def _resolve_str(name: str, root: Node, source: bytes) -> str | None:
     return found
 
 
+def _ui_path(call: Node, source: bytes, default: str) -> str | None:
+    """Endpoint of a GraphQL dev-UI middleware: a literal path arg, else the library default
+    when called with no args. An unparseable options object → None (path may be overridden;
+    do not guess)."""
+    args = _positional_args(call)
+    if not args:
+        return default
+    if args[0].type == "string_literal":
+        return _literal(args[0], source)
+    return None
+
+
 def _minimal_path(call: Node, source: bytes) -> str | None:
-    """Route template = the FIRST argument's string literal. The args that follow (the handler
-    delegate/lambda) may hold their own string literals — never mistake those for the path;
-    return None when the first arg isn't a literal (absent beats a fabricated endpoint)."""
+    """Route template = the FIRST argument when it is a string literal. The args that follow
+    (the handler delegate/lambda) may hold their own string literals — never mistake those for
+    the path; return None when the first arg isn't itself a literal (``PathOf("x")``,
+    ``Config.Prefix``): absent beats a fabricated endpoint."""
     args = call.child_by_field_name("arguments")
     first = args.named_children[0] if args is not None and args.named_children else None
     if first is None:
         return None
-    lit = _find_string(first)
-    return _literal(lit, source) if lit is not None else None
+    inner = first
+    while inner.type != "string_literal" and len(inner.named_children) == 1:
+        inner = inner.named_children[0]  # argument / expression wrappers (VB nests several)
+    return _literal(inner, source) if inner.type == "string_literal" else None
 
 
 def _literal(lit: Node, source: bytes) -> str:
@@ -470,26 +699,44 @@ def _maproute_url(call: Node, source: bytes) -> str | None:
     return strings[1] if len(strings) >= 2 else None
 
 
+#: Statement nodes that are just a call (``routes.MapRoute(…);``), in C# and VB.
+_CALL_STATEMENTS = frozenset({"expression_statement", "call_statement"})
+
+
+def _call_statement(call: Node) -> Node:
+    """The statement that is just ``call`` (through VB's ``expression`` wrapper), else ``call``."""
+    node = call
+    while node.parent is not None and node.parent.start_byte == call.start_byte:
+        node = node.parent
+        if node.type in _CALL_STATEMENTS:
+            return node
+    return call
+
+
 def detect_route_registrations(
     root: Node,
     source: bytes,
     path: str,
-    seen_ids: set[str],
     *,
     invocation_type: str,
     member_type: str,
-) -> list[Statement]:
+) -> tuple[list[Emit], bool]:
     """AST-walk for MVC / Web-API **convention-route registrations** —
     ``routes.MapRoute(name, url, defaults)`` / ``config.Routes.MapHttpRoute(…)`` declared in
-    ``RouteConfig`` / ``Global.asax`` / an ``AreaRegistration``. Emits the declared URL
-    template as a ``route`` (method ``ANY``, since a convention route matches any verb), with
-    the default ``controller``[.``action``] as the handler. Grammar-specific node/field names
-    are supplied by the C#/VB caller (Phase 2 of the MVC endpoint-resolution work)."""
-    routes: list[Statement] = []
+    ``RouteConfig`` / ``Global.asax`` / an ``AreaRegistration``. Emits the declared URL template
+    as a ``route`` (method ``ANY``, since a convention route matches any verb), with the default
+    ``controller``[.``action``] as the handler — the Target Spec's current form, a convention
+    template (``{controller}/{action}/{id}``) included; there the handler is empty, since the
+    URL picks it. The record is the ``MapRoute(…)`` statement itself when the base parser
+    captured one, else a new one on the call. Grammar-specific node/field names are
+    supplied by the C#/VB caller. Returns the records and whether any registration was seen."""
+    routes: list[Emit] = []
+    seen_registration = False
     name_field = "name" if member_type == "member_access_expression" else "member"
     fn_field = "function" if invocation_type == "invocation_expression" else "target"
 
     def visit(node: Node) -> None:
+        nonlocal seen_registration
         for child in node.named_children:
             if child.type == invocation_type:
                 func = child.child_by_field_name(fn_field)
@@ -497,29 +744,29 @@ def detect_route_registrations(
                     name_node = func.child_by_field_name(name_field)
                     method = node_text(name_node, source) if name_node is not None else ""
                     url = _maproute_url(child, source) if method in _MAP_ROUTE_METHODS else None
+                    text = node_text(child, source) if url else ""
+                    seen_registration = seen_registration or url is not None
+                    ctrl, action = _CTRL_RE.search(text), _ACTION_RE.search(text)
                     if url:
-                        text = node_text(child, source)
-                        ctrl, action = _CTRL_RE.search(text), _ACTION_RE.search(text)
-                        handler = (f"{ctrl.group(1)}.{action.group(1)}" if ctrl and action
+                        # A `{controller}` / `{action}` segment picks the handler per request:
+                        # the defaults only fill an absent segment, so there is no one handler.
+                        variable = "{controller" in url.lower() or "{action" in url.lower()
+                        handler = (None if variable
+                                   else f"{ctrl.group(1)}.{action.group(1)}" if ctrl and action
                                    else ctrl.group(1) if ctrl else None)
-                        start = child.start_point[0] + 1
-                        routes.append(Statement(
-                            id=disambiguate(statement_id(path, start, child.start_point[1]), seen_ids),
-                            parentId=path,
-                            nodeType=child.type,
+                        # The record is the registration statement itself when the base
+                        # parser captured it (C# `expression_statement`, VB `call_statement`).
+                        stmt = _call_statement(child)
+                        routes.append(Emit(stmt, dict(
                             semanticType="route",
-                            text=text.split("\n", 1)[0][:200],
                             method="ANY",
                             endpoint="/" + url.strip("/"),
                             framework="aspnet",
                             handler=handler,
                             routeKind="route",
                             isRegex=False,
-                            startLine=start,
-                            endLine=child.end_point[0] + 1,
-                            path=path,
-                        ))
+                        ), parent=path, text=text.split("\n", 1)[0][:200], enrich="same"))
             visit(child)
 
     visit(root)
-    return routes
+    return routes, seen_registration

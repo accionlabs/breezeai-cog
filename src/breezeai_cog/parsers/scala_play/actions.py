@@ -2,9 +2,9 @@
 
 A Play action is a ``Function`` whose body is a call rooted at ``Action`` —
 ``Action { ... }`` / ``Action.async { ... }`` / ``Action(parse.json) { ... }`` /
-``Action.async(parse.json) { ... }``. The verb and path live in ``conf/routes``, not the
-controller, so ``method``/``endpoint`` are left honest-null here (see
-``PlayRoutesParser`` in :mod:`.routes`).
+``Action.async(parse.json) { ... }``. The verb and path live in ``conf/routes`` (see
+``PlayRoutesParser`` in :mod:`.routes`), which records the entry point with the action as its
+handler; the action itself gets no record.
 
 Play SIRD (String Interpolating Routing DSL) defines routes directly in code:
 ``override def routes: Routes = { case GET(p"/posts/$id") => postController.show(id) }``.
@@ -13,14 +13,16 @@ Play SIRD (String Interpolating Routing DSL) defines routes directly in code:
 from __future__ import annotations
 
 import re
-from typing import Collection
+from typing import Any
 
 from tree_sitter import Node
 
-from ...emit import disambiguate, statement_id
-from ...schemas import FileRecord, Statement
+from ...schemas import FileRecord, Function
+from ..emits import Emit
+from ..scala.imports import _package_of
 from ..scala.statements import find_enclosing_parent_id
 from ..treesitter import node_text
+from .includes import join, router_prefix
 
 _FN_TYPES = ("function_definition", "function_declaration")
 
@@ -57,13 +59,13 @@ def _is_play_action(fn_node: Node, source: bytes) -> bool:
     return ret == "Action" or ret.startswith("Action[")
 
 
-def detect_play_actions(
-    root: Node,
-    source: bytes,
-    record: FileRecord,
-    seen_ids: set[str] | None = None,
-    exclude_handlers: Collection[str] = (),
-) -> list[Statement]:
+def detect_play_actions(root: Node, source: bytes, record: FileRecord) -> list[Function]:
+    """The controller functions that are Play actions (``def index = Action { … }``).
+
+    An action is the **handler** of a binding, not a binding: its verb and path live in
+    ``conf/routes`` (or a SIRD case), which records the entry point and names the action as its
+    handler. So no statement is emitted for an action — a second record with no address would
+    count each binding twice. The caller uses the result to label the file ``play``."""
     if b"Action" not in source:
         return []
     action_lines: set[int] = set()
@@ -75,36 +77,8 @@ def detect_play_actions(
             walk(c)
 
     walk(root)
-    if not action_lines:
-        return []
-
     by_start = {fn.startLine: fn for fn in record.functions}
-    seen = seen_ids if seen_ids is not None else {s.id for s in record.statements}
-    routes: list[Statement] = []
-    for start in sorted(action_lines):
-        fn = by_start.get(start)
-        if fn is None:
-            continue
-        if fn.name in exclude_handlers:
-            continue
-        sid = disambiguate(statement_id(record.path, fn.startLine, 0), seen)
-        routes.append(Statement(
-            id=sid,
-            parentId=fn.id,
-            nodeType="synthetic",
-            semanticType="route",
-            text=fn.name,
-            framework="play",
-            handler=fn.name,
-            method=None,
-            endpoint=None,
-            routeKind="route",
-            isRegex=False,
-            startLine=fn.startLine,
-            endLine=fn.endLine,
-            path=fn.path,
-        ))
-    return routes
+    return [by_start[line] for line in sorted(action_lines) if line in by_start]
 
 
 _SIRD_VERBS = frozenset({"GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS"})
@@ -135,6 +109,23 @@ def _sird_path(node: Node, source: bytes) -> tuple[str, bool] | None:
     norm = re.sub(r"\$\{?([a-zA-Z_]\w*)\}?", r"{\1}", norm)
     norm = re.sub(r"\*([a-zA-Z_]\w*)", r"{\1}", norm)
     return norm, is_regex
+
+
+def _router_fqn(node: Node, source: bytes) -> str | None:
+    """``package.Name`` of the class / object enclosing ``node`` (nested: ``package.Outer.Inner``)."""
+    names: list[str] = []
+    in_block_package = False  # `package a.b { … }` — else the package is a `package a.b` header
+    curr, root = node.parent, node
+    while curr is not None:
+        if curr.type in ("class_definition", "object_definition", "package_clause"):
+            name = curr.child_by_field_name("name")
+            if name is None:
+                return None
+            names.append(node_text(name, source).strip())
+            in_block_package |= curr.type == "package_clause"
+        root, curr = curr, curr.parent
+    package = "" if in_block_package else _package_of(root, source)
+    return ".".join(([package] if package else []) + names[::-1]) or None
 
 
 def _find_router_prefix(node: Node, source: bytes) -> str | None:
@@ -185,14 +176,15 @@ def _extract_sird_handler(clause: Node, source: bytes) -> str | None:
 
 
 def detect_play_sird_routes(
-    root: Node, source: bytes, record: FileRecord, seen_ids: set[str] | None = None
-) -> list[Statement]:
-    """Detect Play SIRD ``Routes`` methods (``case GET(p"/path") => ...``)."""
+    root: Node, source: bytes, record: FileRecord, *, index: Any | None = None,
+) -> list[Emit]:
+    """Detect Play SIRD ``Routes`` methods (``case GET(p"/path") => ...``). The router's prefix
+    is the one a routes file includes it under (``-> /v1/posts v1.post.PostRouter``, from the
+    Scala index); failing that, its own ``val prefix``."""
     # D2: cheap byte guard
     if b"p\"" not in source and b"Routes" not in source and b"SimpleRouter" not in source:
         return []
-    seen = seen_ids if seen_ids is not None else {s.id for s in record.statements}
-    routes: list[Statement] = []
+    routes: list[Emit] = []
 
     def walk(node: Node) -> None:
         if node.type in _FN_TYPES:
@@ -207,8 +199,10 @@ def detect_play_sird_routes(
                 and body is not None
                 and body.type == "case_block"
             ):
+                fqn = _router_fqn(node, source)
+                included = router_prefix(index, fqn) if fqn is not None else None
                 # C5: Mount prefix from class
-                mount_prefix = _find_router_prefix(node, source)
+                mount_prefix = None if included is not None else _find_router_prefix(node, source)
                 for clause in body.named_children:
                     if clause.type != "case_clause":
                         continue
@@ -228,30 +222,24 @@ def detect_play_sird_routes(
                     endpoint, is_regex = res
                     if not endpoint.startswith("/"):
                         endpoint = "/" + endpoint
-                    if mount_prefix:
+                    if included:
+                        endpoint = join(included, endpoint)
+                    elif mount_prefix:
                         p = "/" + mount_prefix.strip("/")
                         endpoint = p + ("/" if endpoint == "/" else endpoint)
                     # C6: Populate handler from case body
                     handler = _extract_sird_handler(clause, source)
-                    start = clause.start_point[0] + 1
-                    sid = disambiguate(statement_id(record.path, start, clause.start_point[1]), seen)
                     routes.append(
-                        Statement(
-                            id=sid,
-                            parentId=find_enclosing_parent_id(start, record),
-                            nodeType="synthetic",
+                        Emit(clause, dict(
                             semanticType="route",
-                            text=node_text(clause, source),
                             framework="play",
                             handler=handler,
                             method=verb,
                             endpoint=endpoint,
                             routeKind="route",
                             isRegex=is_regex,
-                            startLine=start,
-                            endLine=clause.end_point[0] + 1,
-                            path=record.path,
-                        )
+                        ), parent=find_enclosing_parent_id(clause.start_point[0] + 1, record),
+                            node_type="synthetic", text=node_text(clause, source))
                     )
         for child in node.named_children:
             walk(child)

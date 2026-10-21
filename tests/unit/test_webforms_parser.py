@@ -13,9 +13,11 @@ from breezeai_cog.emit import to_line
 from breezeai_cog.parsers.base import ParseContext
 from breezeai_cog.parsers.csharp.parser import CSharpParser
 from breezeai_cog.parsers.csharp_aspnet.parser import AspNetCoreParser
+from breezeai_cog.parsers.csharp_webforms.page_routes import page_routes
+from breezeai_cog.parsers.emits import apply
+from breezeai_cog.parsers.treesitter import parse_source
 from breezeai_cog.parsers.csharp_webforms.parser import WebFormsParser
 from breezeai_cog.parsers.csharp_webforms.routes import (
-    detect_master_layout,
     detect_webforms_pages,
 )
 from breezeai_cog.schemas import FileRecord
@@ -99,13 +101,11 @@ def test_page_route() -> None:
     assert rec.framework == "aspnet-webforms"
 
 
-def test_control_mounts() -> None:
+def test_user_control_has_no_record() -> None:
+    # A user control is part of the pages that load it, not an entry point (contract §4).
     rec = _parse(WebFormsParser(), CONTROL, "CMS/Controls/ButtonNavigation.ascx.cs")
-    routes = [s for s in rec.statements if s.semanticType == "route"]
-    assert len(routes) == 1
-    assert routes[0].routeKind == "mount"
-    assert routes[0].endpoint == "/CMS/Controls/ButtonNavigation.ascx"
-    assert routes[0].handler == "ButtonNavigation"
+    assert [s for s in rec.statements if s.semanticType == "route"] == []
+    assert rec.framework == "aspnet-webforms"
 
 
 def test_master_page_skipped() -> None:
@@ -231,7 +231,7 @@ def _page_routes(*cs_sources: bytes) -> dict[str, list[str]]:
             p.parent.mkdir(parents=True, exist_ok=True)
             p.write_bytes(src)
             files.append(p)
-        return build_csharp_index(root, files).page_routes
+        return page_routes(build_csharp_index(root, files))
 
 
 ROUTECFG = b"""
@@ -278,7 +278,7 @@ namespace Acme {
         cfg = app / "App_Start" / "RouteConfig.cs"
         cfg.parent.mkdir(parents=True)
         cfg.write_bytes(src)
-        pr = build_csharp_index(root, [cfg]).page_routes
+        pr = page_routes(build_csharp_index(root, [cfg]))
     # Key must include the full subdir prefix so it matches
     # "SplendidCRM-CE/App/CMS/Enrollment.aspx.cs"[:-len(".cs")]
     assert pr == {"SplendidCRM-CE/App/CMS/Enrollment.aspx": ["enroll/{id}"]}
@@ -305,11 +305,17 @@ namespace X { class C { void R(System.Web.Routing.RouteCollection routes, string
     assert _page_routes(src) == {}
 
 
+def _pages(rec, path: str, page_routes_: dict[str, list[str]]) -> list:
+    """The records ``detect_webforms_pages`` writes onto ``rec`` (through ``apply``)."""
+    root = parse_source("csharp", b"", 0).root_node  # stands in for the node, as in the parser
+    before = len(rec.statements)
+    apply(rec, detect_webforms_pages(rec, root, path, page_routes_), b"", path)
+    return rec.statements[before:]
+
+
 def test_page_route_uses_friendly_url() -> None:
     rec = _parse(WebFormsParser(), PAGE, "CMS/Enrollment.aspx.cs")
-    routes = detect_webforms_pages(
-        rec, "CMS/Enrollment.aspx.cs", {"CMS/Enrollment.aspx": ["enroll/{id}"]}
-    )
+    routes = _pages(rec, "CMS/Enrollment.aspx.cs", {"CMS/Enrollment.aspx": ["enroll/{id}"]})
     assert len(routes) == 1
     assert routes[0].endpoint == "/enroll/{id}"  # friendly, not /CMS/Enrollment.aspx
     assert routes[0].routeKind == "page"
@@ -337,18 +343,18 @@ namespace Acme {
     cfg = app / "App_Start" / "RouteConfig.cs"
     cfg.parent.mkdir(parents=True)
     cfg.write_bytes(route_src)
-    pr = build_csharp_index(tmp_path, [cfg]).page_routes
+    pr = page_routes(build_csharp_index(tmp_path, [cfg]))
 
     # Now simulate detect_webforms_pages for the code-behind at the full repo-relative path.
     page_path = "SplendidCRM-CE/App/CMS/Enrollment.aspx.cs"
     rec = _parse(WebFormsParser(), PAGE, page_path)
-    routes = detect_webforms_pages(rec, page_path, pr)
+    routes = _pages(rec, page_path, pr)
     assert len(routes) == 1
     assert routes[0].endpoint == "/enroll/{id}"
 
 
 def test_page_route_multiple_friendly_urls() -> None:
-    routes = detect_webforms_pages(
+    routes = _pages(
         _parse(WebFormsParser(), PAGE, "P.aspx.cs"), "P.aspx.cs", {"P.aspx": ["a/{id}", "b/{id}"]}
     )
     assert sorted(r.endpoint for r in routes) == ["/a/{id}", "/b/{id}"]
@@ -356,7 +362,7 @@ def test_page_route_multiple_friendly_urls() -> None:
 
 
 def test_page_route_physical_fallback_without_mapping() -> None:
-    routes = detect_webforms_pages(
+    routes = _pages(
         _parse(WebFormsParser(), PAGE, "CMS/Enrollment.aspx.cs"),
         "CMS/Enrollment.aspx.cs",
         {"Other.aspx": ["x"]},
@@ -364,22 +370,21 @@ def test_page_route_physical_fallback_without_mapping() -> None:
     assert routes[0].endpoint == "/CMS/Enrollment.aspx"  # no match → physical, as before
 
 
-def test_mount_not_friendly_routed() -> None:
-    # A control (routeKind=mount) never takes a MapPageRoute URL, even if one keys its path.
-    routes = detect_webforms_pages(
+def test_control_not_friendly_routed() -> None:
+    # A control never becomes a route, even if a MapPageRoute URL keys its path.
+    routes = _pages(
         _parse(WebFormsParser(), CONTROL, "Ctrl.ascx.cs"),
         "Ctrl.ascx.cs",
         {"Ctrl.ascx": ["should/not/apply"]},
     )
-    assert routes[0].endpoint == "/Ctrl.ascx"
-    assert routes[0].routeKind == "mount"
+    assert routes == []
 
 
 MASTER_CB = b"using System.Web.UI;\nnamespace Acme { public partial class Site : MasterPage {} }\n"
 
 
-def test_master_layout_page(tmp_path: Path) -> None:
-    # `<%@ Page MasterPageFile %>` → a routeKind=layout statement alongside the page route.
+def test_master_page_is_a_structural_link(tmp_path: Path) -> None:
+    # `<%@ Page MasterPageFile %>` → the page→master link is an import edge, not a route record.
     rec = _parse_repo(
         WebFormsParser(),
         tmp_path,
@@ -392,14 +397,8 @@ def test_master_layout_page(tmp_path: Path) -> None:
             "Site.master.cs": MASTER_CB,
         },
     )
-    layouts = [s for s in rec.statements if s.routeKind == "layout"]
-    assert len(layouts) == 1
-    assert layouts[0].endpoint == "/Site.master"
-    assert layouts[0].semanticType == "route"
-    assert layouts[0].nodeType == "synthetic"
-    assert layouts[0].method is None  # layout is composition, not a verb
-    # page route still present and distinct
-    assert {s.routeKind for s in rec.statements if s.semanticType == "route"} == {"page", "layout"}
+    assert {s.routeKind for s in rec.statements if s.semanticType == "route"} == {"page"}
+    assert "Site.master.cs" in rec.importFiles
 
 
 def test_master_layout_nesting(tmp_path: Path) -> None:
@@ -416,13 +415,12 @@ def test_master_layout_nesting(tmp_path: Path) -> None:
             "Root.master.cs": MASTER_CB,
         },
     )
-    layouts = [s for s in rec.statements if s.routeKind == "layout"]
-    assert len(layouts) == 1 and layouts[0].endpoint == "/Root.master"
+    assert [s for s in rec.statements if s.semanticType == "route"] == []
+    assert "Root.master.cs" in rec.importFiles  # master → parent master edge
 
 
 def test_master_import_edge(tmp_path: Path) -> None:
-    # Page→master is also a traversable IMPORTS edge (to the master's code-behind), not only
-    # the routeKind=layout statement.
+    # Page→master is a traversable IMPORTS edge (to the master's code-behind).
     rec = _parse_repo(
         WebFormsParser(),
         tmp_path,
@@ -436,12 +434,11 @@ def test_master_import_edge(tmp_path: Path) -> None:
         },
     )
     assert "Site.master.cs" in rec.importFiles  # page→master IMPORTS edge
-    assert any(s.routeKind == "layout" for s in rec.statements)  # and the layout statement
 
 
 def test_master_inline_no_import_edge(tmp_path: Path) -> None:
-    # Master with no code-behind (inline <script runat=server>) → layout fact captured, but no
-    # dangling IMPORTS edge (honest-null).
+    # Master with no code-behind (inline <script runat=server>) → no dangling IMPORTS edge
+    # (honest-null); the markup file keeps its link to the .master itself.
     rec = _parse_repo(
         WebFormsParser(),
         tmp_path,
@@ -453,12 +450,11 @@ def test_master_inline_no_import_edge(tmp_path: Path) -> None:
             "Inline.master": b"<%@ Master %>",  # no Inline.master.cs
         },
     )
-    assert [s for s in rec.statements if s.routeKind == "layout"]  # layout fact present
     assert "Inline.master.cs" not in rec.importFiles  # no dangling edge
 
 
 def test_master_missing_file_skipped(tmp_path: Path) -> None:
-    # Declared master not present in the repo → honest-null, no layout statement.
+    # Declared master not present in the repo → honest-null, no edge.
     rec = _parse_repo(
         WebFormsParser(),
         tmp_path,
@@ -469,7 +465,7 @@ def test_master_missing_file_skipped(tmp_path: Path) -> None:
             "P.aspx.cs": PAGE,
         },
     )
-    assert [s for s in rec.statements if s.routeKind == "layout"] == []
+    assert not any("Ghost.master" in i for i in rec.importFiles)
 
 
 def test_master_directive_only_not_comment(tmp_path: Path) -> None:
@@ -486,13 +482,7 @@ def test_master_directive_only_not_comment(tmp_path: Path) -> None:
             "Site.master.cs": MASTER_CB,
         },
     )
-    assert [s for s in rec.statements if s.routeKind == "layout"] == []
-
-
-def test_master_layout_no_master_no_statement() -> None:
-    assert (
-        detect_master_layout(_parse(WebFormsParser(), PAGE, "P.aspx.cs"), "P.aspx.cs", None) == []
-    )
+    assert "Site.master.cs" not in rec.importFiles
 
 
 def _nav_page(body: bytes) -> bytes:
@@ -522,7 +512,7 @@ def test_navigation_redirect_real_node() -> None:
     assert len(navs) == 1
     assert navs[0].endpoint == "/Login.aspx"  # query stripped
     assert navs[0].nodeType == "invocation_expression"  # real call, not synthetic
-    assert navs[0].semanticType == "route"
+    assert (navs[0].semanticType, navs[0].routeKind) == ("route", "navigation")
 
 
 def test_navigation_server_transfer() -> None:
@@ -596,8 +586,7 @@ def test_master_case_insensitive(tmp_path: Path) -> None:
             "Root.master.cs": MASTER_CB,
         },
     )
-    layouts = [s for s in rec.statements if s.routeKind == "layout"]
-    assert len(layouts) == 1 and layouts[0].endpoint == "/Root.master"  # real casing
+    assert "Root.master.cs" in rec.importFiles  # resolved to the real casing
 
 
 def test_mount_case_collision_honest_null(tmp_path: Path) -> None:
@@ -742,14 +731,10 @@ def test_host_to_control_import_edge(tmp_path) -> None:
     assert "Default.aspx.cs" in rec.importFiles
 
 
-def test_host_to_control_mount_route(tmp_path) -> None:
+def test_host_to_control_is_not_a_route(tmp_path) -> None:
+    # The host → control composition is the import edge above, never a route record.
     rec = _host_with_control(tmp_path)
-    mounts = [s for s in rec.statements if s.semanticType == "route" and s.routeKind == "mount"]
-    assert mounts, "host should emit a mount route to the control"
-    m = mounts[0]
-    # QA Defect #1: source is the host .aspx, target endpoint is the .ascx control
-    assert m.path == "Default.aspx" and m.endpoint == "/Controls/Shortcuts.ascx"
-    assert m.framework == "aspnet-webforms" and m.nodeType == "synthetic"
+    assert [s for s in rec.statements if s.semanticType == "route"] == []
 
 
 def test_mount_to_missing_control_is_dropped(tmp_path) -> None:
@@ -872,3 +857,54 @@ def test_markup_master_missing_is_dropped(tmp_path) -> None:
     )
     rec = WebFormsParser().parse_file(ctx)
     assert not any("Ghost.master" in i for i in rec.importFiles)
+
+
+def test_generic_handlers_are_bound_at_their_ashx(analyze_files) -> None:
+    sync_cb = (
+        "using System.Web;\nnamespace Shop {\npublic class Export : IHttpHandler\n{\n"
+        "    public bool IsReusable => false;\n"
+        "    public void ProcessRequest(HttpContext context) { }\n}\n}\n"
+    )
+    async_cb = (
+        "using System.Web;\npublic class Feed : HttpTaskAsyncHandler\n{\n"
+        "    public override async Task ProcessRequestAsync(HttpContext context) { }\n}\n"
+    )
+    stmts = analyze_files({
+        "Handlers/Export.ashx": '<%@ WebHandler Language="C#" CodeBehind="Export.ashx.cs" Class="Shop.Export" %>',
+        "Handlers/Export.ashx.cs": sync_cb,
+        "Feed.ashx": '<%@ WebHandler Class="Feed" %>',
+        "Feed.ashx.cs": async_cb,
+        "Other.ashx": '<%@ WebHandler Class="Shop.Somewhere" %>',  # names another class
+        "Other.ashx.cs": sync_cb.replace("Export", "Other"),
+        "Loose.cs": sync_cb.replace("Export", "Loose"),               # no .ashx at all
+    })
+    got = {(s.path, s.method, s.endpoint, s.handler, s.handlerLine)
+           for s in stmts if s.semanticType == "route"}
+    assert got == {
+        ("Handlers/Export.ashx.cs", "ANY", "/Handlers/Export.ashx", "ProcessRequest", 6),
+        ("Feed.ashx.cs", "ANY", "/Feed.ashx", "ProcessRequestAsync", 4),
+    }
+
+
+def test_page_handler_line_and_page_methods(analyze_files) -> None:
+    # Decision Q6: the page class is the handler (handlerLine = its declaration); each static
+    # [WebMethod] page method is its own POST entry point at <page URL>/<Method>.
+    st = analyze_files({
+        "Orders/List.aspx": '<%@ Page Language="C#" CodeBehind="List.aspx.cs" Inherits="Shop.Orders.List" %>\n',
+        "Orders/List.aspx.cs": (
+            "using System.Web.Services;\nusing System.Web.UI;\nnamespace Shop.Orders {\n"
+            "public partial class List : Page {\n"                          # line 4
+            "  protected void Page_Load(object s, System.EventArgs e) { }\n"
+            "  [WebMethod]\n"                                               # line 6
+            "  public static string[] Search(string term) { return null; }\n"
+            "  [WebMethod]\n"
+            "  public string NotStatic() { return null; }\n"               # instance: not a page method
+            "}\n}\n"
+        ),
+    })
+    routes = {(s.method, s.endpoint): (s.handler, s.handlerLine, s.framework)
+              for s in st if s.semanticType == "route" and s.path == "Orders/List.aspx.cs"}
+    assert routes[("GET", "/Orders/List.aspx")] == ("List", 4, "aspnet-webforms")
+    assert routes[("POST", "/Orders/List.aspx/Search")] == ("Search", 6, "aspnet-webforms")
+    assert not any(ep and ep.endswith("NotStatic") for _, ep in routes)
+    assert not [s for s in st if s.framework == "asmx"]  # not also an ASMX operation

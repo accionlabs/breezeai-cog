@@ -144,7 +144,7 @@ def file_record() -> FileRecord:
 
 
 def test_schema_version() -> None:
-    assert SCHEMA_VERSION == "2.2"
+    assert SCHEMA_VERSION == "2.3"
 
 
 def test_project_metadata_valid(project_meta: ProjectMetaData) -> None:

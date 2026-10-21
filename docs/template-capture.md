@@ -44,7 +44,8 @@ Two details worth knowing:
 
 - **Only the final extension counts.** `Page.aspx.cs` ends in `.cs`, so the code-behind is
   always captured. Only the bare `Page.aspx` is gated.
-- **Case is ignored.** `Site.Master` and `Default.ASPX` are recognised as templates.
+- **Case is ignored.** `Site.Master` and `Default.ASPX` are skipped as templates, and parsed
+  like `.master` / `.aspx` with the flag.
 
 ### Markup that is *not* gated
 
@@ -274,7 +275,7 @@ src/TodoItem.vue   framework=vue  uiRole=component
 
 This is the clearest argument for the flag on a Vue codebase: the `<script>` block is **real
 code**, so `edit` is a genuine Function. `@click` records `handler=edit`, wiring the markup
-back to the method beside it, and `<router-link>` becomes a `route` so navigation stays
+back to the method beside it, and `<router-link>` becomes a `navigation` record so navigation stays
 discoverable. Skip `.vue` and all of that goes with it.
 
 ---

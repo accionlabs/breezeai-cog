@@ -63,6 +63,13 @@ def _receiver_text(callee: str) -> str:
     return "".join(visible).rsplit(".", 1)[0]
 
 
+#: .NET ``HttpClient`` convenience methods (``Async`` already stripped) → the verb they send.
+_DOTNET_VERBS = {
+    "getstring": "get", "getbytearray": "get", "getstream": "get", "getfromjson": "get",
+    "postasjson": "post", "putasjson": "put", "patchasjson": "patch", "deletefromjson": "delete",
+}
+
+
 def match_api(
     callee: str, method: str, http_client_ids: "frozenset[str] | None" = None
 ) -> str | None:
@@ -83,6 +90,7 @@ def match_api(
     # client-hint substring is still required, so a bare ``FooAsync()`` never matches).
     if m.endswith("async") and len(m) > len("async"):
         m = m[: -len("async")]
+    m = _DOTNET_VERBS.get(m, m)  # GetStringAsync / PostAsJsonAsync … → the verb they send
     if m not in _HTTP_VERBS:
         return None
     if m == "request" and method != "request":
@@ -92,7 +100,9 @@ def match_api(
     if not is_client and http_client_ids:
         # names are original-case identifiers; the receiver is the segment before the first dot
         # (``service.get`` → ``service``), or the whole callee for a bare call (``request``).
-        is_client = callee in http_client_ids or callee.split(".", 1)[0] in http_client_ids
+        own = callee.removeprefix("this.")  # this.client.get → client
+        is_client = (callee in http_client_ids or own in http_client_ids
+                     or own.split(".", 1)[0] in http_client_ids)
     if is_client:
         if any(mk in low for mk in _DB_CHAIN_MARKERS):
             return None  # an ORM query chain (e.g. session.query(...).filter(...).delete())

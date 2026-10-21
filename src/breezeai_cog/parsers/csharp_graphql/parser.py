@@ -12,6 +12,7 @@ from __future__ import annotations
 
 from ...schemas import FileRecord
 from ..base import ParseContext
+from ..emits import apply
 from ..csharp.parser import CSharpParser
 from ..treesitter import parse_source
 from .routes import detect_graphql_dotnet_routes
@@ -31,9 +32,9 @@ class CSharpGraphQLParser(CSharpParser):
         root = parse_source("csharp", ctx.source, ctx.parse_timeout_micros).root_node
         record = self.extract(root, ctx)  # inherited C# extraction (one parse)
         if ctx.capture_statements and not self.is_fixture_file(ctx.path):
-            seen = {s.id for s in record.statements}
-            routes = detect_graphql_dotnet_routes(record, root, ctx.source, ctx.path, seen)
+            routes = detect_graphql_dotnet_routes(
+                record, root, ctx.source, ctx.path, ctx.resolution_index)
             if routes:
-                record.statements.extend(routes)
+                apply(record, routes, ctx.source, ctx.path)
                 record.framework = "graphql"
         return record

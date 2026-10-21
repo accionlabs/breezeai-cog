@@ -4,7 +4,11 @@ The ``razor`` grammar parses the whole file (markup + embedded C#) in one pass, 
 statement keeps its genuine grammar ``nodeType`` — no shadow, no ``synthetic``. Mirrors the
 Angular/Vue/Web-Forms template capture:
 
-* ``@page "/orders/{id}"`` → a ``route`` statement (``routeKind=page``), endpoint = the path.
+* ``@page "/orders/{id}"`` → a ``route`` statement (``routeKind=page``), endpoint = the path,
+  ``handler`` = the page: a Blazor component (``.razor``) is its file's component
+  (``Counter.razor`` → ``Counter``, ``handlerLine`` 1: the component is the whole file); a
+  Razor Page (``.cshtml``) is its ``@model`` PageModel class (declared in another file, so no
+  ``handlerLine``); neither → empty.
 * ``@onclick="Remove"`` (Blazor event) → the event on ``name``, the referenced method on
   ``handler`` — the P1–P3 handler model.
 * ``@Model.Title`` / ``@expr`` → an interpolation-like reference (``semanticType=null``, like
@@ -61,6 +65,20 @@ def _model_name(node: Node, source: bytes) -> str | None:
     return node_text(ident, source) if ident is not None else None
 
 
+def _page_handler(root: Node, source: bytes, path: str) -> str | None:
+    """The page an ``@page`` directive serves (see the module docstring)."""
+    if path.lower().endswith(".razor"):
+        stem = path.rsplit("/", 1)[-1][: -len(".razor")]
+        return stem if stem.isidentifier() else None
+    stack = [root]
+    while stack:
+        node = stack.pop()
+        if node.type == "razor_model_directive":
+            return _model_name(node, source)
+        stack.extend(node.named_children)
+    return None
+
+
 def collect_razor_statements(
     root: Node,
     source: bytes,
@@ -103,6 +121,9 @@ def collect_razor_statements(
                     framework=framework,
                     routeKind="page",
                     endpoint=_page_endpoint(node, source),
+                    handler=(handler := _page_handler(root, source, path)),
+                    # A Blazor component is its whole file: the handler starts at line 1.
+                    handlerLine=1 if handler and path.lower().endswith(".razor") else None,
                 )
         elif t == "razor_html_attribute":
             name = _attr_name(node, source)

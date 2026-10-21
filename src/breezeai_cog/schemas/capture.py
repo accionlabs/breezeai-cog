@@ -90,7 +90,10 @@ class Statement(BaseModel):
     method: str | None = None  # HTTP verb (route/api_call) or db method (db_method_call)
     endpoint: str | None = None  # route path (route) or outbound URL (api_call)
     handler: str | None = None
+    #: Line of the handler's declaration — in ``handlerPath`` when that is set, else in this file.
     handlerLine: int | None = None
+    #: Repo-relative file of the handler, only when it is not this statement's own file.
+    handlerPath: str | None = None
     routeKind: str | None = None
     isRegex: bool | None = None
     version: str | None = None

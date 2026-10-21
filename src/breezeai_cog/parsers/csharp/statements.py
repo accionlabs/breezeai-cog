@@ -90,10 +90,77 @@ def _call_details(call: Node, source: bytes) -> tuple[str, str, str | None] | No
         callee = method
     args = call.child_by_field_name("arguments")
     named = list(args.named_children) if args is not None else []
+    request = _request_message(named, source)
+    if request is not None:  # client.SendAsync(new HttpRequestMessage(HttpMethod.Post, url))
+        verb, url_node = request
+        endpoint = _render_url(url_node, source) if url_node is not None else None
+        return callee, verb or method, endpoint
     endpoint, override = resolve_endpoint(named, source, _render_url)
     if override is not None:
         method = override
     return callee, method, endpoint
+
+
+def _request_message(args: list[Node], source: bytes) -> tuple[str | None, Node | None] | None:
+    """``new HttpRequestMessage(HttpMethod.Post, url)`` as a call's first argument → (``POST``,
+    the url node); ``None`` when the first argument is not one. A verb that is not a literal
+    ``HttpMethod.X`` → (None, url): the request is known, its verb is not."""
+    first = args[0] if args else None
+    inner = first.named_children[0] if first is not None and first.named_children else None
+    if inner is None or inner.type != "object_creation_expression":
+        return None
+    type_node = inner.child_by_field_name("type")
+    if type_node is None or node_text(type_node, source).rsplit(".", 1)[-1] != "HttpRequestMessage":
+        return None
+    ctor = inner.child_by_field_name("arguments")
+    ctor_args = [a.named_children[0] for a in ctor.named_children if a.named_children] \
+        if ctor is not None else []
+    verb = None
+    if ctor_args and node_text(ctor_args[0], source).startswith("HttpMethod."):
+        verb = node_text(ctor_args[0], source).rsplit(".", 1)[-1].upper()
+    return verb, ctor_args[1] if len(ctor_args) > 1 else None
+
+
+_HTTP_CLIENT_TYPES = {"HttpClient"}
+
+
+def collect_http_client_ids(root: Node, source: bytes, types: dict[str, str]) -> frozenset[str]:
+    """Names in this file that hold an ``HttpClient`` — declared with that type (field,
+    property, parameter, local; ``types`` from ``type_map``), or initialised from
+    ``new HttpClient(…)`` / ``factory.CreateClient(…)`` — so a call on a client whose name has
+    no ``http`` hint (``client.GetAsync``, ``_api.PostAsJsonAsync``) is still an outbound call."""
+    ids = {name for name, typ in types.items()
+           if typ.split("<", 1)[0].rsplit(".", 1)[-1] in _HTTP_CLIENT_TYPES}
+
+    def walk(n: Node) -> None:
+        if n.type == "property_declaration":
+            typ, name = n.child_by_field_name("type"), n.child_by_field_name("name")
+            if typ is not None and name is not None and \
+                    node_text(typ, source).rsplit(".", 1)[-1] in _HTTP_CLIENT_TYPES:
+                ids.add(node_text(name, source))
+        elif n.type == "variable_declarator":
+            name = n.child_by_field_name("name")
+            value = next((c for c in n.named_children if c is not name), None)
+            if name is not None and value is not None and _creates_client(value, source):
+                ids.add(node_text(name, source))
+        for c in n.named_children:
+            walk(c)
+
+    walk(root)
+    return frozenset(ids)
+
+
+def _creates_client(value: Node, source: bytes) -> bool:
+    """``new HttpClient(…)`` or ``….CreateClient(…)`` (IHttpClientFactory)."""
+    if value.type == "object_creation_expression":
+        typ = value.child_by_field_name("type")
+        return typ is not None and node_text(typ, source).rsplit(".", 1)[-1] in _HTTP_CLIENT_TYPES
+    if value.type == "invocation_expression":
+        fn = value.child_by_field_name("function")
+        name = fn.child_by_field_name("name") if fn is not None and \
+            fn.type == "member_access_expression" else None
+        return name is not None and node_text(name, source) == "CreateClient"
+    return False
 
 
 def _span(node: Node) -> tuple[int, int]:

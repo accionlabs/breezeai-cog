@@ -5,6 +5,8 @@ from __future__ import annotations
 
 from tree_sitter import Node
 
+from .preproc import members
+
 from ...emit import class_id, disambiguate
 from ...schemas import Class, ConstructorParam, Function, Statement
 from ..callresolve import CallResolver, noop_resolver
@@ -95,7 +97,7 @@ def build_class(
         statements.extend(
             extract_statements(body, source, path, parent_id=cid, capture=capture, limit=limit, seen_ids=seen_ids)
         )
-        for member in body.named_children:
+        for member in members(body):  # `#if` blocks opened
             if member.type in _METHOD_MEMBERS:
                 fns, fn_statements = build_method(
                     member, source, path,

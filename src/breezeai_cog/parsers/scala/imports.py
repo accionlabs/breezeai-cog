@@ -8,12 +8,16 @@ Selector groups (``{X, Y}``) and renames (``{X => Y}``) are supported.
 from __future__ import annotations
 
 from collections.abc import Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
+from typing import Any
 
 from tree_sitter import Node
 
 from ...utils import repo_relative
+from ..additive import (
+    collect_additive, collect_fact_sources, resolve_additive, split_fact_sources,
+)
 from ..constfold import Token
 from ..index_common import parallel_map, record_distinct, seed_same_package
 from ..treesitter import node_text, parse_source
@@ -37,6 +41,9 @@ class ScalaIndex:
 
     fqcn: FqcnIndex = field(default_factory=dict)
     consts: dict[str, str] = field(default_factory=dict)
+    #: Facts registered with ``register_fact`` (fact name → fact), resolved once before
+    #: parsing. Read with :func:`~..additive.index_fact`; see ``parsers/additive.py``.
+    facts: dict[str, Any] = field(default_factory=dict)
 
 
 def _package_of(root: Node, source: bytes) -> str:
@@ -72,8 +79,11 @@ def _collect_top_level_types(root: Node, source: bytes) -> list[tuple[str, str]]
     return results
 
 
-def _fqcn_index_one(args: tuple[str, str]) -> tuple[dict[str, str], dict[str, list[Token]]] | None:
+def _fqcn_index_one(
+    args: tuple[str, str],
+) -> tuple[dict[str, str], dict[str, list[Token]], dict[str, Any]] | None:
     file_s, rel = args
+    repo_root = Path(file_s[: -len(rel) - 1]) if file_s.endswith("/" + rel) else None
     try:
         source = Path(file_s).read_bytes()
     except OSError:
@@ -83,7 +93,7 @@ def _fqcn_index_one(args: tuple[str, str]) -> tuple[dict[str, str], dict[str, li
         fqcn_frag: dict[str, str] = {}
         for package, name in _collect_top_level_types(root, source):
             fqcn_frag[f"{package}.{name}" if package else name] = rel
-        return fqcn_frag, {}
+        return fqcn_frag, {}, collect_additive("scala", root, source, rel, repo_root)
     except Exception as exc:
         from ...logging import get_logger
 
@@ -98,15 +108,22 @@ def _fqcn_index_one(args: tuple[str, str]) -> tuple[dict[str, str], dict[str, li
 
 
 def build_fqcn_index(repo_root: Path, files: Sequence[Path], jobs: int = 1) -> ScalaIndex:
+    files, fact_files = split_fact_sources("scala", list(files))
     args = [(str(f), repo_relative(f, repo_root)) for f in files]
+    # registered fact name → per-file values: fact-source files (another parser's), then our own
+    collected: dict[str, list[Any]] = collect_fact_sources("scala", fact_files, repo_root, jobs)
     fqcn: FqcnIndex = {}
     for frag in parallel_map(args, _fqcn_index_one, jobs):
         if frag is None:
             continue
-        fqcn_frag, _ = frag
+        fqcn_frag, _, facts = frag
         for name, rel in fqcn_frag.items():
             record_distinct(fqcn, name, rel)
-    return ScalaIndex(fqcn=fqcn)
+        for name, value in facts.items():
+            collected.setdefault(name, []).append(value)
+    index = ScalaIndex(fqcn=fqcn)
+    # Registered facts may need the whole index, so they resolve after it is built.
+    return replace(index, facts=resolve_additive("scala", collected, index))
 
 
 def _resolve(fqcn: str, index: FqcnIndex | None) -> str | None:

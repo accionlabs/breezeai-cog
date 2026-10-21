@@ -17,6 +17,8 @@ from typing import Callable, Iterator
 from .._version import __version__
 from ..emit import split_oversized_statements
 from ..logging import DETAIL_LOGGER, get_logger
+from ..parsers.additive import fact_sources
+from ..parsers.contract import validate as validate_contract
 from ..schemas import FileRecord, ProjectMetaData
 from . import executor
 from .ignore import IgnoreEngine
@@ -45,11 +47,10 @@ def _template_skip_rule(settings) -> Callable[[str], str | None] | None:
     """The ``skip_rule`` that drops markup/view files, or ``None`` when
     ``--capture-templates`` is on.
 
-    Extension-based, so it costs a suffix lookup and never reads the file. Lowercased —
-    unlike ``BaseParser.matches``, which is case-sensitive — so ``Site.Master`` and
-    ``Default.ASPX`` (endemic in older ASP.NET trees) land in the honest ``template``
-    bucket instead of ``unsupported``. The gate is therefore a superset of what the
-    parsers actually claim.
+    Extension-based, so it costs a suffix lookup and never reads the file. Lowercased, as
+    ``BaseParser.matches`` is for template extensions, so ``Site.Master`` and
+    ``Default.ASPX`` (endemic in older ASP.NET trees) land in the ``template`` bucket
+    without the flag and are parsed with it.
     """
     if settings.capture_templates:
         return None
@@ -132,6 +133,16 @@ def _build_indexes(
             continue
         bases[base.name] = base
         files.setdefault(base.name, []).append(repo_root / entry.path)
+    # A registered fact may read files another parser owns (``FactSpec.sources``): hand them to
+    # that language's index too. The owning parser still parses and emits them.
+    for language, exts in fact_sources().items():
+        if language not in bases:
+            continue
+        own = set(files[language])
+        files[language] += [
+            repo_root / e.path for e in entries
+            if str(e.path).lower().endswith(exts) and repo_root / e.path not in own
+        ]
     indexes: dict[str, object] = {}
     for name, base in bases.items():
         start = time.perf_counter()
@@ -276,6 +287,11 @@ def _assemble(
                 functions=len(record.functions), classes=len(record.classes),
                 statements=len(record.statements),
             )
+            for v in validate_contract(record):  # entry-point contract check; output unchanged
+                log.debug(
+                    "contract.violation", path=record.path, statement=v.statement_id,
+                    rule=v.rule, severity=v.severity, detail=v.detail,
+                )
 
     meta = ProjectMetaData(
         repositoryPath=str(repo_root.resolve()),

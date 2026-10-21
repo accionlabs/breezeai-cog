@@ -27,7 +27,7 @@ export function App() {
 }
 '''
 
-# Data-router config-object form (with nesting + lazy mount).
+# Data-router config-object form (with nesting + a lazy route).
 CONFIG_SRC = b'''import { createBrowserRouter } from 'react-router-dom';
 
 export const router = createBrowserRouter([
@@ -66,12 +66,12 @@ def test_jsx_routes_detected_and_nested(tmp_path) -> None:
     assert rec.framework == "react"
 
 
-def test_config_routes_detected_with_lazy_mount(tmp_path) -> None:
+def test_config_routes_detected_with_lazy_page(tmp_path) -> None:
     rec = _parse(tmp_path, CONFIG_SRC, "router.tsx")
     routes = {s.endpoint: s for s in rec.statements if s.semanticType == "route"}
     assert set(routes) == {"/", "/team", "/reports"}
     assert routes["/team"].handler == "Team"
-    assert routes["/reports"].routeKind == "mount"  # lazy code-split
+    assert routes["/reports"].routeKind == "page"  # lazy code-split: still a page (Q10)
     assert routes["/team"].routeKind == "page"
     assert rec.framework == "react"
 
@@ -104,8 +104,9 @@ export const router = createHashRouter([
 def test_jsx_index_route_captured(tmp_path) -> None:
     rec = _parse(tmp_path, INDEX_JSX_SRC, "App.tsx")
     routes = [(s.endpoint, s.handler) for s in rec.statements if s.semanticType == "route"]
-    # index route renders at the parent path ("/") alongside the layout route
-    assert ("/", "Home") in routes and ("/", "Layout") in routes and ("/about", "About") in routes
+    # the index route renders at the parent path ("/"); the parent is a layout (wiring, no record)
+    assert ("/", "Home") in routes and ("/about", "About") in routes
+    assert ("/", "Layout") not in routes
 
 
 # React Router v7 framework-mode config DSL (route/index/layout/prefix helper calls),
@@ -144,10 +145,9 @@ def test_v7_config_dsl_routes_detected(tmp_path) -> None:
     # index() renders at the enclosing prefix path (no own segment).
     assert "/procurements/:itemId" in routes
     assert routes["/procurements/:itemId"].handler == "routes/procurement/index.tsx"
-    # layout() is a pathless wrapper (mount) and its children keep the parent path.
+    # layout() is a pathless wrapper (wiring, no record); its children keep the parent path.
     assert "/chat" in routes and routes["/chat"].handler == "routes/chat.tsx"
-    main = next(s for s in rec.statements if s.handler == "routes/layouts/main.tsx")
-    assert main.routeKind == "mount"
+    assert not any(s.handler == "routes/layouts/main.tsx" for s in rec.statements)
     # catch-all is a real route, not filtered.
     assert "/*" in routes
     assert routes["/procurements/:itemId/tender/new"].framework == "react"
@@ -211,7 +211,8 @@ def test_config_index_route_captured(tmp_path) -> None:
     # createHashRouter is handled like createBrowserRouter (config-object walker)
     rec = _parse(tmp_path, INDEX_CONFIG_SRC, "router.tsx")
     routes = [(s.endpoint, s.handler) for s in rec.statements if s.semanticType == "route"]
-    assert ("/", "Home") in routes and ("/", "Layout") in routes and ("/about", "About") in routes
+    assert ("/", "Home") in routes and ("/about", "About") in routes
+    assert ("/", "Layout") not in routes  # a layout (an index child fills its outlet)
 
 
 def test_base_extraction_reused(tmp_path) -> None:
@@ -402,3 +403,55 @@ def test_jsx_file_is_javascript_language(tmp_path) -> None:
     rec = _parse(tmp_path, src, "Widget.jsx")
     assert rec.framework == "react" and rec.language == "javascript"
     assert {f.name: f.uiRole for f in rec.functions}["Widget"] == "component"
+
+
+# ── The page behind wrapper elements ─────────────────────────────────────────────────────────
+def test_wrapped_page_handler_is_the_innermost_component(analyze_files) -> None:
+    st = analyze_files({
+        "package.json": '{"dependencies": {"react-router-dom": "6"}}',
+        "src/App.tsx": (
+            "import { Routes, Route } from 'react-router-dom';\n"
+            "export const App = () => (\n  <Routes>\n"
+            '    <Route path="/a" element={<Suspense fallback={<Spinner />}><Dash /></Suspense>} />\n'
+            '    <Route path="/b" element={<ErrorBoundary><Shell><Reports /></Shell></ErrorBoundary>} />\n'
+            '    <Route path="/c" element={<><Settings /></>} />\n'
+            '    <Route path="/d" element={<Split><Left /><Right /></Split>} />\n'
+            '    <Route path="/e" element={<Plain>text</Plain>} />\n'
+            "  </Routes>\n);\n"
+        ),
+    })
+    handlers = {s.endpoint: s.handler for s in st if s.semanticType == "route"}
+    assert handlers == {"/a": "Dash", "/b": "Reports", "/c": "Settings", "/d": None, "/e": "Plain"}
+
+
+def test_config_element_variable_is_not_a_component_name(analyze_files) -> None:
+    st = analyze_files({
+        "package.json": '{"dependencies": {"react-router-dom": "6"}}',
+        "src/router.tsx": (
+            "import { createBrowserRouter } from 'react-router-dom';\n"
+            "const page = <Home />;\n"
+            "export const router = createBrowserRouter([\n"
+            "  { path: '/', element: page },\n  { path: '/about', Component: About },\n"
+            "  { path: '/team', element: (\n    <Suspense fallback={<Spin />}>\n      <Provider>\n"
+            "        <Team />\n      </Provider>\n    </Suspense>\n  ) },\n]);\n"
+        ),
+    })
+    handlers = {s.endpoint: s.handler for s in st if s.semanticType == "route"}
+    assert handlers == {"/": None, "/about": "About", "/team": "Team"}
+
+
+def test_redirect_route_has_no_record(analyze_files) -> None:
+    st = analyze_files({
+        "package.json": '{"dependencies": {"react-router-dom": "6"}}',
+        "src/App.tsx": (
+            "import { Routes, Route, Navigate, createBrowserRouter } from 'react-router-dom';\n"
+            "export const App = () => (\n  <Routes>\n"
+            '    <Route path="/old" element={<Navigate to="/" replace />} />\n'
+            '    <Route path="/home" element={<Home />} />\n'
+            "  </Routes>\n);\n"
+            "export const router = createBrowserRouter([\n"
+            "  { path: '/legacy', element: <Navigate to='/home' /> },\n"
+            "  { path: '/about', element: <About /> },\n]);\n"
+        ),
+    })
+    assert sorted(s.endpoint for s in st if s.semanticType == "route") == ["/about", "/home"]

@@ -11,6 +11,7 @@ from __future__ import annotations
 
 from ...schemas import FileRecord
 from ..base import ParseContext
+from ..emits import apply
 from ..constfold import resolve_all
 from ..java.constants import collect_constants
 from ..java.imports import JavaIndex
@@ -34,6 +35,8 @@ class VertxParser(JavaParser):
             idx = ctx.resolution_index
             cross = idx.consts if isinstance(idx, JavaIndex) else {}  # repo-wide constants
             consts = resolve_all(collect_constants(root, ctx.source), base=cross)
-            if detect_vertx(root, ctx.source, ctx.path, record, consts):
+            found = detect_vertx(root, ctx.source, ctx.path, record, consts, idx)
+            if found:
+                apply(record, found, ctx.source, ctx.path)
                 record.framework = "vertx"
         return record

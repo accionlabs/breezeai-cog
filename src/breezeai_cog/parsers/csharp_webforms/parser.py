@@ -2,8 +2,9 @@
 parser per file) over CSharpParser when ``claims`` sees a Web Forms code-behind — an
 ``.aspx.cs``/``.ascx.cs`` file, or a ``System.Web.UI`` import. Reuses
 ``CSharpParser.extract`` (single parse), then emits one file-parented ``route`` statement
-per page (``.aspx.cs`` → ``routeKind=page``) or user control (``.ascx.cs`` → ``mount``),
-mirroring the React detector (routes are markup-level, not handler methods).
+per page (``.aspx.cs`` → ``routeKind=page``), mirroring the React detector (routes are
+markup-level, not handler methods). A user control and a master page are parts of pages, not
+entry points: their links stay structural (``importFiles``).
 
 Endpoints are derived from the code-behind path. **Host→control mount edges** are resolved
 by the markup pass (:mod:`.mounts`): ``<%@ Register Src %>`` from the sibling markup and
@@ -13,11 +14,12 @@ master-page composition, and ``NavigateUrl`` navigation are later items of the s
 
 from __future__ import annotations
 
-from ...emit import disambiguate, file_id, statement_id
-from ...schemas import FileRecord, Statement
+from ...emit import file_id
+from ...schemas import FileRecord
 from ...utils import count_loc
 from ..base import ParseContext
 from ..csharp.parser import CSharpParser
+from ..emits import apply
 from ..treesitter import parse_source
 from .markup import (
     collect_markup_statements,
@@ -27,7 +29,8 @@ from .markup import (
 )
 from .mounts import master_codebehind, read_sibling_markup, resolve_master, resolve_mounts
 from .navigation import detect_navigation
-from .routes import detect_master_layout, detect_webforms_pages
+from .page_routes import page_routes
+from .routes import detect_webforms_pages
 
 #: Web Forms code-behind imports System.Web.UI (Page/UserControl) — NOT the MVC/Core
 #: markers that select the sibling AspNetCoreParser, so the two claim disjoint files.
@@ -49,8 +52,8 @@ class WebFormsParser(CSharpParser):
 
     def claims(self, path: str, source: bytes) -> bool:
         return (
-            path.endswith(_MARKUP_EXT)  # markup files (Step 1)
-            or path.endswith((".aspx.cs", ".ascx.cs", ".master.cs"))
+            path.lower().endswith(_MARKUP_EXT)  # markup files (Step 1)
+            or path.lower().endswith((".aspx.cs", ".ascx.cs", ".master.cs"))
             or any(m in source for m in _MARKERS)
         )
 
@@ -92,52 +95,26 @@ class WebFormsParser(CSharpParser):
                     root, ctx.source, ctx.path, fid, seen_ids, ctx.statement_text_limit
                 )
             )
-            # Host→control mount as a queryable route (host source, control endpoint) — a
-            # directive-derived route with no backing AST node → nodeType=synthetic (spec).
-            # Route emitters skip fixtures.
-            if not self.is_fixture_file(ctx.path):
-                for control, line in mounts:
-                    record.statements.append(
-                        Statement(
-                            id=disambiguate(statement_id(ctx.path, line, 0), seen_ids),
-                            parentId=fid,
-                            nodeType="synthetic",
-                            semanticType="route",
-                            framework="aspnet-webforms",
-                            routeKind="mount",
-                            endpoint="/" + control,
-                            text=f"mounts {control}",
-                            startLine=line,
-                            endLine=line,
-                            path=ctx.path,
-                        )
-                    )
         return record
 
     def parse_file(self, ctx: ParseContext) -> FileRecord:
-        if ctx.path.endswith(_MARKUP_EXT):
+        if ctx.path.lower().endswith(_MARKUP_EXT):
             return self._parse_markup(ctx)
         root = parse_source("csharp", ctx.source, ctx.parse_timeout_micros).root_node
         record = self.extract(root, ctx)  # inherited C# extraction (one parse)
         markup = read_sibling_markup(ctx.abs_path)  # read once — shared by all markup passes
-        master_ep = resolve_master(
-            markup, ctx.path, ctx.repo_root
-        )  # once — layout stmt + import edge
+        master_ep = resolve_master(markup, ctx.path, ctx.repo_root)  # → the master import edge
         if ctx.capture_statements:  # routes are statements — gated (spec A4)
-            page_routes = getattr(ctx.resolution_index, "page_routes", None)
-            routes = detect_webforms_pages(record, ctx.path, page_routes)
-            if routes:
-                record.statements.extend(routes)
-                record.framework = "aspnet-webforms"
-            # Master-page composition → routeKind=layout statement (item 3).
-            layout = detect_master_layout(record, ctx.path, master_ep)
-            if layout:
-                record.statements.extend(layout)
+            routes = detect_webforms_pages(
+                record, root, ctx.path, page_routes(ctx.resolution_index))
+            apply(record, routes, ctx.source, ctx.path)
+            # A page, a user control, or a file composed into a master page is Web Forms code.
+            if routes or master_ep is not None or ctx.path.lower().endswith(".ascx.cs"):
                 record.framework = "aspnet-webforms"
             # Page→page navigation → routeKind=navigation statements (item 4).
             nav = detect_navigation(record, ctx.path, root, ctx.source, markup, ctx.repo_root)
             if nav:
-                record.statements.extend(nav)
+                apply(record, nav, ctx.source, ctx.path)
                 record.framework = "aspnet-webforms"
         # Cross-file IMPORTS edges (core field, NOT statement-gated): host→control mounts +
         # page→master composition. Deduped against existing imports, sorted for determinism.

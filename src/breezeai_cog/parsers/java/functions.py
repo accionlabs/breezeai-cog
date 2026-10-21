@@ -185,3 +185,18 @@ def build_method(
         descend_all=True,  # walk inline lambdas — attribute their statements here
     )
     return fn, statements
+
+
+def method_nodes(root: Node, source: bytes) -> dict[tuple[str, int], Node]:
+    """``(name, start line)`` → the method's declaration, the key the Java parser's
+    ``Function`` records carry (``name``, ``startLine``)."""
+    out: dict[tuple[str, int], Node] = {}
+    stack = [root]
+    while stack:
+        n = stack.pop()
+        if n.type in ("method_declaration", "constructor_declaration"):
+            name = n.child_by_field_name("name")
+            if name is not None:
+                out[(node_text(name, source), n.start_point[0] + 1)] = n
+        stack.extend(n.named_children)
+    return out

@@ -98,9 +98,15 @@ class BaseParser:
     def matches(self, path: str | Path) -> bool:
         """Whether this parser handles ``path`` by name/extension (the candidacy gate,
         before ``claims``). Default: suffix or exact filename in ``extensions``. Override
-        for filename patterns (e.g. the config parser's ``Dockerfile.*`` / ``.env.*``)."""
+        for filename patterns (e.g. the config parser's ``Dockerfile.*`` / ``.env.*``).
+
+        A template extension matches in any case (``Default.ASPX``, ``Site.Master``, common in
+        older ASP.NET trees), as the template gate does; code extensions stay case-sensitive
+        (``.TS`` is also an MPEG video)."""
         p = Path(path)
-        return p.suffix in self.extensions or p.name in self.extensions
+        suffix = p.suffix
+        return (suffix in self.extensions or p.name in self.extensions
+                or (bool(self.template_extensions) and suffix.lower() in self.template_extensions))
 
     def claims(self, path: str, source: bytes) -> bool:
         """Whether this parser should handle ``path``. The base language parser claims
@@ -112,6 +118,11 @@ class BaseParser:
         self, repo_root: Path, files: Sequence[Path], jobs: int = 1
     ) -> Any | None:  # optional pre-pass
         return None
+
+    def link_handlers(self, record: FileRecord, ctx: ParseContext) -> None:
+        """After ``parse_file``: lead each entry point whose handler is declared elsewhere to that
+        declaration (``handlerLine``, and ``handlerPath`` for another file) through the repo
+        index. Languages that can do it override this; the default leaves the record as is."""
 
     def ignore_patterns(self) -> list[str]:
         """Per-language ignore defaults (layer 2) — from sibling ``ignore.txt``."""

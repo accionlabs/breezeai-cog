@@ -12,6 +12,7 @@ from tree_sitter import Node
 from ...emit import file_id
 from ...schemas import SCHEMA_VERSION, FileRecord, Function, Statement
 from ...utils import count_loc
+from ..additive import run_additive
 from ..base import BaseParser, ParseContext
 from ..treesitter import parse_source
 from ..callresolve import make_resolver
@@ -77,7 +78,7 @@ class JavaParser(BaseParser):
                 )
             )
 
-        return FileRecord(
+        record = FileRecord(
             id=fid,
             path=path,
             type="code",
@@ -89,3 +90,7 @@ class JavaParser(BaseParser):
             classes=classes,
             statements=statements,
         )
+        # Additive detectors (parsers/additive.py) — layered on top of the base extraction, before
+        # any framework subclass adds its own (a Quartz job co-exists with a Spring controller).
+        run_additive("java", root, ctx, record, is_fixture=self.is_fixture_file(path))
+        return record

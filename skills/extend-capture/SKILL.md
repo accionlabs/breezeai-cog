@@ -136,7 +136,13 @@ re-pollutes every graph.
 Subclass the base language parser, sniff the framework cheaply in `claims`, set a
 `priority` above the base, reuse `extract` (one parse), then add route/handler detection —
 gated on `ctx.capture_statements` (on by default, off with `--no-capture-statements`), and skipping fixture files for route emitters. See the
-framework-parser section and detection idioms in the reference guide.
+framework-parser section and detection idioms in the reference guide. Entry points (routes,
+consumers, scheduled jobs, pages) follow the
+[entry-point contract](../../docs/architecture/entry-points.md): give each framework construct
+a role, record one entry point per binding, and keep wiring (mounts, prefixes, registrations)
+as plain statements. Write the role table (in
+[`docs/entry-point-roles/`](../../docs/entry-point-roles/README.md)) and its
+`tests/unit/test_roles_<framework>.py` before the detection code.
 
 ### 3C. Internal-framework detector (additive — composes on top)
 An internal framework appears *inside* files owned by other frameworks, so it must never be
@@ -153,16 +159,26 @@ a one-per-file parser. There are **two hook points** — choose by the shape of 
   (`parsers/additive.py`). Do **not** edit the language parser: its `extract` already ends
   with `run_additive(<language>, …)`, which runs every registered detector for that language,
   so it fires for every file of the language and layers underneath whichever framework won.
-  It **enriches statements in place or appends new ones**; it never replaces the file's
-  parser. The runner applies the shared rules: it runs only with `ctx.capture_statements`,
-  skips fixture files when `skip_fixtures=True` (set it for route / entry-point emitters),
-  applies the cheap byte `guard` when one is given (otherwise guard inside the detector), and
-  lets a returned framework label fill `record.framework` only while it is unset. Pick a
-  unique `order` — it fixes the run order, which decides statement-id disambiguation — declare
+  Its `detect` **returns** what it found (`Detection` of `Emit`s: node + fields + whether it
+  may enrich the statement already there); the registry writes it (`parsers/emits.py` `apply`:
+  enrich in place or append, ids, parents). It never replaces the file's parser. Its `Gate`
+  decides when it runs: only with `ctx.capture_statements`, not on fixture files when
+  `skip_fixtures=True` (set it for route / entry-point emitters), only when the cheap byte
+  `guard` is present (otherwise guard inside the detector); a returned framework label fills
+  `record.framework` only while it is unset. Pick a unique `order` — it fixes the run order, which decides statement-id disambiguation — declare
   the `frameworks` labels it can emit, and add it to the inventory in
   `tests/unit/test_additive.py`. A language without the hook (see `HOOKED_LANGUAGES`) needs a
   one-time `run_additive` call in its base `extract` first — that one is a language-parser
   change.
+- **A fact from another file** (a class is an API only because the composition root registers
+  it; a URL prefix set by a mount elsewhere) → register a **fact** beside the
+  detector: `register_fact(FactSpec(name="framework.concern", gate=…, collect=…, resolve=…))`.
+  The language's `build_index` builds it once before parsing, and the detector reads it with
+  `index_fact`. Do not add a framework field to the
+  language index or a new selection hook — the file keeps its owner and the detector adds to it.
+  Bind names with the language's rules and leave ambiguous ones unbound. Recipe and worked
+  example: the parser reference ("Additive detectors", facts from other files) and
+  [`docs/architecture/cross-file-resolution.md`](../../docs/architecture/cross-file-resolution.md#a-framework-fact-from-another-file-a-registered-fact).
 
 Some "internal frameworks" only describe data models. Often the base parser already
 captures the class, its base class, and its fields — so the only thing to add is a **role
@@ -212,13 +228,17 @@ schema-wide commitment — ask.
 - **Design for scale without gold-plating.** Capture streams NDJSON so a large repo never
   sits fully in memory; parsing is per-file and parallelized, so keep parsers free of
   cross-file mutable state (use the repo-wide index hook for shared data, returning a
-  picklable value). When that hook (`build_index`) parses every file, structure it as a
+  picklable value). Only the **language** parser's `build_index` runs — a framework's facts
+  reach it through a registered fact (`register_fact`), never through the framework parser's
+  own `build_index` or instance state. When that hook (`build_index`) parses every file, structure it as a
   picklable per-file worker plus a deterministic (order-independent) reduce and run it
   through the shared `parallel_map(files, fn, jobs)` — so it honours `--jobs` (serial at
   `jobs<=1`) like the parse stage, instead of looping single-threaded.
 - **Test every behavioral change** — happy path, edges, failure modes. For parser work,
   also validate emitted records against the schema and dogfood on a real repository; a unit
-  test passing is not enough.
+  test passing is not enough. Anything that crosses files is also tested end to end through
+  `analyze_repo` with `jobs` 1 and 2 — a hand-built index cannot catch a fact that never
+  reaches the workers.
 
 ## 7. Setup & workflow
 
@@ -274,6 +294,8 @@ src/breezeai_cog/parsers/
       internal framework is an additive detector that does not displace the file's owner.
 - [ ] Existing vocabulary reused where it fits; any new node/relationship/statement kind
       was raised for a decision (§5).
+- [ ] Entry points follow the entry-point contract: a role table with one test per row, one
+      record per binding, `endpoint` resolved or empty, wiring never recorded as a route.
 - [ ] Verified on unit tests **and** dogfooded on a real repository; the suite stays green
       and every emitted record validates against the schema.
 

@@ -32,7 +32,6 @@ _NAV_TAGS = frozenset({"router-link", "RouterLink", "nuxt-link", "NuxtLink"})
 _CALL_RE = re.compile(r"^\s*([A-Za-z_$][\w.$]*)\s*\(")
 _IDENT_RE = re.compile(r"^\s*([A-Za-z_$][\w.$]*)\s*$")
 #: First string literal in a ``:to`` value — the static base of the target route.
-_LITERAL_RE = re.compile(r"""['"]([^'"]+)['"]""")
 
 
 def _child(node: Node, kind: str) -> Node | None:
@@ -79,10 +78,31 @@ def _handler(value_text: str) -> str | None:
     return m.group(1).split(".")[-1] if m else None
 
 
-def _nav_endpoint(value_text: str) -> str | None:
-    """The target route of a ``router-link`` ``to`` — the first string literal, else None."""
-    m = _LITERAL_RE.search(value_text)
-    return m.group(1) if m else None
+_QUOTED_RE = re.compile(r"""^(['"`])([^'"`$]*)\1$""")
+# The literal must be the whole value (``path: '/users/' + id`` is not a path: never partial).
+_OBJ_PATH_RE = re.compile(r"""\bpath\s*:\s*(['"`])([^'"`$]*)\1(?=\s*[,}])""")
+
+
+def _nav_endpoint(value_text: str, bound: bool) -> str | None:
+    """The target path of a ``router-link`` ``to``. A static ``to="/users"`` is the path itself;
+    a bound ``:to`` is a path only when it is a string literal (``:to="'/users'"``) or an object
+    with a literal ``path`` (``:to="{ path: '/users' }"``). A named route (``{ name: 'users' }``),
+    a variable or an expression is not a path → None (the endpoint is an address, never a route
+    name or a code name). A relative path (no leading ``/``) depends on the current route → None."""
+    value = value_text.strip()
+    if not bound:
+        return _absolute(value)
+    m = _QUOTED_RE.match(value)
+    if m:
+        return _absolute(m.group(2))
+    if value.startswith("{"):
+        m = _OBJ_PATH_RE.search(value)
+        return _absolute(m.group(2)) if m else None
+    return None
+
+
+def _absolute(path: str | None) -> str | None:
+    return path if path and path.startswith("/") else None
 
 
 def _interpolation_name(node: Node, source: bytes) -> str:
@@ -141,7 +161,7 @@ def collect_vue_template_statements(
                     semanticType="route",
                     framework=framework,
                     routeKind="navigation",
-                    endpoint=_nav_endpoint(value),
+                    endpoint=_nav_endpoint(value, node.type == "directive_attribute"),
                     name="to",
                 )
             elif node.type == "directive_attribute":

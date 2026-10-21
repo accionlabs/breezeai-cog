@@ -20,11 +20,12 @@ from pathlib import Path
 
 from tree_sitter import Node
 
-from ...emit import disambiguate, file_id, statement_id
-from ...schemas import FileRecord, Statement
+from ...emit import file_id
+from ...schemas import FileRecord
 from ..csharp.imports import _positional_args, _string_literal
 from ..treesitter import node_text
 from ..dotnet_common import ci_resolve, to_repo_path, web_app_root
+from ..emits import Emit
 from .routes import _page_class
 
 #: code-behind redirect/transfer method → the receiver it must be called on (precision guard,
@@ -81,43 +82,32 @@ def detect_navigation(
     source: bytes,
     markup: bytes,
     repo_root: Path | None,
-) -> list[Statement]:
-    """``routeKind=navigation`` route statements for this page's outgoing navigation (item 4).
-    Code-behind redirects keep their real node type/line; markup ``NavigateUrl``/``PostBackUrl``
-    are ``synthetic`` (no C# node), anchored to the page class."""
+) -> list[Emit]:
+    """``navigation`` records for this page's outgoing navigation (item 4), for
+    :func:`~..emits.apply`. Code-behind redirects keep their real node type/line; markup
+    ``NavigateUrl``/``PostBackUrl`` are ``synthetic`` (no C# node), anchored to the page class.
+    All sit at column 2 (distinct from the page record at 0) and parent to the file."""
     app_root = web_app_root(path, repo_root) if repo_root is not None else ""
     cur_dir = posixpath.dirname(path)
     cls = _page_class(record, path)
     cname = cls.name if cls is not None else None
     cstart = cls.startLine if cls is not None else 1
     cend = cls.endLine if cls is not None else 1
-    seen = {s.id for s in record.statements}
     dedup: set[tuple[str, str, int]] = set()
-    out: list[Statement] = []
+    out: list[Emit] = []
 
     def emit(endpoint: str, node_type: str, start: int, end: int) -> None:
         key = (node_type, endpoint, start)
         if key in dedup:
             return
         dedup.add(key)
-        stmt = Statement(
-            id=disambiguate(
-                statement_id(path, start, 2), seen
-            ),  # col 2 → distinct from page(0)/layout(1)
-            parentId=file_id(path),
-            nodeType=node_type,
-            semanticType="route",
-            text=endpoint,
-            endpoint=endpoint,
-            framework="aspnet-webforms",
-            routeKind="navigation",
-            handler=cname,
-            startLine=start,
-            endLine=end,
-            path=path,
-        )
-        seen.add(stmt.id)
-        out.append(stmt)
+        out.append(Emit(
+            root,
+            {"semanticType": "route", "routeKind": "navigation", "endpoint": endpoint,
+             "framework": "aspnet-webforms", "handler": cname},
+            parent=file_id(path), node_type=node_type, text=endpoint,
+            line=start, col=2, end_line=end,  # col 2 → distinct from page(0)/layout(1)
+        ))
 
     if b"Redirect" in source or b"Transfer" in source:  # cheap gate before the AST walk
         for target, node in _codebehind_navs(root, source):

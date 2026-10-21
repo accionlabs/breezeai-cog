@@ -1,0 +1,111 @@
+"""Role-table tests for C# AWS Lambda handlers (docs/entry-point-roles/lambda-csharp.md)."""
+
+from __future__ import annotations
+
+from breezeai_cog.parsers.contract import is_entry_point
+
+EP = {"route", "eventbus_consumer", "timer"}
+
+
+def _handler(event_type: str, ns: str = "Amazon.Lambda.SQSEvents") -> str:
+    return f"""using Amazon.Lambda.Core;
+using {ns};
+
+namespace Jobs;
+
+public class Function
+{{
+    public Task FunctionHandler({event_type} evt, ILambdaContext context) => Task.CompletedTask;
+
+    public void Report(string message, ILambdaContext context) {{ }}
+}}
+"""
+
+
+def _eps(stmts):
+    return [s for s in stmts if is_entry_point(s)]
+
+
+def test_event_handler_is_binding(analyze_files) -> None:
+    stmts = analyze_files({"Function.cs": _handler("SQSEvent")})
+    [r] = _eps(stmts)
+    assert r.semanticType == "eventbus_consumer"
+    assert (r.handler, r.handlerLine) == ("FunctionHandler", 8)
+
+
+def test_event_handler_framework_is_trigger(analyze_files) -> None:
+    stmts = analyze_files({"Function.cs": _handler("SQSEvent")})
+    [r] = _eps(stmts)
+    assert r.framework == "aws-sqs"
+
+
+def test_event_handler_endpoint_not_code_name(analyze_files) -> None:
+    stmts = analyze_files({"Function.cs": _handler("SQSEvent")})
+    [r] = _eps(stmts)
+    assert r.endpoint in (None, "")
+
+
+def test_http_event_handler_is_route(analyze_files) -> None:
+    stmts = analyze_files(
+        {"Function.cs": _handler("APIGatewayProxyRequest", "Amazon.Lambda.APIGatewayEvents")}
+    )
+    [r] = _eps(stmts)
+    assert (r.semanticType, r.routeKind, r.handler) == ("route", "route", "FunctionHandler")
+
+
+def test_scheduled_event_handler_is_timer(analyze_files) -> None:
+    stmts = analyze_files(
+        {
+            "Function.cs": _handler(
+                "ScheduledEvent", "Amazon.Lambda.CloudWatchEvents.ScheduledEvents"
+            )
+        }
+    )
+    [r] = _eps(stmts)
+    assert r.semanticType == "timer"
+
+
+def test_context_only_helper_is_none(analyze_files) -> None:
+    stmts = analyze_files({"Function.cs": _handler("SQSEvent")})
+    assert [s for s in _eps(stmts) if s.handler == "Report"] == []
+
+
+def test_deployment_config_is_wiring(analyze_files) -> None:
+    template = """{
+  "Resources": {
+    "Worker": {
+      "Type": "AWS::Serverless::Function",
+      "Properties": {
+        "Handler": "Jobs::Jobs.Function::FunctionHandler",
+        "Events": {"Q": {"Type": "SQS", "Properties": {"Queue": "arn:aws:sqs:eu-west-1:1:orders"}}}
+      }
+    }
+  }
+}
+"""
+    stmts = analyze_files({"Function.cs": _handler("SQSEvent"), "serverless.template": template})
+    [r] = _eps(stmts)
+    assert r.endpoint == "orders"
+
+
+def test_serverless_yml_trigger_is_copied_to_the_handler(analyze_files) -> None:
+    config = """service: jobs
+provider:
+  runtime: dotnet8
+functions:
+  worker:
+    handler: Jobs::Jobs.Function::FunctionHandler
+    events:
+      - sqs: arn:aws:sqs:eu-west-1:1:orders
+  report:
+    handler: Jobs::Jobs.Function::Report
+    events:
+      - schedule: cron(0 2 * * ? *)
+"""
+    stmts = analyze_files({"Function.cs": _handler("SQSEvent"), "serverless.yml": config})
+    got = sorted((r.handler, r.semanticType, r.framework, r.endpoint) for r in _eps(stmts))
+    # Report has no Lambda event parameter: the config alone says it is a handler.
+    assert got == [
+        ("FunctionHandler", "eventbus_consumer", "aws-sqs", "orders"),
+        ("Report", "timer", "aws-eventbridge", "cron(0 2 * * ? *)"),
+    ]

@@ -81,8 +81,8 @@ def test_claims_selects_angular() -> None:
 
 
 def test_mount_captures_lazy_module_link(tmp_path) -> None:
-    # Tier 1: a loadChildren mount must record what it loads, so it's a traversable
-    # edge in the code graph rather than a dead-end path segment.
+    # A loadChildren mount records what it loads, so it is a traversable edge in the code graph
+    # rather than a dead-end path segment.
     rec = _parse(tmp_path)
     mount = next(s for s in rec.statements
                  if s.semanticType == "route" and s.endpoint == "/admin")
@@ -109,9 +109,10 @@ def test_lazy_forms_across_angular_versions(tmp_path) -> None:
                        repo_root=tmp_path, capture_statements=True)
     rec = AngularParser().parse_file(ctx)
     by_ep = {s.endpoint: s for s in rec.statements if s.semanticType == "route"}
+    # Lazy route groups (routes const, legacy string form) are mounts; a lazy component is a page.
     assert by_ep["/catalog"].routeKind == "mount" and by_ep["/catalog"].handler == "CATALOG_ROUTES"
-    assert by_ep["/user/:id"].routeKind == "page" and by_ep["/user/:id"].handler == "UserComponent"
     assert by_ep["/legacy"].routeKind == "mount" and by_ep["/legacy"].handler == "LegacyModule"
+    assert by_ep["/user/:id"].routeKind == "page" and by_ep["/user/:id"].handler == "UserComponent"
 
 
 # ── Non-literal path resolution (Task #9) ──────────────────────────────────────
@@ -299,8 +300,8 @@ export class BrandRoutingModule {}
 
 
 def test_lazy_multi_mount_module_is_honest_null(tmp_path) -> None:
-    # A module mounted at TWO different prefixes → ambiguous → child keeps its own bare path
-    # (never wrongly attributed to one parent).
+    # A module mounted at TWO different prefixes → ambiguous → its routes get no address
+    # (never wrongly attributed to one parent, never the bare path it is not served at).
     app = b'''import { RouterModule, Routes } from '@angular/router';
 export const routes: Routes = [
   { path: 'a', loadChildren: () => import('./shared.module').then(m => m.SharedModule) },
@@ -315,7 +316,73 @@ export class SharedModule {}
     rec = _parse_with_index({"app.module.ts": app, "shared.module.ts": shared},
                             "shared.module.ts", tmp_path)
     eps = {s.handler: s.endpoint for s in rec.statements if s.semanticType == "route"}
-    assert eps["XComponent"] == "/x"  # bare path, not /a/x or /b/x
+    assert eps["XComponent"] is None  # not /a/x or /b/x, and not the bare /x
+
+
+# ── Standalone lazy routes: the mount reaches the loaded file (G42) ─────────────
+_STANDALONE_APP = b'''import { Routes } from '@angular/router';
+const routes: Routes = [
+  { path: 'admin', canActivate: [AuthGuard], loadChildren: () => import('./admin/admin.routes') },
+  { path: '', loadChildren: () => import('./entities/entity.routes') },
+  { path: 'shop', loadChildren: () => import('./shop/shop.routes').then(m => m.SHOP_ROUTES) },
+];
+export default routes;
+'''
+_STANDALONE_ADMIN = b'''import { Routes } from '@angular/router';
+const routes: Routes = [ { path: 'docs', loadComponent: () => import('./docs/docs') } ];
+export default routes;
+'''
+_STANDALONE_ENTITIES = b'''import { Routes } from '@angular/router';
+const routes: Routes = [ { path: 'label', loadChildren: () => import('./label/label.routes') } ];
+export default routes;
+'''
+_STANDALONE_LABEL = b'''import { Routes } from '@angular/router';
+const routes: Routes = [ { path: ':id/view', component: LabelDetail } ];
+export default routes;
+'''
+_STANDALONE_SHOP = b'''import { Routes } from '@angular/router';
+export const SHOP_ROUTES: Routes = [ { path: 'cart', component: CartComponent } ];
+'''
+
+
+def _standalone_files(tmp_path) -> dict:
+    for d in ("admin", "entities/label", "shop"):
+        (tmp_path / d).mkdir(parents=True, exist_ok=True)
+    return {"app.routes.ts": _STANDALONE_APP, "admin/admin.routes.ts": _STANDALONE_ADMIN,
+            "entities/entity.routes.ts": _STANDALONE_ENTITIES,
+            "entities/label/label.routes.ts": _STANDALONE_LABEL,
+            "shop/shop.routes.ts": _STANDALONE_SHOP}
+
+
+def test_standalone_default_export_gets_mount_prefix(tmp_path) -> None:
+    rec = _parse_with_index(_standalone_files(tmp_path), "admin/admin.routes.ts", tmp_path)
+    docs = next(s for s in rec.statements if s.semanticType == "route")
+    assert docs.endpoint == "/admin/docs"
+    assert docs.guards == ["AuthGuard"]  # unchanged: the mount guard already reached it
+
+
+def test_standalone_named_export_gets_mount_prefix(tmp_path) -> None:
+    # `.then(m => m.SHOP_ROUTES)` names a const, not a class: the loaded file carries the prefix.
+    rec = _parse_with_index(_standalone_files(tmp_path), "shop/shop.routes.ts", tmp_path)
+    eps = {s.handler: s.endpoint for s in rec.statements if s.semanticType == "route"}
+    assert eps["CartComponent"] == "/shop/cart"
+
+
+def test_standalone_chain_composes_through_files(tmp_path) -> None:
+    # app → entities ('') → label ('label'): the grandchild gets the whole chain.
+    rec = _parse_with_index(_standalone_files(tmp_path), "entities/label/label.routes.ts",
+                            tmp_path)
+    eps = {s.handler: s.endpoint for s in rec.statements if s.semanticType == "route"}
+    assert eps["LabelDetail"] == "/label/:id/view"
+
+
+def test_standalone_unresolved_mount_path_is_honest_null(tmp_path) -> None:
+    # The mount's path can't be resolved, so the loaded routes' full address is unknown.
+    files = _standalone_files(tmp_path)
+    files["app.routes.ts"] = _STANDALONE_APP.replace(b"path: 'admin'", b"path: adminPath()")
+    rec = _parse_with_index(files, "admin/admin.routes.ts", tmp_path)
+    docs = next(s for s in rec.statements if s.semanticType == "route")
+    assert docs.endpoint is None
 
 
 def test_breadcrumb_objects_not_captured_as_routes(tmp_path) -> None:
@@ -477,3 +544,63 @@ def test_ui_roles_without_capture_statements(tmp_path) -> None:
     roles = {c.name: c.uiRole for c in rec.classes}
     assert roles["UserComponent"] == "component"
     assert roles["MoneyPipe"] == "pipe"
+
+
+def test_route_entry_text_is_one_line_without_children(analyze_files) -> None:
+    st = analyze_files({
+        "package.json": '{"dependencies": {"@angular/core": "17", "@angular/router": "17"}}',
+        "src/app/app.routes.ts": (
+            "import { Routes } from '@angular/router';\n"
+            "export const routes: Routes = [\n  {\n    // the admin area\n    path: 'admin',\n"
+            "    component: AdminComponent, /* lazy later */\n"
+            "    children: [\n      { path: 'users', component: UsersComponent },\n    ],\n  },\n];\n"
+        ),
+    })
+    texts = {s.endpoint: s.text for s in st if s.semanticType == "route"}
+    assert texts["/admin"] == "{ path: 'admin', component: AdminComponent, children: […], }"
+    assert texts["/admin/users"] == "{ path: 'users', component: UsersComponent }"
+
+
+def test_route_guards_can_match_and_can_activate_child(analyze_files) -> None:
+    st = analyze_files({
+        "package.json": '{"dependencies": {"@angular/core": "17", "@angular/router": "17"}}',
+        "src/app/app.routes.ts": (
+            "import { Routes } from '@angular/router';\n"
+            "export const routes: Routes = [\n"
+            "  { path: 'admin', component: AdminComponent, canMatch: [RoleGuard],\n"
+            "    canActivate: [AuthGuard], canActivateChild: [ChildGuard, () => true],\n"
+            "    children: [\n"
+            "      { path: 'users', component: UsersComponent, canActivate: [UsersGuard],\n"
+            "        canActivateChild: [DeepGuard],\n"
+            "        children: [ { path: ':id', component: UserComponent } ] },\n"
+            "    ] },\n];\n"
+        ),
+    })
+    guards = {s.endpoint: s.guards for s in st if s.semanticType == "route"}
+    assert guards == {
+        "/admin": ["RoleGuard", "AuthGuard"],          # own guards in source order
+        # the parent's own guards run first, then its canActivateChild, then the child's own
+        "/admin/users": ["RoleGuard", "AuthGuard", "ChildGuard", "UsersGuard"],
+        "/admin/users/:id": ["RoleGuard", "AuthGuard", "ChildGuard", "UsersGuard", "DeepGuard"],
+    }
+
+
+def test_mount_inside_a_children_parent_gets_the_parent_path(tmp_path) -> None:
+    # The loaded routes are served under every enclosing route's path: /shop/admin/docs.
+    files = {
+        "app.routes.ts": b"""import { Routes } from '@angular/router';
+const routes: Routes = [
+  { path: 'shop', component: Shell, children: [
+    { path: 'admin', loadChildren: () => import('./admin.routes') },
+  ] },
+];
+export default routes;
+""",
+        "admin.routes.ts": b"""import { Routes } from '@angular/router';
+const routes: Routes = [ { path: 'docs', component: DocsComponent } ];
+export default routes;
+""",
+    }
+    rec = _parse_with_index(files, "admin.routes.ts", tmp_path)
+    eps = {s.handler: s.endpoint for s in rec.statements if s.semanticType == "route"}
+    assert eps["DocsComponent"] == "/shop/admin/docs"
