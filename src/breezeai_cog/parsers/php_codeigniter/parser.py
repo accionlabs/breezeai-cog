@@ -15,6 +15,7 @@ from ..php_route_common import (
     group_filters,
     join_endpoint,
     method_of,
+    route_options,
     string_value,
     strings_in_array,
 )
@@ -73,6 +74,9 @@ def detect_codeigniter_routes(root: Node, source: bytes, path: str, record: File
                     return
             methods, path_index, handler_index = _route_methods(method, args, source)
             endpoint = string_value(args[path_index], source) if len(args) > path_index else None
+            options_index = handler_index + 1 if handler_index is not None else None
+            options = args[options_index] if options_index is not None and len(args) > options_index else None
+            route_name, route_guards = route_options(options, source)
             receiver = node.child_by_field_name("object")
             receiver_name = node_text(receiver, source).lstrip("$").rsplit("->", 1)[-1] if receiver else ""
             if endpoint is not None and receiver_name.lower() in {"routes", "routecollection"}:
@@ -82,7 +86,8 @@ def detect_codeigniter_routes(root: Node, source: bytes, path: str, record: File
                         framework="codeigniter",
                         endpoint=join_endpoint(prefix, endpoint), method=verb,
                         handler_node=args[handler_index] if handler_index is not None else None,
-                        guards=guards,
+                        name=route_name,
+                        guards=list(dict.fromkeys([*(guards or []), *route_guards])),
                         is_regex=bool("(:num)" in endpoint or "(:segment)" in endpoint or "(:any)" in endpoint or "(.*)" in
                         endpoint)                    )
         for child in node.named_children:

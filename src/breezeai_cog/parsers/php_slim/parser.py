@@ -9,6 +9,7 @@ from ..base import ParseContext
 from ..php.parser import PhpParser
 from ..php_route_common import (
     args_of,
+    chained_route_metadata,
     chain_prefix,
     closure_argument,
     closure_body,
@@ -67,11 +68,19 @@ def detect_slim_routes(root: Node, source: bytes, path: str, record: FileRecord)
                 "app", "group", "router", "routecollector",
             }:
                 for verb in methods:
+                    route_name, guards = chained_route_metadata(
+                        node,
+                        source,
+                        name_methods={"setname"},
+                        guard_methods={"add"},
+                    )
                     found |= enrich_route(
                         node, source, path, statements, record.statements, seen_ids,
                         framework="slim",
                         endpoint=join_endpoint(prefix, endpoint), method=verb,
                         handler_node=handler_node,
+                        name=route_name,
+                        guards=guards,
                     )
         for child in node.named_children:
             visit(child, prefix)

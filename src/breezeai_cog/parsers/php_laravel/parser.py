@@ -9,12 +9,15 @@ from ..base import ParseContext
 from ..php.parser import PhpParser
 from ..php_route_common import (
     args_of,
+    chained_route_metadata,
     chain_prefix,
     closure_argument,
     closure_body,
     enrich_route,
     join_endpoint,
     method_of,
+    receiver_chain_metadata,
+    route_options,
     string_value,
     strings_in_array,
 )
@@ -60,7 +63,12 @@ def detect_laravel_routes(root: Node, source: bytes, path: str, record: FileReco
     seen_ids = {statement.id for statement in record.statements}
     found = False
 
-    def visit(node: Node, prefix: str = "") -> None:
+    def visit(
+        node: Node,
+        prefix: str = "",
+        name_prefix: str = "",
+        inherited_guards: list[str] | None = None,
+    ) -> None:
         nonlocal found
         if node.type in {"member_call_expression", "scoped_call_expression"}:
             name = method_of(node, source)
@@ -68,7 +76,22 @@ def detect_laravel_routes(root: Node, source: bytes, path: str, record: FileReco
                 closure = closure_argument(node)
                 if closure is not None:
                     next_prefix = _direct_prefix(node, source)
-                    visit(closure_body(closure), join_endpoint(prefix, next_prefix or "") if next_prefix else prefix)
+                    group_name, group_guards = receiver_chain_metadata(
+                        node,
+                        source,
+                        name_methods={"name"},
+                        guard_methods={"middleware"},
+                    )
+                    args = args_of(node)
+                    option_name, option_guards = route_options(args[0], source) if args else (None, [])
+                    visit(
+                        closure_body(closure),
+                        join_endpoint(prefix, next_prefix or "") if next_prefix else prefix,
+                        f"{name_prefix}{option_name or ''}{group_name or ''}",
+                        list(dict.fromkeys([
+                            *(inherited_guards or []), *option_guards, *group_guards,
+                        ])),
+                    )
                     return
             if node.type == "scoped_call_expression" and _route_scope(node, source):
                 args = args_of(node)
@@ -84,14 +107,24 @@ def detect_laravel_routes(root: Node, source: bytes, path: str, record: FileReco
                 endpoint = string_value(endpoint_node, source)
                 if endpoint is not None:
                     for method in methods:
+                        route_name, guards = chained_route_metadata(
+                            node,
+                            source,
+                            name_methods={"name"},
+                            guard_methods={"middleware"},
+                        )
+                        if route_name:
+                            route_name = f"{name_prefix}{route_name}"
                         found |= enrich_route(
                             node, source, path, statements, record.statements, seen_ids,
                             framework="laravel",
                             endpoint=join_endpoint(prefix, endpoint), method=method,
                             handler_node=handler_node,
+                            name=route_name,
+                            guards=list(dict.fromkeys([*(inherited_guards or []), *guards])),
                         )
         for child in node.named_children:
-            visit(child, prefix)
+            visit(child, prefix, name_prefix, inherited_guards)
 
     visit(root)
     return found
