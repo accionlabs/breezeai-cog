@@ -536,7 +536,9 @@ the file:
   │                  45   graphql-resol…   typescript_graphql/…modules.py    ✔       │
   │                  50   vue-routes       typescript_vue/routes.py          ✔       │
   │                  60   nextjs-pages     typescript_nextjs/pages.py        ✔       │
-  │                  70   navigation       typescript/navigation.py          ✔       │
+  │                  70   vue-navigation   typescript_vue/navigation.py      ✔       │
+  │                  72   angular-navi…    typescript_angular/navigation.py  ✔       │
+  │                  74   react-navigation typescript_react/navigation.py    ✔       │
   │                                                                                  │
   │  csharp          10   lambda-handlers  csharp/lambda_events.py           ✔       │
   │                  20   lucene           csharp/lucene.py                          │

@@ -1,4 +1,5 @@
-"""Programmatic navigation and React <Link> as outbound navigation (parsers/typescript/navigation.py)."""
+"""Programmatic navigation and React <Link> as outbound navigation (the ``navigation`` detectors
+in parsers/typescript_vue, typescript_angular and typescript_react)."""
 
 from __future__ import annotations
 

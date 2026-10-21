@@ -104,8 +104,9 @@ class BaseParser:
         older ASP.NET trees), as the template gate does; code extensions stay case-sensitive
         (``.TS`` is also an MPEG video)."""
         p = Path(path)
-        return (p.suffix in self.extensions or p.name in self.extensions
-                or p.suffix.lower() in self.template_extensions)
+        suffix = p.suffix
+        return (suffix in self.extensions or p.name in self.extensions
+                or (bool(self.template_extensions) and suffix.lower() in self.template_extensions))
 
     def claims(self, path: str, source: bytes) -> bool:
         """Whether this parser should handle ``path``. The base language parser claims
