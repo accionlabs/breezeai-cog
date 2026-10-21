@@ -1,6 +1,8 @@
-"""Slim framework parser with literal-path route detection."""
+"""Slim framework parser with route registration detection."""
 
 from __future__ import annotations
+
+import re
 
 from tree_sitter import Node
 
@@ -18,6 +20,7 @@ from ..php_route_common import (
     method_of,
     string_value,
     strings_in_array,
+    unwrap,
 )
 from ..treesitter import node_text, parse_source
 
@@ -29,7 +32,76 @@ _VERBS = {
     "delete": "DELETE",
     "options": "OPTIONS",
     "head": "HEAD",
+    "any": "ANY",
 }
+
+_ROUTE_RECEIVERS = {"app", "group", "router", "routecollector"}
+_ROUTE_METHODS = set(_VERBS) | {"map", "redirect"}
+_ROUTE_TYPE_MARKERS = (
+    b"RouteCollectorProxy",
+    b"RouteCollectorProxyInterface",
+    b"RouteCollectorInterface",
+    b"Slim\\App",
+)
+
+
+def _closure_parameter_names(closure: Node, source: bytes) -> set[str]:
+    parameters = closure.child_by_field_name("parameters")
+    if parameters is None:
+        return set()
+    names: set[str] = set()
+    for parameter in parameters.named_children:
+        name = parameter.child_by_field_name("name")
+        if name is not None:
+            names.add(node_text(name, source).lstrip("$").lower())
+    return names
+
+
+def _typed_slim_receiver(receiver_name: str, source: bytes) -> bool:
+    if not receiver_name:
+        return False
+    variable = re.escape(receiver_name.encode())
+    return any(
+        re.search(re.escape(marker) + rb"\s+\$" + variable + rb"\b", source)
+        for marker in _ROUTE_TYPE_MARKERS
+    )
+
+
+def _route_receiver(call: Node, source: bytes, allowed: set[str]) -> bool:
+    receiver = call.child_by_field_name("object")
+    if receiver is None:
+        return False
+    receiver_name = node_text(receiver, source).lstrip("$").rsplit("->", 1)[-1].lower()
+    return receiver_name in allowed or _typed_slim_receiver(receiver_name, source)
+
+
+def _route_methods(node: Node, source: bytes) -> tuple[list[str | None], Node | None, Node | None, str]:
+    method = method_of(node, source)
+    args = args_of(node)
+    if method == "map" and len(args) >= 2:
+        methods = [value.upper() for value in strings_in_array(args[0], source)]
+        return methods or [None], args[1], args[2] if len(args) > 2 else None, "route"
+    if method in _VERBS and args:
+        return [_VERBS[method]], args[0], args[1] if len(args) > 1 else None, "route"
+    if method == "redirect" and args:
+        return ["GET"], args[0], None, "redirect"
+    return [], None, None, "route"
+
+
+def _is_class_reference_endpoint(node: Node | None, source: bytes) -> bool:
+    value = unwrap(node)
+    return value is not None and node_text(value, source).strip().lower().endswith("::class")
+
+
+def _may_contain_slim_routes(source: bytes) -> bool:
+    return any(
+        token in source
+        for token in (
+            b"->get", b"->post", b"->put", b"->patch", b"->delete",
+            b"->options", b"->head", b"->any", b"->map", b"->redirect",
+            b"->group",
+        )
+    )
 
 
 def detect_slim_routes(root: Node, source: bytes, path: str, record: FileRecord) -> bool:
@@ -37,8 +109,15 @@ def detect_slim_routes(root: Node, source: bytes, path: str, record: FileRecord)
     seen_ids = {statement.id for statement in record.statements}
     found = False
 
-    def visit(node: Node, prefix: str = "") -> None:
+    def visit(
+        node: Node,
+        prefix: str = "",
+        inherited_guards: list[str] | None = None,
+        allowed_receivers: set[str] | None = None,
+    ) -> None:
         nonlocal found
+        receivers = allowed_receivers or set(_ROUTE_RECEIVERS)
+        guards_in_scope = inherited_guards or []
         if node.type in {"member_call_expression", "scoped_call_expression"}:
             method = method_of(node, source)
             args = args_of(node)
@@ -48,25 +127,25 @@ def detect_slim_routes(root: Node, source: bytes, path: str, record: FileRecord)
                     base = string_value(args[0], source) if args else None
                     if base is None:
                         base = chain_prefix(node.child_by_field_name("object"), source)
-                    visit(closure_body(closure), join_endpoint(prefix, base or "") if base else prefix)
+                    _, group_guards = chained_route_metadata(
+                        node,
+                        source,
+                        name_methods=set(),
+                        guard_methods={"add"},
+                    )
+                    visit(
+                        closure_body(closure),
+                        join_endpoint(prefix, base or "") if base else prefix,
+                        list(dict.fromkeys([*guards_in_scope, *group_guards])),
+                        receivers | _closure_parameter_names(closure, source),
+                    )
                     return
-            if node.type == "member_call_expression" and method == "map" and len(args) >= 2:
-                methods = [m.upper() for m in strings_in_array(args[0], source)]
-                endpoint_node = args[1]
-                handler_node = args[2] if len(args) > 2 else None
-            elif method in _VERBS and args:
-                methods = [_VERBS[method]]
-                endpoint_node = args[0]
-                handler_node = args[1] if len(args) > 1 else None
-            else:
-                methods = []
-                endpoint_node, handler_node = None, None
+            methods, endpoint_node, handler_node, route_kind = _route_methods(node, source)
             endpoint = string_value(endpoint_node, source)
-            receiver = node.child_by_field_name("object")
-            receiver_name = node_text(receiver, source).lstrip("$").rsplit("->", 1)[-1] if receiver else ""
-            if endpoint is not None and receiver_name.lower() in {
-                "app", "group", "router", "routecollector",
-            }:
+            if _is_class_reference_endpoint(endpoint_node, source):
+                methods = []
+            if methods and _route_receiver(node, source, receivers):
+                route_endpoint = join_endpoint(prefix, endpoint) if endpoint is not None else None
                 for verb in methods:
                     route_name, guards = chained_route_metadata(
                         node,
@@ -77,13 +156,15 @@ def detect_slim_routes(root: Node, source: bytes, path: str, record: FileRecord)
                     found |= enrich_route(
                         node, source, path, statements, record.statements, seen_ids,
                         framework="slim",
-                        endpoint=join_endpoint(prefix, endpoint), method=verb,
+                        endpoint=route_endpoint, method=verb,
                         handler_node=handler_node,
                         name=route_name,
-                        guards=guards,
+                        guards=list(dict.fromkeys([*guards_in_scope, *guards])),
+                        route_kind=route_kind,
+                        closure_handler="<closure>",
                     )
         for child in node.named_children:
-            visit(child, prefix)
+            visit(child, prefix, guards_in_scope, receivers)
 
     visit(root)
     return found
@@ -95,7 +176,7 @@ class SlimParser(PhpParser):
     frameworks = ["slim"]
 
     def claims(self, path: str, source: bytes) -> bool:
-        explicit_marker = b"Slim\\" in source
+        explicit_marker = b"Slim\\" in source or b"namespace Slim;" in source
         normalized_path = path.lower().replace("\\", "/")
         entrypoint = normalized_path.endswith(
             ("/public/index.php", "/index.php", "/routes.php")
@@ -103,7 +184,7 @@ class SlimParser(PhpParser):
         slim_route_call = b"$app" in source and any(
             token in source for token in (
                 b"->get", b"->post", b"->put", b"->patch", b"->delete",
-                b"->options", b"->map", b"->run",
+                b"->options", b"->head", b"->any", b"->map", b"->redirect", b"->run",
             )
         )
         other_framework = any(
@@ -115,6 +196,10 @@ class SlimParser(PhpParser):
         root = parse_source("php", ctx.source, ctx.parse_timeout_micros).root_node
         record = self.extract(root, ctx)
         record.framework = "slim"
-        if ctx.capture_statements and not self.is_fixture_file(ctx.path):
+        if (
+            ctx.capture_statements
+            and not self.is_fixture_file(ctx.path)
+            and _may_contain_slim_routes(ctx.source)
+        ):
             detect_slim_routes(root, ctx.source, ctx.path, record)
         return record
