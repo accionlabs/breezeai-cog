@@ -67,7 +67,7 @@ def _model_name(node: Node, source: bytes) -> str | None:
 
 def _page_handler(root: Node, source: bytes, path: str) -> str | None:
     """The page an ``@page`` directive serves (see the module docstring)."""
-    if path.endswith(".razor"):
+    if path.lower().endswith(".razor"):
         stem = path.rsplit("/", 1)[-1][: -len(".razor")]
         return stem if stem.isidentifier() else None
     stack = [root]
@@ -123,7 +123,7 @@ def collect_razor_statements(
                     endpoint=_page_endpoint(node, source),
                     handler=(handler := _page_handler(root, source, path)),
                     # A Blazor component is its whole file: the handler starts at line 1.
-                    handlerLine=1 if handler and path.endswith(".razor") else None,
+                    handlerLine=1 if handler and path.lower().endswith(".razor") else None,
                 )
         elif t == "razor_html_attribute":
             name = _attr_name(node, source)

@@ -49,7 +49,7 @@ class RazorParser(BaseParser):
         fid = file_id(ctx.path)
         root = parse_source("razor", ctx.source, ctx.parse_timeout_micros).root_node
         # .razor is a Blazor component; .cshtml is a view template.
-        ui_role = "component" if ctx.path.endswith(".razor") else "template"
+        ui_role = "component" if ctx.path.lower().endswith(".razor") else "template"
         record = FileRecord(
             id=fid,
             path=ctx.path,

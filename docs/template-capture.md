@@ -44,7 +44,8 @@ Two details worth knowing:
 
 - **Only the final extension counts.** `Page.aspx.cs` ends in `.cs`, so the code-behind is
   always captured. Only the bare `Page.aspx` is gated.
-- **Case is ignored.** `Site.Master` and `Default.ASPX` are recognised as templates.
+- **Case is ignored.** `Site.Master` and `Default.ASPX` are skipped as templates, and parsed
+  like `.master` / `.aspx` with the flag.
 
 ### Markup that is *not* gated
 

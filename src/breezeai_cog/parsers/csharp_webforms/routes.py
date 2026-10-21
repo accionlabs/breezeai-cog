@@ -61,7 +61,7 @@ def detect_webforms_pages(
     ``MapPageRoute`` URLs, the endpoint is **enriched** with the real routed URL(s) — one
     route per URL — instead of the physical path (BREEZEAI-765 item 2); otherwise a single
     physical-path route is emitted, as before."""
-    match = next((kv for sfx, kv in _KIND_BY_SUFFIX.items() if path.endswith(sfx)), None)
+    match = next((kv for sfx, kv in _KIND_BY_SUFFIX.items() if path.lower().endswith(sfx)), None)
     if match is None:
         return []
     route_kind, node_type = match

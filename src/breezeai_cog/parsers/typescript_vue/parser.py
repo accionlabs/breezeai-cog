@@ -50,7 +50,7 @@ class VueParser(TypeScriptParser):
     def claims(self, path: str, source: bytes) -> bool:
         # A .vue SFC is always ours. A .ts/.js file is ours only when it imports vue /
         # vue-router (router configs, app bootstrap) — byte guard keeps it off unrelated TS.
-        return path.endswith(".vue") or any(g in source for g in _VUE_IMPORT_GUARDS)
+        return path.lower().endswith(".vue") or any(g in source for g in _VUE_IMPORT_GUARDS)
 
     def _template_statements(
         self, ctx: ParseContext, fid: str, seen_ids: set[str]
@@ -70,7 +70,7 @@ class VueParser(TypeScriptParser):
         )
 
     def parse_file(self, ctx: ParseContext) -> FileRecord:
-        if ctx.path.endswith(".vue"):
+        if ctx.path.lower().endswith(".vue"):
             ranges = script_ranges(ctx.source)
             if not ranges:  # a template/style-only SFC has no code — still capture the template
                 fid = file_id(ctx.path)
@@ -106,7 +106,7 @@ class VueParser(TypeScriptParser):
         # answerable, not only when a route array happened to be detected. Authoritative over
         # any tentative label the additive extract pass set.
         record.framework = "vue"
-        if ctx.path.endswith(".vue"):
+        if ctx.path.lower().endswith(".vue"):
             # language axis: the SFC's script lang (ts/js), NOT "vue" — "vue" is the framework,
             # which the extension can't carry, so JS/TS would otherwise be lost on .vue files.
             record.language = script_language(ctx.source)
@@ -119,7 +119,7 @@ class VueParser(TypeScriptParser):
         mark_composables(root, parsed_source, record)
         # <template> bindings — parsed from the ORIGINAL source with the vue grammar (the
         # shadow blanked the template). Closes the sfc.py gap; script statements keep their ids.
-        if ctx.path.endswith(".vue") and ctx.capture_statements:
+        if ctx.path.lower().endswith(".vue") and ctx.capture_statements:
             record.statements.extend(
                 self._template_statements(ctx, file_id(ctx.path), {s.id for s in record.statements})
             )

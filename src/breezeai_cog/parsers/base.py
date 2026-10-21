@@ -98,9 +98,14 @@ class BaseParser:
     def matches(self, path: str | Path) -> bool:
         """Whether this parser handles ``path`` by name/extension (the candidacy gate,
         before ``claims``). Default: suffix or exact filename in ``extensions``. Override
-        for filename patterns (e.g. the config parser's ``Dockerfile.*`` / ``.env.*``)."""
+        for filename patterns (e.g. the config parser's ``Dockerfile.*`` / ``.env.*``).
+
+        A template extension matches in any case (``Default.ASPX``, ``Site.Master``, common in
+        older ASP.NET trees), as the template gate does; code extensions stay case-sensitive
+        (``.TS`` is also an MPEG video)."""
         p = Path(path)
-        return p.suffix in self.extensions or p.name in self.extensions
+        return (p.suffix in self.extensions or p.name in self.extensions
+                or p.suffix.lower() in self.template_extensions)
 
     def claims(self, path: str, source: bytes) -> bool:
         """Whether this parser should handle ``path``. The base language parser claims

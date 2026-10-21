@@ -47,11 +47,10 @@ def _template_skip_rule(settings) -> Callable[[str], str | None] | None:
     """The ``skip_rule`` that drops markup/view files, or ``None`` when
     ``--capture-templates`` is on.
 
-    Extension-based, so it costs a suffix lookup and never reads the file. Lowercased —
-    unlike ``BaseParser.matches``, which is case-sensitive — so ``Site.Master`` and
-    ``Default.ASPX`` (endemic in older ASP.NET trees) land in the honest ``template``
-    bucket instead of ``unsupported``. The gate is therefore a superset of what the
-    parsers actually claim.
+    Extension-based, so it costs a suffix lookup and never reads the file. Lowercased, as
+    ``BaseParser.matches`` is for template extensions, so ``Site.Master`` and
+    ``Default.ASPX`` (endemic in older ASP.NET trees) land in the ``template`` bucket
+    without the flag and are parsed with it.
     """
     if settings.capture_templates:
         return None

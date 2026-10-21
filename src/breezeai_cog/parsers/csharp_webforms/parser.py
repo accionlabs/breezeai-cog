@@ -52,8 +52,8 @@ class WebFormsParser(CSharpParser):
 
     def claims(self, path: str, source: bytes) -> bool:
         return (
-            path.endswith(_MARKUP_EXT)  # markup files (Step 1)
-            or path.endswith((".aspx.cs", ".ascx.cs", ".master.cs"))
+            path.lower().endswith(_MARKUP_EXT)  # markup files (Step 1)
+            or path.lower().endswith((".aspx.cs", ".ascx.cs", ".master.cs"))
             or any(m in source for m in _MARKERS)
         )
 
@@ -98,7 +98,7 @@ class WebFormsParser(CSharpParser):
         return record
 
     def parse_file(self, ctx: ParseContext) -> FileRecord:
-        if ctx.path.endswith(_MARKUP_EXT):
+        if ctx.path.lower().endswith(_MARKUP_EXT):
             return self._parse_markup(ctx)
         root = parse_source("csharp", ctx.source, ctx.parse_timeout_micros).root_node
         record = self.extract(root, ctx)  # inherited C# extraction (one parse)
@@ -109,7 +109,7 @@ class WebFormsParser(CSharpParser):
                 record, root, ctx.path, page_routes(ctx.resolution_index))
             apply(record, routes, ctx.source, ctx.path)
             # A page, a user control, or a file composed into a master page is Web Forms code.
-            if routes or master_ep is not None or ctx.path.endswith(".ascx.cs"):
+            if routes or master_ep is not None or ctx.path.lower().endswith(".ascx.cs"):
                 record.framework = "aspnet-webforms"
             # Page→page navigation → routeKind=navigation statements (item 4).
             nav = detect_navigation(record, ctx.path, root, ctx.source, markup, ctx.repo_root)

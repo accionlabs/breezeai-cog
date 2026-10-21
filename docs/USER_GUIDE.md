@@ -413,8 +413,8 @@ layers do not interact the way you might expect:
 - `.repoinclude` does **not** bring templates back. Only `--capture-templates` does.
 - `.repoignore` still wins over `--capture-templates`: the template gate runs *after* the ignore
   layers, so an ignored template stays ignored.
-- The gate matches on the file extension case-insensitively, so `Site.Master` and `Default.ASPX`
-  are recognised as templates even though the parsers themselves match case-sensitively.
+- Template extensions are matched case-insensitively, so `Site.Master` and `Default.ASPX` are
+  skipped as templates by default and parsed like `.master` / `.aspx` with the flag.
 
 See [Template Capture](template-capture.md) for what each template type produces, worked
 examples, and guidance on which stacks need the flag.

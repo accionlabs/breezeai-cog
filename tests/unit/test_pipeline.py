@@ -123,6 +123,42 @@ def test_capture_templates_includes_markup(tmp_path) -> None:
     assert sorted(r.path for r in records) == ["Default.aspx", "app.py", "page.html"]
 
 
+def test_upper_case_template_extensions_are_parsed_as_lower_case(tmp_path) -> None:
+    """``Default.ASPX`` / ``Site.Master`` / ``Counter.RAZOR`` / ``App.VUE`` parse exactly as
+    their lower-case names would; a code extension stays case-sensitive (``clip.TS``)."""
+    repo = tmp_path / "upper"
+    (repo / "Pages").mkdir(parents=True)
+    (repo / "Default.ASPX").write_text(
+        '<%@ Page CodeFile="Default.ASPX.cs" Inherits="Default" %>\n'
+        '<asp:Button ID="Save" runat="server" OnClick="Save_Click" />\n')
+    (repo / "Default.ASPX.cs").write_text(
+        "using System.Web.UI;\n"
+        "public partial class Default : Page { protected void Save_Click() {} }\n")
+    (repo / "Site.Master").write_text('<%@ Master Language="C#" %>\n<html></html>\n')
+    (repo / "Pages" / "Counter.RAZOR").write_text('@page "/counter"\n@code { void Inc() {} }\n')
+    (repo / "App.VUE").write_text(
+        "<template><div/></template>\n<script>export default { methods: { load() {} } }</script>\n")
+    (repo / "clip.TS").write_text("G@\x00 not typescript\n")
+
+    assert {r.path for r in iter_file_records(repo)} == {"Default.ASPX.cs"}
+
+    records = {r.path: r for r in iter_file_records(repo, capture_templates=True)}
+    assert set(records) == {"Default.ASPX", "Default.ASPX.cs", "Site.Master",
+                            "Pages/Counter.RAZOR", "App.VUE"}
+    assert (records["Default.ASPX"].framework, records["Default.ASPX"].uiRole) == (
+        "aspnet-webforms", "template")
+    assert records["Default.ASPX"].importFiles == ["Default.ASPX.cs"]
+    page = next(s for s in records["Default.ASPX.cs"].statements if s.semanticType == "route")
+    assert (page.endpoint, page.handler) == ("/Default.ASPX", "Default")
+    blazor = records["Pages/Counter.RAZOR"]
+    assert blazor.uiRole == "component"
+    route = next(s for s in blazor.statements if s.semanticType == "route")
+    assert (route.endpoint, route.handler, route.handlerLine) == ("/counter", "Counter", 1)
+    vue = records["App.VUE"]
+    assert (vue.framework, vue.uiRole, vue.language) == ("vue", "component", "javascript")
+    assert [f.name for f in vue.functions] == ["load"]
+
+
 def test_template_skips_are_counted_and_reconcile(tmp_path) -> None:
     """A `template` skip joins the reason tally and keeps
     `scanned == parsed + failed + skipped` intact."""
