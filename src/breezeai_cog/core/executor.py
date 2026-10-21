@@ -1,7 +1,8 @@
 """Parallel parse fan-out.
 
 Spawn-safe (Linux/macOS/Windows): module-level worker functions, a ``Manager().Queue``
-for log funneling, and picklable ``initargs``. Each worker loads grammars lazily
+for log funneling, and picklable ``initargs``. The repo indexes reach the workers through a
+private temp file, not ``initargs`` (see :func:`_worker_options`). Each worker loads grammars lazily
 (cached per process) after ``discover_builtin`` registers parsers in the pool
 initializer; files are submitted in batches and collected in completion order.
 Per-file failures (incl. the tree-sitter timeout ``ValueError``) are isolated.
@@ -13,10 +14,14 @@ import logging
 import math
 import multiprocessing as mp
 import os
+import pickle
+import shutil
+import tempfile
 from concurrent.futures import ProcessPoolExecutor, as_completed
+from contextlib import contextmanager
 from logging.handlers import QueueListener
 from pathlib import Path
-from typing import Iterator
+from typing import Any, Iterator
 
 from ..logging import get_logger
 from ..schemas import FileRecord
@@ -131,6 +136,10 @@ def _init_worker(log_queue: object, repo_root: str, options: dict) -> None:
     from .registry import discover_builtin
 
     discover_builtin()
+    path = options.pop("indexes_path", None)
+    if path is not None:
+        with open(path, "rb") as fh:
+            options["indexes"] = pickle.load(fh)
     _WORKER["repo_root"] = repo_root
     _WORKER["options"] = options
     if log_queue is not None:
@@ -153,6 +162,38 @@ def _parse_batch(batch: list[ScanEntry]) -> list[tuple[str, FileRecord]]:
 def _chunk(items: list[ScanEntry], jobs: int) -> list[list[ScanEntry]]:
     size = max(1, math.ceil(len(items) / (jobs * 4)))  # ~4 batches/worker for balance
     return [items[i:i + size] for i in range(0, len(items), size)]
+
+
+@contextmanager
+def _worker_options(options: dict[str, Any]) -> Iterator[dict[str, Any]]:
+    """The ``options`` for the pool's ``initargs``, with the indexes moved to a temp file.
+
+    A spawned worker gets its ``initargs`` through a pipe; once they outgrow the pipe buffer
+    (~64 KB), the parent blocks on each worker until that worker has started Python and
+    imported cog to read them, so the workers start one after another instead of together.
+    The indexes are most of that size, so the parent writes them once to a file in a private
+    temp directory and each worker loads them in ``_init_worker``. If the file can't be written
+    (no writable temp dir), they stay in ``options``: slower to start, same result. The
+    directory is removed once the pool has shut down."""
+    if not options.get("indexes"):
+        yield options
+        return
+    try:
+        tmp = tempfile.mkdtemp(prefix="breezeai-cog-")  # owner-only (0700)
+    except OSError:
+        yield options
+        return
+    try:
+        path = os.path.join(tmp, "indexes.pickle")
+        try:
+            with open(path, "wb") as fh:
+                pickle.dump(options["indexes"], fh, protocol=pickle.HIGHEST_PROTOCOL)
+        except OSError:
+            yield options
+            return
+        yield {**options, "indexes": {}, "indexes_path": path}
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
 
 
 def _start_listener() -> tuple[object, tuple]:
@@ -190,9 +231,9 @@ def parse_entries(
 
     queue, state = _start_listener()
     try:
-        with ProcessPoolExecutor(
+        with _worker_options(options) as worker_options, ProcessPoolExecutor(
             max_workers=jobs, mp_context=_SPAWN,
-            initializer=_init_worker, initargs=(queue, repo_root, options),
+            initializer=_init_worker, initargs=(queue, repo_root, worker_options),
         ) as pool:
             futures = [pool.submit(_parse_batch, batch) for batch in _chunk(entries, jobs)]
             for future in as_completed(futures):
