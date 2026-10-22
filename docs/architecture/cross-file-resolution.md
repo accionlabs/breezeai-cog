@@ -94,7 +94,7 @@ What each index holds:
 | Kotlin | fully-qualified class name → file | imports, same-package types |
 | Scala | fully-qualified class name → file; **registered facts** (`index.facts`: Play router includes `play.router-includes` — read from the routes files, which the Play routes parser owns) | imports, same-package types, SIRD router prefixes |
 | Play routes files | the `->` router includes, resolved to each router's prefix | route prefixes of included routes files |
-| C# | type → files; global `using`s; project roots (`.csproj`), their MSBuild `using`s and project references; class heritage incl. methods; extension methods; implemented interfaces; **registered facts** (string constants `csharp.string-constants` and MVC area registrations `aspnet.area-registrations`, for area route prefixes; method declarations `csharp.method-lines` — (class, method) → file and line, for `handlerPath`; `index.facts`: HotChocolate registered roots `hotchocolate.registered-roots`, graphql-dotnet schema roots `graphql-dotnet.schema-roots`, WCF `.svc` hosts `wcf.svc-hosts` — read from `.svc` files, which the ServiceHost parser owns — Web Forms `MapPageRoute` URLs `webforms.page-routes`, HotChocolate source-generated DataLoaders `hotchocolate.data-loaders`, AWS Lambda handlers `aws.deployed-handlers` — read from `serverless.yml` / SAM templates) | type resolution, inherited calls, extension calls, routes |
+| C# | type → files; global `using`s; project roots (`.csproj`), their MSBuild `using`s and project references; class heritage incl. methods; extension methods; implemented interfaces; **registered facts** (string constants `csharp.string-constants` and MVC area registrations `aspnet.area-registrations`, for area route prefixes; method declarations `csharp.method-lines` — (class, method) → file and line, for `handlerPath`; minimal-API group extensions `aspnet.group-extensions` — an extension method on `RouteGroupBuilder` → the prefix of the one group it is called on; `index.facts`: HotChocolate registered roots `hotchocolate.registered-roots`, graphql-dotnet schema roots `graphql-dotnet.schema-roots`, WCF `.svc` hosts `wcf.svc-hosts` — read from `.svc` files, which the ServiceHost parser owns — Web Forms `MapPageRoute` URLs `webforms.page-routes`, HotChocolate source-generated DataLoaders `hotchocolate.data-loaders`, AWS Lambda handlers `aws.deployed-handlers` — read from `serverless.yml` / SAM templates) | type resolution, inherited calls, extension calls, routes |
 | VB | class heritage (base class + attributes) | inherited controller routes |
 | TypeScript / JavaScript | `tsconfig`/`jsconfig` path aliases (per config scope); constant values; class heritage; **registered facts** (`index.facts`: Angular lazy-route mounts `angular.route-mounts` and their guards `angular.mount-guards`, Express mounts `express.router-mounts`, Fastify plugin prefixes `fastify.plugin-prefixes`, NestJS stub parents `nest.stub-parents` and prefixes `nest.prefixes`, Next.js apps `next.apps`, middleware matchers `next.middlewares` and base paths `next.base-paths`, LoopBack base paths `loopback.base-paths`, GraphQL root-field DTOs `graphql.sdl-root-fields` — read from `.graphql` files too, which the GraphQL parser owns; module exports and their declarations `typescript.declarations` — each file's exported names with the declared name and line, re-exports followed, for `handlerPath`, and the component of each `.vue` file `typescript.vue-components`; AWS Lambda handlers `aws.deployed-handlers` — read from `serverless.yml` / SAM templates) | aliased imports, inherited calls, route prefixes |
 | C++ | header basename → file; free functions; `Class::method`; `Class::field` types; heritage | `#include`, calls |
@@ -407,13 +407,29 @@ Everything for this lives in `parsers/handler_sites.py`:
 
 | The detector knows … | Call | Languages | Used by |
 |---|---|---|---|
-| a class and a method | `locate_method(index, lang, cls, method)` — the `*.method-lines` fact | C#, Java, Groovy, Ruby | ASP.NET, HotChocolate, Spring functional routes, Vert.x, Quartz, Rails |
+| a class and a method | `locate_method(index, lang, cls, method)` — the `*.method-lines` fact | C#, Java, Groovy, Ruby | ASP.NET, HotChocolate, Spring functional routes, Vert.x, Quartz, Rails, WCF |
 | a module and an exported name | `locate_export(index, module_file, name)` — the `typescript.declarations` fact, re-exports followed | TypeScript / JavaScript | GraphQL resolver modules |
 | only a name written in this file | nothing — it names the handler; `link_handlers` locates it after parsing | TypeScript / JavaScript (every TS framework parser) | React, Angular, Vue, Next.js pages |
 
 Whichever found the declaration, `handler_location(site, own_path)` turns it into
 `(handlerLine, handlerPath)`: `handlerPath` only when the file is not the record's own. The rule
 lives in that one place.
+
+The `*.method-lines` fact is keyed by the class's simple name, so two classes of one name are
+ambiguous. A detector that knows which files the class binds to passes them as `within=`, and
+only the sites in those files count: the C# Quartz detector binds the job class by the C# rules
+(`type_files`: namespaces, `using`s, projects), so two examples that each declare their own
+`SimpleJob` are told apart; WCF passes the files of the contract's one implementing type.
+
+Play's `conf/routes` is parsed by its own base parser, which has no Scala or Java index to ask.
+Its `build_index` reads the controllers the routes name instead, in Play's project layout
+(`scala_play/handlers.py`): a `<Class>.scala` / `.java` under the project's `app/` whose
+`package` is the route's, read with the same collectors as the `*.method-lines` facts
+(`method_sites`).
+
+Razor (`.cshtml`) is its own base parser too. Its `handler_locator` reads the page's code-behind
+`<page>.cshtml.cs` and finds the `@model` class there (`razor/page_models.py`) — the shared
+`link_handlers` loop writes the result, as for TypeScript.
 
 `BaseParser.link_handlers` is the same loop for every language: it takes each record that names a
 handler without a location, asks the language's lookup (`handler_locator(ctx)`; default: none),
@@ -442,8 +458,8 @@ route files per repo. A `.vue` SFC is never re-parsed: its script is not the who
 
 Honest-null applies: a handler that can't be found, or is declared twice (two classes of one
 name, a name imported from two places), leaves `handlerPath` and `handlerLine` empty — never a
-guessed file. Python, Kotlin and Scala have no way yet: their handlers carry a
-`handlerLine` in the record's own file only.
+guessed file. Python, Kotlin and Scala (apart from Play routes) have no way yet: their handlers
+carry a `handlerLine` in the record's own file only.
 
 ---
 

@@ -25,6 +25,7 @@ from tree_sitter import Node
 from ...schemas import Class, Decorator, FileRecord, Function
 from ..dotnet_common import code_behind_host, response_dto, simple_attr_name
 from ..emits import Emit
+from ..handler_sites import handler_location, locate_method
 from .svc_hosts import SVC_SERVICE_RE, svc_hosts
 
 _SERVICE_ATTR = "ServiceContract"
@@ -111,11 +112,12 @@ def _on_operation(fn: Function, text: str) -> dict[str, Any]:
 
 def _implementing_handler(
     cls_name: str, op: str, record: FileRecord, index: object | None
-) -> tuple[str, int | None] | None:
+) -> tuple[str, int | None, str | None] | None:
     """For a contract declared on an interface: the method with a body that runs —
-    ``(Class.Method, handlerLine)`` when exactly one type in the repo implements the interface
-    and declares that method; else None (the interface method stays the handler). handlerLine
-    is set only when the implementing method is in this file (no ``handlerPath`` yet)."""
+    ``(Class.Method, handlerLine, handlerPath)`` when exactly one type in the repo implements the
+    interface and declares that method; else None (the interface method stays the handler). In
+    another file it is found through ``csharp.method-lines`` among the implementing type's own
+    files; not found there (overloads, a base class's method) → no line, never a guess."""
     implementers = getattr(index, "implementers", None)
     heritage_map = getattr(index, "class_heritage", None)
     if not isinstance(implementers, dict) or not isinstance(heritage_map, dict):
@@ -130,7 +132,12 @@ def _implementing_handler(
     impl_cls = next((c for c in record.classes if c.name == simple), None)
     line = next((f.startLine for f in record.functions
                  if impl_cls is not None and f.parentId == impl_cls.id and f.name == op), None)
-    return f"{simple}.{op}", line
+    if line is not None:
+        return f"{simple}.{op}", line, None
+    types = getattr(index, "types", None)
+    files = types.get(impl) if isinstance(types, dict) else None
+    site = locate_method(index, "csharp", simple, op, within=files) if files else None
+    return f"{simple}.{op}", *handler_location(site, record.path)
 
 
 def _registered_host(cls: Class, path: str, index: object | None) -> str | None:
@@ -192,10 +199,11 @@ def detect_wcf_services(
             method, endpoint, route_kind = "RPC", f"{svc}/{fn.name}", "rpc"
         handler: str = fn.name
         handler_line: int | None = fn.startLine
+        handler_path: str | None = None
         iface = interfaces.get(fn.parentId)
         impl = _implementing_handler(iface, fn.name, record, index) if iface else None
         if impl is not None:
-            handler, handler_line = impl
+            handler, handler_line, handler_path = impl
         routes.append(
             Emit(root, dict(
                 semanticType="route",
@@ -204,6 +212,7 @@ def detect_wcf_services(
                 framework="wcf",
                 handler=handler,
                 handlerLine=handler_line,
+                handlerPath=handler_path,
                 routeKind=route_kind,
                 isRegex=False,
                 responseDTO=response_dto(fn.returnType),

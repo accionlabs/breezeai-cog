@@ -24,6 +24,7 @@ from ..emits import apply
 from ..scala.parser import ScalaParser
 from ..treesitter import parse_source
 from .actions import detect_play_actions, detect_play_sird_routes
+from .handlers import FACT as HANDLERS_FACT, collect_route_handlers, route_handler
 from .includes import (
     FACT, collect_includes, is_routes_file, resolve_includes, router_name, router_prefix,
     served_routers,
@@ -69,20 +70,34 @@ class PlayRoutesParser(BaseParser):
 
     def build_index(self, repo_root: Path, files: Sequence[Path], jobs: int = 1) -> PlayRoutesIndex:
         values = []
+        texts: list[tuple[str, str]] = []
         for f in files:
             try:
-                found = collect_includes(f.read_bytes(), repo_relative(f, repo_root))
+                source = f.read_bytes()
             except OSError:
                 continue
+            rel = repo_relative(f, repo_root)
+            texts.append((rel, source.decode("utf-8", "replace")))
+            found = collect_includes(source, rel)
             if found is not None:
                 values.append(found)
+        facts: dict[str, Any] = {}
         fact = resolve_includes(values)
-        return PlayRoutesIndex({FACT: fact} if fact is not None else {})
+        if fact is not None:
+            facts[FACT] = fact
+        # Each binding's controller method (:mod:`.handlers`): the routes index is the only
+        # one this parser gets, so the few controller files it names are read here.
+        handlers = collect_route_handlers(Path(repo_root), texts)
+        if handlers:
+            facts[HANDLERS_FACT] = handlers
+        return PlayRoutesIndex(facts)
 
     def parse_file(self, ctx: ParseContext) -> FileRecord:
         text = ctx.source.decode("utf-8", "replace")
         prefix = router_prefix(ctx.resolution_index, router_name(ctx.path))
-        statements = (extract_routes(text, ctx.path, prefix, served_routers(ctx.resolution_index))
+        index = ctx.resolution_index
+        statements = (extract_routes(text, ctx.path, prefix, served_routers(index),
+                                     lambda h: route_handler(index, ctx.path, h))
                       if ctx.capture_statements else [])
         return FileRecord(
             id=file_id(ctx.path),

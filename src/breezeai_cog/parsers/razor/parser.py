@@ -23,10 +23,11 @@ from tree_sitter import Node
 from ...emit import file_id
 from ...schemas import SCHEMA_VERSION, FileRecord
 from ...utils import count_loc
-from ..base import BaseParser, ParseContext
+from ..base import BaseParser, HandlerLocator, ParseContext
 from ..csharp.functions import build_method
 from ..treesitter import parse_source
 from .mappings import FRAMEWORKS, STATEMENT_TYPES
+from .page_models import page_model_locator
 from .statements import collect_razor_statements
 
 #: C# member declarations inside an ``@code { }`` block that become Functions. The razor
@@ -76,6 +77,13 @@ class RazorParser(BaseParser):
             # File, so an @onclick="Remove" handler resolves to the Remove method in this file.
             self._extract_code_methods(root, ctx, fid, seen_ids, record)
         return record
+
+    def handler_locator(self, ctx: ParseContext) -> HandlerLocator | None:
+        # A page's @model class, in its code-behind (:mod:`.page_models`). A .razor component
+        # is its own handler, already located (line 1).
+        if not ctx.path.lower().endswith(".cshtml"):
+            return None
+        return page_model_locator(ctx.abs_path, ctx.path, ctx.parse_timeout_micros)
 
     @staticmethod
     def _extract_code_methods(

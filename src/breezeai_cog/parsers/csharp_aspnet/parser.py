@@ -17,6 +17,7 @@ from ..aspnet_common import (
     detect_minimal_api_routes,
     detect_route_registrations,
 )
+from .group_extensions import group_extension_prefix
 
 _MARKERS = (b"Microsoft.AspNetCore", b"System.Web.Mvc", b"System.Web.Http")
 
@@ -34,9 +35,11 @@ class AspNetCoreParser(CSharpParser):
         record = self.extract(root, ctx)  # inherited C# extraction (one parse)
         if ctx.capture_statements:  # routes are statements — gated by statement capture
             routes = detect_controller_routes(record, root, ctx.resolution_index, ctx.source)
+            index = ctx.resolution_index
             routes += detect_minimal_api_routes(
                 root, ctx.source, ctx.path,
                 invocation_type="invocation_expression", member_type="member_access_expression",
+                extension_prefix=lambda method: group_extension_prefix(index, method),
             )
             registrations, wiring = detect_route_registrations(
                 root, ctx.source, ctx.path,

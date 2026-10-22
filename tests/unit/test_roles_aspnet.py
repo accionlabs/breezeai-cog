@@ -209,9 +209,35 @@ public class OrdersModel : PageModel
     )
     [r] = [s for s in _eps(stmts) if s.path == "Pages/Orders.cshtml"]
     assert (r.semanticType, r.routeKind, r.endpoint) == ("route", "page", "/orders")
-    # The PageModel class serves the page; it is declared in another file, so no handlerLine
-    # here (its file goes to handlerPath).
-    assert (r.handler, r.handlerLine) == ("OrdersModel", None)
+    # The PageModel class serves the page: declared in the code-behind, which the record leads to.
+    assert (r.handler, r.handlerPath, r.handlerLine) == (
+        "OrdersModel", "Pages/Orders.cshtml.cs", 3)
+
+
+def _page_record(analyze_files, model_directive: str, code_behind: str | None):
+    files = {"Pages/Orders.cshtml": f'@page "/orders"\n@model {model_directive}\n<h1>x</h1>\n'}
+    if code_behind is not None:
+        files["Pages/Orders.cshtml.cs"] = code_behind
+    stmts = analyze_files(files, templates=True)
+    [r] = [s for s in _eps(stmts) if s.path == "Pages/Orders.cshtml"]
+    return r.handler, r.handlerPath, r.handlerLine
+
+
+_MODEL = "namespace Shop.Pages;\npublic class OrdersModel : PageModel { }\n"
+
+
+def test_razor_page_qualified_model_matches_its_namespace(analyze_files) -> None:
+    assert _page_record(analyze_files, "Shop.Pages.OrdersModel", _MODEL) == (
+        "Shop.Pages.OrdersModel", "Pages/Orders.cshtml.cs", 2)
+    # Another namespace's OrdersModel is not this page's model.
+    assert _page_record(analyze_files, "Admin.Pages.OrdersModel", _MODEL)[1:] == (None, None)
+
+
+def test_razor_page_model_not_in_the_code_behind_stays_unlocated(analyze_files) -> None:
+    assert _page_record(analyze_files, "OrdersModel", None) == ("OrdersModel", None, None)
+    assert _page_record(analyze_files, "List<Order>", _MODEL) == (None, None, None)
+    twice = _MODEL + "namespace Shop.Other { public class OrdersModel { } }\n"
+    assert _page_record(analyze_files, "OrdersModel", twice)[1:] == (None, None)
 
 
 def test_blazor_page_handler_is_its_component(analyze_files) -> None:
@@ -353,3 +379,70 @@ def test_route_area_constant_binds_in_its_own_namespace(analyze_files) -> None:
     st = analyze_files({**plugin("Watchdog", "Plugins/Watchdog"), **plugin("Forums", "Plugins/Forums")})
     got = {s.path.rsplit("/", 1)[-1]: s.endpoint for s in _eps(st)}
     assert got == {"WatchdogController.cs": "/Plugins/Watchdog", "ForumsController.cs": "/Plugins/Forums"}
+
+
+_TODO_ENDPOINTS = """using Microsoft.AspNetCore.Builder;
+using Microsoft.AspNetCore.Http;
+public static class TodoEndpoints
+{
+    public static RouteGroupBuilder MapTodos(this RouteGroupBuilder g)
+    {
+        g.MapGet("/", GetAll);
+        g.MapPost("/{id}", Save);
+        return g;
+    }
+    static IResult GetAll() => Results.Ok();
+    static IResult Save(int id) => Results.Ok();
+}
+"""
+
+
+def _program(body: str) -> str:
+    return ("using Microsoft.AspNetCore.Builder;\nvar builder = WebApplication.CreateBuilder(args);\n"
+            f"var app = builder.Build();\n{body}app.Run();\n")
+
+
+def _group_ext_routes(analyze_files, program_body: str, extra: dict[str, str] | None = None):
+    files = {"Program.cs": _program(program_body), "TodoEndpoints.cs": _TODO_ENDPOINTS,
+             **(extra or {})}
+    stmts = analyze_files(files)
+    return sorted((s.method, s.endpoint) for s in _eps(stmts) if s.path == "TodoEndpoints.cs")
+
+
+def test_extension_method_routes_get_the_group_prefix(analyze_files) -> None:
+    assert _group_ext_routes(analyze_files, 'app.MapGroup("/todos").MapTodos();\n') == [
+        ("GET", "/todos"), ("POST", "/todos/{id}")]
+    # Through a variable, with builder calls in between.
+    assert _group_ext_routes(
+        analyze_files, 'var todos = app.MapGroup("/api").MapGroup("/todos").RequireAuthorization();\n'
+                       "todos.MapTodos();\n") == [("GET", "/api/todos"), ("POST", "/api/todos/{id}")]
+
+
+def test_extension_method_called_twice_has_no_address(analyze_files) -> None:
+    body = 'app.MapGroup("/todos").MapTodos();\napp.MapGroup("/v2/todos").MapTodos();\n'
+    assert _group_ext_routes(analyze_files, body) == [("GET", None), ("POST", None)]
+
+
+def test_extension_method_also_called_elsewhere_has_no_address(analyze_files) -> None:
+    # A second caller in another file — on a parameter, in the static-call form — counts too.
+    other = """using Microsoft.AspNetCore.Builder;
+public static class Wiring {
+    public static void Add(RouteGroupBuilder api) { TodoEndpoints.MapTodos(api); }
+}
+"""
+    assert _group_ext_routes(analyze_files, 'app.MapGroup("/todos").MapTodos();\n',
+                             {"Wiring.cs": other}) == [("GET", None), ("POST", None)]
+
+
+def test_extension_method_declared_twice_has_no_address(analyze_files) -> None:
+    twin = _TODO_ENDPOINTS.replace("class TodoEndpoints", "class OtherTodoEndpoints")
+    assert _group_ext_routes(analyze_files, 'app.MapGroup("/todos").MapTodos();\n',
+                             {"OtherTodoEndpoints.cs": twin}) == [("GET", None), ("POST", None)]
+
+
+def test_routes_mapped_in_program_are_unchanged(analyze_files) -> None:
+    stmts = analyze_files({"Program.cs": _program(
+        'var api = app.MapGroup("/api");\napi.MapGet("/ping", () => "pong");\n'
+        'app.MapGroup("/todos").MapTodos();\n'), "TodoEndpoints.cs": _TODO_ENDPOINTS})
+    assert [(s.method, s.endpoint) for s in _eps(stmts) if s.path == "Program.cs"] == [
+        ("GET", "/api/ping")]

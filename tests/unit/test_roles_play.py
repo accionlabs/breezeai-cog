@@ -4,8 +4,6 @@ from __future__ import annotations
 
 from breezeai_cog.parsers.contract import is_entry_point
 
-import pytest
-
 EP = {"route", "eventbus_consumer", "timer"}
 
 CONTROLLER = """package controllers
@@ -41,11 +39,6 @@ def test_routes_line_is_binding(analyze_files) -> None:
     )
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="routes-line handler is the qualified controller path, "
-    "not the action name with its file and line",
-)
 def test_routes_line_records_handler(analyze_files) -> None:
     st = analyze_files(
         {
@@ -205,3 +198,57 @@ class Billing @Inject()(ws: WSClient) {
         }
     )
     assert _eps(st) == []
+
+
+JAVA_CONTROLLER = """package controllers;
+import play.mvc.*;
+public class HomeController extends Controller {
+    public Result index() { return ok("x"); }
+}
+"""
+
+
+def _route(st, path: str = "conf/routes"):
+    [r] = _eps(st, path)
+    return r.handler, r.handlerPath, r.handlerLine
+
+
+def test_routes_line_leads_to_a_java_controller(analyze_files) -> None:
+    st = analyze_files({"conf/routes": "GET  /  controllers.HomeController.index()\n",
+                        "app/controllers/HomeController.java": JAVA_CONTROLLER})
+    assert _route(st) == ("index", "app/controllers/HomeController.java", 4)
+
+
+def test_controller_not_in_the_repo_keeps_the_handler_as_written(analyze_files) -> None:
+    # Play's own Assets controller: no file to lead to, no guess.
+    st = analyze_files({"conf/routes": "GET  /assets/*file  controllers.Assets.at(file)\n"})
+    assert _route(st) == ("controllers.Assets.at", None, None)
+
+
+def test_module_controller_found_by_its_package_not_its_folder(analyze_files) -> None:
+    # A sub-project's controller in package `controllers.one`, kept in app/controllers/.
+    controller = CONTROLLER.replace("package controllers", "package controllers.one")
+    st = analyze_files({
+        "modules/one/conf/one.routes": "GET  /orders/:id  controllers.one.OrderController.get(id: Long)\n",
+        "modules/one/app/controllers/OrderController.scala": controller,
+        "app/controllers/OrderController.scala": CONTROLLER,  # another package: not this one
+    })
+    assert _route(st, "modules/one/conf/one.routes") == (
+        "get", "modules/one/app/controllers/OrderController.scala", 5)
+
+
+def test_controller_in_another_package_is_not_the_handler(analyze_files) -> None:
+    st = analyze_files({
+        "conf/routes": "GET  /orders/:id  controllers.admin.OrderController.get(id: Long)\n",
+        "app/controllers/OrderController.scala": CONTROLLER,
+    })
+    assert _route(st) == ("controllers.admin.OrderController.get", None, None)
+
+
+def test_overloaded_action_has_no_location(analyze_files) -> None:
+    controller = CONTROLLER.replace("  def create()", "  def get(id: String) = Action { Ok(\"y\") }\n  def create()")
+    st = analyze_files({
+        "conf/routes": "GET  /orders/:id  controllers.OrderController.get(id: Long)\n",
+        "app/controllers/OrderController.scala": controller,
+    })
+    assert _route(st) == ("controllers.OrderController.get", None, None)

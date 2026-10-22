@@ -181,6 +181,36 @@ def test_descriptor_field_on_root_is_binding(analyze_files) -> None:
     assert (r.method, r.routeKind, r.endpoint) == ("QUERY", "query", "books")
 
 
+REGISTERED_DESCRIPTOR = """using HotChocolate.Types;
+namespace Books;
+public class QueryType : ObjectType<Query>
+{
+    protected override void Configure(IObjectTypeDescriptor<Query> descriptor)
+    {
+        descriptor.Field(t => t.GetHero(default));
+    }
+}
+"""
+
+ROOT_CLASS = """namespace Books;
+public class Query
+{
+    public Character GetHero(Episode episode) => new Character();
+}
+"""
+
+
+def test_registered_descriptor_leads_to_the_described_types_method(analyze_files) -> None:
+    # `AddQueryType<QueryType>()` makes the descriptor a root; its field `t => t.GetHero(…)` is
+    # the method of the type it describes (`ObjectType<Query>` → Query), in another file.
+    program = PROGRAM.replace("AddQueryType<AuthorQueries>", "AddQueryType<QueryType>")
+    stmts = analyze_files({"QueryType.cs": REGISTERED_DESCRIPTOR, "Query.cs": ROOT_CLASS,
+                           "Program.cs": program})
+    [r] = [s for s in _eps(stmts) if s.path == "QueryType.cs"]
+    assert (r.method, r.endpoint, r.handler) == ("QUERY", "hero", "GetHero")
+    assert (r.handlerPath, r.handlerLine) == ("Query.cs", _line(ROOT_CLASS, "GetHero"))
+
+
 def test_registration_binds_only_a_type_in_scope(analyze_files) -> None:
     # Without `using Books;` the registration cannot name Books.AuthorQueries (it would not
     # compile): no binding is made rather than a guessed one.
