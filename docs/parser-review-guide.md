@@ -130,7 +130,8 @@ framework must have the **higher** priority.
 
 | Situation | Example | Verdict |
 |---|---|---|
-| Derived framework, higher priority | NestJS (`priority = 20`) claims `@nestjs/`; it is built on Express (`priority = 10`). A NestJS controller that also imports `express` goes to NestJS. | Correct |
+| Derived framework, higher priority | Framework B is built on framework A, and a B file may also match A's claim: B has the higher `priority`, so B owns the file. | Correct |
+| Underlying framework as an additive detector | Express and Fastify run underneath NestJS and others, so they are additive detectors, not parsers: a NestJS controller that imports `express` is owned by NestJS, and the `express` detector still adds its routes. | Correct |
 | Unrelated frameworks, same priority, both match | Spring Boot claims `org.springframework`, Vert.x claims `io.vertx` — both `priority = 10`. A file importing both is claimed by both; `select` uses `max()`, so the **registration order** decides silently. | Gap — either make the claims exclusive or decide the priority explicitly. |
 | Claim too broad | A claim on a common word (e.g. `b"Router"`) pulls in files from other frameworks or plain code. | Gap — false positive ownership. |
 | Claim too narrow | A claim on one import form only (`import io.vertx.core.Vertx`) misses wildcard imports, re-exports or fully-qualified use. | Gap — files fall back to the base parser and lose their routes. |

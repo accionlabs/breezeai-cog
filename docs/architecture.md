@@ -234,8 +234,12 @@ flowchart TD
 Rules:
 - The language parser has priority 0 and claims everything, so every file has an owner.
 - A framework parser claims a file with a **cheap content check** (a substring search).
-- If a framework is built on another one, it gets a **higher** priority. NestJS (20) is built
-  on Express (10), so a NestJS controller that also imports Express goes to NestJS.
+- If a framework is built on another one, it gets a **higher** priority, so the derived
+  framework wins a file both claim.
+- A framework that runs underneath others (Express, Fastify) is an
+  [additive detector](#6-the-parser-model), not a parser, so it never competes for a file: a
+  NestJS controller that also calls `app.get(...)` is owned by NestJS, and the `express`
+  detector still adds the route.
 
 > **Decision —** one parser per file; no combining of parsers.
 > **Why:** each file is parsed once, and there is no question of merging two parsers'
