@@ -147,7 +147,7 @@ parser can be confidently wrong. Check every one of them against real code:
 |---|---|---|
 | File ownership | `claims()` | A file that only *mentions* `io.vertx` in a comment or string is claimed as Vert.x. |
 | `semanticType` = `api_call` / `query_statement` / `db_method_call` | `parsers/detection/` (`classify_call`) | `cache.get(key)` tagged as an HTTP `GET`; `"select an option"` tagged as SQL; `list.find(x)` tagged as a DB call. |
-| `semanticType` = `route` | framework `routes.py` | A test helper `router.get(...)` in a non-fixture file; a method named `get` on an unrelated object; a mount, layout or redirect recorded as a route (wiring, not an entry point — see the [entry-point contract](architecture/entry-points.md)). |
+| `semanticType` = `route` | framework `routes.py` | A test helper `router.get(...)` in a non-fixture file; a method named `get` on an unrelated object; a mount, layout or redirect recorded as a page (wiring, not an entry point; an Angular `redirectTo` is a `navigation` record — see the [entry-point contract](architecture/entry-points.md)). |
 | `semanticType` = `eventbus_send` / `eventbus_publish` / `eventbus_consumer` | e.g. `parsers/java_vertx/events.py` | A user wrapper method also called `send(...)` tagged as an event-bus send. |
 | `semanticType` = `service_proxy`, `verticle_deploy`, `timer` | framework detectors | A class with an annotation that merely shares the simple name `ProxyGen` from another library. |
 | `endpoint`, `method`, `routeKind` | detectors, constant folding (`constfold.py`) | An endpoint folded from the wrong constant; a path concatenated from a router prefix that is never mounted; a child route missing the prefix of the router it is mounted under; a handler or method name used as `endpoint`. |
