@@ -75,3 +75,16 @@ def test_locator_asked_only_when_a_record_needs_it() -> None:
     assert parser.asked == 0
     parser.link_handlers(_record(_route("Home")), _ctx())
     assert parser.asked == 1
+
+
+def test_typescript_lookup_skips_a_vue_sfc() -> None:
+    """A .vue SFC is not a script: the Vue parser (whose extensions add ``.vue``) must not
+    re-parse the whole file as TypeScript to look a handler up."""
+    from breezeai_cog.parsers.typescript_vue.parser import VueParser
+
+    def ctx(path: str) -> ParseContext:
+        return ParseContext(path=path, abs_path=Path(path), source=b"const a = 1;\n",
+                            repo_root=Path("."), capture_statements=True)
+
+    assert VueParser().handler_locator(ctx("src/App.vue")) is None
+    assert VueParser().handler_locator(ctx("src/router.ts")) is not None

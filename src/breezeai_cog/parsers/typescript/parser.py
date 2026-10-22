@@ -153,8 +153,9 @@ class TypeScriptParser(BaseParser):
 
     def handler_locator(self, ctx: ParseContext) -> HandlerLocator | None:
         # Asked for only when a record names a handler without a line — the rare case, so the
-        # extra parse is rare too. Only script files: a .vue SFC's script is not the whole file.
-        if not ctx.path.endswith(self.extensions):
+        # extra parse is rare too. Only script files: a .vue SFC's script is not the whole file
+        # (the TS extensions, not ``self.extensions`` — the Vue parser adds ``.vue`` to those).
+        if not ctx.path.endswith(TypeScriptParser.extensions):
             return None
         grammar = "tsx" if ctx.path.endswith(_TSX_EXT) else "typescript"
         root = parse_source(grammar, ctx.source, ctx.parse_timeout_micros).root_node
