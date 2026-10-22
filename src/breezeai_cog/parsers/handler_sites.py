@@ -44,6 +44,7 @@ from typing import Any
 
 from tree_sitter import Node
 
+from ..schemas import FileRecord, Statement
 from .additive import FactSpec, index_fact, register_fact
 from .index_common import record_distinct
 from .treesitter import node_text
@@ -130,6 +131,20 @@ def handler_location(site: _Site | None, own_path: str) -> tuple[int | None, str
         return None, None
     file, line = site
     return line, (file if file != own_path else None)
+
+
+#: Statements that point at a handler.
+HANDLED = frozenset({"route", "eventbus_consumer", "timer"})
+
+
+def unlocated(s: Statement) -> bool:
+    """An entry point that names its handler but not where it is declared."""
+    return (s.semanticType in HANDLED and bool(s.handler) and s.handlerLine is None
+            and s.handlerPath is None)
+
+
+def needs_location(record: FileRecord) -> bool:
+    return any(unlocated(s) for s in record.statements)
 
 
 for _language in _SHAPES:

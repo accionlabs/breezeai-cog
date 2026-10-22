@@ -17,7 +17,7 @@ from ...emit import file_id
 from ...schemas import SCHEMA_VERSION, FileRecord, Function, Statement
 from ...utils import count_loc
 from ..additive import run_additive
-from ..base import BaseParser, ParseContext
+from ..base import BaseParser, HandlerLocator, ParseContext
 from ..treesitter import node_text, parse_source
 from .classes import build_class
 from ..callresolve import make_resolver
@@ -29,7 +29,7 @@ from .functions import (
     type_map,
 )
 from ..statements_common import reset_http_client_ids, set_http_client_ids
-from .handlers import link_handlers, needs_location
+from .handlers import handler_locator
 from .imports import TsAliasIndex, build_ts_index, extract_imports
 from ..comments_common import comment_statements_for
 from .mappings import (
@@ -151,15 +151,14 @@ class TypeScriptParser(BaseParser):
         root = parse_source(grammar, ctx.source, ctx.parse_timeout_micros).root_node
         return self.extract(root, ctx)
 
-    def link_handlers(self, record: FileRecord, ctx: ParseContext) -> None:
-        # Only script files (a .vue SFC's script is not the whole file), and only when a record
-        # names a handler without a line — the rare case, so the extra parse is rare too.
-        if not ctx.capture_statements or not ctx.path.endswith(self.extensions) \
-                or not needs_location(record):
-            return
+    def handler_locator(self, ctx: ParseContext) -> HandlerLocator | None:
+        # Asked for only when a record names a handler without a line — the rare case, so the
+        # extra parse is rare too. Only script files: a .vue SFC's script is not the whole file.
+        if not ctx.path.endswith(self.extensions):
+            return None
         grammar = "tsx" if ctx.path.endswith(_TSX_EXT) else "typescript"
         root = parse_source(grammar, ctx.source, ctx.parse_timeout_micros).root_node
-        link_handlers(record, root, ctx.source, ctx.path, ctx.repo_root, ctx.resolution_index)
+        return handler_locator(root, ctx.source, ctx.path, ctx.repo_root, ctx.resolution_index)
 
     def extract(self, root: Node, ctx: ParseContext) -> FileRecord:
         # Collect the per-file wrapped-HTTP-client names and make them available to the shared
