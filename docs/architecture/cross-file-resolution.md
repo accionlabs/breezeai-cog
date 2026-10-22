@@ -402,14 +402,24 @@ How a registered name is bound to a file uses the C# rules — the same ones imp
 Every entry point leads to the code that handles it: `handler` (its name), `handlerLine` and,
 when it is declared in another file, `handlerPath`
 ([entry-point contract](entry-points.md)). A handler in the same file is easy: the detector
-has its node and sets `handlerLine`. A handler in **another** file is found through the index,
-in one of three ways:
+has its node and sets `handlerLine`. A handler in **another** file is found through the index.
+Everything for this lives in `parsers/handler_sites.py`:
 
-| Way | Where | Languages | How |
+| The detector knows … | Call | Languages | Used by |
 |---|---|---|---|
-| In the detector, through a `*.method-lines` fact | `parsers/method_lines.py` (`locate_method`); used by ASP.NET, HotChocolate, Spring functional routes, Vert.x, Quartz, Rails | C#, Java, Groovy, Ruby | The detector knows the class and the method, and asks the fact where that method is declared |
-| In the detector, through the `typescript.declarations` fact | `typescript_graphql/resolver_modules.py` | TypeScript / JavaScript | The detector follows a module's exports (re-exports included) to each declaration |
-| After parsing, in the `link_handlers` hook | `BaseParser.link_handlers` (default: nothing); `TypeScriptParser.link_handlers` → `typescript/handlers.py` | TypeScript / JavaScript (every TS framework parser) | The detector writes only the name; after every detector has run, the hook follows the file's imports and lazy loads through `typescript.declarations` |
+| a class and a method | `locate_method(index, lang, cls, method)` — the `*.method-lines` fact | C#, Java, Groovy, Ruby | ASP.NET, HotChocolate, Spring functional routes, Vert.x, Quartz, Rails |
+| a module and an exported name | `locate_export(index, module_file, name)` — the `typescript.declarations` fact, re-exports followed | TypeScript / JavaScript | GraphQL resolver modules |
+| only a name written in this file | nothing — it names the handler; `link_handlers` locates it after parsing | TypeScript / JavaScript (every TS framework parser) | React, Angular, Vue, Next.js pages |
+
+Whichever found the declaration, `handler_location(site, own_path)` turns it into
+`(handlerLine, handlerPath)`: `handlerPath` only when the file is not the record's own. The rule
+lives in that one place.
+
+`BaseParser.link_handlers` is the same loop for every language: it takes each record that names a
+handler without a location, asks the language's lookup (`handler_locator(ctx)`; default: none),
+and writes the result through `handler_location`. A language supplies only the lookup —
+TypeScript's (`typescript/handlers.py`) follows the file's imports and lazy loads through
+`typescript.declarations`.
 
 ```csharp
 // Jobs/Startup.cs — the Quartz detector knows the job class and its method
@@ -426,8 +436,9 @@ import ProjectList from '../components/pages/projects';
 // → handlerPath "src/components/pages/projects.tsx", handlerLine 128
 ```
 
-The hook runs in the worker right after `parse_file`, and re-parses the file only when a record
-names a handler with no location (`needs_location`) — in practice a few route files per repo.
+The loop runs in the worker right after `parse_file`. The lookup is asked for only when a record
+names a handler with no location, so TypeScript re-parses only those files — in practice a few
+route files per repo. A `.vue` SFC is never re-parsed: its script is not the whole file.
 
 Honest-null applies: a handler that can't be found, or is declared twice (two classes of one
 name, a name imported from two places), leaves `handlerPath` and `handlerLine` empty — never a

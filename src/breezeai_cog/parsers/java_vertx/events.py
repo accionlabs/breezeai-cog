@@ -44,7 +44,7 @@ from tree_sitter import Node
 
 from ...schemas import FileRecord, SemanticType
 from ..emits import Emit
-from ..method_lines import locate_method
+from ..handler_sites import handler_location, locate_method
 from .service_interfaces import service_methods
 from ..treesitter import node_text
 from ..vertx_common import (
@@ -393,10 +393,8 @@ def detect_vertx(
             impl = _registered_impl(call, source) if names else None
 
         def site(name: str | None) -> tuple[int | None, str | None]:
-            found_at = locate_method(index, "java", impl, name) if impl else None
-            if found_at is None:
-                return None, None
-            return found_at[1], (found_at[0] if found_at[0] != path else None)
+            return handler_location(locate_method(index, "java", impl, name) if impl else None,
+                                    path)
 
         handler = handlers[0]
         if impl:
