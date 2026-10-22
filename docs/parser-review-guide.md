@@ -39,7 +39,7 @@ git diff --name-only main...HEAD
 | **Parser-local** | `parsers/<lang>_<framework>/**`, `tests/unit/test_<x>_parser.py` | This parser only | Normal |
 | **Language parser** | `parsers/<lang>/**` (when the work is for a framework) | Every framework built on this language | High — see §1.1 |
 | **Additive detector** | a module that calls `register_detector(...)` or `register_fact(...)`, or a changed `Gate` (`order`, `skip_fixtures`, `guard`) | Every file of that language, whichever parser owns it | High — same blast radius as a language-parser change; see §1.1 |
-| **Shared family helper** | e.g. `parsers/vertx_common.py` (shared by `java_vertx` and `groovy_vertx`), `parsers/dotnet_common.py` (the .NET framework parsers), `parsers/aspnet_common.py` (`csharp_aspnet` and `vb_aspnet`), `parsers/aspnet_areas.py`, `parsers/quartz_common.py` (Java and C# Quartz), `parsers/method_lines.py` (C#, Java, Ruby handlers), `parsers/aws_deploy.py` (TypeScript and C# Lambda) | Every parser that imports it | High |
+| **Shared family helper** | e.g. `parsers/vertx_common.py` (shared by `java_vertx` and `groovy_vertx`), `parsers/dotnet_common.py` (the .NET framework parsers), `parsers/aspnet_common.py` (`csharp_aspnet` and `vb_aspnet`), `parsers/aspnet_areas.py`, `parsers/quartz_common.py` (Java and C# Quartz), `parsers/handler_sites.py` (where a handler is declared; every language), `parsers/aws_deploy.py` (TypeScript and C# Lambda) | Every parser that imports it | High |
 | **Core** | `schemas/`, `core/`, `emit/`, `parsers/base.py`, `parsers/treesitter.py`, `parsers/statements_common.py`, `parsers/comments_common.py`, `parsers/callresolve.py`, `parsers/index_common.py`, `parsers/constfold.py`, `parsers/additive.py`, `parsers/emits.py`, `parsers/enclosing.py`, `parsers/wiring.py`, `parsers/contract.py`, `parsers/detection/`, `cli.py`, `config.py` | Every parser | Highest — architectural change, see §1.2 |
 
 #### 1.1 Language-parser changes made during framework work
@@ -164,7 +164,7 @@ parser can be confidently wrong. Check every one of them against real code:
 | `semanticType` = `eventbus_send` / `eventbus_publish` / `eventbus_consumer` | e.g. `parsers/java_vertx/events.py` | A user wrapper method also called `send(...)` tagged as an event-bus send. |
 | `semanticType` = `service_proxy`, `verticle_deploy`, `timer` | framework detectors | A class with an annotation that merely shares the simple name `ProxyGen` from another library. |
 | `endpoint`, `method`, `routeKind` | detectors, constant folding (`constfold.py`) | An endpoint folded from the wrong constant; a path concatenated from a router prefix that is never mounted; a child route missing the prefix of the router it is mounted under; a handler or method name used as `endpoint`. |
-| `handlerPath`, `handlerLine` | `locate_method` (`*.method-lines` facts), `link_handlers` (TypeScript) | A handler pointed at a guessed file, or at one of two same-named classes or imports; a line that is not the handler's declaration. |
+| `handlerPath`, `handlerLine` | `parsers/handler_sites.py` (`locate_method`, `locate_export`, `handler_location`); `link_handlers` + `handler_locator` (TypeScript) | A handler pointed at a guessed file, or at one of two same-named classes or imports; a line that is not the handler's declaration. |
 | `calls[].path`, import resolution | `callresolve.py`, `imports.py`, `build_index` | A call resolved to a same-named class in another module. |
 | `Class.type`, visibility, `isStatic` | `classes.py` / `functions.py` | A defaulted value presented as if it was read (e.g. every member `public`). |
 
@@ -183,13 +183,14 @@ same per file. In short:
 |---|---|
 | Scan | One directory walk; no file is read for classification. |
 | `build_index` (optional) | Once per repo, parallelised with `parallel_map`, only when cross-file resolution is needed. |
-| Parse | **One** `parse_source` per file. A framework parser reuses the base parser's tree via `extract`. The one exception is `link_handlers`, gated to files with a record whose handler has no location (`needs_location`). |
+| Parse | **One** `parse_source` per file. A framework parser reuses the base parser's tree via `extract`. The one exception is TypeScript's `handler_locator`, asked for only when a record names a handler with no location. |
 | Extraction | A fixed number of tree walks per file (e.g. imports, symbol tables, declarations, comments) — never one walk per item found. |
 | Framework detection | Off-the-record (reads the `FileRecord`, no walk) where possible; otherwise one walk, behind a cheap byte guard. |
 | Embedded-DSL re-parse | Only on the embedded fragment, with `ctx.parse_timeout_micros`. |
 
 Flag any of the following:
-- a second `parse_source` on the whole file, outside `link_handlers`'s gated case;
+- a second `parse_source` on the whole file, outside `handler_locator`'s gated case;
+- `handlerPath` written by hand instead of through `handler_location`;
 - a full-tree walk per detected item (nested walks → O(n²) on large files);
 - a `detect_*` pass that runs on every file with no byte guard;
 - `build_index` that reads or parses every file serially;

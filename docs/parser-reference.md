@@ -239,20 +239,22 @@ build indexes at `jobs=1`). `fn` and every item must be picklable. The merge mus
 ### Step 6b — `link_handlers` (when handlers are declared in other files)
 An entry point leads to its handler: `handler`, `handlerLine`, and `handlerPath` when the handler
 is declared in another file ([entry-point contract §5](architecture/entry-points.md)). Detectors
-name the handler as the code writes it; the language parser's `link_handlers(record, ctx)` runs
-once per file right after `parse_file` and looks each unlocated name up through the repo index:
+name the handler as the code writes it. `BaseParser.link_handlers(record, ctx)` runs once per
+file right after `parse_file`; it is the same loop for every language. A language supplies only
+the lookup:
 
 ```python
-def link_handlers(self, record, ctx):
-    if not needs_location(record):        # cheap: most files have nothing to look up
-        return
+def handler_locator(self, ctx):           # asked for only when a record has an unlocated handler
     ...                                   # import bindings + the index's declarations fact
+    return locate                         # name → (handler, (file, line)), or None: not found
 ```
 
-TypeScript implements it (`parsers/typescript/handlers.py`, fact `typescript.declarations`);
-the default leaves the record as is. A name that can't be found, or is declared twice, keeps
-`handlerPath` and `handlerLine` empty — and a `handler` written as a module path becomes empty,
-never the path.
+The loop writes the result through `handler_location` (`parsers/handler_sites.py`), so
+`handlerPath` is set only for another file. TypeScript implements the lookup
+(`parsers/typescript/handlers.py`, fact `typescript.declarations`); the default has none. A
+detector that knows the class calls `locate_method` / `locate_export` from `handler_sites.py`
+itself. A name that can't be found, or is declared twice, keeps `handlerPath` and `handlerLine`
+empty — and a `handler` written as a module path becomes empty, never the path.
 
 ### Step 7 — Register
 ```python
