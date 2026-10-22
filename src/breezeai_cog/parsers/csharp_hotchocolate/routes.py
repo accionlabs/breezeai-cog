@@ -24,7 +24,7 @@ from ...logging import get_logger
 from ...schemas import Class, Decorator, FileRecord, Function
 from ..dotnet_common import response_dto, simple_attr_name
 from ..emits import Emit
-from ..method_lines import locate_method
+from ..handler_sites import handler_location, locate_method
 from ..treesitter import first_line, node_text
 from .data_loaders import generated_loaders as generated_loaders_of
 from .mappings import (
@@ -430,7 +430,7 @@ def descriptor_field_statement(
     configure: Function, kind: str, name: str, call: Node, source: bytes, root: Node,
     guards: list[str] | None = None, *, target: str | None = None,
     resolver: Function | None = None, generated_loaders: dict[str, str | None] | None = None,
-    located: tuple[str | None, int] | None = None,
+    located: tuple[int | None, str | None] = (None, None),
 ) -> Emit:
     """One field declared fluently inside ``Configure``. Unlike the attribute-derived routes this
     has a real backing node — the ``d.Field(...)`` call — so it keeps that ``nodeType``, matching
@@ -442,8 +442,8 @@ def descriptor_field_statement(
     resolves_field = kind == "field_resolver"
     handler, handler_line = field_handler(call, source) if resolver is None else (None, None)
     handler_path = None
-    if located is not None and resolver is None:  # the resolver method, in another file
-        handler_path, handler_line = located
+    if located[0] is not None and resolver is None:  # the resolver method, in another file
+        handler_line, handler_path = located
     return Emit(call, dict(
         semanticType="route",
         method="RESOLVE_FIELD" if resolves_field else kind.upper(),
@@ -589,7 +589,7 @@ def _descriptor_routes(
             configure, kind, name, call, source, root,
             _guard_labels(type_level + field_authorizations(call, source)),
             resolver=resolver, generated_loaders=generated_loaders,
-            located=(None if site[0] == record.path else site[0], site[1]) if site else None))
+            located=handler_location(site, record.path)))
     return out
 
 

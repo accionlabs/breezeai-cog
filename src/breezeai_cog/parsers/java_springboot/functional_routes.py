@@ -30,7 +30,7 @@ from tree_sitter import Node
 
 from ...schemas import FileRecord
 from ..emits import Emit
-from ..method_lines import locate_method
+from ..handler_sites import handler_location, locate_method
 from ..treesitter import node_text
 
 _FN_VERBS = {"GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"}
@@ -154,7 +154,7 @@ def _receiver_type(ref: Node, receiver: str, source: bytes) -> str | None:
 
 
 def _handler_for(
-    call: Node, args: Node | None, source: bytes, methods: dict[str, int | None],
+    call: Node, args: Node | None, source: bytes, path: str, methods: dict[str, int | None],
     index: Any | None = None,
 ) -> tuple[str | None, int | None, str | None]:
     """(handler, handlerLine, handlerPath). A method reference names the handler: ``this::m`` is
@@ -171,7 +171,7 @@ def _handler_for(
     if receiver == "this":
         return name, methods.get(name), None
     site = locate_method(index, "java", _receiver_type(arg, receiver, source), name)
-    return (name, site[1], site[0]) if site is not None else (name, None, None)
+    return (name, *handler_location(site, path))
 
 
 def detect_spring_functional_routes(
@@ -191,7 +191,7 @@ def detect_spring_functional_routes(
                 p = _first_string_arg(args, source)
                 if p is not None:
                     handler, handler_line, handler_path = _handler_for(
-                        n, args, source, methods, index)
+                        n, args, source, path, methods, index)
                     prefix = _nest_prefix(n, source)
                     routes.append(
                         Emit(n, dict(
@@ -201,7 +201,7 @@ def detect_spring_functional_routes(
                             framework="spring",
                             handler=handler,
                             handlerLine=handler_line,
-                            handlerPath=handler_path if handler_path != path else None,
+                            handlerPath=handler_path,
                             routeKind="route",
                             isRegex=False,
                         ), parent=record.id)

@@ -39,6 +39,7 @@ from tree_sitter import Node
 
 from ..schemas import FileRecord
 from .emits import Emit
+from .handler_sites import handler_location
 from .index_common import record_distinct
 
 _DEFAULT_GROUP = "DEFAULT"
@@ -266,13 +267,13 @@ def detect_quartz(root: Node, source: bytes, record: FileRecord, syntax: Syntax,
         method, endpoint = f.schedule(trigger) if trigger is not None else (None, None)
         line = handler_lines.get(job) if job else None
         site = locate(job) if job and line is None and locate is not None else None
+        handler_path = None
         if site is not None:
-            line = site[1]
+            line, handler_path = handler_location(site, record.path)
         return Emit(node, {
             "semanticType": "timer", "framework": "quartz", "method": method,
             "endpoint": endpoint, "handler": syntax.handler if job else None,
-            "handlerLine": line,
-            "handlerPath": site[0] if site is not None and site[0] != record.path else None,
+            "handlerLine": line, "handlerPath": handler_path,
         }, enrich="unclassified")
 
     found: list[Emit] = []

@@ -7,7 +7,7 @@ minimal APIs, and classic ASP.NET (System.Web)."""
 from __future__ import annotations
 
 from ...schemas import FileRecord
-from ..method_lines import locate_method
+from ..handler_sites import handler_location, locate_method
 from ..base import ParseContext
 from ..emits import apply
 from ..csharp.parser import CSharpParser
@@ -48,8 +48,8 @@ class AspNetCoreParser(CSharpParser):
                 site = locate_method(ctx.resolution_index, "csharp", ctrl + "Controller", action) \
                     if ctrl and action else None
                 if site is not None:
-                    e.fields.update(handler=action, handlerLine=site[1],
-                                    handlerPath=site[0] if site[0] != ctx.path else None)
+                    line, path = handler_location(site, ctx.path)
+                    e.fields.update(handler=action, handlerLine=line, handlerPath=path)
             routes += registrations
             if routes or wiring:  # a wiring-only RouteConfig is still ASP.NET code
                 apply(record, routes, ctx.source, ctx.path)

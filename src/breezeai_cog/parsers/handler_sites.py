@@ -1,10 +1,26 @@
-"""Where each class's methods are declared — registered facts on the C#, Java and Ruby indexes,
-``csharp.method-lines``, ``java.method-lines`` and ``ruby.method-lines``.
+"""Where an entry point's handler is declared — one place for every language.
 
-An entry point's handler is often a method of a class declared in another file: a Quartz job's
-``Execute``, a Spring functional route's ``handler::list``, a HotChocolate resolver class, a
-Rails controller action. The
-detector knows the class and the method; the fact says where that method is::
+An entry point names its handler; ``handlerLine`` says where it is declared, and ``handlerPath``
+which file when that is not the record's own (contract §5). A detector that knows enough to look
+the handler up does so here:
+
+==========================================  ==================================================
+The detector knows …                        Call
+==========================================  ==================================================
+a class and a method (``ExampleJob`` +      :func:`locate_method` — the ``<lang>.method-lines``
+``Execute``, ``users#show``)                fact (C#, Java, Ruby)
+a module and an exported name               :func:`locate_export` — the
+(``import * as queries``)                   ``typescript.declarations`` fact (TS / JS)
+only a name written in this file            nothing — name it; the parser's ``link_handlers``
+(``<ProjectList/>``)                        locates it after parsing
+==========================================  ==================================================
+
+Whatever found the site, :func:`handler_location` turns it into the two fields, so the "own file
+→ no ``handlerPath``" rule lives once.
+
+``<lang>.method-lines`` — where each class's methods are declared. A Quartz job's ``Execute``, a
+Spring functional route's ``handler::list``, a HotChocolate resolver class, a Rails controller
+action: the detector knows the class and the method; the fact says where that method is::
 
     // ExampleJob.cs
     public class ExampleJob : IJob {
@@ -97,6 +113,23 @@ def locate_method(index: Any | None, language: str, cls: str | None,
         return None
     fact: dict[_Key, _Site | None] = index_fact(index, fact_name(language)) or {}
     return fact.get((_simple(cls), method))
+
+
+def locate_export(index: Any | None, module_file: str, name: str) -> Any | None:
+    """The :class:`~.typescript.declarations.Declaration` behind export ``name`` of a TS / JS
+    module (re-exports followed; ``name`` may be ``"default"``), or None when it can't be
+    followed."""
+    from .typescript.declarations import resolve_export  # the TS package imports this module
+    return resolve_export(index, module_file, name)
+
+
+def handler_location(site: _Site | None, own_path: str) -> tuple[int | None, str | None]:
+    """``(handlerLine, handlerPath)`` for a found declaration ``(file, line)``: ``handlerPath``
+    only when the file is not the record's own; ``(None, None)`` when not found."""
+    if site is None:
+        return None, None
+    file, line = site
+    return line, (file if file != own_path else None)
 
 
 for _language in _SHAPES:
