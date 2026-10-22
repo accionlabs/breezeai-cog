@@ -143,7 +143,11 @@ framework-parser section and detection idioms in the reference guide. Entry poin
 consumers, scheduled jobs, pages) follow the
 [entry-point contract](../../docs/architecture/entry-points.md): give each framework construct
 a role, record one entry point per binding, and keep wiring (mounts, prefixes, registrations)
-as plain statements. Write the role table (in
+as plain statements. Lead each entry point to its handler: in a C# / Java / Ruby detector use
+`locate_method` on the `*.method-lines` fact; in TypeScript name the handler and let
+`link_handlers` locate it — never guess a file (see
+[leading an entry point to its handler](../../docs/architecture/cross-file-resolution.md#leading-an-entry-point-to-its-handler)).
+Write the role table (in
 [`docs/entry-point-roles/`](../../docs/entry-point-roles/README.md)) and its
 `tests/unit/test_roles_<framework>.py` before the detection code.
 

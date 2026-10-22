@@ -394,6 +394,43 @@ How a registered name is bound to a file uses the C# rules — the same ones imp
 > with no marker cannot use a byte guard — its first check is a dictionary lookup instead; and the
 > framework's own parser must share an ownership check with the detector so the two never both emit.
 
+### Leading an entry point to its handler
+
+Every entry point leads to the code that handles it: `handler` (its name), `handlerLine` and,
+when it is declared in another file, `handlerPath`
+([entry-point contract](entry-points.md)). A handler in the same file is easy: the detector
+has its node and sets `handlerLine`. A handler in **another** file is found through the index,
+in one of three ways:
+
+| Way | Where | Languages | How |
+|---|---|---|---|
+| In the detector, through a `*.method-lines` fact | `parsers/method_lines.py` (`locate_method`); used by ASP.NET, HotChocolate, Spring functional routes, Vert.x, Quartz, Rails | C#, Java, Groovy, Ruby | The detector knows the class and the method, and asks the fact where that method is declared |
+| In the detector, through the `typescript.declarations` fact | `typescript_graphql/resolver_modules.py` | TypeScript / JavaScript | The detector follows a module's exports (re-exports included) to each declaration |
+| After parsing, in the `link_handlers` hook | `BaseParser.link_handlers` (default: nothing); `TypeScriptParser.link_handlers` → `typescript/handlers.py` | TypeScript / JavaScript (every TS framework parser) | The detector writes only the name; after every detector has run, the hook follows the file's imports and lazy loads through `typescript.declarations` |
+
+```csharp
+// Jobs/Startup.cs — the Quartz detector knows the job class and its method
+q.AddJob<ExampleJob>(…);                          // → timer, handler "Execute"
+// locate_method(index, "csharp", "ExampleJob", "Execute") → ("Jobs/ExampleJob.cs", 19)
+// → handlerPath "Jobs/ExampleJob.cs", handlerLine 19
+```
+
+```tsx
+// src/routes/index.tsx — the React detector knows only the component's name
+import ProjectList from '../components/pages/projects';
+<Route path="/" element={<ProjectList/>} />       // → page, handler "ProjectList"
+// link_handlers: ProjectList ← import '../components/pages/projects' → its default export
+// → handlerPath "src/components/pages/projects.tsx", handlerLine 128
+```
+
+The hook runs in the worker right after `parse_file`, and re-parses the file only when a record
+names a handler with no location (`needs_location`) — in practice a few route files per repo.
+
+Honest-null applies: a handler that can't be found, or is declared twice (two classes of one
+name, a name imported from two places), leaves `handlerPath` and `handlerLine` empty — never a
+guessed file. Python, Kotlin and Scala have no way yet: their handlers carry a
+`handlerLine` in the record's own file only.
+
 ---
 
 ## 9. Links to skipped template files

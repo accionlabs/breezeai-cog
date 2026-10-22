@@ -128,7 +128,7 @@ flowchart TD
   B --> C["2 · Build indexes<br/>once per language, optional"]
   C --> D["3 · Parse pool (parallel)"]
   subgraph D3 [" for each file, in a worker process "]
-    D1[read file] --> D2["choose ONE parser<br/>claims + priority"] --> D4["parse once<br/>(tree-sitter)"] --> D5["extract<br/>classes · functions · statements"] --> D6["framework / additive<br/>detection"] --> D7[prune edges to<br/>skipped templates]
+    D1[read file] --> D2["choose ONE parser<br/>claims + priority"] --> D4["parse once<br/>(tree-sitter)"] --> D5["extract<br/>classes · functions · statements"] --> D6["framework / additive<br/>detection"] --> D8["link handlers<br/>(handlerPath / handlerLine)"] --> D7[prune edges to<br/>skipped templates]
   end
   D --> D3
   D3 --> E["4 · Assemble<br/>split oversized statements,<br/>accumulate totals"]
@@ -417,6 +417,7 @@ classDiagram
     claims(path, source) bool
     build_index(repo_root, files, jobs)
     parse_file(ctx) FileRecord
+    link_handlers(record, ctx)
   }
   class JavaParser {
     extract(root, ctx) FileRecord
@@ -801,6 +802,10 @@ Other places that resolve values:
   `static final String`). A runtime value stays unresolved.
 - **Inheritance** (`parsers/index_common.py`): base classes in other files, e.g. routes
   inherited from a base controller.
+- **Handlers** (`handlerPath` / `handlerLine`): an entry point whose handler is declared in
+  another file is led to it through the index — by the detector (`locate_method` on a
+  `*.method-lines` fact) or, for TypeScript, by the `link_handlers` hook after parsing. See
+  [leading an entry point to its handler](architecture/cross-file-resolution.md#leading-an-entry-point-to-its-handler).
 
 Detail page: [Cross-file resolution](architecture/cross-file-resolution.md).
 
