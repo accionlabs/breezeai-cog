@@ -407,13 +407,19 @@ Everything for this lives in `parsers/handler_sites.py`:
 
 | The detector knows … | Call | Languages | Used by |
 |---|---|---|---|
-| a class and a method | `locate_method(index, lang, cls, method)` — the `*.method-lines` fact | C#, Java, Groovy, Ruby | ASP.NET, HotChocolate, Spring functional routes, Vert.x, Quartz, Rails |
+| a class and a method | `locate_method(index, lang, cls, method)` — the `*.method-lines` fact | C#, Java, Groovy, Ruby | ASP.NET, HotChocolate, Spring functional routes, Vert.x, Quartz, Rails, WCF |
 | a module and an exported name | `locate_export(index, module_file, name)` — the `typescript.declarations` fact, re-exports followed | TypeScript / JavaScript | GraphQL resolver modules |
 | only a name written in this file | nothing — it names the handler; `link_handlers` locates it after parsing | TypeScript / JavaScript (every TS framework parser) | React, Angular, Vue, Next.js pages |
 
 Whichever found the declaration, `handler_location(site, own_path)` turns it into
 `(handlerLine, handlerPath)`: `handlerPath` only when the file is not the record's own. The rule
 lives in that one place.
+
+The `*.method-lines` fact is keyed by the class's simple name, so two classes of one name are
+ambiguous. A detector that knows which files the class binds to passes them as `within=`, and
+only the sites in those files count: the C# Quartz detector binds the job class by the C# rules
+(`type_files`: namespaces, `using`s, projects), so two examples that each declare their own
+`SimpleJob` are told apart; WCF passes the files of the contract's one implementing type.
 
 `BaseParser.link_handlers` is the same loop for every language: it takes each record that names a
 handler without a location, asks the language's lookup (`handler_locator(ctx)`; default: none),
