@@ -184,7 +184,9 @@ Flag any of the following:
   over statements).
 
 Measure it: run capture on a large repo before and after the change with the same `--jobs`
-and compare the wall time and the per-language parse time in the run log.
+and compare the wall time. With `--verbose`, the log also gives each language's index build
+time (`build_index.done ms=…`). For a per-item view, `scripts/bench_parse_scaling.py` (below)
+times a parser on growing inputs.
 
 A per-item scan rarely shows on ordinary files — it bites on very large ones. Two checks cover
 that:
