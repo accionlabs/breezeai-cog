@@ -159,7 +159,7 @@ a one-per-file parser. There are **two hook points** — choose by the shape of 
 - **Structure-shaped signal** (a base class, a decorator, a type annotation, a
   command-object argument) that a flat classifier cannot express → write a `detect_*` pass
   and **register it** with `register_detector(Detector(...))` at the bottom of its own module
-  (`parsers/additive.py`). Do **not** edit the language parser: its `extract` already ends
+  (e.g. `parsers/typescript_express/routes.py`; the registry is `parsers/additive.py`). Do **not** edit the language parser: its `extract` already ends
   with `run_additive(<language>, …)`, which runs every registered detector for that language,
   so it fires for every file of the language and layers underneath whichever framework won.
   Its `detect` **returns** what it found (`Detection` of `Emit`s: node + fields + whether it
