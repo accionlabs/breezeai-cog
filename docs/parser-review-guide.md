@@ -88,24 +88,36 @@ src/breezeai_cog/parsers/<lang>/
 tests/unit/test_<lang>_parser.py
 ```
 
-A **framework parser** package:
+A **framework parser** package (it owns the files it claims):
 
 ```
 src/breezeai_cog/parsers/<lang>_<framework>/
 ├─ __init__.py      # PARSERS = [<Framework>Parser()]
 ├─ parser.py        # subclasses <Lang>Parser: name, priority, frameworks, claims(), parse_file()
-└─ routes.py        # detection -> list[Statement]  (or events.py etc., named by what it detects)
-tests/unit/test_<framework>_parser.py
+└─ routes.py        # detection -> list[Emit], written by emits.apply (or events.py etc.)
+tests/unit/test_<framework>_parser.py, tests/unit/test_roles_<framework>.py
+```
+
+A **detector-only** package (an additive detector; owns no file — e.g. `typescript_fastify/`):
+
+```
+src/breezeai_cog/parsers/<lang>_<framework>/
+├─ __init__.py      # PARSERS = []
+├─ routes.py        # register_detector(Detector(name, Gate(...), detect)) -> Detection of Emits
+└─ plugins.py       # register_fact(FactSpec(...)) when it needs data from other files
+tests/unit/test_roles_<framework>.py
 ```
 
 Check against `parser-reference.md` §4 (conventions checklist). The items that most often fail:
 
 - `parse_file` / `extract` split missing, so the framework parser re-parses;
 - ids built by hand instead of through `emit.*` + `disambiguate`, so `parentId`s don't match
-  what the base parser assigned;
+  what the base parser assigned — or a detector that edits `record.statements` instead of
+  returning `Emit`s (`apply` assigns their ids and parents);
 - statements nested on a `Function`/`Class` instead of flat on `FileRecord.statements`;
 - semantic statements emitted without the `ctx.capture_statements` gate, or route emitters that
-  don't skip fixture files (`is_fixture_file`);
+  don't skip fixture files (`Gate(skip_fixtures=True)` for a detector, `is_fixture_file` in
+  parser-owned route code);
 - `build_index` that parses every file in a serial loop instead of `parallel_map`.
 
 ### 3. Rules: was it built according to `extend-capture`?

@@ -276,10 +276,14 @@ src/breezeai_cog/
 ├─ schemas/                # Pydantic v2 capture contract (capture.py, enums.py) — source of truth
 ├─ core/                   # scanner, registry (claims/priority selection), pipeline, executor, default ignores
 ├─ parsers/                # base + framework parsers + shared detectors (below)
-├─ emit/                   # deterministic ids/parentId, ndjson, gzip_stream, sinks, s3
-├─ analyzers/              # sql (DDL), es (Elasticsearch) — server-only
-├─ services/               # analysis, inprocess, diff, notify
-└─ server/                 # FastAPI: app, routes, git
+├─ emit/                   # deterministic ids/parentId, ndjson, gzip_stream, sinks, split
+├─ analyzers/              # sql (DDL), es (Elasticsearch), nosql — server-only
+├─ services/               # analysis, inprocess, upload, batch_upload, diff, notify
+├─ server/                 # FastAPI: app, routes, git
+├─ infra/                  # object storage providers (infra/aws/s3.py)
+├─ integrations/scm/       # git providers (GitHub, GitLab, Bitbucket, Azure DevOps)
+├─ utils/                  # loc, paths, source cache, text helpers
+└─ errors.py               # error types
 
 src/breezeai_cog/parsers/
 ├─ base.py                 # BaseParser, ParseContext
@@ -287,9 +291,13 @@ src/breezeai_cog/parsers/
 ├─ statements_common.py    # shared flat-statement emission + detection wiring
 ├─ callresolve.py          # calls[].path resolution
 ├─ index_common.py         # shared build_index helpers: ambiguity collapse, heritage, parallel_map
+├─ additive.py             # detector + fact registry (register_detector, register_fact, run_additive)
+├─ emits.py                # Emit + apply: the one place detector output is written
+├─ contract.py             # entry-point contract check (validate)
 ├─ detection/              # shared cross-language classifiers (api/db/query) — reuse, don't fork
 ├─ <lang>/                 # one base language parser package per language
-└─ <lang>_<framework>/     # framework parsers (subclass the base; one wins per file)
+└─ <lang>_<framework>/     # framework parsers (subclass the base; one wins per file) and
+                           # detector-only packages (register detectors / facts)
 ```
 
 ## 9. Reliability checklist

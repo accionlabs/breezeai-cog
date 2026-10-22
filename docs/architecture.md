@@ -601,9 +601,11 @@ For example, `order.controller.ts` imports both `@nestjs/common` and `@aws-sdk/c
  select()            → nestjs parser owns the file
  base extract()      → class OrderController, fn create, Statement@L11 "await this.sqs.send(...)"
    run_additive()      (still inside extract)
-     express         → guard ✗ → skip
-     aws-events      → guard ✓ → ENRICH Statement@L11 → framework=aws-sqs, endpoint=ORDER_QUEUE
-     sdk-calls       → guard ✗ → skip
+     express         → no Express app or router → nothing
+     fastify         → no Fastify instance      → nothing
+     aws-events      → SQS send found → ENRICH Statement@L11 → framework=aws-sqs, endpoint=ORDER_QUEUE
+     sdk-calls       → nothing
+     graphql-…, vue-…, nextjs-…, *-navigation → nothing (most stop at a cheap first check)
  nestjs detection    → + Statement  POST /orders   (after extract returns)
  ─────────────────────────────────────────────────────────────────────────────
  FileRecord.framework = "nestjs"   (route ✔  +  queue publish ✔)
