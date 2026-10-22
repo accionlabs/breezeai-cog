@@ -170,13 +170,13 @@ same per file. In short:
 |---|---|
 | Scan | One directory walk; no file is read for classification. |
 | `build_index` (optional) | Once per repo, parallelised with `parallel_map`, only when cross-file resolution is needed. |
-| Parse | **One** `parse_source` per file. A framework parser reuses the base parser's tree via `extract`. |
+| Parse | **One** `parse_source` per file. A framework parser reuses the base parser's tree via `extract`. The one exception is `link_handlers`, gated to files with a record whose handler has no location (`needs_location`). |
 | Extraction | A fixed number of tree walks per file (e.g. imports, symbol tables, declarations, comments) — never one walk per item found. |
 | Framework detection | Off-the-record (reads the `FileRecord`, no walk) where possible; otherwise one walk, behind a cheap byte guard. |
 | Embedded-DSL re-parse | Only on the embedded fragment, with `ctx.parse_timeout_micros`. |
 
 Flag any of the following:
-- a second `parse_source` on the whole file;
+- a second `parse_source` on the whole file, outside `link_handlers`'s gated case;
 - a full-tree walk per detected item (nested walks → O(n²) on large files);
 - a `detect_*` pass that runs on every file with no byte guard;
 - `build_index` that reads or parses every file serially;

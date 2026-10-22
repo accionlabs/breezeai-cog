@@ -814,7 +814,7 @@ the rules every parser keeps:
 | Rule | Why |
 |---|---|
 | The scan never reads file contents. | I/O grows with repo size; only candidates are read. |
-| Each file is parsed **once** by the main grammar. Framework parsers reuse the tree via `extract`. | Parsing is the most expensive step. |
+| Each file is parsed **once** by the main grammar. Framework parsers reuse the tree via `extract`. The one exception is `link_handlers`, which re-parses a file only when a record names a handler it could not locate (`needs_location`) — in practice a few route files per repo. | Parsing is the most expensive step. |
 | Extraction does a **fixed** number of tree walks per file (e.g. imports, symbol tables, declarations, comments, framework detection), never one walk per item found. | Cost stays linear in file size; nested walks become quadratic on large files. |
 | Additive detectors start with a cheap byte check (`b"…" in source`). | They run on every file of the language, and most files don't use the library. |
 | A second grammar parses only the embedded fragment, with the same timeout. | Embedded languages (SQL, GraphQL) must not re-parse the whole file. |
