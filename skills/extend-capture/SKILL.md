@@ -293,12 +293,14 @@ src/breezeai_cog/parsers/
 - [ ] Ids come only from the `emit` helpers, one shared `seen_ids` set per file, so a
       detector's statements attach to the parent the base parser assigned.
 - [ ] Statements are flat and linked to their owner; nesting is expressed by line ranges.
-- [ ] The right category was chosen (§3): a server framework is a one-per-file parser; an
-      internal framework is an additive detector that does not displace the file's owner.
+- [ ] The right category was chosen (§3): a framework is a one-per-file parser only when no
+      other framework's file can hold its entry points; otherwise it is an additive detector
+      that does not displace the file's owner.
 - [ ] Existing vocabulary reused where it fits; any new node/relationship/statement kind
       was raised for a decision (§5).
 - [ ] Entry points follow the entry-point contract: a role table with one test per row, one
-      record per binding, `endpoint` resolved or empty, wiring never recorded as a route.
+      record per binding, `endpoint` resolved or left unset (never `""` or a code placeholder
+      like `${…}`), wiring never recorded as a route.
 - [ ] Verified on unit tests **and** dogfooded on a real repository; the suite stays green
       and every emitted record validates against the schema.
 
