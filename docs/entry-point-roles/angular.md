@@ -13,7 +13,7 @@ Tests: `tests/unit/test_roles_angular.py`
 | `{ path, children: [...] }` (no component) | Wiring | no record; `path` prefixes the children | No handler of its own |
 | `{ path, component, children }` with a child `path: ''` (a redirect too) | Wiring | no record; prefix for the children | A layout: a child always fills its outlet |
 | `{ path, component, children }` with no empty-path child | Binding (and wiring for the children) | `route`, `page`, `handler` = component | Its own URL shows it with an empty outlet |
-| `{ path, redirectTo }` | None | — | An alias; no handler |
+| `{ path, redirectTo }` | Outbound | `route`, `routeKind: navigation`, `endpoint` = target path — an absolute target (`/x`) as-is, a relative one joined onto the parent path; empty for a function form or a target that can't be resolved | Sends the user to another page; no handler of its own |
 | `canActivate` / `canMatch` on a route | Guard | names in `guards` of that route | Run before its handler |
 | `canActivateChild` on a parent | Guard | names in `guards` of each child | Run before the children's handlers |
 | `HttpClient` calls (`this.http.get(…)`) | Outbound | `api_call` | |

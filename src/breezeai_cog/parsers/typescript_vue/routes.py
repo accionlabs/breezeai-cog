@@ -250,8 +250,9 @@ def _emit(
     if "path" not in pairs:
         return
     full = _join(prefix, _string_val(pairs["path"], source))
-    # Emit only a route with a component of its own (a pure redirect is an alias, like
-    # Angular's redirectTo; a path-only parent is a prefix) that is not a layout. A shell with
+    # Emit only a route with a component of its own (a pure redirect is an alias with no
+    # record here, unlike Angular's redirectTo, which is a navigation record; a path-only
+    # parent is a prefix) that is not a layout. A shell with
     # a component and a redirect (its default child) is still a page. The children are walked
     # in every case — they are often the whole app subtree.
     has_component = "component" in pairs or "components" in pairs
