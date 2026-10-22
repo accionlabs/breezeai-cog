@@ -928,8 +928,13 @@ src/breezeai_cog/
 │  ├─ statements_common.py         shared statement emission
 │  ├─ comments_common.py           shared comment pass
 │  ├─ callresolve.py, constfold.py, index_common.py   shared resolution helpers
+│  ├─ additive.py, emits.py        detector + fact registry; the one place detector output is written
+│  ├─ enclosing.py, wiring.py      shared lookups: enclosing statement, wiring facts
+│  ├─ contract.py                  entry-point contract check
+│  ├─ method_lines.py, aws_deploy.py   facts shared by several languages
 │  ├─ detection/                   shared api / db / query classifiers
-│  ├─ vertx_common.py, dotnet_common.py, aspnet_common.py   helpers shared by one framework family
+│  ├─ vertx_common.py, dotnet_common.py, aspnet_common.py, aspnet_areas.py, quartz_common.py
+│  │                               helpers shared by one framework family
 │  ├─ <lang>/                      language parsers
 │  └─ <lang>_<framework>/          framework parsers
 ├─ emit/                           ids, NDJSON, gzip, sinks, statement splitting
@@ -964,8 +969,9 @@ from another.
 |---|---|---|
 | **Parser-local** | `parsers/<lang>_<framework>/`, its test file | That parser only |
 | **Language parser** | `parsers/<lang>/` | Every framework built on that language |
-| **Shared family helper** | e.g. `parsers/vertx_common.py` | Every parser in that family |
-| **Core** | `schemas/`, `core/`, `emit/`, `parsers/base.py`, `treesitter.py`, `statements_common.py`, `comments_common.py`, `callresolve.py`, `constfold.py`, `index_common.py`, `detection/`, `cli.py`, `config.py` | Every parser — an architectural change |
+| **Additive detector** | a module that calls `register_detector(...)` or `register_fact(...)`, or a changed `Gate` (`order`, `skip_fixtures`, `guard`) | Every file of that language, whichever parser owns it |
+| **Shared helper** | e.g. `parsers/vertx_common.py`, `quartz_common.py`, `aspnet_areas.py`, `method_lines.py`, `aws_deploy.py` | Every parser that imports it |
+| **Core** | `schemas/`, `core/`, `emit/`, `parsers/base.py`, `treesitter.py`, `statements_common.py`, `comments_common.py`, `callresolve.py`, `constfold.py`, `index_common.py`, `additive.py`, `emits.py`, `enclosing.py`, `wiring.py`, `contract.py`, `detection/`, `cli.py`, `config.py` | Every parser — an architectural change |
 
 > **Decision —** parser-specific code stays in the parser's own directory.
 > **Why:** a change can then only affect the files that parser owns, which keeps reviews small
