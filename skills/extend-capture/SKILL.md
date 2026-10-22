@@ -168,20 +168,26 @@ a one-per-file parser. There are **two hook points** — choose by the shape of 
   so it fires for every file of the language and layers underneath whichever framework won.
   Its `detect` **returns** what it found (`Detection` of `Emit`s: node + fields + whether it
   may enrich the statement already there); the registry writes it (`parsers/emits.py` `apply`:
-  enrich in place or append, ids, parents). It never replaces the file's parser. Its `Gate`
+  enrich in place or append, ids, parents). `detect(dc)` gets a `DetectContext`: `dc.root`,
+  `dc.source`, `dc.path`, `dc.record` (the statements so far), `dc.is_fixture`, and per-language
+  extras (`dc.bindings`: TypeScript import bindings; `dc.types`: Scala type map). It never
+  replaces the file's parser. Its `Gate`
   decides when it runs: only with `ctx.capture_statements`, not on fixture files when
   `skip_fixtures=True` (set it for route / entry-point emitters), only when the cheap byte
   `guard` is present (otherwise guard inside the detector); a returned framework label fills
   `record.framework` only while it is unset. Pick a unique `order` — it fixes the run order, which decides statement-id disambiguation — declare
   the `frameworks` labels it can emit, and add it to the inventory in
   `tests/unit/test_additive.py`. A language without the hook (see `HOOKED_LANGUAGES`) needs a
-  one-time `run_additive` call in its base `extract` first — that one is a language-parser
-  change.
+  one-time `run_additive` call in its base `extract` first, and the language added to
+  `HOOKED_LANGUAGES` (the hooked-language test checks the call) — that one is a
+  language-parser change.
 - **A fact from another file** (a class is an API only because the composition root registers
   it; a URL prefix set by a mount elsewhere) → register a **fact** beside the
   detector: `register_fact(FactSpec(name="framework.concern", language="csharp", gate=…, collect=…, resolve=…))`.
   The language's `build_index` builds it once before parsing, and the detector reads it with
-  `index_fact`. Do not add a framework field to the
+  `index_fact`. Only languages whose `build_index` calls `collect_additive` /
+  `resolve_additive` can hold facts (`INDEX_HOOKED_LANGUAGES`); registering one for another
+  language raises. Do not add a framework field to the
   language index or a new selection hook — the file keeps its owner and the detector adds to it.
   Bind names with the language's rules and leave ambiguous ones unbound. Recipe and worked
   example: the parser reference ("Additive detectors", facts from other files) and
@@ -306,7 +312,8 @@ src/breezeai_cog/parsers/
       record per binding, `endpoint` resolved or left unset (never `""` or a code placeholder
       like `${…}`), wiring never recorded as a route.
 - [ ] Verified on unit tests **and** dogfooded on a real repository; the suite stays green
-      and every emitted record validates against the schema.
+      and every emitted record validates against the schema and the entry-point contract
+      (`parsers/contract.py`; role tests through `analyze_files` fail on a contract error).
 
 ## 10. Explaining a problem or fix, and writing docs
 
