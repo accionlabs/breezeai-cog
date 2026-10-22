@@ -29,7 +29,7 @@ Python reimplementation of `breezeai-code-ontology-generator`.
 | VB.NET | `.vb` | ASP.NET |
 | Kotlin | `.kt` | Ktor |
 | Scala | `.scala .sc` | Play (P2), Akka / http4s / Spark (P3) |
-| C++ | `.cpp .cc .cxx .c++ .hpp .h .hh .hxx .inl .ipp` | — |
+| C / C++ | `.c` (reported as `c`), `.cpp .cc .cxx .c++ .hpp .h .hh .hxx .inl .ipp` (reported as `cpp`) | — |
 | Groovy † | `.groovy` | Vert.x |
 | HTML | `.html .htm` ‡ | Framework-neutral template parser — detects Angular 2+ (grammar-parsed), AngularJS, Vue, Thymeleaf from `templateUrl` resolution or markup fingerprints; htmx / Alpine.js / Stimulus carried as `behaviors` |
 | GraphQL | `.graphql .gql .graphqls` | Schema-first SDL — types, fields, operations and resolvers |

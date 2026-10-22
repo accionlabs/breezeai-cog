@@ -5,6 +5,9 @@ such as ``Q_OBJECT``, unexpanded preprocessor tokens, template metaprogramming),
 declaration is guarded by :func:`.functions.has_declaration_error` and a corrupt header is
 skipped rather than turned into a fabricated node (absent beats wrong).
 
+``.c`` files go through the same parser and index (the C++ grammar parses C) and are
+reported as language ``c``; ``.h`` stays ``cpp`` since C and C++ share it.
+
 Structure captured:
 * ``#include`` → imports (local ``"x.h"`` resolved to a repo file, ``<system>`` external);
 * ``class_specifier`` / ``struct_specifier`` → a ``Class`` (with heritage and flat member
@@ -59,10 +62,15 @@ _TRANSPARENT_SCOPES = frozenset({
 })
 
 
+#: ``.c`` is parsed by the C++ grammar but reported as language ``c``. ``.h`` is shared with
+#: C++ and cannot be classified per file, so it stays ``cpp``.
+_C_EXT = (".c",)
+
+
 class CppParser(BaseParser):
     name = "cpp"
     extensions = (
-        ".cpp", ".cc", ".cxx", ".c++", ".hpp", ".h", ".hh", ".hxx", ".ipp", ".inl",
+        ".cpp", ".cc", ".cxx", ".c++", ".hpp", ".h", ".hh", ".hxx", ".ipp", ".inl", ".c",
     )
     schema_version = SCHEMA_VERSION
     statement_types = STATEMENT_TYPES
@@ -211,7 +219,7 @@ class CppParser(BaseParser):
             id=fid,
             path=path,
             type="code",
-            language="cpp",
+            language="c" if path.endswith(_C_EXT) else "cpp",
             loc=count_loc(source.decode("utf-8", "replace")),
             importFiles=internal,
             externalImports=external,

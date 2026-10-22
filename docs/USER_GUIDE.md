@@ -10,7 +10,7 @@ system: it generates the ontology, a separate Breeze backend loads it into a gra
 tools query it. This guide only covers the generator — the part you run against your code.
 
 **What it understands today** (run `breezeai-cog capabilities` for the authoritative, live list):
-- **Languages:** TypeScript/JavaScript, Python, Ruby, Java, C#, VB.NET, Kotlin, Groovy, and C++.
+- **Languages:** TypeScript/JavaScript, Python, Ruby, Java, C#, VB.NET, Kotlin, Groovy, C, and C++.
 - **Frameworks** (route/event detection on top of those languages): FastAPI (Python); NestJS,
   Angular, Express, React, Vue, Next.js, LoopBack, and GraphQL (TypeScript); Spring Boot, JAX-RS,
   and Vert.x (Java); ASP.NET, Web Forms, WCF/ASMX, and GraphQL (C#); ASP.NET (VB.NET); Ktor
@@ -178,7 +178,7 @@ edits your `.gitignore` itself, and it always skips a `.cog/` directory when sca
 |---|---|---|
 | `--repo <dir>` | *(required)* | The folder to analyze. |
 | `--out <dir>` | `<repo>/.cog` | Output **directory** for the export only (not a filename). The file is named `<repo>-project-analysis.ndjson.gz`. The skip report and logs always go to `<repo>/.cog`. |
-| `--language <name>` | all (auto-detected) | Only analyze this language. Repeat the flag for several (e.g. `--language python --language java`). |
+| `--language <name>` | all (auto-detected) | Only analyze this language. Repeat the flag for several (e.g. `--language python --language java`). C files are selected with `--language cpp`. |
 | `--no-capture-statements` | off (statements captured) | Skip recording statements *inside* functions. Statements are captured by default because they are what detects API calls, DB queries, and routes; turn this on only when you want smaller output and don't need that detail. Env `BREEZEAI_COG_CAPTURE_STATEMENTS=false`. The old `--capture-statements` flag still works but is deprecated (prints a warning); it forces capture on, overriding the env var. |
 | `--capture-templates` | off | Also analyze markup/view **template** files — `.html` `.htm` `.cshtml` `.razor` `.aspx` `.ascx` `.master` `.vue`. Off by default: markup produces a large number of low-value nodes that bury the business logic when reading the graph. Turn it **on** for Razor Pages / Blazor (`@page` routes and `@code` methods live in the markup) and for Vue SFC `<script>` blocks. Env `BREEZEAI_COG_CAPTURE_TEMPLATES`. |
 | `--batch` | off | Treat `--repo` as a **workspace folder** and analyze each immediate subdirectory as its own project (one `.ndjson.gz` per subdir). See *Batch mode* below. |
