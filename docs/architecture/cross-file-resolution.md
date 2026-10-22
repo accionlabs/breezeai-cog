@@ -77,7 +77,9 @@ How it works (`core/pipeline.py::_build_indexes`):
   once, in the main process, over all its files.
 - Large indexes are built in parallel with `parallel_map` (`parsers/index_common.py`), using the
   same `--jobs` as parsing.
-- The result must be picklable. It is handed to every worker as `ctx.resolution_index`.
+- The result must be picklable. It is handed to every worker (through a temp file the worker
+  loads at start, see [architecture §4.5](../architecture.md#45-parallel-execution)) as
+  `ctx.resolution_index`.
 - **Framework parsers use their language's index.** A Spring or Vert.x file gets the Java index.
   The one exception: a framework parser that owns an extension no language parser owns (Vue's
   `.vue`, WebForms' `.aspx`) gets an index built over just those files.

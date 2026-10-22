@@ -290,6 +290,14 @@ process pool. Results are streamed back in completion order.
 > must be picklable. The server's small `/api/analyze` requests therefore run in-process,
 > with no pool.
 
+> **Decision —** the indexes reach the workers through a temp file, not the pool's start-up
+> arguments.
+> **Why:** start-up arguments go through a pipe; once they outgrow its buffer (~64 KB) the
+> workers start one after another instead of together. The main process writes the indexes once
+> (`core/executor.py::_worker_options`) and each worker loads them at start. **Cost:** a private
+> temp directory (owner-only) for the length of the run; if it can't be written, the indexes go
+> through the pipe — slower to start, same output.
+
 > **Decision —** each file is isolated.
 > **Why:** one bad file must not abort a repository. A parser exception or timeout is logged
 > as `parse.file.failed` and the run continues. **Cost:** the failure is easy to miss.
