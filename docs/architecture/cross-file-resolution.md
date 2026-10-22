@@ -427,6 +427,10 @@ Its `build_index` reads the controllers the routes name instead, in Play's proje
 `package` is the route's, read with the same collectors as the `*.method-lines` facts
 (`method_sites`).
 
+Razor (`.cshtml`) is its own base parser too. Its `handler_locator` reads the page's code-behind
+`<page>.cshtml.cs` and finds the `@model` class there (`razor/page_models.py`) — the shared
+`link_handlers` loop writes the result, as for TypeScript.
+
 `BaseParser.link_handlers` is the same loop for every language: it takes each record that names a
 handler without a location, asks the language's lookup (`handler_locator(ctx)`; default: none),
 and writes the result through `handler_location`. A language supplies only the lookup —

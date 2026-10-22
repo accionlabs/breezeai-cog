@@ -209,9 +209,35 @@ public class OrdersModel : PageModel
     )
     [r] = [s for s in _eps(stmts) if s.path == "Pages/Orders.cshtml"]
     assert (r.semanticType, r.routeKind, r.endpoint) == ("route", "page", "/orders")
-    # The PageModel class serves the page; it is declared in another file, so no handlerLine
-    # here (its file goes to handlerPath).
-    assert (r.handler, r.handlerLine) == ("OrdersModel", None)
+    # The PageModel class serves the page: declared in the code-behind, which the record leads to.
+    assert (r.handler, r.handlerPath, r.handlerLine) == (
+        "OrdersModel", "Pages/Orders.cshtml.cs", 3)
+
+
+def _page_record(analyze_files, model_directive: str, code_behind: str | None):
+    files = {"Pages/Orders.cshtml": f'@page "/orders"\n@model {model_directive}\n<h1>x</h1>\n'}
+    if code_behind is not None:
+        files["Pages/Orders.cshtml.cs"] = code_behind
+    stmts = analyze_files(files, templates=True)
+    [r] = [s for s in _eps(stmts) if s.path == "Pages/Orders.cshtml"]
+    return r.handler, r.handlerPath, r.handlerLine
+
+
+_MODEL = "namespace Shop.Pages;\npublic class OrdersModel : PageModel { }\n"
+
+
+def test_razor_page_qualified_model_matches_its_namespace(analyze_files) -> None:
+    assert _page_record(analyze_files, "Shop.Pages.OrdersModel", _MODEL) == (
+        "Shop.Pages.OrdersModel", "Pages/Orders.cshtml.cs", 2)
+    # Another namespace's OrdersModel is not this page's model.
+    assert _page_record(analyze_files, "Admin.Pages.OrdersModel", _MODEL)[1:] == (None, None)
+
+
+def test_razor_page_model_not_in_the_code_behind_stays_unlocated(analyze_files) -> None:
+    assert _page_record(analyze_files, "OrdersModel", None) == ("OrdersModel", None, None)
+    assert _page_record(analyze_files, "List<Order>", _MODEL) == (None, None, None)
+    twice = _MODEL + "namespace Shop.Other { public class OrdersModel { } }\n"
+    assert _page_record(analyze_files, "OrdersModel", twice)[1:] == (None, None)
 
 
 def test_blazor_page_handler_is_its_component(analyze_files) -> None:
