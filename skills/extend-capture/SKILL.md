@@ -109,13 +109,16 @@ causes the failures in §1.
 | You are adding… | Category | Mechanism | Owns the file? |
 |---|---|---|---|
 | A new programming language (its own grammar and extensions) | **Language parser** | The full `LanguageParser` for the language | Yes — the fallback owner for its extensions |
-| A framework that defines the file's request/dispatch model — routes, endpoints, message handlers | **Server-framework parser** | Subclass the base language parser; add `claims` + `priority`; reuse the base extraction, then add detection | Yes — exactly one framework parser wins per file |
-| A library used *across* files that already belong to other frameworks — ORM, validation, serialization, messaging SDK, HTTP client | **Internal-framework detector** | An *additive* detector — **not** a registered parser | **No** — it composes on top of whatever parser owns the file |
+| A framework that defines the file's request/dispatch model — routes, endpoints, message handlers — **and** has a file-level signature no other framework shares (NestJS, Spring, Vert.x) | **Server-framework parser** | Subclass the base language parser; add `claims` + `priority`; reuse the base extraction, then add detection | Yes — exactly one framework parser wins per file |
+| A library used *across* files that already belong to other frameworks — ORM, validation, serialization, messaging SDK, HTTP client — **or** a route, job or consumer style that can appear in files other frameworks own (Express, Fastify, Celery, Quartz) | **Internal-framework detector** | An *additive* detector — **not** a registered parser | **No** — it composes on top of whatever parser owns the file |
 
 The distinction that trips people up: a **server framework owns the file** (a file "is a
 NestJS controller"), so it is a one-per-file parser. An **internal framework does not own
 the file** (a controller *that also publishes to a queue*), so it must be additive — a
 one-per-file parser would displace the server framework and lose its routes.
+The test: **can this framework's entry points appear in a file another framework owns?** If
+so, it is additive even though it defines routes — an Express `app.get(...)` inside a NestJS
+`main.ts` is captured by the `express` detector while NestJS keeps the file.
 
 ### 3A. Language parser
 Implement the full language parser. The step-by-step (package layout, the parse/extract

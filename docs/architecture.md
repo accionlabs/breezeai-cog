@@ -404,8 +404,8 @@ when adding support for something new.
 | You are adding… | Build a… | Owns the file? | Example |
 |---|---|---|---|
 | A new programming language | **Language parser** | Yes, as the fallback for its extensions | `parsers/java/` |
-| A framework that defines how requests reach the code (routes, handlers) | **Framework parser** | Yes, when it claims the file | `parsers/java_vertx/` |
-| A library used inside files owned by other frameworks (ORM, HTTP client, messaging SDK) | **Additive detector** | No, it runs inside the owning parser | `parsers/detection/` (classifiers), `parsers/additive.py` (registry), `parsers/typescript/aws_events.py` |
+| A framework that defines how requests reach the code (routes, handlers) and has a file-level signature no other framework shares | **Framework parser** | Yes, when it claims the file | `parsers/java_vertx/`, `parsers/typescript_nestjs/` |
+| A library used inside files owned by other frameworks (ORM, HTTP client, messaging SDK), or a route, job or consumer style that can appear in files other frameworks own (Express, Fastify, Celery, Quartz) | **Additive detector** | No, it runs inside the owning parser | `parsers/detection/` (classifiers), `parsers/additive.py` (registry), `parsers/typescript/aws_events.py` |
 
 ```mermaid
 classDiagram
