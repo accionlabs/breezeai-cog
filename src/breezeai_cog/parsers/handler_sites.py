@@ -56,7 +56,12 @@ _SHAPES: dict[str, tuple[frozenset[str], frozenset[str]]] = {
     "java": (frozenset({"class_declaration", "record_declaration", "enum_declaration"}),
              frozenset({"method_declaration"})),
     "ruby": (frozenset({"class"}), frozenset({"method"})),
+    "scala": (frozenset({"class_definition", "object_definition", "trait_definition"}),
+              frozenset({"function_definition", "function_declaration"})),
 }
+#: Languages with a repo-wide ``<lang>.method-lines`` fact. Scala has none yet: its one user, the
+#: Play routes lookup, reads the few controller files a routes file names (:func:`method_sites`).
+_FACT_LANGUAGES = ("csharp", "java", "ruby")
 
 _Key = tuple[str, str]  # (class simple name, method name)
 _Site = tuple[str, int]  # (file, line)
@@ -153,7 +158,12 @@ def needs_location(record: FileRecord) -> bool:
     return any(unlocated(s) for s in record.statements)
 
 
-for _language in _SHAPES:
+def method_sites(language: str, root: Node, source: bytes, rel: str) -> list[tuple[_Key, _Site]]:
+    """Every ``((class, method), (file, line))`` declared in one parsed file."""
+    return _collector(language)(root, source, rel, None) or []
+
+
+for _language in _FACT_LANGUAGES:
     register_fact(FactSpec(
         name=fact_name(_language), language=_language, gate=(b"class",),
         collect=_collector(_language), resolve=_resolve,

@@ -421,6 +421,12 @@ only the sites in those files count: the C# Quartz detector binds the job class 
 (`type_files`: namespaces, `using`s, projects), so two examples that each declare their own
 `SimpleJob` are told apart; WCF passes the files of the contract's one implementing type.
 
+Play's `conf/routes` is parsed by its own base parser, which has no Scala or Java index to ask.
+Its `build_index` reads the controllers the routes name instead, in Play's project layout
+(`scala_play/handlers.py`): a `<Class>.scala` / `.java` under the project's `app/` whose
+`package` is the route's, read with the same collectors as the `*.method-lines` facts
+(`method_sites`).
+
 `BaseParser.link_handlers` is the same loop for every language: it takes each record that names a
 handler without a location, asks the language's lookup (`handler_locator(ctx)`; default: none),
 and writes the result through `handler_location`. A language supplies only the lookup —
@@ -448,8 +454,8 @@ route files per repo. A `.vue` SFC is never re-parsed: its script is not the who
 
 Honest-null applies: a handler that can't be found, or is declared twice (two classes of one
 name, a name imported from two places), leaves `handlerPath` and `handlerLine` empty — never a
-guessed file. Python, Kotlin and Scala have no way yet: their handlers carry a
-`handlerLine` in the record's own file only.
+guessed file. Python, Kotlin and Scala (apart from Play routes) have no way yet: their handlers
+carry a `handlerLine` in the record's own file only.
 
 ---
 

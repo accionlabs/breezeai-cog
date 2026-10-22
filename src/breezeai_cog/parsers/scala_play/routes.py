@@ -1,18 +1,20 @@
 """``conf/routes`` extraction — Play's line-based routing DSL, not Scala source. Plain
 text, no tree-sitter (see :class:`.parser.PlayRoutesParser`).
 
-Handler resolution is intentionally **not** attempted here: ``PlayRoutesParser`` is its
-own base parser (nothing else claims ``conf/routes``), so it gets no ``resolution_index``
-from ``_build_indexes`` (keyed by base-parser name). The declared handler text is emitted
-verbatim rather than fabricating a resolved link.
+A binding's controller method is located by ``PlayRoutesParser.build_index``
+(:mod:`.handlers`): found → ``handler`` is the method's name, with its file and line; not
+found → the handler as written (``controllers.Assets.at``), no location.
 """
 
 from __future__ import annotations
 
 import re
 
+from collections.abc import Callable, Iterator
+
 from ...emit import disambiguate, file_id, statement_id
 from ...schemas import Statement
+from ..handler_sites import handler_location
 from .includes import join
 
 _VERB_RE = re.compile(
@@ -38,11 +40,22 @@ def _handler_text(raw: str) -> str:
     return raw.split("(", 1)[0].strip()
 
 
+def route_lines(text: str) -> Iterator[str]:
+    """The handler of every binding line, as :func:`extract_routes` records it."""
+    for raw_line in text.splitlines():
+        m = None if _is_skippable(raw_line) else _VERB_RE.match(raw_line)
+        if m is not None:
+            yield _handler_text(m["handler"])
+
+
 def extract_routes(text: str, path: str, prefix: str | None = None,
-                   served: frozenset[str] = frozenset()) -> list[Statement]:
+                   served: frozenset[str] = frozenset(),
+                   locate: Callable[[str], tuple[str, int] | None] | None = None,
+                   ) -> list[Statement]:
     """The bindings of one routes file. ``prefix``: where its router is served (from the ``->``
     includes, :mod:`.includes`); ``None`` = unknown, paths as written. ``served``: the routers a
-    routes file of the repo defines under a resolved prefix — an include of one has no record."""
+    routes file of the repo defines under a resolved prefix — an include of one has no record.
+    ``locate``: the handler as written → where its controller method is declared."""
     fid = file_id(path)
     seen: set[str] = set()
     routes: list[Statement] = []
@@ -51,6 +64,11 @@ def extract_routes(text: str, path: str, prefix: str | None = None,
             continue
         m = _VERB_RE.match(raw_line)
         if m is not None:
+            handler = _handler_text(m["handler"])
+            site = locate(handler) if locate is not None else None
+            handler_line, handler_path = handler_location(site, path)
+            if site is not None:
+                handler = handler.rsplit(".", 1)[-1]  # the method: its class is in handlerPath
             routes.append(Statement(
                 id=disambiguate(statement_id(path, lineno, 0), seen),
                 parentId=fid,
@@ -59,7 +77,9 @@ def extract_routes(text: str, path: str, prefix: str | None = None,
                 text=raw_line.strip(),
                 method=m["verb"],
                 endpoint=join(prefix, m["path"]) if prefix else m["path"],
-                handler=_handler_text(m["handler"]),
+                handler=handler,
+                handlerLine=handler_line,
+                handlerPath=handler_path,
                 framework="play",
                 routeKind="route",
                 isRegex=bool(_REGEX_PART_RE.search(m["path"])),
