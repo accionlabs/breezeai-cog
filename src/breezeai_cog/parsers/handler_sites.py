@@ -32,13 +32,14 @@ action: the detector knows the class and the method; the fact says where that me
 The key is (class simple name, method name); the value is the declaring file and the method's
 start line — the line its ``Function`` record starts at, attributes / annotations included. The
 same pair declared in two places (two classes of one name, overloads on different lines) is
-ambiguous and resolves to None (honest-null). A partial class split over files is fine: each
-method keeps its own file.
+ambiguous and resolves to None (honest-null) — unless the detector knows which files the class
+binds to (``within``: two examples each declaring their own ``SimpleJob``, told apart by the
+caller's namespace). A partial class split over files is fine: each method keeps its own file.
 """
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Collection
 from pathlib import Path
 from typing import Any
 
@@ -46,7 +47,6 @@ from tree_sitter import Node
 
 from ..schemas import FileRecord, Statement
 from .additive import FactSpec, index_fact, register_fact
-from .index_common import record_distinct
 from .treesitter import node_text
 
 #: language → (class-like node types, method node types).
@@ -90,12 +90,14 @@ def _collector(language: str) -> _Collect:
     return collect
 
 
-def _resolve(values: list[list[tuple[_Key, _Site]]], index: Any) -> dict[_Key, _Site | None] | None:
-    out: dict[_Key, _Site | None] = {}
+def _resolve(values: list[list[tuple[_Key, _Site]]],
+             index: Any) -> dict[_Key, tuple[_Site, ...]] | None:
+    # Every site of a key, so a caller that knows the class's files can still pick one.
+    out: dict[_Key, set[_Site]] = {}
     for file_values in values:
         for key, site in file_values:
-            record_distinct(out, key, site)
-    return out or None
+            out.setdefault(key, set()).add(site)
+    return {key: tuple(sorted(sites)) for key, sites in out.items()} or None
 
 
 def _simple(name: str) -> str:
@@ -107,13 +109,17 @@ def fact_name(language: str) -> str:
     return f"{language}.method-lines"
 
 
-def locate_method(index: Any | None, language: str, cls: str | None,
-                  method: str | None) -> _Site | None:
-    """(file, line) of ``cls.method``, or None when unknown or ambiguous."""
+def locate_method(index: Any | None, language: str, cls: str | None, method: str | None,
+                  *, within: Collection[str] | None = None) -> _Site | None:
+    """(file, line) of ``cls.method``, or None when unknown or ambiguous. ``within`` — the files
+    the class binds to, when the detector knows them — keeps only the sites in those files."""
     if not cls or not method:
         return None
-    fact: dict[_Key, _Site | None] = index_fact(index, fact_name(language)) or {}
-    return fact.get((_simple(cls), method))
+    fact: dict[_Key, tuple[_Site, ...]] = index_fact(index, fact_name(language)) or {}
+    sites = fact.get((_simple(cls), method), ())
+    if within is not None:
+        sites = tuple(s for s in sites if s[0] in within)
+    return sites[0] if len(sites) == 1 else None
 
 
 def locate_export(index: Any | None, module_file: str, name: str) -> Any | None:

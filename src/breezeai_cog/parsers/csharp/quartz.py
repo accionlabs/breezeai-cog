@@ -14,6 +14,7 @@ from ..index_common import record_distinct
 from ..handler_sites import locate_method
 from ..quartz_common import Call, detect_quartz
 from ..treesitter import node_text
+from .imports import CSharpIndex, in_scope_namespaces, type_files
 
 
 #: A trailing positional argument that is a cancellation token (``ScheduleJob(job, trigger, ct)``).
@@ -155,8 +156,20 @@ class _CSharp:
 
 def _detect(dc: DetectContext) -> Detection | None:
     index = dc.ctx.resolution_index
-    found = detect_quartz(dc.root, dc.source, dc.record, _CSharp(dc.source),
-                          lambda job: locate_method(index, "csharp", job, _CSharp.handler))
+    scopes: set[str] | None = None
+
+    def locate(job: str) -> tuple[str, int] | None:
+        # The job class binds by C# rules (namespace, usings, projects): two examples may each
+        # declare their own SimpleJob. Bound to no type or to two → the simple name alone.
+        nonlocal scopes
+        files: set[str] = set()
+        if isinstance(index, CSharpIndex):
+            if scopes is None:
+                scopes = in_scope_namespaces(dc.root, dc.source) | index.global_usings
+            files = type_files(job, scopes, index, dc.path)
+        return locate_method(index, "csharp", job, _CSharp.handler, within=files or None)
+
+    found = detect_quartz(dc.root, dc.source, dc.record, _CSharp(dc.source), locate)
     return Detection(found, label="quartz") if found else None
 
 
