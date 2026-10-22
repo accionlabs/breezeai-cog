@@ -11,7 +11,7 @@ Related documents:
 |---|---|
 | [`skills/extend-capture/SKILL.md`](../skills/extend-capture/SKILL.md) | The rules a parser must follow (reliability, honest-null, the three extension categories). The review checks the code against these rules. |
 | [`docs/parser-reference.md`](parser-reference.md) | The step-by-step for building a parser, and its conventions checklist (§4). |
-| [Architecture](architecture.md) *(to be written)* | Layering, the parse pipeline and its pass budget, and what counts as a core change. |
+| [Architecture](architecture.md) | Layering, the parse pipeline and its pass budget, and what counts as a core change. |
 | [`src/breezeai_cog/schemas/capture.py`](../src/breezeai_cog/schemas/capture.py), [`enums.py`](../src/breezeai_cog/schemas/enums.py) | The capture contract: every field and `semanticType` that *can* be captured. |
 | [Code Ontology Parser Target Spec (Neo4j Graph Model)](https://accionlabs.atlassian.net/wiki/spaces/~5cfa0cffd898610dbf3bacf1/pages/2483453956/Code+Ontology+Parser+Target+Spec+Neo4j+Graph+Model) | The external spec the backend ingests against. |
 
