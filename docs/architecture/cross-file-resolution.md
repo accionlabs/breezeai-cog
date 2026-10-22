@@ -77,7 +77,9 @@ How it works (`core/pipeline.py::_build_indexes`):
   once, in the main process, over all its files.
 - Large indexes are built in parallel with `parallel_map` (`parsers/index_common.py`), using the
   same `--jobs` as parsing.
-- The result must be picklable. It is handed to every worker as `ctx.resolution_index`.
+- The result must be picklable. It is handed to every worker (through a temp file the worker
+  loads at start, see [architecture §4.5](../architecture.md#45-parallel-execution)) as
+  `ctx.resolution_index`.
 - **Framework parsers use their language's index.** A Spring or Vert.x file gets the Java index.
   The one exception: a framework parser that owns an extension no language parser owns (Vue's
   `.vue`, WebForms' `.aspx`) gets an index built over just those files.
@@ -92,11 +94,12 @@ What each index holds:
 | Kotlin | fully-qualified class name → file | imports, same-package types |
 | Scala | fully-qualified class name → file; **registered facts** (`index.facts`: Play router includes `play.router-includes` — read from the routes files, which the Play routes parser owns) | imports, same-package types, SIRD router prefixes |
 | Play routes files | the `->` router includes, resolved to each router's prefix | route prefixes of included routes files |
-| C# | type → files; global `using`s; project roots (`.csproj`), their MSBuild `using`s and project references; class heritage incl. methods; extension methods; implemented interfaces; **registered facts** (string constants `csharp.string-constants` and MVC area registrations `aspnet.area-registrations`, for area route prefixes; method declarations `csharp.method-lines` — (class, method) → file and line, for `handlerPath`; `index.facts`: HotChocolate registered roots, WCF `.svc` hosts — read from `.svc` files, which the ServiceHost parser owns — Web Forms `MapPageRoute` URLs `webforms.page-routes`, HotChocolate source-generated DataLoaders `hotchocolate.data-loaders`) | type resolution, inherited calls, extension calls, routes |
+| C# | type → files; global `using`s; project roots (`.csproj`), their MSBuild `using`s and project references; class heritage incl. methods; extension methods; implemented interfaces; **registered facts** (string constants `csharp.string-constants` and MVC area registrations `aspnet.area-registrations`, for area route prefixes; method declarations `csharp.method-lines` — (class, method) → file and line, for `handlerPath`; `index.facts`: HotChocolate registered roots `hotchocolate.registered-roots`, graphql-dotnet schema roots `graphql-dotnet.schema-roots`, WCF `.svc` hosts `wcf.svc-hosts` — read from `.svc` files, which the ServiceHost parser owns — Web Forms `MapPageRoute` URLs `webforms.page-routes`, HotChocolate source-generated DataLoaders `hotchocolate.data-loaders`, AWS Lambda handlers `aws.deployed-handlers` — read from `serverless.yml` / SAM templates) | type resolution, inherited calls, extension calls, routes |
 | VB | class heritage (base class + attributes) | inherited controller routes |
-| TypeScript / JavaScript | `tsconfig`/`jsconfig` path aliases (per config scope); constant values; class heritage; **registered facts** (`index.facts`: Angular lazy-route mounts `angular.route-mounts`, Express mounts `express.router-mounts`, Fastify plugin prefixes `fastify.plugin-prefixes`, NestJS stub parents `nest.stub-parents` and prefixes `nest.prefixes`, Next.js apps `next.apps`, middleware matchers `next.middlewares` and base paths `next.base-paths`, LoopBack base paths `loopback.base-paths`, GraphQL root-field DTOs `graphql.sdl-root-fields` — read from `.graphql` files too, which the GraphQL parser owns; module exports and their declarations `typescript.declarations` — each file's exported names with the declared name and line, re-exports followed, for `handlerPath`) | aliased imports, inherited calls, route prefixes |
+| TypeScript / JavaScript | `tsconfig`/`jsconfig` path aliases (per config scope); constant values; class heritage; **registered facts** (`index.facts`: Angular lazy-route mounts `angular.route-mounts` and their guards `angular.mount-guards`, Express mounts `express.router-mounts`, Fastify plugin prefixes `fastify.plugin-prefixes`, NestJS stub parents `nest.stub-parents` and prefixes `nest.prefixes`, Next.js apps `next.apps`, middleware matchers `next.middlewares` and base paths `next.base-paths`, LoopBack base paths `loopback.base-paths`, GraphQL root-field DTOs `graphql.sdl-root-fields` — read from `.graphql` files too, which the GraphQL parser owns; module exports and their declarations `typescript.declarations` — each file's exported names with the declared name and line, re-exports followed, for `handlerPath`, and the component of each `.vue` file `typescript.vue-components`; AWS Lambda handlers `aws.deployed-handlers` — read from `serverless.yml` / SAM templates) | aliased imports, inherited calls, route prefixes |
 | C++ | header basename → file; free functions; `Class::method`; `Class::field` types; heritage | `#include`, calls |
-| Ruby | ActiveRecord model names; **registered facts** (`index.facts`: Rails controller `before_action` callbacks `rails.controller-callbacks`) | recognising DB calls; Rails route guards |
+| Ruby | ActiveRecord model names; **registered facts** (`index.facts`: Rails controller `before_action` callbacks `rails.controller-callbacks`; method declarations `ruby.method-lines` — (controller, action) → file and line, for `handlerPath`) | recognising DB calls; Rails route guards and handlers |
+| GraphQL | **registered facts** (`index.facts`: client projects `graphql.client-configs` — read from `.graphqlrc.json`) | a downloaded client schema is not taken as this repo's operations |
 | HCL / Terraform | folder → `.tf` files | local `module` sources |
 | HTML | template → owning component | linking templates to components |
 | Python | **registered facts** (`index.facts`): FastAPI wiring `fastapi.wiring` — `APIRouter` variables (own prefix, dependencies), `include_router` sites (also routers imported from other files), app middleware, module-level string constants used as prefixes; Celery task names `celery.tasks` | route prefixes and guards of routers mounted in another file |
@@ -393,6 +396,43 @@ How a registered name is bound to a file uses the C# rules — the same ones imp
 > unchanged, so no file can be taken from its owner. **Cost:** a detector that emits for files
 > with no marker cannot use a byte guard — its first check is a dictionary lookup instead; and the
 > framework's own parser must share an ownership check with the detector so the two never both emit.
+
+### Leading an entry point to its handler
+
+Every entry point leads to the code that handles it: `handler` (its name), `handlerLine` and,
+when it is declared in another file, `handlerPath`
+([entry-point contract](entry-points.md)). A handler in the same file is easy: the detector
+has its node and sets `handlerLine`. A handler in **another** file is found through the index,
+in one of three ways:
+
+| Way | Where | Languages | How |
+|---|---|---|---|
+| In the detector, through a `*.method-lines` fact | `parsers/method_lines.py` (`locate_method`); used by ASP.NET, HotChocolate, Spring functional routes, Vert.x, Quartz, Rails | C#, Java, Groovy, Ruby | The detector knows the class and the method, and asks the fact where that method is declared |
+| In the detector, through the `typescript.declarations` fact | `typescript_graphql/resolver_modules.py` | TypeScript / JavaScript | The detector follows a module's exports (re-exports included) to each declaration |
+| After parsing, in the `link_handlers` hook | `BaseParser.link_handlers` (default: nothing); `TypeScriptParser.link_handlers` → `typescript/handlers.py` | TypeScript / JavaScript (every TS framework parser) | The detector writes only the name; after every detector has run, the hook follows the file's imports and lazy loads through `typescript.declarations` |
+
+```csharp
+// Jobs/Startup.cs — the Quartz detector knows the job class and its method
+q.AddJob<ExampleJob>(…);                          // → timer, handler "Execute"
+// locate_method(index, "csharp", "ExampleJob", "Execute") → ("Jobs/ExampleJob.cs", 19)
+// → handlerPath "Jobs/ExampleJob.cs", handlerLine 19
+```
+
+```tsx
+// src/routes/index.tsx — the React detector knows only the component's name
+import ProjectList from '../components/pages/projects';
+<Route path="/" element={<ProjectList/>} />       // → page, handler "ProjectList"
+// link_handlers: ProjectList ← import '../components/pages/projects' → its default export
+// → handlerPath "src/components/pages/projects.tsx", handlerLine 128
+```
+
+The hook runs in the worker right after `parse_file`, and re-parses the file only when a record
+names a handler with no location (`needs_location`) — in practice a few route files per repo.
+
+Honest-null applies: a handler that can't be found, or is declared twice (two classes of one
+name, a name imported from two places), leaves `handlerPath` and `handlerLine` empty — never a
+guessed file. Python, Kotlin and Scala have no way yet: their handlers carry a
+`handlerLine` in the record's own file only.
 
 ---
 

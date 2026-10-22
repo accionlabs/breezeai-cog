@@ -109,13 +109,16 @@ causes the failures in §1.
 | You are adding… | Category | Mechanism | Owns the file? |
 |---|---|---|---|
 | A new programming language (its own grammar and extensions) | **Language parser** | The full `LanguageParser` for the language | Yes — the fallback owner for its extensions |
-| A framework that defines the file's request/dispatch model — routes, endpoints, message handlers | **Server-framework parser** | Subclass the base language parser; add `claims` + `priority`; reuse the base extraction, then add detection | Yes — exactly one framework parser wins per file |
-| A library used *across* files that already belong to other frameworks — ORM, validation, serialization, messaging SDK, HTTP client | **Internal-framework detector** | An *additive* detector — **not** a registered parser | **No** — it composes on top of whatever parser owns the file |
+| A framework that defines the file's request/dispatch model — routes, endpoints, message handlers — **and** has a file-level signature no other framework shares (NestJS, Spring, Vert.x) | **Server-framework parser** | Subclass the base language parser; add `claims` + `priority`; reuse the base extraction, then add detection | Yes — exactly one framework parser wins per file |
+| A library used *across* files that already belong to other frameworks — ORM, validation, serialization, messaging SDK, HTTP client — **or** a route, job or consumer style that can appear in files other frameworks own (Express, Fastify, Celery, Quartz) | **Internal-framework detector** | An *additive* detector — **not** a registered parser | **No** — it composes on top of whatever parser owns the file |
 
 The distinction that trips people up: a **server framework owns the file** (a file "is a
 NestJS controller"), so it is a one-per-file parser. An **internal framework does not own
 the file** (a controller *that also publishes to a queue*), so it must be additive — a
 one-per-file parser would displace the server framework and lose its routes.
+The test: **can this framework's entry points appear in a file another framework owns?** If
+so, it is additive even though it defines routes — an Express `app.get(...)` inside a NestJS
+`main.ts` is captured by the `express` detector while NestJS keeps the file.
 
 ### 3A. Language parser
 Implement the full language parser. The step-by-step (package layout, the parse/extract
@@ -140,7 +143,11 @@ framework-parser section and detection idioms in the reference guide. Entry poin
 consumers, scheduled jobs, pages) follow the
 [entry-point contract](../../docs/architecture/entry-points.md): give each framework construct
 a role, record one entry point per binding, and keep wiring (mounts, prefixes, registrations)
-as plain statements. Write the role table (in
+as plain statements. Lead each entry point to its handler: in a C# / Java / Ruby detector use
+`locate_method` on the `*.method-lines` fact; in TypeScript name the handler and let
+`link_handlers` locate it — never guess a file (see
+[leading an entry point to its handler](../../docs/architecture/cross-file-resolution.md#leading-an-entry-point-to-its-handler)).
+Write the role table (in
 [`docs/entry-point-roles/`](../../docs/entry-point-roles/README.md)) and its
 `tests/unit/test_roles_<framework>.py` before the detection code.
 
@@ -156,25 +163,31 @@ a one-per-file parser. There are **two hook points** — choose by the shape of 
 - **Structure-shaped signal** (a base class, a decorator, a type annotation, a
   command-object argument) that a flat classifier cannot express → write a `detect_*` pass
   and **register it** with `register_detector(Detector(...))` at the bottom of its own module
-  (`parsers/additive.py`). Do **not** edit the language parser: its `extract` already ends
+  (e.g. `parsers/typescript_express/routes.py`; the registry is `parsers/additive.py`). Do **not** edit the language parser: its `extract` already ends
   with `run_additive(<language>, …)`, which runs every registered detector for that language,
   so it fires for every file of the language and layers underneath whichever framework won.
   Its `detect` **returns** what it found (`Detection` of `Emit`s: node + fields + whether it
   may enrich the statement already there); the registry writes it (`parsers/emits.py` `apply`:
-  enrich in place or append, ids, parents). It never replaces the file's parser. Its `Gate`
+  enrich in place or append, ids, parents). `detect(dc)` gets a `DetectContext`: `dc.root`,
+  `dc.source`, `dc.path`, `dc.record` (the statements so far), `dc.is_fixture`, and per-language
+  extras (`dc.bindings`: TypeScript import bindings; `dc.types`: Scala type map). It never
+  replaces the file's parser. Its `Gate`
   decides when it runs: only with `ctx.capture_statements`, not on fixture files when
   `skip_fixtures=True` (set it for route / entry-point emitters), only when the cheap byte
   `guard` is present (otherwise guard inside the detector); a returned framework label fills
   `record.framework` only while it is unset. Pick a unique `order` — it fixes the run order, which decides statement-id disambiguation — declare
   the `frameworks` labels it can emit, and add it to the inventory in
   `tests/unit/test_additive.py`. A language without the hook (see `HOOKED_LANGUAGES`) needs a
-  one-time `run_additive` call in its base `extract` first — that one is a language-parser
-  change.
+  one-time `run_additive` call in its base `extract` first, and the language added to
+  `HOOKED_LANGUAGES` (the hooked-language test checks the call) — that one is a
+  language-parser change.
 - **A fact from another file** (a class is an API only because the composition root registers
   it; a URL prefix set by a mount elsewhere) → register a **fact** beside the
-  detector: `register_fact(FactSpec(name="framework.concern", gate=…, collect=…, resolve=…))`.
+  detector: `register_fact(FactSpec(name="framework.concern", language="csharp", gate=…, collect=…, resolve=…))`.
   The language's `build_index` builds it once before parsing, and the detector reads it with
-  `index_fact`. Do not add a framework field to the
+  `index_fact`. Only languages whose `build_index` calls `collect_additive` /
+  `resolve_additive` can hold facts (`INDEX_HOOKED_LANGUAGES`); registering one for another
+  language raises. Do not add a framework field to the
   language index or a new selection hook — the file keeps its owner and the detector adds to it.
   Bind names with the language's rules and leave ambiguous ones unbound. Recipe and worked
   example: the parser reference ("Additive detectors", facts from other files) and
@@ -263,10 +276,14 @@ src/breezeai_cog/
 ├─ schemas/                # Pydantic v2 capture contract (capture.py, enums.py) — source of truth
 ├─ core/                   # scanner, registry (claims/priority selection), pipeline, executor, default ignores
 ├─ parsers/                # base + framework parsers + shared detectors (below)
-├─ emit/                   # deterministic ids/parentId, ndjson, gzip_stream, sinks, s3
-├─ analyzers/              # sql (DDL), es (Elasticsearch) — server-only
-├─ services/               # analysis, inprocess, diff, notify
-└─ server/                 # FastAPI: app, routes, git
+├─ emit/                   # deterministic ids/parentId, ndjson, gzip_stream, sinks, split
+├─ analyzers/              # sql (DDL), es (Elasticsearch), nosql — server-only
+├─ services/               # analysis, inprocess, upload, batch_upload, diff, notify
+├─ server/                 # FastAPI: app, routes, git
+├─ infra/                  # object storage providers (infra/aws/s3.py)
+├─ integrations/scm/       # git providers (GitHub, GitLab, Bitbucket, Azure DevOps)
+├─ utils/                  # loc, paths, source cache, text helpers
+└─ errors.py               # error types
 
 src/breezeai_cog/parsers/
 ├─ base.py                 # BaseParser, ParseContext
@@ -274,9 +291,13 @@ src/breezeai_cog/parsers/
 ├─ statements_common.py    # shared flat-statement emission + detection wiring
 ├─ callresolve.py          # calls[].path resolution
 ├─ index_common.py         # shared build_index helpers: ambiguity collapse, heritage, parallel_map
+├─ additive.py             # detector + fact registry (register_detector, register_fact, run_additive)
+├─ emits.py                # Emit + apply: the one place detector output is written
+├─ contract.py             # entry-point contract check (validate)
 ├─ detection/              # shared cross-language classifiers (api/db/query) — reuse, don't fork
 ├─ <lang>/                 # one base language parser package per language
-└─ <lang>_<framework>/     # framework parsers (subclass the base; one wins per file)
+└─ <lang>_<framework>/     # framework parsers (subclass the base; one wins per file) and
+                           # detector-only packages (register detectors / facts)
 ```
 
 ## 9. Reliability checklist
@@ -290,14 +311,17 @@ src/breezeai_cog/parsers/
 - [ ] Ids come only from the `emit` helpers, one shared `seen_ids` set per file, so a
       detector's statements attach to the parent the base parser assigned.
 - [ ] Statements are flat and linked to their owner; nesting is expressed by line ranges.
-- [ ] The right category was chosen (§3): a server framework is a one-per-file parser; an
-      internal framework is an additive detector that does not displace the file's owner.
+- [ ] The right category was chosen (§3): a framework is a one-per-file parser only when no
+      other framework's file can hold its entry points; otherwise it is an additive detector
+      that does not displace the file's owner.
 - [ ] Existing vocabulary reused where it fits; any new node/relationship/statement kind
       was raised for a decision (§5).
 - [ ] Entry points follow the entry-point contract: a role table with one test per row, one
-      record per binding, `endpoint` resolved or empty, wiring never recorded as a route.
+      record per binding, `endpoint` resolved or left unset (never `""` or a code placeholder
+      like `${…}`), wiring never recorded as a route.
 - [ ] Verified on unit tests **and** dogfooded on a real repository; the suite stays green
-      and every emitted record validates against the schema.
+      and every emitted record validates against the schema and the entry-point contract
+      (`parsers/contract.py`; role tests through `analyze_files` fail on a contract error).
 
 ## 10. Explaining a problem or fix, and writing docs
 

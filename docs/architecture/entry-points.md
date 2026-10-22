@@ -359,7 +359,7 @@ there.
 | `{ path, loadChildren }` | Wiring | Points at a module or route list: prefix for its routes |
 | `{ path, children: [...] }` | Wiring | Prefix for the children |
 | `{ path, component, children: [...] }` | Wiring when a child has `path: ''`; otherwise also a Binding | A layout when a child always fills its outlet; otherwise its own URL shows it with an empty outlet |
-| `{ path, redirectTo }` | None | An alias; no handler |
+| `{ path, redirectTo }` | Outbound | `route`, `routeKind: navigation`: sends the user to the target page |
 | `canActivate` / `canMatch` / `canActivateChild` | Guard | |
 | `HttpClient` calls | Outbound | |
 | `routerLink` / `router.navigate(...)` | Outbound | `route`, `routeKind: navigation` |

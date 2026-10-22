@@ -11,7 +11,7 @@ Related documents:
 |---|---|
 | [`skills/extend-capture/SKILL.md`](../skills/extend-capture/SKILL.md) | The rules a parser must follow (reliability, honest-null, the three extension categories). The review checks the code against these rules. |
 | [`docs/parser-reference.md`](parser-reference.md) | The step-by-step for building a parser, and its conventions checklist (§4). |
-| [Architecture](architecture.md) *(to be written)* | Layering, the parse pipeline and its pass budget, and what counts as a core change. |
+| [Architecture](architecture.md) | Layering, the parse pipeline and its pass budget, and what counts as a core change. |
 | [`src/breezeai_cog/schemas/capture.py`](../src/breezeai_cog/schemas/capture.py), [`enums.py`](../src/breezeai_cog/schemas/enums.py) | The capture contract: every field and `semanticType` that *can* be captured. |
 | [Code Ontology Parser Target Spec (Neo4j Graph Model)](https://accionlabs.atlassian.net/wiki/spaces/~5cfa0cffd898610dbf3bacf1/pages/2483453956/Code+Ontology+Parser+Target+Spec+Neo4j+Graph+Model) | The external spec the backend ingests against. |
 
@@ -38,9 +38,9 @@ git diff --name-only main...HEAD
 |---|---|---|---|
 | **Parser-local** | `parsers/<lang>_<framework>/**`, `tests/unit/test_<x>_parser.py` | This parser only | Normal |
 | **Language parser** | `parsers/<lang>/**` (when the work is for a framework) | Every framework built on this language | High — see §1.1 |
-| **Additive detector** | a module that calls `register_detector(...)`, or a changed `order` / `skip_fixtures` / `guard` | Every file of that language, whichever parser owns it | High — same blast radius as a language-parser change; see §1.1 |
-| **Shared family helper** | e.g. `parsers/vertx_common.py` (shared by `java_vertx` and `groovy_vertx`), `parsers/dotnet_common.py` (the .NET framework parsers), `parsers/aspnet_common.py` (`csharp_aspnet` and `vb_aspnet`) | Every parser that imports it | High |
-| **Core** | `schemas/`, `core/`, `emit/`, `parsers/base.py`, `parsers/treesitter.py`, `parsers/statements_common.py`, `parsers/comments_common.py`, `parsers/callresolve.py`, `parsers/index_common.py`, `parsers/constfold.py`, `parsers/detection/`, `cli.py`, `config.py` | Every parser | Highest — architectural change, see §1.2 |
+| **Additive detector** | a module that calls `register_detector(...)` or `register_fact(...)`, or a changed `Gate` (`order`, `skip_fixtures`, `guard`) | Every file of that language, whichever parser owns it | High — same blast radius as a language-parser change; see §1.1 |
+| **Shared family helper** | e.g. `parsers/vertx_common.py` (shared by `java_vertx` and `groovy_vertx`), `parsers/dotnet_common.py` (the .NET framework parsers), `parsers/aspnet_common.py` (`csharp_aspnet` and `vb_aspnet`), `parsers/aspnet_areas.py`, `parsers/quartz_common.py` (Java and C# Quartz), `parsers/method_lines.py` (C#, Java, Ruby handlers), `parsers/aws_deploy.py` (TypeScript and C# Lambda) | Every parser that imports it | High |
+| **Core** | `schemas/`, `core/`, `emit/`, `parsers/base.py`, `parsers/treesitter.py`, `parsers/statements_common.py`, `parsers/comments_common.py`, `parsers/callresolve.py`, `parsers/index_common.py`, `parsers/constfold.py`, `parsers/additive.py`, `parsers/emits.py`, `parsers/enclosing.py`, `parsers/wiring.py`, `parsers/contract.py`, `parsers/detection/`, `cli.py`, `config.py` | Every parser | Highest — architectural change, see §1.2 |
 
 #### 1.1 Language-parser changes made during framework work
 
@@ -88,24 +88,36 @@ src/breezeai_cog/parsers/<lang>/
 tests/unit/test_<lang>_parser.py
 ```
 
-A **framework parser** package:
+A **framework parser** package (it owns the files it claims):
 
 ```
 src/breezeai_cog/parsers/<lang>_<framework>/
 ├─ __init__.py      # PARSERS = [<Framework>Parser()]
 ├─ parser.py        # subclasses <Lang>Parser: name, priority, frameworks, claims(), parse_file()
-└─ routes.py        # detection -> list[Statement]  (or events.py etc., named by what it detects)
-tests/unit/test_<framework>_parser.py
+└─ routes.py        # detection -> list[Emit], written by emits.apply (or events.py etc.)
+tests/unit/test_<framework>_parser.py, tests/unit/test_roles_<framework>.py
+```
+
+A **detector-only** package (an additive detector; owns no file — e.g. `typescript_fastify/`):
+
+```
+src/breezeai_cog/parsers/<lang>_<framework>/
+├─ __init__.py      # PARSERS = []
+├─ routes.py        # register_detector(Detector(name, Gate(...), detect)) -> Detection of Emits
+└─ plugins.py       # register_fact(FactSpec(...)) when it needs data from other files
+tests/unit/test_roles_<framework>.py
 ```
 
 Check against `parser-reference.md` §4 (conventions checklist). The items that most often fail:
 
 - `parse_file` / `extract` split missing, so the framework parser re-parses;
 - ids built by hand instead of through `emit.*` + `disambiguate`, so `parentId`s don't match
-  what the base parser assigned;
+  what the base parser assigned — or a detector that edits `record.statements` instead of
+  returning `Emit`s (`apply` assigns their ids and parents);
 - statements nested on a `Function`/`Class` instead of flat on `FileRecord.statements`;
 - semantic statements emitted without the `ctx.capture_statements` gate, or route emitters that
-  don't skip fixture files (`is_fixture_file`);
+  don't skip fixture files (`Gate(skip_fixtures=True)` for a detector, `is_fixture_file` in
+  parser-owned route code);
 - `build_index` that parses every file in a serial loop instead of `parallel_map`.
 
 ### 3. Rules: was it built according to `extend-capture`?
@@ -130,7 +142,8 @@ framework must have the **higher** priority.
 
 | Situation | Example | Verdict |
 |---|---|---|
-| Derived framework, higher priority | NestJS (`priority = 20`) claims `@nestjs/`; it is built on Express (`priority = 10`). A NestJS controller that also imports `express` goes to NestJS. | Correct |
+| Derived framework, higher priority | Framework B is built on framework A, and a B file may also match A's claim: B has the higher `priority`, so B owns the file. | Correct |
+| Underlying framework as an additive detector | Express and Fastify run underneath NestJS and others, so they are additive detectors, not parsers: a NestJS controller that imports `express` is owned by NestJS, and the `express` detector still adds its routes. | Correct |
 | Unrelated frameworks, same priority, both match | Spring Boot claims `org.springframework`, Vert.x claims `io.vertx` — both `priority = 10`. A file importing both is claimed by both; `select` uses `max()`, so the **registration order** decides silently. | Gap — either make the claims exclusive or decide the priority explicitly. |
 | Claim too broad | A claim on a common word (e.g. `b"Router"`) pulls in files from other frameworks or plain code. | Gap — false positive ownership. |
 | Claim too narrow | A claim on one import form only (`import io.vertx.core.Vertx`) misses wildcard imports, re-exports or fully-qualified use. | Gap — files fall back to the base parser and lose their routes. |
@@ -147,10 +160,11 @@ parser can be confidently wrong. Check every one of them against real code:
 |---|---|---|
 | File ownership | `claims()` | A file that only *mentions* `io.vertx` in a comment or string is claimed as Vert.x. |
 | `semanticType` = `api_call` / `query_statement` / `db_method_call` | `parsers/detection/` (`classify_call`) | `cache.get(key)` tagged as an HTTP `GET`; `"select an option"` tagged as SQL; `list.find(x)` tagged as a DB call. |
-| `semanticType` = `route` | framework `routes.py` | A test helper `router.get(...)` in a non-fixture file; a method named `get` on an unrelated object; a mount, layout or redirect recorded as a route (wiring, not an entry point — see the [entry-point contract](architecture/entry-points.md)). |
+| `semanticType` = `route` | framework `routes.py` | A test helper `router.get(...)` in a non-fixture file; a method named `get` on an unrelated object; a mount, layout or redirect recorded as a page (wiring, not an entry point; an Angular `redirectTo` is a `navigation` record — see the [entry-point contract](architecture/entry-points.md)). |
 | `semanticType` = `eventbus_send` / `eventbus_publish` / `eventbus_consumer` | e.g. `parsers/java_vertx/events.py` | A user wrapper method also called `send(...)` tagged as an event-bus send. |
 | `semanticType` = `service_proxy`, `verticle_deploy`, `timer` | framework detectors | A class with an annotation that merely shares the simple name `ProxyGen` from another library. |
 | `endpoint`, `method`, `routeKind` | detectors, constant folding (`constfold.py`) | An endpoint folded from the wrong constant; a path concatenated from a router prefix that is never mounted; a child route missing the prefix of the router it is mounted under; a handler or method name used as `endpoint`. |
+| `handlerPath`, `handlerLine` | `locate_method` (`*.method-lines` facts), `link_handlers` (TypeScript) | A handler pointed at a guessed file, or at one of two same-named classes or imports; a line that is not the handler's declaration. |
 | `calls[].path`, import resolution | `callresolve.py`, `imports.py`, `build_index` | A call resolved to a same-named class in another module. |
 | `Class.type`, visibility, `isStatic` | `classes.py` / `functions.py` | A defaulted value presented as if it was read (e.g. every member `public`). |
 
@@ -169,13 +183,13 @@ same per file. In short:
 |---|---|
 | Scan | One directory walk; no file is read for classification. |
 | `build_index` (optional) | Once per repo, parallelised with `parallel_map`, only when cross-file resolution is needed. |
-| Parse | **One** `parse_source` per file. A framework parser reuses the base parser's tree via `extract`. |
+| Parse | **One** `parse_source` per file. A framework parser reuses the base parser's tree via `extract`. The one exception is `link_handlers`, gated to files with a record whose handler has no location (`needs_location`). |
 | Extraction | A fixed number of tree walks per file (e.g. imports, symbol tables, declarations, comments) — never one walk per item found. |
 | Framework detection | Off-the-record (reads the `FileRecord`, no walk) where possible; otherwise one walk, behind a cheap byte guard. |
 | Embedded-DSL re-parse | Only on the embedded fragment, with `ctx.parse_timeout_micros`. |
 
 Flag any of the following:
-- a second `parse_source` on the whole file;
+- a second `parse_source` on the whole file, outside `link_handlers`'s gated case;
 - a full-tree walk per detected item (nested walks → O(n²) on large files);
 - a `detect_*` pass that runs on every file with no byte guard;
 - `build_index` that reads or parses every file serially;
@@ -183,7 +197,9 @@ Flag any of the following:
   over statements).
 
 Measure it: run capture on a large repo before and after the change with the same `--jobs`
-and compare the wall time and the per-language parse time in the run log.
+and compare the wall time. With `--verbose`, the log also gives each language's index build
+time (`build_index.done ms=…`). For a per-item view, `scripts/bench_parse_scaling.py` (below)
+times a parser on growing inputs.
 
 A per-item scan rarely shows on ordinary files — it bites on very large ones. Two checks cover
 that:
@@ -234,7 +250,7 @@ against it. Do not derive the list from the parser's own code.
 | **Heritage** | `extends`, `implements`, mixins; base classes that live in another file (needs `build_index`). |
 | **Decorators / annotations** | Every annotation on classes, methods **and parameters**, with arguments. One row per decorator form the framework uses. |
 | **Routes** | Every route form: annotations, router calls (`router.get(...)`), chained builders, sub-routers and mounts, path prefixes, regex routes, method-less routes. Fields: `method`, `endpoint`, `routeKind`, guards / auth, request / response DTOs. |
-| **Entry points** | The parser's role table in [`docs/entry-point-roles/`](entry-point-roles/README.md) ([entry-point contract](architecture/entry-points.md) §9) covers every inbound construct the framework documents — routes, message and event consumers, scheduled jobs, pages — and each record leads to its handler (`handler`, `handlerLine`). |
+| **Entry points** | The parser's role table in [`docs/entry-point-roles/`](entry-point-roles/README.md) ([entry-point contract](architecture/entry-points.md) §9) covers every inbound construct the framework documents — routes, message and event consumers, scheduled jobs, pages — and each record leads to its handler (`handler`, `handlerLine`, and `handlerPath` when it is in another file). |
 | **Statements with a `semanticType`** | `route`, `api_call`, `db_method_call`, `query_statement`, `eventbus_send`, `eventbus_publish`, `eventbus_consumer`, `verticle_deploy`, `service_proxy`, `timer`, `graphql_entity`, `data_model`, `structured_data`, `comment`, `enum_member`, and the `iac_*` values for config parsers. Check each one that applies **wherever** it can appear — including inside lambdas and callbacks, which the base extraction skips as nested scopes. |
 | **Imports / calls** | Relative and internal imports resolved to repo-relative paths; external imports listed; `calls[]` resolved where the target is certain. |
 | **Configs** | Framework config files (YAML / JSON / properties / HCL) handled by the config parsers; values that drive routing (ports, base paths, event addresses). |

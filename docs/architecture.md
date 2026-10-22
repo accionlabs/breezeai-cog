@@ -128,7 +128,7 @@ flowchart TD
   B --> C["2 · Build indexes<br/>once per language, optional"]
   C --> D["3 · Parse pool (parallel)"]
   subgraph D3 [" for each file, in a worker process "]
-    D1[read file] --> D2["choose ONE parser<br/>claims + priority"] --> D4["parse once<br/>(tree-sitter)"] --> D5["extract<br/>classes · functions · statements"] --> D6["framework / additive<br/>detection"] --> D7[prune edges to<br/>skipped templates]
+    D1[read file] --> D2["choose ONE parser<br/>claims + priority"] --> D4["parse once<br/>(tree-sitter)"] --> D5["extract<br/>classes · functions · statements"] --> D6["framework / additive<br/>detection"] --> D8["link handlers<br/>(handlerPath / handlerLine)"] --> D7[prune edges to<br/>skipped templates]
   end
   D --> D3
   D3 --> E["4 · Assemble<br/>split oversized statements,<br/>accumulate totals"]
@@ -234,8 +234,12 @@ flowchart TD
 Rules:
 - The language parser has priority 0 and claims everything, so every file has an owner.
 - A framework parser claims a file with a **cheap content check** (a substring search).
-- If a framework is built on another one, it gets a **higher** priority. NestJS (20) is built
-  on Express (10), so a NestJS controller that also imports Express goes to NestJS.
+- If a framework is built on another one, it gets a **higher** priority, so the derived
+  framework wins a file both claim.
+- A framework that runs underneath others (Express, Fastify) is an
+  [additive detector](#6-the-parser-model), not a parser, so it never competes for a file: a
+  NestJS controller that also calls `app.get(...)` is owned by NestJS, and the `express`
+  detector still adds the route.
 
 > **Decision —** one parser per file; no combining of parsers.
 > **Why:** each file is parsed once, and there is no question of merging two parsers'
@@ -286,6 +290,14 @@ process pool. Results are streamed back in completion order.
 > must be picklable. The server's small `/api/analyze` requests therefore run in-process,
 > with no pool.
 
+> **Decision —** the indexes reach the workers through a temp file, not the pool's start-up
+> arguments.
+> **Why:** start-up arguments go through a pipe; once they outgrow its buffer (~64 KB) the
+> workers start one after another instead of together. The main process writes the indexes once
+> (`core/executor.py::_worker_options`) and each worker loads them at start. **Cost:** a private
+> temp directory (owner-only) for the length of the run; if it can't be written, the indexes go
+> through the pipe — slower to start, same output.
+
 > **Decision —** each file is isolated.
 > **Why:** one bad file must not abort a repository. A parser exception or timeout is logged
 > as `parse.file.failed` and the run continues. **Cost:** the failure is easy to miss.
@@ -293,10 +305,13 @@ process pool. Results are streamed back in completion order.
 
 ### 4.6 Assembly and output
 
-After parsing, every record passes through one place (`pipeline._assemble`) before it is written:
+In the worker, right after parsing, **template edges are pruned**
+(`core/executor.py::_prune_template_edges`): if an import or call points at a skipped template
+file, the link is removed (`calls[].path` becomes empty) so the graph has no edge to a missing
+node.
 
-- **Template edges are pruned.** If an import or call points at a skipped template file, the
-  link is removed (`calls[].path` becomes empty) so the graph has no edge to a missing node.
+Then every record passes through one place (`pipeline._assemble`) before it is written:
+
 - **Oversized statements are split.** A statement whose text is longer than the limit is
   split into numbered parts (`…#part1of3`) instead of being truncated, so nothing is lost. Only
   the first part keeps the `semanticType`, so one route never becomes three routes.
@@ -400,8 +415,8 @@ when adding support for something new.
 | You are adding… | Build a… | Owns the file? | Example |
 |---|---|---|---|
 | A new programming language | **Language parser** | Yes, as the fallback for its extensions | `parsers/java/` |
-| A framework that defines how requests reach the code (routes, handlers) | **Framework parser** | Yes, when it claims the file | `parsers/java_vertx/` |
-| A library used inside files owned by other frameworks (ORM, HTTP client, messaging SDK) | **Additive detector** | No, it runs inside the owning parser | `parsers/detection/` (classifiers), `parsers/additive.py` (registry), `parsers/typescript/aws_events.py` |
+| A framework that defines how requests reach the code (routes, handlers) and has a file-level signature no other framework shares | **Framework parser** | Yes, when it claims the file | `parsers/java_vertx/`, `parsers/typescript_nestjs/` |
+| A library used inside files owned by other frameworks (ORM, HTTP client, messaging SDK), or a route, job or consumer style that can appear in files other frameworks own (Express, Fastify, Celery, Quartz) | **Additive detector** | No, it runs inside the owning parser | `parsers/detection/` (classifiers), `parsers/additive.py` (registry), `parsers/typescript/aws_events.py` |
 
 ```mermaid
 classDiagram
@@ -410,6 +425,7 @@ classDiagram
     claims(path, source) bool
     build_index(repo_root, files, jobs)
     parse_file(ctx) FileRecord
+    link_handlers(record, ctx)
   }
   class JavaParser {
     extract(root, ctx) FileRecord
@@ -461,7 +477,7 @@ classDiagram
 > file and needed in another. A registered fact keeps it in the framework's own module and in the
 > same registry as every other add-on, instead of a framework field on the language index or a new
 > parser-selection hook. **Cost:** a language must call `collect_additive` / `resolve_additive`
-> from its `build_index` to offer it (`INDEX_HOOKED_LANGUAGES`: C#, Java, Python, Ruby, Scala, TypeScript), and a detector that
+> from its `build_index` to offer it (`INDEX_HOOKED_LANGUAGES`: C#, GraphQL, Java, Python, Ruby, Scala, TypeScript), and a detector that
 > emits for files with no marker cannot use a byte guard. Details:
 > [cross-file resolution §8](architecture/cross-file-resolution.md#a-framework-fact-from-another-file-a-registered-fact).
 
@@ -585,9 +601,11 @@ For example, `order.controller.ts` imports both `@nestjs/common` and `@aws-sdk/c
  select()            → nestjs parser owns the file
  base extract()      → class OrderController, fn create, Statement@L11 "await this.sqs.send(...)"
    run_additive()      (still inside extract)
-     express         → guard ✗ → skip
-     aws-events      → guard ✓ → ENRICH Statement@L11 → framework=aws-sqs, endpoint=ORDER_QUEUE
-     sdk-calls       → guard ✗ → skip
+     express         → no Express app or router → nothing
+     fastify         → no Fastify instance      → nothing
+     aws-events      → SQS send found → ENRICH Statement@L11 → framework=aws-sqs, endpoint=ORDER_QUEUE
+     sdk-calls       → nothing
+     graphql-…, vue-…, nextjs-…, *-navigation → nothing (most stop at a cheap first check)
  nestjs detection    → + Statement  POST /orders   (after extract returns)
  ─────────────────────────────────────────────────────────────────────────────
  FileRecord.framework = "nestjs"   (route ✔  +  queue publish ✔)
@@ -794,6 +812,10 @@ Other places that resolve values:
   `static final String`). A runtime value stays unresolved.
 - **Inheritance** (`parsers/index_common.py`): base classes in other files, e.g. routes
   inherited from a base controller.
+- **Handlers** (`handlerPath` / `handlerLine`): an entry point whose handler is declared in
+  another file is led to it through the index — by the detector (`locate_method` on a
+  `*.method-lines` fact) or, for TypeScript, by the `link_handlers` hook after parsing. See
+  [leading an entry point to its handler](architecture/cross-file-resolution.md#leading-an-entry-point-to-its-handler).
 
 Detail page: [Cross-file resolution](architecture/cross-file-resolution.md).
 
@@ -807,7 +829,7 @@ the rules every parser keeps:
 | Rule | Why |
 |---|---|
 | The scan never reads file contents. | I/O grows with repo size; only candidates are read. |
-| Each file is parsed **once** by the main grammar. Framework parsers reuse the tree via `extract`. | Parsing is the most expensive step. |
+| Each file is parsed **once** by the main grammar. Framework parsers reuse the tree via `extract`. The one exception is `link_handlers`, which re-parses a file only when a record names a handler it could not locate (`needs_location`) — in practice a few route files per repo. | Parsing is the most expensive step. |
 | Extraction does a **fixed** number of tree walks per file (e.g. imports, symbol tables, declarations, comments, framework detection), never one walk per item found. | Cost stays linear in file size; nested walks become quadratic on large files. |
 | Additive detectors start with a cheap byte check (`b"…" in source`). | They run on every file of the language, and most files don't use the library. |
 | A second grammar parses only the embedded fragment, with the same timeout. | Embedded languages (SQL, GraphQL) must not re-parse the whole file. |
@@ -908,8 +930,13 @@ src/breezeai_cog/
 │  ├─ statements_common.py         shared statement emission
 │  ├─ comments_common.py           shared comment pass
 │  ├─ callresolve.py, constfold.py, index_common.py   shared resolution helpers
+│  ├─ additive.py, emits.py        detector + fact registry; the one place detector output is written
+│  ├─ enclosing.py, wiring.py      shared lookups: enclosing statement, wiring facts
+│  ├─ contract.py                  entry-point contract check
+│  ├─ method_lines.py, aws_deploy.py   facts shared by several languages
 │  ├─ detection/                   shared api / db / query classifiers
-│  ├─ vertx_common.py, dotnet_common.py, aspnet_common.py   helpers shared by one framework family
+│  ├─ vertx_common.py, dotnet_common.py, aspnet_common.py, aspnet_areas.py, quartz_common.py
+│  │                               helpers shared by one framework family
 │  ├─ <lang>/                      language parsers
 │  └─ <lang>_<framework>/          framework parsers
 ├─ emit/                           ids, NDJSON, gzip, sinks, statement splitting
@@ -944,8 +971,9 @@ from another.
 |---|---|---|
 | **Parser-local** | `parsers/<lang>_<framework>/`, its test file | That parser only |
 | **Language parser** | `parsers/<lang>/` | Every framework built on that language |
-| **Shared family helper** | e.g. `parsers/vertx_common.py` | Every parser in that family |
-| **Core** | `schemas/`, `core/`, `emit/`, `parsers/base.py`, `treesitter.py`, `statements_common.py`, `comments_common.py`, `callresolve.py`, `constfold.py`, `index_common.py`, `detection/`, `cli.py`, `config.py` | Every parser — an architectural change |
+| **Additive detector** | a module that calls `register_detector(...)` or `register_fact(...)`, or a changed `Gate` (`order`, `skip_fixtures`, `guard`) | Every file of that language, whichever parser owns it |
+| **Shared helper** | e.g. `parsers/vertx_common.py`, `quartz_common.py`, `aspnet_areas.py`, `method_lines.py`, `aws_deploy.py` | Every parser that imports it |
+| **Core** | `schemas/`, `core/`, `emit/`, `parsers/base.py`, `treesitter.py`, `statements_common.py`, `comments_common.py`, `callresolve.py`, `constfold.py`, `index_common.py`, `additive.py`, `emits.py`, `enclosing.py`, `wiring.py`, `contract.py`, `detection/`, `cli.py`, `config.py` | Every parser — an architectural change |
 
 > **Decision —** parser-specific code stays in the parser's own directory.
 > **Why:** a change can then only affect the files that parser owns, which keeps reviews small
