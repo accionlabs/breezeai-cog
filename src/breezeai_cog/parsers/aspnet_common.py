@@ -22,6 +22,8 @@ Two idioms, both emitted as ``route`` statements:
 
 from __future__ import annotations
 
+from collections.abc import Callable
+
 import re
 from typing import Any
 
@@ -346,6 +348,7 @@ def detect_minimal_api_routes(
     *,
     invocation_type: str,
     member_type: str,
+    extension_prefix: Callable[[str], str | None] | None = None,
 ) -> list[Emit]:
     """AST-walk for endpoint registrations on an ``app``/``endpoints`` object:
     ``MapGet/MapPost/…`` minimal APIs, ``MapHealthChecks``, and the GraphQL HTTP mount +
@@ -377,7 +380,7 @@ def detect_minimal_api_routes(
                                 child, source, invocation_type, member_type, decls)
                             if groups is None:
                                 groups = _Groups(root, source, invocation_type, member_type,
-                                                 fn_field, name_field)
+                                                 fn_field, name_field, extension_prefix)
                             prefix = groups.prefix(_receiver(func, name_field), frozenset())
                             path_part = _minimal_path(child, source)
                             # Group prefix + route pattern. A group whose prefix exists but
@@ -481,12 +484,18 @@ class _Groups:
     in between). :meth:`prefix` → ``""`` for the app itself, the composed prefix of a group, or
     None when a group's prefix exists but cannot be resolved (a non-literal ``MapGroup`` argument,
     a variable assigned two different groups, a ``RouteGroupBuilder`` parameter whose caller is in
-    another file)."""
+    another file).
+
+    ``extension_prefix``: for the ``this RouteGroupBuilder`` parameter of an extension method
+    (``MapTodos(this RouteGroupBuilder g)``), the method's name → the prefix of the one group it
+    is called on, or None (``csharp_aspnet/group_extensions.py``)."""
 
     def __init__(self, root: Node, source: bytes, invocation_type: str, member_type: str,
-                 fn_field: str, name_field: str) -> None:
+                 fn_field: str, name_field: str,
+                 extension_prefix: Callable[[str], str | None] | None = None) -> None:
         self.source, self.invocation_type, self.member_type = source, invocation_type, member_type
         self.fn_field, self.name_field = fn_field, name_field
+        self.extension_prefix = extension_prefix
         self.values: dict[str, Node | None] = {}  # variable → its group expression (None: ambiguous)
         self.params: set[str] = set()  # RouteGroupBuilder parameters (prefix set by the caller)
         self._collect(root)
@@ -547,13 +556,37 @@ class _Groups:
         if expr.type == "identifier":
             name = node_text(expr, self.source)
             if name in self.params:
-                return None
+                method = extension_of(expr, name, self.source)
+                return self.extension_prefix(method) \
+                    if method is not None and self.extension_prefix is not None else None
             if name not in self.values:
                 return ""  # the app / endpoint builder itself
             value = self.values[name]
             return self.prefix(value, seen | {name}) if value is not None and name not in seen \
                 else None
         return ""
+
+
+def extension_of(node: Node, param: str, source: bytes) -> str | None:
+    """The name of the extension method whose ``this RouteGroupBuilder <param>`` ``node`` is
+    inside (``MapTodos(this RouteGroupBuilder g)`` → ``MapTodos``), or None."""
+    method = node.parent
+    while method is not None and method.type not in ("method_declaration", "local_function_statement"):
+        method = method.parent
+    if method is None or method.type != "method_declaration":
+        return None
+    params = method.child_by_field_name("parameters")
+    first = next((c for c in params.named_children if c.type == "parameter"), None) \
+        if params is not None else None
+    if first is None or not any(c.type == "modifier" and node_text(c, source) == "this"
+                                for c in first.named_children):
+        return None
+    ptype, pname = first.child_by_field_name("type"), first.child_by_field_name("name")
+    if ptype is None or pname is None or node_text(pname, source) != param \
+            or node_text(ptype, source).rsplit(".", 1)[-1] != "RouteGroupBuilder":
+        return None
+    name = method.child_by_field_name("name")
+    return node_text(name, source) if name is not None else None
 
 
 def _member_method_name(func: Node, source: bytes, name_field: str) -> str:
