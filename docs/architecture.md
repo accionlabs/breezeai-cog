@@ -297,10 +297,13 @@ process pool. Results are streamed back in completion order.
 
 ### 4.6 Assembly and output
 
-After parsing, every record passes through one place (`pipeline._assemble`) before it is written:
+In the worker, right after parsing, **template edges are pruned**
+(`core/executor.py::_prune_template_edges`): if an import or call points at a skipped template
+file, the link is removed (`calls[].path` becomes empty) so the graph has no edge to a missing
+node.
 
-- **Template edges are pruned.** If an import or call points at a skipped template file, the
-  link is removed (`calls[].path` becomes empty) so the graph has no edge to a missing node.
+Then every record passes through one place (`pipeline._assemble`) before it is written:
+
 - **Oversized statements are split.** A statement whose text is longer than the limit is
   split into numbered parts (`…#part1of3`) instead of being truncated, so nothing is lost. Only
   the first part keeps the `semanticType`, so one route never becomes three routes.
