@@ -558,11 +558,11 @@ def _descriptor_routes(
     receiver = configure.params[0].name if configure.params else None
     if receiver is None:
         return []
+    # The type this descriptor describes: where `Field(t => t.M())` finds `M`.
+    target = descriptor_target(cls, configure) or named_target(body, source, receiver)
     # A descriptor registered itself (AddQueryType<QueryType>()) is a root whatever it describes.
     kind = (hc_root_types or {}).get(cls.name)
-    target: str | None = None
     if kind is None:
-        target = descriptor_target(cls, configure) or named_target(body, source, receiver)
         if target is None:
             return []
         kind = _root_kind_of_name(target, record, heritage, hc_root_types)
