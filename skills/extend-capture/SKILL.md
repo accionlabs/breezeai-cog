@@ -175,7 +175,7 @@ a one-per-file parser. There are **two hook points** — choose by the shape of 
   change.
 - **A fact from another file** (a class is an API only because the composition root registers
   it; a URL prefix set by a mount elsewhere) → register a **fact** beside the
-  detector: `register_fact(FactSpec(name="framework.concern", gate=…, collect=…, resolve=…))`.
+  detector: `register_fact(FactSpec(name="framework.concern", language="csharp", gate=…, collect=…, resolve=…))`.
   The language's `build_index` builds it once before parsing, and the detector reads it with
   `index_fact`. Do not add a framework field to the
   language index or a new selection hook — the file keeps its owner and the detector adds to it.
