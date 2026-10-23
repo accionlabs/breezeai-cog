@@ -171,10 +171,22 @@ def _go_gin(n: int) -> str:
             f"func routes(r *gin.Engine, h *Handler) {{\n{body}}}\n{helpers}")
 
 
+def _ts_backbone(n: int) -> str:
+    body = "".join(
+        f"const M{i} = Backbone.Model.extend({{ urlRoot: '/api/m{i}' }});\n"
+        f"const m{i} = new M{i}({{ id: {i} }});\n"
+        f"m{i}.fetch();\n"
+        f"const R{i} = Backbone.Router.extend({{ routes: {{ 'r{i}/:id': 'h{i}' }}, h{i}() {{}} }});\n"
+        for i in range(n)
+    )
+    return f"import Backbone from 'backbone';\n{body}"
+
+
 SAMPLES: dict[str, tuple[str, Callable[[int], str]]] = {
     "java-vertx": ("V.java", _java_vertx),
     "groovy-vertx": ("Http.groovy", _groovy_vertx),
     "typescript-express-aws": ("app.ts", _ts_express_aws),
+    "typescript-backbone": ("app.ts", _ts_backbone),
     "python": ("mod.py", _python),
     "csharp": ("C.cs", _csharp),
     "xsd": ("schema.xsd", _xsd),
