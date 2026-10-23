@@ -28,10 +28,9 @@ _VERB_SIG = re.compile(rb"@(?:Get|Post|Put|Patch|Delete|Options|Head|All)\b")
 
 class NestJSParser(TypeScriptParser):
     name = "typescript-nestjs"
-    # Above ExpressParser (priority 10): NestJS / routing-controllers are built on Express
-    # and their controllers routinely ``import { Request } from 'express'``, which the
-    # Express parser also claims. A decorator-controller signature is decisive, so this
-    # must win the selection.
+    # Above the other TypeScript framework parsers (priority 10): a decorator-controller
+    # signature is decisive, so this must win the selection. Express routes in the same file
+    # still come from the additive ``express`` detector.
     priority = 20
     frameworks = ["nestjs", "routing-controllers", "nestjs-like"]
 

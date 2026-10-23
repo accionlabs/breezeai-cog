@@ -47,6 +47,7 @@ The other fields depend on the meaning:
 | `keyFields` | `graphql_entity` |
 | `platform` | `iac_*` |
 | `isPartial` | Parts of a split statement ([§7](#7-very-large-statements)) |
+| `decorators`, `uiRole` | Declarations that are UI components (`export const X = defineComponent({…})` → `uiRole`), with their decorators |
 
 Statements are stored **flat** on `FileRecord.statements`, not nested inside functions or
 classes. Nesting is expressed by `parentId` and line ranges.
@@ -194,7 +195,9 @@ Detectors that record **entry points** (routes, consumers, schedules) follow the
 lives and what `endpoint` must hold.
 
 Framework detectors (routes, event buses, schedulers) run after the language extraction, on the
-same tree. For each thing they find, they look for an existing statement covering that line:
+same tree. A detector never edits `record.statements`: it returns `Emit`s (the node, the fields,
+and an `enrich` mode), and `apply` (`parsers/emits.py`) writes them — enriching the smallest
+eligible statement on the line, or appending:
 
 ```mermaid
 flowchart TD
@@ -222,14 +225,31 @@ public Order get(@PathVariable String id) { … }
 → a new record with `nodeType: synthetic`, `semanticType: route`, `method: GET`,
 `endpoint: /orders/{id}`, `handler: get`, parented to the method.
 
-> **Decision —** enrich first, append only when nothing is there.
-> **Why:** one piece of source maps to one record, so nothing is double-counted, and the
-> statement keeps its real `nodeType` and text. **Cost:** the detector must use the same ids
-> and line numbers as the extractor ([ids](../architecture.md#8-ids-and-linking)).
+Which statement an emit may enrich is its `enrich` mode:
+
+| `enrich` | May enrich |
+|---|---|
+| `never` (default) | nothing — always append |
+| `unclassified` | a statement with no `semanticType` (or one listed in `reclassify`, a known mis-tag) |
+| `own` | an unclassified statement that is exactly the construct's line span |
+| `starts` | an unclassified statement that begins on the construct's first line |
+| `same` | the statement captured on this very node, whatever its type |
+| `any` | whatever statement is there |
+
+`apply` also gives each appended statement its id (`path:line:col`, disambiguated in emit
+order) and its parent, and enriches a statement at most once per run, so a second route in one
+statement (`route(p).get(a).post(b)`) gets its own record.
+
+> **Decision —** the detector decides per emit whether it may enrich (`Emit.enrich`, default
+> `never`); `apply` is the one place that writes.
+> **Why:** one piece of source maps to one record, and ids, parents and "once per run" are
+> applied the same way for every detector. **Cost:** an author must choose the mode; the wrong
+> one either duplicates a record or overwrites another detector's.
 
 Two further rules apply to detectors:
 - **Route emitters skip fixture files** (`*.stories.*`, `mocks/`, `fixtures/`…), whose routers
-  are throwaway test set-ups.
+  are throwaway test set-ups: additive detectors with `Gate(skip_fixtures=True)`, parser-owned
+  route code with `is_fixture_file`.
 - **Constants are folded** into `endpoint` when they are true compile-time constants (`ORDERS` →
   `orders.created`). Otherwise the endpoint is left empty. See
   [Cross-file resolution](cross-file-resolution.md).
@@ -337,11 +357,13 @@ routes, calls, events, comments or enum members. Files, classes, functions, impo
 
 ## 9. Rules for parser authors
 
-- Emit statements only through the shared helpers (`classify_statement`, `member_statement`,
-  `emit_enum_members`) and the id helpers in `emit`, with one `seen_ids` set per file.
-- Check `ctx.capture_statements` before emitting anything; route emitters also check
-  `is_fixture_file`.
-- Enrich an existing statement before appending a new one.
+- Extraction emits statements only through the shared helpers (`classify_statement`,
+  `member_statement`, `emit_enum_members`) and the id helpers in `emit`, with one `seen_ids` set
+  per file.
+- Detectors return `Emit`s and never edit `record.statements`; `apply` writes them. Choose the
+  `enrich` mode deliberately ([§4](#4-framework-detectors-enrich-or-append)).
+- Check `ctx.capture_statements` before emitting anything (an additive detector's `Gate` does
+  it); route emitters skip fixture files (`Gate(skip_fixtures=True)` or `is_fixture_file`).
 - Use a real grammar `nodeType`, or `synthetic`. Never invent a node type.
 - Never put a `semanticType` on a control-flow statement.
 - Reuse an existing `semanticType` where it fits. A new value needs a decision first

@@ -10,7 +10,7 @@ from ...emit import file_id
 from ...schemas import FileRecord
 from ..emits import Emit
 from ..ruby.ownership import owner_id
-from ..method_lines import locate_method
+from ..handler_sites import handler_location, locate_method
 from ..treesitter import node_text
 from .callbacks import callbacks_of, controller_class, guards_for
 
@@ -402,10 +402,9 @@ def detect_rails_routes(
         target = controller_class(f"{module}/{handler}" if module else handler) \
             if handler is not None and module is not None else None
         site = locate_method(index, "ruby", *target) if target is not None else None
-        handler_line = handler_path = None
+        handler_line, handler_path = handler_location(site, path)
         if site is not None and target is not None:
-            handler, handler_line = target[1], site[1]
-            handler_path = site[0] if site[0] != path else None
+            handler = target[1]
         found.append(
             Emit(call, dict(
                 semanticType="route",

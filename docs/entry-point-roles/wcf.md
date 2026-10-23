@@ -4,7 +4,7 @@ Parser: `src/breezeai_cog/parsers/csharp_wcf/`, `dotnet_servicehost/` (`.svc` / 
 
 | Construct | Role | Record | Why |
 |---|---|---|---|
-| `[OperationContract]` method of a `[ServiceContract]` | Binding | `route`, `RPC`, `routeKind: rpc`, `<Contract>/<Operation>`, `handler` = the operation | One operation, inbound SOAP call |
+| `[OperationContract]` method of a `[ServiceContract]` | Binding | `route`, `RPC`, `routeKind: rpc`, `<Contract>/<Operation>`, `handler` = the operation — for an interface contract with one implementing class, that class's method (`Class.Method`) with its `handlerLine` and, in another file, `handlerPath` | One operation, inbound SOAP call |
 | `[OperationContract]` + `[WebGet]` / `[WebInvoke]` | Binding | `route`, HTTP verb, `routeKind: route`, `.svc` path joined with the `UriTemplate` — the `.svc` naming the class, or for an interface contract its one implementing class, anywhere in the repo (empty if unknown or ambiguous) | One operation, inbound HTTP call |
 | `[OperationContract]` of a service whose `.svc` uses `Factory="…WebScriptServiceHostFactory"` (AJAX) or `WebServiceHostFactory` | Binding | `route`, `POST`, `routeKind: route`, `/<.svc path>/<Operation>` (`[WebGet]` / `[WebInvoke]` on it set the verb and `UriTemplate`) | The host serves every operation over HTTP |
 | `[ServiceContract]` on an interface or class | Wiring | — | Marks a container whose operations are bindings |

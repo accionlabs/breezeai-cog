@@ -14,13 +14,13 @@ Parser: `src/breezeai_cog/parsers/csharp_aspnet/`, `vb_aspnet/` (shared detector
 | A controller under an `Areas/` folder whose area nothing in code names | — | its convention routes have an empty `endpoint` (never the folder as a prefix, never `/{Controller}/{Action}` as if outside an area); attribute routes as written | The address is unknown |
 | `app.MapControllers()` / `MapControllerRoute(...)` | Wiring | — | Enables routing; no handler |
 | `app.MapGet(path, handler)` / `MapPost` / … (minimal API) | Binding | `route`, HTTP verb, path; named handler → `handler` + `handlerLine`; inline lambda → `handler` empty, `handlerLine` = the lambda | One handler, inbound API |
-| `app.MapGroup(prefix)` | Wiring | statement stays plain; prefix joins the group's endpoints | Points at many endpoints |
+| `app.MapGroup(prefix)` | Wiring | statement stays plain; prefix joins the group's endpoints — also those mapped in an extension method the group is handed to (`group.MapTodos()` → `MapTodos(this RouteGroupBuilder g)`), when that method is declared once and called once in the repo; otherwise their address stays empty | Points at many endpoints |
 | `[Authorize]` / `[AllowAnonymous]` on a controller or action | Guard | name in `guards` | Runs before the handler; applies to many |
 | `app.UseAuthentication()` / `UseAuthorization()` / `UseMiddleware<T>()` / MVC filters | Guard | — | Run before many handlers |
 | `app.MapHealthChecks(path)` | Binding | `route`, `GET`, `endpoint` = path, `handler` empty | A real URL outside callers hit; the framework's handler runs, none of ours |
 | `MapGraphQL()` / `UseGraphQL<T>()` | Wiring | `route`, `POST`, `endpoint` = the path (else `/graphql`), `framework: graphql`, no handler — the Target Spec's current form | Transport path for many GraphQL operations |
 | `UseGraphQLPlayground()` / `Voyager` / `GraphiQL` / `Altair` | Binding | `route`, `GET`, `endpoint` = the UI path, `handler` empty | A real URL; the framework serves it, no handler of ours |
-| `@page "/path"` in a `.cshtml` / `.razor` file | Binding | `route`, `routeKind: page`, path, `handler` = the `@model` PageModel class (`.cshtml`, declared in another file; not located yet: no `handlerLine` / `handlerPath`) or the component named by the file (`.razor`, `handlerLine` 1: the component is the whole file) | One page reached by URL |
+| `@page "/path"` in a `.cshtml` / `.razor` file | Binding | `route`, `routeKind: page`, path, `handler` = the `@model` PageModel class as written (`.cshtml`; `handlerPath` / `handlerLine` = its declaration in the page's code-behind `<page>.cshtml.cs`, a qualified name matching its namespace; not there or declared twice → no location; a generic `@model List<T>` → no handler) or the component named by the file (`.razor`, `handlerLine` 1: the component is the whole file) | One page reached by URL |
 | `RecurringJob.AddOrUpdate(...)` (Hangfire) | Binding | `timer`, cron as `endpoint`, `handler` = the job method | One handler, started by a schedule |
 | `HttpClient` calls | Outbound | `api_call` | Our code calling out |
 | `WebApplication.CreateBuilder(...)` / `app.Run()` / `Program.Main` | None | — | Start-up |

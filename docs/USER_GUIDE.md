@@ -10,12 +10,13 @@ system: it generates the ontology, a separate Breeze backend loads it into a gra
 tools query it. This guide only covers the generator — the part you run against your code.
 
 **What it understands today** (run `breezeai-cog capabilities` for the authoritative, live list):
-- **Languages:** TypeScript/JavaScript, Python, Ruby, Java, C#, VB.NET, Kotlin, Groovy, and C++.
+- **Languages:** TypeScript/JavaScript, Python, PHP, Ruby, Java, C#, VB.NET, Kotlin, Groovy, and C++.
 - **Frameworks** (route/event detection on top of those languages): FastAPI (Python); NestJS,
   Angular, Express, React, Vue, Next.js, LoopBack, and GraphQL (TypeScript); Spring Boot, JAX-RS,
   and Vert.x (Java); ASP.NET, Web Forms, WCF/ASMX, and GraphQL (C#); ASP.NET (VB.NET); Ktor
-  (Kotlin); Rails, Sinatra, and Grape (Ruby); Vert.x (Groovy). Cross-cutting SDK detectors (AWS
-  messaging, HubSpot, Chargebee, Salesforce) layer on top additively.
+  (Kotlin); Laravel, CodeIgniter 4, Slim, and Symfony (PHP); Rails, Sinatra, and Grape (Ruby);
+  Vert.x (Groovy). WordPress hooks and cross-cutting SDK detectors (AWS messaging, HubSpot,
+  Chargebee, Salesforce) layer on top additively.
 - **Database/search schemas:** SQL DDL files and Elasticsearch mappings (via the HTTP service).
 - **Config & structured data:** `package.json`, `tsconfig.json`, `Dockerfile`, `docker-compose.yml`,
   `pom.xml`, `build.gradle`, `pyproject.toml`, `requirements.txt`, `Pipfile`, `.csproj`/`.vbproj`/`.sln`,
@@ -35,6 +36,14 @@ Ruby framework parsers recognize these route stacks when statement capture is en
 
 Rails-style ActiveRecord calls such as `User.find`, `User.where`, and `user.save` are emitted
 as `db_method_call` statements with `dataAccessHint: "activerecord"`.
+
+### PHP routes and WordPress hooks
+
+PHP route capture supports Laravel, CodeIgniter 4, Slim, and Symfony. Static literal paths are
+normalized to a leading slash, nested route-group prefixes are joined, and unresolved dynamic
+paths or handlers are left empty. WordPress `add_action()` / `add_filter()` calls are captured as
+`eventbus_consumer` statements with `method: "CONSUMER"`; they are not HTTP routes. Blade view
+files (`.blade.php`) remain unsupported.
 
 It does **not** run or execute your code — it only reads and parses the source text, so it's safe to
 point at any repository.
@@ -409,6 +418,8 @@ subfolders.
 `.aspx` `.ascx` `.master` `.vue`) are skipped by default and reported under their own `template`
 skip reason — not `ignored`. This is a capture-scope choice rather than an ignore rule, so the two
 layers do not interact the way you might expect:
+
+PHP `.phtml` files are also markup templates and follow the same `--capture-templates` gate.
 
 - `.repoinclude` does **not** bring templates back. Only `--capture-templates` does.
 - `.repoignore` still wins over `--capture-templates`: the template gate runs *after* the ignore

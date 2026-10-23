@@ -313,6 +313,12 @@ def match_db(callee: str, method: str, language: str | None = None,
         return "prisma"
     if m in _DISTINCTIVE:
         db = _DISTINCTIVE[m]
+        if db in {"sequelize", "typeorm"} and language is not None and language not in {"javascript", "typescript"}:
+            return None
+        if db == "dynamodb" and language is not None and language not in {
+            "javascript", "typescript", "python", "java", "csharp", "vb",
+        }:
+            return None
         # A receiverless distinctive verb is a local/helper call, not a database access.
         # This is defense-in-depth for callers that do not provide local_names.
         if callee != method and not (
@@ -350,6 +356,8 @@ def match_db(callee: str, method: str, language: str | None = None,
     cache_receivers = _CACHE_RECEIVERS
     if language == "scala":
         cache_receivers = _CACHE_RECEIVERS - {"cache"}
+    elif language == "php":
+        cache_receivers = _CACHE_RECEIVERS - {"cache"}
     if receiver and (receiver in cache_receivers or receiver.endswith("redis")):
         if m in _CACHE_VERBS or m in ("delete", "remove"):
             return "redis"
@@ -379,6 +387,7 @@ def match_db(callee: str, method: str, language: str | None = None,
         if receiver and any(receiver.endswith(s) for s in _NON_DB_RECEIVERS):
             return None  # a cache/collection/UI-state/etc. receiver — not data access
         return "orm"
+
     if m in _DJANGO_VERBS and (language is None or language in _PYTHON) and (
         ".objects." in low or low.startswith("objects.") or "queryset" in low
     ):

@@ -215,7 +215,6 @@ async def analyze_sql(
     file: UploadFile = File(None),
     projectUuid: str = Form(None),
     dataLakeId: str = Form(None),
-    repositoryName: str = Form(None),
 ) -> JSONResponse:
     deps: ServerDeps = request.app.state.deps
 
@@ -255,8 +254,7 @@ async def analyze_sql(
     await run_in_threadpool(_stream_records_to_infra, deps, storage_key, [record])
     background_tasks.add_task(
         deps.notify, "/db-ontology/stream-ingest-s3",
-        {"storage_key": storage_key, "projectUuid": projectUuid, "dataLakeId": dataLakeId,
-         "repositoryName": repositoryName or file_name},
+        {"storage_key": storage_key, "projectUuid": projectUuid, "dataLakeId": dataLakeId},
     )
 
     return JSONResponse(status_code=202, content={
@@ -280,7 +278,6 @@ async def analyze_nosql(
     file: list[UploadFile] = File(None),
     projectUuid: str = Form(None),
     dataLakeId: str = Form(None),
-    repositoryName: str = Form(None),
 ) -> JSONResponse:
     deps: ServerDeps = request.app.state.deps
 
@@ -307,8 +304,7 @@ async def analyze_nosql(
     await run_in_threadpool(_stream_records_to_infra, deps, storage_key, build["records"])
     background_tasks.add_task(
         deps.notify, "/db-ontology/stream-ingest-s3",
-        {"storage_key": storage_key, "projectUuid": projectUuid, "dataLakeId": dataLakeId,
-         "repositoryName": repositoryName or primary_name},
+        {"storage_key": storage_key, "projectUuid": projectUuid, "dataLakeId": dataLakeId},
     )
 
     n = len(uploads)
@@ -337,7 +333,6 @@ async def analyze_es(
     file: list[UploadFile] = File(None),
     projectUuid: str = Form(None),
     dataLakeId: str = Form(None),
-    repositoryName: str = Form(None),
 ) -> JSONResponse:
     deps: ServerDeps = request.app.state.deps
 
@@ -365,8 +360,7 @@ async def analyze_es(
     await run_in_threadpool(_stream_records_to_infra, deps, storage_key, build["records"])
     background_tasks.add_task(
         deps.notify, "/db-ontology/stream-ingest-s3",
-        {"storage_key": storage_key, "projectUuid": projectUuid, "dataLakeId": dataLakeId,
-         "repositoryName": repositoryName or primary_name},
+        {"storage_key": storage_key, "projectUuid": projectUuid, "dataLakeId": dataLakeId},
     )
 
     n_map, n_set = len(build["mappings"]), len(build["settings"])

@@ -60,9 +60,18 @@ def _attr_handler(node: Node, source: bytes) -> str | None:
     return node_text(ident, source) if ident is not None else None
 
 
+def _model_type(node: Node, source: bytes) -> str | None:
+    """The ``@model`` type as written, generics included (``List<Order>``)."""
+    model = next(iter(node.named_children), None)
+    return node_text(model, source) if model is not None else None
+
+
 def _model_name(node: Node, source: bytes) -> str | None:
-    ident = _descendant(node, "identifier")
-    return node_text(ident, source) if ident is not None else None
+    """The ``@model`` class as written — ``OrdersModel`` / ``Shop.Pages.OrdersModel``. A generic
+    type (``@model List<Order>``) is no page's own class: None, never its first identifier."""
+    model = next((c for c in node.named_children
+                  if c.type in ("identifier", "qualified_name")), None)
+    return node_text(model, source) if model is not None else None
 
 
 def _page_handler(root: Node, source: bytes, path: str) -> str | None:
@@ -133,7 +142,7 @@ def collect_razor_statements(
         elif t == "razor_implicit_expression":
             _emit(node, nodeType=t, name=node_text(node, source).lstrip("@").strip())
         elif t == "razor_model_directive":
-            _emit(node, nodeType=t, name=_model_name(node, source))
+            _emit(node, nodeType=t, name=_model_type(node, source))
         elif t in ("razor_foreach", "razor_if"):
             _emit(node, nodeType=t)  # control flow — semanticType null
         stack.extend(reversed(node.named_children))

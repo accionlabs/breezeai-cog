@@ -12,9 +12,15 @@ from __future__ import annotations
 from dataclasses import dataclass
 from importlib import resources
 from pathlib import Path
-from typing import Any, Protocol, Sequence, runtime_checkable
+from typing import Any, Callable, Protocol, Sequence, runtime_checkable
 
 from ..schemas import SCHEMA_VERSION, FileRecord
+
+
+#: A language's handler lookup: the handler name as written → ``(handler, (file, line))`` — the
+#: name to keep (a path-shaped name becomes the declared one, or None when unknown) and where it
+#: is declared (None: not found) — or None to leave the record as it is.
+HandlerLocator = Callable[[str], tuple[str | None, tuple[str, int] | None] | None]
 
 
 def _read_sibling_lines(obj: object, filename: str) -> list[str]:
@@ -120,9 +126,35 @@ class BaseParser:
         return None
 
     def link_handlers(self, record: FileRecord, ctx: ParseContext) -> None:
-        """After ``parse_file``: lead each entry point whose handler is declared elsewhere to that
-        declaration (``handlerLine``, and ``handlerPath`` for another file) through the repo
-        index. Languages that can do it override this; the default leaves the record as is."""
+        """After ``parse_file``: lead each entry point that names its handler but not where it is
+        declared to that declaration (``handlerLine``, and ``handlerPath`` for another file).
+
+        The loop and its rules are the same for every language: only unlocated records, the
+        "own file → no ``handlerPath``" rule (:func:`~.handler_sites.handler_location`), and
+        honest-null — a name the language can't find is left as it is. A language supplies only
+        the lookup, :meth:`handler_locator`, which is asked for only when a record needs it."""
+        if not ctx.capture_statements:
+            return
+        from .handler_sites import handler_location, unlocated  # handler_sites imports this module
+
+        pending = [s for s in record.statements if unlocated(s)]
+        if not pending:
+            return
+        locate = self.handler_locator(ctx)
+        if locate is None:
+            return
+        for s in pending:
+            found = locate(s.handler or "")
+            if found is None:
+                continue
+            s.handler, site = found
+            s.handlerLine, s.handlerPath = handler_location(site, ctx.path)
+
+    def handler_locator(self, ctx: ParseContext) -> HandlerLocator | None:
+        """This file's handler lookup for :meth:`link_handlers`, or None when the language
+        locates nothing after parsing (the default). Detectors that know the class look their
+        handler up inline instead (:mod:`.handler_sites`)."""
+        return None
 
     def ignore_patterns(self) -> list[str]:
         """Per-language ignore defaults (layer 2) — from sibling ``ignore.txt``."""

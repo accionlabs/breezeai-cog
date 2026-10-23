@@ -306,8 +306,8 @@ def _wcf_handlers(stmts) -> dict[str, tuple[str | None, int | None]]:
 
 
 def test_interface_contract_handler_is_the_implementing_method(analyze_files) -> None:
-    # One implementer in another file: the method with a body runs → Class.Method, no line
-    # (the record is in the interface's file; handlerPath does not exist yet).
+    # One implementer in another file: the method with a body runs → Class.Method, led there
+    # (handlerPath + its line), an explicit implementation (`IOrderService.Cancel`) included.
     stmts = analyze_files({
         "IOrderService.cs": _CONTRACT,
         "OrderService.svc.cs": (
@@ -317,9 +317,10 @@ def test_interface_contract_handler_is_the_implementing_method(analyze_files) ->
         ),
     })
     assert _wcf_handlers(stmts) == {
-        "OrderService/GetOrder": ("OrderService.GetOrder", None),
-        "OrderService/Cancel": ("OrderService.Cancel", None),
+        "OrderService/GetOrder": ("OrderService.GetOrder", 3),
+        "OrderService/Cancel": ("OrderService.Cancel", 4),
     }
+    assert {s.handlerPath for s in stmts if s.framework == "wcf"} == {"OrderService.svc.cs"}
 
 
 def test_interface_contract_with_two_implementers_keeps_the_interface_method(analyze_files) -> None:

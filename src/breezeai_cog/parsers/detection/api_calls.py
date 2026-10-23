@@ -71,7 +71,8 @@ _DOTNET_VERBS = {
 
 
 def match_api(
-    callee: str, method: str, http_client_ids: "frozenset[str] | None" = None
+    callee: str, method: str, http_client_ids: "frozenset[str] | None" = None,
+    language: str | None = None,
 ) -> str | None:
     """Return the HTTP verb (uppercased) if ``callee.method(...)`` is an HTTP call.
 
@@ -92,6 +93,10 @@ def match_api(
         m = m[: -len("async")]
     m = _DOTNET_VERBS.get(m, m)  # GetStringAsync / PostAsJsonAsync … → the verb they send
     if m not in _HTTP_VERBS:
+        return None
+    if language == "php" and not any(
+        hint in _receiver_text(low) for hint in ("http", "guzzle", "curl", "restclient", "apiclient")
+    ):
         return None
     if m == "request" and method != "request":
         # Capitalized Request (...) is a constructor or model type, not an outbound HTTP request call

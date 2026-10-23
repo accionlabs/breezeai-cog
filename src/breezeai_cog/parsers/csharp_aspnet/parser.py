@@ -7,7 +7,7 @@ minimal APIs, and classic ASP.NET (System.Web)."""
 from __future__ import annotations
 
 from ...schemas import FileRecord
-from ..method_lines import locate_method
+from ..handler_sites import handler_location, locate_method
 from ..base import ParseContext
 from ..emits import apply
 from ..csharp.parser import CSharpParser
@@ -17,6 +17,7 @@ from ..aspnet_common import (
     detect_minimal_api_routes,
     detect_route_registrations,
 )
+from .group_extensions import group_extension_prefix
 
 _MARKERS = (b"Microsoft.AspNetCore", b"System.Web.Mvc", b"System.Web.Http")
 
@@ -34,9 +35,11 @@ class AspNetCoreParser(CSharpParser):
         record = self.extract(root, ctx)  # inherited C# extraction (one parse)
         if ctx.capture_statements:  # routes are statements — gated by statement capture
             routes = detect_controller_routes(record, root, ctx.resolution_index, ctx.source)
+            index = ctx.resolution_index
             routes += detect_minimal_api_routes(
                 root, ctx.source, ctx.path,
                 invocation_type="invocation_expression", member_type="member_access_expression",
+                extension_prefix=lambda method: group_extension_prefix(index, method),
             )
             registrations, wiring = detect_route_registrations(
                 root, ctx.source, ctx.path,
@@ -48,8 +51,8 @@ class AspNetCoreParser(CSharpParser):
                 site = locate_method(ctx.resolution_index, "csharp", ctrl + "Controller", action) \
                     if ctrl and action else None
                 if site is not None:
-                    e.fields.update(handler=action, handlerLine=site[1],
-                                    handlerPath=site[0] if site[0] != ctx.path else None)
+                    line, path = handler_location(site, ctx.path)
+                    e.fields.update(handler=action, handlerLine=line, handlerPath=path)
             routes += registrations
             if routes or wiring:  # a wiring-only RouteConfig is still ASP.NET code
                 apply(record, routes, ctx.source, ctx.path)
