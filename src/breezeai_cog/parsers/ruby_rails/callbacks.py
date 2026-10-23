@@ -7,9 +7,18 @@ its callbacks; a controller declared in more than one file with different callba
 ambiguous, no guards), looked up by the route's ``controller#action`` handler.
 
 Only what the syntax states is recorded: ``before_action :a, :b`` with literal ``only:`` /
-``except:`` action lists, minus ``skip_before_action``. A callback with ``if:`` / ``unless:``
-(may not run), a block, or a non-symbol argument names no guard. Callbacks of a parent controller
-are included only when that parent is declared in the same file.
+``except:`` action lists. A callback with ``if:`` / ``unless:`` (may not run), a block, or a
+non-symbol argument names no guard. Callbacks of a parent controller are included only when that
+parent is declared in the same file.
+
+``skip_before_action`` removes a callback — inherited ones included — from the actions it names::
+
+    before_action :authenticate_user!
+    skip_before_action :authenticate_user!, only: [:create]    # create: no guard; others: guarded
+
+``only:`` removes it from those actions, ``except:`` from every other one. A skip whose actions
+cannot be read (``if:`` / ``unless:``, a non-literal list) removes it everywhere, and one whose
+callback cannot be read removes every callback: a guard is never kept where it may be skipped.
 """
 
 from __future__ import annotations
@@ -29,6 +38,12 @@ FACT = "rails.controller-callbacks"
 #: One ``before_action`` entry: (guard name, actions it is limited to or None for all,
 #: actions it excludes).
 Callback = tuple[str, tuple[str, ...] | None, tuple[str, ...]]
+
+#: One ``skip_before_action``: (the callbacks it names, or None when unreadable — all of them;
+#: the actions it is limited to, or None for all; the actions it leaves the callback on).
+Skip = tuple[tuple[str, ...] | None, tuple[str, ...] | None, tuple[str, ...]]
+#: A class body's callbacks and skips, in declaration order: one of the two is set.
+_Op = tuple[Callback | None, Skip | None]
 
 _BEFORE = {"before_action", "prepend_before_action"}
 _SKIP = {"skip_before_action"}
@@ -79,9 +94,56 @@ def _callbacks(call: Node, source: bytes) -> list[Callback] | None:
     return [(name, only, exclude) for name in names] or None
 
 
-def _class_callbacks(cls: Node, source: bytes) -> list[Callback]:
-    body = cls.child_by_field_name("body")
+def _skip(call: Node, source: bytes) -> Skip:
+    """One ``skip_before_action`` call (see :data:`Skip`)."""
+    args = call.child_by_field_name("arguments")
+    names: list[str] = []
+    only: tuple[str, ...] | None = None
+    keep: tuple[str, ...] = ()
+    everywhere = False
+    for arg in args.named_children if args is not None else []:
+        if arg.type == "simple_symbol":
+            names.append(node_text(arg, source).lstrip(":"))
+        elif arg.type == "pair":
+            key_node = arg.child_by_field_name("key")
+            key = node_text(key_node, source).rstrip(":").lstrip(":") if key_node is not None else ""
+            values = _symbols(arg.child_by_field_name("value"), source)
+            if key in ("if", "unless") or (key in ("only", "except") and values is None):
+                everywhere = True  # where it applies is unknown: removed everywhere
+            elif key == "only" and values is not None:
+                only = values
+            elif key == "except" and values is not None:
+                keep = values
+        else:
+            return None, None, ()  # a callback we cannot name: every one may be skipped
+    if not names or call.child_by_field_name("block") is not None:
+        return None, None, ()
+    return (tuple(names), None, ()) if everywhere else (tuple(names), only, keep)
+
+
+def _apply_skip(callbacks: list[Callback], skip: Skip) -> list[Callback]:
+    """``callbacks`` with ``skip`` applied: each one it names runs on fewer actions, or none."""
+    names, only, keep = skip
     out: list[Callback] = []
+    for cb in callbacks:
+        name, cb_only, cb_except = cb
+        if names is not None and name not in names:
+            out.append(cb)
+        elif only is not None:  # skipped for these actions
+            out.append((name, cb_only, tuple(dict.fromkeys(cb_except + only))))
+        elif keep:  # skipped for every action but these
+            left = tuple(a for a in keep
+                         if (cb_only is None or a in cb_only) and a not in cb_except)
+            if left:
+                out.append((name, left, ()))
+        # else: skipped everywhere
+    return out
+
+
+def _class_ops(cls: Node, source: bytes) -> list[_Op]:
+    """The ``before_action`` callbacks and ``skip_before_action`` skips of a class body."""
+    body = cls.child_by_field_name("body")
+    out: list[_Op] = []
     for stmt in body.named_children if body is not None else []:
         if stmt.type not in ("call", "identifier"):
             continue
@@ -91,11 +153,20 @@ def _class_callbacks(cls: Node, source: bytes) -> list[Callback]:
             continue
         if name in _BEFORE:
             entries = _callbacks(stmt, source) if stmt.type == "call" else None
-            out.extend(entries or [])
-        elif name in _SKIP and stmt.type == "call":
-            entries = _callbacks(stmt, source) or []
-            skipped = {e[0] for e in entries if e[1] is None and not e[2]}
-            out = [c for c in out if c[0] not in skipped]
+            out.extend((e, None) for e in entries or [])
+        elif name in _SKIP:
+            out.append((None, _skip(stmt, source) if stmt.type == "call" else (None, None, ())))
+    return out
+
+
+def _run(callbacks: list[Callback], ops: list[_Op]) -> list[Callback]:
+    """``callbacks`` (inherited) followed by a class's own callbacks and skips, in order."""
+    out = list(callbacks)
+    for callback, skip in ops:
+        if callback is not None:
+            out.append(callback)
+        elif skip is not None:
+            out = _apply_skip(out, skip)
     return out
 
 
@@ -104,13 +175,13 @@ def controller_callbacks(root: Node, source: bytes) -> list[tuple[str, list[Call
     parent callbacks first when the parent is declared in the same file."""
     if b"before_action" not in source:
         return []
-    own: dict[str, list[Callback]] = {}
+    own: dict[str, list[_Op]] = {}
     parents: dict[str, str] = {}
     for cls in _iter_classes(root):
         name = _qualified_name(cls, source)
         if name is None or not name.endswith("Controller"):
             continue
-        own[name] = _class_callbacks(cls, source)
+        own[name] = _class_ops(cls, source)
         parent = _superclass_name(cls, source)
         if parent is not None:
             parents[name] = parent
@@ -118,7 +189,7 @@ def controller_callbacks(root: Node, source: bytes) -> list[tuple[str, list[Call
     def chain(name: str, seen: frozenset[str]) -> list[Callback]:
         parent = parents.get(name)
         inherited = chain(parent, seen | {name}) if parent in own and parent not in seen else []
-        return inherited + own.get(name, [])
+        return _run(inherited, own.get(name, []))
 
     return [(name, chain(name, frozenset())) for name in own]
 
