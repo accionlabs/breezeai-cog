@@ -3,8 +3,6 @@
 from __future__ import annotations
 
 import re
-from collections.abc import Iterator
-
 from tree_sitter import Node
 
 from ...emit import disambiguate, statement_id
@@ -24,6 +22,7 @@ from ..php_route_common import (
     string_value,
     strings_in_array,
     unwrap,
+    walk,
 )
 from ..treesitter import node_text, parse_source
 
@@ -220,7 +219,7 @@ def _enrich_route(
 def _detect_codeigniter_events(root: Node, source: bytes, path: str, record: FileRecord) -> bool:
     statements = {statement.id: statement for statement in record.statements}
     found = False
-    for node in _walk(root):
+    for node in walk(root):
         if node.type != "scoped_call_expression":
             continue
         receiver = node.child_by_field_name("scope")
@@ -243,12 +242,6 @@ def _detect_codeigniter_events(root: Node, source: bytes, path: str, record: Fil
         statement.handlerLine = handler_line
         found = True
     return found
-
-
-def _walk(node: Node) -> Iterator[Node]:
-    yield node
-    for child in node.named_children:
-        yield from _walk(child)
 
 
 def detect_codeigniter_routes(root: Node, source: bytes, path: str, record: FileRecord) -> bool:

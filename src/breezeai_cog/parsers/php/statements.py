@@ -8,6 +8,7 @@ from tree_sitter import Node
 
 from ...schemas import Statement
 from ..statements_common import classify_statement, resolve_endpoint
+from ..php_route_common import string_value
 from ..treesitter import node_text
 from .mappings import CONTROL_FLOW, EMIT_TYPES, NESTED_SCOPES
 
@@ -35,18 +36,6 @@ def _unwrap(node: Node) -> Node:
     return node
 
 
-def _render_url(node: Node, source: bytes) -> str | None:
-    node = _unwrap(node)
-    if node.type != "string":
-        return None
-    text = node_text(node, source)
-    if len(text) < 2 or text[0] not in {"'", '"'} or text[-1] != text[0]:
-        return None
-    if any(child.type not in {"string_content"} for child in node.named_children):
-        return None
-    return "".join(node_text(child, source) for child in node.named_children)
-
-
 def _call_details(call: Node, source: bytes) -> tuple[str, str, str | None] | None:
     if call.type == "function_call_expression":
         function = call.child_by_field_name("function")
@@ -69,7 +58,7 @@ def _call_details(call: Node, source: bytes) -> tuple[str, str, str | None] | No
         callee = callee.replace("::", ".").replace("->", ".")
     args_node = call.child_by_field_name("arguments")
     args = [_unwrap(arg) for arg in args_node.named_children] if args_node is not None else []
-    endpoint, override = resolve_endpoint(args, source, _render_url)
+    endpoint, override = resolve_endpoint(args, source, string_value)
     return callee, override or method, endpoint
 
 

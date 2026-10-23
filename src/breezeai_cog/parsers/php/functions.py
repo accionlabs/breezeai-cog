@@ -2,13 +2,12 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterator
-
 from tree_sitter import Node
 
 from ...emit import disambiguate, function_id
 from ...schemas import Call, Decorator, Function, Parameter, Statement
 from ..callresolve import CallResolver, noop_resolver
+from ..php_route_common import string_value, walk
 from ..treesitter import line_span, node_text
 from .statements import extract_statements
 
@@ -22,19 +21,12 @@ _NESTED_FUNCTIONS = {"function_definition", "method_declaration", "anonymous_fun
 _CLASS_TYPES = {"class_declaration", "interface_declaration", "trait_declaration", "enum_declaration"}
 
 
-def _literal(node: Node, source: bytes) -> str:
-    text = node_text(node, source)
-    if node.type == "string":
-        return text[1:-1] if len(text) >= 2 and text[0] in {"'", '"'} else text
-    return text
-
-
 def extract_attributes(node: Node, source: bytes) -> list[Decorator]:
     attribute_list = node.child_by_field_name("attributes")
     if attribute_list is None:
         return []
     decorators: list[Decorator] = []
-    for attr in (child for child in _walk(attribute_list) if child.type == "attribute"):
+    for attr in (child for child in walk(attribute_list) if child.type == "attribute"):
         name_node = next(
             (child for child in attr.named_children if child.type in {"name", "qualified_name", "namespace_name"}),
             None,
@@ -47,15 +39,10 @@ def extract_attributes(node: Node, source: bytes) -> list[Decorator]:
         if args_node is not None:
             for argument in args_node.named_children:
                 value = next(iter(argument.named_children), argument)
-                args.append(_literal(value, source))
+                literal = string_value(value, source)
+                args.append(literal if literal is not None else node_text(value, source))
         decorators.append(Decorator(name=name, args=args))
     return decorators
-
-
-def _walk(node: Node) -> Iterator[Node]:
-    yield node
-    for child in node.named_children:
-        yield from _walk(child)
 
 
 def _type_text(node: Node | None, source: bytes) -> str:
