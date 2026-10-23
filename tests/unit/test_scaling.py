@@ -89,6 +89,21 @@ def _python(n: int) -> str:
     )
 
 
+def _ruby(n: int) -> str:
+    body = "".join(
+        f"  # doc for m{i}\n"
+        f"  def m{i}(user)\n"
+        f"    user = User.find({i})\n"
+        f"    user.update(name: \"user-{i}\")\n"
+        f"    if user.active?\n"
+        f"      audit.record(user)\n"
+        f"    end\n"
+        f"  end\n"
+        for i in range(n)
+    )
+    return f"class UserService\n{body}end\n"
+
+
 def _csharp(n: int) -> str:
     body = "".join(
         f"    /// <summary>M{i}</summary>\n"
@@ -176,6 +191,7 @@ SAMPLES: dict[str, tuple[str, Callable[[int], str]]] = {
     "groovy-vertx": ("Http.groovy", _groovy_vertx),
     "typescript-express-aws": ("app.ts", _ts_express_aws),
     "python": ("mod.py", _python),
+    "ruby": ("service.rb", _ruby),
     "csharp": ("C.cs", _csharp),
     "xsd": ("schema.xsd", _xsd),
     "wsdl": ("service.wsdl", _wsdl),

@@ -83,6 +83,7 @@ def _prune_template_edges(record: FileRecord, dropped: frozenset[str]) -> None:
 
 def _parse_entry(path: str, repo_root: str, options: dict) -> FileRecord | None:
     from ..parsers.base import ParseContext
+    from ..parsers import treesitter
     from .registry import base_parser_for, select
 
     abs_path = os.path.join(repo_root, path)
@@ -92,13 +93,8 @@ def _parse_entry(path: str, repo_root: str, options: dict) -> FileRecord | None:
     except OSError:
         return None
 
-    parser = select(
-        path, source, options["parse_timeout_micros"]
-    )  # exactly one parser per file (claims + priority)
-    if parser is None:  # pragma: no cover - classify already filtered
-        return None
-    base = base_parser_for(path)
-    index = options.get("indexes", {}).get(base.name if base is not None else "")
+    base = base_parser_for(path, source)
+    parser = None
     from ..parsers.statements_common import (
         begin_concat_tracking,
         set_concat_depth,
@@ -108,6 +104,20 @@ def _parse_entry(path: str, repo_root: str, options: dict) -> FileRecord | None:
     set_concat_depth(options.get("max_concat_depth"))  # apply configured cap in this process
     begin_concat_tracking()  # collect concats the fold cap skips, for one per-file summary
     try:
+        parsed_root = None
+        if base is not None and base.name == "ruby":
+            parsed_root = treesitter.parse_source(
+                "ruby", source, options["parse_timeout_micros"]
+            ).root_node
+        parser = select(
+            path,
+            source,
+            options["parse_timeout_micros"],
+            parsed_root=parsed_root,
+        )  # exactly one parser per file (claims + priority)
+        if parser is None:  # pragma: no cover - classify already filtered
+            return None
+        index = options.get("indexes", {}).get(base.name if base is not None else "")
         ctx = ParseContext(
             path=path,
             abs_path=Path(abs_path),
@@ -117,12 +127,16 @@ def _parse_entry(path: str, repo_root: str, options: dict) -> FileRecord | None:
             statement_text_limit=options["statement_text_limit"],
             parse_timeout_micros=options["parse_timeout_micros"],
             resolution_index=index,
+            parsed_root=parsed_root,
         )
         record = parser.parse_file(ctx)
         parser.link_handlers(record, ctx)
     except Exception as exc:  # per-file isolation (incl. parse timeout)
         get_logger("breezeai_cog.worker").warning(
-            "parse.file.failed", path=path, parser=parser.name, error=str(exc)
+            "parse.file.failed",
+            path=path,
+            parser=parser.name if parser is not None else (base.name if base is not None else None),
+            error=str(exc),
         )
         return None
     _prune_template_edges(record, options.get("template_extensions") or frozenset())

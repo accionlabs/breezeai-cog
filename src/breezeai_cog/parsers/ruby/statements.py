@@ -7,12 +7,12 @@ from collections.abc import Iterator
 from tree_sitter import Node
 
 from ...schemas import Statement
-from ..statements_common import classify_statement, render_concat, resolve_endpoint
+from ..statements_common import classify_statement, emit_enum_members, render_concat, resolve_endpoint
 from ..detection import text_has_query
 from ..treesitter import node_text
 from .mappings import CONTROL_FLOW, EMIT_TYPES
 
-_SCOPE_TYPES = {"class", "module", "method"}
+_SCOPE_TYPES = {"class", "module", "method", "singleton_method"}
 
 
 def _iter_statements(node: Node, source: bytes) -> Iterator[Node]:
@@ -44,12 +44,23 @@ def _name_of(node: Node, source: bytes) -> str | None:
 
 
 def _render_url(node: Node, source: bytes) -> str | None:
+    if _contains_string_interpolation(node):
+        return None
     if node.type == "string":
-        content = next((child for child in node.named_children if child.type == "string_content"), None)
-        return node_text(content, source) if content is not None else ""
+        parts = node.named_children
+        if any(part.type not in {"string_content", "escape_sequence"} for part in parts):
+            return None
+        return "".join(node_text(part, source) for part in parts)
     if node.type == "binary":
         return render_concat(node, source, _render_url)
     return None
+
+
+def _contains_string_interpolation(node: Node) -> bool:
+    """Return True when this URL expression contains Ruby string interpolation."""
+    return node.type == "interpolation" or any(
+        _contains_string_interpolation(child) for child in node.named_children
+    )
 
 
 def _call_details(call: Node, source: bytes) -> tuple[str, str, str | None] | None:
@@ -63,6 +74,61 @@ def _call_details(call: Node, source: bytes) -> tuple[str, str, str | None] | No
     if override is not None:
         method = override
     return callee, method, endpoint
+
+
+def _is_enum_like_module(body: Node, source: bytes) -> bool:
+    """Return True when the body looks like a Ruby enum module.
+
+    C8 fix: detects modules used as enums (e.g. ``module Status; ACTIVE = 1; end``).
+    A module body is treated as enum-like when it has at least one constant assignment
+    and every non-method, non-class child is a constant assignment or a bare constant.
+    Constants are SCREAMING_SNAKE_CASE (first char uppercase, all uppercase or underscore).
+    """
+    relevant = [
+        c for c in body.named_children
+        if c.type not in {"method", "class", "module", "comment"}
+    ]
+    if not relevant:
+        return False
+    constant_assigns = []
+    for child in relevant:
+        if child.type == "assignment":
+            left = child.child_by_field_name("left")
+            if left is not None and left.type == "constant":
+                name = node_text(left, source)
+                if name and name[0].isupper():
+                    constant_assigns.append(child)
+                    continue
+        # Any other node type disqualifies this module as enum-like
+        return False
+    return len(constant_assigns) > 0
+
+
+def extract_enum_members(
+    body: Node | None,
+    source: bytes,
+    path: str,
+    *,
+    parent_id: str,
+    limit: int,
+    seen_ids: set[str],
+) -> list[Statement]:
+    """Emit enum_member Statements for constant assignments in an enum-style Ruby module.
+
+    C8 fix: constant assignments like ``ACTIVE = 1`` in enum-style modules are emitted
+    as Statements with ``semanticType = "enum_member"``.
+    """
+    if body is None or not _is_enum_like_module(body, source):
+        return []
+    return emit_enum_members(
+        body,
+        source,
+        path,
+        member_types={"assignment"},
+        parent_id=parent_id,
+        limit=limit,
+        seen_ids=seen_ids,
+    )
 
 
 def extract_statements(

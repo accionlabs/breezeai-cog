@@ -7,6 +7,7 @@ import os
 
 from breezeai_cog.core.ignore import IgnoreEngine
 from breezeai_cog.core.scanner import scan
+from breezeai_cog.parsers.ruby.parser import RubyParser
 
 
 def classify(path: str) -> str | None:
@@ -136,3 +137,103 @@ def test_repoinclude_does_not_override_the_template_gate(tmp_path) -> None:
     )
     assert "page.html" not in [e.path for e in entries]
     assert ("page.html", "template") in skips
+
+
+def test_ruby_project_file_discovery_and_exclusions(tmp_path) -> None:
+    parser = RubyParser()
+    for path in (
+        "tasks/release.rake",
+        "rubocop.gemspec",
+        "Gemfile",
+        "Rakefile",
+        "custom-extensionless-file",
+        "bin/console",
+        ".git/config.rb",
+        ".cog/output.rb",
+    ):
+        file_path = tmp_path / path
+        file_path.parent.mkdir(parents=True, exist_ok=True)
+        file_path.write_text("source\n")
+
+    entries = list(
+        scan(
+            tmp_path,
+            lambda path: parser.name if parser.matches(path) else None,
+            engine=IgnoreEngine.build(),
+            max_file_size=10_000,
+        )
+    )
+
+    found = {entry.path for entry in entries}
+    assert found == {
+        "tasks/release.rake",
+        "rubocop.gemspec",
+        "Gemfile",
+        "Rakefile",
+    }
+    assert all(entry.language == "ruby" for entry in entries)
+
+
+def test_ruby_shebang_discovery_uses_bounded_source_classification(tmp_path) -> None:
+    from breezeai_cog.config import Settings
+    from breezeai_cog.core.pipeline import _scan_entries
+
+    repo = tmp_path / "repo"
+    (repo / "exe").mkdir(parents=True)
+    (repo / "bin").mkdir()
+    scripts = {
+        "exe/rubocop": b"#!/usr/bin/env ruby\nclass Rubocop; end\n",
+        "exe/direct": b"#!/opt/rubies/ruby-3.3.0/bin/ruby\nclass Direct; end\n",
+        "exe/split": b"#!/usr/bin/env -S ruby -w\nclass Split; end\n",
+        "exe/python": b"#!/usr/bin/env python3\nprint('not ruby')\n",
+        "exe/shell": b"#!/bin/sh\necho not ruby\n",
+        "exe/malformed": b"#!/usr/bin/env -S 'ruby\nputs :no\n",
+        "bin/console": b"#!/usr/bin/env ruby\nputs :ignored\n",
+    }
+    for relative, content in scripts.items():
+        path = repo / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(content)
+
+    entries = list(_scan_entries(repo, Settings(repo=repo, jobs=1)))
+    found = {entry.path: entry for entry in entries}
+
+    assert set(found) == {"exe/rubocop", "exe/direct", "exe/split"}
+    assert all(found[path].language == "ruby" for path in found)
+    assert all(found[path].source_prefix for path in found)
+
+
+def test_ruby_shebang_discovery_respects_size_and_language_filters(tmp_path) -> None:
+    from breezeai_cog.config import Settings
+    from breezeai_cog.core.pipeline import _scan_entries
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "run").write_bytes(b"#!/usr/bin/env ruby\nputs :ruby\n")
+
+    too_small = list(_scan_entries(repo, Settings(repo=repo, max_file_size=4)))
+    ruby_filtered = list(_scan_entries(repo, Settings(repo=repo, languages=["python"])))
+
+    assert too_small == []
+    assert ruby_filtered == []
+
+
+def test_unreadable_ruby_shebang_prefix_is_skipped_safely(tmp_path, monkeypatch) -> None:
+    import builtins
+
+    from breezeai_cog.config import Settings
+    from breezeai_cog.core.pipeline import _scan_entries
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    script = repo / "exe-script"
+    script.write_bytes(b"#!/usr/bin/env ruby\nputs :ruby\n")
+    original_open = builtins.open
+
+    def unreadable_open(file, *args, **kwargs):
+        if str(file) == str(script):
+            raise PermissionError("access denied")
+        return original_open(file, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "open", unreadable_open)
+    assert list(_scan_entries(repo, Settings(repo=repo, jobs=1))) == []

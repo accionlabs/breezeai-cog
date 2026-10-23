@@ -46,8 +46,14 @@ class _InfraStreamSink:
             raise UploadError(str(exc)) from exc
         self.files += 1
         self.funcs += len(record.functions)
-        self.classes += len(record.classes)
-        self.loc += record.loc
+        file_classes = (
+            sum(cls.type != "module" for cls in record.classes)
+            if record.language == "ruby"
+            else len(record.classes)
+        )
+        self.classes += file_classes
+        if record.type != "config":
+            self.loc += record.loc
         self.by_type[record.language] = self.by_type.get(record.language, 0) + 1
         if record.type == "config":
             self.config += 1
