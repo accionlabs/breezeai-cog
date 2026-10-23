@@ -76,10 +76,12 @@ def test_analyze_sql(client: TestClient, captured: _Captured) -> None:
 
     rec = captured.records[0]
     assert rec["__type"] == "ddl" and rec["language"] == "sql"
+    # The backend keys every DDL object on this path (its `sourcePath`), so it must be the file name.
+    assert rec["path"] == "schema_pg.sql"
     assert rec["tables"][0]["name"] == "employees" and rec["tables"][0]["hasPrimaryKey"] is True
     path, payload = captured.notifications[0]
     assert path == "/db-ontology/stream-ingest-s3"
-    assert payload["storage_key"] == out["storage_key"] and payload["repositoryName"] == "schema_pg.sql"
+    assert payload == {"storage_key": out["storage_key"], "projectUuid": "P1", "dataLakeId": "D1"}
 
 
 def test_requires_file(client: TestClient) -> None:
@@ -105,3 +107,21 @@ def test_no_ddl_objects_is_422(client: TestClient) -> None:
     assert r.status_code == 422
     body = r.json()
     assert body["error"] == "No DDL objects could be extracted from the SQL file" and "dialect" in body
+
+
+def test_crlf_tsql_upload_with_bom_is_accepted(client: TestClient, captured: _Captured) -> None:
+    # BREEZEAI-958 QA defect 2: a Windows-saved SQL Server script (CRLF, with a BOM) used to come
+    # back 422 "No DDL objects could be extracted" because no GO line matched.
+    script = (
+        "\ufeffCREATE TABLE [dbo].[Student] ([Id] INT NOT NULL PRIMARY KEY)\r\nGO\r\n"
+        "CREATE VIEW [dbo].[VW_Test] AS SELECT s.[Id] FROM [dbo].[Student] s\r\nGO\r\n"
+    )
+    r = client.post(
+        "/api/analyze-sql",
+        files={"file": ("schema_mssql.sql", script.encode("utf-8"), "application/sql")},
+        data={"projectUuid": "P1", "dataLakeId": "D1"},
+    )
+    assert r.status_code == 202, r.text
+    out = r.json()
+    assert out["dialect"] == "transactsql" and out["tableCount"] == 1 and out["viewCount"] == 1
+    assert captured.records[0]["views"][0]["definition"].endswith("FROM [dbo].[Student] s")
