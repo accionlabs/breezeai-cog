@@ -62,6 +62,9 @@ emitted as open framework strings. WordPress action/filter registrations use
 `semanticType: "eventbus_consumer"` rather than appearing as HTTP routes. Blade views
 (`.blade.php`) remain unsupported and are not classified as PHP source.
 
+PHP `.phtml` files are treated as markup templates and are skipped unless
+`--capture-templates` is enabled.
+
 ## Layout
 
 - `src/breezeai_cog/schemas/` — the capture contract as Pydantic v2 models

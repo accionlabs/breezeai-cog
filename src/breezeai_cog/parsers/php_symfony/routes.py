@@ -120,21 +120,51 @@ def _security_guards(node: Node, source: bytes) -> list[str]:
     return list(dict.fromkeys(guards))
 
 
-def _dto_type(value: str | None, index: PhpIndex | None) -> str | None:
+def _use_bindings(source: bytes) -> dict[str, str]:
+    """Return aliases declared by this file only; never infer by short name."""
+    bindings: dict[str, str] = {}
+    text = source.decode("utf-8", "replace")
+    for match in re.finditer(r"\buse\s+(?!function\b|const\b)([^;]+);", text):
+        clause = match.group(1).strip()
+        if "{" in clause and clause.endswith("}"):
+            prefix, _, members = clause.partition("{")
+            prefix = prefix.rstrip("\\")
+            for member in members[:-1].split(","):
+                parts = re.split(r"\s+as\s+", member.strip(), maxsplit=1)
+                target = f"{prefix}\\{parts[0].strip()}"
+                alias = parts[-1].strip() if len(parts) == 2 else target.rsplit("\\", 1)[-1]
+                bindings[alias] = target
+            continue
+        for item in clause.split(","):
+            parts = re.split(r"\s+as\s+", item.strip(), maxsplit=1)
+            target = parts[0].strip().lstrip("\\")
+            if target:
+                alias = parts[-1].strip() if len(parts) == 2 else target.rsplit("\\", 1)[-1]
+                bindings[alias] = target
+    return bindings
+
+
+def _dto_type(value: str | None, index: PhpIndex | None, bindings: dict[str, str]) -> str | None:
     if not value or index is None:
         return None
     simple = value.split("<", 1)[0].lstrip("?").rsplit("\\", 1)[-1]
     if simple.lower() in _FRAMEWORK_RESPONSE_TYPES:
         return None
-    matches = [fqn for fqn, file_path in index.fqcn.items()
-               if file_path is not None and fqn.rsplit("\\", 1)[-1] == simple]
-    return simple if len(matches) == 1 else None
+    qualified = value.split("<", 1)[0].lstrip("?").lstrip("\\")
+    head, separator, tail = qualified.partition("\\")
+    resolved_name = qualified
+    if head in bindings:
+        resolved_name = f"{bindings[head]}{separator}{tail}" if separator else bindings[head]
+    file_path = index.fqcn.get(resolved_name)
+    if file_path is None:
+        file_path = index.folded_fqcn.get(resolved_name.casefold())
+    return simple if file_path is not None else None
 
 
-def _request_dto(fn: Function, index: PhpIndex | None) -> str | None:
+def _request_dto(fn: Function, index: PhpIndex | None, bindings: dict[str, str]) -> str | None:
     for param in fn.params:
         if any(dec.name in _REQUEST_PAYLOAD_ATTRIBUTES for dec in param.decorators):
-            return _dto_type(param.type, index)
+            return _dto_type(param.type, index, bindings)
     return None
 
 
@@ -193,6 +223,7 @@ def _route_statement(*, path: str, source_node: Node, source: bytes, parent_id: 
 
 def detect_symfony_routes(root: Node, source: bytes, path: str, record: FileRecord,
                           index: PhpIndex | None) -> set[str]:
+    bindings = _use_bindings(source)
     route_names = _route_attribute_names(root, source)
     classes = [node for node in walk(root) if node.type in {
         "class_declaration", "interface_declaration", "trait_declaration", "enum_declaration",
@@ -256,7 +287,8 @@ def detect_symfony_routes(root: Node, source: bytes, path: str, record: FileReco
                             path=path, source_node=source_node, source=source, parent_id=fn.id, seen=seen,
                             method=method, endpoint=endpoint, name=name, handler=fn,
                             is_regex=prefix.is_regex or method_spec.is_regex, guards=guards,
-                            request_dto=_request_dto(fn, index), response_dto=_dto_type(fn.returnType, index),
+                            request_dto=_request_dto(fn, index, bindings),
+                            response_dto=_dto_type(fn.returnType, index, bindings),
                         )
                         seen.add(statement.id)
                         record.statements.append(statement)

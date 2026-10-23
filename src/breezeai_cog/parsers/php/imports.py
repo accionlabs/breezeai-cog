@@ -2,29 +2,14 @@
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
-from collections.abc import Iterator
-
 from tree_sitter import Node
 
 from ...utils import repo_relative
+from ..php_route_common import walk
 from ..treesitter import node_text
-from .index import PhpIndex
-
-
-def _namespace(root: Node, source: bytes) -> str:
-    for node in root.named_children:
-        if node.type == "namespace_definition":
-            name = node.child_by_field_name("name")
-            if name is not None:
-                return node_text(name, source).lstrip("\\")
-    return ""
-
-
-def _walk(node: Node) -> Iterator[Node]:
-    yield node
-    for child in node.named_children:
-        yield from _walk(child)
+from .index import PhpIndex, namespace_of
 
 
 def _import_name(node: Node, source: bytes) -> tuple[str, str]:
@@ -72,17 +57,11 @@ def extract_imports(
     internal: dict[str, None] = {}
     external: dict[str, None] = {}
     bindings: dict[str, str] = {}
-    namespace = _namespace(root, source)
+    namespace = namespace_of(root, source)
     fqcn_index = index.fqcn if index is not None else {}
-    folded_index: dict[str, str | None] = {}
-    for fqn, path in fqcn_index.items():
-        key = fqn.casefold()
-        if key in folded_index and folded_index[key] != path:
-            folded_index[key] = None
-        else:
-            folded_index[key] = path
+    folded_index = index.folded_fqcn if index is not None else {}
 
-    for node in _walk(root):
+    for node in walk(root):
         if node.type == "namespace_use_declaration":
             default_kind = _import_kind(node, source)
             group = node.child_by_field_name("body")
@@ -125,6 +104,14 @@ def extract_imports(
                     bindings[alias] = resolved
 
         elif node.type == "include_expression":
+            operation_match = re.match(
+                r"(include_once|require_once|include|require)\b",
+                node_text(node, source).lstrip(),
+                re.IGNORECASE,
+            )
+            operation = operation_match.group(1).lower() if operation_match else ""
+            if operation not in {"include", "include_once", "require", "require_once"}:
+                continue
             literal = next((c for c in node.named_children if c.type == "string"), None)
             if literal is None:
                 continue
@@ -141,12 +128,9 @@ def extract_imports(
                 rel = repo_relative(candidate, repo_root)
                 internal.setdefault(rel, None)
 
-    if namespace:
-        prefix = namespace + "\\"
-        for fqn, resolved in fqcn_index.items():
-            if resolved and fqn.startswith(prefix):
-                suffix = fqn[len(prefix):]
-                if "\\" not in suffix:
-                    bindings.setdefault(suffix, resolved)
+    if namespace and index is not None:
+        for simple, resolved in index.namespace_members.get(namespace, {}).items():
+            if resolved:
+                bindings.setdefault(simple, resolved)
 
     return list(internal), list(external), [], bindings

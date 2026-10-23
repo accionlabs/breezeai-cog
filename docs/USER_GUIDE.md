@@ -419,6 +419,8 @@ subfolders.
 skip reason — not `ignored`. This is a capture-scope choice rather than an ignore rule, so the two
 layers do not interact the way you might expect:
 
+PHP `.phtml` files are also markup templates and follow the same `--capture-templates` gate.
+
 - `.repoinclude` does **not** bring templates back. Only `--capture-templates` does.
 - `.repoignore` still wins over `--capture-templates`: the template gate runs *after* the ignore
   layers, so an ignored template stays ignored.

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterator
 from pathlib import Path
 from typing import Sequence
 
@@ -17,6 +16,7 @@ from ..callresolve import make_resolver
 from ..comments_common import comment_statements_for
 from ..statements_common import emit_enum_members
 from ..treesitter import node_text, parse_source
+from ..php_route_common import walk
 from .classes import build_class
 from .functions import build_function, function_node_type, function_parent_id
 from .imports import extract_imports
@@ -28,15 +28,9 @@ _CLASS_TYPES = {"class_declaration", "interface_declaration", "trait_declaration
 _FUNCTION_NAMES = {"function_definition", "method_declaration"}
 
 
-def _walk(node: Node) -> Iterator[Node]:
-    yield node
-    for child in node.named_children:
-        yield from _walk(child)
-
-
 def _defined_names(root: Node, source: bytes) -> set[str]:
     names: set[str] = set()
-    for node in _walk(root):
+    for node in walk(root):
         if node.type in _CLASS_TYPES | _FUNCTION_NAMES:
             name = node.child_by_field_name("name")
             if name is not None:
@@ -50,6 +44,7 @@ class PhpParser(BaseParser):
     schema_version = SCHEMA_VERSION
     statement_types = STATEMENT_TYPES
     frameworks: list[str] = []
+    template_extensions = (".phtml",)
 
     def matches(self, path: str | Path) -> bool:
         value = str(path).lower().replace("\\", "/")
@@ -97,16 +92,14 @@ class PhpParser(BaseParser):
                 continue
             if index is None:
                 continue
-            candidates: set[str] = set()
             wanted = class_name.lstrip("\\").lower()
-            for fqcn, indexed_path in index.fqcn.items():
-                if indexed_path is None:
-                    continue
-                normalized = fqcn.lstrip("\\").lower()
-                if normalized == wanted or normalized.rsplit("\\", 1)[-1] == simple_class.lower():
-                    candidates.add(indexed_path)
-            if len(candidates) == 1 and next(iter(candidates)) != ctx.path:
-                statement.handlerPath = next(iter(candidates))
+            indexed_path = index.fqcn.get(class_name.lstrip("\\"))
+            if indexed_path is None:
+                indexed_path = index.folded_fqcn.get(wanted)
+            if indexed_path is None:
+                indexed_path = index.simple_names.get(simple_class.casefold())
+            if indexed_path is not None and indexed_path != ctx.path:
+                statement.handlerPath = indexed_path
 
     def extract(self, root: Node, ctx: ParseContext) -> FileRecord:
         source, path = ctx.source, ctx.path
@@ -180,7 +173,7 @@ class PhpParser(BaseParser):
 
         extract_scope(root)
         if ctx.capture_statements:
-            for enum_node in (node for node in _walk(root) if node.type == "enum_declaration"):
+            for enum_node in (node for node in walk(root) if node.type == "enum_declaration"):
                 body = enum_node.child_by_field_name("body")
                 enum_id = class_ids.get((enum_node.start_byte, enum_node.end_byte))
                 if body is not None and enum_id is not None:
