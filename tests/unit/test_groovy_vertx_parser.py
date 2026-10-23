@@ -255,3 +255,45 @@ def test_gstring_constants_resolve_reassigned_variables_do_not(tmp_path) -> None
     )
     rec = _parse(tmp_path, src, "R.groovy")
     assert _routes(rec) == {("GET", "/v1/x"), ("GET", "/fixed/y"), ("GET", None)}
+
+
+def test_local_literal_folds_only_where_it_is_visible(tmp_path) -> None:
+    src = (
+        b"import io.vertx.ext.web.Router\n"
+        b"class Api {\n"
+        b"  static final String BASE = '/v1'\n"
+        b"  String field = '/f'\n"
+        b"  void one(def router) {\n"
+        b"    def prefix = '/a'\n"
+        b'    router.get("${prefix}/x").handler(h)\n'
+        b'    router.get("${field}/w").handler(h)\n'
+        b"  }\n"
+        b"  void two(def router, String prefix) {\n"
+        b'    router.get("${prefix}/y").handler(h)\n'                  # the parameter, not one()'s
+        b"  }\n"
+        b"  void three(def router, cfg) {\n"
+        b"    def BASE = cfg.base\n"
+        b'    router.get("${BASE}/v").handler(h)\n'                    # the local hides the constant
+        b"    def prefix = '/c'\n"
+        b'    def each = { prefix -> router.get("${prefix}/q").handler(h) }\n'  # closure parameter
+        b"  }\n}\n"
+    )
+    rec = _parse(tmp_path, src, "Api.groovy")
+    assert _routes(rec) == {("GET", "/a/x"), ("GET", "/f/w"), ("GET", None)}
+    assert sorted(s.endpoint or "" for s in rec.statements if s.semanticType == "route") == [
+        "", "", "", "/a/x", "/f/w"]
+
+
+def test_script_local_is_not_seen_inside_a_method(tmp_path) -> None:
+    src = (
+        b"import io.vertx.ext.web.Router\n"
+        b"def prefix = '/s'\n"
+        b'router.get("${prefix}/top").handler(h)\n'
+        b'def c = { router.get("${prefix}/closure").handler(h) }\n'
+        b"void m(router) {\n"
+        b'  router.get("${prefix}/method").handler(h)\n'
+        b"}\n"
+    )
+    rec = _parse(tmp_path, src, "script.groovy")
+    assert sorted(s.endpoint or "" for s in rec.statements if s.semanticType == "route") == [
+        "", "/s/closure", "/s/top"]

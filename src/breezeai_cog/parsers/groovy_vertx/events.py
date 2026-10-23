@@ -76,30 +76,87 @@ def _render_path(node: Node, source: bytes, consts: dict[str, str] | None = None
     return text or None
 
 
-def _local_literals(root: Node, source: bytes) -> dict[str, str]:
-    """Variables of this file bound once to a plain string literal and never reassigned
-    (``def prefix = '/api'``) → their value: a GString path may interpolate them."""
-    values: dict[str, list[str | None]] = {}
-    assigned: set[str] = set()
+#: Nodes whose declarations are visible to their descendants.
+_SCOPES = ("block", "closure", "source_file", "class_body")
+#: Nodes that take parameters; a method's body cannot see the locals around it.
+_CALLABLES = ("method_declaration", "constructor_declaration", "closure")
+_PARAMETERS = ("formal_parameter", "closure_parameter")
 
-    def walk(n: Node) -> None:
-        name, value = n.child_by_field_name("name"), n.child_by_field_name("value")
-        if n.type in ("variable_declarator", "local_variable_declaration") and name is not None \
-                and value is not None and name.type == "identifier":
-            literal = (_render_path(value, source)
-                       if value.type == "string_literal" and "interpolation" not in str(
-                           [c.type for c in value.named_children]) else None)
-            values.setdefault(node_text(name, source), []).append(literal)
-        if n.type == "assignment_expression":
-            left = n.child_by_field_name("left")
-            if left is not None and left.type == "identifier":
-                assigned.add(node_text(left, source))
-        for c in n.named_children:
-            walk(c)
 
-    walk(root)
-    return {k: v[0] for k, v in values.items()
-            if len(v) == 1 and v[0] is not None and k not in assigned}
+def _scope_of(node: Node) -> Node | None:
+    parent = node.parent
+    while parent is not None and parent.type not in _SCOPES:
+        parent = parent.parent
+    return parent
+
+
+class _Literals:
+    """Variables bound once to a plain string literal and never reassigned (``def prefix =
+    '/api'``), folded only where Groovy sees them: a GString path may interpolate them.
+
+    A name is looked up from the use outwards, as Groovy resolves it: the locals of each
+    enclosing block, closure or script body — up to the enclosing method, whose body cannot see
+    the locals around it — then the fields of the enclosing classes. A method or closure
+    parameter of that name, or a local that is not a plain literal (``def prefix = cfg.base``),
+    declared twice in one scope or reassigned, hides any outer value and any repository constant
+    of that name: the part is unknown (``{prefix}``), never another scope's value. A field bound
+    to an expression (``static final String A = BASE + '/x'``) is left to the constants."""
+
+    def __init__(self, root: Node, source: bytes) -> None:
+        values: dict[int, dict[str, list[str | None]]] = {}
+        self._params: dict[int, set[str]] = {}
+        assigned: set[str] = set()
+
+        def walk(n: Node) -> None:
+            name, value = n.child_by_field_name("name"), n.child_by_field_name("value")
+            if n.type == "variable_declarator" and name is not None and value is not None \
+                    and name.type == "identifier" and (scope := _scope_of(n)) is not None:
+                literal = (_render_path(value, source)
+                           if value.type == "string_literal" and not any(
+                               "interpolation" in c.type for c in value.named_children)
+                           else None)
+                if literal is not None or scope.type != "class_body":  # a field's expression
+                    values.setdefault(scope.id, {}).setdefault(       # is the constants' job
+                        node_text(name, source), []).append(literal)
+            elif n.type in _PARAMETERS and n.parent is not None:
+                owner = n.parent.parent  # (formal|closure)_parameters → method / closure
+                ident = [c for c in n.named_children if c.type == "identifier"]
+                if owner is not None and ident:
+                    self._params.setdefault(owner.id, set()).add(node_text(ident[-1], source))
+            elif n.type == "assignment_expression":
+                left = n.child_by_field_name("left")
+                if left is not None and left.type == "identifier":
+                    assigned.add(node_text(left, source))
+            for c in n.named_children:
+                walk(c)
+
+        walk(root)
+        # Per scope: name → its value, or None when it is not a foldable literal.
+        self._scopes: dict[int, dict[str, str | None]] = {
+            scope: {k: (v[0] if len(v) == 1 and k not in assigned else None)
+                    for k, v in names.items()}
+            for scope, names in values.items()}
+
+    def at(self, node: Node, consts: dict[str, str]) -> dict[str, str]:
+        """The values ``node`` sees: the visible locals and fields over ``consts``, minus the
+        names a parameter or an unfoldable local hides."""
+        seen: dict[str, str | None] = {}
+        in_method = False  # past a method: only class fields stay visible
+        parent = node.parent
+        while parent is not None:
+            if parent.type in _SCOPES and (not in_method or parent.type == "class_body"):
+                for name, value in self._scopes.get(parent.id, {}).items():
+                    seen.setdefault(name, value)
+            if parent.type in _CALLABLES:
+                for name in self._params.get(parent.id, ()):
+                    seen.setdefault(name, None)
+                in_method = in_method or parent.type != "closure"
+            parent = parent.parent
+        if not seen:
+            return consts
+        out = {k: v for k, v in consts.items() if k not in seen}
+        out.update({k: v for k, v in seen.items() if v is not None})
+        return out
 
 
 def _parts(
@@ -153,7 +210,7 @@ def _handler_arg(call: Node, source: bytes) -> Node | None:
 
 
 def _sub_router_mounts(
-    calls: list[Node], source: bytes, consts: dict[str, str]
+    calls: list[Node], source: bytes, consts: dict[str, str], literals: _Literals
 ) -> tuple[list[SubRouterMount], set[tuple[int, int]]]:
     """Sub-router mounts in this file, and the ``route("/api/*")`` calls they hang off (those are
     the mount's path, not routes). ``router.route("/api/*").subRouter(sub)`` and
@@ -162,7 +219,7 @@ def _sub_router_mounts(
     mounts: list[SubRouterMount] = []
     mount_routes: set[tuple[int, int]] = set()
     for call in calls:
-        method, prefix, _, obj = _parts(call, source, consts)
+        method, prefix, _, obj = _parts(call, source, literals.at(call, consts))
         args = call.child_by_field_name("arguments")
         named = list(args.named_children) if args is not None else []
         if method == SUB_ROUTER_CALL and len(named) == 1 and named[0].type == "identifier":
@@ -170,7 +227,8 @@ def _sub_router_mounts(
             inner = fn.child_by_field_name("object") if fn is not None else None
             if inner is None or inner.type != "method_invocation":
                 continue
-            inner_method, inner_path, inner_arg, inner_obj = _parts(inner, source, consts)
+            inner_method, inner_path, inner_arg, inner_obj = _parts(
+                inner, source, literals.at(inner, consts))
             if inner_method == "route" and inner_arg is not None:
                 mounts.append((node_text(named[0], source), inner_obj, inner_path))
                 mount_routes.add((inner.start_byte, inner.end_byte))
@@ -185,7 +243,8 @@ def detect_vertx_groovy(
     """This file's Vert.x routes, consumers, sends and timers, for :func:`~..emits.apply`.
     ``consts`` (``name → value``) folds symbolic addresses to their String value."""
     found: list[Emit] = []
-    consts = {**_local_literals(root, source), **(consts or {})}
+    consts = consts or {}
+    literals = _Literals(root, source)
     # Vert.x 2.x RouteMatcher: bare `get("/x", h)` calls (no receiver) inside `rm.with {}`
     # are routes only when the file actually builds a RouteMatcher — a cheap file-level gate
     # that keeps a stray `map.get(...)` from being mistaken for a route.
@@ -193,7 +252,8 @@ def detect_vertx_groovy(
     methods = method_lines(record.functions)
     calls = _invocations(root)
     mounts, mount_routes = (
-        _sub_router_mounts(calls, source, consts) if b"ubRouter" in source else ([], set())
+        _sub_router_mounts(calls, source, consts, literals) if b"ubRouter" in source
+        else ([], set())
     )
     bases = sub_router_bases(mounts)
     service_vars = service_builder_vars(source) if b"setAddress" in source else {}
@@ -201,7 +261,7 @@ def detect_vertx_groovy(
     for call in calls:
         if (call.start_byte, call.end_byte) in mount_routes:  # a sub-router's mount path: wiring
             continue
-        method, endpoint_path, first_arg, obj = _parts(call, source, consts)
+        method, endpoint_path, first_arg, obj = _parts(call, source, literals.at(call, consts))
         route_scope = bool(
             uses_routematcher and obj == "" and endpoint_path and "/" in endpoint_path
         )
