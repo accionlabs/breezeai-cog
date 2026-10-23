@@ -102,26 +102,26 @@ def route_handler(node: Node | None, source: bytes) -> tuple[str | None, int | N
                 cls = s.lstrip("\\") if s else None
         method = string_value(right, source) if right is not None else None
         if cls and method:
-            clean_method = method.lstrip(":").lstrip("@")
-            return f"{cls}@{clean_method}", node.start_point[0] + 1
+            clean_method = method.lstrip(":").lstrip("@").split("/", 1)[0]
+            return f"{cls}@{clean_method}", None
 
     literal = string_value(node, source)
     if literal is not None:
         literal = literal.lstrip("\\")
         if "::" in literal:
             cls, method = literal.rsplit("::", 1)
-            return f"{cls}@{method}", node.start_point[0] + 1
+            return f"{cls}@{method.split('/', 1)[0]}", None
         if "@" in literal:
             cls, method = literal.rsplit("@", 1)
-            return f"{cls}@{method}", node.start_point[0] + 1
+            return f"{cls}@{method.split('/', 1)[0]}", None
         if ":" in literal:
             cls, method = literal.rsplit(":", 1)
-            return f"{cls}@{method}", node.start_point[0] + 1
-        return literal, node.start_point[0] + 1
+            return f"{cls}@{method.split('/', 1)[0]}", None
+        return literal, None
 
     if node.type == "class_constant_access_expression":
         cls = node_text(node, source).rsplit("::", 1)[0].lstrip("\\")
-        return cls, node.start_point[0] + 1
+        return cls, None
 
     if node.type != "array_creation_expression":
         return None, None
@@ -132,7 +132,7 @@ def route_handler(node: Node | None, source: bytes) -> tuple[str | None, int | N
     method_name = string_value(values[1], source)
     if method_name is None:
         return None, None
-    clean_method = method_name.lstrip(":").lstrip("@")
+    clean_method = method_name.lstrip(":").lstrip("@").split("/", 1)[0]
     target = values[0]
     class_name: str | None = None
     if target is not None:
@@ -141,7 +141,7 @@ def route_handler(node: Node | None, source: bytes) -> tuple[str | None, int | N
         else:
             s = string_value(target, source)
             class_name = s.lstrip("\\") if s else None
-    return (f"{class_name}@{clean_method}" if class_name else clean_method), node.start_point[0] + 1
+    return (f"{class_name}@{clean_method}" if class_name else clean_method), None
 
 
 def enrich_route(
@@ -161,19 +161,26 @@ def enrich_route(
     is_regex: bool | None = False,
     route_kind: str = "route",
     closure_handler: str | None = None,
+    handler_name: str | None = None,
 ) -> bool:
     line, column = call.start_point[0] + 1, call.start_point[1]
     statement = statements.get(statement_id(path, line, column))
     if statement is None:
         return False
     handler, handler_line = route_handler(handler_node, source)
+    if handler_name is not None:
+        handler, handler_line = handler_name, None
     if handler is None and closure_handler and handler_node is not None:
         closure = unwrap(handler_node)
         if closure is not None and closure.type in {"anonymous_function", "arrow_function"}:
-            handler = closure_handler
+            # A closure has no declared handler name.  Slim still exposes the
+            # closure's declaration line; Laravel deliberately leaves both
+            # fields absent because its closure is not an addressable handler.
+            handler = None
             handler_line = closure.start_point[0] + 1
     if statement.semanticType == "route":
-        if statement.method == method:
+        normalized_endpoint = normalize_endpoint(endpoint) if endpoint is not None else None
+        if statement.method == method and statement.endpoint == normalized_endpoint:
             changed = False
             if name and statement.name != name:
                 statement.name = name

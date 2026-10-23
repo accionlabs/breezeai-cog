@@ -576,3 +576,12 @@ def test_api_hints_ignore_call_arguments() -> None:
     assert match_api("this.http.post", "post") == "POST"
     assert match_api("axios.get", "get") == "GET"
 
+
+def test_php_classifier_does_not_guess_plain_receivers() -> None:
+    from breezeai_cog.parsers.detection import classify_call
+
+    assert classify_call("builder.where", "where", language="php") is None
+    assert classify_call("this.model.findAll", "findAll", language="php") is None
+    assert classify_call("cache.get", "get", language="php") is None
+    assert classify_call("http.get", "get", language="php") == ("api_call", "GET", None)
+

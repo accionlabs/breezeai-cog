@@ -6,6 +6,7 @@ from tree_sitter import Node
 
 from ...emit import disambiguate, statement_id
 from ...schemas import FileRecord, Statement
+from ...schemas.enums import SemanticType
 from ..base import ParseContext
 from ..php.parser import PhpParser
 from ..php_route_common import (
@@ -19,9 +20,11 @@ from ..php_route_common import (
     join_endpoint,
     method_of,
     receiver_chain_metadata,
+    route_handler,
     route_options,
     string_value,
     strings_in_array,
+    unwrap,
     walk,
 )
 from ..treesitter import node_text, parse_source
@@ -38,13 +41,39 @@ _VERBS = {
 }
 
 _SPECIAL_ROUTES = {
-    "fallback": ("ANY", "fallback"),
-    "view": ("VIEW", "view"),
-    "redirect": ("REDIRECT", "redirect"),
-    "resource": ("RESOURCE", "resource"),
-    "apiresource": ("API_RESOURCE", "api_resource"),
-    "singleton": ("SINGLETON", "singleton"),
-    "apisingleton": ("API_SINGLETON", "api_singleton"),
+    "fallback": "ANY",
+    "view": "GET",
+    "redirect": "GET",
+}
+
+_RESOURCE_ACTIONS = {
+    "resource": {
+        "index": [("GET", "{base}", "index")],
+        "create": [("GET", "{base}/create", "create")],
+        "store": [("POST", "{base}", "store")],
+        "show": [("GET", "{base}/{{id}}", "show")],
+        "edit": [("GET", "{base}/{{id}}/edit", "edit")],
+        "update": [("PUT", "{base}/{{id}}", "update"), ("PATCH", "{base}/{{id}}", "update")],
+        "destroy": [("DELETE", "{base}/{{id}}", "destroy")],
+    },
+    "api_resource": {
+        "index": [("GET", "{base}", "index")],
+        "store": [("POST", "{base}", "store")],
+        "show": [("GET", "{base}/{{id}}", "show")],
+        "update": [("PUT", "{base}/{{id}}", "update"), ("PATCH", "{base}/{{id}}", "update")],
+        "destroy": [("DELETE", "{base}/{{id}}", "destroy")],
+    },
+    "singleton": {
+        "show": [("GET", "{base}", "show")],
+        "edit": [("GET", "{base}/edit", "edit")],
+        "update": [("PUT", "{base}", "update"), ("PATCH", "{base}", "update")],
+        "destroy": [("DELETE", "{base}", "destroy")],
+    },
+    "api_singleton": {
+        "show": [("GET", "{base}", "show")],
+        "update": [("PUT", "{base}", "update"), ("PATCH", "{base}", "update")],
+        "destroy": [("DELETE", "{base}", "destroy")],
+    },
 }
 
 
@@ -101,6 +130,41 @@ def _direct_prefix(call: Node, source: bytes) -> str | None:
     return None
 
 
+def _has_dynamic_prefix(call: Node, source: bytes) -> bool:
+    """Whether a group has a prefix argument/chain that is present but unresolved."""
+    args = args_of(call)
+    if args:
+        first = unwrap(args[0])
+        if first is not None and first.type in {"anonymous_function", "arrow_function"}:
+            first = None
+        if first is None:
+            args = []
+    if args:
+        first = args[0]
+        if string_value(first, source) is None:
+            value = first.named_children[0] if first.named_children else first
+            if value.type != "array_creation_expression":
+                return True
+            for pair in value.named_children:
+                parts = list(pair.named_children)
+                if len(parts) > 1 and node_text(parts[0], source).strip("'\"") == "prefix":
+                    return string_value(parts[-1], source) is None
+    object_node = call.child_by_field_name("object")
+    return object_node is not None and chain_prefix(object_node, source) is None and any(
+        method_of(node, source) == "prefix" for node in walk(object_node)
+    )
+
+
+def _laravel_resource_specs(name: str, controller: str | None, kind: str) -> list[tuple[str, str, str]]:
+    actions = _RESOURCE_ACTIONS[kind]
+    target = controller or name.rsplit("/", 1)[-1].replace("-", " ").title().replace(" ", "") + "Controller"
+    return [
+        (method, endpoint.format(base=name), f"{target}@{action}")
+        for action in actions
+        for method, endpoint, _ in actions[action]
+    ]
+
+
 def detect_laravel_routes(root: Node, source: bytes, path: str, record: FileRecord) -> bool:
     statements = {statement.id: statement for statement in record.statements}
     seen_ids = {statement.id for statement in record.statements}
@@ -108,7 +172,7 @@ def detect_laravel_routes(root: Node, source: bytes, path: str, record: FileReco
 
     def visit(
         node: Node,
-        prefix: str = "",
+        prefix: str | None = "",
         name_prefix: str = "",
         inherited_guards: list[str] | None = None,
     ) -> None:
@@ -129,7 +193,9 @@ def detect_laravel_routes(root: Node, source: bytes, path: str, record: FileReco
                     option_name, option_guards = route_options(args[0], source) if args else (None, [])
                     visit(
                         closure_body(closure),
-                        join_endpoint(prefix, next_prefix or "") if next_prefix else prefix,
+                        None if _has_dynamic_prefix(node, source) else (
+                            join_endpoint(prefix or "", next_prefix or "") if next_prefix else prefix
+                        ),
                         f"{name_prefix}{option_name or ''}{group_name or ''}",
                         list(dict.fromkeys([
                             *(inherited_guards or []), *option_guards, *group_guards,
@@ -138,6 +204,33 @@ def detect_laravel_routes(root: Node, source: bytes, path: str, record: FileReco
                     return
             if _is_route_call(node, source):
                 args = args_of(node)
+                endpoint_node: Node | None = None
+                handler_node: Node | None = None
+                if name in {"resource", "apiresource", "singleton", "apisingleton"}:
+                    endpoint = string_value(args[0], source) if args else None
+                    controller, _ = route_handler(args[1], source) if len(args) > 1 else (None, None)
+                    kind = {
+                        "resource": "resource",
+                        "apiresource": "api_resource",
+                        "singleton": "singleton",
+                        "apisingleton": "api_singleton",
+                    }[name]
+                    if endpoint is not None and controller is not None:
+                        chain_route_prefix = chain_prefix(node.child_by_field_name("object"), source)
+                        effective_prefix = (
+                            join_endpoint(prefix or "", chain_route_prefix)
+                            if chain_route_prefix and prefix is not None else prefix
+                        )
+                        for method, binding, handler in _laravel_resource_specs(endpoint, controller, kind):
+                            found |= enrich_route(
+                                node, source, path, statements, record.statements, seen_ids,
+                                framework="laravel",
+                                endpoint=(join_endpoint(effective_prefix or "", binding)
+                                          if effective_prefix is not None else None),
+                                method=method, handler_node=None, handler_name=handler,
+                                route_kind="route",
+                            )
+                    return
                 if name == "match" and len(args) >= 2:
                     methods = [m.upper() for m in strings_in_array(args[0], source)]
                     endpoint_node, handler_node = args[1], args[2] if len(args) > 2 else None
@@ -147,10 +240,13 @@ def detect_laravel_routes(root: Node, source: bytes, path: str, record: FileReco
                     endpoint_node, handler_node = args[0], args[1] if len(args) > 1 else None
                     route_kind = "route"
                 elif name in _SPECIAL_ROUTES:
-                    method, route_kind = _SPECIAL_ROUTES[name]
+                    method = _SPECIAL_ROUTES[name]
+                    route_kind = "route"
                     methods = [method]
                     endpoint_node = args[0] if args else None
-                    handler_node = args[1] if len(args) > 1 else None
+                    handler_node = None if name in {"view", "redirect"} else (
+                        args[1] if len(args) > 1 else None
+                    )
                     if name == "fallback":
                         handler_node = args[0] if args else None
                 else:
@@ -161,8 +257,8 @@ def detect_laravel_routes(root: Node, source: bytes, path: str, record: FileReco
                 if methods and (endpoint is not None or name == "fallback"):
                     chain_route_prefix = chain_prefix(node.child_by_field_name("object"), source)
                     effective_prefix = (
-                        join_endpoint(prefix, chain_route_prefix)
-                        if chain_route_prefix else prefix
+                        join_endpoint(prefix or "", chain_route_prefix)
+                        if chain_route_prefix and prefix is not None else prefix
                     )
                     for method in methods:
                         route_name, guards = chained_route_metadata(
@@ -176,7 +272,8 @@ def detect_laravel_routes(root: Node, source: bytes, path: str, record: FileReco
                         found |= enrich_route(
                             node, source, path, statements, record.statements, seen_ids,
                             framework="laravel",
-                            endpoint=(join_endpoint(effective_prefix, endpoint) if endpoint is not None else None),
+                            endpoint=(join_endpoint(effective_prefix or "", endpoint)
+                                      if endpoint is not None and effective_prefix is not None else None),
                             method=method,
                             handler_node=handler_node,
                             name=route_name,
@@ -206,7 +303,7 @@ def _event_endpoint(call: Node, source: bytes, listener: bool = False) -> str | 
     return None
 
 
-def _event_kind(call: Node, source: bytes) -> tuple[str, str] | None:
+def _event_kind(call: Node, source: bytes) -> tuple[SemanticType, str] | None:
     method = method_of(call, source)
     if method is None and call.type == "function_call_expression":
         function = call.child_by_field_name("function")
@@ -355,7 +452,7 @@ class LaravelParser(PhpParser):
 
     def parse_file(self, ctx: ParseContext) -> FileRecord:
         root = parse_source("php", ctx.source, ctx.parse_timeout_micros).root_node
-        record = self.extract(root, ctx)
+        record = self.extract(root, ctx, framework="laravel")
         record.framework = "laravel"
         if ctx.capture_statements and not self.is_fixture_file(ctx.path):
             detect_laravel_routes(root, ctx.source, ctx.path, record)

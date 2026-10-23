@@ -306,13 +306,16 @@ def _is_prisma_chain(low: str) -> bool:
 
 
 def match_db(callee: str, method: str, language: str | None = None,
-             typed_db_ids: "frozenset[str] | None" = None) -> str | None:
+             typed_db_ids: "frozenset[str] | None" = None,
+             framework: str | None = None) -> str | None:
     m = method.lower()
     low = callee.lower()
     if m in _PRISMA_VERBS and _is_prisma_chain(low):
         return "prisma"
     if m in _DISTINCTIVE:
         db = _DISTINCTIVE[m]
+        if language == "php" and db == "sequelize" and "sequelize" not in low:
+            return None
         # A receiverless distinctive verb is a local/helper call, not a database access.
         # This is defense-in-depth for callers that do not provide local_names.
         if callee != method and not (
@@ -350,6 +353,8 @@ def match_db(callee: str, method: str, language: str | None = None,
     cache_receivers = _CACHE_RECEIVERS
     if language == "scala":
         cache_receivers = _CACHE_RECEIVERS - {"cache"}
+    elif language == "php":
+        cache_receivers = _CACHE_RECEIVERS - {"cache"}
     if receiver and (receiver in cache_receivers or receiver.endswith("redis")):
         if m in _CACHE_VERBS or m in ("delete", "remove"):
             return "redis"
@@ -380,7 +385,7 @@ def match_db(callee: str, method: str, language: str | None = None,
             return None  # a cache/collection/UI-state/etc. receiver — not data access
         return "orm"
 
-    if language == "php":
+    if language == "php" and framework == "codeigniter":
         ci_builder_methods = {
             "select", "where", "orwhere", "wherein", "wherenotin",
             "like", "orlike", "notlike", "ornotlike",

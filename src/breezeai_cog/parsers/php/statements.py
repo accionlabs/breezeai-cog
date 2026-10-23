@@ -102,6 +102,7 @@ def extract_statements(
     capture: bool,
     limit: int,
     seen_ids: set[str],
+    framework: str | None = None,
 ) -> list[Statement]:
     if not capture or body is None:
         return []
@@ -121,6 +122,7 @@ def extract_statements(
                 name_of=_name_of,
                 call_details=_call_details,
                 language="php",
+                framework=framework,
             )
         )
     return out

@@ -182,7 +182,7 @@ def _route_statement(*, path: str, source_node: Node, source: bytes, parent_id: 
     start, end = line_span(source_node)
     return Statement(
         id=disambiguate(statement_id(path, start, source_node.start_point[1]), seen),
-        parentId=parent_id, nodeType="synthetic", semanticType="route",
+        parentId=parent_id, nodeType=source_node.type, semanticType="route",
         text=node_text(source_node, source), method=method, endpoint=endpoint,
         framework="symfony", name=name, handler=handler.name if handler else None,
         handlerLine=handler.startLine if handler else None, routeKind="route", isRegex=is_regex,
@@ -330,9 +330,10 @@ def detect_symfony_route_builders(root: Node, source: bytes, path: str, record: 
         for method in methods:
             statement = Statement(
                 id=disambiguate(statement_id(path, line, call.start_point[1]), seen), parentId=parent_id,
-                nodeType="synthetic", semanticType="route", text=text, method=method,
+                nodeType=call.type, semanticType="route", text=text, method=method,
                 endpoint=join_endpoint("", endpoint) if endpoint is not None else None,
-                framework="symfony", name=name, handler=controller, handlerLine=line,
+                framework="symfony", name=name, handler=controller,
+                handlerLine=line if controller is not None else None,
                 routeKind="route", isRegex=requirements, startLine=line,
                 endLine=expression.end_point[0] + 1, path=path,
             )

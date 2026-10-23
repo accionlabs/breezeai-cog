@@ -21,6 +21,7 @@ from ..php_route_common import (
     string_value,
     strings_in_array,
     unwrap,
+    walk,
 )
 from ..treesitter import node_text, parse_source
 
@@ -75,12 +76,12 @@ def _route_receiver(call: Node, source: bytes, allowed: set[str]) -> bool:
     return receiver_name in allowed or _typed_slim_receiver(receiver_name, source)
 
 
-def _route_methods(node: Node, source: bytes) -> tuple[list[str | None], Node | None, Node | None, str]:
+def _route_methods(node: Node, source: bytes) -> tuple[list[str], Node | None, Node | None, str]:
     method = method_of(node, source)
     args = args_of(node)
     if method == "map" and len(args) >= 2:
         methods = [value.upper() for value in strings_in_array(args[0], source)]
-        return methods or [None], args[1], args[2] if len(args) > 2 else None, "route"
+        return methods, args[1], args[2] if len(args) > 2 else None, "route"
     if method in _VERBS and args:
         return [_VERBS[method]], args[0], args[1] if len(args) > 1 else None, "route"
     if method == "redirect" and args:
@@ -111,7 +112,7 @@ def detect_slim_routes(root: Node, source: bytes, path: str, record: FileRecord)
 
     def visit(
         node: Node,
-        prefix: str = "",
+        prefix: str | None = "",
         inherited_guards: list[str] | None = None,
         allowed_receivers: set[str] | None = None,
     ) -> None:
@@ -127,6 +128,16 @@ def detect_slim_routes(root: Node, source: bytes, path: str, record: FileRecord)
                     base = string_value(args[0], source) if args else None
                     if base is None:
                         base = chain_prefix(node.child_by_field_name("object"), source)
+                    first = unwrap(args[0]) if args else None
+                    dynamic_base = (
+                        (first is not None and first.type not in {"anonymous_function", "arrow_function"}
+                         and base is None)
+                        or (
+                            (object_node := node.child_by_field_name("object")) is not None
+                            and chain_prefix(object_node, source) is None
+                            and any(method_of(item, source) == "prefix" for item in walk(object_node))
+                        )
+                    )
                     _, group_guards = chained_route_metadata(
                         node,
                         source,
@@ -135,7 +146,9 @@ def detect_slim_routes(root: Node, source: bytes, path: str, record: FileRecord)
                     )
                     visit(
                         closure_body(closure),
-                        join_endpoint(prefix, base or "") if base else prefix,
+                        None if dynamic_base else (
+                            join_endpoint(prefix or "", base or "") if base else prefix
+                        ),
                         list(dict.fromkeys([*guards_in_scope, *group_guards])),
                         receivers | _closure_parameter_names(closure, source),
                     )
@@ -145,7 +158,10 @@ def detect_slim_routes(root: Node, source: bytes, path: str, record: FileRecord)
             if _is_class_reference_endpoint(endpoint_node, source):
                 methods = []
             if methods and _route_receiver(node, source, receivers):
-                route_endpoint = join_endpoint(prefix, endpoint) if endpoint is not None else None
+                route_endpoint = (
+                    join_endpoint(prefix or "", endpoint)
+                    if endpoint is not None and prefix is not None else None
+                )
                 for verb in methods:
                     route_name, guards = chained_route_metadata(
                         node,
@@ -194,7 +210,7 @@ class SlimParser(PhpParser):
 
     def parse_file(self, ctx: ParseContext) -> FileRecord:
         root = parse_source("php", ctx.source, ctx.parse_timeout_micros).root_node
-        record = self.extract(root, ctx)
+        record = self.extract(root, ctx, framework="slim")
         record.framework = "slim"
         if (
             ctx.capture_statements
