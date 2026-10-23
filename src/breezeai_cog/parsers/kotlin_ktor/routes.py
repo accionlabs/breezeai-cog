@@ -149,6 +149,26 @@ def _guard_name(call: Node, source: bytes) -> str:
     return "authenticate"
 
 
+def _requires_auth(call: Node, source: bytes) -> bool:
+    """Whether an ``authenticate(...)`` block certainly rejects an unauthenticated call. Not when
+    it is optional (``optional = true``, ``strategy = AuthenticationStrategy.Optional``) or the
+    option cannot be read (``optional = flag``): anonymous calls may get through."""
+    for suffix in call.named_children:
+        if suffix.type != "call_suffix":
+            continue
+        args = next((c for c in suffix.named_children if c.type == "value_arguments"), None)
+        for arg in args.named_children if args is not None else []:
+            parts = arg.named_children
+            if len(parts) < 2 or parts[0].type != "simple_identifier":
+                continue  # a provider name, positional
+            name, value = node_text(parts[0], source), node_text(parts[-1], source).strip()
+            if name == "optional" and value != "false":
+                return False
+            if name == "strategy" and not value.endswith(("Required", "FirstSuccessful")):
+                return False
+    return True
+
+
 def _callee_name(call: Node, source: bytes) -> str | None:
     callee = call.named_children[0] if call.named_children else None
     if callee is None or callee.type != "simple_identifier":
@@ -165,19 +185,21 @@ def _collect_routes(
     prefix: str | None = "",
     guards: tuple[str, ...] = (),
     consts: dict[str, str | None] | None = None,
+    required: bool = False,
 ) -> list[Emit]:
     """Recursively collect Ktor routes from a subtree. ``guards`` are the enclosing
-    ``authenticate(...)`` blocks, outermost first."""
+    ``authenticate(...)`` blocks, outermost first; ``required``: one of them certainly rejects an
+    unauthenticated call (:func:`_requires_auth`) — only then is ``authRequired`` set."""
     consts = consts if consts is not None else {}
     out: list[Emit] = []
     for child in node.named_children:
         if child.type != "call_expression":
-            out.extend(_collect_routes(child, source, path, parent_id, limit, prefix, guards, consts))
+            out.extend(_collect_routes(child, source, path, parent_id, limit, prefix, guards, consts, required))
             continue
 
         verb = _callee_name(child, source)
         if verb is None:
-            out.extend(_collect_routes(child, source, path, parent_id, limit, prefix, guards, consts))
+            out.extend(_collect_routes(child, source, path, parent_id, limit, prefix, guards, consts, required))
             continue
 
         if verb == "authenticate":
@@ -187,6 +209,7 @@ def _collect_routes(
                 out.extend(_collect_routes(
                     body, source, path, parent_id, limit, prefix,
                     (*guards, _guard_name(child, source)), consts,
+                    required or _requires_auth(child, source),
                 ))
             continue
 
@@ -200,12 +223,12 @@ def _collect_routes(
             body = _lambda_body(child)
             if body is not None:
                 out.extend(
-                    _collect_routes(body, source, path, parent_id, limit, new_prefix, guards, consts)
+                    _collect_routes(body, source, path, parent_id, limit, new_prefix, guards, consts, required)
                 )
             continue
 
         if verb not in _HTTP_VERBS and verb not in _WS_BUILDERS:
-            out.extend(_collect_routes(child, source, path, parent_id, limit, prefix, guards, consts))
+            out.extend(_collect_routes(child, source, path, parent_id, limit, prefix, guards, consts, required))
             continue
 
         method, kind = ("WEBSOCKET", "ws") if verb in _WS_BUILDERS else (verb.upper(), "route")
@@ -234,7 +257,7 @@ def _collect_routes(
             child,
             {"semanticType": "route", "framework": "ktor", "method": method,
              "endpoint": full_endpoint, "routeKind": kind, "handlerLine": handler_line},
-            fill={"guards": list(guards) or None, "authRequired": True if guards else None},
+            fill={"guards": list(guards) or None, "authRequired": True if required else None},
             enrich="same", parent=parent_id, text=text[:limit] if limit else text,
         ))
 
