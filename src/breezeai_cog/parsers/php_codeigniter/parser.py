@@ -14,7 +14,6 @@ from ..php_route_common import (
     args_of,
     closure_argument,
     closure_body,
-    enrich_route,
     group_filters,
     join_endpoint,
     method_of,
