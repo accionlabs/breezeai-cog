@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from tree_sitter import Node
 
 from ...emit import disambiguate, statement_id
-from ...schemas import FileRecord, Function, Statement
+from ...schemas import FileRecord, Function, SemanticType, Statement
 from ..php.index import PhpIndex
 from ..php_route_common import join_endpoint, string_value, strings_in_array, walk
 from ..treesitter import line_span, node_text
@@ -58,10 +58,10 @@ def _args(attr: Node, source: bytes) -> list[tuple[str | None, Node]]:
     return result
 
 
-def _string_map(node: Node | None, source: bytes) -> dict[str, str] | None:
+def _string_map(node: Node | None, source: bytes) -> dict[str | None, str] | None:
     if node is None or node.type != "array_creation_expression":
         return None
-    values: dict[str, str] = {}
+    values: dict[str | None, str] = {}
     for element in node.named_children:
         key = element.child_by_field_name("key")
         value = element.child_by_field_name("value")
@@ -167,12 +167,12 @@ def _path_combinations(prefix: dict[str | None, str] | None,
     if prefix is None or suffix is None:
         return [(None, None)]
     locales = set(prefix) | set(suffix)
-    if locales == {None}:
+    if locales <= {None}:
         return [(None, join_endpoint(prefix.get(None, ""), suffix.get(None, "")))]
-    locales.discard(None)
+    named_locales = sorted(locale for locale in locales if locale is not None)
     return [(locale, join_endpoint(prefix.get(locale, prefix.get(None, "")),
                                    suffix.get(locale, suffix.get(None, ""))))
-            for locale in sorted(locales)]
+            for locale in named_locales]
 
 
 def _route_statement(*, path: str, source_node: Node, source: bytes, parent_id: str, seen: set[str],
@@ -236,9 +236,15 @@ def detect_symfony_routes(root: Node, source: bytes, path: str, record: FileReco
         else:
             continue
 
-        for attr, method_spec in zip(attrs or [None] * len(method_specs), method_specs):
-            source_node = (attr.parent if attr is not None and attr.parent is not None
-                           and attr.parent.type == "attribute_group" else attr) or fn_node
+        attrs_for_specs: list[Node | None] = list(attrs)
+        if not attrs_for_specs:
+            attrs_for_specs = [None] * len(method_specs)
+        for route_attr, method_spec in zip(attrs_for_specs, method_specs):
+            source_node = fn_node
+            if route_attr is not None:
+                route_parent = route_attr.parent
+                source_node = (route_parent if route_parent is not None
+                               and route_parent.type == "attribute_group" else route_attr)
             for prefix in prefixes:
                 methods = (prefix.methods if attrs and method_spec.methods == ("ANY",)
                            and prefix.methods != ("ANY",) else method_spec.methods)
@@ -337,7 +343,7 @@ def detect_symfony_route_builders(root: Node, source: bytes, path: str, record: 
 
 
 def _event_statement(call: Node, source: bytes, path: str, record: FileRecord, seen: set[str],
-                     semantic: str, endpoint: str | None) -> Statement:
+                     semantic: SemanticType, endpoint: str | None) -> Statement:
     line, column = call.start_point[0] + 1, call.start_point[1]
     parent_id = next((fn.id for fn in record.functions if fn.startLine <= line <= fn.endLine), record.id)
     statement = Statement(
@@ -376,6 +382,7 @@ def detect_symfony_events(root: Node, source: bytes, path: str, record: FileReco
             "bus", "messagebus", "eventbus",
         })
         if method == "dispatch":
+            semantic: SemanticType
             if is_messenger:
                 semantic, endpoint = "eventbus_send", None
             elif is_dispatcher:
