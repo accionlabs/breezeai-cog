@@ -316,12 +316,14 @@ def _event_kind(call: Node, source: bytes) -> tuple[SemanticType, str] | None:
         b"illuminate\\contracts\\events\\dispatcher",
         b"illuminate\\events\\dispatcher",
         b"illuminate\\support\\facades\\event",
+        b"illuminate\\support\\facades\\" if b"event::" in source_lower else b"__no_event_facade__",
         b"namespace illuminate\\events",
     ))
     bus_marker = any(marker in source_lower for marker in (
         b"illuminate\\contracts\\bus\\dispatcher",
         b"illuminate\\bus\\dispatcher",
         b"illuminate\\support\\facades\\bus",
+        b"illuminate\\support\\facades\\" if b"bus::" in source_lower else b"__no_bus_facade__",
         b"illuminate\\foundation\\bus",
         b"namespace illuminate\\bus",
     ))
@@ -331,22 +333,22 @@ def _event_kind(call: Node, source: bytes) -> tuple[SemanticType, str] | None:
             scoped in {"this", "self"} and b"namespace illuminate\\events" in source_lower
         )) and event_marker
     ):
-        return "eventbus_consumer", method
+        return "eventbus_consumer", "CONSUMER"
     if method in {"dispatch", "until", "dispatchafterresponse", "dispatchsync", "dispatchnow", "dispatchtoqueue"}:
         if (
             scoped in {"event", "events", "eventdispatcher"}
             or (scoped in {"this", "self"} and b"namespace illuminate\\events" in source_lower)
         ) and event_marker:
-            return "eventbus_publish", method
+            return "eventbus_publish", "PUBLISH"
         if (
             scoped in {"bus", "dispatcher"}
             or (scoped in {"this", "self"} and b"namespace illuminate\\bus" in source_lower)
         ) and bus_marker:
-            return "eventbus_send", method
+            return "eventbus_send", "MESSAGE"
     if call.type == "function_call_expression" and method == "dispatch" and bus_marker:
-        return "eventbus_send", method
+        return "eventbus_send", "MESSAGE"
     if call.type == "function_call_expression" and method == "event" and event_marker:
-        return "eventbus_publish", method
+        return "eventbus_publish", "PUBLISH"
     return None
 
 
@@ -402,40 +404,6 @@ def _clear_semantic(statement: Statement) -> None:
     statement.dataAccessHint = None
 
 
-def _remove_laravel_false_positives(record: FileRecord, source: bytes) -> None:
-    """Undo generic detector guesses that are known to be wrong for Laravel code."""
-    source_lower = source.lower()
-    for statement in record.statements:
-        text = statement.text.lower()
-        if statement.semanticType == "api_call":
-            http_context = any(marker in text for marker in (
-                "http", "guzzle", "curl", "client", "request", "rest",
-            ))
-            if ("->fetch(" in text or "?->fetch(" in text) and not http_context:
-                _clear_semantic(statement)
-            elif statement.method == "GET" and any(marker in text for marker in (
-                "session", "output", "cache", "container", "flashbag", "store",
-            )) and not http_context:
-                _clear_semantic(statement)
-        if statement.semanticType != "db_method_call":
-            continue
-        hint = (statement.dataAccessHint or "").lower()
-        if hint == "codeigniter-builder":
-            _clear_semantic(statement)
-        elif hint in {"typeorm", "couchdb", "mongodb", "prisma", "sqlalchemy"} and hint not in source_lower.decode(errors="ignore"):
-            _clear_semantic(statement)
-        elif hint == "dynamodb" and "dynamo" not in text and "dynamo" not in source_lower.decode(errors="ignore"):
-            _clear_semantic(statement)
-        elif hint == "redis" and "redis" not in text and any(marker in text for marker in (
-            "cache", "session", "container", "store",
-        )):
-            _clear_semantic(statement)
-        elif hint == "orm" and any(marker in text for marker in (
-            "session", "cache", "container", "config", "output",
-        )):
-            _clear_semantic(statement)
-
-
 class LaravelParser(PhpParser):
     name = "php-laravel"
     priority = 10
@@ -445,6 +413,8 @@ class LaravelParser(PhpParser):
         lower = source.lower()
         return (
             b"Illuminate\\Support\\Facades\\Route" in source
+            or b"Illuminate\\Support\\Facades\\Event" in source
+            or b"Illuminate\\Support\\Facades\\Bus" in source
             or (b"Illuminate\\Routing\\" in source and b"Route::" in source)
             or b"namespace illuminate\\" in lower
             or b"use illuminate\\" in lower
@@ -452,10 +422,9 @@ class LaravelParser(PhpParser):
 
     def parse_file(self, ctx: ParseContext) -> FileRecord:
         root = parse_source("php", ctx.source, ctx.parse_timeout_micros).root_node
-        record = self.extract(root, ctx, framework="laravel")
+        record = self.extract(root, ctx)
         record.framework = "laravel"
         if ctx.capture_statements and not self.is_fixture_file(ctx.path):
             detect_laravel_routes(root, ctx.source, ctx.path, record)
             detect_laravel_events(root, ctx.source, ctx.path, record)
-            _remove_laravel_false_positives(record, ctx.source)
         return record
