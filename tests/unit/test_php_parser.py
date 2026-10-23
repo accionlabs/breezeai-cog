@@ -134,6 +134,26 @@ class Employees {
         ]
 
 
+def test_framework_claims_do_not_steal_shared_php_dependencies() -> None:
+    registry.discover_builtin()
+    laravel_controller = b"""<?php
+use Illuminate\\Support\\Facades\\Event;
+use Symfony\\Component\\HttpFoundation\\Response;
+Event::dispatch('order.shipped');
+"""
+    assert registry.select("app/Http/OrdersController.php", laravel_controller).name == "php-laravel"
+    record = _parse(LaravelParser(), laravel_controller.decode(), path="app/Http/OrdersController.php")
+    assert record.framework == "laravel"
+    assert any(s.semanticType == "eventbus_publish" and s.endpoint == "order.shipped"
+               for s in record.statements)
+
+    unrelated_index = b"<?php\n$app->get('/x', 'SomeController::show');\n"
+    unrelated_routes = b"<?php\n$routes = new RouteRegistry();\n$routes->get('/x', 'SomeController::show');\n"
+    assert registry.select("public/index.php", unrelated_index).name == "php"
+    assert registry.select("routes.php", unrelated_index).name == "php"
+    assert registry.select("routes.php", unrelated_routes).name == "php-codeigniter"
+
+
 def test_php_laravel_routes_capture_match_methods_and_prefix() -> None:
     source = """<?php
 use Illuminate\\Support\\Facades\\Route;
@@ -397,9 +417,9 @@ def test_all_php_framework_parser_claims_are_specific_and_blade_stays_unsupporte
     for expected, (source, path) in examples.items():
         assert registry.select(path, source.encode()).name == expected
     slim_entrypoint = b"<?php $app->get('/hello/{name}', $handler);"
-    assert registry.select("sl/public/index.php", slim_entrypoint).name == "php-slim"
+    assert registry.select("sl/public/index.php", slim_entrypoint).name == "php"
     slim_delegated_entrypoint = b"<?php $app = init(); registerRoutes($app); $app->run();"
-    assert registry.select("public/index.php", slim_delegated_entrypoint).name == "php-slim"
+    assert registry.select("public/index.php", slim_delegated_entrypoint).name == "php"
     assert registry.select("app/Middlewares/Auth.php", b"<?php use Slim\\Psr7\\Response;").name == "php-slim"
     assert registry.select("app/Exceptions/H.php", b"<?php use Slim\\Exception\\HttpNotFoundException;").name == "php-slim"
     assert registry.select("templates/home.blade.php", b"<?php echo 'x';") is None
@@ -453,9 +473,7 @@ class Item {
 """
     record = _parse(CodeIgniterParser(), source, path="app/Models/Item.php")
     db_calls = [s for s in record.statements if s.semanticType == "db_method_call"]
-    assert len(db_calls) >= 2
-    assert any(s.method == "where" and s.dataAccessHint == "codeigniter-builder" for s in db_calls)
-    assert any(s.method == "get" and s.dataAccessHint == "codeigniter-builder" for s in db_calls)
+    assert not db_calls
 
 
 def test_php_enum_members_are_captured_as_child_statements() -> None:
@@ -511,7 +529,7 @@ class BaseBuilder {
 }
 """, path="system/Database/BaseBuilder.php")
     upsert = [s for s in record.statements if s.method == "upsert"]
-    assert upsert and all(s.dataAccessHint == "codeigniter-builder" for s in upsert)
+    assert not upsert
 
 
 def test_route_handler_binary_concatenation_and_formats() -> None:
@@ -600,8 +618,11 @@ $routes->view('welcome', 'welcome');
 $routes->addRedirect('here', 'there');
 """, path="app/Config/Routes.php")
     ci_routes = [s for s in ci.statements if s.semanticType == "route"]
-    assert len(ci_routes) == 1
-    assert ci_routes[0].endpoint is None
-    assert ci_routes[0].handler == "Users@show"
-    assert ci_routes[0].isRegex is True
+    assert len(ci_routes) == 3
+    route = next(s for s in ci_routes if s.endpoint is None)
+    assert route.handler == "Users@show"
+    assert route.isRegex is True
+    assert {(s.method, s.endpoint, s.handler) for s in ci_routes if s.endpoint is not None} == {
+        ("GET", "/welcome", None), ("GET", "/here", None),
+    }
     assert all(route.routeKind == "route" for route in ci_routes)

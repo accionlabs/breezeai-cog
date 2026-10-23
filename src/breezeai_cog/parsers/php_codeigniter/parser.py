@@ -62,7 +62,9 @@ def _route_methods(
     if method == "match" and len(args) >= 2:
         return [item.upper() for item in strings_in_array(args[0], source)], 1, 2 if len(args) > 2 else None
     if method == "addredirect":
-        return [], 0, None
+        return ["GET"], 0, None
+    if method == "view":
+        return ["GET"], 0, None
     if method in _VERBS:
         return [_VERBS[method]], 0, 1 if len(args) > 1 else None
     return [], 0, None
@@ -243,27 +245,6 @@ def _detect_codeigniter_events(root: Node, source: bytes, path: str, record: Fil
     return found
 
 
-def _repair_codeigniter_db_hints(record: FileRecord, source: bytes) -> None:
-    """Correct shared PHP call heuristics when the surrounding code proves CI semantics."""
-    source_text = source.decode("utf-8", "replace")
-    is_ci_model = bool(re.search(
-        r"(?:namespace\s+CodeIgniter\\|use\s+CodeIgniter\\Model|extends\s+(?:BaseModel|Model)\b|class\s+BaseModel\b)",
-        source_text,
-    ))
-    is_ci_builder = bool(re.search(
-        r"(?:namespace\s+CodeIgniter\\Database|use\s+CodeIgniter\\Database|class\s+BaseBuilder\b)",
-        source_text,
-    ))
-    for statement in record.statements:
-        if statement.semanticType != "db_method_call":
-            continue
-        method = (statement.method or "").lower()
-        if method == "findall" and statement.dataAccessHint == "sequelize" and is_ci_model:
-            statement.dataAccessHint = "codeigniter-builder"
-        elif method == "upsert" and statement.dataAccessHint == "typeorm" and is_ci_builder:
-            statement.dataAccessHint = "codeigniter-builder"
-
-
 def _walk(node: Node) -> Iterator[Node]:
     yield node
     for child in node.named_children:
@@ -345,7 +326,10 @@ def detect_codeigniter_routes(root: Node, source: bytes, path: str, record: File
                     found |= _enrich_route(
                         node, source, path, statements, record.statements, seen_ids,
                         endpoint=(join_endpoint(prefix, route_endpoint) if prefix is not None else None), method=verb,
-                        handler_node=args[handler_index] if handler_index is not None else None,
+                        handler_node=(
+                            args[handler_index] if handler_index is not None
+                            and method not in {"view", "addredirect"} else None
+                        ),
                         name=route_name,
                         guards=list(dict.fromkeys([*(guards or []), *route_guards])),
                         is_regex=any(token in route_endpoint for token in _CI_REGEX_TOKENS),
@@ -366,17 +350,14 @@ class CodeIgniterParser(PhpParser):
     def claims(self, path: str, source: bytes) -> bool:
         if _CODEIGNITER_DECLARATION.search(source):
             return True
-        normalized_path = path.replace("\\", "/").encode()
-        return bool(
-            _CODEIGNITER_DOC.search(normalized_path)
-            or (_CODEIGNITER_ROUTE_CALL.search(source) and _ROUTE_FILE.search(normalized_path))
-        )
+        # A filename is not framework evidence.  Route configuration without an
+        # import is still recognizable from CodeIgniter's `$routes->...` syntax.
+        return bool(_CODEIGNITER_ROUTE_CALL.search(source) and b"$routes" in source)
 
     def parse_file(self, ctx: ParseContext) -> FileRecord:
         root = parse_source("php", ctx.source, ctx.parse_timeout_micros).root_node
-        record = self.extract(root, ctx, framework="codeigniter")
+        record = self.extract(root, ctx)
         record.framework = "codeigniter"
-        _repair_codeigniter_db_hints(record, ctx.source)
         if ctx.capture_statements and not self.is_fixture_file(ctx.path):
             detect_codeigniter_routes(root, ctx.source, ctx.path, record)
             _detect_codeigniter_events(root, ctx.source, ctx.path, record)
