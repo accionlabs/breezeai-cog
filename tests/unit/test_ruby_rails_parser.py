@@ -81,3 +81,137 @@ def test_rails_parser_claims_only_rails_sources(tmp_path: Path) -> None:
     assert not parser.claims("lib/chart.rb", b"chart.axes.routes.draw do\nend")
     assert parser.priority > 0
     assert parser.frameworks == ["rails"]
+
+
+
+def test_rails_routes_skip_spec_files_but_not_config_routes(tmp_path: Path) -> None:
+    source = b'Rails.application.routes.draw do\n  get "/x", to: "a#b"\nend\n'
+    spec = RailsParser().parse_file(_context(tmp_path, "spec/routing_spec.rb", source))
+    cfg = RailsParser().parse_file(_context(tmp_path, "config/routes.rb", source))
+    assert not any(s.semanticType == "route" for s in spec.statements)
+    assert [s.endpoint for s in cfg.statements if s.semanticType == "route"] == ["/x"]
+
+
+def _rails_routes(tmp_path: Path, body: str):
+    source = ('require "rails"\nRails.application.routes.draw do\n' + body + "end\n").encode()
+    record = RailsParser().parse_file(_context(tmp_path, "config/routes.rb", source))
+    return [(s.method, s.endpoint, s.handler) for s in record.statements if s.semanticType == "route"]
+
+
+def test_rails_namespace_and_scope_prefix_routes(tmp_path: Path) -> None:
+    body = '''  get "/top", to: "a#b"
+  namespace :admin do
+    get "dashboard", to: "admin#dash"
+    post "/users", to: "users#create"
+  end
+  scope "/api" do
+    get "scoped", to: "s#t"
+  end
+  scope "v1" do
+    get "/x", to: "x#y"
+  end
+  get "after", to: "a#c"
+'''
+    assert _rails_routes(tmp_path, body) == [
+        ("GET", "/top", "a#b"),
+        ("GET", "/admin/dashboard", "admin#dash"),
+        ("POST", "/admin/users", "users#create"),
+        ("GET", "/api/scoped", "s#t"),
+        ("GET", "/v1/x", "x#y"),
+        ("GET", "after", "a#c"),
+    ]
+
+
+def test_rails_nested_namespace_and_scope_compose(tmp_path: Path) -> None:
+    body = '''  namespace :admin do
+    namespace :v2 do
+      get "deep", to: "d#e"
+    end
+    scope "/reports" do
+      namespace "monthly" do
+        get "/", to: "r#m"
+      end
+    end
+    get "sibling", to: "s#t"
+  end
+  scope module: "web" do
+    get "modonly", to: "w#x"
+  end
+  scope path: "/p" do
+    get "viapath", to: "p#q"
+  end
+  namespace :admin, path: "control" do
+    get "x", to: "c#x"
+  end
+  constraints(subdomain: "api") do
+    namespace :t do
+      get "wrapped", to: "t#w"
+    end
+  end
+'''
+    assert _rails_routes(tmp_path, body) == [
+        ("GET", "/admin/v2/deep", "d#e"),
+        ("GET", "/admin/reports/monthly", "r#m"),
+        ("GET", "/admin/sibling", "s#t"),
+        ("GET", "modonly", "w#x"),
+        ("GET", "/p/viapath", "p#q"),
+        ("GET", "/control/x", "c#x"),
+        ("GET", "/t/wrapped", "t#w"),
+    ]
+
+
+def test_rails_dynamic_or_unsupported_prefix_leaves_endpoint_null(tmp_path: Path) -> None:
+    body = '''  namespace "ns#{i}" do
+    get "a", to: "a#a"
+  end
+  namespace prefix_var do
+    get "b", to: "b#b"
+  end
+  scope PREFIX do
+    get "c", to: "c#c"
+  end
+  scope :sym do
+    get "d", to: "d#d"
+  end
+  scope path: dynamic do
+    get "e", to: "e#e"
+  end
+  resources :users do
+    get "f", to: "f#f"
+  end
+  namespace :admin do
+    resources :things do
+      member { get "g", to: "g#g" }
+    end
+    get "ok", to: "o#k"
+  end
+'''
+    assert _rails_routes(tmp_path, body) == [
+        ("GET", None, "a#a"),
+        ("GET", None, "b#b"),
+        ("GET", None, "c#c"),
+        ("GET", None, "d#d"),
+        ("GET", None, "e#e"),
+        ("GET", None, "f#f"),
+        ("GET", None, "g#g"),
+        ("GET", "/admin/ok", "o#k"),
+    ]
+
+
+def test_rails_interpolated_paths_are_null_and_static_routes_remain_correct(
+    tmp_path: Path,
+) -> None:
+    body = '''  get "/outside/#{id}", to: "items#show"
+  namespace :admin do
+    get "/dynamic/#{id}", to: "admin#show"
+    get "/static", to: "admin#index"
+    get '/literal/#{id}', to: 'admin#literal'
+  end
+'''
+
+    assert _rails_routes(tmp_path, body) == [
+        ("GET", None, "items#show"),
+        ("GET", None, "admin#show"),
+        ("GET", "/admin/static", "admin#index"),
+        ("GET", "/admin/literal/#{id}", "admin#literal"),
+    ]

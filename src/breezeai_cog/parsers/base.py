@@ -14,6 +14,8 @@ from importlib import resources
 from pathlib import Path
 from typing import Any, Protocol, Sequence, runtime_checkable
 
+from tree_sitter import Node
+
 from ..schemas import SCHEMA_VERSION, FileRecord
 
 
@@ -57,6 +59,7 @@ class ParseContext:
     statement_text_limit: int = 8000  # max captured code statement text/body length
     parse_timeout_micros: int = 0  # cross-platform tree-sitter timeout (0 = none)
     resolution_index: Any | None = None  # result of the language's build_index, or None
+    parsed_root: Node | None = None  # pre-parsed tree root, when selection created one
 
 
 @runtime_checkable
@@ -69,6 +72,14 @@ class LanguageParser(Protocol):
     schema_version: str
     statement_types: list[str]
     frameworks: list[str]
+
+    def claims(
+        self,
+        path: str,
+        source: bytes,
+        parse_timeout_micros: int = 0,
+        parsed_root: Node | None = None,
+    ) -> bool: ...
 
     def parse_file(self, ctx: ParseContext) -> FileRecord: ...
 
@@ -102,10 +113,18 @@ class BaseParser:
         p = Path(path)
         return p.suffix in self.extensions or p.name in self.extensions
 
-    def claims(self, path: str, source: bytes) -> bool:
+    def claims(
+        self,
+        path: str,
+        source: bytes,
+        parse_timeout_micros: int = 0,
+        parsed_root: Node | None = None,
+    ) -> bool:
         """Whether this parser should handle ``path``. The base language parser claims
         everything of its extension (fallback); framework parsers override this to sniff
-        their framework's signature in ``source`` (e.g. ``b"@nestjs/" in source``)."""
+        their framework's signature in ``source`` (e.g. ``b"@nestjs/" in source``). The
+        registry passes ``parse_timeout_micros`` to every claim and may provide an already
+        parsed tree root."""
         return True
 
     def build_index(

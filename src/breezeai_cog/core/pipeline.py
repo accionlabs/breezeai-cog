@@ -29,9 +29,9 @@ log = get_logger("breezeai_cog.pipeline")
 detail_log = get_logger(DETAIL_LOGGER)
 
 
-def _classifier(languages: set[str] | None) -> Callable[[str], str | None]:
-    def classify(path: str) -> str | None:
-        base = base_parser_for(path)  # the language parser (extension allow-list + label)
+def _classifier(languages: set[str] | None) -> Callable[..., str | None]:
+    def classify(path: str, source: bytes | None = None) -> str | None:
+        base = base_parser_for(path, source)  # path match first; source is fallback
         if base is None:
             return None
         if languages and base.name not in languages:
@@ -100,10 +100,12 @@ def _scan_entries(
         if debug_on:  # gated so structlog never renders below DEBUG
             log.debug("scan.file.skipped", path=path, reason=reason, is_dir=is_dir)
 
+    classify = _classifier(languages)
     for entry in scan(
-        repo_root, _classifier(languages),
+        repo_root, classify,
         engine=engine, max_file_size=settings.max_file_size,
         skip_rule=skip_rule, on_skip=on_skip,
+        source_classifier=lambda path, source: classify(path, source),
     ):
         # Per-language layer-2 filter, applied post-scan and scoped to the file's
         # own classified language — so e.g. C#'s NuGet ``packages/`` never prunes a
@@ -127,7 +129,7 @@ def _build_indexes(
     bases: dict[str, object] = {}
     files: dict[str, list[Path]] = {}
     for entry in entries:
-        base = base_parser_for(entry.path)  # index is per base language, keyed by its name
+        base = base_parser_for(entry.path, entry.source_prefix)
         if base is None:
             continue
         bases[base.name] = base
@@ -260,9 +262,15 @@ def _assemble(
         sink.write(record)
         total_files += 1
         total_functions += len(record.functions)
-        total_classes += len(record.classes)
+        file_classes = (
+            sum(cls.type != "module" for cls in record.classes)
+            if language == "ruby"
+            else len(record.classes)
+        )
+        total_classes += file_classes
         total_statements += len(record.statements)
-        total_loc += record.loc
+        if record.type != "config":
+            total_loc += record.loc
         if record.type == "config":
             config_files += 1
             cfg.add(record.metadata or {})
@@ -273,7 +281,7 @@ def _assemble(
         if debug_on:  # gated: no structlog cost unless --verbose
             log.debug(
                 "parse.file.done", path=record.path, language=language,
-                functions=len(record.functions), classes=len(record.classes),
+                functions=len(record.functions), classes=file_classes,
                 statements=len(record.statements),
             )
 

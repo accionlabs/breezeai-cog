@@ -128,7 +128,7 @@ flowchart TD
   B --> C["2 · Build indexes<br/>once per language, optional"]
   C --> D["3 · Parse pool (parallel)"]
   subgraph D3 [" for each file, in a worker process "]
-    D1[read file] --> D2["choose ONE parser<br/>claims + priority"] --> D4["parse once<br/>(tree-sitter)"] --> D5["extract<br/>classes · functions · statements"] --> D6["framework / additive<br/>detection"] --> D7[prune edges to<br/>skipped templates]
+    D1[read file] --> D2["choose ONE parser<br/>claims + priority"] --> D4["parse once<br/>(tree-sitter)"] --> D5["extract<br/>classes · functions · statements"] --> D6["framework / additive<br/>detection"] --> D8["link handlers<br/>(handlerPath / handlerLine)"] --> D7[prune edges to<br/>skipped templates]
   end
   D --> D3
   D3 --> E["4 · Assemble<br/>split oversized statements,<br/>accumulate totals"]
@@ -200,6 +200,8 @@ Some facts can't be known from one file. For example, which file defines
 `com.acme.OrderService`? A language parser can provide `build_index`, which runs **once, before
 parsing**, and returns data that every worker receives. Today it is used for things like Java
 fully-qualified names and constants, TypeScript path aliases, and C#/VB class inheritance.
+Additive detectors can add their own facts to it by registering them (`register_fact`,
+[§6](#6-the-parser-model)), so framework rules never have to live in the language's index code.
 
 > **Decision —** cross-file data is built once in a separate pre-pass, not shared between workers while parsing.
 > **Why:** workers then share no mutable state, so files can be parsed in any order, in
@@ -232,8 +234,12 @@ flowchart TD
 Rules:
 - The language parser has priority 0 and claims everything, so every file has an owner.
 - A framework parser claims a file with a **cheap content check** (a substring search).
-- If a framework is built on another one, it gets a **higher** priority. NestJS (20) is built
-  on Express (10), so a NestJS controller that also imports Express goes to NestJS.
+- If a framework is built on another one, it gets a **higher** priority, so the derived
+  framework wins a file both claim.
+- A framework that runs underneath others (Express, Fastify) is an
+  [additive detector](#6-the-parser-model), not a parser, so it never competes for a file: a
+  NestJS controller that also calls `app.get(...)` is owned by NestJS, and the `express`
+  detector still adds the route.
 
 > **Decision —** one parser per file; no combining of parsers.
 > **Why:** each file is parsed once, and there is no question of merging two parsers'
@@ -284,6 +290,14 @@ process pool. Results are streamed back in completion order.
 > must be picklable. The server's small `/api/analyze` requests therefore run in-process,
 > with no pool.
 
+> **Decision —** the indexes reach the workers through a temp file, not the pool's start-up
+> arguments.
+> **Why:** start-up arguments go through a pipe; once they outgrow its buffer (~64 KB) the
+> workers start one after another instead of together. The main process writes the indexes once
+> (`core/executor.py::_worker_options`) and each worker loads them at start. **Cost:** a private
+> temp directory (owner-only) for the length of the run; if it can't be written, the indexes go
+> through the pipe — slower to start, same output.
+
 > **Decision —** each file is isolated.
 > **Why:** one bad file must not abort a repository. A parser exception or timeout is logged
 > as `parse.file.failed` and the run continues. **Cost:** the failure is easy to miss.
@@ -291,10 +305,13 @@ process pool. Results are streamed back in completion order.
 
 ### 4.6 Assembly and output
 
-After parsing, every record passes through one place (`pipeline._assemble`) before it is written:
+In the worker, right after parsing, **template edges are pruned**
+(`core/executor.py::_prune_template_edges`): if an import or call points at a skipped template
+file, the link is removed (`calls[].path` becomes empty) so the graph has no edge to a missing
+node.
 
-- **Template edges are pruned.** If an import or call points at a skipped template file, the
-  link is removed (`calls[].path` becomes empty) so the graph has no edge to a missing node.
+Then every record passes through one place (`pipeline._assemble`) before it is written:
+
 - **Oversized statements are split.** A statement whose text is longer than the limit is
   split into numbered parts (`…#part1of3`) instead of being truncated, so nothing is lost. Only
   the first part keeps the `semanticType`, so one route never becomes three routes.
@@ -398,8 +415,8 @@ when adding support for something new.
 | You are adding… | Build a… | Owns the file? | Example |
 |---|---|---|---|
 | A new programming language | **Language parser** | Yes, as the fallback for its extensions | `parsers/java/` |
-| A framework that defines how requests reach the code (routes, handlers) | **Framework parser** | Yes, when it claims the file | `parsers/java_vertx/` |
-| A library used inside files owned by other frameworks (ORM, HTTP client, messaging SDK) | **Additive detector** | No, it runs inside the owning parser | `parsers/detection/` (classifiers), `parsers/additive.py` (registry), `parsers/typescript/aws_events.py` |
+| A framework that defines how requests reach the code (routes, handlers) and has a file-level signature no other framework shares | **Framework parser** | Yes, when it claims the file | `parsers/java_vertx/`, `parsers/typescript_nestjs/` |
+| A library used inside files owned by other frameworks (ORM, HTTP client, messaging SDK), or a route, job or consumer style that can appear in files other frameworks own (Express, Fastify, Celery, Quartz) | **Additive detector** | No, it runs inside the owning parser | `parsers/detection/` (classifiers), `parsers/additive.py` (registry), `parsers/typescript/aws_events.py` |
 
 ```mermaid
 classDiagram
@@ -408,6 +425,8 @@ classDiagram
     claims(path, source) bool
     build_index(repo_root, files, jobs)
     parse_file(ctx) FileRecord
+    link_handlers(record, ctx)
+    handler_locator(ctx)
   }
   class JavaParser {
     extract(root, ctx) FileRecord
@@ -451,6 +470,33 @@ classDiagram
 > `tests/unit/test_additive.py` list it per language in run order. Run order is part of the
 > output (new statement ids are disambiguated against the ones already on the record), so
 > `order` is explicit and unique per language, and a reorder is a reviewed change.
+
+> **Decision —** a detector that needs a fact from another file registers a named **fact**
+> (`FactSpec`: `collect` / `resolve`, named `framework.concern`), which the language's `build_index`
+> builds; the detector reads it with `index_fact`.
+> **Why:** a fact like "`Program.cs` registers `BookQueries` as a GraphQL root" is declared in one
+> file and needed in another. A registered fact keeps it in the framework's own module and in the
+> same registry as every other add-on, instead of a framework field on the language index or a new
+> parser-selection hook. **Cost:** a language must call `collect_additive` / `resolve_additive`
+> from its `build_index` to offer it (`INDEX_HOOKED_LANGUAGES`: C#, GraphQL, Java, Python, Ruby, Scala, TypeScript), and a detector that
+> emits for files with no marker cannot use a byte guard. Details:
+> [cross-file resolution §8](architecture/cross-file-resolution.md#a-framework-fact-from-another-file-a-registered-fact).
+
+> **Decision —** a detector returns what it found (`Detection` of `Emit`s); one applier
+> (`parsers/emits.py` `apply`) writes it onto the record, and one validator (`parsers/contract.py`)
+> checks every entry point against the [entry-point contract](architecture/entry-points.md).
+> **Why:** each detector used to edit `record.statements` itself, with its own rule for "enrich the
+> statement already there, or append one", its own id disambiguation and its own parent lookup;
+> most output bugs were one of those done differently in one place. With one applier the rules are
+> written once (enrich only an eligible statement, once per run; ids disambiguated in emit order;
+> parent = smallest enclosing function). The validator turns the contract into a check: a wrong
+> value (unknown `method`, missing `routeKind`, a `${…}` address, two records for one binding)
+> fails the role tests; a missing handler is counted as a gap, because an honest empty value is
+> allowed. **Cost:** a detector can no longer read back what it wrote earlier in the same run; the
+> validator runs only in tests, golden comparisons and under `--verbose`, never on normal output.
+> Every detector and framework parser writes through `apply`; the framework parsers that read text
+> rather than a syntax tree and build a record of their own (Play `conf/routes`, the `.svc` /
+> `.asmx` ServiceHost directive, Web Forms markup) build it directly.
 
 > **Decision —** API, database and query detection is shared across languages (`parsers/detection/`).
 > **Why:** "is `axios.get` an HTTP call?" has the same answer everywhere; one table, improved
@@ -496,22 +542,37 @@ the file:
   │ ADDITIVE DETECTORS   base extract() ends with run_additive(<language>, …)        │
   │   registry: parsers/additive.py; each detector registers itself in its own       │
   │   module and is found by discovery; no parser edit to add one                    │
-  │   runner: capture gate · skip_fixtures · optional byte guard · run by `order`    │
+  │   Gate: capture · skip_fixtures · optional byte guard · run by `order`;          │
+  │   a `detect` detector returns Emits, written by `apply` (parsers/emits.py)       │
   │                                                                                  │
   │  typescript    order  detector         code in                    [skips tests]  │
   │                  10   express          typescript_express/routes.py      ✔       │
+  │                  15   fastify          typescript_fastify/routes.py      ✔       │
   │                  20   aws-events       typescript/aws_events.py                  │
   │                  30   sdk-calls        detection/sdk_calls.py                    │
   │                  40   graphql-client   typescript_graphql/routes.py      ✔       │
+  │                  45   graphql-resol…   typescript_graphql/…modules.py    ✔       │
   │                  50   vue-routes       typescript_vue/routes.py          ✔       │
+  │                  60   nextjs-pages     typescript_nextjs/pages.py        ✔       │
+  │                  70   vue-navigation   typescript_vue/navigation.py      ✔       │
+  │                  72   angular-navi…    typescript_angular/navigation.py  ✔       │
+  │                  74   react-navigation typescript_react/navigation.py    ✔       │
   │                                                                                  │
   │  csharp          10   lambda-handlers  csharp/lambda_events.py           ✔       │
   │                  20   lucene           csharp/lucene.py                          │
+  │                  30   hotchocolate-…   csharp_hotchocolate/…roots.py     ✔       │
+  │                  40   generic-handlers csharp_webforms/handlers.py       ✔       │
+  │                  50   hangfire         csharp/hangfire.py                ✔       │
+  │                  60   quartz           csharp/quartz.py                  ✔       │
+  │                                                                                  │
+  │  java            10   quartz           java/quartz.py                    ✔       │
+  │                                                                                  │
+  │  python          10   celery           python/celery.py                  ✔       │
   │                                                                                  │
   │  scala           10   akka-events      scala/events.py                           │
   │                  20   spark            scala/spark.py                            │
   │                                                                                  │
-  │  Java · Kotlin · Groovy · Python · PHP · Ruby · VB · C++ · HCL                   │
+  │  Kotlin · Groovy · PHP · Ruby · VB · C++ · HCL                                   │
   │   └─ no additive hook yet: shared classifiers only                               │
   └──────────────────────────────────────┬───────────────────────────────────────────┘
                                          │
@@ -541,9 +602,11 @@ For example, `order.controller.ts` imports both `@nestjs/common` and `@aws-sdk/c
  select()            → nestjs parser owns the file
  base extract()      → class OrderController, fn create, Statement@L11 "await this.sqs.send(...)"
    run_additive()      (still inside extract)
-     express         → guard ✗ → skip
-     aws-events      → guard ✓ → ENRICH Statement@L11 → framework=aws-sqs, endpoint=ORDER_QUEUE
-     sdk-calls       → guard ✗ → skip
+     express         → no Express app or router → nothing
+     fastify         → no Fastify instance      → nothing
+     aws-events      → SQS send found → ENRICH Statement@L11 → framework=aws-sqs, endpoint=ORDER_QUEUE
+     sdk-calls       → nothing
+     graphql-…, vue-…, nextjs-…, *-navigation → nothing (most stop at a cheap first check)
  nestjs detection    → + Statement  POST /orders   (after extract returns)
  ─────────────────────────────────────────────────────────────────────────────
  FileRecord.framework = "nestjs"   (route ✔  +  queue publish ✔)
@@ -627,7 +690,19 @@ statements under their enum class.
 > faster. **Cost:** with the flag off there are no routes, API/DB calls, events, comments or enum
 > members either. Every detector must check the flag; reviews check this.
 
+> **Decision —** entry points are decided by the role of a framework construct, not by how the code runs.
+> **Why:** a parser sees constructs, not execution. Every construct a parser recognises is a
+> binding, wiring, guard, outbound or none; only a binding (one handler, directly addressable)
+> becomes an entry-point record (`route`, `eventbus_consumer`, `timer`), and wiring stays a plain
+> statement — unless what it carries is recorded nowhere else (a mount whose routes aren't in the
+> repo: `route` / `routeKind: mount`); links are `route` / `routeKind: navigation`
+> ([entry-point contract §5](architecture/entry-points.md#how-wiring-is-written-today)). One binding, one record, so "all entry points" is an accurate count across languages
+> and Breeze components. **Cost:** each entry-point parser keeps a role table, and wiring in
+> another file must reach the binding through the repository index.
+
 Detail page: [Statement model](architecture/statement-model.md).
+What counts as an entry point and how one is recorded:
+[Entry-point contract](architecture/entry-points.md).
 
 ---
 
@@ -738,6 +813,11 @@ Other places that resolve values:
   `static final String`). A runtime value stays unresolved.
 - **Inheritance** (`parsers/index_common.py`): base classes in other files, e.g. routes
   inherited from a base controller.
+- **Handlers** (`handlerPath` / `handlerLine`): an entry point whose handler is declared in
+  another file is led to it through the index (`parsers/handler_sites.py`) — by the detector
+  (`locate_method` / `locate_export`) or after parsing by `link_handlers`, one loop for every
+  language with a per-language lookup (`handler_locator`; TypeScript today). See
+  [leading an entry point to its handler](architecture/cross-file-resolution.md#leading-an-entry-point-to-its-handler).
 
 Detail page: [Cross-file resolution](architecture/cross-file-resolution.md).
 
@@ -751,7 +831,7 @@ the rules every parser keeps:
 | Rule | Why |
 |---|---|
 | The scan never reads file contents. | I/O grows with repo size; only candidates are read. |
-| Each file is parsed **once** by the main grammar. Framework parsers reuse the tree via `extract`. | Parsing is the most expensive step. |
+| Each file is parsed **once** by the main grammar. Framework parsers reuse the tree via `extract`. The one exception is TypeScript's `handler_locator`, which re-parses a file only when a record names a handler with no location — in practice a few route files per repo. | Parsing is the most expensive step. |
 | Extraction does a **fixed** number of tree walks per file (e.g. imports, symbol tables, declarations, comments, framework detection), never one walk per item found. | Cost stays linear in file size; nested walks become quadratic on large files. |
 | Additive detectors start with a cheap byte check (`b"…" in source`). | They run on every file of the language, and most files don't use the library. |
 | A second grammar parses only the embedded fragment, with the same timeout. | Embedded languages (SQL, GraphQL) must not re-parse the whole file. |
@@ -852,8 +932,13 @@ src/breezeai_cog/
 │  ├─ statements_common.py         shared statement emission
 │  ├─ comments_common.py           shared comment pass
 │  ├─ callresolve.py, constfold.py, index_common.py   shared resolution helpers
+│  ├─ additive.py, emits.py        detector + fact registry; the one place detector output is written
+│  ├─ enclosing.py, wiring.py      shared lookups: enclosing statement, wiring facts
+│  ├─ contract.py                  entry-point contract check
+│  ├─ handler_sites.py, aws_deploy.py  facts shared by several languages; where a handler is declared
 │  ├─ detection/                   shared api / db / query classifiers
-│  ├─ vertx_common.py, dotnet_common.py, aspnet_common.py   helpers shared by one framework family
+│  ├─ vertx_common.py, dotnet_common.py, aspnet_common.py, aspnet_areas.py, quartz_common.py
+│  │                               helpers shared by one framework family
 │  ├─ <lang>/                      language parsers
 │  └─ <lang>_<framework>/          framework parsers
 ├─ emit/                           ids, NDJSON, gzip, sinks, statement splitting
@@ -888,8 +973,9 @@ from another.
 |---|---|---|
 | **Parser-local** | `parsers/<lang>_<framework>/`, its test file | That parser only |
 | **Language parser** | `parsers/<lang>/` | Every framework built on that language |
-| **Shared family helper** | e.g. `parsers/vertx_common.py` | Every parser in that family |
-| **Core** | `schemas/`, `core/`, `emit/`, `parsers/base.py`, `treesitter.py`, `statements_common.py`, `comments_common.py`, `callresolve.py`, `constfold.py`, `index_common.py`, `detection/`, `cli.py`, `config.py` | Every parser — an architectural change |
+| **Additive detector** | a module that calls `register_detector(...)` or `register_fact(...)`, or a changed `Gate` (`order`, `skip_fixtures`, `guard`) | Every file of that language, whichever parser owns it |
+| **Shared helper** | e.g. `parsers/vertx_common.py`, `quartz_common.py`, `aspnet_areas.py`, `handler_sites.py`, `aws_deploy.py` | Every parser that imports it |
+| **Core** | `schemas/`, `core/`, `emit/`, `parsers/base.py`, `treesitter.py`, `statements_common.py`, `comments_common.py`, `callresolve.py`, `constfold.py`, `index_common.py`, `additive.py`, `emits.py`, `enclosing.py`, `wiring.py`, `contract.py`, `detection/`, `cli.py`, `config.py` | Every parser — an architectural change |
 
 > **Decision —** parser-specific code stays in the parser's own directory.
 > **Why:** a change can then only affect the files that parser owns, which keeps reviews small
@@ -932,11 +1018,14 @@ from another.
 | Parsers | Framework parsers subclass their language parser | [§6](#6-the-parser-model) |
 | Parsers | Cross-cutting libraries are additive detectors | [§6](#6-the-parser-model) |
 | Parsers | Additive detectors self-register; the language parser calls one runner | [§6](#6-the-parser-model) |
+| Parsers | A fact from another file is a registered fact, built by `build_index` | [§6](#6-the-parser-model) |
+| Parsers | Detectors return emits; one applier writes them; one validator checks the contract | [§6](#6-the-parser-model) |
 | Parsers | API / DB / query detection is shared across languages | [§6](#6-the-parser-model) |
 | Parsers | Route emitters skip fixture files | [§6](#6-the-parser-model) |
 | Statements | Flat list linked by `parentId` | [§7](#7-the-statement-model) |
 | Statements | Syntax (`nodeType`) and meaning (`semanticType`) are separate | [§7](#7-the-statement-model) |
 | Statements | All statements are gated by `capture_statements` | [§7](#7-the-statement-model) |
+| Statements | Entry points are decided by construct roles; one binding, one record | [§7](#7-the-statement-model) |
 | Ids | Deterministic ids computed from the source | [§8](#8-ids-and-linking) |
 | Contract | Open `File`/`Class`, allow-listed `Function`/`Statement` | [§9](#9-the-capture-contract-and-the-graph) |
 | Contract | Unknown values are omitted | [§9](#9-the-capture-contract-and-the-graph) |
@@ -965,6 +1054,7 @@ from another.
 | [Parser Review & Gap Analysis Guide](parser-review-guide.md) | Reviewing a parser and reporting its gaps |
 | [Template Capture](template-capture.md) | How markup files are handled |
 | [Statement model](architecture/statement-model.md) | Emission rules, enrichment, comments, enum members, splitting |
+| [Entry-point contract](architecture/entry-points.md) | What an entry point is, construct roles, what a binding records |
 | [Cross-file resolution](architecture/cross-file-resolution.md) | Indexes, call resolution, inheritance, constant folding |
 | [Capture-to-graph mapping](architecture/graph-mapping.md) | How each capture field becomes a Neo4j node, property or edge |
 | [Target Spec (Confluence)](https://accionlabs.atlassian.net/wiki/spaces/~5cfa0cffd898610dbf3bacf1/pages/2483453956/Code+Ontology+Parser+Target+Spec+Neo4j+Graph+Model) | The graph model the backend ingests |

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from tree_sitter import Node
+
 from ...schemas import FileRecord
 from ..base import ParseContext
 from ..ruby.parser import RubyParser
@@ -15,17 +17,27 @@ class GrapeParser(RubyParser):
     priority = 20
     frameworks = ["grape"]
 
-    def claims(self, path: str, source: bytes, parse_timeout_micros: int = 0) -> bool:
+    def claims(
+        self,
+        path: str,
+        source: bytes,
+        parse_timeout_micros: int = 0,
+        parsed_root: Node | None = None,
+    ) -> bool:
         if b"grape" not in source.lower():
             return False
-        root = parse_source("ruby", source, parse_timeout_micros).root_node
+        root = parsed_root
+        if root is None:
+            root = parse_source("ruby", source, parse_timeout_micros).root_node
         return (
             has_require(root, source, {"grape"})
             or has_superclass(root, source, {"Grape::API", "Grape::Endpoint"})
         )
 
     def parse_file(self, ctx: ParseContext) -> FileRecord:
-        root = parse_source("ruby", ctx.source, ctx.parse_timeout_micros).root_node
+        root = ctx.parsed_root
+        if root is None:
+            root = parse_source("ruby", ctx.source, ctx.parse_timeout_micros).root_node
         record = self.extract(root, ctx)
         if ctx.capture_statements and not self.is_fixture_file(ctx.path):
             if detect_grape_routes(root, ctx.source, ctx.path, record):
