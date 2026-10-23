@@ -134,6 +134,46 @@ def test_functional_route_is_binding(analyze_files) -> None:
     assert (r.method, r.endpoint, r.routeKind, r.handler) == ("GET", "/products", "route", "list")
 
 
+FLUX_IMPORTS = FN_IMPORTS.replace(".web.servlet.function.", ".web.reactive.function.server.")
+FN_BODY = """public class Fn {
+  @Bean
+  public RouterFunction<?> r(Handler h) {
+    return route(GET("/products"), h::list);
+  }
+}"""
+
+
+def _fn_endpoint(analyze_files, imports: str, config: str) -> str | None:
+    files = _java("Fn", imports, FN_BODY)
+    files["src/main/resources/application.properties"] = config
+    [r] = _eps(analyze_files(files))
+    return r.endpoint
+
+
+def test_servlet_context_path_prefixes_a_webmvc_functional_route(analyze_files) -> None:
+    assert _fn_endpoint(analyze_files, FN_IMPORTS,
+                        "server.servlet.context-path=/ctx\n") == "/ctx/products"
+
+
+def test_servlet_context_path_does_not_prefix_a_webflux_functional_route(analyze_files) -> None:
+    # WebFlux is not served by the servlet: its context path does not apply.
+    assert _fn_endpoint(analyze_files, FLUX_IMPORTS,
+                        "server.servlet.context-path=/ctx\n") == "/products"
+
+
+def test_webflux_base_path_prefixes_a_webflux_functional_route(analyze_files) -> None:
+    config = "server.servlet.context-path=/ctx\nspring.webflux.base-path=/api\n"
+    assert _fn_endpoint(analyze_files, FLUX_IMPORTS, config) == "/api/products"
+    assert _fn_endpoint(analyze_files, FN_IMPORTS, config) == "/ctx/products"
+
+
+def test_unresolved_webflux_base_path_leaves_the_address_empty(analyze_files) -> None:
+    assert _fn_endpoint(analyze_files, FLUX_IMPORTS,
+                        "spring.webflux.base-path=${BASE}\n") is None
+    assert _fn_endpoint(analyze_files, FLUX_IMPORTS,
+                        "base=/b\nspring.webflux.base-path=${base}\n") == "/b/products"
+
+
 def test_functional_nest_path_is_wiring(analyze_files) -> None:
     st = analyze_files(
         _java(
@@ -311,3 +351,15 @@ def test_functional_route_handler_in_another_class_is_located(analyze_files) -> 
                        "  public Object list(Object req) { return null; }\n}"))
     [r] = _eps(analyze_files(files), "Routes.java")
     assert (r.handler, r.handlerPath, r.handlerLine) == ("list", SRC + "OrderHandler.java", 4)
+
+
+def test_servlet_filter_does_not_guard_a_webflux_functional_route(analyze_files) -> None:
+    files = _java("Fn", FLUX_IMPORTS, FN_BODY)
+    files.update(_java("AuthFilter", "import org.springframework.stereotype.Component;\n"
+                       "import org.springframework.web.filter.OncePerRequestFilter;",
+                       "@Component\npublic class AuthFilter extends OncePerRequestFilter {}"))
+    [r] = _eps(analyze_files(files))
+    assert (r.endpoint, r.guards) == ("/products", None)
+    mvc = _java("Fn", FN_IMPORTS, FN_BODY) | {k: v for k, v in files.items() if "AuthFilter" in k}
+    [r] = _eps(analyze_files(mvc))
+    assert r.guards == ["AuthFilter"]

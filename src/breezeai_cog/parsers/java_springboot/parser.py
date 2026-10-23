@@ -2,7 +2,8 @@
 JavaParser when ``claims`` finds an ``org.springframework`` import; reuses
 ``JavaParser.extract`` (single parse), then detects Spring MVC routes from the captured
 annotations. Covers Spring Boot v2 and v3 (identical web annotations). The module's
-``server.servlet.context-path`` (the ``spring.context-paths`` fact) prefixes every HTTP route. Broker
+``server.servlet.context-path`` (the ``spring.context-paths`` fact) prefixes every HTTP route except
+WebFlux.fn routes, which take ``spring.webflux.base-path`` instead. Broker
 listeners and template sends (Kafka, RabbitMQ, JMS, SQS) are detected in ``messaging.py``,
 ``@Scheduled`` jobs in ``scheduling.py``."""
 
@@ -12,7 +13,7 @@ from ...schemas import FileRecord
 from ..base import ParseContext
 from ..constfold import resolve_all
 from ..emits import apply
-from ..java.config import module_of
+from ..java.config import module_of, resolve_placeholders
 from ..java.constants import collect_constants
 from ..java.imports import JavaIndex
 from ..java.parser import JavaParser
@@ -24,6 +25,12 @@ from .messaging import detect_spring_listeners, detect_spring_sends, has_messagi
 from .scheduling import detect_spring_scheduled, has_scheduled
 from .queries import detect_spring_queries
 from .routes import apply_context_path, apply_global_guards, detect_spring_routes
+
+
+#: A WebFlux.fn router (``org.springframework.web.reactive.function.server``), as opposed to
+#: WebMvc.fn (``…web.servlet.function``).
+_WEBFLUX_FN = b"org.springframework.web.reactive.function"
+_WEBFLUX_BASE_PATH = "spring.webflux.base-path"
 
 
 class SpringBootParser(JavaParser):
@@ -41,8 +48,14 @@ class SpringBootParser(JavaParser):
             idx = ctx.resolution_index
             module = module_of(ctx.path)
             routes = detect_spring_routes(record, root, ctx.source)  # annotated controllers
+            reactive = []
             if b"RouterFunction" in ctx.source:  # functional routing needs the AST
-                routes += detect_spring_functional_routes(root, ctx.source, ctx.path, record, idx)
+                functional = detect_spring_functional_routes(
+                    root, ctx.source, ctx.path, record, idx)
+                if _WEBFLUX_FN in ctx.source:  # WebFlux.fn: not served by the servlet
+                    reactive = functional
+                else:  # WebMvc.fn
+                    routes += functional
             if routes:
                 # Servlet filters and MVC interceptors of this module run first (matched within
                 # the servlet context, so before the context path is joined).
@@ -53,7 +66,15 @@ class SpringBootParser(JavaParser):
                 paths = context_paths(idx)
                 if module is not None and module in paths:
                     apply_context_path(routes, paths[module])
-                apply(record, routes, ctx.source, ctx.path)
+            if reactive and module is not None:
+                # WebFlux ignores the servlet context path and filters; its prefix is its own.
+                props = module_properties(idx).get(module, {})
+                if _WEBFLUX_BASE_PATH in props:
+                    base = props[_WEBFLUX_BASE_PATH]
+                    apply_context_path(
+                        reactive, resolve_placeholders(base, props) if base is not None else None)
+            if routes or reactive:
+                apply(record, routes + reactive, ctx.source, ctx.path)
                 record.framework = "spring"
             messaging, scheduled = has_messaging(ctx.source), has_scheduled(ctx.source)
             if messaging or scheduled:  # @KafkaListener … consumers, template sends; @Scheduled
