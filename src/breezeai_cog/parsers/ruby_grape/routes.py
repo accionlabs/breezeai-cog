@@ -13,7 +13,8 @@ from ..ruby.ownership import owner_id
 from ..treesitter import node_text
 
 _HTTP_METHODS = {"get", "post", "put", "patch", "delete", "head", "options"}
-_ROUTE_PREFIXES = {"namespace", "resource", "resources", "route_param"}
+_ROUTE_PREFIXES = {"namespace", "resource", "resources", "route_param", "prefix"}
+_GRAPE_API_SUPERCLASSES = {"Grape::API", "Grape::Endpoint"}
 
 
 def _calls(root: Node) -> Iterator[Node]:
@@ -35,15 +36,47 @@ def _arguments(call: Node) -> list[Node]:
     return list(arguments.named_children) if arguments is not None else []
 
 
+def _static_string(node: Node, source: bytes) -> str | None:
+    """Text of a string whose every part is literal; ``None`` if any part is interpolated.
+
+    A ``"/r#{i}/:id"`` string has ``string_content``, ``interpolation``, ``string_content``
+    children — reading only the first content node would emit ``/r`` as if it were the whole
+    path. A value that is not fully present in the syntax stays unresolved (honest-null)."""
+    parts = node.named_children
+    if any(part.type not in {"string_content", "escape_sequence"} for part in parts):
+        return None
+    return "".join(node_text(part, source) for part in parts)
+
+
+def _contains_interpolation(node: Node) -> bool:
+    return node.type == "interpolation" or any(
+        _contains_interpolation(child) for child in node.named_children
+    )
+
+
 def _literal_path(node: Node | None, source: bytes) -> str | None:
     if node is None:
         return None
     if node.type == "string":
-        content = next((child for child in node.named_children if child.type == "string_content"), None)
-        return node_text(content, source) if content is not None else ""
+        return _static_string(node, source)
     if node.type in {"simple_symbol", "symbol"}:
+        if _contains_interpolation(node):
+            return None
         value = node_text(node, source)
         return "/" + value.lstrip(":/")
+    return None
+
+
+def _literal_value(node: Node | None, source: bytes) -> str | None:
+    """Read a static string or symbol without path normalization."""
+    if node is None:
+        return None
+    if node.type == "string":
+        return _static_string(node, source)
+    if node.type in {"simple_symbol", "symbol"}:
+        if _contains_interpolation(node):
+            return None
+        return node_text(node, source).lstrip(":")
     return None
 
 
@@ -51,7 +84,10 @@ def _is_grape_api_class(node: Node, source: bytes) -> bool:
     if node.type != "class":
         return False
     superclass = node.child_by_field_name("superclass")
-    return superclass is not None and "Grape::API" in node_text(superclass, source)
+    if superclass is None:
+        return False
+    name = node_text(superclass, source).lstrip("<").strip()
+    return name in _GRAPE_API_SUPERCLASSES
 
 
 def _in_grape_api(call: Node, source: bytes) -> bool:
@@ -82,9 +118,55 @@ def _prefix_for(call: Node, source: bytes) -> str | None:
                 prefix = ":" + prefix.lstrip("/")
             prefixes.append(prefix)
         current = current.parent
-    if not prefixes:
-        return ""
-    return "/" + "/".join(part.strip("/") for part in reversed(prefixes) if part.strip("/"))
+    ordered = list(reversed(prefixes))
+    return "/" + "/".join(part.strip("/") for part in ordered if part and part.strip("/")) if ordered else ""
+
+
+def _version_for(call: Node, source: bytes) -> tuple[str | None, bool, bool]:
+    """Return (literal version, path strategy, unresolved declaration found)."""
+    declarations: list[Node] = []
+    enclosing_versions: list[Node] = []
+    current = call.parent
+    api_class: Node | None = None
+    while current is not None:
+        if api_class is None and _is_grape_api_class(current, source):
+            api_class = current
+        if current.type == "call" and _method(current, source) == "version":
+            enclosing_versions.append(current)
+        current = current.parent
+    declarations.extend(enclosing_versions)
+    if api_class is not None and not enclosing_versions:
+        body = api_class.child_by_field_name("body")
+        if body is not None:
+            declarations.extend(
+                child for child in body.named_children
+                if child.type == "call" and _method(child, source) == "version"
+                and child.start_byte < call.start_byte
+            )
+    unique: list[Node] = []
+    seen: set[tuple[int, int]] = set()
+    for declaration in declarations:
+        key = (declaration.start_byte, declaration.end_byte)
+        if key not in seen:
+            unique.append(declaration)
+            seen.add(key)
+    if not unique:
+        return None, False, False
+    declaration = (
+        min(enclosing_versions, key=lambda node: node.end_byte - node.start_byte)
+        if enclosing_versions else max(unique, key=lambda node: node.start_byte)
+    )
+    args = _arguments(declaration)
+    version = _literal_value(args[0], source) if args else None
+    using_path = True
+    for arg in args[1:]:
+        if arg.type != "pair":
+            continue
+        key = arg.child_by_field_name("key")
+        value = arg.child_by_field_name("value")
+        if key is not None and node_text(key, source).rstrip(":") == "using":
+            using_path = _literal_value(value, source) == "path"
+    return version, using_path, version is None
 
 
 #: ``version … using:`` strategies that keep the version out of the path.
@@ -205,6 +287,9 @@ def detect_grape_routes(root: Node, source: bytes, path: str, record: FileRecord
         local = _literal_path(args[0], source) if args else ""
         if local is None:
             continue
+        version, path_version, unresolved_version = _version_for(call, source)
+        if unresolved_version and path_version:
+            continue
         settings = _api_settings(call, source)
         prefix = _prefix_for(call, source)
         # An unresolved prefix, version or namespace leaves the address unknown: the route is kept
@@ -212,6 +297,8 @@ def detect_grape_routes(root: Node, source: bytes, path: str, record: FileRecord
         endpoint = (
             _join_path(settings + prefix, local) if settings is not None and prefix is not None else None
         )
+        if local == "/" and not prefix and endpoint and not endpoint.endswith("/"):
+            endpoint += "/"
         line = call.start_point[0] + 1
         block = call.child_by_field_name("block")  # the handler: an anonymous block
         guards = _guards(call, source)
@@ -220,6 +307,7 @@ def detect_grape_routes(root: Node, source: bytes, path: str, record: FileRecord
                 semanticType="route",
                 method=method.upper(),
                 endpoint=endpoint,
+                version=version,
                 framework="grape",
                 handlerLine=block.start_point[0] + 1 if block is not None else None,
                 guards=guards or None,

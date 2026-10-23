@@ -4,6 +4,7 @@ files (``register_fact``, e.g. Rails controller callbacks). One parse per file f
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Sequence
@@ -13,7 +14,7 @@ from ..additive import (
 )
 from ..index_common import parallel_map
 from ..treesitter import parse_source
-from .models import declared_parents, models_from_parents
+from .models import build_model_index, declared_parents
 
 _FileFacts = tuple[list[tuple[str, str]], dict[str, Any]]
 
@@ -22,9 +23,17 @@ _FileFacts = tuple[list[tuple[str, str]], dict[str, Any]]
 class RubyIndex:
     #: Constants naming an ActiveRecord model (see ``models.py``).
     models: frozenset[str] = frozenset()
+    #: Proven model associations, indexed by class and association name.
+    associations: dict[str, dict[str, tuple[str, str]]] = field(default_factory=dict)
     #: Facts registered with ``register_fact`` (fact name → fact), resolved once before
     #: parsing. Read with :func:`~..additive.index_fact`; see ``parsers/additive.py``.
     facts: dict[str, Any] = field(default_factory=dict)
+
+    def __contains__(self, name: object) -> bool:
+        return name in self.models
+
+    def __iter__(self) -> Iterator[str]:
+        return iter(self.models)
 
 
 def _file_facts(args: tuple[Path, Path]) -> _FileFacts:
@@ -48,16 +57,25 @@ def _file_facts(args: tuple[Path, Path]) -> _FileFacts:
 
 def build_ruby_index(repo_root: Path, files: Sequence[Path], jobs: int = 1) -> RubyIndex:
     root = Path(repo_root)
+    source_files = list(files)
     files, fact_files = split_fact_sources("ruby", list(files))
     ruby_files = [f for f in files if f.suffix == ".rb"]
     # registered fact name → per-file values: fact-source files (another parser's), then our own
     collected: dict[str, list[Any]] = collect_fact_sources("ruby", fact_files, root, jobs)
+    model_index = build_model_index(root, source_files, jobs)
     if not ruby_files:
-        return replace(RubyIndex(), facts=resolve_additive("ruby", collected, RubyIndex()))
+        index = RubyIndex(
+            models=frozenset(model_index),
+            associations=model_index.associations,
+        )
+        return replace(index, facts=resolve_additive("ruby", collected, index))
     per_file = parallel_map([(root, f) for f in ruby_files], _file_facts, jobs)
     for _, facts in per_file:
         for name, value in facts.items():
             collected.setdefault(name, []).append(value)
-    index = RubyIndex(models=models_from_parents([pairs for pairs, _ in per_file]))
+    index = RubyIndex(
+        models=frozenset(model_index),
+        associations=model_index.associations,
+    )
     # Registered facts may need the whole index, so they resolve after it is built.
     return replace(index, facts=resolve_additive("ruby", collected, index))

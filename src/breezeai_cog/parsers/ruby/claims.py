@@ -29,6 +29,21 @@ def has_require(root: Node, source: bytes, required: set[str]) -> bool:
     return False
 
 
+def has_require_relative_helper(root: Node, source: bytes, helper: str) -> bool:
+    """Match only an explicitly named local helper load, never arbitrary relatives."""
+    for node in _nodes(root):
+        if node.type != "call" or node.child_by_field_name("receiver") is not None:
+            continue
+        method = node.child_by_field_name("method")
+        args = node.child_by_field_name("arguments")
+        first = args.named_children[0] if args is not None and args.named_children else None
+        if (method is not None and node_text(method, source) == "require_relative"
+                and first is not None and first.type == "string"
+                and node_text(first, source).strip("'\"") == helper):
+            return True
+    return False
+
+
 def has_superclass(root: Node, source: bytes, required: set[str]) -> bool:
     return any(
         node.type == "class"

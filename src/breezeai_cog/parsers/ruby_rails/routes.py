@@ -33,8 +33,10 @@ def _method(call: Node, source: bytes) -> str | None:
 def _string_value(node: Node | None, source: bytes) -> str | None:
     if node is None or node.type != "string":
         return None
-    content = next((child for child in node.named_children if child.type == "string_content"), None)
-    return node_text(content, source) if content is not None else ""
+    parts = node.named_children
+    if any(part.type not in {"string_content", "escape_sequence"} for part in parts):
+        return None
+    return "".join(node_text(part, source) for part in parts)
 
 
 def _inside_routes_draw(call: Node, source: bytes) -> bool:
@@ -203,6 +205,7 @@ def _scope_segment(call: Node, source: bytes) -> tuple[bool, str]:
     ``namespace :admin`` → ``admin`` (``path:`` overrides it); ``scope '/v1'`` / ``scope path: '/v1'``
     → ``/v1``; ``scope module: 'x'`` (no path) → ``""``. A path given by anything but a literal
     → unresolved."""
+    method = _method(call, source)
     args = _arguments(call)
     for a in args:
         if a.type == "pair":
@@ -213,6 +216,8 @@ def _scope_segment(call: Node, source: bytes) -> tuple[bool, str]:
     positional = [a for a in args if a.type != "pair"]
     if not positional:
         return True, ""  # namespace with no name is not valid Rails; scope module:/as: adds no path
+    if method == "scope" and positional[0].type != "string":
+        return False, ""
     seg = _segment(positional[0], source)
     return (seg is not None, seg or "")
 

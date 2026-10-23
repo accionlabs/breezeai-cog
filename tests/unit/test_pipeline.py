@@ -99,6 +99,177 @@ def test_run_reports_progress(tmp_path) -> None:
     assert all(t == 5 for _, t in seen)             # total stable
 
 
+def test_extensionless_ruby_executable_reaches_extraction(tmp_path) -> None:
+    repo = tmp_path / "repo"
+    executable = repo / "exe" / "rubocop"
+    executable.parent.mkdir(parents=True)
+    executable.write_bytes(
+        b"#!/usr/bin/env ruby\n"
+        b"class Rubocop\n"
+        b"  def run\n"
+        b"    puts :ok\n"
+        b"  end\n"
+        b"end\n"
+    )
+
+    records = {record.path: record for record in iter_file_records(repo)}
+
+    assert "exe/rubocop" in records
+    assert records["exe/rubocop"].language == "ruby"
+    assert any(cls.name == "Rubocop" for cls in records["exe/rubocop"].classes)
+    assert any(fn.name == "run" for fn in records["exe/rubocop"].functions)
+
+
+def test_existing_ruby_project_filenames_still_reach_extraction(tmp_path) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    for name in ("task.rake", "rubocop.gemspec", "Gemfile", "Rakefile"):
+        (repo / name).write_text("class ProjectFile\n  def run; end\nend\n", encoding="utf-8")
+
+    records = {record.path: record for record in iter_file_records(repo)}
+
+    assert set(records) == {"task.rake", "rubocop.gemspec", "Gemfile", "Rakefile"}
+    assert all(record.language == "ruby" for record in records.values())
+    assert all(any(function.name == "run" for function in record.functions)
+               for record in records.values())
+
+
+def test_ruby_class_metric_excludes_modules_and_counts_nested_classes(tmp_path) -> None:
+    from breezeai_cog.config import Settings
+    from breezeai_cog.core import pipeline
+    from breezeai_cog.emit.sinks import MemorySink
+
+    cases = [
+        (
+            "classes_only",
+            "class Outer\n  class Inner\n  end\nend\n",
+            2,
+            [("Outer", "class"), ("Inner", "class")],
+        ),
+        (
+            "modules_only",
+            "module Outer\n  module Inner\n  end\nend\n",
+            0,
+            [("Outer", "module"), ("Inner", "module")],
+        ),
+        (
+            "classes_and_modules",
+            "class Widget\nend\nmodule Helpers\nend\n",
+            1,
+            [("Widget", "class"), ("Helpers", "module")],
+        ),
+        (
+            "nested_classes_and_modules",
+            "class Outer\n  module Namespace\n    class Inner\n    end\n    module Nested\n    end\n  end\nend\n",
+            2,
+            [
+                ("Outer", "class"),
+                ("Namespace", "module"),
+                ("Inner", "class"),
+                ("Nested", "module"),
+            ],
+        ),
+    ]
+
+    for name, source, expected_count, expected_nodes in cases:
+        repo = tmp_path / name
+        repo.mkdir()
+        (repo / "sample.rb").write_text(source, encoding="utf-8")
+        sink = MemorySink()
+
+        metadata = pipeline.run(repo, Settings(repo=repo, jobs=1), sink)
+
+        assert metadata.totalClasses == expected_count
+        record = next(record for record in sink.records if record.path == "sample.rb")
+        assert [(node.name, node.type) for node in record.classes] == expected_nodes
+
+
+def test_project_loc_excludes_config_records_and_keeps_ruby_source(tmp_path) -> None:
+    from breezeai_cog.config import Settings
+    from breezeai_cog.core import pipeline
+    from breezeai_cog.emit.sinks import MemorySink
+
+    cases = [
+        ("ruby_source", {"app.rb": "class App\n  def run; end\nend\n"}, 3),
+        ("config_only", {"settings.json": '{\n  "enabled": true\n}\n'}, 0),
+        (
+            "mixed",
+            {
+                "app.rb": "class App\n  def run; end\nend\n",
+                "settings.json": '{\n  "enabled": true\n}\n',
+            },
+            3,
+        ),
+    ]
+    for name, files, expected_loc in cases:
+        repo = tmp_path / name
+        repo.mkdir()
+        for relative_path, content in files.items():
+            (repo / relative_path).write_text(content, encoding="utf-8")
+
+        metadata = pipeline.run(
+            repo,
+            Settings(repo=repo, jobs=1),
+            MemorySink(),
+        )
+
+        assert metadata.totalLinesOfCode == expected_loc
+
+
+def test_diff_metadata_loc_excludes_config_records() -> None:
+    from breezeai_cog.schemas import FileRecord
+    from breezeai_cog.services.diff import _InfraStreamSink
+
+    class Upload:
+        def write_line(self, _line: str) -> None:
+            pass
+
+    sink = _InfraStreamSink(Upload(), None)
+    sink.write(FileRecord(id="ruby", path="app.rb", type="code", language="ruby", loc=3))
+    sink.write(FileRecord(id="json", path="config.json", type="config", language="config", loc=7))
+
+    assert sink.loc == 3
+
+
+def test_diff_metadata_class_count_excludes_ruby_modules_only() -> None:
+    from breezeai_cog.schemas import Class, FileRecord
+    from breezeai_cog.services.diff import _InfraStreamSink
+
+    class Upload:
+        def write_line(self, _line: str) -> None:
+            pass
+
+    sink = _InfraStreamSink(Upload(), None)
+    sink.write(FileRecord(
+        id="ruby", path="app.rb", type="code", language="ruby", loc=0,
+        classes=[
+            Class(
+                id="ruby-class", parentId="ruby", path="app.rb", name="Widget",
+                type="class", startLine=1, endLine=2,
+            ),
+            Class(
+                id="ruby-module", parentId="ruby", path="app.rb", name="Helpers",
+                type="module", startLine=3, endLine=4,
+            ),
+        ],
+    ))
+    sink.write(FileRecord(
+        id="python", path="app.py", type="code", language="python", loc=0,
+        classes=[
+            Class(
+                id="python-class", parentId="python", path="app.py", name="Widget",
+                type="class", startLine=1, endLine=2,
+            ),
+            Class(
+                id="python-module", parentId="python", path="app.py", name="Helpers",
+                type="module", startLine=3, endLine=4,
+            ),
+        ],
+    ))
+
+    assert sink.classes == 3
+
+
 def _make_markup_repo(root) -> None:
     (root / "app.py").write_text("def top():\n    return 1\n")
     (root / "page.html").write_text("<div *ngFor='let x of xs'>{{ x }}</div>\n")

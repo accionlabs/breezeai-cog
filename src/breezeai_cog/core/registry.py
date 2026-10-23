@@ -15,8 +15,11 @@ language from the whole repo, and ``base_parser_for`` / ``select`` take that dec
 from __future__ import annotations
 
 import importlib
+import inspect
 import pkgutil
 from pathlib import Path
+
+from tree_sitter import Node
 
 from ..errors import RegistryError
 from ..parsers.additive import all_detectors

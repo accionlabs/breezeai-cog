@@ -101,6 +101,14 @@ class LanguageParser(Protocol):
     statement_types: list[str]
     frameworks: list[str]
 
+    def claims(
+        self,
+        path: str,
+        source: bytes,
+        parse_timeout_micros: int = 0,
+        parsed_root: Node | None = None,
+    ) -> bool: ...
+
     def parse_file(self, ctx: ParseContext) -> FileRecord: ...
 
 
@@ -149,10 +157,18 @@ class BaseParser:
         return (suffix in self.extensions or p.name in self.extensions
                 or (bool(self.template_extensions) and suffix.lower() in self.template_extensions))
 
-    def claims(self, path: str, source: bytes) -> bool:
+    def claims(
+        self,
+        path: str,
+        source: bytes,
+        parse_timeout_micros: int = 0,
+        parsed_root: Node | None = None,
+    ) -> bool:
         """Whether this parser should handle ``path``. The base language parser claims
         everything of its extension (fallback); framework parsers override this to sniff
-        their framework's signature in ``source`` (e.g. ``b"@nestjs/" in source``)."""
+        their framework's signature in ``source`` (e.g. ``b"@nestjs/" in source``). The
+        registry passes ``parse_timeout_micros`` to every claim and may provide an already
+        parsed tree root."""
         return True
 
     def build_index(

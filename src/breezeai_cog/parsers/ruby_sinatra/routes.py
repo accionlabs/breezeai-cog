@@ -33,8 +33,28 @@ def _calls(root: Node) -> Iterator[Node]:
         yield from _calls(child)
 
 
+def _is_app_receiver(call: Node, source: bytes) -> bool:
+    receiver = call.child_by_field_name("receiver")
+    if receiver is None:
+        return True
+
+    receiver_name = node_text(receiver, source)
+    if receiver.type == "instance_variable":
+        return receiver_name == "@app" or receiver_name.endswith("_app")
+
+    # Sinatra extension callbacks receive the app class as `klass`.
+    if receiver.type == "identifier" and receiver_name == "klass":
+        parent = call.parent
+        while parent is not None:
+            if parent.type in {"method", "singleton_method"}:
+                name = parent.child_by_field_name("name")
+                return name is not None and node_text(name, source) == "registered"
+            parent = parent.parent
+    return False
+
+
 def _method(call: Node, source: bytes) -> str | None:
-    if call.child_by_field_name("receiver") is not None:
+    if not _is_app_receiver(call, source):
         return None
     node = call.child_by_field_name("method")
     return node_text(node, source) if node is not None and node.type == "identifier" else None
@@ -48,31 +68,98 @@ def _arguments(call: Node) -> list[Node]:
 def _string_value(node: Node | None, source: bytes) -> str | None:
     if node is None or node.type != "string":
         return None
-    content = next((child for child in node.named_children if child.type == "string_content"), None)
-    return node_text(content, source) if content is not None else ""
+    parts = node.named_children
+    if any(part.type not in {"string_content", "escape_sequence"} for part in parts):
+        return None
+    return "".join(node_text(part, source) for part in parts)
+
+
+def _http_method_value(node: Node, source: bytes) -> str | None:
+    if node.type == "string":
+        value = _string_value(node, source)
+    elif node.type == "simple_symbol":
+        value = node_text(node, source)[1:]
+    else:
+        return None
+    method = value.lower() if value is not None else ""
+    return method.upper() if method in _HTTP_METHODS else None
+
+
+def _literal_paths(nodes: list[Node], source: bytes) -> list[str]:
+    paths: list[str] = []
+    for node in nodes:
+        if node.type in {"hash", "pair"}:
+            break  # route options/conditions follow the path arguments
+        path = _string_value(node, source)
+        if path is None:
+            return []  # do not emit a partial result when another path is dynamic
+        paths.append(path)
+    return paths
+
+
+def _route_combinations(
+    method: str, args: list[Node], source: bytes, *, allow_pathless: bool = False
+) -> list[tuple[str, str]]:
+    if method != "route":
+        paths = _literal_paths(args, source)
+        if not args and allow_pathless:
+            paths = [""]
+        return [(method.upper(), path) for path in paths]
+
+    methods: list[str] = []
+    for node in args:
+        value = _http_method_value(node, source)
+        if value is None:
+            break
+        methods.append(value)
+    if not methods:
+        return []
+
+    paths = _literal_paths(args[len(methods) :], source)
+    if len(args) == len(methods) and allow_pathless:
+        paths = [""]
+    return [(verb, path) for verb in methods for path in paths]
+
+
+def _namespace_prefix(call: Node, source: bytes) -> tuple[str | None, bool] | None:
+    """Return the statically known namespace prefix and whether one exists."""
+    scopes: list[str] = []
+    current = call.parent
+    while current is not None:
+        if (
+            current.type == "call"
+            and _method(current, source) == "namespace"
+            and current.child_by_field_name("block") is not None
+        ):
+            args = _arguments(current)
+            prefix = _string_value(args[0], source) if args else None
+            if prefix is None:
+                return None, True
+            scopes.append(prefix)
+        current = current.parent
+    if not scopes:
+        return "", False
+    prefix = ""
+    for part in reversed(scopes):
+        if not part:
+            continue
+        prefix = prefix.rstrip("/") + "/" + part.strip("/")
+    return prefix, True
+
+
+def _join_endpoint(prefix: str, endpoint: str) -> str:
+    if not prefix:
+        return endpoint
+    if not endpoint:
+        return prefix
+    if endpoint == "/":
+        return prefix + "/"
+    return prefix.rstrip("/") + "/" + endpoint.lstrip("/")
 
 
 def _has_route_block(call: Node) -> bool:
     block = call.child_by_field_name("block")
-    return block is not None and block.type == "do_block"
-
-
-def _namespace_prefix(call: Node, source: bytes) -> str | None:
-    """The path enclosing sinatra-contrib ``namespace '/api' do … end`` blocks put in front of a
-    route (outermost first; nested namespaces compose), ``""`` for none, or None when a
-    namespace's path is not a string literal (a regex or variable) — the address is unknown."""
-    segments: list[str] = []
-    current = call.parent
-    while current is not None:
-        if (current.type == "call" and _method(current, source) == "namespace"
-                and current.child_by_field_name("block") is not None):
-            args = _arguments(current)
-            seg = _string_value(args[0], source) if args else None
-            if seg is None:
-                return None
-            segments.append(seg)
-        current = current.parent
-    return "".join("/" + s.strip("/") for s in reversed(segments) if s.strip("/"))
+    return block is not None and block.type in {"do_block", "block"}
 
 
 def _before_name(call: Node, source: bytes) -> str | None:
@@ -143,9 +230,10 @@ def _global_guards(root: Node, source: bytes) -> list[tuple[Node, int, int, str,
                 if literal is None:
                     continue  # a regex or variable path: coverage unknown
                 prefix = _namespace_prefix(call, source)
-                if prefix is None:
+                if prefix is None or prefix[0] is None:
                     continue
-                pattern = _pattern_re(prefix + literal)
+                namespace_prefix, _ = prefix
+                pattern = _pattern_re(_join_endpoint(namespace_prefix, literal))
             out.append((_scope(call, source), 1, call.start_byte, name, pattern))
     return out
 
@@ -171,29 +259,36 @@ def detect_sinatra_routes(root: Node, source: bytes, path: str, record: FileReco
 
     for call in _calls(root):
         method = _method(call, source)
-        if method not in _HTTP_METHODS or not _has_route_block(call):
+        if (method not in _HTTP_METHODS and method != "route") or not _has_route_block(call):
             continue
+        namespace = _namespace_prefix(call, source)
+        if namespace is None:
+            continue
+        prefix, in_namespace = namespace
         args = _arguments(call)
-        local = _string_value(args[0], source) if args else None
-        if local is None:
+        combinations = _route_combinations(
+            method, args, source, allow_pathless=in_namespace and bool(prefix)
+        )
+        if not combinations:
             continue
-        prefix = _namespace_prefix(call, source)
-        # Under an unresolved namespace the address is unknown → empty, never the bare path.
-        endpoint = None if prefix is None else (prefix + local if prefix else local)
         line = call.start_point[0] + 1
         block = call.child_by_field_name("block")  # the handler: an anonymous block
-        # Global guards don't assert auth (middleware is often logging or sessions).
-        guards = _guards_for(call, endpoint, hooks) or None
-        found.append(
-            Emit(call, dict(
-                semanticType="route",
-                method=method.upper(),
-                endpoint=endpoint,
-                framework="sinatra",
-                handlerLine=block.start_point[0] + 1 if block is not None else None,
-                guards=guards,
-                routeKind="route",
-                isRegex=False,
-            ), parent=owner_id(line, record.functions, record.classes, fallback), node_type="call")
-        )
+        for index, (verb, local) in enumerate(combinations):
+            endpoint = None if prefix is None else _join_endpoint(prefix, local)
+            # Global guards don't assert auth (middleware is often logging or sessions).
+            guards = _guards_for(call, endpoint, hooks) or None
+            found.append(
+                Emit(call, dict(
+                    semanticType="route",
+                    method=verb,
+                    endpoint=endpoint,
+                    framework="sinatra",
+                    handlerLine=block.start_point[0] + 1 if block is not None else None,
+                    guards=guards,
+                    routeKind="route",
+                    isRegex=False,
+                ), enrich="same" if index == 0 else "never",
+                    parent=owner_id(line, record.functions, record.classes, fallback),
+                    node_type="call")
+            )
     return found
