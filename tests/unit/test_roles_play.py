@@ -120,6 +120,41 @@ def test_routes_file_not_included_keeps_its_paths(analyze_files) -> None:
     assert _served(st) == [("conf/admin.routes", "/users")]
 
 
+def test_include_names_its_own_projects_router(analyze_files) -> None:
+    # Two sub-projects each have an admin.routes: `a`'s include is `a`'s own; `b`'s is not
+    # included anywhere and keeps its paths.
+    st = analyze_files({
+        "a/conf/routes": "->      /admin           admin.Routes\n",
+        "a/conf/admin.routes": "GET     /users     controllers.Admin.users\n",
+        "b/conf/admin.routes": "GET     /tools     controllers.Tools.list\n",
+    })
+    assert _served(st) == [("a/conf/admin.routes", "/admin/users"),
+                           ("b/conf/admin.routes", "/tools")]
+
+
+def test_include_of_another_projects_router(analyze_files) -> None:
+    # The app includes a sub-project's router: the one project that defines it.
+    st = analyze_files({
+        "conf/routes": "->      /admin           admin.Routes\n",
+        "modules/admin/conf/admin.routes": "GET     /users     controllers.Admin.users\n",
+    })
+    assert _served(st) == [("modules/admin/conf/admin.routes", "/admin/users")]
+    assert not [s for s in st if s.path == "conf/routes" and s.semanticType == "route"]
+
+
+def test_include_two_other_projects_could_serve_prefixes_neither(analyze_files) -> None:
+    # Two sub-projects define admin.Routes and the app defines none: the include can't be tied
+    # to one, so neither takes the prefix — not even from an include that names it alone.
+    st = analyze_files({
+        "conf/routes": "->      /admin           admin.Routes\n",
+        "one/conf/admin.routes": "GET     /users     controllers.Admin.users\n",
+        "two/conf/admin.routes": "GET     /tools     controllers.Tools.list\n",
+        "two/conf/routes": "->      /backoffice      admin.Routes\n",
+    })
+    assert _served(st) == [("one/conf/admin.routes", "/users"),
+                           ("two/conf/admin.routes", "/tools")]
+
+
 SIRD_ROUTER = """package v1.post
 import javax.inject.Inject
 import play.api.routing.Router.Routes

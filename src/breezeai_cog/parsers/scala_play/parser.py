@@ -94,9 +94,9 @@ class PlayRoutesParser(BaseParser):
 
     def parse_file(self, ctx: ParseContext) -> FileRecord:
         text = ctx.source.decode("utf-8", "replace")
-        prefix = router_prefix(ctx.resolution_index, router_name(ctx.path))
+        prefix = router_prefix(ctx.resolution_index, router_name(ctx.path), ctx.path)
         index = ctx.resolution_index
-        statements = (extract_routes(text, ctx.path, prefix, served_routers(index),
+        statements = (extract_routes(text, ctx.path, prefix, served_routers(index, ctx.path),
                                      lambda h: route_handler(index, ctx.path, h))
                       if ctx.capture_statements else [])
         return FileRecord(
