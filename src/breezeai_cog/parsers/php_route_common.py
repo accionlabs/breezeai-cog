@@ -191,7 +191,7 @@ def enrich_route(
                 semanticType="route",
                 text=statement.text,
                 method=method,
-                endpoint=normalize_endpoint(endpoint),
+                endpoint=normalize_endpoint(endpoint) if endpoint is not None else None,
                 handler=handler,
                 handlerLine=handler_line,
                 name=name or statement.name,
