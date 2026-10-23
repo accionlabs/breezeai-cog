@@ -585,3 +585,14 @@ def test_php_classifier_does_not_guess_plain_receivers() -> None:
     assert classify_call("cache.get", "get", language="php") is None
     assert classify_call("http.get", "get", language="php") == ("api_call", "GET", None)
 
+
+def test_php_cannot_activate_javascript_orm_mappings() -> None:
+    from breezeai_cog.parsers.detection import classify_call
+
+    for callee, method in (
+        ("Model.findAll", "findAll"),
+        ("repository.upsert", "upsert"),
+        ("ddb.putItem", "putItem"),
+    ):
+        assert classify_call(callee, method, language="php") is None
+

@@ -306,15 +306,18 @@ def _is_prisma_chain(low: str) -> bool:
 
 
 def match_db(callee: str, method: str, language: str | None = None,
-             typed_db_ids: "frozenset[str] | None" = None,
-             framework: str | None = None) -> str | None:
+             typed_db_ids: "frozenset[str] | None" = None) -> str | None:
     m = method.lower()
     low = callee.lower()
     if m in _PRISMA_VERBS and _is_prisma_chain(low):
         return "prisma"
     if m in _DISTINCTIVE:
         db = _DISTINCTIVE[m]
-        if language == "php" and db == "sequelize" and "sequelize" not in low:
+        if db in {"sequelize", "typeorm"} and language is not None and language not in {"javascript", "typescript"}:
+            return None
+        if db == "dynamodb" and language is not None and language not in {
+            "javascript", "typescript", "python", "java", "csharp", "vb",
+        }:
             return None
         # A receiverless distinctive verb is a local/helper call, not a database access.
         # This is defense-in-depth for callers that do not provide local_names.
@@ -385,18 +388,6 @@ def match_db(callee: str, method: str, language: str | None = None,
             return None  # a cache/collection/UI-state/etc. receiver — not data access
         return "orm"
 
-    if language == "php" and framework == "codeigniter":
-        ci_builder_methods = {
-            "select", "where", "orwhere", "wherein", "wherenotin",
-            "like", "orlike", "notlike", "ornotlike",
-            "insert", "insertbatch", "update", "updatebatch",
-            "delete", "emptyrecord", "truncate", "get", "getwhere",
-            "countallresults", "countall", "groupstart", "groupend",
-            "orwheregroupstart", "orwheregroupend",
-        }
-        if m in ci_builder_methods:
-            if "builder" in low or "db.table" in low:
-                return "codeigniter-builder"
     if m in _DJANGO_VERBS and (language is None or language in _PYTHON) and (
         ".objects." in low or low.startswith("objects.") or "queryset" in low
     ):

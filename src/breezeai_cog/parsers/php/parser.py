@@ -108,7 +108,7 @@ class PhpParser(BaseParser):
             if len(candidates) == 1 and next(iter(candidates)) != ctx.path:
                 statement.handlerPath = next(iter(candidates))
 
-    def extract(self, root: Node, ctx: ParseContext, framework: str | None = None) -> FileRecord:
+    def extract(self, root: Node, ctx: ParseContext) -> FileRecord:
         source, path = ctx.source, ctx.path
         fid = file_id(path)
         seen_ids: set[str] = set()
@@ -141,7 +141,6 @@ class PhpParser(BaseParser):
                             body, source, path, parent_id=cls.id,
                             capture=ctx.capture_statements, limit=ctx.statement_text_limit,
                             seen_ids=seen_ids,
-                            framework=framework,
                         )
                     )
                 for child in node.named_children:
@@ -168,7 +167,6 @@ class PhpParser(BaseParser):
                     capture=ctx.capture_statements,
                     limit=ctx.statement_text_limit,
                     resolve=resolve,
-                    framework=framework,
                 )
                 function_ids[(node.start_byte, node.end_byte)] = fn.id
                 functions.append(fn)
@@ -200,7 +198,7 @@ class PhpParser(BaseParser):
         statements.extend(
             extract_statements(
                 root, source, path, parent_id=fid, capture=ctx.capture_statements,
-                limit=ctx.statement_text_limit, seen_ids=seen_ids, framework=framework,
+                limit=ctx.statement_text_limit, seen_ids=seen_ids,
             )
         )
         if ctx.capture_statements:

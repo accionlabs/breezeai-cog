@@ -298,7 +298,6 @@ def classify_statement(
     typed_db_ids: "frozenset[str] | None" = None,
     decorators: "list[Decorator] | None" = None,
     local_names: Collection[str] = (),
-    framework: str | None = None,
 ) -> list[Statement]:
     # ``code_text`` (comment-free) drives query/semantic detection; ``display_text`` is what
     # lands on the record — for a normal statement it folds in a same-line trailing comment
@@ -328,7 +327,6 @@ def classify_statement(
             language,
             typed_db_ids=typed_db_ids,
             http_client_ids=current_http_client_ids() or None,
-            framework=framework,
         )
         if classified is None:
             continue
