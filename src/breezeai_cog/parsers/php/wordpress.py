@@ -6,8 +6,8 @@ from collections.abc import Iterator
 
 from tree_sitter import Node
 
-from ...emit import statement_id
-from ..additive import DetectContext, Detector, register_detector
+from ..additive import DetectContext, Detection, Detector, Gate, register_detector
+from ..emits import Emit
 from ..treesitter import node_text
 
 
@@ -53,12 +53,11 @@ def _callable(node: Node, source: bytes) -> tuple[str | None, int | None]:
     return (f"{class_name}@{method}" if class_name else method), node.start_point[0] + 1
 
 
-def detect_wordpress_hooks(dc: DetectContext) -> bool:
+def detect_wordpress_hooks(dc: DetectContext) -> Detection | None:
     source = dc.source
     if b"add_action" not in source and b"add_filter" not in source:
-        return False
-    statements = {statement.id: statement for statement in dc.record.statements}
-    found = False
+        return None
+    found: list[Emit] = []
     for node in _walk(dc.root):
         if node.type != "function_call_expression":
             continue
@@ -74,32 +73,27 @@ def detect_wordpress_hooks(dc: DetectContext) -> bool:
         hook = _value(values[0].named_children[0], source) if values[0].named_children else None
         if hook is None:
             continue
-        line, column = node.start_point[0] + 1, node.start_point[1]
-        statement = statements.get(statement_id(dc.path, line, column))
-        if statement is None:
-            continue
         handler, handler_line = _callable(values[1], source)
-        statement.semanticType = "eventbus_consumer"
-        statement.method = "CONSUMER"
-        statement.endpoint = hook
-        statement.handler = handler
-        statement.handlerLine = handler_line
-        statement.framework = "wordpress"
-        found = True
-    return found
-
-
-def _run(dc: DetectContext) -> str | None:
-    return "wordpress" if detect_wordpress_hooks(dc) else None
+        found.append(Emit(
+            node,
+            {
+                "semanticType": "eventbus_consumer",
+                "method": "CONSUMER",
+                "endpoint": hook,
+                "handler": handler,
+                "handlerLine": handler_line,
+                "framework": "wordpress",
+            },
+            enrich="unclassified",
+        ))
+    return Detection(found, label="wordpress") if found else None
 
 
 register_detector(
     Detector(
         name="wordpress-hooks",
-        language="php",
-        order=10,
-        run=_run,
-        skip_fixtures=True,
+        gate=Gate("php", order=10, skip_fixtures=True),
+        detect=detect_wordpress_hooks,
         frameworks=("wordpress",),
     )
 )
