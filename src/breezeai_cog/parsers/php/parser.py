@@ -62,7 +62,53 @@ class PhpParser(BaseParser):
         root = parse_source("php", ctx.source, ctx.parse_timeout_micros).root_node
         return self.extract(root, ctx)
 
-    def extract(self, root: Node, ctx: ParseContext) -> FileRecord:
+    def link_handlers(self, record: FileRecord, ctx: ParseContext) -> None:
+        """Resolve PHP handlers only when the declaration is directly verifiable.
+
+        PHP route syntax commonly names a controller without carrying its declaration
+        location.  The registration line is not that location, so leave the line empty
+        until a same-file method or an unambiguous indexed class file is found.
+        """
+        if not ctx.capture_statements:
+            return
+        index = ctx.resolution_index if isinstance(ctx.resolution_index, PhpIndex) else None
+        for statement in record.statements:
+            if statement.semanticType not in {"route", "eventbus_consumer", "timer"}:
+                continue
+            if not statement.handler or statement.handlerLine is not None or statement.handlerPath is not None:
+                continue
+            handler = statement.handler
+            if "@" in handler:
+                class_name, method_name = handler.split("@", 1)
+            else:
+                class_name, method_name = handler, "__invoke"
+            simple_class = class_name.lstrip("\\").rsplit("\\", 1)[-1]
+            same_file_classes = {
+                cls.id: cls for cls in record.classes
+                if cls.name.lower() == simple_class.lower()
+            }
+            same_file_methods = [
+                fn for fn in record.functions
+                if fn.name.lower() == method_name.lower()
+                and (not same_file_classes or fn.parentId in same_file_classes)
+            ]
+            if len(same_file_methods) == 1:
+                statement.handlerLine = same_file_methods[0].startLine
+                continue
+            if index is None:
+                continue
+            candidates: set[str] = set()
+            wanted = class_name.lstrip("\\").lower()
+            for fqcn, indexed_path in index.fqcn.items():
+                if indexed_path is None:
+                    continue
+                normalized = fqcn.lstrip("\\").lower()
+                if normalized == wanted or normalized.rsplit("\\", 1)[-1] == simple_class.lower():
+                    candidates.add(indexed_path)
+            if len(candidates) == 1 and next(iter(candidates)) != ctx.path:
+                statement.handlerPath = next(iter(candidates))
+
+    def extract(self, root: Node, ctx: ParseContext, framework: str | None = None) -> FileRecord:
         source, path = ctx.source, ctx.path
         fid = file_id(path)
         seen_ids: set[str] = set()
@@ -95,6 +141,7 @@ class PhpParser(BaseParser):
                             body, source, path, parent_id=cls.id,
                             capture=ctx.capture_statements, limit=ctx.statement_text_limit,
                             seen_ids=seen_ids,
+                            framework=framework,
                         )
                     )
                 for child in node.named_children:
@@ -121,6 +168,7 @@ class PhpParser(BaseParser):
                     capture=ctx.capture_statements,
                     limit=ctx.statement_text_limit,
                     resolve=resolve,
+                    framework=framework,
                 )
                 function_ids[(node.start_byte, node.end_byte)] = fn.id
                 functions.append(fn)
@@ -152,7 +200,7 @@ class PhpParser(BaseParser):
         statements.extend(
             extract_statements(
                 root, source, path, parent_id=fid, capture=ctx.capture_statements,
-                limit=ctx.statement_text_limit, seen_ids=seen_ids,
+                limit=ctx.statement_text_limit, seen_ids=seen_ids, framework=framework,
             )
         )
         if ctx.capture_statements:

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Iterator
 
 from tree_sitter import Node
 
@@ -22,6 +23,7 @@ from ..php_route_common import (
     route_options,
     string_value,
     strings_in_array,
+    unwrap,
 )
 from ..treesitter import node_text, parse_source
 
@@ -35,9 +37,9 @@ _VERBS = {
     "head": "HEAD",
     "any": "ANY",
     "add": "ANY",
-    "cli": "CLI",
-    "view": "GET",
 }
+
+_CI_REGEX_TOKENS = ("(:num)", "(:segment)", "(:any)", "(:alpha)", "(:alphanum)", "(:hash)", "(.*)")
 
 _CODEIGNITER_DECLARATION = re.compile(
     rb"(?m)^[\t ]*(?:use|namespace)\s+[^;\r\n]*\bCodeIgniter\\"
@@ -60,7 +62,7 @@ def _route_methods(
     if method == "match" and len(args) >= 2:
         return [item.upper() for item in strings_in_array(args[0], source)], 1, 2 if len(args) > 2 else None
     if method == "addredirect":
-        return ["ANY"], 0, 1 if len(args) > 1 else None
+        return [], 0, None
     if method in _VERBS:
         return [_VERBS[method]], 0, 1 if len(args) > 1 else None
     return [], 0, None
@@ -159,21 +161,25 @@ def _enrich_route(
     call: Node,
     source: bytes,
     path: str,
-    statements: dict[str, object],
-    all_statements: list,
+    statements: dict[str, Statement],
+    all_statements: list[Statement],
     seen_ids: set[str],
     *,
-    endpoint: str,
+    endpoint: str | None,
     method: str,
     handler_node: Node | None = None,
     handler: str | None = None,
     name: str | None = None,
     guards: list[str] | None = None,
     route_kind: str = "route",
+    is_regex: bool | None = None,
 ) -> bool:
     from ..php_route_common import enrich_route
 
-    normalized = normalize_endpoint(endpoint)
+    normalized = normalize_endpoint(endpoint) if endpoint is not None else None
+    regex = is_regex if is_regex is not None else bool(
+        endpoint and any(token in endpoint for token in _CI_REGEX_TOKENS)
+    )
     line = call.start_point[0] + 1
     base = statements.get(statement_id(path, line, call.start_point[1]))
     if base is not None and base.semanticType == "route" and base.method == method and base.endpoint != normalized:
@@ -185,10 +191,10 @@ def _enrich_route(
             "method": method,
             "endpoint": normalized,
             "handler": handler if handler is not None else rendered_handler,
-            "handlerLine": line if handler is not None else rendered_handler_line,
+            "handlerLine": rendered_handler_line,
             "name": name,
             "routeKind": route_kind,
-            "isRegex": bool(any(token in endpoint for token in ("(:num)", "(:segment)", "(:any)", "(.*)"))),
+            "isRegex": regex,
             "guards": list(dict.fromkeys(guards or [])) or None,
         })
         all_statements.append(Statement.model_validate(clone))
@@ -198,13 +204,11 @@ def _enrich_route(
         call, source, path, statements, all_statements, seen_ids,
         framework="codeigniter", endpoint=endpoint, method=method,
         handler_node=handler_node, name=name, guards=guards,
-        is_regex=bool(any(token in endpoint for token in ("(:num)", "(:segment)", "(:any)", "(.*)"))),
+        is_regex=regex,
+        handler_name=handler,
     )
     for statement in reversed(all_statements):
         if statement.startLine == line and statement.method == method and statement.endpoint == normalized:
-            if handler is not None:
-                statement.handler = handler
-                statement.handlerLine = line
             statement.routeKind = route_kind
             changed = True
             break
@@ -260,7 +264,7 @@ def _repair_codeigniter_db_hints(record: FileRecord, source: bytes) -> None:
             statement.dataAccessHint = "codeigniter-builder"
 
 
-def _walk(node: Node):
+def _walk(node: Node) -> Iterator[Node]:
     yield node
     for child in node.named_children:
         yield from _walk(child)
@@ -272,7 +276,7 @@ def detect_codeigniter_routes(root: Node, source: bytes, path: str, record: File
     found = False
 
     def visit(
-        node: Node, prefix: str = "", guards: list[str] | None = None
+        node: Node, prefix: str | None = "", guards: list[str] | None = None
     ) -> None:
         nonlocal found
         if node.type == "member_call_expression":
@@ -283,9 +287,17 @@ def detect_codeigniter_routes(root: Node, source: bytes, path: str, record: File
                 if closure is not None:
                     group_prefix = _group_prefix(node, source)
                     group_guards = group_filters(args[1] if len(args) > 1 else None, source)
+                    first = unwrap(args[0]) if args else None
+                    dynamic_prefix = (
+                        first is not None
+                        and first.type not in {"anonymous_function", "arrow_function"}
+                        and group_prefix is None
+                    )
                     visit(
                         closure_body(closure),
-                        join_endpoint(prefix, group_prefix or "") if group_prefix else prefix,
+                        None if dynamic_prefix else (
+                            join_endpoint(prefix or "", group_prefix) if group_prefix and prefix is not None else prefix
+                        ),
                         list(dict.fromkeys([*(guards or []), *group_guards])),
                     )
                     return
@@ -298,42 +310,45 @@ def detect_codeigniter_routes(root: Node, source: bytes, path: str, record: File
                 if _route_receiver(node.child_by_field_name("object"), source):
                     options = args[1] if len(args) > 1 else None
                     route_name, route_guards = route_options(options, source)
-                    for verb, endpoint, handler, kind in _resource_specs(method, args, source):
+                    for verb, resource_endpoint, resource_handler, kind in _resource_specs(method, args, source):
                         found |= _enrich_route(
                             node, source, path, statements, record.statements, seen_ids,
-                            endpoint=join_endpoint(prefix, endpoint), method=verb,
-                            handler=handler, name=route_name,
+                            endpoint=(join_endpoint(prefix, resource_endpoint) if prefix is not None else None), method=verb,
+                            handler=resource_handler, name=route_name,
                             guards=list(dict.fromkeys([*(guards or []), *route_guards])),
                             route_kind=kind,
+                        is_regex=any(token in resource_endpoint for token in _CI_REGEX_TOKENS),
                         )
                     return
             if method == "map" and _route_receiver(node.child_by_field_name("object"), source):
                 options = args[1] if len(args) > 1 else None
                 route_name, route_guards = route_options(options, source)
                 for endpoint_node, handler_node in _static_array_map(args[0] if args else None, source).items():
-                    handler, _ = route_handler(handler_node, source)
+                    rendered_handler, _ = route_handler(handler_node, source)
                     found |= _enrich_route(
                         node, source, path, statements, record.statements, seen_ids,
-                        endpoint=join_endpoint(prefix, endpoint_node), method="ANY",
-                        handler=handler, name=route_name,
+                        endpoint=(join_endpoint(prefix, endpoint_node) if prefix is not None else None), method="ANY",
+                        handler=rendered_handler, name=route_name,
                         guards=list(dict.fromkeys([*(guards or []), *route_guards])),
+                        is_regex=any(token in endpoint_node for token in _CI_REGEX_TOKENS),
                     )
                 return
             methods, path_index, handler_index = _route_methods(method, args, source)
-            endpoint = string_value(args[path_index], source) if len(args) > path_index else None
+            route_endpoint = string_value(args[path_index], source) if len(args) > path_index else None
             options_index = handler_index + 1 if handler_index is not None else None
             options = args[options_index] if options_index is not None and len(args) > options_index else None
             route_name, route_guards = route_options(options, source)
             receiver = node.child_by_field_name("object")
-            if endpoint is not None and _route_receiver(receiver, source):
-                route_kind = "redirect" if method == "addredirect" else "view" if method == "view" else "route"
+            if route_endpoint is not None and _route_receiver(receiver, source):
+                route_kind = "route"
                 for verb in methods:
                     found |= _enrich_route(
                         node, source, path, statements, record.statements, seen_ids,
-                        endpoint=join_endpoint(prefix, endpoint), method=verb,
+                        endpoint=(join_endpoint(prefix, route_endpoint) if prefix is not None else None), method=verb,
                         handler_node=args[handler_index] if handler_index is not None else None,
                         name=route_name,
                         guards=list(dict.fromkeys([*(guards or []), *route_guards])),
+                        is_regex=any(token in route_endpoint for token in _CI_REGEX_TOKENS),
                         route_kind=route_kind,
                     )
         for child in node.named_children:
@@ -359,7 +374,7 @@ class CodeIgniterParser(PhpParser):
 
     def parse_file(self, ctx: ParseContext) -> FileRecord:
         root = parse_source("php", ctx.source, ctx.parse_timeout_micros).root_node
-        record = self.extract(root, ctx)
+        record = self.extract(root, ctx, framework="codeigniter")
         record.framework = "codeigniter"
         _repair_codeigniter_db_hints(record, ctx.source)
         if ctx.capture_statements and not self.is_fixture_file(ctx.path):

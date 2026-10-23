@@ -59,7 +59,7 @@ def build_class(
                 for param in extract_params(member.child_by_field_name("parameters"), source)
             ]
             break
-    properties: list[dict] = []
+    properties: list[dict[str, object]] = []
     if body is not None:
         for member in body.named_children:
             if member.type == "property_declaration":
@@ -132,20 +132,12 @@ def build_class(
                         "endLine": member.end_point.row + 1,
                     })
 
-    return Class(
-        id=cid,
-        parentId=parent_id,
-        path=path,
-        name=name,
-        type=_CLASS_TYPES[node.type],
-        visibility=visibility,
-        isAbstract=is_abstract or None,
-        extends=extends,
-        implements=implements,
-        constructorParams=constructor_params,
-        decorators=extract_attributes(node, source),
-        properties=properties,
-        startLine=start,
-        endLine=end,
-    )
+    return Class.model_validate({
+        "id": cid, "parentId": parent_id, "path": path, "name": name,
+        "type": _CLASS_TYPES[node.type], "visibility": visibility,
+        "isAbstract": is_abstract or None, "extends": extends,
+        "implements": implements, "constructorParams": constructor_params,
+        "decorators": extract_attributes(node, source), "properties": properties,
+        "startLine": start, "endLine": end,
+    })
 

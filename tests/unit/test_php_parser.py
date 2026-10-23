@@ -266,7 +266,7 @@ class LegacyController {
     assert (routes[0].endpoint, routes[0].method, routes[0].routeKind) == (
         "/legacy:format", "ANY", "route",
     )
-    assert routes[0].nodeType == "synthetic"
+    assert routes[0].nodeType == "attribute_group"
     assert routes[0].text == "#[Route('/legacy:format', priority: 10)]"
     assert record.functions[0].decorators == []
 
@@ -533,3 +533,75 @@ $app->get('/invokable', SingleAction::class);
     assert handlers["/users"] == "UserController@store"
     assert handlers["/colon"] == "OtherController@show"
     assert handlers["/invokable"] == "SingleAction"
+
+
+def test_laravel_special_routes_and_resources_use_entry_point_contract() -> None:
+    source = """<?php
+use Illuminate\\Support\\Facades\\Route;
+Route::view('/welcome', 'welcome');
+Route::redirect('/here', 'https://example.com/there');
+Route::resource('photos', PhotoController::class);
+Route::apiResource('albums', AlbumController::class);
+Route::singleton('profile', ProfileController::class);
+"""
+    record = _parse(LaravelParser(), source, path="routes/web.php")
+    routes = [s for s in record.statements if s.semanticType == "route"]
+
+    assert all(route.routeKind == "route" for route in routes)
+    assert not any(route.method in {"VIEW", "REDIRECT", "RESOURCE", "API_RESOURCE"} for route in routes)
+    assert next(route for route in routes if route.endpoint == "/welcome").handler is None
+    assert next(route for route in routes if route.endpoint == "/here").handler is None
+    assert any(route.endpoint == "/photos/{id}" and route.method == "GET"
+               and route.handler == "PhotoController@show" for route in routes)
+    assert any(route.endpoint == "/albums/{id}" and route.method == "PATCH"
+               and route.handler == "AlbumController@update" for route in routes)
+    assert any(route.endpoint == "/profile" and route.method == "DELETE"
+               and route.handler == "ProfileController@destroy" for route in routes)
+
+
+def test_php_route_locations_and_dynamic_prefixes_are_honest() -> None:
+    source = """<?php
+use Illuminate\\Support\\Facades\\Route;
+Route::prefix($dynamic)->group(function () {
+    Route::get('/inner', [UserController::class, 'index']);
+});
+Route::get('/closure', function () {});
+class UserController { public function index() {} }
+"""
+    record = _parse(LaravelParser(), source, path="routes/web.php")
+    routes = [s for s in record.statements if s.semanticType == "route"]
+    dynamic = next(route for route in routes if route.text.startswith("Route::get('/inner'"))
+    closure = next(route for route in routes if route.endpoint == "/closure")
+
+    assert dynamic.endpoint is None
+    assert dynamic.handler == "UserController@index"
+    assert dynamic.handlerLine is None
+    assert closure.handler is None and closure.handlerLine is None
+
+
+def test_slim_closures_and_codeigniter_contract_values() -> None:
+    slim = _parse(SlimParser(), """<?php
+use Slim\\App;
+$app = new App();
+$app->group($base, function ($group) { $group->get('/inner', function () {}); });
+""", path="routes.php")
+    slim_routes = [s for s in slim.statements if s.semanticType == "route"]
+    assert slim_routes and slim_routes[0].endpoint is None
+    assert slim_routes[0].handler is None
+    assert slim_routes[0].handlerLine == 4
+
+    ci = _parse(CodeIgniterParser(), """<?php
+use CodeIgniter\\Router\\RouteCollection;
+$routes->group($prefix, function () use ($routes) {
+    $routes->get('users/(:alpha)', 'Users::show/$1');
+});
+$routes->cli('jobs', 'Jobs::run');
+$routes->view('welcome', 'welcome');
+$routes->addRedirect('here', 'there');
+""", path="app/Config/Routes.php")
+    ci_routes = [s for s in ci.statements if s.semanticType == "route"]
+    assert len(ci_routes) == 1
+    assert ci_routes[0].endpoint is None
+    assert ci_routes[0].handler == "Users@show"
+    assert ci_routes[0].isRegex is True
+    assert all(route.routeKind == "route" for route in ci_routes)

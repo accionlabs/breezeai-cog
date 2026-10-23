@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import re
 
-from ...schemas import FileRecord
+from ...schemas import FileRecord, Statement
 from ..base import ParseContext
 from ..php.index import PhpIndex
 from ..php.parser import PhpParser
@@ -35,7 +35,7 @@ class SymfonyParser(PhpParser):
 
     def parse_file(self, ctx: ParseContext) -> FileRecord:
         root = parse_source("php", ctx.source, ctx.parse_timeout_micros).root_node
-        record = self.extract(root, ctx)
+        record = self.extract(root, ctx, framework="symfony")
         record.framework = "symfony"
         if ctx.capture_statements and not self.is_fixture_file(ctx.path):
             index = ctx.resolution_index if isinstance(ctx.resolution_index, PhpIndex) else None
@@ -48,7 +48,7 @@ class SymfonyParser(PhpParser):
         return record
 
 
-def _clear_semantic(statement) -> None:
+def _clear_semantic(statement: Statement) -> None:
     """Remove a shared semantic label when Symfony-local evidence disproves it."""
 
     statement.semanticType = None

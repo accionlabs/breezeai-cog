@@ -17,6 +17,7 @@ def classify_call(
     language: str | None = None,
     typed_db_ids: "frozenset[str] | None" = None,
     http_client_ids: "frozenset[str] | None" = None,
+    framework: str | None = None,
 ) -> tuple[str, str, str | None] | None:
     """Classify a normalized call into ``(semanticType, method, dataAccessHint)``.
 
@@ -30,12 +31,12 @@ def classify_call(
     permissive). API is tried first (so ``objects.get`` is a Django query, not an HTTP GET);
     raw queries before ORM (so ``createNativeQuery("SELECT …")`` is a ``query_statement``).
     """
-    verb = match_api(callee, method, http_client_ids=http_client_ids)
+    verb = match_api(callee, method, http_client_ids=http_client_ids, language=language)
     if verb is not None:
         return "api_call", verb, None
     if is_query(method, arg):
         return "query_statement", method, None
-    hint = match_db(callee, method, language, typed_db_ids=typed_db_ids)
+    hint = match_db(callee, method, language, typed_db_ids=typed_db_ids, framework=framework)
     if hint is not None:
         return "db_method_call", method, hint
     return None

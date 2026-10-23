@@ -298,6 +298,7 @@ def classify_statement(
     typed_db_ids: "frozenset[str] | None" = None,
     decorators: "list[Decorator] | None" = None,
     local_names: Collection[str] = (),
+    framework: str | None = None,
 ) -> list[Statement]:
     # ``code_text`` (comment-free) drives query/semantic detection; ``display_text`` is what
     # lands on the record — for a normal statement it folds in a same-line trailing comment
@@ -327,6 +328,7 @@ def classify_statement(
             language,
             typed_db_ids=typed_db_ids,
             http_client_ids=current_http_client_ids() or None,
+            framework=framework,
         )
         if classified is None:
             continue
@@ -359,28 +361,36 @@ def classify_statement(
                 path=path,
             )
         )
-        for semantic, method_value, endpoint, hint, call in hits:
+        for hit_semantic, hit_method, hit_endpoint, hit_hint, call in hits:
             cs, ccol = call.start_point[0] + 1, call.start_point[1]
             records.append(
                 Statement(
                     id=disambiguate(statement_id(path, cs, ccol), seen_ids),
                     parentId=parent_id,
                     nodeType=call.type,
-                    semanticType=cast(SemanticType, semantic),
+                    semanticType=cast(SemanticType, hit_semantic),
                     text=node_text(call, source),
-                    method=method_value,
-                    endpoint=endpoint,
-                    dataAccessHint=hint,
+                    method=hit_method,
+                    endpoint=hit_endpoint,
+                    dataAccessHint=hit_hint,
                     startLine=cs,
                     endLine=call.end_point[0] + 1,
                     path=path,
                 )
             )
         return records
+    semantic: SemanticType | None
+    method_value: str | None
+    endpoint: str | None
+    hint: str | None
     if hits:
-        semantic, method_value, endpoint, hint, _ = hits[0]
+        semantic_value, method_value, endpoint, hint, _ = hits[0]
+        semantic = cast(SemanticType, semantic_value)
     else:
-        semantic = method_value = endpoint = hint = None
+        semantic = None
+        method_value = None
+        endpoint = None
+        hint = None
         if text_has_query(code_text):  # raw SQL/Cypher string literal, no classified call
             semantic = "query_statement"
     records.append(
@@ -388,7 +398,7 @@ def classify_statement(
             id=disambiguate(statement_id(path, start, col), seen_ids),
             parentId=parent_id,
             nodeType=node.type,
-            semanticType=semantic,
+            semanticType=cast(SemanticType, semantic),
             text=display_text,
             name=name_of(node, source),
             method=method_value,
@@ -401,18 +411,18 @@ def classify_statement(
         )
     )
     # One synthetic record per additional hit, at the same span (fields stay single-valued).
-    for semantic, method_value, endpoint, hint, call in hits[1:]:
+    for hit_semantic, hit_method, hit_endpoint, hit_hint, call in hits[1:]:
         cs, ccol = call.start_point[0] + 1, call.start_point[1]
         records.append(
             Statement(
                 id=disambiguate(statement_id(path, cs, ccol), seen_ids),
                 parentId=parent_id,
                 nodeType=call.type,
-                semanticType=semantic,
+                semanticType=cast(SemanticType, hit_semantic),
                 text=node_text(call, source),
-                method=method_value,
-                endpoint=endpoint,
-                dataAccessHint=hint,
+                method=hit_method,
+                endpoint=hit_endpoint,
+                dataAccessHint=hit_hint,
                 startLine=start,
                 endLine=end,
                 path=path,
@@ -457,7 +467,7 @@ def member_statement(
     seen_ids: set[str],
     name: str | None = None,
     decorators: "list[Decorator] | None" = None,
-    semantic_type: str | None = None,
+    semantic_type: SemanticType | None = None,
 ) -> Statement:
     """One flat declaration Statement for ``node`` (``nodeType`` = the AST node, ``text`` =
     its source). ``name`` defaults to the member's declared name; ``semantic_type`` marks the
