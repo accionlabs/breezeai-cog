@@ -291,3 +291,15 @@ def test_router_included_twice_keeps_its_own_path(analyze_files) -> None:
                  "app.include_router(router, prefix='/v2')\n",
     })
     assert [s.endpoint for s in st if s.semanticType == "route"] == ["/items/"]
+
+
+def test_mounted_sub_application_has_no_address_without_an_index(tmp_path) -> None:
+    src = (b"from fastapi import FastAPI\napp = FastAPI()\nsub = FastAPI()\n"
+           b"@sub.get('/items')\ndef items():\n    return []\n"
+           b"@app.get('/ping')\ndef ping():\n    return 1\napp.mount('/v1', sub)\n")
+    p = tmp_path / "main.py"
+    p.write_bytes(src)
+    rec = FastAPIParser().parse_file(ParseContext(path="main.py", abs_path=p, source=src,
+                                                  repo_root=tmp_path, capture_statements=True))
+    assert sorted((s.endpoint or "") for s in rec.statements if s.semanticType == "route") == [
+        "", "/ping"]

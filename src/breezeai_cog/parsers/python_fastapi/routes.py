@@ -17,6 +17,7 @@ from .file_facts import app_middleware as _app_middleware
 from .file_facts import calls as _calls
 from .file_facts import dependencies as _dependencies
 from .file_facts import literal as _literal
+from .file_facts import mounted_names as _mounted_names
 from .file_facts import prefix_kwarg as _prefix_kwarg
 from .wiring import fastapi_wiring
 
@@ -117,6 +118,11 @@ def _router_bases(
             return _UNKNOWN, guards, top
         return f"{parent_base}{mount}{prefix}", guards, top
 
+    # A sub-application mounted in this file (``app.mount("/v1", sub)``): served under a path
+    # this pass does not follow, so its address is unknown.
+    for name in _mounted_names(root, source) if b".mount(" in source else ():
+        if name in own:
+            own[name] = _UNKNOWN
     resolved = {name: wiring(name, frozenset()) for name in own}
     return ({k: v[0] for k, v in resolved.items()},
             {k: v[1] for k, v in resolved.items()},

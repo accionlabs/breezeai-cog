@@ -18,6 +18,9 @@ UNKNOWN = object()
 
 DEPENDS = frozenset({"Depends", "Security", "fastapi.Depends", "fastapi.Security"})
 ROUTERS = frozenset({"APIRouter", "fastapi.APIRouter", "FastAPI", "fastapi.FastAPI"})
+#: The application constructors among :data:`ROUTERS`: an app is the root of its routes — never
+#: passed to ``include_router`` — unless it is mounted as a sub-application (``.mount(…)``).
+APPS = frozenset({"FastAPI", "fastapi.FastAPI"})
 
 #: A prefix as recorded in the index (picklable): ``("lit", "/x")``, ``("const", file, name)``
 #: for a module-level string constant (this file or another), or ``("unknown",)``.
@@ -150,6 +153,11 @@ class FileFacts:
     #: Router variables created inside a function: served only where the function's result
     #: is included, so unknown when no include is found.
     local_routers: set[str] = field(default_factory=set)
+    #: App variables (``FastAPI(…)``) → the top-level function that creates them, ``""`` at
+    #: module level.
+    apps: dict[str, str] = field(default_factory=dict)
+    #: Names a ``.mount(…)`` call of this file hands a sub-application by (:func:`mounted_names`).
+    mounted: set[str] = field(default_factory=set)
 
 
 def module_constants(root: Node, source: bytes) -> dict[str, str]:
@@ -242,6 +250,12 @@ def _enclosing_function(node: Node) -> Node | None:
     return parent
 
 
+def _outermost_function(fdef: Node) -> Node:
+    while (outer := _enclosing_function(fdef)) is not None:
+        fdef = outer
+    return fdef
+
+
 def _top_functions(root: Node) -> list[Node]:
     out = []
     for c in root.named_children:
@@ -305,9 +319,15 @@ def file_facts(root: Node, source: bytes, repo_root: Path, rel: str) -> FileFact
                 and parent is not None and parent.type == "assignment"):
             target = parent.child_by_field_name("left")
             if target is not None and target.type == "identifier":
-                facts.routers[node_text(target, source)] = (spec(node), tuple(dependencies(node, source)))
-                if _enclosing_function(node) is not None:
-                    facts.local_routers.add(node_text(target, source))
+                name = node_text(target, source)
+                facts.routers[name] = (spec(node), tuple(dependencies(node, source)))
+                enclosing = _enclosing_function(node)
+                if node_text(fn, source) in APPS:
+                    outer = _outermost_function(enclosing) if enclosing is not None else None
+                    fname = outer.child_by_field_name("name") if outer is not None else None
+                    facts.apps[name] = node_text(fname, source) if fname is not None else ""
+                elif enclosing is not None:
+                    facts.local_routers.add(name)
     for fdef in _top_functions(root):
         fname = fdef.child_by_field_name("name")
         returned = _returned_names(fdef, source)
@@ -356,4 +376,39 @@ def file_facts(root: Node, source: bytes, repo_root: Path, rel: str) -> FileFact
             facts.includes.append(
                 (node_text(obj, source), child, spec(node), tuple(dependencies(node, source))))
     facts.middleware = app_middleware(root, source) if b"middleware" in source else {}
+    facts.mounted = mounted_names(root, source) if b".mount(" in source else set()
     return facts
+
+
+def mounted_names(root: Node, source: bytes) -> set[str]:
+    """The names a ``.mount(path, app)`` call hands a sub-application by: an identifier or
+    attribute argument (``sub``, ``pkg.sub`` → ``sub``), the function a call argument calls
+    (``create_sub()`` → ``create_sub``), and the function a module-level variable so passed was
+    assigned from (``sub = create_sub()``). Matched by simple name across the repo, so a same-named
+    app or factory elsewhere also counts as mounted — its address becomes unknown, never wrong."""
+    out: set[str] = set()
+    for node in calls(root):
+        fn = node.child_by_field_name("function")
+        attr = fn.child_by_field_name("attribute") if fn is not None and fn.type == "attribute" else None
+        args = node.child_by_field_name("arguments")
+        if attr is None or node_text(attr, source) != "mount" or args is None:
+            continue
+        for arg in args.named_children:
+            value = arg.child_by_field_name("value") if arg.type == "keyword_argument" else arg
+            if value is not None and value.type == "call":
+                value = value.child_by_field_name("function")
+            if value is not None and value.type == "attribute":
+                value = value.child_by_field_name("attribute")
+            if value is not None and value.type == "identifier":
+                out.add(node_text(value, source))
+    for stmt in root.named_children:  # sub = create_sub(): the factory is mounted too
+        node = stmt.named_children[0] if stmt.type == "expression_statement" and stmt.named_children else stmt
+        left, right = node.child_by_field_name("left"), node.child_by_field_name("right")
+        if node.type != "assignment" or left is None or right is None or right.type != "call":
+            continue
+        callee = right.child_by_field_name("function")
+        if callee is not None and callee.type == "attribute":
+            callee = callee.child_by_field_name("attribute")
+        if node_text(left, source) in out and callee is not None and callee.type == "identifier":
+            out.add(node_text(callee, source))
+    return out

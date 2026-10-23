@@ -8,6 +8,8 @@ wiring facts (:mod:`.file_facts`) are collected once per repository and composed
 
 * every router or app variable gets the prefix its routes are served under, the dependency
   guards it inherits, and the outermost app/router it is reached from;
+* an app (``FastAPI()``, at module level or made in a ``create_app()`` function) is a root —
+  unless a ``.mount(…)`` anywhere names it or its factory: a sub-application's address is unknown;
 * a router included at more than one place, or in a cycle, keeps its own prefix (ambiguous);
 * a prefix that exists but cannot be resolved makes the address unknown (``None``);
 * a prefix given by a module-level string constant (``API_PREFIX = "/api/v1"``, in this file or
@@ -105,6 +107,7 @@ def _resolve(values: list[tuple[str, str, FileFacts]], index: Any) -> FastapiWir
             if target in own:
                 sites.setdefault(target, set()).add(((rel, receiver), value(spec), deps))
 
+    mounted = set().union(*(f.mounted for f in facts.values()))
     memo: dict[Node_, Wiring] = {}
 
     def wiring(node: Node_, seen: frozenset[Node_]) -> Wiring:
@@ -112,10 +115,15 @@ def _resolve(values: list[tuple[str, str, FileFacts]], index: Any) -> FastapiWir
             return memo[node]
         prefix, deps = own.get(node, ("", ()))
         at = sites.get(node, set())
-        if not at and node[1] in facts[node[0]].local_routers:
+        maker = facts[node[0]].apps.get(node[1])
+        if maker is not None:
+            # An app is the root of its routes, wherever it is made (``create_app()``) — unless
+            # it may be a mounted sub-application: then where it is served is unknown.
+            result: Wiring = ((None if (maker or node[1]) in mounted else prefix), deps, node)
+        elif not at and node[1] in facts[node[0]].local_routers:
             # Made inside a function and not found included: served wherever the function's
             # result is mounted — unknown, never the bare path.
-            result: Wiring = (None, deps, node)
+            result = (None, deps, node)
         elif len(at) != 1 or node in seen:  # not included anywhere, ambiguous, or a cycle
             result = (prefix, deps, node)
         else:
@@ -140,6 +148,6 @@ def _resolve(values: list[tuple[str, str, FileFacts]], index: Any) -> FastapiWir
 
 
 register_fact(FactSpec(
-    name=FACT, language="python", gate=(b"APIRouter", b"FastAPI", b"include_router"),
+    name=FACT, language="python", gate=(b"APIRouter", b"FastAPI", b"include_router", b".mount("),
     collect=_collect, resolve=_resolve,
 ))
