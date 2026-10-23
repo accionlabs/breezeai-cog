@@ -350,7 +350,10 @@ def _event_statement(call: Node, source: bytes, path: str, record: FileRecord, s
     statement = Statement(
         id=disambiguate(statement_id(path, line, column), seen), parentId=parent_id,
         nodeType=call.type, semanticType=semantic, text=node_text(call, source),
-        framework="symfony", method=_call_method(call, source), endpoint=endpoint,
+        framework="symfony",
+        method=("CONSUMER" if semantic == "eventbus_consumer"
+                else "PUBLISH" if semantic == "eventbus_publish" else "MESSAGE"),
+        endpoint=endpoint,
         startLine=line, endLine=call.end_point[0] + 1, path=path,
     )
     seen.add(statement.id)

@@ -165,7 +165,6 @@ def build_function(
     capture: bool,
     limit: int,
     resolve: CallResolver = noop_resolver,
-    framework: str | None = None,
 ) -> tuple[Function, list[Statement]]:
     name_node = node.child_by_field_name("name")
     name = node_text(name_node, source) if name_node is not None else "<anonymous>"
@@ -208,6 +207,6 @@ def build_function(
     )
     statements = extract_statements(
         body, source, path, parent_id=fid, capture=capture, limit=limit,
-        seen_ids=seen_ids, framework=framework,
+        seen_ids=seen_ids,
     )
     return fn, statements
