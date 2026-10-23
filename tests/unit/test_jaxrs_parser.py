@@ -182,11 +182,13 @@ public class Res {
   public void create(String o) {}
 }
 """})
-    got = {s.method: s.guards for s in st if s.semanticType == "route"}
+    got = {s.method: (s.guards, s.authRequired) for s in st if s.semanticType == "route"}
+    # A method annotation replaces the class one of its family: @DenyAll and @PermitAll on the
+    # method set that method's access, whatever the class says.
     assert got == {
-        "GET": ['RolesAllowed({"user"})'],
-        "DELETE": ['RolesAllowed({"user"})', "DenyAll"],
-        "POST": ['RolesAllowed({"user"})'],  # @PermitAll opens nothing up front: not a guard
+        "GET": (['RolesAllowed({"user"})'], True),
+        "DELETE": (["DenyAll"], True),
+        "POST": (None, None),  # @PermitAll: open to everyone
     }
 
 

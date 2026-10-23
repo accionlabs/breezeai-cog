@@ -363,3 +363,46 @@ def test_servlet_filter_does_not_guard_a_webflux_functional_route(analyze_files)
     mvc = _java("Fn", FN_IMPORTS, FN_BODY) | {k: v for k, v in files.items() if "AuthFilter" in k}
     [r] = _eps(analyze_files(mvc))
     assert r.guards == ["AuthFilter"]
+
+
+SECURED = WEB + "\nimport org.springframework.security.access.prepost.PreAuthorize;"
+
+
+def _secured(analyze_files, class_ann: str, method_ann: str):
+    st = analyze_files(_java("C", SECURED, f"""@RestController
+{class_ann}
+public class C {{
+  @GetMapping("/x")
+  {method_ann}
+  public String x() {{ return ""; }}
+}}"""))
+    [r] = _eps(st)
+    return r.guards, r.authRequired
+
+
+def test_permit_all_expression_is_no_guard(analyze_files) -> None:
+    assert _secured(analyze_files, "", '@PreAuthorize("permitAll()")') == (None, None)
+
+
+def test_method_pre_authorize_replaces_the_class_one(analyze_files) -> None:
+    assert _secured(analyze_files, '@PreAuthorize("hasRole(\'ADMIN\')")',
+                    '@PreAuthorize("permitAll()")') == (None, None)
+    assert _secured(analyze_files, '@PreAuthorize("isAuthenticated()")',
+                    '@PreAuthorize("hasRole(\'ADMIN\')")') == (
+        ["PreAuthorize(hasRole('ADMIN'))"], True)
+
+
+def test_only_a_signed_in_check_asserts_auth(analyze_files) -> None:
+    for expr, required in (("hasAuthority('orders:read')", True),
+                           ("isAuthenticated() and #id == principal.id", True),
+                           ("hasRole('ADMIN') or isAnonymous()", None),
+                           ("!isAuthenticated()", None),
+                           ("isAnonymous()", None),
+                           ("@acl.canRead(#id)", None)):
+        guards, auth = _secured(analyze_files, "", f'@PreAuthorize("{expr}")')
+        assert guards == [f"PreAuthorize({expr})"] and auth is required, expr
+
+
+def test_secured_anonymously_makes_no_claim(analyze_files) -> None:
+    assert _secured(analyze_files, "", '@Secured("ROLE_ADMIN")') == (["Secured(ROLE_ADMIN)"], True)
+    assert _secured(analyze_files, "", '@Secured("IS_AUTHENTICATED_ANONYMOUSLY")')[1] is None

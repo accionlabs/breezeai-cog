@@ -14,7 +14,7 @@ Parser: `src/breezeai_cog/parsers/java_springboot/` · Rules: [entry-point contr
 | Functional `nest(path("/p"), …)` / `.path("/p", …)` | Wiring | prefix on the nested bindings | Points at no handler |
 | `@KafkaListener` / `@RabbitListener` / `@JmsListener` / `@SqsListener` on a method | Binding | `eventbus_consumer`, topic or queue as `endpoint`, `handler` = method | One handler, inbound message |
 | `@Scheduled(cron = …)` / `@Scheduled(fixedRate = …)` / `fixedDelay` on a method | Binding | `timer`, cron or interval as `endpoint`, `handler` = method | One handler, triggered by a schedule |
-| `@PreAuthorize` / `@Secured` / `@RolesAllowed` on a handler | Guard | name in `guards` of that binding | Runs before the handler |
+| `@PreAuthorize` / `@Secured` / `@RolesAllowed` on a handler or its class | Guard | name in `guards` of that binding; a method annotation replaces the class one of the same kind. `authRequired: true` only for a check that needs a signed-in caller — a role, or `hasRole` / `hasAnyRole` / `hasAuthority` / `hasAnyAuthority` / `isAuthenticated` / `isFullyAuthenticated` not combined with `or` or a negation. `@PreAuthorize("permitAll()")` is no guard; any other expression is listed without a claim | Runs before the handler |
 | `HandlerInterceptor`, servlet `Filter`, `OncePerRequestFilter` | Guard | name in `guards`; no record of its own | Runs before many handlers |
 | `RestTemplate` / `WebClient` / Feign client calls | Outbound | `api_call` | Our code calling out |
 | `SpringApplication.run(...)` | None | — | Start-up |

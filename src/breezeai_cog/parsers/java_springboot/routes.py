@@ -136,7 +136,9 @@ def detect_spring_routes(record: FileRecord, root: Node, source: bytes) -> list[
         base = controllers.get(fn.parentId)
         if base is None:
             continue
-        guards = security_guards(class_decorators[fn.parentId], fn.decorators)
+        scoped = security_guards(class_decorators[fn.parentId], fn.decorators)
+        guards = [g.text for g in scoped] or None
+        auth_required = True if any(g.requires_auth for g in scoped) else None
         for dec in fn.decorators:
             verb, subs = _routes_of(dec)
             if verb is None:
@@ -152,7 +154,7 @@ def detect_spring_routes(record: FileRecord, root: Node, source: bytes) -> list[
                     routeKind="route",
                     isRegex=False,
                     guards=guards,
-                    authRequired=True if guards else None,
+                    authRequired=auth_required,
                     requestDTO=_request_dto(fn),
                     responseDTO=fn.returnType or None,
                 ), parent=fn.id, node_type="synthetic", text=f"@{dec.name}",
