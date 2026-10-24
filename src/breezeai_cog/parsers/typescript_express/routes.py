@@ -395,12 +395,43 @@ def _route_root(obj: Node | None, source: bytes) -> Node | None:
     return None
 
 
+def _later_verb(call: Node, source: bytes) -> bool:
+    """Whether another verb is chained after ``call`` (``.all(auth).get(list)``)."""
+    member = call.parent
+    outer = member.parent if member is not None else None
+    prop = member.child_by_field_name("property") \
+        if member is not None and member.type == "member_expression" else None
+    return (prop is not None and outer is not None and outer.type == "call_expression"
+            and node_text(prop, source) in _HTTP_VERBS)
+
+
+def _chain_middleware(call: Node, route_call: Node, source: bytes) -> list[Node]:
+    """The arguments of the ``.all(...)`` calls chained between ``route(path)`` and ``call``,
+    in chain order: Express runs them for every verb after them."""
+    out: list[list[Node]] = []
+    fn = call.child_by_field_name("function")
+    node = fn.child_by_field_name("object") if fn is not None else None
+    while node is not None and node is not route_call and node.type == "call_expression":
+        nfn = node.child_by_field_name("function")
+        prop = nfn.child_by_field_name("property") if nfn is not None else None
+        if prop is not None and node_text(prop, source) == "all":
+            args = node.child_by_field_name("arguments")
+            out.append(list(args.named_children) if args is not None else [])
+        node = nfn.child_by_field_name("object") if nfn is not None else None
+    return [arg for args in reversed(out) for arg in args]
+
+
 def _classify_route_verb(
     call: Node, route_call: Node, method: str, source: bytes, routers: frozenset[str],
     decl_lines: dict[str, int | None] | None, consts: dict[str, str | None] | None,
 ) -> tuple[str | None, str | None, str | None, int | None, list[str] | None, str, str] | None:
     """One verb of an ``X.route(path).get(...)`` chain → a route at ``path`` with the verb's
-    handler (last argument) and guards (the arguments before it)."""
+    handler (last argument) and guards (the arguments before it). An ``.all(...)`` followed by
+    another verb is middleware, not a route: its arguments guard the verbs after it
+    (``route('/x').all(auth).get(list)`` → ``GET /x``, guard ``auth`` — :func:`detect_express`
+    adds them, like other middleware that runs first)."""
+    if method == "all" and _later_verb(call, source):
+        return None
     rfn = route_call.child_by_field_name("function")
     robj = rfn.child_by_field_name("object") if rfn is not None else None
     if robj is None:
@@ -670,7 +701,13 @@ def detect_express(
             receiver = _receiver(call, source)
             outer = global_guards(receiver, call.start_byte)
             mounted = list(mount_guards.get(receiver, ())) or file_mount_guards
-            guards = compose_guards(mounted, outer, guards)
+            # ``route(path).all(mw).get(h)``: ``mw`` runs before every verb chained after it.
+            fn = call.child_by_field_name("function")
+            route_call = _route_root(fn.child_by_field_name("object"), source) \
+                if fn is not None else None
+            chained = (_guard_names(_chain_middleware(call, route_call, source), source)
+                       if route_call is not None else None)
+            guards = compose_guards(mounted, outer, chained, guards)
         # Enrich the base statement on the call's line (a top-level route call); a second route in
         # one statement (route(path).get(a).post(b)) or one inside a handler/callback (the base
         # skips nested scopes) gets its own record.
