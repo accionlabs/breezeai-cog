@@ -19,6 +19,7 @@ from .file_facts import dependencies as _dependencies
 from .file_facts import literal as _literal
 from .file_facts import mounted_names as _mounted_names
 from .file_facts import prefix_kwarg as _prefix_kwarg
+from .auth import certain_auth
 from .wiring import fastapi_wiring
 
 # HTTP verbs (+ websocket) exposed as decorator methods on FastAPI app/router objects.
@@ -132,7 +133,7 @@ def _router_bases(
 def _routes(dec: Node, fdef: Node, source: bytes, path: str, class_name: str | None,
             bases: dict[str, str | object],
             router_guards: dict[str, list[str]], roots: dict[str, str],
-            middleware: dict[str, list[str]]) -> list[Emit]:
+            middleware: dict[str, list[str]], auth: frozenset[str] = frozenset()) -> list[Emit]:
     call = dec.named_children[0] if dec.named_children else None
     if call is None or call.type != "call":
         return []
@@ -159,7 +160,8 @@ def _routes(dec: Node, fdef: Node, source: bytes, path: str, class_name: str | N
     served = bases.get(receiver_name, "")
     # Guards: the app's middleware (decision Q9: a global guard on every binding it covers),
     # then the router's / app's inherited dependencies, then the route's own (outer first).
-    # Only dependencies assert auth: app middleware is often logging or CORS.
+    # Only a security-scheme dependency asserts auth (:mod:`.auth`): middleware is often logging
+    # or CORS, a dependency often a DB session or paging.
     scoped = router_guards.get(receiver_name, []) + _dependencies(call, source)
     guards = middleware.get(roots.get(receiver_name, receiver_name), []) + scoped
     if served is _UNKNOWN:
@@ -176,8 +178,9 @@ def _routes(dec: Node, fdef: Node, source: bytes, path: str, class_name: str | N
             handler=name,
             handlerLine=handler_line,
             guards=guards or None,
-            # Honest-null: assert auth only when a guard is present; absence is unknown.
-            authRequired=True if scoped else None,
+            # Only a dependency that certainly rejects an anonymous call asserts auth
+            # (:mod:`.auth`); any other is listed, its effect unknown.
+            authRequired=True if auth.intersection(scoped) else None,
             routeKind="ws" if m == "WEBSOCKET" else "route",
         ), parent=parent, node_type="synthetic")
         for m in methods
@@ -227,6 +230,8 @@ def detect_routes(
         )
         middleware = _app_middleware(root, source) if b"middleware" in source else {}
 
+    auth = certain_auth(root, source)
+
     def walk(node: Node, class_name: str | None) -> None:
         for child in node.named_children:
             if child.type == "class_definition":
@@ -243,7 +248,7 @@ def detect_routes(
                 elif fdef is not None:
                     for dec in (c for c in child.named_children if c.type == "decorator"):
                         routes.extend(_routes(dec, fdef, source, path, class_name,
-                                              bases, router_guards, roots, middleware))
+                                              bases, router_guards, roots, middleware, auth))
                     body = fdef.child_by_field_name("body")
                     if body is not None:
                         walk(body, class_name)

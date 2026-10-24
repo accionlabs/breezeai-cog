@@ -1261,7 +1261,7 @@ def test_express_verb_route_guards(tmp_path) -> None:
     route = next(s for s in rec.statements if s.semanticType == "route" and s.endpoint == "/items/:id")
     assert route.handler == "getItem"
     assert route.guards == ["requireAuth"]
-    assert route.authRequired is True
+    assert route.authRequired is None  # requireAuth is the app's own: no certain claim
 
 
 def test_express_route_no_guards_is_unknown_not_open(tmp_path) -> None:

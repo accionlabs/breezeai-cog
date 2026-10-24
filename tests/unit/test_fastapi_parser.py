@@ -198,12 +198,13 @@ def test_dependencies_are_guards_outer_first(analyze_files) -> None:
         "app.include_router(admin, dependencies=[Depends(require_login)])\n"
     )})
     got = {s.handler: (s.guards, s.authRequired) for s in st if s.semanticType == "route"}
+    # Every dependency is listed; none is a security scheme of this file, so none asserts auth.
     assert got == {
         # app → include → router → route; Depends() with no callable is skipped
-        "stats": (["audit", "require_login", "require_admin", "auth.scopes"], True),
-        "open_": (["audit"], True),
+        "stats": (["audit", "require_login", "require_admin", "auth.scopes"], None),
+        "open_": (["audit"], None),
         # not included in this file: only its own dependencies
-        "l": (["rate_limit"], True),
+        "l": (["rate_limit"], None),
     }
 
 
@@ -234,8 +235,8 @@ def test_app_middleware_guards_every_route_of_the_app(analyze_files) -> None:
     )})
     got = {s.handler: (s.guards, s.authRequired) for s in st if s.semanticType == "route"}
     assert got == {
-        # app middleware first, then dependencies; only dependencies assert auth
-        "me": (["audit", "CORSMiddleware", "require_user"], True),
+        # app middleware first, then dependencies; require_user is not a known scheme: no claim
+        "me": (["audit", "CORSMiddleware", "require_user"], None),
         "health": (["audit", "CORSMiddleware"], None),
         # a router not included in this file: coverage uncertain → no app middleware
         "x": (None, None),
@@ -274,7 +275,7 @@ def test_include_router_from_another_file(analyze_files) -> None:
     got = {s.handler: (s.endpoint, s.guards, s.authRequired)
            for s in st if s.semanticType == "route"}
     # imported constant + nested include across files; guards: app middleware, mount, own
-    assert got["get_order"] == ("/api/v1/orders/{oid}", ["CORSMiddleware", "audit", "auth"], True)
+    assert got["get_order"] == ("/api/v1/orders/{oid}", ["CORSMiddleware", "audit", "auth"], None)
     # a settings attribute is not resolved (the environment can override it) → address unknown
     assert got["list_users"] == (None, ["CORSMiddleware"], None)
 
@@ -303,3 +304,31 @@ def test_mounted_sub_application_has_no_address_without_an_index(tmp_path) -> No
                                                   repo_root=tmp_path, capture_statements=True))
     assert sorted((s.endpoint or "") for s in rec.statements if s.semanticType == "route") == [
         "", "/ping"]
+
+
+def test_only_a_security_scheme_dependency_asserts_auth(analyze_files) -> None:
+    st = analyze_files({"main.py": (
+        "from fastapi import FastAPI, Depends, Security\n"
+        "from fastapi.security import OAuth2PasswordBearer, HTTPBearer as Bearer, APIKeyHeader\n"
+        "app = FastAPI()\n"
+        "oauth2 = OAuth2PasswordBearer(tokenUrl='token')\n"
+        "optional = Bearer(auto_error=False)\n"
+        "dynamic = APIKeyHeader(name='X-Key', auto_error=settings.STRICT)\n"
+        "def current_user(token: str = Depends(oauth2)):\n    return token\n"
+        "def admin(user = Depends(current_user)):\n    return user\n"
+        "def maybe_user(token = Depends(optional)):\n    return token\n"
+        "def get_db():\n    yield 1\n"
+        "@app.get('/scheme', dependencies=[Depends(oauth2)])\ndef a():\n    pass\n"
+        "@app.get('/user', dependencies=[Security(current_user)])\ndef b():\n    pass\n"
+        "@app.get('/admin', dependencies=[Depends(get_db), Depends(admin)])\ndef c():\n    pass\n"
+        "@app.get('/maybe', dependencies=[Depends(maybe_user)])\ndef d():\n    pass\n"
+        "@app.get('/dyn', dependencies=[Depends(dynamic)])\ndef e():\n    pass\n"
+        "@app.get('/db', dependencies=[Depends(get_db)])\ndef f():\n    pass\n"
+    )})
+    got = {s.endpoint: s.authRequired for s in st if s.semanticType == "route"}
+    assert got == {
+        "/scheme": True, "/user": True, "/admin": True,  # a scheme with auto_error on runs first
+        "/maybe": None,  # auto_error=False: a missing token gives None, the route still runs
+        "/dyn": None,    # auto_error not a literal: unknown
+        "/db": None,     # a DB session is not authentication
+    }

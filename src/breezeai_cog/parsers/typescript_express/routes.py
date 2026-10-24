@@ -282,6 +282,62 @@ def package_locals(root: Node, source: bytes) -> dict[str, tuple[str, str]]:
     return out
 
 
+#: express-jwt's factory: ``expressjwt`` (v7+) or the module itself (``require('express-jwt')``,
+#: v6 and earlier).
+_JWT_PACKAGE = "express-jwt"
+
+
+def _certain_jwt_call(call: Node, source: bytes, factories: set[str]) -> bool:
+    """``expressjwt({ secret, … })``: rejects a request without a valid token unless
+    ``credentialsRequired`` is not ``true`` or ``.unless(…)`` exempts some paths."""
+    fn = call.child_by_field_name("function")
+    if fn is None or fn.type != "identifier" or node_text(fn, source) not in factories:
+        return False
+    member = call.parent
+    if member is not None and member.type == "member_expression":
+        return False  # expressjwt(…).unless(…): some paths pass without a token
+    args = call.child_by_field_name("arguments")
+    options = args.named_children[0] if args is not None and args.named_children else None
+    if options is None or options.type != "object":
+        return False
+    for pair in options.named_children:
+        key = pair.child_by_field_name("key") if pair.type == "pair" else None
+        value = pair.child_by_field_name("value") if key is not None else None
+        if key is not None and node_text(key, source).strip("'\"") == "credentialsRequired" \
+                and (value is None or node_text(value, source) != "true"):
+            return False
+    return True
+
+
+def certain_auth(root: Node, source: bytes,
+                 packages: dict[str, tuple[str, str]]) -> frozenset[str]:
+    """The middleware names of this file that certainly reject an anonymous request — the only
+    guards that assert ``authRequired``. Express has no authentication of its own, and a name
+    (``requireAuth``) says nothing certain, so only express-jwt counts: a variable bound once to a
+    certain ``expressjwt({…})`` call (:func:`_certain_jwt_call`), or the factory's own name when
+    every call of it in the file is certain."""
+    factories = {local for local, (pkg, export) in packages.items()
+                 if pkg == _JWT_PACKAGE and export in ("expressjwt", "*")}
+    if not factories:
+        return frozenset()
+    calls: dict[str, list[bool]] = {}
+    bound: dict[str, list[bool]] = {}
+    for node in _invocations(root):
+        fn = node.child_by_field_name("function")
+        if fn is None or fn.type != "identifier" or node_text(fn, source) not in factories:
+            continue
+        certain = _certain_jwt_call(node, source, factories)
+        calls.setdefault(node_text(fn, source), []).append(certain)
+        decl = node.parent
+        name = decl.child_by_field_name("name") if decl is not None \
+            and decl.type == "variable_declarator" else None
+        if name is not None and name.type == "identifier":
+            bound.setdefault(node_text(name, source), []).append(certain)
+    out = {n for n, found in bound.items() if found == [True]}
+    out |= {n for n, found in calls.items() if all(found)}
+    return frozenset(out)
+
+
 def _serving_middleware(chain: list[Node], source: bytes,
                         packages: dict[str, tuple[str, str]]) -> str | None:
     """The framework label when a mount's args are known serving middleware
@@ -678,6 +734,7 @@ def detect_express(
     )
 
     packages = package_locals(root, source)
+    auth = certain_auth(root, source, packages) if _JWT_PACKAGE.encode() in source else frozenset()
     plain = plain_locals(root, source)
     # Routers mounted in this file whose base resolved: their routes carry the mount's prefix.
     local_served = {r for r in routers if r in receiver_base and r not in imported}
@@ -692,9 +749,10 @@ def detect_express(
         served = _apply_base(
             receiver_base.get(_receiver(call, source), mount_base), framework, route_kind, endpoint
         )
-        # Honest-null: assert auth only when a route-level guard is present. Absence is
-        # "unknown" (None), not "open" — app-level middleware may still protect the route.
-        auth_required = True if guards else None
+        # Only a route-level guard that certainly rejects an anonymous request asserts auth
+        # (:func:`certain_auth`); any other middleware — validation, logging, a rate limit, a
+        # custom check — is listed, its effect unknown.
+        auth_required = True if auth and auth.intersection(guards or ()) else None
         if route_kind == "route" and method:
             # Middleware registered earlier on this receiver (or its parents) runs first. It does
             # not set authRequired: app-wide middleware is often a body parser, not auth.

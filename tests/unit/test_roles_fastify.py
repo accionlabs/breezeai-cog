@@ -62,7 +62,8 @@ def test_route_hooks_are_guards(analyze_files) -> None:
     st = _app(analyze_files,
               "app.get('/me', { onRequest: [verifyJwt], preHandler: app.auth([isAdmin]) }, me);\n")
     [r] = _eps(st)
-    assert (r.guards, r.authRequired) == (["verifyJwt", "app.auth"], True)
+    # listed as guards; a hook's effect is not certain, so no auth claim
+    assert (r.guards, r.authRequired) == (["verifyJwt", "app.auth"], None)
 
 
 def test_instance_hook_guards_later_routes(analyze_files) -> None:

@@ -13,7 +13,7 @@ Parser: `src/breezeai_cog/parsers/python_fastapi/` · Rules: [entry-point contra
 | `app = FastAPI()` — at module level or inside a `create_app()` function | Wiring | — (the app is the root: its routes and the routers it includes are served from `/`) | The application |
 | `app.mount("/v1", sub)` — a FastAPI sub-application | Wiring | — (the mount path is not followed: the sub-application's routes have an empty `endpoint`. Matched by name — the variable, the attribute, or the factory that made it — so a same-named app elsewhere is unknown too) | Points at an app |
 | `app.mount(path, sub_app)` | Wiring | statement stays plain | Points at an application, not a handler |
-| `dependencies=[Depends(fn)]` on a route, `APIRouter` or `FastAPI` | Guard | `fn` in `guards` of each affected route | Runs before the handler(s) |
+| `dependencies=[Depends(fn)]` on a route, `APIRouter` or `FastAPI` | Guard | `fn` in `guards` of each affected route. `authRequired: true` only when `fn` certainly rejects an anonymous call: a `fastapi.security` scheme (`OAuth2PasswordBearer`, `HTTPBearer`, `APIKeyHeader` …) assigned in this file with `auto_error` left on, or a function of this file whose parameter depends on one. Any other dependency (a DB session, paging, a rate limit) or one defined elsewhere makes no claim | Runs before the handler(s) |
 | `@app.middleware("http")` | Guard | function name in `guards` of every route of the app | Runs before many handlers |
 | `@app.on_event("startup")` / `lifespan` | None | — | Start-up |
 | `httpx` / `requests` call | Outbound | `api_call` | Our code calling out |

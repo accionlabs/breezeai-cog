@@ -424,8 +424,9 @@ def test_use_middleware_guards_later_routes(analyze_files) -> None:
     got = {s.endpoint: (s.guards, s.authRequired)
            for s in st if s.semanticType == "route" and s.routeKind == "route"}
     assert got["/early"] == (None, None)
-    # global middleware first, then route-level; only the route-level guard asserts auth
-    assert got["/me"] == (["cors", "authenticate", "requireRole"], True)
+    # global middleware first, then route-level; the app's own middleware (authenticate)
+    # proves nothing certain about auth: listed, no claim
+    assert got["/me"] == (["cors", "authenticate", "requireRole"], None)
     # parent app's middleware, then the mount's guard, then the router's own use()
     assert got["/admin/stats"] == (["cors", "authenticate", "isAdmin", "audit"], None)
 
