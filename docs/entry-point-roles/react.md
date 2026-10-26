@@ -14,7 +14,7 @@ Parser: `src/breezeai_cog/parsers/typescript_react/` · Rules:
 | Path-only parent `<Route path>` / `{ path, children }` (no element) | Wiring | statement stays plain; `path` prefixes the children | No handler of its own |
 | Element + children with an index (or empty-path) child | Wiring | statement stays plain; prefix for the children | A layout: a child always fills its outlet |
 | Element + children with no index child | Binding (and wiring for the children) | `route`, `page`, `handler` = the element | Its own URL shows it with an empty outlet |
-| Guard element as a layout (`<Route element={<ProtectedRoute/>}>` + children) | Guard | name in `guards` of each child | Runs before the children's pages |
+| Guard element as a layout (`<Route element={<ProtectedRoute/>}>` + children) | Guard | name in `guards` of each child. A guard by whole words of its name: `Protected`, `Private`, `Guard`, `Authenticated`, `Authorized` (not after `Non`/`Not`/`No`), or `Require` + `Auth`/`Login`/`User`/`Role`/`Admin`/`Permission`/`Session`; not a name with `Layout`/`Page`/`Shell` (`RequiredFieldsNotice`, `UnprotectedRoute` are not guards) | Runs before the children's pages |
 | `<Route path element={<Navigate to/>}>` | None | — | A redirect; no page |
 | v7 `route(path, file)` / `index(file)` | Binding | `route`, `page`; `handler` = the module's component, never the file path | One route module |
 | v7 `layout(file, [...])` | Wiring | statement stays plain | A layout around its children |
