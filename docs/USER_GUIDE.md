@@ -45,6 +45,11 @@ paths or handlers are left empty. WordPress `add_action()` / `add_filter()` call
 `eventbus_consumer` statements with `method: "CONSUMER"`; they are not HTTP routes. Blade view
 files (`.blade.php`) remain unsupported.
 
+`include` / `require` (and their `_once` forms) become file imports only when the path is
+anchored to the including file — `__DIR__ . '/x.php'` or `dirname(__FILE__) . '/x.php'`. A bare
+`include 'x.php'` is resolved by PHP through `include_path` and the working directory at
+runtime, so it is not linked.
+
 It does **not** run or execute your code — it only reads and parses the source text, so it's safe to
 point at any repository.
 

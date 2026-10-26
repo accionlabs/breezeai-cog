@@ -2,14 +2,72 @@
 
 from __future__ import annotations
 
-import re
 from pathlib import Path
+
 from tree_sitter import Node
 
 from ...utils import repo_relative
-from ..php_route_common import walk
+from ..php_route_common import string_value, unwrap, walk
 from ..treesitter import node_text
 from .index import PhpIndex, namespace_of
+
+_INCLUDE_TYPES = {
+    "include_expression", "include_once_expression", "require_expression", "require_once_expression",
+}
+
+
+def _anchor_levels(node: Node, source: bytes) -> int | None:
+    """How many folders above the including file's folder an anchor points:
+    ``__DIR__`` / ``dirname(__FILE__)`` → 0, ``dirname(__DIR__)`` → 1,
+    ``dirname(__FILE__, n)`` → n - 1, ``dirname(__DIR__, n)`` → n. None for anything else."""
+    if node.type == "name" and node_text(node, source) == "__DIR__":
+        return 0
+    if node.type != "function_call_expression":
+        return None
+    function = node.child_by_field_name("function")
+    if function is None or node_text(function, source).lstrip("\\").lower() != "dirname":
+        return None
+    args = [unwrap(a) for a in (node.child_by_field_name("arguments") or node).named_children]
+    if not args or args[0] is None or args[0].type != "name":
+        return None
+    magic = node_text(args[0], source)
+    if len(args) == 1:
+        levels = 1
+    elif len(args) == 2 and args[1] is not None and args[1].type == "integer":
+        levels = int(node_text(args[1], source))
+    else:
+        return None
+    if magic == "__FILE__":
+        return levels - 1 if levels >= 1 else None
+    if magic == "__DIR__":
+        return levels
+    return None
+
+
+def _anchored_include(node: Node, source: bytes, file_path: str, repo_root: Path) -> str | None:
+    """The repo file an include/require loads, only when its path is anchored to this file
+    (``__DIR__ . '/x.php'``, ``dirname(__FILE__) . '/x.php'``). A bare ``'x.php'`` resolves
+    through ``include_path`` and the working directory at runtime, so it is not linked."""
+    expr = unwrap(next(iter(node.named_children), None))
+    if expr is None or expr.type != "binary_expression":
+        return None
+    operator = expr.child_by_field_name("operator")
+    if operator is None or node_text(operator, source) != ".":
+        return None
+    left, right = unwrap(expr.child_by_field_name("left")), expr.child_by_field_name("right")
+    levels = _anchor_levels(left, source) if left is not None else None
+    tail = string_value(right, source)
+    if levels is None or tail is None or not tail.startswith("/"):
+        return None
+    folder = (repo_root / file_path).parent
+    for _ in range(levels):
+        folder = folder.parent
+    candidate = (folder / tail.lstrip("/")).resolve()
+    try:
+        candidate.relative_to(repo_root.resolve())
+    except ValueError:
+        return None
+    return repo_relative(candidate, repo_root) if candidate.is_file() else None
 
 
 def _import_name(node: Node, source: bytes) -> tuple[str, str]:
@@ -103,29 +161,9 @@ def extract_imports(
                 if resolved:
                     bindings[alias] = resolved
 
-        elif node.type == "include_expression":
-            operation_match = re.match(
-                r"(include_once|require_once|include|require)\b",
-                node_text(node, source).lstrip(),
-                re.IGNORECASE,
-            )
-            operation = operation_match.group(1).lower() if operation_match else ""
-            if operation not in {"include", "include_once", "require", "require_once"}:
-                continue
-            literal = next((c for c in node.named_children if c.type == "string"), None)
-            if literal is None:
-                continue
-            raw = node_text(literal, source)
-            if len(raw) < 2 or raw[0] not in {"'", '"'} or raw[-1] != raw[0]:
-                continue
-            relative = raw[1:-1]
-            candidate = (repo_root / file_path).parent.joinpath(relative).resolve()
-            try:
-                candidate.relative_to(repo_root.resolve())
-            except ValueError:
-                continue
-            if candidate.is_file():
-                rel = repo_relative(candidate, repo_root)
+        elif node.type in _INCLUDE_TYPES:
+            rel = _anchored_include(node, source, file_path, repo_root)
+            if rel is not None:
                 internal.setdefault(rel, None)
 
     if namespace and index is not None:

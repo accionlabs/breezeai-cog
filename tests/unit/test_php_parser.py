@@ -75,16 +75,22 @@ class Controller extends BaseController {
     assert FileRecord.model_validate(record.model_dump(by_alias=True))
 
 
-def test_php_captures_all_literal_include_forms(tmp_path: Path) -> None:
-    for name in ("a.php", "b.php", "c.php", "d.php"):
+def test_php_links_only_includes_anchored_to_the_file(tmp_path: Path) -> None:
+    (tmp_path / "lib").mkdir()
+    for name in ("lib/a.php", "lib/b.php", "c.php", "d.php", "lib/bare.php"):
         (tmp_path / name).write_text("<?php\n")
-    source = b"<?php include 'a.php'; include_once('b.php'); require 'c.php'; require_once(\"d.php\");"
+    source = (
+        b"<?php require __DIR__ . '/a.php'; include_once(dirname(__FILE__) . \"/b.php\");"
+        b" require_once dirname(__DIR__) . '/c.php'; include dirname(__FILE__, 2) . '/d.php';"
+        b" include 'bare.php'; require $base . '/a.php'; require __DIR__ . '/missing.php';"
+        b" require __DIR__ . '/../../outside.php';"
+    )
     context = ParseContext(
-        path="main.php", abs_path=tmp_path / "main.php", source=source,
+        path="lib/main.php", abs_path=tmp_path / "lib/main.php", source=source,
         repo_root=tmp_path, capture_statements=False,
     )
     record = PhpParser().parse_file(context)
-    assert record.importFiles == ["a.php", "b.php", "c.php", "d.php"]
+    assert record.importFiles == ["lib/a.php", "lib/b.php", "c.php", "d.php"]
 
 
 def test_php_resolves_direct_and_grouped_class_imports_and_captures_constructor_params() -> None:
