@@ -15,10 +15,12 @@ import re
 import tomllib
 import xml.etree.ElementTree as ET
 from pathlib import Path
+from types import ModuleType
 from typing import Any
 
 try:  # PyYAML is a core dep; degrade gracefully if somehow absent
-    import yaml
+    import yaml as _yaml
+    yaml: ModuleType | None = _yaml
 except Exception:  # pragma: no cover
     yaml = None
 
@@ -466,7 +468,7 @@ def _strip(tag: str) -> str:
     return tag.rsplit("}", 1)[-1]
 
 
-def _child(parent, tag):
+def _child(parent: ET.Element, tag: str) -> ET.Element | None:
     return next((c for c in parent if _strip(c.tag) == tag), None)
 
 
@@ -479,7 +481,7 @@ def _pom(text: str) -> dict[str, Any]:
             continue
         deps.append(
             {
-                t: (_child(d, t).text if _child(d, t) is not None else None)
+                t: getattr(_child(d, t), "text", None)
                 for t in ("groupId", "artifactId", "version", "scope")
             }
         )

@@ -21,20 +21,22 @@ from concurrent.futures import ProcessPoolExecutor, as_completed
 from contextlib import contextmanager
 from logging.handlers import QueueListener
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any, Generator, Iterator
 
+from ..config import Settings
 from ..logging import get_logger
 from ..schemas import FileRecord
+from .nx import NxProjectIndex
 from .scanner import ScanEntry
 
 # Force spawn: cross-platform (matches macOS/Windows) and avoids the
 # fork()-in-a-multithreaded-process deprecation/deadlock risk on Linux 3.13+.
 _SPAWN = mp.get_context("spawn")
 
-_WORKER: dict[str, object] = {}
+_WORKER: dict[str, Any] = {}
 
 
-def _options(settings) -> dict:
+def _options(settings: Settings) -> dict[str, Any]:
     from .registry import discover_builtin, template_extensions
 
     # The extensions the scanner is dropping this run — empty when --capture-templates is on.
@@ -81,7 +83,9 @@ def _prune_template_edges(record: FileRecord, dropped: frozenset[str]) -> None:
                 call.path = None
 
 
-def _parse_entry(path: str, repo_root: str, options: dict) -> FileRecord | None:
+def _parse_entry(
+    path: str, repo_root: str, options: dict[str, Any]
+) -> FileRecord | None:
     from ..parsers.base import ParseContext
     from .registry import base_parser_for, select
 
@@ -142,7 +146,7 @@ def _parse_entry(path: str, repo_root: str, options: dict) -> FileRecord | None:
     return record
 
 
-def _init_worker(log_queue: object, repo_root: str, options: dict) -> None:
+def _init_worker(log_queue: object, repo_root: str, options: dict[str, Any]) -> None:
     from .registry import discover_builtin
 
     discover_builtin()
@@ -159,11 +163,11 @@ def _init_worker(log_queue: object, repo_root: str, options: dict) -> None:
 
 
 def _parse_batch(batch: list[ScanEntry]) -> list[tuple[str, FileRecord]]:
-    repo_root = _WORKER["repo_root"]  # type: ignore[assignment]
-    options = _WORKER["options"]  # type: ignore[assignment]
+    repo_root = _WORKER["repo_root"]
+    options = _WORKER["options"]
     out: list[tuple[str, FileRecord]] = []
     for entry in batch:
-        record = _parse_entry(entry.path, repo_root, options)  # type: ignore[arg-type]
+        record = _parse_entry(entry.path, repo_root, options)
         if record is not None:
             out.append((record.language, record))  # the base language, not the parser name
     return out
@@ -175,7 +179,7 @@ def _chunk(items: list[ScanEntry], jobs: int) -> list[list[ScanEntry]]:
 
 
 @contextmanager
-def _worker_options(options: dict[str, Any]) -> Iterator[dict[str, Any]]:
+def _worker_options(options: dict[str, Any]) -> Generator[dict[str, Any], None, None]:
     """The ``options`` for the pool's ``initargs``, with the indexes moved to a temp file.
 
     A spawned worker gets its ``initargs`` through a pipe; once they outgrow the pipe buffer
@@ -206,7 +210,7 @@ def _worker_options(options: dict[str, Any]) -> Iterator[dict[str, Any]]:
         shutil.rmtree(tmp, ignore_errors=True)
 
 
-def _start_listener() -> tuple[object, tuple]:
+def _start_listener() -> tuple[Any, tuple[Any, QueueListener]]:
     manager = _SPAWN.Manager()
     queue = manager.Queue()
     handlers = logging.getLogger("breezeai_cog").handlers
@@ -215,15 +219,18 @@ def _start_listener() -> tuple[object, tuple]:
     return queue, (manager, listener)
 
 
-def _stop_listener(state: tuple) -> None:
+def _stop_listener(state: tuple[Any, QueueListener]) -> None:
     manager, listener = state
     listener.stop()
     manager.shutdown()
 
 
 def parse_entries(
-    entries: list[ScanEntry], repo_root: str | Path, settings, indexes: dict | None = None,
-    nx_projects=None,
+    entries: list[ScanEntry],
+    repo_root: str | Path,
+    settings: Settings,
+    indexes: dict[str, Any] | None = None,
+    nx_projects: NxProjectIndex | None = None,
 ) -> Iterator[tuple[str, FileRecord]]:
     """Yield ``(language, FileRecord)`` — parallel across processes, sequential when
     ``jobs == 1`` or there's nothing to parallelize. ``indexes`` maps parser-name →

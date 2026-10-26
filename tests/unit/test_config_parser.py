@@ -5,6 +5,8 @@ from __future__ import annotations
 
 import gzip
 import json
+from pathlib import Path
+from typing import Any
 
 from breezeai_cog.config import Settings
 from breezeai_cog.core import registry
@@ -12,10 +14,12 @@ from breezeai_cog.parsers.base import ParseContext
 from breezeai_cog.parsers.config.parser import ConfigParser
 
 
-def _meta(path: str, text: str) -> dict:
-    ctx = ParseContext(path=path, abs_path=None, source=text.encode(), repo_root=".")
+def _meta(path: str, text: str) -> dict[str, Any]:
+    ctx = ParseContext(
+        path=path, abs_path=Path(path), source=text.encode(), repo_root=Path(".")
+    )
     rec = ConfigParser().parse_file(ctx)
-    assert rec.type == "config" and rec.language == "config"
+    assert rec.type == "config" and rec.language == "config" and rec.metadata is not None
     return rec.metadata
 
 
@@ -344,7 +348,7 @@ def test_service_model_honest_null_on_missing_attrs() -> None:
     assert ep == {"address": None, "binding": None, "contract": "A.ISvc"}
 
 
-def test_pipeline_captures_config_and_aggregates(tmp_path) -> None:
+def test_pipeline_captures_config_and_aggregates(tmp_path: Path) -> None:
     (tmp_path / "package.json").write_text(json.dumps({"dependencies": {"react": "^18"}}))
     (tmp_path / "Dockerfile").write_text("FROM python:3.12\nEXPOSE 8000\n")
     (tmp_path / "app.py").write_text("def f():\n    return 1\n")
@@ -353,6 +357,7 @@ def test_pipeline_captures_config_and_aggregates(tmp_path) -> None:
 
     result = AnalysisService(Settings(jobs=1, out=tmp_path / "out")).analyze_repo(tmp_path)
 
+    assert result.out_path is not None
     lines = gzip.open(result.out_path, "rt").read().splitlines()
     records = [json.loads(x) for x in lines]
     meta, files = records[0], records[1:]
@@ -368,8 +373,10 @@ def test_config_registered_and_selected() -> None:
     from breezeai_cog.core.registry import discover_builtin
 
     discover_builtin()
-    assert "config" in registry.capabilities()["languages"]
-    assert registry.select("package.json", b'{"name":"x"}').name == "json"  # JsonParser owns .json
+    languages = registry.capabilities()["languages"]
+    assert isinstance(languages, list) and "config" in languages
+    parser = registry.select("package.json", b'{"name":"x"}')
+    assert parser is not None and parser.name == "json"  # JsonParser owns .json
 
 
 def test_mod_json_verticle_main() -> None:
