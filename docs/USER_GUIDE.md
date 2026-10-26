@@ -52,6 +52,11 @@ a CodeIgniter `$this->db` builder or `CodeIgniter\Model` subclass → `"codeigni
 imported `DB` facade → no hint (it is the query builder, not Eloquent). Calls on untyped variables
 are not guessed.
 
+Outbound HTTP calls (`api_call`) are recorded the same way: only for the imported Laravel `Http`
+facade (or a typed `PendingRequest`), a Guzzle `Client` typed or constructed in the file, or a
+Symfony `HttpClientInterface` / `HttpClient::create()` client. A receiver's name is not evidence:
+`$this->httpCache->get()` is not an HTTP call, and home-grown API wrappers are not guessed.
+
 `include` / `require` (and their `_once` forms) become file imports only when the path is
 anchored to the including file — `__DIR__ . '/x.php'` or `dirname(__FILE__) . '/x.php'`. A bare
 `include 'x.php'` is resolved by PHP through `include_path` and the working directory at

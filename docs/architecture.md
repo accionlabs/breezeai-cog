@@ -576,6 +576,7 @@ the file:
   │                  20   laravel-events   php_laravel/events.py                     │
   │                  30   symfony-events   php_symfony/events.py                     │
   │                  40   php-data-access  php/data_access.py                        │
+  │                  50   php-http-calls   php/http_calls.py                         │
   │                                                                                  │
   │  Kotlin · Groovy · Ruby · VB · C++ · HCL                                         │
   │   └─ no additive hook yet: shared classifiers only                               │

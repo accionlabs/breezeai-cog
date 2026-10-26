@@ -585,7 +585,8 @@ def test_php_classifier_does_not_guess_plain_receivers() -> None:
     assert classify_call("cache.get", "get", language="php") is None
     assert classify_call("stmt.fetch", "fetch", language="php") is None
     assert classify_call("this.client.fetch", "fetch", language="php") is None
-    assert classify_call("http.get", "get", language="php") == ("api_call", "GET", None)
+    # PHP HTTP calls come from the evidence-based php-http-calls detector, not names.
+    assert classify_call("http.get", "get", language="php") is None
 
 
 def test_php_cannot_activate_javascript_orm_mappings() -> None:

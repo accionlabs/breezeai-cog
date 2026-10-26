@@ -24,9 +24,6 @@ _CLIENT_HINTS = (
 # Bare (receiver-less) function calls that are HTTP requests → default GET.
 _BARE_FUNCTIONS = {"fetch", "$fetch", "usefetch", "apifetch", "authfetch", "customfetch"}
 
-# PHP: receiver substrings that name an HTTP client (Laravel ``Http::``, Guzzle, cURL wrappers).
-_PHP_HTTP_HINTS = ("http", "guzzle", "curl", "restclient", "apiclient")
-
 # ORM query-builder markers that make a chain a DB query, not an HTTP call — the
 # ``session`` client hint collides with SQLAlchemy's DB session, so a chain like
 # ``session.query(User).filter(...).delete()`` ends in an HTTP verb but is data access.
@@ -87,10 +84,10 @@ def match_api(
     """
     m = method.lower()
     low = callee.lower()
-    # PHP verbs collide with everyday APIs (PDO ``$stmt->fetch()``, ``$cache->get()``,
-    # ``$session->get()``): only a receiver that names an HTTP client counts, checked before
-    # any verb shortcut below.
-    if language == "php" and not any(hint in _receiver_text(low) for hint in _PHP_HTTP_HINTS):
+    # PHP HTTP calls are recorded from evidence (the imported Http facade, typed Guzzle /
+    # Symfony clients) by the php-http-calls detector; a receiver-name match here would be a
+    # guess (``$this->httpCache->get()``) — see php/http_calls.py.
+    if language == "php":
         return None
     if m in _BARE_FUNCTIONS or low in _BARE_FUNCTIONS or low.endswith(".fetch"):
         return "GET"
