@@ -143,6 +143,22 @@ def _jslt(n: int) -> str:
     return f"{body}f0(1)\n"
 
 
+def _go(n: int) -> str:
+    body = "".join(
+        f"// doc for F{i}\n"
+        f'const Path{i} = "/r{i}"\n'
+        f"type T{i} struct{{ N int }}\n"
+        f"type I{i} interface{{ Get{i}(a, b int) (int, error) }}\n"
+        f"func (t *T{i}) F{i}(x int, rest ...string) error {{\n"
+        f"\tgo func() {{ http.Get(Path{i}) }}()\n"
+        f"\tswitch x {{\n\tcase {i}:\n\t\tx++ // note\n\t}}\n"
+        f"\treturn nil\n"
+        f"}}\n"
+        for i in range(n)
+    )
+    return f'package p\n\nimport "net/http"\n\n{body}'
+
+
 SAMPLES: dict[str, tuple[str, Callable[[int], str]]] = {
     "java-vertx": ("V.java", _java_vertx),
     "groovy-vertx": ("Http.groovy", _groovy_vertx),
@@ -152,6 +168,7 @@ SAMPLES: dict[str, tuple[str, Callable[[int], str]]] = {
     "xsd": ("schema.xsd", _xsd),
     "wsdl": ("service.wsdl", _wsdl),
     "jslt": ("transform.jslt", _jslt),
+    "go": ("p.go", _go),
 }
 
 

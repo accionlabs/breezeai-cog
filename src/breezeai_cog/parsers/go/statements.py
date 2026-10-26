@@ -14,9 +14,17 @@ _CALL_TYPE = "call_expression"
 
 def _name_of(node: Node, source: bytes) -> str | None:
     if node.type in {"var_declaration", "const_declaration"}:
-        for child in node.named_children:
-            if child.type == "identifier":
-                return node_text(child, source)
+        # `var x = 1` / `const (A = 1; B = 2)`: the names live on the var_spec/const_spec
+        # children (a grouped declaration is named after its first spec).
+        specs = [c for c in node.named_children if c.type != "var_spec_list"]
+        for group in node.named_children:
+            if group.type == "var_spec_list":  # `var ( … )` wraps its specs; `const ( … )` does not
+                specs.extend(group.named_children)
+        for spec in specs:
+            if spec.type in {"var_spec", "const_spec"}:
+                name = spec.child_by_field_name("name")
+                if name is not None:
+                    return node_text(name, source)
     if node.type == "short_var_declaration":
         left = node.child_by_field_name("left")
         if left is not None:

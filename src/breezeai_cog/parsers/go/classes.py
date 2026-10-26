@@ -4,9 +4,10 @@ from __future__ import annotations
 
 from tree_sitter import Node
 
-from ...emit import class_id, disambiguate
+from ...emit import class_id, disambiguate, function_id
 from ...schemas import Class, Function, Statement
 from ..treesitter import line_span, node_text
+from .functions import _extract_params, _result_type
 
 
 def _kind(node: Node, source: bytes) -> str:
@@ -35,6 +36,36 @@ def _embedded_type(spec: Node, source: bytes) -> str | None:
     return embedded[0] if len(embedded) == 1 else None
 
 
+def _interface_methods(spec: Node, source: bytes, path: str, *, parent_id: str,
+                       seen_ids: set[str]) -> list[Function]:
+    """The method set of an interface (`Get(id ID) (*User, error)`), one Function per
+    `method_elem`, parented to the interface. Embedded interfaces and type-set terms are
+    not methods and are skipped."""
+    type_node = spec.child_by_field_name("type")
+    if type_node is None or type_node.type != "interface_type":
+        return []
+    out: list[Function] = []
+    for elem in type_node.named_children:
+        if elem.type != "method_elem":
+            continue
+        name_node = elem.child_by_field_name("name")
+        name = node_text(name_node, source) if name_node is not None else ""
+        start, end = line_span(elem)
+        out.append(Function(
+            id=disambiguate(function_id(path, name, start), seen_ids),
+            parentId=parent_id,
+            path=path,
+            name=name,
+            type="method",
+            startLine=start,
+            endLine=end,
+            visibility="public" if name[:1].isupper() else "package",
+            params=_extract_params(elem.child_by_field_name("parameters"), source),
+            returnType=_result_type(elem, source),
+        ))
+    return out
+
+
 def _generics(spec: Node, source: bytes) -> str | None:
     params = spec.child_by_field_name("type_parameters")
     return node_text(params, source) if params is not None else None
@@ -54,6 +85,7 @@ def build_class(
     if not specs:
         return [], [], []
     classes: list[Class] = []
+    methods: list[Function] = []
     for spec in specs:
         name_node = spec.child_by_field_name("name")
         name = node_text(name_node, source) if name_node is not None else ""
@@ -75,4 +107,5 @@ def build_class(
                 endLine=end,
             )
         )
-    return classes, [], []
+        methods.extend(_interface_methods(spec, source, path, parent_id=cid, seen_ids=seen_ids))
+    return classes, methods, []

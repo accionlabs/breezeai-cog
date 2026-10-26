@@ -347,5 +347,138 @@ func run(ch chan int) {
     )
 
     assert any(function.type == "anonymous" for function in record.functions)
-    assert any(statement.nodeType == "range_clause" for statement in record.statements)
+    assert any(
+        statement.nodeType == "for_statement" and "range ch" in statement.text
+        for statement in record.statements
+    )
     assert any(statement.nodeType == "send_statement" for statement in record.statements)
+
+
+def _parse(tmp_path, src: bytes, name: str = "main.go"):
+    path = tmp_path / name
+    path.write_bytes(src)
+    return GoParser().parse_file(
+        ParseContext(path=name, abs_path=path, source=src, repo_root=tmp_path, capture_statements=True)
+    )
+
+
+def test_go_call_statement_is_one_record_classified_on_the_statement(tmp_path) -> None:
+    record = _parse(tmp_path, b'''package p
+
+import "net/http"
+
+func f() {
+    http.Get("http://x/y")
+    log(1)
+}
+''')
+
+    rows = [(s.startLine, s.nodeType) for s in record.statements]
+    assert rows == [(6, "expression_statement"), (7, "expression_statement")]
+    call = record.statements[0]
+    assert (call.semanticType, call.method, call.endpoint) == ("api_call", "GET", "http://x/y")
+
+
+def test_go_switch_inc_and_package_level_declarations_are_captured(tmp_path) -> None:
+    record = _parse(tmp_path, b'''package p
+
+const BaseURL = "/api"
+
+var (
+    db *Store
+)
+
+func f(x int) {
+    switch x {
+    case 1:
+        x++
+        fallthrough
+    default:
+        x--
+    }
+}
+''')
+
+    by_line = {s.startLine: s for s in record.statements}
+    fid = record.id
+    assert (by_line[3].nodeType, by_line[3].name, by_line[3].parentId) == ("const_declaration", "BaseURL", fid)
+    assert (by_line[5].nodeType, by_line[5].name, by_line[5].parentId) == ("var_declaration", "db", fid)
+    f = next(fn for fn in record.functions if fn.name == "f")
+    assert by_line[10].nodeType == "expression_switch_statement"
+    assert by_line[12].nodeType == "inc_statement"
+    assert by_line[13].nodeType == "fallthrough_statement"
+    assert by_line[15].nodeType == "dec_statement"
+    assert all(by_line[line].parentId == f.id for line in (10, 12, 13, 15))
+
+
+def test_go_params_keep_every_name_and_variadic(tmp_path) -> None:
+    record = _parse(tmp_path, b'''package p
+
+func Add(a, b int, rest ...string) (sum int, err error) { return 0, nil }
+func Pair(int, string) *User { return nil }
+''')
+
+    fns = {fn.name: fn for fn in record.functions}
+    assert [(p.name, p.type) for p in fns["Add"].params] == [
+        ("a", "int"), ("b", "int"), ("rest", "...string"),
+    ]
+    assert fns["Add"].returnType == "(int, error)"
+    assert [(p.name, p.type) for p in fns["Pair"].params] == [("", "int"), ("", "string")]
+    assert fns["Pair"].returnType == "*User"
+
+
+def test_go_interface_method_set_is_captured(tmp_path) -> None:
+    record = _parse(tmp_path, b'''package p
+
+type Store interface {
+    fmt.Stringer
+    Get(id string) (*User, error)
+    save(u *User) error
+}
+''')
+
+    store = next(c for c in record.classes if c.name == "Store")
+    methods = {fn.name: fn for fn in record.functions}
+    assert set(methods) == {"Get", "save"}
+    get = methods["Get"]
+    assert (get.parentId, get.type, get.visibility, get.startLine) == (store.id, "method", "public", 5)
+    assert [(p.name, p.type) for p in get.params] == [("id", "string")]
+    assert get.returnType == "(*User, error)"
+    assert methods["save"].visibility == "package"
+
+
+def test_go_closures_are_parented_by_tree_not_by_line(tmp_path) -> None:
+    record = _parse(tmp_path, b'''package p
+
+func f() {
+    a := func() {}; b := func() { _ = func() {} }
+    _, _ = a, b
+}
+''')
+
+    f = next(fn for fn in record.functions if fn.name == "f")
+    anon = sorted((fn for fn in record.functions if fn.type == "anonymous"), key=lambda fn: fn.id)
+    assert len(anon) == 3
+    parents = {fn.parentId for fn in anon}
+    # a and b both belong to f; the literal inside b belongs to b — never a sibling on the same line.
+    assert sum(1 for fn in anon if fn.parentId == f.id) == 2
+    inner = next(fn for fn in anon if fn.parentId != f.id)
+    assert inner.parentId in {fn.id for fn in anon} and parents - {f.id} == {inner.parentId}
+
+
+def test_go_index_resolves_packages_in_nested_modules(tmp_path) -> None:
+    (tmp_path / "go.mod").write_text("module example.com/root\n")
+    api = tmp_path / "services" / "api"
+    (api / "users").mkdir(parents=True)
+    (api / "go.mod").write_text("module example.com/api\n")
+    (api / "users" / "h.go").write_text("package users\n")
+    (tmp_path / "util").mkdir()
+    (tmp_path / "util" / "u.go").write_text("package util\n")
+
+    files = [tmp_path / "go.mod", api / "go.mod", api / "users" / "h.go", tmp_path / "util" / "u.go"]
+    index = GoParser().build_index(tmp_path, files)
+
+    assert index.modules == {
+        "example.com/api/users": "services/api/users/h.go",
+        "example.com/root/util": "util/u.go",
+    }

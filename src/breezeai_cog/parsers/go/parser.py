@@ -19,11 +19,11 @@ from .functions import (
     _constructor_target_name,
     build_anonymous_function,
     build_function,
-    defined_names,
-    type_map,
+    scan_file,
 )
 from .imports import GoIndex, build_fqcn_index, extract_imports
 from .mappings import COMMENT_TYPES, CONTROL_FLOW, FRAMEWORKS, STATEMENT_TYPES
+from .statements import extract_statements
 from .gomod import parse_gomod
 from .gosum import parse_gosum
 
@@ -78,7 +78,8 @@ class GoParser(BaseParser):
         internal, external, _, bindings = extract_imports(
             root, source, idx if isinstance(idx, GoIndex) else None
         )
-        resolve = make_resolver(bindings, defined_names(root, source), path, type_map(root, source))
+        scan = scan_file(root, source)
+        resolve = make_resolver(bindings, scan.names, path, scan.types)
 
         functions: list[Function] = []
         classes = []
@@ -88,16 +89,18 @@ class GoParser(BaseParser):
         class_by_name = {}
         for child in root.named_children:
             if child.type == "type_declaration":
-                cls_list, _, cls_statements = build_class(
+                cls_list, cls_methods, cls_statements = build_class(
                     child, source, path, parent_id=fid, seen_ids=seen_ids,
                 )
                 classes.extend(cls_list)
+                functions.extend(cls_methods)
                 statements.extend(cls_statements)
                 for cls in cls_list:
                     class_by_name[cls.name] = cls
                     if cls.name[:1].isupper():
                         exports.add(cls.name)
 
+        owner_ids: dict[int, str] = {}  # function/literal start byte -> Function.id
         for child in root.named_children:
             if child.type in {"function_declaration", "method_declaration"}:
                 receiver = child.child_by_field_name("receiver")
@@ -115,6 +118,7 @@ class GoParser(BaseParser):
                     resolve=resolve,
                 )
                 functions.append(fn)
+                owner_ids[child.start_byte] = fn.id
                 statements.extend(fn_statements)
                 if fn.name[:1].isupper():
                     exports.add(fn.name)
@@ -126,29 +130,22 @@ class GoParser(BaseParser):
                     if target is not None:
                         target.constructorParams = [ConstructorParam(name=p.name, type=p.type) for p in fn.params]
 
-        named_owners = [(fn.startLine, fn.endLine, fn.id) for fn in functions]
-        anonymous_nodes: list[Node] = []
-
-        def collect_anonymous(node: Node) -> None:
-            if node.type == "func_literal":
-                anonymous_nodes.append(node)
-            for child in node.named_children:
-                collect_anonymous(child)
-
-        collect_anonymous(root)
-        anonymous_nodes.sort(key=lambda node: (node.start_point[0], -node.end_point[0]))
-        anonymous_owners: list[tuple[int, int, str]] = []
-        for node in anonymous_nodes:
-            start, end = node.start_point[0] + 1, node.end_point[0] + 1
-            candidates = named_owners + anonymous_owners
-            enclosing = [item for item in candidates if item[0] <= start and end <= item[1]]
-            owner_id = min(enclosing, key=lambda item: item[1] - item[0])[2] if enclosing else fid
-            functions.append(
-                build_anonymous_function(
-                    node, source, path, parent_id=owner_id, seen_ids=seen_ids, resolve=resolve
-                )
+        for node, owner in scan.literals:  # document order: an enclosing literal comes first
+            fn = build_anonymous_function(
+                node, source, path,
+                parent_id=owner_ids.get(owner, fid) if owner is not None else fid,
+                seen_ids=seen_ids, resolve=resolve,
             )
-            anonymous_owners.append((start, end, functions[-1].id))
+            functions.append(fn)
+            owner_ids[node.start_byte] = fn.id
+
+        # Package-level declarations (`const BaseURL = "/api"`, `var db *gorm.DB`). The walk
+        # stops at NESTED_SCOPES, so function bodies are not re-walked. Runs before the comment
+        # pass so a same-line trailing comment rides on the statement's `text`.
+        statements.extend(
+            extract_statements(root, source, path, parent_id=fid, capture=capture,
+                               limit=limit, seen_ids=seen_ids)
+        )
 
         if capture:
             statements.extend(
