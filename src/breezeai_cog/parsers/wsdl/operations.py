@@ -22,8 +22,9 @@ wiring (``binding``) across files (the WS-I-recommended layout), or omit a bindi
   somewhere even when the implementation isn't in the repo), ``requestDTO``/``responseDTO``
   = the operation's declared input/output message local names — the DTOs a GraphQL SDL
   root field also keeps.
-* ``import`` → a plain statement recording the referenced namespace/location — never
-  resolved (same v1 scope decision as XSD's ``import``/``include``).
+* ``import`` → a plain statement recording the referenced namespace/location, with no
+  ``endpoint`` — never resolved to a file, for the same reason as XSD's ``import``/
+  ``include`` (the location is often a URL or not in the repo).
 
 ``binding``/``service``/``port`` elements are not modeled — not a declaration this parser
 captures (absent beats wrong, same rule ``prisma/schema.py`` applies to its own grammar

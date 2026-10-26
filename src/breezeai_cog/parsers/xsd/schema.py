@@ -16,8 +16,9 @@ split into their own records.
   via ``ref=``/``base=`` elsewhere), not standalone domain entities, so they don't carry the
   ``data_model`` tag.
 * ``import`` / ``include`` → a plain statement recording the referenced namespace /
-  schemaLocation — never resolved across files (honest-null; matches this project's v1 scope
-  decision to record cross-file XSD/WSDL references without resolving them).
+  schemaLocation, with no ``endpoint`` — never resolved to a file: a ``schemaLocation`` is
+  often a URL, catalog-mapped, or absent from the repo (``web-common_4_0.xsd`` in Grails'
+  servlet schemas), so a resolved path would be a guess.
 
 Anything else at schema scope (``annotation``, ``notation``, ``redefine``, ``override``,
 top-level ``key``/``unique``) is intentionally skipped — not a declaration this parser

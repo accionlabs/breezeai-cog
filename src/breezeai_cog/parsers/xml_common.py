@@ -47,7 +47,7 @@ def element_attr(node: Node, source: bytes, attr: str) -> str | None:
     *different* namespace — e.g. an EMF-generated schema's ``ecore:name`` is unrelated to the
     schema's own unprefixed ``name``. Stripping prefixes here would let a foreign-namespace
     attribute that merely shares a local name shadow the real one if it happens to appear
-    first in the tag (verified against real EMF-annotated `.xsd` files)."""
+    first in the tag (e.g. EMF's ``ecore:name`` written before ``name``)."""
     open_tag = _child(node, "STag") or _child(node, "EmptyElemTag")
     if open_tag is None:
         return None

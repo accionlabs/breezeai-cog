@@ -2,9 +2,10 @@
 
 The ``jslt`` language parser owns ``.jslt`` files. Since JSLT has no tree-sitter grammar in
 this project's language pack, structure comes from a hand-rolled line-scan: ``import``/
-``let`` declarations and a trailing ``module_expression`` are flat Statements; top-level
-(column-0) ``def`` declarations are ``Function`` records (independently searchable,
-call-linked) with untyped ``Parameter``s and same-file ``calls[]`` resolution. Capture is on
+``let`` declarations and the trailing module expression are flat ``synthetic`` Statements;
+top-level (column-0) ``def`` declarations are ``Function`` records (independently
+searchable, call-linked) with untyped ``Parameter``s and same-file ``calls[]`` resolution,
+each with one body statement parented to it. Capture is on
 by default; unlike every tree-sitter-backed parser in this project, ``//`` comments are not
 captured as their own statements (no grammar tree to run the shared comment pass over).
 """
@@ -76,8 +77,7 @@ def _func(rec, name: str):
 
 
 def _body(rec, fn) -> str:
-    """The full-text `function_body` statement companion to `fn` (Function has no `text`
-    field)."""
+    """The text of `fn`'s body statement (Function has no `text` field)."""
     return next(
         s for s in rec.statements if _kind(rec, s) == "function_body" and s.parentId == fn.id
     ).text

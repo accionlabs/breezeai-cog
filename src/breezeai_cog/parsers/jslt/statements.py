@@ -9,8 +9,8 @@ JSLT's own grammar requires every declaration to precede the module's single tra
 expression (never interleaved) — so the **first** column-0 line that isn't a declaration
 keyword, *and* isn't inside an unclosed ``{``/``[``/``(`` from a still-open multi-line value,
 *and* isn't the value/body of a still-pending header (see below), marks "declarations are
-over"; everything from there to EOF is captured as one ``module_expression``, without trying
-to sub-parse it further.
+over"; everything from there to EOF is captured as one module-expression statement,
+without trying to sub-parse it further.
 
 Two things keep a declaration's value/body from being cut short:
 
@@ -28,11 +28,16 @@ functions. Parameters carry no type (JSLT is untyped), so ``Parameter.type=""``,
 convention ``python/functions.py`` uses for an untyped parameter. ``calls[]`` resolves only
 same-file calls (a bare ``name(…)`` matching another ``def`` in this file, via the shared
 ``callresolve.make_resolver`` — Tier 2, same as every other language) — honest-null for
-everything else (built-ins, calls inside the trailing ``module_expression``, which isn't a
+everything else (built-ins, ``m:fn(…)`` calls into an imported module, names inside
+comments or strings, and calls in the trailing module expression, which isn't a
 ``Function`` and so has no ``calls`` field to carry a resolved edge on). ``Function`` has no
-``text`` field, so the full body is carried on a companion ``function_body`` statement
-parented to it (``parentId`` = the Function's id, not the file's) — same "full body on text"
-philosophy as ``prisma/schema.py``, just one hop further down.
+``text`` field, and with no grammar there are no inner statements to hold the body as other
+languages have, so each ``def``'s full text is one body statement parented to its Function
+(``parentId`` = the Function's id, not the file's).
+
+Every statement's ``nodeType`` is ``synthetic`` — none has a backing AST node. Which
+construct a statement records is read from its ``text`` (``import``/``let`` keyword, or
+neither for the module expression) and its parent (a Function for a body).
 
 This is still an honest structural approximation, not a real JSLT parser: nested ``let``s
 inside a ``def`` body (indented) are correctly left inside that body's captured text, never
@@ -198,10 +203,10 @@ def _same_file_calls(lines: list[str], header_end: int, resolve: CallResolver) -
 def collect_jslt_declarations(
     source: str, path: str, seen_ids: set[str], *, capture_statements: bool
 ) -> tuple[list[Statement], list[Function]]:
-    """Line-scan a JSLT document and emit: one ``Function`` per top-level (column-0,
-    depth-0) ``def``, one ``Statement`` per ``import``/``let`` declaration, plus one trailing
-    ``module_expression`` statement for the output expression after the last declaration
-    (empty file → nothing). ``Function.calls`` resolves same-file calls only. Functions are
+    """Line-scan a JSLT document and emit: one ``Function`` (plus its body statement) per
+    top-level (column-0, depth-0) ``def``, one ``Statement`` per ``import``/``let``
+    declaration, plus one trailing statement for the module (output) expression after the
+    last declaration (empty file → nothing). ``Function.calls`` resolves same-file calls only. Functions are
     structure and always emitted; statements only when ``capture_statements`` is set."""
     fid = file_id(path)
     lines = source.splitlines()
@@ -270,9 +275,9 @@ def collect_jslt_declarations(
         )
         if not capture_statements:
             continue
-        # Function has no `text` field (schemas/capture.py) -- the full body is carried on a
-        # companion statement parented to it, same "full body on text" philosophy as every
-        # other data-shaped capture in this parser, so the body stays findable/embeddable.
+        # Function has no `text` field (schemas/capture.py) and there is no grammar to give
+        # the body inner statements, so the def's full text is one statement parented to it
+        # -- the only place the body's content is kept.
         statements.append(
             Statement(
                 id=disambiguate(statement_id(path, start, 0), seen_ids),
