@@ -27,7 +27,7 @@ from .actions import detect_play_actions, detect_play_sird_routes
 from .handlers import FACT as HANDLERS_FACT, collect_route_handlers, route_handler
 from .includes import (
     FACT, collect_includes, is_routes_file, resolve_includes, router_name, router_prefix,
-    served_routers,
+    router_unknown, served_routers,
 )
 from .routes import extract_routes
 
@@ -96,8 +96,9 @@ class PlayRoutesParser(BaseParser):
         text = ctx.source.decode("utf-8", "replace")
         prefix = router_prefix(ctx.resolution_index, router_name(ctx.path), ctx.path)
         index = ctx.resolution_index
+        unknown = router_unknown(index, router_name(ctx.path), ctx.path)
         statements = (extract_routes(text, ctx.path, prefix, served_routers(index, ctx.path),
-                                     lambda h: route_handler(index, ctx.path, h))
+                                     lambda h: route_handler(index, ctx.path, h), unknown=unknown)
                       if ctx.capture_statements else [])
         return FileRecord(
             id=file_id(ctx.path),

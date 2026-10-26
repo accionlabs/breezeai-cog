@@ -61,8 +61,8 @@ def test_router_include_is_wiring(analyze_files) -> None:
     assert _eps(st) == []
 
 
-def _served(stmts) -> list[tuple[str, str]]:
-    return sorted((s.path, s.endpoint) for s in _eps(stmts))
+def _served(stmts) -> list[tuple[str, str | None]]:
+    return sorted(((s.path, s.endpoint) for s in _eps(stmts)), key=lambda r: (r[0], r[1] or ""))
 
 
 def test_included_routes_file_is_served_under_the_include_prefix(analyze_files) -> None:
@@ -104,7 +104,7 @@ def test_includes_chain(analyze_files) -> None:
     assert _served(st) == [("conf/reports.routes", "/admin/reports/daily")]
 
 
-def test_router_included_twice_keeps_its_paths(analyze_files) -> None:
+def test_router_included_twice_has_no_address(analyze_files) -> None:
     st = analyze_files(
         {
             "conf/routes": "->      /admin           admin.Routes\n"
@@ -112,7 +112,8 @@ def test_router_included_twice_keeps_its_paths(analyze_files) -> None:
             "conf/admin.routes": "GET     /users     controllers.Admin.users\n",
         }
     )
-    assert _served(st) == [("conf/admin.routes", "/users")]
+    # served at /admin/users and /backoffice/users — never at /users: no address
+    assert _served(st) == [("conf/admin.routes", None)]
 
 
 def test_routes_file_not_included_keeps_its_paths(analyze_files) -> None:
@@ -142,17 +143,16 @@ def test_include_of_another_projects_router(analyze_files) -> None:
     assert not [s for s in st if s.path == "conf/routes" and s.semanticType == "route"]
 
 
-def test_include_two_other_projects_could_serve_prefixes_neither(analyze_files) -> None:
+def test_include_two_other_projects_could_serve_has_no_address(analyze_files) -> None:
     # Two sub-projects define admin.Routes and the app defines none: the include can't be tied
-    # to one, so neither takes the prefix — not even from an include that names it alone.
+    # to one, so where either is served is unknown — not even an include naming it alone helps.
     st = analyze_files({
         "conf/routes": "->      /admin           admin.Routes\n",
         "one/conf/admin.routes": "GET     /users     controllers.Admin.users\n",
         "two/conf/admin.routes": "GET     /tools     controllers.Tools.list\n",
         "two/conf/routes": "->      /backoffice      admin.Routes\n",
     })
-    assert _served(st) == [("one/conf/admin.routes", "/users"),
-                           ("two/conf/admin.routes", "/tools")]
+    assert _served(st) == [("one/conf/admin.routes", None), ("two/conf/admin.routes", None)]
 
 
 SIRD_ROUTER = """package v1.post
@@ -502,3 +502,20 @@ def test_overloaded_action_has_no_location(analyze_files) -> None:
         "app/controllers/OrderController.scala": controller,
     })
     assert _route(st) == ("controllers.OrderController.get", None, None)
+
+
+def test_router_under_a_twice_included_router_has_no_address(analyze_files) -> None:
+    st = analyze_files({
+        "conf/routes": "->  /v1  api.Routes\n->  /v2  api.Routes\n",
+        "conf/api.routes": "GET  /ping  controllers.Api.ping\n->  /reports  reports.Routes\n",
+        "conf/reports.routes": "GET  /daily  controllers.Reports.daily\n",
+    })
+    assert _served(st) == [("conf/api.routes", None), ("conf/reports.routes", None)]
+
+
+def test_sird_router_included_twice_has_no_address(analyze_files) -> None:
+    st = analyze_files({
+        "conf/routes": "->  /v1/posts  v1.post.PostRouter\n->  /v2/posts  v1.post.PostRouter\n",
+        "app/v1/post/PostRouter.scala": SIRD_ROUTER,
+    })
+    assert [e for _, e in _served(st)] == [None, None]

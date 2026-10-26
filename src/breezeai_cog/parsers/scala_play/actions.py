@@ -24,7 +24,7 @@ from ..handler_sites import handler_location, locate_method
 from ..scala.imports import ScalaIndex, _package_of, _resolve, extract_imports, visible_names
 from ..scala.statements import find_enclosing_parent_id
 from ..treesitter import node_text
-from .includes import join, router_prefix
+from .includes import join, router_prefix, router_unknown
 
 _FN_TYPES = ("function_definition", "function_declaration")
 
@@ -310,6 +310,7 @@ def detect_play_sird_routes(
             ):
                 fqn = _router_fqn(node, source)
                 included = router_prefix(index, fqn) if fqn is not None else None
+                unknown = fqn is not None and router_unknown(index, fqn)
                 # C5: Mount prefix from class
                 mount_prefix = None if included is not None else _find_router_prefix(node, source)
                 for clause in body.named_children:
@@ -356,7 +357,8 @@ def detect_play_sird_routes(
                             handlerLine=line,
                             handlerPath=path,
                             method=verb,
-                            endpoint=endpoint,
+                            # served at more than one prefix: no single address
+                            endpoint=None if unknown else endpoint,
                             routeKind="route",
                             isRegex=is_regex,
                         ), parent=find_enclosing_parent_id(clause.start_point[0] + 1, record),

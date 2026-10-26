@@ -18,13 +18,14 @@ A name is unique only within one Play project (``<project>/conf/…``): two sub-
 have an ``admin.routes``. So a routes file's router is keyed by ``(project, name)``, and an
 include names the router of its own project when that project defines it, else the one other
 project that does (a sub-project the app depends on). Defined by two or more other projects → the
-include can't be tied to one: none of them takes its prefix, and none takes another include's
-either (each may be the one it serves). A router no routes file defines (a SIRD class, a
-generated gRPC router) is keyed ``("", name)``.
+include can't be tied to one, so where each of them is served is unknown. A router no routes file
+defines (a SIRD class, a generated gRPC router) is keyed ``("", name)``.
 
-One includer and prefix per router (:func:`~..wiring.resolve_wiring`): a router included twice,
-or under a router whose own prefix is unknown, keeps its paths as written. Each project's main
-router's prefix is empty. The routes parser reads the fact from its own index, the SIRD detector
+One includer and prefix per router (:func:`~..wiring.resolve_wiring`). A router included at two
+places (``-> /v1 api.Routes`` and ``-> /v2 api.Routes``) is served at each, so its bindings — and
+those of every router it includes — have no address (:func:`router_unknown`), never their paths
+as written. A router included nowhere keeps its paths as written. Each project's main router's
+prefix is empty. The routes parser reads the fact from its own index, the SIRD detector
 from the Scala index; both use :func:`router_prefix`.
 """
 
@@ -88,6 +89,8 @@ class RouterIncludes:
 
     prefixes: dict[RouterKey, str] = field(default_factory=dict)
     served: dict[str, frozenset[str]] = field(default_factory=dict)
+    #: Routers served at more than one prefix, or under one that is (no single address).
+    unknown: frozenset[RouterKey] = frozenset()
 
 
 def served_routers(index: Any | None, routes_rel: str) -> frozenset[str]:
@@ -110,6 +113,14 @@ def router_prefix(index: Any | None, router: str, routes_rel: str | None = None)
     if fact is None or project is None:
         return None
     return fact.prefixes.get((project, router))
+
+
+def router_unknown(index: Any | None, router: str, routes_rel: str | None = None) -> bool:
+    """Whether ``router`` is served at more than one prefix (see :func:`router_prefix` for the
+    arguments): its bindings then have no address."""
+    fact: RouterIncludes | None = index_fact(index, FACT)
+    project = project_of(routes_rel) if routes_rel is not None else ""
+    return fact is not None and project is not None and (project, router) in fact.unknown
 
 
 #: One routes file: its project, router name, includes, and whether it has any binding or include.
@@ -149,6 +160,7 @@ def resolve_includes(values: list[_FileIncludes]) -> RouterIncludes | None:
         return ("", name) if not owners else None
 
     includer: dict[RouterKey, RouterKey | None] = {}
+    sites: dict[RouterKey, set[tuple[RouterKey, str]]] = {}  # router → (includer, prefix)
     wiring: list[Wiring] = []
     unsure: set[RouterKey] = set()  # a candidate of an include that can't be tied to one router
     served: dict[str, set[str]] = {}
@@ -163,6 +175,7 @@ def resolve_includes(values: list[_FileIncludes]) -> RouterIncludes | None:
                 served.setdefault(project, set()).add(name)
             wiring.append(Wiring(key, w.kind, w.value, w.site))
             record_distinct(includer, key, (project, router))
+            sites.setdefault(key, set()).add(((project, router), w.value or ""))
     relative: dict[RouterKey, str] = {
         (s[0], s[1]): prefix for s, prefix in resolve_wiring(wiring).items()
         if includer.get((s[0], s[1])) is not None and (s[0], s[1]) not in unsure}
@@ -184,10 +197,27 @@ def resolve_includes(values: list[_FileIncludes]) -> RouterIncludes | None:
 
     for key in sorted(relative):
         full(key)
+
+    # Served at two places (or possibly: an include tied to no one project) → no single address,
+    # for the router and every router it reaches.
+    twice = {k for k, at in sites.items() if len(at) > 1} | unsure
+    children: dict[RouterKey, set[RouterKey]] = {}
+    for k, at in sites.items():
+        for parent, _ in at:
+            children.setdefault(parent, set()).add(k)
+    unknown: set[RouterKey] = set()
+    todo = list(twice)
+    while todo:
+        k = todo.pop()
+        if k not in unknown:
+            unknown.add(k)
+            todo.extend(children.get(k, ()))
+    for k in unknown:
+        prefixes.pop(k, None)
     served_by = {project: frozenset(
         name for name in names if target(project, name) in prefixes)
         for project, names in served.items()}
-    return RouterIncludes(prefixes, served_by) if prefixes else None
+    return RouterIncludes(prefixes, served_by, frozenset(unknown)) if prefixes or unknown else None
 
 
 def _collect(root: object, source: bytes, rel: str, repo_root: Path | None) -> _FileIncludes | None:
