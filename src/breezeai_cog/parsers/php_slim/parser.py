@@ -85,7 +85,8 @@ def _route_methods(node: Node, source: bytes) -> tuple[list[str], Node | None, N
     if method in _VERBS and args:
         return [_VERBS[method]], args[0], args[1] if len(args) > 1 else None, "route"
     if method == "redirect" and args:
-        return ["GET"], args[0], None, "redirect"
+        # A GET binding Slim itself serves: the target is a URL, not a handler of ours.
+        return ["GET"], args[0], None, "route"
     return [], None, None, "route"
 
 

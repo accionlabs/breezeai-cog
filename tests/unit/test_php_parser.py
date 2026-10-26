@@ -6,6 +6,7 @@ from pathlib import Path
 
 from breezeai_cog.core import registry
 from breezeai_cog.parsers.base import ParseContext
+from breezeai_cog.parsers.contract import validate
 from breezeai_cog.parsers.php.index import PhpIndex
 from breezeai_cog.parsers.php.parser import PhpParser
 from breezeai_cog.parsers.php_codeigniter.parser import CodeIgniterParser
@@ -721,3 +722,11 @@ Route::prefix($p)->group(function () { Route::resource('tags', T::class)->only([
     assert {tuple(s.guards or []) for s in photos} == {("auth", "verified")}
     tags = [s for s in routes if (s.handler or "").startswith("T@")]
     assert [(s.endpoint, s.handler) for s in tags] == [(None, "T@index"), (None, "T@create")]
+
+
+def test_slim_redirect_is_a_get_binding_without_handler() -> None:
+    record = _parse(SlimParser(), "<?php use Slim\\App; $app->redirect('/old', '/new');",
+                    path="public/index.php")
+    (route,) = [s for s in record.statements if s.semanticType == "route"]
+    assert (route.method, route.endpoint, route.routeKind, route.handler) == ("GET", "/old", "route", None)
+    assert not [v for v in validate(record) if v.severity == "error"]
