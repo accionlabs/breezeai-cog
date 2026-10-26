@@ -229,6 +229,11 @@ def detect_symfony_routes(root: Node, source: bytes, path: str, record: FileReco
         "class_declaration", "interface_declaration", "trait_declaration", "enum_declaration",
     }]
     class_routes: dict[tuple[int, int], list[_RouteSpec]] = {}
+    # #[IsGranted] on a class guards its routes whether or not the class has a #[Route] prefix.
+    class_guards: dict[tuple[int, int], tuple[str, ...]] = {
+        (cls_node.start_byte, cls_node.end_byte): tuple(_security_guards(cls_node, source))
+        for cls_node in classes
+    }
     for cls_node in classes:
         routes = []
         for attr in _route_decorators(cls_node, source, route_names):
@@ -255,6 +260,9 @@ def detect_symfony_routes(root: Node, source: bytes, path: str, record: FileReco
             if key in class_routes:
                 prefixes = class_routes[key]
                 has_class_route = True
+                break
+            if key in class_guards:  # the enclosing class has no #[Route]: only its guards
+                prefixes = [_RouteSpec({None: ""}, ("ANY",), False, None, class_guards[key])]
                 break
             parent = parent.parent
 
