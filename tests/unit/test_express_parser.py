@@ -303,7 +303,7 @@ def test_instance_mount_middleware_import_is_not_a_prefix(analyze_files) -> None
     assert routes == {("src/api.js", "GET"): "/api/me"}
 
 
-def test_instance_mounted_at_two_bases_keeps_its_own_path(analyze_files) -> None:
+def test_instance_mounted_at_two_bases_has_no_address(analyze_files) -> None:
     routes = _routes(analyze_files, {
         "src/index.js": (
             "import express from 'express';\nimport { shared } from './shared.js';\n"
@@ -314,7 +314,7 @@ def test_instance_mounted_at_two_bases_keeps_its_own_path(analyze_files) -> None
             "shared.get('/status', status);\n"
         ),
     })
-    assert routes[("src/shared.js", "GET")] == "/status"
+    assert routes[("src/shared.js", "GET")] is None  # served under both bases, never at /status
 
 
 def test_same_file_nested_routers_compose(analyze_files) -> None:
@@ -332,7 +332,7 @@ def test_same_file_nested_routers_compose(analyze_files) -> None:
     assert endpoints == ["/api/health", "/api/v1/ping"]
 
 
-def test_same_file_router_mounted_twice_keeps_its_own_path(analyze_files) -> None:
+def test_same_file_router_mounted_twice_has_no_address(analyze_files) -> None:
     routes = _routes(analyze_files, {
         "src/index.js": (
             "import express from 'express';\nconst app = express();\n"
@@ -340,7 +340,7 @@ def test_same_file_router_mounted_twice_keeps_its_own_path(analyze_files) -> Non
             "app.use('/a', router);\napp.use('/b', router);\n"
         ),
     })
-    assert list(routes.values()) == ["/x"]
+    assert list(routes.values()) == [None]  # served under both bases, never at /x
 
 
 # ── Handler and handlerLine ──────────────────────────────────────────────────────────────────
@@ -499,3 +499,34 @@ def test_commonjs_required_middleware_is_never_a_prefix(analyze_files) -> None:
     })
     got = {s.path: s.endpoint for s in st if s.semanticType == "route" and s.routeKind == "route"}
     assert got == {"src/api.js": "/api/me"}
+
+
+def test_mount_base_built_from_constants_folds_or_leaves_no_address(analyze_files) -> None:
+    files = {
+        "package.json": '{"dependencies": {"express": "4"}}',
+        "src/config.js": "export const API = '/api';\n",
+        "src/users.js": ("import { Router } from 'express';\nexport const users = Router();\n"
+                         "users.get('/items', list);\n"),
+        "src/orders.js": ("import { Router } from 'express';\nexport const orders = Router();\n"
+                          "orders.get('/all', all);\n"),
+        "src/app.js": (
+            "import express, { Router } from 'express';\nimport { API } from './config';\n"
+            "import { users } from './users';\nimport { orders } from './orders';\n"
+            "const app = express();\n"
+            "app.use(`${API}/v1`, users);\n"                  # constant from another file: folds
+            "app.use(process.env.BASE + '/o', orders);\n"     # environment: does not fold
+            "const local = Router();\nlocal.get('/ping', ping);\n"
+            "app.use(API + '/local', local);\n"               # same file, concatenation: folds
+            "const dyn = Router();\ndyn.get('/x', x);\n"
+            "app.use(`${cfg.base}`, dyn);\n"                  # same file, unresolved: no address
+        ),
+    }
+    st = analyze_files(files)
+    got = {(s.path, s.handler): s.endpoint for s in st
+           if s.semanticType == "route" and s.method == "GET"}
+    assert got == {
+        ("src/users.js", "list"): "/api/v1/items",
+        ("src/orders.js", "all"): None,
+        ("src/app.js", "ping"): "/api/local/ping",
+        ("src/app.js", "x"): None,
+    }

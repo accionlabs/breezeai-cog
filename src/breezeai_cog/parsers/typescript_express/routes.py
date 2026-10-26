@@ -24,10 +24,11 @@ from ..additive import DetectContext, Detection, Detector, Gate, register_detect
 from ..emits import Emit
 from ..treesitter import node_text
 from ..typescript.imports import (
+    _path_pieces, _resolve_pieces,
     _module_of, _require_module, relative_requires, resolve_const_value,
 )
 from ..wiring import compose_guards
-from .mounts import express_mounts, mw_name, router_locals
+from .mounts import _PATH_EXPRESSIONS, express_mounts, mw_name, router_locals
 
 # HTTP-verb methods that register a route handler on an app/router.
 _HTTP_VERBS = {"get", "post", "put", "delete", "patch", "options", "head", "all"}
@@ -541,30 +542,42 @@ def _join_base(base: str, local: str) -> str:
 
 
 def _apply_base(
-    base: str | None, framework: str, route_kind: str, endpoint: str | None
+    base: str | None, framework: str, route_kind: str, endpoint: str | None,
+    unknown: bool = False,
 ) -> str | None:
     """Prefix a router-local Express route with the base its factory is mounted at, when the
     repo index resolved one for this file. Express ``route`` and ``mount`` statements are joined
-    (a nested mount's address is its full prefix); other frameworks are untouched. No resolved mount (or a
-    dynamic endpoint) → endpoint unchanged (honest-null; today's behavior)."""
-    if base is None or endpoint is None or framework != "express" or route_kind not in ("route", "mount"):
+    (a nested mount's address is its full prefix); other frameworks are untouched. ``unknown``:
+    the router is mounted where cog cannot tell (a base that does not fold, or two bases) → no
+    address. Not mounted (or a dynamic endpoint) → endpoint unchanged."""
+    if framework != "express" or route_kind not in ("route", "mount"):
+        return endpoint
+    if unknown:
+        return None
+    if base is None or endpoint is None:
         return endpoint
     return _join_base(base, endpoint)
 
 
 def _receiver_bases(
-    root: Node, source: bytes, file_base: str | None, imported: dict[str, str]
-) -> dict[str, str]:
-    """Router variable → the base its routes are served under, for routers in this file.
+    root: Node, source: bytes, file_base: str | None, imported: dict[str, str],
+    consts: dict[str, str | None] | None = None, unknown: frozenset[str] = frozenset(),
+    file_unknown: bool = False,
+) -> tuple[dict[str, str], set[str]]:
+    """(router variable → the base its routes are served under, routers served somewhere
+    unknown), for routers in this file.
 
     ``imported`` holds the bases the repo index resolved for routers this file exports and
-    another file mounts (``app.use('/matches', matchRouter)``). Same-file mounts
-    (``const r = Router(); app.use('/api', r)``) are composed on top: a router mounted on another
-    router inherits that router's base; one mounted on the app (or an unmounted router) starts
-    from ``file_base`` (a factory file's base) or ``/``. A router mounted at >1 distinct base, or
-    in a cycle, gets no entry (honest-null: its routes keep their own path)."""
+    another file mounts (``app.use('/matches', matchRouter)``); ``unknown`` those it found mounted
+    at an unknown base. Same-file mounts (``const r = Router(); app.use('/api', r)``) are composed
+    on top: a router mounted on another router inherits that router's base; one mounted on the
+    app (or an unmounted router) starts from ``file_base`` (a factory file's base) or ``/``. A
+    base built from constants (`` `${API}/v1` ``) folds through ``consts``. A router whose base
+    does not fold, that is mounted at >1 distinct base, or under an unknown one is unknown: its
+    routes have no address, never their own path. A mount cycle keeps the routes' own path."""
     routers = router_locals(root, source) if b"Router" in source else set()
-    local: dict[str, tuple[str, str] | None] = {}  # router → (receiver it is mounted on, path)
+    # router → (receiver it is mounted on, path), or None: two bases, or one that does not fold
+    local: dict[str, tuple[str, str] | None] = {}
     for call in _invocations(root) if routers else []:
         fn = call.child_by_field_name("function")
         is_member = fn is not None and fn.type == "member_expression"
@@ -573,34 +586,60 @@ def _receiver_bases(
             continue
         args = call.child_by_field_name("arguments")
         arg_nodes = list(args.named_children) if args is not None else []
-        path = _string_value(arg_nodes[0], source) if arg_nodes else None
-        if path is None or not path.startswith("/"):
+        if not arg_nodes:
+            continue
+        first = arg_nodes[0]
+        literal = _string_value(first, source)
+        if literal is not None:
+            path: str | None = literal
+            if not literal.startswith("/"):
+                continue  # not a mount path
+        elif first.type in _PATH_EXPRESSIONS:
+            pieces = _path_pieces(first, source)
+            folded = _resolve_pieces(pieces, consts or {}) if pieces is not None else None
+            path = folded if folded is not None and folded.startswith("/") else None
+        else:
             continue
         receiver = _receiver(call, source)
         for a in arg_nodes[1:]:
             name = node_text(a, source)
             if a.type == "identifier" and name in routers:
-                entry = (receiver, path)
+                entry = (receiver, path) if path is not None else None
                 local[name] = entry if local.get(name, entry) == entry else None
 
-    out: dict[str, str] = dict(imported)
+    out: dict[str, str] = {k: v for k, v in imported.items() if k not in local}
+    lost: set[str] = set(unknown)
 
     def resolve(router: str, seen: frozenset[str]) -> str | None:
         if router in out:
             return out[router]
-        entry = local.get(router)
-        if entry is None or router in seen:  # ambiguous, or a mount cycle
+        if router in lost:
+            return None
+        if router not in local:
+            return None
+        entry = local[router]
+        if router in seen:  # a mount cycle
+            return None
+        if entry is None or router in imported:  # two bases, unfolded, or also mounted elsewhere
+            lost.add(router)
             return None
         receiver, path = entry
-        if receiver in local:  # mounted on a router that is itself mounted in this file
+        if receiver in local or receiver in lost:  # mounted on a router of this file
             parent = resolve(receiver, seen | {router})
-            return _join_base(parent, path) if parent is not None else None
+            if parent is None:
+                if receiver in lost:
+                    lost.add(router)
+                return None
+            return _join_base(parent, path)
+        if file_unknown:
+            lost.add(router)
+            return None
         return _join_base(imported.get(receiver) or file_base or "/", path)
 
     for router in local:
         if (base := resolve(router, frozenset())) is not None:
             out[router] = base
-    return out
+    return out, lost
 
 
 def _global_guards(
@@ -716,10 +755,15 @@ def detect_express(
     # (an exported Router()), else the whole file (a router factory).
     mount_guards = mounts.router_guards.get(path, {})
     file_mount_guards = list(mounts.factory_guards.get(path, ()))
-    receiver_base = _receiver_bases(root, source, mount_base, imported)
-    routers = frozenset(router_locals(root, source)) if b"Router" in source else frozenset()
     index_consts = getattr(index, "const_values", None)
     consts: dict[str, str | None] = index_consts if isinstance(index_consts, dict) else {}
+    # A factory mounted at a base that does not resolve, or at two: every route of the file is
+    # served somewhere unknown.
+    file_unknown = path in mounts.unknown_factories
+    receiver_base, unknown_receivers = _receiver_bases(
+        root, source, mount_base, imported, consts,
+        mounts.unknown_routers.get(path, frozenset()), file_unknown)
+    routers = frozenset(router_locals(root, source)) if b"Router" in source else frozenset()
     # Top-level functions of this file → declaration line; a name declared twice → None.
     decl_lines: dict[str, int | None] = {}
     for f in record.functions:
@@ -746,9 +790,10 @@ def detect_express(
         if route_kind == "mount" and _mounts_served_router(
                 call, source, path, mounts.served, local_served):
             continue  # wiring: its prefix and middleware are on the router's routes
+        receiver_of = _receiver(call, source)
+        lost = receiver_of in unknown_receivers or (file_unknown and receiver_of not in receiver_base)
         served = _apply_base(
-            receiver_base.get(_receiver(call, source), mount_base), framework, route_kind, endpoint
-        )
+            receiver_base.get(receiver_of, mount_base), framework, route_kind, endpoint, lost)
         # Only a route-level guard that certainly rejects an anonymous request asserts auth
         # (:func:`certain_auth`); any other middleware — validation, logging, a rate limit, a
         # custom check — is listed, its effect unknown.
