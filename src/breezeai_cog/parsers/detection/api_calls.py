@@ -24,6 +24,9 @@ _CLIENT_HINTS = (
 # Bare (receiver-less) function calls that are HTTP requests → default GET.
 _BARE_FUNCTIONS = {"fetch", "$fetch", "usefetch", "apifetch", "authfetch", "customfetch"}
 
+# PHP: receiver substrings that name an HTTP client (Laravel ``Http::``, Guzzle, cURL wrappers).
+_PHP_HTTP_HINTS = ("http", "guzzle", "curl", "restclient", "apiclient")
+
 # ORM query-builder markers that make a chain a DB query, not an HTTP call — the
 # ``session`` client hint collides with SQLAlchemy's DB session, so a chain like
 # ``session.query(User).filter(...).delete()`` ends in an HTTP verb but is data access.
@@ -84,6 +87,11 @@ def match_api(
     """
     m = method.lower()
     low = callee.lower()
+    # PHP verbs collide with everyday APIs (PDO ``$stmt->fetch()``, ``$cache->get()``,
+    # ``$session->get()``): only a receiver that names an HTTP client counts, checked before
+    # any verb shortcut below.
+    if language == "php" and not any(hint in _receiver_text(low) for hint in _PHP_HTTP_HINTS):
+        return None
     if m in _BARE_FUNCTIONS or low in _BARE_FUNCTIONS or low.endswith(".fetch"):
         return "GET"
     # .NET (C#/VB) HttpClient uses async-suffixed verbs (``GetAsync``/``PostAsync``…);
@@ -93,10 +101,6 @@ def match_api(
         m = m[: -len("async")]
     m = _DOTNET_VERBS.get(m, m)  # GetStringAsync / PostAsJsonAsync … → the verb they send
     if m not in _HTTP_VERBS:
-        return None
-    if language == "php" and not any(
-        hint in _receiver_text(low) for hint in ("http", "guzzle", "curl", "restclient", "apiclient")
-    ):
         return None
     if m == "request" and method != "request":
         # Capitalized Request (...) is a constructor or model type, not an outbound HTTP request call
