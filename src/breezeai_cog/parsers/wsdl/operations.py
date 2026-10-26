@@ -1,26 +1,27 @@
 """Walk a ``<definitions>`` element (a standalone ``.wsdl`` document's root) and emit one
-flat ``Statement`` per ``message`` declaration plus one ``route`` statement per operation
-declared under any ``portType`` — regardless of whether a same-file ``binding`` implements
-it.
+flat ``Statement`` per ``message`` declaration plus one per operation declared under any
+``portType`` — regardless of whether a same-file ``binding`` implements it.
+
+A ``portType`` operation is **wiring, not an entry point** (entry-point contract,
+``docs/entry-point-roles/wsdl.md``): it declares an operation's name and messages but names
+no handler — the handler is the implementing code (a WCF ``[OperationContract]``, an ASMX
+``[WebMethod]``), which is the binding. This is the same rule as a GraphQL SDL root field.
+Recording it as a ``route`` would count one operation twice next to its implementation, and
+would turn the WSDL of a remote service the code only *calls* into an inbound entry point.
 
 Real-world WSDLs commonly separate the abstract interface (``portType``) from its concrete
 wiring (``binding``) across files (the WS-I-recommended layout), or omit a binding entirely
-(an abstract-only interface WSDL). An earlier version of this parser only emitted a route
-when a same-file ``binding`` referenced the ``portType``, which silently dropped those
-operations — verified against Apache CXF's real corpus: ~1,100 of 2,728 operations had no
-same-file binding. ``method`` is always ``"RPC"``, matching every other SOAP/RPC emitter in
-this repo (``csharp_wcf``, ASMX, ``dotnet_servicehost``) — a binding's SOAP action is
-wire-protocol detail, not the messaging verb the schema's ``method`` field documents, and
-there is no dedicated field for it in this v1.
+(an abstract-only interface WSDL), so operations are read from the ``portType`` itself.
 
 * ``message`` (global) → a ``data_model`` entity, same shape as an XSD global ``element``:
   ``framework="wsdl"``, ``endpoint=name`` (the join key — matches Prisma's own ``data_model``
-  statements, so a route's ``requestDTO``/``responseDTO`` can resolve to the ``message`` it
+  statements, so an operation's ``requestDTO``/``responseDTO`` can resolve to the ``message`` it
   names).
-* ``portType/operation`` → a ``route`` statement, the operation's own real grammar node
-  (``nodeType="operation"``), ``framework="wsdl"``, ``method="RPC"``, ``routeKind="rpc"``,
-  ``endpoint`` = ``f"{portType}/{operation}"``, ``requestDTO``/``responseDTO`` = the
-  operation's declared input/output message local names.
+* ``portType/operation`` → a plain statement (no ``semanticType``), ``framework="wsdl"``,
+  ``endpoint`` = ``f"{portType}/{operation}"`` (the SOAP address, kept so it is recorded
+  somewhere even when the implementation isn't in the repo), ``requestDTO``/``responseDTO``
+  = the operation's declared input/output message local names — the DTOs a GraphQL SDL
+  root field also keeps.
 * ``import`` → a plain statement recording the referenced namespace/location — never
   resolved (same v1 scope decision as XSD's ``import``/``include``).
 
@@ -102,7 +103,7 @@ def _collect_messages(
     return out
 
 
-def _route_statement(
+def _operation_statement(
     op: Node, source: bytes, path: str, fid: str, pt_name: str, op_name: str, seen_ids: set[str]
 ) -> Statement:
     start, end = line_span(op)
@@ -111,14 +112,10 @@ def _route_statement(
         parentId=fid,
         path=path,
         nodeType="operation",
-        semanticType="route",
         name=op_name,
         text=node_text(op, source),
         framework="wsdl",
-        method="RPC",
         endpoint=f"{pt_name}/{op_name}",
-        routeKind="rpc",
-        isRegex=False,
         requestDTO=_message_local(op, source, "input"),
         responseDTO=_message_local(op, source, "output"),
         startLine=start,
@@ -126,7 +123,7 @@ def _route_statement(
     )
 
 
-def _collect_routes(
+def _collect_operations(
     definitions: Node, source: bytes, path: str, fid: str, seen_ids: set[str]
 ) -> list[Statement]:
     out: list[Statement] = []
@@ -142,20 +139,16 @@ def _collect_routes(
             op_name = element_attr(op, source, "name")
             if not op_name:
                 continue
-            out.append(_route_statement(op, source, path, fid, pt_name, op_name, seen_ids))
+            out.append(_operation_statement(op, source, path, fid, pt_name, op_name, seen_ids))
     return out
 
 
 def collect_definitions_statements(
-    definitions: Node, source: bytes, path: str, seen_ids: set[str], *, include_routes: bool
+    definitions: Node, source: bytes, path: str, seen_ids: set[str]
 ) -> list[Statement]:
-    """Walk a ``<definitions>`` element's direct children and emit ``message``/``import``
-    statements, plus ``route`` statements when ``include_routes`` is True. Pass
-    ``include_routes=False`` for a fixture file — the ``is_fixture_file`` gate (base.py)
-    exists only for route/entry-point emitters; a fixture WSDL's ``message``/``import``
-    declarations are still real and worth capturing."""
+    """Walk a ``<definitions>`` element's direct children and emit ``message``/``import``/
+    ``portType`` operation statements, parented to the file."""
     fid = file_id(path)
-    out = _collect_messages(definitions, source, path, fid, seen_ids)
-    if include_routes:
-        out += _collect_routes(definitions, source, path, fid, seen_ids)
-    return out
+    return _collect_messages(definitions, source, path, fid, seen_ids) + _collect_operations(
+        definitions, source, path, fid, seen_ids
+    )

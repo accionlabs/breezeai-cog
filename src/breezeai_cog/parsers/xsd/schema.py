@@ -7,7 +7,7 @@ split into their own records.
 
 * ``element`` / ``complexType`` (global) → a ``data_model`` entity (parallels a Prisma
   ``model``), the full declaration on ``text``, ``endpoint=name`` (the join key — matches
-  Prisma's own ``data_model`` statements, so a WSDL route's ``requestDTO``/``responseDTO``
+  Prisma's own ``data_model`` statements, so a WSDL operation's ``requestDTO``/``responseDTO``
   can resolve to the ``message``/type it names) and ``framework`` set to the caller's
   ``framework`` (``"xsd"`` for a standalone ``.xsd`` file, ``"wsdl"`` when this walker is
   reused for a schema embedded in a WSDL's ``<wsdl:types>``).

@@ -2,9 +2,9 @@
 
 Parses a WSDL 1.1 SOAP service-contract document with the generic tree-sitter ``xml``
 grammar (same grammar and ``parsers/xml_common.py`` namespace-stripping as
-``xsd/parser.py``) and emits: one ``data_model`` statement per ``message``, one ``route``
-statement per operation declared under any ``portType`` (see :mod:`.operations` — routes
-are emitted directly from the abstract interface, not gated on a same-file ``binding``),
+``xsd/parser.py``) and emits: one ``data_model`` statement per ``message``, one plain
+statement per operation declared under any ``portType`` (see :mod:`.operations` — an
+operation is wiring, not an entry point: the implementing code is the binding),
 one ``import`` statement per ``wsdl:import``, and reuses ``xsd/schema.py``'s walker for
 every ``<xsd:schema>`` embedded in ``<wsdl:types>`` (the common case — most real WSDLs
 declare their message types inline rather than only importing external ``.xsd`` files).
@@ -14,8 +14,8 @@ the version this repo's existing SOAP support (``csharp_wcf``, ASMX) already tar
 
 Semantic capture is on by default (gated behind ``ctx.capture_statements``; the CLI's
 ``--no-capture-statements`` turns it off); the shared comment pass adds ``<!-- … -->``
-comments when capture is on. ``is_fixture_file`` (base.py) scopes only route emission — a
-fixture WSDL's ``message``/``import``/embedded-schema declarations are still captured.
+comments when capture is on. There is no ``is_fixture_file`` gate: that check exists only
+for entry-point emitters (base.py), and a WSDL records none.
 """
 
 from __future__ import annotations
@@ -57,15 +57,7 @@ class WsdlParser(BaseParser):
             and definitions is not None
             and element_tag(definitions, source) == "definitions"
         ):
-            statements.extend(
-                collect_definitions_statements(
-                    definitions,
-                    source,
-                    path,
-                    seen_ids,
-                    include_routes=not self.is_fixture_file(path),
-                )
-            )
+            statements.extend(collect_definitions_statements(definitions, source, path, seen_ids))
             types = find_child(definitions, source, "types")
             if types is not None:
                 for schema_node in child_elements(types):
