@@ -8,8 +8,11 @@ statement that contains a call is run through the shared detectors
 
 from __future__ import annotations
 
-from collections.abc import Collection, Iterator
+from collections.abc import Collection, Iterator, Mapping
+from contextlib import contextmanager
+import contextvars
 import re
+from types import MappingProxyType
 
 from tree_sitter import Node
 
@@ -18,7 +21,9 @@ from ..statements_common import (
     classify_statement,
     current_http_client_ids,
     render_concat,
+    reset_http_client_ids,
     resolve_endpoint,
+    set_http_client_ids,
     strip_leading_base,
     url_placeholder,
 )
@@ -26,6 +31,11 @@ from ..treesitter import node_text
 from .mappings import CONTROL_FLOW, EMIT_TYPES, NESTED_SCOPES
 
 _CALL_TYPE = "call_expression"
+
+#: Per-file variable name -> HTTP client type (simple name); see scoped_http_clients.
+_client_types: contextvars.ContextVar[Mapping[str, str]] = contextvars.ContextVar(
+    "scala_http_client_types", default=MappingProxyType({})
+)
 
 #: Distinctive HTTP client type names — safe to match on the bare simple name anywhere.
 _SCALA_HTTP_TYPES = frozenset({
@@ -59,9 +69,8 @@ _REST_TEMPLATE_METHOD_VERBS = {
     "headforheaders": "head",
     "optionsforallow": "options",
 }
-#: Calls whose verb lives inside a request/method argument rather than the method name
-#: itself (RestTemplate's generic ``exchange``/``execute``, java.net.http's ``send``).
-_SCALA_AMBIGUOUS_VERB_METHODS = frozenset({"exchange", "execute"})
+#: RestTemplate's generic calls, whose verb is an ``HttpMethod`` argument.
+_REST_TEMPLATE_VERB_ARG_METHODS = frozenset({"exchange", "execute"})
 
 # Bare expression-statements: Scala puts a statement-position call / infix expression
 # directly under a block or template_body (no expression_statement wrapper).
@@ -162,6 +171,23 @@ def _chain_http_method(call: Node, source: bytes) -> str | None:
         alias = _HTTP_METHOD_ALIASES.get(method)
         if alias is not None:
             return alias
+    return None
+
+
+def _http_method_constant(args: list[Node], source: bytes) -> str | None:
+    """The verb of an ``HttpMethod.POST`` argument, if one is written literally."""
+    for arg in args:
+        if arg.type != "field_expression":
+            continue
+        value = arg.child_by_field_name("value")
+        field = arg.child_by_field_name("field")
+        if value is None or field is None:
+            continue
+        if node_text(value, source).rsplit(".", 1)[-1] != "HttpMethod":
+            continue
+        verb = node_text(field, source).lower()
+        if verb in _HTTP_METHODS:
+            return verb
     return None
 
 
@@ -289,14 +315,15 @@ def _call_details(call: Node, source: bytes) -> tuple[str, str, str | None] | No
             return callee, "request", endpoint
 
     # Spring RestTemplate: "ForObject"/"ForEntity" methods carry the verb in their name;
-    # ``exchange``/``execute`` take it as an argument instead, so fall back to the
-    # sentinel rather than guessing. Gated on the receiver's declared type so an
-    # unrelated user method of the same name is untouched.
-    rest_verb = _REST_TEMPLATE_METHOD_VERBS.get(lower_method)
-    if rest_verb is not None and root_receiver in current_http_client_ids():
-        return callee, rest_verb, endpoint
-    if lower_method in _SCALA_AMBIGUOUS_VERB_METHODS and root_receiver in current_http_client_ids():
-        return callee, "request", endpoint
+    # ``exchange``/``execute`` take it as an argument, read only when written as
+    # ``HttpMethod.X``. Gated on the receiver being declared a ``RestTemplate`` — Play
+    # WS has an ``execute`` too, whose string argument is a verb, not an endpoint.
+    if _http_client_types().get(root_receiver) == "RestTemplate":
+        rest_verb = _REST_TEMPLATE_METHOD_VERBS.get(lower_method)
+        if rest_verb is not None:
+            return callee, rest_verb, endpoint
+        if lower_method in _REST_TEMPLATE_VERB_ARG_METHODS:
+            return callee, _http_method_constant(named_args, source) or "request", endpoint
 
     # http4s terminal operations represent a GET only when the sole argument is a bare
     # Uri/String; when it's a Request value the verb lives inside that value (could be
@@ -315,23 +342,41 @@ def _call_details(call: Node, source: bytes) -> tuple[str, str, str | None] | No
     return callee, method, endpoint
 
 
-def collect_http_client_ids(types: dict[str, str], source: bytes) -> frozenset[str]:
-    """Return Scala variables whose declared type is a known HTTP client/backend.
+def collect_http_clients(types: dict[str, str], source: bytes) -> dict[str, str]:
+    """Return Scala variables whose declared type is a known HTTP client/backend,
+    mapped to that type's simple name.
 
     ``Client`` and ``HttpClient`` only count in a file that actually references their
     owning framework (http4s / java.net.http) — otherwise they over-match Kafka/cache/
     gRPC wrapper types and user-defined traits of the same name.
     """
-    ids: set[str] = set()
+    clients: dict[str, str] = {}
     for name, type_text in types.items():
         base = type_text.split("<", 1)[0].split("[", 1)[0].strip().rsplit(".", 1)[-1]
         if base in _SCALA_HTTP_TYPES:
-            ids.add(name)
+            clients[name] = base
             continue
         gate = _SCALA_HTTP_TYPES_GATED.get(base)
         if gate is not None and gate in source:
-            ids.add(name)
-    return frozenset(ids)
+            clients[name] = base
+    return clients
+
+
+@contextmanager
+def scoped_http_clients(clients: Mapping[str, str]) -> Iterator[None]:
+    """Make ``clients`` the file's HTTP clients — their names for the shared api-call
+    classifier, their types for the Scala rules that depend on which client it is."""
+    ids_token = set_http_client_ids(frozenset(clients))
+    types_token = _client_types.set(MappingProxyType(dict(clients)))
+    try:
+        yield
+    finally:
+        _client_types.reset(types_token)
+        reset_http_client_ids(ids_token)
+
+
+def _http_client_types() -> Mapping[str, str]:
+    return _client_types.get()
 
 
 def _span(node: Node) -> tuple[int, int]:

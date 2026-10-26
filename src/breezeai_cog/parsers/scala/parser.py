@@ -19,13 +19,12 @@ from ..additive import run_additive
 from ..base import BaseParser, ParseContext
 from ..callresolve import make_resolver
 from ..comments_common import comment_statements_for
-from ..statements_common import reset_http_client_ids, set_http_client_ids
 from ..treesitter import parse_source
 from .classes import build_class
 from .functions import build_function, defined_names, type_map
 from .imports import ScalaIndex, build_fqcn_index, extract_imports
 from .mappings import COMMENT_TYPES, CONTROL_FLOW, FRAMEWORKS, STATEMENT_TYPES
-from .statements import collect_http_client_ids, extract_statements
+from .statements import collect_http_clients, extract_statements, scoped_http_clients
 
 _CLASS_TYPES = (
     "class_definition",
@@ -59,16 +58,13 @@ class ScalaParser(BaseParser):
         return self.extract(root, ctx)
 
     def extract(self, root: Node, ctx: ParseContext) -> FileRecord:
-        ids = (
-            collect_http_client_ids(type_map(root, ctx.source), ctx.source)
+        clients = (
+            collect_http_clients(type_map(root, ctx.source), ctx.source)
             if ctx.capture_statements
-            else frozenset()
+            else {}
         )
-        token = set_http_client_ids(ids)
-        try:
+        with scoped_http_clients(clients):
             return self._extract(root, ctx)
-        finally:
-            reset_http_client_ids(token)
 
     def _extract(self, root: Node, ctx: ParseContext) -> FileRecord:
         source, path = ctx.source, ctx.path

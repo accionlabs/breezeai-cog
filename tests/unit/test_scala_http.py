@@ -85,10 +85,39 @@ class Calls(
 
 def test_resttemplate_and_java_net_http_resolve_without_guessing() -> None:
     record = _parse(REST_TEMPLATE_SRC)
-    calls = {s.method: s for s in record.statements if s.semanticType == "api_call"}
-    assert calls["GET"]
-    assert calls["POST"]
-    assert calls["REQUEST"]
+    calls = [(s.method, s.endpoint) for s in record.statements if s.semanticType == "api_call"]
+    assert calls == [("GET", None), ("POST", "/orders"), ("REQUEST", None)]
+
+
+RT = "import org.springframework.web.client.RestTemplate"
+
+
+@pytest.mark.parametrize(
+    ("body", "expected"),
+    [
+        ('rt.getForEntity("/a", classOf[String])', [("GET", "/a")]),
+        ('rt.put("/a", body)', [("PUT", "/a")]),
+        # the verb argument is read when written as HttpMethod.X, else left unresolved
+        ('rt.exchange("/a", HttpMethod.POST, e, classOf[String])', [("POST", "/a")]),
+        ('rt.execute("/a", org.springframework.http.HttpMethod.DELETE, cb, ex)', [("DELETE", "/a")]),
+        ('rt.exchange("/a", verb, e, classOf[String])', [("REQUEST", "/a")]),
+    ],
+)
+def test_resttemplate_verbs(body: str, expected: list[tuple[str, str | None]]) -> None:
+    assert _api_calls(RT, "rt: RestTemplate", body) == expected
+
+
+@pytest.mark.parametrize(
+    ("params", "body"),
+    [
+        # Play WS's execute takes a verb string — it must not land in endpoint
+        ("ws: WSClient", 'ws.url("/x").execute("POST")'),
+        ("ws: WSClient", 'ws.url("/x").getForObject("/y")'),
+        ("svc: OrderService", 'svc.exchange("/a", HttpMethod.POST)'),
+    ],
+)
+def test_resttemplate_rules_need_a_resttemplate(params: str, body: str) -> None:
+    assert _api_calls(RT, params, body) == []
 
 
 def _api_calls(imports: str, params: str, body: str) -> list[tuple[str | None, str | None]]:
