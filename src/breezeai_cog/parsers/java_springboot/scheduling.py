@@ -5,12 +5,15 @@ A method annotated with ``@Scheduled`` is the handler of a schedule; the schedul
   @Scheduled(cron = "0 2 * * *")            → timer  spring  PERIODIC  0 2 * * *
   @Scheduled(fixedRate = 5000)              → timer  spring  PERIODIC  5000
   @Scheduled(fixedDelayString = "${poll}")  → timer  spring  PERIODIC  <poll from config>
+  @Scheduled(fixedRate = 5, timeUnit = TimeUnit.SECONDS)  → timer  spring  PERIODIC  5000
 
 One record per ``@Scheduled`` (the annotation is repeatable). The schedule is taken from
 ``cron``, then ``fixedRate``, then ``fixedDelay`` (or their ``…String`` forms); ``initialDelay``
 and ``zone`` only qualify it. A literal, a ``static final`` constant or a ``${property}`` from the
 module's base config resolves; anything else (SpEL ``#{…}``, an unset property) leaves
-``endpoint`` empty.
+``endpoint`` empty. An interval is in milliseconds, as Spring's default: one given with
+``timeUnit = TimeUnit.X`` is converted; a ``timeUnit`` that is not a literal unit, or a value
+that is not a whole number of milliseconds, leaves ``endpoint`` empty.
 """
 
 from __future__ import annotations
@@ -38,6 +41,24 @@ def _number(node: Node, source: bytes) -> str | None:
     return digits if digits.replace(".", "", 1).isdigit() else None
 
 
+#: java.util.concurrent.TimeUnit → milliseconds per unit.
+_UNIT_MS = {"NANOSECONDS": 1e-6, "MICROSECONDS": 1e-3, "MILLISECONDS": 1, "SECONDS": 1_000,
+            "MINUTES": 60_000, "HOURS": 3_600_000, "DAYS": 86_400_000}
+
+
+def _in_ms(value: str | None, unit: Node | None, source: bytes) -> str | None:
+    """An interval ``value`` given in ``unit`` (``TimeUnit.SECONDS``) → milliseconds; ``unit``
+    None → the value as is (Spring's default unit). Unknown unit or not a whole ms → None."""
+    if unit is None or value is None:
+        return value
+    factor = _UNIT_MS.get(node_text(unit, source).rsplit(".", 1)[-1])
+    try:
+        ms = float(value) * factor if factor is not None else None
+    except ValueError:
+        return None  # a duration string ("PT5S") or other text: its unit is not this one
+    return str(int(ms)) if ms is not None and ms == int(ms) else None
+
+
 def _schedule(ann: Node, source: bytes, consts: dict[str, str],
               props: dict[str, str | None]) -> str | None:
     args = ann.child_by_field_name("arguments")
@@ -51,7 +72,8 @@ def _schedule(ann: Node, source: bytes, consts: dict[str, str],
     for attr in _SCHEDULE_ATTRS:
         value = pairs.get(attr)
         if value is not None:
-            return _number(value, source) or _address(value, source, consts, props)
+            found = _number(value, source) or _address(value, source, consts, props)
+            return found if attr == "cron" else _in_ms(found, pairs.get("timeUnit"), source)
     return None
 
 

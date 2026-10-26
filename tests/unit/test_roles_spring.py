@@ -406,3 +406,30 @@ def test_only_a_signed_in_check_asserts_auth(analyze_files) -> None:
 def test_secured_anonymously_makes_no_claim(analyze_files) -> None:
     assert _secured(analyze_files, "", '@Secured("ROLE_ADMIN")') == (["Secured(ROLE_ADMIN)"], True)
     assert _secured(analyze_files, "", '@Secured("IS_AUTHENTICATED_ANONYMOUSLY")')[1] is None
+
+
+def test_scheduled_interval_with_a_time_unit_is_in_milliseconds(analyze_files) -> None:
+    st = analyze_files(_java(
+        "J",
+        "import org.springframework.scheduling.annotation.Scheduled;\n"
+        "import java.util.concurrent.TimeUnit;",
+        """public class J {
+  @Scheduled(fixedRate = 5, timeUnit = TimeUnit.SECONDS)
+  public void a() {}
+  @Scheduled(fixedDelayString = "2", timeUnit = TimeUnit.MINUTES)
+  public void b() {}
+  @Scheduled(fixedRate = 5, timeUnit = unit)
+  public void c() {}
+  @Scheduled(fixedRate = 5, timeUnit = TimeUnit.MICROSECONDS)
+  public void d() {}
+  @Scheduled(cron = "0 * * * *", timeUnit = TimeUnit.SECONDS)
+  public void e() {}
+}""",
+    ))
+    got = {r.handler: r.endpoint for r in _eps(st)}
+    assert got == {
+        "a": "5000", "b": "120000",
+        "c": None,            # a unit that is not a literal TimeUnit: unknown
+        "d": None,            # not a whole number of milliseconds
+        "e": "0 * * * *",     # timeUnit does not apply to cron
+    }
