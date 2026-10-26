@@ -387,6 +387,9 @@ def detect_laravel_routes(root: Node, source: bytes, path: str, record: FileReco
                     )
                     _, chained_guards = chained_route_metadata(
                         node, source, name_methods=set(), guard_methods={"middleware"})
+                    _, receiver_guards = receiver_chain_metadata(
+                        node, source, name_methods=set(), guard_methods={"middleware"})
+                    chained_guards = [*receiver_guards, *chained_guards]
                     options = _literal_map(args[2], source) if len(args) > 2 else None
                     option_guards = route_guard_values(options.get("middleware"), source) if options else []
                     guards = list(dict.fromkeys([*(inherited_guards or []), *option_guards, *chained_guards]))
@@ -431,6 +434,10 @@ def detect_laravel_routes(root: Node, source: bytes, path: str, record: FileReco
                         join_endpoint(prefix or "", chain_route_prefix)
                         if chain_route_prefix and prefix is not None else prefix
                     )
+                    # Middleware / name prefix written before the verb
+                    # (``Route::middleware('auth')->name('admin.')->get(...)``) apply too.
+                    receiver_name, receiver_guards = receiver_chain_metadata(
+                        node, source, name_methods={"name"}, guard_methods={"middleware"})
                     for method in methods:
                         route_name, guards = chained_route_metadata(
                             node,
@@ -438,8 +445,9 @@ def detect_laravel_routes(root: Node, source: bytes, path: str, record: FileReco
                             name_methods={"name"},
                             guard_methods={"middleware"},
                         )
+                        guards = [*receiver_guards, *guards]
                         if route_name:
-                            route_name = f"{name_prefix}{route_name}"
+                            route_name = f"{name_prefix}{receiver_name or ''}{route_name}"
                         found |= enrich_route(
                             node, source, path, statements, record.statements, seen_ids,
                             framework="laravel",

@@ -764,3 +764,14 @@ def test_codeigniter_dynamic_path_is_a_binding_with_empty_endpoint() -> None:
                     path="app/Config/Routes.php")
     assert [(s.method, s.endpoint, s.handler) for s in record.statements
             if s.semanticType == "route"] == [("GET", None, "Users@list")]
+
+
+def test_laravel_middleware_and_name_before_the_verb_apply() -> None:
+    record = _parse(LaravelParser(), """<?php
+use Illuminate\\Support\\Facades\\Route;
+Route::middleware('auth')->name('admin.')->get('/x', 'X@y')->middleware('verified')->name('x');
+Route::middleware(['auth'])->resource('tags', T::class)->only('index');
+""")
+    routes = {s.endpoint: s for s in record.statements if s.semanticType == "route"}
+    assert (routes["/x"].guards, routes["/x"].name) == (["auth", "verified"], "admin.x")
+    assert routes["/tags"].guards == ["auth"]
