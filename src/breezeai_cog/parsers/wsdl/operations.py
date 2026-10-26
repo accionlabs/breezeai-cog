@@ -51,6 +51,8 @@ def _plain_statement(
     name: str | None,
     semantic: SemanticType | None,
     seen_ids: set[str],
+    *,
+    endpoint: str | None,
 ) -> Statement:
     start, end = line_span(node)
     return Statement(
@@ -60,7 +62,7 @@ def _plain_statement(
         nodeType=tag,
         semanticType=semantic,
         name=name,
-        endpoint=name,
+        endpoint=endpoint,
         framework="wsdl",
         text=node_text(node, source),
         startLine=start,
@@ -86,10 +88,17 @@ def _collect_messages(
         tag = element_tag(node, source)
         if tag == _MESSAGE_TAG:
             name = element_attr(node, source, "name")
-            out.append(_plain_statement(node, source, path, fid, tag, name, "data_model", seen_ids))
+            out.append(
+                _plain_statement(
+                    node, source, path, fid, tag, name, "data_model", seen_ids, endpoint=name
+                )
+            )
         elif tag == _IMPORT_TAG:
+            # The namespace/location is not a name anything joins on: no endpoint.
             name = element_attr(node, source, "namespace") or element_attr(node, source, "location")
-            out.append(_plain_statement(node, source, path, fid, tag, name, None, seen_ids))
+            out.append(
+                _plain_statement(node, source, path, fid, tag, name, None, seen_ids, endpoint=None)
+            )
     return out
 
 

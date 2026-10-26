@@ -72,7 +72,10 @@ def collect_schema_statements(
                 nodeType=tag,
                 semanticType=semantic,
                 name=name,
-                endpoint=name,
+                # A declaration's name is its join key (a `type=`/`ref=` elsewhere names it),
+                # same as Prisma. An import/include's "name" is a namespace or file location
+                # — not a name anything joins on — so it gets no endpoint.
+                endpoint=None if tag in _IMPORT_TAGS else name,
                 framework=framework,
                 text=node_text(node, source),
                 startLine=start,

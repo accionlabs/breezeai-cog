@@ -209,6 +209,36 @@ def test_import_recorded_not_resolved(tmp_path) -> None:
     assert 'schemaLocation="common.xsd"' in imp.text
 
 
+def test_import_and_include_carry_no_endpoint(tmp_path) -> None:
+    # A namespace / schemaLocation is not a name anything joins on, so it must not sit in
+    # `endpoint`, where a lookup by entity name could match it.
+    src = (
+        '<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema">\n'
+        '  <xs:import namespace="urn:common" schemaLocation="common.xsd"/>\n'
+        '  <xs:include schemaLocation="types.xsd"/>\n'
+        "</xs:schema>\n"
+    )
+    rec = _parse(tmp_path, "schema.xsd", src)
+    refs = [s for s in rec.statements if s.semanticType != "comment"]
+    assert [(s.name, s.endpoint, s.framework) for s in refs] == [
+        ("urn:common", None, "xsd"),
+        ("types.xsd", None, "xsd"),
+    ]
+
+
+def test_non_entity_declaration_keeps_name_as_endpoint(tmp_path) -> None:
+    # Same as Prisma's enum/config blocks: a simpleType / group is referenced by name
+    # (`type=` / `ref=`), so its name stays the join key even without `data_model`.
+    src = (
+        '<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema">\n'
+        '  <xs:simpleType name="Code"><xs:restriction base="xs:string"/></xs:simpleType>\n'
+        "</xs:schema>\n"
+    )
+    rec = _parse(tmp_path, "schema.xsd", src)
+    st = next(s for s in rec.statements if s.name == "Code")
+    assert (st.semanticType, st.endpoint, st.framework) == (None, "Code", "xsd")
+
+
 def test_comment_captured(tmp_path) -> None:
     rec = _parse(tmp_path, "schema.xsd", SCHEMA)
     comments = [s for s in rec.statements if s.nodeType == "Comment"]

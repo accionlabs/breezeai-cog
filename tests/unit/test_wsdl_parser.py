@@ -326,6 +326,8 @@ def test_import_recorded_not_resolved(tmp_path) -> None:
     imp = next(s for s in rec.statements if s.nodeType == "import")
     assert imp.semanticType is None
     assert imp.name == "http://example.com/common"
+    assert imp.endpoint is None  # a namespace/location, not a join key
+    assert imp.framework == "wsdl"
 
 
 def test_comment_captured(tmp_path) -> None:
