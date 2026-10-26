@@ -23,8 +23,8 @@ wiring (``binding``) across files (the WS-I-recommended layout), or omit a bindi
   = the operation's declared input/output message local names — the DTOs a GraphQL SDL
   root field also keeps.
 * ``import`` → a plain statement recording the referenced namespace/location, with no
-  ``endpoint`` — never resolved to a file, for the same reason as XSD's ``import``/
-  ``include`` (the location is often a URL or not in the repo).
+  ``endpoint``; its ``location`` (:func:`definitions_locations`) becomes an ``importFiles`` /
+  ``externalImports`` entry by the same rule as XSD's ``schemaLocation``.
 
 ``binding``/``service``/``port`` elements are not modeled — not a declaration this parser
 captures (absent beats wrong, same rule ``prisma/schema.py`` applies to its own grammar
@@ -141,6 +141,17 @@ def _collect_operations(
             if not op_name:
                 continue
             out.append(_operation_statement(op, source, path, fid, pt_name, op_name, seen_ids))
+    return out
+
+
+def definitions_locations(definitions: Node, source: bytes) -> list[str]:
+    """The ``location`` of every top-level ``wsdl:import`` — the documents this WSDL loads."""
+    out: list[str] = []
+    for node in child_elements(definitions):
+        if element_tag(node, source) == _IMPORT_TAG:
+            loc = element_attr(node, source, "location")
+            if loc:
+                out.append(loc)
     return out
 
 

@@ -16,9 +16,11 @@ split into their own records.
   via ``ref=``/``base=`` elsewhere), not standalone domain entities, so they don't carry the
   ``data_model`` tag.
 * ``import`` / ``include`` → a plain statement recording the referenced namespace /
-  schemaLocation, with no ``endpoint`` — never resolved to a file: a ``schemaLocation`` is
-  often a URL, catalog-mapped, or absent from the repo (``web-common_4_0.xsd`` in Grails'
-  servlet schemas), so a resolved path would be a guess.
+  schemaLocation, with no ``endpoint``. The documents themselves (:func:`schema_locations`,
+  also ``redefine``/``override``) become the file's ``importFiles`` / ``externalImports``,
+  resolved by ``xml_common.resolve_locations``: a relative ``schemaLocation`` is resolved against the
+  schema's own folder (the W3C rule) and kept only when that file is in the repo; a URL is an
+  external import.
 
 Anything else at schema scope (``annotation``, ``notation``, ``redefine``, ``override``,
 top-level ``key``/``unique``) is intentionally skipped — not a declaration this parser
@@ -40,6 +42,23 @@ _STRUCTURAL_TAGS = ("element", "complexType", "simpleType", "group", "attributeG
 #: and so carry `semanticType="data_model"`.
 _ENTITY_TAGS = ("element", "complexType")
 _IMPORT_TAGS = ("import", "include")
+
+
+#: Schema-composition elements whose ``schemaLocation`` names another schema document.
+_LOCATION_TAGS = ("include", "import", "redefine", "override")
+
+
+def schema_locations(schema_node: Node, source: bytes) -> list[str]:
+    """The ``schemaLocation`` of every top-level ``include``/``import``/``redefine``/
+    ``override`` — the documents this schema loads (an ``import`` naming only a namespace
+    loads no document, so it contributes nothing)."""
+    out: list[str] = []
+    for node in child_elements(schema_node):
+        if element_tag(node, source) in _LOCATION_TAGS:
+            loc = element_attr(node, source, "schemaLocation")
+            if loc:
+                out.append(loc)
+    return out
 
 
 def collect_schema_statements(

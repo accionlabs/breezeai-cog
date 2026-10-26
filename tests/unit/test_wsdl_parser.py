@@ -7,7 +7,8 @@ plain statement per operation declared under any ``portType`` — wiring, not an
 (the implementing code is the binding) — regardless of whether a same-file ``binding``
 implements it (real-world WSDLs commonly separate the interface from its wiring across
 files, or omit a binding entirely), one ``import`` statement per ``wsdl:import``
-(never resolved), and reuses the ``xsd`` walker (tagged ``framework="wsdl"``) for every
+(its ``location``, like an embedded schema's ``schemaLocation``, also resolved into
+``importFiles`` / ``externalImports``), and reuses the ``xsd`` walker (tagged ``framework="wsdl"``) for every
 ``<xsd:schema>`` embedded in ``<wsdl:types>``. Capture is on by default.
 """
 
@@ -84,6 +85,7 @@ def _parse(
     tmp_path, filename: str, src: str, *, capture: bool = True, limit: int = 1000
 ) -> FileRecord:
     p = tmp_path / filename
+    p.parent.mkdir(parents=True, exist_ok=True)
     p.write_text(src)
     ctx = ParseContext(
         path=filename,
@@ -330,13 +332,55 @@ def test_embedded_xsd_schema_reuses_xsd_walker(tmp_path) -> None:
     assert 'name="id"' in user.text
 
 
-def test_import_recorded_not_resolved(tmp_path) -> None:
+def test_import_recorded_as_a_statement(tmp_path) -> None:
     rec = _parse(tmp_path, "service.wsdl", WSDL)
     imp = next(s for s in rec.statements if _tag(s) == "import")
     assert imp.semanticType is None
     assert imp.name == "http://example.com/common"
     assert imp.endpoint is None  # a namespace/location, not a join key
     assert imp.framework == "wsdl"
+
+
+def test_wsdl_import_and_embedded_schema_locations_resolve(tmp_path) -> None:
+    # Both a `wsdl:import location=` and an embedded schema's `schemaLocation=` are resolved
+    # against the WSDL file's own folder; URLs are external, missing files are left out.
+    for rel in ("svc/common.wsdl", "svc/xsd/types.xsd"):
+        (tmp_path / rel).parent.mkdir(parents=True, exist_ok=True)
+        (tmp_path / rel).write_text("<x/>")
+    src = """\
+<wsdl:definitions xmlns:wsdl="http://schemas.xmlsoap.org/wsdl/"
+    xmlns:xs="http://www.w3.org/2001/XMLSchema">
+  <wsdl:import namespace="urn:common" location="common.wsdl"/>
+  <wsdl:import namespace="urn:remote" location="https://example.com/remote?wsdl"/>
+  <wsdl:types>
+    <xs:schema>
+      <xs:include schemaLocation="xsd/types.xsd"/>
+      <xs:import namespace="urn:gone" schemaLocation="xsd/missing.xsd"/>
+    </xs:schema>
+  </wsdl:types>
+</wsdl:definitions>
+"""
+    for capture in (True, False):
+        rec = _parse(tmp_path, "svc/service.wsdl", src, capture=capture)
+        assert rec.importFiles == ["svc/common.wsdl", "svc/xsd/types.xsd"]
+        assert rec.externalImports == ["https://example.com/remote?wsdl"]
+
+
+def test_soap_address_location_is_not_an_import(tmp_path) -> None:
+    # Negative case: `soap:address location=` under service/port is the deployed endpoint
+    # URL, not a document this WSDL loads -- it must not become an external import.
+    src = """\
+<wsdl:definitions xmlns:wsdl="http://schemas.xmlsoap.org/wsdl/"
+    xmlns:soap="http://schemas.xmlsoap.org/wsdl/soap/">
+  <wsdl:service name="S">
+    <wsdl:port name="P" binding="tns:B">
+      <soap:address location="http://localhost:9000/SoapContext/SoapPort"/>
+    </wsdl:port>
+  </wsdl:service>
+</wsdl:definitions>
+"""
+    rec = _parse(tmp_path, "service.wsdl", src)
+    assert (rec.importFiles, rec.externalImports) == ([], [])
 
 
 def test_comment_captured(tmp_path) -> None:

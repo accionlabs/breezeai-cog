@@ -16,4 +16,4 @@ records less (contract §8).
 | `binding` and its `operation` children (`soap:binding`, `soap12:binding`) | None | — | Wire protocol for a `portType`'s operations |
 | `service` / `port` (`soap:address location`) | None | — | Deployment address; not modeled |
 | `message` | None | `data_model` (not an entry point) | Declares a message body |
-| `import` | None | plain statement: `name` = namespace or location, no `endpoint` | References another document; never resolved |
+| `import` | None | plain statement: `name` = namespace or location, no `endpoint`; the location is an `importFiles` (in-repo) or `externalImports` (URL) entry | References another document (a structural link, not a binding) |

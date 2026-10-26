@@ -6,7 +6,9 @@ declaration (full body, including nested elements/restrictions, on ``text``,
 ``data_model`` entity; ``simpleType``/``group``/``attributeGroup`` captured the same way but
 with no ``data_model`` tag (reusable fragments / scalar constraints, not domain entities);
 ``import``/``include`` as a plain statement recording the referenced
-namespace/schemaLocation (never resolved across files). Capture is on by default.
+namespace/schemaLocation. A relative ``schemaLocation`` that exists in the repo becomes an
+``importFiles`` entry (resolved against the schema's folder), a URL an ``externalImports``
+entry. Capture is on by default.
 """
 
 from __future__ import annotations
@@ -62,6 +64,7 @@ def _parse(
     tmp_path, filename: str, src: str, *, capture: bool = True, limit: int = 1000
 ) -> FileRecord:
     p = tmp_path / filename
+    p.parent.mkdir(parents=True, exist_ok=True)
     p.write_text(src)
     ctx = ParseContext(
         path=filename,
@@ -211,7 +214,7 @@ def test_attribute_value_ending_in_quote_character_preserved(tmp_path) -> None:
     assert any(s.name == "Editors'" for s in rec.statements)
 
 
-def test_import_recorded_not_resolved(tmp_path) -> None:
+def test_import_recorded_as_a_statement(tmp_path) -> None:
     rec = _parse(tmp_path, "schema.xsd", SCHEMA)
     imp = next(s for s in rec.statements if _tag(s) == "import")
     assert imp.semanticType is None
@@ -247,6 +250,95 @@ def test_non_entity_declaration_keeps_name_as_endpoint(tmp_path) -> None:
     rec = _parse(tmp_path, "schema.xsd", src)
     st = next(s for s in rec.statements if s.name == "Code")
     assert (st.semanticType, st.endpoint, st.framework) == (None, "Code", "xsd")
+
+
+def _schema(*refs: str) -> str:
+    return (
+        '<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema">\n'
+        + "".join(f"  {r}\n" for r in refs)
+        + "</xs:schema>\n"
+    )
+
+
+def _touch(tmp_path, *rels: str) -> None:
+    for rel in rels:
+        (tmp_path / rel).parent.mkdir(parents=True, exist_ok=True)
+        (tmp_path / rel).write_text(_schema())
+
+
+def test_relative_schema_location_resolves_against_the_schema_folder(tmp_path) -> None:
+    # A relative schemaLocation is a URI reference resolved against the schema's own folder
+    # (W3C XSD), so an existing target becomes an IMPORTS edge -- with or without `./`.
+    _touch(tmp_path, "schemas/types.xsd", "schemas/common/base.xsd", "shared/codes.xsd")
+    src = _schema(
+        '<xs:include schemaLocation="types.xsd"/>',
+        '<xs:import namespace="urn:base" schemaLocation="./common/base.xsd"/>',
+        '<xs:redefine schemaLocation="../shared/codes.xsd"/>',
+    )
+    rec = _parse(tmp_path, "schemas/order.xsd", src)
+    assert rec.importFiles == [
+        "schemas/common/base.xsd",
+        "schemas/types.xsd",
+        "shared/codes.xsd",
+    ]
+    assert rec.externalImports == []
+
+
+def test_absolute_url_schema_location_is_an_external_import(tmp_path) -> None:
+    src = _schema('<xs:import namespace="x" schemaLocation="http://www.w3.org/2001/xml.xsd"/>')
+    rec = _parse(tmp_path, "order.xsd", src)
+    assert rec.importFiles == []
+    assert rec.externalImports == ["http://www.w3.org/2001/xml.xsd"]
+
+
+def test_unresolvable_schema_locations_are_left_out(tmp_path) -> None:
+    # Honest-null: a missing file, a path leaving the repo, a root-absolute or backslash
+    # path, a self-reference and a namespace-only import never produce an IMPORTS edge.
+    (tmp_path.parent / "outside.xsd").write_text(_schema())
+    src = _schema(
+        '<xs:include schemaLocation="missing.xsd"/>',
+        f'<xs:include schemaLocation="../{tmp_path.parent.name}/../outside.xsd"/>',
+        '<xs:include schemaLocation="../outside.xsd"/>',
+        '<xs:include schemaLocation="/schemas/types.xsd"/>',
+        '<xs:include schemaLocation="sub\\types.xsd"/>',
+        '<xs:include schemaLocation="order.xsd"/>',
+        '<xs:import namespace="urn:only-a-namespace"/>',
+    )
+    rec = _parse(tmp_path, "order.xsd", src)
+    assert (rec.importFiles, rec.externalImports) == ([], [])
+
+
+def test_symlink_leaving_the_repo_is_not_an_import(tmp_path) -> None:
+    outside = tmp_path.parent / f"{tmp_path.name}-outside.xsd"
+    outside.write_text(_schema())
+    (tmp_path / "link.xsd").symlink_to(outside)
+    rec = _parse(tmp_path, "order.xsd", _schema('<xs:include schemaLocation="link.xsd"/>'))
+    assert rec.importFiles == []
+
+
+def test_percent_encoded_location_and_duplicates(tmp_path) -> None:
+    _touch(tmp_path, "my types.xsd")
+    src = _schema(
+        '<xs:include schemaLocation="my%20types.xsd"/>',
+        '<xs:include schemaLocation="my%20types.xsd#frag"/>',
+    )
+    assert _parse(tmp_path, "order.xsd", src).importFiles == ["my types.xsd"]
+
+
+def test_imports_resolved_without_statement_capture(tmp_path) -> None:
+    # Imports are File-level structure, kept with --no-capture-statements like any language.
+    _touch(tmp_path, "types.xsd")
+    rec = _parse(
+        tmp_path, "order.xsd", _schema('<xs:include schemaLocation="types.xsd"/>'), capture=False
+    )
+    assert rec.statements == []
+    assert rec.importFiles == ["types.xsd"]
+
+
+def test_non_schema_root_has_no_imports(tmp_path) -> None:
+    _touch(tmp_path, "types.xsd")
+    src = '<config><include schemaLocation="types.xsd"/></config>\n'
+    assert _parse(tmp_path, "order.xsd", src).importFiles == []
 
 
 def test_comment_captured(tmp_path) -> None:

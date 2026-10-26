@@ -22,9 +22,9 @@ from ...utils import count_loc
 from ..base import BaseParser, ParseContext
 from ..comments_common import comment_statements_for
 from ..treesitter import parse_source
-from ..xml_common import document_root, element_tag
+from ..xml_common import document_root, element_tag, resolve_locations
 from .mappings import COMMENT_TYPES, FRAMEWORKS, STATEMENT_TYPES
-from .schema import collect_schema_statements
+from .schema import collect_schema_statements, schema_locations
 
 
 class XsdParser(BaseParser):
@@ -45,11 +45,16 @@ class XsdParser(BaseParser):
         statements: list[Statement] = []
 
         schema_node = document_root(root)
-        if (
-            ctx.capture_statements
-            and schema_node is not None
-            and element_tag(schema_node, source) == "schema"
-        ):
+        if schema_node is not None and element_tag(schema_node, source) != "schema":
+            schema_node = None  # not an XML Schema document
+        # Referenced schema documents are File-level structure (IMPORTS), like every
+        # language's imports — resolved whether or not statements are captured.
+        import_files, external_imports = resolve_locations(
+            schema_locations(schema_node, source) if schema_node is not None else [],
+            path,
+            ctx.repo_root,
+        )
+        if ctx.capture_statements and schema_node is not None:
             # No is_fixture_file gate: that check exists only for route/entry-point emitters
             # (base.py), and XSD emits no routes — a fixture .xsd still has real data_model
             # declarations worth capturing.
@@ -65,6 +70,8 @@ class XsdParser(BaseParser):
             language="xml",
             loc=count_loc(source.decode("utf-8", "replace")),
             statements=statements,
+            importFiles=import_files,
+            externalImports=external_imports,
             framework="xsd" if statements else None,
         )
 

@@ -28,10 +28,10 @@ from ...utils import count_loc
 from ..base import BaseParser, ParseContext
 from ..comments_common import comment_statements_for
 from ..treesitter import parse_source
-from ..xml_common import child_elements, document_root, element_tag, find_child
-from ..xsd.schema import collect_schema_statements
+from ..xml_common import child_elements, document_root, element_tag, find_child, resolve_locations
+from ..xsd.schema import collect_schema_statements, schema_locations
 from .mappings import COMMENT_TYPES, FRAMEWORKS, STATEMENT_TYPES
-from .operations import collect_definitions_statements
+from .operations import collect_definitions_statements, definitions_locations
 
 
 class WsdlParser(BaseParser):
@@ -52,19 +52,28 @@ class WsdlParser(BaseParser):
         statements: list[Statement] = []
 
         definitions = document_root(root)
-        if (
-            ctx.capture_statements
-            and definitions is not None
-            and element_tag(definitions, source) == "definitions"
-        ):
+        if definitions is not None and element_tag(definitions, source) != "definitions":
+            definitions = None  # not a WSDL 1.1 document
+        types = find_child(definitions, source, "types") if definitions is not None else None
+        schemas = [
+            s
+            for s in (child_elements(types) if types is not None else [])
+            if element_tag(s, source) == "schema"
+        ]
+        # Referenced documents (`wsdl:import location=`, an embedded schema's
+        # `schemaLocation=`) are File-level structure (IMPORTS), resolved against this file
+        # whether or not statements are captured.
+        locations = definitions_locations(definitions, source) if definitions is not None else []
+        for schema_node in schemas:
+            locations += schema_locations(schema_node, source)
+        import_files, external_imports = resolve_locations(locations, path, ctx.repo_root)
+
+        if ctx.capture_statements and definitions is not None:
             statements.extend(collect_definitions_statements(definitions, source, path, seen_ids))
-            types = find_child(definitions, source, "types")
-            if types is not None:
-                for schema_node in child_elements(types):
-                    if element_tag(schema_node, source) == "schema":
-                        statements.extend(
-                            collect_schema_statements(schema_node, source, path, seen_ids, "wsdl")
-                        )
+            for schema_node in schemas:
+                statements.extend(
+                    collect_schema_statements(schema_node, source, path, seen_ids, "wsdl")
+                )
 
         record = FileRecord(
             id=fid,
@@ -76,6 +85,8 @@ class WsdlParser(BaseParser):
             language="xml",
             loc=count_loc(source.decode("utf-8", "replace")),
             statements=statements,
+            importFiles=import_files,
+            externalImports=external_imports,
             framework="wsdl" if statements else None,
         )
 

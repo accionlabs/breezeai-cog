@@ -10,9 +10,19 @@ walker dispatch on the *local* name after stripping the prefix — the same norm
 
 from __future__ import annotations
 
+import posixpath
+import re
+from collections.abc import Iterable
+from pathlib import Path
+from urllib.parse import unquote
+
 from tree_sitter import Node
 
 from .treesitter import node_text
+
+#: A URI with a scheme (``http:``, ``https:``, ``urn:``, ``file:`` …) — two or more letters so a
+#: Windows drive (``C:``) is not mistaken for one.
+_URI_SCHEME_RE = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]+:")
 
 
 def local_name(qualified: str) -> str:
@@ -76,6 +86,42 @@ def child_elements(node: Node) -> list[Node]:
 def find_child(node: Node, source: bytes, local: str) -> Node | None:
     """First direct child element of ``node`` whose local (prefix-stripped) tag == ``local``."""
     return next((c for c in child_elements(node) if element_tag(c, source) == local), None)
+
+
+def resolve_locations(
+    locations: Iterable[str], path: str, repo_root: Path | None
+) -> tuple[list[str], list[str]]:
+    """Split document references (``schemaLocation=`` / ``location=``) into
+    ``(importFiles, externalImports)`` — the same rule HCL applies to a module ``source``.
+
+    A relative location is a URI reference resolved against the referencing document's own
+    folder (the XSD / WSDL rule), so it is no guess: it becomes an in-repo path when that file
+    exists inside ``repo_root``. A location with a scheme (``http://…``) is an external
+    dependency. Anything else — a root-absolute or backslash path, a path leaving the repo, a
+    file that isn't there, or no ``repo_root`` to check against — is left out (honest-null)."""
+    internal: set[str] = set()
+    external: set[str] = set()
+    root = repo_root.resolve() if repo_root is not None else None
+    for loc in locations:
+        loc = loc.strip()
+        if not loc:
+            continue
+        if _URI_SCHEME_RE.match(loc):
+            external.add(loc)
+            continue
+        rel = unquote(loc.split("#", 1)[0].split("?", 1)[0])
+        if root is None or not rel or rel.startswith("/") or "\\" in rel:
+            continue
+        target = posixpath.normpath(posixpath.join(posixpath.dirname(path), rel))
+        if target == path or target == ".." or target.startswith("../"):
+            continue
+        try:
+            resolved = (root / target).resolve()
+        except OSError:
+            continue
+        if resolved.is_relative_to(root) and resolved.is_file():
+            internal.add(target)
+    return sorted(internal), sorted(external)
 
 
 def _child(node: Node, typ: str) -> Node | None:
