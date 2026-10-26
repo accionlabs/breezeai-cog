@@ -182,7 +182,7 @@ def enrich_route(
             handler_line = closure.start_point[0] + 1
     if statement.semanticType == "route":
         normalized_endpoint = normalize_endpoint(endpoint) if endpoint is not None else None
-        if statement.method == method and statement.endpoint == normalized_endpoint:
+        if (statement.method, statement.endpoint, statement.handler) == (method, normalized_endpoint, handler):
             changed = False
             if name and statement.name != name:
                 statement.name = name

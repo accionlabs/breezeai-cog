@@ -8,6 +8,7 @@ from ...emit import disambiguate, statement_id
 from ...schemas import FileRecord, Statement
 from ...schemas.enums import SemanticType
 from ..base import ParseContext
+from ..inflect import singular
 from ..php.parser import PhpParser
 from ..php_route_common import (
     PHP_CALL_TYPES,
@@ -20,6 +21,7 @@ from ..php_route_common import (
     join_endpoint,
     method_of,
     receiver_chain_metadata,
+    route_guard_values,
     route_handler,
     route_options,
     string_value,
@@ -46,34 +48,31 @@ _SPECIAL_ROUTES = {
     "redirect": "GET",
 }
 
-_RESOURCE_ACTIONS = {
-    "resource": {
-        "index": [("GET", "{base}", "index")],
-        "create": [("GET", "{base}/create", "create")],
-        "store": [("POST", "{base}", "store")],
-        "show": [("GET", "{base}/{{id}}", "show")],
-        "edit": [("GET", "{base}/{{id}}/edit", "edit")],
-        "update": [("PUT", "{base}/{{id}}", "update"), ("PATCH", "{base}/{{id}}", "update")],
-        "destroy": [("DELETE", "{base}/{{id}}", "destroy")],
-    },
-    "api_resource": {
-        "index": [("GET", "{base}", "index")],
-        "store": [("POST", "{base}", "store")],
-        "show": [("GET", "{base}/{{id}}", "show")],
-        "update": [("PUT", "{base}/{{id}}", "update"), ("PATCH", "{base}/{{id}}", "update")],
-        "destroy": [("DELETE", "{base}/{{id}}", "destroy")],
-    },
-    "singleton": {
-        "show": [("GET", "{base}", "show")],
-        "edit": [("GET", "{base}/edit", "edit")],
-        "update": [("PUT", "{base}", "update"), ("PATCH", "{base}", "update")],
-        "destroy": [("DELETE", "{base}", "destroy")],
-    },
-    "api_singleton": {
-        "show": [("GET", "{base}", "show")],
-        "update": [("PUT", "{base}", "update"), ("PATCH", "{base}", "update")],
-        "destroy": [("DELETE", "{base}", "destroy")],
-    },
+#: Resource method → (resource kind, plural: has a member parameter).
+_RESOURCE_KINDS = {
+    "resource": ("resource", True),
+    "apiresource": ("api_resource", True),
+    "singleton": ("singleton", False),
+    "apisingleton": ("api_singleton", False),
+}
+
+#: action → [(verb, path suffix)]; ``{p}`` is the member parameter (Laravel's ResourceRegistrar).
+_ACTION_PATHS = {
+    "index": [("GET", "")],
+    "create": [("GET", "/create")],
+    "store": [("POST", "")],
+    "show": [("GET", "/{p}")],
+    "edit": [("GET", "/{p}/edit")],
+    "update": [("PUT", "/{p}"), ("PATCH", "/{p}")],
+    "destroy": [("DELETE", "/{p}")],
+}
+
+#: kind → default actions, actions ``->creatable()`` adds, actions ``->destroyable()`` adds.
+_KIND_ACTIONS: dict[str, tuple[tuple[str, ...], tuple[str, ...], tuple[str, ...]]] = {
+    "resource": (("index", "create", "store", "show", "edit", "update", "destroy"), (), ()),
+    "api_resource": (("index", "store", "show", "update", "destroy"), (), ()),
+    "singleton": (("show", "edit", "update"), ("create", "store", "destroy"), ("destroy",)),
+    "api_singleton": (("show", "update"), ("store", "destroy"), ("destroy",)),
 }
 
 
@@ -155,14 +154,187 @@ def _has_dynamic_prefix(call: Node, source: bytes) -> bool:
     )
 
 
-def _laravel_resource_specs(name: str, controller: str | None, kind: str) -> list[tuple[str, str, str]]:
-    actions = _RESOURCE_ACTIONS[kind]
-    target = controller or name.rsplit("/", 1)[-1].replace("-", " ").title().replace(" ", "") + "Controller"
-    return [
-        (method, endpoint.format(base=name), f"{target}@{action}")
-        for action in actions
-        for method, endpoint, _ in actions[action]
-    ]
+def _chain_calls(call: Node, source: bytes) -> dict[str, list[Node]]:
+    """Calls chained on ``call``'s result (``Route::resource(...)->only([...])->names(...)``):
+    method name (lower-case) → its arguments."""
+    out: dict[str, list[Node]] = {}
+    current = call
+    while current.parent is not None:
+        parent = current.parent
+        if parent.type == "parenthesized_expression" and len(parent.named_children) == 1:
+            current = parent
+            continue
+        if parent.type not in PHP_CALL_TYPES:
+            break
+        receiver = unwrap(parent.child_by_field_name("object"))
+        if receiver is None or (receiver.start_byte, receiver.end_byte) != (
+                current.start_byte, current.end_byte):
+            break
+        method = method_of(parent, source)
+        if method is not None:
+            out[method] = args_of(parent)
+        current = parent
+    return out
+
+
+def _literal_strings(node: Node | None, source: bytes) -> list[str] | None:
+    """A literal string or array of strings; None when any part is not literal."""
+    node = unwrap(node)
+    if node is None:
+        return None
+    single = string_value(node, source)
+    if single is not None:
+        return [single]
+    if node.type != "array_creation_expression":
+        return None
+    values: list[str] = []
+    for element in node.named_children:
+        if len(element.named_children) != 1:
+            return None
+        value = string_value(element.named_children[0], source)
+        if value is None:
+            return None
+        values.append(value)
+    return values
+
+
+def _literal_map(node: Node | None, source: bytes) -> dict[str, Node] | None:
+    """A literal-keyed array (``['only' => [...]]``) → key → value node; None otherwise."""
+    node = unwrap(node)
+    if node is None or node.type != "array_creation_expression":
+        return None
+    out: dict[str, Node] = {}
+    for element in node.named_children:
+        parts = list(element.named_children)
+        key = string_value(parts[0], source) if len(parts) == 2 else None
+        if key is None:
+            return None
+        out[key] = parts[1]
+    return out
+
+
+def _string_map(node: Node | None, source: bytes) -> dict[str, str] | None:
+    entries = _literal_map(node, source)
+    if entries is None:
+        return None
+    out = {key: string_value(value, source) for key, value in entries.items()}
+    return {k: v for k, v in out.items() if v is not None} if all(
+        v is not None for v in out.values()) else None
+
+
+class _Unknown(Exception):
+    """A resource option is present but not literal: the routes it declares are unknown."""
+
+
+def _option(chain: dict[str, list[Node]], options: dict[str, Node], key: str) -> Node | None:
+    args = chain.get(key.lower())
+    if args is not None:
+        if not args:
+            raise _Unknown
+        return args[0]
+    return options.get(key)
+
+
+def _resource_actions(kind: str, chain: dict[str, list[Node]], options: dict[str, Node],
+                      source: bytes) -> list[str]:
+    defaults, creatable, destroyable = _KIND_ACTIONS[kind]
+    actions = list(defaults)
+    if "creatable" in chain:
+        actions += creatable
+    if "destroyable" in chain:
+        actions += destroyable
+    only = _option(chain, options, "only")
+    if only is not None:
+        wanted = _literal_strings(only, source)
+        if wanted is None:
+            raise _Unknown
+        actions = [a for a in actions if a in wanted]
+    except_ = _option(chain, options, "except")
+    if except_ is not None:
+        dropped = _literal_strings(except_, source)
+        if dropped is None:
+            raise _Unknown
+        actions = [a for a in actions if a not in dropped]
+    return list(dict.fromkeys(actions))
+
+
+def _resource_parameters(chain: dict[str, list[Node]], options: dict[str, Node],
+                         source: bytes) -> dict[str, str] | None:
+    """Literal parameter overrides (``->parameters(['photos' => 'pic'])``,
+    ``->parameter('photos', 'pic')``); None when an override is present but not literal."""
+    if "parameter" in chain:
+        args = chain["parameter"]
+        key = string_value(args[0], source) if len(args) == 2 else None
+        value = string_value(args[1], source) if len(args) == 2 else None
+        return {key: value} if key is not None and value is not None else None
+    node = _option(chain, options, "parameters")
+    if node is None:
+        return {}
+    return _string_map(node, source)
+
+
+def _wildcard(segment: str, overrides: dict[str, str] | None) -> str | None:
+    if overrides is None:
+        return None
+    if segment in overrides:
+        return overrides[segment]
+    word = singular(segment)
+    return word.replace("-", "_") if word is not None else None
+
+
+def _resource_names(chain: dict[str, list[Node]], options: dict[str, Node], resource: str,
+                    name_prefix: str, source: bytes) -> dict[str, str | None] | None:
+    """action → route name. Default ``<group prefix><resource>.<action>``; ``->names('x')``
+    replaces the base, a literal ``->names([...])`` map overrides actions. None (every name
+    unknown) when ``names`` is not literal."""
+    base = f"{name_prefix}{resource}"
+    node = _option(chain, options, "names")
+    if node is None:
+        return {action: f"{base}.{action}" for action in _ACTION_PATHS}
+    as_base = string_value(node, source)
+    if as_base is not None:
+        return {action: f"{as_base}.{action}" for action in _ACTION_PATHS}
+    mapped = _string_map(node, source)
+    if mapped is None:
+        return None
+    return {action: mapped.get(action, f"{base}.{action}") for action in _ACTION_PATHS}
+
+
+def _resource_routes(call: Node, args: list[Node], kind: str, plural_kind: bool, source: bytes,
+                     name_prefix: str) -> list[tuple[str, str | None, str, str | None]] | None:
+    """Every binding a resource registration declares: (verb, path, action, route name), the
+    path relative to the group prefix (None when a parameter can't be named). None when the
+    resource name isn't literal, or the routes it declares can't be known."""
+    resource = string_value(args[0], source) if args else None
+    if resource is None:
+        return None
+    chain = _chain_calls(call, source)
+    options = _literal_map(args[2], source) if len(args) > 2 else {}
+    if options is None or "shallow" in chain:
+        return None  # dynamic options / shallow nesting: the declared routes are not known
+    try:
+        actions = _resource_actions(kind, chain, options, source)
+        overrides = _resource_parameters(chain, options, source)
+        names = _resource_names(chain, options, resource, name_prefix, source)
+    except _Unknown:
+        return None
+    *parents, last = resource.strip("/").split(".")
+    base: str | None = ""
+    for segment in parents:
+        wildcard = _wildcard(segment, overrides)
+        base = None if base is None or wildcard is None else f"{base}/{segment}/{{{wildcard}}}"
+    base = None if base is None else f"{base}/{last}"
+    member = _wildcard(last, overrides) if plural_kind else None
+    routes = []
+    for action in actions:
+        for verb, suffix in _ACTION_PATHS[action]:
+            if not plural_kind:
+                suffix = suffix.replace("/{p}", "")
+            path = None
+            if base is not None and ("{p}" not in suffix or member is not None):
+                path = base + suffix.replace("{p}", f"{{{member}}}")
+            routes.append((verb, path, action, names.get(action) if names else None))
+    return routes
 
 
 def detect_laravel_routes(root: Node, source: bytes, path: str, record: FileRecord) -> bool:
@@ -206,30 +378,30 @@ def detect_laravel_routes(root: Node, source: bytes, path: str, record: FileReco
                 args = args_of(node)
                 endpoint_node: Node | None = None
                 handler_node: Node | None = None
-                if name in {"resource", "apiresource", "singleton", "apisingleton"}:
-                    endpoint = string_value(args[0], source) if args else None
+                if name in _RESOURCE_KINDS:
+                    kind, plural_kind = _RESOURCE_KINDS[name]
+                    routes = _resource_routes(node, args, kind, plural_kind, source, name_prefix)
                     controller, _ = route_handler(args[1], source) if len(args) > 1 else (None, None)
-                    kind = {
-                        "resource": "resource",
-                        "apiresource": "api_resource",
-                        "singleton": "singleton",
-                        "apisingleton": "api_singleton",
-                    }[name]
-                    if endpoint is not None and controller is not None:
-                        chain_route_prefix = chain_prefix(node.child_by_field_name("object"), source)
-                        effective_prefix = (
-                            join_endpoint(prefix or "", chain_route_prefix)
-                            if chain_route_prefix and prefix is not None else prefix
+                    chain_route_prefix = chain_prefix(node.child_by_field_name("object"), source)
+                    effective_prefix = (
+                        join_endpoint(prefix or "", chain_route_prefix)
+                        if chain_route_prefix and prefix is not None else prefix
+                    )
+                    _, chained_guards = chained_route_metadata(
+                        node, source, name_methods=set(), guard_methods={"middleware"})
+                    options = _literal_map(args[2], source) if len(args) > 2 else None
+                    option_guards = route_guard_values(options.get("middleware"), source) if options else []
+                    guards = list(dict.fromkeys([*(inherited_guards or []), *option_guards, *chained_guards]))
+                    for method, binding, action, route_name in routes or []:
+                        found |= enrich_route(
+                            node, source, path, statements, record.statements, seen_ids,
+                            framework="laravel",
+                            endpoint=(join_endpoint(effective_prefix, binding)
+                                      if effective_prefix is not None and binding is not None else None),
+                            method=method, handler_node=None,
+                            handler_name=f"{controller}@{action}" if controller else None,
+                            name=route_name, guards=guards, route_kind="route",
                         )
-                        for method, binding, handler in _laravel_resource_specs(endpoint, controller, kind):
-                            found |= enrich_route(
-                                node, source, path, statements, record.statements, seen_ids,
-                                framework="laravel",
-                                endpoint=(join_endpoint(effective_prefix or "", binding)
-                                          if effective_prefix is not None else None),
-                                method=method, handler_node=None, handler_name=handler,
-                                route_kind="route",
-                            )
                     return
                 if name == "match" and len(args) >= 2:
                     methods = [m.upper() for m in strings_in_array(args[0], source)]

@@ -589,12 +589,12 @@ Route::singleton('profile', ProfileController::class);
     assert not any(route.method in {"VIEW", "REDIRECT", "RESOURCE", "API_RESOURCE"} for route in routes)
     assert next(route for route in routes if route.endpoint == "/welcome").handler is None
     assert next(route for route in routes if route.endpoint == "/here").handler is None
-    assert any(route.endpoint == "/photos/{id}" and route.method == "GET"
+    assert any(route.endpoint == "/photos/{photo}" and route.method == "GET"
                and route.handler == "PhotoController@show" for route in routes)
-    assert any(route.endpoint == "/albums/{id}" and route.method == "PATCH"
+    assert any(route.endpoint == "/albums/{album}" and route.method == "PATCH"
                and route.handler == "AlbumController@update" for route in routes)
-    assert any(route.endpoint == "/profile" and route.method == "DELETE"
-               and route.handler == "ProfileController@destroy" for route in routes)
+    # A singleton has no destroy route unless ->destroyable() / ->creatable() adds it.
+    assert not any(route.endpoint == "/profile" and route.method == "DELETE" for route in routes)
 
 
 def test_php_route_locations_and_dynamic_prefixes_are_honest() -> None:
@@ -656,3 +656,68 @@ Route::get("/users/{$id}", [UserController::class, "show"]);
 """)
     routes = [s for s in record.statements if s.semanticType == "route"]
     assert [(s.method, s.endpoint) for s in routes] == [("GET", "/users")]
+
+
+def _laravel_routes(source: str):
+    record = _parse(LaravelParser(), "<?php\nuse Illuminate\\Support\\Facades\\Route;\n" + source)
+    return sorted(
+        ((s.method, s.endpoint, s.handler, s.name)
+         for s in record.statements if s.semanticType == "route"),
+        key=lambda r: tuple(v or "" for v in r),
+    )
+
+
+def test_laravel_resource_only_except_and_parameter_names() -> None:
+    assert _laravel_routes("Route::resource('photos', PhotoController::class)->only(['index', 'show']);") == [
+        ("GET", "/photos", "PhotoController@index", "photos.index"),
+        ("GET", "/photos/{photo}", "PhotoController@show", "photos.show"),
+    ]
+    assert _laravel_routes(
+        "Route::apiResource('blog-posts', P::class, ['except' => ['destroy', 'update']]);"
+    ) == [
+        ("GET", "/blog-posts", "P@index", "blog-posts.index"),
+        ("GET", "/blog-posts/{blog_post}", "P@show", "blog-posts.show"),
+        ("POST", "/blog-posts", "P@store", "blog-posts.store"),
+    ]
+
+
+def test_laravel_resource_nested_parameters_and_overrides() -> None:
+    routes = _laravel_routes(
+        "Route::resource('photos.comments', C::class)->only('show')->parameters(['comments' => 'note']);"
+    )
+    assert routes == [("GET", "/photos/{photo}/comments/{note}", "C@show", "photos.comments.show")]
+
+
+def test_laravel_resource_unknown_parts_are_never_guessed() -> None:
+    # Ambiguous singular → member routes keep an empty endpoint; collection routes stay.
+    assert _laravel_routes("Route::resource('statuses', S::class)->only(['index', 'show']);") == [
+        ("GET", None, "S@show", "statuses.show"),
+        ("GET", "/statuses", "S@index", "statuses.index"),
+    ]
+    # A non-literal only/except, or shallow nesting: which routes exist is unknown → none.
+    assert _laravel_routes("Route::resource('photos', P::class)->only($actions);") == []
+    assert _laravel_routes("Route::resource('photos.comments', C::class)->shallow();") == []
+
+
+def test_laravel_singleton_registers_only_what_laravel_does() -> None:
+    assert [r[:3] for r in _laravel_routes("Route::singleton('profile', P::class);")] == [
+        ("GET", "/profile", "P@show"), ("GET", "/profile/edit", "P@edit"),
+        ("PATCH", "/profile", "P@update"), ("PUT", "/profile", "P@update"),
+    ]
+    assert ("DELETE", "/profile", "P@destroy") in [
+        r[:3] for r in _laravel_routes("Route::singleton('profile', P::class)->destroyable();")]
+
+
+def test_laravel_resource_guards_and_dynamic_prefix() -> None:
+    record = _parse(LaravelParser(), """<?php
+use Illuminate\\Support\\Facades\\Route;
+Route::middleware('auth')->group(function () {
+    Route::resource('photos', P::class)->only(['index', 'create'])->middleware('verified');
+});
+Route::prefix($p)->group(function () { Route::resource('tags', T::class)->only(['index', 'create']); });
+""")
+    routes = [s for s in record.statements if s.semanticType == "route"]
+    photos = [s for s in routes if (s.handler or "").startswith("P@")]
+    assert {tuple(s.guards or []) for s in photos} == {("auth", "verified")}
+    tags = [s for s in routes if (s.handler or "").startswith("T@")]
+    assert [(s.endpoint, s.handler) for s in tags] == [(None, "T@index"), (None, "T@create")]
