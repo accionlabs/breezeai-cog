@@ -87,13 +87,13 @@ def test_language_and_extensions() -> None:
     p = JsltParser()
     assert p.name == "jslt"
     assert p.extensions == (".jslt",)
-    assert "jslt" in p.frameworks
+    assert p.frameworks == []  # JSLT is a language, with no framework on top
 
 
 def test_import_is_captured_with_alias_as_name(tmp_path) -> None:
     rec = _parse(tmp_path, "transform.jslt", SOURCE)
     assert rec.language == "jslt"
-    assert rec.framework == "jslt"
+    assert rec.framework is None
     imp = _by_name(rec, "common", "import")
     assert imp.parentId == rec.id
     assert imp.text == 'import "common.jslt" as common'

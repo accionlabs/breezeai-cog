@@ -8,5 +8,5 @@ from __future__ import annotations
 #: is read from its `text`.
 STATEMENT_TYPES: list[str] = ["synthetic"]
 
-#: Frameworks this parser reports (single-purpose — the transform-script surface).
-FRAMEWORKS: list[str] = ["jslt"]
+#: Frameworks this parser reports: none — JSLT is a language, with no framework on top.
+FRAMEWORKS: list[str] = []

@@ -70,7 +70,10 @@ class WsdlParser(BaseParser):
             id=fid,
             path=path,
             type="code",
-            language="wsdl",
+            # `language` is the file's format (an XSD/WSDL document *is* XML, parsed with the
+            # `xml` grammar); `framework` is the vocabulary written in it — the same split as
+            # HCL / Terraform (docs/parser-reference.md, "Language label").
+            language="xml",
             loc=count_loc(source.decode("utf-8", "replace")),
             statements=statements,
             framework="wsdl" if statements else None,

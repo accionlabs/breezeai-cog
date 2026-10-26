@@ -118,7 +118,7 @@ def test_language_and_extensions() -> None:
 
 def test_message_is_data_model_entity(tmp_path) -> None:
     rec = _parse(tmp_path, "service.wsdl", WSDL)
-    assert rec.language == "wsdl"
+    assert rec.language == "xml"  # the format; the WSDL vocabulary is the framework
     assert rec.framework == "wsdl"
     req = _by_name(rec, "GetUserRequest", "message")
     assert req.semanticType == "data_model"
@@ -348,7 +348,7 @@ def test_comment_captured(tmp_path) -> None:
 def test_capture_gate(tmp_path) -> None:
     rec = _parse(tmp_path, "service.wsdl", WSDL, capture=False)
     assert rec.statements == []
-    assert rec.language == "wsdl"
+    assert rec.language == "xml"
     assert rec.framework is None
 
 

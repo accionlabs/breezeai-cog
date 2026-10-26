@@ -51,6 +51,8 @@ class JsltParser(BaseParser):
             text, path, seen_ids, capture_statements=ctx.capture_statements
         )
 
+        # No `framework`: JSLT is the language itself, with no framework on top (no route or
+        # event records to roll one up from), so a label would only repeat `language`.
         return FileRecord(
             id=fid,
             path=path,
@@ -59,5 +61,4 @@ class JsltParser(BaseParser):
             loc=count_loc(text),
             statements=statements,
             functions=functions,
-            framework="jslt" if (statements or functions) else None,
         )

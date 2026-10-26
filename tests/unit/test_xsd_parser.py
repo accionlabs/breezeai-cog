@@ -96,7 +96,7 @@ def test_language_and_extensions() -> None:
 
 def test_complex_type_is_data_model_entity_with_full_body(tmp_path) -> None:
     rec = _parse(tmp_path, "schema.xsd", SCHEMA)
-    assert rec.language == "xsd"
+    assert rec.language == "xml"  # the format; the XSD vocabulary is the framework
     assert rec.framework == "xsd"
     addr = _by_name(rec, "AddressType", "complexType")
     assert addr.semanticType == "data_model"
@@ -258,7 +258,7 @@ def test_comment_captured(tmp_path) -> None:
 def test_capture_gate(tmp_path) -> None:
     rec = _parse(tmp_path, "schema.xsd", SCHEMA, capture=False)
     assert rec.statements == []
-    assert rec.language == "xsd"
+    assert rec.language == "xml"
     assert rec.framework is None
 
 
