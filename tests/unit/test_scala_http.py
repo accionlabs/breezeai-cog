@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from breezeai_cog.parsers.base import ParseContext
 from breezeai_cog.parsers.scala.parser import ScalaParser
 from breezeai_cog.schemas import FileRecord
@@ -87,6 +89,80 @@ def test_resttemplate_and_java_net_http_resolve_without_guessing() -> None:
     assert calls["GET"]
     assert calls["POST"]
     assert calls["REQUEST"]
+
+
+def _api_calls(imports: str, params: str, body: str) -> list[tuple[str | None, str | None]]:
+    """(method, endpoint) of every api_call in ``class Calls(<params>)`` running ``body``."""
+    source = f'''package example
+{imports}
+class Calls({params}) {{
+  def run(): Unit = {{
+    {body}
+  }}
+}}
+'''
+    record = _parse(source.encode())
+    return [(s.method, s.endpoint) for s in record.statements if s.semanticType == "api_call"]
+
+
+HTTP4S = "import org.http4s.client.Client"
+
+
+@pytest.mark.parametrize(
+    ("imports", "params", "body"),
+    [
+        ("", "client: Client", "client.get(k)"),
+        ("", "client: Client", "client.delete(id)"),
+        ("", "client: com.mycorp.kafka.Client", "client.get(k)"),
+        ("trait Client { def get(k: String): String }", "client: Client", "client.get(k)"),
+        ("", "client: S3Client", "client.get(k)"),
+        ("", "client: DbClient", "client.delete(id)"),
+        ("", "client: RedisClient", "client.get(k)"),
+    ],
+)
+def test_a_client_type_outside_http4s_is_not_an_http_client(
+    imports: str, params: str, body: str
+) -> None:
+    assert _api_calls(imports, params, body) == []
+
+
+def test_an_http4s_client_is_an_http_client() -> None:
+    assert _api_calls(HTTP4S, "client: Client[IO]", 'client.get(uri"/users")') == [
+        ("GET", "/users")
+    ]
+
+
+@pytest.mark.parametrize(
+    ("body", "expected"),
+    [
+        # a Request argument carries its own verb — never assume GET
+        ("client.expect[String](req)", [("REQUEST", None)]),
+        ("client.run(postReq)", [("REQUEST", None)]),
+        # a Uri argument is a GET
+        ('client.expect[String](uri"https://a.b/c")', [("GET", "https://a.b/c")]),
+    ],
+)
+def test_http4s_verb_is_resolved_never_guessed(
+    body: str, expected: list[tuple[str, str | None]]
+) -> None:
+    assert _api_calls(HTTP4S, "client: Client[IO]", body) == expected
+
+
+@pytest.mark.parametrize(
+    ("body", "expected"),
+    [
+        ("Http(u).asString", [("GET", None)]),
+        ("Http(u).postData(b).asString", [("POST", None)]),
+    ],
+)
+def test_scalaj_verb_comes_from_the_builder_chain(
+    body: str, expected: list[tuple[str, str | None]]
+) -> None:
+    assert _api_calls("", "u: String", body) == expected
+
+
+def test_as_string_on_a_value_named_http_is_not_a_call() -> None:
+    assert _api_calls("", "http: ConfigSection", "http.asString") == []
 
 
 def test_scala_http_client_ids_do_not_leak_between_files() -> None:
