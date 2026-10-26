@@ -10,8 +10,9 @@ from tree_sitter import Node
 from ...emit import file_id
 from ...schemas import SCHEMA_VERSION, ConstructorParam, FileRecord, Function, Statement
 from ...utils import count_loc
+from ..additive import run_additive
 from ..base import BaseParser, ParseContext
-from ..callresolve import make_resolver
+from ..callresolve import CallResolver, make_resolver
 from ..comments_common import comment_statements_for
 from ..treesitter import parse_source
 from .classes import build_class
@@ -21,11 +22,33 @@ from .functions import (
     build_function,
     scan_file,
 )
+from .declarations import Declarations, declarations, package_dir
 from .imports import GoIndex, build_fqcn_index, extract_imports
 from .mappings import COMMENT_TYPES, CONTROL_FLOW, FRAMEWORKS, STATEMENT_TYPES
 from .statements import extract_statements
 from .gomod import parse_gomod
 from .gosum import parse_gosum
+
+
+def _resolver(packages: dict[str, str], names: set[str], types: dict[str, str], path: str,
+              decls: Declarations) -> CallResolver:
+    """Call → declaring file. ``pkg.Func()`` on an in-repo package and a same-package call to a
+    function declared in another file resolve through the ``go.declarations`` fact to the file
+    that declares the function (a package is a directory of files, so the import alone does not
+    say which); everything else uses the shared resolver."""
+    local = make_resolver({}, names, path, types)
+    pkg = package_dir(path)
+
+    def resolve(name: str, receiver: str | None, owner: str | None = None) -> str | None:
+        if receiver in packages:
+            site = decls.functions.get((packages[receiver], "", name))
+            return site[0] if site else None
+        if receiver is None and name not in names:
+            site = decls.functions.get((pkg, "", name))
+            return site[0] if site else None
+        return local(name, receiver, owner)
+
+    return resolve
 
 
 class GoParser(BaseParser):
@@ -75,11 +98,11 @@ class GoParser(BaseParser):
         capture, limit = ctx.capture_statements, ctx.statement_text_limit
 
         idx = ctx.resolution_index
-        internal, external, _, bindings = extract_imports(
+        internal, external, packages = extract_imports(
             root, source, idx if isinstance(idx, GoIndex) else None
         )
         scan = scan_file(root, source)
-        resolve = make_resolver(bindings, scan.names, path, scan.types)
+        resolve = _resolver(packages, scan.names, scan.types, path, declarations(idx))
 
         functions: list[Function] = []
         classes = []
@@ -156,7 +179,7 @@ class GoParser(BaseParser):
                 )
             )
 
-        return FileRecord(
+        record = FileRecord(
             id=fid,
             path=path,
             type="code",
@@ -169,3 +192,7 @@ class GoParser(BaseParser):
             classes=classes,
             statements=statements,
         )
+        # Additive detectors (parsers/additive.py): the Go router frameworks (go_*/) and anything
+        # else registered for Go, layered on top of the base extraction.
+        run_additive("go", root, ctx, record, is_fixture=self.is_fixture_file(path))
+        return record

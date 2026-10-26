@@ -159,6 +159,18 @@ def _go(n: int) -> str:
     return f'package p\n\nimport "net/http"\n\n{body}'
 
 
+def _go_gin(n: int) -> str:
+    body = "".join(
+        f"\tg{i} := r.Group(\"/g{i}\")\n"
+        f"\tg{i}.GET(\"/a\", h.List{i}) // note\n"
+        f"\tg{i}.POST(\"/b\", func(c *gin.Context) {{ mount{i}(g{i}) }})\n"
+        for i in range(n)
+    )
+    helpers = "".join(f"func mount{i}(g *gin.RouterGroup) {{ g.PUT(\"/c\", put) }}\n" for i in range(n))
+    return (f'package p\n\nimport "github.com/gin-gonic/gin"\n\n'
+            f"func routes(r *gin.Engine, h *Handler) {{\n{body}}}\n{helpers}")
+
+
 SAMPLES: dict[str, tuple[str, Callable[[int], str]]] = {
     "java-vertx": ("V.java", _java_vertx),
     "groovy-vertx": ("Http.groovy", _groovy_vertx),
@@ -169,6 +181,7 @@ SAMPLES: dict[str, tuple[str, Callable[[int], str]]] = {
     "wsdl": ("service.wsdl", _wsdl),
     "jslt": ("transform.jslt", _jslt),
     "go": ("p.go", _go),
+    "go-gin": ("routes.go", _go_gin),
 }
 
 
