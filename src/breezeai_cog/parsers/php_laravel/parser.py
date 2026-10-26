@@ -421,7 +421,8 @@ def detect_laravel_routes(root: Node, source: bytes, path: str, record: FileReco
                         args[1] if len(args) > 1 else None
                     )
                     if name == "fallback":
-                        handler_node = args[0] if args else None
+                        # fallback(handler) has no path: its only argument is the handler.
+                        endpoint_node, handler_node = None, (args[0] if args else None)
                 else:
                     methods = []
                     endpoint_node, handler_node = None, None
