@@ -11,7 +11,7 @@ from tree_sitter import Node
 from ...emit import disambiguate, statement_id
 from ...schemas import FileRecord, Function, SemanticType, Statement
 from ..php.index import PhpIndex
-from ..php_route_common import join_endpoint, string_value, strings_in_array, walk
+from ..php_route_common import join_endpoint, route_handler, string_value, strings_in_array, walk
 from ..treesitter import line_span, node_text
 
 _FRAMEWORK_RESPONSE_TYPES = {
@@ -306,14 +306,15 @@ def _call_args(node: Node) -> list[Node]:
     return list(args.named_children) if args is not None else []
 
 
-def _call_chain_value(expression: Node, source: bytes, method: str) -> str | None:
+def _chain_controller(expression: Node, source: bytes) -> str | None:
+    """The handler a builder chain's ``->controller(...)`` names, written like every PHP route
+    handler (``'App\\Controller\\Blog::list'`` / ``[Blog::class, 'list']`` → ``…Blog@list``,
+    ``Blog::class`` → ``Blog``); the handler locator finds its declaration."""
     for node in walk(expression):
-        if node.type in _CALL_TYPES and _call_method(node, source) == method:
+        if node.type in _CALL_TYPES and _call_method(node, source) == "controller":
             args = _call_args(node)
-            if args:
-                value = string_value(args[0], source)
-                if value is not None:
-                    return value
+            handler, _ = route_handler(args[0], source) if args else (None, None)
+            return handler
     return None
 
 
@@ -356,7 +357,7 @@ def detect_symfony_route_builders(root: Node, source: bytes, path: str, record: 
         line = call.start_point[0] + 1
         parent_id = next((fn.id for fn in record.functions if fn.startLine <= line <= fn.endLine), record.id)
         methods = [verb.upper() for verb in _call_chain_array(expression, source, "methods")] or ["ANY"]
-        controller = _call_chain_value(expression, source, "controller")
+        controller = _chain_controller(expression, source)
         requirements = any(node.type in _CALL_TYPES and _call_method(node, source) == "requirements"
                            for node in walk(expression))
         for method in methods:
@@ -365,7 +366,6 @@ def detect_symfony_route_builders(root: Node, source: bytes, path: str, record: 
                 nodeType=call.type, semanticType="route", text=text, method=method,
                 endpoint=join_endpoint("", endpoint) if endpoint is not None else None,
                 framework="symfony", name=name, handler=controller,
-                handlerLine=line if controller is not None else None,
                 routeKind="route", isRegex=requirements, startLine=line,
                 endLine=expression.end_point[0] + 1, path=path,
             )

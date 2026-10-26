@@ -125,3 +125,29 @@ def test_wordpress_callbacks_lead_to_their_declaration(analyze_files) -> None:
     assert (hooks["the_title"].handler, hooks["the_title"].handlerLine) == ("title", 9)
     # The object's class is unknown: no handler, never the global run() of the same name.
     assert (hooks["save"].handler, hooks["save"].handlerLine) == (None, None)
+
+
+BLOG = (
+    "<?php\nnamespace App\\Controller;\n\nuse Symfony\\Component\\HttpFoundation\\Response;\n\n"
+    "class Blog\n{\n    public function list(): Response {}\n}\n"
+)
+
+
+def test_symfony_builder_controller_leads_to_the_method(analyze_files) -> None:
+    stmts = analyze_files({
+        "config/routes.php": (
+            "<?php\nuse Symfony\\Component\\Routing\\Loader\\Configurator\\RoutingConfigurator;\n"
+            "use App\\Controller\\Blog;\n"
+            "return function (RoutingConfigurator $routes) {\n"
+            "    $routes->add('a', '/a')->controller([Blog::class, 'list'])->methods(['GET']);\n"
+            "    $routes->add('b', '/b')->controller('App\\Controller\\Blog::list');\n"
+            "    $routes->add('c', '/c')->controller('Vendor\\Blog::list');\n"
+            "};\n"
+        ),
+        "src/Controller/Blog.php": BLOG,
+    })
+    routes = {s.endpoint: s for s in stmts if s.semanticType == "route"}
+    for endpoint in ("/a", "/b"):
+        r = routes[endpoint]
+        assert (r.handler, r.handlerPath, r.handlerLine) == ("list", "src/Controller/Blog.php", 8)
+    assert (routes["/c"].handler, routes["/c"].handlerLine) == ("Vendor\\Blog@list", None)
