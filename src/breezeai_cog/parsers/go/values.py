@@ -112,16 +112,32 @@ class _Values:
         if kind != "call_expression":
             return None
         fn = node.child_by_field_name("function")
-        if fn is None or fn.type != "selector_expression":
+        if fn is None:
+            return None
+        if fn.type == "identifier":  # a function of this package returning the type
+            return self._returned(self.a.pkg, node_text(fn, self.a.source), node)
+        if fn.type != "selector_expression":
             return None
         operand = fn.child_by_field_name("operand")
         name = node_text(fn.child_by_field_name("field"), self.a.source)
-        if operand is not None and operand.type == "identifier" and node_text(operand, self.a.source) in self.aliases:
-            typ = self.spec.constructors.get(name)
-            return Value(typ, node) if typ else None
+        if operand is not None and operand.type == "identifier":
+            alias = node_text(operand, self.a.source)
+            if alias in self.aliases:
+                typ = self.spec.constructors.get(name)
+                return Value(typ, node) if typ else None
+            if alias in self.a.aliases and self.a.index is not None:  # another package of the repo
+                pkg = self.a.index.package_dir(self.a.aliases[alias])
+                return self._returned(pkg, name, node) if pkg is not None else None
         base = self.eval(operand, env)
         if base is not None and (base.type, name) in self.spec.derived:
             return Value(self.spec.derived[(base.type, name)], node)
+        return None
+
+    def _returned(self, pkg: str, name: str, call: Node) -> Value | None:
+        """``common.GetDB()`` → the library type it is declared to return (``go.declarations``)."""
+        rtype = self.a.decls.results.get((pkg, name))
+        if isinstance(rtype, tuple) and self.spec.owns(rtype[0]) and rtype[1] in self.spec.types:
+            return Value(rtype[1], call)
         return None
 
     def bind_params(self, params: Node | None, env: dict) -> None:
@@ -186,10 +202,12 @@ class _Values:
             yield from self.walk(child, env, function)
 
 
-def typed_calls(analyzer: _Analyzer, spec: ValueSpec) -> Iterator[TypedCall]:
-    """Every call on a value of ``spec``'s types, in document order, function by function."""
+def typed_calls(analyzer: _Analyzer, spec: ValueSpec, *, returned: bool = False) -> Iterator[TypedCall]:
+    """Every call on a value of ``spec``'s types, in document order, function by function.
+    Skipped when the file doesn't import the package, unless ``returned``: the file calls a repo
+    function declared to return one of the types (``db := common.GetDB()``)."""
     values = _Values(analyzer, spec)
-    if not values.aliases:
+    if not values.aliases and not returned:
         return
     globals_: dict = {}
     for decl in analyzer.root.named_children:
