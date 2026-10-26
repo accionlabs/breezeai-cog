@@ -62,10 +62,14 @@ class SpringBootParser(JavaParser):
                 guards = module_guards(idx)
                 if module is not None and module in guards:
                     apply_global_guards(routes, guards[module])
-                # server.servlet.context-path of this file's module prefixes every HTTP route
+                # server.servlet.context-path of this file's module prefixes every HTTP route.
+                # A module without one, in a repo where another module sets one, may be served
+                # by that module's application: its address is unknown.
                 paths = context_paths(idx)
                 if module is not None and module in paths:
                     apply_context_path(routes, paths[module])
+                elif paths:
+                    apply_context_path(routes, None)
             if reactive and module is not None:
                 # WebFlux ignores the servlet context path and filters; its prefix is its own.
                 props = module_properties(idx).get(module, {})

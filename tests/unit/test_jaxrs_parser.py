@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 import json
 
 from jsonschema import Draft202012Validator
@@ -256,3 +258,48 @@ def test_locator_owner_path_is_its_own_not_a_same_named_class(analyze_files) -> 
     })
     got = {s.handler: s.endpoint for s in st if s.semanticType == "route"}
     assert got == {"list": "/alpha/items", "ping": "/beta"}
+
+
+_ORDERS = _RS + '@Path("/orders")\npublic class Orders {\n  @GET public String list() { return ""; }\n}\n'
+_WEB_XML = (
+    '<web-app xmlns="https://jakarta.ee/xml/ns/jakartaee">\n'
+    "  <servlet><servlet-name>jersey</servlet-name>\n"
+    "    <servlet-class>org.glassfish.jersey.servlet.ServletContainer</servlet-class></servlet>\n"
+    "  <servlet-mapping><servlet-name>jersey</servlet-name><url-pattern>/rest/*</url-pattern>"
+    "</servlet-mapping>\n</web-app>\n"
+)
+
+
+def _endpoint(analyze_files, files: dict[str, str]) -> str | None:
+    [r] = [s for s in analyze_files(files) if s.semanticType == "route"]
+    return r.endpoint
+
+
+_APP = _RS + '@ApplicationPath("/api")\npublic class App extends Application {}\n'
+_PROPS = "src/main/resources/application.properties"
+
+
+@pytest.mark.parametrize(("extra", "expected"), [
+    ({"src/main/webapp/WEB-INF/web.xml": _WEB_XML}, "/rest/orders"),
+    ({_PROPS: "quarkus.rest.path=/q\n"}, "/q/orders"),
+    ({_PROPS: "quarkus.resteasy.path=/q\n"}, "/q/orders"),
+    ({_PROPS: "spring.jersey.application-path=/q\n"}, "/q/orders"),
+    # @ApplicationPath /api and web.xml /rest disagree
+    ({_MAIN + "App.java": _APP, "src/main/webapp/WEB-INF/web.xml": _WEB_XML}, None),
+    # Quarkus joins its path with @ApplicationPath: not read
+    ({_MAIN + "App.java": _APP, _PROPS: "quarkus.rest.path=/q\n"}, None),
+    ({_PROPS: "quarkus.rest.path=${BASE}\n"}, None),
+])
+def test_base_path_from_web_xml_or_properties(analyze_files, extra, expected) -> None:
+    assert _endpoint(analyze_files, {_MAIN + "Orders.java": _ORDERS, **extra}) == expected
+
+
+@pytest.mark.parametrize(("files", "expected"), [
+    # the application is in another module: Orders may be served under /api — never bare /orders
+    ({"shop-api/src/main/java/a/Orders.java": _ORDERS,
+      "shop-app/src/main/java/a/App.java": _APP}, None),
+    ({"shop-api/src/main/java/a/Orders.java": _ORDERS}, "/orders"),  # no base anywhere
+])
+def test_module_without_a_base_is_unknown_when_another_module_sets_one(
+        analyze_files, files, expected) -> None:
+    assert _endpoint(analyze_files, files) == expected

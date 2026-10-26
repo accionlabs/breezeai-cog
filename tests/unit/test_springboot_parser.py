@@ -245,14 +245,14 @@ def test_context_path_prefixes_routes_of_its_module(analyze_files) -> None:
         # module "legacy": Spring Boot 1.x key
         "legacy/src/main/java/a/C.java": _CTRL,
         "legacy/src/main/resources/application.properties": "server.context-path=/old\n",
-        # module "plain": no context path → unchanged
+        # module "plain": no context path of its own while others set one → unknown
         "plain/src/main/java/a/C.java": _CTRL,
     })
     assert _endpoints(st) == {
         "app/src/main/java/a/C.java": "/shop/x",
         "yml/src/main/java/a/C.java": "/api/x",
         "legacy/src/main/java/a/C.java": "/old/x",
-        "plain/src/main/java/a/C.java": "/x",
+        "plain/src/main/java/a/C.java": None,
     }
 
 
@@ -408,7 +408,8 @@ def test_filters_and_interceptors_guard_the_routes_they_cover(analyze_files) -> 
         ("/shop/api/public/info", ("AuditFilter", "AuthFilter", "AuthInterceptor"), None),
         ("/shop/admin/stats", ("AuthFilter", "LegacyFilter", "AuthInterceptor"), None),
         ("/shop/home", ("AuthFilter", "AuthInterceptor"), None),
-        ("/x", (), None),
+        # another module without a context path, while app sets one: address unknown
+        (None, (), None),
     }
 
 
@@ -533,3 +534,15 @@ def test_template_sends(analyze_files) -> None:
         ("S.java", 20, "events", "rabbitmq"),
         ("S.java", 21, "audit", "jms"),
     }
+
+
+def test_module_without_context_path_is_unknown_only_when_another_sets_one(analyze_files) -> None:
+    alone = analyze_files({"web/src/main/java/a/C.java": _CTRL})
+    assert _endpoints(alone) == {"web/src/main/java/a/C.java": "/x"}  # no prefix anywhere
+    split = analyze_files({
+        "web/src/main/java/a/C.java": _CTRL,
+        "boot/src/main/java/a/App.java": "package a;\npublic class App {}\n",
+        "boot/src/main/resources/application.properties": "server.servlet.context-path=/shop\n",
+    })
+    # the context path is set in the boot module: web's routes may be served under it
+    assert _endpoints(split) == {"web/src/main/java/a/C.java": None}

@@ -4,7 +4,10 @@ and sub-resource locators.
 Two constructs put a prefix in front of a JAX-RS resource's routes from outside its class:
 
 * ``@ApplicationPath("/api")`` on the ``Application`` subclass — the base of every resource of
-  that application (scoped to the Maven/Gradle module, like the Spring context path).
+  that application (scoped to the Maven/Gradle module, like the Spring context path). The same
+  base may be set in the module's ``web.xml`` or properties instead (:mod:`.config`); sources
+  that disagree make it unknown. A module with no base of its own, in a repo where another module
+  sets one, may be served by that module's application: its base is unknown too.
 * a **sub-resource locator** — a resource method with ``@Path`` and no HTTP-verb annotation,
   returning another resource class: ``@Path("/items") public ItemRes items()`` on
   ``@Path("/orders") class OrderRes`` serves ``ItemRes``'s methods under ``/orders/items``.
@@ -30,6 +33,7 @@ from tree_sitter import Node
 from ..additive import FactSpec, index_fact, register_fact
 from ..java.config import module_of
 from ..treesitter import node_text
+from .config import PROPERTY_KEYS, property_bases, web_xml_bases
 
 FACT = "jaxrs.prefixes"
 
@@ -102,6 +106,9 @@ class JaxrsFacts:
     #: index) — a locator's returned type is matched by simple name, so a name declared twice in
     #: the repo is not followed.
     nested: list[str] = field(default_factory=list)
+    #: (repo root, module) of a file with a resource class — its module's configured base is
+    #: read once in ``_resolve``.
+    module_root: tuple[str, str] | None = None
 
 
 def _annotations(decl: Node) -> list[Node]:
@@ -328,7 +335,41 @@ def jaxrs_prefixes(index: Any | None) -> JaxrsPrefixes:
 
 
 def _collect(root: Node, source: bytes, rel: str, repo_root: Path | None) -> JaxrsFacts | None:
-    return collect_jaxrs_facts(root, source, rel)
+    facts = collect_jaxrs_facts(root, source, rel)
+    module = module_of(rel)
+    if facts is not None and repo_root is not None and module is not None \
+            and (facts.class_paths or facts.app_paths):
+        facts.module_root = (str(repo_root), module)
+    return facts
+
+
+def module_bases(app: dict[str, str | None], modules: set[tuple[str, str]]) -> dict[str, str | None]:
+    """Module → its application base, from every source (:mod:`.config`): ``@ApplicationPath``
+    (``app``), ``web.xml`` and properties. Two sources that disagree, or a Quarkus key together
+    with ``@ApplicationPath`` (Quarkus joins them), → None. A module with no source, while another
+    module has one, → None; with no source anywhere → absent (no prefix)."""
+    out: dict[str, str | None] = {}
+    for repo, module in sorted(modules):
+        values: list[str | None] = []
+        joined = False
+        if module in app:
+            values.append(app[module])
+        module_dir = Path(repo) / module if module else Path(repo)
+        values.extend(web_xml_bases(module_dir))
+        for key, value in property_bases(Path(repo), module):
+            values.append(value)
+            joined = joined or PROPERTY_KEYS[key]
+        if not values:
+            continue
+        distinct = set(values)
+        out[module] = None if len(distinct) > 1 or None in distinct or (
+            joined and module in app) else values[0]
+    for module in app:
+        out.setdefault(module, app[module])
+    if out:
+        for _, module in modules:
+            out.setdefault(module, None)  # another module sets a base: this one may be under it
+    return out
 
 
 def _resolve(values: list[JaxrsFacts], index: Any) -> JaxrsPrefixes | None:
@@ -339,6 +380,7 @@ def _resolve(values: list[JaxrsFacts], index: Any) -> JaxrsPrefixes | None:
         simple = fqcn.rsplit(".", 1)[-1]
         top_level[simple] = top_level.get(simple, 0) + (1 if rel is not None else 2)
     app_paths, sub_bases = resolve_jaxrs(values, getattr(index, "consts", None) or {}, top_level)
+    app_paths = module_bases(app_paths, {f.module_root for f in values if f.module_root})
     if not app_paths and not sub_bases:
         return None
     return JaxrsPrefixes(app_paths, sub_bases)
