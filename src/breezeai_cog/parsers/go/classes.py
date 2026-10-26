@@ -81,7 +81,8 @@ def build_class(
 ) -> tuple[list[Class], list[Function], list[Statement]]:
     if node.type != "type_declaration":
         return [], [], []
-    specs = [child for child in node.named_children if child.type == "type_spec"]
+    # `type_alias` (`type ID = string`) is recorded like a named type, as `class`.
+    specs = [child for child in node.named_children if child.type in {"type_spec", "type_alias"}]
     if not specs:
         return [], [], []
     classes: list[Class] = []

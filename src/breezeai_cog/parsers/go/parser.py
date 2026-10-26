@@ -98,11 +98,17 @@ class GoParser(BaseParser):
         capture, limit = ctx.capture_statements, ctx.statement_text_limit
 
         idx = ctx.resolution_index
-        internal, external, packages = extract_imports(
-            root, source, idx if isinstance(idx, GoIndex) else None
-        )
+        external, packages = extract_imports(root, source, idx if isinstance(idx, GoIndex) else None)
         scan = scan_file(root, source)
-        resolve = _resolver(packages, scan.names, scan.types, path, declarations(idx))
+        decls = declarations(idx)
+        resolve = _resolver(packages, scan.names, scan.types, path, decls)
+        # importFiles: the files declaring the names this file uses from each in-repo package
+        # (`users.Register` → users/routers.go), as C# resolves `using` namespaces — an import
+        # names a directory, so no single file stands for it.
+        internal = sorted({
+            decls.symbols.get((packages[alias], name))
+            for alias, name in scan.qualified if alias in packages
+        } - {None, path})
 
         functions: list[Function] = []
         classes = []

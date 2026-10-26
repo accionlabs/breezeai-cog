@@ -482,3 +482,57 @@ def test_go_index_resolves_packages_in_nested_modules(tmp_path) -> None:
         "example.com/api/users": "services/api/users/h.go",
         "example.com/root/util": "util/u.go",
     }
+
+
+def test_generated_mocks_are_ignored_and_protobuf_is_kept(tmp_path) -> None:
+    repo = tmp_path / "r"
+    repo.mkdir()
+    (repo / "go.mod").write_text("module example.com/r\n")
+    for name in ("store.go", "store_mock.go", "mock_client.go", "zz_generated.deepcopy.go",
+                 "auth.pb.go", "auth_grpc.pb.go"):
+        (repo / name).write_text("package r\n\nfunc F() {}\n")
+
+    result = analyze_repo(repo, capture_statements=True)
+    with gzip.open(result.out_path, "rt", encoding="utf-8") as fh:
+        paths = {json.loads(line).get("path") for line in fh}
+
+    assert {"store.go", "auth.pb.go", "auth_grpc.pb.go"} <= paths
+    assert not paths & {"store_mock.go", "mock_client.go", "zz_generated.deepcopy.go"}
+
+
+def test_type_alias_is_a_class(tmp_path) -> None:
+    record = _parse(tmp_path, b'''package p
+
+type ID = string
+
+type (
+    Handler = func() error
+    Role string
+)
+''')
+
+    classes = {c.name: (c.type, c.startLine, c.visibility) for c in record.classes}
+    assert classes == {"ID": ("class", 3, "public"), "Handler": ("class", 6, "public"),
+                       "Role": ("class", 7, "public")}
+
+
+def test_import_files_are_the_files_declaring_the_names_used(tmp_path) -> None:
+    repo = tmp_path / "r"
+    (repo / "users").mkdir(parents=True)
+    (repo / "go.mod").write_text("module example.com/app\n")
+    (repo / "users" / "routers.go").write_text("package users\n\nfunc Register() {}\n")
+    (repo / "users" / "models.go").write_text("package users\n\ntype User struct{}\n\nconst Admin = 1\n")
+    (repo / "users" / "validators.go").write_text("package users\n\nfunc Validate() {}\n")
+    (repo / "main.go").write_text(
+        'package main\n\nimport (\n\t"fmt"\n\t"example.com/app/users"\n)\n\n'
+        "func main() {\n\tvar u users.User\n\tusers.Register()\n\tfmt.Println(u, users.Admin)\n}\n"
+    )
+
+    result = analyze_repo(repo, capture_statements=True)
+    with gzip.open(result.out_path, "rt", encoding="utf-8") as fh:
+        main = next(r for r in map(json.loads, fh) if r.get("path") == "main.go")
+
+    assert main["importFiles"] == ["users/models.go", "users/routers.go"]
+    assert main["externalImports"] == ["fmt"]
+    register = next(c for f in main["functions"] for c in f["calls"] if c["name"] == "Register")
+    assert register["path"] == "users/routers.go"

@@ -1,5 +1,7 @@
-"""The ``go.declarations`` fact: where each function and method of the repo is declared, and the
-package-qualified type of each struct field — read by the Go route detectors to locate a handler
+"""The ``go.declarations`` fact: where each function and method of the repo is declared, which
+file declares each package-level name, and the package-qualified type of each struct field. Read
+by the Go parser to resolve calls and imports to files (``users.Register`` → the file of the
+``users`` package that declares ``Register``), and by the Go route detectors to locate a handler
 (``handlerLine`` / ``handlerPath``) and to know what ``s.router`` is when ``Server`` is declared
 in another file of the package.
 
@@ -43,6 +45,9 @@ class Declarations:
     methods: dict[str, tuple[Site, ...]] = field(default_factory=dict)
     #: (package dir, struct, field) → (import path, type name) for package-qualified field types.
     fields: dict[tuple[str, str, str], tuple[str, str]] = field(default_factory=dict)
+    #: (package dir, name) → the file declaring that package-level name (function, type, var,
+    #: const); None when two files declare it (build-tag variants).
+    symbols: dict[tuple[str, str], str | None] = field(default_factory=dict)
 
 
 def package_dir(rel: str) -> str:
@@ -74,14 +79,29 @@ def _collect(root: Node, source: bytes, rel: str, repo_root: Path | None) -> dic
     aliases = import_aliases(root, source)
     functions: list[tuple[FuncKey, Site]] = []
     fields: list[tuple[tuple[str, str, str], tuple[str, str]]] = []
+    symbols: list[str] = []
     for child in root.named_children:
         if child.type in {"function_declaration", "method_declaration"}:
             name = child.child_by_field_name("name")
             if name is not None:
                 key = (pkg, receiver_type(child, source), node_text(name, source))
                 functions.append((key, (rel, child.start_point[0] + 1)))
+                if not key[1]:
+                    symbols.append(key[2])
+        elif child.type in {"var_declaration", "const_declaration"}:
+            specs = list(child.named_children)
+            for group in child.named_children:
+                if group.type == "var_spec_list":
+                    specs.extend(group.named_children)
+            symbols.extend(node_text(n, source) for spec in specs
+                           if spec.type in {"var_spec", "const_spec"}
+                           for n in spec.children_by_field_name("name"))
         elif child.type == "type_declaration":
             for spec in child.named_children:
+                if spec.type in {"type_spec", "type_alias"}:
+                    tname = spec.child_by_field_name("name")
+                    if tname is not None:
+                        symbols.append(node_text(tname, source))
                 type_node = spec.child_by_field_name("type") if spec.type == "type_spec" else None
                 if type_node is None or type_node.type != "struct_type":
                     continue
@@ -96,28 +116,34 @@ def _collect(root: Node, source: bytes, rel: str, repo_root: Path | None) -> dic
                             continue
                         for fname in decl.children_by_field_name("name"):
                             fields.append(((pkg, struct, node_text(fname, source)), qualified))
-    return {"functions": functions, "fields": fields} if functions or fields else None
+    if not (functions or fields or symbols):
+        return None
+    return {"functions": functions, "fields": fields, "symbols": [(pkg, n, rel) for n in symbols]}
 
 
 def _resolve(values: list[dict[str, Any]], index: Any) -> Declarations | None:
     functions: dict[FuncKey, Site | None] = {}
     methods: dict[str, list[Site]] = {}
     fields: dict[tuple[str, str, str], tuple[str, str]] = {}
+    symbols: dict[tuple[str, str], str | None] = {}
     for value in values:
+        for pkg, name, rel in value["symbols"]:
+            key = (pkg, name)
+            symbols[key] = rel if symbols.get(key, rel) == rel else None
         for key, site in value["functions"]:
             functions[key] = site if key not in functions else None
             if key[1]:
                 methods.setdefault(key[2], []).append(site)
         for key, qualified in value["fields"]:
             fields[key] = qualified
-    if not functions and not fields:
+    if not functions and not fields and not symbols:
         return None
-    return Declarations(functions, {n: tuple(sorted(s)) for n, s in methods.items()}, fields)
+    return Declarations(functions, {n: tuple(sorted(s)) for n, s in methods.items()}, fields, symbols)
 
 
 def declarations(index: Any | None) -> Declarations:
     return index_fact(index, FACT) or Declarations()
 
 
-register_fact(FactSpec(name=FACT, language="go", gate=(b"func", b"struct"),
+register_fact(FactSpec(name=FACT, language="go", gate=(b"package",),
                        collect=_collect, resolve=_resolve))

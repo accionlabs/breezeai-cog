@@ -108,6 +108,9 @@ class FileScan:
     #: Every ``func_literal`` in document order, with the start byte of its nearest enclosing
     #: function/method/literal node (``None`` at package level).
     literals: list[tuple[Node, int | None]] = field(default_factory=list)
+    #: ``x.Name`` selectors and ``pkg.Type`` qualified types: (``x`` / ``pkg``, ``Name``). Those
+    #: whose qualifier is an import alias are the names the file uses from that package.
+    qualified: set[tuple[str, str]] = field(default_factory=set)
 
 
 _FUNCTION_NODES = frozenset({"function_declaration", "method_declaration", "func_literal"})
@@ -132,6 +135,14 @@ def scan_file(root: Node, source: bytes) -> FileScan:
                             scan.types[node_text(target, source)] = node_text(rhs, source)
             elif kind == "func_literal":
                 scan.literals.append((child, owner))
+            elif kind == "selector_expression":
+                operand, fld = child.child_by_field_name("operand"), child.child_by_field_name("field")
+                if operand is not None and fld is not None and operand.type == "identifier":
+                    scan.qualified.add((node_text(operand, source), node_text(fld, source)))
+            elif kind == "qualified_type":
+                pkg, name = child.child_by_field_name("package"), child.child_by_field_name("name")
+                if pkg is not None and name is not None:
+                    scan.qualified.add((node_text(pkg, source), node_text(name, source)))
             walk(child, child.start_byte if kind in _FUNCTION_NODES else owner)
 
     walk(root, None)

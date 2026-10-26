@@ -158,23 +158,23 @@ def extract_imports(
     root: Node,
     source: bytes,
     index: GoIndex | None = None,
-) -> tuple[list[str], list[str], dict[str, str]]:
-    """(importFiles, externalImports, alias → package dir of each in-repo import)."""
-    internal: set[str] = set()
+) -> tuple[list[str], dict[str, str]]:
+    """(externalImports, alias → package dir of each in-repo import). An in-repo package is a
+    directory, so its import is not one file: the parser turns the names the file uses from it
+    into ``importFiles`` (see ``GoParser.extract``)."""
     external: set[str] = set()
     packages: dict[str, str] = {}
-    for alias, module in import_aliases(root, source).items():
-        target = index.modules.get(module) if index is not None else None
-        if target is not None:
-            internal.add(target)
-            packages[alias] = target.rpartition("/")[0]
-        else:
-            external.add(module)
-    for spec in _import_specs(root):  # blank / dot imports still count as dependencies
-        alias_node = spec.child_by_field_name("name")
+    for spec in _import_specs(root):
         path_node = spec.child_by_field_name("path")
-        if alias_node is not None and path_node is not None and node_text(alias_node, source) in {"_", "."}:
-            module = node_text(path_node, source).strip('"`')
-            target = index.modules.get(module) if index is not None else None
-            (internal if target is not None else external).add(target or module)
-    return sorted(internal), sorted(external), packages
+        if path_node is None:
+            continue
+        module = node_text(path_node, source).strip('"`')
+        pkg_dir = index.package_dir(module) if index is not None else None
+        if pkg_dir is None:
+            external.add(module)
+            continue
+        alias_node = spec.child_by_field_name("name")
+        alias = node_text(alias_node, source) if alias_node is not None else default_package_name(module)
+        if alias not in {"_", "."}:
+            packages[alias] = pkg_dir
+    return sorted(external), packages
