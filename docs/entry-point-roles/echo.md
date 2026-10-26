@@ -14,5 +14,6 @@ across files, constants, negatives) are in the [Gin table](gin.md) and apply her
 | `e.CONNECT` / `e.TRACE` | Binding | `method` empty (no contract value) | Verb outside the value set |
 | `e.Group(prefix, mw…)` | Wiring | no record; `prefix` joined in front | Points at many handlers |
 | `e.Static(prefix, dir)` / `e.File(path, file)` | Binding | `GET`, no handler | Framework-served |
-| `e.Use(mw)` / `e.Pre(mw)` | Guard | **not recorded yet** | Runs before many handlers |
-| `e.Match([]string{…}, path, h)` | Binding | **not recorded yet** | One record per verb |
+| `e.Use(mw)` / `e.Pre(mw)` | Guard | `mw` in `guards` of the routes registered on that router after it, and of the groups made from it after it (a call `mw.Auth(cfg)` is named by its function); a router passed in from another file starts with no known guards | Runs before many handlers |
+| Middleware after the handler (`e.GET(p, h, audit)`) and a group's (`e.Group(p, auth)`) | Guard | their names in `guards`, outermost first | Run before this handler |
+| `e.Match([]string{…}, path, h)` | Binding per verb | one `route` per verb of the list | Each verb is served by the handler |

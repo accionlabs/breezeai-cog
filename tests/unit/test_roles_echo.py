@@ -3,8 +3,6 @@ router are tested in test_roles_gin.py."""
 
 from __future__ import annotations
 
-import pytest
-
 from breezeai_cog.parsers.contract import is_entry_point
 
 MOD = "module example.com/app\n\ngo 1.22\n"
@@ -47,13 +45,17 @@ def test_static_is_framework_served(analyze_files) -> None:
         == {("GET", "/assets", None, "echo")}
 
 
-@pytest.mark.xfail(strict=True, reason="Echo middleware is not recorded as guards yet")
 def test_use_is_a_guard(analyze_files) -> None:
     st = analyze_files({"go.mod": MOD, "main.go": HEAD + 'func main() {\n\te := echo.New()\n\te.Use(auth)\n\te.GET("/x", h)\n}\n'})
     assert [s.guards for s in st if is_entry_point(s)] == [["auth"]]
 
 
-@pytest.mark.xfail(strict=True, reason="Echo Match is not recorded yet")
 def test_match_is_one_binding_per_verb(analyze_files) -> None:
     assert _routes(analyze_files, 'func main() {\n\te := echo.New()\n\te.Match([]string{"GET", "PUT"}, "/x", h)\n}\n') \
         == {("GET", "/x", "h", "echo"), ("PUT", "/x", "h", "echo")}
+
+
+def test_route_middleware_follows_the_handler(analyze_files) -> None:
+    st = analyze_files({"go.mod": MOD, "main.go": HEAD + 'func main() {\n\te := echo.New()\n\tg := e.Group("/admin", auth)\n'
+                                                   '\tg.GET("/x", h, audit)\n}\n'})
+    assert [(s.handler, s.guards) for s in st if is_entry_point(s)] == [("h", ["auth", "audit"])]

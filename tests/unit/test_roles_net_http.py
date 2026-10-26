@@ -3,8 +3,6 @@ Go router are tested in test_roles_gin.py."""
 
 from __future__ import annotations
 
-import pytest
-
 from breezeai_cog.parsers.contract import is_entry_point
 
 MOD = "module example.com/app\n\ngo 1.22\n"
@@ -46,7 +44,6 @@ def test_framework_served_handler(analyze_files) -> None:
         == {(None, "/static/", None, "net-http")}
 
 
-@pytest.mark.xfail(strict=True, reason="http.StripPrefix mounts are not followed yet")
 def test_strip_prefix_mount(analyze_files) -> None:
     assert _routes(analyze_files, 'func main() {\n\tapi := http.NewServeMux()\n\tapi.HandleFunc("/users", list)\n'
                                   '\thttp.Handle("/api/", http.StripPrefix("/api", api))\n}\n') \

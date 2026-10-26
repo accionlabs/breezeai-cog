@@ -3,8 +3,6 @@ every Go router are tested in test_roles_gin.py."""
 
 from __future__ import annotations
 
-import pytest
-
 from breezeai_cog.parsers.contract import is_entry_point
 
 MOD = "module example.com/app\n\ngo 1.22\n"
@@ -41,13 +39,16 @@ def test_matcher_subrouter_keeps_the_prefix(analyze_files) -> None:
                                   '\ts.HandleFunc("/x", h)\n}\n') == {(None, "/x", "h", "gorilla-mux")}
 
 
-@pytest.mark.xfail(strict=True, reason="routes on a PathPrefix (Handler) are not recorded yet")
 def test_path_prefix_handler(analyze_files) -> None:
     assert _routes(analyze_files, 'func main() {\n\tr := mux.NewRouter()\n\tr.PathPrefix("/static/").Handler(files)\n}\n') \
         == {(None, "/static/", "files", "gorilla-mux")}
 
 
-@pytest.mark.xfail(strict=True, reason="gorilla/mux middleware is not recorded as guards yet")
 def test_use_is_a_guard(analyze_files) -> None:
     st = analyze_files({"go.mod": MOD, "main.go": HEAD + 'func main() {\n\tr := mux.NewRouter()\n\tr.Use(auth)\n\tr.HandleFunc("/x", h)\n}\n'})
     assert [s.guards for s in st if is_entry_point(s)] == [["auth"]]
+
+
+def test_methods_before_the_handler(analyze_files) -> None:
+    assert _routes(analyze_files, 'func main() {\n\tr := mux.NewRouter()\n\tr.Path("/x").Methods("DELETE").HandlerFunc(h)\n}\n') \
+        == {("DELETE", "/x", "h", "gorilla-mux")}

@@ -15,5 +15,5 @@ this reason.
 | `impl` of unknown type | Binding | located when exactly one method of that name exists in the repo, else `handlerLine` empty | Never a guessed declaration |
 | `s.RegisterService(&Desc, srv)` inside the generated register function | None | — | Generated plumbing; the binding is where the repo calls `RegisterXServer` |
 | `reflection.Register(s)` / `grpc.NewServer(…)` / `s.Serve(lis)` | None | — | Server set-up, not an RPC |
-| `grpc.UnaryInterceptor(f)` / `ChainUnaryInterceptor` | Guard | **not recorded yet** | Runs before every RPC |
+| `grpc.NewServer(grpc.UnaryInterceptor(f), grpc.ChainUnaryInterceptor(a, b), …)` (also `Stream…`) — the server inline or assigned earlier in the function | Guard | their names in `guards` of every RPC registered on that server | Run before every RPC |
 | A register function without its generated file in the repo (a module dependency) | Binding | **not recorded** — the methods are unknown | The service is defined outside the repo |

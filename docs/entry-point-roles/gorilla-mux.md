@@ -13,5 +13,6 @@ and `r.PathPrefix(prefix).Subrouter()`. Rows shared by every Go router are in th
 | `r.HandleFunc(path, h)` with no `.Methods` | Binding | empty `method` | Every verb; no verb to record |
 | `r.PathPrefix(prefix).Subrouter()` | Wiring | no record; `prefix` joined in front of the subrouter's routes | Points at many handlers |
 | `r.Methods(…).Subrouter()` / `r.Host(…).Subrouter()` | Wiring | no record; same prefix | Matchers only |
-| `r.PathPrefix(prefix).Handler(h)` | Binding | **not recorded yet** | A route on a prefix |
-| `r.Use(mw)` | Guard | **not recorded yet** | Runs before many handlers |
+| `r.PathPrefix(prefix).Handler(h)` / `.HandlerFunc(h)` | Binding | `route` at the prefix, the verbs of `.Methods(…)` on the chain or an empty `method` | A route on a prefix |
+| `r.Path(p).Methods("GET").HandlerFunc(h)` | Binding per verb | as `HandleFunc(p, h).Methods("GET")` | `.Methods` may come before the handler |
+| `r.Use(mw)` | Guard | `mw` in `guards` of the routes registered on that router after it, and of the groups made from it after it (a call `mw.Auth(cfg)` is named by its function); a router passed in from another file starts with no known guards | Runs before many handlers |

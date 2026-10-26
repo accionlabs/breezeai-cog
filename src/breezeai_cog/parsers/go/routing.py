@@ -43,10 +43,11 @@ from ..contract import HTTP_METHODS
 from ..emits import Emit
 from ..handler_sites import handler_location
 from ..treesitter import node_text
+from ..wiring import compose_guards
 from .declarations import Declarations, Site, declarations, package_dir, receiver_type
 from .imports import GoIndex, import_aliases
 
-GroupKind = Literal["child", "same", "closure_child", "closure_same", "mount"]
+GroupKind = Literal["child", "same", "with", "closure_child", "closure_same", "mount"]
 
 
 @dataclass(frozen=True)
@@ -83,6 +84,19 @@ class RouterSpec:
     adapters: frozenset[str] = frozenset()
     #: The handler is the argument after the path (Echo: ``GET(path, h, mw…)``); else the last.
     handler_after_path: bool = False
+    #: Route methods whose first argument is a list of verbs (Echo ``Match``): method → path index.
+    verb_list: dict[str, int] = field(default_factory=dict)
+    #: Route methods with no path argument, served at the router's own prefix (gorilla
+    #: ``r.PathPrefix(p).Handler(h)``).
+    pathless: frozenset[str] = frozenset()
+    #: Methods that add middleware to a router (``Use``): guards of the routes registered after.
+    use: frozenset[str] = frozenset()
+    #: A ``child`` group's arguments after the prefix are its middleware (``r.Group("/x", auth)``).
+    group_guards: bool = False
+    #: A route's own middleware: ``before`` the handler (Gin, Fiber) or ``after`` it (Echo).
+    route_guards: Literal["before", "after"] | None = None
+    #: Package functions that mount a router under a stripped prefix (``http.StripPrefix``).
+    strip_prefix: frozenset[str] = frozenset()
 
     @property
     def guard(self) -> bytes:
@@ -132,9 +146,11 @@ class Router:
     spec: RouterSpec
     origin: Origin
     rel: str | None = ""  # path below the origin
+    #: Middleware known for certain to run before this router's routes, outermost first.
+    guards: tuple[str, ...] = ()
 
-    def child(self, path: str | None) -> "Router":
-        return Router(self.spec, self.origin, join(self.rel, path))
+    def child(self, path: str | None, guards: tuple[str, ...] = ()) -> "Router":
+        return Router(self.spec, self.origin, join(self.rel, path), self.guards + guards)
 
 
 # --- per-file analysis ------------------------------------------------------------------------
@@ -152,6 +168,7 @@ class RouteFound:
     path: str | None
     handler: Node | None
     served: bool = False  # framework-served (Static): no handler
+    guards: tuple[str, ...] = ()
 
 
 @dataclass
@@ -331,12 +348,26 @@ class _Analyzer:
         if router is None:
             return None
         group = router.spec.groups.get(method)
+        args = _args(node)
         if group == "child":
-            args = _args(node)
-            return router.child(_string(args[0], self.source, self.consts) if args else None)
+            guards = self._guards(args[1:]) if router.spec.group_guards else ()
+            return router.child(_string(args[0], self.source, self.consts) if args else None, guards)
+        if group == "with":
+            return router.child("", self._guards(args))
         if group == "same":
             return router
         return None
+
+    def _guards(self, nodes: list[Node]) -> tuple[str, ...]:
+        """Middleware arguments → their names: ``auth`` / ``mw.Auth`` as written, a call
+        ``mw.Auth(cfg)`` by its function; a function literal has no name."""
+        out: list[str] = []
+        for node in nodes:
+            if node.type == "call_expression":
+                node = node.child_by_field_name("function") or node
+            if node.type in {"identifier", "selector_expression"}:
+                out.append(node_text(node, self.source))
+        return tuple(out)
 
     # -- functions -----------------------------------------------------------------------------
 
@@ -523,9 +554,31 @@ class _Analyzer:
         if group == "mount" and len(args) >= 2:
             self._mount(router.child(_string(args[0], self.source, self.consts)), args[1], env)
             return False
-        if method in spec.verbs or method in spec.verb_arg or method in spec.statics:
+        if method in spec.use:
+            if args and args[0].type not in {"interpreted_string_literal", "raw_string_literal"}:
+                router.guards = router.guards + self._guards(args)  # `app.Use("/x", mw)`: path-scoped, skipped
+            return False
+        if method in spec.verbs and len(args) >= 2 and self._stripped_mount(router, args, env):
+            return False
+        if (method in spec.verbs or method in spec.verb_arg or method in spec.statics
+                or method in spec.verb_list or method in spec.pathless):
             self._route(call, router, method, args)
         return False
+
+    def _stripped_mount(self, router: Router, args: list[Node], env: dict[str, Any]) -> bool:
+        """``mux.Handle("/api/", http.StripPrefix("/api", sub))`` → ``sub`` mounted at ``/api``
+        (no record of its own). False when the stripped handler is not a router of the repo."""
+        wrapper = args[-1]
+        sel = _selector(wrapper) if wrapper.type == "call_expression" else None
+        if sel is None or sel[0].type != "identifier" or sel[1] not in router.spec.strip_prefix:
+            return False
+        if self.spec_of.get(node_text(sel[0], self.source)) is not router.spec:
+            return False
+        inner = _args(wrapper)
+        if len(inner) < 2:
+            return False
+        at = router.child(_string(inner[0], self.source, self.consts))
+        return self._mount(at, inner[1], env)
 
     def _walk_expr(self, node: Node, env: dict[str, Any], key: FuncKey | None, returned: set[str]) -> None:
         if node.type == "call_expression":
@@ -538,8 +591,9 @@ class _Analyzer:
         else:
             self._walk(node, env, key, returned)
 
-    def _mount(self, at: Router, target: Node, env: dict[str, Any]) -> None:
-        """``r.Mount("/admin", sub)`` / ``r.Mount("/admin", adminRouter())``."""
+    def _mount(self, at: Router, target: Node, env: dict[str, Any]) -> bool:
+        """``r.Mount("/admin", sub)`` / ``r.Mount("/admin", adminRouter())``. False when the
+        target is neither a router of this function nor a call of a function of the repo."""
         sub = self.eval(target, env)
         if sub is not None:
             origin = sub.origin
@@ -547,10 +601,12 @@ class _Analyzer:
                 origin.base, origin.rel, origin.mounted = at.origin.base, join(at.origin.rel, at.rel), True
             elif origin.mounted:
                 origin.base = UNKNOWN  # mounted twice
-            return
+            return True
         callee = self._callee(target) if target.type == "call_expression" else None
         if callee is not None:
             self.edges.edges.append((callee, "ret", 0, self.pkg, at.origin.base, join(at.origin.rel, at.rel)))
+            return True
+        return False
 
     def _callee(self, call: Node) -> CalleeRef | None:
         fn = call.child_by_field_name("function")
@@ -589,6 +645,23 @@ class _Analyzer:
             path = _string(args[0], self.source, self.consts) if args else None
             self.routes.append(RouteFound(call, spec, router, "GET", path, None, served=True))
             return
+        if method in spec.pathless:
+            handler = args[-1] if args else None
+            chained = spec.chain_verbs(call, self.source) if spec.chain_verbs else None
+            for verb in chained or [None]:
+                verb = verb if verb in HTTP_METHODS else None
+                self.routes.append(RouteFound(call, spec, router, verb, "", handler, guards=router.guards))
+            return
+        if method in spec.verb_list:
+            path_idx = spec.verb_list[method]
+            path = _string(args[path_idx], self.source, self.consts) if len(args) > path_idx else None
+            verbs = self._verb_list(args[0]) if args else [None]
+            handler = args[path_idx + 1] if len(args) > path_idx + 1 else None
+            own = self._guards(args[path_idx + 2:]) if spec.route_guards == "after" else ()
+            for verb in verbs:
+                self.routes.append(RouteFound(call, spec, router, verb, path, handler,
+                                              guards=router.guards + own))
+            return
         if method in spec.verb_arg:
             verb_node = args[0] if args else None
             verb = _string(verb_node, self.source, self.consts) if verb_node is not None else None
@@ -608,11 +681,29 @@ class _Analyzer:
             handler = args[path_idx + 1] if len(args) > path_idx + 1 else None
         else:
             handler = args[-1] if len(args) > path_idx + 1 else None
+        own: tuple[str, ...] = ()
+        if spec.route_guards == "before":
+            own = self._guards(args[path_idx + 1:-1])
+        elif spec.route_guards == "after":
+            own = self._guards(args[path_idx + 2:])
         for verb in verbs:
             v, p = spec.pattern(verb, path) if spec.pattern else (verb, path)
             if v not in HTTP_METHODS and v != "ANY":
                 v = None  # CONNECT / TRACE / a verb we can't read: no method value
-            self.routes.append(RouteFound(call, spec, router, v, p, handler))
+            self.routes.append(RouteFound(call, spec, router, v, p, handler, guards=router.guards + own))
+
+    def _verb_list(self, node: Node) -> list[str | None]:
+        """``[]string{"GET", http.MethodPut}`` → ``["GET", "PUT"]``; unreadable → ``[None]``."""
+        body = node.child_by_field_name("body") if node.type == "composite_literal" else None
+        verbs: list[str | None] = []
+        for el in body.named_children if body is not None else []:
+            el = el.named_children[0] if el.type == "literal_element" and el.named_children else el
+            verb = _string(el, self.source, self.consts)
+            if verb is None and el.type == "selector_expression":
+                verb = _http_constant(node_text(el, self.source))
+            verb = verb.upper() if verb else None
+            verbs.append(verb if verb in HTTP_METHODS else None)
+        return verbs or [None]
 
 
 def _http_constant(text: str) -> str | None:
@@ -795,11 +886,11 @@ def detect_routes(dc: DetectContext, spec: RouterSpec) -> Detection | None:
             "semanticType": "route", "framework": spec.name, "routeKind": "route",
             "method": route.method, "endpoint": _endpoint(route.router, route.path, prefixes),
         }
-        fill: dict[str, Any] = {}
+        fill: dict[str, Any] = {"guards": compose_guards(list(route.guards))}
         handler = _unwrap_handler(route.handler, analyzer, spec) if not route.served else None
         if handler is not None:
             name, line, path = _locate(analyzer, handler, types(route.call))
-            fill = {"handler": name, "handlerLine": line, "handlerPath": path}
+            fill.update({"handler": name, "handlerLine": line, "handlerPath": path})
         found.append(Emit(route.call, fields, fill=fill, enrich="any"))
     return Detection(found, label=spec.name)
 

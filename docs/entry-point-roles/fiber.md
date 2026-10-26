@@ -15,4 +15,6 @@ Rows shared by every Go router are in the [Gin table](gin.md).
 | `app.Route(prefix, func(r fiber.Router) {…})` | Wiring | no record; `prefix` joined in front of the closure's routes | Points at many handlers |
 | `app.Mount(prefix, sub)` | Wiring | no record; `sub`'s routes get `prefix` | Mounts a sub-app |
 | `app.Static(prefix, dir)` | Binding | `GET`, no handler | Framework-served |
-| `app.Use(mw)` | Guard | **not recorded yet** | Runs before many handlers |
+| `app.Use(mw)` | Guard | `mw` in `guards` of the routes registered on that router after it, and of the groups made from it after it (a call `mw.Auth(cfg)` is named by its function); a router passed in from another file starts with no known guards | Runs before many handlers |
+| `app.Use("/prefix", mw)` | Guard | **not recorded** — scoped to a path | Runs before the routes under the path |
+| Middleware before the handler (`app.Get(p, auth, h)`) and a group's (`app.Group(p, auth)`) | Guard | their names in `guards`, outermost first | Run before this handler |

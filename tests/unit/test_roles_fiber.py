@@ -3,8 +3,6 @@ router are tested in test_roles_gin.py."""
 
 from __future__ import annotations
 
-import pytest
-
 from breezeai_cog.parsers.contract import is_entry_point
 
 MOD = "module example.com/app\n\ngo 1.22\n"
@@ -49,7 +47,12 @@ def test_static_is_framework_served(analyze_files) -> None:
         == {("GET", "/", None, "fiber")}
 
 
-@pytest.mark.xfail(strict=True, reason="Fiber middleware is not recorded as guards yet")
 def test_use_is_a_guard(analyze_files) -> None:
     st = analyze_files({"go.mod": MOD, "main.go": HEAD + 'func main() {\n\tapp := fiber.New()\n\tapp.Use(auth)\n\tapp.Get("/x", h)\n}\n'})
     assert [s.guards for s in st if is_entry_point(s)] == [["auth"]]
+
+
+def test_path_scoped_use_is_not_recorded(analyze_files) -> None:
+    st = analyze_files({"go.mod": MOD, "main.go": HEAD + 'func main() {\n\tapp := fiber.New()\n\tapp.Use("/admin", auth)\n'
+                                                   '\tapp.Get("/admin/x", h)\n}\n'})
+    assert [s.guards for s in st if is_entry_point(s)] == [None]

@@ -36,6 +36,7 @@ SPEC = RouterSpec(
     verbs={"Handle": None, "HandleFunc": None},
     package_routes=True,
     adapters=frozenset({"HandlerFunc"}),
+    strip_prefix=frozenset({"StripPrefix"}),
     pattern=_pattern,
 )
 

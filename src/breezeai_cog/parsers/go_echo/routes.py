@@ -28,6 +28,10 @@ SPEC = RouterSpec(
     groups={"Group": "child"},
     adapters=frozenset({"WrapHandler"}),
     handler_after_path=True,
+    verb_list={"Match": 1},
+    use=frozenset({"Use", "Pre"}),
+    group_guards=True,
+    route_guards="after",
 )
 
 register_router_fact(SPEC)

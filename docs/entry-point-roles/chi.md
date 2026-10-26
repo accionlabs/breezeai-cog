@@ -16,5 +16,6 @@ Parser: `src/breezeai_cog/parsers/go_chi/` (additive detector, every Go file imp
 | `r.Group(func(r chi.Router) {…})` | Wiring | no record; same prefix | Groups middleware only |
 | `r.Mount(prefix, sub)` — `sub` built in this function, or `subRouter()` returning a router it builds | Wiring | no record; `sub`'s routes get `prefix` (across files through `chi.router-prefixes`) | Mounts a router |
 | A router mounted twice | Wiring | its routes have an empty `endpoint` | Never a partial or guessed address |
-| `r.Use(mw)` | Guard | **not recorded yet** | Runs before many handlers |
+| `r.Use(mw)` | Guard | `mw` in `guards` of the routes registered on that router after it, and of the groups made from it after it (a call `mw.Auth(cfg)` is named by its function); a router passed in from another file starts with no known guards | Runs before many handlers |
+| `r.With(mw).Get(…)` | Guard | `mw` in `guards` of that route only | Runs before this handler |
 | `r.NotFound(h)` / `r.MethodNotAllowed(h)` | None | — | Not an address of their own |

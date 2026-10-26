@@ -15,6 +15,7 @@ by every Go router (handler location, prefixes across files, constants, negative
 | `http.HandleFunc(pattern, h)` / `http.Handle(pattern, h)` | Binding | as above | The default mux |
 | `mux.Handle(p, http.HandlerFunc(h))` / `mux.Handle(p, mw(h))` | Binding | `handler: h` | The wrapper only forwards |
 | `mux.Handle(p, http.FileServer(…))` / `expvar.Handler()` | Binding | no `handler` | Framework-served |
-| `mux.Handle("/api/", http.StripPrefix("/api", sub))` | Wiring | `sub`'s routes should get `/api` — **not followed yet**; they keep their own paths | Mount |
+| `mux.Handle("/api/", http.StripPrefix("/api", sub))` — `sub` a mux of this function or `subMux()` of the repo | Wiring | no record; `sub`'s routes get `/api` (across files through `net-http.router-prefixes`) | Mount |
+| `http.StripPrefix(…)` around anything else (`http.FileServer`) | Binding | the `Handle` route, no handler | Framework-served |
 | `http.ListenAndServe(addr, mux)` / `http.Get(url)` | None / Outbound | `http.Get` is an `api_call` | Not a route |
 | A pattern from a variable or `fmt.Sprintf` (an in-repo wrapper that registers routes for its callers) | Binding | `endpoint` empty | The wrapper's callers are not followed (known limit) |

@@ -27,6 +27,9 @@ SPEC = RouterSpec(
     verb_arg={"Add": 1},
     statics=frozenset({"Static"}),
     groups={"Group": "child", "Route": "closure_child", "Mount": "mount"},
+    use=frozenset({"Use"}),
+    group_guards=True,
+    route_guards="before",
 )
 
 register_router_fact(SPEC)

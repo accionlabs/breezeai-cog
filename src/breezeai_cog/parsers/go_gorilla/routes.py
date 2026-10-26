@@ -18,22 +18,37 @@ from ..go.routing import RouterSpec, detect_routes, register_router_fact
 from ..treesitter import node_text
 
 
+def _verbs_of(call: Node, source: bytes) -> list[str]:
+    args = call.child_by_field_name("arguments")
+    out: list[str] = []
+    for arg in args.named_children if args is not None else []:
+        if arg.type == "interpreted_string_literal":
+            out.append(node_text(arg, source)[1:-1].upper())
+        elif arg.type == "selector_expression" and node_text(arg, source).startswith("http.Method"):
+            out.append(node_text(arg, source)[len("http.Method"):].upper())
+    return out
+
+
 def _methods(call: Node, source: bytes) -> list[str] | None:
-    """The verbs of ``.Methods("GET", …)`` anywhere on the chain the route call starts."""
+    """The verbs of ``.Methods("GET", …)`` on the route's chain, after the route call
+    (``r.HandleFunc(p, h).Methods("GET")``) or before it (``r.Path(p).Methods("GET").HandlerFunc(h)``)."""
     verbs: list[str] = []
     node = call
     while (node.parent is not None and node.parent.type == "selector_expression"
            and node.parent.parent is not None and node.parent.parent.type == "call_expression"):
-        selector, outer = node.parent, node.parent.parent
-        field = selector.child_by_field_name("field")
+        field = node.parent.child_by_field_name("field")
+        node = node.parent.parent
         if field is not None and node_text(field, source) == "Methods":
-            args = outer.child_by_field_name("arguments")
-            for arg in args.named_children if args is not None else []:
-                if arg.type == "interpreted_string_literal":
-                    verbs.append(node_text(arg, source)[1:-1].upper())
-                elif arg.type == "selector_expression" and node_text(arg, source).startswith("http.Method"):
-                    verbs.append(node_text(arg, source)[len("http.Method"):].upper())
-        node = outer
+            verbs.extend(_verbs_of(node, source))
+    fn = call.child_by_field_name("function")
+    operand = fn.child_by_field_name("operand") if fn is not None and fn.type == "selector_expression" else None
+    while operand is not None and operand.type == "call_expression":
+        inner = operand.child_by_field_name("function")
+        if inner is None or inner.type != "selector_expression":
+            break
+        if node_text(inner.child_by_field_name("field"), source) == "Methods":
+            verbs.extend(_verbs_of(operand, source))
+        operand = inner.child_by_field_name("operand")
     return verbs or None
 
 
@@ -44,8 +59,10 @@ SPEC = RouterSpec(
     app_types=frozenset({"Router"}),
     constructors=frozenset({"NewRouter"}),
     verbs={"HandleFunc": None, "Handle": None},
-    groups={"PathPrefix": "child", "Subrouter": "same", "Methods": "same", "Host": "same",
-            "Schemes": "same", "Headers": "same"},
+    groups={"PathPrefix": "child", "Path": "child", "Subrouter": "same", "Methods": "same",
+            "Host": "same", "Schemes": "same", "Headers": "same"},
+    pathless=frozenset({"Handler", "HandlerFunc"}),
+    use=frozenset({"Use"}),
     chain_verbs=_methods,
 )
 

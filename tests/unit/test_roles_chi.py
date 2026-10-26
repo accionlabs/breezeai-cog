@@ -3,8 +3,6 @@ are tested in test_roles_gin.py."""
 
 from __future__ import annotations
 
-import pytest
-
 from breezeai_cog.parsers.contract import is_entry_point
 
 MOD = "module example.com/app\n\ngo 1.22\n"
@@ -63,7 +61,6 @@ def test_router_mounted_twice_has_no_endpoint(analyze_files) -> None:
                                   '\tsub.Get("/x", x)\n\tr.Mount("/a", sub)\n\tr.Mount("/b", sub)\n}\n') == {("GET", None, "x", "chi")}
 
 
-@pytest.mark.xfail(strict=True, reason="chi middleware is not recorded as guards yet")
 def test_use_is_a_guard(analyze_files) -> None:
     st = analyze_files({"go.mod": MOD, "main.go": HEAD + 'func main() {\n\tr := chi.NewRouter()\n\tr.Use(auth)\n\tr.Get("/x", h)\n}\n'})
     assert [s.guards for s in st if is_entry_point(s)] == [["auth"]]
@@ -71,3 +68,9 @@ def test_use_is_a_guard(analyze_files) -> None:
 
 def test_not_found_is_not_a_route(analyze_files) -> None:
     assert _routes(analyze_files, 'func main() {\n\tr := chi.NewRouter()\n\tr.NotFound(h)\n\tr.MethodNotAllowed(h)\n}\n') == set()
+
+
+def test_with_adds_guards_to_that_route_only(analyze_files) -> None:
+    st = analyze_files({"go.mod": MOD, "main.go": HEAD + 'func main() {\n\tr := chi.NewRouter()\n'
+                                                   '\tr.With(auth).Get("/me", me)\n\tr.Get("/open", open)\n}\n'})
+    assert {(s.endpoint, tuple(s.guards or ())) for s in st if is_entry_point(s)} == {("/me", ("auth",)), ("/open", ())}

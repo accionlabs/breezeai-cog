@@ -3,8 +3,6 @@ the router analysis every Go router detector uses (parsers/go/routing.py)."""
 
 from __future__ import annotations
 
-import pytest
-
 from breezeai_cog.parsers.contract import is_entry_point
 
 MOD = "module example.com/app\n\ngo 1.22\n"
@@ -158,7 +156,6 @@ def test_static_is_framework_served(analyze_files) -> None:
     assert (r.method, r.endpoint, r.handler, r.handlerLine) == ("GET", "/assets", None, None)
 
 
-@pytest.mark.xfail(strict=True, reason="Gin middleware is not recorded as guards yet")
 def test_use_is_a_guard(analyze_files) -> None:
     st = _app(analyze_files, 'func main() {\n\tr := gin.New()\n\tr.Use(auth)\n\tr.GET("/x", h)\n}\n')
     [r] = _eps(st)
@@ -179,3 +176,15 @@ def test_a_value_that_is_not_a_router(analyze_files) -> None:
 def test_fixture_file_has_no_routes(analyze_files) -> None:
     st = analyze_files({"go.mod": MOD, "mock/routes.go": HEAD + 'func m() {\n\tr := gin.New()\n\tr.GET("/x", h)\n}\n'})
     assert _eps(st) == []
+
+
+def test_group_and_route_middleware_are_guards(analyze_files) -> None:
+    st = _app(analyze_files, 'func main() {\n\tr := gin.New()\n\tr.Use(logger)\n\tapi := r.Group("/api", auth)\n'
+                             '\tapi.GET("/me", limit, me)\n}\n')
+    [r] = _eps(st)
+    assert r.guards == ["logger", "auth", "limit"]
+
+
+def test_use_does_not_reach_earlier_routes(analyze_files) -> None:
+    st = _app(analyze_files, 'func main() {\n\tr := gin.New()\n\tr.GET("/a", a)\n\tr.Use(auth.Required(cfg))\n\tr.GET("/b", b)\n}\n')
+    assert {(r.endpoint, tuple(r.guards or ())) for r in _eps(st)} == {("/a", ()), ("/b", ("auth.Required",))}

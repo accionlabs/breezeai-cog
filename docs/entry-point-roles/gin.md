@@ -35,7 +35,8 @@ analysis, so the rows marked **(shared)** are tested here once.
 | **(shared)** Path from a constant of the file (`const base = "/x"`, `base + "/y"`) | Binding | the folded path | Constant folding |
 | **(shared)** Path from a variable or a call | Binding | `endpoint` empty | Never a guessed address |
 | `r.Static(prefix, dir)` / `StaticFS` / `StaticFile` | Binding | `route`, `GET`, `endpoint` = prefix, no handler | Framework-served files |
-| `r.Use(mw)` | Guard | `mw` in `guards` of the routes after it | Runs before many handlers — **not recorded yet** |
+| `r.Use(mw)` | Guard | `mw` in `guards` of the routes registered on that router after it, and of the groups made from it after it (a call `mw.Auth(cfg)` is named by its function); a router passed in from another file starts with no known guards | Runs before many handlers |
+| Middleware before the handler (`r.GET(p, auth, h)`) and a group's (`r.Group(p, auth)`) | Guard | their names in `guards`, outermost first | Run before this handler |
 | `r.NoRoute(h)` / `r.NoMethod(h)` / `r.Run(addr)` | None | — | Not an address of their own |
 | **(shared)** `client.GET(url)` on a value that is not a Gin router | None (Outbound if an HTTP client) | — | Not a router: bound from no Gin constructor, type or group |
 | **(shared)** A route in a fixture file (`mock`, `fixtures` folder) | None | — | Not served |

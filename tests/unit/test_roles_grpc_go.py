@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import pytest
-
 from breezeai_cog.parsers.contract import is_entry_point
 
 MOD = "module example.com/app\n\ngo 1.22\n"
@@ -90,7 +88,6 @@ def test_server_setup_is_not_a_binding(analyze_files) -> None:
     assert _eps(analyze_files, "func main() {\n\tgs := grpc.NewServer()\n\treflection.Register(gs)\n\tgs.Serve(nil)\n}\n") == []
 
 
-@pytest.mark.xfail(strict=True, reason="gRPC interceptors are not recorded as guards yet")
 def test_interceptor_is_a_guard(analyze_files) -> None:
     eps = _eps(analyze_files, "func main() {\n\tgs := grpc.NewServer(grpc.UnaryInterceptor(auth))\n"
                               "\tauthpb.RegisterAuthServer(gs, &server{})\n}\n")
@@ -102,3 +99,9 @@ def test_register_function_outside_the_repo_is_not_recorded(analyze_files) -> No
                                                   '\tpb "github.com/acme/protos/auth"\n)\n\n'
                                                   "func main() {\n\tpb.RegisterAuthServer(grpc.NewServer(), &server{})\n}\n")})
     assert [s for s in st if is_entry_point(s)] == []
+
+
+def test_interceptors_of_a_server_assigned_earlier(analyze_files) -> None:
+    eps = _eps(analyze_files, "func main() {\n\tgs := grpc.NewServer(\n\t\tgrpc.ChainUnaryInterceptor(logging, auth.Check),\n\t)\n"
+                              "\tauthpb.RegisterAuthServer(gs, &server{})\n}\n")
+    assert {tuple(r.guards) for r in eps} == {("logging", "auth.Check")}

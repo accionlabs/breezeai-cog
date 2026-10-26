@@ -26,6 +26,9 @@ SPEC = RouterSpec(
     verb_arg={"Handle": 1},
     statics=frozenset({"Static", "StaticFS", "StaticFile"}),
     groups={"Group": "child", "Use": "same"},
+    use=frozenset({"Use"}),
+    group_guards=True,
+    route_guards="before",
     adapters=frozenset({"WrapF", "WrapH"}),
 )
 

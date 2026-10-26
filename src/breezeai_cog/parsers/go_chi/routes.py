@@ -26,7 +26,8 @@ SPEC = RouterSpec(
     verbs={"Get": "GET", "Post": "POST", "Put": "PUT", "Patch": "PATCH", "Delete": "DELETE",
            "Options": "OPTIONS", "Head": "HEAD", "Handle": None, "HandleFunc": None},
     verb_arg={"Method": 1, "MethodFunc": 1},
-    groups={"Route": "closure_child", "Group": "closure_same", "With": "same", "Mount": "mount"},
+    groups={"Route": "closure_child", "Group": "closure_same", "With": "with", "Mount": "mount"},
+    use=frozenset({"Use"}),
 )
 
 register_router_fact(SPEC)
