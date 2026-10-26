@@ -476,7 +476,9 @@ def _event_endpoint(call: Node, source: bytes, listener: bool = False) -> str | 
     return None
 
 
-def _event_kind(call: Node, source: bytes) -> tuple[SemanticType, str] | None:
+def _event_kind(call: Node, source: bytes) -> tuple[SemanticType, str | None] | None:
+    """(semanticType, method): ``CONSUMER`` on a listener; outbound records carry no method
+    (the direction is the semanticType, as for Vert.x)."""
     method = method_of(call, source)
     if method is None and call.type == "function_call_expression":
         function = call.child_by_field_name("function")
@@ -512,16 +514,16 @@ def _event_kind(call: Node, source: bytes) -> tuple[SemanticType, str] | None:
             scoped in {"event", "events", "eventdispatcher"}
             or (scoped in {"this", "self"} and b"namespace illuminate\\events" in source_lower)
         ) and event_marker:
-            return "eventbus_publish", "PUBLISH"
+            return "eventbus_publish", None
         if (
             scoped in {"bus", "dispatcher"}
             or (scoped in {"this", "self"} and b"namespace illuminate\\bus" in source_lower)
         ) and bus_marker:
-            return "eventbus_send", "MESSAGE"
+            return "eventbus_send", None
     if call.type == "function_call_expression" and method == "dispatch" and bus_marker:
-        return "eventbus_send", "MESSAGE"
+        return "eventbus_send", None
     if call.type == "function_call_expression" and method == "event" and event_marker:
-        return "eventbus_publish", "PUBLISH"
+        return "eventbus_publish", None
     return None
 
 

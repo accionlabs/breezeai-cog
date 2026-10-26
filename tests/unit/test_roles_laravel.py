@@ -26,4 +26,4 @@ Event::dispatch('order.shipped');
         ("GET", "route", None),
     }
     assert any(s.handler == "PhotoController@show" for s in routes)
-    assert next(s for s in record.statements if s.semanticType == "eventbus_publish").method == "PUBLISH"
+    assert next(s for s in record.statements if s.semanticType == "eventbus_publish").method is None

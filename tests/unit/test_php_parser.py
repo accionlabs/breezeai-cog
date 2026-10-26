@@ -528,7 +528,7 @@ $routes->resource('photos', ['only' => ['index', 'show']]);
 
     assert [(s.semanticType, s.endpoint, s.method) for s in events] == [
         ("eventbus_consumer", "pre_system", "CONSUMER"),
-        ("eventbus_publish", "cache.clear", "PUBLISH"),
+        ("eventbus_publish", "cache.clear", None),
     ]
     assert ("GET", "/__hot-reload", "HotReload@index") in [
         (s.method, s.endpoint, s.handler) for s in routes

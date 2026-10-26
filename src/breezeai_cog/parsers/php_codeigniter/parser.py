@@ -236,7 +236,7 @@ def _detect_codeigniter_events(root: Node, source: bytes, path: str, record: Fil
         handler, handler_line = route_handler(args[1], source) if method == "on" and len(args) > 1 else (None, None)
         statement.semanticType = "eventbus_consumer" if method == "on" else "eventbus_publish"
         statement.framework = "codeigniter"
-        statement.method = "CONSUMER" if method == "on" else "PUBLISH"
+        statement.method = "CONSUMER" if method == "on" else None  # outbound: no method
         statement.endpoint = event_name
         statement.handler = handler
         statement.handlerLine = handler_line
