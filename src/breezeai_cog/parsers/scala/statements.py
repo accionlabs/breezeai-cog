@@ -28,6 +28,7 @@ from ..statements_common import (
     url_placeholder,
 )
 from ..treesitter import node_text
+from .imports import VisibleNames
 from .mappings import CONTROL_FLOW, EMIT_TYPES, NESTED_SCOPES
 
 _CALL_TYPE = "call_expression"
@@ -45,14 +46,12 @@ _SCALA_HTTP_TYPES = frozenset({
     "SttpBackend",
     "RestTemplate",
 })
-#: Type name -> substring that must appear in the file's source for the bare name to
-#: count as an HTTP client. ``Client`` and ``HttpClient`` alone are too common (Kafka/
-#: cache/gRPC wrappers, domain traits) to treat as a signal on their own — gated on the
-#: owning framework's import path actually appearing, same cheap byte guard as
-#: events.py/spark.py.
-_SCALA_HTTP_TYPES_GATED: dict[str, bytes] = {
-    "Client": b"org.http4s",
-    "HttpClient": b"java.net.http",
+#: HTTP client types whose simple name is too common to trust (Kafka/cache/gRPC
+#: wrappers, domain traits all have a ``Client``): they count only when the type, as
+#: written, resolves to this FQCN — fully qualified, or a bare name the file imports.
+_SCALA_HTTP_TYPES_BY_FQCN: dict[str, str] = {
+    "org.http4s.client.Client": "Client",
+    "java.net.http.HttpClient": "HttpClient",
 }
 _HTTP_METHODS = frozenset({"get", "post", "put", "patch", "delete", "head", "options"})
 #: scalaj builder methods that set the request's verb; any other builder call keeps
@@ -362,23 +361,19 @@ def _call_details(call: Node, source: bytes) -> tuple[str, str, str | None] | No
     return callee, method, endpoint
 
 
-def collect_http_clients(types: dict[str, str], source: bytes) -> dict[str, str]:
+def collect_http_clients(types: dict[str, str], visible: VisibleNames) -> dict[str, str]:
     """Return Scala variables whose declared type is a known HTTP client/backend,
-    mapped to that type's simple name.
-
-    ``Client`` and ``HttpClient`` only count in a file that actually references their
-    owning framework (http4s / java.net.http) — otherwise they over-match Kafka/cache/
-    gRPC wrapper types and user-defined traits of the same name.
-    """
+    mapped to that type's simple name."""
     clients: dict[str, str] = {}
     for name, type_text in types.items():
-        base = type_text.split("<", 1)[0].split("[", 1)[0].strip().rsplit(".", 1)[-1]
+        written = type_text.split("<", 1)[0].split("[", 1)[0].strip()
+        base = written.rsplit(".", 1)[-1]
         if base in _SCALA_HTTP_TYPES:
             clients[name] = base
             continue
-        gate = _SCALA_HTTP_TYPES_GATED.get(base)
-        if gate is not None and gate in source:
-            clients[name] = base
+        for fqcn, simple in _SCALA_HTTP_TYPES_BY_FQCN.items():
+            if written == fqcn or ("." not in written and visible.resolve(written, fqcn)):
+                clients[name] = simple
     return clients
 
 

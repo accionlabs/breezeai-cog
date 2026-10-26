@@ -22,7 +22,7 @@ from ..comments_common import comment_statements_for
 from ..treesitter import parse_source
 from .classes import build_class
 from .functions import build_function, defined_names, type_map
-from .imports import ScalaIndex, build_fqcn_index, extract_imports
+from .imports import ScalaIndex, build_fqcn_index, extract_imports, visible_names
 from .mappings import COMMENT_TYPES, CONTROL_FLOW, FRAMEWORKS, STATEMENT_TYPES
 from .statements import collect_http_clients, extract_statements, scoped_http_clients
 
@@ -59,7 +59,7 @@ class ScalaParser(BaseParser):
 
     def extract(self, root: Node, ctx: ParseContext) -> FileRecord:
         clients = (
-            collect_http_clients(type_map(root, ctx.source), ctx.source)
+            collect_http_clients(type_map(root, ctx.source), visible_names(root, ctx.source))
             if ctx.capture_statements
             else {}
         )

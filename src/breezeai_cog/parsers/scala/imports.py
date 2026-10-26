@@ -58,6 +58,67 @@ def _package_of(root: Node, source: bytes) -> str:
     return ".".join(pkgs)
 
 
+@dataclass(frozen=True)
+class VisibleNames:
+    """External type names a file can refer to by a bare name.
+
+    ``names`` maps a local name to the FQCN it imports (a rename binds the alias);
+    ``packages`` holds every package whose members are all visible — wildcard imports
+    and the file's own package clauses. Unlike :func:`extract_imports`, imports at any
+    depth count (a class body may hold them), and nothing needs the repo index.
+    """
+
+    names: dict[str, str]
+    packages: frozenset[str]
+
+    def resolve(self, name: str, fqcn: str) -> bool:
+        """True when bare ``name`` refers to ``fqcn`` in this file."""
+        package, _, simple = fqcn.rpartition(".")
+        if name in self.names:
+            return self.names[name] == fqcn
+        return name == simple and package in self.packages
+
+
+def visible_names(root: Node, source: bytes) -> VisibleNames:
+    names: dict[str, str] = {}
+    packages: set[str] = set()
+    # ``package a.b`` then ``package c`` makes both ``a.b`` and ``a.b.c`` visible.
+    clauses = [
+        node_text(name, source).strip()
+        for node in root.named_children
+        if node.type == "package_clause" and (name := node.child_by_field_name("name"))
+    ]
+    for i in range(1, len(clauses) + 1):
+        packages.add(".".join(clauses[:i]))
+
+    stack = [root]
+    while stack:
+        node = stack.pop()
+        if node.type != "import_declaration":
+            stack.extend(node.named_children)
+            continue
+        path = [node_text(c, source) for c in node.children_by_field_name("path")]
+        path = [part for part in path if part != "."]
+        last = node.named_children[-1] if node.named_children else None
+        prefix = ".".join(path)
+        if last is not None and last.type == "namespace_wildcard":
+            packages.add(prefix)
+        elif last is not None and last.type == "namespace_selectors":
+            for sel in last.named_children:
+                if sel.type == "namespace_wildcard":
+                    packages.add(prefix)
+                elif sel.type == "identifier":
+                    names[node_text(sel, source)] = f"{prefix}.{node_text(sel, source)}"
+                elif sel.type in ("arrow_renamed_identifier", "as_renamed_identifier"):
+                    orig = sel.child_by_field_name("name")
+                    alias = sel.child_by_field_name("alias")
+                    if orig is not None and alias is not None:
+                        names[node_text(alias, source)] = f"{prefix}.{node_text(orig, source)}"
+        elif len(path) > 1:
+            names[path[-1]] = prefix
+    return VisibleNames(names, frozenset(packages))
+
+
 def _collect_top_level_types(root: Node, source: bytes) -> list[tuple[str, str]]:
     results: list[tuple[str, str]] = []
     package = _package_of(root, source)

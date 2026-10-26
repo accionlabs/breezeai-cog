@@ -155,10 +155,73 @@ def test_a_client_type_outside_http4s_is_not_an_http_client(
     assert _api_calls(imports, params, body) == []
 
 
-def test_an_http4s_client_is_an_http_client() -> None:
-    assert _api_calls(HTTP4S, "client: Client[IO]", 'client.get(uri"/users")') == [
-        ("GET", "/users")
-    ]
+@pytest.mark.parametrize(
+    ("imports", "params"),
+    [
+        # the file uses http4s, but this Client is not http4s's
+        (HTTP4S, "client: com.mycorp.kafka.Client"),
+        ("import org.http4s.Uri", "client: Client"),
+        ("import org.http4s.client.{Client => HC}", "client: Client"),
+        ("import com.mycorp.kafka.Client", "client: Client"),
+        ("", "client: HttpClient"),
+        ("import java.net.http.HttpRequest", "client: HttpClient"),
+    ],
+)
+def test_a_client_type_is_resolved_through_its_import(imports: str, params: str) -> None:
+    assert _api_calls(imports, params, 'client.get("/a")') == []
+
+
+@pytest.mark.parametrize(
+    ("imports", "params"),
+    [
+        (HTTP4S, "client: Client[IO]"),
+        ("import org.http4s.client.{Client, Middleware}", "client: Client[IO]"),
+        ("import org.http4s.client.{Client => HC}", "client: HC[IO]"),
+        ("import org.http4s.client.{Client as HC}", "client: HC[IO]"),
+        ("import org.http4s.client._", "client: Client[IO]"),
+        ("import org.http4s.client.*", "client: Client[IO]"),
+        ("", "client: org.http4s.client.Client[IO]"),
+    ],
+)
+def test_an_http4s_client_is_an_http_client(imports: str, params: str) -> None:
+    assert _api_calls(imports, params, 'client.get(uri"/users")') == [("GET", "/users")]
+
+
+def test_an_import_inside_the_class_body_counts() -> None:
+    assert _api_calls(
+        "", "client: Client[IO]", 'import org.http4s.client.Client\n    client.get(uri"/users")'
+    ) == [("GET", "/users")]
+
+
+@pytest.mark.parametrize(
+    ("packages", "expected"),
+    [
+        # a file sees its own package's members without an import
+        ("package org.http4s.client", [("GET", "/users")]),
+        ("package org.http4s.client\npackage middleware", [("GET", "/users")]),
+        # a single clause doesn't make the parent package visible
+        ("package org.http4s.client.middleware", []),
+    ],
+)
+def test_a_client_in_its_own_package_needs_no_import(
+    packages: str, expected: list[tuple[str, str | None]]
+) -> None:
+    source = f'''{packages}
+class Calls(client: Client[IO]) {{
+  def run(): Unit = {{
+    client.get(uri"/users")
+  }}
+}}
+'''
+    record = _parse(source.encode())
+    calls = [(s.method, s.endpoint) for s in record.statements if s.semanticType == "api_call"]
+    assert calls == expected
+
+
+def test_a_java_net_http_client_is_resolved_through_its_import() -> None:
+    assert _api_calls(
+        "import java.net.http.{HttpClient, HttpRequest}", "c: HttpClient", "c.send(req, h)"
+    ) == [("REQUEST", None)]
 
 
 @pytest.mark.parametrize(
