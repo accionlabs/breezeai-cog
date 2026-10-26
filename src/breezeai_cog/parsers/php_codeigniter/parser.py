@@ -284,14 +284,15 @@ def detect_codeigniter_routes(root: Node, source: bytes, path: str, record: File
                 if _route_receiver(node.child_by_field_name("object"), source):
                     options = args[1] if len(args) > 1 else None
                     route_name, route_guards = route_options(options, source)
-                    for verb, resource_endpoint, resource_handler, kind in _resource_specs(method, args, source):
+                    # Each generated route is a plain HTTP binding (routeKind "route").
+                    for verb, resource_endpoint, resource_handler, _ in _resource_specs(method, args, source):
                         found |= _enrich_route(
                             node, source, path, statements, record.statements, seen_ids,
                             endpoint=(join_endpoint(prefix, resource_endpoint) if prefix is not None else None), method=verb,
                             handler=resource_handler, name=route_name,
                             guards=list(dict.fromkeys([*(guards or []), *route_guards])),
-                            route_kind=kind,
-                        is_regex=any(token in resource_endpoint for token in _CI_REGEX_TOKENS),
+                            route_kind="route",
+                            is_regex=any(token in resource_endpoint for token in _CI_REGEX_TOKENS),
                         )
                     return
             if method == "map" and _route_receiver(node.child_by_field_name("object"), source):

@@ -533,7 +533,7 @@ $routes->resource('photos', ['only' => ['index', 'show']]);
     assert ("GET", "/__hot-reload", "HotReload@index") in [
         (s.method, s.endpoint, s.handler) for s in routes
     ]
-    assert {s.endpoint for s in routes if s.routeKind == "resource"} == {
+    assert {s.endpoint for s in routes if (s.handler or "").startswith("Photos@")} == {
         "/photos", "/photos/(:segment)",
     }
 
