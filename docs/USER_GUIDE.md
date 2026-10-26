@@ -45,6 +45,13 @@ paths or handlers are left empty. WordPress `add_action()` / `add_filter()` call
 `eventbus_consumer` statements with `method: "CONSUMER"`; they are not HTTP routes. Blade view
 files (`.blade.php`) remain unsupported.
 
+PHP data access is recorded only where the code proves it: a static call on a class that extends an
+Eloquent model (`User::create([...])`, `Song::query()->get()`) or an instance typed as one →
+`dataAccessHint: "eloquent"`; a typed Doctrine `EntityManagerInterface` / repository → `"doctrine"`;
+a CodeIgniter `$this->db` builder or `CodeIgniter\Model` subclass → `"codeigniter-builder"`; the
+imported `DB` facade → no hint (it is the query builder, not Eloquent). Calls on untyped variables
+are not guessed.
+
 `include` / `require` (and their `_once` forms) become file imports only when the path is
 anchored to the including file — `__DIR__ . '/x.php'` or `dirname(__FILE__) . '/x.php'`. A bare
 `include 'x.php'` is resolved by PHP through `include_path` and the working directory at

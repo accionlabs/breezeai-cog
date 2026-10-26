@@ -307,16 +307,16 @@ def _is_prisma_chain(low: str) -> bool:
 
 def match_db(callee: str, method: str, language: str | None = None,
              typed_db_ids: "frozenset[str] | None" = None) -> str | None:
+    if language == "php":
+        # PHP data access is recorded from evidence (imports, types, model classes) by the
+        # php-data-access detector; a name match here would be a guess (php/data_access.py).
+        return None
     m = method.lower()
     low = callee.lower()
     if m in _PRISMA_VERBS and _is_prisma_chain(low):
         return "prisma"
     if m in _DISTINCTIVE:
         db = _DISTINCTIVE[m]
-        # PHP has none of these SDKs/ORMs: a PHP ``findAll`` / ``upsert`` / ``putItem`` is a
-        # framework model or a plain method, never Sequelize, TypeORM or DynamoDB.
-        if language == "php" and db in {"sequelize", "typeorm", "dynamodb"}:
-            return None
         # A receiverless distinctive verb is a local/helper call, not a database access.
         # This is defense-in-depth for callers that do not provide local_names.
         if callee != method and not (
@@ -353,8 +353,6 @@ def match_db(callee: str, method: str, language: str | None = None,
     # ``dataLoaderCache: Map<K,V>``), and their ``.get()``/``.set()`` are memory ops, not Redis.
     cache_receivers = _CACHE_RECEIVERS
     if language == "scala":
-        cache_receivers = _CACHE_RECEIVERS - {"cache"}
-    elif language == "php":
         cache_receivers = _CACHE_RECEIVERS - {"cache"}
     if receiver and (receiver in cache_receivers or receiver.endswith("redis")):
         if m in _CACHE_VERBS or m in ("delete", "remove"):
