@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 from breezeai_cog.parsers.contract import is_entry_point
 
 EP = {"route", "eventbus_consumer", "timer"}
@@ -168,6 +170,219 @@ class PostRouter @Inject()(controller: PostController) extends SimpleRouter {
     )
     [r] = _eps(st)
     assert (r.method, r.endpoint, r.routeKind, r.handler) == ("GET", "/posts/{id}", "route", "show")
+
+
+POST_CONTROLLER = """package v1.post
+import play.api.mvc._
+class PostController @Inject()(cc: ControllerComponents) extends AbstractController(cc) {
+  def index = Action { Ok("x") }
+  def show(id: String) = Action { Ok(id) }
+}
+"""
+
+
+def _sird(st) -> list[tuple[str | None, str | None, str | None, int | None]]:
+    return sorted(
+        (r.endpoint, r.handler, r.handlerPath, r.handlerLine)
+        for r in _eps(st)
+        if r.path.endswith("Router.scala")
+    )
+
+
+def test_sird_case_leads_to_its_controller_method(analyze_files) -> None:
+    st = analyze_files({
+        "app/v1/post/PostRouter.scala": SIRD_ROUTER,
+        "app/v1/post/PostController.scala": POST_CONTROLLER,
+    })
+    assert _sird(st) == [
+        ("/", "index", "app/v1/post/PostController.scala", 4),
+        ("/{id}", "show", "app/v1/post/PostController.scala", 5),
+    ]
+
+
+def test_sird_controller_found_through_an_import(analyze_files) -> None:
+    router = SIRD_ROUTER.replace("package v1.post", "package v1.routing").replace(
+        "import javax.inject.Inject", "import javax.inject.Inject\nimport v1.post.PostController"
+    )
+    st = analyze_files({
+        "app/v1/routing/PostRouter.scala": router,
+        "app/v1/post/PostController.scala": POST_CONTROLLER,
+    })
+    assert [row[2] for row in _sird(st)] == ["app/v1/post/PostController.scala"] * 2
+
+
+def test_sird_controllers_of_one_name_are_told_apart(analyze_files) -> None:
+    # v1 and v2 each have a PostController; each router leads to its own package's.
+    st = analyze_files({
+        "app/v1/post/PostRouter.scala": SIRD_ROUTER,
+        "app/v1/post/PostController.scala": POST_CONTROLLER,
+        "app/v2/post/PostRouter.scala": SIRD_ROUTER.replace("v1.post", "v2.post"),
+        "app/v2/post/PostController.scala": POST_CONTROLLER.replace("v1.post", "v2.post"),
+    })
+    by_router = {(r.path, r.endpoint): r.handlerPath for r in _eps(st)}
+    assert by_router[("app/v1/post/PostRouter.scala", "/")] == "app/v1/post/PostController.scala"
+    assert by_router[("app/v2/post/PostRouter.scala", "/")] == "app/v2/post/PostController.scala"
+
+
+@pytest.mark.parametrize(
+    ("router", "controller"),
+    [
+        # the receiver's type is not declared
+        (SIRD_ROUTER.replace("(controller: PostController)", "()").replace(
+            "  override def routes", "  val controller = make()\n  override def routes"), POST_CONTROLLER),
+        # the type is not in the repo
+        (SIRD_ROUTER, None),
+        # PostController lives in another package and is not imported
+        (SIRD_ROUTER, POST_CONTROLLER.replace("package v1.post", "package v2.post")),
+    ],
+)
+def test_sird_handler_without_a_resolved_controller_has_no_location(
+    analyze_files, router: str, controller: str | None
+) -> None:
+    files = {"app/v1/post/PostRouter.scala": router}
+    if controller is not None:
+        files["app/v1/post/PostController.scala"] = controller
+    assert [row[1:] for row in _sird(analyze_files(files))] == [
+        ("index", None, None), ("show", None, None)
+    ]
+
+
+INLINE_ROUTER = """package v1
+import play.api.routing.Router.Routes
+import play.api.routing.SimpleRouter
+import play.api.routing.sird._
+class InlineRouter(controller: PostController, cc: ControllerComponents) extends SimpleRouter {
+  override def routes: Routes = {
+    case GET(p"/a") => Action { Ok("x") }
+    case GET(p"/b") => Action.async { req => f(req) }
+    case GET(p"/c") => Action(parse.json) { req => Ok("") }
+    case GET(p"/d") => cc.actionBuilder { Ok("y") }
+    case GET(p"/e") => controller.secured { controller.index }
+    case GET(p"/f") => controller.show(id)
+    case GET(p"/g") => controller.index
+    case GET(p"/h") => helper
+  }
+}
+"""
+
+
+def test_sird_inline_action_is_anonymous(analyze_files) -> None:
+    rows = {
+        r.endpoint: (r.handler, r.handlerLine)
+        for r in _eps(analyze_files({"app/v1/InlineRouter.scala": INLINE_ROUTER}))
+    }
+    # written inline: no name, the line of the action itself
+    assert rows["/a"] == (None, 7)
+    assert rows["/b"] == (None, 8)
+    assert rows["/c"] == (None, 9)
+    assert rows["/d"] == (None, 10)
+    assert rows["/e"] == (None, 11)
+    # a method reference keeps its name
+    assert rows["/f"][0] == "show"
+    assert rows["/g"][0] == "index"
+    assert rows["/h"][0] == "helper"
+
+
+def test_two_routers_in_one_file_lead_to_their_own_controllers(analyze_files) -> None:
+    routers = """package v1
+import play.api.routing.Router.Routes
+import play.api.routing.SimpleRouter
+import play.api.routing.sird._
+class PostRouter(controller: PostController) extends SimpleRouter {
+  override def routes: Routes = {
+    case GET(p"/posts") => controller.index
+  }
+}
+class UserRouter(controller: UserController) extends SimpleRouter {
+  override def routes: Routes = {
+    case GET(p"/users") => controller.index
+  }
+}
+"""
+    st = analyze_files({
+        "app/v1/Routers.scala": routers,
+        "app/v1/PostController.scala": "package v1\nclass PostController {\n  def index = Action { Ok(\"p\") }\n}\n",
+        "app/v1/UserController.scala": "package v1\nclass UserController {\n  def index = Action { Ok(\"u\") }\n}\n",
+    })
+    assert {r.endpoint: r.handlerPath for r in _eps(st)} == {
+        "/posts": "app/v1/PostController.scala",
+        "/users": "app/v1/UserController.scala",
+    }
+
+
+def test_sird_receiver_declared_with_two_types_has_no_location(analyze_files) -> None:
+    router = SIRD_ROUTER.replace(
+        "  override def routes", "  def other(controller: OtherController) = ()\n  override def routes"
+    )
+    st = analyze_files({
+        "app/v1/post/PostRouter.scala": router,
+        "app/v1/post/PostController.scala": POST_CONTROLLER,
+    })
+    assert [row[2] for row in _sird(st)] == [None, None]
+
+
+def test_sird_explicit_import_outranks_the_routers_package(analyze_files) -> None:
+    router = SIRD_ROUTER.replace(
+        "import javax.inject.Inject", "import javax.inject.Inject\nimport v2.post.PostController"
+    )
+    st = analyze_files({
+        "app/v1/post/PostRouter.scala": router,
+        "app/v1/post/PostController.scala": POST_CONTROLLER,
+        "app/v2/post/PostController.scala": POST_CONTROLLER.replace("v1.post", "v2.post"),
+    })
+    assert [row[2] for row in _sird(st)] == ["app/v2/post/PostController.scala"] * 2
+
+
+def test_sird_wildcard_import_and_package_class_of_one_name_have_no_location(analyze_files) -> None:
+    # Scala lets the wildcard import win over another file of the package; not worth guessing.
+    router = SIRD_ROUTER.replace(
+        "import javax.inject.Inject", "import javax.inject.Inject\nimport v2.post._"
+    )
+    st = analyze_files({
+        "app/v1/post/PostRouter.scala": router,
+        "app/v1/post/PostController.scala": POST_CONTROLLER,
+        "app/v2/post/PostController.scala": POST_CONTROLLER.replace("v1.post", "v2.post"),
+    })
+    assert [row[2] for row in _sird(st)] == [None, None]
+
+
+def test_sird_overloaded_controller_method_has_no_location(analyze_files) -> None:
+    controller = POST_CONTROLLER.replace(
+        "  def show(", '  def show(id: Long) = Action { Ok("n") }\n  def show('
+    )
+    st = analyze_files({
+        "app/v1/post/PostRouter.scala": SIRD_ROUTER,
+        "app/v1/post/PostController.scala": controller,
+    })
+    assert _sird(st)[1] == ("/{id}", "show", None, None)
+
+
+@pytest.mark.parametrize("jobs", [1, 2])
+def test_sird_location_is_the_same_for_any_jobs(tmp_path, jobs) -> None:
+    import gzip
+    import json
+
+    from breezeai_cog import analyze_repo
+
+    repo = tmp_path / "repo"
+    for rel, src in {
+        "app/v1/post/PostRouter.scala": SIRD_ROUTER,
+        "app/v1/post/PostController.scala": POST_CONTROLLER,
+    }.items():
+        f = repo / rel
+        f.parent.mkdir(parents=True, exist_ok=True)
+        f.write_text(src)
+    result = analyze_repo(repo, capture_statements=True, out=tmp_path / "out", jobs=jobs)
+    lines = gzip.open(result.out_path, "rt", encoding="utf-8").read().splitlines()
+    rec = next(json.loads(line) for line in lines if '"app/v1/post/PostRouter.scala"' in line)
+    routes = sorted(
+        (s["endpoint"], s["handlerPath"], s["handlerLine"])
+        for s in rec["statements"] if s.get("semanticType") == "route"
+    )
+    assert routes == [
+        ("/", "app/v1/post/PostController.scala", 4),
+        ("/{id}", "app/v1/post/PostController.scala", 5),
+    ]
 
 
 def test_filter_has_no_record(analyze_files) -> None:

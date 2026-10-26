@@ -12,6 +12,7 @@ Play SIRD (String Interpolating Routing DSL) defines routes directly in code:
 
 from __future__ import annotations
 
+from pathlib import Path
 import re
 from typing import Any
 
@@ -19,7 +20,8 @@ from tree_sitter import Node
 
 from ...schemas import FileRecord, Function
 from ..emits import Emit
-from ..scala.imports import _package_of
+from ..handler_sites import handler_location, locate_method
+from ..scala.imports import ScalaIndex, _package_of, _resolve, extract_imports, visible_names
 from ..scala.statements import find_enclosing_parent_id
 from ..treesitter import node_text
 from .includes import join, router_prefix
@@ -147,24 +149,42 @@ def _find_router_prefix(node: Node, source: bytes) -> str | None:
     return None
 
 
-def _extract_sird_handler(clause: Node, source: bytes) -> str | None:
-    """Extract handler name from SIRD case body: ``case GET(p"/") => controller.index`` -> ``index``."""
+def _sird_body(clause: Node) -> Node | None:
+    """The expression after ``=>`` in a SIRD case."""
     body = clause.child_by_field_name("body")
-    if body is None:
-        # Fallback to children after '=>'
-        found_arrow = False
-        for c in clause.children:
-            if c.type == "=>":
-                found_arrow = True
-            elif found_arrow and c.is_named:
-                body = c
-                break
+    if body is not None:
+        return body
+    found_arrow = False
+    for c in clause.children:
+        if c.type == "=>":
+            found_arrow = True
+        elif found_arrow and c.is_named:
+            return c
+    return None
+
+
+def _extract_sird_handler(clause: Node, source: bytes) -> str | None:
+    """Extract handler name from SIRD case body: ``case GET(p"/") => controller.index`` -> ``index``.
+
+    Only a method reference names one — ``name``, ``x.method``, ``x.method(args)``. An action
+    written inline (``Action { … }``, ``cc.actionBuilder { … }``, curried
+    ``Action(parse.json) { … }``) has no name: its builder is not the handler."""
+    body = _sird_body(clause)
     if body is None:
         return None
     if body.type == "call_expression":
         fn = body.child_by_field_name("function")
-        if fn is not None:
+        args = body.child_by_field_name("arguments")
+        root = _callee_root(fn)
+        if (
+            fn is not None
+            and fn.type in ("identifier", "field_expression")
+            and args is not None
+            and args.type == "arguments"
+            and (root is None or node_text(root, source) != "Action")
+        ):
             return node_text(fn, source).rsplit(".", 1)[-1]
+        return None
     if body.type == "field_expression":
         field = body.child_by_field_name("field")
         if field is not None:
@@ -175,8 +195,95 @@ def _extract_sird_handler(clause: Node, source: bytes) -> str | None:
     return None
 
 
+def _sird_receiver(clause: Node, source: bytes) -> str | None:
+    """``controller`` in ``controller.index`` / ``controller.show(id)``; None for any other shape."""
+    body = _sird_body(clause)
+    if body is not None and body.type == "call_expression":
+        body = body.child_by_field_name("function")
+    if body is None or body.type != "field_expression":
+        return None
+    value = body.child_by_field_name("value")
+    return node_text(value, source) if value is not None and value.type == "identifier" else None
+
+
+_SCOPES = ("class_definition", "object_definition", "trait_definition")
+
+
+def _declared_types(scope: Node, source: bytes) -> dict[str, set[str]]:
+    """Every type each name is declared with inside ``scope`` (parameters, vals, vars)."""
+    found: dict[str, set[str]] = {}
+    stack = [scope]
+    while stack:
+        node = stack.pop()
+        name = type_node = None
+        if node.type in ("val_definition", "var_definition"):
+            name, type_node = node.child_by_field_name("pattern"), node.child_by_field_name("type")
+        elif node.type in ("parameter", "class_parameter"):
+            name, type_node = node.child_by_field_name("name"), node.child_by_field_name("type")
+        if name is not None and name.type == "identifier" and type_node is not None:
+            written = node_text(type_node, source).split("[", 1)[0].strip()
+            found.setdefault(node_text(name, source), set()).add(written)
+        stack.extend(node.named_children)
+    return found
+
+
+class _ControllerSites:
+    """Where a SIRD case's controller method is declared — or None whenever that isn't certain.
+
+    The receiver's type is read from the router class alone (two routers in one file may each
+    have a ``controller``), and must be the only type that name is declared with there. The type
+    resolves as Scala resolves it: fully qualified; else an explicit import; else the one class
+    of that name among the file's package and its wildcard imports (a wildcard import outranks
+    another file of the same package, so two candidates are ambiguous). The method is then
+    looked up in ``scala.method-lines`` within that one file."""
+
+    def __init__(self, root: Node, source: bytes, path: str, repo_root: Path | None,
+                 index: Any | None) -> None:
+        self._index = index
+        self._fqcn = index.fqcn if isinstance(index, ScalaIndex) else None
+        self._bindings = extract_imports(root, source, path, repo_root or Path("."), self._fqcn)[3]
+        self._visible = visible_names(root, source)
+        self._scopes: dict[tuple[int, int], dict[str, set[str]]] = {}
+
+    def _type_in(self, scope: Node, receiver: str, source: bytes) -> str | None:
+        key = (scope.start_byte, scope.end_byte)
+        if key not in self._scopes:
+            self._scopes[key] = _declared_types(scope, source)
+        types = self._scopes[key].get(receiver, set())
+        return next(iter(types)) if len(types) == 1 else None
+
+    def _file_of(self, written: str) -> str | None:
+        if "." in written:
+            return _resolve(written, self._fqcn)
+        if written in self._visible.names:
+            return self._bindings.get(written)
+        candidates = {self._bindings.get(written)} | {
+            _resolve(f"{package}.{written}", self._fqcn) for package in self._visible.packages
+        }
+        candidates.discard(None)
+        return candidates.pop() if len(candidates) == 1 else None
+
+    def find(self, scope: Node, source: bytes, receiver: str | None,
+             method: str | None) -> tuple[str, int] | None:
+        written = self._type_in(scope, receiver, source) if receiver else None
+        file = self._file_of(written) if written else None
+        if written is None or file is None:
+            return None
+        return locate_method(self._index, "scala", written.rsplit(".", 1)[-1], method,
+                             within={file})
+
+
+def _router_scope(node: Node, root: Node) -> Node:
+    """The class / object / trait a ``routes`` method belongs to (the file for a script)."""
+    current = node.parent
+    while current is not None and current.type not in _SCOPES:
+        current = current.parent
+    return current or root
+
+
 def detect_play_sird_routes(
     root: Node, source: bytes, record: FileRecord, *, index: Any | None = None,
+    repo_root: Path | None = None,
 ) -> list[Emit]:
     """Detect Play SIRD ``Routes`` methods (``case GET(p"/path") => ...``). The router's prefix
     is the one a routes file includes it under (``-> /v1/posts v1.post.PostRouter``, from the
@@ -185,8 +292,10 @@ def detect_play_sird_routes(
     if b"p\"" not in source and b"Routes" not in source and b"SimpleRouter" not in source:
         return []
     routes: list[Emit] = []
+    sites: _ControllerSites | None = None
 
     def walk(node: Node) -> None:
+        nonlocal sites
         if node.type in _FN_TYPES:
             name = node.child_by_field_name("name")
             ret = node.child_by_field_name("return_type")
@@ -229,11 +338,23 @@ def detect_play_sird_routes(
                         endpoint = p + ("/" if endpoint == "/" else endpoint)
                     # C6: Populate handler from case body
                     handler = _extract_sird_handler(clause, source)
+                    if sites is None:
+                        sites = _ControllerSites(root, source, record.path, repo_root, index)
+                    body = _sird_body(clause)
+                    line, path = handler_location(
+                        sites.find(_router_scope(node, root), source,
+                                   _sird_receiver(clause, source), handler),
+                        record.path,
+                    )
+                    if handler is None and body is not None:
+                        line = body.start_point[0] + 1  # inline action (anonymous)
                     routes.append(
                         Emit(clause, dict(
                             semanticType="route",
                             framework="play",
                             handler=handler,
+                            handlerLine=line,
+                            handlerPath=path,
                             method=verb,
                             endpoint=endpoint,
                             routeKind="route",

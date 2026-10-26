@@ -45,7 +45,7 @@ class ScalaPlayParser(ScalaParser):
         record = self.extract(root, ctx)  # inherited Scala extraction (one parse)
         if ctx.capture_statements and not self.is_fixture_file(ctx.path):
             sird_routes = detect_play_sird_routes(
-                root, ctx.source, record, index=ctx.resolution_index,
+                root, ctx.source, record, index=ctx.resolution_index, repo_root=ctx.repo_root,
             )
             apply(record, sird_routes, ctx.source, ctx.path)
             # Actions are handlers of conf/routes / SIRD bindings — they label the file, no record.

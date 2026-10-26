@@ -60,9 +60,10 @@ _SHAPES: dict[str, tuple[frozenset[str], frozenset[str]]] = {
     "scala": (frozenset({"class_definition", "object_definition", "trait_definition"}),
               frozenset({"function_definition", "function_declaration"})),
 }
-#: Languages with a repo-wide ``<lang>.method-lines`` fact. Scala has none yet: its one user, the
-#: Play routes lookup, reads the few controller files a routes file names (:func:`method_sites`).
-_FACT_LANGUAGES = ("csharp", "java", "php", "ruby")
+#: Languages with a repo-wide ``<lang>.method-lines`` fact. Play's ``conf/routes`` lookup has no
+#: Scala index to ask, so it reads the few controller files a routes file names instead
+#: (:func:`method_sites`); Play's SIRD routers, parsed as Scala, use ``scala.method-lines``.
+_FACT_LANGUAGES = ("csharp", "java", "php", "ruby", "scala")
 
 _Key = tuple[str, str]  # (class simple name, method name)
 _Site = tuple[str, int]  # (file, line)
