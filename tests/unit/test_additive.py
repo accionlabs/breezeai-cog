@@ -56,7 +56,8 @@ def test_inventory_in_run_order() -> None:
     assert inventory == {
         "csharp": ["lambda-handlers", "lucene", "hotchocolate-registered-roots",
                    "generic-handlers", "hangfire", "quartz"],
-        "go": ["go-net-http", "go-gin", "go-echo", "go-chi", "go-fiber", "go-gorilla-mux", "go-grpc"],
+        "go": ["go-net-http", "go-gin", "go-echo", "go-chi", "go-fiber", "go-gorilla-mux", "go-grpc",
+               "go-nats", "go-kafka", "go-scheduling"],
         "java": ["quartz"],
         "python": ["celery"],
         "php": ["wordpress-hooks", "laravel-events", "symfony-events", "php-data-access",

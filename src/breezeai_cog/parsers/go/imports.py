@@ -114,14 +114,21 @@ def _module_index(repo_root: Path, files: Sequence[Path]) -> GoIndex:
 
 
 def default_package_name(import_path: str) -> str:
-    """The name a package is used by when imported without an alias: its last path segment,
-    skipping a major-version suffix (``github.com/labstack/echo/v4`` → ``echo``) and a
-    ``gopkg.in`` version (``gopkg.in/yaml.v3`` → ``yaml``)."""
+    """The name a package is used by when imported without an alias, by the rule ``goimports``
+    assumes (``ImportPathToAssumedName``): the last path segment, the one before it when that is a
+    major version (``…/echo/v4`` → ``echo``), without a ``go-`` prefix, up to the first character
+    that can't be in an identifier (``nats.go`` → ``nats``, ``kafka-go`` → ``kafka``,
+    ``yaml.v3`` → ``yaml``)."""
     parts = import_path.split("/")
-    last = parts[-1]
-    if len(parts) > 1 and last[:1] == "v" and last[1:].isdigit():
-        last = parts[-2]
-    return last.split(".v", 1)[0] if import_path.startswith("gopkg.in/") else last
+    base = parts[-1]
+    if len(parts) > 1 and base[:1] == "v" and base[1:].isdigit():
+        base = parts[-2]
+    if base.startswith("go-"):
+        base = base[3:]
+    for i, ch in enumerate(base):
+        if not (ch.isalnum() or ch == "_"):
+            return base[:i]
+    return base
 
 
 def _import_specs(root: Node) -> list[Node]:

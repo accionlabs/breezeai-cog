@@ -932,3 +932,8 @@ def types_by_function(analyzer: _Analyzer) -> Callable[[Node], dict[str, str]]:
         return cache[fn.start_byte]
 
     return types
+
+
+#: For detectors outside this module: a string argument's value (literal, constant of the file,
+#: or a ``+`` of those) and the guard names of middleware arguments.
+string_value = _string

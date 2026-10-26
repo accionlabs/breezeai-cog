@@ -574,6 +574,9 @@ the file:
   │                  50   go-fiber         go_fiber/routes.py                ✔       │
   │                  60   go-gorilla-mux   go_gorilla/routes.py              ✔       │
   │                  70   go-grpc          go_grpc/routes.py                 ✔       │
+  │                  80   go-nats          go_nats/events.py                 ✔       │
+  │                  90   go-kafka         go_kafka/events.py                ✔       │
+  │                 100   go-scheduling    go_scheduling/timers.py           ✔       │
   │                                                                                  │
   │  python          10   celery           python/celery.py                  ✔       │
   │                                                                                  │
