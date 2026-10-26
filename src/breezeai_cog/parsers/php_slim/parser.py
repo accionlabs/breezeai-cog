@@ -178,7 +178,6 @@ def detect_slim_routes(root: Node, source: bytes, path: str, record: FileRecord)
                         name=route_name,
                         guards=list(dict.fromkeys([*guards_in_scope, *guards])),
                         route_kind=route_kind,
-                        closure_handler="<closure>",
                     )
         for child in node.named_children:
             visit(child, prefix, guards_in_scope, receivers)

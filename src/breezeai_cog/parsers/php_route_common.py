@@ -162,7 +162,6 @@ def enrich_route(
     guards: list[str] | None = None,
     is_regex: bool | None = False,
     route_kind: str = "route",
-    closure_handler: str | None = None,
     handler_name: str | None = None,
 ) -> bool:
     line, column = call.start_point[0] + 1, call.start_point[1]
@@ -172,13 +171,10 @@ def enrich_route(
     handler, handler_line = route_handler(handler_node, source)
     if handler_name is not None:
         handler, handler_line = handler_name, None
-    if handler is None and closure_handler and handler_node is not None:
+    if handler is None and handler_node is not None:
         closure = unwrap(handler_node)
         if closure is not None and closure.type in {"anonymous_function", "arrow_function"}:
-            # A closure has no declared handler name.  Slim still exposes the
-            # closure's declaration line; Laravel deliberately leaves both
-            # fields absent because its closure is not an addressable handler.
-            handler = None
+            # An inline handler has no name: the contract records the line it starts on.
             handler_line = closure.start_point[0] + 1
     if statement.semanticType == "route":
         normalized_endpoint = normalize_endpoint(endpoint) if endpoint is not None else None

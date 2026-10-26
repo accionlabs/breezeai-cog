@@ -615,7 +615,7 @@ class UserController { public function index() {} }
     assert dynamic.endpoint is None
     assert dynamic.handler == "UserController@index"
     assert dynamic.handlerLine is None
-    assert closure.handler is None and closure.handlerLine is None
+    assert closure.handler is None and closure.handlerLine == 6  # the closure starts on the route line
 
 
 def test_slim_closures_and_codeigniter_contract_values() -> None:
@@ -730,3 +730,17 @@ def test_slim_redirect_is_a_get_binding_without_handler() -> None:
     (route,) = [s for s in record.statements if s.semanticType == "route"]
     assert (route.method, route.endpoint, route.routeKind, route.handler) == ("GET", "/old", "route", None)
     assert not [v for v in validate(record) if v.severity == "error"]
+
+
+def test_inline_closure_handlers_record_their_start_line() -> None:
+    laravel = _parse(LaravelParser(), """<?php
+use Illuminate\\Support\\Facades\\Route;
+Route::get('/c',
+    function () { return 1; });
+Route::fallback(fn () => 404);
+""")
+    ci = _parse(CodeIgniterParser(), "<?php\n$routes->get('x', static function () {});\n",
+                path="app/Config/Routes.php")
+    lines = {(s.endpoint, s.handler, s.handlerLine)
+             for r in (laravel, ci) for s in r.statements if s.semanticType == "route"}
+    assert lines == {("/c", None, 4), (None, None, 5), ("/x", None, 2)}
