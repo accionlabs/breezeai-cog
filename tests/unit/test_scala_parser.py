@@ -343,6 +343,34 @@ object Outer {
 """
 
 
+EXPRESSION_BODIES_SRC = b"""package com.acme.orders
+
+class Report {
+  def direct(): String = DH.today()
+  def outer(): String = fmt(DH.today())
+  def branch(a: Boolean): String = if (a) left() else right()
+  def wrapper(): Int = {
+    def inner(): Int = hidden()
+    inner()
+  }
+  def expressionWrapper(): Int = run(() => helper())
+}
+"""
+
+
+def test_expression_bodied_def_records_its_calls(tmp_path: Path) -> None:
+    """``def f() = a.b()`` has the call *as* its body; it was skipped, inner calls kept."""
+    rec, _ = _parse(tmp_path, EXPRESSION_BODIES_SRC)
+    calls = {f.name: [c.name for c in f.calls] for f in rec.functions}
+    assert calls["direct"] == ["today"]
+    assert calls["outer"] == ["fmt", "today"]
+    assert sorted(calls["branch"]) == ["left", "right"]
+    # a nested def keeps its own calls; a lambda's belong to the enclosing def
+    assert calls["wrapper"] == ["inner"]
+    assert calls["inner"] == ["hidden"]
+    assert calls["expressionWrapper"] == ["run", "helper"]
+
+
 def test_nested_def_is_captured_as_its_own_function(tmp_path: Path) -> None:
     """Defect C: a nested `def` was dropped entirely."""
     rec, _ = _parse(tmp_path, NESTED_DEF_SRC, capture=True)
