@@ -62,6 +62,29 @@ def test_project_json_and_pnpm_workspace_retained() -> None:
     assert ws["buildTool"] == "pnpm" and ws["workspaceGlobs"] == ["apps/*", "packages/*"]
 
 
+def test_nx_and_legacy_workspace_project_maps_are_retained() -> None:
+    nx = _meta("nx.json", json.dumps({
+        "plugins": [{"plugin": "@nx/js"}],
+        "targetDefaults": {"build": {}},
+        "projects": {"web": "apps/web"},
+    }))
+    assert nx["kind"] == "nx.json"
+    assert nx["projectInfo"]["projects"]["web"]["root"] == "apps/web"
+    assert nx["nxConfig"]["plugins"] == ["@nx/js"]
+
+    workspace = _meta("workspace.json", json.dumps({
+        "projects": {"api": {"root": "apps/api", "implicitDependencies": ["shared"]}},
+    }))
+    assert workspace["kind"] == "workspace.json"
+    assert workspace["projectInfo"]["projects"]["api"]["implicitDependencies"] == ["shared"]
+
+
+def test_project_name_falls_back_to_project_directory() -> None:
+    md = _meta("libs/shared/project.json", json.dumps({"targets": {"build": {}}}))
+    assert md["projectInfo"]["name"] == "shared"
+    assert md["projectInfo"]["projectRoot"] == "libs/shared"
+
+
 def test_pyproject_deps_extracted() -> None:
     # Improvement over the JS analyzer, which only line-counted pyproject.toml.
     md = _meta(

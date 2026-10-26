@@ -126,6 +126,16 @@ def _parse_entry(path: str, repo_root: str, options: dict) -> FileRecord | None:
         )
         return None
     _prune_template_edges(record, options.get("template_extensions") or frozenset())
+    project_index = options.get("nx_projects")
+    if project_index is not None:
+        project = project_index.project_for(record.path)
+        if project is not None:
+            record.project = project.name
+            record.projectRoot = project.root
+            if (record.metadata and record.metadata.get("kind") == "project.json"
+                    and isinstance(record.metadata.get("projectInfo"), dict)):
+                record.metadata["projectInfo"].setdefault("name", project.name)
+                record.metadata["projectInfo"].setdefault("projectRoot", project.root)
     summary = summarize_skipped_concats(path)  # one clean, human-readable line if any
     if summary:
         get_logger("breezeai_cog.worker").warning(summary)
@@ -212,7 +222,8 @@ def _stop_listener(state: tuple) -> None:
 
 
 def parse_entries(
-    entries: list[ScanEntry], repo_root: str | Path, settings, indexes: dict | None = None
+    entries: list[ScanEntry], repo_root: str | Path, settings, indexes: dict | None = None,
+    nx_projects=None,
 ) -> Iterator[tuple[str, FileRecord]]:
     """Yield ``(language, FileRecord)`` — parallel across processes, sequential when
     ``jobs == 1`` or there's nothing to parallelize. ``indexes`` maps parser-name →
@@ -220,6 +231,7 @@ def parse_entries(
     repo_root = str(Path(repo_root))
     options = _options(settings)
     options["indexes"] = indexes or {}
+    options["nx_projects"] = nx_projects
     jobs = settings.jobs if settings.jobs and settings.jobs > 0 else (os.cpu_count() or 1)
 
     if jobs <= 1 or len(entries) <= 1:

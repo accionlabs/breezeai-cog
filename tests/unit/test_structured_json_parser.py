@@ -58,6 +58,9 @@ def test_named_rich_configs_stay_config() -> None:
     assert _language("package.json", {"name": "app", "contributors": [{"name": "Al"}]}) == "config"
     assert _language("tsconfig.json", {"compilerOptions": {}, "references": [{"path": "../x"}]}) == "config"
     assert _language("mod.json", {"main": "Verticle"}) == "config"
+    assert _language("project.json", {"name": "web", "targets": {"build": {}}}) == "config"
+    assert _language("nx.json", {"plugins": [], "targetDefaults": {}}) == "config"
+    assert _language("workspace.json", {"projects": {"web": "apps/web"}}) == "config"
 
 
 def test_composer_json_is_captured_not_named_rich() -> None:
