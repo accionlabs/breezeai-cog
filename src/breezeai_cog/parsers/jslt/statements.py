@@ -91,26 +91,37 @@ def _is_blank_or_comment(line: str) -> bool:
     return _strip_line_comment(line).strip() == ""
 
 
-def _bracket_delta(line: str) -> int:
-    """Net change in ``{}``/``[]``/``()`` nesting depth caused by ``line`` (comment- and
-    string-aware, like ``_strip_line_comment``)."""
+def _code_only(line: str) -> str:
+    """``line`` with its ``//`` comment and every double-quoted string literal (quotes
+    included) replaced by spaces — only code is left, at the same columns, so an offset into
+    ``line`` is still valid in the result. An unterminated string blanks the rest of the
+    line."""
     stripped = _strip_line_comment(line)
-    delta = 0
+    out = list(stripped)
     in_string = False
     i = 0
     while i < len(stripped):
         ch = stripped[i]
-        if ch == "\\" and in_string:
-            i += 2
-            continue
-        if ch == '"':
-            in_string = not in_string
-        elif not in_string and ch in _OPEN_BRACKETS:
-            delta += 1
-        elif not in_string and ch in _CLOSE_BRACKETS:
-            delta -= 1
+        if in_string:
+            out[i] = " "
+            if ch == "\\" and i + 1 < len(stripped):
+                out[i + 1] = " "
+                i += 2
+                continue
+            if ch == '"':
+                in_string = False
+        elif ch == '"':
+            in_string = True
+            out[i] = " "
         i += 1
-    return delta
+    return "".join(out) + " " * (len(line) - len(stripped))
+
+
+def _bracket_delta(line: str) -> int:
+    """Net change in ``{}``/``[]``/``()`` nesting depth caused by ``line``, ignoring
+    brackets inside comments and strings."""
+    code = _code_only(line)
+    return sum(code.count(c) for c in _OPEN_BRACKETS) - sum(code.count(c) for c in _CLOSE_BRACKETS)
 
 
 def _boundaries(lines: list[str]) -> list[int]:
@@ -166,12 +177,14 @@ def _def_params(raw: str) -> list[Parameter]:
     return [Parameter(name=p.strip(), type="") for p in raw.split(",") if p.strip()]
 
 
-def _same_file_calls(text: str, header_end: int, resolve: CallResolver) -> list[Call]:
-    """Bare `name(...)` calls in `text` that resolve to another `def` in this same file —
-    scanned from `header_end` onward (the header's own `def name(` is excluded, or `name`
-    would read as a spurious call to itself)."""
+def _same_file_calls(lines: list[str], header_end: int, resolve: CallResolver) -> list[Call]:
+    """Bare `name(...)` calls in a `def`'s `lines` that resolve to another `def` in this same
+    file — scanned from `header_end` onward (the header's own `def name(` is excluded, or
+    `name` would read as a spurious call to itself). Comments and string literals are blanked
+    first, so a name written in either is never read as a call."""
+    code = "\n".join(_code_only(line) for line in lines)
     seen: dict[str, Call] = {}
-    for m in _CALL_RE.finditer(text[header_end:]):
+    for m in _CALL_RE.finditer(code[header_end:]):
         name = m.group(1)
         if name in seen:
             continue
@@ -246,7 +259,7 @@ def collect_jslt_declarations(
                 name=name,
                 type="function",
                 params=_def_params(params_raw),
-                calls=_same_file_calls(text, header_end, resolve),
+                calls=_same_file_calls(lines[start - 1 : end], header_end, resolve),
                 startLine=start,
                 endLine=end,
             )

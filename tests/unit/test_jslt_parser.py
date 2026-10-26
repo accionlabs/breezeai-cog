@@ -140,6 +140,26 @@ def test_bare_call_after_operator_or_bracket_still_resolves(tmp_path) -> None:
     assert [c.name for c in _func(rec, "sum").calls] == ["one"]
 
 
+def test_name_in_comment_or_string_not_read_as_call(tmp_path) -> None:
+    # A def's name written in a `//` comment or inside a string literal is not a call.
+    src = (
+        "def helper(x)\n  $x + 1\n\n"
+        "def main(x)\n"
+        "  // TODO: replace helper(x) later\n"
+        '  {"label": "call helper(x) here", "esc": "a \\" helper(x)", "v": $x}\n\n'
+        "main(.)\n"
+    )
+    rec = _parse(tmp_path, "transform.jslt", src)
+    assert _func(rec, "main").calls == []
+
+
+def test_call_after_string_and_comment_on_same_line_still_resolves(tmp_path) -> None:
+    # Blanking a string or a trailing comment must not hide a real call beside it.
+    src = 'def one()\n  1\n\ndef main(x)\n  "(" + one() // one() again\n\nmain(.)\n'
+    rec = _parse(tmp_path, "transform.jslt", src)
+    assert [c.name for c in _func(rec, "main").calls] == ["one"]
+
+
 def test_call_in_own_header_not_mistaken_for_self_call(tmp_path) -> None:
     # The header line `def f(x)` must not read its own name (`f(`) as a call to itself.
     src = "def f(x)\n  x + 1\n\nf(1)\n"
