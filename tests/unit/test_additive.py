@@ -219,7 +219,7 @@ def test_index_hooked_languages_call_the_collector(language: str) -> None:
 
 def test_fact_for_an_unhooked_language_rejected(isolated) -> None:
     with pytest.raises(RegistryError, match="no index hook"):
-        register_fact(_marked(language="php"))
+        register_fact(_marked(language="kotlin"))
 
 
 def test_fact_needs_a_gate(isolated) -> None:

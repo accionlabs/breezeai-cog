@@ -8,7 +8,7 @@ the handler up does so here:
 The detector knows …                        Call
 ==========================================  ==================================================
 a class and a method (``ExampleJob`` +      :func:`locate_method` — the ``<lang>.method-lines``
-``Execute``, ``users#show``)                fact (C#, Java, Ruby)
+``Execute``, ``users#show``)                fact (C#, Java, PHP, Ruby)
 a module and an exported name               :func:`locate_export` — the
 (``import * as queries``)                   ``typescript.declarations`` fact (TS / JS)
 only a name written in this file            nothing — name it; the parser's ``link_handlers``
@@ -55,13 +55,14 @@ _SHAPES: dict[str, tuple[frozenset[str], frozenset[str]]] = {
                frozenset({"method_declaration"})),
     "java": (frozenset({"class_declaration", "record_declaration", "enum_declaration"}),
              frozenset({"method_declaration"})),
+    "php": (frozenset({"class_declaration"}), frozenset({"method_declaration"})),
     "ruby": (frozenset({"class"}), frozenset({"method"})),
     "scala": (frozenset({"class_definition", "object_definition", "trait_definition"}),
               frozenset({"function_definition", "function_declaration"})),
 }
 #: Languages with a repo-wide ``<lang>.method-lines`` fact. Scala has none yet: its one user, the
 #: Play routes lookup, reads the few controller files a routes file names (:func:`method_sites`).
-_FACT_LANGUAGES = ("csharp", "java", "ruby")
+_FACT_LANGUAGES = ("csharp", "java", "php", "ruby")
 
 _Key = tuple[str, str]  # (class simple name, method name)
 _Site = tuple[str, int]  # (file, line)
@@ -106,8 +107,9 @@ def _resolve(values: list[list[tuple[_Key, _Site]]],
 
 
 def _simple(name: str) -> str:
-    """A class's simple name: ``Ns.T<X>`` / ``Admin::UsersController`` → ``T`` / ``UsersController``."""
-    return name.split("<", 1)[0].rsplit("::", 1)[-1].rsplit(".", 1)[-1].strip()
+    """A class's simple name: ``Ns.T<X>`` / ``Admin::UsersController`` / ``App\\Http\\UserController``
+    → ``T`` / ``UsersController`` / ``UserController``."""
+    return name.split("<", 1)[0].rsplit("::", 1)[-1].rsplit(".", 1)[-1].rsplit("\\", 1)[-1].strip()
 
 
 def fact_name(language: str) -> str:

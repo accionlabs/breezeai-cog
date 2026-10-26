@@ -407,7 +407,7 @@ Everything for this lives in `parsers/handler_sites.py`:
 
 | The detector knows … | Call | Languages | Used by |
 |---|---|---|---|
-| a class and a method | `locate_method(index, lang, cls, method)` — the `*.method-lines` fact | C#, Java, Groovy, Ruby | ASP.NET, HotChocolate, Spring functional routes, Vert.x, Quartz, Rails, WCF |
+| a class and a method | `locate_method(index, lang, cls, method)` — the `*.method-lines` fact | C#, Java, Groovy, PHP, Ruby | ASP.NET, HotChocolate, Spring functional routes, Vert.x, Quartz, Rails, WCF |
 | a module and an exported name | `locate_export(index, module_file, name)` — the `typescript.declarations` fact, re-exports followed | TypeScript / JavaScript | GraphQL resolver modules |
 | only a name written in this file | nothing — it names the handler; `link_handlers` locates it after parsing | TypeScript / JavaScript (every TS framework parser) | React, Angular, Vue, Next.js pages |
 
@@ -435,7 +435,11 @@ Razor (`.cshtml`) is its own base parser too. Its `handler_locator` reads the pa
 handler without a location, asks the language's lookup (`handler_locator(ctx)`; default: none),
 and writes the result through `handler_location`. A language supplies only the lookup —
 TypeScript's (`typescript/handlers.py`) follows the file's imports and lazy loads through
-`typescript.declarations`.
+`typescript.declarations`. PHP's (`php/handlers.py`) reads `Class@method` / an invokable class
+from `php.method-lines`, limited to the class's file when the routes file's `use` imports or a
+fully qualified name say which one, and a plain function name from the file's own declarations.
+A found PHP handler is written as the method name (`UserController@index` → `index` +
+`handlerPath`), as Rails and Play do; an unfound one keeps the name as written.
 
 ```csharp
 // Jobs/Startup.cs — the Quartz detector knows the job class and its method

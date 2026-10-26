@@ -2,14 +2,17 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import Sequence
+from typing import Any, Sequence
 
 from tree_sitter import Node
 
 from ...logging import get_logger
 from ...utils import repo_relative
+from ..additive import (
+    collect_additive, collect_fact_sources, resolve_additive, split_fact_sources,
+)
 from ..index_common import parallel_map, record_distinct
 from ..treesitter import node_text, parse_source
 
@@ -26,7 +29,8 @@ class PhpIndex:
     fqcn: dict[str, str | None] = field(default_factory=dict)
     folded_fqcn: dict[str, str | None] = field(default_factory=dict)
     namespace_members: dict[str, dict[str, str | None]] = field(default_factory=dict)
-    simple_names: dict[str, str | None] = field(default_factory=dict)
+    #: Registered facts (``handler_sites``' ``php.method-lines``), read with ``index_fact``.
+    facts: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         # Keep hand-built indexes used by parser callers/tests equivalent to the
@@ -49,15 +53,6 @@ class PhpIndex:
                 else:
                     target[simple] = path
             object.__setattr__(self, "namespace_members", members)
-        if not self.simple_names:
-            simple_names: dict[str, str | None] = {}
-            for name, path in self.fqcn.items():
-                simple = name.rsplit("\\", 1)[-1].casefold()
-                if simple in simple_names and simple_names[simple] != path:
-                    simple_names[simple] = None
-                else:
-                    simple_names[simple] = path
-            object.__setattr__(self, "simple_names", simple_names)
 
 
 def namespace_of(root: Node, source: bytes) -> str:
@@ -69,8 +64,8 @@ def namespace_of(root: Node, source: bytes) -> str:
     return ""
 
 
-def _index_one(args: tuple[str, str]) -> dict[str, str] | None:
-    file_path, relative_path = args
+def _index_one(args: tuple[str, str, str]) -> tuple[dict[str, str], dict[str, Any]] | None:
+    file_path, relative_path, repo_root = args
     try:
         source = Path(file_path).read_bytes()
     except OSError as exc:
@@ -95,7 +90,7 @@ def _index_one(args: tuple[str, str]) -> dict[str, str] | None:
                 visit(child)
 
         visit(root)
-        return found
+        return found, collect_additive("php", root, source, relative_path, Path(repo_root))
     except Exception as exc:
         get_logger("breezeai_cog.index").warning(
             "index.file.skipped", path=file_path, language="php",
@@ -105,15 +100,20 @@ def _index_one(args: tuple[str, str]) -> dict[str, str] | None:
 
 
 def build_fqcn_index(repo_root: Path, files: Sequence[Path], jobs: int = 1) -> PhpIndex:
-    args = [(str(path), repo_relative(path, repo_root)) for path in files]
+    own, fact_files = split_fact_sources("php", list(files))
+    collected: dict[str, list[Any]] = collect_fact_sources("php", fact_files, repo_root, jobs)
+    args = [(str(path), repo_relative(path, repo_root), str(repo_root)) for path in own]
     fqcn: dict[str, str | None] = {}
     for fragment in parallel_map(args, _index_one, jobs):
-        if fragment is not None:
-            for name, path in fragment.items():
-                record_distinct(fqcn, name, path)
+        if fragment is None:
+            continue
+        names, facts = fragment
+        for name, path in names.items():
+            record_distinct(fqcn, name, path)
+        for fact, value in facts.items():
+            collected.setdefault(fact, []).append(value)
     folded_fqcn: dict[str, str | None] = {}
     namespace_members: dict[str, dict[str, str | None]] = {}
-    simple_names: dict[str, str | None] = {}
     for name, indexed_path in fqcn.items():
         folded = name.casefold()
         existing = folded_fqcn.get(folded)
@@ -127,14 +127,6 @@ def build_fqcn_index(repo_root: Path, files: Sequence[Path], jobs: int = 1) -> P
             members[simple] = None
         else:
             members[simple] = indexed_path
-        simple_key = simple.casefold()
-        if simple_key in simple_names and simple_names[simple_key] != indexed_path:
-            simple_names[simple_key] = None
-        else:
-            simple_names[simple_key] = indexed_path
-    return PhpIndex(
-        fqcn=fqcn,
-        folded_fqcn=folded_fqcn,
-        namespace_members=namespace_members,
-        simple_names=simple_names,
-    )
+    index = PhpIndex(fqcn=fqcn, folded_fqcn=folded_fqcn, namespace_members=namespace_members)
+    # Registered facts may read the whole index, so they resolve after it is built.
+    return replace(index, facts=resolve_additive("php", collected, index))

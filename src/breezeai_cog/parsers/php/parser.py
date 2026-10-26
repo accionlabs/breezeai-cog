@@ -11,7 +11,7 @@ from ...emit import file_id
 from ...schemas import SCHEMA_VERSION, Class, FileRecord, Function, Statement
 from ...utils import count_loc
 from ..additive import run_additive
-from ..base import BaseParser, ParseContext
+from ..base import BaseParser, HandlerLocator, ParseContext
 from ..callresolve import make_resolver
 from ..comments_common import comment_statements_for
 from ..statements_common import emit_enum_members
@@ -19,6 +19,7 @@ from ..treesitter import node_text, parse_source
 from ..php_route_common import walk
 from .classes import build_class
 from .functions import build_function, function_node_type, function_parent_id
+from .handlers import handler_locator
 from .imports import extract_imports
 from .index import PhpIndex, build_fqcn_index
 from .mappings import COMMENT_TYPES, CONTROL_FLOW, STATEMENT_TYPES
@@ -57,49 +58,13 @@ class PhpParser(BaseParser):
         root = parse_source("php", ctx.source, ctx.parse_timeout_micros).root_node
         return self.extract(root, ctx)
 
-    def link_handlers(self, record: FileRecord, ctx: ParseContext) -> None:
-        """Resolve PHP handlers only when the declaration is directly verifiable.
-
-        PHP route syntax commonly names a controller without carrying its declaration
-        location.  The registration line is not that location, so leave the line empty
-        until a same-file method or an unambiguous indexed class file is found.
-        """
-        if not ctx.capture_statements:
-            return
+    def handler_locator(self, ctx: ParseContext) -> HandlerLocator | None:
+        # Asked for only when a record names a handler without a line (a routes file, a
+        # WordPress hook), so the extra parse is limited to those files.
         index = ctx.resolution_index if isinstance(ctx.resolution_index, PhpIndex) else None
-        for statement in record.statements:
-            if statement.semanticType not in {"route", "eventbus_consumer", "timer"}:
-                continue
-            if not statement.handler or statement.handlerLine is not None or statement.handlerPath is not None:
-                continue
-            handler = statement.handler
-            if "@" in handler:
-                class_name, method_name = handler.split("@", 1)
-            else:
-                class_name, method_name = handler, "__invoke"
-            simple_class = class_name.lstrip("\\").rsplit("\\", 1)[-1]
-            same_file_classes = {
-                cls.id: cls for cls in record.classes
-                if cls.name.lower() == simple_class.lower()
-            }
-            same_file_methods = [
-                fn for fn in record.functions
-                if fn.name.lower() == method_name.lower()
-                and (not same_file_classes or fn.parentId in same_file_classes)
-            ]
-            if len(same_file_methods) == 1:
-                statement.handlerLine = same_file_methods[0].startLine
-                continue
-            if index is None:
-                continue
-            wanted = class_name.lstrip("\\").lower()
-            indexed_path = index.fqcn.get(class_name.lstrip("\\"))
-            if indexed_path is None:
-                indexed_path = index.folded_fqcn.get(wanted)
-            if indexed_path is None:
-                indexed_path = index.simple_names.get(simple_class.casefold())
-            if indexed_path is not None and indexed_path != ctx.path:
-                statement.handlerPath = indexed_path
+        root = parse_source("php", ctx.source, ctx.parse_timeout_micros).root_node
+        _, _, _, bindings = extract_imports(root, ctx.source, ctx.path, ctx.repo_root, index)
+        return handler_locator(root, ctx.source, ctx.path, index, bindings)
 
     def extract(self, root: Node, ctx: ParseContext) -> FileRecord:
         source, path = ctx.source, ctx.path
