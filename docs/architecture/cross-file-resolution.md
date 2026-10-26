@@ -92,7 +92,7 @@ What each index holds:
 |---|---|---|
 | Java, Groovy | fully-qualified class name → file; `Class.FIELD` → constant value; **registered facts** (method declarations `java.method-lines` — (class, method) → file and line, for `handlerPath`; Java: `index.facts` — Vert.x service interfaces `vertx.service-interfaces`, Spring context paths `spring.context-paths` and module properties `spring.properties`, JAX-RS application paths and sub-resource bases `jaxrs.prefixes`, servlet filters / interceptors / JAX-RS request filters `java.web-guards`) | imports, same-package types, event addresses / route paths |
 | Kotlin | fully-qualified class name → file | imports, same-package types |
-| Scala | fully-qualified class name → file; **registered facts** (`index.facts`: Play router includes `play.router-includes` — read from the routes files, which the Play routes parser owns) | imports, same-package types, SIRD router prefixes |
+| Scala | fully-qualified class name → file; **registered facts** (method declarations `scala.method-lines` — (class, method) → file and line, for `handlerPath`; `index.facts`: Play router includes `play.router-includes` — read from the routes files, which the Play routes parser owns) | imports, same-package types, SIRD router prefixes and handlers |
 | Play routes files | the `->` router includes, resolved to each router's prefix | route prefixes of included routes files |
 | C# | type → files; global `using`s; project roots (`.csproj`), their MSBuild `using`s and project references; class heritage incl. methods; extension methods; implemented interfaces; **registered facts** (string constants `csharp.string-constants` and MVC area registrations `aspnet.area-registrations`, for area route prefixes; method declarations `csharp.method-lines` — (class, method) → file and line, for `handlerPath`; minimal-API group extensions `aspnet.group-extensions` — an extension method on `RouteGroupBuilder` → the prefix of the one group it is called on; `index.facts`: HotChocolate registered roots `hotchocolate.registered-roots`, graphql-dotnet schema roots `graphql-dotnet.schema-roots`, WCF `.svc` hosts `wcf.svc-hosts` — read from `.svc` files, which the ServiceHost parser owns — Web Forms `MapPageRoute` URLs `webforms.page-routes`, HotChocolate source-generated DataLoaders `hotchocolate.data-loaders`, AWS Lambda handlers `aws.deployed-handlers` — read from `serverless.yml` / SAM templates) | type resolution, inherited calls, extension calls, routes |
 | VB | class heritage (base class + attributes) | inherited controller routes |
@@ -407,7 +407,7 @@ Everything for this lives in `parsers/handler_sites.py`:
 
 | The detector knows … | Call | Languages | Used by |
 |---|---|---|---|
-| a class and a method | `locate_method(index, lang, cls, method)` — the `*.method-lines` fact | C#, Java, Groovy, PHP, Ruby | ASP.NET, HotChocolate, Spring functional routes, Vert.x, Quartz, Rails, WCF |
+| a class and a method | `locate_method(index, lang, cls, method)` — the `*.method-lines` fact | C#, Java, Groovy, PHP, Ruby, Scala | ASP.NET, HotChocolate, Spring functional routes, Vert.x, Quartz, Rails, WCF, Play SIRD |
 | a module and an exported name | `locate_export(index, module_file, name)` — the `typescript.declarations` fact, re-exports followed | TypeScript / JavaScript | GraphQL resolver modules |
 | only a name written in this file | nothing — it names the handler; `link_handlers` locates it after parsing | TypeScript / JavaScript (every TS framework parser) | React, Angular, Vue, Next.js pages |
 
@@ -419,7 +419,10 @@ The `*.method-lines` fact is keyed by the class's simple name, so two classes of
 ambiguous. A detector that knows which files the class binds to passes them as `within=`, and
 only the sites in those files count: the C# Quartz detector binds the job class by the C# rules
 (`type_files`: namespaces, `using`s, projects), so two examples that each declare their own
-`SimpleJob` are told apart; WCF passes the files of the contract's one implementing type.
+`SimpleJob` are told apart; WCF passes the files of the contract's one implementing type; a
+Play SIRD router passes the one file its receiver's declared type (`controller: PostController`,
+read from the router class alone) resolves to through the router's imports or package, so `v1`
+and `v2` controllers of one name are told apart — and two candidates leave it unlocated.
 
 Play's `conf/routes` is parsed by its own base parser, which has no Scala or Java index to ask.
 Its `build_index` reads the controllers the routes name instead, in Play's project layout
