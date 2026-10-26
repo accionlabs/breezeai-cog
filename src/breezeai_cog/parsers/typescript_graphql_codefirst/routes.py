@@ -44,13 +44,11 @@ _OPS = {"Query": "query", "Mutation": "mutation", "Subscription": "subscription"
 _AUTH_DECORATORS = {"RequireScopes", "RequireAPIScope", "Authorized"}
 _LEADING_ID_RE = re.compile(r"[A-Za-z_$][\w$]*")
 
-#: GraphQL built-in scalars are not DTOs — an operation over ``ID``/``String`` carries no
-#: payload type, so those are dropped (honest-null), mirroring the primitive filtering the
-#: NestJS/resolver-map detectors apply.
-_GQL_SCALARS = frozenset({"ID", "String", "Int", "Float", "Boolean"})
-#: TS type wrappers/primitives skipped when reading a DTO off an ``@Arg`` parameter type.
+#: TS type wrappers skipped when reading a DTO off an ``@Arg`` parameter type, and types that
+#: carry no payload. A built-in type or scalar (``Int``, ``Date``) is the declared type: kept,
+#: as the SDL parser keeps ``Int`` (docs/architecture/statement-model.md, DTO fields).
 _TS_NON_DTO = frozenset(
-    {"string", "number", "boolean", "any", "unknown", "void", "object", "Date",
+    {"string", "number", "boolean", "any", "unknown", "void", "object",
      "Array", "Promise", "Record", "Partial"}
 )
 
@@ -90,8 +88,9 @@ def _sdl_fragment(arg: str) -> str | None:
 
 
 def _dto_or_none(name: str | None) -> str | None:
-    """A DTO type name, or None for an absent/built-in-scalar type (honest-null)."""
-    return name if name and name not in _GQL_SCALARS else None
+    """The declared type name, built-in scalars (``Int``, ``String``) included; None when
+    absent."""
+    return name or None
 
 
 def _first_field_definition(root: Node) -> Node | None:
@@ -108,7 +107,7 @@ def _sdl_dtos(fragment: str, timeout_micros: int) -> tuple[str | None, str | Non
     """(requestDTO, responseDTO) from an operation's SDL fragment. The fragment is wrapped into
     a parseable object type and walked with the GraphQL grammar, reusing the SDL DTO helpers:
     requestDTO is the ``input``/``data`` arg (else the first), responseDTO the return type — each
-    reduced to its base name (``[OrderLine!]!`` → ``OrderLine``). Scalars → None."""
+    reduced to its base name (``[OrderLine!]!`` → ``OrderLine``), scalars included."""
     wrapped = b"type Query {\n" + fragment.encode("utf-8") + b"\n}"
     try:
         root = parse_source("graphql", wrapped, timeout_micros).root_node

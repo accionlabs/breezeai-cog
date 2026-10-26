@@ -83,15 +83,14 @@ def _graphql_op_name(d: Decorator, mname: str) -> str:
     return mname
 _RESPONSE_DECORATORS = {"ApiResponse", "ApiOkResponse", "ApiCreatedResponse"}
 _TYPE_PROP_RE = re.compile(r"\btype\s*:\s*\[?\s*([A-Za-z_$][\w.$]*)")
-# return-type → responseDTO: skip generic wrappers and primitives, take the first
-# PascalCase type name (``Promise<OrderDto[]>`` → ``OrderDto``, ``void`` → None).
+# return-type → responseDTO: skip generic wrappers and types with no payload, take the first
+# PascalCase type name (``Promise<OrderDto[]>`` → ``OrderDto``, ``void`` → None). A GraphQL
+# scalar or built-in class (``() => Int``, ``() => Date``) is the declared type: kept.
 _ID_RE = re.compile(r"[A-Za-z_$][\w$]*")
 _NON_DTO_TYPES = {
     "Promise", "Observable", "Array", "Map", "Set", "Record", "Partial", "Readonly",
     "void", "any", "unknown", "never", "null", "undefined", "string", "number",
     "boolean", "object", "bigint", "symbol", "this", "true", "false",
-    # NestJS/GraphQL scalar wrappers used as @ResolveField return types (e.g. () => Number)
-    "Number", "String", "Boolean",
 }
 
 

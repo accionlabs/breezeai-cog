@@ -155,8 +155,8 @@ def test_graphql_code_first_operations(tmp_path) -> None:
     assert ("RESOLVE_FIELD", "Conversation.title") in ops
     assert ops[("RESOLVE_FIELD", "Conversation.title")].routeKind == "field_resolver"
     assert ops[("RESOLVE_FIELD", "Conversation.title")].framework == "graphql"
-    # @ResolveField(() => String) — String is a scalar → responseDTO is None
-    assert ops[("RESOLVE_FIELD", "Conversation.title")].responseDTO is None
+    # @ResolveField(() => String) — the declared type, a scalar
+    assert ops[("RESOLVE_FIELD", "Conversation.title")].responseDTO == "String"
     # the @Query PARAM decorator on SearchResolver.search must NOT produce a route
     assert "search" not in {s.endpoint for s in ops.values()}
     # ops parent to their handler methods
@@ -197,7 +197,7 @@ def test_resolve_field_captured(tmp_path) -> None:
     # return type from @ResolveField(() => BrandResult) → responseDTO
     assert fields["Brand.byObjectIds"].responseDTO == "BrandResult"
     # @ResolveField(() => Number) → Number is a scalar → responseDTO None
-    assert fields["Brand.count"].responseDTO is None
+    assert fields["Brand.count"].responseDTO == "Number"  # () => Number: the declared type
     # framework is graphql
     assert all(s.framework == "graphql" for s in fields.values())
 
@@ -508,8 +508,8 @@ export class UserResolver {
     assert by_ep["getUser"].responseDTO == "UserDto"
     # @Mutation(() => [UserDto]) — array form → UserDto (scalar stripped by _dto_from_type)
     assert by_ep["createUser"].responseDTO == "UserDto"
-    # @Query(() => String) — scalar → responseDTO None
-    assert by_ep["ping"].responseDTO is None
+    # @Query(() => String) — the declared scalar
+    assert by_ep["ping"].responseDTO == "String"
 
 
 def _resolver_routes(tmp_path, src: bytes) -> dict[str, tuple[str | None, str | None]]:

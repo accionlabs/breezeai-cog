@@ -49,6 +49,15 @@ The other fields depend on the meaning:
 | `isPartial` | Parts of a split statement ([§7](#7-very-large-statements)) |
 | `decorators`, `uiRole` | Declarations that are UI components (`export const X = defineComponent({…})` → `uiRole`), with their decorators |
 
+**`requestDTO` / `responseDTO`.** `requestDTO` is the type name of the request payload as the
+code declares it: the body parameter (`@RequestBody`, `@Body()`, a FastAPI body model) or a
+GraphQL operation's input argument. `responseDTO` is the type name of the response payload as
+declared: the response model, the handler's return type, or the GraphQL field type. Both are
+the base type name: async, HTTP-result and list wrappers are removed (`Promise<T>`, `Task<T>`,
+`ActionResult<T>`, `[T!]!` → `T`). Built-in types and scalars are kept (`Int`, `String`,
+`Date`): they are the declared type. Empty when nothing is declared, or when the declared type
+carries no payload (`void`, `IActionResult`).
+
 Statements are stored **flat** on `FileRecord.statements`, not nested inside functions or
 classes. Nesting is expressed by `parentId` and line ranges.
 
