@@ -324,7 +324,6 @@ def test_page_route_uses_friendly_url() -> None:
 def test_page_route_subdir_app_end_to_end(tmp_path: Path) -> None:
     # Full pipeline: RouteConfig.cs in a subdir app produces a key that matches the
     # code-behind's full repo-relative path, so the page gets the friendly endpoint.
-    import tempfile
     from breezeai_cog.parsers.csharp.imports import build_csharp_index
 
     route_src = b"""

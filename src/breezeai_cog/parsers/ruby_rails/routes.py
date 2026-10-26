@@ -11,6 +11,7 @@ from ...schemas import FileRecord
 from ..emits import Emit
 from ..ruby.ownership import owner_id
 from ..handler_sites import handler_location, locate_method
+from ..inflect import plural as _plural, singular as _singular
 from ..treesitter import node_text
 from .callbacks import callbacks_of, controller_class, guards_for
 
@@ -123,39 +124,6 @@ _SINGULAR_ACTIONS = (
     ("show", "GET", ""), ("update", "PATCH", ""), ("update", "PUT", ""),
     ("destroy", "DELETE", ""),
 )
-#: Irregular nouns Rails inflects (singular ↔ plural) that the suffix rules below get wrong.
-_IRREGULAR = {"person": "people", "child": "children", "man": "men", "woman": "women",
-              "mouse": "mice", "goose": "geese", "foot": "feet", "tooth": "teeth"}
-_IRREGULAR_PLURAL = {v: k for k, v in _IRREGULAR.items()}
-
-
-def _singular(name: str) -> str | None:
-    """ActiveSupport-style singular of a resource name (``photos`` → ``photo``, ``categories`` →
-    ``category``, ``people`` → ``person``); None when the word is not one the rules are sure of
-    (a guessed parameter name would be a wrong address)."""
-    if name in _IRREGULAR_PLURAL:
-        return _IRREGULAR_PLURAL[name]
-    if name.endswith("ies") and len(name) > 3:
-        return name[:-3] + "y"
-    if name.endswith(("sses", "shes", "ches", "xes", "zes")):
-        return name[:-2]
-    if name.endswith("s") and not name.endswith(("ss", "us", "is")):
-        return name[:-1]
-    return None
-
-
-def _plural(name: str) -> str | None:
-    """ActiveSupport-style plural (``profile`` → ``profiles``): a singular ``resource`` is served
-    by the plural controller. None when unsure."""
-    if name in _IRREGULAR:
-        return _IRREGULAR[name]
-    if name.endswith("y") and len(name) > 1 and name[-2] not in "aeiou":
-        return name[:-1] + "ies"
-    if name.endswith(("s", "x", "z", "ch", "sh")):
-        return name + "es"
-    return name + "s" if name and name[-1].isalpha() else None
-
-
 class _Resource:
     """One ``resources`` / ``resource`` declaration: the path segment, its controller, the
     member parameter, the actions it declares (None = not known) — or ``ok`` False when a part

@@ -307,6 +307,10 @@ def _is_prisma_chain(low: str) -> bool:
 
 def match_db(callee: str, method: str, language: str | None = None,
              typed_db_ids: "frozenset[str] | None" = None) -> str | None:
+    if language == "php":
+        # PHP data access is recorded from evidence (imports, types, model classes) by the
+        # php-data-access detector; a name match here would be a guess (php/data_access.py).
+        return None
     m = method.lower()
     low = callee.lower()
     if m in _PRISMA_VERBS and _is_prisma_chain(low):
@@ -379,6 +383,7 @@ def match_db(callee: str, method: str, language: str | None = None,
         if receiver and any(receiver.endswith(s) for s in _NON_DB_RECEIVERS):
             return None  # a cache/collection/UI-state/etc. receiver — not data access
         return "orm"
+
     if m in _DJANGO_VERBS and (language is None or language in _PYTHON) and (
         ".objects." in low or low.startswith("objects.") or "queryset" in low
     ):
