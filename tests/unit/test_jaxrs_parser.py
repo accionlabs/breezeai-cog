@@ -240,3 +240,19 @@ def test_path_values_resolve_or_leave_the_endpoint_empty(analyze_files) -> None:
         "x": "/users/api/x",
         "gone": None,
     }
+
+
+def test_locator_owner_path_is_its_own_not_a_same_named_class(analyze_files) -> None:
+    # Two classes named Api in different packages: the locator in a.Api serves Items under
+    # a.Api's path, never b.Api's.
+    st = analyze_files({
+        "src/main/java/a/Api.java": _RS + '@Path("/alpha")\npublic class Api {\n'
+                                    '  @Path("items") public Items items() { return null; }\n}\n',
+        "src/main/java/a/Items.java": _RS + "public class Items {\n"
+                                      '  @GET public String list() { return ""; }\n}\n',
+        "src/main/java/b/Api.java": _RS.replace("package a", "package b")
+                                    + '@Path("/beta")\npublic class Api {\n'
+                                    '  @GET public String ping() { return ""; }\n}\n',
+    })
+    got = {s.handler: s.endpoint for s in st if s.semanticType == "route"}
+    assert got == {"list": "/alpha/items", "ping": "/beta"}

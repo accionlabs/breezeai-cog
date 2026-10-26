@@ -258,8 +258,11 @@ def resolve_jaxrs(
         return resolve_value(v, consts)
 
     app: dict[str, str | None] = {}
-    class_paths: dict[str, PathValue] = {}
-    locators: dict[str, list[tuple[str, PathValue]]] = {}
+    class_paths: dict[str, PathValue] = {}  # any root resource of that simple name (is it one?)
+    # returned class → (owner, locator path, the owner file's own @Path values): a locator is
+    # declared in its owner, so the owner's @Path is the one in that file — never another
+    # package's class of the same simple name.
+    locators: dict[str, list[tuple[str, PathValue, dict[str, PathValue]]]] = {}
     declared = dict(top_level)  # class simple name → how many declarations in the repo
     for f in facts:
         for cls in f.nested:
@@ -271,22 +274,24 @@ def resolve_jaxrs(
             app[module] = resolved
         class_paths.update(f.class_paths)
         for owner, path, returned in f.locators:
-            locators.setdefault(returned, []).append((owner, path))
+            locators.setdefault(returned, []).append((owner, path, f.class_paths))
 
-    def base_of(cls: str, seen: frozenset[str]) -> object:
-        """A class's base: its own @Path, else its locator base; None if not a resource,
-        _UNKNOWN if unresolved or ambiguous-unknown."""
-        if cls in class_paths:
-            own = value(class_paths[cls])
+    def base_of(cls: str, seen: frozenset[str], own_file: dict[str, PathValue]) -> object:
+        """A locator owner's base: its own @Path in its file, else its locator base; None if not
+        a resource, _UNKNOWN if unresolved, or a sub-resource whose name is declared twice."""
+        if cls in own_file:
+            own = value(own_file[cls])
             return own if own is not None else _UNKNOWN
+        if cls in locators and declared.get(cls) != 1:
+            return _UNKNOWN  # reached by a locator, but which class of that name is unknown
         return sub_base(cls, seen)
 
     def sub_base(cls: str, seen: frozenset[str]) -> object:
         if cls in seen or declared.get(cls) != 1:
             return None
         candidates: set[object] = set()
-        for owner, path in locators.get(cls, []):
-            parent = base_of(owner, seen | {cls})
+        for owner, path, owner_file in locators.get(cls, []):
+            parent = base_of(owner, seen | {cls}, owner_file)
             if parent is None:  # the locator's class is not a resource
                 continue
             local = value(path)
