@@ -745,3 +745,15 @@ Route::fallback(fn () => 404);
     lines = {(s.endpoint, s.handler, s.handlerLine)
              for r in (laravel, ci) for s in r.statements if s.semanticType == "route"}
     assert lines == {("/c", None, 4), (None, None, 5), ("/x", None, 2)}
+
+
+def test_symfony_builder_needs_a_declared_routing_builder() -> None:
+    record = _parse(SymfonyParser(), """<?php
+use Symfony\\Component\\Routing\\RouteCollection;
+class K {
+    function a() { $this->routeParams->add('k', 'v'); $collection->add('sku', 'x'); }
+    function b() { $c = new RouteCollection(); $c->add('blog', '/blog'); }
+}
+""")
+    routes = [(s.endpoint, s.parentId) for s in record.statements if s.semanticType == "route"]
+    assert routes == [("/blog", next(f.id for f in record.functions if f.name == "b"))]

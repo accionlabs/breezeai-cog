@@ -306,6 +306,12 @@ def _call_args(node: Node) -> list[Node]:
     return list(args.named_children) if args is not None else []
 
 
+def _innermost_function(record: FileRecord, line: int) -> str:
+    """The id of the innermost function containing ``line``, else the file."""
+    owners = [fn for fn in record.functions if fn.startLine <= line <= fn.endLine]
+    return max(owners, key=lambda fn: (fn.startLine, -fn.endLine)).id if owners else record.id
+
+
 def _chain_controller(expression: Node, source: bytes) -> str | None:
     """The handler a builder chain's ``->controller(...)`` names, written like every PHP route
     handler (``'App\\Controller\\Blog::list'`` / ``[Blog::class, 'list']`` → ``…Blog@list``,
@@ -327,15 +333,24 @@ def _call_chain_array(expression: Node, source: bytes, method: str) -> list[str]
     return []
 
 
-def _routing_builder_receiver(receiver: str) -> bool:
-    low = receiver.lower().replace("$", "")
-    terminal = re.split(r"->|\\", low)[-1]
-    return terminal in {"routes", "collection", "routecollection"} or "route" in terminal
+_BUILDER_TYPED = re.compile(
+    rb"\b(?:RoutingConfigurator|RouteCollection)\s+\$(\w+)"  # a typed parameter
+    rb"|\$(\w+)\s*=\s*new\s+\\?(?:[\w\\]+\\)?RouteCollection\s*\("  # $c = new RouteCollection()
+)
+
+
+def _builder_variables(source: bytes) -> set[str]:
+    """Variables this file declares as a routing builder. Only these are routes receivers: a
+    name alone (``$routeParams->add('k', 'v')``, ``$collection->add(...)``) is not evidence."""
+    return {"$" + (m.group(1) or m.group(2)).decode() for m in _BUILDER_TYPED.finditer(source)}
 
 
 def detect_symfony_route_builders(root: Node, source: bytes, path: str, record: FileRecord) -> int:
     source_lower = source.decode("utf-8", "replace").lower()
     if "routingconfigurator" not in source_lower and "routecollection" not in source_lower:
+        return 0
+    builders = _builder_variables(source)
+    if not builders:
         return 0
     seen = {statement.id for statement in record.statements}
     emitted = 0
@@ -343,7 +358,7 @@ def detect_symfony_route_builders(root: Node, source: bytes, path: str, record: 
         if call.type not in _CALL_TYPES or _call_method(call, source) != "add":
             continue
         receiver = call.child_by_field_name("object")
-        if receiver is None or not _routing_builder_receiver(node_text(receiver, source)):
+        if receiver is None or receiver.type != "variable_name" or node_text(receiver, source) not in builders:
             continue
         args = _call_args(call)
         name = string_value(args[0], source) if args else None
@@ -355,7 +370,7 @@ def detect_symfony_route_builders(root: Node, source: bytes, path: str, record: 
         if name is None and endpoint is None:
             continue
         line = call.start_point[0] + 1
-        parent_id = next((fn.id for fn in record.functions if fn.startLine <= line <= fn.endLine), record.id)
+        parent_id = _innermost_function(record, line)
         methods = [verb.upper() for verb in _call_chain_array(expression, source, "methods")] or ["ANY"]
         controller = _chain_controller(expression, source)
         requirements = any(node.type in _CALL_TYPES and _call_method(node, source) == "requirements"
