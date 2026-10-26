@@ -164,14 +164,27 @@ def _sird_body(clause: Node) -> Node | None:
 
 
 def _extract_sird_handler(clause: Node, source: bytes) -> str | None:
-    """Extract handler name from SIRD case body: ``case GET(p"/") => controller.index`` -> ``index``."""
+    """Extract handler name from SIRD case body: ``case GET(p"/") => controller.index`` -> ``index``.
+
+    Only a method reference names one — ``name``, ``x.method``, ``x.method(args)``. An action
+    written inline (``Action { … }``, ``cc.actionBuilder { … }``, curried
+    ``Action(parse.json) { … }``) has no name: its builder is not the handler."""
     body = _sird_body(clause)
     if body is None:
         return None
     if body.type == "call_expression":
         fn = body.child_by_field_name("function")
-        if fn is not None:
+        args = body.child_by_field_name("arguments")
+        root = _callee_root(fn)
+        if (
+            fn is not None
+            and fn.type in ("identifier", "field_expression")
+            and args is not None
+            and args.type == "arguments"
+            and (root is None or node_text(root, source) != "Action")
+        ):
             return node_text(fn, source).rsplit(".", 1)[-1]
+        return None
     if body.type == "field_expression":
         field = body.child_by_field_name("field")
         if field is not None:
@@ -327,11 +340,14 @@ def detect_play_sird_routes(
                     handler = _extract_sird_handler(clause, source)
                     if sites is None:
                         sites = _ControllerSites(root, source, record.path, repo_root, index)
+                    body = _sird_body(clause)
                     line, path = handler_location(
                         sites.find(_router_scope(node, root), source,
                                    _sird_receiver(clause, source), handler),
                         record.path,
                     )
+                    if handler is None and body is not None:
+                        line = body.start_point[0] + 1  # inline action (anonymous)
                     routes.append(
                         Emit(clause, dict(
                             semanticType="route",

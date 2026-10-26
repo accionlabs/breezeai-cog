@@ -247,6 +247,42 @@ def test_sird_handler_without_a_resolved_controller_has_no_location(
     ]
 
 
+INLINE_ROUTER = """package v1
+import play.api.routing.Router.Routes
+import play.api.routing.SimpleRouter
+import play.api.routing.sird._
+class InlineRouter(controller: PostController, cc: ControllerComponents) extends SimpleRouter {
+  override def routes: Routes = {
+    case GET(p"/a") => Action { Ok("x") }
+    case GET(p"/b") => Action.async { req => f(req) }
+    case GET(p"/c") => Action(parse.json) { req => Ok("") }
+    case GET(p"/d") => cc.actionBuilder { Ok("y") }
+    case GET(p"/e") => controller.secured { controller.index }
+    case GET(p"/f") => controller.show(id)
+    case GET(p"/g") => controller.index
+    case GET(p"/h") => helper
+  }
+}
+"""
+
+
+def test_sird_inline_action_is_anonymous(analyze_files) -> None:
+    rows = {
+        r.endpoint: (r.handler, r.handlerLine)
+        for r in _eps(analyze_files({"app/v1/InlineRouter.scala": INLINE_ROUTER}))
+    }
+    # written inline: no name, the line of the action itself
+    assert rows["/a"] == (None, 7)
+    assert rows["/b"] == (None, 8)
+    assert rows["/c"] == (None, 9)
+    assert rows["/d"] == (None, 10)
+    assert rows["/e"] == (None, 11)
+    # a method reference keeps its name
+    assert rows["/f"][0] == "show"
+    assert rows["/g"][0] == "index"
+    assert rows["/h"][0] == "helper"
+
+
 def test_two_routers_in_one_file_lead_to_their_own_controllers(analyze_files) -> None:
     routers = """package v1
 import play.api.routing.Router.Routes
