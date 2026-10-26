@@ -10,7 +10,9 @@ wiring facts (:mod:`.file_facts`) are collected once per repository and composed
   guards it inherits, and the outermost app/router it is reached from;
 * an app (``FastAPI()``, at module level or made in a ``create_app()`` function) is a root —
   unless a ``.mount(…)`` anywhere names it or its factory: a sub-application's address is unknown;
-* a router included at more than one place, or in a cycle, keeps its own prefix (ambiguous);
+* a router included at more than one place is served at each of them: its address is unknown
+  (``None``), never its own prefix alone — an address it is not served at;
+* a router in an include cycle keeps its own prefix;
 * a prefix that exists but cannot be resolved makes the address unknown (``None``);
 * a prefix given by a module-level string constant (``API_PREFIX = "/api/v1"``, in this file or
   imported) is resolved; a settings attribute (``settings.API_V1_PREFIX``) is not — the
@@ -124,7 +126,9 @@ def _resolve(values: list[tuple[str, str, FileFacts]], index: Any) -> FastapiWir
             # Made inside a function and not found included: served wherever the function's
             # result is mounted — unknown, never the bare path.
             result = (None, deps, node)
-        elif len(at) != 1 or node in seen:  # not included anywhere, ambiguous, or a cycle
+        elif len(at) > 1:  # served under each include: no single address
+            result = (None, deps, node)
+        elif not at or node in seen:  # not included anywhere, or a cycle
             result = (prefix, deps, node)
         else:
             (parent, mount, mount_deps), = at

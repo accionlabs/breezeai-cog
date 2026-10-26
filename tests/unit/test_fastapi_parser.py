@@ -161,7 +161,7 @@ def test_unresolved_prefix_leaves_endpoint_empty(analyze_files) -> None:
     assert got == {"get_order": None, "list_items": None}
 
 
-def test_router_included_twice_or_not_here_keeps_its_own_path(analyze_files) -> None:
+def test_router_included_twice_has_no_address_one_not_included_keeps_its_own(analyze_files) -> None:
     got = _endpoints(analyze_files, (
         "from fastapi import FastAPI, APIRouter\n"
         "app = FastAPI()\n"
@@ -172,7 +172,8 @@ def test_router_included_twice_or_not_here_keeps_its_own_path(analyze_files) -> 
         "app.include_router(shared, prefix='/v1')\n"
         "app.include_router(shared, prefix='/v2')\n"
     ))
-    assert got == {"x": "/shared/x", "y": "/lonely/y"}
+    # shared is served at /v1/shared/x and /v2/shared/x — not at /shared/x: no address
+    assert got == {"x": None, "y": "/lonely/y"}
 
 
 def test_empty_path_is_the_router_prefix(analyze_files) -> None:
@@ -280,7 +281,7 @@ def test_include_router_from_another_file(analyze_files) -> None:
     assert got["list_users"] == (None, ["CORSMiddleware"], None)
 
 
-def test_router_included_twice_keeps_its_own_path(analyze_files) -> None:
+def test_router_included_twice_across_files_has_no_address(analyze_files) -> None:
     st = analyze_files({
         "items.py": (
             "from fastapi import APIRouter\nrouter = APIRouter(prefix='/items')\n\n"
@@ -291,7 +292,8 @@ def test_router_included_twice_keeps_its_own_path(analyze_files) -> None:
         "v2.py": "from fastapi import FastAPI\nfrom items import router\napp = FastAPI()\n"
                  "app.include_router(router, prefix='/v2')\n",
     })
-    assert [s.endpoint for s in st if s.semanticType == "route"] == ["/items/"]
+    # served at /v1/items/ and /v2/items/, never at /items/
+    assert [s.endpoint for s in st if s.semanticType == "route"] == [None]
 
 
 def test_mounted_sub_application_has_no_address_without_an_index(tmp_path) -> None:

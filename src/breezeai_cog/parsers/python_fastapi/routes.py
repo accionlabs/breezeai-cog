@@ -74,7 +74,8 @@ def _router_bases(
     ``app = FastAPI(dependencies=…)`` gives every route of the app its guards.
 
     A router never included in this file keeps its own prefix and guards (no wiring seen). A
-    router included at more than one place keeps its own too (ambiguous). A prefix that exists
+    router included at more than one place is served at each: its base is :data:`_UNKNOWN`
+    (never its own prefix alone, an address it is not served at). A prefix that exists
     but is not a literal makes the base :data:`_UNKNOWN`. Includes of routers from other files
     (``app.include_router(orders.router)``) are not resolved here. The third map gives each
     router the outermost app/router it is reached from in this file (itself when not included)."""
@@ -110,7 +111,9 @@ def _router_bases(
     def wiring(name: str, seen: frozenset[str]) -> tuple[str | object, list[str], str]:
         prefix, deps = own.get(name, ""), own_deps.get(name, [])
         sites = includes.get(name, set())
-        if len(sites) != 1 or name in seen:  # not included here, or ambiguous, or a cycle
+        if len(sites) > 1:  # served under each include: no single address
+            return _UNKNOWN, deps, name
+        if not sites or name in seen:  # not included here, or a cycle
             return prefix, deps, name
         (parent, mount, mount_deps), = sites
         parent_base, parent_deps, top = wiring(parent, seen | {name})
