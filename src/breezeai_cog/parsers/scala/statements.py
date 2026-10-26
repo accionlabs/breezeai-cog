@@ -55,8 +55,9 @@ _SCALA_HTTP_TYPES_GATED: dict[str, bytes] = {
     "HttpClient": b"java.net.http",
 }
 _HTTP_METHODS = frozenset({"get", "post", "put", "patch", "delete", "head", "options"})
-#: scalaj builder methods that aren't themselves named after the verb they produce.
-_HTTP_METHOD_ALIASES = {"postdata": "post"}
+#: scalaj builder methods that set the request's verb; any other builder call keeps
+#: scalaj's default GET. ``method(...)`` takes the verb as an argument.
+_SCALAJ_VERB_METHODS = {"postdata": "post", "postform": "post", "postmulti": "post", "put": "put"}
 #: Spring RestTemplate's "ForObject"/"ForEntity" family — the verb is baked into the
 #: method name rather than being the method name itself.
 _REST_TEMPLATE_METHOD_VERBS = {
@@ -168,10 +169,32 @@ def _chain_http_method(call: Node, source: bytes) -> str | None:
         method = _function_name(function, source).lower()
         if method in _HTTP_METHODS:
             return method
-        alias = _HTTP_METHOD_ALIASES.get(method)
-        if alias is not None:
-            return alias
     return None
+
+
+def _scalaj_request(chain: Node, source: bytes) -> tuple[str, str | None]:
+    """The verb and URL of a scalaj ``Http(url).….asString`` builder chain.
+
+    The URL is ``Http``'s own argument — never another builder's (``header("Accept",
+    …)``). The verb is set by the outermost (last applied) verb builder; a
+    ``method(…)`` argument that isn't a literal verb leaves it unresolved (``request``).
+    """
+    verb: str | None = None
+    endpoint: str | None = None
+    for chained in _chain_calls(chain, source):
+        function = chained.child_by_field_name("function")
+        if function is None:
+            continue
+        name = _function_name(function, source)
+        if name == "Http" and function.type == "identifier":
+            endpoint, _ = resolve_endpoint(_call_args(chained), source, _render_url)
+        elif verb is None and name.lower() in _SCALAJ_VERB_METHODS:
+            verb = _SCALAJ_VERB_METHODS[name.lower()]
+        elif verb is None and name == "method":
+            args = _call_args(chained)
+            literal = _render_url(args[0], source) if len(args) == 1 else None
+            verb = literal.lower() if literal and literal.lower() in _HTTP_METHODS else "request"
+    return verb or "get", endpoint
 
 
 def _http_method_constant(args: list[Node], source: bytes) -> str | None:
@@ -260,18 +283,13 @@ def _call_details(call: Node, source: bytes) -> tuple[str, str, str | None] | No
         if method.isupper():
             return None
         callee = node_text(call, source)
-        endpoint = (
-            _chain_endpoint(value, source)
-            if value is not None and value.type == _CALL_TYPE
-            else None
-        )
+        chain = value if value is not None and value.type == _CALL_TYPE else None
         # scalaj's ``Http`` companion object only — a user-named ``http`` variable (e.g. a
         # config section) must not match, so this is an exact-case check, not a name hint.
-        if method.lower() == "asstring" and _receiver_name(callee) == "Http":
-            verb = None
-            if value is not None and value.type == _CALL_TYPE:
-                verb = _chain_http_method(value, source)
-            return "Http", verb or "get", endpoint
+        if method.lower() == "asstring" and _receiver_name(callee) == "Http" and chain:
+            scalaj_verb, scalaj_endpoint = _scalaj_request(chain, source)
+            return "Http", scalaj_verb, scalaj_endpoint
+        endpoint = _chain_endpoint(chain, source) if chain else None
         return callee, method, endpoint
 
     fn = call.child_by_field_name("function")
@@ -334,11 +352,13 @@ def _call_details(call: Node, source: bytes) -> tuple[str, str, str | None] | No
         verb = "get" if _is_uri_or_string_arg(named_args) else "request"
         return callee, verb, endpoint
 
-    # scalaj's ``Http(url).asString`` is a GET-shaped request whose receiver itself carries
-    # the HTTP hint — gated on the literal ``Http`` companion object, not any name containing
-    # "http", so it doesn't generalize to arbitrary string conversions.
-    if lower_method == "asstring" and root_receiver == "Http":
-        return root_receiver, "get", endpoint
+    # scalaj's ``Http(url).asString()`` — gated on the literal ``Http`` companion object,
+    # not any name containing "http", so it doesn't generalize to string conversions.
+    if lower_method == "asstring" and root_receiver == "Http" and fn.type == "field_expression":
+        value = fn.child_by_field_name("value")
+        if value is not None and value.type == _CALL_TYPE:
+            scalaj_verb, scalaj_endpoint = _scalaj_request(value, source)
+            return root_receiver, scalaj_verb, scalaj_endpoint
     return callee, method, endpoint
 
 
