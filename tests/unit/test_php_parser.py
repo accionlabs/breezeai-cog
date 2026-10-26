@@ -775,3 +775,18 @@ Route::middleware(['auth'])->resource('tags', T::class)->only('index');
     routes = {s.endpoint: s for s in record.statements if s.semanticType == "route"}
     assert (routes["/x"].guards, routes["/x"].name) == (["auth", "verified"], "admin.x")
     assert routes["/tags"].guards == ["auth"]
+
+
+def test_php_class_names_resolve_by_php_rules() -> None:
+    from breezeai_cog.parsers.php.imports import resolve_class, use_aliases
+    from breezeai_cog.parsers.treesitter import parse_source
+
+    source = (b"<?php\nnamespace App\\Http;\nuse App\\Models\\User;\nuse Vendor\\Pkg\\{Thing as T, Other};\n"
+              b"use function Vendor\\helper;\n")
+    aliases = use_aliases(parse_source("php", source, 0).root_node, source)
+    assert aliases == {"User": "App\\Models\\User", "T": "Vendor\\Pkg\\Thing", "Other": "Vendor\\Pkg\\Other"}
+    assert resolve_class("User", aliases, "App\\Http") == "App\\Models\\User"
+    assert resolve_class("T\\Sub", aliases, "App\\Http") == "Vendor\\Pkg\\Thing\\Sub"
+    assert resolve_class("Local", aliases, "App\\Http") == "App\\Http\\Local"
+    assert resolve_class("\\Abs\\X", aliases, "App\\Http") == "Abs\\X"
+    assert resolve_class("static", aliases, "App\\Http") is None

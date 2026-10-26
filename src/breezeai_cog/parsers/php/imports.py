@@ -105,6 +105,55 @@ def _import_kind(node: Node, source: bytes) -> str | None:
     return None
 
 
+def _use_imports(node: Node, source: bytes) -> list[tuple[str, str, str | None]]:
+    """``(fully qualified name, alias, kind)`` for each clause of one ``use`` declaration;
+    ``kind`` is ``function`` / ``const``, or None for a class import."""
+    default_kind = _import_kind(node, source)
+    group = node.child_by_field_name("body")
+    prefix_node = next(
+        (c for c in node.named_children if c is not group and c.type == "namespace_name"),
+        None,
+    )
+    if group is not None:
+        prefix = node_text(prefix_node, source).rstrip("\\") if prefix_node is not None else ""
+        clauses = list(group.named_children)
+    else:
+        prefix = ""
+        clauses = [c for c in node.named_children if c.type == "namespace_use_clause"]
+    out: list[tuple[str, str, str | None]] = []
+    for clause in clauses:
+        target, alias = _import_name(clause, source)
+        fqcn = f"{prefix}\\{target}".strip("\\") if prefix else target.lstrip("\\")
+        out.append((fqcn, alias, _import_kind(clause, source) or default_kind))
+    return out
+
+
+def use_aliases(root: Node, source: bytes) -> dict[str, str]:
+    """Class imports of a file: alias → fully qualified name (``use A\\B as C`` → ``C``)."""
+    aliases: dict[str, str] = {}
+    for node in walk(root):
+        if node.type == "namespace_use_declaration":
+            for fqcn, alias, kind in _use_imports(node, source):
+                if kind is None:
+                    aliases[alias] = fqcn
+    return aliases
+
+
+def resolve_class(name: str, aliases: dict[str, str], namespace: str) -> str | None:
+    """A class name as written → its fully qualified name, by PHP's rules: ``\\A\\B`` is
+    absolute, a first segment that is an import alias is replaced, anything else is relative to
+    the file's namespace. ``self`` / ``static`` / ``parent`` → None (they depend on context)."""
+    name = name.strip()
+    if not name or name.lower() in {"self", "static", "parent"}:
+        return None
+    if name.startswith("\\"):
+        return name.lstrip("\\")
+    head, sep, tail = name.partition("\\")
+    if head in aliases:
+        return f"{aliases[head]}{sep}{tail}" if sep else aliases[head]
+    return f"{namespace}\\{name}" if namespace else name
+
+
 def extract_imports(
     root: Node,
     source: bytes,
@@ -121,36 +170,7 @@ def extract_imports(
 
     for node in walk(root):
         if node.type == "namespace_use_declaration":
-            default_kind = _import_kind(node, source)
-            group = node.child_by_field_name("body")
-            prefix_node = next(
-                (c for c in node.named_children if c is not group and c.type == "namespace_name"),
-                None,
-            )
-            if group is not None:
-                prefix = node_text(prefix_node, source).rstrip("\\") if prefix_node is not None else ""
-                clauses = list(group.named_children)
-                imports = [
-                    (
-                        *_import_name(clause, source),
-                        prefix,
-                        _import_kind(clause, source) or default_kind,
-                    )
-                    for clause in clauses
-                ]
-            else:
-                clauses = [
-                    c for c in node.named_children if c.type == "namespace_use_clause"
-                ]
-                if not clauses:
-                    continue
-                imports = [
-                    (*_import_name(clause, source), "", _import_kind(clause, source) or default_kind)
-                    for clause in clauses
-                ]
-
-            for target, alias, base, kind in imports:
-                fqcn = f"{base}\\{target}".strip("\\") if base else target.lstrip("\\")
+            for fqcn, alias, kind in _use_imports(node, source):
                 if kind is not None:
                     external.setdefault(f"{kind} {fqcn}", None)
                     continue
