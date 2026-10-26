@@ -200,8 +200,6 @@ func GetUser(id int) User {
     assert rec.language == "go"
     assert {f.name for f in rec.functions} >= {"main", "GetUser"}
     assert any(c.name == "User" for c in rec.classes)
-    assert "net-http" in GoParser.frameworks
-    assert "gorilla-mux" in GoParser.frameworks
 
     mod = tmp_path / "go.mod"
     mod.write_text("module example.com/demo\n\ngo 1.22\n\nrequire github.com/gin-gonic/gin v1.10.0\n")
@@ -287,34 +285,12 @@ func ordinary(client *Client, cache *Cache) {
     assert functions["Save"].visibility == "public"
     assert functions["Save"].metadata == {"receiverKind": "pointer"}
 
-    routes = {
-        (item.framework, item.method, item.endpoint)
-        for item in record.statements
-        if item.semanticType == "route"
-    }
-    assert ("net-http", "HANDLEFUNC", "/http") in routes
-    assert ("gin", "GET", "/gin") in routes
-    assert ("echo", "POST", "/echo") in routes
-    assert ("chi", "GET", "/chi") in routes
-    assert all(endpoint != "https://example.test" for _, _, endpoint in routes)
-    save_routes = [item for item in record.statements if item.semanticType == "route" and item.endpoint == "/http"]
-    assert save_routes and save_routes[0].parentId == functions["Save"].id
     assert any(item.semanticType == "api_call" and item.method == "GET" for item in record.statements)
     assert not any(
         item.semanticType == "db_method_call" and item.method in {"GET", "SAVE"}
         for item in record.statements
     )
 
-    fixture_record = GoParser().parse_file(
-        ParseContext(
-            path="handlers.test.go",
-            abs_path=path,
-            source=src,
-            repo_root=tmp_path,
-            capture_statements=True,
-        )
-    )
-    assert not any(item.semanticType == "route" for item in fixture_record.statements)
 
 
 def test_go_repo_is_analyzed_and_capabilities_match_ticket(tmp_path) -> None:
@@ -345,22 +321,17 @@ def test_go_repo_is_analyzed_and_capabilities_match_ticket(tmp_path) -> None:
     assert "go.sum" in caps["extensions"]
 
 
-def test_go_captures_anonymous_functions_channels_events_and_timers(tmp_path) -> None:
+def test_go_captures_anonymous_functions_and_channels(tmp_path) -> None:
     src = b'''\
 package demo
 
-import (
-    "time"
-    "github.com/nats-io/nats.go"
-)
+import "time"
 
-func run(nc *nats.Conn, ch chan int) {
+func run(ch chan int) {
     for value := range ch {
         ch <- value
     }
     time.AfterFunc(time.Second, func() {})
-    nc.Publish("orders.created", nil)
-    nc.Subscribe("orders.created", func(msg *nats.Msg) {})
 }
 '''
     path = tmp_path / "events.go"
@@ -378,102 +349,3 @@ func run(nc *nats.Conn, ch chan int) {
     assert any(function.type == "anonymous" for function in record.functions)
     assert any(statement.nodeType == "range_clause" for statement in record.statements)
     assert any(statement.nodeType == "send_statement" for statement in record.statements)
-    assert any(
-        statement.semanticType == "eventbus_send"
-        and statement.framework == "nats"
-        and statement.endpoint == "orders.created"
-        for statement in record.statements
-    )
-    assert any(
-        statement.semanticType == "eventbus_consumer"
-        and statement.framework == "nats"
-        and statement.endpoint == "orders.created"
-        for statement in record.statements
-    )
-    assert any(
-        statement.semanticType == "timer"
-        and statement.framework == "time"
-        for statement in record.statements
-    )
-
-
-def test_go_event_detection_requires_typed_bus_receiver(tmp_path) -> None:
-    src = b'''\
-package demo
-
-import "github.com/nats-io/nats.go"
-
-type Client struct{}
-
-func run(nc *nats.Conn, client *Client) {
-    nc.Publish("orders.created", nil)
-    client.Publish("not-an-event", nil)
-    client.Request("not-an-event", nil)
-}
-'''
-    path = tmp_path / "events.go"
-    path.write_bytes(src)
-
-    record = GoParser().parse_file(
-        ParseContext(
-            path="events.go",
-            abs_path=path,
-            source=src,
-            repo_root=tmp_path,
-            capture_statements=True,
-        )
-    )
-
-    events = [statement for statement in record.statements if statement.semanticType == "eventbus_send"]
-    assert len(events) == 1
-    assert events[0].endpoint == "orders.created"
-
-
-def test_go_captures_fiber_grpc_and_kafka(tmp_path) -> None:
-    src = b'''\
-package demo
-
-import (
-    "github.com/gofiber/fiber/v2"
-    "google.golang.org/grpc"
-    "github.com/segmentio/kafka-go"
-)
-
-func register(app *fiber.App, server grpc.ServiceRegistrar, writer *kafka.Writer, reader *kafka.Reader) {
-    app.Get("/health", func(c *fiber.Ctx) error { return nil })
-    grpc.RegisterGreeterServer(server, handler{})
-    writer.WriteMessages(nil)
-    reader.ReadMessage(nil)
-}
-'''
-    path = tmp_path / "transport.go"
-    path.write_bytes(src)
-    record = GoParser().parse_file(
-        ParseContext(
-            path="transport.go",
-            abs_path=path,
-            source=src,
-            repo_root=tmp_path,
-            capture_statements=True,
-        )
-    )
-
-    assert any(
-        statement.semanticType == "route"
-        and statement.framework == "fiber"
-        and statement.method == "GET"
-        and statement.endpoint == "/health"
-        for statement in record.statements
-    )
-    assert any(
-        statement.semanticType == "route" and statement.framework == "grpc"
-        for statement in record.statements
-    )
-    assert any(
-        statement.semanticType == "eventbus_send" and statement.framework == "kafka"
-        for statement in record.statements
-    )
-    assert any(
-        statement.semanticType == "eventbus_consumer" and statement.framework == "kafka"
-        for statement in record.statements
-    )

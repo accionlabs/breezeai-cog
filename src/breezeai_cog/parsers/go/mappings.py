@@ -48,4 +48,4 @@ NESTED_SCOPES = {
 
 STATEMENT_TYPES = sorted(EMIT_TYPES)
 COMMENT_TYPES = {"line_comment", "block_comment"}
-FRAMEWORKS = ["net-http", "gin", "echo", "fiber", "chi", "gorilla-mux", "grpc"]
+FRAMEWORKS: list[str] = []

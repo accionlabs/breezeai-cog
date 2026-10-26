@@ -24,8 +24,6 @@ from .functions import (
 )
 from .imports import GoIndex, build_fqcn_index, extract_imports
 from .mappings import COMMENT_TYPES, CONTROL_FLOW, FRAMEWORKS, STATEMENT_TYPES
-from .routes import detect_framework, detect_routes
-from .events import detect_events
 from .gomod import parse_gomod
 from .gosum import parse_gosum
 
@@ -152,15 +150,6 @@ class GoParser(BaseParser):
             )
             anonymous_owners.append((start, end, functions[-1].id))
 
-        if capture and not self.is_fixture_file(path):
-            owners = [(fn.startLine, fn.endLine, fn.id) for fn in functions]
-            statements.extend(
-                detect_routes(root, source, path, seen_ids=seen_ids, parent_id=fid, owners=owners)
-            )
-            statements.extend(
-                detect_events(root, source, path, seen_ids=seen_ids, parent_id=fid, owners=owners)
-            )
-
         if capture:
             statements.extend(
                 comment_statements_for(
@@ -170,15 +159,12 @@ class GoParser(BaseParser):
                 )
             )
 
-        framework = detect_framework(path, source)
-
         return FileRecord(
             id=fid,
             path=path,
             type="code",
             language="go",
             loc=count_loc(source.decode("utf-8", "replace")),
-            framework=framework,
             importFiles=internal,
             externalImports=external,
             exports=sorted(exports),

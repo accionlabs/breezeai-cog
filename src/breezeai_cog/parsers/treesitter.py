@@ -68,8 +68,7 @@ def parse_source(language: str, source: bytes, timeout_micros: int = 0) -> Tree:
     parser.reset()
     with warnings.catch_warnings():  # timeout_micros is deprecated but is the only bytes-path option
         warnings.simplefilter("ignore", DeprecationWarning)
-        if hasattr(parser, "timeout_micros"):
-            parser.timeout_micros = int(timeout_micros) if timeout_micros and timeout_micros > 0 else 0
+        parser.timeout_micros = int(timeout_micros) if timeout_micros and timeout_micros > 0 else 0
     return parser.parse(source)
 
 
