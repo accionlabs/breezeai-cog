@@ -8,7 +8,6 @@ from ..php.index import PhpIndex
 from ..php.parser import PhpParser
 from ..treesitter import parse_source
 from .routes import (
-    detect_symfony_events,
     detect_symfony_routes,
     detect_symfony_route_builders,
     strip_route_decorators,
@@ -22,16 +21,15 @@ class SymfonyParser(PhpParser):
 
     def claims(self, path: str, source: bytes) -> bool:
         lower = source.lower()
-        # HttpFoundation is a dependency of many non-Symfony applications, notably
-        # Laravel.  It is not ownership evidence.  Require Symfony's routing,
-        # dispatcher, messenger, or framework namespace instead.
+        # Symfony components (HttpFoundation, EventDispatcher, Messenger) are used by many
+        # non-Symfony applications — Laravel, Drupal, Slim — so they are not ownership
+        # evidence. Require Symfony's routing or framework namespace instead; the event
+        # components are detected additively (php_symfony/events.py).
         if b"illuminate\\" in lower:
             return False
         return (
             b"namespace symfony\\" in lower
             or b"symfony\\component\\routing\\" in lower
-            or b"symfony\\component\\eventdispatcher\\" in lower
-            or b"symfony\\component\\messenger\\" in lower
             or b"symfony\\bundle\\frameworkbundle\\" in lower
             or b"#[route" in lower
             or b"routingconfigurator" in lower
@@ -46,7 +44,6 @@ class SymfonyParser(PhpParser):
             index = ctx.resolution_index if isinstance(ctx.resolution_index, PhpIndex) else None
             route_names = detect_symfony_routes(root, ctx.source, ctx.path, record, index)
             detect_symfony_route_builders(root, ctx.source, ctx.path, record)
-            detect_symfony_events(root, ctx.source, ctx.path, record)
             if route_names:
                 strip_route_decorators(record, route_names)
         return record

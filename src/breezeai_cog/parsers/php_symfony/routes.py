@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from tree_sitter import Node
 
 from ...emit import disambiguate, statement_id
-from ...schemas import FileRecord, Function, SemanticType, Statement
+from ...schemas import FileRecord, Function, Statement
 from ..php.index import PhpIndex
 from ..php_route_common import join_endpoint, route_handler, string_value, strings_in_array, walk
 from ..treesitter import line_span, node_text
@@ -387,68 +387,6 @@ def detect_symfony_route_builders(root: Node, source: bytes, path: str, record: 
             seen.add(statement.id)
             record.statements.append(statement)
             emitted += 1
-    return emitted
-
-
-def _event_statement(call: Node, source: bytes, path: str, record: FileRecord, seen: set[str],
-                     semantic: SemanticType, endpoint: str | None) -> Statement:
-    line, column = call.start_point[0] + 1, call.start_point[1]
-    parent_id = next((fn.id for fn in record.functions if fn.startLine <= line <= fn.endLine), record.id)
-    statement = Statement(
-        id=disambiguate(statement_id(path, line, column), seen), parentId=parent_id,
-        nodeType=call.type, semanticType=semantic, text=node_text(call, source),
-        framework="symfony",
-        method="CONSUMER" if semantic == "eventbus_consumer" else None,  # outbound: no method
-        endpoint=endpoint,
-        startLine=line, endLine=call.end_point[0] + 1, path=path,
-    )
-    seen.add(statement.id)
-    return statement
-
-
-def detect_symfony_events(root: Node, source: bytes, path: str, record: FileRecord) -> int:
-    source_lower = source.decode("utf-8", "replace").lower()
-    has_dispatcher = "eventdispatcher" in source_lower or "event_dispatcher" in source_lower
-    has_messenger = "messagebus" in source_lower or "symfony\\component\\messenger" in source_lower
-    if not has_dispatcher and not has_messenger:
-        return 0
-    seen = {statement.id for statement in record.statements}
-    emitted = 0
-    for call in walk(root):
-        if call.type not in _CALL_TYPES:
-            continue
-        method = (_call_method(call, source) or "").lower()
-        if method not in {"dispatch", "addlistener", "addsubscriber"}:
-            continue
-        receiver_node = call.child_by_field_name("object") or call.child_by_field_name("scope")
-        receiver = node_text(receiver_node, source).lower() if receiver_node is not None else ""
-        terminal = re.split(r"->|::", receiver)[-1].replace("$", "")
-        if terminal in {"this", "self", "static"}:
-            continue
-        is_dispatcher = has_dispatcher and ("dispatcher" in receiver or terminal in {
-            "dispatcher", "eventdispatcher", "eventdispatcherinterface",
-        })
-        is_messenger = has_messenger and ("messagebus" in receiver or terminal in {
-            "bus", "messagebus", "eventbus",
-        })
-        if method == "dispatch":
-            semantic: SemanticType
-            if is_messenger:
-                semantic, endpoint = "eventbus_send", None
-            elif is_dispatcher:
-                args = _call_args(call)
-                semantic = "eventbus_publish"
-                endpoint = string_value(args[1], source) if len(args) > 1 else None
-            else:
-                continue
-        elif is_dispatcher:
-            args = _call_args(call)
-            semantic = "eventbus_consumer"
-            endpoint = string_value(args[0], source) if args else None
-        else:
-            continue
-        record.statements.append(_event_statement(call, source, path, record, seen, semantic, endpoint))
-        emitted += 1
     return emitted
 
 

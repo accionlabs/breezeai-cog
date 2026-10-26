@@ -4,9 +4,7 @@ from __future__ import annotations
 
 from tree_sitter import Node
 
-from ...emit import disambiguate, statement_id
-from ...schemas import FileRecord, Statement
-from ...schemas.enums import SemanticType
+from ...schemas import FileRecord
 from ..base import ParseContext
 from ..inflect import singular
 from ..php.parser import PhpParser
@@ -460,125 +458,6 @@ def detect_laravel_routes(root: Node, source: bytes, path: str, record: FileReco
     return found
 
 
-def _call_receiver(call: Node, source: bytes) -> str:
-    receiver = call.child_by_field_name("scope") or call.child_by_field_name("object")
-    return node_text(receiver, source).lower() if receiver is not None else ""
-
-
-def _event_endpoint(call: Node, source: bytes, listener: bool = False) -> str | None:
-    args = args_of(call)
-    if listener:
-        return string_value(args[0], source) if args else None
-    for arg in args[:2]:
-        value = string_value(arg, source)
-        if value is not None:
-            return value
-    return None
-
-
-def _event_kind(call: Node, source: bytes) -> tuple[SemanticType, str | None] | None:
-    """(semanticType, method): ``CONSUMER`` on a listener; outbound records carry no method
-    (the direction is the semanticType, as for Vert.x)."""
-    method = method_of(call, source)
-    if method is None and call.type == "function_call_expression":
-        function = call.child_by_field_name("function")
-        method = node_text(function, source).lower() if function is not None else None
-    if method is None:
-        return None
-    receiver = _call_receiver(call, source)
-    source_lower = source.lower()
-    event_marker = any(marker in source_lower for marker in (
-        b"illuminate\\contracts\\events\\dispatcher",
-        b"illuminate\\events\\dispatcher",
-        b"illuminate\\support\\facades\\event",
-        b"illuminate\\support\\facades\\" if b"event::" in source_lower else b"__no_event_facade__",
-        b"namespace illuminate\\events",
-    ))
-    bus_marker = any(marker in source_lower for marker in (
-        b"illuminate\\contracts\\bus\\dispatcher",
-        b"illuminate\\bus\\dispatcher",
-        b"illuminate\\support\\facades\\bus",
-        b"illuminate\\support\\facades\\" if b"bus::" in source_lower else b"__no_bus_facade__",
-        b"illuminate\\foundation\\bus",
-        b"namespace illuminate\\bus",
-    ))
-    scoped = _last_name(receiver)
-    if method in {"listen", "subscribe", "addlistener"} and (
-        (scoped in {"event", "events", "dispatcher"} or (
-            scoped in {"this", "self"} and b"namespace illuminate\\events" in source_lower
-        )) and event_marker
-    ):
-        return "eventbus_consumer", "CONSUMER"
-    if method in {"dispatch", "until", "dispatchafterresponse", "dispatchsync", "dispatchnow", "dispatchtoqueue"}:
-        if (
-            scoped in {"event", "events", "eventdispatcher"}
-            or (scoped in {"this", "self"} and b"namespace illuminate\\events" in source_lower)
-        ) and event_marker:
-            return "eventbus_publish", None
-        if (
-            scoped in {"bus", "dispatcher"}
-            or (scoped in {"this", "self"} and b"namespace illuminate\\bus" in source_lower)
-        ) and bus_marker:
-            return "eventbus_send", None
-    if call.type == "function_call_expression" and method == "dispatch" and bus_marker:
-        return "eventbus_send", None
-    if call.type == "function_call_expression" and method == "event" and event_marker:
-        return "eventbus_publish", None
-    return None
-
-
-def detect_laravel_events(root: Node, source: bytes, path: str, record: FileRecord) -> bool:
-    """Emit Laravel Event/Bus dispatch and listener semantics with conservative ownership."""
-    by_id = {statement.id: statement for statement in record.statements}
-    seen_ids = set(by_id)
-    found = False
-    for call in walk(root):
-        if call.type not in PHP_CALL_TYPES:
-            continue
-        kind = _event_kind(call, source)
-        if kind is None:
-            continue
-        semantic_type, method = kind
-        line, column = call.start_point[0] + 1, call.start_point[1]
-        sid = statement_id(path, line, column)
-        statement = by_id.get(sid)
-        if statement is None:
-            functions = [
-                function for function in record.functions
-                if function.startLine <= line <= function.endLine
-            ]
-            parent_id = max(functions, key=lambda function: function.startLine).id if functions else record.id
-            statement = Statement(
-                id=disambiguate(sid, seen_ids),
-                parentId=parent_id,
-                nodeType=call.type,
-                text=node_text(call, source),
-                startLine=line,
-                endLine=call.end_point[0] + 1,
-                path=path,
-            )
-            record.statements.append(statement)
-            by_id[statement.id] = statement
-        if statement.semanticType is not None and statement.semanticType != semantic_type:
-            continue
-        statement.semanticType = semantic_type
-        statement.framework = "laravel"
-        statement.method = method
-        statement.endpoint = _event_endpoint(
-            call, source, listener=semantic_type == "eventbus_consumer"
-        )
-        found = True
-    return found
-
-
-def _clear_semantic(statement: Statement) -> None:
-    statement.semanticType = None
-    statement.framework = None
-    statement.method = None
-    statement.endpoint = None
-    statement.dataAccessHint = None
-
-
 class LaravelParser(PhpParser):
     name = "php-laravel"
     priority = 10
@@ -601,5 +480,4 @@ class LaravelParser(PhpParser):
         record.framework = "laravel"
         if ctx.capture_statements and not self.is_fixture_file(ctx.path):
             detect_laravel_routes(root, ctx.source, ctx.path, record)
-            detect_laravel_events(root, ctx.source, ctx.path, record)
         return record
