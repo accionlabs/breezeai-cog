@@ -165,6 +165,33 @@ def test_as_string_on_a_value_named_http_is_not_a_call() -> None:
     assert _api_calls("", "http: ConfigSection", "http.asString") == []
 
 
+@pytest.mark.parametrize(
+    ("imports", "params", "body", "expected"),
+    [
+        # building a request is not sending one
+        ("", "", 'HttpRequest(method = HttpMethods.POST, uri = "/x")', []),
+        (
+            "",
+            "http: HttpExt",
+            'http.singleRequest(HttpRequest(HttpMethods.POST, "https://a/b"))',
+            [("POST", "https://a/b")],
+        ),
+        (
+            HTTP4S,
+            "c: Client[IO]",
+            "c.run(org.http4s.Request[F](org.http4s.Method.GET, uri))",
+            [("REQUEST", None)],
+        ),
+        # a paren-less verb call is still a call
+        ("", "ws: WSClient", 'ws.url("/x").get', [("GET", "/x")]),
+    ],
+)
+def test_an_http_method_constant_is_not_a_call(
+    imports: str, params: str, body: str, expected: list[tuple[str, str | None]]
+) -> None:
+    assert _api_calls(imports, params, body) == expected
+
+
 def test_scala_http_client_ids_do_not_leak_between_files() -> None:
     _parse()
     source = b'''class Plain {

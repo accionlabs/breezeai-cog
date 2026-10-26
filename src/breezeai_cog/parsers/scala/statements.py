@@ -229,6 +229,10 @@ def _call_details(call: Node, source: bytes) -> tuple[str, str, str | None] | No
         if field is None:
             return None
         method = node_text(field, source)
+        # An upper-case field is a constant read, not a paren-less call:
+        # ``HttpMethods.POST`` names a verb, it doesn't send a request.
+        if method.isupper():
+            return None
         callee = node_text(call, source)
         endpoint = (
             _chain_endpoint(value, source)
