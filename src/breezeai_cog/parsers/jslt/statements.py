@@ -54,7 +54,10 @@ _DECL_RE = re.compile(r"^(import|def|let)\b")
 _IMPORT_ALIAS_RE = re.compile(r'^import\s+"[^"]*"\s+as\s+(\S+)')
 _DEF_HEADER_RE = re.compile(r"^def\s+([A-Za-z_][\w-]*)\s*\(([^)]*)\)")
 _LET_NAME_RE = re.compile(r"^let\s+([A-Za-z_][\w-]*)\s*=")
-_CALL_RE = re.compile(r"\b([A-Za-z_][\w-]*)\s*\(")
+#: A bare `name(` call. The lookbehind rejects a name that is only the tail of something
+#: else: `m:foo(` calls `foo` in the module imported `as m` (not this file's `foo`), and a
+#: preceding word character, `-`, `$` or `.` means the match started mid-identifier.
+_CALL_RE = re.compile(r"(?<![\w:$.-])([A-Za-z_][\w-]*)\s*\(")
 
 _NODE_TYPES = {"import": "import", "let": "let_binding"}
 _OPEN_BRACKETS = "{[("

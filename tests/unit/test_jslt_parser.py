@@ -124,6 +124,22 @@ def test_call_to_parameter_not_resolved(tmp_path) -> None:
     assert fn.calls == []
 
 
+def test_call_into_imported_module_not_linked_to_same_named_local_def(tmp_path) -> None:
+    # `m:foo()` calls `foo` in the module imported `as m`; linking it to this file's own
+    # `foo` would invent a self-recursion edge.
+    src = 'import "other.jslt" as m\n\ndef foo()\n  m:foo()\n\nfoo()\n'
+    rec = _parse(tmp_path, "transform.jslt", src)
+    assert _func(rec, "foo").calls == []
+
+
+def test_bare_call_after_operator_or_bracket_still_resolves(tmp_path) -> None:
+    # The module-prefix guard must not drop real bare calls written right after an operator,
+    # a bracket or a comma.
+    src = "def one()\n  1\n\ndef sum(x)\n  [one(),(one())] + -one()+one()\n\nsum(1)\n"
+    rec = _parse(tmp_path, "transform.jslt", src)
+    assert [c.name for c in _func(rec, "sum").calls] == ["one"]
+
+
 def test_call_in_own_header_not_mistaken_for_self_call(tmp_path) -> None:
     # The header line `def f(x)` must not read its own name (`f(`) as a call to itself.
     src = "def f(x)\n  x + 1\n\nf(1)\n"
