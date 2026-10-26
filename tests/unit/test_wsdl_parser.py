@@ -14,6 +14,7 @@ files, or omit a binding entirely), one ``import`` statement per ``wsdl:import``
 from __future__ import annotations
 
 import json
+import re
 
 from jsonschema import Draft202012Validator
 
@@ -95,8 +96,17 @@ def _parse(
     return WsdlParser().parse_file(ctx)
 
 
-def _by_name(rec, name: str, node_type: str):
-    return next(s for s in rec.statements if s.name == name and s.nodeType == node_type)
+def _tag(s) -> str | None:
+    """The XML tag a statement records (`complexType`, `operation`, …) — read from its
+    `text`, since `nodeType` is the grammar's one `element` type for every tag."""
+    m = re.match(r"<(?:[\w.-]+:)?([\w.-]+)", s.text)
+    return m.group(1) if m else None
+
+
+def _by_name(rec, name: str, tag: str):
+    s = next(s for s in rec.statements if s.name == name and _tag(s) == tag)
+    assert s.nodeType == "element"
+    return s
 
 
 def test_language_and_extensions() -> None:
@@ -225,7 +235,7 @@ def test_multiple_bindings_for_same_operation_not_duplicated(tmp_path) -> None:
 </wsdl:definitions>
 """
     rec = _parse(tmp_path, "service.wsdl", src)
-    ops = [s for s in rec.statements if s.nodeType == "operation"]
+    ops = [s for s in rec.statements if _tag(s) == "operation"]
     assert len(ops) == 1
     assert ops[0].endpoint == "CalculatorSoap/Add"
 
@@ -264,7 +274,7 @@ def test_operations_in_different_port_types_not_merged(tmp_path) -> None:
 </wsdl:definitions>
 """
     rec = _parse(tmp_path, "service.wsdl", src)
-    ops = [s for s in rec.statements if s.nodeType == "operation"]
+    ops = [s for s in rec.statements if _tag(s) == "operation"]
     assert len(ops) == 2
     by_endpoint = {o.endpoint: o for o in ops}
     assert by_endpoint["PortA/Ping"].requestDTO == "PingARequest"
@@ -286,7 +296,7 @@ def test_port_type_and_operation_missing_name_skipped(tmp_path) -> None:
 </wsdl:definitions>
 """
     rec = _parse(tmp_path, "service.wsdl", src)
-    assert [s for s in rec.statements if s.nodeType == "operation"] == []
+    assert [s for s in rec.statements if _tag(s) == "operation"] == []
 
 
 def test_binding_only_operation_not_captured(tmp_path) -> None:
@@ -322,7 +332,7 @@ def test_embedded_xsd_schema_reuses_xsd_walker(tmp_path) -> None:
 
 def test_import_recorded_not_resolved(tmp_path) -> None:
     rec = _parse(tmp_path, "service.wsdl", WSDL)
-    imp = next(s for s in rec.statements if s.nodeType == "import")
+    imp = next(s for s in rec.statements if _tag(s) == "import")
     assert imp.semanticType is None
     assert imp.name == "http://example.com/common"
     assert imp.endpoint is None  # a namespace/location, not a join key
@@ -347,8 +357,8 @@ def test_fixture_file_captured_like_any_other(tmp_path) -> None:
     # entry points -- a fixture WSDL is captured in full.
     rec = _parse(tmp_path, "service.test.wsdl", WSDL)
     normal = _parse(tmp_path, "service.wsdl", WSDL)
-    assert [(s.nodeType, s.name) for s in rec.statements] == [
-        (s.nodeType, s.name) for s in normal.statements
+    assert [(_tag(s), s.name) for s in rec.statements] == [
+        (_tag(s), s.name) for s in normal.statements
     ]
 
 
@@ -370,6 +380,21 @@ def test_malformed_markup_yields_no_statements_not_a_crash(tmp_path) -> None:
     )
     rec = _parse(tmp_path, "service.wsdl", src)
     assert rec.statements == []
+
+
+def test_node_type_is_the_grammar_type_and_declared(tmp_path) -> None:
+    # message, operation, import and embedded-schema records are all the xml grammar's
+    # `element` (the tag is in `text`); comments keep `Comment`.
+    rec = _parse(tmp_path, "service.wsdl", WSDL)
+    kinds = {s.nodeType for s in rec.statements}
+    assert kinds == {"element", "Comment"}
+    assert {_tag(s) for s in rec.statements if s.nodeType == "element"} >= {
+        "message",
+        "operation",
+        "import",
+        "complexType",
+    }
+    assert kinds - {"Comment"} <= set(WsdlParser().statement_types)
 
 
 def test_records_validate_against_schema(tmp_path) -> None:

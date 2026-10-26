@@ -59,7 +59,8 @@ _LET_NAME_RE = re.compile(r"^let\s+([A-Za-z_][\w-]*)\s*=")
 #: preceding word character, `-`, `$` or `.` means the match started mid-identifier.
 _CALL_RE = re.compile(r"(?<![\w:$.-])([A-Za-z_][\w-]*)\s*\(")
 
-_NODE_TYPES = {"import": "import", "let": "let_binding"}
+#: JSLT has no tree-sitter grammar, so no statement has a backing AST node.
+_SYNTHETIC = "synthetic"
 _OPEN_BRACKETS = "{[("
 _CLOSE_BRACKETS = "}])"
 
@@ -207,13 +208,13 @@ def collect_jslt_declarations(
     n = len(lines)
     statements: list[Statement] = []
 
-    def build_statement(node_type: str, name: str | None, start: int, end: int) -> Statement:
+    def build_statement(name: str | None, start: int, end: int) -> Statement:
         text = "\n".join(lines[start - 1 : end])
         return Statement(
             id=disambiguate(statement_id(path, start, 0), seen_ids),
             parentId=fid,
             path=path,
-            nodeType=node_type,
+            nodeType=_SYNTHETIC,
             name=name,
             text=text,
             startLine=start,
@@ -241,11 +242,11 @@ def collect_jslt_declarations(
         pattern = _IMPORT_ALIAS_RE if keyword == "import" else _LET_NAME_RE
         name_match = pattern.match(first)
         name = name_match.group(1) if name_match else None
-        statements.append(build_statement(_NODE_TYPES[keyword], name, start, end))
+        statements.append(build_statement(name, start, end))
 
     if capture_statements and module_start is not None:
         hi = _trim_trailing_blank(lines, module_start, n)
-        statements.append(build_statement("module_expression", None, module_start, hi))
+        statements.append(build_statement(None, module_start, hi))
 
     resolve = make_resolver(
         bindings={}, local_defs={name for name, _, _, _, _ in def_spans}, path=path
@@ -277,7 +278,7 @@ def collect_jslt_declarations(
                 id=disambiguate(statement_id(path, start, 0), seen_ids),
                 parentId=func_id,
                 path=path,
-                nodeType="function_body",
+                nodeType=_SYNTHETIC,
                 text=text,
                 startLine=start,
                 endLine=end,

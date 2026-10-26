@@ -12,6 +12,7 @@ namespace/schemaLocation (never resolved across files). Capture is on by default
 from __future__ import annotations
 
 import json
+import re
 
 from jsonschema import Draft202012Validator
 
@@ -73,8 +74,17 @@ def _parse(
     return XsdParser().parse_file(ctx)
 
 
-def _by_name(rec, name: str, node_type: str):
-    return next(s for s in rec.statements if s.name == name and s.nodeType == node_type)
+def _tag(s) -> str | None:
+    """The XML tag a statement records (`complexType`, `operation`, …) — read from its
+    `text`, since `nodeType` is the grammar's one `element` type for every tag."""
+    m = re.match(r"<(?:[\w.-]+:)?([\w.-]+)", s.text)
+    return m.group(1) if m else None
+
+
+def _by_name(rec, name: str, tag: str):
+    s = next(s for s in rec.statements if s.name == name and _tag(s) == tag)
+    assert s.nodeType == "element"
+    return s
 
 
 def test_language_and_extensions() -> None:
@@ -126,7 +136,7 @@ def test_foreign_namespace_attribute_does_not_shadow_real_name(tmp_path) -> None
         "</xs:schema>\n"
     )
     rec = _parse(tmp_path, "schema.xsd", src)
-    names = {s.name for s in rec.statements if s.nodeType == "complexType"}
+    names = {s.name for s in rec.statements if _tag(s) == "complexType"}
     assert names == {"ProcessingInstruction"}
 
 
@@ -183,7 +193,7 @@ def test_nested_elements_not_split_into_own_records(tmp_path) -> None:
     # `street`/`zip` are local (nested) elements inside AddressType — not global, so they
     # must not appear as their own top-level Statement records.
     rec = _parse(tmp_path, "schema.xsd", SCHEMA)
-    names = {s.name for s in rec.statements if s.nodeType == "element"}
+    names = {s.name for s in rec.statements if _tag(s) == "element"}
     assert names == {"Person"}
 
 
@@ -203,7 +213,7 @@ def test_attribute_value_ending_in_quote_character_preserved(tmp_path) -> None:
 
 def test_import_recorded_not_resolved(tmp_path) -> None:
     rec = _parse(tmp_path, "schema.xsd", SCHEMA)
-    imp = next(s for s in rec.statements if s.nodeType == "import")
+    imp = next(s for s in rec.statements if _tag(s) == "import")
     assert imp.semanticType is None
     assert imp.name == "http://example.com/common"
     assert 'schemaLocation="common.xsd"' in imp.text
@@ -256,7 +266,7 @@ def test_fixture_file_still_captures_statements(tmp_path) -> None:
     # XSD emits no routes, so `is_fixture_file` (route/entry-point-only, per base.py) must
     # not gate its capture at all.
     rec = _parse(tmp_path, "schema.test.xsd", SCHEMA)
-    assert any(s.nodeType == "complexType" for s in rec.statements)
+    assert any(_tag(s) == "complexType" for s in rec.statements)
 
 
 def test_annotation_and_other_unmodeled_tags_skipped(tmp_path) -> None:
@@ -272,9 +282,9 @@ def test_annotation_and_other_unmodeled_tags_skipped(tmp_path) -> None:
         "</xs:schema>\n"
     )
     rec = _parse(tmp_path, "schema.xsd", src)
-    names = {s.name for s in rec.statements if s.nodeType == "complexType"}
+    names = {s.name for s in rec.statements if _tag(s) == "complexType"}
     assert names == {"Keep"}
-    assert not any(s.nodeType == "annotation" for s in rec.statements)
+    assert not any(_tag(s) == "annotation" for s in rec.statements)
 
 
 def test_malformed_markup_yields_no_statements_not_a_crash(tmp_path) -> None:
@@ -297,6 +307,15 @@ def test_non_schema_root_yields_no_statements(tmp_path) -> None:
     # without error but yields no declarations — never guessed.
     rec = _parse(tmp_path, "not-a-schema.xsd", "<root><a/></root>\n")
     assert rec.statements == []
+
+
+def test_node_type_is_the_grammar_type_and_declared(tmp_path) -> None:
+    # nodeType is always the real tree-sitter type: the xml grammar's `element` for every
+    # tag (the tag itself is in `text`), `Comment` for comments -- and capabilities lists it.
+    rec = _parse(tmp_path, "schema.xsd", SCHEMA)
+    kinds = {s.nodeType for s in rec.statements}
+    assert kinds == {"element", "Comment"}
+    assert kinds - {"Comment"} <= set(XsdParser().statement_types)
 
 
 def test_records_validate_against_schema(tmp_path) -> None:

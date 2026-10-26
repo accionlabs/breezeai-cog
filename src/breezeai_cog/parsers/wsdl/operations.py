@@ -60,7 +60,7 @@ def _plain_statement(
         id=disambiguate(statement_id(path, start, node.start_point[1]), seen_ids),
         parentId=fid,
         path=path,
-        nodeType=tag,
+        nodeType=node.type,  # the grammar's `element`; the tag is read from `text`
         semanticType=semantic,
         name=name,
         endpoint=endpoint,
@@ -111,7 +111,7 @@ def _operation_statement(
         id=disambiguate(statement_id(path, start, op.start_point[1]), seen_ids),
         parentId=fid,
         path=path,
-        nodeType="operation",
+        nodeType=op.type,
         name=op_name,
         text=node_text(op, source),
         framework="wsdl",

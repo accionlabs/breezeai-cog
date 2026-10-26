@@ -54,8 +54,21 @@ def _parse(
     return JsltParser().parse_file(ctx)
 
 
-def _by_name(rec, name: str, node_type: str):
-    return next(s for s in rec.statements if s.name == name and s.nodeType == node_type)
+def _kind(rec, s) -> str:
+    """What a statement records — read from its `text` and parent, since every JSLT
+    statement's `nodeType` is `synthetic` (no tree-sitter grammar)."""
+    assert s.nodeType == "synthetic"
+    if s.parentId != rec.id:
+        return "function_body"
+    if s.text.startswith("import"):
+        return "import"
+    if s.text.startswith("let"):
+        return "let_binding"
+    return "module_expression"
+
+
+def _by_name(rec, name: str, kind: str):
+    return next(s for s in rec.statements if s.name == name and _kind(rec, s) == kind)
 
 
 def _func(rec, name: str):
@@ -66,7 +79,7 @@ def _body(rec, fn) -> str:
     """The full-text `function_body` statement companion to `fn` (Function has no `text`
     field)."""
     return next(
-        s for s in rec.statements if s.nodeType == "function_body" and s.parentId == fn.id
+        s for s in rec.statements if _kind(rec, s) == "function_body" and s.parentId == fn.id
     ).text
 
 
@@ -199,7 +212,7 @@ def test_let_is_captured(tmp_path) -> None:
 
 def test_trailing_module_expression_captured_as_one_statement(tmp_path) -> None:
     rec = _parse(tmp_path, "transform.jslt", SOURCE)
-    modules = [s for s in rec.statements if s.nodeType == "module_expression"]
+    modules = [s for s in rec.statements if _kind(rec, s) == "module_expression"]
     assert len(modules) == 1
     assert modules[0].name is None
     assert '"greeting": greeting' in modules[0].text
@@ -207,7 +220,7 @@ def test_trailing_module_expression_captured_as_one_statement(tmp_path) -> None:
 
 def test_double_slash_inside_string_literal_not_treated_as_comment(tmp_path) -> None:
     rec = _parse(tmp_path, "transform.jslt", SOURCE)
-    module = next(s for s in rec.statements if s.nodeType == "module_expression")
+    module = next(s for s in rec.statements if _kind(rec, s) == "module_expression")
     assert '"note": "uses // not a comment"' in module.text
 
 
@@ -222,7 +235,7 @@ def test_leading_comment_line_not_captured_as_a_statement(tmp_path) -> None:
 def test_bare_expression_with_no_declarations(tmp_path) -> None:
     rec = _parse(tmp_path, "identity.jslt", ".\n")
     assert len(rec.statements) == 1
-    assert rec.statements[0].nodeType == "module_expression"
+    assert _kind(rec, rec.statements[0]) == "module_expression"
     assert rec.statements[0].text == "."
     assert rec.functions == []
 
@@ -237,7 +250,7 @@ def test_nested_let_inside_def_stays_on_def_text_not_split(tmp_path) -> None:
         "full-name(.)\n"
     )
     rec = _parse(tmp_path, "transform.jslt", src)
-    let_bindings = [s for s in rec.statements if s.nodeType == "let_binding"]
+    let_bindings = [s for s in rec.statements if _kind(rec, s) == "let_binding"]
     assert let_bindings == []  # the nested lets are indented -- part of the def's body only
     body = _body(rec, _func(rec, "full-name"))
     assert "let first = p.firstName" in body
@@ -253,7 +266,7 @@ def test_let_value_starting_on_next_line_not_cut_off(tmp_path) -> None:
     rec = _parse(tmp_path, "transform.jslt", src)
     binding = _by_name(rec, "cfg", "let_binding")
     assert binding.text == 'let cfg =\n{\n  "a": 1\n}'
-    module = next(s for s in rec.statements if s.nodeType == "module_expression")
+    module = next(s for s in rec.statements if _kind(rec, s) == "module_expression")
     assert module.text == '{"out": cfg}'
 
 
@@ -265,7 +278,7 @@ def test_def_body_starting_on_next_line_not_cut_off(tmp_path) -> None:
     rec = _parse(tmp_path, "transform.jslt", src)
     body = _body(rec, _func(rec, "f"))
     assert body == "def f(x)\nif ($x) 1 else 2"
-    module = next(s for s in rec.statements if s.nodeType == "module_expression")
+    module = next(s for s in rec.statements if _kind(rec, s) == "module_expression")
     assert module.text == '{"y": f(.a)}'
 
 
@@ -278,7 +291,7 @@ def test_multiline_value_closing_brace_at_column_zero_not_a_new_boundary(tmp_pat
     rec = _parse(tmp_path, "transform.jslt", src)
     binding = _by_name(rec, "config", "let_binding")
     assert binding.text == 'let config = {\n  "a": 1,\n  "b": 2\n}'
-    module = next(s for s in rec.statements if s.nodeType == "module_expression")
+    module = next(s for s in rec.statements if _kind(rec, s) == "module_expression")
     assert module.text == '{ "result": config }'
 
 
@@ -300,7 +313,7 @@ def test_escaped_quote_inside_string_not_miscounted_as_bracket(tmp_path) -> None
     # expression would never be recognized as a boundary at all.
     src = 'let cfg = "esc \\" opens { a brace"\n\ncfg\n'
     rec = _parse(tmp_path, "t.jslt", src)
-    modules = [s for s in rec.statements if s.nodeType == "module_expression"]
+    modules = [s for s in rec.statements if _kind(rec, s) == "module_expression"]
     assert len(modules) == 1
     assert modules[0].text == "cfg"
 
@@ -323,8 +336,8 @@ def test_utf8_bom_stripped_before_scanning(tmp_path) -> None:
         statement_text_limit=1000,
     )
     rec = JsltParser().parse_file(ctx)
-    node_types = [s.nodeType for s in rec.statements]
-    assert node_types == ["import", "let_binding", "module_expression", "function_body"]
+    kinds = [_kind(rec, s) for s in rec.statements]
+    assert kinds == ["import", "let_binding", "module_expression", "function_body"]
     assert [f.name for f in rec.functions] == ["f"]
 
 
@@ -342,7 +355,7 @@ def test_fixture_file_still_captures_declarations(tmp_path) -> None:
     # JSLT emits no routes, so `is_fixture_file` (route/entry-point-only, per base.py) must
     # not gate its capture at all -- statements and functions alike.
     rec = _parse(tmp_path, "transform.test.jslt", SOURCE)
-    assert any(s.nodeType == "let_binding" for s in rec.statements)
+    assert any(_kind(rec, s) == "let_binding" for s in rec.statements)
     assert any(f.name == "full-name" for f in rec.functions)
 
 
@@ -350,6 +363,13 @@ def test_empty_file_yields_no_statements(tmp_path) -> None:
     rec = _parse(tmp_path, "empty.jslt", "")
     assert rec.statements == []
     assert rec.functions == []
+
+
+def test_every_statement_is_synthetic_and_declared(tmp_path) -> None:
+    # No tree-sitter grammar means no backing AST node, so every statement is `synthetic`.
+    rec = _parse(tmp_path, "transform.jslt", SOURCE)
+    assert {s.nodeType for s in rec.statements} == {"synthetic"}
+    assert JsltParser().statement_types == ["synthetic"]
 
 
 def test_records_validate_against_schema(tmp_path) -> None:
