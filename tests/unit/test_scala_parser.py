@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
 from jsonschema import Draft202012Validator  # type: ignore[import-untyped]
 
 from breezeai_cog.core.registry import capabilities, discover_builtin
@@ -109,6 +110,29 @@ def test_imports_and_fqcn_resolution(tmp_path: Path) -> None:
     # FQCN resolved imports
     assert any(p.endswith("com/acme/repo/OrderRepo.scala") for p in rec.importFiles)
     assert any(p.endswith("com/acme/util/DateHelper.scala") for p in rec.importFiles)
+
+
+@pytest.mark.parametrize("arrow", ["=>", "as"])
+def test_renamed_imports_are_recorded(tmp_path: Path, arrow: str) -> None:
+    """Scala 2 renames with ``=>``, Scala 3 with ``as`` — both import the original name."""
+    src = f"""package com.acme.orders
+
+import cats.effect.{{IO {arrow} CIO}}
+import com.acme.util.{{DateHelper {arrow} DH}}
+
+class Report {{
+  def stamp(): String = {{
+    DH.today()
+  }}
+}}
+""".encode()
+    rec, _ = _parse(tmp_path, src)
+    assert "cats.effect.IO" in rec.externalImports
+    assert "src/main/scala/com/acme/util/DateHelper.scala" in rec.importFiles
+    stamp = next(f for f in rec.functions if f.name == "stamp")
+    assert {(c.name, c.path) for c in stamp.calls} == {
+        ("today", "src/main/scala/com/acme/util/DateHelper.scala")
+    }
 
 
 def test_types_and_case_classes(tmp_path: Path) -> None:

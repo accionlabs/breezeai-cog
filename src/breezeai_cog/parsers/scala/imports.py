@@ -2,7 +2,7 @@
 
 Scala imports resolve to in-repo files via a repo-level FQCN index built by ``build_index``
 (maps each file's ``package.TypeName`` → repo-relative path). Wildcard imports stay external.
-Selector groups (``{X, Y}``) and renames (``{X => Y}``) are supported.
+Selector groups (``{X, Y}``) and renames (``{X => Y}``, Scala 3 ``{X as Y}``) are supported.
 """
 
 from __future__ import annotations
@@ -262,7 +262,7 @@ def extract_imports(
                     (internal if resolved else external).setdefault(resolved or fqcn, None)
                     if resolved:
                         bindings[name] = resolved
-                elif sel.type == "arrow_renamed_identifier":
+                elif sel.type in ("arrow_renamed_identifier", "as_renamed_identifier"):
                     ids = [c for c in sel.named_children if c.type == "identifier"]
                     if len(ids) >= 2:
                         orig_name = node_text(ids[0], source)
