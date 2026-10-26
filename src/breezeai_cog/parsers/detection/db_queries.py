@@ -313,11 +313,9 @@ def match_db(callee: str, method: str, language: str | None = None,
         return "prisma"
     if m in _DISTINCTIVE:
         db = _DISTINCTIVE[m]
-        if db in {"sequelize", "typeorm"} and language is not None and language not in {"javascript", "typescript"}:
-            return None
-        if db == "dynamodb" and language is not None and language not in {
-            "javascript", "typescript", "python", "java", "csharp", "vb",
-        }:
+        # PHP has none of these SDKs/ORMs: a PHP ``findAll`` / ``upsert`` / ``putItem`` is a
+        # framework model or a plain method, never Sequelize, TypeORM or DynamoDB.
+        if language == "php" and db in {"sequelize", "typeorm", "dynamodb"}:
             return None
         # A receiverless distinctive verb is a local/helper call, not a database access.
         # This is defense-in-depth for callers that do not provide local_names.
