@@ -101,3 +101,27 @@ def test_located_the_same_for_any_jobs(tmp_path, jobs) -> None:
     (route,) = [s for s in rec["statements"] if s.get("semanticType") == "route"]
     assert (route["handler"], route["handlerLine"], route["handlerPath"]) == (
         "index", 6, "app/Http/Controllers/UserController.php")
+
+
+def _hooks(statements):
+    return {s.endpoint: s for s in statements if s.semanticType == "eventbus_consumer"}
+
+
+def test_wordpress_callbacks_lead_to_their_declaration(analyze_files) -> None:
+    hooks = _hooks(analyze_files({"plugin.php": (
+        "<?php\n"
+        "add_action('init', 'my_init');\n"           # 2
+        "function my_init() {}\n"                    # 3
+        "class Plugin {\n"                           # 4
+        "    public function register() {\n"         # 5
+        "        add_filter('the_title', [$this, 'title']);\n"
+        "        add_action('save', [$service, 'run']);\n"
+        "    }\n"
+        "    public function title($t) { return $t; }\n"   # 9
+        "}\n"
+        "function run() {}\n"
+    )}))
+    assert (hooks["init"].handler, hooks["init"].handlerLine) == ("my_init", 3)
+    assert (hooks["the_title"].handler, hooks["the_title"].handlerLine) == ("title", 9)
+    # The object's class is unknown: no handler, never the global run() of the same name.
+    assert (hooks["save"].handler, hooks["save"].handlerLine) == (None, None)

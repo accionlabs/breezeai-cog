@@ -473,9 +473,10 @@ class Plugin {
     record = _parse(PhpParser(), source)
     hooks = [s for s in record.statements if s.semanticType == "eventbus_consumer"]
 
-    assert [(s.endpoint, s.method, s.framework, s.handler, s.routeKind) for s in hooks] == [
-        ("init", "CONSUMER", "wordpress", "boot", None),
+    assert [(s.endpoint, s.method, s.framework, s.handler, s.handlerLine) for s in hooks] == [
+        ("init", "CONSUMER", "wordpress", "Plugin@boot", None),
         ("the_content", "CONSUMER", "wordpress", "filter_content", None),
+        (None, "CONSUMER", "wordpress", None, 6),
     ]
     assert record.framework == "wordpress"
     assert not any(s.semanticType == "route" for s in record.statements)
