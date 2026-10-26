@@ -11,14 +11,15 @@ Unlike every tree-sitter-backed parser in this project, there is no grammar tree
 shared ``comments_common.py`` pass over, so ``//`` comments are not captured as their own
 statements.
 
-Semantic capture is on by default (gated behind ``ctx.capture_statements``; the CLI's
-``--no-capture-statements`` turns it off), same as every other parser.
+Statement capture is on by default (gated behind ``ctx.capture_statements``; the CLI's
+``--no-capture-statements`` turns it off), same as every other parser; ``def`` functions are
+structure and are captured either way.
 """
 
 from __future__ import annotations
 
 from ...emit import file_id
-from ...schemas import SCHEMA_VERSION, FileRecord, Function, Statement
+from ...schemas import SCHEMA_VERSION, FileRecord
 from ...utils import count_loc
 from ..base import BaseParser, ParseContext
 from .mappings import FRAMEWORKS, STATEMENT_TYPES
@@ -44,11 +45,11 @@ class JsltParser(BaseParser):
 
         # No is_fixture_file gate: that check exists only for route/entry-point emitters
         # (base.py), and JSLT emits no routes — a fixture .jslt still has real declarations
-        # worth capturing.
-        statements: list[Statement] = []
-        functions: list[Function] = []
-        if ctx.capture_statements:
-            statements, functions = collect_jslt_declarations(text, path, seen_ids)
+        # worth capturing. Functions are structure, so they are captured even with
+        # `--no-capture-statements`, like every other language's.
+        statements, functions = collect_jslt_declarations(
+            text, path, seen_ids, capture_statements=ctx.capture_statements
+        )
 
         return FileRecord(
             id=fid,

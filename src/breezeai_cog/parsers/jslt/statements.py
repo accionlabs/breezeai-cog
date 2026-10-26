@@ -195,12 +195,13 @@ def _same_file_calls(lines: list[str], header_end: int, resolve: CallResolver) -
 
 
 def collect_jslt_declarations(
-    source: str, path: str, seen_ids: set[str]
+    source: str, path: str, seen_ids: set[str], *, capture_statements: bool
 ) -> tuple[list[Statement], list[Function]]:
     """Line-scan a JSLT document and emit: one ``Function`` per top-level (column-0,
     depth-0) ``def``, one ``Statement`` per ``import``/``let`` declaration, plus one trailing
     ``module_expression`` statement for the output expression after the last declaration
-    (empty file → nothing). ``Function.calls`` resolves same-file calls only."""
+    (empty file → nothing). ``Function.calls`` resolves same-file calls only. Functions are
+    structure and always emitted; statements only when ``capture_statements`` is set."""
     fid = file_id(path)
     lines = source.splitlines()
     n = len(lines)
@@ -235,12 +236,14 @@ def collect_jslt_declarations(
             if m:
                 def_spans.append((m.group(1), m.group(2), start, end, m.end()))
             continue
+        if not capture_statements:
+            continue
         pattern = _IMPORT_ALIAS_RE if keyword == "import" else _LET_NAME_RE
         name_match = pattern.match(first)
         name = name_match.group(1) if name_match else None
         statements.append(build_statement(_NODE_TYPES[keyword], name, start, end))
 
-    if module_start is not None:
+    if capture_statements and module_start is not None:
         hi = _trim_trailing_blank(lines, module_start, n)
         statements.append(build_statement("module_expression", None, module_start, hi))
 
@@ -264,6 +267,8 @@ def collect_jslt_declarations(
                 endLine=end,
             )
         )
+        if not capture_statements:
+            continue
         # Function has no `text` field (schemas/capture.py) -- the full body is carried on a
         # companion statement parented to it, same "full body on text" philosophy as every
         # other data-shaped capture in this parser, so the body stays findable/embeddable.

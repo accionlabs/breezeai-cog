@@ -328,12 +328,14 @@ def test_utf8_bom_stripped_before_scanning(tmp_path) -> None:
     assert [f.name for f in rec.functions] == ["f"]
 
 
-def test_capture_gate(tmp_path) -> None:
-    rec = _parse(tmp_path, "transform.jslt", SOURCE, capture=False)
-    assert rec.statements == []
-    assert rec.functions == []
-    assert rec.language == "jslt"
-    assert rec.framework is None
+def test_capture_gate_drops_statements_but_keeps_functions(tmp_path) -> None:
+    # Functions are structure (every language keeps them with --no-capture-statements);
+    # only the statements are gated.
+    on = _parse(tmp_path, "transform.jslt", SOURCE)
+    off = _parse(tmp_path, "transform.jslt", SOURCE, capture=False)
+    assert off.statements == []
+    assert off.language == "jslt"
+    assert [f.model_dump() for f in off.functions] == [f.model_dump() for f in on.functions]
 
 
 def test_fixture_file_still_captures_declarations(tmp_path) -> None:
