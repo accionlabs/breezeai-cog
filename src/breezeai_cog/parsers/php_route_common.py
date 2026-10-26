@@ -46,10 +46,12 @@ def method_of(call: Node, source: bytes) -> str | None:
 
 
 def string_value(node: Node | None, source: bytes) -> str | None:
+    """The value of a plain PHP string literal: single-quoted (``string``) or double-quoted
+    (``encapsed_string``) with no interpolation or escape sequence, else None."""
     if node is None:
         return None
     node = unwrap(node)
-    if node is None or node.type != "string":
+    if node is None or node.type not in {"string", "encapsed_string"}:
         return None
     if any(child.type != "string_content" for child in node.named_children):
         return None

@@ -640,3 +640,13 @@ $routes->addRedirect('here', 'there');
         ("GET", "/welcome", None), ("GET", "/here", None),
     }
     assert all(route.routeKind == "route" for route in ci_routes)
+
+
+def test_php_double_quoted_literals_are_values_but_interpolation_is_not() -> None:
+    record = _parse(LaravelParser(), """<?php
+use Illuminate\\Support\\Facades\\Route;
+Route::get("/users", [UserController::class, "index"]);
+Route::get("/users/{$id}", [UserController::class, "show"]);
+""")
+    routes = [s for s in record.statements if s.semanticType == "route"]
+    assert [(s.method, s.endpoint) for s in routes] == [("GET", "/users")]
