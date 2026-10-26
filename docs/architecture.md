@@ -573,6 +573,7 @@ the file:
   │                  40   go-chi           go_chi/routes.py                  ✔       │
   │                  50   go-fiber         go_fiber/routes.py                ✔       │
   │                  60   go-gorilla-mux   go_gorilla/routes.py              ✔       │
+  │                  70   go-grpc          go_grpc/routes.py                 ✔       │
   │                                                                                  │
   │  python          10   celery           python/celery.py                  ✔       │
   │                                                                                  │

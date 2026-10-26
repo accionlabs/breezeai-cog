@@ -15,8 +15,8 @@ tools query it. This guide only covers the generator — the part you run agains
   Angular, Express, React, Vue, Next.js, LoopBack, and GraphQL (TypeScript); Spring Boot, JAX-RS,
   and Vert.x (Java); ASP.NET, Web Forms, WCF/ASMX, and GraphQL (C#); ASP.NET (VB.NET); Ktor
   (Kotlin); Laravel, CodeIgniter 4, Slim, and Symfony (PHP); Rails, Sinatra, and Grape (Ruby);
-  Vert.x (Groovy); net/http, Gin, Echo, chi, Fiber, and gorilla/mux (Go). WordPress hooks and
-  cross-cutting SDK detectors (AWS messaging, HubSpot, Chargebee, Salesforce) layer on top
+  Vert.x (Groovy); net/http, Gin, Echo, chi, Fiber, and gorilla/mux, and gRPC (Go). WordPress hooks
+  and cross-cutting SDK detectors (AWS messaging, HubSpot, Chargebee, Salesforce) layer on top
   additively.
 - **Database/search schemas:** SQL DDL files and Elasticsearch mappings (via the HTTP service).
 - **Config & structured data:** `package.json`, `tsconfig.json`, `Dockerfile`, `docker-compose.yml`,

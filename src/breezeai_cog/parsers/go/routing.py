@@ -43,7 +43,7 @@ from ..contract import HTTP_METHODS
 from ..emits import Emit
 from ..handler_sites import handler_location
 from ..treesitter import node_text
-from .declarations import Declarations, declarations, package_dir, receiver_type
+from .declarations import Declarations, Site, declarations, package_dir, receiver_type
 from .imports import GoIndex, import_aliases
 
 GroupKind = Literal["child", "same", "closure_child", "closure_same", "mount"]
@@ -404,14 +404,38 @@ class _Analyzer:
                 env[("type", name)] = typ
 
     def _value_type(self, value: Node) -> str | None:
-        """``&Handler{…}`` / ``Handler{…}`` → ``Handler`` (``pkg.Handler`` kept qualified)."""
+        """The type of a value, when it says: ``&Handler{…}`` / ``Handler{…}`` → ``Handler``;
+        ``NewHandler(…)`` / ``pkg.New(…)`` → the function's declared result type
+        (``go.declarations``). A package-qualified type keeps its alias (``pkg.Handler``)."""
         node = value
         if node.type == "unary_expression":
             node = node.child_by_field_name("operand") or node
         if node.type == "composite_literal":
             tnode = node.child_by_field_name("type")
             return node_text(tnode, self.source).split("[", 1)[0] if tnode is not None else None
-        return None
+        if node.type != "call_expression":
+            return None
+        fn = node.child_by_field_name("function")
+        if fn is None:
+            return None
+        if fn.type == "identifier":
+            pkg, name, alias = self.pkg, node_text(fn, self.source), None
+        elif fn.type == "selector_expression":
+            operand = fn.child_by_field_name("operand")
+            alias = node_text(operand, self.source) if operand is not None else ""
+            if alias not in self.aliases or self.index is None:
+                return None
+            pkg = self.index.package_dir(self.aliases[alias])
+            name = node_text(fn.child_by_field_name("field"), self.source)
+        else:
+            return None
+        rtype = self.decls.results.get((pkg, name)) if pkg is not None else None
+        if rtype is None:
+            return None
+        if isinstance(rtype, tuple):  # declared in another package: (import path, type)
+            back = next((a for a, ip in self.aliases.items() if ip == rtype[0]), None)
+            return f"{back}.{rtype[1]}" if back is not None else None
+        return rtype if alias is None else f"{alias}.{rtype}"
 
     def _bind_vars(self, decl: Node, env: dict[str, Any], returned: set[str], key: FuncKey | None) -> None:
         specs = [c for c in decl.named_children if c.type == "var_spec"]
@@ -710,40 +734,52 @@ def _unwrap_handler(node: Node | None, analyzer: "_Analyzer", spec: RouterSpec) 
     return node
 
 
+def locate_member(analyzer: _Analyzer, recv: str, member: str,
+                  env_types: dict[str, str]) -> Site | None:
+    """Where ``recv.member`` is declared: a function of an imported package of the repo, a
+    method of ``recv``'s known type, or — the type unknown — the one method of that name in the
+    repo (None when there are several)."""
+    decls = analyzer.decls
+    if recv in analyzer.aliases:
+        pkg = analyzer.index.package_dir(analyzer.aliases[recv]) if analyzer.index is not None else None
+        return decls.functions.get((pkg, "", member)) if pkg is not None else None
+    typ = env_types.get(recv)
+    if not typ:
+        sites = decls.methods.get(member, ())
+        return sites[0] if len(sites) == 1 else None
+    alias, dot, tname = typ.partition(".")
+    pkg: str | None = analyzer.pkg
+    if dot:
+        pkg = (analyzer.index.package_dir(analyzer.aliases.get(alias, ""))
+               if analyzer.index is not None else None)
+    else:
+        tname = typ
+    return decls.functions.get((pkg, tname, member)) if pkg is not None else None
+
+
 def _locate(analyzer: _Analyzer, handler: Node, env_types: dict[str, str]) -> tuple[str | None, int | None, str | None]:
     """(handler name, handlerLine, handlerPath)."""
     source, decls = analyzer.source, analyzer.decls
     if handler.type == "func_literal":
         return None, handler.start_point[0] + 1, None
     name = node_text(handler, source)
-    site = None
     if handler.type == "identifier":
         site = decls.functions.get((analyzer.pkg, "", name))
     elif handler.type == "selector_expression":
         operand = handler.child_by_field_name("operand")
-        fld = node_text(handler.child_by_field_name("field"), source)
         recv = node_text(operand, source) if operand is not None else ""
-        if recv in analyzer.aliases and analyzer.index is not None:
-            pkg = analyzer.index.package_dir(analyzer.aliases[recv])
-            site = decls.functions.get((pkg, "", fld)) if pkg is not None else None
-        else:
-            typ = env_types.get(recv)
-            if typ:
-                alias, dot, tname = typ.partition(".")
-                pkg = analyzer.pkg
-                if dot:
-                    pkg = (analyzer.index.package_dir(analyzer.aliases.get(alias, ""))
-                           if analyzer.index is not None else None)
-                else:
-                    tname = typ
-                site = decls.functions.get((pkg, tname, fld)) if pkg is not None else None
-            else:
-                sites = decls.methods.get(fld, ())
-                site = sites[0] if len(sites) == 1 else None
+        site = locate_member(analyzer, recv, node_text(handler.child_by_field_name("field"), source),
+                             env_types)
     else:
         return None, None, None
     line, path = handler_location(site, analyzer.rel)
     return name, line, path
+
+
+def file_analyzer(root: Node, source: bytes, rel: str, index: GoIndex | None) -> _Analyzer:
+    """An analyzer with no router specs: imports, constants and declared types of one file, for
+    detectors that locate handlers the same way (``locate_member``, ``types_by_function``)."""
+    return _Analyzer(root, source, rel, [], declarations(index), index)
 
 
 def detect_routes(dc: DetectContext, spec: RouterSpec) -> Detection | None:
@@ -752,7 +788,7 @@ def detect_routes(dc: DetectContext, spec: RouterSpec) -> Detection | None:
     if not analyzer.routes:
         return None
     prefixes = index_fact(index, spec.fact_name())
-    types = _types_by_function(analyzer)
+    types = types_by_function(analyzer)
     found: list[Emit] = []
     for route in analyzer.routes:
         fields: dict[str, Any] = {
@@ -768,7 +804,7 @@ def detect_routes(dc: DetectContext, spec: RouterSpec) -> Detection | None:
     return Detection(found, label=spec.name)
 
 
-def _types_by_function(analyzer: _Analyzer) -> Callable[[Node], dict[str, str]]:
+def types_by_function(analyzer: _Analyzer) -> Callable[[Node], dict[str, str]]:
     """Route call → the declared types of the names in its function (params, ``&T{}``)."""
     cache: dict[int, dict[str, str]] = {}
 
@@ -791,8 +827,12 @@ def _types_by_function(analyzer: _Analyzer) -> Callable[[Node], dict[str, str]]:
                     continue
                 if node.type in {"short_var_declaration", "assignment_statement"}:
                     left, right = node.child_by_field_name("left"), node.child_by_field_name("right")
-                    if left is not None and right is not None and len(left.named_children) == len(right.named_children):
-                        for lhs, rhs in zip(left.named_children, right.named_children):
+                    lefts = left.named_children if left is not None else []
+                    rights = right.named_children if right is not None else []
+                    if len(rights) == 1 and len(lefts) > 1:  # `h, err := NewHandler()`
+                        lefts = lefts[:1]
+                    if len(lefts) == len(rights):
+                        for lhs, rhs in zip(lefts, rights):
                             typ = analyzer._value_type(rhs)
                             if lhs.type == "identifier" and typ:
                                 env[("type", node_text(lhs, analyzer.source))] = typ

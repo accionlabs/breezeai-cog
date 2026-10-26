@@ -48,6 +48,9 @@ class Declarations:
     #: (package dir, name) → the file declaring that package-level name (function, type, var,
     #: const); None when two files declare it (build-tag variants).
     symbols: dict[tuple[str, str], str | None] = field(default_factory=dict)
+    #: (package dir, function) → the type it returns (``NewHandler() (*Handler, error)`` →
+    #: ``Handler``; a package-qualified type keeps its import path: ``(path, "Type")``).
+    results: dict[tuple[str, str], str | tuple[str, str]] = field(default_factory=dict)
 
 
 def package_dir(rel: str) -> str:
@@ -74,10 +77,26 @@ def qualified_type(type_text: str, aliases: dict[str, str]) -> tuple[str, str] |
     return aliases[alias], name.split("[", 1)[0]
 
 
+def result_type(node: Node, source: bytes) -> str | None:
+    """The first result type of a function, pointer dropped: ``(*Handler, error)`` → ``Handler``,
+    ``*pkg.Server`` → ``pkg.Server``; None when it returns nothing or only ``error``."""
+    result = node.child_by_field_name("result")
+    if result is None:
+        return None
+    if result.type == "parameter_list":
+        first = next((p for p in result.named_children if p.type == "parameter_declaration"), None)
+        result = first.child_by_field_name("type") if first is not None else None
+        if result is None:
+            return None
+    text = node_text(result, source).lstrip("*").split("[", 1)[0]
+    return None if text == "error" or not text[:1].isalpha() else text
+
+
 def _collect(root: Node, source: bytes, rel: str, repo_root: Path | None) -> dict[str, Any] | None:
     pkg = package_dir(rel)
     aliases = import_aliases(root, source)
     functions: list[tuple[FuncKey, Site]] = []
+    results: list[tuple[str, str | tuple[str, str]]] = []
     fields: list[tuple[tuple[str, str, str], tuple[str, str]]] = []
     symbols: list[str] = []
     for child in root.named_children:
@@ -88,6 +107,9 @@ def _collect(root: Node, source: bytes, rel: str, repo_root: Path | None) -> dic
                 functions.append((key, (rel, child.start_point[0] + 1)))
                 if not key[1]:
                     symbols.append(key[2])
+                    rtype = result_type(child, source)
+                    if rtype is not None:
+                        results.append((key[2], qualified_type(rtype, aliases) or rtype))
         elif child.type in {"var_declaration", "const_declaration"}:
             specs = list(child.named_children)
             for group in child.named_children:
@@ -118,7 +140,8 @@ def _collect(root: Node, source: bytes, rel: str, repo_root: Path | None) -> dic
                             fields.append(((pkg, struct, node_text(fname, source)), qualified))
     if not (functions or fields or symbols):
         return None
-    return {"functions": functions, "fields": fields, "symbols": [(pkg, n, rel) for n in symbols]}
+    return {"functions": functions, "fields": fields, "symbols": [(pkg, n, rel) for n in symbols],
+            "results": [(pkg, n, t) for n, t in results]}
 
 
 def _resolve(values: list[dict[str, Any]], index: Any) -> Declarations | None:
@@ -126,7 +149,10 @@ def _resolve(values: list[dict[str, Any]], index: Any) -> Declarations | None:
     methods: dict[str, list[Site]] = {}
     fields: dict[tuple[str, str, str], tuple[str, str]] = {}
     symbols: dict[tuple[str, str], str | None] = {}
+    results: dict[tuple[str, str], Any] = {}
     for value in values:
+        for pkg, name, rtype in value["results"]:
+            results[(pkg, name)] = tuple(rtype) if isinstance(rtype, list) else rtype
         for pkg, name, rel in value["symbols"]:
             key = (pkg, name)
             symbols[key] = rel if symbols.get(key, rel) == rel else None
@@ -138,7 +164,8 @@ def _resolve(values: list[dict[str, Any]], index: Any) -> Declarations | None:
             fields[key] = qualified
     if not functions and not fields and not symbols:
         return None
-    return Declarations(functions, {n: tuple(sorted(s)) for n, s in methods.items()}, fields, symbols)
+    return Declarations(functions, {n: tuple(sorted(s)) for n, s in methods.items()}, fields, symbols,
+                        results)
 
 
 def declarations(index: Any | None) -> Declarations:
