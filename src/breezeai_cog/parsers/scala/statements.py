@@ -429,7 +429,9 @@ def extract_statements(
     if not capture or body is None:
         return []
     out: list[Statement] = []
-    for node in _iter_in_scope(body, descend_all, barriers):
+    # An expression-bodied ``def f() = a.b()`` / ``= if (…) …`` has the statement as its body.
+    whole = [body] if body.type in EMIT_TYPES or body.type in _STMT_EXPR else []
+    for node in (*whole, *_iter_in_scope(body, descend_all, barriers)):
         out.extend(
             classify_statement(
                 node,

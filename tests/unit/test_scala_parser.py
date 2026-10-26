@@ -371,6 +371,43 @@ def test_expression_bodied_def_records_its_calls(tmp_path: Path) -> None:
     assert calls["expressionWrapper"] == ["run", "helper"]
 
 
+def _statements_of(body: str) -> list[tuple[str, str | None, str | None, str | None]]:
+    src = f"""package p
+import play.api.libs.ws.WSClient
+class R(ws: WSClient, db: Database) {{
+  {body}
+}}
+""".encode()
+    rec = ScalaParser().parse_file(
+        ParseContext(path="R.scala", abs_path=Path("R.scala"), source=src,
+                     repo_root=Path.cwd(), capture_statements=True)
+    )
+    return [(s.nodeType, s.semanticType, s.method, s.endpoint) for s in rec.statements]
+
+
+@pytest.mark.parametrize(
+    "expr",
+    [
+        'ws.url("/x").get()',
+        'if (a) ws.url("/x").get() else ws.url("/y").post(b)',
+        'x match {\n    case 1 => ws.url("/x").get()\n    case _ => ws.url("/y").delete()\n  }',
+        'Future {\n    // absorbed into the statement\n    db.withConnection { c => SQL"select 1".as(p) }\n  }',
+    ],
+)
+def test_expression_bodied_def_captures_what_a_braced_one_does(expr: str) -> None:
+    """``def f() = expr`` had no statements at all; it must match ``def f() = { expr }``."""
+    expression = _statements_of(f"def f() = {expr}")
+    braced = _statements_of(f"def f() = {{\n  {expr}\n  }}")
+    assert expression == braced
+    assert expression
+
+
+def test_expression_bodied_def_records_its_api_call() -> None:
+    assert _statements_of('def f() = ws.url("/x").get()') == [
+        ("call_expression", "api_call", "GET", "/x")
+    ]
+
+
 def test_nested_def_is_captured_as_its_own_function(tmp_path: Path) -> None:
     """Defect C: a nested `def` was dropped entirely."""
     rec, _ = _parse(tmp_path, NESTED_DEF_SRC, capture=True)
