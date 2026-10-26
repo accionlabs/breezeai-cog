@@ -657,7 +657,7 @@ Route::get("/users", [UserController::class, "index"]);
 Route::get("/users/{$id}", [UserController::class, "show"]);
 """)
     routes = [s for s in record.statements if s.semanticType == "route"]
-    assert [(s.method, s.endpoint) for s in routes] == [("GET", "/users")]
+    assert [(s.method, s.endpoint) for s in routes] == [("GET", "/users"), ("GET", None)]
 
 
 def _laravel_routes(source: str):
@@ -757,3 +757,10 @@ class K {
 """)
     routes = [(s.endpoint, s.parentId) for s in record.statements if s.semanticType == "route"]
     assert routes == [("/blog", next(f.id for f in record.functions if f.name == "b"))]
+
+
+def test_codeigniter_dynamic_path_is_a_binding_with_empty_endpoint() -> None:
+    record = _parse(CodeIgniterParser(), "<?php\n$routes->get($uri, 'Users::list');\n",
+                    path="app/Config/Routes.php")
+    assert [(s.method, s.endpoint, s.handler) for s in record.statements
+            if s.semanticType == "route"] == [("GET", None, "Users@list")]

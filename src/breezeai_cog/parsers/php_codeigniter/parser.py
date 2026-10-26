@@ -313,19 +313,22 @@ def detect_codeigniter_routes(root: Node, source: bytes, path: str, record: File
             options = args[options_index] if options_index is not None and len(args) > options_index else None
             route_name, route_guards = route_options(options, source)
             receiver = node.child_by_field_name("object")
-            if route_endpoint is not None and _route_receiver(receiver, source):
+            # A path that isn't a literal is still a binding: empty endpoint (contract §8).
+            if len(args) > path_index and _route_receiver(receiver, source):
                 route_kind = "route"
                 for verb in methods:
                     found |= _enrich_route(
                         node, source, path, statements, record.statements, seen_ids,
-                        endpoint=(join_endpoint(prefix, route_endpoint) if prefix is not None else None), method=verb,
+                        endpoint=(join_endpoint(prefix, route_endpoint)
+                                  if prefix is not None and route_endpoint is not None else None),
+                        method=verb,
                         handler_node=(
                             args[handler_index] if handler_index is not None
                             and method not in {"view", "addredirect"} else None
                         ),
                         name=route_name,
                         guards=list(dict.fromkeys([*(guards or []), *route_guards])),
-                        is_regex=any(token in route_endpoint for token in _CI_REGEX_TOKENS),
+                        is_regex=any(token in (route_endpoint or "") for token in _CI_REGEX_TOKENS),
                         route_kind=route_kind,
                     )
         for child in node.named_children:

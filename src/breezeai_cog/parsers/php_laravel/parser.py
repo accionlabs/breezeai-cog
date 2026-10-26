@@ -426,7 +426,8 @@ def detect_laravel_routes(root: Node, source: bytes, path: str, record: FileReco
                     endpoint_node, handler_node = None, None
                     route_kind = "route"
                 endpoint = string_value(endpoint_node, source)
-                if methods and (endpoint is not None or name == "fallback"):
+                # A path that isn't a literal is still a binding: empty endpoint (contract §8).
+                if methods and (endpoint_node is not None or name == "fallback"):
                     chain_route_prefix = chain_prefix(node.child_by_field_name("object"), source)
                     effective_prefix = (
                         join_endpoint(prefix or "", chain_route_prefix)
