@@ -4,6 +4,8 @@ selection via claims, and schema validity."""
 
 from __future__ import annotations
 
+import pytest
+
 import json
 
 from jsonschema import Draft202012Validator
@@ -297,3 +299,46 @@ def test_script_local_is_not_seen_inside_a_method(tmp_path) -> None:
     rec = _parse(tmp_path, src, "script.groovy")
     assert sorted(s.endpoint or "" for s in rec.statements if s.semanticType == "route") == [
         "", "/s/closure", "/s/top"]
+
+
+_GROOVY_USER_API = """import io.vertx.ext.web.Router
+class UserApi {
+  static Router router(def vertx) {
+    def userRouter = Router.router(vertx)
+    userRouter.get("/users").handler({ ctx -> ctx.end() })
+    userRouter
+  }
+}
+"""
+
+
+@pytest.mark.parametrize(("main", "expected"), [
+    ('    router.mountSubRouter("/api", UserApi.router(vertx))\n', "/api/users"),
+    ("    vertx.createHttpServer().requestHandler(UserApi.router(vertx))\n", "/users"),
+    ('    router.mountSubRouter("/a", UserApi.router(vertx))\n'
+     '    router.mountSubRouter("/b", UserApi.router(vertx))\n', None),
+])
+def test_groovy_router_factory_is_served_where_it_is_mounted(analyze_files, main, expected) -> None:
+    st = analyze_files({
+        "src/UserApi.groovy": _GROOVY_USER_API,
+        "src/Main.groovy": ("import io.vertx.ext.web.Router\nclass Main extends io.vertx.core.AbstractVerticle {\n"
+                            "  void start() {\n    def router = Router.router(vertx)\n" + main + "  }\n}\n"),
+    })
+    got = [s.endpoint for s in st if s.semanticType == "route" and s.path == "src/UserApi.groovy"]
+    assert got == [expected]
+
+
+def test_groovy_field_sub_router_and_mount_route(tmp_path) -> None:
+    src = b"""import io.vertx.ext.web.Router
+class Api extends io.vertx.core.AbstractVerticle {
+  def adminRouter
+  void start() {
+    def router = Router.router(vertx)
+    adminRouter = Router.router(vertx)
+    adminRouter.get("/stats").handler(this::stats)
+    router.route("/admin/*").subRouter(this.adminRouter)
+  }
+}
+"""
+    rec = _parse(tmp_path, src, "src/Api.groovy")
+    assert _routes(rec) == {("GET", "/admin/stats")}  # no record for the mount route itself

@@ -14,9 +14,12 @@ here. Mutates ``record``; returns True if anything matched."""
 
 from __future__ import annotations
 
+from pathlib import Path
+
 from tree_sitter import Node
 
 from ...schemas import FileRecord
+from ..additive import FactSpec, register_fact
 from ..emits import Emit
 from ..treesitter import node_text
 from ..vertx_common import (
@@ -24,6 +27,11 @@ from ..vertx_common import (
     HANDLER_CALLS,
     HANDLER_SEMANTICS,
     MOUNT_SUB_ROUTER,
+    MOUNTED_FACTORIES,
+    FactoryMount,
+    factory_mount,
+    resolve_mounted_factories,
+    router_name,
     SUB_ROUTER_CALL,
     SubRouterMount,
     classify_call,
@@ -209,20 +217,31 @@ def _handler_arg(call: Node, source: bytes) -> Node | None:
     return found
 
 
-def _sub_router_mounts(
-    calls: list[Node], source: bytes, consts: dict[str, str], literals: _Literals
-) -> tuple[list[SubRouterMount], set[tuple[int, int]]]:
-    """Sub-router mounts in this file, and the ``route("/api/*")`` calls they hang off (those are
-    the mount's path, not routes). ``router.route("/api/*").subRouter(sub)`` and
-    ``router.mountSubRouter("/api", sub)``; ``sub`` must be a plain variable. In this grammar a
-    chained call is ``method_invocation(function: field_access(object: <call>, …))``."""
-    mounts: list[SubRouterMount] = []
-    mount_routes: set[tuple[int, int]] = set()
+_NOT_MOUNTED = object()
+
+
+def _mount_arg(node: Node, source: bytes) -> str | None:
+    """A mounted router given by name: ``apiRouter`` / ``this.apiRouter`` → ``apiRouter``."""
+    if node.type == "identifier":
+        return node_text(node, source)
+    if node.type == "field_access":
+        return router_name(node_text(node, source))
+    return None
+
+
+def _mount_calls(
+    calls: list[Node], source: bytes, consts: dict[str, str], literals: _Literals,
+) -> list[tuple[Node, Node, str, str | None, Node | None]]:
+    """Every sub-router mount: (the mount call, the mounted argument, the parent router, the
+    prefix, the ``route("/api/*")`` call it hangs off or None). ``router.route("/api/*")
+    .subRouter(sub)`` and ``router.mountSubRouter("/api", sub)``. In this grammar a chained call
+    is ``method_invocation(function: field_access(object: <call>, …))``."""
+    out: list[tuple[Node, Node, str, str | None, Node | None]] = []
     for call in calls:
         method, prefix, _, obj = _parts(call, source, literals.at(call, consts))
         args = call.child_by_field_name("arguments")
         named = list(args.named_children) if args is not None else []
-        if method == SUB_ROUTER_CALL and len(named) == 1 and named[0].type == "identifier":
+        if method == SUB_ROUTER_CALL and len(named) == 1:
             fn = call.child_by_field_name("function")
             inner = fn.child_by_field_name("object") if fn is not None else None
             if inner is None or inner.type != "method_invocation":
@@ -230,18 +249,134 @@ def _sub_router_mounts(
             inner_method, inner_path, inner_arg, inner_obj = _parts(
                 inner, source, literals.at(inner, consts))
             if inner_method == "route" and inner_arg is not None:
-                mounts.append((node_text(named[0], source), inner_obj, inner_path))
-                mount_routes.add((inner.start_byte, inner.end_byte))
-        elif method == MOUNT_SUB_ROUTER and len(named) == 2 and named[1].type == "identifier":
-            mounts.append((node_text(named[1], source), obj, prefix))
+                out.append((call, named[0], router_name(inner_obj), inner_path, inner))
+        elif method == MOUNT_SUB_ROUTER and len(named) == 2:
+            out.append((call, named[1], router_name(obj), prefix, None))
+    return out
+
+
+def _sub_router_mounts(
+    calls: list[Node], source: bytes, consts: dict[str, str], literals: _Literals
+) -> tuple[list[SubRouterMount], set[tuple[int, int]]]:
+    """Sub-router mounts by name in this file (a variable or a field), and the
+    ``route("/api/*")`` calls every mount hangs off (the mount's path, not routes — whatever is
+    mounted). A mounted factory call is collected repo-wide instead (:func:`_factory_mounts`)."""
+    mounts: list[SubRouterMount] = []
+    mount_routes: set[tuple[int, int]] = set()
+    for _, arg, parent, prefix, inner in _mount_calls(calls, source, consts, literals):
+        if inner is not None:
+            mount_routes.add((inner.start_byte, inner.end_byte))
+        name = _mount_arg(arg, source)
+        if name is not None:
+            mounts.append((name, parent, prefix))
     return mounts, mount_routes
 
 
+def _enclosing(node: Node, source: bytes) -> tuple[str | None, str | None]:
+    """(class simple name, method name) a node is declared in."""
+    method = cls = None
+    parent = node.parent
+    while parent is not None:
+        if parent.type in ("method_declaration", "constructor_declaration") and method is None:
+            name = parent.child_by_field_name("name")
+            method = node_text(name, source) if name is not None else None
+        elif parent.type in ("class_declaration", "enum_declaration"):
+            name = parent.child_by_field_name("name")
+            cls = node_text(name, source) if name is not None else None
+            break
+        parent = parent.parent
+    return cls, method
+
+
+def _factory_routers(root: Node, source: bytes) -> dict[tuple[str, str], str]:
+    """``(class, method)`` → the router variable a method creates (``Router.router(…)``) and
+    returns — with ``return`` or as its last expression: a router factory."""
+    out: dict[tuple[str, str], str] = {}
+    stack = [root]
+    while stack:
+        node = stack.pop()
+        stack.extend(node.named_children)
+        if node.type != "method_declaration":
+            continue
+        body = node.child_by_field_name("body")
+        if body is None:
+            continue
+        created: set[str] = set()
+        returned: set[str] = set()
+        inner = [body]
+        while inner:
+            n = inner.pop()
+            if n.type in ("closure", "class_body") and n is not body:
+                continue  # a nested scope returns its own values
+            inner.extend(n.named_children)
+            name, value = n.child_by_field_name("name"), n.child_by_field_name("value")
+            if n.type in ("variable_declarator", "local_variable_declaration") \
+                    and name is not None and value is not None \
+                    and node_text(value, source).replace(" ", "").startswith("Router.router("):
+                created.add(node_text(name, source))
+            elif n.type == "return_statement":
+                value = next(iter(n.named_children), None)
+                if value is not None and value.type == "identifier":
+                    returned.add(node_text(value, source))
+        last = body.named_children[-1] if body.named_children else None
+        if last is not None and last.type == "expression_statement" and last.named_children \
+                and last.named_children[0].type == "identifier":  # Groovy's implicit return
+            returned.add(node_text(last.named_children[0], source))
+        cls, method = _enclosing(body, source)
+        both = created & returned
+        if cls and method and len(both) == 1:
+            out[(cls, method)] = both.pop()
+    return out
+
+
+def _factory_key(call: Node, source: bytes) -> tuple[str, bool] | None:
+    """A mounted factory call → (``Class.method``, True), or (``method``, False) when its class
+    is not known from the call (``api.router()``). Not a call → None."""
+    if call.type != "method_invocation":
+        return None
+    fn = call.child_by_field_name("function")
+    if fn is None:
+        return None
+    if fn.type == "identifier":
+        cls, _ = _enclosing(call, source)
+        method = node_text(fn, source)
+        return (f"{cls}.{method}", True) if cls else (method, False)
+    obj, field = fn.child_by_field_name("object"), fn.child_by_field_name("field")
+    if field is None:
+        return None
+    method = node_text(field, source)
+    if obj is not None and obj.type == "identifier" and node_text(obj, source)[:1].isupper():
+        return f"{node_text(obj, source)}.{method}", True  # a static call
+    return method, False
+
+
+def _factory_mounts(root: Node, source: bytes, rel: str, repo_root: Path | None) -> list[FactoryMount] | None:
+    """The factory calls this file mounts, for the ``vertx.mounted-factories`` fact. A mount on
+    a router that is itself mounted here has a prefix cog does not compose here → None."""
+    calls = _invocations(root)
+    mounts = _mount_calls(calls, source, {}, _Literals(root, source))
+    subs = {name for _, arg, _, _, _ in mounts if (name := _mount_arg(arg, source)) is not None}
+    out: list[FactoryMount] = []
+    for _, arg, parent, prefix, _ in mounts:
+        key = _factory_key(arg, source)
+        if key is not None:
+            out.append((key[0], None if parent in subs else prefix, key[1]))
+    return out or None
+
+
+register_fact(FactSpec(
+    name=MOUNTED_FACTORIES, language="groovy", gate=(b"ubRouter",),
+    collect=_factory_mounts, resolve=resolve_mounted_factories,
+))
+
+
 def detect_vertx_groovy(
-    root: Node, source: bytes, path: str, record: FileRecord, consts: dict[str, str] | None = None
+    root: Node, source: bytes, path: str, record: FileRecord, consts: dict[str, str] | None = None,
+    index: object | None = None,
 ) -> list[Emit]:
     """This file's Vert.x routes, consumers, sends and timers, for :func:`~..emits.apply`.
-    ``consts`` (``name → value``) folds symbolic addresses to their String value."""
+    ``consts`` (``name → value``) folds symbolic addresses to their String value. ``index`` (the
+    Groovy index) carries the ``vertx.mounted-factories`` fact."""
     found: list[Emit] = []
     consts = consts or {}
     literals = _Literals(root, source)
@@ -256,6 +391,8 @@ def detect_vertx_groovy(
         else ([], set())
     )
     bases = sub_router_bases(mounts)
+    # Routers a method of this file creates and returns: served where their factory is mounted.
+    factories = _factory_routers(root, source) if b"Router.router" in source else {}
     service_vars = service_builder_vars(source) if b"setAddress" in source else {}
 
     for call in calls:
@@ -271,12 +408,21 @@ def detect_vertx_groovy(
             continue
         semantic, verb, endpoint, route_kind = info
         unknown_base = False
-        if semantic == "route" and obj in bases:  # a sub-router's route: under its mount
-            base = bases[obj]
+        recv = router_name(obj)
+        base: str | None | object = _NOT_MOUNTED
+        if semantic == "route" and recv in bases:  # a sub-router's route: under its mount
+            base = bases[recv]
+        elif semantic == "route" and factories:
+            cls, method_name = _enclosing(call, source)
+            if cls and method_name and factories.get((cls, method_name)) == recv:
+                mounted, prefix = factory_mount(index, cls, method_name)
+                if mounted:
+                    base = prefix
+        if base is not _NOT_MOUNTED:
             if base is None or endpoint is None:
                 unknown_base, endpoint = True, None
             else:
-                endpoint = join_path(base, endpoint)
+                endpoint = join_path(str(base), endpoint)
         handler, handler_line = (
             handler_info(_handler_arg(call, source), source, methods)
             if semantic in HANDLER_SEMANTICS else (None, None)

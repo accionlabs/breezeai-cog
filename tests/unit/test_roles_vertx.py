@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 from breezeai_cog.parsers.contract import is_entry_point
 
 
@@ -289,3 +291,51 @@ def test_service_method_leads_to_the_implementing_class(analyze_files) -> None:
     [r] = _eps(analyze_files(files))
     assert (r.handler, r.handlerPath, r.handlerLine) == (
         "listOrders", "src/main/java/a/OrderServiceImpl.java", 3)
+
+
+_IMPORTS = "package a;\nimport io.vertx.core.*;\nimport io.vertx.ext.web.Router;\n"
+_USER_API = (_IMPORTS + "public class UserApi {\n"
+             "  public static Router router(Vertx vertx) {\n"
+             "    Router userRouter = Router.router(vertx);\n"
+             '    userRouter.get("/users").handler(ctx -> ctx.end());\n'
+             "    return userRouter;\n  }\n}\n")
+
+
+def _routes(st) -> dict[str, str | None]:
+    return {s.path.rsplit("/", 1)[-1]: s.endpoint for s in st if s.semanticType == "route"}
+
+
+@pytest.mark.parametrize(("main", "expected"), [
+    # mounted under /api from another file: the factory's routes are served there
+    ('    router.mountSubRouter("/api", UserApi.router(vertx));\n', "/api/users"),
+    ('    router.route("/v2/*").subRouter(UserApi.router(vertx));\n', "/v2/users"),
+    # used as the main router: served at the root
+    ("    vertx.createHttpServer().requestHandler(UserApi.router(vertx));\n", "/users"),
+    # mounted at a prefix that does not resolve, or twice: where is unknown
+    ("    router.mountSubRouter(base(), UserApi.router(vertx));\n", None),
+    ('    router.mountSubRouter("/a", UserApi.router(vertx));\n'
+     '    router.mountSubRouter("/b", UserApi.router(vertx));\n', None),
+])
+def test_router_factory_is_served_where_it_is_mounted(analyze_files, main, expected) -> None:
+    st = analyze_files({
+        "src/main/java/a/UserApi.java": _USER_API,
+        "src/main/java/a/Main.java": (_IMPORTS + "public class Main extends AbstractVerticle {\n"
+                                      "  public void start() {\n"
+                                      "    Router router = Router.router(vertx);\n"
+                                      + main + "  }\n}\n"),
+    })
+    assert _routes(st)["UserApi.java"] == expected
+
+
+def test_field_sub_router_and_twice_mounted_sub_router(analyze_files) -> None:
+    st = analyze_files(_verticle("""    Router router = Router.router(vertx);
+    this.adminRouter = Router.router(vertx);
+    adminRouter.get("/stats").handler(this::handle);
+    router.route("/admin/*").subRouter(this.adminRouter);
+    Router sharedRouter = Router.router(vertx);
+    sharedRouter.get("/ping").handler(this::handle);
+    router.mountSubRouter("/v1", sharedRouter);
+    router.mountSubRouter("/v2", sharedRouter);"""))
+    got = sorted((s.endpoint or "") for s in _eps(st))
+    # the field's routes get its prefix; the mount itself is no route; shared is served twice
+    assert got == ["", "/admin/stats"]
