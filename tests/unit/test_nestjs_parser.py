@@ -338,16 +338,16 @@ export class OrderController {
 
 
 def test_response_dto_from_return_type(tmp_path) -> None:
-    # responseDTO falls back to the handler return type (Promise<T>/T); a built-in type is kept.
+    # responseDTO falls back to the handler return type as declared, Promise<…> removed.
     p = tmp_path / "ret.controller.ts"
     p.write_text(_RETTYPE_SRC.decode())
     ctx = ParseContext(path="ret.controller.ts", abs_path=p, source=_RETTYPE_SRC,
                        repo_root=tmp_path, capture_statements=True)
     rec = NestJSParser().parse_file(ctx)
     dto = {s.handler: s.responseDTO for s in rec.statements if s.semanticType == "route"}
-    assert dto["list"] == "OrderDto"          # Promise<OrderDto[]> → OrderDto
+    assert dto["list"] == "OrderDto[]"        # Promise<OrderDto[]> → OrderDto[]
     assert dto["one"] == "UserDto"            # UserDto
-    assert dto["count"] == "number"           # Promise<number> → the built-in type
+    assert dto["count"] == "number"           # Promise<number> → number
 
 
 # routing-controllers: same @Controller/@Get grammar, different import package. Mirrors the
@@ -795,17 +795,34 @@ def test_object_pattern_with_a_numeric_constant_is_unknown(analyze_files) -> Non
 
 
 @pytest.mark.parametrize(("ret", "dto"), [
-    ("Promise<string>", "string"),  # a built-in type is the declared type
-    ("Observable<number[] | null>", "number"),
-    ("orders.Order", "Order"),  # never the namespace
-    ("{ url: string }", None),  # an object type: not its field's type
-    ("Record<string, OrderDto>", "OrderDto"),
+    # the declared type as written; only Promise<…> / Observable<…> are removed
+    ("Promise<string>", "string"),
+    ("Observable<number[] | null>", "number[] | null"),
+    ("orders.Order", "orders.Order"),
+    ("{ url: string }", "{ url: string }"),
+    ("Record<string, OrderDto>", "Record<string, OrderDto>"),
     ("Promise<void>", None),
+    ("Promise<any>", None),  # nothing declared
+    ("Promise<Response | void>", None),  # the handler writes to the response object
+    ("Promise<OrderDto | void>", "OrderDto | void"),
 ])
-def test_response_dto_keeps_built_in_types(analyze_files, ret: str, dto: str | None) -> None:
+def test_response_dto_is_the_declared_type(analyze_files, ret: str, dto: str | None) -> None:
     st = analyze_files({"src/a.controller.ts": (
         "import { Controller, Get } from '@nestjs/common';\n"
         f"@Controller('a')\nexport class A {{\n  @Get()\n  get(): {ret} {{ return null; }}\n}}\n"
+    )})
+    [r] = [s for s in st if s.semanticType == "route"]
+    assert r.responseDTO == dto
+
+
+@pytest.mark.parametrize(("decorator", "dto"), [
+    ("@ApiOkResponse({ type: OrderDto })", "OrderDto"),
+    ("@ApiOkResponse({ type: [OrderDto] })", "[OrderDto]"),  # an array, as the decorator writes it
+])
+def test_api_response_type_as_written(analyze_files, decorator: str, dto: str) -> None:
+    st = analyze_files({"src/a.controller.ts": (
+        "import { Controller, Get } from '@nestjs/common';\n"
+        f"@Controller('a')\nexport class A {{\n  @Get()\n  {decorator}\n  get() {{ return null; }}\n}}\n"
     )})
     [r] = [s for s in st if s.semanticType == "route"]
     assert r.responseDTO == dto

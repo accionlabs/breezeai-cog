@@ -12,7 +12,7 @@ from tree_sitter import Node
 
 from ...emit import function_id
 from ...parsers.typescript.decorators import decorator
-from ...parsers.typescript.functions import dto_from_type, extract_params, return_dto
+from ...parsers.typescript.functions import extract_params, payload_type, return_dto
 from ..emits import Emit
 from ..treesitter import node_text
 from ..typescript.base_paths import app_base_path
@@ -130,12 +130,10 @@ def _auth(decs: list[Node], source: bytes) -> tuple[bool, list[str]]:
 
 
 def _request_dto(member: Node, source: bytes) -> str | None:
-    """Type name of the ``@requestBody()``-decorated parameter → requestDTO. Normalized to a
-    single DTO name (so a named class links to its ``Class`` node); an anonymous inline
-    object type (``{a: number; b: string}``) has no name and yields ``None``."""
+    """Declared type of the ``@requestBody()``-decorated parameter → requestDTO, as written."""
     for p in extract_params(member.child_by_field_name("parameters"), source):
         if any(d.name == "requestBody" for d in p.decorators):
-            return dto_from_type(p.type)
+            return payload_type(p.type)
     return None
 
 

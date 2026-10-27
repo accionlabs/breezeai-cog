@@ -129,9 +129,31 @@ def dto_from_type(t: str | None, *, built_ins: bool = True) -> str | None:
     return _primitive(t) if built_ins else None
 
 
+#: Async wrappers, not part of the payload (contract: ``requestDTO`` / ``responseDTO`` are the
+#: declared payload type with these removed).
+_ASYNC_WRAPPER_RE = re.compile(r"^(?:Promise|Observable)\s*<(.*)>$", re.DOTALL)
+#: Declared types that carry no payload: no body, nothing declared (``any``), or the
+#: framework's response object (Express ``Response``: the handler writes the body to it).
+_NO_PAYLOAD_TYPES = frozenset({"void", "never", "undefined", "any", "unknown", "Response"})
+
+
+def payload_type(t: str | None) -> str | None:
+    """A handler's declared request / response type → the payload type as written, with
+    ``Promise<…>`` / ``Observable<…>`` removed (``Promise<OrderDto[]>`` → ``OrderDto[]``,
+    ``Promise<string>`` → ``string``); arrays, unions, namespaces and object types stay as
+    declared. None when every member of the type carries no payload (``void``,
+    ``Promise<any>``, ``Promise<Response | void>``)."""
+    t = " ".join((t or "").split())
+    while (m := _ASYNC_WRAPPER_RE.match(t)) is not None:
+        t = m.group(1).strip()
+    if not t or all(p.strip() in _NO_PAYLOAD_TYPES for p in t.split("|")):
+        return None
+    return t
+
+
 def return_dto(member: Node, source: bytes) -> str | None:
-    """Handler return type → responseDTO (``Promise<TimezoneDto[]>`` → ``TimezoneDto``)."""
-    return dto_from_type(_type_text(member.child_by_field_name("return_type"), source))
+    """Handler return type → responseDTO (``Promise<TimezoneDto[]>`` → ``TimezoneDto[]``)."""
+    return payload_type(_type_text(member.child_by_field_name("return_type"), source))
 
 
 def _visibility(node: Node, source: bytes) -> str:

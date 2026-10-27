@@ -21,7 +21,9 @@ from tree_sitter import Node
 from ...emit import function_id
 from ...schemas import Decorator
 from ...parsers.typescript.decorators import decorator
-from ...parsers.typescript.functions import _type_text, dto_from_type, extract_params
+from ...parsers.typescript.functions import (
+    dto_from_type, extract_params, payload_type, return_dto,
+)
 from ..additive import FactSpec, index_fact, register_fact
 from ..emits import Emit
 from ..index_common import record_distinct
@@ -82,10 +84,7 @@ def _graphql_op_name(d: Decorator, mname: str) -> str:
                 return m.group(0)
     return mname
 _RESPONSE_DECORATORS = {"ApiResponse", "ApiOkResponse", "ApiCreatedResponse"}
-_TYPE_PROP_RE = re.compile(r"\btype\s*:\s*\[?\s*([A-Za-z_$][\w.$]*)")
-def _return_dto(member: Node, source: bytes) -> str | None:
-    """Handler return type → responseDTO (fallback when no ``@ApiResponse``)."""
-    return dto_from_type(_type_text(member.child_by_field_name("return_type"), source))
+_TYPE_PROP_RE = re.compile(r"\btype\s*:\s*(\[\s*[A-Za-z_$][\w.$]*\s*\]|[A-Za-z_$][\w.$]*)")
 # `@Controller({ path: 'orders', host: '...' })` — pull the string `path` out of the
 # object form (the string form `@Controller('orders')` is handled directly).
 _PATH_PROP_RE = re.compile(r"""\bpath\s*:\s*['"`]([^'"`]*)['"`]""")
@@ -182,14 +181,15 @@ def _guards(decs: list[Node], source: bytes, *, interceptors: bool = False) -> l
 
 
 def _response_dto(decs: list[Node], source: bytes) -> str | None:
-    """``@ApiResponse({ type: Dto })`` / ApiOkResponse / ApiCreatedResponse → Dto."""
+    """``@ApiResponse({ type: Dto })`` / ApiOkResponse / ApiCreatedResponse → ``Dto`` (an array
+    ``type: [Dto]`` as written)."""
     for dec in decs:
         d = decorator(dec, source)
         if d.name in _RESPONSE_DECORATORS:
             for arg in d.args:
                 m = _TYPE_PROP_RE.search(arg)
                 if m:
-                    return m.group(1)
+                    return "".join(m.group(1).split())
     return None
 
 
@@ -197,7 +197,7 @@ def _request_dto(member: Node, source: bytes) -> str | None:
     """Declared type of the ``@Body``-decorated parameter → requestDTO."""
     for p in extract_params(member.child_by_field_name("parameters"), source):
         if any(d.name == "Body" for d in p.decorators):
-            return p.type or None
+            return payload_type(p.type)
     return None
 
 
@@ -530,7 +530,7 @@ def detect_nest_routes(
                                     version=_version(pending, source) or ctrl_version,
                                     requestDTO=_request_dto(member, source),
                                     responseDTO=(_response_dto(pending, source)
-                                                 or _return_dto(member, source)),
+                                                 or return_dto(member, source)),
                                     **common,
                                 ), parent=parent, node_type="synthetic"))
                         continue
@@ -574,7 +574,7 @@ def detect_nest_routes(
                             method=gql.upper(),
                             endpoint=_graphql_op_name(d, mname),
                             routeKind=gql,
-                            responseDTO=_field_resolver_return_dto(d) or _return_dto(member, source),
+                            responseDTO=_field_resolver_return_dto(d) or return_dto(member, source),
                         )
                     elif fld is not None:  # @ResolveField/@ResolveProperty field resolver
                         if stub_method is not None:
@@ -586,7 +586,7 @@ def detect_nest_routes(
                                 endpoint=f"{stub_type}.{mname}",
                                 routeKind=stub_method.lower(),
                                 requestDTO=_args_dto(member, source),
-                                responseDTO=_field_resolver_return_dto(d) or _return_dto(member, source),
+                                responseDTO=_field_resolver_return_dto(d) or return_dto(member, source),
                             )
                         else:
                             # `Parent.field` when @Resolver(() => T) names the parent type, else
@@ -601,7 +601,7 @@ def detect_nest_routes(
                                 endpoint=f"{parent_type}.{mname}" if parent_type else mname,
                                 routeKind="field_resolver",
                                 requestDTO=_args_dto(member, source),
-                                responseDTO=_field_resolver_return_dto(d) or _return_dto(member, source),
+                                responseDTO=_field_resolver_return_dto(d) or return_dto(member, source),
                             )
                     routes.append(Emit(dec, fields, parent=parent, node_type="synthetic"))
             pending = []
