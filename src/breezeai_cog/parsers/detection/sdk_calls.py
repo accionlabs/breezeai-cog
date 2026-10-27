@@ -260,6 +260,7 @@ def _emit_outbound(
     framework: str,
     out: list[Emit],
     *,
+    method: str | None = None,
     reclassify_db: bool = False,
 ) -> None:
     """An ``api_call`` for ``call``: enriches the enclosing statement in place when it is
@@ -273,7 +274,7 @@ def _emit_outbound(
             "framework": framework,
             # empty → honest-null (unresolved SObject); never a blank string
             "endpoint": endpoint or None,
-            "method": None,  # SDK call carries no HTTP verb (honest-null)
+            "method": method,  # None for SDK calls (no HTTP verb visible); jQuery passes its verb
             "dataAccessHint": None,  # clear the ORM hint if we reclassified a db_method_call
         },
         enrich="unclassified",
