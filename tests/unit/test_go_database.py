@@ -87,3 +87,15 @@ def test_single_line_control_flow_keeps_no_semantic_type(analyze_files) -> None:
     assert flow and all(s.semanticType is None for s in flow)
     assert sorted((s.startLine, s.nodeType, s.method) for s in st if s.semanticType == "db_method_call") \
         == [(6, "call_expression", "Find"), (7, "call_expression", "Find")]  # Find runs the query
+
+
+def test_disagreeing_declarations_give_no_type(analyze_files) -> None:
+    # Two build-tag variants of GetDB return different libraries: neither is assumed.
+    st = analyze_files({
+        "go.mod": MOD,
+        "common/db_gorm.go": '//go:build gorm\n\npackage common\n\nimport "gorm.io/gorm"\n\nfunc GetDB() *gorm.DB { return nil }\n',
+        "common/db_sql.go": '//go:build !gorm\n\npackage common\n\nimport "database/sql"\n\nfunc GetDB() *sql.DB { return nil }\n',
+        "main.go": ('package main\n\nimport "example.com/app/common"\n\n'
+                    'func find() {\n\tdb := common.GetDB()\n\tdb.Find(&out)\n\tdb.Query("SELECT 1")\n}\n'),
+    })
+    assert [s for s in st if s.semanticType == "db_method_call" and s.path == "main.go"] == []

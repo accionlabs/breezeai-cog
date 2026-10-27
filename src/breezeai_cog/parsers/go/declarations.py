@@ -49,7 +49,8 @@ class Declarations:
     #: const); None when two files declare it (build-tag variants).
     symbols: dict[tuple[str, str], str | None] = field(default_factory=dict)
     #: (package dir, function) → the type it returns (``NewHandler() (*Handler, error)`` →
-    #: ``Handler``; a package-qualified type keeps its import path: ``(path, "Type")``).
+    #: ``Handler``; a package-qualified type keeps its import path: ``(path, "Type")``). Absent
+    #: when two declarations disagree (build-tag variants), as for ``fields``.
     results: dict[tuple[str, str], str | tuple[str, str]] = field(default_factory=dict)
 
 
@@ -147,12 +148,12 @@ def _collect(root: Node, source: bytes, rel: str, repo_root: Path | None) -> dic
 def _resolve(values: list[dict[str, Any]], index: Any) -> Declarations | None:
     functions: dict[FuncKey, Site | None] = {}
     methods: dict[str, list[Site]] = {}
-    fields: dict[tuple[str, str, str], tuple[str, str]] = {}
+    field_types: dict[tuple[str, str, str], set[tuple[str, str]]] = {}
     symbols: dict[tuple[str, str], str | None] = {}
-    results: dict[tuple[str, str], Any] = {}
+    result_types: dict[tuple[str, str], set[Any]] = {}
     for value in values:
         for pkg, name, rtype in value["results"]:
-            results[(pkg, name)] = tuple(rtype) if isinstance(rtype, list) else rtype
+            result_types.setdefault((pkg, name), set()).add(tuple(rtype) if isinstance(rtype, list) else rtype)
         for pkg, name, rel in value["symbols"]:
             key = (pkg, name)
             symbols[key] = rel if symbols.get(key, rel) == rel else None
@@ -161,7 +162,11 @@ def _resolve(values: list[dict[str, Any]], index: Any) -> Declarations | None:
             if key[1]:
                 methods.setdefault(key[2], []).append(site)
         for key, qualified in value["fields"]:
-            fields[key] = qualified
+            field_types.setdefault(tuple(key), set()).add(tuple(qualified))
+    # A type is known only when every declaration agrees: two build-tag variants of `GetDB()`
+    # returning `*gorm.DB` and `*sql.DB` leave it unknown, never the last one read.
+    fields = {k: next(iter(v)) for k, v in field_types.items() if len(v) == 1}
+    results = {k: next(iter(v)) for k, v in result_types.items() if len(v) == 1}
     if not functions and not fields and not symbols:
         return None
     return Declarations(functions, {n: tuple(sorted(s)) for n, s in methods.items()}, fields, symbols,
