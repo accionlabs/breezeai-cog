@@ -49,7 +49,7 @@ from ...schemas import Class, Statement
 from ..additive import DetectContext, Detection, Detector, Gate, register_detector
 from ..emits import Emit
 from .sdl_fields import root_field_dto
-from ..graphql.sdl import base_type_name, child_of_type, extract_graphql
+from ..graphql.sdl import child_of_type, extract_graphql, type_text
 from ..treesitter import first_line, node_text, parse_source
 
 # The three root operation types. Everything else keyed in a resolver map
@@ -312,7 +312,7 @@ def _root_fields(op_def: Node) -> list[Node]:
 
 def _op_request_dto(op_def: Node, sdl: bytes) -> str | None:
     """DTO from the operation's variable definitions — the ``$input``/``$data`` variable if
-    present, else the sole variable — as its base type name. ``None`` if 0 or many unnamed."""
+    present, else the sole variable — as its type, as written. ``None`` if 0 or many unnamed."""
     var_defs = child_of_type(op_def, "variable_definitions")
     if var_defs is None:
         return None
@@ -330,7 +330,7 @@ def _op_request_dto(op_def: Node, sdl: bytes) -> str | None:
         if len(variables) != 1:
             return None
         chosen = variables[0]
-    return base_type_name(child_of_type(chosen, "type"), sdl)
+    return type_text(child_of_type(chosen, "type"), sdl)
 
 
 def _emit_client_ops(

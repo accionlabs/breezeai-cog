@@ -129,15 +129,14 @@ def test_output_validates() -> None:
 
 def test_request_response_dto_from_sdl() -> None:
     # DTOs are parsed from the decorator's SDL fragment via the GraphQL grammar: requestDTO =
-    # the input/data (else first) arg's base type; responseDTO = the return base type, with
-    # `!`/`[]` stripped and built-in scalars dropped.
+    # the input/data (else first) arg's type; responseDTO = the return type — both as written.
     rec = _parse(RESOLVER, "consolidate.resolver.ts")
     ops = {s.endpoint: s for s in _routes(rec)}
-    assert ops["consolidate"].requestDTO == "ConsolidateInput"
+    assert ops["consolidate"].requestDTO == "ConsolidateInput!"
     assert ops["consolidate"].responseDTO == "ID"        # `: ID`: the declared type, a scalar
-    assert ops["products"].requestDTO == "ProductsInput"
-    assert ops["products"].responseDTO == "Product"       # `[Product!]!` → Product
-    assert ops["watchLocks"].requestDTO == "String"       # `keys: [String!]!` → its base type
+    assert ops["products"].requestDTO == "ProductsInput!"
+    assert ops["products"].responseDTO == "[Product!]!"
+    assert ops["watchLocks"].requestDTO == "[String!]!"
     assert ops["watchLocks"].responseDTO == "Lockout"
     assert ops["availableModels"].requestDTO is None      # bare `@Query()`, no SDL, no @Arg
     assert ops["availableModels"].responseDTO is None
@@ -204,7 +203,7 @@ def test_type_graphql_resolvers() -> None:
     got = {s.endpoint: (s.method, s.handler, s.responseDTO, s.requestDTO, s.guards)
            for s in rec.statements if s.semanticType == "route"}
     assert got == {
-        "allRecipes": ("QUERY", "recipes", "Recipe", None, None),          # { name } option
+        "allRecipes": ("QUERY", "recipes", "[Recipe]", None, None),        # { name } option
         "addRecipe": ("MUTATION", "addRecipe", "Recipe", "RecipeInput", ["Authorized"]),
         "ping": ("QUERY", "ping", "String", None, None),                   # the declared scalar
     }                                                                       # @FieldResolver: none
@@ -226,4 +225,4 @@ export class StatsResolver {
 """
     rec = _parse(src, "stats.resolver.ts")
     got = {s.endpoint: s.responseDTO for s in rec.statements if s.semanticType == "route"}
-    assert got == {"serverTime": "Date", "total": "Int", "recipes": "Recipe"}
+    assert got == {"serverTime": "Date", "total": "Int", "recipes": "[Recipe]"}

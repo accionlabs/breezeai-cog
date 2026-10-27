@@ -191,7 +191,7 @@ def test_root_fields_are_plain_statements(tmp_path) -> None:
     assert q.responseDTO == "User"
     m = _by(rec, "createUser", "field_definition")
     assert m.semanticType is None
-    assert m.requestDTO == "CreateUserInput"
+    assert m.requestDTO == "CreateUserInput!"
 
 
 def test_scalar_directive_are_plain_statements(tmp_path) -> None:

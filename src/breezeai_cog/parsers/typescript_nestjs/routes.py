@@ -59,6 +59,8 @@ _GRAPHQL_OPS = {"Query": "query", "Mutation": "mutation", "Subscription": "subsc
 _FIELD_RESOLVERS = {"ResolveField", "ResolveProperty"}
 # Extracts the return type from a @ResolveField(() => Brand) / @ResolveField(() => [Brand]) arg.
 _RESOLVE_RETURN_RE = re.compile(r"=>\s*\[?\s*([A-Za-z_$][\w$]*)")
+#: The whole return-type thunk expression: ``() => [Brand]`` → ``[Brand]``.
+_RETURN_TYPE_EXPR_RE = re.compile(r"=>\s*(\[\s*[A-Za-z_$][\w.$]*\s*\]|[A-Za-z_$][\w.$]*)")
 # Singleton-only variant (no leading `[`): distinguishes a grouping-object return
 # `@Mutation(() => NotificationsMutation)` from an array return `@Query(() => [Brand])`.
 # Grouping resolvers always return a singleton shell; entity queries return arrays.
@@ -202,14 +204,14 @@ def _request_dto(member: Node, source: bytes) -> str | None:
 
 
 def _field_resolver_return_dto(dec: Decorator) -> str | None:
-    """Extract the GraphQL return type from ``@ResolveField(() => Brand)`` — the first
-    identifier after ``=>`` in the first decorator arg, skipping primitive scalars."""
+    """The GraphQL return type of ``@ResolveField(() => Brand)`` / ``@Query(() => [Brand])``, as
+    written (``Brand`` / ``[Brand]``); None when the thunk names no type."""
     if not dec.args:
         return None
-    m = _RESOLVE_RETURN_RE.search(dec.args[0])
-    if m is None:
+    m = _RETURN_TYPE_EXPR_RE.search(dec.args[0])
+    if m is None or dto_from_type(m.group(1)) is None:
         return None
-    return dto_from_type(m.group(1))
+    return "".join(m.group(1).split())
 
 
 def _resolver_type_arg(decs: list[Node], source: bytes) -> str | None:
@@ -323,8 +325,8 @@ register_fact(FactSpec(
 
 
 def _args_dto(member: Node, source: bytes) -> str | None:
-    """The requestDTO for a ``@ResolveField`` method — the first ``@Args()``-decorated
-    parameter whose declared type is a non-primitive class (e.g. ``GetBrandsArgs``).
+    """The requestDTO for a ``@ResolveField`` method — the declared type, as written, of the
+    first ``@Args()``-decorated parameter of a non-primitive class type (``GetBrandsArgs``).
     Prefers a parameter named ``input``/``data`` (conventional DTO name), then takes the
     first class-typed ``@Args()`` param. Returns ``None`` when all ``@Args`` are scalars."""
     preferred: str | None = None
@@ -332,9 +334,9 @@ def _args_dto(member: Node, source: bytes) -> str | None:
     for p in extract_params(member.child_by_field_name("parameters"), source):
         if not any(d.name == "Args" for d in p.decorators):
             continue
-        t = dto_from_type(p.type, built_ins=False)  # a class, not one of several scalar args
-        if t is None:
-            continue
+        if dto_from_type(p.type) is None:
+            continue  # a scalar, not the DTO among several scalar args
+        t = payload_type(p.type)
         if first_class is None:
             first_class = t
         if p.name in ("input", "data") and preferred is None:

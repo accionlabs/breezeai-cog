@@ -508,8 +508,8 @@ export class UserResolver {
     by_ep = {s.endpoint: s for s in rec.statements if s.semanticType == "route"}
     # @Query(() => UserDto) → responseDTO from decorator arg, not return type
     assert by_ep["getUser"].responseDTO == "UserDto"
-    # @Mutation(() => [UserDto]) — array form → UserDto (scalar stripped by _dto_from_type)
-    assert by_ep["createUser"].responseDTO == "UserDto"
+    # @Mutation(() => [UserDto]) — the array form, as written
+    assert by_ep["createUser"].responseDTO == "[UserDto]"
     # @Query(() => String) — the declared scalar
     assert by_ep["ping"].responseDTO == "String"
 
