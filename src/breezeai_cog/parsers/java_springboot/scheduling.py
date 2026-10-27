@@ -13,7 +13,8 @@ and ``zone`` only qualify it. A literal, a ``static final`` constant or a ``${pr
 module's base config resolves; anything else (SpEL ``#{…}``, an unset property) leaves
 ``endpoint`` empty. An interval is in milliseconds, as Spring's default: one given with
 ``timeUnit = TimeUnit.X`` is converted; a ``timeUnit`` that is not a literal unit, or a value
-that is not a whole number of milliseconds, leaves ``endpoint`` empty.
+that is not a whole number of milliseconds, leaves ``endpoint`` empty. An ISO-8601 duration in a
+``…String`` form (``fixedRateString = "PT5S"``) is kept as written: it carries its own unit.
 """
 
 from __future__ import annotations
