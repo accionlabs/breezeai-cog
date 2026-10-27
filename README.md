@@ -31,7 +31,7 @@ Python reimplementation of `breezeai-code-ontology-generator`.
 | Kotlin | `.kt` | Ktor |
 | Go | `.go` `go.mod` `go.sum` | net/http (`ServeMux`, Go 1.22 patterns), Gin, Echo, chi, Fiber, gorilla/mux, gRPC services from generated `ServiceDesc`, NATS, Kafka (kafka-go / sarama / confluent), robfig/cron and `time` tickers; AWS Lambda handlers (`lambda.Start`, trigger from the event type); database access by receiver type — database/sql, sqlx, GORM, pgx, MongoDB, go-redis (additive) — group / mount prefixes followed across files |
 | Scala | `.scala .sc .mill` | Play (P2), Akka / http4s / Spark (P3); outbound HTTP calls through a typed Play WS, http4s, sttp, akka-http, Spring RestTemplate or java.net.http client, and scalaj `Http(…)` |
-| Apex | `.cls .trigger` | REST resources, `@AuraEnabled`, SOAP `webservice` |
+| Apex | `.cls .trigger` | REST resources (`@RestResource`), Lightning (`@AuraEnabled`), SOAP `webservice`, triggers (record changes, Platform Events, Change Data Capture), scheduled Apex (`System.schedule`); SOQL / SOSL / DML, HTTP callouts and `EventBus.publish` |
 | C++ | `.cpp .cc .cxx .c++ .hpp .h .hh .hxx .inl .ipp` | — |
 | Groovy † | `.groovy` | Vert.x |
 | HTML | `.html .htm` ‡ | Framework-neutral template parser — detects Angular 2+ (grammar-parsed), AngularJS, Vue, Thymeleaf from `templateUrl` resolution or markup fingerprints; htmx / Alpine.js / Stimulus carried as `behaviors` |
