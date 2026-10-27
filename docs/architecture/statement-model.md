@@ -51,12 +51,19 @@ The other fields depend on the meaning:
 
 **`requestDTO` / `responseDTO`.** `requestDTO` is the type name of the request payload as the
 code declares it: the body parameter (`@RequestBody`, `@Body()`, a FastAPI body model) or a
-GraphQL operation's input argument. `responseDTO` is the type name of the response payload as
+GraphQL operation's input argument. `responseDTO` is the type of the response payload as
 declared: the response model, the handler's return type, or the GraphQL field type. Both are
-the base type name: async, HTTP-result and list wrappers are removed (`Promise<T>`, `Task<T>`,
-`ActionResult<T>`, `[T!]!` → `T`). Built-in types and scalars are kept (`Int`, `String`,
-`Date`): they are the declared type. Empty when nothing is declared, or when the declared type
-carries no payload (`void`, `IActionResult`).
+the declared type **as written in the source language**, with only the wrappers that are not
+payload removed: async results (`Promise<T>`, `Observable<T>`, `Task<T>`, `Mono<T>`,
+`CompletableFuture<T>`) and HTTP results (`ResponseEntity<T>`, `ActionResult<T>`, `Ok<T>`,
+`Optional<T>`). Everything that is payload stays as written: lists and arrays (`List<OrderDto>`,
+`OrderDto[]`, `IEnumerable<X>`, GraphQL `[Order!]!`), nullability (`X?`, `ID!`), pages, maps and
+the application's own generics (`Page<X>`, `Map<K, V>`, `ApiResponse<X>`), unions and object
+types (`X | null`, `{ url: string }`), built-in types and scalars (`string`, `Int`, `Date`).
+Empty when nothing is declared (`any`, `unknown`), or when the declared type carries no payload
+(`void`, `Promise<void>`, `IActionResult`, `ResponseEntity<Void>`, JAX-RS / Express `Response`,
+`ModelAndView`). A consumer that links a DTO to its class reads the name out of the type
+(`List<OrderDto>` → `OrderDto`).
 
 Statements are stored **flat** on `FileRecord.statements`, not nested inside functions or
 classes. Nesting is expressed by `parentId` and line ranges.
