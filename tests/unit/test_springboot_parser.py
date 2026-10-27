@@ -433,6 +433,29 @@ def test_registration_bean_filter_through_a_local_variable(analyze_files) -> Non
     assert r.guards == ["TimingFilter"]  # ContextFilter's pattern is not a literal → not added
 
 
+
+def test_filter_with_should_not_filter_guards_no_route(analyze_files) -> None:
+    m = "src/main/java/a/"
+    skip = "  protected boolean shouldNotFilter(HttpServletRequest r) { return r.getRequestURI().equals(\"/open\"); }\n"
+    st = analyze_files({
+        m + "AuthFilter.java": _SPRING + "@Component\npublic class AuthFilter extends OncePerRequestFilter {}\n",
+        m + "JwtFilter.java": _SPRING + "@Component\npublic class JwtFilter extends OncePerRequestFilter {\n" + skip + "}\n",
+        # registered elsewhere: the registration does not bring it back
+        m + "ApiFilter.java": _SPRING + "public class ApiFilter extends OncePerRequestFilter {\n" + skip + "}\n",
+        m + "Filters.java": (
+            "package a;\nimport org.springframework.boot.web.servlet.FilterRegistrationBean;\n"
+            "public class Filters {\n  FilterRegistrationBean<ApiFilter> api() {\n"
+            "    FilterRegistrationBean<ApiFilter> r = new FilterRegistrationBean<>(new ApiFilter());\n"
+            '    r.addUrlPatterns("/*");\n    return r;\n  }\n}\n'
+        ),
+        m + "C.java": (
+            "package a;\nimport org.springframework.web.bind.annotation.*;\n"
+            '@RestController\npublic class C {\n  @GetMapping("/open") public String open() { return ""; }\n}\n'
+        ),
+    })
+    [r] = [s for s in st if s.semanticType == "route"]
+    assert (r.guards, r.authRequired) == (["AuthFilter"], None)
+
 # ── Messaging: broker listeners (inbound) and template sends (outbound) ──────────────────────
 _MSG = "src/main/java/m/"
 
