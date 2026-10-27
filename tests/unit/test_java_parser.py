@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 import json
 
 from jsonschema import Draft202012Validator
@@ -428,3 +430,21 @@ def test_nested_class_method_id_carries_the_qualified_owner(tmp_path) -> None:
     rec = JavaParser().parse_file(ctx)
     owners = {f.id.split("#")[1] for f in rec.functions if f.name == "code"}
     assert owners == {"OrderService.Result", "InvoiceService.Result"}
+
+
+@pytest.mark.parametrize(("declared", "payload"), [
+    ("ResponseEntity<List<UserDTO>>", "UserDTO"),
+    ("Mono<ResponseEntity<Flux<OrderDto>>>", "OrderDto"),
+    ("Page<OrderCto>", "OrderCto"),
+    ("OrderDto[]", "OrderDto"),
+    ("java.util.List<com.acme.OrderDto>", "OrderDto"),
+    ("List<@Valid ? extends OrderDto>", "OrderDto"),
+    ("String", "String"),  # a built-in type is the declared type
+    ("ApiResponse<OrderDto>", "ApiResponse"),  # the application's envelope is the payload
+    ("Map<String, OrderDto>", "Map"),  # two type arguments: no single payload
+    ("void", None), ("ResponseEntity<Void>", None), ("ResponseEntity", None),
+    ("ResponseEntity<?>", None), ("Response", None), ("ModelAndView", None),
+])
+def test_payload_type(declared: str, payload: str | None) -> None:
+    from breezeai_cog.parsers.java.functions import payload_type
+    assert payload_type(declared) == payload

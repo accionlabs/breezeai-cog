@@ -89,6 +89,18 @@ def test_route_attributes(tmp_path) -> None:
     assert routes["get"].isRegex is False
 
 
+def test_response_dto_is_the_payload_type(analyze_files) -> None:
+    st = analyze_files({"src/main/java/a/R.java": (
+        "package a;\nimport java.util.List;\nimport jakarta.ws.rs.*;\nimport jakarta.ws.rs.core.Response;\n"
+        '@Path("/r")\npublic class R {\n'
+        '  @GET @Path("/a") public List<Order> a() { return null; }\n'
+        '  @GET @Path("/b") public Response b() { return null; }\n'
+        '  @GET @Path("/c") public java.util.concurrent.CompletionStage<Order> c() { return null; }\n}\n'
+    )})
+    got = {s.handler: s.responseDTO for s in st if s.semanticType == "route"}
+    assert got == {"a": "Order", "b": None, "c": "Order"}
+
+
 def test_output_validates(tmp_path) -> None:
     rec = _parse(tmp_path, SRC_JAKARTA, "OrderResource.java")
     errors = list(Draft202012Validator(FileRecord.model_json_schema(by_alias=True))

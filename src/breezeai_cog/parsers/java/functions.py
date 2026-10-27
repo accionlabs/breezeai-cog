@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import re
+
 from tree_sitter import Node
 
 from ...emit import disambiguate, function_id
@@ -200,3 +202,54 @@ def method_nodes(root: Node, source: bytes) -> dict[tuple[str, int], Node]:
                 out[(node_text(name, source), n.start_point[0] + 1)] = n
         stack.extend(n.named_children)
     return out
+
+
+#: Generic wrappers around a handler's payload type (contract: ``requestDTO`` / ``responseDTO``
+#: are the base type): async, HTTP-result, optional and list wrappers.
+_PAYLOAD_WRAPPERS = frozenset({
+    "Mono", "Flux", "CompletableFuture", "CompletionStage", "Callable", "DeferredResult", "Uni",
+    "Multi", "ResponseEntity", "HttpEntity", "Optional", "List", "Set", "Collection", "Iterable",
+    "Page", "Slice", "Stream",
+})
+#: Declared types that carry no payload: no body, or a response that is not a declared type
+#: (a raw ``ResponseEntity``, JAX-RS ``Response``, a Spring MVC view).
+_NO_PAYLOAD = frozenset({
+    "void", "Void", "?", "ResponseEntity", "HttpEntity", "Response", "ModelAndView",
+})
+_TYPE_ANNOTATION = re.compile(r"@[\w.]+(\([^()]*\))?\s*")
+
+
+def _type_arguments(inner: str) -> list[str]:
+    """``"String, List<X>"`` → ``["String", "List<X>"]`` (split at the top nesting level)."""
+    parts, depth, start = [], 0, 0
+    for i, ch in enumerate(inner):
+        depth += (ch == "<") - (ch == ">")
+        if ch == "," and depth == 0:
+            parts.append(inner[start:i].strip())
+            start = i + 1
+    return [*parts, inner[start:].strip()]
+
+
+def payload_type(declared: str | None) -> str | None:
+    """A handler's declared request / response type → its payload's base type name: wrappers
+    removed (``ResponseEntity<List<OrderDto>>`` → ``OrderDto``, ``OrderDto[]`` → ``OrderDto``),
+    simple name (``com.x.OrderDto`` → ``OrderDto``). Another generic keeps its own name
+    (``ApiResponse<X>`` → ``ApiResponse``, ``Map<K, V>`` → ``Map``). None for no payload."""
+    if not declared:
+        return None
+    t = _TYPE_ANNOTATION.sub("", declared).strip()
+    while True:
+        if t.endswith("[]"):
+            t = t[:-2].strip()
+            continue
+        t = re.sub(r"^\?\s*(extends|super)\s+", "", t)
+        if "<" not in t or not t.endswith(">"):
+            break
+        outer = t[: t.index("<")].strip().rsplit(".", 1)[-1]
+        args = _type_arguments(t[t.index("<") + 1: -1])
+        if outer not in _PAYLOAD_WRAPPERS or len(args) != 1:
+            t = outer
+            break
+        t = args[0]
+    t = t.rsplit(".", 1)[-1].strip()
+    return None if not t or t in _NO_PAYLOAD else t

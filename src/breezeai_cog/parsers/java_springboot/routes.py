@@ -13,7 +13,7 @@ from tree_sitter import Node
 
 from ...schemas import Decorator, FileRecord, Function
 from ..emits import Emit
-from ..java.functions import method_nodes
+from ..java.functions import method_nodes, payload_type
 from ..java.guards import security_guards
 from ..java.web_guards import ModuleGuards, spring_global_guards
 
@@ -114,7 +114,7 @@ def _request_dto(fn: Function) -> str | None:
     """Declared type of the ``@RequestBody`` parameter → requestDTO."""
     for p in fn.params:
         if any(d.name == "RequestBody" for d in p.decorators):
-            return p.type or None
+            return payload_type(p.type)
     return None
 
 
@@ -156,7 +156,7 @@ def detect_spring_routes(record: FileRecord, root: Node, source: bytes) -> list[
                     guards=guards,
                     authRequired=auth_required,
                     requestDTO=_request_dto(fn),
-                    responseDTO=fn.returnType or None,
+                    responseDTO=payload_type(fn.returnType),
                 ), parent=fn.id, node_type="synthetic", text=f"@{dec.name}",
                     line=fn.startLine, col=0, end_line=fn.endLine))
     return routes

@@ -15,7 +15,7 @@ from tree_sitter import Node
 
 from ...schemas import Decorator, FileRecord
 from ..emits import Emit
-from ..java.functions import method_nodes
+from ..java.functions import method_nodes, payload_type
 from ..java.guards import security_guards
 
 # Standard @HttpMethod-meta-annotated markers (javax/jakarta.ws.rs).
@@ -111,7 +111,7 @@ def detect_jaxrs_routes(
                 isRegex=False,
                 guards=guards,
                 authRequired=True if any(g.requires_auth for g in scoped) else None,
-                responseDTO=fn.returnType or None,  # JAX-RS has no @RequestBody → requestDTO stays null
+                responseDTO=payload_type(fn.returnType),  # JAX-RS has no @RequestBody → requestDTO stays null
             ), parent=fn.id, node_type="synthetic", text=f"@{dec.name}",
                 line=fn.startLine, col=0, end_line=fn.endLine))
     return routes
