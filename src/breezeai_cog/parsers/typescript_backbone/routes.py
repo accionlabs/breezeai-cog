@@ -21,12 +21,17 @@ from __future__ import annotations
 from ..additive import (DetectContext, Detection, Detector, FactSpec, Gate, index_fact,
                         register_detector, register_fact)
 from ..emits import Emit
-from .backbone import (_FRAMEWORK, _FUNCTIONS, _Class, _Values, _args, _key, _kind, _line, _new_target,
-                       _object_props, _scope, _string, _text, _unwrap, _walk)
+from .backbone import (_FRAMEWORK, _Class, _Values, _args, _key, _kind, _new_target,
+                       _object_props, _scope, _text, _unwrap, _walk)
 
 _ORDER = 62  # must be unique among the TypeScript detectors (backbone.py takes 61)
 _TABLES = ("routes", "appRoutes")
+_FUNCTIONS = ("function_expression", "function", "arrow_function")
 _ROOT_FACT = "backbone.history-root"  # the root set by a history.start in another file
+
+
+def _line(node) -> int:
+    return node.start_point[0] + 1
 
 
 # --------------------------------------------------------------------------- history root
@@ -81,12 +86,12 @@ def _history_base(root, src: bytes, values: _Values, index_root: str | None) -> 
     return (_single_root(roots) or "") if roots else (index_root or "")
 
 
-def _collect_root_fact(root, source: bytes, rel: str, repo_root) -> list | None:
+def _collect_root_fact(root, source: bytes, _rel: str, _repo_root) -> list | None:
     roots = _history_roots(root, source, _Values(root, source))
     return roots or None
 
 
-def _resolve_root_fact(values: list, index) -> dict | None:
+def _resolve_root_fact(values: list, _index) -> dict | None:
     """``{"root": "/app"}`` when the whole repo agrees on one root, else nothing."""
     root = _single_root([r for roots in values for r in roots])
     return {"root": root} if root else None
@@ -128,7 +133,7 @@ def _route_fields(base: str, path: str) -> dict:
     }
 
 
-def _table_node(prop, values: _Values):
+def _table_node(prop):
     """The object a ``routes`` property holds, or the one its function returns (Backbone calls it)."""
     if prop is not None and (prop.type == "method_definition" or prop.type in _FUNCTIONS):
         body = prop.child_by_field_name("body")  # ``routes() {}`` / ``routes: function () {}`` / ``() => ({})``
@@ -144,7 +149,7 @@ def _table_routes(props: dict, cls: _Class | None, base: str, values: _Values, s
     """The bindings of ``routes`` / ``appRoutes`` among the properties of a router."""
     found = []
     for table_name in _TABLES:
-        table = _table_node(props.get(table_name), values)
+        table = _table_node(props.get(table_name))
         if table is None:
             continue
         if table_name == "appRoutes":  # handlers are methods of the ``controller``
@@ -170,10 +175,13 @@ def _table_routes(props: dict, cls: _Class | None, base: str, values: _Values, s
 def _route_call(call, args: list, cls: _Class | None, base: str, values: _Values,
                 src: bytes) -> Emit | None:
     """``router.route(path, name, callback)`` / ``router.route(path, callback)``."""
-    path = values.string(args[0])
-    if path is None:  # a RegExp or a computed path has no address to record
+    regex = args[0].type == "regex"
+    path = _text(args[0], src) if regex else values.string(args[0])
+    if path is None:  # a computed path has no address to record
         return None
-    fields = _route_fields(base, path)
+    fields = _route_fields("" if regex else base, path)
+    if regex:
+        fields["isRegex"] = True
     owner = cls.props if cls else {}
     if len(args) >= 3:  # the callback; the name only names the ``route:name`` event
         fields.update(_handler_fields(args[2], owner, values, src))

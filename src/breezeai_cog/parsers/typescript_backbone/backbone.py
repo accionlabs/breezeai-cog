@@ -33,9 +33,6 @@ _LIBRARY = re.compile(r"backbone|marionette", re.I)  # module specifier of the l
 _MODEL_CALLS = {"fetch": "GET", "save": None, "destroy": "DELETE"}  # save: PUT or POST
 _COLLECTION_CALLS = {"fetch": "GET", "create": "POST"}
 _SYNC_VERBS = {"read": "GET", "create": "POST", "update": "PUT", "patch": "PATCH", "delete": "DELETE"}
-_FUNCTIONS = ("function_expression", "function", "arrow_function")
-
-
 @dataclass
 class _Class:
     kind: str
@@ -64,10 +61,6 @@ class _Target:
 
 def _text(node, src: bytes) -> str:
     return src[node.start_byte:node.end_byte].decode("utf-8", "replace")
-
-
-def _line(node) -> int:
-    return node.start_point[0] + 1
 
 
 def _walk(root) -> Iterator:
