@@ -65,7 +65,7 @@ HOOKED_LANGUAGES: frozenset[str] = frozenset({"typescript", "csharp", "java", "p
 #: A fact for any other language is an error: it would never be built, and the detector
 #: reading it would silently find nothing.
 INDEX_HOOKED_LANGUAGES: frozenset[str] = frozenset(
-    {"csharp", "go", "graphql", "java", "php", "python", "ruby", "scala", "typescript"})
+    {"apex", "csharp", "go", "graphql", "java", "php", "python", "ruby", "scala", "typescript"})
 
 #: Source markers that make a module a registering module for :func:`discover_detectors`.
 _MARKERS = (b"register_detector(", b"register_fact(")

@@ -125,20 +125,21 @@ def build_method(
     fid = disambiguate(function_id(path, name, start, class_name=class_name), seen_ids)
     ret = node.child_by_field_name("type")
     body = node.child_by_field_name("body")
+    # A `webservice` method is callable from outside the org, i.e. global, whatever is written.
+    default = "global" if "webservice" in keywords else "public" if in_interface else "private"
     fn = Function(
         id=fid,
         parentId=parent_id,
         path=path,
         name=name,
         type="constructor" if node.type == "constructor_declaration" else "method",
-        visibility=visibility_of(keywords, "public" if in_interface else "private"),
+        visibility=visibility_of(keywords, default),
         isStatic="static" in keywords,
         params=extract_params(node.child_by_field_name("parameters"), source),
         decorators=extract_annotations(modifiers, source),
         returnType=node_text(ret, source) if ret is not None else None,
         startLine=start,
         endLine=end,
-        metadata={"webservice": True} if "webservice" in keywords else None,
         calls=_calls(body, source, resolve),
     )
     statements = extract_statements(

@@ -52,12 +52,11 @@ def sharing_of(keywords: set[str]) -> str | None:
 
 
 def _argument(node: Node, source: bytes) -> str:
-    key = node.child_by_field_name("key")
-    value = node.child_by_field_name("value")
-    value_text = node_text(value, source) if value is not None else ""
-    if value is not None and value.type == "string_literal":
-        value_text = value_text.strip("'")
-    return f"{node_text(key, source)}={value_text}" if key is not None else value_text
+    """Raw argument text, as the spec's decorator rule asks: a bare string literal is
+    unquoted (``'/x'`` → ``/x``), a ``key=value`` pair is kept as written (``urlMapping='/x'``)."""
+    if node.type == "string_literal":
+        return node_text(node, source).strip("'")
+    return node_text(node, source)
 
 
 def extract_annotations(modifiers: Node | None, source: bytes) -> list[Decorator]:

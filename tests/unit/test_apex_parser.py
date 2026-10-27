@@ -8,7 +8,7 @@ from jsonschema import Draft202012Validator
 
 from breezeai_cog.core import registry
 from breezeai_cog.emit import to_line
-from breezeai_cog.parsers.apex.index import build_class_index
+from breezeai_cog.parsers.apex.index import ApexIndex, build_class_index
 from breezeai_cog.parsers.apex.parser import ApexParser
 from breezeai_cog.parsers.base import ParseContext
 from breezeai_cog.schemas import FileRecord
@@ -57,7 +57,7 @@ def test_class_structure(tmp_path) -> None:
     assert (svc.type, svc.visibility, svc.extends) == ("class", "global", "BaseService")
     assert svc.implements == ["Schedulable"]
     assert svc.metadata == {"sharing": "with"}
-    assert [(d.name, d.args) for d in svc.decorators] == [("RestResource", ["urlMapping=/accounts/*"])]
+    assert [(d.name, d.args) for d in svc.decorators] == [("RestResource", ["urlMapping='/accounts/*'"])]
     assert classes["Status"].type == "enum"
     assert classes["Greeter"].type == "interface" and classes["Greeter"].implements == ["Named"]
     assert classes["Inner"].parentId == svc.id  # nested type parented to its enclosing class
@@ -126,8 +126,8 @@ def test_cross_file_call_resolution(tmp_path) -> None:
     (tmp_path / "other" / "Dup.cls").write_bytes(b"public class dup { }")
     files = sorted(tmp_path.glob("**/*.cls"))
     index = build_class_index(tmp_path, files)
-    assert index["accounthandler"] == "classes/AccountHandler.cls"
-    assert index["dup"] is None  # declared twice: never a guessed file
+    assert index.classes["accounthandler"] == "classes/AccountHandler.cls"
+    assert index.classes["dup"] is None  # declared twice: never a guessed file
 
     rec = _parse(tmp_path, SRC_TRIGGER, "AccountTrigger.trigger", index=index)
     assert rec.functions[0].calls[0].path == "classes/AccountHandler.cls"
@@ -135,7 +135,7 @@ def test_cross_file_call_resolution(tmp_path) -> None:
 
 def test_receiver_type_resolution_is_case_insensitive(tmp_path) -> None:
     src = b"public class C { private AccountHandler H; public void run() { h.Handle(); } }"
-    rec = _parse(tmp_path, src, "C.cls", index={"accounthandler": "classes/AccountHandler.cls"})
+    rec = _parse(tmp_path, src, "C.cls", index=ApexIndex(classes={"accounthandler": "classes/AccountHandler.cls"}))
     assert rec.functions[0].calls[0].path == "classes/AccountHandler.cls"
 
 
@@ -192,10 +192,10 @@ def _sem(rec: FileRecord):
 def test_soql_and_sosl(tmp_path) -> None:
     rec = _parse(tmp_path, SRC_SEMANTICS, "Svc.cls")
     queries = [(m, line) for sem, m, _, _, line in _sem(rec) if sem == "query_statement"]
-    assert ("soql", 4) in queries          # variable initialiser
-    assert ("sosl", 5) in queries
-    assert ("query", 6) in queries         # Database.query(...) with a string argument
-    assert ("soql", 7) in queries          # for (x : [SELECT ...])
+    assert (None, 4) in queries            # variable initialiser: inline SOQL has no method
+    assert (None, 5) in queries            # inline SOSL
+    assert ("query", 6) in queries         # Database.query(...): the called method
+    assert (None, 7) in queries            # for (x : [SELECT ...])
 
 
 def test_dml_keywords_and_database_methods(tmp_path) -> None:
@@ -215,9 +215,9 @@ def test_http_callout(tmp_path) -> None:
 
 def test_timer_and_event(tmp_path) -> None:
     rec = _parse(tmp_path, SRC_SEMANTICS, "Svc.cls")
-    kinds = {(sem, m) for sem, m, _, _, _ in _sem(rec)}
-    assert ("timer", "schedule") in kinds
-    assert ("eventbus_publish", "publish") in kinds
+    found = {sem: (m, ep) for sem, m, ep, _, _ in _sem(rec)}
+    assert found["timer"] == ("PERIODIC", "0 0 * * * ?")
+    assert found["eventbus_publish"] == (None, "Order_Event__e")
 
 
 def test_no_false_positives(tmp_path) -> None:
@@ -247,7 +247,7 @@ def test_trigger_statements_are_classified(tmp_path) -> None:
     src = b"trigger T on Account (before insert) { insert new Task(Subject = 'x'); }"
     rec = _parse(tmp_path, src, "T.trigger")
     assert [(s.semanticType, s.method) for s in rec.statements if s.semanticType] == [
-        ("db_method_call", "insert")]
+        ("db_method_call", "insert"), ("eventbus_consumer", "EVENT")]
     assert all(s.parentId == rec.functions[0].id for s in rec.statements)
 
 
@@ -278,11 +278,11 @@ def test_rest_aura_and_soap_routes(tmp_path) -> None:
     assert _routes(rec) == [
         ("GET", rest, "apex-rest", "route", "doGet", "Account"),
         ("POST", rest, "apex-rest", "route", "doPost", "String"),
-        ("PUT", rest, "apex-rest", "route", "doPut", "void"),
-        ("PATCH", rest, "apex-rest", "route", "doPatch", "void"),
-        ("DELETE", rest, "apex-rest", "route", "doDelete", "void"),
-        (None, "AccountApi.list", "apex-aura", "aura", "list", "List<Account>"),
-        (None, "AccountApi.soap", "apex-soap", "soap", "soap", "Id"),
+        ("PUT", rest, "apex-rest", "route", "doPut", None),       # void: no response DTO
+        ("PATCH", rest, "apex-rest", "route", "doPatch", None),
+        ("DELETE", rest, "apex-rest", "route", "doDelete", None),
+        ("RPC", "AccountApi.list", "apex-aura", "rpc", "list", "List<Account>"),
+        ("RPC", "AccountApi/soap", "apex-soap", "rpc", "soap", "Id"),
     ]
     assert rec.framework == "apex-rest"
 
@@ -311,7 +311,7 @@ def test_routes_need_capture(tmp_path) -> None:
 
 def test_aura_without_rest_resource(tmp_path) -> None:
     rec = _parse(tmp_path, b"public with sharing class C { @auraenabled(cacheable=true) public static void m() {} }", "C.cls")
-    assert _routes(rec) == [(None, "C.m", "apex-aura", "aura", "m", "void")]
+    assert _routes(rec) == [("RPC", "C.m", "apex-aura", "rpc", "m", None)]
     assert rec.framework == "apex-aura"
 
 
@@ -329,4 +329,52 @@ def test_system_namespace_prefix(tmp_path) -> None:
         System.System.debug('x');
     } }"""
     kinds = [(sem, m) for sem, m, _, _, _ in _sem(_parse(tmp_path, src, "Q.cls"))]
-    assert kinds == [("db_method_call", "insert"), ("eventbus_publish", "publish")]
+    assert kinds == [("db_method_call", "insert"), ("eventbus_publish", None)]
+
+
+def test_bare_call_never_resolves_to_a_class_elsewhere(tmp_path) -> None:
+    src = b"public class Svc { public void run() { process(); } private void process() {} }"
+    index = ApexIndex(classes={"process": "classes/Process.cls"})
+    rec = _parse(tmp_path, src, "Svc.cls", index=index)
+    run = next(f for f in rec.functions if f.name == "run")
+    assert [(c.name, c.path) for c in run.calls] == [("process", "Svc.cls")]
+    other = _parse(tmp_path, b"public class T { public void run() { process(); } }", "T.cls", index=index)
+    assert [c.path for c in other.functions[0].calls] == [None]  # inherited or unknown: unresolved
+
+
+def test_http_type_is_read_from_the_calling_method(tmp_path) -> None:
+    src = b"""public class C {
+    public void a() { Http h = new Http(); }
+    public void b(Mailer h) { h.send(null); }
+}"""
+    assert _sem(_parse(tmp_path, src, "C.cls")) == []
+
+
+def test_http_field_is_a_callout_receiver(tmp_path) -> None:
+    src = b"public class C { private Http client; public void a(HttpRequest r) { client.send(r); } }"
+    assert [s[0] for s in _sem(_parse(tmp_path, src, "C.cls"))] == ["api_call"]
+
+
+def test_claims_rejects_latex_document_class() -> None:
+    parser = ApexParser()
+    assert not parser.claims("article.cls", b"\\NeedsTeXFormat{LaTeX2e}\n\\ProvidesClass{article}\n")
+    assert not parser.claims("x.cls", b"% a LaTeX comment\n\\LoadClass{article}\n")
+    assert parser.claims("Foo.cls", b"/* header */ public class Foo {}")
+
+
+def test_webservice_method_is_global(tmp_path) -> None:
+    rec = _parse(tmp_path, b"global class S { webservice static Id op() { return null; } }", "S.cls")
+    (fn,) = rec.functions
+    assert (fn.visibility, fn.metadata) == ("global", None)
+
+
+def test_index_is_the_same_for_any_job_count(tmp_path) -> None:
+    (tmp_path / "a").mkdir()
+    for name, src in {"a/A.cls": b"public class A { public void execute() {} }",
+                      "a/B.cls": b"public class B { }", "a/T.trigger": SRC_TRIGGER}.items():
+        (tmp_path / name).write_bytes(src)
+    files = sorted(tmp_path.glob("a/*"))
+    one, two = build_class_index(tmp_path, files, 1), build_class_index(tmp_path, files, 2)
+    assert one == two
+    assert one.classes == {"a": "a/A.cls", "b": "a/B.cls"}
+    assert one.facts["apex.method-lines"][("A", "execute")] == (("a/A.cls", 1),)

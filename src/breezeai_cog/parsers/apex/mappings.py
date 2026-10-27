@@ -44,7 +44,8 @@ STATEMENT_TYPES = sorted(EMIT_TYPES)
 
 COMMENT_TYPES = {"line_comment", "block_comment"}
 
-FRAMEWORKS = ["apex-rest", "apex-aura", "apex-soap"]
+FRAMEWORKS = ["apex-rest", "apex-aura", "apex-soap", "apex-trigger", "apex-platform-event",
+              "apex-schedule"]
 
 TYPE_DECLARATIONS = {
     "class_declaration": "class",
