@@ -70,13 +70,22 @@ def test_db_facade_needs_the_import_and_has_no_hint(analyze_files) -> None:
     assert _db(stmts) == [("DB::table('songs')->where('a', 1)->get();", "get", None)]
 
 
-def test_raw_sql_stays_a_query_statement(analyze_files) -> None:
+def test_raw_sql_on_a_proven_handle_is_a_data_call(analyze_files) -> None:
     stmts = analyze_files({"app/R.php": (
         "<?php\nnamespace App;\nuse Illuminate\\Support\\Facades\\DB;\n"
         "function f() {\n    DB::select('SELECT id FROM users WHERE active = 1');\n}\n"
     )})
+    assert _db(stmts) == [("DB::select('SELECT id FROM users WHERE active = 1');", "select", None)]
+    assert [s.semanticType for s in stmts if "SELECT" in s.text and s.startLine == 5] == ["db_method_call"]
+
+
+def test_raw_sql_on_an_unproven_receiver_stays_a_query_statement(analyze_files) -> None:
+    stmts = analyze_files({"app/R.php": (
+        "<?php\nnamespace App;\n"
+        "function f($conn) {\n    $conn->query('SELECT id FROM users');\n}\n"
+    )})
     assert _db(stmts) == []
-    assert [s.semanticType for s in stmts if "SELECT" in s.text and s.startLine == 5] == ["query_statement"]
+    assert [s.semanticType for s in stmts if "SELECT" in s.text] == ["query_statement"]
 
 
 def test_doctrine_handles_and_repositories(analyze_files) -> None:
@@ -159,3 +168,14 @@ def test_model_fact_reaches_workers(tmp_path, jobs) -> None:
                if '"app/Http/Controllers/C.php"' in line)
     assert [(s["method"], s["dataAccessHint"]) for s in rec["statements"]
             if s.get("semanticType") == "db_method_call"] == [("create", "eloquent")]
+
+
+def test_single_line_control_flow_keeps_no_semantic_type(analyze_files) -> None:
+    stmts = analyze_files({"app/R.php": (
+        "<?php\nnamespace App;\nuse Illuminate\\Support\\Facades\\DB;\n"
+        "function f() {\n    if (DB::table('songs')->exists()) { return; }\n}\n"
+    )})
+    flow = [s for s in stmts if s.nodeType == "if_statement"]
+    assert flow and all(s.semanticType is None for s in flow)
+    assert [(s.startLine, s.semanticType) for s in stmts if s.semanticType == "db_method_call"] \
+        == [(5, "db_method_call")]

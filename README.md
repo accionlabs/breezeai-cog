@@ -29,6 +29,7 @@ Python reimplementation of `breezeai-code-ontology-generator`.
 | C# | `.cs .asmx .svc` `.cshtml .razor .aspx .ascx .master` ‡ | ASP.NET (MVC / Web API / Minimal API / Web Forms), Razor Pages (`.cshtml`), Blazor (`.razor`), WCF / ASMX (SOAP), .NET ServiceHost, GraphQL (graphql-dotnet + HotChocolate — attribute, type-extension and fluent-descriptor styles, incl. field resolvers and subscription topics); Lucene.NET index reads/writes (additive) |
 | VB.NET | `.vb` | ASP.NET |
 | Kotlin | `.kt` | Ktor |
+| Go | `.go` `go.mod` `go.sum` | net/http (`ServeMux`, Go 1.22 patterns), Gin, Echo, chi, Fiber, gorilla/mux, gRPC services from generated `ServiceDesc`, NATS, Kafka (kafka-go / sarama / confluent), robfig/cron and `time` tickers; AWS Lambda handlers (`lambda.Start`, trigger from the event type); database access by receiver type — database/sql, sqlx, GORM, pgx, MongoDB, go-redis (additive) — group / mount prefixes followed across files |
 | Scala | `.scala .sc .mill` | Play (P2), Akka / http4s / Spark (P3); outbound HTTP calls through a typed Play WS, http4s, sttp, akka-http, Spring RestTemplate or java.net.http client, and scalaj `Http(…)` |
 | C++ | `.cpp .cc .cxx .c++ .hpp .h .hh .hxx .inl .ipp` | — |
 | Groovy † | `.groovy` | Vert.x |

@@ -478,7 +478,7 @@ classDiagram
 > file and needed in another. A registered fact keeps it in the framework's own module and in the
 > same registry as every other add-on, instead of a framework field on the language index or a new
 > parser-selection hook. **Cost:** a language must call `collect_additive` / `resolve_additive`
-> from its `build_index` to offer it (`INDEX_HOOKED_LANGUAGES`: C#, GraphQL, Java, Python, Ruby, Scala, TypeScript), and a detector that
+> from its `build_index` to offer it (`INDEX_HOOKED_LANGUAGES`: C#, Go, GraphQL, Java, Python, Ruby, Scala, TypeScript), and a detector that
 > emits for files with no marker cannot use a byte guard. Details:
 > [cross-file resolution §8](architecture/cross-file-resolution.md#a-framework-fact-from-another-file-a-registered-fact).
 
@@ -566,6 +566,19 @@ the file:
   │                  60   quartz           csharp/quartz.py                  ✔       │
   │                                                                                  │
   │  java            10   quartz           java/quartz.py                    ✔       │
+  │                                                                                  │
+  │  go              10   go-net-http      go_nethttp/routes.py              ✔       │
+  │                  20   go-gin           go_gin/routes.py                  ✔       │
+  │                  30   go-echo          go_echo/routes.py                 ✔       │
+  │                  40   go-chi           go_chi/routes.py                  ✔       │
+  │                  50   go-fiber         go_fiber/routes.py                ✔       │
+  │                  60   go-gorilla-mux   go_gorilla/routes.py              ✔       │
+  │                  70   go-grpc          go_grpc/routes.py                 ✔       │
+  │                  80   go-nats          go_nats/events.py                 ✔       │
+  │                  90   go-kafka         go_kafka/events.py                ✔       │
+  │                 100   go-scheduling    go_scheduling/timers.py           ✔       │
+  │                 110   go-database      go_database/access.py                     │
+  │                 120   go-lambda        go_lambda/handlers.py             ✔       │
   │                                                                                  │
   │  python          10   celery           python/celery.py                  ✔       │
   │                                                                                  │
