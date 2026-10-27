@@ -80,7 +80,7 @@ def _type_text(annotation: Node | None, source: bytes) -> str | None:
 
 # Type-expression → DTO name: skip generic wrappers/primitives, take the first PascalCase
 # name (``Promise<OrderDto[]>`` → ``OrderDto``, ``void``/``object`` → None). Shared by the
-# route parsers (NestJS keeps a private copy; LoopBack uses this) for responseDTO capture.
+# route parsers (NestJS, LoopBack) for requestDTO / responseDTO capture.
 _DTO_ID_RE = re.compile(r"[A-Za-z_$][\w$]*")
 _NON_DTO_TYPES = {
     "Promise", "Observable", "Array", "Map", "Set", "Record", "Partial", "Readonly",
@@ -89,14 +89,44 @@ _NON_DTO_TYPES = {
 }
 
 
-def dto_from_type(t: str | None) -> str | None:
+#: Built-in types that are a payload's declared type (``Promise<string>`` → ``string``).
+_PRIMITIVE_DTOS = frozenset({"string", "number", "boolean", "bigint"})
+_PRIMITIVE_WRAPPER_RE = re.compile(r"^(?:Promise|Observable|Array|ReadonlyArray|Readonly)<(.*)>$")
+
+
+def _primitive(t: str) -> str | None:
+    """The built-in type a whole type expression is, wrappers and ``| null`` / ``| undefined``
+    removed (``Promise<string[] | null>`` → ``string``); None for anything else — an object
+    type (``{ url: string }``) is not its field's type."""
+    t = t.strip()
+    while True:
+        m = _PRIMITIVE_WRAPPER_RE.match(t)
+        if m:
+            t = m.group(1).strip()
+        elif t.endswith("[]"):
+            t = t[:-2].strip()
+        elif t.startswith("(") and t.endswith(")"):
+            t = t[1:-1].strip()
+        elif "|" in t:
+            kept = [p.strip() for p in t.split("|") if p.strip() not in ("null", "undefined")]
+            if len(kept) != 1 or kept[0] == t:
+                return None
+            t = kept[0]
+        else:
+            return t if t in _PRIMITIVE_DTOS else None
+
+
+def dto_from_type(t: str | None, *, built_ins: bool = True) -> str | None:
+    """A request / response type → its DTO name: the first PascalCase type name past the
+    wrappers; failing that (``built_ins``), the built-in type the whole expression is
+    (:func:`_primitive`)."""
     if not t:
         return None
     for tok in _DTO_ID_RE.findall(t):
         if tok in _NON_DTO_TYPES or not tok[0].isupper():
             continue
-        return tok
-    return None
+        return str(tok)
+    return _primitive(t) if built_ins else None
 
 
 def return_dto(member: Node, source: bytes) -> str | None:

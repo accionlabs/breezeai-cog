@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
 from jsonschema import Draft202012Validator
 
 from breezeai_cog.core import registry
@@ -336,7 +338,7 @@ export class OrderController {
 
 
 def test_response_dto_from_return_type(tmp_path) -> None:
-    # responseDTO falls back to the handler return type (Promise<T>/T), skipping primitives.
+    # responseDTO falls back to the handler return type (Promise<T>/T); a built-in type is kept.
     p = tmp_path / "ret.controller.ts"
     p.write_text(_RETTYPE_SRC.decode())
     ctx = ParseContext(path="ret.controller.ts", abs_path=p, source=_RETTYPE_SRC,
@@ -345,7 +347,7 @@ def test_response_dto_from_return_type(tmp_path) -> None:
     dto = {s.handler: s.responseDTO for s in rec.statements if s.semanticType == "route"}
     assert dto["list"] == "OrderDto"          # Promise<OrderDto[]> → OrderDto
     assert dto["one"] == "UserDto"            # UserDto
-    assert dto["count"] is None               # Promise<number> → primitive → None
+    assert dto["count"] == "number"           # Promise<number> → the built-in type
 
 
 # routing-controllers: same @Controller/@Get grammar, different import package. Mirrors the
@@ -790,3 +792,20 @@ def test_object_pattern_with_a_numeric_constant_is_unknown(analyze_files) -> Non
     })
     got = {s.handler: s.endpoint for s in st if s.semanticType == "eventbus_consumer"}
     assert got == {"versioned": None, "named": '{"cmd":"sum"}', "top": "2"}
+
+
+@pytest.mark.parametrize(("ret", "dto"), [
+    ("Promise<string>", "string"),  # a built-in type is the declared type
+    ("Observable<number[] | null>", "number"),
+    ("orders.Order", "Order"),  # never the namespace
+    ("{ url: string }", None),  # an object type: not its field's type
+    ("Record<string, OrderDto>", "OrderDto"),
+    ("Promise<void>", None),
+])
+def test_response_dto_keeps_built_in_types(analyze_files, ret: str, dto: str | None) -> None:
+    st = analyze_files({"src/a.controller.ts": (
+        "import { Controller, Get } from '@nestjs/common';\n"
+        f"@Controller('a')\nexport class A {{\n  @Get()\n  get(): {ret} {{ return null; }}\n}}\n"
+    )})
+    [r] = [s for s in st if s.semanticType == "route"]
+    assert r.responseDTO == dto

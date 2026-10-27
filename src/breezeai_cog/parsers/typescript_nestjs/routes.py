@@ -21,7 +21,7 @@ from tree_sitter import Node
 from ...emit import function_id
 from ...schemas import Decorator
 from ...parsers.typescript.decorators import decorator
-from ...parsers.typescript.functions import _type_text, extract_params
+from ...parsers.typescript.functions import _type_text, dto_from_type, extract_params
 from ..additive import FactSpec, index_fact, register_fact
 from ..emits import Emit
 from ..index_common import record_distinct
@@ -83,30 +83,9 @@ def _graphql_op_name(d: Decorator, mname: str) -> str:
     return mname
 _RESPONSE_DECORATORS = {"ApiResponse", "ApiOkResponse", "ApiCreatedResponse"}
 _TYPE_PROP_RE = re.compile(r"\btype\s*:\s*\[?\s*([A-Za-z_$][\w.$]*)")
-# return-type → responseDTO: skip generic wrappers and types with no payload, take the first
-# PascalCase type name (``Promise<OrderDto[]>`` → ``OrderDto``, ``void`` → None). A GraphQL
-# scalar or built-in class (``() => Int``, ``() => Date``) is the declared type: kept.
-_ID_RE = re.compile(r"[A-Za-z_$][\w$]*")
-_NON_DTO_TYPES = {
-    "Promise", "Observable", "Array", "Map", "Set", "Record", "Partial", "Readonly",
-    "void", "any", "unknown", "never", "null", "undefined", "string", "number",
-    "boolean", "object", "bigint", "symbol", "this", "true", "false",
-}
-
-
-def _dto_from_type(t: str | None) -> str | None:
-    if not t:
-        return None
-    for tok in _ID_RE.findall(t):
-        if tok in _NON_DTO_TYPES or not tok[0].isupper():
-            continue
-        return tok
-    return None
-
-
 def _return_dto(member: Node, source: bytes) -> str | None:
     """Handler return type → responseDTO (fallback when no ``@ApiResponse``)."""
-    return _dto_from_type(_type_text(member.child_by_field_name("return_type"), source))
+    return dto_from_type(_type_text(member.child_by_field_name("return_type"), source))
 # `@Controller({ path: 'orders', host: '...' })` — pull the string `path` out of the
 # object form (the string form `@Controller('orders')` is handled directly).
 _PATH_PROP_RE = re.compile(r"""\bpath\s*:\s*['"`]([^'"`]*)['"`]""")
@@ -230,7 +209,7 @@ def _field_resolver_return_dto(dec: Decorator) -> str | None:
     m = _RESOLVE_RETURN_RE.search(dec.args[0])
     if m is None:
         return None
-    return _dto_from_type(m.group(1))
+    return dto_from_type(m.group(1))
 
 
 def _resolver_type_arg(decs: list[Node], source: bytes) -> str | None:
@@ -353,7 +332,7 @@ def _args_dto(member: Node, source: bytes) -> str | None:
     for p in extract_params(member.child_by_field_name("parameters"), source):
         if not any(d.name == "Args" for d in p.decorators):
             continue
-        t = _dto_from_type(p.type)
+        t = dto_from_type(p.type, built_ins=False)  # a class, not one of several scalar args
         if t is None:
             continue
         if first_class is None:
