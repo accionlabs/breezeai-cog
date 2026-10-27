@@ -24,7 +24,9 @@ Hint                  Proof
 A chain (``Song::query()->where(...)->get()``) is one record, at its outermost call, and only
 when one of its methods is a data method of that kind. A static model call must itself start a
 query (``Song::search()`` — Laravel Scout — and ``User::factory()`` do not).
-A statement the shared classifier already filed as a raw SQL ``query_statement`` keeps that.
+A proven data call wins over the shared classifier's raw-SQL ``query_statement`` on the same
+statement (``DB::select('SELECT …')`` is a ``db_method_call``; the SQL stays in ``text``), as in Go
+and as the shared classifier itself ranks a classified call above SQL text.
 Calls on untyped variables, custom repository methods, Redis / Mongo / PDO are gaps, never
 guesses.
 """
@@ -36,7 +38,6 @@ from typing import Any
 
 from tree_sitter import Node
 
-from ...emit import statement_id
 from ..additive import (
     DetectContext, Detection, Detector, FactSpec, Gate, index_fact, register_detector, register_fact,
 )
@@ -44,7 +45,6 @@ from ..emits import Emit
 from ..treesitter import node_text
 from .imports import resolve_class, use_aliases
 from .index import namespace_of
-from .mappings import EMIT_TYPES
 from .receivers import Rules, method_name, outermost_calls
 
 FACT = "php.model-classes"
@@ -209,35 +209,23 @@ def _rules(dc: DetectContext, models: dict[str, str]) -> Rules:
     )
 
 
-def _statement_of(node: Node) -> Node | None:
-    current: Node | None = node
-    while current is not None and current.type not in EMIT_TYPES:
-        current = current.parent
-    return current
-
-
 def detect_php_data_access(dc: DetectContext) -> Detection | None:
     models: dict[str, str] = index_fact(dc.ctx.resolution_index, FACT) or {}
     if not models and not any(marker in dc.source for marker in (
             b"Illuminate\\", b"Doctrine\\", b"CodeIgniter\\", b"db_connect", b"Config\\Database")):
         return None
-    raw_sql = {s.id for s in dc.record.statements if s.semanticType == "query_statement"}
     found: list[Emit] = []
     for call, calls, kind in outermost_calls(dc, _rules(dc, models)):
         methods, hint = _KINDS[kind]
         data = [c for c in calls if method_name(c, dc.source) in methods]
         if not data:
             continue
-        statement = _statement_of(call)
-        if statement is not None and statement_id(
-                dc.path, statement.start_point[0] + 1, statement.start_point[1]) in raw_sql:
-            continue  # raw SQL already filed as query_statement
         name = data[-1].child_by_field_name("name")
         found.append(Emit(call, {
             "semanticType": "db_method_call",
             "method": node_text(name, dc.source) if name is not None else None,
             "dataAccessHint": hint,
-        }, enrich="own"))
+        }, enrich="own", reclassify=frozenset({"query_statement"})))
     return Detection(found) if found else None
 
 
