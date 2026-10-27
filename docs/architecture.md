@@ -578,6 +578,7 @@ the file:
   │                  90   go-kafka         go_kafka/events.py                ✔       │
   │                 100   go-scheduling    go_scheduling/timers.py           ✔       │
   │                 110   go-database      go_database/access.py                     │
+  │                 120   go-lambda        go_lambda/handlers.py             ✔       │
   │                                                                                  │
   │  python          10   celery           python/celery.py                  ✔       │
   │                                                                                  │

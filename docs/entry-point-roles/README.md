@@ -23,4 +23,4 @@ When you add a framework construct to a parser, add its row here and its test.
 | Python | [FastAPI](fastapi.md) · [Celery](celery.md) |
 | Ruby | [Rails](rails.md) · [Sinatra](sinatra.md) · [Grape](grape.md) |
 | PHP | [Laravel](laravel.md) · [CodeIgniter](codeigniter.md) · [Slim](slim.md) · [Symfony](symfony.md) · [WordPress](wordpress.md) |
-| Go | [net/http](net-http.md) · [Gin](gin.md) · [Echo](echo.md) · [chi](chi.md) · [Fiber](fiber.md) · [gorilla/mux](gorilla-mux.md) · [gRPC](grpc-go.md) · [NATS](nats.md) · [Kafka](kafka-go.md) · [Scheduled jobs](scheduling-go.md) |
+| Go | [net/http](net-http.md) · [Gin](gin.md) · [Echo](echo.md) · [chi](chi.md) · [Fiber](fiber.md) · [gorilla/mux](gorilla-mux.md) · [gRPC](grpc-go.md) · [NATS](nats.md) · [Kafka](kafka-go.md) · [Scheduled jobs](scheduling-go.md) · [AWS Lambda](lambda-go.md) |
