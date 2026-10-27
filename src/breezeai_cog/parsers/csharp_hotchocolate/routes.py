@@ -22,7 +22,7 @@ from tree_sitter import Node
 
 from ...logging import get_logger
 from ...schemas import Class, Decorator, FileRecord, Function
-from ..dotnet_common import response_dto, simple_attr_name
+from ..dotnet_common import innermost_type, response_dto, simple_attr_name
 from ..emits import Emit
 from ..handler_sites import handler_location, locate_method
 from ..treesitter import first_line, node_text
@@ -210,7 +210,7 @@ def entity_resolver_statements(
         if attr is None:
             continue
         target = None if on_root else extend_target(cls)
-        entity = target or response_dto(fn.returnType)
+        entity = target or innermost_type(fn.returnType)
         out.append(_statement(
             cls, fn, kind="query", method="RESOLVE_REFERENCE", endpoint=entity,
             text=f"[{attr}] {fn.name}", root=root, generated_loaders=generated_loaders,
