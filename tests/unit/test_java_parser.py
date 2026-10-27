@@ -433,17 +433,21 @@ def test_nested_class_method_id_carries_the_qualified_owner(tmp_path) -> None:
 
 
 @pytest.mark.parametrize(("declared", "payload"), [
-    ("ResponseEntity<List<UserDTO>>", "UserDTO"),
-    ("Mono<ResponseEntity<Flux<OrderDto>>>", "OrderDto"),
-    ("Page<OrderCto>", "OrderCto"),
-    ("OrderDto[]", "OrderDto"),
-    ("java.util.List<com.acme.OrderDto>", "OrderDto"),
-    ("List<@Valid ? extends OrderDto>", "OrderDto"),
-    ("String", "String"),  # a built-in type is the declared type
-    ("ApiResponse<OrderDto>", "ApiResponse"),  # the application's envelope is the payload
-    ("Map<String, OrderDto>", "Map"),  # two type arguments: no single payload
+    # async and HTTP-result wrappers are removed; the payload stays as declared
+    ("ResponseEntity<List<UserDTO>>", "List<UserDTO>"),
+    ("Mono<ResponseEntity<OrderDto>>", "OrderDto"),
+    ("Optional<OrderDto>", "OrderDto"),
+    ("Flux<OrderDto>", "Flux<OrderDto>"),  # declares many: part of the payload
+    ("Page<OrderCto>", "Page<OrderCto>"),
+    ("OrderDto[]", "OrderDto[]"), ("byte[]", "byte[]"),
+    ("java.util.List<com.acme.OrderDto>", "java.util.List<com.acme.OrderDto>"),
+    ("List<@Valid OrderDto>", "List<OrderDto>"),  # a type annotation is not the type
+    ("ResponseEntity<Map<String, Object>>", "Map<String, Object>"),
+    ("ApiResponse<OrderDto>", "ApiResponse<OrderDto>"),
+    ("String", "String"),
     ("void", None), ("ResponseEntity<Void>", None), ("ResponseEntity", None),
-    ("ResponseEntity<?>", None), ("Response", None), ("ModelAndView", None),
+    ("ResponseEntity<?>", None), ("Response", None), ("CompletionStage<Response>", None),
+    ("ModelAndView", None),
 ])
 def test_payload_type(declared: str, payload: str | None) -> None:
     from breezeai_cog.parsers.java.functions import payload_type

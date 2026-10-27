@@ -90,7 +90,7 @@ def test_route_attributes(tmp_path) -> None:
 
 
 
-def test_dtos_are_the_payload_types(analyze_files) -> None:
+def test_dtos_are_the_declared_payload_types(analyze_files) -> None:
     st = analyze_files({"src/main/java/a/C.java": (
         "package a;\nimport java.util.List;\nimport org.springframework.web.bind.annotation.*;\n"
         "@RestController\npublic class C {\n"
@@ -99,7 +99,7 @@ def test_dtos_are_the_payload_types(analyze_files) -> None:
         '  @GetMapping("/c") public void c() { }\n}\n'
     )})
     got = {s.endpoint: (s.requestDTO, s.responseDTO) for s in st if s.semanticType == "route"}
-    assert got == {"/a": ("OrderDto", "OrderDto"), "/b": (None, None), "/c": (None, None)}
+    assert got == {"/a": ("List<OrderDto>", "List<OrderDto>"), "/b": (None, None), "/c": (None, None)}
 
 def test_non_controller_has_no_routes(tmp_path) -> None:
     src = b"package x;\npublic class Plain { public int add(int a){ return a; } }\n"

@@ -204,12 +204,11 @@ def method_nodes(root: Node, source: bytes) -> dict[tuple[str, int], Node]:
     return out
 
 
-#: Generic wrappers around a handler's payload type (contract: ``requestDTO`` / ``responseDTO``
-#: are the base type): async, HTTP-result, optional and list wrappers.
-_PAYLOAD_WRAPPERS = frozenset({
-    "Mono", "Flux", "CompletableFuture", "CompletionStage", "Callable", "DeferredResult", "Uni",
-    "Multi", "ResponseEntity", "HttpEntity", "Optional", "List", "Set", "Collection", "Iterable",
-    "Page", "Slice", "Stream",
+#: Wrappers that are not part of the payload: async results and HTTP results (contract:
+#: ``requestDTO`` / ``responseDTO`` are the declared payload type with these removed).
+_NON_PAYLOAD_WRAPPERS = frozenset({
+    "Mono", "CompletableFuture", "CompletionStage", "Callable", "DeferredResult", "Uni",
+    "ResponseEntity", "HttpEntity", "Optional",
 })
 #: Declared types that carry no payload: no body, or a response that is not a declared type
 #: (a raw ``ResponseEntity``, JAX-RS ``Response``, a Spring MVC view).
@@ -219,37 +218,18 @@ _NO_PAYLOAD = frozenset({
 _TYPE_ANNOTATION = re.compile(r"@[\w.]+(\([^()]*\))?\s*")
 
 
-def _type_arguments(inner: str) -> list[str]:
-    """``"String, List<X>"`` → ``["String", "List<X>"]`` (split at the top nesting level)."""
-    parts, depth, start = [], 0, 0
-    for i, ch in enumerate(inner):
-        depth += (ch == "<") - (ch == ">")
-        if ch == "," and depth == 0:
-            parts.append(inner[start:i].strip())
-            start = i + 1
-    return [*parts, inner[start:].strip()]
-
-
 def payload_type(declared: str | None) -> str | None:
-    """A handler's declared request / response type → its payload's base type name: wrappers
-    removed (``ResponseEntity<List<OrderDto>>`` → ``OrderDto``, ``OrderDto[]`` → ``OrderDto``),
-    simple name (``com.x.OrderDto`` → ``OrderDto``). Another generic keeps its own name
-    (``ApiResponse<X>`` → ``ApiResponse``, ``Map<K, V>`` → ``Map``). None for no payload."""
+    """A handler's declared request / response type → the payload type as written, with async
+    and HTTP-result wrappers removed (``ResponseEntity<List<UserDTO>>`` → ``List<UserDTO>``,
+    ``Mono<OrderDto>`` → ``OrderDto``). Lists, arrays, pages, maps and the application's own
+    generics stay as declared. None when no payload is declared (``void``,
+    ``ResponseEntity<Void>``, JAX-RS ``Response``)."""
     if not declared:
         return None
-    t = _TYPE_ANNOTATION.sub("", declared).strip()
-    while True:
-        if t.endswith("[]"):
-            t = t[:-2].strip()
-            continue
-        t = re.sub(r"^\?\s*(extends|super)\s+", "", t)
-        if "<" not in t or not t.endswith(">"):
-            break
+    t = " ".join(_TYPE_ANNOTATION.sub("", declared).split())
+    while "<" in t and t.endswith(">"):
         outer = t[: t.index("<")].strip().rsplit(".", 1)[-1]
-        args = _type_arguments(t[t.index("<") + 1: -1])
-        if outer not in _PAYLOAD_WRAPPERS or len(args) != 1:
-            t = outer
+        if outer not in _NON_PAYLOAD_WRAPPERS:
             break
-        t = args[0]
-    t = t.rsplit(".", 1)[-1].strip()
-    return None if not t or t in _NO_PAYLOAD else t
+        t = t[t.index("<") + 1: -1].strip()
+    return None if not t or t.rsplit(".", 1)[-1] in _NO_PAYLOAD else t
