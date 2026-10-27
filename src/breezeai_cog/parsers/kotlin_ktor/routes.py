@@ -14,7 +14,8 @@ these call_expression nodes and emit them as Statement records.
 
 from __future__ import annotations
 
-from collections.abc import Callable
+import re
+from collections.abc import Callable, Iterable
 
 from tree_sitter import Node
 
@@ -36,29 +37,59 @@ _PATH_EXPRS = frozenset({
 })
 
 
+_CONTAINERS = frozenset({"object_declaration", "class_declaration", "companion_object"})
+
+
+def _qualified_matches(declared: Iterable[str], ref: str) -> list[str]:
+    """The declared qualified names (``Other.ITEMS``) a written one (``Admin.ITEMS``) can be: one
+    chain ends with the other — ``Routes.Admin.ITEMS`` for ``Admin.ITEMS`` (the written chain
+    starts lower), ``Admin.ITEMS`` for ``com.x.Admin.ITEMS`` (a package in front)."""
+    return [k for k in declared
+            if k == ref or k.endswith("." + ref) or ref.endswith("." + k)]
+
+
 def string_constants(root: Node, source: bytes) -> dict[str, str | None]:
     """``val`` / ``const val`` string properties of this file → their value, by simple name
-    (``object Paths { const val USERS = "/users" }`` → ``USERS``). A value may interpolate another
-    constant. A name declared twice with different values, or with a value that does not
-    resolve, maps to None."""
+    (``USERS``) and, for one inside an ``object`` / class / ``companion object``, also by its
+    container chain (``object Paths { const val USERS = "/users" }`` → ``Paths.USERS``). A value
+    may interpolate another constant. A name declared twice with different values, or with a
+    value that does not resolve, maps to None. Look names up with :func:`lookup_constant`."""
     raw: dict[str, list[Node]] = {}
 
-    def walk(n: Node) -> None:
+    def walk(n: Node, chain: tuple[str, ...]) -> None:
         if n.type == "property_declaration":
             var = next((c for c in n.named_children if c.type == "variable_declaration"), None)
             name = var.named_children[0] if var is not None and var.named_children else None
             value = next((c for c in n.named_children if c.type in _PATH_EXPRS), None)
             if name is not None and name.type == "simple_identifier" and value is not None:
-                raw.setdefault(node_text(name, source), []).append(value)
+                simple = node_text(name, source)
+                raw.setdefault(simple, []).append(value)
+                if chain:
+                    raw.setdefault(".".join((*chain, simple)), []).append(value)
+            return  # a property's initializer declares no constants of the container
+        if n.type in _CONTAINERS:
+            nm = next((c for c in n.named_children if c.type == "type_identifier"), None)
+            if n.type != "companion_object":  # a companion's members are the class's
+                if nm is None:
+                    return
+                chain = (*chain, node_text(nm, source))
+        elif n.type == "infix_expression" and [c.type for c in n.named_children] == [
+                "object_literal", "simple_identifier", "lambda_literal"]:
+            # the grammar's parse of a one-line ``object Paths { … }``
+            chain = (*chain, node_text(n.named_children[1], source))
         for c in n.named_children:
-            walk(c)
+            walk(c, chain)
 
-    walk(root)
+    walk(root, ())
     out: dict[str, str | None] = {}
 
     def value_of(name: str, depth: int) -> str | None:
         if name in out:
             return out[name]
+        if "." in name and name not in raw:
+            return lookup_constant(
+                {k: value_of(k, depth + 1) for k in _qualified_matches(
+                    [k for k in raw if "." in k], name)}, name)
         nodes = raw.get(name)
         if not nodes or depth > 8:
             return None
@@ -69,6 +100,17 @@ def string_constants(root: Node, source: bytes) -> dict[str, str | None]:
     for name in raw:
         value_of(name, 0)
     return out
+
+
+def lookup_constant(consts: dict[str, str | None], ref: str) -> str | None:
+    """A written constant reference's value: a bare name by its simple name; a qualified one
+    (``Admin.ITEMS``) only through a declared container chain it matches
+    (:func:`_qualified_matches`) — never another container's constant of the same simple name.
+    None when unknown or when the matches disagree."""
+    if "." not in ref:
+        return consts.get(ref)
+    values = {consts.get(k) for k in _qualified_matches([k for k in consts if "." in k], ref)}
+    return values.pop() if len(values) == 1 else None
 
 
 def _resolve(node: Node, source: bytes, lookup: Callable[[str], str | None]) -> str | None:
@@ -90,13 +132,9 @@ def _resolve(node: Node, source: bytes, lookup: Callable[[str], str | None]) -> 
         return "".join(parts)
     if node.type == "simple_identifier":
         return lookup(node_text(node, source))
-    if node.type == "navigation_expression":  # Paths.USERS → USERS
-        names = [c for c in node.named_children if c.type == "simple_identifier"]
-        suffix = next((c for c in node.named_children if c.type == "navigation_suffix"), None)
-        last = suffix.named_children[0] if suffix is not None and suffix.named_children else None
-        if not names or last is None or last.type != "simple_identifier":
-            return None
-        return lookup(node_text(last, source))
+    if node.type == "navigation_expression":  # Paths.USERS — by its chain (lookup_constant)
+        ref = "".join(node_text(node, source).split())
+        return lookup(ref) if re.fullmatch(r"\w+(\.\w+)+", ref) else None
     if node.type == "additive_expression" and len(node.named_children) == 2:
         left, right = (_resolve(c, source, lookup) for c in node.named_children)
         return left + right if left is not None and right is not None else None
@@ -118,7 +156,7 @@ def _first_arg(call: Node, source: bytes, consts: dict[str, str | None]) -> obje
             if first_arg is not None else None
         if expr is None:
             return None
-        value = _resolve(expr, source, consts.get)
+        value = _resolve(expr, source, lambda ref: lookup_constant(consts, ref))
         return _UNKNOWN if value is None else value
     return _SENTINEL_NO_ARGS
 

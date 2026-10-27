@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 from breezeai_cog.core.registry import discover_builtin, select
 from breezeai_cog.parsers.base import ParseContext
 from breezeai_cog.parsers.kotlin.parser import KotlinParser
@@ -196,6 +198,24 @@ def test_ktor_unresolved_path_leaves_endpoint_empty():
     rec = _parse(_UNRESOLVED_SRC)
     endpoints = [s.endpoint for s in rec.statements if s.semanticType == "route"]
     assert endpoints == ["/api/items/{id}", "/users", "/api/b", None, None, None]
+
+
+
+@pytest.mark.parametrize(("decls", "ref", "endpoint"), [
+    # Admin is declared elsewhere: never Other's constant of the same name
+    ('object Other {\n    const val ITEMS = "/other-items"\n}', "Admin.ITEMS", None),
+    ('object Routes {\n    object Admin {\n        const val ITEMS = "/a"\n    }\n}', "Admin.ITEMS", "/a"),
+    ('object Paths {\n    const val USERS = "/users"\n}', "com.acme.Paths.USERS", "/users"),
+    ('class R {\n    companion object {\n        const val X = "/x"\n    }\n}', "R.X", "/x"),
+    ('val USERS = "/users"', "Paths.USERS", None),  # a top-level val is not Paths'
+    ('object A {\n    object Admin {\n        const val ITEMS = "/1"\n    }\n}\n'
+     'object B {\n    object Admin {\n        const val ITEMS = "/2"\n    }\n}', "Admin.ITEMS", None),
+])
+def test_ktor_qualified_constant_by_its_container(decls: str, ref: str, endpoint: str | None):
+    src = (f"package com.acme\n\nimport io.ktor.server.routing.*\n\n{decls}\n\n"
+           f"fun Route.admin() {{\n    get({ref}) {{ }}\n}}\n").encode()
+    [r] = [s for s in _parse(src).statements if s.semanticType == "route"]
+    assert r.endpoint == endpoint
 
 
 def test_ktor_framework_set_regardless_of_routes():
