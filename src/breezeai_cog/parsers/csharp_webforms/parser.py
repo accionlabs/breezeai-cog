@@ -19,6 +19,7 @@ from ...schemas import FileRecord
 from ...utils import count_loc
 from ..base import ParseContext
 from ..csharp.parser import CSharpParser
+from ..detection.jquery_calls import detect_inline_jquery
 from ..emits import apply
 from ..treesitter import parse_source
 from .markup import (
@@ -101,6 +102,8 @@ class WebFormsParser(CSharpParser):
                     register_controls(ctx.source, ctx.path, ctx.repo_root),
                 )
             )
+            # inline <script> jQuery AJAX calls → api_call
+            detect_inline_jquery(record, ctx.source, ctx.path, ctx.parse_timeout_micros)
         return record
 
     def parse_file(self, ctx: ParseContext) -> FileRecord:

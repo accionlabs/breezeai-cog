@@ -38,6 +38,7 @@ from ...schemas import SCHEMA_VERSION, FileRecord
 from ...utils import count_loc
 from ..base import BaseParser, ParseContext
 from ..comments_common import comment_statements_for
+from ..detection.jquery_calls import detect_inline_jquery
 from ..treesitter import parse_source
 from .fingerprint import detect_behaviors, detect_rendering_framework
 from .index import HtmlTemplateIndex, build_html_template_index
@@ -87,7 +88,9 @@ class HtmlParser(BaseParser):
 
         if framework is None:
             # Not a recognized template — a plain html File (may still carry behaviors).
-            return self._file(fid, ctx.path, loc, behaviors=behaviors)
+            plain = self._file(fid, ctx.path, loc, behaviors=behaviors)
+            self._inline_scripts(plain, ctx)
+            return plain
 
         record = self._file(
             fid,
@@ -129,7 +132,14 @@ class HtmlParser(BaseParser):
                     seen_ids=seen_ids,
                 )
             )
+        self._inline_scripts(record, ctx)
         return record
+
+    @staticmethod
+    def _inline_scripts(record: FileRecord, ctx: ParseContext) -> None:
+        # The markup grammar never looks inside <script>; jQuery AJAX calls there → api_call.
+        if ctx.capture_statements:
+            detect_inline_jquery(record, ctx.source, ctx.path, ctx.parse_timeout_micros)
 
     @staticmethod
     def _file(
