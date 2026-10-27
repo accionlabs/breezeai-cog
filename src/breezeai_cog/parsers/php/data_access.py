@@ -45,6 +45,7 @@ from ..emits import Emit
 from ..treesitter import node_text
 from .imports import resolve_class, use_aliases
 from .index import namespace_of
+from .mappings import CONTROL_FLOW, EMIT_TYPES
 from .receivers import Rules, method_name, outermost_calls
 
 FACT = "php.model-classes"
@@ -209,6 +210,15 @@ def _rules(dc: DetectContext, models: dict[str, str]) -> Rules:
     )
 
 
+def _in_control_flow(call: Node) -> bool:
+    """Whether the call's own statement is a control-flow statement (``if (DB::table…->exists())``):
+    a header keeps no semantic type, so the call gets a record of its own."""
+    node = call.parent
+    while node is not None and node.type not in EMIT_TYPES:
+        node = node.parent
+    return node is not None and node.type in CONTROL_FLOW
+
+
 def detect_php_data_access(dc: DetectContext) -> Detection | None:
     models: dict[str, str] = index_fact(dc.ctx.resolution_index, FACT) or {}
     if not models and not any(marker in dc.source for marker in (
@@ -225,7 +235,8 @@ def detect_php_data_access(dc: DetectContext) -> Detection | None:
             "semanticType": "db_method_call",
             "method": node_text(name, dc.source) if name is not None else None,
             "dataAccessHint": hint,
-        }, enrich="own", reclassify=frozenset({"query_statement"})))
+        }, enrich="never" if _in_control_flow(call) else "own",
+            reclassify=frozenset({"query_statement"})))
     return Detection(found) if found else None
 
 

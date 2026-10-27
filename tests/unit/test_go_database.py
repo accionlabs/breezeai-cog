@@ -77,3 +77,13 @@ def test_db_from_a_repo_function_in_another_package(analyze_files) -> None:
 def test_name_based_guesses_are_not_made_for_go(analyze_files) -> None:
     assert _db(analyze_files, '\t"context"', 'func run(ctx context.Context) {\n\ta.articleRepo.Update(ctx, ar)\n'
                                             '\ts.cache.Get(key)\n\tdb.Query("SELECT 1")\n}\n') == []
+
+
+def test_single_line_control_flow_keeps_no_semantic_type(analyze_files) -> None:
+    st = analyze_files({"go.mod": MOD, "main.go": 'package main\n\nimport "gorm.io/gorm"\n\n'
+                        'func run(db *gorm.DB) {\n\tif db.Find(&xs).Error != nil { return }\n'
+                        '\tfor _, r := range db.Find(&ys).Rows() {}\n}\n'})
+    flow = [s for s in st if s.nodeType in {"if_statement", "for_statement"}]
+    assert flow and all(s.semanticType is None for s in flow)
+    assert sorted((s.startLine, s.nodeType, s.method) for s in st if s.semanticType == "db_method_call") \
+        == [(6, "call_expression", "Find"), (7, "call_expression", "Find")]  # Find runs the query

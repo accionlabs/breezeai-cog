@@ -168,3 +168,14 @@ def test_model_fact_reaches_workers(tmp_path, jobs) -> None:
                if '"app/Http/Controllers/C.php"' in line)
     assert [(s["method"], s["dataAccessHint"]) for s in rec["statements"]
             if s.get("semanticType") == "db_method_call"] == [("create", "eloquent")]
+
+
+def test_single_line_control_flow_keeps_no_semantic_type(analyze_files) -> None:
+    stmts = analyze_files({"app/R.php": (
+        "<?php\nnamespace App;\nuse Illuminate\\Support\\Facades\\DB;\n"
+        "function f() {\n    if (DB::table('songs')->exists()) { return; }\n}\n"
+    )})
+    flow = [s for s in stmts if s.nodeType == "if_statement"]
+    assert flow and all(s.semanticType is None for s in flow)
+    assert [(s.startLine, s.semanticType) for s in stmts if s.semanticType == "db_method_call"] \
+        == [(5, "db_method_call")]

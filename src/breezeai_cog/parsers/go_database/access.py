@@ -21,6 +21,7 @@ from ..emits import Emit
 from ...emit import statement_id
 from ..go.declarations import declarations
 from ..go.imports import GoIndex
+from ..go.mappings import CONTROL_FLOW, EMIT_TYPES
 from ..go.routing import file_analyzer
 from ..go.values import ValueSpec, typed_calls
 
@@ -99,6 +100,14 @@ _LIBRARIES: list[tuple[ValueSpec, str, frozenset[str] | None]] = [
 _MARKERS = (b'"database/sql"', b"jmoiron/sqlx", b"gorm", b"jackc/pgx", b"mongo-driver", b"redis")
 
 
+def _in_control_flow(call) -> bool:
+    """Whether the call's own statement is a control-flow statement (``if db.Find(…).Error …``)."""
+    node = call.parent
+    while node is not None and node.type not in EMIT_TYPES:
+        node = node.parent
+    return node is not None and node.type in CONTROL_FLOW
+
+
 _returning_cache: tuple[int, dict[bytes, frozenset[str]]] | None = None
 
 
@@ -136,11 +145,16 @@ def detect_access(dc: DetectContext) -> Detection | None:
             if (tc.value.type, tc.method) in spec.derived:
                 continue  # a chain step (gorm Where/Model): the terminal call is the access
             line, col = tc.call.start_point[0] + 1, tc.call.start_point[1]
-            same = statement_id(dc.path, line, col) in own_calls
+            if statement_id(dc.path, line, col) in own_calls:
+                enrich = "same"  # the base parser's record of this call
+            elif _in_control_flow(tc.call):
+                enrich = "never"  # a header keeps no semantic type: a record of its own
+            else:
+                enrich = "own"
             found.append(Emit(
                 tc.call,
                 {"semanticType": "db_method_call", "method": tc.method, "dataAccessHint": hint},
-                enrich="same" if same else "own",
+                enrich=enrich,
                 reclassify=frozenset({"query_statement", "db_method_call", "api_call"}),
             ))
     return Detection(found) if found else None
