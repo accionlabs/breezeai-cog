@@ -3,8 +3,8 @@
 A WCF service is a ``[ServiceContract]``-decorated interface; each ``[OperationContract]``
 method is a callable operation (an entry point over SOAP/net.tcp, or REST when the method
 also carries ``[WebGet]``/``[WebInvoke]``). The C# base parser already captured these
-attributes onto ``Class.decorators`` / ``Function.decorators``, so this detector just reads
-the ``FileRecord`` — no AST re-walk, no new grammar.
+attributes onto ``Class.decorators`` / ``Function.decorators``, so this detector mostly reads
+the ``FileRecord``; only a ``UriTemplate`` is read from the tree, so a constant resolves.
 
 Emitted as ``route`` statements:
 * ``semanticType=route``, ``framework=wcf``, ``handler`` = the operation method.
@@ -23,6 +23,7 @@ from typing import Any
 from tree_sitter import Node
 
 from ...schemas import Class, Decorator, FileRecord, Function
+from ..aspnet_areas import attribute_args, attribute_node, namespace_of, string_value
 from ..dotnet_common import code_behind_host, response_dto, simple_attr_name
 from ..emits import Emit
 from ..handler_sites import handler_location, locate_method
@@ -50,24 +51,39 @@ def _has_attr(decorators: list[Decorator], name: str) -> bool:
 # looked up by key; we recover them by the *shape* of the value instead.
 
 
-#: The other named arguments of ``[WebGet]`` / ``[WebInvoke]`` are enum values.
-_WEB_ENUMS = ("WebMessageFormat.", "WebMessageBodyStyle.")
+#: A ``UriTemplate`` that is set but cannot be read (not a literal or a known constant).
+_UNKNOWN = object()
 
 
-def _uri_arg(dec: Decorator) -> str | None:
-    """The ``UriTemplate`` value of a WebGet/WebInvoke. Its other arguments are ``Method`` (an
-    HTTP verb) and the format / body-style enums, so the template is the one argument that is
-    neither — ``"orders/{id}"``, ``"/status"`` or a bare ``"status"``."""
-    for a in dec.args:
-        s = a.strip()
-        name, eq, value = s.partition("=")
-        if eq and name.strip().isidentifier():  # kept in `Name = value` form
-            if name.strip() == "UriTemplate":
-                return value.strip().strip('"')
-            continue
-        if s and s.upper() not in _HTTP_VERBS and not s.startswith(_WEB_ENUMS):
-            return s
-    return None
+def _web_methods(root: Node) -> dict[int, Node]:
+    """Method declarations by their first line (attributes included, as ``Function.startLine``)."""
+    out: dict[int, Node] = {}
+    stack = [root]
+    while stack:
+        node = stack.pop()
+        if node.type == "method_declaration":
+            out[node.start_point[0] + 1] = node
+        else:
+            stack.extend(node.named_children)
+    return out
+
+
+def _uri_template(method: Node | None, source: bytes, index: object | None) -> object:
+    """The ``UriTemplate`` of a method's WebGet / WebInvoke: its value — a literal or a constant
+    (``Routes.GetOrder``, :func:`..aspnet_areas.string_value`) — None when it has none (WCF then
+    serves the operation name), :data:`_UNKNOWN` when it is set but cannot be read (a
+    concatenation, a call, an unknown or ambiguous constant)."""
+    if method is None:
+        return _UNKNOWN
+    for name in (_WEB_GET, _WEB_INVOKE):
+        attr = attribute_node(method, name, source)
+        if attr is not None:
+            value = attribute_args(attr, source)[1].get("UriTemplate")
+            if value is None:
+                return None
+            got = string_value(value, source, index, namespace_of(method, source))
+            return _UNKNOWN if got is None else got
+    return _UNKNOWN
 
 
 def _verb_arg(dec: Decorator) -> str | None:
@@ -157,13 +173,15 @@ def _registered_host(cls: Class, path: str, index: object | None) -> str | None:
 
 
 def detect_wcf_services(
-    record: FileRecord, root: Node, repo_root: Path | None = None, index: object | None = None
+    record: FileRecord, root: Node, source: bytes, repo_root: Path | None = None,
+    index: object | None = None,
 ) -> list[Emit]:
     """One ``route`` statement per ``[OperationContract]`` under a ``[ServiceContract]`` type
     (WCF / CoreWCF; tolerant of the full ``…Attribute`` form). A REST operation's endpoint is
     its served address under the class's ``.svc`` (:func:`svc_host`, else the ``wcf.svc-hosts``
     fact — a ``.svc`` anywhere naming the class or the interface's implementer), empty when that
-    host is not known — a bare ``UriTemplate`` or a service name is not an address. For a contract on an
+    host is not known — a bare ``UriTemplate`` or a service name is not an address — or when its
+    ``UriTemplate`` cannot be read (:func:`_uri_template`). For a contract on an
     interface, the handler is the implementing class's method when the repo has exactly one
     implementer (``index.implementers``); otherwise the interface method."""
     contracts = [
@@ -180,6 +198,7 @@ def detect_wcf_services(
     }
     interfaces = {cls.id: cls.name for cls in contracts if cls.type == "interface"}
     web_hosts = {cid: _web_host(host, repo_root) for cid, host in hosts.items()}
+    methods = _web_methods(root)
 
     routes: list[Emit] = []
     for fn in record.functions:
@@ -190,7 +209,9 @@ def detect_wcf_services(
         if web is not None:  # REST-over-WCF (WebHttpBinding)
             method = "GET" if simple_attr_name(web.name) == _WEB_GET else (_verb_arg(web) or "POST")
             host = hosts.get(fn.parentId)
-            endpoint = _rest_address(host, _uri_arg(web), fn.name) if host is not None else None
+            template = _uri_template(methods.get(fn.startLine), source, index)
+            endpoint = None if host is None or template is _UNKNOWN \
+                else _rest_address(host, template, fn.name)
             route_kind = "route"
         elif web_hosts.get(fn.parentId):  # an HTTP host: POST <file>.svc/<Operation>
             method, route_kind = "POST", "route"
@@ -251,12 +272,12 @@ def _web_host(host: str | None, repo_root: Path | None) -> bool:
         return False
 
 
-def _rest_address(host: str, template: str | None, operation: str) -> str:
+def _rest_address(host: str, template: object, operation: str) -> str:
     """``/<.svc path>/<UriTemplate>`` (its query part dropped — those are query bindings, not the
     path), or ``/<.svc path>/<Operation>`` when the operation has no ``UriTemplate`` (WCF's default
     for WebGet / WebInvoke). REST over WCF is HTTP, so the address is a path with a leading
     ``/``, like a Web Forms page's (contract §6); SOAP keeps ``<Service>.asmx/<Operation>``."""
-    tail = template.split("?", 1)[0].strip("/") if template else operation
+    tail = template.split("?", 1)[0].strip("/") if isinstance(template, str) else operation
     return "/" + (f"{host}/{tail}" if tail else host).lstrip("/")
 
 

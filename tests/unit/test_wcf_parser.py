@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 
+import pytest
 from jsonschema import Draft202012Validator
 
 from breezeai_cog.core import registry
@@ -171,6 +172,27 @@ def test_rest_endpoint_is_under_the_svc(analyze_files) -> None:
     assert got[("Import/Rest.svc.cs", "FindItem")] == ("GET", "/Import/Rest.svc/items/{id}")
     assert got[("Import/Rest.svc.cs", "Ping")] == ("RPC", "Rest/Ping")  # SOAP: <Contract>/<Operation>
     assert got[("Other/Rest.svc.cs", "GetImportItem")] == ("POST", None)
+
+
+@pytest.mark.parametrize(("template", "endpoint"), [
+    ('"lit/{id}"', "/Svc/Order.svc/lit/{id}"),
+    ("Routes.GetOrder", "/Svc/Order.svc/orders/{id}"),  # a constant, from another file
+    ('Routes.GetOrder + "/x"', None),  # a concatenation: not read → unknown, not the operation
+    ("Routes.Missing", None),
+])
+def test_uri_template_constant(analyze_files, template: str, endpoint: str | None) -> None:
+    stmts = analyze_files({
+        "Svc/Order.svc": '<%@ ServiceHost Service="Shop.OrderSvc" CodeBehind="Order.svc.cs" %>',
+        "Svc/Routes.cs": 'namespace Shop {\n  public static class Routes { public const string GetOrder = "orders/{id}"; }\n}\n',
+        "Svc/Order.svc.cs": (
+            "using System.ServiceModel;\nusing System.ServiceModel.Web;\nnamespace Shop {\n"
+            "  [ServiceContract]\n  public class OrderSvc {\n"
+            f"    [OperationContract, WebGet(UriTemplate = {template})]\n"
+            '    public string Get(string id) { return ""; }\n  }\n}\n'
+        ),
+    })
+    [r] = [s for s in stmts if s.framework == "wcf" and s.semanticType == "route"]
+    assert r.endpoint == endpoint
 
 
 def test_default_service_name_strips_leading_i() -> None:
