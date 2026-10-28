@@ -26,6 +26,7 @@ from ..additive import FactSpec, index_fact, register_fact
 from ..graphql.sdl import root_field_dtos
 from ..index_common import record_distinct
 from ..treesitter import parse_source
+from ..typescript.imports import TsAliasIndex
 
 FACT = "graphql.sdl-root-fields"
 
@@ -40,6 +41,13 @@ def root_field_dto(index: Any | None, type_name: str, field: str) -> tuple[str |
     """The SDL DTOs of ``type_name.field`` (``(None, None)`` when unknown or ambiguous)."""
     dtos: RootFieldDtos = index_fact(index, FACT) or {}
     return dtos.get((type_name, field), (None, None))
+
+
+def declares_root_fields(index: TsAliasIndex | None) -> bool:
+    """Whether the repo declares any GraphQL root field in SDL — a schema file or an embedded
+    ``gql`` schema — which is what makes a ``Query: <import>`` key GraphQL and not another
+    ``Query`` map."""
+    return bool(index_fact(index, FACT))
 
 
 def _embedded(root: Node, source: bytes) -> list[tuple[str, str, str | None, str | None]]:
