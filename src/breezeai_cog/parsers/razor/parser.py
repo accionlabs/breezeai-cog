@@ -78,7 +78,8 @@ class RazorParser(BaseParser):
             # File, so an @onclick="Remove" handler resolves to the Remove method in this file.
             self._extract_code_methods(root, ctx, fid, seen_ids, record)
             # inline <script> jQuery AJAX calls → api_call (the markup grammar skips script bodies)
-            detect_inline_jquery(record, ctx.source, ctx.path, ctx.parse_timeout_micros)
+            detect_inline_jquery(
+                record, ctx.source, ctx.path, ctx.parse_timeout_micros, ctx.repo_root)
         return record
 
     def handler_locator(self, ctx: ParseContext) -> HandlerLocator | None:

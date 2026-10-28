@@ -34,7 +34,7 @@ from dataclasses import dataclass
 
 from tree_sitter import Node
 
-from .emits import Emit
+from .emits import Emit, Enrich
 from .treesitter import node_text
 
 
@@ -177,6 +177,7 @@ def emit_outbound(
     out: list[Emit],
     *,
     method: str | None = None,
+    enrich: Enrich = "unclassified",
     reclassify_db: bool = False,
 ) -> None:
     """An ``api_call`` for ``call``: enriches the enclosing statement in place when it is
@@ -193,7 +194,7 @@ def emit_outbound(
             "method": method,  # None for SDK calls (no HTTP verb visible); jQuery passes its verb
             "dataAccessHint": None,  # clear the ORM hint if we reclassified a db_method_call
         },
-        enrich="unclassified",
+        enrich=enrich,
         reclassify=frozenset({"db_method_call"}) if reclassify_db else frozenset(),
     ))
 
