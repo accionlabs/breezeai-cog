@@ -276,13 +276,80 @@ def _table(create: exp.Create, dialect: str) -> dict[str, Any]:
     }
 
 
-def _apply_alter(alter: exp.Alter, by_table: dict[str, dict[str, Any]]) -> None:
+# The schema an unqualified name means when several same-named tables exist.
+_DEFAULT_SCHEMA = {"transactsql": "dbo", "postgresql": "public"}
+
+
+class _TableLookup:
+    """Finds the table a ``CREATE INDEX`` or ``ALTER TABLE`` refers to. Tables in different
+    schemas can share a name (``dbo.Orders`` and ``sales.Orders``), so the bare name is not
+    enough: keying by it attached ``dbo``'s indexes and constraints to whichever same-named
+    table came last (DEF-958-01).
+
+    A qualified reference takes the table in that schema; failing that, the one same-named
+    table declared without a schema (it lives in the default schema). An unqualified reference
+    takes the only same-named table, else the one declared without a schema, else the one in
+    the dialect's default schema. Anything still ambiguous resolves to ``None`` — leaving an
+    index unattached is better than attaching it to the wrong table. Schemas compare
+    case-insensitively; names compare as written, as before."""
+
+    def __init__(self, tables: list[dict[str, Any]] | None = None, default_schema: str | None = None) -> None:
+        self._by_name: dict[str, list[dict[str, Any]]] = {}
+        self._default = default_schema.casefold() if default_schema else None
+        for table in tables or []:
+            self.add(table)
+
+    def add(self, table: dict[str, Any]) -> None:
+        self._by_name.setdefault(table["name"], []).append(table)
+
+    def find(self, name: str | None, schema: str | None = None) -> dict[str, Any] | None:
+        candidates = self._by_name.get(name or "") or []
+        if not candidates:
+            return None
+        if schema:
+            # Last wins, as the old dict did when one script declares the same table twice.
+            exact = [t for t in candidates if (t.get("schema") or "").casefold() == schema.casefold()]
+            if exact:
+                return exact[-1]
+        elif len(candidates) == 1:
+            return candidates[0]
+        unqualified = [t for t in candidates if not t.get("schema")]
+        if len(unqualified) == 1:
+            return unqualified[0]
+        if not schema and self._default:
+            in_default = [t for t in candidates if (t.get("schema") or "").casefold() == self._default]
+            if in_default:
+                return in_default[-1]
+        return None
+
+
+def _index_schema(idx: dict[str, Any]) -> str | None:
+    """The schema an index record's ``ON [schema.]table`` named, recovered from
+    ``tableFullName`` (``schema.table``) so the record shape stays unchanged."""
+    name, full = idx.get("tableName"), idx.get("tableFullName")
+    if name and full and full != name and full.endswith(f".{name}"):
+        return full[: -len(name) - 1]
+    return None
+
+
+def _attach_indexes(indexes: list[dict[str, Any]], lookup: _TableLookup) -> None:
+    """Attach each index to the table it names and flag the indexed columns."""
+    for idx in indexes:
+        owner = lookup.find(idx["tableName"], _index_schema(idx))
+        if owner is not None:
+            owner["indexes"].append(idx)
+            for col in owner["columns"]:
+                if col["name"] in idx["columns"]:
+                    col["isIndexed"] = True
+
+
+def _apply_alter(alter: exp.Alter, lookup: _TableLookup) -> None:
     """Attach constraints from ``ALTER TABLE … ADD CONSTRAINT`` to the owning table.
     Oracle scripts commonly declare every PK/FK/UNIQUE this way rather than inline."""
     if (alter.args.get("kind") or "").upper() != "TABLE":
         return
     table = alter.find(exp.Table)
-    owner = by_table.get(table.name) if table is not None else None
+    owner = lookup.find(table.name, table.db or None) if table is not None else None
     if owner is None:
         return
     for act in alter.args.get("actions") or []:
@@ -459,20 +526,14 @@ def parse_ddl(text: str, filepath: str | None = None) -> dict[str, Any]:
             if len(sample_errors) < 5:
                 sample_errors.append(str(exc))
 
-    by_table = {t["name"]: t for t in tables}
+    lookup = _TableLookup(tables, _DEFAULT_SCHEMA.get(dialect))
 
     # apply ALTER TABLE ADD CONSTRAINT (PK/FK/UNIQUE declared after the table)
     for alter in alters:
-        _apply_alter(alter, by_table)
+        _apply_alter(alter, lookup)
 
     # attach table-owned indexes
-    for idx in all_indexes:
-        owner = by_table.get(idx["tableName"])
-        if owner is not None:
-            owner["indexes"].append(idx)
-            for col in owner["columns"]:
-                if col["name"] in idx["columns"]:
-                    col["isIndexed"] = True
+    _attach_indexes(all_indexes, lookup)
 
     # set per-column PK/FK flags now that inline + ALTER constraints are all attached
     for table in tables:
@@ -931,21 +992,15 @@ def _parse_tsql_ddl(text: str) -> dict[str, Any]:
         except Exception as exc:
             _fail(f"{s[:40]}: {exc}")
 
-    by_table = {t["name"]: t for t in tables}
+    lookup = _TableLookup(tables, _DEFAULT_SCHEMA["transactsql"])
     for alter in alters:
-        _apply_alter(alter, by_table)
-    for idx in all_indexes:
-        owner = by_table.get(idx["tableName"])
-        if owner is not None:
-            owner["indexes"].append(idx)
-            for col in owner["columns"]:
-                if col["name"] in idx["columns"]:
-                    col["isIndexed"] = True
+        _apply_alter(alter, lookup)
+    _attach_indexes(all_indexes, lookup)
     for table in tables:
         _wire_columns(table)
 
     # Table-valued types are appended AFTER the ALTER/index wiring above — they never receive
-    # an ALTER or a standalone CREATE INDEX, and keeping them out of `by_table` avoids a name
+    # an ALTER or a standalone CREATE INDEX, and keeping them out of `lookup` avoids a name
     # collision with a base table of the same name. They still get column PK/FK flags wired.
     for tt in table_types:
         _wire_columns(tt)
@@ -2023,12 +2078,10 @@ def _recompute_column_flags(tbl: dict[str, Any]) -> None:
                     col["isForeignKey"] = True
 
 
-def _apply_oracle_alter(stmt: str, table_map: dict[str, dict], comment_map: dict[str, dict]) -> bool:
+def _apply_oracle_alter(stmt: str, lookup: _TableLookup, comment_map: dict[str, list[dict]]) -> bool:
     """Apply one ALTER TABLE mutation (DROP/RENAME/ADD/MODIFY column, ADD/DROP constraint) to
     the owning table in file order. Returns True if the statement was recognized."""
-
-    def find_table(name: str, schema: str | None) -> dict | None:
-        return table_map.get(name) or (table_map.get(f"{schema}.{name}") if schema else None)
+    find_table = lookup.find
 
     dc = _parse_alter_table_drop_constraint(stmt)
     if dc:
@@ -2064,9 +2117,10 @@ def _apply_oracle_alter(stmt: str, table_map: dict[str, dict], comment_map: dict
             for con in tbl["constraints"]:
                 if con.get("columns"):
                     con["columns"] = [rc["newName"] if c == rc["oldName"] else c for c in con["columns"]]
-            ck = f'{tbl["name"]}.{rc["oldName"]}'
-            if ck in comment_map["columns"]:
-                comment_map["columns"][f'{tbl["name"]}.{rc["newName"]}'] = comment_map["columns"].pop(ck)
+            # A comment made before the rename follows the column to its new name.
+            for c in comment_map["columns"]:
+                if c["columnName"] == rc["oldName"] and lookup.find(c["tableName"], c["schema"]) is tbl:
+                    c["columnName"] = rc["newName"]
         return True
 
     ac = _parse_alter_table_add_column(stmt)
@@ -2135,8 +2189,11 @@ def _parse_oracle_ddl(text: str) -> dict[str, Any]:
     procedures: list[dict[str, Any]] = []
     indexes: list[dict[str, Any]] = []
     sequences: list[dict[str, Any]] = []
-    comment_map: dict[str, dict] = {"tables": {}, "columns": {}}
-    table_map: dict[str, dict] = {}
+    # COMMENT records in file order, resolved to their table at the end through `lookup`, so a
+    # comment on HR.ORDERS never lands on SALES.ORDERS (DEF-958-01).
+    comment_map: dict[str, list[dict]] = {"tables": [], "columns": []}
+    # Filled in file order, so an ALTER only sees the tables declared above it.
+    lookup = _TableLookup()
     parsed = 0
     skipped = 0
     skipped_samples: list[str] = []
@@ -2155,9 +2212,7 @@ def _parse_oracle_ddl(text: str) -> dict[str, Any]:
             t = _parse_create_table(stripped)
             if t:
                 tables.append(t)
-                table_map[t["name"]] = t
-                if t["schema"]:
-                    table_map[t["fullName"]] = t
+                lookup.add(t)
                 parsed += 1
             else:
                 record_skip(stripped, "create_table_unparsed")
@@ -2194,50 +2249,41 @@ def _parse_oracle_ddl(text: str) -> dict[str, Any]:
         elif upper.startswith("COMMENT"):
             c = _parse_comment(stripped)
             if c:
-                if c["target"] == "table":
-                    comment_map["tables"][c["name"]] = c["comment"]
-                    if c["schema"]:
-                        comment_map["tables"][f'{c["schema"]}.{c["name"]}'] = c["comment"]
-                else:
-                    comment_map["columns"][f'{c["tableName"]}.{c["columnName"]}'] = c["comment"]
+                comment_map["tables" if c["target"] == "table" else "columns"].append(c)
                 parsed += 1
             else:
                 record_skip(stripped, "comment_unparsed")
         elif upper.startswith("ALTER"):
-            if _apply_oracle_alter(stripped, table_map, comment_map):
+            if _apply_oracle_alter(stripped, lookup, comment_map):
                 parsed += 1
             else:
                 record_skip(stripped, "alter_unparsed")
         else:
             record_skip(stripped, "unrecognized_statement")
 
-    for table in tables:
-        tc = comment_map["tables"].get(table["name"]) or comment_map["tables"].get(table["fullName"])
-        if tc:
-            table["comment"] = tc
+    # In file order, so a later comment on the same object wins.
+    for c in comment_map["tables"]:
+        table = lookup.find(c["name"], c["schema"])
+        if table is not None and c["comment"]:
+            table["comment"] = c["comment"]
+    for c in comment_map["columns"]:
+        table = lookup.find(c["tableName"], c["schema"])
+        if table is None or not c["comment"]:
+            continue
         for col in table["columns"]:
-            cc = comment_map["columns"].get(f'{table["name"]}.{col["name"]}')
-            if cc:
-                col["comment"] = cc
+            if col["name"] == c["columnName"]:
+                col["comment"] = c["comment"]
 
-    for idx in indexes:
-        table = table_map.get(idx["tableName"]) or table_map.get(idx["tableFullName"])
-        if table:
-            for col in table["columns"]:
-                if col["name"] in idx["columns"]:
-                    col["isIndexed"] = True
-            table.setdefault("indexes", []).append(idx)
     for table in tables:
         table.setdefault("indexes", [])
+    _attach_indexes(indexes, lookup)
 
     for table in tables:
         for i, col in enumerate(table["columns"]):
             col["ordinalPosition"] = i + 1
         table["columnCount"] = len(table["columns"])
 
-    standalone = [
-        idx for idx in indexes if not (table_map.get(idx["tableName"]) or table_map.get(idx["tableFullName"]))
-    ]
+    standalone = [idx for idx in indexes if lookup.find(idx["tableName"], _index_schema(idx)) is None]
 
     # Deterministic ordering: constraints/indexes within a table sort by (type, cols, name)
     # so a re-parse yields byte-identical output and diffs reflect real schema changes.
