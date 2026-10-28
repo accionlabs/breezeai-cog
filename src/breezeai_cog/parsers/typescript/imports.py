@@ -1,8 +1,9 @@
 """Import extraction + in-repo resolution for TypeScript/JavaScript.
 
 Relative imports resolve directly; bare specifiers are external **unless** they match
-a tsconfig ``compilerOptions.paths`` alias — those are resolved via the repo-level
-``build_index`` result (a :class:`TsAliasIndex`) threaded in as ``resolution_index``.
+a tsconfig ``compilerOptions.paths`` alias or a Vite ``resolve.alias`` entry (see
+:mod:`.vite_aliases`) — those are resolved via the repo-level ``build_index`` result (a
+:class:`TsAliasIndex`) threaded in as ``resolution_index``.
 """
 
 from __future__ import annotations
@@ -78,14 +79,23 @@ def _load_jsonc(path: Path) -> dict | None:
 _PRUNE_DIRS = frozenset({"node_modules", "dist", "build", "out", ".next", "coverage", ".git"})
 
 
-def _iter_tsconfigs(repo_root: Path) -> Iterator[Path]:
-    """Every ``tsconfig*.json`` / ``jsconfig.json`` in the tree, node_modules & build output
-    pruned. tsconfigs are ``.json``, so they go to the config parser — the alias index must
-    find them by its own bounded walk, not the TypeScript file list."""
+#: Extensions of a Vite config (``vite.config.ts``, ``vite.config.mjs``, …).
+_VITE_CONFIG_EXTS = (".js", ".mjs", ".cjs", ".ts", ".mts", ".cts")
+
+
+def _is_vite_config(fn: str) -> bool:
+    return fn.startswith("vite.config.") and fn.endswith(_VITE_CONFIG_EXTS)
+
+
+def _iter_alias_configs(repo_root: Path) -> Iterator[Path]:
+    """Every ``tsconfig*.json`` / ``jsconfig.json`` / ``vite.config.*`` in the tree, node_modules
+    & build output pruned. tsconfigs are ``.json``, so they go to the config parser — the alias
+    index must find them by its own bounded walk, not the TypeScript file list."""
     for dirpath, dirnames, filenames in os.walk(repo_root):
         dirnames[:] = [d for d in dirnames if d not in _PRUNE_DIRS]
-        for fn in filenames:
-            if fn == "jsconfig.json" or (fn.startswith("tsconfig") and fn.endswith(".json")):
+        for fn in sorted(filenames):
+            if (fn == "jsconfig.json" or (fn.startswith("tsconfig") and fn.endswith(".json"))
+                    or _is_vite_config(fn)):
                 yield Path(dirpath) / fn
 
 
@@ -128,15 +138,25 @@ def _collect_tsconfig_paths(cfg: Path, seen: set[Path], out: dict[str, list[str]
 
 
 def build_alias_index(repo_root: Path) -> TsAliasIndex | None:
-    """Collect tsconfig path aliases from **every** tsconfig in the tree (not just the root),
-    each scope carrying absolute targets so an app's ``@/*`` resolves against its own package.
-    Scopes are ordered deepest-first for nearest-config resolution."""
+    """Collect path aliases from **every** tsconfig and Vite config in the tree (not just the
+    root), each scope carrying absolute targets so an app's ``@/*`` resolves against its own
+    package. Scopes are ordered deepest-first for nearest-config resolution; where a tsconfig
+    and a Vite config share a folder, the tsconfig's scope is tried first."""
+    from .vite_aliases import vite_alias_scope  # it imports this module
+
     scopes: list[tuple[str, dict[str, list[str]]]] = []
-    for cfg in _iter_tsconfigs(repo_root):
+    vite_scopes: list[tuple[str, dict[str, list[str]]]] = []
+    for cfg in _iter_alias_configs(repo_root):
+        if _is_vite_config(cfg.name):
+            vite_scope = vite_alias_scope(cfg, repo_root)
+            if vite_scope is not None:
+                vite_scopes.append(vite_scope)
+            continue
         paths: dict[str, list[str]] = {}
         _collect_tsconfig_paths(cfg, set(), paths)  # fresh cycle-guard per config
         if paths:
             scopes.append((str(cfg.parent.resolve()), paths))
+    scopes += vite_scopes
     if not scopes:
         return None
     scopes.sort(key=lambda s: len(Path(s[0]).parts), reverse=True)
