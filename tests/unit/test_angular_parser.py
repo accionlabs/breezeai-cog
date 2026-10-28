@@ -309,7 +309,7 @@ def test_redirect_routes_emit_navigation_to_target(tmp_path) -> None:
 def test_redirect_statement_shape(tmp_path) -> None:
     rec = _parse_routes_file(_REDIRECT_SRC, tmp_path)
     nav = next(s for s in rec.statements if s.routeKind == "navigation")
-    assert (nav.nodeType, nav.semanticType, nav.framework) == ("synthetic", "route", "angular")
+    assert (nav.nodeType, nav.semanticType, nav.framework) == ("object", "route", "angular")
     assert nav.text.startswith("{ path: '', redirectTo: 'home'")  # source path stays visible
 
 

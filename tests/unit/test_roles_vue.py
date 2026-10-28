@@ -185,3 +185,9 @@ def test_parent_before_enter_guards_its_children(analyze_files) -> None:
     assert [(r.handler, r.guards) for r in _at(st, "/admin/users")] == [
         ("AdminUsers", ["requireAdmin", "audit"]),
     ]
+
+
+def test_route_record_is_its_route_object(analyze_files) -> None:
+    st = _routes(analyze_files, "  { path: '/users', component: UserList },\n")
+    [r] = _at(st, "/users")
+    assert r.nodeType == "object"  # the route object's tree-sitter type, not "synthetic"

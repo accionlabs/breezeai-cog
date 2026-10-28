@@ -262,7 +262,7 @@ def _process(arr: Node, prefix: str | None, source: bytes, path: str,
                 endpoint=_redirect_target(redirect, prefix, source, index),
                 framework="angular",
                 routeKind="navigation",
-            ), parent=file_id(path), node_type="synthetic", text=entry_text(elem, source)))
+            ), parent=file_id(path), text=entry_text(elem, source)))
             continue
         full = _compose(prefix, _resolve_path(pairs["path"], source, index))
         own = _own_guards(elem, source)
@@ -297,7 +297,7 @@ def _process(arr: Node, prefix: str | None, source: bytes, path: str,
                 routeKind=kind,
                 handler=handler,
                 guards=[*inherited, *own] or None,
-            ), parent=file_id(path), node_type="synthetic", text=entry_text(elem, source)))
+            ), parent=file_id(path), text=entry_text(elem, source)))
         if children is not None and children.type == "array":
             _process(children, full, source, path, routes, index, child_guards, mounts)
 
