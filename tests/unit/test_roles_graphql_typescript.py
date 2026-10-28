@@ -255,3 +255,39 @@ def test_resolver_map_root_from_a_missing_module_is_none(analyze_files) -> None:
     # The imported module isn't in the repo: no operations are invented.
     st = _run(analyze_files, {"src/server.ts": SERVER_NS})
     assert _eps(st) == []
+
+
+SERVER_NAMED = (
+    "import { ApolloServer } from '@apollo/server';\n"
+    "import { queries } from './queries';\n"
+    "const resolvers = { Query: queries };\n"
+    "export const server = new ApolloServer({ typeDefs, resolvers });\n"
+)
+
+
+def test_resolver_map_root_from_a_default_import_is_none(analyze_files) -> None:
+    # Only a namespace or a named import names a module's operations; a default import does not.
+    st = _run(
+        analyze_files,
+        {
+            "src/server.ts": "import queries from './queries';\nconst resolvers = { Query: queries };\n",
+            "src/queries.ts": "export default { books: async () => [] };\n",
+        },
+    )
+    assert _eps(st) == []
+
+
+def test_resolver_map_root_from_a_local_object_is_none(analyze_files) -> None:
+    # An object declared in the same file is not an import; no operations are read from it.
+    st = _run(
+        analyze_files,
+        {"src/server.ts": "const queries = { books: async () => [] };\n"
+                          "const resolvers = { Query: queries };\n"},
+    )
+    assert _eps(st) == []
+
+
+def test_resolver_map_root_from_a_missing_named_import_is_none(analyze_files) -> None:
+    # The named import's module isn't in the repo: no operations are invented.
+    st = _run(analyze_files, {"src/server.ts": SERVER_NAMED})
+    assert _eps(st) == []
