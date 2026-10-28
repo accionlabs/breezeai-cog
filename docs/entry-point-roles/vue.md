@@ -17,5 +17,5 @@ Parser: `src/breezeai_cog/parsers/typescript_vue/` (`routes.py` route configs, `
 | `router.beforeEach(...)` | Guard | — | Runs before every page |
 | `fetch` / `axios` calls | Outbound | `api_call` | |
 | `<router-link to>` / `<RouterLink :to>` | Outbound | `route`, `routeKind: navigation`, `endpoint` = target path | A link to a page |
-| `router.push(...)` / `this.$router.push(...)` / `replace` | Outbound | `route`, `routeKind: navigation`, `endpoint` = target path | Programmatic navigation |
+| `router.push(...)` / `this.$router.push(...)` / `replace` | Outbound | `route`, `routeKind: navigation`, `endpoint` = target path. `router` counts when bound from `useRouter()` imported from `'vue-router'` (Next.js has a `useRouter` of its own) | Programmatic navigation |
 | `createApp(App).mount(...)` / `new Vue({...})` | None | — | Start-up |

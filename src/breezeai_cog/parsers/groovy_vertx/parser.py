@@ -39,7 +39,7 @@ class GroovyVertxParser(GroovyParser):
             idx = ctx.resolution_index
             cross = idx.consts if isinstance(idx, GroovyIndex) else {}  # repo-wide constants
             consts = resolve_all(collect_constants(root, ctx.source), base=cross)
-            found = detect_vertx_groovy(root, ctx.source, ctx.path, record, consts)
+            found = detect_vertx_groovy(root, ctx.source, ctx.path, record, consts, idx)
             if found:
                 apply(record, found, ctx.source, ctx.path)
                 record.framework = "vertx"

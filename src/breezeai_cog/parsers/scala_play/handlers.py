@@ -24,13 +24,14 @@ Found in no file, in two, or overloaded → no location (honest-null): Play's ow
 
 from __future__ import annotations
 
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 from typing import Any
 
 from tree_sitter import Node
 
 from ..handler_sites import method_sites
 from ..treesitter import node_text, parse_source
+from .includes import project_of
 from .routes import route_lines
 
 FACT = "play.route-handlers"
@@ -49,12 +50,6 @@ def split_handler(handler: str) -> tuple[str, str, str] | None:
     if len(parts) < 2 or not all(parts):
         return None
     return ".".join(parts[:-2]), parts[-2], parts[-1]
-
-
-def project_of(routes_rel: str) -> str | None:
-    """``modules/one/conf/one.routes`` → ``modules/one``; ``conf/routes`` → ``""``."""
-    conf = PurePosixPath(routes_rel).parent
-    return str(conf.parent) if conf.name == "conf" else None
 
 
 def _package(root: Node, source: bytes, language: str) -> str:

@@ -4,6 +4,8 @@ selection via claims, and schema validity."""
 
 from __future__ import annotations
 
+import pytest
+
 import json
 
 from jsonschema import Draft202012Validator
@@ -255,3 +257,88 @@ def test_gstring_constants_resolve_reassigned_variables_do_not(tmp_path) -> None
     )
     rec = _parse(tmp_path, src, "R.groovy")
     assert _routes(rec) == {("GET", "/v1/x"), ("GET", "/fixed/y"), ("GET", None)}
+
+
+def test_local_literal_folds_only_where_it_is_visible(tmp_path) -> None:
+    src = (
+        b"import io.vertx.ext.web.Router\n"
+        b"class Api {\n"
+        b"  static final String BASE = '/v1'\n"
+        b"  String field = '/f'\n"
+        b"  void one(def router) {\n"
+        b"    def prefix = '/a'\n"
+        b'    router.get("${prefix}/x").handler(h)\n'
+        b'    router.get("${field}/w").handler(h)\n'
+        b"  }\n"
+        b"  void two(def router, String prefix) {\n"
+        b'    router.get("${prefix}/y").handler(h)\n'                  # the parameter, not one()'s
+        b"  }\n"
+        b"  void three(def router, cfg) {\n"
+        b"    def BASE = cfg.base\n"
+        b'    router.get("${BASE}/v").handler(h)\n'                    # the local hides the constant
+        b"    def prefix = '/c'\n"
+        b'    def each = { prefix -> router.get("${prefix}/q").handler(h) }\n'  # closure parameter
+        b"  }\n}\n"
+    )
+    rec = _parse(tmp_path, src, "Api.groovy")
+    assert _routes(rec) == {("GET", "/a/x"), ("GET", "/f/w"), ("GET", None)}
+    assert sorted(s.endpoint or "" for s in rec.statements if s.semanticType == "route") == [
+        "", "", "", "/a/x", "/f/w"]
+
+
+def test_script_local_is_not_seen_inside_a_method(tmp_path) -> None:
+    src = (
+        b"import io.vertx.ext.web.Router\n"
+        b"def prefix = '/s'\n"
+        b'router.get("${prefix}/top").handler(h)\n'
+        b'def c = { router.get("${prefix}/closure").handler(h) }\n'
+        b"void m(router) {\n"
+        b'  router.get("${prefix}/method").handler(h)\n'
+        b"}\n"
+    )
+    rec = _parse(tmp_path, src, "script.groovy")
+    assert sorted(s.endpoint or "" for s in rec.statements if s.semanticType == "route") == [
+        "", "/s/closure", "/s/top"]
+
+
+_GROOVY_USER_API = """import io.vertx.ext.web.Router
+class UserApi {
+  static Router router(def vertx) {
+    def userRouter = Router.router(vertx)
+    userRouter.get("/users").handler({ ctx -> ctx.end() })
+    userRouter
+  }
+}
+"""
+
+
+@pytest.mark.parametrize(("main", "expected"), [
+    ('    router.mountSubRouter("/api", UserApi.router(vertx))\n', "/api/users"),
+    ("    vertx.createHttpServer().requestHandler(UserApi.router(vertx))\n", "/users"),
+    ('    router.mountSubRouter("/a", UserApi.router(vertx))\n'
+     '    router.mountSubRouter("/b", UserApi.router(vertx))\n', None),
+])
+def test_groovy_router_factory_is_served_where_it_is_mounted(analyze_files, main, expected) -> None:
+    st = analyze_files({
+        "src/UserApi.groovy": _GROOVY_USER_API,
+        "src/Main.groovy": ("import io.vertx.ext.web.Router\nclass Main extends io.vertx.core.AbstractVerticle {\n"
+                            "  void start() {\n    def router = Router.router(vertx)\n" + main + "  }\n}\n"),
+    })
+    got = [s.endpoint for s in st if s.semanticType == "route" and s.path == "src/UserApi.groovy"]
+    assert got == [expected]
+
+
+def test_groovy_field_sub_router_and_mount_route(tmp_path) -> None:
+    src = b"""import io.vertx.ext.web.Router
+class Api extends io.vertx.core.AbstractVerticle {
+  def adminRouter
+  void start() {
+    def router = Router.router(vertx)
+    adminRouter = Router.router(vertx)
+    adminRouter.get("/stats").handler(this::stats)
+    router.route("/admin/*").subRouter(this.adminRouter)
+  }
+}
+"""
+    rec = _parse(tmp_path, src, "src/Api.groovy")
+    assert _routes(rec) == {("GET", "/admin/stats")}  # no record for the mount route itself

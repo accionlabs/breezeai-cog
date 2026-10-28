@@ -4,8 +4,9 @@
     router.push('/reports')                 // router from useRouter()
     this.$router.replace({ path: '/x' })
 
-A receiver counts only when the code shows what it is: bound from ``useRouter()``, or
-``$router``. ``{ path: '/x' }`` is the address; a named route (``{ name }``) is not.
+A receiver counts only when the code shows what it is: bound from Vue Router's ``useRouter()``
+— imported from ``'vue-router'``; Next.js has a hook of the same name — or ``$router``.
+``{ path: '/x' }`` is the address; a named route (``{ name }``) is not.
 Template links (``<router-link>``) are recorded by the template parser.
 """
 
@@ -21,7 +22,32 @@ from ..treesitter import node_text
 from ..typescript.navigation import absolute, first_arg, literal, navigation, walk
 
 _METHODS = frozenset({"push", "replace"})
-_HOOK_BIND = re.compile(rb"\b(?:const|let|var)\s+(\w+)\s*=\s*useRouter\s*\(\s*\)")
+_VUE_ROUTER = "vue-router"
+
+
+def _hook_names(root: Node, source: bytes) -> set[str]:
+    """The local names of Vue Router's ``useRouter`` (``import { useRouter } from 'vue-router'``,
+    aliases included)."""
+    names: set[str] = set()
+    for stmt in root.named_children:
+        src = stmt.child_by_field_name("source") if stmt.type == "import_statement" else None
+        if src is None or node_text(src, source).strip("'\"") != _VUE_ROUTER:
+            continue
+        for spec in walk(stmt):
+            name = spec.child_by_field_name("name") if spec.type == "import_specifier" else None
+            if name is not None and node_text(name, source) == "useRouter":
+                alias = spec.child_by_field_name("alias")
+                names.add(node_text(alias if alias is not None else name, source))
+    return names
+
+
+def _bound_routers(source: bytes, hooks: set[str]) -> set[str]:
+    """Variables bound from one of ``hooks`` (``const router = useRouter()``)."""
+    if not hooks:
+        return set()
+    hook = b"|".join(re.escape(h.encode()) for h in sorted(hooks))
+    bind = re.compile(rb"\b(?:const|let|var)\s+(\w+)\s*=\s*(?:" + hook + rb")\s*\(\s*\)")
+    return {m.group(1).decode() for m in bind.finditer(source)}
 
 
 def _target(arg: Node, source: bytes) -> str | None:
@@ -37,7 +63,8 @@ def _target(arg: Node, source: bytes) -> str | None:
 
 def _detect(dc: DetectContext) -> Detection | None:
     source = dc.source
-    routers = {m.group(1).decode() for m in _HOOK_BIND.finditer(source)}
+    routers = _bound_routers(source, _hook_names(dc.root, source)) \
+        if _VUE_ROUTER.encode() in source else set()
     if not routers and b"$router" not in source:
         return None
     found: list[Emit] = []

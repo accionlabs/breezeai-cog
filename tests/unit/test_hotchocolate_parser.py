@@ -130,10 +130,10 @@ def test_ignored_and_non_public_members_excluded() -> None:
 
 def test_response_dto_is_the_declared_type_not_the_generated_wrapper() -> None:
     # [UsePaging] makes the client see a Connection<Book>; that type exists nowhere in the
-    # repo, so the declared inner type is recorded instead.
+    # repo, so the declared type is recorded, as written (Task<…> removed).
     rec = _parse(CSharpHotChocolateParser(), QUERIES, "BookQueries.cs")
     ops = _by_endpoint(rec)
-    assert ops["books"].responseDTO == "Book"
+    assert ops["books"].responseDTO == "IQueryable<Book>"
     assert ops["bookById"].responseDTO == "Book"
 
 
@@ -284,7 +284,7 @@ def test_data_type_extension_yields_field_resolvers() -> None:
         assert ops[endpoint].routeKind == "field_resolver"
         assert ops[endpoint].method == "RESOLVE_FIELD"  # the spec's verb for a field resolver
     assert ops["Book.author"].dataLoaders == ["IDataLoader<int, Author>"]
-    assert ops["Book.reviews"].responseDTO == "Review"
+    assert ops["Book.reviews"].responseDTO == "IEnumerable<Review>"
 
 
 def test_parent_binding_by_convention_is_honoured() -> None:
@@ -410,12 +410,11 @@ def test_consumer_anchors_at_the_topic_attribute() -> None:
     assert route.startLine < consumer.startLine <= route.endLine  # inside the member's span
 
 
-def test_nullable_return_type_is_not_recorded_as_the_dto() -> None:
-    # Task<Book?> unwraps to Book, not "Book?" -- the annotation is not part of the type name and
-    # would name no captured class.
+def test_nullable_return_type_is_recorded_as_written() -> None:
+    # the declared type as written: the nullable annotation is part of it
     src = SUBSCRIPTIONS.replace(b"public Book OnBookAdded", b"public Book? OnBookAdded")
     rec = _parse(CSharpHotChocolateParser(), src, "BookSubscriptions.cs")
-    assert _by_endpoint(rec)["onBookAdded"].responseDTO == "Book"
+    assert _by_endpoint(rec)["onBookAdded"].responseDTO == "Book?"
 
 
 def test_consumer_ids_are_independent_of_the_route() -> None:
@@ -554,7 +553,7 @@ def test_data_type_resolvers_that_read_their_parent_are_field_resolvers() -> Non
     # The inline resolver keeps the field as its handler; a ResolveWith method is the handler.
     assert ops["Product.isAvailable"].guards == ["Authorize(Staff)"]
     assert ops["Product.reviews"].handler == "GetReviews"
-    assert ops["Product.reviews"].responseDTO == "Review"
+    assert ops["Product.reviews"].responseDTO == "IEnumerable<Review>"
     assert ops["Product.code"].handler == "GetSkuAsync"
 
 
@@ -694,9 +693,8 @@ namespace Catalog {
     assert op.routeKind == "field_resolver"
 
 
-def test_multi_argument_generic_return_keeps_the_outer_type() -> None:
-    # FieldResult<T, TError> has no single payload type; the concatenation "string, FooException"
-    # is not a type name, so the declared outer type is recorded instead.
+def test_multi_argument_generic_return_is_recorded_as_written() -> None:
+    # FieldResult<T, TError> is the declared type; it is kept whole, as written.
     src = b'''using HotChocolate;
 namespace Catalog {
   [MutationType]
@@ -706,7 +704,7 @@ namespace Catalog {
 }
 '''
     rec = _parse(CSharpHotChocolateParser(), src, "M.cs")
-    assert _by_endpoint(rec)["doSomething"].responseDTO == "FieldResult"
+    assert _by_endpoint(rec)["doSomething"].responseDTO == "FieldResult<string, FooException>"
 
 
 # ---- generated DataLoader types -------------------------------------------------------------

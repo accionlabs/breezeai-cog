@@ -154,14 +154,14 @@ def test_sdl_operations_detected_with_dtos(tmp_path) -> None:
         "createProcurementItem",
         "_byIds",
     }
-    # response/request DTOs cleaned of [ ] ! decorations.
+    # response/request DTOs as written, [ ] ! included.
     assert routes["procurementItem"].responseDTO == "ProcurementItem"
-    assert routes["procurementItem"].requestDTO == "ID"
-    assert routes["createProcurementItem"].requestDTO == "CreateProcurementItemInput"
+    assert routes["procurementItem"].requestDTO == "ID!"
+    assert routes["createProcurementItem"].requestDTO == "CreateProcurementItemInput!"
     # multi-line args stay one operation (not split into filter/pagination fields).
-    assert routes["procurementItems"].responseDTO == "ProcurementItemConnection"
-    # trailing directive stripped from the return type.
-    assert routes["_byIds"].responseDTO == "ProcurementItem"
+    assert routes["procurementItems"].responseDTO == "ProcurementItemConnection!"
+    # a trailing directive is not part of the return type.
+    assert routes["_byIds"].responseDTO == "[ProcurementItem]!"
     # Embedded SDL is walked by the shared extract_graphql walker but marked synthetic (no host
     # AST node), unlike a standalone .graphql file where the real grammar node is kept.
     assert routes["procurementItem"].nodeType == "synthetic"
@@ -184,14 +184,14 @@ def test_client_operations_detected_via_base_parser(tmp_path) -> None:
     assert spec.method == "QUERY"
     assert spec.framework == "graphql"
     assert spec.handler == "specification"  # operation name kept as the client-side label
-    assert spec.requestDTO == "String"  # from $id: String!
+    assert spec.requestDTO == "String!"  # from $id: String!
     assert spec.nodeType == "synthetic"
     assert spec.parentId == rec.id
 
     mut = routes["createSpecification"]
     assert mut.routeKind == "mutation"
     assert mut.method == "MUTATION"
-    assert mut.requestDTO == "CreateSpecInput"
+    assert mut.requestDTO == "CreateSpecInput!"
 
     # Interpolated (${...}) document is not dropped — the operation header still parses.
     assert routes["items"].routeKind == "query"

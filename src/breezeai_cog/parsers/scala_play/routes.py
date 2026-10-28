@@ -51,11 +51,13 @@ def route_lines(text: str) -> Iterator[str]:
 def extract_routes(text: str, path: str, prefix: str | None = None,
                    served: frozenset[str] = frozenset(),
                    locate: Callable[[str], tuple[str, int] | None] | None = None,
+                   unknown: bool = False,
                    ) -> list[Statement]:
     """The bindings of one routes file. ``prefix``: where its router is served (from the ``->``
     includes, :mod:`.includes`); ``None`` = unknown, paths as written. ``served``: the routers a
     routes file of the repo defines under a resolved prefix — an include of one has no record.
-    ``locate``: the handler as written → where its controller method is declared."""
+    ``locate``: the handler as written → where its controller method is declared. ``unknown``:
+    the router is served at more than one prefix — every address is unknown (empty)."""
     fid = file_id(path)
     seen: set[str] = set()
     routes: list[Statement] = []
@@ -76,7 +78,7 @@ def extract_routes(text: str, path: str, prefix: str | None = None,
                 semanticType="route",
                 text=raw_line.strip(),
                 method=m["verb"],
-                endpoint=join(prefix, m["path"]) if prefix else m["path"],
+                endpoint=None if unknown else join(prefix, m["path"]) if prefix else m["path"],
                 handler=handler,
                 handlerLine=handler_line,
                 handlerPath=handler_path,
@@ -104,7 +106,7 @@ def extract_routes(text: str, path: str, prefix: str | None = None,
                 semanticType="route",
                 text=raw_line.strip(),
                 method="GET" if webjars else "ANY",
-                endpoint=join(prefix, m["prefix"]) if prefix else m["prefix"],
+                endpoint=None if unknown else join(prefix, m["prefix"]) if prefix else m["prefix"],
                 handler=None if webjars else m["router"],
                 framework="play",
                 routeKind="route" if webjars else "mount",

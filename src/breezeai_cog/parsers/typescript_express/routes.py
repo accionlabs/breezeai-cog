@@ -24,10 +24,11 @@ from ..additive import DetectContext, Detection, Detector, Gate, register_detect
 from ..emits import Emit
 from ..treesitter import node_text
 from ..typescript.imports import (
+    _path_pieces, _resolve_pieces,
     _module_of, _require_module, relative_requires, resolve_const_value,
 )
 from ..wiring import compose_guards
-from .mounts import express_mounts, mw_name, router_locals
+from .mounts import _PATH_EXPRESSIONS, express_mounts, mw_name, router_locals
 
 # HTTP-verb methods that register a route handler on an app/router.
 _HTTP_VERBS = {"get", "post", "put", "delete", "patch", "options", "head", "all"}
@@ -282,6 +283,62 @@ def package_locals(root: Node, source: bytes) -> dict[str, tuple[str, str]]:
     return out
 
 
+#: express-jwt's factory: ``expressjwt`` (v7+) or the module itself (``require('express-jwt')``,
+#: v6 and earlier).
+_JWT_PACKAGE = "express-jwt"
+
+
+def _certain_jwt_call(call: Node, source: bytes, factories: set[str]) -> bool:
+    """``expressjwt({ secret, … })``: rejects a request without a valid token unless
+    ``credentialsRequired`` is not ``true`` or ``.unless(…)`` exempts some paths."""
+    fn = call.child_by_field_name("function")
+    if fn is None or fn.type != "identifier" or node_text(fn, source) not in factories:
+        return False
+    member = call.parent
+    if member is not None and member.type == "member_expression":
+        return False  # expressjwt(…).unless(…): some paths pass without a token
+    args = call.child_by_field_name("arguments")
+    options = args.named_children[0] if args is not None and args.named_children else None
+    if options is None or options.type != "object":
+        return False
+    for pair in options.named_children:
+        key = pair.child_by_field_name("key") if pair.type == "pair" else None
+        value = pair.child_by_field_name("value") if key is not None else None
+        if key is not None and node_text(key, source).strip("'\"") == "credentialsRequired" \
+                and (value is None or node_text(value, source) != "true"):
+            return False
+    return True
+
+
+def certain_auth(root: Node, source: bytes,
+                 packages: dict[str, tuple[str, str]]) -> frozenset[str]:
+    """The middleware names of this file that certainly reject an anonymous request — the only
+    guards that assert ``authRequired``. Express has no authentication of its own, and a name
+    (``requireAuth``) says nothing certain, so only express-jwt counts: a variable bound once to a
+    certain ``expressjwt({…})`` call (:func:`_certain_jwt_call`), or the factory's own name when
+    every call of it in the file is certain."""
+    factories = {local for local, (pkg, export) in packages.items()
+                 if pkg == _JWT_PACKAGE and export in ("expressjwt", "*")}
+    if not factories:
+        return frozenset()
+    calls: dict[str, list[bool]] = {}
+    bound: dict[str, list[bool]] = {}
+    for node in _invocations(root):
+        fn = node.child_by_field_name("function")
+        if fn is None or fn.type != "identifier" or node_text(fn, source) not in factories:
+            continue
+        certain = _certain_jwt_call(node, source, factories)
+        calls.setdefault(node_text(fn, source), []).append(certain)
+        decl = node.parent
+        name = decl.child_by_field_name("name") if decl is not None \
+            and decl.type == "variable_declarator" else None
+        if name is not None and name.type == "identifier":
+            bound.setdefault(node_text(name, source), []).append(certain)
+    out = {n for n, found in bound.items() if found == [True]}
+    out |= {n for n, found in calls.items() if all(found)}
+    return frozenset(out)
+
+
 def _serving_middleware(chain: list[Node], source: bytes,
                         packages: dict[str, tuple[str, str]]) -> str | None:
     """The framework label when a mount's args are known serving middleware
@@ -395,12 +452,43 @@ def _route_root(obj: Node | None, source: bytes) -> Node | None:
     return None
 
 
+def _later_verb(call: Node, source: bytes) -> bool:
+    """Whether another verb is chained after ``call`` (``.all(auth).get(list)``)."""
+    member = call.parent
+    outer = member.parent if member is not None else None
+    prop = member.child_by_field_name("property") \
+        if member is not None and member.type == "member_expression" else None
+    return (prop is not None and outer is not None and outer.type == "call_expression"
+            and node_text(prop, source) in _HTTP_VERBS)
+
+
+def _chain_middleware(call: Node, route_call: Node, source: bytes) -> list[Node]:
+    """The arguments of the ``.all(...)`` calls chained between ``route(path)`` and ``call``,
+    in chain order: Express runs them for every verb after them."""
+    out: list[list[Node]] = []
+    fn = call.child_by_field_name("function")
+    node = fn.child_by_field_name("object") if fn is not None else None
+    while node is not None and node is not route_call and node.type == "call_expression":
+        nfn = node.child_by_field_name("function")
+        prop = nfn.child_by_field_name("property") if nfn is not None else None
+        if prop is not None and node_text(prop, source) == "all":
+            args = node.child_by_field_name("arguments")
+            out.append(list(args.named_children) if args is not None else [])
+        node = nfn.child_by_field_name("object") if nfn is not None else None
+    return [arg for args in reversed(out) for arg in args]
+
+
 def _classify_route_verb(
     call: Node, route_call: Node, method: str, source: bytes, routers: frozenset[str],
     decl_lines: dict[str, int | None] | None, consts: dict[str, str | None] | None,
 ) -> tuple[str | None, str | None, str | None, int | None, list[str] | None, str, str] | None:
     """One verb of an ``X.route(path).get(...)`` chain → a route at ``path`` with the verb's
-    handler (last argument) and guards (the arguments before it)."""
+    handler (last argument) and guards (the arguments before it). An ``.all(...)`` followed by
+    another verb is middleware, not a route: its arguments guard the verbs after it
+    (``route('/x').all(auth).get(list)`` → ``GET /x``, guard ``auth`` — :func:`detect_express`
+    adds them, like other middleware that runs first)."""
+    if method == "all" and _later_verb(call, source):
+        return None
     rfn = route_call.child_by_field_name("function")
     robj = rfn.child_by_field_name("object") if rfn is not None else None
     if robj is None:
@@ -454,30 +542,42 @@ def _join_base(base: str, local: str) -> str:
 
 
 def _apply_base(
-    base: str | None, framework: str, route_kind: str, endpoint: str | None
+    base: str | None, framework: str, route_kind: str, endpoint: str | None,
+    unknown: bool = False,
 ) -> str | None:
     """Prefix a router-local Express route with the base its factory is mounted at, when the
     repo index resolved one for this file. Express ``route`` and ``mount`` statements are joined
-    (a nested mount's address is its full prefix); other frameworks are untouched. No resolved mount (or a
-    dynamic endpoint) → endpoint unchanged (honest-null; today's behavior)."""
-    if base is None or endpoint is None or framework != "express" or route_kind not in ("route", "mount"):
+    (a nested mount's address is its full prefix); other frameworks are untouched. ``unknown``:
+    the router is mounted where cog cannot tell (a base that does not fold, or two bases) → no
+    address. Not mounted (or a dynamic endpoint) → endpoint unchanged."""
+    if framework != "express" or route_kind not in ("route", "mount"):
+        return endpoint
+    if unknown:
+        return None
+    if base is None or endpoint is None:
         return endpoint
     return _join_base(base, endpoint)
 
 
 def _receiver_bases(
-    root: Node, source: bytes, file_base: str | None, imported: dict[str, str]
-) -> dict[str, str]:
-    """Router variable → the base its routes are served under, for routers in this file.
+    root: Node, source: bytes, file_base: str | None, imported: dict[str, str],
+    consts: dict[str, str | None] | None = None, unknown: frozenset[str] = frozenset(),
+    file_unknown: bool = False,
+) -> tuple[dict[str, str], set[str]]:
+    """(router variable → the base its routes are served under, routers served somewhere
+    unknown), for routers in this file.
 
     ``imported`` holds the bases the repo index resolved for routers this file exports and
-    another file mounts (``app.use('/matches', matchRouter)``). Same-file mounts
-    (``const r = Router(); app.use('/api', r)``) are composed on top: a router mounted on another
-    router inherits that router's base; one mounted on the app (or an unmounted router) starts
-    from ``file_base`` (a factory file's base) or ``/``. A router mounted at >1 distinct base, or
-    in a cycle, gets no entry (honest-null: its routes keep their own path)."""
+    another file mounts (``app.use('/matches', matchRouter)``); ``unknown`` those it found mounted
+    at an unknown base. Same-file mounts (``const r = Router(); app.use('/api', r)``) are composed
+    on top: a router mounted on another router inherits that router's base; one mounted on the
+    app (or an unmounted router) starts from ``file_base`` (a factory file's base) or ``/``. A
+    base built from constants (`` `${API}/v1` ``) folds through ``consts``. A router whose base
+    does not fold, that is mounted at >1 distinct base, or under an unknown one is unknown: its
+    routes have no address, never their own path. A mount cycle keeps the routes' own path."""
     routers = router_locals(root, source) if b"Router" in source else set()
-    local: dict[str, tuple[str, str] | None] = {}  # router → (receiver it is mounted on, path)
+    # router → (receiver it is mounted on, path), or None: two bases, or one that does not fold
+    local: dict[str, tuple[str, str] | None] = {}
     for call in _invocations(root) if routers else []:
         fn = call.child_by_field_name("function")
         is_member = fn is not None and fn.type == "member_expression"
@@ -486,34 +586,60 @@ def _receiver_bases(
             continue
         args = call.child_by_field_name("arguments")
         arg_nodes = list(args.named_children) if args is not None else []
-        path = _string_value(arg_nodes[0], source) if arg_nodes else None
-        if path is None or not path.startswith("/"):
+        if not arg_nodes:
+            continue
+        first = arg_nodes[0]
+        literal = _string_value(first, source)
+        if literal is not None:
+            path: str | None = literal
+            if not literal.startswith("/"):
+                continue  # not a mount path
+        elif first.type in _PATH_EXPRESSIONS:
+            pieces = _path_pieces(first, source)
+            folded = _resolve_pieces(pieces, consts or {}) if pieces is not None else None
+            path = folded if folded is not None and folded.startswith("/") else None
+        else:
             continue
         receiver = _receiver(call, source)
         for a in arg_nodes[1:]:
             name = node_text(a, source)
             if a.type == "identifier" and name in routers:
-                entry = (receiver, path)
+                entry = (receiver, path) if path is not None else None
                 local[name] = entry if local.get(name, entry) == entry else None
 
-    out: dict[str, str] = dict(imported)
+    out: dict[str, str] = {k: v for k, v in imported.items() if k not in local}
+    lost: set[str] = set(unknown)
 
     def resolve(router: str, seen: frozenset[str]) -> str | None:
         if router in out:
             return out[router]
-        entry = local.get(router)
-        if entry is None or router in seen:  # ambiguous, or a mount cycle
+        if router in lost:
+            return None
+        if router not in local:
+            return None
+        entry = local[router]
+        if router in seen:  # a mount cycle
+            return None
+        if entry is None or router in imported:  # two bases, unfolded, or also mounted elsewhere
+            lost.add(router)
             return None
         receiver, path = entry
-        if receiver in local:  # mounted on a router that is itself mounted in this file
+        if receiver in local or receiver in lost:  # mounted on a router of this file
             parent = resolve(receiver, seen | {router})
-            return _join_base(parent, path) if parent is not None else None
+            if parent is None:
+                if receiver in lost:
+                    lost.add(router)
+                return None
+            return _join_base(parent, path)
+        if file_unknown:
+            lost.add(router)
+            return None
         return _join_base(imported.get(receiver) or file_base or "/", path)
 
     for router in local:
         if (base := resolve(router, frozenset())) is not None:
             out[router] = base
-    return out
+    return out, lost
 
 
 def _global_guards(
@@ -629,10 +755,15 @@ def detect_express(
     # (an exported Router()), else the whole file (a router factory).
     mount_guards = mounts.router_guards.get(path, {})
     file_mount_guards = list(mounts.factory_guards.get(path, ()))
-    receiver_base = _receiver_bases(root, source, mount_base, imported)
-    routers = frozenset(router_locals(root, source)) if b"Router" in source else frozenset()
     index_consts = getattr(index, "const_values", None)
     consts: dict[str, str | None] = index_consts if isinstance(index_consts, dict) else {}
+    # A factory mounted at a base that does not resolve, or at two: every route of the file is
+    # served somewhere unknown.
+    file_unknown = path in mounts.unknown_factories
+    receiver_base, unknown_receivers = _receiver_bases(
+        root, source, mount_base, imported, consts,
+        mounts.unknown_routers.get(path, frozenset()), file_unknown)
+    routers = frozenset(router_locals(root, source)) if b"Router" in source else frozenset()
     # Top-level functions of this file → declaration line; a name declared twice → None.
     decl_lines: dict[str, int | None] = {}
     for f in record.functions:
@@ -647,6 +778,7 @@ def detect_express(
     )
 
     packages = package_locals(root, source)
+    auth = certain_auth(root, source, packages) if _JWT_PACKAGE.encode() in source else frozenset()
     plain = plain_locals(root, source)
     # Routers mounted in this file whose base resolved: their routes carry the mount's prefix.
     local_served = {r for r in routers if r in receiver_base and r not in imported}
@@ -658,19 +790,27 @@ def detect_express(
         if route_kind == "mount" and _mounts_served_router(
                 call, source, path, mounts.served, local_served):
             continue  # wiring: its prefix and middleware are on the router's routes
+        receiver_of = _receiver(call, source)
+        lost = receiver_of in unknown_receivers or (file_unknown and receiver_of not in receiver_base)
         served = _apply_base(
-            receiver_base.get(_receiver(call, source), mount_base), framework, route_kind, endpoint
-        )
-        # Honest-null: assert auth only when a route-level guard is present. Absence is
-        # "unknown" (None), not "open" — app-level middleware may still protect the route.
-        auth_required = True if guards else None
+            receiver_base.get(receiver_of, mount_base), framework, route_kind, endpoint, lost)
+        # Only a route-level guard that certainly rejects an anonymous request asserts auth
+        # (:func:`certain_auth`); any other middleware — validation, logging, a rate limit, a
+        # custom check — is listed, its effect unknown.
+        auth_required = True if auth and auth.intersection(guards or ()) else None
         if route_kind == "route" and method:
             # Middleware registered earlier on this receiver (or its parents) runs first. It does
             # not set authRequired: app-wide middleware is often a body parser, not auth.
             receiver = _receiver(call, source)
             outer = global_guards(receiver, call.start_byte)
             mounted = list(mount_guards.get(receiver, ())) or file_mount_guards
-            guards = compose_guards(mounted, outer, guards)
+            # ``route(path).all(mw).get(h)``: ``mw`` runs before every verb chained after it.
+            fn = call.child_by_field_name("function")
+            route_call = _route_root(fn.child_by_field_name("object"), source) \
+                if fn is not None else None
+            chained = (_guard_names(_chain_middleware(call, route_call, source), source)
+                       if route_call is not None else None)
+            guards = compose_guards(mounted, outer, chained, guards)
         # Enrich the base statement on the call's line (a top-level route call); a second route in
         # one statement (route(path).get(a).post(b)) or one inside a handler/callback (the base
         # skips nested scopes) gets its own record.

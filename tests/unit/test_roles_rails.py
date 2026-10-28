@@ -105,3 +105,58 @@ def test_before_action_is_guard(analyze_files) -> None:
 def test_unrouted_action_is_none(analyze_files) -> None:
     st = analyze_files({"app/controllers/users_controller.rb": CONTROLLER})
     assert _eps(st) == []
+
+
+def _guards_by_action(analyze_files, controller_body: str) -> dict[str, tuple]:
+    routes = "".join(f"  get '/{a}', to: 'sessions#{a}'\n" for a in ("new", "create", "destroy"))
+    controller = ("class SessionsController < ApplicationController\n" + controller_body
+                  + "".join(f"  def {a}; end\n" for a in ("new", "create", "destroy")) + "end\n")
+    st = _routes(analyze_files, routes,
+                 **{"app/controllers/sessions_controller.rb": controller})
+    return {s.endpoint.lstrip("/"): (s.guards, s.authRequired) for s in _eps(st)}
+
+
+GUARDED = (["authenticate_user!"], True)
+OPEN = (None, None)
+
+
+def test_skip_only_removes_the_guard_from_those_actions(analyze_files) -> None:
+    got = _guards_by_action(analyze_files, "  before_action :authenticate_user!\n"
+                            "  skip_before_action :authenticate_user!, only: [:new, :create]\n")
+    assert got == {"new": OPEN, "create": OPEN, "destroy": GUARDED}
+
+
+def test_skip_except_keeps_the_guard_only_on_those_actions(analyze_files) -> None:
+    got = _guards_by_action(analyze_files, "  before_action :authenticate_user!\n"
+                            "  skip_before_action :authenticate_user!, except: :destroy\n")
+    assert got == {"new": OPEN, "create": OPEN, "destroy": GUARDED}
+
+
+def test_skip_composes_with_the_callbacks_own_action_list(analyze_files) -> None:
+    got = _guards_by_action(analyze_files,
+                            "  before_action :authenticate_user!, except: [:new]\n"
+                            "  skip_before_action :authenticate_user!, only: :create\n")
+    assert got == {"new": OPEN, "create": OPEN, "destroy": GUARDED}
+
+
+def test_conditional_or_unreadable_skip_removes_the_guard_everywhere(analyze_files) -> None:
+    for skip in ("  skip_before_action :authenticate_user!, if: :api?\n",
+                 "  skip_before_action :authenticate_user!, only: ACTIONS\n",
+                 "  skip_before_action callback_name\n"):
+        got = _guards_by_action(analyze_files, "  before_action :authenticate_user!\n" + skip)
+        assert got == {"new": OPEN, "create": OPEN, "destroy": OPEN}, skip
+
+
+def test_skip_applies_to_a_parents_callback(analyze_files) -> None:
+    # The parent in the same file: its callback is inherited, then skipped for create.
+    controller = (
+        "class ApplicationController < ActionController::Base\n"
+        "  before_action :authenticate_user!\nend\n"
+        "class SessionsController < ApplicationController\n"
+        "  skip_before_action :authenticate_user!, only: :create\n"
+        "  def create; end\n  def destroy; end\nend\n")
+    st = _routes(analyze_files, "  post '/login', to: 'sessions#create'\n"
+                 "  delete '/logout', to: 'sessions#destroy'\n",
+                 **{"app/controllers/sessions_controller.rb": controller})
+    assert {s.endpoint: (s.guards, s.authRequired) for s in _eps(st)} == {
+        "/login": OPEN, "/logout": GUARDED}

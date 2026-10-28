@@ -327,7 +327,7 @@ there.
 |---|---|---|
 | `@GetMapping` / `@PostMapping` / … / `@RequestMapping` on a method | Binding | One handler, inbound API |
 | `@RequestMapping` on a controller class | Wiring | Prefix for the class's bindings |
-| `server.servlet.context-path` in `application.properties` / `.yml` | Wiring | Prefix for every HTTP binding |
+| `server.servlet.context-path` in `application.properties` / `.yml` | Wiring | Prefix for every HTTP binding served by the servlet — not WebFlux.fn routes, which take `spring.webflux.base-path` |
 | `@KafkaListener` / `@RabbitListener` / `@JmsListener` / `@SqsListener` on a method | Binding | `eventbus_consumer`, topic or queue as `endpoint` |
 | `@Scheduled(cron = …)` on a method | Binding | `timer`, cron expression as `endpoint` |
 | `@PreAuthorize`, `HandlerInterceptor`, servlet `Filter` | Guard | Run before many handlers |

@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
 from jsonschema import Draft202012Validator
 
 from breezeai_cog.core import registry
@@ -155,8 +157,8 @@ def test_graphql_code_first_operations(tmp_path) -> None:
     assert ("RESOLVE_FIELD", "Conversation.title") in ops
     assert ops[("RESOLVE_FIELD", "Conversation.title")].routeKind == "field_resolver"
     assert ops[("RESOLVE_FIELD", "Conversation.title")].framework == "graphql"
-    # @ResolveField(() => String) — String is a scalar → responseDTO is None
-    assert ops[("RESOLVE_FIELD", "Conversation.title")].responseDTO is None
+    # @ResolveField(() => String) — the declared type, a scalar
+    assert ops[("RESOLVE_FIELD", "Conversation.title")].responseDTO == "String"
     # the @Query PARAM decorator on SearchResolver.search must NOT produce a route
     assert "search" not in {s.endpoint for s in ops.values()}
     # ops parent to their handler methods
@@ -197,7 +199,7 @@ def test_resolve_field_captured(tmp_path) -> None:
     # return type from @ResolveField(() => BrandResult) → responseDTO
     assert fields["Brand.byObjectIds"].responseDTO == "BrandResult"
     # @ResolveField(() => Number) → Number is a scalar → responseDTO None
-    assert fields["Brand.count"].responseDTO is None
+    assert fields["Brand.count"].responseDTO == "Number"  # () => Number: the declared type
     # framework is graphql
     assert all(s.framework == "graphql" for s in fields.values())
 
@@ -336,16 +338,16 @@ export class OrderController {
 
 
 def test_response_dto_from_return_type(tmp_path) -> None:
-    # responseDTO falls back to the handler return type (Promise<T>/T), skipping primitives.
+    # responseDTO falls back to the handler return type as declared, Promise<…> removed.
     p = tmp_path / "ret.controller.ts"
     p.write_text(_RETTYPE_SRC.decode())
     ctx = ParseContext(path="ret.controller.ts", abs_path=p, source=_RETTYPE_SRC,
                        repo_root=tmp_path, capture_statements=True)
     rec = NestJSParser().parse_file(ctx)
     dto = {s.handler: s.responseDTO for s in rec.statements if s.semanticType == "route"}
-    assert dto["list"] == "OrderDto"          # Promise<OrderDto[]> → OrderDto
+    assert dto["list"] == "OrderDto[]"        # Promise<OrderDto[]> → OrderDto[]
     assert dto["one"] == "UserDto"            # UserDto
-    assert dto["count"] is None               # Promise<number> → primitive → None
+    assert dto["count"] == "number"           # Promise<number> → number
 
 
 # routing-controllers: same @Controller/@Get grammar, different import package. Mirrors the
@@ -506,10 +508,10 @@ export class UserResolver {
     by_ep = {s.endpoint: s for s in rec.statements if s.semanticType == "route"}
     # @Query(() => UserDto) → responseDTO from decorator arg, not return type
     assert by_ep["getUser"].responseDTO == "UserDto"
-    # @Mutation(() => [UserDto]) — array form → UserDto (scalar stripped by _dto_from_type)
-    assert by_ep["createUser"].responseDTO == "UserDto"
-    # @Query(() => String) — scalar → responseDTO None
-    assert by_ep["ping"].responseDTO is None
+    # @Mutation(() => [UserDto]) — the array form, as written
+    assert by_ep["createUser"].responseDTO == "[UserDto]"
+    # @Query(() => String) — the declared scalar
+    assert by_ep["ping"].responseDTO == "String"
 
 
 def _resolver_routes(tmp_path, src: bytes) -> dict[str, tuple[str | None, str | None]]:
@@ -790,3 +792,37 @@ def test_object_pattern_with_a_numeric_constant_is_unknown(analyze_files) -> Non
     })
     got = {s.handler: s.endpoint for s in st if s.semanticType == "eventbus_consumer"}
     assert got == {"versioned": None, "named": '{"cmd":"sum"}', "top": "2"}
+
+
+@pytest.mark.parametrize(("ret", "dto"), [
+    # the declared type as written; only Promise<…> / Observable<…> are removed
+    ("Promise<string>", "string"),
+    ("Observable<number[] | null>", "number[] | null"),
+    ("orders.Order", "orders.Order"),
+    ("{ url: string }", "{ url: string }"),
+    ("Record<string, OrderDto>", "Record<string, OrderDto>"),
+    ("Promise<void>", None),
+    ("Promise<any>", None),  # nothing declared
+    ("Promise<Response | void>", None),  # the handler writes to the response object
+    ("Promise<OrderDto | void>", "OrderDto | void"),
+])
+def test_response_dto_is_the_declared_type(analyze_files, ret: str, dto: str | None) -> None:
+    st = analyze_files({"src/a.controller.ts": (
+        "import { Controller, Get } from '@nestjs/common';\n"
+        f"@Controller('a')\nexport class A {{\n  @Get()\n  get(): {ret} {{ return null; }}\n}}\n"
+    )})
+    [r] = [s for s in st if s.semanticType == "route"]
+    assert r.responseDTO == dto
+
+
+@pytest.mark.parametrize(("decorator", "dto"), [
+    ("@ApiOkResponse({ type: OrderDto })", "OrderDto"),
+    ("@ApiOkResponse({ type: [OrderDto] })", "[OrderDto]"),  # an array, as the decorator writes it
+])
+def test_api_response_type_as_written(analyze_files, decorator: str, dto: str) -> None:
+    st = analyze_files({"src/a.controller.ts": (
+        "import { Controller, Get } from '@nestjs/common';\n"
+        f"@Controller('a')\nexport class A {{\n  @Get()\n  {decorator}\n  get() {{ return null; }}\n}}\n"
+    )})
+    [r] = [s for s in st if s.semanticType == "route"]
+    assert r.responseDTO == dto

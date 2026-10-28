@@ -15,7 +15,7 @@ from tree_sitter import Node
 
 from ...schemas import Decorator, FileRecord
 from ..emits import Emit
-from ..java.functions import method_nodes
+from ..java.functions import method_nodes, payload_type
 from ..java.guards import security_guards
 
 # Standard @HttpMethod-meta-annotated markers (javax/jakarta.ws.rs).
@@ -92,9 +92,9 @@ def detect_jaxrs_routes(
         outer = [name for name, binds in filters or [] if not binds or binds & carried]
         # A name-binding annotation (@Secured bound to a filter) selects that filter; it is not a
         # guard itself (Spring Security's @Secured shares the name).
-        scoped = [g for g in security_guards(class_decorators[fn.parentId], fn.decorators) or []
-                  if g.split("(", 1)[0] not in bound]
-        guards = (outer + scoped) or None
+        scoped = [g for g in security_guards(class_decorators[fn.parentId], fn.decorators)
+                  if g.text.split("(", 1)[0] not in bound]
+        guards = (outer + [g.text for g in scoped]) or None
         for dec in fn.decorators:
             if dec.name not in _HTTP_METHODS:
                 continue
@@ -110,8 +110,8 @@ def detect_jaxrs_routes(
                 routeKind="route",
                 isRegex=False,
                 guards=guards,
-                authRequired=True if scoped else None,
-                responseDTO=fn.returnType or None,  # JAX-RS has no @RequestBody → requestDTO stays null
+                authRequired=True if any(g.requires_auth for g in scoped) else None,
+                responseDTO=payload_type(fn.returnType),  # JAX-RS has no @RequestBody → requestDTO stays null
             ), parent=fn.id, node_type="synthetic", text=f"@{dec.name}",
                 line=fn.startLine, col=0, end_line=fn.endLine))
     return routes

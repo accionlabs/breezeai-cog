@@ -1160,8 +1160,8 @@ def test_express_mount_join_root_base_and_root_local(tmp_path) -> None:
 
 
 def test_express_mount_join_ambiguous_is_honest_null(tmp_path) -> None:
-    # Same factory mounted at two DIFFERENT bases in two non-fixture files → ambiguous → the
-    # factory keeps its own bare path (never wrongly attributed to one base).
+    # Same factory mounted at two DIFFERENT bases in two non-fixture files → served at both →
+    # no address (never its own bare path, never one base).
     rec = _parse_repo(
         tmp_path,
         {
@@ -1176,8 +1176,7 @@ def test_express_mount_join_ambiguous_is_honest_null(tmp_path) -> None:
         "shared-router.ts",
     )
     routes = _express_routes(rec)
-    assert "/x" in routes
-    assert "/a/x" not in routes and "/b/x" not in routes
+    assert list(routes) == [None]
 
 
 def test_express_mount_join_ignores_fixture_mount(tmp_path) -> None:
@@ -1261,7 +1260,7 @@ def test_express_verb_route_guards(tmp_path) -> None:
     route = next(s for s in rec.statements if s.semanticType == "route" and s.endpoint == "/items/:id")
     assert route.handler == "getItem"
     assert route.guards == ["requireAuth"]
-    assert route.authRequired is True
+    assert route.authRequired is None  # requireAuth is the app's own: no certain claim
 
 
 def test_express_route_no_guards_is_unknown_not_open(tmp_path) -> None:

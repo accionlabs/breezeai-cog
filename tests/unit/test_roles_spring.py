@@ -134,6 +134,46 @@ def test_functional_route_is_binding(analyze_files) -> None:
     assert (r.method, r.endpoint, r.routeKind, r.handler) == ("GET", "/products", "route", "list")
 
 
+FLUX_IMPORTS = FN_IMPORTS.replace(".web.servlet.function.", ".web.reactive.function.server.")
+FN_BODY = """public class Fn {
+  @Bean
+  public RouterFunction<?> r(Handler h) {
+    return route(GET("/products"), h::list);
+  }
+}"""
+
+
+def _fn_endpoint(analyze_files, imports: str, config: str) -> str | None:
+    files = _java("Fn", imports, FN_BODY)
+    files["src/main/resources/application.properties"] = config
+    [r] = _eps(analyze_files(files))
+    return r.endpoint
+
+
+def test_servlet_context_path_prefixes_a_webmvc_functional_route(analyze_files) -> None:
+    assert _fn_endpoint(analyze_files, FN_IMPORTS,
+                        "server.servlet.context-path=/ctx\n") == "/ctx/products"
+
+
+def test_servlet_context_path_does_not_prefix_a_webflux_functional_route(analyze_files) -> None:
+    # WebFlux is not served by the servlet: its context path does not apply.
+    assert _fn_endpoint(analyze_files, FLUX_IMPORTS,
+                        "server.servlet.context-path=/ctx\n") == "/products"
+
+
+def test_webflux_base_path_prefixes_a_webflux_functional_route(analyze_files) -> None:
+    config = "server.servlet.context-path=/ctx\nspring.webflux.base-path=/api\n"
+    assert _fn_endpoint(analyze_files, FLUX_IMPORTS, config) == "/api/products"
+    assert _fn_endpoint(analyze_files, FN_IMPORTS, config) == "/ctx/products"
+
+
+def test_unresolved_webflux_base_path_leaves_the_address_empty(analyze_files) -> None:
+    assert _fn_endpoint(analyze_files, FLUX_IMPORTS,
+                        "spring.webflux.base-path=${BASE}\n") is None
+    assert _fn_endpoint(analyze_files, FLUX_IMPORTS,
+                        "base=/b\nspring.webflux.base-path=${base}\n") == "/b/products"
+
+
 def test_functional_nest_path_is_wiring(analyze_files) -> None:
     st = analyze_files(
         _java(
@@ -311,3 +351,85 @@ def test_functional_route_handler_in_another_class_is_located(analyze_files) -> 
                        "  public Object list(Object req) { return null; }\n}"))
     [r] = _eps(analyze_files(files), "Routes.java")
     assert (r.handler, r.handlerPath, r.handlerLine) == ("list", SRC + "OrderHandler.java", 4)
+
+
+def test_servlet_filter_does_not_guard_a_webflux_functional_route(analyze_files) -> None:
+    files = _java("Fn", FLUX_IMPORTS, FN_BODY)
+    files.update(_java("AuthFilter", "import org.springframework.stereotype.Component;\n"
+                       "import org.springframework.web.filter.OncePerRequestFilter;",
+                       "@Component\npublic class AuthFilter extends OncePerRequestFilter {}"))
+    [r] = _eps(analyze_files(files))
+    assert (r.endpoint, r.guards) == ("/products", None)
+    mvc = _java("Fn", FN_IMPORTS, FN_BODY) | {k: v for k, v in files.items() if "AuthFilter" in k}
+    [r] = _eps(analyze_files(mvc))
+    assert r.guards == ["AuthFilter"]
+
+
+SECURED = WEB + "\nimport org.springframework.security.access.prepost.PreAuthorize;"
+
+
+def _secured(analyze_files, class_ann: str, method_ann: str):
+    st = analyze_files(_java("C", SECURED, f"""@RestController
+{class_ann}
+public class C {{
+  @GetMapping("/x")
+  {method_ann}
+  public String x() {{ return ""; }}
+}}"""))
+    [r] = _eps(st)
+    return r.guards, r.authRequired
+
+
+def test_permit_all_expression_is_no_guard(analyze_files) -> None:
+    assert _secured(analyze_files, "", '@PreAuthorize("permitAll()")') == (None, None)
+
+
+def test_method_pre_authorize_replaces_the_class_one(analyze_files) -> None:
+    assert _secured(analyze_files, '@PreAuthorize("hasRole(\'ADMIN\')")',
+                    '@PreAuthorize("permitAll()")') == (None, None)
+    assert _secured(analyze_files, '@PreAuthorize("isAuthenticated()")',
+                    '@PreAuthorize("hasRole(\'ADMIN\')")') == (
+        ["PreAuthorize(hasRole('ADMIN'))"], True)
+
+
+def test_only_a_signed_in_check_asserts_auth(analyze_files) -> None:
+    for expr, required in (("hasAuthority('orders:read')", True),
+                           ("isAuthenticated() and #id == principal.id", True),
+                           ("hasRole('ADMIN') or isAnonymous()", None),
+                           ("!isAuthenticated()", None),
+                           ("isAnonymous()", None),
+                           ("@acl.canRead(#id)", None)):
+        guards, auth = _secured(analyze_files, "", f'@PreAuthorize("{expr}")')
+        assert guards == [f"PreAuthorize({expr})"] and auth is required, expr
+
+
+def test_secured_anonymously_makes_no_claim(analyze_files) -> None:
+    assert _secured(analyze_files, "", '@Secured("ROLE_ADMIN")') == (["Secured(ROLE_ADMIN)"], True)
+    assert _secured(analyze_files, "", '@Secured("IS_AUTHENTICATED_ANONYMOUSLY")')[1] is None
+
+
+def test_scheduled_interval_with_a_time_unit_is_in_milliseconds(analyze_files) -> None:
+    st = analyze_files(_java(
+        "J",
+        "import org.springframework.scheduling.annotation.Scheduled;\n"
+        "import java.util.concurrent.TimeUnit;",
+        """public class J {
+  @Scheduled(fixedRate = 5, timeUnit = TimeUnit.SECONDS)
+  public void a() {}
+  @Scheduled(fixedDelayString = "2", timeUnit = TimeUnit.MINUTES)
+  public void b() {}
+  @Scheduled(fixedRate = 5, timeUnit = unit)
+  public void c() {}
+  @Scheduled(fixedRate = 5, timeUnit = TimeUnit.MICROSECONDS)
+  public void d() {}
+  @Scheduled(cron = "0 * * * *", timeUnit = TimeUnit.SECONDS)
+  public void e() {}
+}""",
+    ))
+    got = {r.handler: r.endpoint for r in _eps(st)}
+    assert got == {
+        "a": "5000", "b": "120000",
+        "c": None,            # a unit that is not a literal TimeUnit: unknown
+        "d": None,            # not a whole number of milliseconds
+        "e": "0 * * * *",     # timeUnit does not apply to cron
+    }

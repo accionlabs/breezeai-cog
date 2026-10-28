@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 import json
 
 from jsonschema import Draft202012Validator
@@ -85,6 +87,18 @@ def test_route_attributes(tmp_path) -> None:
     assert routes["get"].responseDTO == "Order"
     assert routes["get"].requestDTO is None  # JAX-RS has no @RequestBody
     assert routes["get"].isRegex is False
+
+
+def test_response_dto_is_the_declared_payload_type(analyze_files) -> None:
+    st = analyze_files({"src/main/java/a/R.java": (
+        "package a;\nimport java.util.List;\nimport jakarta.ws.rs.*;\nimport jakarta.ws.rs.core.Response;\n"
+        '@Path("/r")\npublic class R {\n'
+        '  @GET @Path("/a") public List<Order> a() { return null; }\n'
+        '  @GET @Path("/b") public Response b() { return null; }\n'
+        '  @GET @Path("/c") public java.util.concurrent.CompletionStage<Order> c() { return null; }\n}\n'
+    )})
+    got = {s.handler: s.responseDTO for s in st if s.semanticType == "route"}
+    assert got == {"a": "List<Order>", "b": None, "c": "Order"}
 
 
 def test_output_validates(tmp_path) -> None:
@@ -182,11 +196,13 @@ public class Res {
   public void create(String o) {}
 }
 """})
-    got = {s.method: s.guards for s in st if s.semanticType == "route"}
+    got = {s.method: (s.guards, s.authRequired) for s in st if s.semanticType == "route"}
+    # A method annotation replaces the class one of its family: @DenyAll and @PermitAll on the
+    # method set that method's access, whatever the class says.
     assert got == {
-        "GET": ['RolesAllowed({"user"})'],
-        "DELETE": ['RolesAllowed({"user"})', "DenyAll"],
-        "POST": ['RolesAllowed({"user"})'],  # @PermitAll opens nothing up front: not a guard
+        "GET": (['RolesAllowed({"user"})'], True),
+        "DELETE": (["DenyAll"], True),
+        "POST": (None, None),  # @PermitAll: open to everyone
     }
 
 
@@ -238,3 +254,64 @@ def test_path_values_resolve_or_leave_the_endpoint_empty(analyze_files) -> None:
         "x": "/users/api/x",
         "gone": None,
     }
+
+
+def test_locator_owner_path_is_its_own_not_a_same_named_class(analyze_files) -> None:
+    # Two classes named Api in different packages: the locator in a.Api serves Items under
+    # a.Api's path, never b.Api's.
+    st = analyze_files({
+        "src/main/java/a/Api.java": _RS + '@Path("/alpha")\npublic class Api {\n'
+                                    '  @Path("items") public Items items() { return null; }\n}\n',
+        "src/main/java/a/Items.java": _RS + "public class Items {\n"
+                                      '  @GET public String list() { return ""; }\n}\n',
+        "src/main/java/b/Api.java": _RS.replace("package a", "package b")
+                                    + '@Path("/beta")\npublic class Api {\n'
+                                    '  @GET public String ping() { return ""; }\n}\n',
+    })
+    got = {s.handler: s.endpoint for s in st if s.semanticType == "route"}
+    assert got == {"list": "/alpha/items", "ping": "/beta"}
+
+
+_ORDERS = _RS + '@Path("/orders")\npublic class Orders {\n  @GET public String list() { return ""; }\n}\n'
+_WEB_XML = (
+    '<web-app xmlns="https://jakarta.ee/xml/ns/jakartaee">\n'
+    "  <servlet><servlet-name>jersey</servlet-name>\n"
+    "    <servlet-class>org.glassfish.jersey.servlet.ServletContainer</servlet-class></servlet>\n"
+    "  <servlet-mapping><servlet-name>jersey</servlet-name><url-pattern>/rest/*</url-pattern>"
+    "</servlet-mapping>\n</web-app>\n"
+)
+
+
+def _endpoint(analyze_files, files: dict[str, str]) -> str | None:
+    [r] = [s for s in analyze_files(files) if s.semanticType == "route"]
+    return r.endpoint
+
+
+_APP = _RS + '@ApplicationPath("/api")\npublic class App extends Application {}\n'
+_PROPS = "src/main/resources/application.properties"
+
+
+@pytest.mark.parametrize(("extra", "expected"), [
+    ({"src/main/webapp/WEB-INF/web.xml": _WEB_XML}, "/rest/orders"),
+    ({_PROPS: "quarkus.rest.path=/q\n"}, "/q/orders"),
+    ({_PROPS: "quarkus.resteasy.path=/q\n"}, "/q/orders"),
+    ({_PROPS: "spring.jersey.application-path=/q\n"}, "/q/orders"),
+    # @ApplicationPath /api and web.xml /rest disagree
+    ({_MAIN + "App.java": _APP, "src/main/webapp/WEB-INF/web.xml": _WEB_XML}, None),
+    # Quarkus joins its path with @ApplicationPath: not read
+    ({_MAIN + "App.java": _APP, _PROPS: "quarkus.rest.path=/q\n"}, None),
+    ({_PROPS: "quarkus.rest.path=${BASE}\n"}, None),
+])
+def test_base_path_from_web_xml_or_properties(analyze_files, extra, expected) -> None:
+    assert _endpoint(analyze_files, {_MAIN + "Orders.java": _ORDERS, **extra}) == expected
+
+
+@pytest.mark.parametrize(("files", "expected"), [
+    # the application is in another module: Orders may be served under /api — never bare /orders
+    ({"shop-api/src/main/java/a/Orders.java": _ORDERS,
+      "shop-app/src/main/java/a/App.java": _APP}, None),
+    ({"shop-api/src/main/java/a/Orders.java": _ORDERS}, "/orders"),  # no base anywhere
+])
+def test_module_without_a_base_is_unknown_when_another_module_sets_one(
+        analyze_files, files, expected) -> None:
+    assert _endpoint(analyze_files, files) == expected

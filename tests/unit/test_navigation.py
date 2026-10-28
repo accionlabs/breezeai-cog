@@ -24,6 +24,20 @@ def test_vue_push_forms(analyze_files) -> None:
     assert _nav(st, "src/go.js") == [("vue", ""), ("vue", ""), ("vue", "/orders")]
 
 
+def test_vue_router_hook_needs_the_vue_router_import(analyze_files) -> None:
+    # Next.js has a useRouter() of its own: not Vue's, so no Vue navigation. An aliased Vue
+    # import still counts.
+    next_src = ("import { useRouter } from 'next/navigation';\n"
+                "export function Go() {\n  const router = useRouter();\n"
+                "  router.push('/dashboard');\n}\n")
+    alias_src = ("import { useRouter as useVueRouter } from 'vue-router';\n"
+                 "export function go() {\n  const r = useVueRouter();\n  r.push('/orders');\n}\n")
+    pkg = '{"dependencies": {"next": "14", "react": "18", "vue": "3", "vue-router": "4"}}'
+    st = analyze_files({"package.json": pkg, "app/go.tsx": next_src, "src/go.js": alias_src})
+    assert _nav(st, "app/go.tsx") == []
+    assert _nav(st, "src/go.js") == [("vue", "/orders")]
+
+
 def test_angular_link_array(analyze_files) -> None:
     svc = (
         "import { Injectable } from '@angular/core';\nimport { Router } from '@angular/router';\n"

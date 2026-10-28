@@ -89,6 +89,18 @@ def test_route_attributes(tmp_path) -> None:
     assert routes["get"].requestDTO is None  # only @PathVariable, no body
 
 
+
+def test_dtos_are_the_declared_payload_types(analyze_files) -> None:
+    st = analyze_files({"src/main/java/a/C.java": (
+        "package a;\nimport java.util.List;\nimport org.springframework.web.bind.annotation.*;\n"
+        "@RestController\npublic class C {\n"
+        '  @PostMapping("/a") public ResponseEntity<List<OrderDto>> a(@RequestBody List<OrderDto> b) { return null; }\n'
+        '  @DeleteMapping("/b") public ResponseEntity<Void> b() { return null; }\n'
+        '  @GetMapping("/c") public void c() { }\n}\n'
+    )})
+    got = {s.endpoint: (s.requestDTO, s.responseDTO) for s in st if s.semanticType == "route"}
+    assert got == {"/a": ("List<OrderDto>", "List<OrderDto>"), "/b": (None, None), "/c": (None, None)}
+
 def test_non_controller_has_no_routes(tmp_path) -> None:
     src = b"package x;\npublic class Plain { public int add(int a){ return a; } }\n"
     rec = _parse(tmp_path, src, "Plain.java")
@@ -245,14 +257,14 @@ def test_context_path_prefixes_routes_of_its_module(analyze_files) -> None:
         # module "legacy": Spring Boot 1.x key
         "legacy/src/main/java/a/C.java": _CTRL,
         "legacy/src/main/resources/application.properties": "server.context-path=/old\n",
-        # module "plain": no context path → unchanged
+        # module "plain": no context path of its own while others set one → unknown
         "plain/src/main/java/a/C.java": _CTRL,
     })
     assert _endpoints(st) == {
         "app/src/main/java/a/C.java": "/shop/x",
         "yml/src/main/java/a/C.java": "/api/x",
         "legacy/src/main/java/a/C.java": "/old/x",
-        "plain/src/main/java/a/C.java": "/x",
+        "plain/src/main/java/a/C.java": None,
     }
 
 
@@ -408,7 +420,8 @@ def test_filters_and_interceptors_guard_the_routes_they_cover(analyze_files) -> 
         ("/shop/api/public/info", ("AuditFilter", "AuthFilter", "AuthInterceptor"), None),
         ("/shop/admin/stats", ("AuthFilter", "LegacyFilter", "AuthInterceptor"), None),
         ("/shop/home", ("AuthFilter", "AuthInterceptor"), None),
-        ("/x", (), None),
+        # another module without a context path, while app sets one: address unknown
+        (None, (), None),
     }
 
 
@@ -431,6 +444,29 @@ def test_registration_bean_filter_through_a_local_variable(analyze_files) -> Non
     [r] = [s for s in st if s.semanticType == "route"]
     assert r.guards == ["TimingFilter"]  # ContextFilter's pattern is not a literal → not added
 
+
+
+def test_filter_with_should_not_filter_guards_no_route(analyze_files) -> None:
+    m = "src/main/java/a/"
+    skip = "  protected boolean shouldNotFilter(HttpServletRequest r) { return r.getRequestURI().equals(\"/open\"); }\n"
+    st = analyze_files({
+        m + "AuthFilter.java": _SPRING + "@Component\npublic class AuthFilter extends OncePerRequestFilter {}\n",
+        m + "JwtFilter.java": _SPRING + "@Component\npublic class JwtFilter extends OncePerRequestFilter {\n" + skip + "}\n",
+        # registered elsewhere: the registration does not bring it back
+        m + "ApiFilter.java": _SPRING + "public class ApiFilter extends OncePerRequestFilter {\n" + skip + "}\n",
+        m + "Filters.java": (
+            "package a;\nimport org.springframework.boot.web.servlet.FilterRegistrationBean;\n"
+            "public class Filters {\n  FilterRegistrationBean<ApiFilter> api() {\n"
+            "    FilterRegistrationBean<ApiFilter> r = new FilterRegistrationBean<>(new ApiFilter());\n"
+            '    r.addUrlPatterns("/*");\n    return r;\n  }\n}\n'
+        ),
+        m + "C.java": (
+            "package a;\nimport org.springframework.web.bind.annotation.*;\n"
+            '@RestController\npublic class C {\n  @GetMapping("/open") public String open() { return ""; }\n}\n'
+        ),
+    })
+    [r] = [s for s in st if s.semanticType == "route"]
+    assert (r.guards, r.authRequired) == (["AuthFilter"], None)
 
 # ── Messaging: broker listeners (inbound) and template sends (outbound) ──────────────────────
 _MSG = "src/main/java/m/"
@@ -533,3 +569,15 @@ def test_template_sends(analyze_files) -> None:
         ("S.java", 20, "events", "rabbitmq"),
         ("S.java", 21, "audit", "jms"),
     }
+
+
+def test_module_without_context_path_is_unknown_only_when_another_sets_one(analyze_files) -> None:
+    alone = analyze_files({"web/src/main/java/a/C.java": _CTRL})
+    assert _endpoints(alone) == {"web/src/main/java/a/C.java": "/x"}  # no prefix anywhere
+    split = analyze_files({
+        "web/src/main/java/a/C.java": _CTRL,
+        "boot/src/main/java/a/App.java": "package a;\npublic class App {}\n",
+        "boot/src/main/resources/application.properties": "server.servlet.context-path=/shop\n",
+    })
+    # the context path is set in the boot module: web's routes may be served under it
+    assert _endpoints(split) == {"web/src/main/java/a/C.java": None}

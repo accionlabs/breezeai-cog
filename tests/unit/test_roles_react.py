@@ -233,6 +233,23 @@ def test_plain_pathless_layout_is_not_a_guard(analyze_files) -> None:
     assert (r.handler, r.guards) == ("Home", None)
 
 
+def test_guard_layout_is_named_by_whole_words(analyze_files) -> None:
+    from breezeai_cog.parsers.typescript_react.routes import _is_guard_element
+    for name in ("ProtectedRoute", "PrivateOutlet", "AuthGuard", "RequireAuth", "RequireRole",
+                 "AuthenticatedRoute", "guards.ProtectedRoute"):
+        assert _is_guard_element(name), name
+    for name in ("RequiredFieldsNotice", "RequirementsBanner", "RequireJsLoader",
+                 "UnprotectedRoute", "NonAuthorizedRedirect", "ProtectedLayout", "AppLayout"):
+        assert not _is_guard_element(name), name
+    st = _jsx(
+        analyze_files,
+        "      <Route path=\"/form\" element={<RequiredFieldsNotice />}>\n"
+        '        <Route path="edit" element={<EditForm />} />\n'
+        "      </Route>\n",
+    )
+    assert [r.guards for r in _at(st, "/form/edit")] == [None]
+
+
 def test_config_guard_layout_is_guard(analyze_files) -> None:
     src = (
         "import { createBrowserRouter } from 'react-router-dom';\n"

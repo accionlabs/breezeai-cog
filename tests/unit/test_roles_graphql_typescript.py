@@ -177,7 +177,7 @@ def test_resolver_takes_its_dtos_from_a_graphql_file(analyze_files) -> None:
         },
     )
     got = {(r.endpoint, r.requestDTO, r.responseDTO) for r in _eps(st) if r.path == "src/resolvers.ts"}
-    assert got == {("book", "ID", "Book"), ("addBook", "BookInput", "Book")}
+    assert got == {("book", "ID!", "Book"), ("addBook", "BookInput!", "Book")}
 
 
 def test_resolver_takes_its_dtos_from_embedded_sdl(analyze_files) -> None:
@@ -190,7 +190,7 @@ def test_resolver_takes_its_dtos_from_embedded_sdl(analyze_files) -> None:
         },
     )
     [r] = [r for r in _eps(st) if r.path == "src/resolvers.ts"]
-    assert (r.requestDTO, r.responseDTO) == ("BookFilter", "Book")
+    assert (r.requestDTO, r.responseDTO) == ("BookFilter", "[Book]")
 
 
 def test_conflicting_sdl_leaves_the_dtos_empty(analyze_files) -> None:
