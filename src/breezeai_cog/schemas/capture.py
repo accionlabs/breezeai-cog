@@ -184,6 +184,10 @@ class FileRecord(BaseModel):
     framework: str | None = None
     # iac-only: dominant cloud provider across this file's statements
     platform: str | None = None
+    # Nx ownership, populated by the repository-level project resolver. These stay absent for
+    # files outside a discovered project root; the resolver never guesses from folder names.
+    project: str | None = None
+    projectRoot: str | None = None
     #: UI role of the node when it is a frontend component or state unit — one of
     #: ``component`` / ``page`` / ``layout`` / ``store`` / ``composable`` / ``hook`` /
     #: ``directive`` (open string). Set by the parser on the node that *is* the component

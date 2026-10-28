@@ -5,38 +5,46 @@ ownership of `.json`."""
 from __future__ import annotations
 
 import json
+from pathlib import Path
+from typing import Any
 
 from breezeai_cog.core import registry
 from breezeai_cog.parsers.base import ParseContext
 from breezeai_cog.parsers.structured_json.parser import JsonParser
+from breezeai_cog.schemas import FileRecord
 
 
 def _parse(
     path: str,
-    obj,
+    obj: Any,
     *,
     capture_statements: bool = False,
     statement_text_limit: int = 8000,
-):
+) -> FileRecord:
     src = json.dumps(obj, ensure_ascii=False).encode()
     ctx = ParseContext(
         path=path,
-        abs_path=None,
+        abs_path=Path(path),
         source=src,
-        repo_root=".",
+        repo_root=Path("."),
         capture_statements=capture_statements,
         statement_text_limit=statement_text_limit,
     )
     return JsonParser().parse_file(ctx)
 
 
-def _toon(path: str, obj, **kw) -> str:
+def _toon(path: str, obj: Any, **kw: Any) -> str:
     # TOON lives on the (gated) statement, not on metadata — capture it and read its text
     return _parse(path, obj, capture_statements=True, **kw).statements[0].text
 
 
-def _language(path: str, obj) -> str:
+def _language(path: str, obj: Any) -> str:
     return _parse(path, obj).language
+
+
+def _metadata(record: FileRecord) -> dict[str, Any]:
+    assert record.metadata is not None
+    return record.metadata
 
 
 # ── routing: full capture ("structured-json") vs reduced/rich config ("config") ─
@@ -58,6 +66,9 @@ def test_named_rich_configs_stay_config() -> None:
     assert _language("package.json", {"name": "app", "contributors": [{"name": "Al"}]}) == "config"
     assert _language("tsconfig.json", {"compilerOptions": {}, "references": [{"path": "../x"}]}) == "config"
     assert _language("mod.json", {"main": "Verticle"}) == "config"
+    assert _language("project.json", {"name": "web", "targets": {"build": {}}}) == "config"
+    assert _language("nx.json", {"plugins": [], "targetDefaults": {}}) == "config"
+    assert _language("workspace.json", {"projects": {"web": "apps/web"}}) == "config"
 
 
 def test_composer_json_is_captured_not_named_rich() -> None:
@@ -73,7 +84,9 @@ def test_empty_and_scalar_are_config() -> None:
 
 def test_malformed_json_routes_to_config() -> None:
     # unparseable → nothing to capture → the shared config extractor (parseError metadata)
-    ctx = ParseContext(path="x.json", abs_path=None, source=b"{not json", repo_root=".")
+    ctx = ParseContext(
+        path="x.json", abs_path=Path("x.json"), source=b"{not json", repo_root=Path(".")
+    )
     assert JsonParser().parse_file(ctx).language == "config"
 
 
@@ -82,8 +95,9 @@ def test_emits_config_record_no_functions() -> None:
     rec = _parse("json/records.json", {"values": [{"code": "REC-1"}]})
     assert rec.type == "config" and rec.language == "structured-json"
     assert rec.functions == [] and rec.classes == []  # never mints graph-function noise
-    assert rec.metadata["kind"] == "structured-json"
-    assert rec.metadata["format"] == "toon"
+    metadata = _metadata(rec)
+    assert metadata["kind"] == "structured-json"
+    assert metadata["format"] == "toon"
 
 
 def test_toon_tabular_for_uniform_records() -> None:
@@ -101,8 +115,9 @@ def test_toon_tabular_for_uniform_records() -> None:
     assert "members[2]{name,role}:" in toon
     assert "  Al,admin" in toon
     assert "  Bo,viewer" in toon
-    assert rec.metadata["recordCount"] == 2
-    assert "toon" not in rec.metadata  # content is on the statement, not metadata
+    metadata = _metadata(rec)
+    assert metadata["recordCount"] == 2
+    assert "toon" not in metadata  # content is on the statement, not metadata
 
 
 def test_toon_block_form_for_records_with_nested_objects() -> None:
@@ -167,8 +182,9 @@ def test_large_document_keeps_every_leaf_no_truncation() -> None:
     # flagged truncated — oversized TOON is split into parts downstream (emit.split), not dropped.
     big = [{"n": i} for i in range(6000)]
     rec = _parse("a.json", big)
-    assert rec.metadata["leafCount"] == 6000
-    assert "truncated" not in rec.metadata
+    metadata = _metadata(rec)
+    assert metadata["leafCount"] == 6000
+    assert "truncated" not in metadata
 
 
 def test_every_leaf_marker_reaches_toon() -> None:
@@ -184,8 +200,9 @@ def test_no_statement_without_capture_statements() -> None:
     # metadata carries only the structural summary — never the TOON content)
     rec = _parse("a.json", [{"id": 1}], capture_statements=False)
     assert rec.statements == []
-    assert "toon" not in rec.metadata
-    assert rec.metadata["recordCount"] == 1
+    metadata = _metadata(rec)
+    assert "toon" not in metadata
+    assert metadata["recordCount"] == 1
 
 
 def test_document_statement_shape() -> None:
@@ -211,7 +228,7 @@ def test_document_statement_captures_full_text_uncapped() -> None:
     st = rec.statements[0]
     assert len(st.text) > 200 and not st.text.endswith("…")  # full document, not clipped
     assert st.text.count("y" * 100) == 50  # every row's value survives
-    assert "toon" not in rec.metadata  # content is not duplicated on metadata
+    assert "toon" not in _metadata(rec)  # content is not duplicated on metadata
 
 
 def test_record_serializes_schema_valid_with_statement() -> None:
@@ -229,10 +246,13 @@ def test_json_is_sole_owner_of_dot_json() -> None:
     registry.discover_builtin()
     try:
         for path in ("records.json", "package.json", "tsconfig.json", "empty.json", "cfg.json"):
-            assert registry.select(path, b'{"a":1}').name == "json"
-        assert registry.base_parser_for("records.json").name == "json"
+            parser = registry.select(path, b'{"a":1}')
+            assert parser is not None and parser.name == "json"
+        base_parser = registry.base_parser_for("records.json")
+        assert base_parser is not None and base_parser.name == "json"
         # selection never parses, so it is safe on adversarially nested JSON
-        assert registry.select("x.json", ("[" * 1200 + "]" * 1200).encode()).name == "json"
+        parser = registry.select("x.json", ("[" * 1200 + "]" * 1200).encode())
+        assert parser is not None and parser.name == "json"
     finally:
         registry.clear()
         registry.discover_builtin()

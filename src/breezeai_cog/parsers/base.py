@@ -78,6 +78,8 @@ class LanguageParser(Protocol):
 
     def parse_file(self, ctx: ParseContext) -> FileRecord: ...
 
+    def link_handlers(self, record: FileRecord, ctx: ParseContext) -> None: ...
+
 
 class BaseParser:
     """Convenience base: capability-metadata defaults + a no-op ``build_index``.

@@ -12,17 +12,25 @@ import os
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Callable, Iterator
+from typing import Any, Callable, Iterator
 
 from .._version import __version__
+from ..config import Settings
 from ..emit import split_oversized_statements
 from ..logging import DETAIL_LOGGER, get_logger
 from ..parsers.additive import fact_sources
+from ..parsers.base import LanguageParser
 from ..parsers.contract import validate as validate_contract
 from ..schemas import FileRecord, ProjectMetaData
 from . import executor
 from .ignore import IgnoreEngine
-from .registry import base_parser_for, discover_builtin, registered, template_extensions
+from .nx import discover_nx_projects
+from .registry import (
+    base_parser_for,
+    discover_builtin,
+    registered,
+    template_extensions,
+)
 from .scanner import ScanEntry, scan
 from .skips import SkipReport
 
@@ -43,7 +51,7 @@ def _classifier(languages: set[str] | None) -> Callable[[str], str | None]:
     return classify
 
 
-def _template_skip_rule(settings) -> Callable[[str], str | None] | None:
+def _template_skip_rule(settings: Settings) -> Callable[[str], str | None] | None:
     """The ``skip_rule`` that drops markup/view files, or ``None`` when
     ``--capture-templates`` is on.
 
@@ -64,7 +72,7 @@ def _template_skip_rule(settings) -> Callable[[str], str | None] | None:
     return skip_rule
 
 
-def _warn_if_only_template_languages(settings, gate_on: bool) -> None:
+def _warn_if_only_template_languages(settings: Settings, gate_on: bool) -> None:
     """Warn when ``--language`` selects only parsers that own nothing but markup, while the
     template gate is on — otherwise the run silently produces zero files."""
     if not gate_on or not settings.languages:
@@ -86,7 +94,7 @@ def _warn_if_only_template_languages(settings, gate_on: bool) -> None:
 
 
 def _scan_entries(
-    repo_root: Path, settings, report: SkipReport | None = None
+    repo_root: Path, settings: Settings, report: SkipReport | None = None
 ) -> Iterator[ScanEntry]:
     discover_builtin()
     engine = IgnoreEngine.build(registered())
@@ -120,12 +128,12 @@ def _scan_entries(
 
 def _build_indexes(
     repo_root: Path, entries: list[ScanEntry], jobs: int = 1, *, debug_on: bool = False
-) -> dict:
+) -> dict[str, Any]:
     """Run each parser's optional ``build_index`` once (main process). Maps
     parser-name → index; threaded into ParseContext.resolution_index. ``jobs`` is the same
     worker count as the parse stage — passed to ``build_index`` so its per-file parse can
     parallelize (``jobs<=1`` keeps it serial)."""
-    bases: dict[str, object] = {}
+    bases: dict[str, LanguageParser] = {}
     files: dict[str, list[Path]] = {}
     for entry in entries:
         base = base_parser_for(entry.path)  # index is per base language, keyed by its name
@@ -143,11 +151,12 @@ def _build_indexes(
             repo_root / e.path for e in entries
             if str(e.path).lower().endswith(exts) and repo_root / e.path not in own
         ]
-    indexes: dict[str, object] = {}
+    indexes: dict[str, Any] = {}
     for name, base in bases.items():
         start = time.perf_counter()
         try:
-            index = base.build_index(repo_root, files[name], jobs)
+            build_index = getattr(base, "build_index", None)
+            index = build_index(repo_root, files[name], jobs) if callable(build_index) else None
         except Exception as exc:
             # Per-file workers already isolate their own failures; this is a last-resort
             # guard so one language's index cannot abort the whole run. Resolution simply
@@ -164,7 +173,9 @@ def _build_indexes(
     return indexes
 
 
-def iter_records(repo_root: str | Path, settings) -> Iterator[tuple[ScanEntry, FileRecord]]:
+def iter_records(
+    repo_root: str | Path, settings: Settings
+) -> Iterator[tuple[ScanEntry, FileRecord]]:
     """Sequential, in-process scan + parse (streaming)."""
     repo_root = Path(repo_root)
     entries = list(_scan_entries(repo_root, settings))
@@ -172,6 +183,7 @@ def iter_records(repo_root: str | Path, settings) -> Iterator[tuple[ScanEntry, F
     options["indexes"] = _build_indexes(
         repo_root, entries, debug_on=settings.log_level == "DEBUG"
     )
+    options["nx_projects"] = discover_nx_projects(repo_root, entries)
     for entry in entries:
         record = executor._parse_entry(entry.path, str(repo_root), options)
         if record is not None:
@@ -192,7 +204,7 @@ class _ConfigSummary:
         self.dep_total = self.dep_prod = self.dep_dev = 0
         self.captured_documents = 0
 
-    def add(self, md: dict) -> None:
+    def add(self, md: dict[str, Any]) -> None:
         self.by_type[md.get("category", "other")] = self.by_type.get(md.get("category", "other"), 0) + 1
         # A ``format`` marks a data document captured in full (its content serialized, e.g. as
         # TOON) rather than reduced to a summary. Format-neutral: any full-capture parser sets
@@ -215,7 +227,7 @@ class _ConfigSummary:
             self.services.update(dc.get("services", []))
             self.ports.update(dc.get("exposedPorts", []))
 
-    def result(self, total: int) -> dict:
+    def result(self, total: int) -> dict[str, Any]:
         return {
             "totalConfigFiles": total,
             "capturedDataDocuments": self.captured_documents,
@@ -234,7 +246,7 @@ class _ConfigSummary:
 def _assemble(
     repo_root: Path,
     records: Iterator[tuple[str, FileRecord]],
-    sink,
+    sink: Any,
     *,
     statement_text_limit: int = 0,
     max_statement_parts: int = 0,
@@ -242,7 +254,7 @@ def _assemble(
     skips: dict[str, int] | None = None,
     debug_on: bool = False,
     progress: Callable[[int, int], None] | None = None,
-    summary_out: dict | None = None,
+    summary_out: dict[str, Any] | None = None,
 ) -> ProjectMetaData:
     """Stream (language, record) pairs to the sink and accumulate projectMetaData.
 
@@ -333,10 +345,10 @@ def _assemble(
 
 
 def run(
-    repo_root: str | Path, settings, sink,
+    repo_root: str | Path, settings: Settings, sink: Any,
     *,
     progress: Callable[[int, int], None] | None = None,
-    summary_out: dict | None = None,
+    summary_out: dict[str, Any] | None = None,
 ) -> ProjectMetaData:
     """Full analysis to a sink (parallel) → assembled projectMetaData.
 
@@ -358,7 +370,8 @@ def run(
         )
     jobs = settings.jobs if settings.jobs and settings.jobs > 0 else (os.cpu_count() or 1)
     indexes = _build_indexes(repo_root, entries, jobs, debug_on=debug_on)
-    records = executor.parse_entries(entries, repo_root, settings, indexes)
+    nx_projects = discover_nx_projects(repo_root, entries)
+    records = executor.parse_entries(entries, repo_root, settings, indexes, nx_projects)
     meta = _assemble(
         repo_root, records, sink, statement_text_limit=settings.statement_text_limit,
         max_statement_parts=settings.max_statement_parts,
@@ -370,7 +383,7 @@ def run(
     return meta
 
 
-def run_inprocess(repo_root: str | Path, settings, sink) -> ProjectMetaData:
+def run_inprocess(repo_root: str | Path, settings: Settings, sink: Any) -> ProjectMetaData:
     """Full analysis to a sink, **sequential and in-process** (no spawn pool) — the
     server `/api/analyze` path, where file lists are small and per-request pool
     startup would dominate."""
@@ -380,6 +393,7 @@ def run_inprocess(repo_root: str | Path, settings, sink) -> ProjectMetaData:
     entries = list(_scan_entries(repo_root, settings, report))
     options = executor._options(settings)
     options["indexes"] = _build_indexes(repo_root, entries, debug_on=debug_on)
+    options["nx_projects"] = discover_nx_projects(repo_root, entries)
 
     def gen() -> Iterator[tuple[str, FileRecord]]:
         for entry in entries:
