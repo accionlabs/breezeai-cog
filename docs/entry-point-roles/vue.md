@@ -12,7 +12,7 @@ Parser: `src/breezeai_cog/parsers/typescript_vue/` (`routes.py` route configs, `
 | `{ path, children }` (no component) | Wiring | statement stays plain; `path` prefixes the children | No handler of its own |
 | `{ path, component, children }` with a child `path: ''` | Wiring | statement stays plain; prefix for the children | A layout: a child always fills its `<router-view>` |
 | `{ path, component, children }` with no empty-path child | Binding (and wiring for the children) | `route`, `page`, `handler` = component | Its own URL shows it with an empty outlet |
-| `{ path, redirect }` (no component) | None | — | An alias; no handler |
+| `{ path, redirect }` (no component) | Outbound | `route`, `routeKind: navigation`, `framework: vue`, `endpoint` = target path — `'/x'` and `{ path: '/x' }` without query string or fragment; `{ name }` is the full path of the one route of this file with that name; empty for a function, a relative path, a variable or an unknown / duplicate name. No `handler` | Sends the user to another page; no handler of its own. A route with a component *and* a redirect is a page only (its default child) |
 | `beforeEnter` on a route | Guard | names in `guards` of that route and of its child routes (after `beforeEach`, parent first) | Runs before its page; entering a child enters its parents first |
 | `router.beforeEach(...)` | Guard | — | Runs before every page |
 | `fetch` / `axios` calls | Outbound | `api_call` | |

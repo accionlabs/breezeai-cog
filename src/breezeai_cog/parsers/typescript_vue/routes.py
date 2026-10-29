@@ -8,12 +8,16 @@ config-object array:
       { path: '/settings', component: Settings, children: [
         { path: 'profile', component: Profile },                            // -> /settings/profile
       ]},
-      { path: '/', redirect: '/users' },                                     // skipped
+      { path: '/', redirect: '/users' },                                     // navigation
     ]
 
 Emits ``semanticType="route"`` statements (``routeKind="page"``). Nested ``children``
 paths join onto the parent. Routes are parented to the file (route config, not handler
-methods), mirroring the Angular/React detectors.
+methods), mirroring the Angular/React detectors. A route with a ``redirect`` and no component
+of its own is a ``routeKind="navigation"`` record — the same model as Angular's ``redirectTo``:
+``endpoint`` is the redirect *target* (a ``/``-path without its query or fragment, a
+``{ path }`` object's path, or the unique route a ``{ name }`` object names; empty otherwise),
+and it has no handler.
 
 Two Vue-specific differences from the Angular detector this borrows from:
   * A Vue route object routinely carries a top-level ``name`` — so ``name`` is NOT an
@@ -32,10 +36,12 @@ from ...emit import file_id
 from ..additive import DetectContext, Detection, Detector, Gate, register_detector
 from ..emits import Emit
 from ..treesitter import entry_text, node_text
+from ..typescript.navigation import literal
 
 # Dynamic-import target: ``() => import('./views/Reports.vue')`` -> ``./views/Reports.vue``
 # (an import specifier is a resolvable link; falling back to it beats honest-null here).
 _IMPORT_RE = re.compile(r"""import\(\s*['"]([^'"]+)['"]""")
+_QUERY_OR_FRAGMENT_RE = re.compile(r"[?#]")
 
 
 def _all(node: Node, typ: str) -> list[Node]:
@@ -230,34 +236,110 @@ def _has_empty_path_child(children: Node | None, source: bytes) -> bool:
     return False
 
 
+#: Route name → full path of the one route with that name in this file; ``None`` when the name
+#: is declared more than once or the route's own path is not a literal, so no single page is
+#: meant (an ancestor's path is composed as the page record composes it).
+_RouteNames = dict[str, str | None]
+_NO_NAMES: _RouteNames = {}
+
+
+def _collect_names(elem: Node, prefix: str, source: bytes, names: _RouteNames) -> None:
+    """Record ``name`` → full path of this route object and, recursively, of its children."""
+    if elem.type != "object":
+        return
+    pairs = _pairs(elem, source)
+    path = pairs.get("path")
+    if path is None:
+        return
+    full = _join(prefix, _string_val(path, source))
+    name = pairs.get("name")
+    if name is not None and name.type == "string":
+        key = _string_val(name, source)
+        names[key] = full if key not in names and path.type == "string" else None
+    children = pairs.get("children")
+    if children is not None and children.type == "array":
+        for child in children.named_children:
+            _collect_names(child, full, source, names)
+
+
+def _route_names(arrays: list[Node], objects: list[Node], source: bytes) -> _RouteNames:
+    """Names of the routes in this file's route arrays and single route-object modules."""
+    names: _RouteNames = {}
+    for elem in [e for arr in arrays for e in arr.named_children] + objects:
+        _collect_names(elem, "", source, names)
+    return names
+
+
+def _absolute_target(text: str | None) -> str | None:
+    """A redirect target written as an absolute path, normalized like a page endpoint and without
+    its query string or fragment (page data, not part of the address). A relative one depends on
+    the parent route: empty."""
+    if text is None or not text.startswith("/"):
+        return None
+    return _join("", _QUERY_OR_FRAGMENT_RE.split(text, maxsplit=1)[0])
+
+
+def _redirect_endpoint(value: Node, source: bytes, names: _RouteNames) -> str | None:
+    """Where a ``redirect`` sends the user, as a full route path: ``'/home'``, ``{ path:
+    '/home' }``, or ``{ name: 'home' }`` (the path of the one route with that name). A function,
+    a relative path, a variable or anything else → ``None`` (never a guess)."""
+    if value.type != "object":
+        return _absolute_target(literal(value, source))
+    pairs = _pairs(value, source)
+    target, name = pairs.get("path"), pairs.get("name")
+    if target is not None:
+        return _absolute_target(literal(target, source))
+    if name is not None and name.type == "string":
+        return names.get(_string_val(name, source))
+    return None
+
+
+def _redirect_record(elem: Node, source: bytes, path: str, names: _RouteNames,
+                     redirect: Node) -> Emit:
+    """The navigation record of a pure redirect route: no handler, its own source as ``text``."""
+    return Emit(
+        elem,
+        {
+            "semanticType": "route",
+            "endpoint": _redirect_endpoint(redirect, source, names),
+            "framework": "vue",
+            "routeKind": "navigation",
+        },
+        parent=file_id(path), text=entry_text(elem, source),
+    )
+
+
 def _emit(
     elem: Node, prefix: str, source: bytes, path: str, routes: list[Emit],
     outer: _RouterGuards = _NO_ROUTER_GUARDS, inherited: tuple[str, ...] = (),
+    names: _RouteNames = _NO_NAMES,
 ) -> None:
-    """Emit ONE route object (if it isn't a pure redirect) and recurse into its ``children``.
+    """Emit ONE route object and recurse into its ``children``: a page record for a route that
+    shows a component, a navigation record for a pure redirect.
     Shared by the array walk (``_process``) and the single-object module form. ``outer`` are the
     router's global guards: ``beforeEach`` runs before the route's ``beforeEnter``,
     ``beforeResolve`` after it (vue-router's navigation order). ``inherited`` are the ancestors'
     ``beforeEnter``: entering a child enters its parents first, so theirs run before its own.
 
-    Only a route that shows a component of its own has a record (contract §4): a path-only
-    parent ``{ path, children }`` and a layout (a component whose children include an
-    empty-path child, which always fills its outlet) are wiring — their path prefixes the
-    children and their ``beforeEnter`` guards them."""
+    A path-only parent ``{ path, children }`` and a layout (a component whose children include
+    an empty-path child, which always fills its outlet) are wiring (contract §4): no record,
+    their path prefixes the children and their ``beforeEnter`` guards them."""
     if elem.type != "object":
         return
     pairs = _pairs(elem, source)
     if "path" not in pairs:
         return
     full = _join(prefix, _string_val(pairs["path"], source))
-    # Emit only a route with a component of its own (a pure redirect is an alias with no
-    # record here, unlike Angular's redirectTo, which is a navigation record; a path-only
-    # parent is a prefix) that is not a layout. A shell with
-    # a component and a redirect (its default child) is still a page. The children are walked
-    # in every case — they are often the whole app subtree.
+    # A page is a route with a component of its own that is not a layout (a path-only parent is
+    # a prefix). A pure redirect (no component) is an outbound navigation to its target, like
+    # Angular's redirectTo. A shell with a component and a redirect (its default child) is still
+    # a page only. The children are walked in every case — they are often the whole app subtree.
     has_component = "component" in pairs or "components" in pairs
     children = pairs.get("children")
     own = _before_enter(pairs.get("beforeEnter"), source)
+    redirect = pairs.get("redirect")
+    if redirect is not None and not has_component:
+        routes.append(_redirect_record(elem, source, path, names, redirect))
     if has_component and not _has_empty_path_child(children, source):
         routes.append(Emit(
             elem,
@@ -275,15 +357,15 @@ def _emit(
         ))
     if children is not None and children.type == "array":
         for child in children.named_children:
-            _emit(child, full, source, path, routes, outer, (*inherited, *own))
+            _emit(child, full, source, path, routes, outer, (*inherited, *own), names)
 
 
 def _process(
     arr: Node, prefix: str, source: bytes, path: str, routes: list[Emit],
-    outer: _RouterGuards = _NO_ROUTER_GUARDS,
+    outer: _RouterGuards = _NO_ROUTER_GUARDS, names: _RouteNames = _NO_NAMES,
 ) -> None:
     for elem in arr.named_children:
-        _emit(elem, prefix, source, path, routes, outer)
+        _emit(elem, prefix, source, path, routes, outer, names=names)
 
 
 def _is_route_object(obj: Node, source: bytes) -> bool:
@@ -340,15 +422,18 @@ def detect_vue_routes(root: Node, source: bytes, path: str) -> list[Emit]:
         return []
     routes: list[Emit] = []
     router_guards = _router_guards(root, source)
-    for arr in _all(root, "array"):
-        if _is_route_array(arr, source) and not _is_children_value(arr, source):
-            _process(arr, "", source, path, routes,
-                     router_guards.get(arr.start_byte, _NO_ROUTER_GUARDS))
+    arrays = [a for a in _all(root, "array")
+              if _is_route_array(a, source) and not _is_children_value(a, source)]
     # Single route OBJECT modules (const r = {…}; export default r) — not reachable via the
     # array walk. Elements referenced by identifier inside a routes array are skipped there
     # (not objects), and captured here from their own declaration, so there is no double-emit.
-    for obj in _module_route_objects(root, source):
-        _emit(obj, "", source, path, routes)
+    objects = _module_route_objects(root, source)
+    names = _route_names(arrays, objects, source) if b"redirect" in source else _NO_NAMES
+    for arr in arrays:
+        _process(arr, "", source, path, routes,
+                 router_guards.get(arr.start_byte, _NO_ROUTER_GUARDS), names)
+    for obj in objects:
+        _emit(obj, "", source, path, routes, names=names)
     return routes
 
 
