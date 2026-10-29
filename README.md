@@ -13,6 +13,7 @@ Python reimplementation of `breezeai-code-ontology-generator`.
 - **[Extending Capture](skills/extend-capture/SKILL.md)** — add a new language, framework, or cross-cutting detector (start here); reliability-first discipline.
 - **[Parser Reference](docs/parser-reference.md)** — the mechanical step-by-step for building a parser.
 - **[Parser Review & Gap Analysis Guide](docs/parser-review-guide.md)** — how to review a parser and write a gap analysis report.
+- **[Gap Review](skills/gap-review/SKILL.md)** — the procedure an engineer or agent runs to apply that guide, with a capture-check script.
 - **[Template Capture](docs/template-capture.md)** — how `.html` / `.vue` / `.cshtml` / `.aspx` are handled, and why they are skipped by default.
 
 ## Supported languages & frameworks

@@ -127,13 +127,24 @@ split, imports/functions/classes/statements, ids, registration, tests) is in
 apply throughout: resolve imports to real repo-relative paths (or leave them external), and
 never invent a call target you cannot resolve.
 
+A new language also needs, from its first commit:
+- the `run_additive(<language>, …)` call at the end of its `extract`, and the language added to
+  `HOOKED_LANGUAGES` in `parsers/additive.py` — so framework detectors can be added later
+  without touching the language parser again;
+- if it has a `build_index`, the `collect_additive` / `resolve_additive` calls and the language
+  added to `INDEX_HOOKED_LANGUAGES`, so detectors can register facts from other files (§3C).
+
+Keep the `schema_version` the parser inherits from `BaseParser`: `core/registry.py` refuses to
+register a parser whose `schema_version` is not the current `SCHEMA_VERSION`.
+
 If the file type you are adding is **markup/view** (a template: `.hbs`, `.jsp`, `.svelte`,
 `.twig`, …), also declare `template_extensions` on the parser — the subset of `extensions`
 that is markup rather than code. Those files are skipped at scan time unless the caller
 passes `--capture-templates`, which is what keeps markup from flooding the graph. Declare
 only the markup half: a parser owning both (WebForms: `.cs` + `.aspx`; Vue: `.ts` + `.vue`)
 must keep capturing its code half. Skip this and your new template type silently
-re-pollutes every graph.
+re-pollutes every graph. Add the new type to [`docs/template-capture.md`](../../docs/template-capture.md)
+("What counts as a template", "Which stacks need the flag").
 
 ### 3B. Server-framework parser (one per file)
 Subclass the base language parser, sniff the framework cheaply in `claims`, set a
@@ -152,6 +163,13 @@ the handler and lets the parser's `handler_locator` (TypeScript) find it — nev
 Write the role table (in
 [`docs/entry-point-roles/`](../../docs/entry-point-roles/README.md)) and its
 `tests/unit/test_roles_<framework>.py` before the detection code.
+
+Guards need the same care as addresses. A middleware, filter or decorator that runs before a
+handler goes into `guards` by name; `authRequired: true` is set **only** when it is the
+framework's own check and it certainly rejects anonymous calls. An optional or skipped check, an
+"allow anonymous" or open-access marker, the app's own `requireAuth` helper, or an option that
+can't be read makes no claim — leave `authRequired` unset. (Examples: the Express and Ktor role
+tables.)
 
 ### 3C. Internal-framework detector (additive — composes on top)
 An internal framework appears *inside* files owned by other frameworks, so it must never be
@@ -223,12 +241,53 @@ node types; ~fifteen relationship types; ~a dozen plain attributes per node; nod
 connection-counts under ~a hundred; descriptive text as one readable block, not many
 bookkeeping keys.
 
-Two schema boundaries to know before adding a field: some node types are **open** (extra
-plain attributes are kept), others are **restricted** (only documented fields survive
-ingestion, so a brand-new field is silently dropped unless the backend is updated in step —
-a cross-service change to raise, not assume). And reusing an existing statement *kind* (a new
-value in an existing category) is cheap, whereas a new node type or relationship type is a
-schema-wide commitment — ask.
+### What the backend keeps, and what agents can find
+
+A value counts only if it survives ingest and agents can reach it. Three rules (full table:
+[`docs/architecture/graph-mapping.md` §11](../../docs/architecture/graph-mapping.md#11-checklist-adding-a-field-or-value)):
+
+| You are adding… | What happens |
+|---|---|
+| A new field on `File` or `Class` | Kept — these nodes are **open**. Prefer `metadata` for anything nested. |
+| A new field on `Function` or `Statement` | **Silently dropped** — these nodes are **allow-listed**. It needs a backend allow-list change in the same release: a cross-service change to raise, not assume. Unit tests and schema validation pass either way. |
+| A new `semanticType` value | Stored and filterable at once — but it is still a new value: it needs a decision (§2) and an entry in the [Target Spec](https://accionlabs.atlassian.net/wiki/spaces/~5cfa0cffd898610dbf3bacf1/pages/2483453956/Code+Ontology+Parser+Target+Spec+Neo4j+Graph+Model). |
+| A new node type or relationship type | A schema-wide commitment — ask. |
+
+Only `File`, `Class` and `Function` are embedded; **statements are never embedded**. So decide
+by how agents will look for the value:
+
+```
+by meaning ("where is checkout handled?") → on File / Class / Function (a field or metadata)
+by exact field (routes, endpoints)        → a Statement (filterable, returned as context)
+both                                      → a summary on the parent's metadata + statements
+```
+
+For example, moving enum members from `Class.metadata` to `enum_member` statements kept them
+filterable but made the enum class rank lower for "Status enum active inactive" — the member
+names were no longer in its embedded text.
+
+**Approved values.** The Target Spec is the list of approved values. Use only those; a value
+that is not there is a new value (§2). A value belongs to its context — a `method` belongs to a
+`routeKind` (`rpc` → `RPC`) — so reusing an approved value under a new framework, in the same
+context, is not a new value.
+
+### Statement rules
+
+The full list is in [`docs/architecture/statement-model.md` §9](../../docs/architecture/statement-model.md#9-rules-for-parser-authors).
+The ones most often broken:
+
+- **`nodeType` is the raw tree-sitter `node.type`** of the node the statement came from, in the
+  file's own (host-language) tree. A detection with no node of its own there — a route built
+  from an annotation, a config entry, a file name — uses `synthetic`. Never invent a label
+  (`graphql_field`, `page_directive`). For an embedded DSL (SQL in a string, SDL in a
+  `` gql`…` `` template) use the host node that wraps it, never the embedded grammar's type.
+  The kind of thing is carried by `semanticType` / `routeKind`, not by `nodeType`.
+- **No `semanticType` on a control-flow statement** (`if`, `for`, `try`, …).
+- **DTOs as written.** `requestDTO` / `responseDTO` are the declared type as written in the
+  source language — `List<OrderDto>`, not `OrderDto` — with only the wrappers that are not
+  payload removed (async results such as `Promise<T>` / `Task<T>`, HTTP results such as
+  `ResponseEntity<T>`). The exact list is in statement-model §1.
+- **Don't truncate text in the parser;** splitting happens at output.
 
 ## 6. Engineering conventions
 
@@ -239,7 +298,11 @@ schema-wide commitment — ask.
   and the id helpers in `emit` — reuse them, don't fork. Never bake framework-specific
   logic into a base language parser.
 - **Fail loudly at boundaries;** never silently swallow exceptions. Avoid magic
-  numbers/hard-coded values — put limits in configuration (`config.py`).
+  numbers/hard-coded values — put limits in configuration (`config.py`). A parser already runs
+  under the existing ones: `parse_timeout` (per-file tree-sitter timeout; pass
+  `ctx.parse_timeout_micros` when you re-parse an embedded fragment), `max_file_size` (larger
+  files are never scanned) and `--max-concat-depth` (how deep a `+` chain is folded into an
+  endpoint before it is left null). Reuse them before adding a new limit.
 - **Design for scale without gold-plating.** Capture streams NDJSON so a large repo never
   sits fully in memory; parsing is per-file and parallelized, so keep parsers free of
   cross-file mutable state (use the repo-wide index hook for shared data, returning a
@@ -268,6 +331,24 @@ uv run breezeai-cog repo-to-json-tree --repo <path> --out <dir>
 
 Note: the parallel pool needs a real `__main__` — run via the CLI or a script file, not a
 REPL/`python -c`/stdin (or pass `--jobs 1`).
+
+### Before you open a PR
+
+1. **Update the docs that list what cog supports:**
+
+   | You added… | Update |
+   |---|---|
+   | A language, framework or detector | The README's "Supported languages & frameworks" table (it is a snapshot of `breezeai-cog capabilities` and is not generated) |
+   | Entry points | The framework's role table in `docs/entry-point-roles/` and a link to it in that folder's `README.md` |
+   | A template type | `docs/template-capture.md` (§3A) |
+   | A field or value | The Target Spec, and the backend allow-list when §5 says so |
+
+2. **Review your own change** with [`docs/parser-review-guide.md`](../../docs/parser-review-guide.md)
+   Part A (the `gap-review` skill runs it), and fix what it finds before asking for review.
+3. **Commit and PR conventions.** Commits use `type(scope): what is now true`, scoped by
+   framework or area — e.g. `fix(express): .all() before other verbs in a route() chain is their
+   middleware`, `docs(statement-model): …`, `feat(go): …`. CI rejects a PR whose title has no
+   Jira id: include `BREEZEAI-<number>` in the title.
 
 ## 8. Directory structure
 
@@ -313,6 +394,13 @@ src/breezeai_cog/parsers/
 - [ ] Ids come only from the `emit` helpers, one shared `seen_ids` set per file, so a
       detector's statements attach to the parent the base parser assigned.
 - [ ] Statements are flat and linked to their owner; nesting is expressed by line ranges.
+- [ ] Every `nodeType` is a real tree-sitter `node.type` from the host tree, or `synthetic`; no
+      control-flow statement has a `semanticType`; DTOs are the declared type as written (§5).
+- [ ] No new field on `Function` / `Statement` without a matching backend allow-list change;
+      every emitted value is in the Target Spec or was approved; content agents must find by
+      meaning is on File / Class / Function, not only on a Statement (§5).
+- [ ] `authRequired` is set only by a framework check that certainly rejects anonymous calls
+      (§3B).
 - [ ] The right category was chosen (§3): a framework is a one-per-file parser only when no
       other framework's file can hold its entry points; otherwise it is an additive detector
       that does not displace the file's owner.
@@ -324,6 +412,8 @@ src/breezeai_cog/parsers/
 - [ ] Verified on unit tests **and** dogfooded on a real repository; the suite stays green
       and every emitted record validates against the schema and the entry-point contract
       (`parsers/contract.py`; role tests through `analyze_files` fail on a contract error).
+- [ ] Support docs updated, the change self-reviewed with the parser review guide, and the PR
+      title carries a `BREEZEAI-<number>` id (§7).
 
 ## 10. Explaining a problem or fix, and writing docs
 
