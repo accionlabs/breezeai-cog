@@ -99,16 +99,23 @@ def match_api(
     m = _DOTNET_VERBS.get(m, m)  # GetStringAsync / PostAsJsonAsync … → the verb they send
     if m not in _HTTP_VERBS:
         return None
+    own = callee.removeprefix("this.")
+    known_client = bool(http_client_ids) and (
+        callee in http_client_ids or own in http_client_ids
+        or own.split(".", 1)[0] in http_client_ids
+    )
+    if language == "php" and not any(
+        hint in _receiver_text(low) for hint in ("http", "guzzle", "curl", "restclient", "apiclient")
+    ) and not known_client:
+        return None
     if m == "request" and method != "request":
         # Capitalized Request (...) is a constructor or model type, not an outbound HTTP request call
         return None
     is_client = any(hint in _receiver_text(low) for hint in _CLIENT_HINTS)
-    if not is_client and http_client_ids:
+    if not is_client and known_client:
         # names are original-case identifiers; the receiver is the segment before the first dot
         # (``service.get`` → ``service``), or the whole callee for a bare call (``request``).
-        own = callee.removeprefix("this.")  # this.client.get → client
-        is_client = (callee in http_client_ids or own in http_client_ids
-                     or own.split(".", 1)[0] in http_client_ids)
+        is_client = True
     if is_client:
         if any(mk in low for mk in _DB_CHAIN_MARKERS):
             return None  # an ORM query chain (e.g. session.query(...).filter(...).delete())
