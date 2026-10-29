@@ -68,7 +68,7 @@ def test_inventory_in_run_order() -> None:
                        "graphql-client",
                        "graphql-resolver-modules", "vue-routes", "react-routes",
                        "nextjs-routes", "nextjs-pages", "vue-navigation", "angular-navigation",
-                       "react-navigation"],
+                       "react-navigation", "angularjs"],
     }
 
 
