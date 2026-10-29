@@ -49,6 +49,9 @@ EVENTBUS: dict[str, SemanticType] = {
 #: delay in milliseconds) is the ``endpoint`` when it is a number literal; anything else is
 #: unknown → empty.
 TIMERS = {"setTimer": "TIMER", "setPeriodic": "PERIODIC"}
+#: Deployment calls → ``verticle_deploy``: 3.x+ ``deployVerticle`` and the 2.x ``Container``
+#: family (``deployWorkerVerticle``, ``deployModule``); the first argument names what starts.
+DEPLOYS = {"deployVerticle", "deployWorkerVerticle", "deployModule"}
 HTTP_VERBS = {"get", "post", "put", "delete", "patch", "options", "head"}
 
 #: Service proxies: the builder ``setAddress(...)`` is called on decides the side. The service
@@ -85,10 +88,26 @@ ROUTE_RECEIVERS = {"route", "rm", "routematcher"}
 
 
 def is_route_receiver(obj_l: str) -> bool:
-    """Whether a (lower-cased) receiver denotes a Router / RouteMatcher."""
+    """Whether a (lower-cased) receiver denotes a Router / RouteMatcher by its name."""
     return bool(obj_l) and (
         "router" in obj_l or "routematcher" in obj_l or obj_l in ROUTE_RECEIVERS
     )
+
+
+#: A variable, field or parameter declared with a router type, whatever its name:
+#: ``RouteMatcher routes = …`` / ``private Router api;`` / ``(Router r)``, plus an untyped
+#: ``def m = new RouteMatcher()`` (Groovy) or ``var r = Router.router(vertx)`` (Java 10+).
+_ROUTER_TYPED = re.compile(rb"\b(?:RouteMatcher|Router)\s+(\w+)\s*[=;,)]")
+_ROUTER_ASSIGNED = re.compile(rb"\b(\w+)\s*=\s*(?:new\s+RouteMatcher\s*\(|Router\.router\s*\()")
+
+
+def router_vars(source: bytes) -> frozenset[str]:
+    """Names declared as a ``Router`` / ``RouteMatcher`` in this file, so a route call on
+    ``routes`` or ``a`` counts by its declared type, not only by the receiver's name."""
+    if b"Router" not in source and b"RouteMatcher" not in source:
+        return frozenset()
+    return frozenset(n.decode() for rx in (_ROUTER_TYPED, _ROUTER_ASSIGNED)
+                     for n in rx.findall(source))
 
 
 def is_bus_receiver(obj: str) -> bool:
@@ -107,16 +126,19 @@ def classify_call(
     *,
     route_scope: bool = False,
     service_vars: dict[str, str] | None = None,
+    routers: frozenset[str] = frozenset(),
 ) -> tuple[SemanticType, str | None, str | None, str | None] | None:
     """Map one call to ``(semanticType, method, endpoint, routeKind)`` or ``None``.
 
     ``path``      the first string-literal argument, already rendered by the caller (Java:
                   literal text; Groovy: GString → ``{name}`` placeholders).
-    ``first_arg`` raw text of the first argument — the fallback name for ``deployVerticle``
+    ``first_arg`` raw text of the first argument — the fallback name for a :data:`DEPLOYS` call
                   (event-bus addresses never fall back to it: unresolved → empty).
     ``obj``       the receiver text (``""`` for a bare, unqualified call).
     ``service_vars`` variable → service-proxy builder type (:func:`service_builder_vars`), so a
                   ``setAddress`` on a builder held in a variable still finds its side.
+    ``routers``   names this file declares as a ``Router`` / ``RouteMatcher``
+                  (:func:`router_vars`): such a receiver is a router whatever its name.
     ``route_scope`` marks a *bare* HTTP-verb call (no receiver) that the caller has
                   determined is lexically inside a RouteMatcher scope — the Vert.x 2.x
                   ``rm.with { get('/x', h) }`` idiom — so it should still count as a route.
@@ -126,6 +148,7 @@ def classify_call(
     starts with a placeholder. The receiver check (or ``route_scope``) is the real signal.
     """
     obj_l = obj.lower()
+    is_router = is_route_receiver(obj_l) or router_name(obj) in routers
 
     if method in EVENTBUS and is_bus_receiver(obj):
         # The address is resolved or empty — never the symbol or a {…} placeholder (Q15): a
@@ -134,16 +157,16 @@ def classify_call(
     if method in TIMERS:
         delay = (first_arg or "").replace("_", "").rstrip("lL")
         return "timer", TIMERS[method], delay if delay.isdigit() else None, None
-    if method == "deployVerticle":
+    if method in DEPLOYS:
         return "verticle_deploy", None, path or first_arg, None
     if method == "setAddress":
         side = _service_side(obj, service_vars)
         if side is None:
             return None
         return side, None, _known_path(path) if path else None, None
-    if method in HTTP_VERBS and path and (is_route_receiver(obj_l) or route_scope):
+    if method in HTTP_VERBS and path and (is_router or route_scope):
         return "route", method.upper(), _known_path(path), "route"
-    if method == "route" and path and is_route_receiver(obj_l):
+    if method == "route" and path and is_router:
         return "route", None, _known_path(path), "route"
     return None
 
@@ -332,6 +355,7 @@ def handler_info(
     - Inline lambda / closure / anonymous ``new Handler<>() {…}``: no name; its line.
     - ``this::h`` / ``this.&h``: ``h``, line of its declaration in this file (``methods``).
     - ``other::h`` / a handler variable: the name; declared elsewhere, so no line.
+    - ``this`` (the class itself implements ``Handler``): ``handle``, its line in this file.
     - Anything else (a factory call ``Handler.create()``): nothing — honest-null."""
     if arg is None:
         return None, None
@@ -346,6 +370,8 @@ def handler_info(
         if not name.isidentifier():
             return None, None
         return name, methods.get(name) if receiver.strip() == "this" else None
+    if arg.type == "this" or (arg.type == "identifier" and node_text(arg, source) == "this"):
+        return "handle", methods.get("handle")
     if arg.type == "identifier":
         return node_text(arg, source), None
     return None, None
