@@ -114,12 +114,24 @@ def test_children_only_parent_prefixes_children(analyze_files) -> None:
     assert [r.handler for r in _at(st, "/admin/users")] == ["AdminUsers"]
 
 
-def test_redirect_is_none(analyze_files) -> None:
+def test_redirect_is_not_an_entry_point(analyze_files) -> None:
     st = _routes(
         analyze_files,
         "  { path: '/', redirect: '/users' },\n  { path: '/users', component: UserList },\n",
     )
     assert [r.endpoint for r in _eps(st)] == ["/users"]
+
+
+def test_redirect_is_outbound_navigation(analyze_files) -> None:
+    # BREEZEAI-1369: a redirect is recorded as a link to its target, but is not an entry point.
+    st = _routes(
+        analyze_files,
+        "  { path: '/', redirect: '/users?x=1' },\n  { path: '/users', component: UserList },\n",
+    )
+    [nav] = [s for s in st if s.path == ROUTER and s.routeKind == "navigation"]
+    assert (nav.semanticType, nav.framework, nav.endpoint) == ("route", "vue", "/users")
+    assert (nav.handler, nav.handlerPath) == (None, None)
+    assert not is_entry_point(nav)
 
 
 def test_before_enter_is_guard(analyze_files) -> None:
