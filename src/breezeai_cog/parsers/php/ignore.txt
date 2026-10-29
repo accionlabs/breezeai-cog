@@ -1,0 +1,9 @@
+# PHP per-language ignore defaults (layer 2) — generated PHP that is not source.
+# `vendor/` (Composer) is already in the universal set (core/default_ignores.txt).
+# Laravel: compiled Blade views and the framework's cached manifests.
+storage/framework/
+bootstrap/cache/
+# Symfony: compiled container, routing and Twig caches.
+var/cache/
+# CodeIgniter 4: the framework's cache and compiled output.
+writable/cache/
