@@ -192,6 +192,55 @@ Route::prefix('/admin')->group(function () {
     assert sum(statement.semanticType is None for statement in record.statements) == 1
 
 
+def test_php_guzzle_file_client_is_detected_inside_laravel_route_closure() -> None:
+    source = """<?php
+use GuzzleHttp\\Client;
+use Illuminate\\Support\\Facades\\Route;
+
+$c = new Client();
+
+Route::get('/h', function () use ($c) {
+    $c->get('https://h.example.com');
+});
+"""
+    record = _parse(LaravelParser(), source, path="routes/web.php")
+
+    routes = [s for s in record.statements if s.semanticType == "route"]
+    calls = [s for s in record.statements if s.semanticType == "api_call"]
+    assert [(route.method, route.endpoint) for route in routes] == [("GET", "/h")]
+    assert [(call.method, call.endpoint, call.text) for call in calls] == [
+        ("GET", "https://h.example.com", "$c->get('https://h.example.com');")
+    ]
+    assert calls[0].parentId == "routes/web.php#<anonymous>@7"
+
+
+def test_php_guzzle_client_detection_supports_short_names_and_fully_qualified_constructors() -> None:
+    source = """<?php
+use GuzzleHttp\\Client as G;
+
+$c = new G();
+$c->post('https://one.example');
+$d = new \\GuzzleHttp\\Client();
+$d->get('https://two.example');
+"""
+    record = _parse(PhpParser(), source)
+    calls = [s for s in record.statements if s.semanticType == "api_call"]
+    assert [(call.method, call.endpoint) for call in calls] == [
+        ("POST", "https://one.example"),
+        ("GET", "https://two.example"),
+    ]
+
+
+def test_php_unrelated_object_get_is_not_an_api_call() -> None:
+    source = """<?php
+class Unrelated {}
+$x = new Unrelated();
+$x->get('https://not-http.example');
+"""
+    record = _parse(PhpParser(), source)
+    assert not any(statement.semanticType == "api_call" for statement in record.statements)
+
+
 def test_php_laravel_routes_capture_name_and_chained_middleware() -> None:
     source = """<?php
 use Illuminate\\Support\\Facades\\Route;

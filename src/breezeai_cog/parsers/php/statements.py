@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterator
+import re
 
 from tree_sitter import Node
 
@@ -19,6 +20,60 @@ _CALL_TYPES = {
     "scoped_call_expression",
 }
 _SCOPE_BARRIERS = NESTED_SCOPES
+
+
+def collect_http_client_ids(root: Node, source: bytes) -> frozenset[str]:
+    """Return PHP variables proven to contain a Guzzle Client.
+
+    The names are deliberately collected from constructors and typed parameters only;
+    method names such as ``get`` are not evidence that an arbitrary object is HTTP-capable.
+    """
+    aliases: set[str] = set()
+    for node in _walk_nodes(root):
+        if node.type != "namespace_use_declaration":
+            continue
+        text = node_text(node, source).strip().removeprefix("use ").rstrip(";").strip()
+        for item in re.split(r"\s*,\s*", text):
+            item = item.strip()
+            if "{" in item:
+                prefix, members = item.split("{", 1)
+                if prefix.strip().rstrip("\\").lower() != "guzzlehttp":
+                    continue
+                for member in members.rstrip("}").split(","):
+                    parts = member.strip().split()
+                    if parts and parts[0].lower() == "client":
+                        aliases.add(parts[-1] if len(parts) >= 3 and parts[-2].lower() == "as" else "Client")
+            else:
+                parts = item.split()
+                if parts and parts[0].lstrip("\\").lower() == "guzzlehttp\\client":
+                    aliases.add(parts[-1] if len(parts) >= 3 and parts[-2].lower() == "as" else "Client")
+
+    ids: set[str] = set()
+    for node in _walk_nodes(root):
+        if node.type == "object_creation_expression":
+            class_node = next(iter(node.named_children), None)
+            if class_node is None:
+                continue
+            class_name = node_text(class_node, source).lstrip("\\")
+            proven = class_name.lower() == "guzzlehttp\\client" or class_name in aliases
+            if proven and node.parent is not None and node.parent.type == "assignment_expression":
+                left = node.parent.child_by_field_name("left")
+                if left is not None:
+                    ids.add(node_text(left, source))
+        elif node.type in {"simple_parameter", "property_promotion_parameter"}:
+            type_node = node.child_by_field_name("type")
+            name_node = node.child_by_field_name("name")
+            if type_node is not None and name_node is not None:
+                type_name = node_text(type_node, source).lstrip("?").lstrip("\\")
+                if type_name.lower() == "guzzlehttp\\client" or type_name in aliases:
+                    ids.add(node_text(name_node, source))
+    return frozenset(ids)
+
+
+def _walk_nodes(node: Node) -> Iterator[Node]:
+    yield node
+    for child in node.named_children:
+        yield from _walk_nodes(child)
 
 
 def _walk_in_scope(node: Node) -> Iterator[Node]:
