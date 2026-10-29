@@ -229,10 +229,12 @@ def _has_empty_path_child(children: Node | None, source: bytes) -> bool:
 def _redirect_target(node: Node, prefix: str | None, source: bytes, index: object) -> str | None:
     """Where a ``redirectTo`` points, as a full route path. A leading ``/`` is absolute (used
     as-is); anything else is relative to the parent route and composes with ``prefix`` like a
-    child ``path``. A function form or an unresolvable constant → ``None`` (never a guess)."""
+    child ``path``. A query string or fragment is page data, not part of the address, so it is
+    dropped. A function form or an unresolvable constant → ``None`` (never a guess)."""
     target = _resolve_path(node, source, index)
     if target is None:
         return None
+    target = re.split(r"[?#]", target, maxsplit=1)[0]
     return _join("", target) if target.startswith("/") else _compose(prefix, target)
 
 
