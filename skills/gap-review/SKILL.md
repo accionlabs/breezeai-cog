@@ -55,8 +55,8 @@ a wrong finding is worse than a missing one.
 
 | Mode | When | Guide sections |
 |---|---|---|
-| **Change review** | A branch or PR that adds or changes a parser or detector | §1–§6, plus §8 as a before/after diff on one repo per affected language |
-| **Gap analysis** | An existing language/framework, or "what does cog miss in this repo" | §2–§8 in full (§1 only if there is a diff), and the full Part B report |
+| **Change review** | A branch or PR that adds or changes a parser or detector | §1–§6, plus §8 as a before/after diff on one repo per affected language; Step 9 |
+| **Gap analysis** | An existing language/framework, or "what does cog miss in this repo" | §2–§8 in full (§1 only if there is a diff), Step 9, and the full Part B report |
 
 Before starting, write down: the parser(s) and frameworks in scope, the cog commit, the
 repositories (name, commit, stack, size) and the framework versions. That is the report's
@@ -137,6 +137,64 @@ contract error. Then:
 
 For a change review, capture the same repo on `main` and on the branch and diff the two; every
 difference must be intended. For anything cross-file, also compare `--jobs 1` with `--jobs 2`.
+
+**Step 9 — Architecture conformance ([architecture §17](../../docs/architecture.md#17-decisions-at-a-glance)).**
+Go through every row of "Decisions at a glance" and mark it **checked** (with the evidence),
+**not applicable** (say why), or **violated** (a Structural issue). Don't skip rows: new
+decisions are added to that table, and walking it is how the review keeps up with them.
+
+Most rows were already checked by an earlier step — cite that step:
+
+| Rows | Checked in |
+|---|---|
+| Parser-specific code in its own directory | Step 1 |
+| tree-sitter for every language (no hand-rolled or regex parser for a language that has a grammar); framework parsers subclass; cross-cutting libraries are additive; detectors self-register, return emits, run through one runner; facts are registered; shared API / DB / query detection; route emitters skip fixtures | Steps 2–3 |
+| One parser per file by `claims` + `priority` | Step 4 |
+| Fixed pass budget; one parse per file | Step 6 |
+| Flat statements, `nodeType` / `semanticType` separate, unknown values omitted (left `None`, never `""`), the `capture_statements` gate, construct roles, honest-null, open vs allow-listed nodes, reused vocabulary, `SCHEMA_VERSION` | Step 3 (extend-capture checklist) |
+| Scan, Execution (process pool with `spawn`), Output streaming, Server | Not applicable to a parser change unless Step 1 put `core/`, `emit/` or `server/` in scope — then review them against their section |
+
+The rows below are not covered by an earlier step. The leads find candidates; read each hit
+before calling it a violation.
+
+| Decision (section) | Violated when… | Lead |
+|---|---|---|
+| **Layering** (§15): parsers never import `core/`, `services/`, `server/`; one framework never imports another framework's package — shared code goes in a `*_common.py` module | `parsers/<a>_<x>/` imports from `parsers/<a>_<y>/`, or a parser imports a layer above it | grep `layering` |
+| **Workers share nothing** (§4.2, §4.5) | Module-level dicts / lists filled while parsing, a `global` assignment, a cache keyed by file or directory — the result then depends on which worker parsed which file. Constant tables and an empty `PARSERS = []` are fine | grep `state` |
+| **Cross-file data comes from the index** (§4.2) | Another file is read while parsing instead of through `build_index` / a registered fact. A read inside `build_index` or a fact's `collect` is fine | grep `reads` |
+| **Ambiguous index entries become empty** (§4.2) | A name that maps to two declarations resolves to the first or last one | Read each `build_index` reduce: a plain `dict[name] = …` over all files, without the collapse helpers in `index_common.py`, is a hit |
+| **Claims are a cheap substring check** (§4.3) | `claims()` parses, runs a regex over the whole source, or reads another file | Read `claims()` in `parser.py` |
+| **Every parse has a time limit** (§4.4) | An embedded fragment is re-parsed without `ctx.parse_timeout_micros` | grep `parse` |
+| **Size limits only at output, by splitting** (§4.6) | The parser cuts a statement's `text` itself, so the output split can't recover it. A cut of a derived value (a name) needs its own reason | grep `cut` |
+| **Failures are isolated per file; fail loudly** (§4.5, §14) | An exception swallowed with no log (`pass` / `continue` / `return None`), so a broken file looks like an empty one | grep `except` |
+| **Deterministic ids and output** (§8) | Output order depends on iterating a `set`, or on time / randomness — two runs of the same commit differ | grep `nondeterminism`; confirm by capturing twice and diffing |
+| **Static, read-only** (§1) | The parser runs code, starts a process or makes a network call | grep `execution` |
+| **`language` = format, `framework` = tool** (§12) | A config or data parser sets `language` to a tool (`terraform`) instead of the format (`hcl`) | `FileRecord.language` / `framework` in the capture |
+| **Database schemas outside the code contract** (§12) | DDL or Elasticsearch mappings emitted as code statements instead of going through `analyzers/` | The parser's statement kinds for `.sql` / mapping files |
+
+```bash
+P=src/breezeai_cog/parsers/<pkg>
+# layering — a layer above, or another framework's package (shared helpers are fine)
+grep -nE 'from \.\.\.?(core|services|server|cli)\b' $P/*.py
+grep -nE '^from \.\.[a-z]+_[a-z_]+' $P/*.py | grep -v _common
+# state — module-level mutable containers, globals
+grep -nE '^_?[A-Za-z_]+\s*(:[^=]+)?=\s*(\{\}|\[\]|set\(\)|dict\(\)|defaultdict\()' $P/*.py
+grep -n 'global ' $P/*.py
+# reads — another file opened by the parser
+grep -nE '\.read_(text|bytes)\(|\bopen\(' $P/*.py
+# parse — every (re-)parse
+grep -nE 'parse_source|Parser\(' $P/*.py
+# cut — slicing that may shorten a statement's text
+grep -nE '\[:[A-Za-z_0-9]+\]' $P/*.py
+# except — the line after each handler
+grep -nE -A1 'except( [A-Za-z.]+)?( as [a-z]+)?:' $P/*.py
+# nondeterminism
+grep -nE '\b(random|uuid|time\.time|datetime\.now)\b' $P/*.py
+# execution — processes, eval, network
+grep -nE 'subprocess|os\.system|\beval\(|\bexec\(|requests\.|urllib|httpx' $P/*.py
+```
+
+Record each violated row as a Structural issue that names the decision and links its section.
 
 ## 4. Write the report
 
