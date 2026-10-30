@@ -57,7 +57,7 @@ from tree_sitter import Node
 
 from ...schemas import FileRecord
 from ..additive import DetectContext, Detection, Detector, Gate, register_detector
-from ..emits import Emit
+from ..emits import Emit, Enrich
 from ..index_common import ClassHeritage
 from ..treesitter import node_text
 
@@ -260,6 +260,8 @@ def _emit_outbound(
     framework: str,
     out: list[Emit],
     *,
+    method: str | None = None,
+    enrich: Enrich = "unclassified",
     reclassify_db: bool = False,
 ) -> None:
     """An ``api_call`` for ``call``: enriches the enclosing statement in place when it is
@@ -273,10 +275,10 @@ def _emit_outbound(
             "framework": framework,
             # empty → honest-null (unresolved SObject); never a blank string
             "endpoint": endpoint or None,
-            "method": None,  # SDK call carries no HTTP verb (honest-null)
+            "method": method,  # None for SDK calls (no HTTP verb visible); jQuery passes its verb
             "dataAccessHint": None,  # clear the ORM hint if we reclassified a db_method_call
         },
-        enrich="unclassified",
+        enrich=enrich,
         reclassify=frozenset({"db_method_call"}) if reclassify_db else frozenset(),
     ))
 

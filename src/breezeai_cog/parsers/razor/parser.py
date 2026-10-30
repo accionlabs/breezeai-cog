@@ -25,6 +25,7 @@ from ...schemas import SCHEMA_VERSION, FileRecord
 from ...utils import count_loc
 from ..base import BaseParser, HandlerLocator, ParseContext
 from ..csharp.functions import build_method
+from ..detection.jquery_calls import detect_inline_jquery
 from ..treesitter import parse_source
 from .mappings import FRAMEWORKS, STATEMENT_TYPES
 from .page_models import page_model_locator
@@ -76,6 +77,9 @@ class RazorParser(BaseParser):
             # @code { } methods → Functions (Blazor component logic), parented to the component
             # File, so an @onclick="Remove" handler resolves to the Remove method in this file.
             self._extract_code_methods(root, ctx, fid, seen_ids, record)
+            # inline <script> jQuery AJAX calls → api_call (the markup grammar skips script bodies)
+            detect_inline_jquery(
+                record, ctx.source, ctx.path, ctx.parse_timeout_micros, ctx.repo_root)
         return record
 
     def handler_locator(self, ctx: ParseContext) -> HandlerLocator | None:

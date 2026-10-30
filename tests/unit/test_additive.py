@@ -64,7 +64,7 @@ def test_inventory_in_run_order() -> None:
         "php": ["wordpress-hooks", "laravel-events", "symfony-events", "php-data-access",
                 "php-http-calls"],
         "scala": ["akka-events", "spark"],
-        "typescript": ["express", "fastify", "aws-events", "sdk-calls", "graphql-client",
+        "typescript": ["express", "fastify", "aws-events", "sdk-calls", "jquery-calls", "graphql-client",
                        "graphql-resolver-modules", "vue-routes",
                        "nextjs-pages", "vue-navigation", "angular-navigation",
                        "react-navigation"],
