@@ -204,7 +204,7 @@ class _ConfigSummary:
         if md.get("buildTool"):
             self.build_tools.add(md["buildTool"])
         self.dep_total += md.get("dependencyCount", 0)
-        if md.get("kind") == "package.json":
+        if md.get("kind") in {"package.json", "composer.json"}:
             self.dep_prod += md.get("dependencyCount", 0)
             self.dep_dev += md.get("devDependencyCount", 0)
         if md.get("kind") == "dockerfile":

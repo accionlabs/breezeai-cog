@@ -341,6 +341,27 @@ def test_pipeline_captures_config_and_aggregates(tmp_path) -> None:
     assert meta["analyzedLanguages"] == ["python"]  # config not a language
 
 
+def test_pipeline_aggregates_composer_metadata_and_dependency_counts(tmp_path) -> None:
+    (tmp_path / "composer.json").write_text(json.dumps({
+        "name": "acme/example",
+        "require": {"laravel/framework": "^11.0", "guzzlehttp/guzzle": "^7.0"},
+        "require-dev": {"phpunit/phpunit": "^11.0"},
+    }))
+
+    from breezeai_cog.services import AnalysisService
+
+    result = AnalysisService(Settings(jobs=1, out=tmp_path / "out")).analyze_repo(tmp_path)
+    records = [json.loads(x) for x in gzip.open(result.out_path, "rt").read().splitlines()]
+    meta = records[0]
+    composer = next(record for record in records if record["path"] == "composer.json")
+    assert composer["language"] == "config"
+    assert composer["metadata"]["packageInfo"]["name"] == "acme/example"
+    assert meta["configs"]["packageManagers"] == ["composer"]
+    assert meta["configs"]["dependencies"] == {
+        "total": 2, "production": 2, "development": 1,
+    }
+
+
 def test_config_registered_and_selected() -> None:
     from breezeai_cog.core.registry import discover_builtin
 
