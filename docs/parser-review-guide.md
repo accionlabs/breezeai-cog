@@ -10,6 +10,7 @@ Related documents:
 | Document | Use it for |
 |---|---|
 | [`skills/extend-capture/SKILL.md`](../skills/extend-capture/SKILL.md) | The rules a parser must follow (reliability, honest-null, the three extension categories). The review checks the code against these rules. |
+| [`skills/gap-review/SKILL.md`](../skills/gap-review/SKILL.md) | How to run this review step by step, with `check_capture.py` for the capture counts, schema and contract checks. |
 | [`docs/parser-reference.md`](parser-reference.md) | The step-by-step for building a parser, and its conventions checklist (§4). |
 | [Architecture](architecture.md) | Layering, the parse pipeline and its pass budget, and what counts as a core change. |
 | [`src/breezeai_cog/schemas/capture.py`](../src/breezeai_cog/schemas/capture.py), [`enums.py`](../src/breezeai_cog/schemas/enums.py) | The capture contract: every field and `semanticType` that *can* be captured. |
@@ -59,7 +60,9 @@ Check that:
   disambiguation, a reorder needs a before/after capture diff;
 - the other frameworks' tests for that language still pass, and their output on a real repo
   did not change unexpectedly (diff the capture before and after);
-- it is consistent with the [architecture](architecture.md).
+- it is consistent with the [architecture](architecture.md) — every row of its
+  [decisions at a glance](architecture.md#17-decisions-at-a-glance) table is checked, not
+  applicable, or reported (the `gap-review` skill, Step 9, has a lead for each row).
 
 #### 1.2 Core changes
 
@@ -283,6 +286,7 @@ Run capture on at least one real repository for the language/framework (see
 - [ ] Element checklist built from official references, the capture contract and the Target Spec (§7).
 - [ ] Entry-point parsers have a role table, one test per row, and follow the [entry-point contract](architecture/entry-points.md) (§5, §7.1).
 - [ ] Parse failures, counts and skipped extensions all explained (§8).
+- [ ] Every row of the architecture's [decisions at a glance](architecture.md#17-decisions-at-a-glance) checked, not applicable, or reported as a structural issue.
 - [ ] Gap analysis report written (Part B).
 
 ---
@@ -344,7 +348,9 @@ each one also appears as an issue below.
 Group the issues into three sections:
 
 - **Structural issues** — layout, scope creep into language/core code, claims overlap, wrong
-  extension category, pass budget, complexity, convention violations.
+  extension category, pass budget, complexity, convention violations, and any architecture
+  decision the parser breaks (layering, shared state between workers, truncated text, swallowed
+  errors, …).
 - **Capture issues** — something in the code is not captured, captured wrongly, or captured
   when it should not be (false positive).
 - **Other issues** — tests, documentation, spec mismatches, performance numbers, parse failures
