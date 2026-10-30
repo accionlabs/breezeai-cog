@@ -864,3 +864,147 @@ def test_bom_is_only_stripped_at_the_start() -> None:
     # A U+FEFF inside a statement is data, not a byte-order mark: leave it alone.
     r = parse_ddl("CREATE TABLE app.t (a text);\n-- note \ufeff here\nCREATE TABLE app.u (b text);\n", "schema_pg.sql")
     assert sorted(t["name"] for t in r["tables"]) == ["t", "u"]
+
+
+# DEF-958-01: two tables share a name in different schemas. A CREATE INDEX or ALTER TABLE ADD
+# CONSTRAINT naming one schema must land on that table, not on whichever came last.
+_SAME_NAME_SCRIPTS = [
+    pytest.param(
+        "CREATE TABLE [dbo].[Orders] ([Id] INT NOT NULL, [Code] NVARCHAR(10))\nGO\n"
+        "CREATE TABLE [sales].[Orders] ([Id] INT NOT NULL, [Code] NVARCHAR(10))\nGO\n"
+        "CREATE INDEX [IX_Code] ON [dbo].[Orders] ([Code])\nGO\n"
+        "ALTER TABLE [dbo].[Orders] ADD CONSTRAINT [PK_Orders] PRIMARY KEY ([Id])\nGO\n",
+        "schema.sql",
+        "dbo",
+        id="tsql",
+    ),
+    pytest.param(
+        "CREATE TABLE public.orders (id int, code text);\n"
+        "CREATE TABLE sales.orders (id int, code text);\n"
+        "CREATE INDEX ix_code ON public.orders (code);\n"
+        "ALTER TABLE public.orders ADD CONSTRAINT pk_orders PRIMARY KEY (id);\n",
+        "schema_pg.sql",
+        "public",
+        id="postgres",
+    ),
+    pytest.param(
+        "CREATE TABLE HR.ORDERS (ID NUMBER, CODE VARCHAR2(10));\n"
+        "CREATE TABLE SALES.ORDERS (ID NUMBER, CODE VARCHAR2(10));\n"
+        "CREATE INDEX HR.IX_CODE ON HR.ORDERS (CODE);\n"
+        "ALTER TABLE HR.ORDERS ADD CONSTRAINT PK_ORDERS PRIMARY KEY (ID);\n",
+        "schema_ora.sql",
+        "HR",
+        id="oracle",
+    ),
+]
+
+
+def _by_schema(r: dict) -> dict:
+    return {t["schema"]: t for t in r["tables"]}
+
+
+@pytest.mark.parametrize(("text", "filename", "schema"), _SAME_NAME_SCRIPTS)
+def test_index_and_constraint_attach_to_the_named_schema(text: str, filename: str, schema: str) -> None:
+    tables = _by_schema(parse_ddl(text, filename))
+    other = next(s for s in tables if s != schema)
+
+    assert len(tables[schema]["indexes"]) == 1
+    assert [c["constraintType"] for c in tables[schema]["constraints"]] == ["PRIMARY_KEY"]
+    assert tables[other]["indexes"] == []
+    assert tables[other]["constraints"] == []
+    # The column flags follow the attachment.
+    assert any(c.get("isIndexed") for c in tables[schema]["columns"])
+    assert not any(c.get("isIndexed") for c in tables[other]["columns"])
+    assert not any(c.get("isPrimaryKey") for c in tables[other]["columns"])
+
+
+def test_reversed_declaration_order_still_attaches_by_schema() -> None:
+    # The old name-keyed map was last-wins, so the bug showed only when the target came first.
+    text = (
+        "CREATE TABLE sales.orders (id int, code text);\n"
+        "CREATE TABLE public.orders (id int, code text);\n"
+        "CREATE INDEX ix_code ON sales.orders (code);\n"
+    )
+    tables = _by_schema(parse_ddl(text, "schema_pg.sql"))
+    assert [i["name"] for i in tables["sales"]["indexes"]] == ["ix_code"]
+    assert tables["public"]["indexes"] == []
+
+
+def test_tsql_unqualified_reference_means_dbo() -> None:
+    text = (
+        "CREATE TABLE [sales].[Orders] ([Id] INT, [Code] NVARCHAR(10))\nGO\n"
+        "CREATE TABLE [dbo].[Orders] ([Id] INT, [Code] NVARCHAR(10))\nGO\n"
+        "CREATE INDEX [IX_Code] ON [Orders] ([Code])\nGO\n"
+    )
+    tables = _by_schema(parse_ddl(text, "schema.sql"))
+    assert len(tables["dbo"]["indexes"]) == 1
+    assert tables["sales"]["indexes"] == []
+
+
+def test_schema_match_ignores_case() -> None:
+    text = (
+        "CREATE TABLE [dbo].[Orders] ([Id] INT, [Code] NVARCHAR(10))\nGO\n"
+        "CREATE TABLE [sales].[Orders] ([Id] INT, [Code] NVARCHAR(10))\nGO\n"
+        "CREATE INDEX [IX_Code] ON [DBO].[Orders] ([Code])\nGO\n"
+    )
+    tables = _by_schema(parse_ddl(text, "schema.sql"))
+    assert len(tables["dbo"]["indexes"]) == 1
+    assert tables["sales"]["indexes"] == []
+
+
+def test_qualified_reference_reaches_a_table_declared_without_schema() -> None:
+    # `CREATE TABLE Orders` lives in the default schema, so `ON dbo.Orders` still finds it.
+    text = (
+        "CREATE TABLE [Orders] ([Id] INT, [Code] NVARCHAR(10))\nGO\n"
+        "CREATE INDEX [IX_Code] ON [dbo].[Orders] ([Code])\nGO\n"
+    )
+    r = parse_ddl(text, "schema.sql")
+    assert [i["name"] for i in r["tables"][0]["indexes"]] == ["IX_Code"]
+
+
+def test_index_on_a_schema_with_no_such_table_is_not_misattached() -> None:
+    text = (
+        "CREATE TABLE sales.orders (id int, code text);\n"
+        "CREATE INDEX ix_code ON hr.orders (code);\n"
+    )
+    r = parse_ddl(text, "schema_pg.sql")
+    assert r["tables"][0]["indexes"] == []
+
+
+def test_oracle_alter_column_ops_follow_the_schema() -> None:
+    # Every Oracle ALTER (not only ADD CONSTRAINT) shared the bare-name lookup.
+    text = (
+        "CREATE TABLE HR.ORDERS (ID NUMBER, CODE VARCHAR2(10));\n"
+        "CREATE TABLE SALES.ORDERS (ID NUMBER, CODE VARCHAR2(10));\n"
+        "ALTER TABLE HR.ORDERS DROP COLUMN CODE;\n"
+    )
+    tables = _by_schema(parse_ddl(text, "schema_ora.sql"))
+    assert [c["name"] for c in tables["HR"]["columns"]] == ["ID"]
+    assert [c["name"] for c in tables["SALES"]["columns"]] == ["ID", "CODE"]
+
+
+def test_oracle_comments_follow_the_schema() -> None:
+    text = (
+        "CREATE TABLE HR.ORDERS (ID NUMBER, CODE VARCHAR2(10));\n"
+        "CREATE TABLE SALES.ORDERS (ID NUMBER, CODE VARCHAR2(10));\n"
+        "COMMENT ON TABLE HR.ORDERS IS 'hr orders';\n"
+        "COMMENT ON COLUMN HR.ORDERS.CODE IS 'hr code';\n"
+    )
+    tables = _by_schema(parse_ddl(text, "schema_ora.sql"))
+    assert tables["HR"]["comment"] == "hr orders"
+    assert [c.get("comment") for c in tables["HR"]["columns"]] == [None, "hr code"]
+    assert tables["SALES"].get("comment") is None
+    assert not any(c.get("comment") for c in tables["SALES"]["columns"])
+
+
+def test_oracle_column_comment_follows_a_rename_in_its_own_schema() -> None:
+    text = (
+        "CREATE TABLE HR.ORDERS (ID NUMBER, CODE VARCHAR2(10));\n"
+        "CREATE TABLE SALES.ORDERS (ID NUMBER, CODE VARCHAR2(10));\n"
+        "COMMENT ON COLUMN HR.ORDERS.CODE IS 'hr code';\n"
+        "COMMENT ON COLUMN SALES.ORDERS.CODE IS 'sales code';\n"
+        "ALTER TABLE HR.ORDERS RENAME COLUMN CODE TO REF;\n"
+    )
+    tables = _by_schema(parse_ddl(text, "schema_ora.sql"))
+    assert {c["name"]: c.get("comment") for c in tables["HR"]["columns"]} == {"ID": None, "REF": "hr code"}
+    assert {c["name"]: c.get("comment") for c in tables["SALES"]["columns"]} == {"ID": None, "CODE": "sales code"}
