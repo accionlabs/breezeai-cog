@@ -10,8 +10,11 @@ composition — one file, one parser.
 from __future__ import annotations
 
 import importlib
+import inspect
 import pkgutil
 from pathlib import Path
+
+from tree_sitter import Node
 
 from ..errors import RegistryError
 from ..parsers.additive import all_detectors
@@ -40,15 +43,23 @@ def registered() -> list[LanguageParser]:
     return list(_REGISTRY)
 
 
-def parsers_for(path: str | Path) -> list[LanguageParser]:
-    """All registered parsers that claim this file by extension/filename."""
-    return [p for p in _REGISTRY if p.matches(path)]
+def parsers_for(path: str | Path, source: bytes | None = None) -> list[LanguageParser]:
+    """Return parsers matching the path, optionally using a bounded source prefix."""
+    candidates = []
+    for parser in _REGISTRY:
+        if parser.matches(path):
+            candidates.append(parser)
+            continue
+        matches_source = getattr(parser, "matches_source", None)
+        if source is not None and matches_source is not None and matches_source(path, source):
+            candidates.append(parser)
+    return candidates
 
 
-def base_parser_for(path: str | Path) -> LanguageParser | None:
+def base_parser_for(path: str | Path, source: bytes | None = None) -> LanguageParser | None:
     """The base **language** parser for a file (lowest priority among candidates).
     Used for the extension allow-list, the language label, and the build_index key."""
-    candidates = parsers_for(path)
+    candidates = parsers_for(path, source)
     return min(candidates, key=lambda p: p.priority) if candidates else None
 
 
@@ -64,20 +75,47 @@ def template_extensions() -> frozenset[str]:
 
 
 def select(
-    path: str | Path, source: bytes, parse_timeout_micros: int = 0
+    path: str | Path,
+    source: bytes,
+    parse_timeout_micros: int = 0,
+    parsed_root: Node | None = None,
 ) -> LanguageParser | None:
     """The single parser that handles this file: the highest-priority candidate whose
-    ``claims(path, source)`` is True (the base language parser is the priority-0 fallback)."""
-    candidates = parsers_for(path)
-    claiming = [
-        p
-        for p in candidates
+    ``claims(path, source, parse_timeout_micros)`` is True (the base language parser is the
+    priority-0 fallback)."""
+    candidates = parsers_for(path, source)
+    claiming = []
+    for parser in candidates:
+        claim = parser.claims
+        parameters = inspect.signature(claim).parameters
+        timeout_param = parameters.get("parse_timeout_micros")
+        claim_args = [str(path), source]
+        claim_kwargs = {}
+        if timeout_param is not None:
+            if timeout_param.kind is inspect.Parameter.POSITIONAL_ONLY:
+                claim_args.append(parse_timeout_micros)
+            else:
+                claim_kwargs["parse_timeout_micros"] = parse_timeout_micros
+        elif any(
+            parameter.kind is inspect.Parameter.VAR_KEYWORD
+            for parameter in parameters.values()
+        ):
+            claim_kwargs["parse_timeout_micros"] = parse_timeout_micros
+        elif any(
+            parameter.kind is inspect.Parameter.VAR_POSITIONAL
+            for parameter in parameters.values()
+        ):
+            claim_args.append(parse_timeout_micros)
+        parsed_root_param = parameters.get("parsed_root")
         if (
-            p.claims(str(path), source, parse_timeout_micros)
-            if getattr(p, "claims_accepts_timeout", False)
-            else p.claims(str(path), source)
-        )
-    ]
+            parsed_root is not None
+            and parsed_root_param is not None
+            and parsed_root_param.kind is not inspect.Parameter.POSITIONAL_ONLY
+        ):
+            claim_kwargs["parsed_root"] = parsed_root
+        claims_file = claim(*claim_args, **claim_kwargs)
+        if claims_file:
+            claiming.append(parser)
     if not claiming:
         return None
     return max(claiming, key=lambda p: p.priority)

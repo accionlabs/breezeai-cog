@@ -19,8 +19,6 @@ classified as ``query_statement`` before this runs.
 
 from __future__ import annotations
 
-import re
-
 # DB/ORM -> distinctive method names (lowercased). Order matters: on a name collision
 # the first DB wins (mirrors the legacy reverse-map "first one wins").
 _DB_METHODS: dict[str, tuple[str, ...]] = {
@@ -116,7 +114,6 @@ _ACTIVE_RECORD_INSTANCE_METHODS = frozenset({
 _ACTIVE_RECORD_METHODS = (
     _ACTIVE_RECORD_DISTINCTIVE | _ACTIVE_RECORD_GENERIC | _ACTIVE_RECORD_INSTANCE_METHODS
 )
-_RUBY_CONSTANT_RECEIVER = re.compile(r"[A-Z][A-Za-z0-9_]*(?:::[A-Z][A-Za-z0-9_]*)*")
 
 # Receiver substring -> hint (refines _GENERIC).
 # Needles checked via `needle in low` (full lowercased callee). Ambiguous short tokens
@@ -221,21 +218,20 @@ def _has_ef_source(low_callee: str) -> bool:
 
 def _is_active_record_call(
     callee: str, method: str, language: str | None,
-    typed_db_ids: "frozenset[str] | None" = None,
+    typed_db_ids: frozenset[str] | None = None,
 ) -> bool:
     """Whether a Ruby call is ActiveRecord data access.
 
-    Three tiers, strongest evidence first:
+    ActiveRecord calls require positive receiver evidence:
 
     1. The receiver is an **identified model** (a constant that transitively extends
        ``ActiveRecord::Base``, or a variable assigned from one) — any ActiveRecord verb
        counts. ``typed_db_ids`` carries that set; see ``ruby/models.py``.
-    2. The verb is **distinctive** to ActiveRecord (``where`` / ``find_by`` / ``pluck`` / …)
-       on a constant receiver — trusted without the index, so a model defined in a gem
-       (or a file parsed on its own) is still captured.
-    3. Nothing else. A generic verb on an unidentified constant (``Tempfile.create``,
-       ``Settings.all``) and an instance write on an unidentified variable
-       (``config.save``) are ordinary Ruby — absent beats wrong.
+    2. Nothing else. A verb name, including a distinctive ActiveRecord method, on an
+       unidentified receiver is not enough to establish model identity. A generic verb
+       on an unidentified constant (``Tempfile.create``, ``Settings.all``) and an
+       instance write on an unidentified variable (``config.save``) are ordinary Ruby —
+       absent beats wrong.
     """
     if language != "ruby":
         return False
@@ -246,18 +242,15 @@ def _is_active_record_call(
     terminal = receiver.rsplit(".", 1)[-1]
     if not terminal:
         return False
-    # Tier 1 — the receiver is a known model (constant or an instance assigned from one).
-    # Checked first because it is two set lookups, and it is the common case in an indexed
-    # repo; the constant regex below is only needed for the fallback tier.
-    if typed_db_ids and (
-        terminal in typed_db_ids or terminal.rsplit("::", 1)[-1] in typed_db_ids
-    ):
-        return True
-    # Tier 2 — the verb alone is proof, provided it is a class-level query.
-    return (
-        m in _ACTIVE_RECORD_DISTINCTIVE
-        and _RUBY_CONSTANT_RECEIVER.fullmatch(terminal) is not None
-    )
+    # The receiver must be a known model (constant or an instance assigned from one).
+    if typed_db_ids:
+        # Qualified constants must match the indexed identity exactly. Their terminal
+        # name may also be present as a convenience alias for unqualified references.
+        if "::" in receiver:
+            return receiver in typed_db_ids
+        if receiver in typed_db_ids or terminal in typed_db_ids:
+            return True
+    return False
 
 # ElasticSearch / OpenSearch client verbs. These collide with ordinary code (``search`` is
 # ``String.prototype.search``; app repos/services expose ``.search()`` too — 270+ in one repo)
@@ -306,7 +299,7 @@ def _is_prisma_chain(low: str) -> bool:
 
 
 def match_db(callee: str, method: str, language: str | None = None,
-             typed_db_ids: "frozenset[str] | None" = None) -> str | None:
+             typed_db_ids: frozenset[str] | None = None) -> str | None:
     if language in {"php", "go"}:
         # PHP and Go data access is recorded from evidence by their own detectors — PHP from
         # imports, types and model classes (php/data_access.py), Go from the receiver's declared
@@ -360,14 +353,21 @@ def match_db(callee: str, method: str, language: str | None = None,
         if m in _CACHE_VERBS or m in ("delete", "remove"):
             return "redis"
     if m in _GENERIC:
+        # In Ruby, generic ORM verbs require an identified ActiveRecord model receiver
+        # (checked above via _is_active_record_call); they must never match non-Ruby ORM hints.
+        if language == "ruby":
+            return None
         for needle, hint in _RECEIVER_HINTS:  # positive vendor hint wins
             if needle not in low:
                 continue
             # Anchored needles must appear as a dot-segment, not embedded in a longer name
             # (e.g. "session" must match "db.session.query" but NOT "sessionFactory.create").
-            if needle in _ANCHORED_HINTS:
-                if not (f".{needle}." in low or low.startswith(f"{needle}.")):
-                    continue
+            if needle in _ANCHORED_HINTS and not (
+                f".{needle}." in low or low.startswith(f"{needle}.")
+            ):
+                continue
+            if hint in ("sqlalchemy", "django") and language is not None and language not in _PYTHON:
+                continue
             return hint
         if m in _HIGH_COLLISION:
             # Non-DB receivers (canvas ctx, logger, cache, …) are never data access — bail

@@ -31,6 +31,8 @@ _Stack = list[tuple[str, object]]
 
 #: Returns the language name for a path, or ``None`` if no parser claims it.
 Classifier = Callable[[str], str | None]
+SourceClassifier = Callable[[str, bytes], str | None]
+_SOURCE_PREFIX_BYTES = 4096
 
 #: Returns a skip reason for a path, or ``None`` to keep it. Lets a caller drop files for
 #: its own reason without teaching the scanner what that reason means.
@@ -52,6 +54,7 @@ class OnSkip(Protocol):
 class ScanEntry:
     path: str  # repo-relative, POSIX
     language: str
+    source_prefix: bytes | None = None  # bounded prefix used only for content-based discovery
 
 
 def _rel_to_base(rel_path: str, base: str) -> str:
@@ -73,6 +76,7 @@ def scan(
     follow_symlinks: bool = False,
     skip_rule: SkipRule | None = None,
     on_skip: OnSkip | None = None,
+    source_classifier: SourceClassifier | None = None,
 ) -> Iterator[ScanEntry]:
     root = Path(repo_root)
     visited: set[str] = set()
@@ -122,10 +126,6 @@ def scan(
                         on_skip(rel, reason)
                     continue
                 language = classify(rel)
-                if language is None:
-                    if on_skip is not None:
-                        on_skip(rel, "unsupported")  # no parser for this extension
-                    continue
                 try:
                     size = entry.stat(follow_symlinks=True).st_size
                 except OSError:
@@ -134,6 +134,19 @@ def scan(
                     if on_skip is not None:
                         on_skip(rel, "oversized", size=size)
                     continue
-                yield ScanEntry(path=rel, language=language)
+                source_prefix = None
+                if language is None and source_classifier is not None:
+                    try:
+                        with open(entry.path, "rb") as source_file:
+                            source_prefix = source_file.readline(_SOURCE_PREFIX_BYTES)
+                    except OSError:
+                        source_prefix = None
+                    if source_prefix:
+                        language = source_classifier(rel, source_prefix)
+                if language is None:
+                    if on_skip is not None:
+                        on_skip(rel, "unsupported")
+                    continue
+                yield ScanEntry(path=rel, language=language, source_prefix=source_prefix)
 
     yield from walk(root, "", [], [])
