@@ -557,6 +557,7 @@ the file:
   │                  70   vue-navigation   typescript_vue/navigation.py      ✔       │
   │                  72   angular-navi…    typescript_angular/navigation.py  ✔       │
   │                  74   react-navigation typescript_react/navigation.py    ✔       │
+  │                  80   angularjs        typescript_angularjs/detector.py  ✔       │
   │                                                                                  │
   │  csharp          10   lambda-handlers  csharp/lambda_events.py           ✔       │
   │                  20   lucene           csharp/lucene.py                          │

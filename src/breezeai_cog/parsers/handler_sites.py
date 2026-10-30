@@ -152,10 +152,16 @@ def handler_location(site: _Site | None, own_path: str) -> tuple[int | None, str
 HANDLED = frozenset({"route", "eventbus_consumer", "timer"})
 
 
+#: Frameworks whose detector looks its handlers up itself: it names a *registered* name
+#: (AngularJS ``controller: 'ListCtrl'``), which is not a symbol the language can find — a
+#: function of that name in the file is not necessarily the one registered under it.
+LOCATED_BY_DETECTOR = frozenset({"angularjs"})
+
+
 def unlocated(s: Statement) -> bool:
     """An entry point that names its handler but not where it is declared."""
     return (s.semanticType in HANDLED and bool(s.handler) and s.handlerLine is None
-            and s.handlerPath is None)
+            and s.handlerPath is None and s.framework not in LOCATED_BY_DETECTOR)
 
 
 def needs_location(record: FileRecord) -> bool:
