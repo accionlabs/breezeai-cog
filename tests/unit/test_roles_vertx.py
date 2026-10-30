@@ -339,3 +339,32 @@ def test_field_sub_router_and_twice_mounted_sub_router(analyze_files) -> None:
     got = sorted((s.endpoint or "") for s in _eps(st))
     # the field's routes get its prefix; the mount itself is no route; shared is served twice
     assert got == ["", "/admin/stats"]
+
+
+def test_handler_class_instance_is_its_handle_method_in_another_file(analyze_files) -> None:
+    # Vert.x 2.x: `registerHandler(addr, new LoadHandler(eb))` — the class implements `Handler`,
+    # whose one method `handle` is the code that runs; it lives in its own file.
+    st = analyze_files({
+        "src/main/java/p3/Main.java": """package p3;
+import org.vertx.java.platform.Verticle;
+public class Main extends Verticle {
+  public void start() {
+    vertx.eventBus().registerHandler("p3.wizard.load", new LoadHandler(vertx.eventBus()));
+  }
+}
+""",
+        "src/main/java/p3/LoadHandler.java": """package p3;
+import org.vertx.java.core.Handler;
+import org.vertx.java.core.eventbus.EventBus;
+import org.vertx.java.core.eventbus.Message;
+public class LoadHandler implements Handler<Message<Object>> {
+  private final EventBus eb;
+  public LoadHandler(EventBus eb) { this.eb = eb; }
+  public void handle(Message<Object> msg) { }
+}
+""",
+    })
+    [c] = _eps(st)
+    assert (c.semanticType, c.endpoint, c.handler, c.handlerLine, c.handlerPath) == (
+        "eventbus_consumer", "p3.wizard.load", "handle", 8, "src/main/java/p3/LoadHandler.java",
+    )

@@ -438,3 +438,55 @@ def test_sub_router_prefix_composes_and_mount_is_not_a_route(tmp_path) -> None:
     }
     # the route("/api/*") calls the sub-routers hang off are mounts, not routes
     assert all(s.handler for s in rec.statements if s.semanticType == "route")
+
+
+# Vert.x 2.x verticle: a router held under any name, every Container deploy call, and the
+# verticle itself registered as the handler (`registerHandler(addr, this)`).
+_V2_VERTICLE = b"""package p3;
+import org.vertx.java.core.Handler;
+import org.vertx.java.core.eventbus.Message;
+import org.vertx.java.core.http.RouteMatcher;
+import org.vertx.java.platform.Verticle;
+public class W extends Verticle implements Handler<Message<Object>> {
+    private RouteMatcher matcher;
+    public void start() {
+        vertx.eventBus().registerHandler("wizard.load", this);
+        container.deployVerticle("p3.WorkerVerticle");
+        container.deployWorkerVerticle("p3.DocWorker");
+        container.deployModule("mod-x~1.0");
+        RouteMatcher routes = new RouteMatcher();
+        routes.get("/docdef/:id", h);
+        matcher.post("/m", h);
+        java.util.Map<String, String> m = null;
+        m.get("/not-a-route");
+    }
+    public void handle(Message<Object> msg) { }
+}
+"""
+
+
+def _v2_verticle(tmp_path) -> FileRecord:
+    p = tmp_path / "W.java"
+    p.write_bytes(_V2_VERTICLE)
+    ctx = ParseContext(path="W.java", abs_path=p, source=_V2_VERTICLE,
+                       repo_root=tmp_path, capture_statements=True)
+    return VertxParser().parse_file(ctx)
+
+
+def test_vertx2_worker_and_module_deploys_are_verticle_deploys(tmp_path) -> None:
+    rec = _v2_verticle(tmp_path)
+    deploys = [s.endpoint for s in rec.statements if s.semanticType == "verticle_deploy"]
+    assert deploys == ["p3.WorkerVerticle", "p3.DocWorker", "mod-x~1.0"]
+
+
+def test_router_detected_by_declared_type_not_name(tmp_path) -> None:
+    # `routes` (a local) and `matcher` (a field) are RouteMatchers by type; `m` is a Map.
+    rec = _v2_verticle(tmp_path)
+    routes = {(s.method, s.endpoint) for s in rec.statements if s.semanticType == "route"}
+    assert routes == {("GET", "/docdef/:id"), ("POST", "/m")}
+
+
+def test_this_as_handler_is_the_verticles_handle_method(tmp_path) -> None:
+    rec = _v2_verticle(tmp_path)
+    [c] = [s for s in rec.statements if s.semanticType == "eventbus_consumer"]
+    assert (c.endpoint, c.handler, c.handlerLine) == ("wizard.load", "handle", 19)
