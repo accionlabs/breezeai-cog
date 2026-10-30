@@ -43,9 +43,11 @@ The capture contract's source of truth is
 - **Wrong is worse than missing.** Leave a value empty when it can't be read from the code
   (honest-null); emit an edge only when both ends resolve. Never a guess, a symbol name or a
   placeholder in a resolved field.
-- **Ask before new vocabulary.** A new `semanticType`, field, node type or edge, or any value
-  not in the Code Ontology Parser Target Spec, needs a human decision before it is coded. A new
-  field on `Function` or `Statement` is dropped by the backend unless its allow-list changes too.
+- **Existing fields and values first; new ones by proposal.** Use the fields and values in the
+  Code Ontology Parser Target Spec where they fit. When none fits in practice, propose a new
+  `semanticType`, value, field, node or edge (example, why the existing ones don't fit, what the
+  backend needs) and emit it only after it is approved. An approved new field on `Function` or
+  `Statement` also needs the backend allow-list change, or it is dropped.
 - **`nodeType` is the raw tree-sitter `node.type`**, or `synthetic` when there is no node.
 - **Extend the existing mechanisms first** — `build_index`, registered facts, the additive
   detector registry, the shared classifiers in `parsers/detection/` — before proposing a new one.

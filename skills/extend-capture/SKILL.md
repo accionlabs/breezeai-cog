@@ -99,7 +99,8 @@ rather than guess: a known gap is recoverable later, a wrong model silently is n
 Most syntax has one right answer you discover empirically (see the reference guide). The
 point is only that the moment *interpretation* is required, a human makes the call. The
 dividing line for storage shape (§5): **reusing** an existing node / edge / statement kind is
-a call you make yourself; **introducing a new** one is a schema-wide commitment to raise.
+a call you make yourself; **introducing a new** one is a proposal you raise, and use only once it
+is approved (§5).
 
 ## 3. The three ways to extend capture
 
@@ -249,9 +250,9 @@ A value counts only if it survives ingest and agents can reach it. Three rules (
 | You are adding… | What happens |
 |---|---|
 | A new field on `File` or `Class` | Kept — these nodes are **open**. Prefer `metadata` for anything nested. |
-| A new field on `Function` or `Statement` | **Silently dropped** — these nodes are **allow-listed**. It needs a backend allow-list change in the same release: a cross-service change to raise, not assume. Unit tests and schema validation pass either way. |
-| A new `semanticType` value | Stored and filterable at once — but it is still a new value: it needs a decision (§2) and an entry in the [Target Spec](https://accionlabs.atlassian.net/wiki/spaces/~5cfa0cffd898610dbf3bacf1/pages/2483453956/Code+Ontology+Parser+Target+Spec+Neo4j+Graph+Model). |
-| A new node type or relationship type | A schema-wide commitment — ask. |
+| A new field on `Function` or `Statement` | **Silently dropped** — these nodes are **allow-listed**. Once approved, it needs a backend allow-list change in the same release; unit tests and schema validation pass either way, so they won't tell you. |
+| A new `semanticType` value | Stored and filterable at once, with no backend change. Once approved, add it to the [Target Spec](https://accionlabs.atlassian.net/wiki/spaces/~5cfa0cffd898610dbf3bacf1/pages/2483453956/Code+Ontology+Parser+Target+Spec+Neo4j+Graph+Model). |
+| A new node type or relationship type | A schema-wide change for every query and agent — propose it only when no field, value or statement kind can carry the meaning. |
 
 Only `File`, `Class` and `Function` are embedded; **statements are never embedded**. So decide
 by how agents will look for the value:
@@ -266,10 +267,22 @@ For example, moving enum members from `Class.metadata` to `enum_member` statemen
 filterable but made the enum class rank lower for "Status enum active inactive" — the member
 names were no longer in its embedded text.
 
-**Approved values.** The Target Spec is the list of approved values. Use only those; a value
-that is not there is a new value (§2). A value belongs to its context — a `method` belongs to a
-`routeKind` (`rpc` → `RPC`) — so reusing an approved value under a new framework, in the same
-context, is not a new value.
+**Existing fields and values first; new ones by proposal.** Use the fields and values already
+in the Target Spec wherever they fit. A value belongs to its context — a `method` belongs to a
+`routeKind` (`rpc` → `RPC`) — so reusing one under a new framework, in the same context, is not
+a new value.
+
+The spec is not a wall, though: don't force a construct into a value that misdescribes it, or
+drop information agents need, just to stay inside it. When no existing field or value fits in
+practice, **propose** a new one, with:
+
+- the construct, as a small source example, and the record you would emit;
+- why the existing fields and values don't fit;
+- where it lives (field, `metadata`, statement kind, node or edge) and what the backend needs —
+  a new `Function` / `Statement` field needs an allow-list change (table above).
+
+Emit it only **after it is approved**. Until then, capture what the existing values can express
+(or leave it out) and keep the proposal open — never ship the new value ahead of the decision.
 
 ### Statement rules
 
@@ -396,16 +409,17 @@ src/breezeai_cog/parsers/
 - [ ] Statements are flat and linked to their owner; nesting is expressed by line ranges.
 - [ ] Every `nodeType` is a real tree-sitter `node.type` from the host tree, or `synthetic`; no
       control-flow statement has a `semanticType`; DTOs are the declared type as written (§5).
-- [ ] No new field on `Function` / `Statement` without a matching backend allow-list change;
-      every emitted value is in the Target Spec or was approved; content agents must find by
-      meaning is on File / Class / Function, not only on a Statement (§5).
+- [ ] Existing fields and values used where they fit; a new field or value is emitted only
+      after its proposal was approved, and a new `Function` / `Statement` field ships with the
+      backend allow-list change; content agents must find by meaning is on File / Class /
+      Function, not only on a Statement (§5).
 - [ ] `authRequired` is set only by a framework check that certainly rejects anonymous calls
       (§3B).
 - [ ] The right category was chosen (§3): a framework is a one-per-file parser only when no
       other framework's file can hold its entry points; otherwise it is an additive detector
       that does not displace the file's owner.
-- [ ] Existing vocabulary reused where it fits; any new node/relationship/statement kind
-      was raised for a decision (§5).
+- [ ] Any new node, relationship or statement kind was proposed and approved before it was
+      emitted (§2, §5).
 - [ ] Entry points follow the entry-point contract: a role table with one test per row, one
       record per binding, `endpoint` resolved or left unset (never `""` or a code placeholder
       like `${…}`), wiring never recorded as a route.
