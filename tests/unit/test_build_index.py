@@ -6,7 +6,7 @@ import pickle
 
 from breezeai_cog import iter_file_records
 from breezeai_cog.parsers.base import ParseContext
-from breezeai_cog.parsers.typescript.imports import TsAliasIndex
+from breezeai_cog.parsers.typescript.imports import TsAliasIndex, build_alias_index
 from breezeai_cog.parsers.typescript.parser import TypeScriptParser
 
 
@@ -110,6 +110,18 @@ def test_alias_unresolved_without_index(tmp_path) -> None:
                        repo_root=tmp_path, resolution_index=None)
     rec = parser.parse_file(ctx)
     assert "@app/foo" in rec.externalImports  # no index -> stays external
+
+
+def test_no_alias_config_leaves_specifier_external(tmp_path) -> None:
+    # No tsconfig, jsconfig or bundler config declares `@/*`: it stays a package name even
+    # though `src/x.ts` exists — an alias is never invented.
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "x.ts").write_text("export const x = 1;\n")
+    (tmp_path / "main.ts").write_text("import { x } from '@/x';\n")
+    assert build_alias_index(tmp_path) is None
+    rec = {r.path: r for r in iter_file_records(tmp_path)}["main.ts"]
+    assert rec.importFiles == []
+    assert "@/x" in rec.externalImports
 
 
 def test_pipeline_wires_build_index(tmp_path) -> None:

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 from breezeai_cog.parsers.contract import is_entry_point
 
 
@@ -255,3 +257,263 @@ def test_resolver_map_root_from_a_missing_module_is_none(analyze_files) -> None:
     # The imported module isn't in the repo: no operations are invented.
     st = _run(analyze_files, {"src/server.ts": SERVER_NS})
     assert _eps(st) == []
+
+
+SERVER_NAMED = (
+    "import { ApolloServer } from '@apollo/server';\n"
+    "import { queries } from './queries';\n"
+    "const resolvers = { Query: queries };\n"
+    "export const server = new ApolloServer({ typeDefs, resolvers });\n"
+)
+
+
+def test_resolver_map_root_from_a_default_import_is_none(analyze_files) -> None:
+    # Only a namespace or a named import names a module's operations; a default import does not.
+    st = _run(
+        analyze_files,
+        {
+            "src/server.ts": "import queries from './queries';\nconst resolvers = { Query: queries };\n",
+            "src/queries.ts": "export default { books: async () => [] };\n",
+        },
+    )
+    assert _eps(st) == []
+
+
+def test_resolver_map_root_from_a_default_exported_const_is_none(analyze_files) -> None:
+    # `export default queries` names a declaration, but a default import is still not read.
+    st = _run(
+        analyze_files,
+        {
+            "src/server.ts": "import queries from './queries';\nconst resolvers = { Query: queries };\n",
+            "src/queries.ts": "export const queries = { books: async () => [] };\nexport default queries;\n",
+        },
+    )
+    assert _eps(st) == []
+
+
+def test_resolver_map_root_from_a_local_object_is_none(analyze_files) -> None:
+    # An object declared in the same file is not an import; no operations are read from it.
+    st = _run(
+        analyze_files,
+        {"src/server.ts": "const queries = { books: async () => [] };\n"
+                          "const resolvers = { Query: queries };\n"},
+    )
+    assert _eps(st) == []
+
+
+def test_resolver_map_root_from_a_missing_named_import_is_none(analyze_files) -> None:
+    # The named import's module isn't in the repo: no operations are invented.
+    st = _run(analyze_files, {"src/server.ts": SERVER_NAMED})
+    assert _eps(st) == []
+
+
+SERVER_NAMED_TWO = (
+    "import { ApolloServer } from '@apollo/server';\n"
+    "import { queries } from './queries';\n"
+    "import { mutations as muts } from './mutations';\n"
+    "const resolvers = {\n"
+    "  Mutation: muts,\n"
+    "  Query: queries,\n"
+    "};\n"
+    "export const server = new ApolloServer({ typeDefs, resolvers });\n"
+)
+
+
+def _ops(st, path: str | None = None):
+    return {
+        (r.id.split(":", 1)[1], r.method, r.routeKind, r.endpoint, r.handler, r.handlerPath,
+         r.handlerLine)
+        for r in _eps(st)
+        if path is None or r.path == path
+    }
+
+
+def test_resolver_map_root_from_a_named_import(analyze_files) -> None:
+    # `Query: queries`, `queries` an object of functions in another file: one operation per
+    # property, leading to where its function starts. An inline function has no name; a shorthand
+    # method does; `books: getAuthors` is not an inline function, so nothing is claimed for it.
+    st = _run(
+        analyze_files,
+        {
+            "src/server.ts": SERVER_NAMED_TWO,
+            "src/queries.ts":
+                "export const queries = {\n"
+                "  books: async () => [],\n"
+                "  book(_: any, { id }: any) { return null; },\n"
+                "  authors: getAuthors,\n"
+                "};\n"
+                "function getAuthors() { return []; }\n",
+            "src/mutations.ts":
+                "export const mutations = {\n"
+                "  addBook: function (_: any, { input }: any) { return null; },\n"
+                "};\n",
+        },
+    )
+    assert _ops(st) == {
+        ("5:2", "MUTATION", "mutation", "addBook", None, "src/mutations.ts", 2),
+        ("6:2", "QUERY", "query", "books", None, "src/queries.ts", 2),
+        ("6:2#2", "QUERY", "query", "book", "book", "src/queries.ts", 3),
+        ("6:2#3", "QUERY", "query", "authors", None, None, None),
+    }
+
+
+def test_resolver_map_root_from_a_subscription_object(analyze_files) -> None:
+    st = _run(
+        analyze_files,
+        {
+            "src/server.ts": "import { subs } from './subs';\nconst resolvers = { Subscription: subs };\n",
+            "src/subs.ts": "export const subs = {\n  bookAdded: { subscribe: () => null },\n};\n",
+        },
+    )
+    assert _ops(st) == {
+        ("2:20", "SUBSCRIPTION", "subscription", "bookAdded", None, "src/subs.ts", 2),
+    }
+
+
+def test_resolver_map_root_from_a_renamed_and_reexported_named_import(analyze_files) -> None:
+    # `import { queries as q }` binds the local name; the export is followed through a barrel.
+    st = _run(
+        analyze_files,
+        {
+            "src/server.ts": "import { queries as q } from './resolvers';\nconst resolvers = { Query: q };\n",
+            "src/resolvers/index.ts": "export { queries } from './queries';\n",
+            "src/resolvers/queries.ts": "export const queries = {\n  books: () => [],\n};\n",
+        },
+    )
+    assert _ops(st) == {
+        ("2:20", "QUERY", "query", "books", None, "src/resolvers/queries.ts", 2),
+    }
+
+
+VITE_ALIAS = (
+    "import { fileURLToPath, URL } from 'node:url';\n"
+    "export default { resolve: { alias: { '@': fileURLToPath(new URL('./src', import.meta.url)) } } };\n"
+)
+
+
+def test_resolver_map_root_from_a_named_import_through_an_alias(analyze_files) -> None:
+    # The import is written through a Vite `resolve.alias` entry; it leads to the same file.
+    st = _run(
+        analyze_files,
+        {
+            "vite.config.js": VITE_ALIAS,
+            "src/server.ts": "import { queries } from '@/queries';\nconst resolvers = { Query: queries };\n",
+            "src/queries.ts": "export const queries = {\n  books: () => [],\n};\n",
+        },
+    )
+    assert _ops(st) == {("2:20", "QUERY", "query", "books", None, "src/queries.ts", 2)}
+
+
+def test_named_import_root_skips_spreads_and_computed_keys(analyze_files) -> None:
+    st = _run(
+        analyze_files,
+        {
+            "src/server.ts": SERVER_NAMED,
+            "src/queries.ts": "export const queries = {\n  ...base,\n  books: () => [],\n"
+                              "  [dynamic]: () => [],\n};\n",
+        },
+    )
+    assert _ops(st) == {("3:20", "QUERY", "query", "books", None, "src/queries.ts", 3)}
+
+
+def test_named_import_root_takes_its_dtos_from_a_graphql_file(analyze_files) -> None:
+    st = _run(
+        analyze_files,
+        {
+            "src/schema.graphql": "type Query { book(id: ID!): Book }\n",
+            "src/server.ts": SERVER_NAMED,
+            "src/queries.ts": "export const queries = {\n  book: () => null,\n};\n",
+        },
+    )
+    got = {(r.endpoint, r.requestDTO, r.responseDTO) for r in _eps(st) if r.path == "src/server.ts"}
+    assert got == {("book", "ID!", "Book")}
+
+
+@pytest.mark.parametrize("queries_ts", [
+    "export const queries = { limit: 10, books: async () => [] };\n",   # a data property
+    "export const queries = { books: async () => [], tags: ['a'] };\n",  # an array property
+    "export const queries = { books: async () => [], page: { size: 1 } };\n",  # a plain object
+    "export const queries = makeQueries();\n",                         # not an object literal
+    "export const queries = {};\n",                                    # nothing to expose
+    "const queries = { books: async () => [] };\n",                    # not exported
+    "export default { books: async () => [] };\n",                     # not a named export
+])
+def test_named_import_root_that_is_not_a_resolver_object_is_none(analyze_files, queries_ts) -> None:
+    st = _run(analyze_files, {"src/server.ts": SERVER_NAMED, "src/queries.ts": queries_ts})
+    assert _eps(st) == []
+
+
+def test_named_import_root_from_a_package_is_none(analyze_files) -> None:
+    st = _run(
+        analyze_files,
+        {"src/server.ts": SERVER_NAMED.replace("'./queries'", "'some-package'")},
+    )
+    assert _eps(st) == []
+
+
+def test_resolver_map_root_written_shorthand(analyze_files) -> None:
+    # `{ Query, Mutation }` after `import { Query } from './Query'`: the key is the local name.
+    st = _run(
+        analyze_files,
+        {
+            "src/server.ts": "import { Query } from './Query';\nimport { Mutation } from './Mutation';\n"
+                             "export const resolvers = {\n  Query,\n  Mutation,\n};\n",
+            "src/Query.ts": "export const Query = {\n  books: () => [],\n};\n",
+            "src/Mutation.ts": "export const Mutation = {\n  addBook: () => null,\n};\n",
+        },
+    )
+    assert _ops(st) == {
+        ("4:2", "QUERY", "query", "books", None, "src/Query.ts", 2),
+        ("5:2", "MUTATION", "mutation", "addBook", None, "src/Mutation.ts", 2),
+    }
+
+
+def test_resolver_map_root_written_shorthand_from_a_namespace_import(analyze_files) -> None:
+    st = _run(
+        analyze_files,
+        {
+            "src/server.ts": "import * as Query from './Query';\nexport const resolvers = {\n  Query,\n};\n",
+            "src/Query.ts": "export const books = async () => [];\n",
+        },
+    )
+    assert _ops(st) == {("3:2", "QUERY", "query", "books", "books", "src/Query.ts", 1)}
+
+
+QUERIES_TS = "export const queries = {\n  books: () => [],\n};\n"
+IMPORT_QUERIES = "import { queries } from './queries';\n"
+
+
+@pytest.mark.parametrize("holder", [
+    "const resolvers = { Query: queries };",
+    "export const rootResolvers = { Query: queries };",
+    "const map: Resolvers = { Query: queries };",
+    "const map = { Query: queries } as Resolvers;",
+    "const map = { Query: queries } satisfies Resolvers;",
+    "const config = { typeDefs, resolvers: { Query: queries } };",
+    "new ApolloServer({ typeDefs, resolvers: { Query: queries } });",
+])
+def test_named_import_root_in_a_resolver_map_is_read(analyze_files, holder) -> None:
+    st = _run(analyze_files, {"src/server.ts": IMPORT_QUERIES + holder + "\n", "src/queries.ts": QUERIES_TS})
+    assert {r.endpoint for r in _eps(st)} == {"books"}
+
+
+@pytest.mark.parametrize("holder", [
+    "export const bus = { Query: queries, Command: {} };",   # a CQRS bus
+    "const handlers = { Query: queries };",
+    "export default { Query: queries };",                    # no name to tell
+    "const schemas = [{ Query: queries }];",
+])
+def test_named_import_root_that_is_not_in_a_resolver_map_is_none(analyze_files, holder) -> None:
+    # Without a map named like resolvers, or a GraphQL schema in the repo, a `Query` key is not GraphQL.
+    st = _run(analyze_files, {"src/server.ts": IMPORT_QUERIES + holder + "\n", "src/queries.ts": QUERIES_TS})
+    assert _eps(st) == []
+
+
+def test_named_import_root_is_read_where_the_repo_declares_a_schema(analyze_files) -> None:
+    # `export default { Query: queries }` names nothing, but the repo has GraphQL SDL.
+    files = {
+        "src/server.ts": IMPORT_QUERIES + "export default { Query: queries };\n",
+        "src/queries.ts": QUERIES_TS,
+    }
+    st = _run(analyze_files, {**files, "src/schema.graphql": "type Query { books: [Book] }\n"})
+    assert {r.endpoint for r in _eps(st) if r.path == "src/server.ts"} == {"books"}
