@@ -74,7 +74,7 @@ def extract_config(path: str, text: str) -> dict[str, Any]:
 #: even though they are non-empty. Keep in step with the ``.json`` name-cases in ``_dispatch``.
 #: The names in ``NX_ONLY_JSON_NAMES`` are rich only inside an Nx workspace.
 RICH_JSON_NAMES: frozenset[str] = frozenset(
-    {"package.json", "tsconfig.json", "jsconfig.json", "mod.json", "nx.json", "project.json",
+    {"package.json", "composer.json", "tsconfig.json", "jsconfig.json", "mod.json", "nx.json", "project.json",
      "workspace.json"}
 )
 
@@ -86,6 +86,8 @@ NX_ONLY_JSON_NAMES: frozenset[str] = frozenset({"project.json", "workspace.json"
 def _dispatch(name: str, suffix: str, text: str) -> dict[str, Any]:
     if name == "package.json":
         return _package_json(text)
+    if name == "composer.json":
+        return _composer_json(text)
     if name in ("tsconfig.json", "jsconfig.json"):
         return _tsconfig(name, text)
     if name == "project.json":
@@ -172,6 +174,26 @@ def _package_json(text: str) -> dict[str, Any]:
         "dependencyCount": len(deps),
         "devDependencyCount": len(dev),
     }, mode)
+
+
+def _composer_json(text: str) -> dict[str, Any]:
+    d = json.loads(text)
+    deps = dict(d.get("require") or {})
+    dev = dict(d.get("require-dev") or {})
+    return {
+        "kind": "composer.json",
+        "category": "json",
+        "packageManager": "composer",
+        "packageInfo": {
+            "name": d.get("name"),
+            "version": d.get("version"),
+            "description": d.get("description"),
+            "dependencies": deps,
+            "devDependencies": dev,
+        },
+        "dependencyCount": len(deps),
+        "devDependencyCount": len(dev),
+    }
 
 
 def _tsconfig(name: str, text: str) -> dict[str, Any]:

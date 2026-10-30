@@ -56,13 +56,49 @@ def test_named_rich_configs_stay_config() -> None:
     # only the NAME excludes — a record array inside package.json/tsconfig never diverts them
     assert _language("package.json", {"name": "app", "dependencies": {"react": "^18"}}) == "config"
     assert _language("package.json", {"name": "app", "contributors": [{"name": "Al"}]}) == "config"
+    assert _language("composer.json", {"name": "vendor/package", "require": {}}) == "config"
     assert _language("tsconfig.json", {"compilerOptions": {}, "references": [{"path": "../x"}]}) == "config"
     assert _language("mod.json", {"main": "Verticle"}) == "config"
 
 
-def test_composer_json_is_captured_not_named_rich() -> None:
-    # composer.json has no dedicated extractor → captured in full (only RICH_JSON_NAMES are config)
-    assert _language("composer.json", {"name": "v/p", "authors": [{"name": "X"}]}) == "structured-json"
+def test_composer_json_is_a_named_rich_config() -> None:
+    # Composer manifests are named rich configs, like package.json.
+    assert _language("composer.json", {"name": "v/p", "authors": [{"name": "X"}]}) == "config"
+
+
+def test_composer_json_extracts_package_and_dependency_metadata() -> None:
+    rec = _parse(
+        "composer.json",
+        {
+            "name": "acme/example",
+            "require": {"laravel/framework": "^11.0", "guzzlehttp/guzzle": "^7.0"},
+            "require-dev": {"phpunit/phpunit": "^11.0"},
+        },
+    )
+    assert rec.metadata["packageManager"] == "composer"
+    assert rec.metadata["packageInfo"]["name"] == "acme/example"
+    assert rec.metadata["packageInfo"]["dependencies"] == {
+        "laravel/framework": "^11.0", "guzzlehttp/guzzle": "^7.0",
+    }
+    assert rec.metadata["packageInfo"]["devDependencies"] == {"phpunit/phpunit": "^11.0"}
+    assert rec.metadata["dependencyCount"] == 2
+    assert rec.metadata["devDependencyCount"] == 1
+
+
+def test_composer_json_allows_omitted_optional_sections() -> None:
+    rec = _parse("composer.json", {"name": "acme/example"})
+    assert rec.metadata["packageInfo"]["name"] == "acme/example"
+    assert rec.metadata["packageInfo"]["dependencies"] == {}
+    assert rec.metadata["packageInfo"]["devDependencies"] == {}
+    assert rec.metadata["dependencyCount"] == rec.metadata["devDependencyCount"] == 0
+
+
+def test_malformed_composer_json_uses_config_parse_error() -> None:
+    ctx = ParseContext(path="composer.json", abs_path=None, source=b"{not json", repo_root=".")
+    rec = JsonParser().parse_file(ctx)
+    assert rec.language == "config"
+    assert rec.metadata["category"] == "json"
+    assert "parseError" in rec.metadata
 
 
 def test_empty_and_scalar_are_config() -> None:
