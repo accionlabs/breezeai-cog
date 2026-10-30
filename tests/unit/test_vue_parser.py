@@ -54,7 +54,10 @@ def test_routes_require_capture_statements(tmp_path) -> None:
 
 def test_vue3_routes(tmp_path) -> None:
     rec = _parse("src/router/index.ts", _V3_ROUTER, tmp_path)
-    routes = {s.endpoint: s for s in rec.statements if s.semanticType == "route"}
+    # Test expectation updated: BREEZEAI-1369 — '/old' redirects to '/', so a navigation record
+    # now shares the endpoint '/' with the page; the page rows are what this test inspects.
+    routes = {s.endpoint: s for s in rec.statements
+              if s.semanticType == "route" and s.routeKind == "page"}
     assert {"/", "/reports", "/settings", "/settings/profile"} <= set(routes)
     assert rec.framework == "vue"
     # bare-identifier component -> its name; every route is a page (no mount concept)
@@ -85,10 +88,14 @@ def test_name_key_not_excluded(tmp_path) -> None:
     assert named is not None, "a named Vue route must not be dropped"
 
 
-def test_redirect_routes_skipped(tmp_path) -> None:
-    # A redirect entry is an alias, not a page/endpoint — it must not be emitted.
+def test_redirect_route_is_navigation_not_page(tmp_path) -> None:
+    # Test expectation updated: BREEZEAI-1369 — a redirect used to have no record. It is now an
+    # outbound navigation to its target, never a page at its own path ('/old' stays unaddressed).
     rec = _parse("src/router/index.ts", _V3_ROUTER, tmp_path)
-    assert not any(s.semanticType == "route" and s.endpoint == "/old" for s in rec.statements)
+    routes = [s for s in rec.statements if s.semanticType == "route"]
+    assert not any(s.endpoint == "/old" for s in routes)
+    nav = next(s for s in routes if s.routeKind == "navigation")
+    assert (nav.endpoint, nav.framework, nav.text) == ("/", "vue", "{ path: '/old', redirect: '/' }")
 
 
 # ── Param routes: dynamic segments are kept verbatim in the endpoint (BREEZEAI-926 AC2) ──
@@ -148,13 +155,14 @@ def test_layout_route_children_recursed(tmp_path) -> None:
     assert root.handler == "AppLayout"
 
 
-def test_pure_redirect_still_skipped(tmp_path) -> None:
-    # A redirect with NO component of its own is an alias — still never emitted, even though
-    # the fix now recurses through redirect-bearing nodes.
+def test_pure_redirect_is_never_a_page(tmp_path) -> None:
+    # Test expectation updated: BREEZEAI-1369 — a redirect with NO component of its own is still
+    # never a page at its own path; it is a navigation record (its { name: 'dashboard' } target
+    # is declared nowhere in this file, so the endpoint is empty).
     rec = _parse("src/router/index.ts", _LAYOUT_ROUTER, tmp_path)
-    eps = [s.endpoint for s in rec.statements if s.semanticType == "route"]
-    # the top-level `{ path: '/:pathMatch(.*)*', redirect }` (no component) must be absent
-    assert "/:pathMatch(.*)*" not in eps
+    routes = [s for s in rec.statements if s.semanticType == "route"]
+    assert "/:pathMatch(.*)*" not in [s.endpoint for s in routes if s.routeKind == "page"]
+    assert [s.routeKind for s in routes if s.text.startswith("{ path: '/:pathMatch")] == ["navigation"]
 
 
 # ── Vue 2 form (new VueRouter / vue-router 3) — SAME detector, one parser ───────
@@ -507,8 +515,10 @@ def test_signalless_route_array_captured_by_base_parser(tmp_path) -> None:
     assert "/" not in routes
     assert routes["/home"].handler == "home" and routes["/home"].framework == "vue"
     assert rec.framework == "vue"
-    # the redirect-only child is still skipped
+    # the redirect-only child is no page (BREEZEAI-1369: it is a navigation to /home)
     assert not any(s.endpoint == "" for s in rec.statements if s.semanticType == "route")
+    assert [(s.routeKind, s.endpoint) for s in rec.statements
+            if s.semanticType == "route" and s.routeKind == "navigation"] == [("navigation", "/home")]
 
 
 def test_signalless_detection_needs_capture_statements(tmp_path) -> None:
@@ -765,3 +775,113 @@ def test_named_views_default_is_the_page(analyze_files) -> None:
     # '/lazy' loads a module that is not in the repo: its name is unknown, so no handler (never
     # the import path).
     assert got == {"/home": "Home", "/lazy": None, "/split": None, "/one": "One"}
+
+
+# ── BREEZEAI-1369: a pure redirect is an outbound navigation record ────────────────────────
+
+
+def _redirects(tmp_path, *entries: str):
+    """(routeKind, endpoint) of every redirect record in a routes array that also holds a page."""
+    body = "\n".join(f"  {e}," for e in entries)
+    src = ("import Home from './Home.vue'\nconst routes = [\n"
+           "  { path: '/home', name: 'home', component: Home },\n"
+           f"{body}\n]\nexport default routes\n").encode()
+    rec = _parse_base("src/router/index.js", src, tmp_path)
+    return [s for s in rec.statements
+            if s.semanticType == "route" and s.routeKind == "navigation"]
+
+
+def test_redirect_records_follow_the_ticket_examples(tmp_path) -> None:
+    navs = _redirects(tmp_path, "{ path: '/', redirect: '/home' }",
+                      "{ path: '/old', redirect: to => ({ path: '/home' }) }")
+    assert [(s.endpoint, s.text) for s in navs] == [
+        ("/home", "{ path: '/', redirect: '/home' }"),
+        (None, "{ path: '/old', redirect: to => ({ path: '/home' }) }"),
+    ]
+    for s in navs:  # the same model as Angular redirectTo: no handler of its own
+        assert (s.framework, s.nodeType) == ("vue", "object")
+        assert (s.handler, s.handlerPath, s.handlerLine) == (None, None, None)
+
+
+def test_redirect_string_and_path_object_drop_query_and_fragment(tmp_path) -> None:
+    navs = _redirects(tmp_path, "{ path: '/a', redirect: '/home?x=1' }",
+                      "{ path: '/b', redirect: '/home#top' }",
+                      "{ path: '/c', redirect: { path: '/home', query: { x: 1 } } }",
+                      "{ path: '/d', redirect: { path: '/home?x=1#y' } }",
+                      "{ path: '/e', redirect: '/' }")
+    assert [s.endpoint for s in navs] == ["/home", "/home", "/home", "/home", "/"]
+
+
+def test_redirect_target_is_normalized_like_a_page_endpoint(tmp_path) -> None:
+    # A page '/home' and a redirect to '/home/' or '//home' must meet on the same endpoint.
+    navs = _redirects(tmp_path, "{ path: '/a', redirect: '/home/' }",
+                      "{ path: '/b', redirect: '//home' }",
+                      "{ path: '/c', redirect: { path: '/home/?x=1' } }")
+    assert [s.endpoint for s in navs] == ["/home", "/home", "/home"]
+
+
+def test_redirect_template_literal_without_substitution_is_a_literal(tmp_path) -> None:
+    navs = _redirects(tmp_path, "{ path: '/a', redirect: `/home` }",
+                      "{ path: '/b', redirect: { path: `/home?x=1` } }")
+    assert [s.endpoint for s in navs] == ["/home", "/home"]
+
+
+def test_redirect_never_guessed_endpoints_are_empty(tmp_path) -> None:
+    navs = _redirects(tmp_path, "{ path: '/a', redirect: 'home' }",
+                      "{ path: '/b', redirect: { path: 'home' } }",
+                      "{ path: '/c', redirect: TARGET }",
+                      "{ path: '/d', redirect: `/home/${id}` }",
+                      "{ path: '/e', redirect: { query: { x: 1 } } }")
+    assert [s.endpoint for s in navs] == [None] * 5
+
+
+def test_redirect_named_target_resolves_when_declared_once(tmp_path) -> None:
+    navs = _redirects(tmp_path, "{ path: '/a', redirect: { name: 'home' } }",
+                      "{ path: '/b', redirect: { name: 'nope' } }")
+    assert [s.endpoint for s in navs] == ["/home", None]
+
+
+def test_redirect_named_target_resolves_through_nested_prefix(tmp_path) -> None:
+    src = b"""const routes = [
+  { path: '/admin', component: Admin, children: [
+    { path: 'users', name: 'users', component: Users },
+  ]},
+  { path: '/go', redirect: { name: 'users' } },
+]
+"""
+    nav = next(s for s in _parse_base("src/router/index.js", src, tmp_path).statements
+               if s.routeKind == "navigation")
+    assert nav.endpoint == "/admin/users"
+
+
+def test_redirect_named_target_ambiguous_is_empty(tmp_path) -> None:
+    src = b"""const routes = [
+  { path: '/a', name: 'dup', component: A },
+  { path: '/b', name: 'dup', component: B },
+  { path: '/go', redirect: { name: 'dup' } },
+]
+"""
+    nav = next(s for s in _parse_base("src/router/index.js", src, tmp_path).statements
+               if s.routeKind == "navigation")
+    assert nav.endpoint is None
+
+
+def test_redirect_child_of_a_layout_is_recorded_and_children_still_walked(tmp_path) -> None:
+    src = b"""const routes = [
+  { path: '/app', component: Layout, children: [
+    { path: '', redirect: '/app/dash' },
+    { path: 'dash', component: Dash },
+  ]},
+]
+"""
+    rec = _parse_base("src/router/index.js", src, tmp_path)
+    got = {(s.routeKind, s.endpoint) for s in rec.statements if s.semanticType == "route"}
+    assert got == {("navigation", "/app/dash"), ("page", "/app/dash")}
+
+
+def test_component_with_redirect_stays_a_page_only(tmp_path) -> None:
+    # A layout whose default child is a redirect is one page; it gets no navigation record.
+    rec = _parse_base("src/router/modules/table.js", _MODULE_ROUTE, tmp_path)
+    kinds = {s.endpoint: s.routeKind for s in rec.statements if s.semanticType == "route"}
+    assert kinds["/table"] == "page"
+    assert "navigation" not in kinds.values()
