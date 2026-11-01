@@ -44,18 +44,46 @@ def _nested_type_spec(member: Node) -> Node | None:
     """The specifier of a nested type defined in a class body, or ``None`` for a real member.
     A nested ``union Chunk { … };`` / ``enum Kind { … };`` parses as a ``field_declaration``
     whose ``type`` is the specifier (not as a bare specifier), so both forms are unwrapped
-    here. A member variable (``Chunk* root;``) has a plain type and returns ``None``."""
+    here. A member variable (``Chunk* root;``, or C's ``struct node *next;``, whose type is a
+    specifier without a body) returns ``None``."""
     if member.type in _NESTED_TYPE_SPECS:
         return member
     if member.type == "field_declaration":
         tnode = member.child_by_field_name("type")
-        if tnode is not None and tnode.type in _NESTED_TYPE_SPECS:
+        if tnode is not None and tnode.type in _NESTED_TYPE_SPECS and _defines(tnode):
             return tnode
     return None
+
+
+def _defines(spec: Node) -> bool:
+    """Whether a struct/class/union/enum specifier has a body (defines the type) rather than
+    naming it (``struct node``)."""
+    return spec.child_by_field_name("body") is not None or any(
+        c.type == "enumerator_list" for c in spec.named_children
+    )
 #: Class-body members that may be a function: a method with a return type is a
 #: ``field_declaration``; a constructor/destructor (no return type) is a ``declaration``;
 #: an inline definition (or ``= default``) is a ``function_definition``.
 _MEMBER_FN_TYPES = ("field_declaration", "function_definition", "declaration")
+
+def typedef_type(node: Node, source: bytes) -> tuple[Node, str, str | None] | None:
+    """``typedef struct [tag] { … } name;`` (also ``union`` / ``enum``) → the specifier, the
+    typedef name and the tag (``None`` when anonymous). ``None`` when the typedef doesn't
+    define the type (``typedef struct node node_t;``, no body) or doesn't give it exactly one
+    plain name (``typedef struct {…} *list_ptr;``)."""
+    if node.type != "type_definition":
+        return None
+    spec = node.child_by_field_name("type")
+    if spec is None or spec.type not in _NESTED_TYPE_SPECS:
+        return None
+    if not _defines(spec):
+        return None
+    names = [d for d in node.children_by_field_name("declarator") if d.type == "type_identifier"]
+    if len(names) != 1:
+        return None
+    tag = spec.child_by_field_name("name")
+    return spec, node_text(names[0], source), node_text(tag, source) if tag is not None else None
+
 
 #: The two C++ type-alias declarations. ``using namespace …`` / ``using Ns::name`` are a
 #: ``using_declaration`` instead — an import, deliberately not in this set.
@@ -145,15 +173,19 @@ def build_class(
     limit: int,
     resolve: CallResolver = noop_resolver,
     owner: str | None = None,
+    name: str | None = None,
+    metadata: dict[str, str] | None = None,
 ) -> tuple[list[Class], list[Function], list[Statement]]:
     """Return (classes, methods, statements) — all flat, linked by parentId. The class
-    list is this class plus any nested (member) classes/structs parented to it."""
-    name_node = node.child_by_field_name("name")
-    if name_node is None:  # anonymous struct/class — no name to emit; skip (honest gap)
-        return [], [], []
+    list is this class plus any nested (member) classes/structs parented to it. ``name``
+    names the class instead of its tag (a ``typedef``'s name, see :func:`typedef_type`)."""
+    if name is None:
+        name_node = node.child_by_field_name("name")
+        if name_node is None:  # anonymous struct/class — no name to emit; skip (honest gap)
+            return [], [], []
+        name = node_text(name_node, source)
     if node.child_by_field_name("body") is None:  # forward declaration (`class Foo;`) — not a
         return [], [], []                          # definition; emitting it fabricates a hollow node
-    name = node_text(name_node, source)
     start, end = line_span(node)
     qualified = f"{owner}.{name}" if owner else name
     cid = disambiguate(class_id(path, qualified), seen_ids)
@@ -249,6 +281,7 @@ def build_class(
         constructorParams=ctor_params,
         startLine=start,
         endLine=end,
+        metadata=metadata or None,
     )
     return [cls, *nested_classes], methods, statements
 
@@ -262,19 +295,23 @@ def build_enum(
     seen_ids: set[str],
     capture: bool,
     limit: int,
+    name: str | None = None,
+    metadata: dict[str, str] | None = None,
 ) -> tuple[Class | None, list[Statement]]:
     """An ``enum_specifier`` → a ``Class`` of type ``enum`` plus one flat Statement per
     ``enumerator`` member (parented to the enum, gated by statement capture; the member's
     ``= value`` stays inside its ``text``). Anonymous enums and forward declarations (``enum
     Color;`` — no ``enumerator_list``) emit nothing (honest gap, no hollow node). ``enum
-    class`` / ``enum struct`` are scoped enums, captured the same way (scoped-ness not stored)."""
-    name_node = node.child_by_field_name("name")
-    if name_node is None:  # anonymous enum — no name to emit
-        return None, []
+    class`` / ``enum struct`` are scoped enums, captured the same way (scoped-ness not stored).
+    ``name`` names the enum instead of its tag (a ``typedef``'s name)."""
+    if name is None:
+        name_node = node.child_by_field_name("name")
+        if name_node is None:  # anonymous enum — no name to emit
+            return None, []
+        name = node_text(name_node, source)
     body = next((c for c in node.named_children if c.type == "enumerator_list"), None)
     if body is None:
         return None, []  # forward declaration, not a definition
-    name = node_text(name_node, source)
     start, end = line_span(node)
     cid = disambiguate(class_id(path, name), seen_ids)
     cls = Class(
@@ -285,6 +322,7 @@ def build_enum(
         type="enum",
         startLine=start,
         endLine=end,
+        metadata=metadata or None,
     )
     statements = (
         emit_enum_members(

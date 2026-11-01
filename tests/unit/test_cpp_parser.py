@@ -582,9 +582,10 @@ def test_type_alias_declarator_forms_and_using_imports(tmp_path) -> None:
         ("type_definition", "Callback"),   # (*Callback)(int, int) -> Callback
         ("type_definition", "Buf"),        # Buf[16] -> Buf
         ("type_definition", "A"),          # multi-name: first name, both on `text`
-        ("type_definition", "Point"),      # typedef of an anonymous struct
+        ("field_declaration", "x"),        # a typedef'd struct is a class (below), not an alias
         ("alias_declaration", "Ptr"),      # alias template, unwrapped from the template
     ]
+    assert [(c.name, c.type) for c in rec.classes] == [("Point", "struct")]
     assert next(s for s in rec.statements if s.name == "A").text == "typedef int A, B;"
 
 

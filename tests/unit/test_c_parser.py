@@ -572,3 +572,54 @@ def test_a_static_free_function_is_static(tmp_path, parser) -> None:
         "fast": True,
         "api": None,
     }
+
+
+# -- typedef'd types ----------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("parser", [CParser(), CppParser()], ids=["c", "cpp"])
+def test_a_typedef_that_defines_a_type_is_a_class_named_by_the_typedef(tmp_path, parser) -> None:
+    record = _parse(
+        parser,
+        tmp_path,
+        "kv.h",
+        "typedef struct { int x, y; } point_t;\n"
+        "typedef struct listNode { struct listNode *next; void *value; } listNode;\n"
+        "typedef struct _kvstoreIterator { int didx; } kvstoreIterator;\n"
+        "typedef enum { COLOR_RED, COLOR_GREEN } color_t;\n"
+        "typedef union { int i; float f; } num_t;\n"
+        # Not a definition, or not one plain name: stay type aliases.
+        "typedef struct node node_t;\n"
+        "typedef struct { int a; } *row_ptr;\n",
+    )
+    assert [(c.name, c.type, c.metadata) for c in record.classes] == [
+        ("point_t", "struct", None),
+        ("listNode", "struct", None),
+        ("kvstoreIterator", "struct", {"tag": "_kvstoreIterator"}),
+        ("color_t", "enum", None),
+        ("num_t", "union", None),
+    ]
+    members = {
+        c.name: [s.name for s in record.statements if s.parentId == c.id] for c in record.classes
+    }
+    assert members == {
+        "point_t": ["x"],
+        "listNode": ["next", "value"],  # a field typed `struct listNode *` is a field
+        "kvstoreIterator": ["didx"],
+        "color_t": ["COLOR_RED", "COLOR_GREEN"],
+        "num_t": ["i", "f"],
+    }
+    assert [(s.nodeType, s.name) for s in record.statements if s.parentId == record.id] == [
+        ("type_definition", "node_t"),
+        ("type_definition", "row_ptr"),
+    ]
+
+
+def test_a_typedefd_struct_is_a_class_without_statement_capture(tmp_path) -> None:
+    path = tmp_path / "p.h"
+    path.write_text("typedef struct { int x; } point_t;\n")
+    record = CParser().parse_file(
+        ParseContext(path="p.h", abs_path=path, source=path.read_bytes(), repo_root=tmp_path)
+    )
+    assert [c.name for c in record.classes] == ["point_t"]
+    assert record.statements == []

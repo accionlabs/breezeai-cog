@@ -41,6 +41,7 @@ from .classes import (
     build_class,
     build_enum,
     type_alias_statement,
+    typedef_type,
 )
 from .functions import (
     build_function,
@@ -177,6 +178,32 @@ class CppParser(BaseParser):
                             name=node_text(name, source) if name is not None else None,
                         )
                     )
+                elif (typedef := typedef_type(node, source)) is not None:
+                    # `typedef struct [tag] { … } name;` defines the type as well as naming it
+                    # — C's usual way to declare a struct, enum or union. It is a class under
+                    # the typedef's name, the one code writes; a different tag goes in
+                    # `metadata.tag`.
+                    spec, type_name, tag = typedef
+                    meta = {"tag": tag} if tag is not None and tag != type_name else None
+                    if spec.type == "enum_specifier":
+                        enum_cls, enum_stmts = build_enum(
+                            spec, source, path, parent_id=fid, seen_ids=seen_ids,
+                            capture=capture, limit=limit, name=type_name, metadata=meta,
+                        )
+                        if enum_cls is not None:
+                            classes.append(enum_cls)
+                            statements.extend(enum_stmts)
+                    else:
+                        cls_list, methods, cls_stmts = build_class(
+                            spec, source, path, parent_id=fid, seen_ids=seen_ids,
+                            capture=capture, limit=limit, resolve=resolve, name=type_name,
+                            metadata=meta,
+                        )
+                        classes.extend(cls_list)
+                        functions.extend(methods)
+                        statements.extend(cls_stmts)
+                        for c in cls_list:
+                            class_map.setdefault(c.name, c.id)
                 elif node.type in TYPE_ALIAS_TYPES and capture:
                     # `typedef X Y;` / `using Y = X;` at file or namespace scope. C++ carries
                     # much of its vocabulary in typedefs, and the aliased type stays on the

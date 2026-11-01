@@ -421,6 +421,15 @@ C++.
 > function has no class, so on it the field can only mean file-local. **Cost:** a query on
 > `isStatic` across languages mixes the two meanings.
 
+> **Decision —** `typedef struct [tag] { … } name;` (also `union`, `enum`) is a class named
+> `name`, with its fields or members; a tag that differs goes in `metadata.tag`. A typedef
+> without a body (`typedef struct node node_t;`) or without one plain name stays a
+> `type_definition` statement.
+> **Why:** this is C's usual way to declare a struct, and the typedef's name is the one code
+> writes — where the two differ, redis, zlib and llama.cpp use it about 97% of the time — so
+> a type written on a parameter leads to its class. **Cost:** the tag (`_kvstoreIterator`) is
+> found only through metadata. The same applies to C-style typedefs in C++.
+
 > **Decision —** a file-scope function prototype (`int list_len(const node_t *head);`) is a
 > plain `declaration` statement named after the function, not a `Function`.
 > **Why:** a C header's prototypes are its module's API, and nothing else captured them. A
