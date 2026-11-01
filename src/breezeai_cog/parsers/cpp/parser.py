@@ -47,7 +47,7 @@ from .functions import (
     defined_names,
     function_declarator_of,
     has_declaration_error,
-    is_function_pointer,
+    is_misread_declarator,
 )
 from .imports import FamilyHeaders, extract_imports
 from .index import (
@@ -189,24 +189,21 @@ class CppParser(BaseParser):
                     )
                 elif node.type == "declaration" and capture:
                     # A file-/namespace-scope variable or constant (`const int kMax = 5;`,
-                    # `constexpr char kName[] = "x";`). C++ puts much of its controlled
-                    # vocabulary here rather than in a class, and these are otherwise
-                    # captured nowhere, so emit each as a flat statement (its `text` — incl.
-                    # any `= value` — is queryable). The grammar spells a *function
-                    # prototype* with this same node type, so a `function_declarator` marks
-                    # a declaration that is not a value; skip those (a defined function is a
-                    # `function_definition`, handled above). Namespace members parent to the
-                    # file, matching how `process` already flattens namespaces.
+                    # `constexpr char kName[] = "x";`), or a function prototype
+                    # (`int list_len(const node_t *head);`). C++ puts much of its controlled
+                    # vocabulary here rather than in a class, and a C header's prototypes are
+                    # its module's API; neither is captured anywhere else, so each is a flat
+                    # statement named after what it declares (its `text` — incl. any
+                    # `= value` or parameter list — is queryable). A prototype is not a
+                    # `Function`: the definition is, wherever it is. Namespace members parent
+                    # to the file, matching how `process` already flattens namespaces. A
+                    # declarator the grammar misread (a macro taken for the type) is skipped.
                     declarator = node.child_by_field_name("declarator")
-                    if function_declarator_of(declarator) is None or is_function_pointer(
-                        declarator
-                    ):  # a variable, incl. a pointer to a function (`int (*cmp)(int, int);`)
+                    if not is_misread_declarator(declarator):
                         statements.append(
                             member_statement(
                                 node, source, path, parent_id=fid, limit=limit, seen_ids=seen_ids,
-                                name=_declarator_name(
-                                    node.child_by_field_name("declarator"), source
-                                ),
+                                name=_declarator_name(declarator, source),
                             )
                         )
 

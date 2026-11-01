@@ -79,6 +79,16 @@ def function_declarator_of(declarator: Node | None) -> Node | None:
     return inner if inner is not None and inner.type == "function_declarator" else None
 
 
+def is_misread_declarator(declarator: Node | None) -> bool:
+    """Whether ``declarator`` is a function returning a function — not valid C or C++, so the
+    grammar misread it. ``LUA_API int (lua_gettop) (lua_State *L);`` reads as a function
+    ``int`` taking ``lua_gettop``, because ``LUA_API`` is a macro the grammar takes for the
+    type. Its names can't be trusted."""
+    fd = function_declarator_of(declarator)
+    inner = fd.child_by_field_name("declarator") if fd is not None else None
+    return inner is not None and inner.type == "function_declarator"
+
+
 def is_function_pointer(declarator: Node | None) -> bool:
     """Whether ``declarator`` declares a pointer (or reference) *to* a function —
     ``size_t (*read)(void *, size_t)`` — which is a variable, not a function. Its

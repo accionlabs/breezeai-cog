@@ -522,3 +522,37 @@ def test_an_include_is_looked_up_next_to_the_including_file_first(tmp_path) -> N
     )
     assert _calls(_capture(repo, 1)["sycl/main.c"], "run") == {"set_device": "sycl/common.h"}
 
+
+# -- prototypes ------------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("parser", [CParser(), CppParser()], ids=["c", "cpp"])
+def test_prototypes_are_declaration_statements_not_functions(tmp_path, parser) -> None:
+    record = _parse(
+        parser,
+        tmp_path,
+        "list.h",
+        "int list_len(const struct node *head);\n"
+        "extern void list_free(struct node *head);\n"
+        "int (list_parenthesized)(int n);\n"
+        "static int forward(int);\n"
+        # A macro the grammar takes for the type: misread as a function named `int`.
+        "LUA_API int (lua_gettop) (lua_State *L);\n",
+    )
+    assert [(s.nodeType, s.name) for s in record.statements] == [
+        ("declaration", "list_len"),
+        ("declaration", "list_free"),
+        ("declaration", "list_parenthesized"),
+        ("declaration", "forward"),
+    ]
+    assert record.functions == []
+
+
+def test_prototypes_follow_the_statement_gate(tmp_path) -> None:
+    path = tmp_path / "p.h"
+    path.write_text("int list_len(void);\n")
+    record = CParser().parse_file(
+        ParseContext(path="p.h", abs_path=path, source=path.read_bytes(), repo_root=tmp_path)
+    )
+    assert record.statements == []
+

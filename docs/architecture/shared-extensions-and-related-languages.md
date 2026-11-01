@@ -415,6 +415,15 @@ C++.
 > its name with an unrelated file-local one is left unresolved. A same-file call still resolves.
 > This applies to C++ `.cpp` files too.
 
+> **Decision —** a file-scope function prototype (`int list_len(const node_t *head);`) is a
+> plain `declaration` statement named after the function, not a `Function`.
+> **Why:** a C header's prototypes are its module's API, and nothing else captured them. A
+> `Function` would duplicate the definition and, never being a call target, look unused. A
+> prototype the grammar misreads — a macro such as `LUA_API` taken for the return type, which
+> reads as a function returning a function — is skipped rather than named wrongly. **Cost:**
+> statements aren't embedded, so a header isn't found by meaning from its prototypes; and
+> macro-prefixed prototypes the grammar misreads are not captured.
+
 > **Decision —** a call links to a function defined in a header only when the calling file can
 > see that header: the file includes it, directly or through other includes, or — for a call
 > written in a header — every file that includes that header can see it. An include is looked
