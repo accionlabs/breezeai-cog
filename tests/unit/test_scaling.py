@@ -171,6 +171,21 @@ def _go_gin(n: int) -> str:
             f"func routes(r *gin.Engine, h *Handler) {{\n{body}}}\n{helpers}")
 
 
+def _c(n: int) -> str:
+    body = "".join(
+        f"/* ops {i} */\n"
+        f"#define MAX{i} {i}\n"
+        f"struct ops{i} {{ int (*run)(int); int count; }};\n"
+        f"static int helper{i}(int x) {{ return x + MAX{i}; }}\n"
+        f"int f{i}(struct ops{i} *o, int x) {{\n"
+        f"    if (x > 0) {{ return helper{i}(x); }} // note\n"
+        f"    return o->run(x);\n"
+        f"}}\n"
+        for i in range(n)
+    )
+    return f"#include <stdio.h>\n#include \"local.h\"\n{body}"
+
+
 SAMPLES: dict[str, tuple[str, Callable[[int], str]]] = {
     "java-vertx": ("V.java", _java_vertx),
     "groovy-vertx": ("Http.groovy", _groovy_vertx),
@@ -182,6 +197,7 @@ SAMPLES: dict[str, tuple[str, Callable[[int], str]]] = {
     "jslt": ("transform.jslt", _jslt),
     "go": ("p.go", _go),
     "go-gin": ("routes.go", _go_gin),
+    "c": ("mod.c", _c),
 }
 
 

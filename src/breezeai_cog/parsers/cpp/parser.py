@@ -55,8 +55,24 @@ from .ownership import cpp_only_syntax, include_targets
 from ..comments_common import comment_statements_for
 from ..statements_common import member_statement
 from .mappings import (
-    COMMENT_TYPES, CONTROL_FLOW, FRAMEWORKS, STATEMENT_TYPES, TRANSPARENT_SCOPES,
+    COMMENT_TYPES, CONTROL_FLOW, FRAMEWORKS, MACRO_TYPES, STATEMENT_TYPES, TRANSPARENT_SCOPES,
 )
+
+
+def _is_include_guard(node: Node, source: bytes) -> bool:
+    """``#define LIST_H`` with no value, directly inside ``#ifndef LIST_H``: the guard every
+    header has, which says nothing about the code."""
+    parent, name = node.parent, node.child_by_field_name("name")
+    if node.type != "preproc_def" or node.child_by_field_name("value") is not None:
+        return False
+    if parent is None or parent.type != "preproc_ifdef" or name is None:
+        return False
+    guard = parent.child_by_field_name("name")
+    return (
+        parent.children[0].type == "#ifndef"
+        and guard is not None
+        and node_text(guard, source) == node_text(name, source)
+    )
 
 
 class CppParser(BaseParser):
@@ -142,6 +158,14 @@ class CppParser(BaseParser):
                         statements.extend(enum_stmts)
                 elif node.type == "function_definition":
                     _emit_function(node, ns)
+                elif node.type in MACRO_TYPES and capture and not _is_include_guard(node, source):
+                    name = node.child_by_field_name("name")
+                    statements.append(
+                        member_statement(
+                            node, source, path, parent_id=fid, limit=limit, seen_ids=seen_ids,
+                            name=node_text(name, source) if name is not None else None,
+                        )
+                    )
                 elif node.type in TYPE_ALIAS_TYPES and capture:
                     # `typedef X Y;` / `using Y = X;` at file or namespace scope. C++ carries
                     # much of its vocabulary in typedefs, and the aliased type stays on the

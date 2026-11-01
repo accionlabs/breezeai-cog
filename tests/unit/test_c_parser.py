@@ -400,3 +400,44 @@ def test_an_unincluded_header_follows_its_folders_c_headers(tmp_path) -> None:
         },
     )
     assert _capture(repo, 1)["include/curl/stdcheaders.h"]["language"] == "c"
+
+
+# -- macros -------------------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("parser", [CParser(), CppParser()], ids=["c", "cpp"])
+def test_file_scope_macros_are_statements_but_include_guards_are_not(tmp_path, parser) -> None:
+    record = _parse(
+        parser,
+        tmp_path,
+        "list.h",
+        "#ifndef LIST_H\n#define LIST_H\n"
+        "#define LIST_MAX 64\n"
+        "#define MIN(a, b) ((a) < (b) ? (a) : (b))\n"
+        "#define WITH_LOCKS\n"  # a flag, not a guard
+        "#ifdef _WIN32\n#define SEP '\\\\'\n#endif\n"
+        "#endif\n",
+    )
+    macros = [
+        (s.nodeType, s.name, s.parentId)
+        for s in record.statements
+        if s.nodeType.startswith("preproc")
+    ]
+    assert macros == [
+        ("preproc_def", "LIST_MAX", "list.h"),
+        ("preproc_function_def", "MIN", "list.h"),
+        ("preproc_def", "WITH_LOCKS", "list.h"),
+        ("preproc_def", "SEP", "list.h"),
+    ]
+    assert all(
+        s.semanticType is None for s in record.statements if s.nodeType.startswith("preproc")
+    )
+
+
+def test_macros_follow_the_statement_gate(tmp_path) -> None:
+    path = tmp_path / "m.h"
+    path.write_text("#define N 1\n")
+    record = CParser().parse_file(
+        ParseContext(path="m.h", abs_path=path, source=path.read_bytes(), repo_root=tmp_path)
+    )
+    assert record.statements == []
