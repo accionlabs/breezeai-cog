@@ -165,6 +165,17 @@ def test_unreferenced_file_takes_its_folders_language(tmp_path) -> None:
     assert decided == {"lib/x.sh2": ("lower", "neighbours")}
 
 
+def test_unreferenced_file_takes_the_language_its_folders_shared_files_were_decided(
+    tmp_path,
+) -> None:
+    # inc/ holds shared files only: inc/a.sh2 is decided by its includer, so inc/b.sh2 follows it
+    # even though the repo has both languages.
+    decided = _decide(
+        tmp_path, {"inc/a.sh2": "", "inc/b.sh2": "", "src/x.lo": 'use "a.sh2"', "app/y.up": ""}
+    )
+    assert decided == {"inc/a.sh2": ("lower", "references"), "inc/b.sh2": ("lower", "neighbours")}
+
+
 def test_unreferenced_file_takes_the_repos_language(tmp_path) -> None:
     decided = _decide(tmp_path, {"inc/x.sh2": "", "src/a.lo": ""})
     assert decided == {"inc/x.sh2": ("lower", "repo")}

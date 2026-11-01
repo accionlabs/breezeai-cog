@@ -386,3 +386,17 @@ def test_a_librarys_own_include_folder_is_captured(tmp_path) -> None:
         },
     )
     assert sorted(_capture(repo, 1)) == ["include/curl/curl.h", "lib/easy.c"]
+
+
+def test_an_unincluded_header_follows_its_folders_c_headers(tmp_path) -> None:
+    # curl's include/curl/stdcheaders.h is included by nothing; its siblings are C.
+    repo = _repo(
+        tmp_path / "curl",
+        {
+            "include/curl/curl.h": "int curl_easy_init(void);\n",
+            "include/curl/stdcheaders.h": "int strcasecmp(const char *, const char *);\n",
+            "lib/easy.c": '#include "curl/curl.h"\n',
+            "tests/fuzz.cpp": "int main() { return 0; }\n",  # a few C++ files: the repo is mixed
+        },
+    )
+    assert _capture(repo, 1)["include/curl/stdcheaders.h"]["language"] == "c"

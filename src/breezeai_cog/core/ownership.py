@@ -13,8 +13,9 @@ Each shared file goes through the rules in order; the first rule with one answer
 2. **references** — the languages of the files that reference it, followed back through other
    shared files. One language decides it; several decide it for the candidate every one of
    them can reference (a header included from C and C++ is C);
-3. **neighbours**, then **repo** — the languages of the unshared candidate-language files in
-   its folder, then in the whole repo;
+3. **neighbours**, then **repo** — the languages of the candidate-language files in its
+   folder, then in the whole repo: unshared files, and shared files rules 1–2 decided (a header
+   nobody includes, among headers that C files include, is C);
 4. **default** — the candidate that declares the extension its default, else the first
    registered (what the scan chose before the step existed).
 
@@ -183,20 +184,25 @@ def resolve_owners(
     def includes(lang: str) -> tuple[str, ...]:
         return hints[lang].includes if lang in hints else ()
 
-    folder_langs: dict[str, set[str]] = defaultdict(set)
-    for known_path, lang in known.items():
-        folder_langs[posixpath.dirname(known_path)].add(lang)
-    repo_langs = set(known.values())
-
     for path, langs in shared.items():
         if path in decisions:
             continue
-        decision = (
-            _by_references(langs, _referrer_languages(path, referrers, known, by_content), includes)
-            or _by_neighbours(path, langs, folder_langs, repo_langs)
-            or _by_default(path, langs, hints)
-        )
-        decisions[path] = decision
+        referring = _referrer_languages(path, referrers, known, by_content)
+        if (decision := _by_references(langs, referring, includes)) is not None:
+            decisions[path] = decision
+
+    # Rules 3–4 read the languages settled so far — unshared files and rules 1–2 decisions —
+    # never each other's, so the result doesn't depend on the order files are visited.
+    settled = {**known, **{p: d.language for p, d in decisions.items()}}
+    folder_langs: dict[str, set[str]] = defaultdict(set)
+    for settled_path, lang in settled.items():
+        folder_langs[posixpath.dirname(settled_path)].add(lang)
+    repo_langs = set(settled.values())
+    for path, langs in shared.items():
+        if path not in decisions:
+            decisions[path] = _by_neighbours(path, langs, folder_langs, repo_langs) or _by_default(
+                path, langs, hints
+            )
     return decisions
 
 
@@ -241,8 +247,8 @@ def _by_references(
 def _by_neighbours(
     path: str, langs: tuple[str, ...], folder_langs: dict[str, set[str]], repo_langs: set[str]
 ) -> Decision | None:
-    """Rule 3: the one candidate language among the unshared files in the same folder, else
-    in the whole repo."""
+    """Rule 3: the one candidate language among the settled files (unshared, or decided by rules
+    1–2) in the same folder, else in the whole repo."""
     near = folder_langs.get(posixpath.dirname(path), set()) & set(langs)
     if len(near) == 1:
         return Decision(near.pop(), "neighbours")

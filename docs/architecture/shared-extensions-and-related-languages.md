@@ -244,7 +244,10 @@ header is followed back to the real source files (`main.cpp → api.h → list.h
 language can include.
 
 **Rule 3: neighbours.** For a header nobody includes, the step looks at the languages of the
-other source files in the same folder, then in the whole repo. (Project markers such as
+other files in the same folder, then in the whole repo: source files, and headers that rules 1–2
+already decided. A public header that nothing includes, in an `include/` folder of headers that C
+files include, is C. Rules 3–4 read only those settled files, never each other's results, so the
+outcome doesn't depend on the order files are visited. (Project markers such as
 `sfdx-project.json` belong in this rule too. No current language needs them, so they are added
 with the first one that does.)
 
