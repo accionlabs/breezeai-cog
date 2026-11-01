@@ -523,7 +523,7 @@ def test_an_include_is_looked_up_next_to_the_including_file_first(tmp_path) -> N
     assert _calls(_capture(repo, 1)["sycl/main.c"], "run") == {"set_device": "sycl/common.h"}
 
 
-# -- prototypes ------------------------------------------------------------------------------
+# -- prototypes and static ----------------------------------------------------------------------
 
 
 @pytest.mark.parametrize("parser", [CParser(), CppParser()], ids=["c", "cpp"])
@@ -556,3 +556,19 @@ def test_prototypes_follow_the_statement_gate(tmp_path) -> None:
     )
     assert record.statements == []
 
+
+@pytest.mark.parametrize("parser", [CParser(), CppParser()], ids=["c", "cpp"])
+def test_a_static_free_function_is_static(tmp_path, parser) -> None:
+    record = _parse(
+        parser,
+        tmp_path,
+        "a.c" if parser.name == "c" else "a.cpp",
+        "static int helper(int x) { return x; }\n"
+        "static inline int fast(int x) { return x; }\n"
+        "int api(int x) { return helper(x); }\n",
+    )
+    assert {f.name: f.isStatic for f in record.functions} == {
+        "helper": True,
+        "fast": True,
+        "api": None,
+    }

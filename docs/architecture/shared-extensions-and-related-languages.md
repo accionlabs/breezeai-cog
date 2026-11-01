@@ -415,6 +415,12 @@ C++.
 > its name with an unrelated file-local one is left unresolved. A same-file call still resolves.
 > This applies to C++ `.cpp` files too.
 
+> **Decision —** a `static` free function has `isStatic: true`.
+> **Why:** it is the keyword as written, and it is what tells an agent the function can't be
+> called from another file. In Java or C# the same field marks a class-level member; a C
+> function has no class, so on it the field can only mean file-local. **Cost:** a query on
+> `isStatic` across languages mixes the two meanings.
+
 > **Decision —** a file-scope function prototype (`int list_len(const node_t *head);`) is a
 > plain `declaration` statement named after the function, not a `Function`.
 > **Why:** a C header's prototypes are its module's API, and nothing else captured them. A

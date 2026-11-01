@@ -227,6 +227,14 @@ def defined_names(root: Node, source: bytes) -> set[str]:
     return names
 
 
+def is_static_free_function(node: Node, source: bytes) -> bool:
+    """Whether a free ``function_definition`` is declared ``static``."""
+    return any(
+        c.type == "storage_class_specifier" and node_text(c, source) == "static"
+        for c in node.children
+    )
+
+
 def build_function(
     node: Node,
     source: bytes,
@@ -266,6 +274,8 @@ def build_function(
         path=path,
         name=name,
         type=kind,
+        # `static` on a free function: visible to its own file only (internal linkage).
+        isStatic=is_static_free_function(node, source) or None if kind == "function" else None,
         params=extract_params(params, source),
         returnType=node_text(ret, source) if ret is not None else None,
         startLine=start,
