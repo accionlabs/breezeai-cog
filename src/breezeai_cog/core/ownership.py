@@ -27,10 +27,10 @@ order files are visited, so every run on the same repo decides the same way.
 from __future__ import annotations
 
 import posixpath
-from collections import defaultdict, deque
+from collections import defaultdict
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Sequence
+from typing import Callable, Iterator, Sequence
 
 from ..logging import get_logger
 from ..parsers.base import Ownership
@@ -184,11 +184,13 @@ def resolve_owners(
     def includes(lang: str) -> tuple[str, ...]:
         return hints[lang].includes if lang in hints else ()
 
+    referring = _all_referrer_languages(
+        {p for p in shared if p not in decisions}, referrers, known, by_content
+    )
     for path, langs in shared.items():
         if path in decisions:
             continue
-        referring = _referrer_languages(path, referrers, known, by_content)
-        if (decision := _by_references(langs, referring, includes)) is not None:
+        if (decision := _by_references(langs, referring[path], includes)) is not None:
             decisions[path] = decision
 
     # Rules 3–4 read the languages settled so far — unshared files and rules 1–2 decisions —
@@ -206,29 +208,73 @@ def resolve_owners(
     return decisions
 
 
-def _referrer_languages(
-    path: str,
+def _all_referrer_languages(
+    undecided: set[str],
     referrers: dict[str, set[str]],
     known: dict[str, str],
     by_content: dict[str, Decision],
-) -> set[str]:
-    """The languages of the files that reference ``path``, directly or through shared files
-    no rule has decided yet (``main.cpp → api.h → list.h`` counts ``main.cpp`` for ``list.h``)."""
-    langs: set[str] = set()
-    seen = {path}
-    queue = deque([path])
-    while queue:
-        for referrer in referrers.get(queue.popleft(), ()):
-            if referrer in seen:
-                continue
-            seen.add(referrer)
-            if referrer in known:
-                langs.add(known[referrer])
-            elif referrer in by_content:
-                langs.add(by_content[referrer].language)
-            else:  # an undecided shared file — walk on to whoever references it
-                queue.append(referrer)
-    return langs
+) -> dict[str, set[str]]:
+    """For every undecided shared file, the languages of the files that reference it, directly
+    or through other undecided shared files (``main.cpp → api.h → list.h`` counts ``main.cpp``
+    for ``list.h``).
+
+    Linear in the include graph: the undecided files are grouped into strongly connected
+    components (headers that include each other share one answer) with Tarjan's algorithm,
+    which finishes a component only after every component it references — so each
+    component's answer is the union of its members' settled referrers and the answers
+    already computed for the undecided ones."""
+    out: dict[str, set[str]] = {}
+    index: dict[str, int] = {}
+    low: dict[str, int] = {}
+    stack: list[str] = []
+    on_stack: set[str] = set()
+
+    def undecided_referrers(path: str) -> Iterator[str]:
+        return (r for r in sorted(referrers.get(path, ())) if r in undecided)
+
+    def visit(path: str) -> None:
+        index[path] = low[path] = len(index)
+        stack.append(path)
+        on_stack.add(path)
+
+    for root in sorted(undecided):
+        if root in index:
+            continue
+        visit(root)
+        work = [(root, undecided_referrers(root))]
+        while work:
+            path, pending = work[-1]
+            for nxt in pending:
+                if nxt not in index:
+                    visit(nxt)
+                    work.append((nxt, undecided_referrers(nxt)))
+                    break
+                if nxt in on_stack:
+                    low[path] = min(low[path], index[nxt])
+            else:
+                work.pop()
+                if work:
+                    low[work[-1][0]] = min(low[work[-1][0]], low[path])
+                if low[path] == index[path]:  # path roots a component: pop and answer it
+                    component: set[str] = set()
+                    while True:
+                        member = stack.pop()
+                        on_stack.discard(member)
+                        component.add(member)
+                        if member == path:
+                            break
+                    langs: set[str] = set()
+                    for member in component:
+                        for referrer in referrers.get(member, ()):
+                            if referrer in component:
+                                continue
+                            if referrer in undecided:
+                                langs |= out[referrer]
+                            else:
+                                langs.add(known.get(referrer) or by_content[referrer].language)
+                    for member in component:
+                        out[member] = langs
+    return out
 
 
 def _by_references(

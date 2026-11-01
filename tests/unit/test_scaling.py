@@ -226,3 +226,35 @@ def test_parse_cost_is_linear_in_file_size(name: str) -> None:
         f"{name}: doubling the file multiplied parse work by {ratio:.2f} "
         f"({small} → {large} lines) — something now scans per item found (§6.1)"
     )
+
+
+def _referrer_walk_lines(n: int) -> int:
+    """Python lines executed by the ownership step's rule-2 walk over a chain of ``n`` headers
+    each included by the next (``h1.h`` includes ``h0.h`` …, ``main.c`` includes the last) —
+    the shape where walking back from every header separately is quadratic."""
+    from breezeai_cog.core.ownership import _all_referrer_languages
+
+    headers = [f"h{i}.h" for i in range(n)]
+    referrers = {h: {headers[i + 1]} for i, h in enumerate(headers[:-1])}
+    referrers[headers[-1]] = {"main.c"}
+    count = 0
+
+    def trace(frame, event, arg):
+        nonlocal count
+        if event == "line":
+            count += 1
+        return trace
+
+    previous = sys.gettrace()
+    sys.settrace(trace)
+    try:
+        langs = _all_referrer_languages(set(headers), referrers, {"main.c": "c"}, {})
+    finally:
+        sys.settrace(previous)
+    assert langs[headers[0]] == {"c"}
+    return count
+
+
+def test_ownership_referrer_walk_is_linear_in_headers() -> None:
+    small, large = _referrer_walk_lines(SIZE), _referrer_walk_lines(2 * SIZE)
+    assert large / small < MAX_RATIO, f"{small} → {large} lines: the walk is no longer linear"
