@@ -16,7 +16,13 @@ order-independently via :func:`record_distinct`, so ``--jobs`` parallelises it),
   free-function call, so binding a bare name to a same-named method on an unrelated class
   would fabricate edges. Free-function names collide with member calls much less;
 * ``qual`` — ``Scope::name`` → defining file, recorded under both the full scope
-  (``A::B::C::m``) and the trailing ``Class::method`` (``C::m``) so either call style resolves.
+  (``A::B::C::m``) and the trailing ``Class::method`` (``C::m``) so either call style resolves;
+* ``c_linkage`` — the free functions defined inside ``extern "C"``, the only ones C can call.
+
+C uses the same index, built with the C grammar (``parsers/c``). A ``static`` free function
+defined in a file that is not a header is never a target: no other file can call it. Its name
+still collapses to ``None`` in ``funcs``, as any name defined twice does — cog can't see which
+files a call can reach, so a same-named function elsewhere is not assumed to be the one meant.
 
 Every value is honest-null (``None``) the moment two differing files claim the same key —
 a wrong cross-file edge is worse than a missing one (see the extend-capture skill).
@@ -26,7 +32,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Sequence
+from typing import Mapping, Sequence
 
 from tree_sitter import Node
 
@@ -38,12 +44,9 @@ from ..treesitter import node_text, parse_source
 from .classes import _CLASS_TYPES, _heritage, _unwrap_template
 from .functions import function_declarator_of, has_declaration_error
 from .imports import HeaderIndex, build_header_index
+from .mappings import HEADER_EXTENSIONS, TRANSPARENT_SCOPES
 from .types import field_types
 
-_TRANSPARENT_SCOPES = frozenset({
-    "preproc_ifdef", "preproc_if", "preproc_ifndef", "preproc_else", "preproc_elif",
-    "linkage_specification",
-})
 _MEMBER_FN_TYPES = ("field_declaration", "function_definition", "declaration")
 
 
@@ -67,6 +70,8 @@ class CppIndex:
     headers: HeaderIndex = field(default_factory=dict)
     #: free-function simple name → defining file (``None`` when defined in >1 file).
     funcs: dict[str, str | None] = field(default_factory=dict)
+    #: the subset of ``funcs`` defined inside ``extern "C"`` — what a C file can call.
+    c_linkage: dict[str, str | None] = field(default_factory=dict)
     #: ``Class::method`` (trailing two ``::`` components) → defining file (``None`` when
     #: ambiguous). Normalising to the last two components makes a call resolve regardless of
     #: how verbosely its scope is written (``N::C::m()`` and ``C::m()`` share the key ``C::m``).
@@ -97,10 +102,23 @@ def _has_body(node: Node) -> bool:
     return node.child_by_field_name("body") is not None
 
 
-def _record_def(frag: CppIndex, node: Node, source: bytes, rel: str, class_name: str | None) -> None:
+def _file_local(node: Node, source: bytes, rel: str) -> bool:
+    """A ``static`` free function outside a header: visible to its own file only."""
+    if Path(rel).suffix.lower() in HEADER_EXTENSIONS:
+        return False
+    return any(c.type == "storage_class_specifier" and node_text(c, source) == "static"
+               for c in node.children)
+
+
+def _record_def(
+    frag: CppIndex, node: Node, source: bytes, rel: str, class_name: str | None,
+    c_linkage: bool = False,
+) -> None:
     """Record one function/method **definition** into a per-file fragment.
 
-    * free function (declarator is a plain ``identifier``) → ``funcs[name]``;
+    * free function (declarator is a plain ``identifier``) → ``funcs[name]`` (and
+      ``c_linkage[name]`` inside ``extern "C"``); a file-local one only blocks its name
+      (``None``), it is never a target;
     * out-of-class ``Scope::name`` (declarator is a ``qualified_identifier``) → ``qual`` under
       the full scope and the trailing ``Class::method``;
     * inline member definition inside ``class_name`` → ``qual[f"{class_name}::{name}"]``.
@@ -113,8 +131,12 @@ def _record_def(frag: CppIndex, node: Node, source: bytes, rel: str, class_name:
         name = node_text(inner, source)
         if class_name is not None:  # inline member definition
             _record_qual(frag, class_name, name, rel)
+        elif name and _file_local(node, source, rel):
+            frag.funcs[name] = None
         elif name:
             record_distinct(frag.funcs, name, rel)
+            if c_linkage:
+                record_distinct(frag.c_linkage, name, rel)
     elif inner.type == "qualified_identifier":
         nm = inner.child_by_field_name("name")
         scope_node = inner.child_by_field_name("scope")
@@ -188,15 +210,26 @@ def _index_class(frag: CppIndex, node: Node, source: bytes, rel: str, ns: str) -
             _index_class(frag, member, source, rel, fqn)
 
 
-def _index_scope(frag: CppIndex, scope: Node, source: bytes, rel: str, ns: str = "") -> None:
+def _is_extern_c(node: Node, source: bytes) -> bool:
+    """``extern "C"`` (not ``extern "C++"``)."""
+    value = node.child_by_field_name("value")
+    return value is not None and node_text(value, source).strip('"') == "C"
+
+
+def _index_scope(
+    frag: CppIndex, scope: Node, source: bytes, rel: str, ns: str = "", c_linkage: bool = False
+) -> None:
     """Walk a file/namespace scope, recording every definition. ``ns`` accumulates the
-    enclosing namespace path so classes are keyed by their fully-qualified name."""
+    enclosing namespace path so classes are keyed by their fully-qualified name; ``c_linkage``
+    is set inside ``extern "C"``."""
     for child in scope.named_children:
         node = _unwrap_template(child)
-        if has_declaration_error(node):
+        if node.type == "linkage_specification":
+            _index_scope(frag, node, source, rel, ns, c_linkage or _is_extern_c(node, source))
+        elif node.type in TRANSPARENT_SCOPES:
+            _index_scope(frag, node, source, rel, ns, c_linkage)
+        elif has_declaration_error(node):
             continue
-        if node.type in _TRANSPARENT_SCOPES:
-            _index_scope(frag, node, source, rel, ns)
         elif node.type == "namespace_definition":
             body = node.child_by_field_name("body")
             if body is not None:
@@ -204,47 +237,53 @@ def _index_scope(frag: CppIndex, scope: Node, source: bytes, rel: str, ns: str =
         elif node.type in _CLASS_TYPES:
             _index_class(frag, node, source, rel, ns)
         elif node.type == "function_definition":
-            _record_def(frag, node, source, rel, None)
+            _record_def(frag, node, source, rel, None, c_linkage)
 
 
-def _index_one(args: tuple[str, str]) -> CppIndex | None:
+def _index_one(args: tuple[str, str, str]) -> CppIndex | None:
     """Parse one file into a **partial** index fragment — pure, picklable, worker-safe
     (for :func:`parallel_map`). Returns ``None`` on read/parse error (a skipped file is a
     known gap, never fabricated data)."""
-    file_s, rel = args
+    file_s, rel, grammar = args
     try:
         source = Path(file_s).read_bytes()
     except OSError:
         return None
     try:
-        root = parse_source("cpp", source, 0).root_node
+        root = parse_source(grammar, source, 0).root_node
         frag = CppIndex()
         _index_scope(frag, root, source, rel)
         return frag
     except Exception as exc:  # parse OR a pathologically deep AST walk — skip this file
         from ...logging import get_logger
         get_logger("breezeai_cog.index").warning(
-            "index.file.skipped", path=file_s, language="cpp",
+            "index.file.skipped", path=file_s, language=grammar,
             error_type=type(exc).__name__, error=str(exc),
         )
         return None
 
 
-def build_cpp_index(repo_root: Path, files: Sequence[Path], jobs: int = 1) -> CppIndex:
+def build_cpp_index(
+    repo_root: Path, files: Sequence[Path], jobs: int = 1, grammar: str = "cpp"
+) -> CppIndex:
     """Repo-level pre-pass: the ``#include`` header map (no parse) plus a parse over every
     file to map free-function / ``Scope::method`` **definitions** → path. Files are parsed
     into partial fragments across ``jobs`` processes and reduced deterministically
-    (``jobs<=1`` → serial), so the result is identical regardless of fragment order."""
+    (``jobs<=1`` → serial), so the result is identical regardless of fragment order.
+    ``grammar`` is the tree-sitter grammar of the language (``c`` for the C index)."""
     repo_root = Path(repo_root)
     index = CppIndex(headers=build_header_index(repo_root, files))
     fqn_file: dict[str, str | None] = {}  # fully-qualified class name → declaring file (or None)
     rels = [repo_relative(f, repo_root) for f in files]
-    fragments = parallel_map([(str(f), rel) for f, rel in zip(files, rels)], _index_one, jobs)
+    fragments = parallel_map(
+        [(str(f), rel, grammar) for f, rel in zip(files, rels)], _index_one, jobs)
     for frag in fragments:
         if frag is None:
             continue
         for name, rel in frag.funcs.items():
             _merge(index.funcs, name, rel)
+        for name, rel in frag.c_linkage.items():
+            _merge(index.c_linkage, name, rel)
         for key, rel in frag.qual.items():
             _merge(index.qual, key, rel)
         for key, ftype in frag.fields.items():
@@ -314,7 +353,8 @@ def _merge(dst: dict[str, str | None], key: str, value: str | None) -> None:
 
 
 def make_cpp_resolver(
-    local_defs: set[str], path: str, index: CppIndex | None
+    local_defs: set[str], path: str, index: CppIndex | None,
+    related_funcs: Sequence[Mapping[str, str | None]] = (),
 ) -> CallResolver:
     """``(name, receiver, owner=None, types=None) -> repo path | None`` for C++. ``owner`` is
     the class the call is written in (``None`` in a free function); ``types`` maps the calling
@@ -329,8 +369,20 @@ def make_cpp_resolver(
     * ``super``/``base`` call → ``None`` — resolving these needs the base-class chain, which is
       not walked here.
 
+    ``related_funcs`` are the free functions this file can call in its related languages (C++
+    → every C function; C → the C++ functions inside ``extern "C"``). A bare call checks them
+    only when its own language has no definition of the name, and binds only when they agree.
+
     Unresolved / ambiguous always returns ``None`` — never a guessed edge."""
     funcs = index.funcs if index is not None else {}
+
+    def _free(name: str) -> str | None:
+        """A repo-wide free function: the file's own language first (an ambiguous ``None``
+        there stops the lookup), else the one file its related languages agree on."""
+        if name in funcs:
+            return funcs[name]
+        found = {related[name] for related in related_funcs if name in related}
+        return found.pop() if len(found) == 1 else None
     qual = index.qual if index is not None else {}
     fields = index.fields if index is not None else {}
     heritage = index.heritage if index is not None else {}
@@ -379,7 +431,7 @@ def make_cpp_resolver(
                 return path
             # implicit-this: own method, then an inherited one (a member hides a free function
             # in C++ name lookup), then a repo-wide free function.
-            return _method(owner, name) or _inherited(owner, name) or funcs.get(name)
+            return _method(owner, name) or _inherited(owner, name) or _free(name)
         if receiver in ("self", "this"):  # explicit this-> : own method, then inherited
             if name in local_defs:
                 return path

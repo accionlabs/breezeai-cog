@@ -125,7 +125,8 @@ Usage details are in the [User Guide](USER_GUIDE.md).
 ```mermaid
 flowchart TD
   A[Repository on disk] --> B["1 · Scan<br/>walk folders, apply ignores,<br/>classify by extension<br/><i>paths only, no file reads</i>"]
-  B --> C["2 · Build indexes<br/>once per language, optional"]
+  B --> O["1b · Decide shared files<br/>an extension two languages register<br/><i>e.g. .h: C or C++</i>"]
+  O --> C["2 · Build indexes<br/>once per language, optional"]
   C --> D["3 · Parse pool (parallel)"]
   subgraph D3 [" for each file, in a worker process "]
     D1[read file] --> D2["choose ONE parser<br/>claims + priority"] --> D4["parse once<br/>(tree-sitter)"] --> D5["extract<br/>classes · functions · statements"] --> D6["framework / additive<br/>detection"] --> D8["link handlers<br/>(handlerPath / handlerLine)"] --> D7[prune edges to<br/>skipped templates]
@@ -139,6 +140,7 @@ flowchart TD
 | Stage | Code | Runs | Cost |
 |---|---|---|---|
 | 1. Scan | `core/scanner.py`, `core/ignore.py`, `core/pipeline.py` | Once, main process | One directory walk |
+| 1b. Decide shared files | `core/ownership.py` | Once, only when a shared extension is present (may fan out) | One byte read of the competing languages' files |
 | 2. Build indexes | `BaseParser.build_index`, `pipeline._build_indexes` | Once per language, main process (may fan out) | Optional; usually one parse per file of that language |
 | 3. Parse | `core/executor.py`, `core/registry.py`, `parsers/**` | Once per file, in parallel | One parse + a fixed number of tree walks |
 | 4. Assemble | `pipeline._assemble`, `emit/split.py` | Streaming, main process | Linear in output |
@@ -194,6 +196,31 @@ Ignore rules come in layers. A path is kept when it is **included, or not ignore
 Every skipped file is recorded with its reason in a `<repo>-skipped-report.json` sidecar, so a
 reviewer can explain every skipped extension.
 
+### 4.1b Files two languages register
+
+An extension normally belongs to one language. `.h` belongs to both C and C++, and most headers
+are valid in both, so the path can't decide it. For such a **shared** file the scan leaves the
+language open, and the ownership step (`core/ownership.py`) decides it once for the whole repo:
+
+```
+lib/list.h  ── included by lib/list.c (C) and app/main.cpp (C++) ──▶  C
+app/view.h  ── included by app/main.cpp only ──────────────────────▶  C++
+app/shape.h ── contains `class Shape {` ───────────────────────────▶  C++
+```
+
+The rules, in order: syntax only one language allows → the languages of the files that include
+it → the languages of its folder, then the repo → a declared default. Each language supplies
+its evidence through `BaseParser.ownership`. The decision then drives everything after it: the
+file's `language`, the index it joins and the parser that reads it.
+
+> **Decision —** a shared file's language is decided from the whole repo, before indexing.
+> **Why:** what settles `.h` (who includes it) is not in the file, so neither the path nor a
+> per-file `claims()` can settle it. **Cost:** when a shared extension is present, the competing
+> languages' files are read once more, as bytes; a header's language can change when the files
+> that include it change.
+
+Full design: [Shared extensions and related languages](architecture/shared-extensions-and-related-languages.md).
+
 ### 4.2 Repo-wide indexes
 
 Some facts can't be known from one file. For example, which file defines
@@ -202,6 +229,10 @@ parsing**, and returns data that every worker receives. Today it is used for thi
 fully-qualified names and constants, TypeScript path aliases, and C#/VB class inheritance.
 Additive detectors can add their own facts to it by registering them (`register_fact`,
 [§6](#6-the-parser-model)), so framework rules never have to live in the language's index code.
+
+A parser reads its own language's index, and after it the indexes of the languages it lists in
+`related_languages`: C++ reads the C index, so a C++ call to a function defined in a `.c` file
+resolves, and C reads the C++ index for the functions defined in `extern "C"`.
 
 > **Decision —** cross-file data is built once in a separate pre-pass, not shared between workers while parsing.
 > **Why:** workers then share no mutable state, so files can be parsed in any order, in

@@ -83,6 +83,10 @@ How it works (`core/pipeline.py::_build_indexes`):
 - **Framework parsers use their language's index.** A Spring or Vert.x file gets the Java index.
   The one exception: a framework parser that owns an extension no language parser owns (Vue's
   `.vue`, WebForms' `.aspx`) gets an index built over just those files.
+- **Related languages.** A parser also receives the indexes of the languages it lists in
+  `related_languages`, as `ctx.related_indexes`, and reads them only after its own: C++ reads the
+  C index, C reads the C++ index
+  ([shared extensions and related languages](shared-extensions-and-related-languages.md)).
 - If an index build fails, a warning (`build_index.failed`) is logged and that language runs
   **without** an index: fewer links, never a crash.
 
@@ -97,7 +101,8 @@ What each index holds:
 | C# | type → files; global `using`s; project roots (`.csproj`), their MSBuild `using`s and project references; class heritage incl. methods; extension methods; implemented interfaces; **registered facts** (string constants `csharp.string-constants` and MVC area registrations `aspnet.area-registrations`, for area route prefixes; method declarations `csharp.method-lines` — (class, method) → file and line, for `handlerPath`; minimal-API group extensions `aspnet.group-extensions` — an extension method on `RouteGroupBuilder` → the prefix of the one group it is called on; `index.facts`: HotChocolate registered roots `hotchocolate.registered-roots`, graphql-dotnet schema roots `graphql-dotnet.schema-roots`, WCF `.svc` hosts `wcf.svc-hosts` — read from `.svc` files, which the ServiceHost parser owns — Web Forms `MapPageRoute` URLs `webforms.page-routes`, HotChocolate source-generated DataLoaders `hotchocolate.data-loaders`, AWS Lambda handlers `aws.deployed-handlers` — read from `serverless.yml` / SAM templates) | type resolution, inherited calls, extension calls, routes |
 | VB | class heritage (base class + attributes) | inherited controller routes |
 | TypeScript / JavaScript | `tsconfig`/`jsconfig` path aliases (per config scope); constant values; class heritage; **registered facts** (`index.facts`: Angular lazy-route mounts `angular.route-mounts` and their guards `angular.mount-guards`, Express mounts `express.router-mounts`, Fastify plugin prefixes `fastify.plugin-prefixes`, NestJS stub parents `nest.stub-parents` and prefixes `nest.prefixes`, Next.js apps `next.apps`, middleware matchers `next.middlewares` and base paths `next.base-paths`, LoopBack base paths `loopback.base-paths`, GraphQL root-field DTOs `graphql.sdl-root-fields` — read from `.graphql` files too, which the GraphQL parser owns; module exports and their declarations `typescript.declarations` — each file's exported names with the declared name and line, re-exports followed, for `handlerPath`, and the component of each `.vue` file `typescript.vue-components`; AWS Lambda handlers `aws.deployed-handlers` — read from `serverless.yml` / SAM templates) | aliased imports, inherited calls, route prefixes |
-| C++ | header basename → file; free functions; `Class::method`; `Class::field` types; heritage | `#include`, calls |
+| C++ | header basename → file; free functions (a `static` one outside a header is never a target and makes its name ambiguous); the free functions defined in `extern "C"`; `Class::method`; `Class::field` types; heritage | `#include`, calls |
+| C | the C++ index, built over C files with the C grammar | `#include`, calls |
 | Ruby | ActiveRecord model names; **registered facts** (`index.facts`: Rails controller `before_action` callbacks `rails.controller-callbacks`; method declarations `ruby.method-lines` — (controller, action) → file and line, for `handlerPath`) | recognising DB calls; Rails route guards and handlers |
 | GraphQL | **registered facts** (`index.facts`: client projects `graphql.client-configs` — read from `.graphqlrc.json`) | a downloaded client schema is not taken as this repo's operations |
 | HCL / Terraform | folder → `.tf` files | local `module` sources |
@@ -139,7 +144,7 @@ How each language turns an import into a file:
 | TypeScript / JavaScript | Relative paths from the file's folder; otherwise the nearest `tsconfig`/`jsconfig` path alias. Tries the exact file, `.js`→`.ts` rewrites, known extensions, then `index.*`. Re-exports, literal dynamic `import()` and CommonJS `require('…')` (anywhere in the file; a top-level `const x = require(…)` / `const { a } = require(…)` also binds the names for `calls[].path`) count too. | anything not found on disk |
 | Python | `import a.b` / `from a.b import x` from the repo root first; relative imports walk up folders. Tries `a/b.py`, then `a/b/__init__.py`. Then the folders Python could find it in from the file (an app run from its own folder): a dotted import under a non-package folder above the file (a `sys.path` entry), a single name only in a script's own folder; either under a declared project (`pyproject.toml` / `setup.py` / `setup.cfg`) and its `src/`. Only ancestors, never a sibling app; found at two places → not linked | anything not found, or ambiguous |
 | Ruby | Only `require_relative` | every `require`; unresolved `require_relative` |
-| C++ | `#include "x.h"` looked up by file **basename** in the index | `<system>` includes; unknown or ambiguous basenames |
+| C++, C | `#include "x.h"` looked up by file **basename** across the C and C++ indexes (a header is in one of them) | `<system>` includes; unknown or ambiguous basenames |
 
 **Example — a TypeScript path alias**
 
@@ -230,7 +235,8 @@ even if `items` has an in-repo type.
 | Java, Kotlin, Groovy, Scala | ✓ | ✓ | — | — |
 | Python | ✓ | — | — | — |
 | VB, Ruby | same file only | — | — | — |
-| C++ | own resolver (`cpp/index.py`): same file, `Class::method`, inherited, free functions, field types | | | |
+| C++ | own resolver (`cpp/index.py`): same file, `Class::method`, inherited, free functions, field types; then C's free functions | | | |
+| C | the C++ resolver: same file, free functions; then C++'s `extern "C"` functions | | | |
 
 > **Decision —** calls resolve to a file, not to a specific function.
 > **Why:** cog can usually prove the file (from imports and types), but not the overload — that

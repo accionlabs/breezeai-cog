@@ -34,6 +34,7 @@ Python reimplementation of `breezeai-code-ontology-generator`.
 | Scala | `.scala .sc .mill` | Play (P2), Akka / http4s / Spark (P3); outbound HTTP calls through a typed Play WS, http4s, sttp, akka-http, Spring RestTemplate or java.net.http client, and scalaj `Http(…)` |
 | Apex | `.cls .trigger` | REST resources (`@RestResource`), Lightning (`@AuraEnabled`), SOAP `webservice`, triggers (record changes, Platform Events, Change Data Capture), scheduled Apex (`System.schedule`); SOQL / SOSL / DML, HTTP callouts and `EventBus.publish` |
 | C++ | `.cpp .cc .cxx .c++ .hpp .h .hh .hxx .inl .ipp` | — |
+| C | `.c .h` (`.h` shared with C++: each header goes to the language that includes it) | — ; calls between C and C++ resolve (C → C++ only through `extern "C"`) |
 | Groovy † | `.groovy` | Vert.x |
 | HTML | `.html .htm` ‡ | Framework-neutral template parser — detects Angular 2+ (grammar-parsed), AngularJS, Vue, Thymeleaf from `templateUrl` resolution or markup fingerprints; htmx / Alpine.js / Stimulus carried as `behaviors` |
 | GraphQL | `.graphql .gql .graphqls` | Schema-first SDL — types, fields, operations and resolvers |

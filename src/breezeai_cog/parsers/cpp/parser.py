@@ -14,6 +14,10 @@ Structure captured:
   definition attached to that class by name (else parented to the file, honest-null);
 * ``namespace_definition`` is flattened — its members parent to the file (there is no
   namespace node type in the schema).
+
+C shares this extraction on the C grammar (``parsers/c``), and the two share ``.h``: the
+ownership step decides each header's language from the evidence in ``ownership.py``. C++ reads
+the C index after its own, so a call or ``#include`` from C++ resolves into C files.
 """
 
 from __future__ import annotations
@@ -26,7 +30,8 @@ from tree_sitter import Node
 from ...emit import file_id
 from ...schemas import SCHEMA_VERSION, FileRecord, Function, Statement
 from ...utils import count_loc
-from ..base import BaseParser, ParseContext
+from ..additive import run_additive
+from ..base import BaseParser, Ownership, ParseContext
 from ..treesitter import node_text, parse_source
 from .classes import (
     _CLASS_TYPES,
@@ -43,40 +48,48 @@ from .functions import (
     function_declarator_of,
     has_declaration_error,
 )
-from .imports import extract_imports
+from .imports import FamilyHeaders, extract_imports
 from .index import CppIndex, _join_ns, _ns_name, build_cpp_index, make_cpp_resolver
+from .ownership import cpp_only_syntax, include_targets
 from ..comments_common import comment_statements_for
 from ..statements_common import member_statement
-from .mappings import COMMENT_TYPES, CONTROL_FLOW, FRAMEWORKS, STATEMENT_TYPES
-
-#: Transparent wrappers whose *members* are top-level declarations: the ``#ifndef GUARD``
-#: include guard every header uses (``preproc_ifdef``), other preprocessor conditionals, and
-#: ``extern "C" { … }`` (``linkage_specification``). ``process`` recurses through these so a
-#: class/function nested under an include guard isn't missed.
-_TRANSPARENT_SCOPES = frozenset({
-    "preproc_ifdef", "preproc_if", "preproc_ifndef", "preproc_else", "preproc_elif",
-    "linkage_specification",
-})
+from .mappings import (
+    COMMENT_TYPES, CONTROL_FLOW, FRAMEWORKS, STATEMENT_TYPES, TRANSPARENT_SCOPES,
+)
 
 
 class CppParser(BaseParser):
     name = "cpp"
-    extensions = (
+    #: The tree-sitter grammar this language's files are parsed with.
+    grammar = "cpp"
+    extensions: tuple[str, ...] = (
         ".cpp", ".cc", ".cxx", ".c++", ".hpp", ".h", ".hh", ".hxx", ".ipp", ".inl",
     )
     schema_version = SCHEMA_VERSION
     statement_types = STATEMENT_TYPES
     frameworks = FRAMEWORKS
+    related_languages = ("c",)
+    ownership = Ownership(
+        proves=cpp_only_syntax, references=include_targets, includes=("c",), default_for=(".h",),
+    )
 
     def build_index(self, repo_root: Path, files: Sequence[Path], jobs: int = 1) -> CppIndex:
         """Repo-wide index: the ``#include`` header map plus a parse pre-pass mapping
         free-function / ``Scope::method`` **definitions** → path (for cross-file call
         resolution). Honest-null on any name shared by >1 file."""
-        return build_cpp_index(Path(repo_root), files, jobs)
+        return build_cpp_index(Path(repo_root), files, jobs, self.grammar)
 
     def parse_file(self, ctx: ParseContext) -> FileRecord:
-        root = parse_source("cpp", ctx.source, ctx.parse_timeout_micros).root_node
+        root = parse_source(self.grammar, ctx.source, ctx.parse_timeout_micros).root_node
         return self.extract(root, ctx)
+
+    def callable_in(self, related: CppIndex) -> dict[str, str | None]:
+        """The free functions of a related language's index this language can call: C++ can
+        call every C function."""
+        return related.funcs
+
+    def run_detectors(self, root: Node, ctx: ParseContext, record: FileRecord) -> None:
+        run_additive("cpp", root, ctx, record, is_fixture=self.is_fixture_file(ctx.path))
 
     def extract(self, root: Node, ctx: ParseContext) -> FileRecord:
         source, path = ctx.source, ctx.path
@@ -85,8 +98,12 @@ class CppParser(BaseParser):
         capture, limit = ctx.capture_statements, ctx.statement_text_limit
 
         idx = ctx.resolution_index if isinstance(ctx.resolution_index, CppIndex) else None
-        internal, external, _, _ = extract_imports(root, source, idx.headers if idx else None)
-        resolve = make_cpp_resolver(defined_names(root, source), path, idx)
+        related = [r for r in ctx.related_indexes.values() if isinstance(r, CppIndex)]
+        headers = FamilyHeaders(idx.headers if idx else {}, [r.headers for r in related])
+        internal, external, _, _ = extract_imports(root, source, headers)
+        resolve = make_cpp_resolver(
+            defined_names(root, source), path, idx, [self.callable_in(r) for r in related],
+        )
 
         functions: list[Function] = []
         classes = []
@@ -96,10 +113,10 @@ class CppParser(BaseParser):
         def process(scope: Node, ns: str = "") -> None:
             for child in scope.named_children:
                 node = _unwrap_template(child)
-                if has_declaration_error(node):
-                    continue  # corrupt header — skip rather than emit fabricated data
-                if node.type in _TRANSPARENT_SCOPES:
+                if node.type in TRANSPARENT_SCOPES:
                     process(node, ns)  # include guard / preproc conditional / extern "C" — recurse
+                elif has_declaration_error(node):
+                    continue  # corrupt header — skip rather than emit fabricated data
                 elif node.type == "namespace_definition":
                     body = node.child_by_field_name("body")
                     if body is not None:  # flatten members to the file, but track the ns path
@@ -207,11 +224,11 @@ class CppParser(BaseParser):
                 )
             )
 
-        return FileRecord(
+        record = FileRecord(
             id=fid,
             path=path,
             type="code",
-            language="cpp",
+            language=self.name,
             loc=count_loc(source.decode("utf-8", "replace")),
             importFiles=internal,
             externalImports=external,
@@ -219,3 +236,5 @@ class CppParser(BaseParser):
             classes=classes,
             statements=statements,
         )
+        self.run_detectors(root, ctx, record)
+        return record

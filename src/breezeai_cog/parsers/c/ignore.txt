@@ -1,0 +1,21 @@
+# C per-language ignore defaults (layer 2) — vendored/third-party sources that must never be
+# parsed as first-party code. Language-scoped, applied post-scan. A header shared with C++ is
+# dropped only when both languages drop it, so keep this list in step with the C++ one.
+thirdparty/
+third_party/
+vendor/
+vendored/
+external/
+extern/
+deps/
+.deps/
+*.pb-c.h
+*.pb-c.c
+
+# Common vendored third-party C libraries (directory names are universal to the library,
+# never a project's own code).
+openssl/
+curl/
+gmp/
+icu/
+zlib/

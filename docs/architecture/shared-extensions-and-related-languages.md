@@ -1,25 +1,26 @@
-# Proposal: Shared Extensions and Related Languages
+# Shared Extensions and Related Languages
 
-**Status:** proposal, not implemented. It changes `core/`, so it is an architectural change
+**Status:** implemented for C and C++ (steps 1 and 2 of the [delivery plan](#11-delivery-plan)).
+It changed `core/`, so it is an architectural change
 (see [architecture §15](../architecture.md#15-code-layout-and-layering)).
 
-Adding a C parser exposes two gaps in how cog picks a parser and resolves names:
+Adding a C parser exposed two gaps in how cog picks a parser and resolves names:
 
-1. **Which language owns a `.h` file?** C, C++ and Objective-C all use `.h`. Today an extension
-   belongs to exactly one language.
+1. **Which language owns a `.h` file?** C, C++ and Objective-C all use `.h`. Until then an
+   extension belonged to exactly one language.
 2. **How does a C++ file link to a C function?** Each language has its own index, and a parser
    sees only its own.
 
-This page proposes two small, independent mechanisms that close both gaps. Each is written once
+This page describes the two small, independent mechanisms that close both gaps. Each is written once
 in core and works for any language that needs it, not just C.
 
 Paths below are relative to `src/breezeai_cog/`.
 
 **Contents**
 
-1. [How it works today](#1-how-it-works-today)
+1. [How it worked before](#1-how-it-worked-before)
 2. [The problem](#2-the-problem)
-3. [Proposal overview](#3-proposal-overview)
+3. [Overview](#3-overview)
 4. [Mechanism A: the ownership step](#4-mechanism-a-the-ownership-step)
 5. [Mechanism B: related languages](#5-mechanism-b-related-languages)
 6. [How C and C++ link, end to end](#6-how-c-and-c-link-end-to-end)
@@ -32,7 +33,7 @@ Paths below are relative to `src/breezeai_cog/`.
 
 ---
 
-## 1. How it works today
+## 1. How it worked before
 
 ```mermaid
 flowchart LR
@@ -101,7 +102,7 @@ The call from `main()` to `list_push()` stays unlinked.
 
 ---
 
-## 3. Proposal overview
+## 3. Overview
 
 There are two mechanisms, and each answers one question:
 
@@ -242,9 +243,10 @@ header is followed back to the real source files (`main.cpp → api.h → list.h
 (`cpp` declares it can include `c`). The rule picks the candidate that **every** referring
 language can include.
 
-**Rule 3: project markers and neighbours.** For a header nobody includes, the step looks for a
-declared project marker, then at the languages of the other source files in the same folder,
-then in the whole repo.
+**Rule 3: neighbours.** For a header nobody includes, the step looks at the languages of the
+other source files in the same folder, then in the whole repo. (Project markers such as
+`sfdx-project.json` belong in this rule too. No current language needs them, so they are added
+with the first one that does.)
 
 **Rule 4: default.** If nothing decides it, the step uses the default declared for the
 extension. For `.h` that's C++, because its grammar reads most C. This is the only rule that is
@@ -284,15 +286,19 @@ The rule that decided each file is logged at debug level so a wrong decision can
 Core owns the rule order and the table. Each language that registers a shared extension supplies
 only the evidence that applies to it:
 
-| Plug-in | C | C++ | Objective-C (future) |
+| `Ownership` field | C | C++ | Objective-C (future) |
 |---|---|---|---|
-| Content markers | (none, C is the plain case) | `class`, `namespace`, `template`, `::` | `@interface`, `@protocol`, `#import` |
-| References it reports | `#include "…"` | `#include "…"` | `#import "…"`, `#include "…"` |
-| Languages it can include | `c` | `c`, `cpp` | `c`, `objc` |
-| Project markers | — | — | `*.xcodeproj` |
-| Default for an extension | — | `.h` | — |
+| `proves` (rule 1) | — (C is the plain case) | `class Name {`, `namespace`, `using namespace`, `template <`, `std::`, `extern "C"`, `#include <vector>` | `@interface`, `@protocol` |
+| `references` (rule 2) | `#include "…"` | `#include "…"` | `#import "…"`, `#include "…"` |
+| `includes` (rule 2) | — | `c` | `c` |
+| `default_for` (rule 4) | — | `.h` | — |
 
-A language that doesn't register a shared extension supplies nothing.
+A language that doesn't register a shared extension supplies nothing. The C and C++ evidence
+lives in `parsers/cpp/ownership.py`. Comments and string literals never count. Inside an `#if`
+group that tests `__cplusplus`, a C API header routinely has its `extern "C" {` guard and C++
+includes (`<cstddef>`); those are not proof. A C++ *declaration* there (`namespace`, `class`,
+`template <`, `std::`) is: such a header is written for both languages, and only the C++ grammar
+reads all of it, where the C grammar would lose its C++ declarations.
 
 ---
 
@@ -390,9 +396,28 @@ mangling. The rules:
 | C | C function | the name has exactly one definition (normal rule) |
 | C++ | C++ function | existing C++ rules (classes, namespaces) |
 
-> **Decision —** `static` (file-private) C functions are never put in the definitions table.
-> **Why:** another file can't call them. Indexing them would link a call to a same-named
-> function the caller can't reach, which is a wrong edge. **Cost:** none.
+`#include` resolves the same way across the two languages. Each index maps its own headers'
+basenames, and a C++ file reads both maps as one (`cpp/imports.py::FamilyHeaders`): a basename
+resolves only when exactly one file in either language has it, as it did when every header was
+C++.
+
+> **Decision —** a `static` function defined in a file that is not a header is never a call
+> target, but its name still counts as defined, so a same-named function elsewhere becomes
+> ambiguous.
+> **Why:** another file can't call it, so linking to it is a wrong edge. And because cog can't
+> see which files a call can reach, a second definition of the name elsewhere is not assumed to
+> be the one meant: a `run()` in an unrelated tool's header is not what `server.cpp`'s own
+> `run()` calls. A `static inline` function in a header is different: every file that includes
+> the header can call it, so it stays a target. **Cost:** a call to a global function that shares
+> its name with an unrelated file-local one is left unresolved. A same-file call still resolves.
+> This applies to C++ `.cpp` files too.
+
+> **Decision —** include guards and `extern "C" { … }` blocks are walked even when they contain
+> a parse error, and each declaration in them is checked on its own.
+> **Why:** a C API header splits `extern "C" {` and its `}` across two `#ifdef __cplusplus`
+> blocks, which no grammar can pair, so the include guard always carries an error. Skipping the
+> whole guard lost every declaration in the header. **Cost:** none; a corrupt declaration is
+> still skipped. This applies to C++ headers too.
 
 ---
 
@@ -454,13 +479,14 @@ is a new `semanticType` value and goes through the normal proposal process.
 
 | Area | Change |
 |---|---|
-| `parsers/base.py` | `BaseParser.related_languages = ()`; optional ownership plug-in (content markers, references, includable languages, project markers, extension defaults); `ParseContext.related_indexes` |
-| `core/registry.py` | find extensions registered by more than one base language; `base_parser_for` and `select` use the ownership table for those files |
-| `core/pipeline.py` | run the ownership step after the scan; `_build_indexes` groups by decided language; pass each parser its related indexes |
-| `core/` (new module) | the ownership step: the text scan (parallel, same `--jobs`), the rule order, the table |
-| `parsers/c/` (new) | the C parser, on the tree-sitter C grammar |
-| shared C-family module | extraction helpers shared by C and C++; moving them out of `parsers/cpp/` needs a before/after C++ capture diff |
-| `parsers/cpp/` | ownership plug-in; flag `extern "C"` definitions in the index; read the C index |
+| `parsers/base.py` | `BaseParser.related_languages = ()` and `BaseParser.ownership = None` (an `Ownership`); `ParseContext.related_indexes` |
+| `core/registry.py` | `language_candidates` (more than one means shared); `base_parser_for` and `select` take the decided `language` |
+| `core/ownership.py` (new) | the ownership step: the byte scan (parallel, same `--jobs`), the rule order, the decisions |
+| `core/pipeline.py` | `_scan_entries` runs the step and labels shared files; `_build_indexes` groups by decided language |
+| `core/executor.py` | selects a shared file's parser by its decided language; passes each parser its related indexes |
+| `parsers/c/` (new) | `CParser`: the C++ extraction on the C grammar (`grammar = "c"`) |
+| `parsers/cpp/` | `grammar` setting; ownership evidence (`ownership.py`); `c_linkage` and the `static` rule in the index; walks guarded and `extern "C"` scopes; reads related indexes for calls and includes |
+| `parsers/additive.py` | C and C++ call `run_additive`, so detectors can be added for them |
 
 Two interactions with existing options:
 
@@ -498,10 +524,11 @@ Two interactions with existing options:
 
 ## 11. Delivery plan
 
-1. **Core mechanisms, no new language.** Add the ownership step and `related_languages`. With no
-   parser opting in, a capture diff across every language must show **no change**.
-2. **C parser.** Add `parsers/c/` and the C/C++ ownership plug-ins. Move the shared extraction
-   helpers, with a before/after C++ capture diff. Add C++ → C and `extern "C"` lookups.
+1. **Core mechanisms, no new language** (done). The ownership step and `related_languages`. With
+   no parser opting in, captures were byte-identical before and after.
+2. **C parser** (done). `parsers/c/` reuses the C++ extraction through subclassing, so no helpers
+   moved. Adds the C/C++ ownership evidence, C++ → C and `extern "C"` lookups, and the two C++
+   scope fixes in [§6](#6-how-c-and-c-link-end-to-end), checked with a before/after capture diff.
 3. **Later, on evidence.** Measure cross-language calls on JVM and .NET captures; adopt
    `related_languages` there if links are missing. Cross-runtime bindings (§7.3) follow as their
    own proposal.
@@ -510,9 +537,12 @@ Two interactions with existing options:
 
 ## 12. Open questions
 
-1. Is "included by both C and C++ → C" the right rule 2 outcome, as derived from
-   "languages it can include"?
-2. Should the rule 4 default for `.h` be C++, or should a header that nothing decides be
-   left out of the capture?
-3. Should the C → C++ `extern "C"` lookup ship in step 2, or wait until a real repo needs it?
-4. Which JVM or .NET repos should be used to measure missing cross-language calls before step 3?
+1. Which JVM or .NET repos should be used to measure missing cross-language calls before step 3?
+
+Settled while implementing:
+
+| Question | Decision |
+|---|---|
+| A header included from C and C++ | C, derived from `includes` (C++ can include C), not hard-coded |
+| A header nothing decides | C++ (rule 4). Every such header was C++ before, and it is still captured |
+| C → C++ `extern "C"` lookups | Shipped with the C parser |

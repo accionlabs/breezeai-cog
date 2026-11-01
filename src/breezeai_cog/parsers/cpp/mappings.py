@@ -53,6 +53,22 @@ NESTED_SCOPES = {
 
 STATEMENT_TYPES = sorted(EMIT_TYPES)
 
+#: Wrappers whose *members* are top-level declarations: the ``#ifndef GUARD`` include guard
+#: every header uses (``preproc_ifdef``), other preprocessor conditionals, ``extern "C"``
+#: (``linkage_specification``) and the braces of ``extern "C" { … }`` (``declaration_list``;
+#: a namespace body is walked through ``namespace_definition``, never reached here). They are
+#: walked even when they contain an error — a guard whose ``#ifdef __cplusplus`` blocks split
+#: ``extern "C" {`` from its ``}`` always does — and each member is checked on its own.
+TRANSPARENT_SCOPES = frozenset({
+    "preproc_ifdef", "preproc_if", "preproc_ifndef", "preproc_else", "preproc_elif",
+    "linkage_specification", "declaration_list",
+})
+
+#: Extensions of files that are included rather than compiled on their own. A ``static``
+#: function in one of them is visible to every file that includes it; in any other file it is
+#: visible to that file only, so it never resolves a call from another file.
+HEADER_EXTENSIONS = frozenset({".h", ".hh", ".hpp", ".hxx", ".h++", ".ipp", ".inl"})
+
 #: Comment node types the shared comment pass captures (``semanticType="comment"``; each
 #: statement keeps its real tree-sitter ``nodeType``).
 COMMENT_TYPES = {"comment"}

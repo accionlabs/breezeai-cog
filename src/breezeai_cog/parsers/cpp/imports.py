@@ -34,6 +34,19 @@ def build_header_index(repo_root: Path, files: Sequence[Path]) -> HeaderIndex:
     return index
 
 
+class FamilyHeaders:
+    """This language's header map read together with its related languages' maps (C++ and C
+    each index their own headers). A basename resolves only when exactly one file across all
+    the maps has it — the same honest-null rule as a single map over every file."""
+
+    def __init__(self, own: HeaderIndex, related: Sequence[HeaderIndex] = ()) -> None:
+        self.maps = (own, *related)
+
+    def get(self, name: str) -> str | None:
+        found = {m[name] for m in self.maps if name in m}
+        return found.pop() if len(found) == 1 else None
+
+
 def _include_string(path_node: Node, source: bytes) -> str:
     """The include target text from a ``string_literal`` path (``"a/b.h"`` → ``a/b.h``)."""
     frag = next((c for c in path_node.named_children if c.type == "string_content"), None)
@@ -50,7 +63,7 @@ def _walk_includes(node: Node) -> Iterator[Node]:
 
 
 def extract_imports(
-    root: Node, source: bytes, index: HeaderIndex | None = None
+    root: Node, source: bytes, index: HeaderIndex | FamilyHeaders | None = None
 ) -> tuple[list[str], list[str], list[str], dict[str, str]]:
     internal: dict[str, None] = {}
     external: dict[str, None] = {}

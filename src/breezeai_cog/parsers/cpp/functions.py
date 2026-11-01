@@ -25,6 +25,7 @@ from ...emit import disambiguate, function_id
 from ...schemas import Call, Function, Parameter, Statement
 from ..callresolve import CallResolver, noop_resolver
 from ..treesitter import line_span, node_text
+from .mappings import TRANSPARENT_SCOPES
 from .statements import extract_statements
 from .types import build_type_map
 
@@ -178,8 +179,8 @@ def _defs_in(node: Node, source: bytes, names: set[str]) -> None:
             body = c.child_by_field_name("body")
             if body is not None:
                 _defs_in(body, source, names)
-        elif c.type == "template_declaration":
-            _defs_in(c, source, names)
+        elif c.type == "template_declaration" or c.type in TRANSPARENT_SCOPES:
+            _defs_in(c, source, names)  # include guard, #if, extern "C" { … }
         elif c.type == "function_definition" and not has_declaration_error(c):
             fd = function_declarator_of(c.child_by_field_name("declarator"))
             if fd is None:
