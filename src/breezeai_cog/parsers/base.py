@@ -9,10 +9,10 @@ cross-file context simply omit it; the pipeline calls it via ``getattr``.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from importlib import resources
 from pathlib import Path
-from typing import Any, Callable, Protocol, Sequence, runtime_checkable
+from typing import Any, Callable, Mapping, Protocol, Sequence, runtime_checkable
 
 from ..schemas import SCHEMA_VERSION, FileRecord
 
@@ -63,6 +63,29 @@ class ParseContext:
     statement_text_limit: int = 8000  # max captured code statement text/body length
     parse_timeout_micros: int = 0  # cross-platform tree-sitter timeout (0 = none)
     resolution_index: Any | None = None  # result of the language's build_index, or None
+    #: The indexes of the languages in the parser's ``related_languages`` that were built for
+    #: this run, by language name. Empty when the language declares none.
+    related_indexes: Mapping[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class Ownership:
+    """The evidence a language gives the ownership step (``core/ownership.py``), which decides
+    the language of a file whose extension several languages register (``.h``: C and C++).
+
+    Every hook is optional. Functions must be module-level (they are pickled to the workers of
+    a parallel scan) and must only read bytes: the step runs before any parse."""
+
+    #: Rule 1: True when ``source`` uses syntax only this language allows (C++ ``namespace``).
+    proves: Callable[[bytes], bool] | None = None
+    #: Rule 2: the files ``source`` references, as written (``#include "list.h"`` → ``list.h``).
+    references: Callable[[bytes], list[str]] | None = None
+    #: Rule 2: the other languages whose files this language can reference (C++ includes C
+    #: headers; C cannot include C++ ones). A file referenced from several languages goes to
+    #: the candidate every referring language can reference.
+    includes: tuple[str, ...] = ()
+    #: Rule 4: the shared extensions this language takes when no other rule decides.
+    default_for: tuple[str, ...] = ()
 
 
 @runtime_checkable
@@ -100,6 +123,13 @@ class BaseParser:
     #: ``.ts``/``.js`` + ``.vue``) and only the markup half is gated. Optional, like
     #: ``priority``/``build_index`` — deliberately absent from the Protocol above.
     template_extensions: tuple[str, ...] = ()
+    #: Languages whose indexes this parser may read after its own (C++ calls C functions).
+    #: The pipeline hands their indexes to every parser of the language as
+    #: ``ctx.related_indexes``. A lookup checks the parser's own index first.
+    related_languages: tuple[str, ...] = ()
+    #: Evidence for the ownership step, for a language that registers an extension another
+    #: language also registers. ``None`` for every other language.
+    ownership: Ownership | None = None
 
     def matches(self, path: str | Path) -> bool:
         """Whether this parser handles ``path`` by name/extension (the candidacy gate,

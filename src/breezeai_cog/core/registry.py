@@ -5,6 +5,11 @@ Parsers self-register via ``PARSERS`` lists in each ``parsers/<lang>`` subpackag
 :func:`select`: the highest-``priority`` parser whose ``claims(path, source)`` is True
 (framework parsers > the base language parser, which is the fallback). There is no
 composition — one file, one parser.
+
+An extension is normally registered by one base language. When several register it (``.h``:
+C and C++), the file is **shared**: the ownership step (``core/ownership.py``) decides its
+language from the whole repo, and ``base_parser_for`` / ``select`` take that decision as
+``language``.
 """
 
 from __future__ import annotations
@@ -45,11 +50,38 @@ def parsers_for(path: str | Path) -> list[LanguageParser]:
     return [p for p in _REGISTRY if p.matches(path)]
 
 
-def base_parser_for(path: str | Path) -> LanguageParser | None:
-    """The base **language** parser for a file (lowest priority among candidates).
-    Used for the extension allow-list, the language label, and the build_index key."""
+def language_candidates(path: str | Path) -> list[LanguageParser]:
+    """The base language parsers that register this file: every candidate at the lowest
+    priority, in registration order. More than one means the file is shared."""
     candidates = parsers_for(path)
-    return min(candidates, key=lambda p: p.priority) if candidates else None
+    if not candidates:
+        return []
+    lowest = min(p.priority for p in candidates)
+    return [p for p in candidates if p.priority == lowest]
+
+
+def base_parser_for(path: str | Path, language: str | None = None) -> LanguageParser | None:
+    """The base **language** parser for a file (lowest priority among candidates).
+    Used for the extension allow-list, the language label, and the build_index key.
+
+    ``language`` is the ownership step's decision for a shared file. Without it (or when it
+    names no candidate) the first-registered candidate is returned, as before."""
+    candidates = language_candidates(path)
+    if not candidates:
+        return None
+    if language is not None:
+        for parser in candidates:
+            if parser.name == language:
+                return parser
+    return candidates[0]
+
+
+def _of_language(parser: LanguageParser, base: LanguageParser) -> bool:
+    """Whether ``parser`` is ``base`` or one of its framework parsers (a subclass of it at a
+    higher priority). Another base language never is, even when it subclasses ``base``."""
+    if parser is base:
+        return True
+    return parser.priority > base.priority and isinstance(parser, type(base))
 
 
 def template_extensions() -> frozenset[str]:
@@ -64,11 +96,18 @@ def template_extensions() -> frozenset[str]:
 
 
 def select(
-    path: str | Path, source: bytes, parse_timeout_micros: int = 0
+    path: str | Path, source: bytes, parse_timeout_micros: int = 0, language: str | None = None
 ) -> LanguageParser | None:
     """The single parser that handles this file: the highest-priority candidate whose
-    ``claims(path, source)`` is True (the base language parser is the priority-0 fallback)."""
+    ``claims(path, source)`` is True (the base language parser is the priority-0 fallback).
+
+    ``language`` is the ownership step's decision for a shared file: only that language's
+    parsers (its base and framework parsers) are candidates."""
     candidates = parsers_for(path)
+    if language is not None:
+        base = base_parser_for(path, language)
+        if base is not None:
+            candidates = [p for p in candidates if _of_language(p, base)]
     claiming = [
         p
         for p in candidates
