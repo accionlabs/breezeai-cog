@@ -32,12 +32,15 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Mapping, Sequence
+from typing import Any, Callable, Mapping, Sequence
 
 from tree_sitter import Node
 
 from ...emit import class_id
 from ...utils import repo_relative
+from ..additive import (
+    collect_additive, collect_fact_sources, facts_for, resolve_additive, split_fact_sources,
+)
 from ..callresolve import CallResolver
 from ..index_common import ClassHeritage, parallel_map, record_distinct, walk_heritage
 from ..treesitter import node_text, parse_source
@@ -95,6 +98,26 @@ class CppIndex:
     #: transient (fragment-only): fully-qualified class name → declaring file, before the
     #: reduce resolves it to a node id. Empty on the final index.
     classdecl_raw: dict[str, str | None] = field(default_factory=dict)
+    #: Facts registered with ``register_fact`` (fact name → fact), resolved once before
+    #: parsing. Read with :func:`~..additive.index_fact`; see ``parsers/additive.py``.
+    facts: dict[str, Any] = field(default_factory=dict)
+    #: transient (fragment-only): what registered facts collected from this one file.
+    collected: dict[str, Any] = field(default_factory=dict)
+
+
+#: A language's per-file fact collection, run on the tree the index already parsed:
+#: ``(root, source, rel, repo_root) -> {fact name: value}``. Module-level, so it pickles.
+FactCollector = Callable[[Node, bytes, str, Path], dict[str, Any]]
+
+
+def collect_cpp_facts(root: Node, source: bytes, rel: str, repo_root: Path) -> dict[str, Any]:
+    """What C++'s registered facts collect from one C++ file."""
+    return collect_additive("cpp", root, source, rel, repo_root)
+
+
+def resolve_cpp_facts(collected: dict[str, list[Any]], index: CppIndex) -> dict[str, Any]:
+    """C++'s registered facts, resolved once over every file's collection."""
+    return resolve_additive("cpp", collected, index)
 
 
 def _has_body(node: Node) -> bool:
@@ -240,11 +263,14 @@ def _index_scope(
             _record_def(frag, node, source, rel, None, c_linkage)
 
 
-def _index_one(args: tuple[str, str, str]) -> CppIndex | None:
+def _index_one(
+    args: tuple[str, str, str, FactCollector | None, str],
+) -> CppIndex | None:
     """Parse one file into a **partial** index fragment — pure, picklable, worker-safe
     (for :func:`parallel_map`). Returns ``None`` on read/parse error (a skipped file is a
-    known gap, never fabricated data)."""
-    file_s, rel, grammar = args
+    known gap, never fabricated data). ``collect`` (when facts are registered) runs on the
+    same tree, so a fact costs no second parse."""
+    file_s, rel, grammar, collect, repo_root = args
     try:
         source = Path(file_s).read_bytes()
     except OSError:
@@ -253,6 +279,8 @@ def _index_one(args: tuple[str, str, str]) -> CppIndex | None:
         root = parse_source(grammar, source, 0).root_node
         frag = CppIndex()
         _index_scope(frag, root, source, rel)
+        if collect is not None:
+            frag.collected = collect(root, source, rel, Path(repo_root))
         return frag
     except Exception as exc:  # parse OR a pathologically deep AST walk — skip this file
         from ...logging import get_logger
@@ -264,22 +292,40 @@ def _index_one(args: tuple[str, str, str]) -> CppIndex | None:
 
 
 def build_cpp_index(
-    repo_root: Path, files: Sequence[Path], jobs: int = 1, grammar: str = "cpp"
+    repo_root: Path,
+    files: Sequence[Path],
+    jobs: int = 1,
+    grammar: str = "cpp",
+    *,
+    language: str = "cpp",
+    collect: FactCollector = collect_cpp_facts,
+    resolve: Callable[[dict[str, list[Any]], CppIndex], dict[str, Any]] = resolve_cpp_facts,
 ) -> CppIndex:
     """Repo-level pre-pass: the ``#include`` header map (no parse) plus a parse over every
     file to map free-function / ``Scope::method`` **definitions** → path. Files are parsed
     into partial fragments across ``jobs`` processes and reduced deterministically
     (``jobs<=1`` → serial), so the result is identical regardless of fragment order.
-    ``grammar`` is the tree-sitter grammar of the language (``c`` for the C index)."""
+
+    ``grammar`` / ``language`` / ``collect`` / ``resolve`` are the language's (C passes its
+    own, ``parsers/c/index.py``). Registered facts collect on the same parse, and from the
+    files another parser owns that a fact reads (``FactSpec.sources``)."""
     repo_root = Path(repo_root)
-    index = CppIndex(headers=build_header_index(repo_root, files))
+    own, fact_files = split_fact_sources(language, list(files))
+    index = CppIndex(headers=build_header_index(repo_root, own))
     fqn_file: dict[str, str | None] = {}  # fully-qualified class name → declaring file (or None)
-    rels = [repo_relative(f, repo_root) for f in files]
+    collected: dict[str, list[Any]] = collect_fact_sources(language, fact_files, repo_root, jobs)
+    per_file = collect if facts_for(language) else None
+    rels = [repo_relative(f, repo_root) for f in own]
     fragments = parallel_map(
-        [(str(f), rel, grammar) for f, rel in zip(files, rels)], _index_one, jobs)
+        [(str(f), rel, grammar, per_file, str(repo_root))
+         for f, rel in zip(own, rels)],
+        _index_one, jobs,
+    )
     for frag in fragments:
         if frag is None:
             continue
+        for name, value in frag.collected.items():  # in file order: fragments keep it
+            collected.setdefault(name, []).append(value)
         for name, rel in frag.funcs.items():
             _merge(index.funcs, name, rel)
         for name, rel in frag.c_linkage.items():
@@ -294,6 +340,8 @@ def build_cpp_index(
             if ch is not None:  # a fragment only ever creates real records
                 _merge_heritage(index.heritage, cname, ch)
     index.classdecl = _finalize_classdecl(fqn_file)
+    # Registered facts may read the finished index, so they resolve after it is built.
+    index.facts = resolve(collected, index)
     return index
 
 

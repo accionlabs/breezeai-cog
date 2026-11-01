@@ -287,3 +287,21 @@ def test_fact_reads_files_another_parser_owns(isolated, tmp_path) -> None:
 
 def test_index_fact_tolerates_a_missing_index() -> None:
     assert index_fact(None, "anything") is None
+
+
+@pytest.mark.parametrize("jobs", [1, 2])
+@pytest.mark.parametrize("language", ["c", "cpp"])
+def test_c_family_fact_is_resolved_on_its_own_index(isolated, tmp_path, jobs, language) -> None:
+    from breezeai_cog.parsers.c.parser import CParser
+    from breezeai_cog.parsers.cpp.parser import CppParser
+
+    register_fact(_marked(language=language, resolve=lambda values, index: sorted(values)))
+    ext = ".c" if language == "c" else ".cpp"
+    paths = []
+    for name, src in {"a": b"// MARK\nint a(void) { return 0; }\n", "b": b"int b(void);\n"}.items():
+        f = tmp_path / f"{name}{ext}"
+        f.write_bytes(src)
+        paths.append(f)
+    own, other = (CParser(), CppParser()) if language == "c" else (CppParser(), CParser())
+    assert index_fact(own.build_index(tmp_path, paths, jobs), "test.marked") == [f"a{ext}"]
+    assert index_fact(other.build_index(tmp_path, paths, jobs), "test.marked") is None

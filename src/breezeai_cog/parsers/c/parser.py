@@ -16,11 +16,15 @@ defined inside ``extern "C"`` — the only C++ functions a C file can call.
 
 from __future__ import annotations
 
+from pathlib import Path
+from typing import Sequence
+
 from tree_sitter import Node
 
 from ..additive import run_additive
 from ..base import Ownership, ParseContext
 from ..cpp.index import CppIndex
+from .index import build_c_index
 from ..cpp.ownership import include_targets
 from ..cpp.parser import CppParser
 from ...schemas import FileRecord
@@ -32,6 +36,9 @@ class CParser(CppParser):
     extensions = (".c", ".h")
     related_languages = ("cpp",)
     ownership = Ownership(references=include_targets)
+
+    def build_index(self, repo_root: Path, files: Sequence[Path], jobs: int = 1) -> CppIndex:
+        return build_c_index(Path(repo_root), files, jobs)
 
     def callable_in(self, related: CppIndex) -> dict[str, str | None]:
         """C can call only the C++ functions with C linkage."""
