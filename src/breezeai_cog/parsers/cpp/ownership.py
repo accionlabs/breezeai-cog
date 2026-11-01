@@ -8,10 +8,11 @@ parse, and asks two things of each:
   a C header; C cannot include a C++ one).
 * :func:`cpp_only_syntax` — whether a header uses syntax C does not have. Comments and string
   literals are ignored. Inside ``#if`` groups that test ``__cplusplus`` a C API header routinely
-  has its ``extern "C" {`` guard and C++ includes (``<cstddef>``); those are not proof. A C++
-  *declaration* there (``namespace``, ``class``, ``template``, ``std::``) is: the header is
-  written for both languages, and only the C++ grammar reads all of it — the C grammar would
-  lose the C++ declarations.
+  adapts itself for C++ includers — its ``extern "C" {`` guard, C++ includes (``<cstddef>``),
+  ``using namespace std;`` — and none of that is proof. A C++ *declaration* there
+  (``namespace``, ``class``, ``template``, ``std::``) is: the header is written for both
+  languages, and only the C++ grammar reads all of it — the C grammar would lose the C++
+  declarations.
 
 The markers are deliberately few and unambiguous: one that a valid C file could contain would
 send a C header to the C++ grammar on its own.
@@ -35,13 +36,15 @@ _LINKAGE = re.compile(rb'\bextern[ \t]*"C(?:\+\+)?"')
 _CPP_DECLARATION = re.compile(
     rb"(?<![@\w])class[ \t\r\n]+[A-Za-z_]\w*(?:[ \t\r\n]+final)?[ \t\r\n]*[:{;]"
     rb"|\bnamespace(?:[ \t\r\n]+[A-Za-z_][\w:]*)?[ \t\r\n]*\{"
-    rb"|\busing[ \t]+namespace\b"
     rb"|\btemplate[ \t\r\n]*<"
     rb"|\bstd::"
 )
-#: A standard-library header with no extension (``<vector>``, ``<string>``): every C one ends in
-#: ``.h``. Proof only outside ``__cplusplus`` groups, where a C header may include ``<cstddef>``.
-_CPP_LIBRARY = re.compile(rb"^[ \t]*#[ \t]*include[ \t]*<[a-z_]+>", re.M)
+#: Proof only outside ``__cplusplus`` groups, where a C header adapting itself for C++ includers
+#: may have them: a standard-library header with no extension (``<vector>``, ``<cstddef>`` —
+#: every C one ends in ``.h``), and ``using namespace``.
+_CPP_ADAPTER = re.compile(
+    rb"^[ \t]*#[ \t]*include[ \t]*<[a-z_]+>|\busing[ \t]+namespace\b", re.M
+)
 
 
 def include_targets(source: bytes) -> list[str]:
@@ -78,9 +81,9 @@ def _split_cplusplus_blocks(source: bytes) -> tuple[bytes, bytes]:
 
 def cpp_only_syntax(source: bytes) -> bool:
     """True when ``source`` uses syntax only C++ has: a C++ declaration anywhere, or a linkage
-    specification or C++ library include outside ``__cplusplus`` groups. Comments and string
+    specification, a C++ library include or ``using namespace`` outside ``__cplusplus`` groups. Comments and string
     literals never count."""
     outside, inside = _split_cplusplus_blocks(_COMMENT.sub(b" ", source))
-    if _LINKAGE.search(outside) or _CPP_LIBRARY.search(outside):
+    if _LINKAGE.search(outside) or _CPP_ADAPTER.search(_STRING.sub(b'""', outside)):
         return True
     return any(_CPP_DECLARATION.search(_STRING.sub(b'""', code)) for code in (outside, inside))

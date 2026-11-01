@@ -19,3 +19,12 @@ curl/
 gmp/
 icu/
 zlib/
+
+# ...except the library's own repository: its public headers live in include/<name>/ at the
+# root (curl's include/curl/curl.h). A vendored copy keeps its parent folder (third_party/,
+# deps/, lib/curl/...), which these root-anchored lines never match.
+!/include/openssl/
+!/include/curl/
+!/include/gmp/
+!/include/icu/
+!/include/zlib/

@@ -24,6 +24,7 @@ from .functions import (
     extract_params,
     function_declarator_of,
     has_declaration_error,
+    is_function_pointer,
 )
 
 #: Aggregate specifiers that become a ``Class`` node, mapped to their ``type``. A union is
@@ -206,10 +207,12 @@ def build_class(
                     methods.extend(sub_methods)
                     statements.extend(sub_statements)
             elif member.type in _MEMBER_FN_TYPES:
-                if function_declarator_of(member.child_by_field_name("declarator")) is None:
-                    # A member variable / constant, not a function. C++ class fields are
-                    # otherwise captured nowhere, so emit each as a flat statement (its
-                    # `text` — incl. any `= value` initializer — is queryable).
+                declarator = member.child_by_field_name("declarator")
+                if function_declarator_of(declarator) is None or is_function_pointer(declarator):
+                    # A member variable / constant, not a function — including a pointer to a
+                    # function (`size_t (*read)(void *, size_t);`, C's method table). C++ class
+                    # fields are otherwise captured nowhere, so emit each as a flat statement
+                    # (its `text` — incl. any `= value` initializer — is queryable).
                     if capture and member.type == "field_declaration":
                         statements.append(
                             member_statement(

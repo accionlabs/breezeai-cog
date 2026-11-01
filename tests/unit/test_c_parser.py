@@ -330,3 +330,59 @@ def test_a_header_for_both_languages_is_cpp_and_keeps_its_cpp_declarations(tmp_p
     record = _capture(repo, 1)["common.h"]
     assert record["language"] == "cpp"
     assert [f["name"] for f in record["functions"]] == ["clamp", "span"]
+
+
+# -- pointers to functions are variables, not functions -----------------------------------------
+
+
+@pytest.mark.parametrize("parser", [CParser(), CppParser()], ids=["c", "cpp"])
+def test_a_pointer_to_a_function_is_a_field_not_a_method(tmp_path, parser) -> None:
+    record = _parse(
+        parser,
+        tmp_path,
+        "rio.h",
+        "struct rio {\n"
+        "    size_t (*read)(struct rio *, void *buf, size_t len);\n"
+        "    int **(*const lookup)(void);\n"
+        "    int count;\n"
+        "};\n"
+        "int (*cmp)(int, int);\n",
+    )
+    assert record.functions == []
+    fields = [(s.name, s.parentId) for s in record.statements if s.nodeType == "field_declaration"]
+    assert fields == [("read", "rio.h#rio"), ("lookup", "rio.h#rio"), ("count", "rio.h#rio")]
+    assert [(s.name, s.nodeType) for s in record.statements if s.parentId == "rio.h"] == [
+        ("cmp", "declaration")
+    ]
+
+
+def test_a_member_function_with_a_parenthesized_name_is_still_a_method(tmp_path) -> None:
+    record = _parse(CppParser(), tmp_path, "s.h", "struct S { int (f)(int); };\n")
+    assert [f.name for f in record.functions] == ["f"]
+
+
+# -- a C header adapting itself for C++ includers stays C ---------------------------------------
+
+
+def test_a_header_adapting_itself_for_cpp_is_not_cpp() -> None:
+    lzf_style = (
+        b"#ifdef __cplusplus\n# include <cstring>\n# include <climits>\nusing namespace std;\n"
+        b"#else\n# include <string.h>\n# include <limits.h>\n#endif\n"
+    )
+    assert not cpp_only_syntax(lzf_style)
+
+
+# -- a library's own public headers are not taken for a vendored copy ---------------------------
+
+
+def test_a_librarys_own_include_folder_is_captured(tmp_path) -> None:
+    repo = _repo(
+        tmp_path / "curl",
+        {
+            "include/curl/curl.h": "int curl_easy_init(void);\n",
+            "lib/easy.c": '#include "curl/curl.h"\nint curl_easy_init(void) { return 0; }\n',
+            "third_party/curl/include/curl/curl.h": "int vendored(void);\n",  # a vendored copy
+            "lib/curl/old.c": "int old(void) { return 0; }\n",  # a vendored copy elsewhere
+        },
+    )
+    assert sorted(_capture(repo, 1)) == ["include/curl/curl.h", "lib/easy.c"]

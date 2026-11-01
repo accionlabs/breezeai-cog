@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from breezeai_cog.parsers.base import ParseContext
 from breezeai_cog.parsers.detection import classify_call
 from breezeai_cog.parsers.python.parser import PythonParser
@@ -599,3 +601,21 @@ def test_php_cannot_activate_javascript_orm_mappings() -> None:
     ):
         assert classify_call(callee, method, language="php") is None
 
+
+
+@pytest.mark.parametrize(
+    "text, is_sql",
+    [
+        ("TRUNCATE TABLE users", True),
+        ("truncate users;", True),
+        ("TRUNCATE users", True),
+        ("TRUNCATE ONLY public.users CASCADE", True),
+        ("TRUNCATE users RESTART IDENTITY", True),
+        ("Truncate nothing in AOF %s to timestamp %ld\n", False),  # a C format string
+        ("Truncate the log", False),
+    ],
+)
+def test_truncate_needs_sql_structure(text: str, is_sql: bool) -> None:
+    from breezeai_cog.parsers.detection.queries import is_query
+
+    assert is_query("printf", text) is is_sql

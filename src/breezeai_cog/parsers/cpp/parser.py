@@ -47,6 +47,7 @@ from .functions import (
     defined_names,
     function_declarator_of,
     has_declaration_error,
+    is_function_pointer,
 )
 from .imports import FamilyHeaders, extract_imports
 from .index import CppIndex, _join_ns, _ns_name, build_cpp_index, make_cpp_resolver
@@ -161,7 +162,10 @@ class CppParser(BaseParser):
                     # a declaration that is not a value; skip those (a defined function is a
                     # `function_definition`, handled above). Namespace members parent to the
                     # file, matching how `process` already flattens namespaces.
-                    if function_declarator_of(node.child_by_field_name("declarator")) is None:
+                    declarator = node.child_by_field_name("declarator")
+                    if function_declarator_of(declarator) is None or is_function_pointer(
+                        declarator
+                    ):  # a variable, incl. a pointer to a function (`int (*cmp)(int, int);`)
                         statements.append(
                             member_statement(
                                 node, source, path, parent_id=fid, limit=limit, seen_ids=seen_ids,

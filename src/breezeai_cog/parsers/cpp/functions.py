@@ -79,6 +79,20 @@ def function_declarator_of(declarator: Node | None) -> Node | None:
     return inner if inner is not None and inner.type == "function_declarator" else None
 
 
+def is_function_pointer(declarator: Node | None) -> bool:
+    """Whether ``declarator`` declares a pointer (or reference) *to* a function —
+    ``size_t (*read)(void *, size_t)`` — which is a variable, not a function. Its
+    ``function_declarator`` wraps a ``parenthesized_declarator`` holding the pointer; a function
+    whose name is merely parenthesized (``int (f)(int)``) has no pointer there."""
+    fd = function_declarator_of(declarator)
+    inner = fd.child_by_field_name("declarator") if fd is not None else None
+    while inner is not None and inner.type == "parenthesized_declarator":
+        inner = next((c for c in inner.named_children if c.type != "type_qualifier"), None)
+        if inner is not None and inner.type in ("pointer_declarator", "reference_declarator"):
+            return True
+    return False
+
+
 def _first_identifier(node: Node | None) -> Node | None:
     """First ``identifier`` in ``node``'s subtree — the parameter name inside a
     (possibly pointer/reference/array) declarator. ``None`` for an unnamed parameter."""
@@ -274,6 +288,8 @@ def build_member_function(
     **definition** carries a ``body`` and its calls/statements are captured too."""
     fd = function_declarator_of(field_decl.child_by_field_name("declarator"))
     name_node = fd.child_by_field_name("declarator") if fd is not None else None
+    while name_node is not None and name_node.type == "parenthesized_declarator":
+        name_node = name_node.named_children[0] if name_node.named_children else None  # (f)(int)
     name = node_text(name_node, source) if name_node is not None else ""
     start, end = line_span(field_decl)
     # The id carries the qualified owner (`Outer.Inner`) so a nested type's methods are
