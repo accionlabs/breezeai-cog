@@ -308,6 +308,10 @@ copying code.
 > **Why:** a single pathological file (generated or minified code) must not stall the run. The
 > limit is enforced inside tree-sitter, so it works on every OS. **Cost:** that file is
 > recorded as failed and has no record.
+>
+> The repo-wide index pre-pass (§4.2) gets the same limit when the language parser sets
+> `build_index_accepts_timeout` (C and C++ today); a file past it is left out of the index and
+> logged. Other languages' index parses are not bounded yet.
 
 ### 4.5 Parallel execution
 

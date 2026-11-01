@@ -275,3 +275,25 @@ def test_parsers_get_their_own_index_and_related_indexes(tmp_path) -> None:
     assert records["x.sh2"].externalImports == ["own=upper", "lower=lower"]
     assert records["a.up"].externalImports == ["own=upper", "lower=lower"]
     assert records["b.lo"].language == "lower"
+
+
+class TimedLower(Lower):
+    build_index_accepts_timeout = True
+
+    def build_index(self, repo_root, files, jobs=1, parse_timeout_micros=0):
+        return _Index(f"timeout={parse_timeout_micros}")
+
+
+class UntimedUpper(Upper):
+    def build_index(self, repo_root, files, jobs=1):
+        return _Index("no timeout")
+
+
+def test_the_parse_timeout_reaches_only_indexes_that_take_it(tmp_path) -> None:
+    registry.clear()
+    registry.register(TimedLower())
+    registry.register(UntimedUpper())
+    repo = _repo(tmp_path, {"a.lo": "", "b.up": ""})
+    entries = [ScanEntry("a.lo", "lower"), ScanEntry("b.up", "upper")]
+    indexes = pipeline._build_indexes(repo, entries, parse_timeout_micros=1234)
+    assert (indexes["lower"].name, indexes["upper"].name) == ("timeout=1234", "no timeout")

@@ -37,8 +37,10 @@ class CParser(CppParser):
     related_languages = ("cpp",)
     ownership = Ownership(references=include_targets)
 
-    def build_index(self, repo_root: Path, files: Sequence[Path], jobs: int = 1) -> CppIndex:
-        return build_c_index(Path(repo_root), files, jobs)
+    def build_index(
+        self, repo_root: Path, files: Sequence[Path], jobs: int = 1, parse_timeout_micros: int = 0
+    ) -> CppIndex:
+        return build_c_index(Path(repo_root), files, jobs, parse_timeout_micros)
 
     def callable_in(self, related: CppIndex) -> dict[str, str | None]:
         """C can call only the C++ functions with C linkage."""

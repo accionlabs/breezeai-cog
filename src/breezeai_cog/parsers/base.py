@@ -130,6 +130,9 @@ class BaseParser:
     #: Evidence for the ownership step, for a language that registers an extension another
     #: language also registers. ``None`` for every other language.
     ownership: Ownership | None = None
+    #: Set when ``build_index`` takes ``parse_timeout_micros``: the pipeline then passes the
+    #: run's parse timeout, so the index parse is bounded like the parse stage.
+    build_index_accepts_timeout: bool = False
 
     def matches(self, path: str | Path) -> bool:
         """Whether this parser handles ``path`` by name/extension (the candidacy gate,

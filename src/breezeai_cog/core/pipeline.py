@@ -156,12 +156,14 @@ def _owners(entries: list[ScanEntry]) -> dict[str, str]:
 
 
 def _build_indexes(
-    repo_root: Path, entries: list[ScanEntry], jobs: int = 1, *, debug_on: bool = False
+    repo_root: Path, entries: list[ScanEntry], jobs: int = 1, *, debug_on: bool = False,
+    parse_timeout_micros: int = 0,
 ) -> dict:
     """Run each parser's optional ``build_index`` once (main process). Maps
     parser-name → index; threaded into ParseContext.resolution_index. ``jobs`` is the same
     worker count as the parse stage — passed to ``build_index`` so its per-file parse can
-    parallelize (``jobs<=1`` keeps it serial)."""
+    parallelize (``jobs<=1`` keeps it serial). A parser that sets
+    ``build_index_accepts_timeout`` also gets the run's parse timeout."""
     bases: dict[str, object] = {}
     files: dict[str, list[Path]] = {}
     for entry in entries:
@@ -185,7 +187,11 @@ def _build_indexes(
     for name, base in bases.items():
         start = time.perf_counter()
         try:
-            index = base.build_index(repo_root, files[name], jobs)
+            timeout = (
+                {"parse_timeout_micros": parse_timeout_micros}
+                if getattr(base, "build_index_accepts_timeout", False) else {}
+            )
+            index = base.build_index(repo_root, files[name], jobs, **timeout)
         except Exception as exc:
             # Per-file workers already isolate their own failures; this is a last-resort
             # guard so one language's index cannot abort the whole run. Resolution simply
@@ -208,7 +214,8 @@ def iter_records(repo_root: str | Path, settings) -> Iterator[tuple[ScanEntry, F
     entries = _scan_entries(repo_root, settings)
     options = executor._options(settings)
     options["indexes"] = _build_indexes(
-        repo_root, entries, debug_on=settings.log_level == "DEBUG"
+        repo_root, entries, debug_on=settings.log_level == "DEBUG",
+        parse_timeout_micros=options["parse_timeout_micros"],
     )
     options["owners"] = _owners(entries)
     for entry in entries:
@@ -396,7 +403,10 @@ def run(
             reason=skipped["reason"],
             **({"size": skipped["size"]} if "size" in skipped else {}),
         )
-    indexes = _build_indexes(repo_root, entries, jobs, debug_on=debug_on)
+    indexes = _build_indexes(
+        repo_root, entries, jobs, debug_on=debug_on,
+        parse_timeout_micros=int(settings.parse_timeout * 1_000_000),
+    )
     records = executor.parse_entries(entries, repo_root, settings, indexes, _owners(entries))
     meta = _assemble(
         repo_root, records, sink, statement_text_limit=settings.statement_text_limit,
@@ -418,7 +428,9 @@ def run_inprocess(repo_root: str | Path, settings, sink) -> ProjectMetaData:
     report = SkipReport()
     entries = _scan_entries(repo_root, settings, report)
     options = executor._options(settings)
-    options["indexes"] = _build_indexes(repo_root, entries, debug_on=debug_on)
+    options["indexes"] = _build_indexes(
+        repo_root, entries, debug_on=debug_on, parse_timeout_micros=options["parse_timeout_micros"]
+    )
     options["owners"] = _owners(entries)
 
     def gen() -> Iterator[tuple[str, FileRecord]]:

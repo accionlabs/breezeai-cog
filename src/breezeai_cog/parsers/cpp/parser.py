@@ -90,11 +90,17 @@ class CppParser(BaseParser):
         proves=cpp_only_syntax, references=include_targets, includes=("c",), default_for=(".h",),
     )
 
-    def build_index(self, repo_root: Path, files: Sequence[Path], jobs: int = 1) -> CppIndex:
+    build_index_accepts_timeout = True
+
+    def build_index(
+        self, repo_root: Path, files: Sequence[Path], jobs: int = 1, parse_timeout_micros: int = 0
+    ) -> CppIndex:
         """Repo-wide index: the ``#include`` header map plus a parse pre-pass mapping
         free-function / ``Scope::method`` **definitions** → path (for cross-file call
         resolution). Honest-null on any name shared by >1 file."""
-        return build_cpp_index(Path(repo_root), files, jobs, self.grammar)
+        return build_cpp_index(
+            Path(repo_root), files, jobs, parse_timeout_micros=parse_timeout_micros
+        )
 
     def parse_file(self, ctx: ParseContext) -> FileRecord:
         root = parse_source(self.grammar, ctx.source, ctx.parse_timeout_micros).root_node

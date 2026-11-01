@@ -264,19 +264,19 @@ def _index_scope(
 
 
 def _index_one(
-    args: tuple[str, str, str, FactCollector | None, str],
+    args: tuple[str, str, str, int, FactCollector | None, str],
 ) -> CppIndex | None:
     """Parse one file into a **partial** index fragment — pure, picklable, worker-safe
     (for :func:`parallel_map`). Returns ``None`` on read/parse error (a skipped file is a
     known gap, never fabricated data). ``collect`` (when facts are registered) runs on the
     same tree, so a fact costs no second parse."""
-    file_s, rel, grammar, collect, repo_root = args
+    file_s, rel, grammar, timeout_micros, collect, repo_root = args
     try:
         source = Path(file_s).read_bytes()
     except OSError:
         return None
     try:
-        root = parse_source(grammar, source, 0).root_node
+        root = parse_source(grammar, source, timeout_micros).root_node
         frag = CppIndex()
         _index_scope(frag, root, source, rel)
         if collect is not None:
@@ -300,6 +300,7 @@ def build_cpp_index(
     language: str = "cpp",
     collect: FactCollector = collect_cpp_facts,
     resolve: Callable[[dict[str, list[Any]], CppIndex], dict[str, Any]] = resolve_cpp_facts,
+    parse_timeout_micros: int = 0,
 ) -> CppIndex:
     """Repo-level pre-pass: the ``#include`` header map (no parse) plus a parse over every
     file to map free-function / ``Scope::method`` **definitions** → path. Files are parsed
@@ -317,7 +318,7 @@ def build_cpp_index(
     per_file = collect if facts_for(language) else None
     rels = [repo_relative(f, repo_root) for f in own]
     fragments = parallel_map(
-        [(str(f), rel, grammar, per_file, str(repo_root))
+        [(str(f), rel, grammar, parse_timeout_micros, per_file, str(repo_root))
          for f, rel in zip(own, rels)],
         _index_one, jobs,
     )

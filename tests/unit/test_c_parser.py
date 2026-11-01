@@ -402,6 +402,14 @@ def test_an_unincluded_header_follows_its_folders_c_headers(tmp_path) -> None:
     assert _capture(repo, 1)["include/curl/stdcheaders.h"]["language"] == "c"
 
 
+def test_the_index_parse_honours_the_parse_timeout(tmp_path) -> None:
+    big = tmp_path / "big.c"
+    big.write_text("".join(f"int f{i}(int a) {{ return a + {i}; }}\n" for i in range(20000)))
+    assert "f1" in CParser().build_index(tmp_path, [big]).funcs
+    # A parse past the limit skips the file (logged), as the parse stage does.
+    assert CParser().build_index(tmp_path, [big], parse_timeout_micros=1).funcs == {}
+
+
 # -- macros -------------------------------------------------------------------------------------
 
 

@@ -23,9 +23,9 @@ def resolve_c_facts(collected: dict[str, list[Any]], index: CppIndex) -> dict[st
 
 
 def build_c_index(
-    repo_root: Path, files: Sequence[Path], jobs: int = 1
+    repo_root: Path, files: Sequence[Path], jobs: int = 1, parse_timeout_micros: int = 0
 ) -> CppIndex:
     return build_cpp_index(
         repo_root, files, jobs, "c", language="c", collect=collect_c_facts,
-        resolve=resolve_c_facts,
+        resolve=resolve_c_facts, parse_timeout_micros=parse_timeout_micros,
     )
