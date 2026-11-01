@@ -30,6 +30,7 @@ a wrong cross-file edge is worse than a missing one (see the extend-capture skil
 
 from __future__ import annotations
 
+import posixpath
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
@@ -46,8 +47,9 @@ from ..index_common import ClassHeritage, parallel_map, record_distinct, walk_he
 from ..treesitter import node_text, parse_source
 from .classes import _CLASS_TYPES, _heritage, _unwrap_template
 from .functions import function_declarator_of, has_declaration_error
-from .imports import HeaderIndex, build_header_index
+from .imports import FamilyHeaders, HeaderIndex, build_header_index
 from .mappings import HEADER_EXTENSIONS, TRANSPARENT_SCOPES
+from .ownership import include_targets
 from .types import field_types
 
 _MEMBER_FN_TYPES = ("field_declaration", "function_definition", "declaration")
@@ -71,6 +73,12 @@ class CppIndex:
     #: header basename → repo-relative path (``None`` when >1 file shares the basename),
     #: for local ``#include`` resolution.
     headers: HeaderIndex = field(default_factory=dict)
+    #: repo-relative path → its local includes as written (``#include "a/list.h"`` →
+    #: ``a/list.h``), for the headers a file can see (:class:`IncludeGraph`).
+    includes: dict[str, tuple[str, ...]] = field(default_factory=dict)
+    #: included file's basename → ``(including file, include as written)`` pairs, from
+    #: ``includes``: who may include a header, checked with :class:`IncludeGraph`.
+    included_by: dict[str, list[tuple[str, str]]] = field(default_factory=dict)
     #: free-function simple name → defining file (``None`` when defined in >1 file).
     funcs: dict[str, str | None] = field(default_factory=dict)
     #: the subset of ``funcs`` defined inside ``extern "C"`` — what a C file can call.
@@ -277,7 +285,7 @@ def _index_one(
         return None
     try:
         root = parse_source(grammar, source, timeout_micros).root_node
-        frag = CppIndex()
+        frag = CppIndex(includes={rel: tuple(include_targets(source))})
         _index_scope(frag, root, source, rel)
         if collect is not None:
             frag.collected = collect(root, source, rel, Path(repo_root))
@@ -327,6 +335,7 @@ def build_cpp_index(
             continue
         for name, value in frag.collected.items():  # in file order: fragments keep it
             collected.setdefault(name, []).append(value)
+        index.includes.update(frag.includes)
         for name, rel in frag.funcs.items():
             _merge(index.funcs, name, rel)
         for name, rel in frag.c_linkage.items():
@@ -341,6 +350,9 @@ def build_cpp_index(
             if ch is not None:  # a fragment only ever creates real records
                 _merge_heritage(index.heritage, cname, ch)
     index.classdecl = _finalize_classdecl(fqn_file)
+    for rel, written_all in index.includes.items():
+        for written in written_all:
+            index.included_by.setdefault(posixpath.basename(written), []).append((rel, written))
     # Registered facts may read the finished index, so they resolve after it is built.
     index.facts = resolve(collected, index)
     return index
@@ -401,9 +413,85 @@ def _merge(dst: dict[str, str | None], key: str, value: str | None) -> None:
     record_distinct(dst, key, value)
 
 
+class IncludeGraph:
+    """The repo's ``#include "…"`` graph across the file's own and related languages'
+    indexes, for the headers a file can see.
+
+    An include is looked up the way a compiler looks up ``#include "…"``: next to the file
+    that includes it first, else the one repo file with that name (``headers``). One that
+    resolves to neither adds nothing."""
+
+    def __init__(self, headers: FamilyHeaders, indexes: Sequence[CppIndex]) -> None:
+        self.headers = headers
+        self.includes = [i.includes for i in indexes]
+        self.included_by = [i.included_by for i in indexes]
+        self._closures: dict[str, set[str]] = {}
+
+    def _lookup(self, includer: str, written: str) -> str | None:
+        local = posixpath.normpath(posixpath.join(posixpath.dirname(includer), written))
+        if any(local in m for m in self.includes):
+            return local
+        return self.headers.get(posixpath.basename(written))
+
+    def closure(self, path: str, direct: Sequence[str] = ()) -> set[str]:
+        """``path`` and every file it includes, directly or through other includes.
+        ``direct`` adds includes already resolved for it (its imports)."""
+        if path in self._closures and not direct:
+            return self._closures[path]
+        seen: set[str] = set()
+        pending = [path, *direct]
+        while pending:
+            file = pending.pop()
+            if file in seen:
+                continue
+            seen.add(file)
+            for written in (t for m in self.includes for t in m.get(file, ())):
+                target = self._lookup(file, written)
+                if target is not None and target not in seen:
+                    pending.append(target)
+        if not direct:
+            self._closures[path] = seen
+        return seen
+
+    def includers(self, header: str) -> list[str]:
+        """The files whose own ``#include`` resolves to ``header``."""
+        name = posixpath.basename(header)
+        return sorted({
+            file
+            for m in self.included_by
+            for file, written in m.get(name, ())
+            if self._lookup(file, written) == header
+        })
+
+
+def header_visibility(
+    path: str, direct: Sequence[str], graph: IncludeGraph
+) -> Callable[[str], bool]:
+    """Whether the file at ``path`` can see a header: the header is in the file's include
+    closure (``direct`` are its resolved imports) or, for a header, in the closure of every
+    file that includes it — a header is compiled only inside them, and often relies on what
+    they included first. Computed on first use."""
+    own: list[set[str]] = []
+    context: list[list[set[str]]] = []
+
+    def sees(header: str) -> bool:
+        if not own:
+            own.append(graph.closure(path, direct))
+        if header in own[0]:
+            return True
+        if Path(path).suffix.lower() not in HEADER_EXTENSIONS:
+            return False
+        if not context:
+            context.append([graph.closure(f) for f in graph.includers(path) if f != path])
+        return bool(context[0]) and all(header in c for c in context[0])
+
+    return sees
+
+
 def make_cpp_resolver(
     local_defs: set[str], path: str, index: CppIndex | None,
     related_funcs: Sequence[Mapping[str, str | None]] = (),
+    sees: Callable[[str], bool] | None = None,
 ) -> CallResolver:
     """``(name, receiver, owner=None, types=None) -> repo path | None`` for C++. ``owner`` is
     the class the call is written in (``None`` in a free function); ``types`` maps the calling
@@ -422,16 +510,29 @@ def make_cpp_resolver(
     → every C function; C → the C++ functions inside ``extern "C"``). A bare call checks them
     only when its own language has no definition of the name, and binds only when they agree.
 
+    ``sees`` (see :func:`header_visibility`) limits a free function defined in a header to
+    the headers the file can see: the one definition cog sees may not be the one the file is
+    built with — a vendored copy in an ignored folder is invisible, and its calls would land
+    on the first-party copy.
+
     Unresolved / ambiguous always returns ``None`` — never a guessed edge."""
     funcs = index.funcs if index is not None else {}
 
+    def _visible(target: str | None) -> str | None:
+        if target is None or sees is None or target == path:
+            return target
+        if Path(target).suffix.lower() not in HEADER_EXTENSIONS:
+            return target
+        return target if sees(target) else None
+
     def _free(name: str) -> str | None:
         """A repo-wide free function: the file's own language first (an ambiguous ``None``
-        there stops the lookup), else the one file its related languages agree on."""
+        there stops the lookup), else the one file its related languages agree on. A header
+        target must be one the file includes."""
         if name in funcs:
-            return funcs[name]
+            return _visible(funcs[name])
         found = {related[name] for related in related_funcs if name in related}
-        return found.pop() if len(found) == 1 else None
+        return _visible(found.pop()) if len(found) == 1 else None
     qual = index.qual if index is not None else {}
     fields = index.fields if index is not None else {}
     heritage = index.heritage if index is not None else {}

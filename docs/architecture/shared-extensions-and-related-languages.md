@@ -415,6 +415,20 @@ C++.
 > its name with an unrelated file-local one is left unresolved. A same-file call still resolves.
 > This applies to C++ `.cpp` files too.
 
+> **Decision —** a call links to a function defined in a header only when the calling file can
+> see that header: the file includes it, directly or through other includes, or — for a call
+> written in a header — every file that includes that header can see it. An include is looked
+> up the way a compiler looks up `#include "…"`: next to the including file first, else the one
+> repo file with that name.
+> **Why:** cog sees only the files it scans. When a repo vendors a library in an ignored folder
+> and keeps its own copy of the same header (redis builds `redis-cli.c` against
+> `deps/hiredis/sds.h`, not `src/sds.h`), the one definition cog sees is not the one the file is
+> built with, and every call would land on the wrong copy. A header is compiled only inside the
+> files that include it and often relies on what they included first, so their view counts for
+> it. **Cost:** a real call is left unresolved when cog can't follow the include: a `<…>`
+> include of a repo header, or a name found through the build's include path that several
+> folders share. A function defined in a source file is still linked by name.
+
 > **Decision —** include guards and `extern "C" { … }` blocks are walked even when they contain
 > a parse error, and each declaration in them is checked on its own.
 > **Why:** a C API header splits `extern "C" {` and its `}` across two `#ifdef __cplusplus`
@@ -504,7 +518,7 @@ Two interactions with existing options:
 
 | Risk | Severity | Mitigation |
 |---|---|---|
-| **Name-only matching links the wrong C function.** Cog doesn't read Makefiles or CMake, so a name defined once in `server/` can be linked from `client/`, which never links against it | **High** | Exactly-one-definition rule; prefer a definition whose header the caller includes; leave `static` functions out of the index |
+| **Name-only matching links the wrong C function.** Cog doesn't read Makefiles or CMake, so a name defined once in `server/` can be linked from `client/`, which never links against it | **High** | Exactly-one-definition rule; a function defined in a header links only from files that can see the header; `static` functions are never targets |
 | Header language decided wrongly, or changing between runs as includers change | Medium | Fixed rule order; decision logged per file |
 | Existing captures change: headers labelled `cpp` today may become `c` | Medium | Call it out in the release notes; re-onboard affected repos |
 | Core change touches every parser | Medium | Before/after capture diff across all languages; no behaviour change for parsers that don't opt in |

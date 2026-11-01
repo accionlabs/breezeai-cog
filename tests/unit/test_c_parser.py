@@ -449,3 +449,76 @@ def test_macros_follow_the_statement_gate(tmp_path) -> None:
         ParseContext(path="m.h", abs_path=path, source=path.read_bytes(), repo_root=tmp_path)
     )
     assert record.statements == []
+
+
+# -- calls into headers -------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("jobs", [1, 2])
+def test_a_call_resolves_into_a_header_only_when_the_file_includes_it(tmp_path, jobs) -> None:
+    repo = _repo(
+        tmp_path,
+        {
+            "src/sds.h": "static inline int sdslen(const char *s) { return 0; }\n",
+            "src/server.h": '#include "sds.h"\n',
+            "src/server.c": '#include "server.h"\nint serve(void) { return sdslen("a"); }\n',
+            "src/direct.c": '#include "sds.h"\nint direct(void) { return sdslen("a"); }\n',
+            # Built against a vendored copy cog doesn't see: `<sds.h>` names no repo file.
+            "src/cli.c": "#include <sds.h>\nint cli(void) { return sdslen(\"a\"); }\n",
+            "src/none.c": "int none(void) { return sdslen(\"a\"); }\n",
+            # A definition in a source file is linked by name, as before.
+            "src/util.c": "int util_max(int a) { return a; }\n",
+            "src/user.c": "int user(void) { return util_max(1); }\n",
+        },
+    )
+    records = _capture(repo, jobs)
+    assert _calls(records["src/server.c"], "serve") == {"sdslen": "src/sds.h"}  # transitive
+    assert _calls(records["src/direct.c"], "direct") == {"sdslen": "src/sds.h"}
+    assert _calls(records["src/cli.c"], "cli") == {"sdslen": None}
+    assert _calls(records["src/none.c"], "none") == {"sdslen": None}
+    assert _calls(records["src/user.c"], "user") == {"util_max": "src/util.c"}
+
+
+def test_the_include_closure_crosses_languages_and_cycles(tmp_path) -> None:
+    repo = _repo(
+        tmp_path,
+        {
+            "a.hpp": '#include "b.h"\nclass A {};\n',
+            "b.h": '#include "a.hpp"\n#include "c.h"\n',
+            "c.h": "static inline int c_len(void) { return 0; }\n",
+            "main.cpp": '#include "a.hpp"\nint main() { return c_len(); }\n',
+        },
+    )
+    assert _calls(_capture(repo, 1)["main.cpp"], "main") == {"c_len": "c.h"}
+
+
+def test_a_header_sees_what_every_file_including_it_sees(tmp_path) -> None:
+    # A header without includes of its own, compiled inside files that include its needs first.
+    repo = _repo(
+        tmp_path,
+        {
+            "base.h": "static inline int vec_add(int a) { return a; }\n",
+            "other.h": "static inline int vec_mul(int a) { return a; }\n",
+            "kernels.h": "static inline int kernel(int a) { return vec_add(a) + vec_mul(a); }\n",
+            "a.c": '#include "base.h"\n#include "other.h"\n#include "kernels.h"\n',
+            "b.c": '#include "base.h"\n#include "kernels.h"\n',
+        },
+    )
+    # vec_mul is not visible from b.c, so it isn't proven for kernels.h.
+    assert _calls(_capture(repo, 1)["kernels.h"], "kernel") == {
+        "vec_add": "base.h",
+        "vec_mul": None,
+    }
+
+
+def test_an_include_is_looked_up_next_to_the_including_file_first(tmp_path) -> None:
+    repo = _repo(
+        tmp_path,
+        {
+            "sycl/common.h": "static inline int set_device(int d) { return d; }\n",
+            "zdnn/common.h": "static inline int zero_bias(int d) { return d; }\n",
+            "sycl/main.c": '#include "common.h"\nint run(void) { return set_device(0); }\n',
+        },
+    )
+    assert _calls(_capture(repo, 1)["sycl/main.c"], "run") == {"set_device": "sycl/common.h"}
+

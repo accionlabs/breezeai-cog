@@ -50,7 +50,10 @@ from .functions import (
     is_function_pointer,
 )
 from .imports import FamilyHeaders, extract_imports
-from .index import CppIndex, _join_ns, _ns_name, build_cpp_index, make_cpp_resolver
+from .index import (
+    CppIndex, IncludeGraph, _join_ns, _ns_name, build_cpp_index, header_visibility,
+    make_cpp_resolver,
+)
 from .ownership import cpp_only_syntax, include_targets
 from ..comments_common import comment_statements_for
 from ..statements_common import member_statement
@@ -124,8 +127,10 @@ class CppParser(BaseParser):
         related = [r for r in ctx.related_indexes.values() if isinstance(r, CppIndex)]
         headers = FamilyHeaders(idx.headers if idx else {}, [r.headers for r in related])
         internal, external, _, _ = extract_imports(root, source, headers)
+        graph = IncludeGraph(headers, [i for i in (idx, *related) if i is not None])
         resolve = make_cpp_resolver(
             defined_names(root, source), path, idx, [self.callable_in(r) for r in related],
+            header_visibility(path, internal, graph),
         )
 
         functions: list[Function] = []
