@@ -104,3 +104,14 @@ def test_include_chain_and_views_across_files_for_any_jobs(tmp_path, jobs) -> No
     (route,) = [s for s in rec["statements"] if s.get("semanticType") == "route"]
     assert (route["method"], route["endpoint"], route["handler"], route["handlerLine"],
             route["handlerPath"], route["guards"]) == ("GET", "/shop/orders/", "get", 3, "shop/views.py", ["x.Auth"])
+
+
+def test_capabilities_list_the_python_frameworks_their_implementations_declare() -> None:
+    from breezeai_cog.core.registry import capabilities
+    from breezeai_cog.parsers.python.parser import PythonParser
+
+    registry.discover_builtin()
+    frameworks = capabilities()["frameworks"]
+    assert isinstance(frameworks, list)
+    assert {"fastapi", "flask", "django", "drf", "celery"} <= set(frameworks)
+    assert PythonParser().frameworks == []  # the base parser detects none of them itself

@@ -47,4 +47,6 @@ COMMENT_TYPES = {"comment"}
 
 STATEMENT_TYPES = sorted(EMIT_TYPES)
 
-FRAMEWORKS = ["fastapi", "flask", "django"]
+#: Frameworks this parser itself detects: none — each is declared by the parser or detector that
+#: implements it (FastAPI, Django, DRF parsers; the Flask and Celery detectors).
+FRAMEWORKS: list[str] = []
