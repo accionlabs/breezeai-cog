@@ -5,23 +5,33 @@
   ``next.config.*``, or whose ``package.json`` depends on ``next``. A file-based page counts
   only inside one of these — Gatsby also routes ``src/pages/*.tsx``, and Angular has
   ``src/app``.
-* ``next.middlewares`` — ``middleware.(ts|js)``: app directory → its ``config.matcher``
-  patterns, or ``None`` when it has no matcher (runs on every route). A matcher that cannot be
-  read (non-literal, a regex, has / missing conditions) contributes no pattern; an app
-  directory with two middleware files maps to ``()`` (covers nothing for certain). The app
-  directory is the middleware file's directory (its parent when that is ``src``)::
+* ``next.middlewares`` — ``middleware.(ts|js)``, or ``proxy.(ts|js)`` (its Next.js 16 name):
+  app directory → (the file's name — ``middleware`` / ``proxy``, the guard its routes get —
+  its ``config.matcher`` patterns, or ``None`` when it has no matcher: runs on every route). A
+  matcher that cannot be read (non-literal, a regex, has / missing conditions) contributes no
+  pattern; an app directory with two such files maps to ``()`` patterns (covers nothing for
+  certain). The app directory is the file's directory (its parent when that is ``src``)::
 
-      // apps/web/src/middleware.ts                → {"apps/web": ("/admin/:path*",)}
-      export function middleware(req) { … }
+      // apps/web/src/proxy.ts                     → {"apps/web": ("proxy", ("/admin/:path*",))}
+      export function proxy(req) { … }
       export const config = { matcher: ["/admin/:path*"] };
 
 * ``next.base-paths`` — app directory (a ``next.config.*`` file's) → its ``basePath``
   (:mod:`..typescript.base_paths`, shared with LoopBack). Every config file counts, one that
   sets no ``basePath`` too: it marks its directory as an app.
+* ``next.page-extensions`` — app directory → its ``pageExtensions``: the file endings that make
+  a Pages Router file a page (``['page.tsx', 'api.ts']``: ``index.page.tsx`` is ``/``,
+  ``OrderRow.tsx`` is a component). ``None`` when it is set but not a literal array of strings
+  (a variable, a spread): which files are pages is unknown. Only configs that set it count; an
+  app without one keeps Next.js's default (any ``.tsx`` / ``.ts`` / ``.jsx`` / ``.js`` file)::
+
+      // next.config.js                            → {"": ("page.tsx", "api.ts")}
+      module.exports = { pageExtensions: ['page.tsx', 'api.ts'] };
 """
 
 from __future__ import annotations
 
+import re
 from pathlib import Path, PurePosixPath
 from typing import Any
 
@@ -35,9 +45,15 @@ from ..typescript.imports import _load_jsonc, _string_literal
 APPS = "next.apps"
 MIDDLEWARES = "next.middlewares"
 BASE_PATHS = "next.base-paths"
+PAGE_EXTENSIONS = "next.page-extensions"
+
 
 _NEXT_CONFIGS = ("next.config.js", "next.config.mjs", "next.config.ts", "next.config.cjs")
-_MIDDLEWARE_FILES = frozenset({"middleware.ts", "middleware.js", "middleware.mjs"})
+#: The request-interceptor file → the name it exports its function under (and the guard name).
+_MIDDLEWARE_FILES = {f"{stem}.{ext}": stem for stem in ("middleware", "proxy")
+                     for ext in ("ts", "js", "mjs")}
+#: app directory → (guard name, matcher patterns — None: every route).
+Middleware = tuple[str, tuple[str, ...] | None]
 
 
 def router_root(path: str, router_dir: str) -> str | None:
@@ -57,12 +73,75 @@ def next_apps(index: Any | None) -> frozenset[str]:
     return index_fact(index, APPS) or frozenset()
 
 
-def next_middlewares(index: Any | None) -> dict[str, tuple[str, ...] | None]:
+def next_middlewares(index: Any | None) -> dict[str, Middleware]:
     return index_fact(index, MIDDLEWARES) or {}
 
 
 def next_base_paths(index: Any | None) -> dict[str, str | None]:
     return index_fact(index, BASE_PATHS) or {}
+
+
+def next_page_extensions(index: Any | None) -> dict[str, tuple[str, ...] | None]:
+    return index_fact(index, PAGE_EXTENSIONS) or {}
+
+
+def page_extensions(index: Any | None, path: str) -> tuple[str, ...] | None:
+    """The ``pageExtensions`` of the app a ``path`` belongs to — the deepest directory above it
+    holding a ``next.config``: ``()`` when that config sets none (Next.js's default), None when
+    it is set but unknown."""
+    configs = next_base_paths(index)
+    anchors = [d for d in configs if d == "" or path.startswith(d + "/")]
+    if not anchors:
+        return ()
+    return next_page_extensions(index).get(max(anchors, key=len), ())
+
+
+def page_stem(filename: str, extensions: tuple[str, ...]) -> str | None:
+    """A Pages Router file's name without its page extension (the longest that matches):
+    ``index.page.tsx`` with ``page.tsx`` → ``index``; None when no extension matches (not a
+    page). ``()`` (none configured): the file's own extension."""
+    if not extensions:
+        return filename.rsplit(".", 1)[0]
+    matches = [e for e in extensions if filename.endswith("." + e)]
+    if not matches:
+        return None
+    return filename[: -len(max(matches, key=len)) - 1]
+
+
+def _collect_page_extensions(
+    root: Node, source: bytes, rel: str, repo_root: Path | None,
+) -> tuple[str, tuple[str, ...] | None] | None:
+    """(the config's directory, its ``pageExtensions``) of a ``next.config.*`` that sets it."""
+    if not rel.rsplit("/", 1)[-1].startswith("next.config."):
+        return None
+    found: list[tuple[str, ...] | None] = []
+
+    def walk(n: Node) -> None:
+        if n.type == "pair":
+            key, value = n.child_by_field_name("key"), n.child_by_field_name("value")
+            if key is not None and value is not None \
+                    and node_text(key, source).strip("'\"") == "pageExtensions":
+                items = [_string_literal(c, source) for c in value.named_children
+                         if c.type != "comment"] if value.type == "array" else [None]
+                found.append(tuple(i.lstrip(".") for i in items if i is not None)
+                             if items and None not in items else None)
+        for c in n.named_children:
+            walk(c)
+
+    walk(root)
+    if not found:
+        return None
+    anchor = PurePosixPath(rel).parent.as_posix()
+    return ("" if anchor == "." else anchor), (found[0] if len(set(found)) == 1 else None)
+
+
+def _resolve_page_extensions(
+    values: list[tuple[str, tuple[str, ...] | None]], index: Any,
+) -> dict[str, tuple[str, ...] | None] | None:
+    out: dict[str, tuple[str, ...] | None] = {}
+    for anchor, exts in values:
+        out[anchor] = None if anchor in out and out[anchor] != exts else exts
+    return out or None
 
 
 def _collect_base_path(
@@ -122,11 +201,13 @@ def _matcher_patterns(value: Node, source: bytes) -> tuple[str, ...]:
 
 def _collect_middleware(
     root: Node, source: bytes, rel: str, repo_root: Path | None,
-) -> tuple[str, tuple[str, ...] | None] | None:
-    """A ``middleware.(ts|js)`` that exports its middleware (``export function middleware`` /
-    ``export const middleware`` / ``export default``) → (app directory, its matcher patterns);
-    None for any other file. No ``config.matcher`` → ``None`` patterns (every route)."""
-    if rel.rsplit("/", 1)[-1] not in _MIDDLEWARE_FILES:
+) -> tuple[str, Middleware] | None:
+    """A ``middleware.(ts|js)`` / ``proxy.(ts|js)`` that exports its function
+    (``export function middleware`` / ``export const proxy`` / ``export default``) → (app
+    directory, (its name, its matcher patterns)); None for any other file. No ``config.matcher``
+    → ``None`` patterns (every route)."""
+    kind = _MIDDLEWARE_FILES.get(rel.rsplit("/", 1)[-1])
+    if kind is None:
         return None
     exported = False
     matcher: tuple[str, ...] | None = None
@@ -138,14 +219,14 @@ def _collect_middleware(
         for decl in node.named_children:
             if decl.type == "function_declaration":
                 name = decl.child_by_field_name("name")
-                exported = exported or (name is not None and node_text(name, source) == "middleware")
+                exported = exported or (name is not None and node_text(name, source) == kind)
             if decl.type not in ("lexical_declaration", "variable_declaration"):
                 continue
             for vd in decl.named_children:
                 name, value = vd.child_by_field_name("name"), vd.child_by_field_name("value")
                 if name is None or value is None:
                     continue
-                if node_text(name, source) == "middleware":
+                if node_text(name, source) == kind:
                     exported = True
                 elif node_text(name, source) == "config":
                     matcher = ()  # a config that is not a literal object covers nothing for certain
@@ -164,15 +245,39 @@ def _collect_middleware(
     app = PurePosixPath(rel).parent
     if app.name == "src":
         app = app.parent
-    return ("" if str(app) == "." else str(app)), matcher
+    app_dir = "" if str(app) == "." else str(app)
+    major = _next_major(repo_root, app_dir) if kind == "proxy" else None
+    if major is not None and major < 16:
+        return None  # before Next.js 16 a `proxy.ts` is an ordinary module, not the interceptor
+    return app_dir, (kind, matcher)
+
+
+def _next_major(repo_root: Path | None, app_dir: str) -> int | None:
+    """The major version of ``next`` the app declares (its ``package.json``, else the nearest
+    one above it), or None when it is not a plain version (``latest``, ``canary``, a workspace
+    link) or there is none."""
+    if repo_root is None:
+        return None
+    parts = PurePosixPath(app_dir).parts if app_dir else ()
+    for depth in range(len(parts), -1, -1):
+        pkg_path = Path(repo_root, *parts[:depth], "package.json")
+        pkg = _load_jsonc(pkg_path) if pkg_path.is_file() else None
+        if not isinstance(pkg, dict):
+            continue
+        deps = {**(pkg.get("dependencies") or {}), **(pkg.get("devDependencies") or {})}
+        spec = deps.get("next")
+        if isinstance(spec, str):
+            m = re.match(r"^[\^~>=v\s]*(\d+)(?:\.|$)", spec)
+            return int(m.group(1)) if m else None
+    return None
 
 
 def _resolve_middlewares(
-    values: list[tuple[str, tuple[str, ...] | None]], index: Any,
-) -> dict[str, tuple[str, ...] | None] | None:
-    out: dict[str, tuple[str, ...] | None] = {}
-    for app, matcher in values:
-        out[app] = () if app in out else matcher
+    values: list[tuple[str, Middleware]], index: Any,
+) -> dict[str, Middleware] | None:
+    out: dict[str, Middleware] = {}
+    for app, (kind, matcher) in values:
+        out[app] = (kind, ()) if app in out else (kind, matcher)
     return out or None
 
 
@@ -188,4 +293,8 @@ register_fact(FactSpec(
 register_fact(FactSpec(
     name=BASE_PATHS, language="typescript", gate=(b"",),
     collect=_collect_base_path, resolve=resolve_base_paths,
+))
+register_fact(FactSpec(
+    name=PAGE_EXTENSIONS, language="typescript", gate=(b"pageExtensions",),
+    collect=_collect_page_extensions, resolve=_resolve_page_extensions,
 ))
