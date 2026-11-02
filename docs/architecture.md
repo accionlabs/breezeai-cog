@@ -691,6 +691,7 @@ the file:
   │                 120   go-lambda        go_lambda/handlers.py             ✔       │
   │                                                                                  │
   │  python          10   celery           python_celery/tasks.py            ✔       │
+  │                  20   flask            python_flask/routes.py            ✔       │
   │                                                                                  │
   │  scala           10   akka-events      scala_akka/events.py                      │
   │                  20   spark            scala_spark/io.py                         │

@@ -15,6 +15,18 @@ from tree_sitter import Node
 from .treesitter import node_text
 
 
+def field_text(node: Node | None, field: str, source: bytes) -> str:
+    """The text of ``node``'s child ``field`` (a definition's ``name``), ``""`` when absent."""
+    child = node.child_by_field_name(field) if node is not None else None
+    return node_text(child, source) if child is not None else ""
+
+
+def receiver(call: Node) -> Node | None:
+    """``x`` of a method call ``x.m(…)``; None for a plain call."""
+    fn = call.child_by_field_name("function")
+    return fn.child_by_field_name("object") if fn is not None and fn.type == "attribute" else None
+
+
 def literal(node: Node | None, source: bytes) -> str | None:
     """A plain string literal's value (no f-string interpolation), else None."""
     if node is None or node.type != "string":
@@ -130,11 +142,30 @@ def module_file(repo_root: Path, importer: str, module: str, level: int) -> str 
     return None
 
 
-def import_refs(root: Node, source: bytes, repo_root: Path, rel: str) -> dict[str, tuple[str, ...]]:
+def _import_nodes(root: Node, anywhere: bool) -> Iterator[Node]:
+    if not anywhere:
+        yield from root.named_children
+        return
+    stack = [root]
+    while stack:
+        node = stack.pop()
+        if node.type in ("import_from_statement", "import_statement"):
+            yield node
+        else:
+            stack.extend(reversed(node.named_children))
+
+
+def import_refs(root: Node, source: bytes, repo_root: Path, rel: str, *,
+                anywhere: bool = False) -> dict[str, tuple[str, ...]]:
     """Local name → what it refers to in the repo: ``("module", file)`` or
-    ``("symbol", file, name)``. Library imports are left out."""
+    ``("symbol", file, name)``. Library imports are left out.
+
+    Module-level imports only, unless ``anywhere``: then an import inside a function counts too
+    (``def create_app(): from app.auth import bp``), and a name imported as two different things
+    in two places is left out."""
     out: dict[str, tuple[str, ...]] = {}
-    for node in root.named_children:
+    seen: dict[str, tuple[str, ...] | None] = {}
+    for node in _import_nodes(root, anywhere):
         if node.type == "import_from_statement":
             mod = node.child_by_field_name("module_name")
             if mod is None:
@@ -156,11 +187,11 @@ def import_refs(root: Node, source: bytes, repo_root: Path, rel: str) -> dict[st
                 symbol, local = node_text(orig, source), node_text(alias, source)
                 sub = module_file(repo_root, rel, f"{module}.{symbol}" if module else symbol, level)
                 if sub is not None:  # from pkg import mod — a submodule
-                    out[local] = ("module", sub)
+                    _bind(seen, local, ("module", sub), anywhere)
                     continue
                 owner = module_file(repo_root, rel, module, level)
                 if owner is not None:  # from pkg.mod import router — a name in that module
-                    out[local] = ("symbol", owner, symbol)
+                    _bind(seen, local, ("symbol", owner, symbol), anywhere)
         elif node.type == "import_statement":
             for name_node in node.named_children:
                 if name_node.type != "aliased_import":
@@ -168,8 +199,16 @@ def import_refs(root: Node, source: bytes, repo_root: Path, rel: str) -> dict[st
                 orig, alias = name_node.child_by_field_name("name"), name_node.child_by_field_name("alias")
                 target = module_file(repo_root, rel, node_text(orig, source), 0) if orig else None
                 if target is not None and alias is not None:
-                    out[node_text(alias, source)] = ("module", target)
+                    _bind(seen, node_text(alias, source), ("module", target), anywhere)
+    out.update({name: ref for name, ref in seen.items() if ref is not None})
     return out
+
+
+def _bind(seen: dict[str, tuple[str, ...] | None], name: str, ref: tuple[str, ...],
+          strict: bool) -> None:
+    """Bind ``name``. ``strict``: a name bound to two different targets is ambiguous (None);
+    otherwise the later import wins, as at module level."""
+    seen[name] = ref if not strict or seen.get(name, ref) == ref else None
 
 
 class Origins:

@@ -108,7 +108,7 @@ What each index holds:
 | GraphQL | **registered facts** (`index.facts`: client projects `graphql.client-configs` — read from `.graphqlrc.json`) | a downloaded client schema is not taken as this repo's operations |
 | HCL / Terraform | folder → `.tf` files | local `module` sources |
 | HTML | template → owning component | linking templates to components |
-| Python | **registered facts** (`index.facts`): FastAPI wiring `fastapi.wiring` — `APIRouter` variables (own prefix, dependencies), `include_router` sites (also routers imported from other files), app middleware, module-level string constants used as prefixes; Celery task names `celery.tasks` | route prefixes and guards of routers mounted in another file |
+| Python | **registered facts** (`index.facts`): FastAPI wiring `fastapi.wiring` — `APIRouter` variables (own prefix, dependencies), `include_router` sites (also routers imported from other files), app middleware, module-level string constants used as prefixes; Flask wiring `flask.wiring` — apps, blueprints and their `url_prefix`, `register_blueprint` sites (also inside `create_app()`), `before_request` hooks, class-based views; Celery task names `celery.tasks` | route prefixes and guards of routers and blueprints mounted in another file; class-based views declared in another file |
 | GraphQL | **registered facts** (`index.facts`: client projects `graphql.client-configs` — the folders holding a `.graphqlrc.json`, read from those files, which no GraphQL parser owns) | telling a client's copy of a remote schema from a server's own |
 
 > **Decision —** indexes are built once, before parsing, and are read-only afterwards.
@@ -389,6 +389,7 @@ Some frameworks build a route from pieces in several files. These use the index 
 | Fastify | `app.register(users, { prefix: "/users" })` in one file + `fastify.get("/:id")` in the plugin's file → `/users/:id`; registrations chain, and a `fastify-plugin` plugin ignores the prefix. `@fastify/autoload` gives each file in its folder a prefix from the folder path, `options.prefix` and the file's `autoPrefix`, the same way the package walks the folder. A plugin registered at two prefixes, or with one that can't be read, has an empty endpoint | registered fact `fastify.plugin-prefixes` (`typescript_fastify/plugins.py`) |
 | Angular | lazy-loaded child routes under a parent path | TypeScript index: route mounts |
 | FastAPI | `app.include_router(orders.router, prefix="/api")` in one file + `router = APIRouter(prefix="/orders")` in another → `/api/orders/…`. A constant prefix (`API_PREFIX = "/v1"`) is resolved; a settings attribute is not (the environment can override it) → endpoint empty. A router included at two places is served at both: its routes' endpoint is empty, never its own path alone | Python index: `fastapi.wiring` fact |
+| Flask | `app.register_blueprint(auth_bp, url_prefix="/auth")` in `app/__init__.py` (often inside `create_app()`, with the import there too) + `bp = Blueprint("auth", __name__)` in `app/auth/__init__.py` + `@bp.route("/login")` in `app/auth/routes.py` → `/auth/login`. The registration's `url_prefix` replaces the blueprint's own; a blueprint registered on another joins the parent's prefix. A blueprint registered twice, nowhere the code shows (a loop) or under a non-literal prefix → endpoint empty | Python index: `flask.wiring` fact (`python_flask/wiring.py`) |
 | ASP.NET | base controller route prefix + action route | heritage ([§6](#6-inheritance-heritage)) |
 | WebForms | `MapPageRoute` URL → `.aspx` page | C# and VB index: `webforms.page-routes` fact (a page reads its own language's) |
 | ASP.NET | a `.csproj` with `Sdk="Microsoft.NET.Sdk.Web"` (or the `Microsoft.AspNetCore.App` framework reference) → its `.cs` files are ASP.NET code even with no `using` line (implicit usings), so their routes are found | registered fact `aspnet.web-projects`, collected from `.csproj` files (`FactSpec.sources`); detector `aspnet-web-projects` |
@@ -529,7 +530,8 @@ route files per repo. A `.vue` SFC is never re-parsed: its script is not the who
 
 Honest-null applies: a handler that can't be found, or is declared twice (two classes of one
 name, a name imported from two places), leaves `handlerPath` and `handlerLine` empty — never a
-guessed file. Python, Kotlin and Scala (apart from Play routes) have no way yet: their handlers
+guessed file. Flask reads a `MethodView` declared in another file from its own `flask.wiring` fact.
+Other Python handlers, Kotlin and Scala (apart from Play routes) have no way yet: their handlers
 carry a `handlerLine` in the record's own file only.
 
 ---
