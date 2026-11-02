@@ -448,6 +448,42 @@ def test_static_form_without_a_certain_group_has_no_address(analyze_files, body)
     assert _group_ext_routes(analyze_files, body) == [("GET", None), ("POST", None)]
 
 
+@pytest.mark.parametrize("body", [
+    'app.MapGroup(@"/todos").MapTodos();\n',
+    'app.MapGroup("""/todos""").MapTodos();\n',
+    '(app.MapGroup("/todos")).MapTodos();\n',
+    # The name in a comment or a string is not a second call.
+    '// was: app.MapTodos()\napp.MapGroup("/todos").MapTodos();\n',
+    'var note = "MapTodos(";\napp.MapGroup("/todos").MapTodos();\n',
+])
+def test_group_extension_prefix_from_any_spelling(analyze_files, body) -> None:
+    assert _group_ext_routes(analyze_files, body) == [("GET", "/todos"), ("POST", "/todos/{id}")]
+
+
+def test_generic_extension_method_gets_the_group_prefix(analyze_files) -> None:
+    generic = _TODO_ENDPOINTS.replace("MapTodos(this", "MapTodos<T>(this")
+    assert _group_ext_routes(analyze_files, 'app.MapGroup("/todos").MapTodos<int>();\n',
+                             {"TodoEndpoints.cs": generic}) == [("GET", "/todos"), ("POST", "/todos/{id}")]
+
+
+def test_same_named_method_declaration_is_not_a_call(analyze_files) -> None:
+    other = "public static class Tools { public static void MapTodos(int n) { } }\n"
+    assert _group_ext_routes(analyze_files, 'app.MapGroup("/todos").MapTodos();\n',
+                             {"Tools.cs": other}) == [("GET", "/todos"), ("POST", "/todos/{id}")]
+
+
+@pytest.mark.parametrize("other", [
+    # A conditional call is a call.
+    "public static class W { public static void Add(RouteGroupBuilder? g) { g?.MapTodos(); } }\n",
+    # A file that does not parse cleanly is counted from its text: the tree has no call here,
+    # the mention still counts.
+    "public static class W { public static void Add(RouteGroupBuilder g) { g.MapTodos(1,; } }\n",
+])
+def test_second_caller_found_in_any_form_has_no_address(analyze_files, other) -> None:
+    assert _group_ext_routes(analyze_files, 'app.MapGroup("/todos").MapTodos();\n',
+                             {"Wiring.cs": other}) == [("GET", None), ("POST", None)]
+
+
 def test_extension_method_called_twice_has_no_address(analyze_files) -> None:
     body = 'app.MapGroup("/todos").MapTodos();\napp.MapGroup("/v2/todos").MapTodos();\n'
     assert _group_ext_routes(analyze_files, body) == [("GET", None), ("POST", None)]

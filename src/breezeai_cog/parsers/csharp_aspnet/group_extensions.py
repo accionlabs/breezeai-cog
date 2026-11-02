@@ -16,6 +16,9 @@ Inside ``MapTodos`` the group's prefix is the caller's. The fact maps the method
 nothing else can reach the method: exactly one ``MapTodos(this RouteGroupBuilder …)`` declaration
 in the repo, exactly one call of that name anywhere (any receiver, ``Endpoints.MapTodos(g)``
 included, counted in every C# file), and that call made on a ``MapGroup`` whose prefix is known.
+Calls and declarations are read from the syntax tree, so the name in a comment, a string or
+another method's declaration is not a call; a file that does not parse cleanly is counted from
+its text instead, which can only over-count (an empty address, never a wrong one).
 The call may be written either way C# allows: ``grp.MapTodos()``, or the static form
 ``TodoEndpoints.MapTodos(grp)`` / bare ``MapTodos(grp)``, where the group is the first argument.
 A static call counts only through the declaring class (``other.MapTodos(grp)`` makes ``other``
@@ -39,8 +42,10 @@ from ..treesitter import node_text
 
 FACT = "aspnet.group-extensions"
 
-# `MapTodos(this RouteGroupBuilder g` — a declaration, not a call.
-_DECL_RE = re.compile(rb"\b([A-Za-z_]\w*)\s*\(\s*this\s+(?:[\w.]+\.)?RouteGroupBuilder\b")
+# Text fallback, for a file that does not parse cleanly:
+# `MapTodos(this RouteGroupBuilder g` / `MapTodos<T>(this …` — a declaration, not a call;
+_DECL_RE = re.compile(
+    rb"\b([A-Za-z_]\w*)\s*(?:<[^<>()]*>)?\s*\(\s*this\s+(?:[\w.]+\.)?RouteGroupBuilder\b")
 # `MapTodos(` / `MapTodos<T>(` — every mention followed by an argument list.
 _CALL_RE = re.compile(rb"\b([A-Za-z_]\w*)\s*(?:<[^<>()]*>)?\s*\(")
 
@@ -110,42 +115,65 @@ def _group_calls(root: Node, source: bytes) -> list[tuple[str, str, str | None]]
 _TYPE_DECLARATIONS = frozenset({"class_declaration", "struct_declaration", "record_declaration"})
 
 
-def _declarations(root: Node, source: bytes) -> list[tuple[str, str | None]]:
-    """``(method, declaring class)`` for each ``MapX(this RouteGroupBuilder …)`` in this file."""
-    found: list[tuple[str, str | None]] = []
+def _name(node: Node | None, source: bytes) -> str | None:
+    """``MapTodos`` for ``MapTodos`` / ``MapTodos<T>``."""
+    if node is not None and node.type == "generic_name":
+        node = next((c for c in node.named_children if c.type == "identifier"), None)
+    return node_text(node, source) if node is not None and node.type == "identifier" else None
+
+
+def _called_name(func: Node, source: bytes) -> str | None:
+    """The method a call's ``function`` names: ``M()``, ``x.M()``, ``x?.M()``, ``M<T>()``."""
+    if func.type == "conditional_access_expression" and func.named_children:
+        func = func.named_children[-1]
+    if func.type in ("member_access_expression", "member_binding_expression"):
+        return _name(func.child_by_field_name("name"), source)
+    return _name(func, source)
+
+
+def _scan(root: Node, source: bytes) -> tuple[list[tuple[str, str | None]], Counter[str]]:
+    """``(method, declaring class)`` for each ``MapX(this RouteGroupBuilder …)`` in this file,
+    and how often each method name is called."""
+    declared: list[tuple[str, str | None]] = []
+    calls: Counter[str] = Counter()
     stack = [root]
     while stack:
         node = stack.pop()
         stack.extend(node.named_children)
+        if node.type == "invocation_expression":
+            func = node.child_by_field_name("function")
+            name = _called_name(func, source) if func is not None else None
+            if name is not None:
+                calls[name] += 1
+            continue
         if node.type != "method_declaration":
             continue
-        name = node.child_by_field_name("name")
+        name_node = node.child_by_field_name("name")
         params = node.child_by_field_name("parameters")
         first = next((c for c in params.named_children if c.type == "parameter"), None) \
             if params is not None else None
-        if name is None or first is None:
-            continue
-        pname = first.child_by_field_name("name")
-        if pname is None or extension_of(pname, node_text(pname, source), source) is None:
+        pname = first.child_by_field_name("name") if first is not None else None
+        if name_node is None or pname is None \
+                or extension_of(pname, node_text(pname, source), source) is None:
             continue
         cls = node.parent
         while cls is not None and cls.type not in _TYPE_DECLARATIONS:
             cls = cls.parent
         cls_name = cls.child_by_field_name("name") if cls is not None else None
-        found.append((node_text(name, source),
-                      node_text(cls_name, source) if cls_name is not None else None))
-    return found
+        declared.append((node_text(name_node, source),
+                         node_text(cls_name, source) if cls_name is not None else None))
+    return declared, calls
+
+
+def _scan_text(source: bytes) -> tuple[list[tuple[str, str | None]], Counter[str]]:
+    """:func:`_scan` from the text: declaring classes unknown, every mention a call."""
+    names = [m.group(1).decode() for m in _DECL_RE.finditer(source)]
+    mentions = Counter(m.group(1).decode() for m in _CALL_RE.finditer(source))
+    return [(n, None) for n in names], mentions - Counter(names)  # a declaration is not a call
 
 
 def _collect(root: Node, source: bytes, rel: str, repo_root: Path | None) -> _Collected | None:
-    names = [m.group(1).decode() for m in _DECL_RE.finditer(source)]
-    mentions = Counter(m.group(1).decode() for m in _CALL_RE.finditer(source))
-    calls = mentions - Counter(names)  # a declaration is not a call
-    # The tree is only walked for the declaring class when the text has a declaration; a name
-    # the regex saw but the tree does not confirm still counts, with an unknown class.
-    declared = _declarations(root, source) if names else []
-    found = Counter(n for n, _ in declared)
-    declared += [(n, None) for n in (Counter(names) - found).elements()]
+    declared, calls = _scan_text(source) if root.has_error else _scan(root, source)
     on_groups = _group_calls(root, source) if b"MapGroup" in source else []
     if not (declared or on_groups):
         return ([], dict(calls), []) if calls else None

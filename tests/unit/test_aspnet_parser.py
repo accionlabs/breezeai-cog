@@ -582,6 +582,38 @@ def test_map_group_prefixes_compose() -> None:
     ]
 
 
+def test_minimal_api_paths_in_verbatim_and_raw_strings() -> None:
+    # Every literal string spelling is a known path; an interpolated one is not.
+    src = b'''using Microsoft.AspNetCore.Builder;
+var app = WebApplication.Create(args);
+app.MapGet(@"/verbatim", () => "v");
+app.MapGet("""/raw""", () => "r");
+app.MapGroup(@"/g").MapGet(@"/""q""", () => "q");
+(app.MapGroup("/p")).MapGet("/in-parens", () => "p");
+var wrapped = (app.MapGroup("/w"));
+wrapped.MapGet("/x", () => "w");
+app.MapHealthChecks(@"/health");
+app.MapGet($"/{Prefix}/i", () => "i");
+app.MapGraphQL(@"/api/graphql");
+app.MapGet("""
+    /multi
+    """, () => "m");
+'''
+    rec = _parse(AspNetCoreParser(), src, "Program.cs")
+    got = sorted((s.startLine, s.endpoint) for s in rec.statements if s.semanticType == "route")
+    assert got == [
+        (3, "/verbatim"),
+        (4, "/raw"),
+        (5, '/g/"q"'),
+        (6, "/p/in-parens"),
+        (8, "/w/x"),
+        (9, "/health"),
+        (10, None),          # interpolated: the value is not known
+        (11, "/api/graphql"),
+        (12, "/multi"),
+    ]
+
+
 def test_vb_minimal_api_pattern_must_be_a_literal() -> None:
     src = b'''Imports Microsoft.AspNetCore.Builder
 Module Program

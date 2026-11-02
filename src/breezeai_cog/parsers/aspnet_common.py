@@ -532,6 +532,7 @@ class _Groups:
 
     def _is_group(self, expr: Node) -> bool:
         """Whether an expression is a ``MapGroup`` call (possibly followed by builder calls)."""
+        expr = _unparenthesized(expr)
         while expr.type == self.invocation_type:
             if self._call_name(expr) == "MapGroup":
                 return True
@@ -539,12 +540,13 @@ class _Groups:
             inner = _receiver(func, self.name_field) if func is not None else None
             if inner is None:
                 return False
-            expr = inner
+            expr = _unparenthesized(inner)
         return False
 
     def prefix(self, expr: Node | None, seen: frozenset[str]) -> str | None:
         if expr is None:
             return ""
+        expr = _unparenthesized(expr)
         if expr.type == self.invocation_type:
             func = expr.child_by_field_name(self.fn_field)
             inner = _receiver(func, self.name_field) if func is not None else None
@@ -565,6 +567,13 @@ class _Groups:
             return self.prefix(value, seen | {name}) if value is not None and name not in seen \
                 else None
         return ""
+
+
+def _unparenthesized(expr: Node) -> Node:
+    """``app.MapGroup("/x")`` for ``(app.MapGroup("/x"))``."""
+    while expr.type == "parenthesized_expression" and expr.named_children:
+        expr = expr.named_children[0]
+    return expr
 
 
 def extension_of(node: Node, param: str, source: bytes) -> str | None:
@@ -639,7 +648,7 @@ def _graphql_mount_path(call: Node, root: Node, source: bytes) -> str:
     if not args:
         return _GRAPHQL_MOUNT_DEFAULT
     first = args[0]
-    if first.type == "string_literal":
+    if first.type in _STRING_LITERALS:
         return _literal(first, source)
     if first.type == "identifier":
         return _resolve_str(node_text(first, source), root, source) or _GRAPHQL_MOUNT_DEFAULT
@@ -657,7 +666,7 @@ def _resolve_str(name: str, root: Node, source: bytes) -> str | None:
             return
         if n.type == "variable_declarator":
             nm = n.child_by_field_name("name") or (n.named_children[0] if n.named_children else None)
-            val = next((c for c in n.named_children if c.type == "string_literal"), None)
+            val = next((c for c in n.named_children if c.type in _STRING_LITERALS), None)
             if nm is not None and val is not None and node_text(nm, source) == name:
                 found = _literal(val, source)
                 return
@@ -675,7 +684,7 @@ def _ui_path(call: Node, source: bytes, default: str) -> str | None:
     args = _positional_args(call)
     if not args:
         return default
-    if args[0].type == "string_literal":
+    if args[0].type in _STRING_LITERALS:
         return _literal(args[0], source)
     return None
 
@@ -690,13 +699,29 @@ def _minimal_path(call: Node, source: bytes) -> str | None:
     if first is None:
         return None
     inner = first
-    while inner.type != "string_literal" and len(inner.named_children) == 1:
+    while inner.type not in _STRING_LITERALS and len(inner.named_children) == 1:
         inner = inner.named_children[0]  # argument / expression wrappers (VB nests several)
-    return _literal(inner, source) if inner.type == "string_literal" else None
+    return _literal(inner, source) if inner.type in _STRING_LITERALS else None
+
+
+#: Literal strings: ``"/a"``, verbatim ``@"/a"``, raw ``"""/a"""``. An interpolated ``$"/{x}"``
+#: is not one — its value is not known.
+_STRING_LITERALS = frozenset({"string_literal", "verbatim_string_literal", "raw_string_literal"})
 
 
 def _literal(lit: Node, source: bytes) -> str:
-    """The text of a C# string literal, stripping quotes (and a ``@`` verbatim prefix)."""
+    """The value of a C# string literal: quotes stripped, a verbatim ``@"…"`` unescaped
+    (``""`` → ``"``), a multi-line raw literal's indentation removed as the compiler does."""
+    if lit.type == "verbatim_string_literal":
+        return node_text(lit, source)[2:-1].replace('""', '"')
+    if lit.type == "raw_string_literal":
+        content = next((c for c in lit.named_children if c.type == "raw_string_content"), None)
+        text = node_text(content, source) if content is not None else ""
+        if "\n" not in text:
+            return text
+        lines = text.split("\n")[1:]  # the opening delimiter's line holds nothing
+        indent = len(lines[-1])        # the closing delimiter's indentation
+        return "\n".join(line[indent:] for line in lines[:-1])
     content = next((c for c in lit.named_children if c.type == "string_literal_content"), None)
     if content is not None:
         return node_text(content, source)
