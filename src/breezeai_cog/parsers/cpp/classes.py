@@ -174,11 +174,12 @@ def build_class(
     resolve: CallResolver = noop_resolver,
     owner: str | None = None,
     name: str | None = None,
-    metadata: dict[str, str] | None = None,
+    alias: str | None = None,
 ) -> tuple[list[Class], list[Function], list[Statement]]:
     """Return (classes, methods, statements) — all flat, linked by parentId. The class
     list is this class plus any nested (member) classes/structs parented to it. ``name``
-    names the class instead of its tag (a ``typedef``'s name, see :func:`typedef_type`)."""
+    names the class instead of its tag (a ``typedef``'s name, see :func:`typedef_type`);
+    ``alias`` is the tag when it differs."""
     if name is None:
         name_node = node.child_by_field_name("name")
         if name_node is None:  # anonymous struct/class — no name to emit; skip (honest gap)
@@ -281,7 +282,7 @@ def build_class(
         constructorParams=ctor_params,
         startLine=start,
         endLine=end,
-        metadata=metadata or None,
+        alias=alias,
     )
     return [cls, *nested_classes], methods, statements
 
@@ -296,14 +297,15 @@ def build_enum(
     capture: bool,
     limit: int,
     name: str | None = None,
-    metadata: dict[str, str] | None = None,
+    alias: str | None = None,
 ) -> tuple[Class | None, list[Statement]]:
     """An ``enum_specifier`` → a ``Class`` of type ``enum`` plus one flat Statement per
     ``enumerator`` member (parented to the enum, gated by statement capture; the member's
     ``= value`` stays inside its ``text``). Anonymous enums and forward declarations (``enum
     Color;`` — no ``enumerator_list``) emit nothing (honest gap, no hollow node). ``enum
     class`` / ``enum struct`` are scoped enums, captured the same way (scoped-ness not stored).
-    ``name`` names the enum instead of its tag (a ``typedef``'s name)."""
+    ``name`` names the enum instead of its tag (a ``typedef``'s name); ``alias`` is the tag
+    when it differs."""
     if name is None:
         name_node = node.child_by_field_name("name")
         if name_node is None:  # anonymous enum — no name to emit
@@ -322,7 +324,7 @@ def build_enum(
         type="enum",
         startLine=start,
         endLine=end,
-        metadata=metadata or None,
+        alias=alias,
     )
     statements = (
         emit_enum_members(

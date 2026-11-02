@@ -181,14 +181,13 @@ class CppParser(BaseParser):
                 elif (typedef := typedef_type(node, source)) is not None:
                     # `typedef struct [tag] { … } name;` defines the type as well as naming it
                     # — C's usual way to declare a struct, enum or union. It is a class under
-                    # the typedef's name, the one code writes; a different tag goes in
-                    # `metadata.tag`.
+                    # the typedef's name, the one code writes; a different tag is its `alias`.
                     spec, type_name, tag = typedef
-                    meta = {"tag": tag} if tag is not None and tag != type_name else None
+                    alias = tag if tag is not None and tag != type_name else None
                     if spec.type == "enum_specifier":
                         enum_cls, enum_stmts = build_enum(
                             spec, source, path, parent_id=fid, seen_ids=seen_ids,
-                            capture=capture, limit=limit, name=type_name, metadata=meta,
+                            capture=capture, limit=limit, name=type_name, alias=alias,
                         )
                         if enum_cls is not None:
                             classes.append(enum_cls)
@@ -197,7 +196,7 @@ class CppParser(BaseParser):
                         cls_list, methods, cls_stmts = build_class(
                             spec, source, path, parent_id=fid, seen_ids=seen_ids,
                             capture=capture, limit=limit, resolve=resolve, name=type_name,
-                            metadata=meta,
+                            alias=alias,
                         )
                         classes.extend(cls_list)
                         functions.extend(methods)

@@ -422,13 +422,18 @@ C++.
 > `isStatic` across languages mixes the two meanings.
 
 > **Decision —** `typedef struct [tag] { … } name;` (also `union`, `enum`) is a class named
-> `name`, with its fields or members; a tag that differs goes in `metadata.tag`. A typedef
+> `name`, with its fields or members; a tag that differs is the class's `alias`. A typedef
 > without a body (`typedef struct node node_t;`) or without one plain name stays a
 > `type_definition` statement.
 > **Why:** this is C's usual way to declare a struct, and the typedef's name is the one code
 > writes — where the two differ, redis, zlib and llama.cpp use it about 97% of the time — so
-> a type written on a parameter leads to its class. **Cost:** the tag (`_kvstoreIterator`) is
-> found only through metadata. The same applies to C-style typedefs in C++.
+> a type written on a parameter leads to its class. The tag is a second name from the same
+> declaration, so it belongs on the class: `name` holds the typedef name, `extends` means
+> inheritance, a `type_definition` statement would repeat the whole struct body, and
+> `metadata` can't be filtered on. **Cost:** a new `Class` field (`alias`, capture schema 2.4);
+> the backend keeps it (`Class` is open) but doesn't embed it until it is added to the
+> class's embedding text. The same applies to C-style typedefs in C++. An alias declared on
+> its own (`using A = B;`, `typedef B A;`) stays a statement, as in every other language.
 
 > **Decision —** a file-scope function prototype (`int list_len(const node_t *head);`) is a
 > plain `declaration` statement named after the function, not a `Function`.

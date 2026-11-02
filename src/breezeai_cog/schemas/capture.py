@@ -160,6 +160,10 @@ class Class(BaseModel):
     isSealed: bool | None = None
     generics: str | None = None
     extends: str | None = None  # parent class name → builds EXTENDS
+    # The type's other name, given in the same declaration: the tag of a C/C++
+    # `typedef struct _tag { … } name;` when it differs from `name`. Never an alias declared
+    # elsewhere (that stays a statement).
+    alias: str | None = None
     # see FileRecord.uiRole (a class-anchored component, e.g. an Angular @Component)
     uiRole: str | None = None
     implements: list[str] = Field(default_factory=list)

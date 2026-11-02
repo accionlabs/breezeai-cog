@@ -592,10 +592,10 @@ def test_a_typedef_that_defines_a_type_is_a_class_named_by_the_typedef(tmp_path,
         "typedef struct node node_t;\n"
         "typedef struct { int a; } *row_ptr;\n",
     )
-    assert [(c.name, c.type, c.metadata) for c in record.classes] == [
+    assert [(c.name, c.type, c.alias) for c in record.classes] == [
         ("point_t", "struct", None),
-        ("listNode", "struct", None),
-        ("kvstoreIterator", "struct", {"tag": "_kvstoreIterator"}),
+        ("listNode", "struct", None),  # the tag is the same name: no alias
+        ("kvstoreIterator", "struct", "_kvstoreIterator"),
         ("color_t", "enum", None),
         ("num_t", "union", None),
     ]
