@@ -586,6 +586,26 @@ def test_rails_redeclared_callback_replaces_the_inherited_one(analyze_files) -> 
     assert _guards(st, "/a", "/b") == {"/a": ["load", "title"], "/b": ["load"]}
 
 
+def test_rails_login_callbacks_with_their_own_names_set_auth_required(analyze_files) -> None:
+    """An app's own login callbacks count; look-alikes that only mention a user do not."""
+    login = ["require_logged_in_user", "require_logged_in_moderator", "require_logged_in_admin",
+             "require_logged_in_user_or_400", "authenticate_user", "require_user",
+             "login_required", "ensure_logged_in"]
+    other = ["load_user", "find_user_from_rss_token", "require_no_user_or_redirect",
+             "check_new_users", "only_user_or_moderator", "require_logged_in_guest",
+             "require_logged_in_user_or_redirect"]
+    names = login + other
+    files = {"config/routes.rb": _routes(*[f"get '/{n}', to: '{n}#index'" for n in names])}
+    for n in names:
+        files[f"app/controllers/{n}_controller.rb"] = (
+            f"class {''.join(w.capitalize() for w in n.split('_'))}Controller < ApplicationController\n"
+            f"  before_action :{n}\n  def index; end\nend\n")
+    st = analyze_files(files)
+    got = {s.endpoint.lstrip("/"): (s.guards, s.authRequired)
+           for s in st if s.semanticType == "route"}
+    assert got == {**{n: ([n], True) for n in login}, **{n: ([n], None) for n in other}}
+
+
 def test_rails_resources_root_member_and_collection(tmp_path: Path) -> None:
     source = b'''require "rails"
 Rails.application.routes.draw do
