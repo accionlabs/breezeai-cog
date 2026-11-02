@@ -241,6 +241,19 @@ $x->get('https://not-http.example');
     assert not any(statement.semanticType == "api_call" for statement in record.statements)
 
 
+def test_php_file_client_is_not_inherited_without_closure_use_capture() -> None:
+    source = """<?php
+use GuzzleHttp\\Client;
+use Illuminate\\Support\\Facades\\Route;
+$c = new Client();
+Route::get('/h', function () {
+    $c->get('https://h.example.com');
+});
+"""
+    record = _parse(LaravelParser(), source, path="routes/web.php")
+    assert not any(statement.semanticType == "api_call" for statement in record.statements)
+
+
 def test_php_laravel_routes_capture_name_and_chained_middleware() -> None:
     source = """<?php
 use Illuminate\\Support\\Facades\\Route;

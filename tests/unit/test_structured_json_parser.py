@@ -71,7 +71,10 @@ def test_composer_json_extracts_package_and_dependency_metadata() -> None:
         "composer.json",
         {
             "name": "acme/example",
-            "require": {"laravel/framework": "^11.0", "guzzlehttp/guzzle": "^7.0"},
+            "require": {
+                "php": "^8.2", "ext-json": "*", "laravel/framework": "^11.0",
+                "guzzlehttp/guzzle": "^7.0",
+            },
             "require-dev": {"phpunit/phpunit": "^11.0"},
         },
     )

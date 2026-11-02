@@ -179,8 +179,8 @@ def _package_json(text: str) -> dict[str, Any]:
 
 def _composer_json(text: str) -> dict[str, Any]:
     d = json.loads(text)
-    deps = dict(d.get("require") or {})
-    dev = dict(d.get("require-dev") or {})
+    deps = _composer_packages(d.get("require"))
+    dev = _composer_packages(d.get("require-dev"))
     return {
         "kind": "composer.json",
         "category": "json",
@@ -194,6 +194,18 @@ def _composer_json(text: str) -> dict[str, Any]:
         },
         "dependencyCount": len(deps),
         "devDependencyCount": len(dev),
+    }
+
+
+def _composer_packages(value: Any) -> dict[str, Any]:
+    """Keep package requirements while excluding Composer platform constraints."""
+    if not isinstance(value, dict):
+        return {}
+    return {
+        name: spec for name, spec in value.items()
+        if isinstance(name, str)
+        and name.lower() not in {"php", "hhvm"}
+        and not name.lower().startswith(("php-", "ext-", "lib-"))
     }
 
 
