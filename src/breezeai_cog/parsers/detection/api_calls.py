@@ -86,8 +86,11 @@ def match_api(
     low = callee.lower()
     # PHP HTTP calls are recorded from evidence (the imported Http facade, typed Guzzle /
     # Symfony clients) by the per-library PHP HTTP-call detectors; a receiver-name match here would be a
-    # guess (``$this->httpCache->get()``) — see php_http_common.py.
-    if language == "php":
+    # guess (``$this->httpCache->get()``) — see php_http_common.py. C and C++ have no client
+    # naming convention either: ``ctx_http.post("/v1/chat", handler)`` registers a server
+    # route and ``sessions.get(id)`` reads a map, so only an evidence-based detector may
+    # record their HTTP calls.
+    if language in {"php", "c", "cpp"}:
         return None
     if m in _BARE_FUNCTIONS or low in _BARE_FUNCTIONS or low.endswith(".fetch"):
         return "GET"

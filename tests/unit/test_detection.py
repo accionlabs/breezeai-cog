@@ -877,6 +877,17 @@ def test_php_classifier_does_not_guess_plain_receivers() -> None:
     assert classify_call("http.get", "get", language="php") is None
 
 
+def test_c_family_classifier_does_not_guess_from_names() -> None:
+    for language in ("c", "cpp"):
+        assert classify_call("ctx_http.post", "post", language=language) is None
+        assert classify_call("sessions.get", "get", language=language) is None
+        assert classify_call("session.run", "run", language=language) is None
+        assert classify_call("models.remove", "remove", language=language) is None
+        # Raw SQL keeps its structural check in every language.
+        assert classify_call("db.exec", "exec", "SELECT id FROM t WHERE id = 1",
+                             language=language) == ("query_statement", "exec", None)
+
+
 def test_php_cannot_activate_javascript_orm_mappings() -> None:
     from breezeai_cog.parsers.detection import classify_call
 

@@ -133,14 +133,26 @@ def test_statements_gated_and_detected(tmp_path) -> None:
     assert all(s.parentId in ids for s in rec.statements)
 
 
-def test_api_call_endpoint_concatenation(tmp_path) -> None:
-    src = b'void m(const char* id) { httpClient.get("/users/" + id); }'
+def test_a_receiver_name_never_makes_an_http_or_db_call(tmp_path) -> None:
+    # C++ has no client naming convention: a server registering its own route, a map lookup
+    # and a registry update only look like HTTP / ORM calls by name. Raw SQL is still found.
+    src = (
+        b'void m(Server& web_http, Store& sessions, Registry& models, const char* id) {\n'
+        b'    web_http.post("/v1/orders", handle_orders);\n'
+        b'    httpClient.get("/users/" + id);\n'
+        b'    auto s = sessions.get(id);\n'
+        b'    s.run();\n'
+        b'    models.remove(id);\n'
+        b'    db.exec("SELECT id FROM orders WHERE id = ?");\n'
+        b'}\n'
+    )
     p = tmp_path / "c.cpp"
     p.write_bytes(src)
     ctx = ParseContext(path="c.cpp", abs_path=p, source=src, repo_root=tmp_path,
                        capture_statements=True)
     rec = CppParser().parse_file(ctx)
-    assert any(s.semanticType == "api_call" and s.endpoint == "/users/{id}" for s in rec.statements)
+    kinds = {s.semanticType for s in rec.statements} - {None}
+    assert kinds == {"query_statement"}
 
 
 def test_malformed_declaration_not_fabricated(tmp_path) -> None:

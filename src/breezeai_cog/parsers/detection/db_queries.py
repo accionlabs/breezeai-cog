@@ -413,11 +413,13 @@ def match_db(callee: str, method: str, language: str | None = None,
     """The ``dataAccessHint`` of a call, else ``None``. ``vendor`` is the ORM the file's
     imports name (:func:`vendor_from_imports`); it only ever replaces a would-be ``orm``.
     ``typed_receivers`` maps a name declared as a datastore client type to its product."""
-    if language in {"php", "go"}:
+    if language in {"php", "go", "c", "cpp"}:
         # PHP and Go data access is recorded from evidence by their own detectors — PHP from
         # imports, types and model classes (php_data_access_common.py), Go from the receiver's declared
         # type (go_database/access.py). A name match here would be a guess: it would tag a Go
-        # `repo.Update` as TypeORM or an in-memory `cache.Get` as Redis.
+        # `repo.Update` as TypeORM or an in-memory `cache.Get` as Redis. C and C++ have no ORM
+        # naming convention either (`session.run()`, `models.remove(name)`), and no detector
+        # for them yet, so their data access is left unrecorded.
         return None
     m = method.lower()
     low = callee.lower()
