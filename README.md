@@ -74,6 +74,9 @@ shapes still give a wrong statement record:
 new in the Python target. The local capture schema accepts open framework strings; the external
 backend allow-list must add these values before ingestion can rely on them being retained.
 
+Python framework values `flask`, `django` and `drf` are emitted the same way and need the same
+Target Spec §2.4 and backend allow-list entries.
+
 PHP framework values (`laravel`, `codeigniter`, `slim`, `symfony`, and `wordpress`) are also
 emitted as open framework strings. WordPress action/filter registrations use
 `semanticType: "eventbus_consumer"` rather than appearing as HTTP routes. Blade views
