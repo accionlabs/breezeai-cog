@@ -238,6 +238,10 @@ even if `items` has an in-repo type.
 | C++ | own resolver (`cfamily_common/index.py`, shared with C): same file, `Class::method`, inherited, free functions, field types; then C's free functions | | | |
 | C | the same resolver as C++: same file, free functions; then C++'s `extern "C"` functions | | | |
 
+In C and C++, a call through a parameter or local variable of the calling function (a function
+pointer, a lambda, a `std::function`) is never resolved: it calls whatever the variable holds, not
+a function of that name. A prototype declared inside the body still names a function.
+
 > **Decision —** calls resolve to a file, not to a specific function.
 > **Why:** cog can usually prove the file (from imports and types), but not the overload — that
 > needs a type checker. The backend joins on name + file. **Cost:** an overloaded callee is
@@ -495,7 +499,7 @@ the link would point at nothing. After each file is parsed, `core/executor.py::_
 | Limitation | Effect |
 |---|---|
 | `extends` is not resolved by cog, and the backend matches it by exact name | Qualified or generic parents (`a.b.Base`, `Repo<T>`) get no `EXTENDS` edge; same-name classes all get one |
-| C++ includes resolve by basename | Two `util.h` files in different folders → both unresolved |
+| C and C++ `#include "x.h"` resolves to the file next to the includer, else to a unique basename | Two `util.h` files reached only through an include path → both unresolved |
 | Python resolves absolute imports from the repo root only | `src/`-layout projects (package under `src/`) resolve poorly |
 | Ruby `require_relative "x/y"` (no `./`) resolves from the repo root | It should resolve from the file's own folder |
 | TypeScript heritage: any class name used in two files → `None` | Even identical duplicates block inherited-call resolution |

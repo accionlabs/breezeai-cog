@@ -554,7 +554,8 @@ Two interactions with existing options:
 | Existing captures change: headers labelled `cpp` today may become `c` | Medium | Call it out in the release notes; re-onboard affected repos |
 | Core change touches every parser | Medium | Before/after capture diff across all languages; no behaviour change for parsers that don't opt in |
 | Reuse beyond C is unproven | Medium | Implement only the C-family plug-ins now; measure JVM and .NET before adopting |
-| Macros, function pointers and both branches of `#ifdef` stay unresolved or over-linked | Low (expected for C) | Documented as known limitations |
+| Macros and both branches of `#ifdef` stay unresolved or over-linked | Low (expected for C) | Documented as known limitations |
+| Calls through function pointers can't be followed | Low (expected for C) | A call through a parameter or local variable is never resolved, so it stays unlinked rather than linked to a same-named function |
 | Extra scan time and memory | Low | Text scan only, parallel; runs only when a shared extension is present |
 
 ---
