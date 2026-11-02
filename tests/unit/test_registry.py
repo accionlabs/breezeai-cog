@@ -70,6 +70,8 @@ def test_select_passes_parse_timeout_to_every_claim() -> None:
     timeouts: list[int] = []
 
     class TimeoutLang(FakeLang):
+        claims_accepts_timeout = True
+
         def claims(self, path: str, source: bytes, parse_timeout_micros: int = 0) -> bool:
             timeouts.append(parse_timeout_micros)
             return True
@@ -77,6 +79,7 @@ def test_select_passes_parse_timeout_to_every_claim() -> None:
     class TimeoutFramework(TimeoutLang):
         name = "timeout-fw"
         priority = 10
+        claims_accepts_timeout = True
 
         def claims(self, path: str, source: bytes, parse_timeout_micros: int = 0) -> bool:
             timeouts.append(parse_timeout_micros)
@@ -89,52 +92,6 @@ def test_select_passes_parse_timeout_to_every_claim() -> None:
 
     assert selected is not None and selected.name == "timeout-fw"
     assert timeouts == [1234, 1234]
-
-
-def test_select_passes_timeout_and_parsed_root_through_standard_claim_adapter() -> None:
-    received: list[tuple[int, object | None]] = []
-
-    class ContextLang(FakeLang):
-        def claims(
-            self,
-            path: str,
-            source: bytes,
-            parse_timeout_micros: int = 0,
-            parsed_root=None,
-        ) -> bool:
-            received.append((parse_timeout_micros, parsed_root))
-            return True
-
-    registry.register(ContextLang())
-    parsed_root = object()
-
-    selected = registry.select(
-        "a.fk", b"source", parse_timeout_micros=9876, parsed_root=parsed_root
-    )
-
-    assert selected is not None and selected.name == "fake"
-    assert received == [(9876, parsed_root)]
-
-
-def test_claim_signatures_are_inspected_only_when_registered(monkeypatch) -> None:
-    inspected: list[object] = []
-    original_signature = registry.inspect.signature
-
-    def counting_signature(claim):
-        inspected.append(claim)
-        return original_signature(claim)
-
-    monkeypatch.setattr(registry.inspect, "signature", counting_signature)
-    registry.register(FakeLang())
-    registry.register(FakeFramework())
-    registered_count = len(inspected)
-
-    for _ in range(3):
-        assert registry.select("a.fk", b"FRAMEWORK").name == "fake-fw"
-        assert registry.select("a.fk", b"plain").name == "fake"
-
-    assert registered_count == 2
-    assert len(inspected) == registered_count
 
 
 def test_select_supports_legacy_two_argument_claims() -> None:
@@ -298,18 +255,14 @@ end
     assert selected is not None and selected.name == "ruby-rails"
 
 
-def test_ruby_framework_claim_uses_registry_parse_timeout(monkeypatch) -> None:
+def test_ruby_framework_claim_does_not_parse_source(monkeypatch) -> None:
     from breezeai_cog.parsers import ruby_rails
     from breezeai_cog.parsers.ruby.parser import RubyParser
 
-    parse_timeouts: list[int] = []
-    original_parse_source = ruby_rails.parser.parse_source
+    def unexpected_parse(*_args, **_kwargs):
+        raise AssertionError("framework claims must not parse source")
 
-    def recording_parse_source(language: str, source: bytes, timeout_micros: int = 0):
-        parse_timeouts.append(timeout_micros)
-        return original_parse_source(language, source, timeout_micros)
-
-    monkeypatch.setattr(ruby_rails.parser, "parse_source", recording_parse_source)
+    monkeypatch.setattr(ruby_rails.parser, "parse_source", unexpected_parse)
     registry.register(RubyParser())
     registry.register(ruby_rails.parser.RailsParser())
 
@@ -317,7 +270,6 @@ def test_ruby_framework_claim_uses_registry_parse_timeout(monkeypatch) -> None:
     selected = registry.select("users_controller.rb", source, parse_timeout_micros=1234)
 
     assert selected is not None and selected.name == "ruby-rails"
-    assert parse_timeouts == [1234]
 
 
 @pytest.mark.parametrize(
@@ -359,7 +311,7 @@ def test_ruby_framework_selection_and_extraction_parse_once(
 
     monkeypatch.setattr(treesitter, "parse_source", recording_parse_source)
     # The framework modules import parse_source directly; spy on those aliases too so the
-    # assertion detects an unshared parse in claims() or parse_file().
+    # assertion detects more than one parse during extraction.
     for module in (ruby_rails.parser, ruby_sinatra.parser, ruby_grape.parser):
         monkeypatch.setattr(module, "parse_source", recording_parse_source)
     record = executor._parse_entry(
@@ -380,7 +332,7 @@ def test_ruby_framework_selection_and_extraction_parse_once(
 
 def test_ruby_parse_timeout_is_isolated_per_file(tmp_path, monkeypatch) -> None:
     from breezeai_cog.core import executor
-    from breezeai_cog.parsers import treesitter
+    from breezeai_cog.parsers import ruby_sinatra
 
     registry.discover_builtin()
     path = tmp_path / "app.rb"
@@ -389,7 +341,7 @@ def test_ruby_parse_timeout_is_isolated_per_file(tmp_path, monkeypatch) -> None:
     def timeout_parse_source(language: str, source: bytes, timeout_micros: int = 0):
         raise ValueError("Parsing failed")
 
-    monkeypatch.setattr(treesitter, "parse_source", timeout_parse_source)
+    monkeypatch.setattr(ruby_sinatra.parser, "parse_source", timeout_parse_source)
     record = executor._parse_entry(
         "app.rb",
         str(tmp_path),

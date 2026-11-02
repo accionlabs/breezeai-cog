@@ -344,25 +344,11 @@ def resolve_models(parents: dict[str, str]) -> frozenset[str]:
 
 def _model_candidate_files(files: Sequence[Path]) -> list[Path]:
     """Files eligible for model discovery, preserving the historical input order."""
-    # Import lazily to avoid the parser -> models -> parser import cycle. Use the parser's
-    # source extensions and exact filename entries so indexing follows discovery support.
+    # Import lazily to avoid the parser -> models -> parser import cycle.
     from .parser import RubyParser
 
     ruby_extensions = RubyParser.extensions
-    ruby_files = [f for f in files if f.suffix in ruby_extensions or f.name in ruby_extensions]
-    known_files = set(ruby_files)
-    ruby_parser = RubyParser()
-    for path in files:
-        if path in known_files or path.suffix:
-            continue
-        try:
-            with path.open("rb") as source_file:
-                prefix = source_file.readline(4096)
-        except OSError:
-            continue
-        if ruby_parser.matches_source(path, prefix):
-            ruby_files.append(path)
-    return ruby_files
+    return [f for f in files if f.suffix in ruby_extensions or f.name in ruby_extensions]
 
 
 def _model_index_from_info(

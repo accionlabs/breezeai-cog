@@ -83,7 +83,6 @@ def _prune_template_edges(record: FileRecord, dropped: frozenset[str]) -> None:
 
 def _parse_entry(path: str, repo_root: str, options: dict) -> FileRecord | None:
     from ..parsers.base import ParseContext
-    from ..parsers import treesitter
     from .registry import base_parser_for, select
 
     abs_path = os.path.join(repo_root, path)
@@ -93,7 +92,7 @@ def _parse_entry(path: str, repo_root: str, options: dict) -> FileRecord | None:
     except OSError:
         return None
 
-    base = base_parser_for(path, source)
+    base = base_parser_for(path)
     parser = None
     from ..parsers.statements_common import (
         begin_concat_tracking,
@@ -104,16 +103,10 @@ def _parse_entry(path: str, repo_root: str, options: dict) -> FileRecord | None:
     set_concat_depth(options.get("max_concat_depth"))  # apply configured cap in this process
     begin_concat_tracking()  # collect concats the fold cap skips, for one per-file summary
     try:
-        parsed_root = None
-        if base is not None and base.name == "ruby":
-            parsed_root = treesitter.parse_source(
-                "ruby", source, options["parse_timeout_micros"]
-            ).root_node
         parser = select(
             path,
             source,
             options["parse_timeout_micros"],
-            parsed_root=parsed_root,
         )  # exactly one parser per file (claims + priority)
         if parser is None:  # pragma: no cover - classify already filtered
             return None
@@ -127,7 +120,6 @@ def _parse_entry(path: str, repo_root: str, options: dict) -> FileRecord | None:
             statement_text_limit=options["statement_text_limit"],
             parse_timeout_micros=options["parse_timeout_micros"],
             resolution_index=index,
-            parsed_root=parsed_root,
         )
         record = parser.parse_file(ctx)
         parser.link_handlers(record, ctx)

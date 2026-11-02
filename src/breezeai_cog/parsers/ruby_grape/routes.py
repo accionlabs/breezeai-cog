@@ -253,10 +253,10 @@ def _version_for(
     unique: list[Node] = []
     seen: set[tuple[int, int]] = set()
     for declaration in declarations:
-        key = (declaration.start_byte, declaration.end_byte)
-        if key not in seen:
+        declaration_key = (declaration.start_byte, declaration.end_byte)
+        if declaration_key not in seen:
             unique.append(declaration)
-            seen.add(key)
+            seen.add(declaration_key)
     if not unique:
         return None, False, False
     declaration = (
@@ -427,10 +427,11 @@ def _mount_prefixes(root: Node, source: bytes) -> dict[str, list[str | None]]:
         prefix: str | None
         first = args[0]
         if first.type == "pair" and any(part.type == "=>" for part in first.children):
-            child = first.child_by_field_name("key")
+            child_node = first.child_by_field_name("key")
             prefix_node = first.child_by_field_name("value")
-            if child is None:
+            if child_node is None:
                 continue
+            child = child_node
             prefix = _literal_path(prefix_node, source)
         else:
             child, prefix = first, None

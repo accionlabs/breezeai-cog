@@ -3,17 +3,33 @@
 from __future__ import annotations
 
 import re
-from collections.abc import Iterator
-
-from tree_sitter import Node
 
 from ...schemas import FileRecord, Statement
 from ..base import ParseContext
 from ..emits import apply
-from ..ruby.claims import has_require, has_require_relative_helper
 from ..ruby.parser import RubyParser
-from ..treesitter import node_text, parse_source
+from ..treesitter import parse_source
 from .routes import detect_sinatra_routes
+
+
+_SINATRA_REQUIRE = re.compile(
+    rb"""(?m)^\s*require(?:_relative)?\s*(?:\(\s*)?['"]sinatra(?:/base)?['"]"""
+)
+_SINATRA_CLASS = re.compile(
+    rb"(?m)^\s*class\s+[A-Za-z_]\w*(?:::[A-Za-z_]\w*)*\s*<\s*"
+    rb"(?:::)?Sinatra::(?:Base|Application)\b"
+)
+_SINATRA_FACTORY = re.compile(
+    rb"(?m)^\s*(?:[A-Za-z_]\w*\s*=\s*)?Sinatra\s*\.\s*new\b"
+    rb"|^\s*(?:[A-Za-z_]\w*\s*=\s*)?Class\s*\.\s*new\s*\(\s*"
+    rb"(?:::)?Sinatra::(?:Base|Application)\b"
+)
+_SPEC_HELPER_REQUIRE = re.compile(
+    rb"""(?m)^\s*require(?:_relative)?\s*(?:\(\s*)?['"]spec_helper['"]"""
+)
+_SINATRA_NAMESPACE = re.compile(
+    rb"(?m)^\s*(?!#)[^\n]*\bSinatra::[A-Za-z_]\w*"
+)
 
 
 def _statement_order(statement: Statement) -> tuple[int, int, int]:
@@ -23,87 +39,26 @@ def _statement_order(statement: Statement) -> tuple[int, int, int]:
     return statement.startLine, int(match.group(1)), int(match.group(2) or "1")
 
 
-_SINATRA_SUPERCLASSES = {"Sinatra::Base", "Sinatra::Application"}
-
-
-def _nodes(root: Node) -> Iterator[Node]:
-    yield root
-    for child in root.named_children:
-        yield from _nodes(child)
-
-
-def _sinatra_name(node: Node, source: bytes) -> str:
-    return node_text(node, source).lstrip(":").strip()
-
-
-def _has_sinatra_superclass(root: Node, source: bytes) -> bool:
-    return any(
-        node.type == "class"
-        and (superclass := node.child_by_field_name("superclass")) is not None
-        and _sinatra_name(superclass, source).removeprefix("<").strip().lstrip(":")
-        in _SINATRA_SUPERCLASSES
-        for node in _nodes(root)
-    )
-
-
-def _has_sinatra_factory(root: Node, source: bytes) -> bool:
-    for node in _nodes(root):
-        if node.type != "call" or node.child_by_field_name("method") is None:
-            continue
-        method = node_text(node.child_by_field_name("method"), source)
-        receiver = node.child_by_field_name("receiver")
-        args = node.child_by_field_name("arguments")
-        first = args.named_children[0] if args is not None and args.named_children else None
-        if method == "new" and receiver is not None:
-            if _sinatra_name(receiver, source) == "Sinatra":
-                return True
-            if (
-                _sinatra_name(receiver, source) == "Class"
-                and first is not None
-                and _sinatra_name(first, source) in _SINATRA_SUPERCLASSES
-            ):
-                return True
-    return False
-
-
-def _has_sinatra_namespace(root: Node, source: bytes) -> bool:
-    if root.type == "scope_resolution" and node_text(root, source).startswith("Sinatra::"):
-        return True
-    return any(_has_sinatra_namespace(child, source) for child in root.named_children)
-
-
 class SinatraParser(RubyParser):
     name = "ruby-sinatra"
     priority = 10
     frameworks = ["sinatra"]  # noqa: RUF012
 
-    def claims(
-        self,
-        path: str,
-        source: bytes,
-        parse_timeout_micros: int = 0,
-        parsed_root: Node | None = None,
-    ) -> bool:
+    def claims(self, path: str, source: bytes) -> bool:
         if b"sinatra" not in source.lower():
             return False
-        root = parsed_root
-        if root is None:
-            root = parse_source("ruby", source, parse_timeout_micros).root_node
-        direct_sinatra_evidence = (
-            has_require(root, source, {"sinatra", "sinatra/base"})
-            or _has_sinatra_superclass(root, source)
-            or _has_sinatra_factory(root, source)
+        direct = any(
+            signature.search(source) is not None
+            for signature in (_SINATRA_REQUIRE, _SINATRA_CLASS, _SINATRA_FACTORY)
         )
-        helper_sinatra_evidence = (has_require(root, source, {"spec_helper"})
-            or has_require_relative_helper(root, source, "spec_helper")) and (
-            _has_sinatra_namespace(root, source)
+        helper = (
+            _SPEC_HELPER_REQUIRE.search(source) is not None
+            and _SINATRA_NAMESPACE.search(source) is not None
         )
-        return direct_sinatra_evidence or helper_sinatra_evidence
+        return direct or helper
 
     def parse_file(self, ctx: ParseContext) -> FileRecord:
-        root = ctx.parsed_root
-        if root is None:
-            root = parse_source("ruby", ctx.source, ctx.parse_timeout_micros).root_node
+        root = parse_source("ruby", ctx.source, ctx.parse_timeout_micros).root_node
         record = self.extract(root, ctx)
         if ctx.capture_statements and not self.is_fixture_file(ctx.path):
             routes = detect_sinatra_routes(root, ctx.source, ctx.path, record)

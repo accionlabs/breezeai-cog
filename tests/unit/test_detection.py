@@ -18,13 +18,12 @@ def test_classify_api() -> None:
     assert classify_call("session.delete", "delete") == ("api_call", "DELETE", None)
 
 
-def test_fetch_method_lookups_are_not_api_calls() -> None:
-    assert classify_call("cop_config.fetch", "fetch", language="ruby") is None
-    assert classify_call("ENV.fetch", "fetch", language="ruby") is None
-    assert classify_call("config.fetch", "fetch", language="ruby") is None
-    for callee in ("window.fetch", "globalThis.fetch", "this.fetch", "self.fetch"):
-        assert classify_call(callee, "fetch", language="ruby") is None
-    assert classify_call("fetch", "fetch", language="ruby") == ("api_call", "GET", None)
+def test_fetch_suffix_keeps_shared_api_classification() -> None:
+    for callee in (
+        "cop_config.fetch", "ENV.fetch", "config.fetch", "window.fetch",
+        "globalThis.fetch", "this.fetch", "self.fetch", "fetch",
+    ):
+        assert classify_call(callee, "fetch", language="ruby") == ("api_call", "GET", None)
 
 
 def test_javascript_fetch_receivers_remain_api_calls() -> None:
@@ -262,19 +261,17 @@ def test_high_collision_verbs_require_db_receiver() -> None:
     assert classify_call("this.entityManager.merge", "merge") == ("db_method_call", "merge", "typeorm")
 
 
-def test_ruby_active_record_methods_require_model_evidence() -> None:
-    """ActiveRecord method names are only DB calls on an identified model receiver."""
-    models = frozenset({"User", "Post"})
+def test_ruby_active_record_distinctive_verbs_need_no_index() -> None:
+    """Distinctive ActiveRecord query verbs are trusted on constant receivers."""
     for callee, method in [
         ("User.find_by", "find_by"), ("User.where", "where"), ("Post.joins", "joins"),
         ("User.includes", "includes"), ("User.pluck", "pluck"),
         ("User.destroy_all", "destroy_all"), ("User.update_all", "update_all"),
         ("User.take", "take"),
     ]:
-        assert classify_call(callee, method, language="ruby", typed_db_ids=models) == (
+        assert classify_call(callee, method, language="ruby") == (
             "db_method_call", method, "activerecord"
         )
-        assert classify_call(callee, method, language="ruby") is None
 
 
 def test_ruby_generic_verbs_require_an_identified_model() -> None:
@@ -290,7 +287,6 @@ def test_ruby_generic_verbs_require_an_identified_model() -> None:
         assert classify_call(callee, method, language="ruby", typed_db_ids=models) == (
             "db_method_call", method, "activerecord"
         )
-        assert classify_call(callee, method, language="ruby") is None
 
 
 def test_ruby_instance_writes_with_proven_receiver() -> None:
@@ -305,7 +301,9 @@ def test_ruby_instance_writes_with_proven_receiver() -> None:
         assert classify_call(callee, method, language="ruby", typed_db_ids=models) == (
             "db_method_call", method, "activerecord"
         )
-        assert classify_call(callee, method, language="ruby") is None
+    assert classify_call("session.save", "save", language="ruby") == (
+        "db_method_call", "save", "sqlalchemy"
+    )
 
 
 def test_ruby_non_activerecord_constants_are_never_data_access() -> None:
@@ -642,4 +640,3 @@ def test_php_cannot_activate_javascript_orm_mappings() -> None:
         ("ddb.putItem", "putItem"),
     ):
         assert classify_call(callee, method, language="php") is None
-

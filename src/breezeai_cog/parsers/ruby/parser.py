@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import re
-import shlex
 from collections.abc import Sequence
 from pathlib import Path
 
@@ -40,7 +38,6 @@ _RUBY_FIXTURE_DIRS: frozenset[str] = frozenset({"spec", "test", "tests"})
 class RubyParser(BaseParser):
     name = "ruby"
     extensions = (".rb", ".rake", ".gemspec", ".ru", "Gemfile", "Rakefile")
-    _RUBY_INTERPRETER = re.compile(r"(?:ruby(?:\d+(?:\.\d+)*)?|jruby|truffleruby|rbx)\Z")
     schema_version = SCHEMA_VERSION
     statement_types = STATEMENT_TYPES
     frameworks = FRAMEWORKS
@@ -60,75 +57,7 @@ class RubyParser(BaseParser):
             seg in _RUBY_FIXTURE_DIRS for seg in path.replace("\\", "/").split("/")[:-1]
         )
 
-    def matches_source(self, path: str | Path, source: bytes) -> bool:
-        return self.matches(path) or (
-            not Path(path).suffix and self._has_ruby_shebang(source.splitlines()[0] if source else b"")
-        )
-
-    @classmethod
-    def _has_ruby_shebang(cls, first_line: bytes) -> bool:
-        try:
-            line = first_line.decode("utf-8").strip()
-            if not line.startswith("#!"):
-                return False
-            words = shlex.split(line[2:])
-        except (UnicodeDecodeError, ValueError):
-            return False
-
-        if not words:
-            return False
-
-        interpreter = Path(words[0]).name
-        if interpreter == "env":
-            args = words[1:]
-            index = 0
-            while index < len(args):
-                arg = args[index]
-                if arg in {"-S", "--split-string"}:
-                    index += 1
-                    if index >= len(args):
-                        return False
-                    try:
-                        split_args = shlex.split(args[index])
-                    except ValueError:
-                        return False
-                    args[index:index + 1] = split_args
-                    continue
-                if arg.startswith("--split-string="):
-                    try:
-                        split_args = shlex.split(arg.partition("=")[2])
-                    except ValueError:
-                        return False
-                    args[index:index + 1] = split_args
-                    continue
-                if arg in {"-u", "--unset", "-C", "--chdir"}:
-                    index += 2
-                    continue
-                if arg.startswith(("--unset=", "--chdir=")):
-                    index += 1
-                    continue
-                if arg in {"-i", "--ignore-environment", "-v", "--debug", "-"}:
-                    index += 1
-                    continue
-                if arg.startswith("-"):
-                    return False
-                if "=" in arg:
-                    index += 1
-                    continue
-                interpreter = Path(arg).name
-                break
-            else:
-                return False
-
-        return cls._RUBY_INTERPRETER.fullmatch(interpreter) is not None
-
-    def claims(
-        self,
-        path: str,
-        source: bytes,
-        parse_timeout_micros: int = 0,
-        parsed_root: Node | None = None,
-    ) -> bool:
+    def claims(self, path: str, source: bytes) -> bool:
         return True
 
     def build_index(
@@ -143,9 +72,7 @@ class RubyParser(BaseParser):
         return build_ruby_index(Path(repo_root), files, jobs)
 
     def parse_file(self, ctx: ParseContext) -> FileRecord:
-        root = ctx.parsed_root
-        if root is None:
-            root = parse_source("ruby", ctx.source, ctx.parse_timeout_micros).root_node
+        root = parse_source("ruby", ctx.source, ctx.parse_timeout_micros).root_node
         return self.extract(root, ctx)
 
     def extract(self, root: Node, ctx: ParseContext) -> FileRecord:

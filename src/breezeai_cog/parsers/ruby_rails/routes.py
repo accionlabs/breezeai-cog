@@ -87,11 +87,13 @@ def _via_methods(arguments: list[Node], source: bytes) -> list[str | None]:
     per verb. ``via: :all`` → ``["ANY"]`` (one handler for every verb). No ``via:`` or a
     non-literal value → ``[None]`` (one record, method unknown — never a guessed verb)."""
     value = _option(arguments, source, "via")
-    items = _literal_array_items(value) if value is not None else []
+    items: list[Node | None] = []
+    if value is not None:
+        items.extend(_literal_array_items(value))
     if not items:
-        items = [value]
+        items.append(value)
     verbs = [
-        value.upper() if (value := _segment(item, source)) is not None else None
+        segment.upper() if (segment := _segment(item, source)) is not None else None
         for item in items
     ]
     if "ALL" in verbs:

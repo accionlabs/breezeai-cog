@@ -1356,39 +1356,17 @@ def test_ruby_model_index_does_not_apply_alias_to_other_qualified_receiver(
     assert not any("Other::User.find_by" in call for call in db_calls), db_calls
 
 
-def test_extensionless_ruby_model_script_contributes_to_model_index(tmp_path: Path) -> None:
+def test_extensionless_ruby_model_script_is_not_indexed(tmp_path: Path) -> None:
     model_file = tmp_path / "exe" / "user_model"
     model_file.parent.mkdir(parents=True)
     model_file.write_bytes(
         b"#!/usr/bin/env ruby\n"
         b"class User < ActiveRecord::Base\nend\n"
     )
-    service_file = tmp_path / "app" / "services" / "users.rb"
-    service_file.parent.mkdir(parents=True)
-    service_file.write_bytes(
-        b"class Users\n"
-        b"  def find\n"
-        b"    User.find_by(name: 'Ada')\n"
-        b"  end\n"
-        b"end\n"
-    )
-
     parser = RubyParser()
-    index = parser.build_index(tmp_path, [model_file, service_file], jobs=1)
-    record = parser.parse_file(ParseContext(
-        path="app/services/users.rb",
-        abs_path=service_file,
-        source=service_file.read_bytes(),
-        repo_root=tmp_path,
-        capture_statements=True,
-        resolution_index=index,
-    ))
+    index = parser.build_index(tmp_path, [model_file], jobs=1)
 
-    assert "User" in index
-    assert any(
-        statement.semanticType == "db_method_call" and "User.find_by" in statement.text
-        for statement in record.statements
-    )
+    assert "User" not in index
 
 
 def test_ruby_index_parses_shared_model_and_fact_file_once(tmp_path: Path, monkeypatch) -> None:

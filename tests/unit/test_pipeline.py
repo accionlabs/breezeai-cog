@@ -99,7 +99,7 @@ def test_run_reports_progress(tmp_path) -> None:
     assert all(t == 5 for _, t in seen)             # total stable
 
 
-def test_extensionless_ruby_executable_reaches_extraction(tmp_path) -> None:
+def test_extensionless_ruby_executable_is_not_scanned(tmp_path) -> None:
     repo = tmp_path / "repo"
     executable = repo / "exe" / "rubocop"
     executable.parent.mkdir(parents=True)
@@ -114,10 +114,7 @@ def test_extensionless_ruby_executable_reaches_extraction(tmp_path) -> None:
 
     records = {record.path: record for record in iter_file_records(repo)}
 
-    assert "exe/rubocop" in records
-    assert records["exe/rubocop"].language == "ruby"
-    assert any(cls.name == "Rubocop" for cls in records["exe/rubocop"].classes)
-    assert any(fn.name == "run" for fn in records["exe/rubocop"].functions)
+    assert "exe/rubocop" not in records
 
 
 def test_existing_ruby_project_filenames_still_reach_extraction(tmp_path) -> None:

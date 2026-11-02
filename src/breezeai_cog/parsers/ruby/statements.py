@@ -19,6 +19,12 @@ from ..treesitter import node_text
 from .mappings import CONTROL_FLOW, EMIT_TYPES
 
 _SCOPE_TYPES = {"class", "module", "method", "singleton_method"}
+_ACTIVE_RECORD_METHODS = frozenset({
+    "find_by", "find_by!", "find_each", "find_in_batches", "where", "where_not",
+    "joins", "includes", "pluck", "destroy_all", "update_all", "left_outer_joins", "take",
+    "find", "all", "create", "create!", "first", "last", "exists",
+    "save", "save!", "update", "update!", "destroy", "destroy!", "update_attributes",
+})
 
 
 def _iter_statements(node: Node, source: bytes) -> Iterator[Node]:
@@ -84,12 +90,18 @@ def _call_details(call: Node, source: bytes) -> tuple[str, str, str | None] | No
 
 
 def _call_details_with_redis_evidence(
-    call: Node, source: bytes
+    call: Node, source: bytes, typed_db_ids: frozenset[str] | None = None
 ) -> tuple[str, str, str | None] | None:
     details = _call_details(call, source)
     if details is None:
         return None
     receiver = call.child_by_field_name("receiver")
+    if details[1].lower() == "fetch" and receiver is not None:
+        return None
+    if details[1].lower() in _ACTIVE_RECORD_METHODS:
+        receiver_name = node_text(receiver, source) if receiver is not None else ""
+        if typed_db_ids is None or receiver_name not in typed_db_ids:
+            return None
     if receiver is not None:
         receiver_name = node_text(receiver, source)
         terminal = receiver_name.rsplit(".", 1)[-1].lower().lstrip("@")
@@ -172,6 +184,15 @@ def extract_statements(
     if not capture or body is None:
         return []
     out: list[Statement] = []
+    classifier_db_ids = (
+        frozenset(
+            name
+            for receiver in typed_db_ids
+            for name in (receiver, receiver.rsplit(".", 1)[-1])
+        )
+        if typed_db_ids is not None
+        else None
+    )
     for node in _iter_statements(body, source):
         if node.type not in EMIT_TYPES and not (
             node.type == "string" and text_has_query(node_text(node, source))
@@ -189,9 +210,11 @@ def extract_statements(
                 control_flow=CONTROL_FLOW,
                 call_type="call",
                 name_of=_name_of,
-                call_details=_call_details_with_redis_evidence,
+                call_details=lambda call, src: _call_details_with_redis_evidence(
+                    call, src, typed_db_ids
+                ),
                 language="ruby",
-                typed_db_ids=typed_db_ids,
+                typed_db_ids=classifier_db_ids,
             )
         )
     return out

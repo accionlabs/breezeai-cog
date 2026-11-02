@@ -174,72 +174,42 @@ def test_ruby_project_file_discovery_and_exclusions(tmp_path) -> None:
     assert all(entry.language == "ruby" for entry in entries)
 
 
-def test_ruby_shebang_discovery_uses_bounded_source_classification(tmp_path) -> None:
-    from breezeai_cog.config import Settings
-    from breezeai_cog.core.pipeline import _scan_entries
-
-    repo = tmp_path / "repo"
-    (repo / "exe").mkdir(parents=True)
-    (repo / "bin").mkdir()
-    scripts = {
-        "exe/rubocop": b"#!/usr/bin/env ruby\nclass Rubocop; end\n",
-        "exe/direct": b"#!/opt/rubies/ruby-3.3.0/bin/ruby\nclass Direct; end\n",
-        "exe/split": b"#!/usr/bin/env -S ruby -w\nclass Split; end\n",
-        "exe/python": b"#!/usr/bin/env python3\nprint('not ruby')\n",
-        "exe/shell": b"#!/bin/sh\necho not ruby\n",
-        "exe/malformed": b"#!/usr/bin/env -S 'ruby\nputs :no\n",
-        "bin/console": b"#!/usr/bin/env ruby\nputs :ignored\n",
-    }
-    for relative, content in scripts.items():
-        path = repo / relative
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_bytes(content)
-
-    entries = list(_scan_entries(repo, Settings(repo=repo, jobs=1)))
-    found = {entry.path: entry for entry in entries}
-
-    assert set(found) == {"exe/rubocop", "exe/direct", "exe/split"}
-    assert all(found[path].language == "ruby" for path in found)
-    assert all(found[path].source_prefix for path in found)
-
-
-def test_ruby_shebang_discovery_respects_size_and_language_filters(tmp_path) -> None:
-    from breezeai_cog.config import Settings
-    from breezeai_cog.core.pipeline import _scan_entries
-
-    repo = tmp_path / "repo"
-    repo.mkdir()
-    (repo / "run").write_bytes(b"#!/usr/bin/env ruby\nputs :ruby\n")
-
-    too_small = list(_scan_entries(repo, Settings(repo=repo, max_file_size=4)))
-    ruby_filtered = list(_scan_entries(repo, Settings(repo=repo, languages=["python"])))
-
-    assert too_small == []
-    assert ruby_filtered == []
-
-
-def test_unreadable_ruby_shebang_prefix_is_skipped_safely(tmp_path, monkeypatch) -> None:
+def test_scanner_classification_is_path_only(tmp_path, monkeypatch) -> None:
     import builtins
 
-    from breezeai_cog.config import Settings
-    from breezeai_cog.core.pipeline import _scan_entries
-
-    repo = tmp_path / "repo"
-    repo.mkdir()
-    script = repo / "exe-script"
-    script.write_bytes(b"#!/usr/bin/env ruby\nputs :ruby\n")
+    parser = RubyParser()
+    (tmp_path / "exe").mkdir()
+    (tmp_path / "exe" / "rubocop").write_bytes(b"#!/usr/bin/env ruby\nputs :ruby\n")
+    (tmp_path / "supported.rb").write_bytes(b"puts :ruby\n")
+    (tmp_path / "supported.ru").write_bytes(b"run do\nend\n")
     original_open = builtins.open
+    opened: list[str] = []
 
-    def unreadable_open(file, *args, **kwargs):
-        if str(file) == str(script):
-            raise PermissionError("access denied")
+    def tracking_open(file, *args, **kwargs):
+        if str(file) in {
+            str(tmp_path / "exe" / "rubocop"),
+            str(tmp_path / "supported.rb"),
+            str(tmp_path / "supported.ru"),
+        }:
+            opened.append(str(file))
         return original_open(file, *args, **kwargs)
 
-    monkeypatch.setattr(builtins, "open", unreadable_open)
-    assert list(_scan_entries(repo, Settings(repo=repo, jobs=1))) == []
+    monkeypatch.setattr(builtins, "open", tracking_open)
+    entries = list(scan(
+        tmp_path,
+        lambda path: parser.name if parser.matches(path) else None,
+        engine=IgnoreEngine.build(),
+        max_file_size=10_000,
+    ))
+
+    assert [(entry.path, entry.language) for entry in entries] == [
+        ("supported.rb", "ruby"),
+        ("supported.ru", "ruby"),
+    ]
+    assert opened == []
 
 
-def test_known_extensions_are_not_opened_for_source_classification(tmp_path, monkeypatch) -> None:
+def test_unsupported_files_are_not_opened_for_classification(tmp_path, monkeypatch) -> None:
     import builtins
 
     unsupported = (
@@ -263,52 +233,12 @@ def test_known_extensions_are_not_opened_for_source_classification(tmp_path, mon
         return original_open(file, *args, **kwargs)
 
     monkeypatch.setattr(builtins, "open", tracking_open)
-    source_classifications: list[str] = []
-
-    def source_classifier(path: str, _prefix: bytes) -> str | None:
-        source_classifications.append(path)
-        return None
-
     entries = list(scan(
         tmp_path,
         lambda path: "ruby" if path.endswith(".rb") else None,
         engine=IgnoreEngine.build(),
         max_file_size=10_000,
-        source_classifier=source_classifier,
     ))
 
     assert opened == []
-    assert source_classifications == []
     assert [(entry.path, entry.language) for entry in entries] == [("known.rb", "ruby")]
-
-
-def test_extensionless_ruby_shebang_is_opened_and_detected(tmp_path, monkeypatch) -> None:
-    import builtins
-
-    parser = RubyParser()
-    script = tmp_path / "run-ruby"
-    script.write_bytes(b"#!/usr/bin/env ruby\nputs :ok\n")
-
-    original_open = builtins.open
-    opened: list[str] = []
-
-    def tracking_open(file, *args, **kwargs):
-        if str(file) == str(script):
-            opened.append(str(file))
-        return original_open(file, *args, **kwargs)
-
-    monkeypatch.setattr(builtins, "open", tracking_open)
-
-    def source_classifier(path: str, prefix: bytes) -> str | None:
-        return parser.name if parser.matches_source(path, prefix) else None
-
-    entries = list(scan(
-        tmp_path,
-        lambda path: parser.name if parser.matches(path) else None,
-        engine=IgnoreEngine.build(),
-        max_file_size=10_000,
-        source_classifier=source_classifier,
-    ))
-
-    assert opened == [str(script)]
-    assert [(entry.path, entry.language) for entry in entries] == [("run-ruby", "ruby")]
