@@ -21,6 +21,7 @@ from tree_sitter import Node
 from ...emit import function_id
 from ..additive import DetectContext, Detection, Detector, Gate, register_detector
 from ..emits import Emit
+from ..handler_sites import handler_location
 from ..python_common import (
     Origins, argument, field_text, import_refs, keyword, literal, positional, receiver, string_list,
 )
@@ -193,14 +194,15 @@ def _class_view(f: _File, call: Node, view: Node, endpoint: str | None, guards: 
         return [_route(call, m, endpoint, node_text(target, source).rsplit(".", 1)[-1], None, None,
                        guards, False) for m in unknown]
     name, cls, file = found
-    where = file if file != f.path else None
     if cls.verbs:  # MethodView: each verb is its own method
         verbs = [v.lower() for v in listed if v.lower() in cls.verbs] if listed else list(cls.verbs)
-        return [_route(call, v.upper(), endpoint, v, cls.verbs[v], where, guards, False) for v in verbs]
+        return [_route(call, v.upper(), endpoint, v, *handler_location((file, cls.verbs[v]), f.path),
+                       guards, False) for v in verbs]
     methods: list[str | None] = (list(listed) if listed else list(cls.methods) if cls.methods
                                  else ["GET"] if cls.dispatch is not None else [None])
     handler, line = ("dispatch_request", cls.dispatch) if cls.dispatch is not None else (name, cls.line)
-    return [_route(call, m, endpoint, handler, line, where, guards, False) for m in methods]
+    return [_route(call, m, endpoint, handler, *handler_location((file, line), f.path), guards, False)
+            for m in methods]
 
 
 def _add_url_rule(f: _File, call: Node) -> list[Emit]:
