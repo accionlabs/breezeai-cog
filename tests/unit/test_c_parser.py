@@ -624,3 +624,50 @@ def test_a_typedefd_struct_is_a_class_without_statement_capture(tmp_path) -> Non
     )
     assert [c.name for c in record.classes] == ["point_t"]
     assert record.statements == []
+
+
+# -- calls through a variable -------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("jobs", [1, 2])
+def test_a_call_through_a_variable_never_links_to_a_function(tmp_path, jobs) -> None:
+    repo = _repo(
+        tmp_path,
+        {
+            "run.c": "int run(int x) { return x; }\nint cb(int x) { return x; }\n",
+            "use.c": (
+                "struct ops { int (*run)(int); };\n"
+                "int via_member(struct ops *o) { return o->run(1); }\n"
+                "int via_param(int (*cb)(int)) { return cb(3); }\n"
+                "int via_local(void) { int (*cb)(int) = 0; return cb(4); }\n"
+                # A local prototype declares a function, not a variable.
+                "int via_prototype(void) { int cb(int); return cb(5); }\n"
+                "int direct(void) { return run(6); }\n"
+            ),
+        },
+    )
+    use = _capture(repo, jobs)["use.c"]
+    assert _calls(use, "via_member") == {"run": None}
+    assert _calls(use, "via_param") == {"cb": None}
+    assert _calls(use, "via_local") == {"cb": None}
+    assert _calls(use, "via_prototype") == {"cb": "run.c"}
+    assert _calls(use, "direct") == {"run": "run.c"}
+
+
+def test_a_lambda_or_loop_variable_call_is_not_linked_in_cpp(tmp_path) -> None:
+    repo = _repo(
+        tmp_path,
+        {
+            "util.cpp": "int step(int x) { return x; }\nint each(int x) { return x; }\n",
+            "main.cpp": (
+                "#include <vector>\n"
+                "int main() {\n"
+                "  auto step = [](int x) { return x; };\n"
+                "  std::vector<int (*)(int)> fns;\n"
+                "  for (auto each : fns) { each(1); }\n"
+                "  return step(2);\n"
+                "}\n"
+            ),
+        },
+    )
+    assert _calls(_capture(repo, 1)["main.cpp"], "main") == {"each": None, "step": None}

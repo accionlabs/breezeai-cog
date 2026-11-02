@@ -19,6 +19,8 @@ The grammar shapes this parser relies on (discovered empirically):
 
 from __future__ import annotations
 
+from collections.abc import Set as AbstractSet
+
 from tree_sitter import Node
 
 from ...emit import disambiguate, function_id
@@ -162,17 +164,74 @@ def _callee(call: Node, source: bytes) -> tuple[str, str | None] | None:
     return None
 
 
+def _declared_variable(declarator: Node | None, source: bytes) -> str | None:
+    """The name a declarator declares, through pointer / reference / array / init / function
+    declarators (``(*cb)(int)`` → ``cb``)."""
+    node = declarator
+    for _ in range(16):
+        if node is None:
+            return None
+        if node.type in ("identifier", "field_identifier"):
+            return node_text(node, source)
+        node = node.child_by_field_name("declarator") or next(
+            (c for c in node.named_children
+             if c.type == "identifier" or c.type.endswith("declarator")),
+            None,
+        )
+    return None
+
+
+def variable_names(body: Node | None, params: Node | None, source: bytes) -> set[str]:
+    """The names a function's parameters and local variables take, of any type — including
+    pointers to functions (``int (*cb)(int)``) and the parameters of lambdas in the body. A
+    call to one of them is a call through a variable, never to a function elsewhere. A local
+    prototype (``int helper(int);``) declares a function, not a variable, and is left out."""
+    names: set[str] = set()
+
+    def add_params(plist: Node) -> None:
+        for p in plist.named_children:
+            if p.type in ("parameter_declaration", "optional_parameter_declaration"):
+                name = _declared_variable(p.child_by_field_name("declarator"), source)
+                if name:
+                    names.add(name)
+
+    def walk(node: Node) -> None:
+        for c in node.named_children:
+            if c.type == "declaration":
+                for d in c.children_by_field_name("declarator"):
+                    if function_declarator_of(d) is not None and not is_function_pointer(d):
+                        continue  # a local prototype
+                    name = _declared_variable(d, source)
+                    if name:
+                        names.add(name)
+            elif c.type == "parameter_list":
+                add_params(c)
+            elif c.type == "for_range_loop":
+                name = _declared_variable(c.child_by_field_name("declarator"), source)
+                if name:
+                    names.add(name)
+            walk(c)
+
+    if params is not None:
+        add_params(params)
+    if body is not None:
+        walk(body)
+    return names
+
+
 def _calls(
     body: Node | None,
     source: bytes,
     resolve: CallResolver = noop_resolver,
     owner: str | None = None,
     types: dict[str, str | None] | None = None,
+    variables: AbstractSet[str] = frozenset(),
 ) -> list[Call]:
     """Calls in ``body``. ``owner`` is the simple/qualified name of the class the body
     belongs to (``None`` for a free function) — it lets a bare implicit-``this`` call
     ``Foo()`` resolve to ``owner::Foo``; ``types`` maps this body's locals/params to their
-    class type so an ``obj.method()`` receiver can be typed."""
+    class type so an ``obj.method()`` receiver can be typed. A bare call to one of
+    ``variables`` (:func:`variable_names`) calls through that variable and is never resolved."""
     if body is None:
         return []
     calls: list[Call] = []
@@ -188,7 +247,9 @@ def _calls(
                     name, receiver = res
                     if name and name not in seen:
                         seen.add(name)
-                        calls.append(Call(name=name, path=resolve(name, receiver, owner, types)))
+                        through_variable = receiver is None and name in variables
+                        path = None if through_variable else resolve(name, receiver, owner, types)
+                        calls.append(Call(name=name, path=path))
             visit(child)
 
     visit(body)
@@ -280,7 +341,10 @@ def build_function(
         returnType=node_text(ret, source) if ret is not None else None,
         startLine=start,
         endLine=end,
-        calls=_calls(body, source, resolve, class_name, build_type_map(body, params, source)),
+        calls=_calls(
+            body, source, resolve, class_name, build_type_map(body, params, source),
+            variable_names(body, params, source),
+        ),
     )
     statements = extract_statements(
         body, source, path, parent_id=fid, capture=capture, limit=limit, seen_ids=seen_ids,
@@ -331,7 +395,10 @@ def build_member_function(
         returnType=node_text(ret, source) if ret is not None else None,
         startLine=start,
         endLine=end,
-        calls=_calls(body, source, resolve, class_name, build_type_map(body, params, source)),
+        calls=_calls(
+            body, source, resolve, class_name, build_type_map(body, params, source),
+            variable_names(body, params, source),
+        ),
     )
     statements = extract_statements(
         body, source, path, parent_id=fid, capture=capture, limit=limit, seen_ids=seen_ids,
