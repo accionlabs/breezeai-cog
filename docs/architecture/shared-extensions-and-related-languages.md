@@ -450,6 +450,21 @@ C++.
 > statements aren't embedded, so a header isn't found by meaning from its prototypes; and
 > macro-prefixed prototypes the grammar misreads are not captured.
 
+> **Decision —** every macro definition is a statement (`preproc_def` / `preproc_function_def`)
+> named after the macro, wherever it is written: at file scope, inside a function body or
+> inside a class; never a `Function`, and a call to a macro stays unresolved.
+> **Why:** cog doesn't run the preprocessor, so a macro has no body cog can read as code; the
+> functions a macro wraps are captured where they are defined. Where a macro confuses the
+> grammar, nothing is named from the confusion: `unsigned long ZEXPORT f()` has the return type
+> `unsigned long` (a type name can't follow `unsigned` / `long` in C, so `ZEXPORT` is a macro);
+> a declaration or definition with an error on the way to its name is skipped (`int f
+> OF((int a, int b));` would be named `b`, `voidpf ZLIB_INTERNAL zcalloc(…)` would be a
+> function named `ZLIB_INTERNAL`); and a row of macro calls the grammar reads as one function
+> named after the macro (`GEN(a) GEN(b)` followed by a function) is not emitted. An error in an
+> initializer, in a parameter list or after an initialized variable's name leaves the name
+> intact. **Cost:** calls into macros have no `CALLS` edge; a function whose name the grammar
+> lost is not captured.
+
 > **Decision —** a call links to a function defined in a header only when the calling file can
 > see that header: the file includes it, directly or through other includes, or — for a call
 > written in a header — every file that includes that header can see it. An include is looked

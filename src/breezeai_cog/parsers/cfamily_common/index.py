@@ -46,7 +46,7 @@ from ..index_common import ClassHeritage, parallel_map, record_distinct, walk_he
 from ..treesitter import node_text, parse_source
 from .classes import _CLASS_TYPES, _heritage, _unwrap_template
 from .functions import (
-    function_declarator_of, has_declaration_error, is_declared_static,
+    function_declarator_of, has_declaration_error, is_declared_static, is_misnamed_definition,
 )
 from .imports import FamilyHeaders, HeaderIndex, build_header_index, include_targets
 from .mappings import HEADER_EXTENSIONS, TRANSPARENT_SCOPES
@@ -258,7 +258,7 @@ def _index_scope(
                 _index_scope(frag, body, source, rel, _join_ns(ns, _ns_name(node, source)))
         elif node.type in _CLASS_TYPES:
             _index_class(frag, node, source, rel, ns)
-        elif node.type == "function_definition":
+        elif node.type == "function_definition" and not is_misnamed_definition(node, source):
             _record_def(frag, node, source, rel, None, c_linkage)
 
 

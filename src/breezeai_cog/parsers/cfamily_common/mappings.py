@@ -64,8 +64,9 @@ TRANSPARENT_SCOPES = frozenset({
     "linkage_specification", "declaration_list",
 })
 
-#: Macro definitions (``#define NAME value``, ``#define MIN(a, b) …``): at file scope each is a
-#: plain statement — constants and macro APIs (C's ``lua_pop``) live there, nowhere else.
+#: Macro definitions (``#define NAME value``, ``#define MIN(a, b) …``): each is a plain
+#: statement wherever it is written — constants and macro APIs (C's ``lua_pop``) live there,
+#: nowhere else.
 MACRO_TYPES = frozenset({"preproc_def", "preproc_function_def"})
 
 #: Extensions of files that are included rather than compiled on their own. A ``static``

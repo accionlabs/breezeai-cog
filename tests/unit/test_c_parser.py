@@ -452,7 +452,110 @@ def test_macros_follow_the_statement_gate(tmp_path) -> None:
     assert record.statements == []
 
 
-# -- calls into headers -------------------------------------------------------------------------
+@pytest.mark.parametrize("parser", [CParser(), CppParser()], ids=["c", "cpp"])
+def test_a_macro_is_a_statement_wherever_it_is_defined(tmp_path, parser) -> None:
+    record = _parse(
+        parser,
+        tmp_path,
+        "m.c" if parser.name == "c" else "m.cpp",
+        "#define TOP 1\n"
+        "int f(int x) {\n"
+        "#define LOCAL(a) ((a) + 1)\n"
+        "    return LOCAL(x);\n"
+        "}\n"
+        "struct s {\n"
+        "#define FIELD_MAX 8\n"
+        "    int v[FIELD_MAX];\n"
+        "};\n"
+        "#define TWICE(a) \\\n"
+        "    ((a) * 2)\n",
+    )
+    owner = {f.id: f.name for f in record.functions} | {c.id: c.name for c in record.classes}
+    owner[record.id] = "<file>"
+    macros = [
+        (s.nodeType, s.name, s.startLine, s.endLine, owner[s.parentId])
+        for s in record.statements if s.nodeType.startswith("preproc")
+    ]
+    assert sorted(macros, key=lambda m: m[2]) == [
+        ("preproc_def", "TOP", 1, 1, "<file>"),
+        ("preproc_function_def", "LOCAL", 3, 3, "f"),
+        ("preproc_def", "FIELD_MAX", 7, 7, "s"),
+        ("preproc_function_def", "TWICE", 10, 11, "<file>"),
+    ]
+    # A call to a macro stays unresolved: a macro is never a function.
+    assert [(c.name, c.path) for c in record.functions[0].calls] == [("LOCAL", None)]
+
+
+@pytest.mark.parametrize("parser", [CParser(), CppParser()], ids=["c", "cpp"])
+def test_a_macro_folded_into_a_keyword_type_is_not_the_return_type(tmp_path, parser) -> None:
+    record = _parse(
+        parser,
+        tmp_path,
+        "t.c" if parser.name == "c" else "t.cpp",
+        "unsigned long ZEXPORT crc(int c) { return c; }\n"
+        "TARGET_ATTR\nlong long popcount(void *s) { return 0; }\n"
+        "unsigned long long plain(void) { return 0; }\n",
+    )
+    assert {f.name: f.returnType for f in record.functions} == {
+        "crc": "unsigned long",
+        "popcount": "long long",
+        "plain": "unsigned long long",
+    }
+
+
+def test_a_declaration_with_a_broken_declarator_is_not_named_after_a_parameter(tmp_path) -> None:
+    # Old zlib declares prototypes through a macro: `OF((args))` expands to `(args)`.
+    record = _parse(
+        CParser(), tmp_path, "zlib.h",
+        "int deflate OF((int strm, int flush));\n"
+        "int deflateEnd(int strm);\n"
+        # A macro before a typedef'd return type: the grammar names it after the type.
+        "API_FUNC size_type table_len(table *t);\n"
+        # An error in the initializer or after the name leaves the name intact.
+        "struct item items[] = {\n  {1},\n#ifdef EXTRA\n  {2},\n#endif\n};\n"
+        "oid_t mech_oid ALIGN8 = { 9, 0 };\n",
+    )
+    assert [s.name for s in record.statements if s.nodeType == "declaration"] == [
+        "deflateEnd", "items", "mech_oid",
+    ]
+
+
+@pytest.mark.parametrize("parser", [CParser(), CppParser()], ids=["c", "cpp"])
+def test_a_function_is_never_named_after_a_macro_before_its_name(tmp_path, parser) -> None:
+    # `INTERNAL` sits between the return type and the name: the grammar names the function
+    # `INTERNAL` and puts the real name in an error. Neither name is emitted.
+    record = _parse(
+        parser,
+        tmp_path,
+        "z.c" if parser.name == "c" else "z.cpp",
+        "voidpf INTERNAL zalloc(void *opaque, unsigned n) { return 0; }\n"
+        "int plain(int x) { return x; }\n"
+        # A macro between `*` and the name leaves the name intact.
+        "const char * EXPORT version(void) { return 0; }\n",
+    )
+    assert [f.name for f in record.functions] == ["plain", "version"]
+
+
+@pytest.mark.parametrize("jobs", [1, 2])
+def test_a_row_of_macro_calls_is_not_a_function(tmp_path, jobs) -> None:
+    repo = _repo(
+        tmp_path / "r",
+        {
+            "ops.h": (
+                "#define GEN(name) int name(int x) { return x; }\n"
+                # A type written through a macro is still a type: this is a real function.
+                "STACK_OF(cert) *certs(void) { return 0; }\n"
+                # The row and the function after it read as one function named `GEN`; the
+                # real function's name is lost in it, so nothing is emitted for either.
+                "GEN(add)\nGEN(sub)\n"
+                "static inline int real_fn(int x) { return x; }\n"
+            ),
+            "use.c": '#include "ops.h"\nint use(void) { return GEN(1) + certs() != 0; }\n',
+        },
+    )
+    records = _capture(repo, jobs)
+    assert [f["name"] for f in records["ops.h"]["functions"]] == ["certs"]
+    assert _calls(records["use.c"], "use") == {"GEN": None, "certs": "ops.h"}
 
 
 @pytest.mark.parametrize("jobs", [1, 2])

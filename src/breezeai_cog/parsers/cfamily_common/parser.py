@@ -48,9 +48,11 @@ from .classes import (
 )
 from .functions import (
     build_function,
+    declarator_name_is_broken,
     defined_names,
     function_declarator_of,
     has_declaration_error,
+    is_misnamed_definition,
     is_misread_declarator,
 )
 from .imports import FamilyHeaders, extract_imports
@@ -59,6 +61,7 @@ from .index import (
 )
 from ..comments_common import comment_statements_for
 from ..statements_common import member_statement
+from .statements import macro_statement
 from .mappings import (
     COMMENT_TYPES, CONTROL_FLOW, FRAMEWORKS, MACRO_TYPES, STATEMENT_TYPES, TRANSPARENT_SCOPES,
 )
@@ -155,13 +158,12 @@ class CFamilyParser(BaseParser):
                         classes.append(enum_cls)
                         statements.extend(enum_stmts)
                 elif node.type == "function_definition":
-                    _emit_function(node, ns)
+                    if not is_misnamed_definition(node, source):
+                        _emit_function(node, ns)
                 elif node.type in MACRO_TYPES and capture and not _is_include_guard(node, source):
-                    name = node.child_by_field_name("name")
                     statements.append(
-                        member_statement(
+                        macro_statement(
                             node, source, path, parent_id=fid, limit=limit, seen_ids=seen_ids,
-                            name=node_text(name, source) if name is not None else None,
                         )
                     )
                 elif (typedef := typedef_type(node, source)) is not None:
@@ -210,8 +212,13 @@ class CFamilyParser(BaseParser):
                     # `Function`: the definition is, wherever it is. Namespace members parent
                     # to the file, matching how `process` already flattens namespaces. A
                     # declarator the grammar misread (a macro taken for the type) is skipped.
+                    # So is one with an error on the way to its name: zlib's `int f OF((int a,
+                    # int b));` reads as a variable named after the last parameter.
                     declarator = node.child_by_field_name("declarator")
-                    if not is_misread_declarator(declarator):
+                    if (
+                        not declarator_name_is_broken(declarator)
+                        and not is_misread_declarator(declarator)
+                    ):
                         statements.append(
                             member_statement(
                                 node, source, path, parent_id=fid, limit=limit, seen_ids=seen_ids,

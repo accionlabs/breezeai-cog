@@ -266,7 +266,10 @@ def _defs_in(node: Node, source: bytes, names: set[str]) -> None:
                 _defs_in(body, source, names)
         elif c.type == "template_declaration" or c.type in TRANSPARENT_SCOPES:
             _defs_in(c, source, names)  # include guard, #if, extern "C" { … }
-        elif c.type == "function_definition" and not has_declaration_error(c):
+        elif (
+            c.type == "function_definition" and not has_declaration_error(c)
+            and not is_misnamed_definition(c, source)
+        ):
             fd = function_declarator_of(c.child_by_field_name("declarator"))
             if fd is None:
                 continue
@@ -286,6 +289,77 @@ def defined_names(root: Node, source: bytes) -> set[str]:
     names: set[str] = set()
     _defs_in(root, source, names)
     return names
+
+
+#: Node types a declarator's chain ends at: the declared name.
+_DECLARED_NAME_NODES = ("field_identifier", "identifier", "type_identifier")
+
+
+def declarator_name_is_broken(node: Node | None) -> bool:
+    """Whether an error on the way from a declarator to its declared name makes the name
+    untrustworthy. Where the error sits decides it:
+
+    * **after** the name it follows, the "name" was a type or a macro and the real name is in
+      the error: ``LUAI_FUNC lua_Unsigned luaH_getn(…)`` and ``voidpf ZLIB_INTERNAL zcalloc(…)``
+      read as functions named ``lua_Unsigned`` and ``ZLIB_INTERNAL``. The exception is an
+      initialized variable, where it is a macro between name and ``=`` (``oid ALIGN8 = {…}``);
+    * **before** the name, it is a macro in front of it (``char * ZEXPORT zlibVersion()``), and
+      the name is right, except inside parentheses: ``int f OF((int a, int b));`` reads as a
+      parenthesized declarator holding an error and the name ``b``.
+
+    A token the grammar inserts as missing (``API T f(void)`` reads as ``T::f`` in C++), or an
+    error inside an initializer or a parameter list, leaves the name intact."""
+    while node is not None and node.type not in _DECLARED_NAME_NODES:
+        inner = node.child_by_field_name("declarator") or next(
+            (c for c in node.named_children
+             if c.type in _DECLARED_NAME_NODES or c.type.endswith("declarator")),
+            None,
+        )
+        if node.type == "template_function":  # `name<args>`: the name is its `name` field
+            inner = node.child_by_field_name("name")
+        for err in (c for c in node.children if c.type == "ERROR"):
+            if inner is None or node.type == "parenthesized_declarator":
+                return True
+            if err.start_byte >= inner.end_byte and node.type != "init_declarator":
+                return True
+        node = inner
+    return False
+
+
+def is_macro_row(node: Node, source: bytes) -> bool:
+    """Whether a ``function_definition`` is a row of macro invocations misread as one function.
+    ``GEN(a)`` ``GEN(b)`` … followed by a real function reads as a function named ``GEN`` whose
+    type is ``GEN(a)``: the macro names itself. The real function's own name is lost in it."""
+    ret = node.child_by_field_name("type")
+    if ret is None or ret.type != "macro_type_specifier":
+        return False
+    macro = ret.child_by_field_name("name")
+    fd = function_declarator_of(node.child_by_field_name("declarator"))
+    inner = fd.child_by_field_name("declarator") if fd is not None else None
+    return (
+        macro is not None and inner is not None
+        and node_text(macro, source) == node_text(inner, source)
+    )
+
+
+def is_misnamed_definition(node: Node, source: bytes) -> bool:
+    """Whether a ``function_definition``'s name can't be trusted: a row of macro calls read as
+    one function, or an error on the way to its name (``voidpf ZLIB_INTERNAL zcalloc(…)`` reads
+    as a function named ``ZLIB_INTERNAL``). Such a definition is not emitted or indexed."""
+    return is_macro_row(node, source) or declarator_name_is_broken(
+        node.child_by_field_name("declarator"))
+
+
+def return_type(node: Node, source: bytes) -> str | None:
+    """A definition's or declaration's return type as written. In ``unsigned long ZEXPORT f()``
+    the grammar folds a macro into the keyword type (``unsigned`` / ``long`` / ``short`` never
+    combine with a type name in C), so only the keywords are the type: ``unsigned long``."""
+    ret = node.child_by_field_name("type")
+    if ret is None:
+        return None
+    if ret.type == "sized_type_specifier" and any(c.type == "type_identifier" for c in ret.children):
+        return " ".join(node_text(c, source) for c in ret.children if c.type != "type_identifier")
+    return node_text(ret, source)
 
 
 def is_declared_static(node: Node, source: bytes) -> bool:
@@ -327,7 +401,6 @@ def build_function(
     # identified unambiguously; `class_name` stays simple for call resolution.
     fid = disambiguate(
         function_id(path, name, start, class_name=id_owner or class_name), seen_ids)
-    ret = node.child_by_field_name("type")
     body = node.child_by_field_name("body")
     params = fd.child_by_field_name("parameters") if fd is not None else None
     fn = Function(
@@ -340,7 +413,7 @@ def build_function(
         # out-of-class `Class::method` definition can't repeat `static`: left unknown.
         isStatic=is_declared_static(node, source) or None if kind == "function" else None,
         params=extract_params(params, source),
-        returnType=node_text(ret, source) if ret is not None else None,
+        returnType=return_type(node, source),
         startLine=start,
         endLine=end,
         calls=_calls(
@@ -382,7 +455,6 @@ def build_member_function(
     # identified unambiguously; `class_name` stays simple for call resolution.
     fid = disambiguate(
         function_id(path, name, start, class_name=id_owner or class_name), seen_ids)
-    ret = field_decl.child_by_field_name("type")
     body = field_decl.child_by_field_name("body")  # present only for an inline definition
     params = fd.child_by_field_name("parameters") if fd is not None else None
     kind = "constructor" if name == class_name else "method"
@@ -396,7 +468,7 @@ def build_member_function(
         # A static member: `static` is written on its declaration in the class.
         isStatic=is_declared_static(field_decl, source) or None,
         params=extract_params(params, source),
-        returnType=node_text(ret, source) if ret is not None else None,
+        returnType=return_type(field_decl, source),
         startLine=start,
         endLine=end,
         calls=_calls(

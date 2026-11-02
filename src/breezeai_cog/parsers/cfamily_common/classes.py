@@ -26,6 +26,8 @@ from .functions import (
     has_declaration_error,
     is_function_pointer,
 )
+from .mappings import MACRO_TYPES
+from .statements import macro_statement
 
 #: Aggregate specifiers that become a ``Class`` node, mapped to their ``type``. A union is
 #: a distinct kind (overlapping storage, one member active at a time) — it is not a struct,
@@ -209,6 +211,15 @@ def build_class(
                 continue  # corrupt declaration header — skip rather than emit fabricated data
             if member.type == "access_specifier":
                 visibility = node_text(member, source)
+                continue
+            if member.type in MACRO_TYPES:
+                # A `#define` written inside the class body.
+                if capture:
+                    statements.append(
+                        macro_statement(
+                            member, source, path, parent_id=cid, limit=limit, seen_ids=seen_ids,
+                        )
+                    )
                 continue
             if member.type in TYPE_ALIAS_TYPES:
                 # A member typedef/alias (`typedef int MemberHandle;`) declares a name on
