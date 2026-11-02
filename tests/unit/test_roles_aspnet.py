@@ -418,6 +418,36 @@ def test_extension_method_routes_get_the_group_prefix(analyze_files) -> None:
                        "todos.MapTodos();\n") == [("GET", "/api/todos"), ("POST", "/api/todos/{id}")]
 
 
+@pytest.mark.parametrize("body", [
+    'var todos = app.MapGroup("/todos");\nTodoEndpoints.MapTodos(todos);\n',
+    'TodoEndpoints.MapTodos(app.MapGroup("/todos"));\n',
+    'global::TodoEndpoints.MapTodos(app.MapGroup("/todos"));\n',
+])
+def test_extension_method_called_in_static_form_gets_the_group_prefix(analyze_files, body) -> None:
+    assert _group_ext_routes(analyze_files, body) == [("GET", "/todos"), ("POST", "/todos/{id}")]
+
+
+def test_extension_method_called_bare_gets_the_group_prefix(analyze_files) -> None:
+    program = "using static TodoEndpoints;\n" + _program('MapTodos(app.MapGroup("/todos"));\n')
+    stmts = analyze_files({"Program.cs": program, "TodoEndpoints.cs": _TODO_ENDPOINTS})
+    assert sorted((s.method, s.endpoint) for s in _eps(stmts) if s.path == "TodoEndpoints.cs") == [
+        ("GET", "/todos"), ("POST", "/todos/{id}")]
+
+
+@pytest.mark.parametrize("body", [
+    # `other` is the `this` argument; `todos` is a second argument, not the group.
+    'var todos = app.MapGroup("/todos");\nvar other = Build();\nother.MapTodos(todos);\n',
+    # Another class's method of the same name.
+    'OtherEndpoints.MapTodos(app.MapGroup("/todos"));\n',
+    # A variable assigned two different groups.
+    'var g = app.MapGroup("/a");\ng = app.MapGroup("/b");\nTodoEndpoints.MapTodos(g);\n',
+    # A named argument is not taken as the group.
+    'TodoEndpoints.MapTodos(g: app.MapGroup("/todos"));\n',
+])
+def test_static_form_without_a_certain_group_has_no_address(analyze_files, body) -> None:
+    assert _group_ext_routes(analyze_files, body) == [("GET", None), ("POST", None)]
+
+
 def test_extension_method_called_twice_has_no_address(analyze_files) -> None:
     body = 'app.MapGroup("/todos").MapTodos();\napp.MapGroup("/v2/todos").MapTodos();\n'
     assert _group_ext_routes(analyze_files, body) == [("GET", None), ("POST", None)]
