@@ -180,7 +180,8 @@ Ignore rules come in layers. A path is kept when it is **included, or not ignore
 > **Why:** a large repo can have hundreds of thousands of files; reading each one just to
 > decide whether to parse it would double the I/O. **Cost:** a file is classified by its
 > extension, so a file with an unusual extension is reported as `unsupported` even if its
-> content is a known language.
+> content is a known language. The one exception comes after the scan: a file whose extension
+> two languages register gets its language from the repo's content ([§4.1b](#41b-files-two-languages-register)).
 
 > **Decision —** language ignore rules are applied after the walk, and only to files of that language.
 > **Why:** a rule that makes sense for one language breaks another. C#'s NuGet `packages/`
@@ -234,6 +235,13 @@ A parser reads its own language's index, and after it the indexes of the languag
 `related_languages`: C++ reads the C index, so a C++ call to a function defined in a `.c` file
 resolves, and C reads the C++ index for the functions defined in `extern "C"`.
 
+> **Decision —** a parser reads related languages' indexes only after its own, and binds a name
+> from them only when they agree on one file.
+> **Why:** languages that call each other (C and C++) need each other's definitions, but a link
+> that resolves in the caller's own language today must keep resolving the same way. Each index
+> stays as it is, built by its own language. **Cost:** a name the caller's own language defines
+> never reaches a related language's definition; lookups across languages are by name only.
+
 > **Decision —** cross-file data is built once in a separate pre-pass, not shared between workers while parsing.
 > **Why:** workers then share no mutable state, so files can be parsed in any order, in
 > parallel, with the same result every time. **Cost:** a language that needs an index reads
@@ -263,6 +271,9 @@ flowchart TD
 ```
 
 Rules:
+- The candidates are the parsers of the file's language. For a file whose extension two
+  languages register (`.h`), that is the language the ownership step decided
+  ([§4.1b](#41b-files-two-languages-register)), so a C header never goes to a C++ framework parser.
 - The language parser has priority 0 and claims everything, so every file has an owner.
 - A framework parser claims a file with a **cheap content check** (a substring search).
 - If a framework is built on another one, it gets a **higher** priority, so the derived
@@ -1056,11 +1067,13 @@ from another.
 |---|---|---|
 | Scope | Static, read-only analysis; nothing is executed | [§1](#1-what-cog-is-and-is-not) |
 | Scope | cog writes a file; the backend builds the graph | [§1](#1-what-cog-is-and-is-not) |
-| Scan | Classify by path only; never read files during the scan | [§4.1](#41-scanning-and-file-selection) |
+| Scan | Classify by path only; never read files during the scan (exception: shared extensions, below) | [§4.1](#41-scanning-and-file-selection) |
+| Scan | A file whose extension two languages register gets its language from the whole repo, after the scan and before indexing | [§4.1b](#41b-files-two-languages-register) |
 | Scan | Language ignore rules are scoped to that language, after the walk | [§4.1](#41-scanning-and-file-selection) |
 | Scan | Template (markup) files are off by default | [§4.1](#41-scanning-and-file-selection) |
 | Index | Cross-file data is built once, before parsing; workers share nothing | [§4.2](#42-repo-wide-indexes) |
 | Index | Ambiguous entries become empty | [§4.2](#42-repo-wide-indexes) |
+| Index | A parser reads related languages' indexes after its own; they bind a name only when they agree | [§4.2](#42-repo-wide-indexes) |
 | Selection | One parser per file, chosen by `claims` + `priority` | [§4.3](#43-choosing-one-parser-per-file) |
 | Selection | Ownership is decided by a cheap substring check | [§4.3](#43-choosing-one-parser-per-file) |
 | Parsing | tree-sitter for every language | [§4.4](#44-parsing-and-extraction) |
