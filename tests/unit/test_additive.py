@@ -54,7 +54,7 @@ def test_inventory_in_run_order() -> None:
     (statement-id disambiguation), so a change to it is a deliberate, reviewed change."""
     inventory = {lang: [d.name for d in ds] for lang, ds in all_detectors().items()}
     assert inventory == {
-        "csharp": ["lambda-handlers", "lucene", "hotchocolate-registered-roots",
+        "csharp": ["lambda-handlers", "lucene", "hotchocolate-registered-roots", "aspnet-web-projects",
                    "generic-handlers", "hangfire", "quartz"],
         "go": ["go-net-http", "go-gin", "go-echo", "go-chi", "go-fiber", "go-gorilla-mux", "go-grpc",
                "go-nats", "go-kafka", "go-scheduling", "go-database",

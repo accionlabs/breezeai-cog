@@ -2,6 +2,8 @@
 
 Parser: `src/breezeai_cog/parsers/csharp_aspnet/`, `vb_aspnet/` (shared detectors in `aspnet_common.py`), `razor/` · Rules: [entry-point contract](../architecture/entry-points.md) · Tests: `tests/unit/test_roles_aspnet.py`
 
+**Which files are read as ASP.NET.** A C# file whose text names `Microsoft.AspNetCore`, `System.Web.Mvc` or `System.Web.Http` belongs to the ASP.NET parser. A file with none of them — usual in .NET 6+, where implicit usings drop the `using` lines — keeps its own parser, and its routes are added by the `aspnet-web-projects` detector when its nearest `.csproj` is a web project (`Sdk="Microsoft.NET.Sdk.Web"`, or `<FrameworkReference Include="Microsoft.AspNetCore.App" />`) or the file names an ASP.NET-only type (`WebApplication`, `IEndpointRouteBuilder`, `RouteGroupBuilder`, `ControllerBase`, `ApiController`). The routes are the same either way. See [cross-file resolution](../architecture/cross-file-resolution.md#a-framework-fact-from-another-file-a-registered-fact).
+
 | Construct | Role | Record | Why |
 |---|---|---|---|
 | `[HttpGet]` / `[HttpPost]` / … (`[Route]` on the action) on a controller action | Binding | `route`, HTTP verb, `routeKind: route`, path with the controller prefix, `handler` = the action | One handler, inbound API |

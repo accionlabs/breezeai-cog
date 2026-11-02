@@ -628,3 +628,93 @@ def test_wiring_only_route_config_keeps_aspnet_label(tmp_path) -> None:
 def test_response_dto_is_the_declared_payload_type(declared: str, dto: str | None) -> None:
     from breezeai_cog.parsers.dotnet_common import response_dto
     assert response_dto(declared) == dto
+
+
+# --- Files with no ASP.NET `using` line: the web-project detector (BREEZEAI-1419) ---------------
+# A project-local base controller: neither file names an ASP.NET namespace or ASP.NET-only type.
+_APP_BASE = "public abstract class AppController : Controller { }\n"
+_ORDERS = ("public class OrdersController : AppController {\n"
+           '  [HttpGet("/orders")] public string List() => "";\n}\n')
+_WEB_SDK = '<Project Sdk="Microsoft.NET.Sdk.Web"><PropertyGroup>' \
+           "<ImplicitUsings>enable</ImplicitUsings></PropertyGroup></Project>\n"
+_CONSOLE_SDK = '<Project Sdk="Microsoft.NET.Sdk"></Project>\n'
+
+
+def _repo_routes(tmp_path, files: dict[str, str]) -> dict[str, list[tuple[str, str]]]:
+    """Write ``files``, analyze the repo, return path → [(method, endpoint)] of its routes."""
+    from breezeai_cog import iter_file_records
+
+    for rel, text in files.items():
+        (tmp_path / rel).parent.mkdir(parents=True, exist_ok=True)
+        (tmp_path / rel).write_text(text)
+    out: dict[str, list[tuple[str, str]]] = {}
+    for rec in iter_file_records(tmp_path):
+        routes = [(s.method, s.endpoint) for s in rec.statements if s.semanticType == "route"]
+        if routes:
+            out[rec.path] = routes
+    return out
+
+
+def test_web_sdk_project_file_without_using_gets_routes(tmp_path) -> None:
+    routes = _repo_routes(tmp_path, {
+        "Api/Api.csproj": _WEB_SDK, "Api/AppController.cs": _APP_BASE,
+        "Api/OrdersController.cs": _ORDERS})
+    assert routes == {"Api/OrdersController.cs": [("GET", "/orders")]}
+
+
+def test_aspnet_framework_reference_counts_as_web_project(tmp_path) -> None:
+    lib = ('<Project Sdk="Microsoft.NET.Sdk"><ItemGroup>'
+           '<FrameworkReference Include="Microsoft.AspNetCore.App" /></ItemGroup></Project>\n')
+    routes = _repo_routes(tmp_path, {
+        "Lib/Lib.csproj": lib, "Lib/AppController.cs": _APP_BASE,
+        "Lib/OrdersController.cs": _ORDERS})
+    assert routes == {"Lib/OrdersController.cs": [("GET", "/orders")]}
+
+
+def test_root_level_web_project(tmp_path) -> None:
+    routes = _repo_routes(tmp_path, {
+        "Api.csproj": _WEB_SDK, "AppController.cs": _APP_BASE, "OrdersController.cs": _ORDERS})
+    assert routes == {"OrdersController.cs": [("GET", "/orders")]}
+
+
+@pytest.mark.parametrize("csproj", [
+    _CONSOLE_SDK,
+    '<Project Sdk="Microsoft.NET.Sdk"><!-- <Project Sdk="Microsoft.NET.Sdk.Web"> --></Project>\n',
+])
+def test_non_web_project_file_without_using_gets_no_routes(tmp_path, csproj: str) -> None:
+    assert _repo_routes(tmp_path, {
+        "App/App.csproj": csproj, "App/AppController.cs": _APP_BASE,
+        "App/OrdersController.cs": _ORDERS}) == {}
+
+
+def test_nearest_project_decides(tmp_path) -> None:
+    # A class library nested inside a web project's folder is its own (non-web) project.
+    assert _repo_routes(tmp_path, {
+        "Api/Api.csproj": _WEB_SDK, "Api/Lib/Lib.csproj": _CONSOLE_SDK,
+        "Api/Lib/AppController.cs": _APP_BASE, "Api/Lib/OrdersController.cs": _ORDERS}) == {}
+
+
+def test_aspnet_type_name_without_csproj_gets_routes(tmp_path) -> None:
+    routes = _repo_routes(tmp_path, {
+        "Program.cs": 'var app = WebApplication.CreateBuilder(args).Build();\n'
+                      'app.MapGet("/direct", () => "d");\n'})
+    assert routes == {"Program.cs": [("GET", "/direct")]}
+
+
+def test_file_owned_by_aspnet_parser_is_not_emitted_twice(tmp_path) -> None:
+    routes = _repo_routes(tmp_path, {
+        "Api/Api.csproj": _WEB_SDK,
+        "Api/Program.cs": "using Microsoft.AspNetCore.Builder;\n"
+                          'var app = WebApplication.CreateBuilder(args).Build();\n'
+                          'app.MapGet("/direct", () => "d");\n'})
+    assert routes == {"Api/Program.cs": [("GET", "/direct")]}
+
+
+def test_corewcf_file_in_web_project_keeps_its_parser(tmp_path) -> None:
+    program = ("using CoreWCF;\nusing CoreWCF.Configuration;\n"
+               "var app = WebApplication.CreateBuilder(args).Build();\n"
+               "app.UseServiceModel(b => { });\n"
+               'app.MapGet("/health", () => "ok");\n')
+    assert registry.select("Svc/Program.cs", program.encode()).name == "csharp-wcf"
+    routes = _repo_routes(tmp_path, {"Svc/Svc.csproj": _WEB_SDK, "Svc/Program.cs": program})
+    assert routes == {"Svc/Program.cs": [("GET", "/health")]}
