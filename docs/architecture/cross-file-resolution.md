@@ -103,6 +103,7 @@ What each index holds:
 | TypeScript / JavaScript | `tsconfig`/`jsconfig` path aliases and Vite `resolve.alias` entries (per config scope); constant values; class heritage; **registered facts** (`index.facts`: Angular lazy-route mounts `angular.route-mounts` and their guards `angular.mount-guards`, AngularJS controller / component registrations `angularjs.registrations` — `(kind, name)` → file and line, or the import (module, export) the registered function comes from and which the route's detector follows, for a route's `controller: 'Name'`, and ui-router states `angularjs.states` — name → url and parent, for the address of a nested state, Express mounts `express.router-mounts`, Fastify plugin prefixes `fastify.plugin-prefixes`, NestJS stub parents `nest.stub-parents` and prefixes `nest.prefixes`, Next.js apps `next.apps`, middleware matchers `next.middlewares` and base paths `next.base-paths`, LoopBack base paths `loopback.base-paths`, GraphQL root-field DTOs `graphql.sdl-root-fields` — read from `.graphql` files too, which the GraphQL parser owns; GraphQL resolver objects `graphql.resolver-objects` — each top-level object whose properties are all functions, with the line each function starts at, for a root type given by a named import (`Query: queries`); module exports and their declarations `typescript.declarations` — each file's exported names with the declared name and line, re-exports followed, for `handlerPath`, and the component of each `.vue` file `typescript.declarations.vue` (registered by the Vue package); AWS Lambda handlers `aws.deployed-handlers` — read from `serverless.yml` / SAM templates) | aliased imports, inherited calls, route prefixes |
 | C++ | header basename → file; each file's local includes and who includes each header; free functions (a `static` one outside a header is never a target and makes its name ambiguous; one in a header is a target only for files that can see the header); the free functions defined in `extern "C"`; `Class::method`; `Class::field` types; heritage | `#include`, calls |
 | C | the same index as C++ (`cfamily_common/index.py`), built over C files with the C grammar | `#include`, calls |
+| CUDA | the same index as C++, built over `.cu` / `.cuh` files with the CUDA grammar | `#include`, calls |
 | Ruby | ActiveRecord model names; **registered facts** (`index.facts`: Rails controller `before_action` callbacks `rails.controller-callbacks`; method declarations `ruby.method-lines` — (controller, action) → file and line, for `handlerPath`) | recognising DB calls; Rails route guards and handlers |
 | GraphQL | **registered facts** (`index.facts`: client projects `graphql.client-configs` — read from `.graphqlrc.json`) | a downloaded client schema is not taken as this repo's operations |
 | HCL / Terraform | folder → `.tf` files | local `module` sources |
@@ -278,8 +279,9 @@ even if `items` has an in-repo type.
 | VB, Ruby | same file only | — | — | — |
 | C++ | own resolver (`cfamily_common/index.py`, shared with C): same file, `Class::method`, inherited, free functions, field types; then C's free functions | | | |
 | C | the same resolver as C++: same file, free functions; then C++'s `extern "C"` functions | | | |
+| CUDA | the same resolver as C++ (a kernel launch `k<<<grid, block>>>(x)` is a call to `k`); then C++'s and C's free functions | | | |
 
-In C and C++, a call through a parameter or local variable of the calling function (a function
+In C, C++ and CUDA, a call through a parameter or local variable of the calling function (a function
 pointer, a lambda, a `std::function`) is never resolved: it calls whatever the variable holds, not
 a function of that name. A prototype declared inside the body still names a function.
 

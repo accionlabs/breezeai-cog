@@ -1,10 +1,11 @@
-"""CFamilyParser — the extraction C and C++ share: one translation unit into a FileRecord.
+"""CFamilyParser — the extraction C, C++ and CUDA share: one translation unit into a FileRecord.
 
 The tree-sitter C++ grammar is built on the C grammar, so the constructs both languages have
 (``function_definition``, ``struct_specifier``, ``declaration``, ``preproc_def``, …) are the same
 node types in both trees. One walker reads either; C files simply never contain the C++-only
-nodes. Each language parses with its own grammar (``grammar``) and keeps its own identity,
-index and evidence in its package (``parsers/c``, ``parsers/cpp``).
+nodes. The CUDA grammar is built on the C++ one in the same way. Each language parses with its
+own grammar (``grammar``) and keeps its own identity, index and evidence in its package
+(``parsers/c``, ``parsers/cpp``, ``parsers/cuda``).
 
 C and C++ are **best-effort** languages: real files routinely parse with ``has_error`` (macros
 such as ``Q_OBJECT``, unexpanded preprocessor tokens, template metaprogramming), so every
@@ -21,9 +22,9 @@ Structure captured:
 * ``namespace_definition`` is flattened — its members parent to the file (there is no
   namespace node type in the schema).
 
-The two languages share ``.h``: the ownership step decides each header's language. Each reads
-the other's index after its own (``related_languages``); what it may call there is
-:meth:`CFamilyParser.callable_in`.
+C and C++ share ``.h``: the ownership step decides each header's language. Each reads the
+other's index after its own (``related_languages``), and CUDA reads both; what a language may
+call there is :meth:`CFamilyParser.callable_in`.
 """
 
 from __future__ import annotations
