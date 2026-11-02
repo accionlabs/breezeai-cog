@@ -155,16 +155,13 @@ def _import_nodes(root: Node, anywhere: bool) -> Iterator[Node]:
             stack.extend(reversed(node.named_children))
 
 
-def import_refs(root: Node, source: bytes, repo_root: Path, rel: str, *,
-                anywhere: bool = False) -> dict[str, tuple[str, ...]]:
-    """Local name → what it refers to in the repo: ``("module", file)`` or
-    ``("symbol", file, name)``. Library imports are left out.
+#: One import of a local name: ``("from", module, level, symbol)`` or ``("import", dotted)``.
+_Entry = tuple[str, ...]
 
-    Module-level imports only, unless ``anywhere``: then an import inside a function counts too
-    (``def create_app(): from app.auth import bp``), and a name imported as two different things
-    in two places is left out."""
-    out: dict[str, tuple[str, ...]] = {}
-    seen: dict[str, tuple[str, ...] | None] = {}
+
+def _import_entries(root: Node, source: bytes, anywhere: bool) -> dict[str, list[_Entry]]:
+    """Local name → its imports in source order, as written (nothing resolved yet)."""
+    out: dict[str, list[_Entry]] = {}
     for node in _import_nodes(root, anywhere):
         if node.type == "import_from_statement":
             mod = node.child_by_field_name("module_name")
@@ -182,26 +179,66 @@ def import_refs(root: Node, source: bytes, repo_root: Path, rel: str, *,
                     continue
                 orig = name_node.child_by_field_name("name") if name_node.type == "aliased_import" else name_node
                 alias = name_node.child_by_field_name("alias") if name_node.type == "aliased_import" else name_node
-                if orig is None or alias is None:
-                    continue
-                symbol, local = node_text(orig, source), node_text(alias, source)
-                sub = module_file(repo_root, rel, f"{module}.{symbol}" if module else symbol, level)
-                if sub is not None:  # from pkg import mod — a submodule
-                    _bind(seen, local, ("module", sub), anywhere)
-                    continue
-                owner = module_file(repo_root, rel, module, level)
-                if owner is not None:  # from pkg.mod import router — a name in that module
-                    _bind(seen, local, ("symbol", owner, symbol), anywhere)
+                if orig is not None and alias is not None:
+                    out.setdefault(node_text(alias, source), []).append(
+                        ("from", module, str(level), node_text(orig, source)))
         elif node.type == "import_statement":
             for name_node in node.named_children:
                 if name_node.type != "aliased_import":
                     continue  # `import pkg.mod` binds `pkg`, not the module — not followed
                 orig, alias = name_node.child_by_field_name("name"), name_node.child_by_field_name("alias")
-                target = module_file(repo_root, rel, node_text(orig, source), 0) if orig else None
-                if target is not None and alias is not None:
-                    _bind(seen, node_text(alias, source), ("module", target), anywhere)
-    out.update({name: ref for name, ref in seen.items() if ref is not None})
+                if orig is not None and alias is not None:
+                    out.setdefault(node_text(alias, source), []).append(("import", node_text(orig, source)))
     return out
+
+
+def _resolve_entry(entry: _Entry, repo_root: Path, rel: str) -> tuple[str, ...] | None:
+    if entry[0] == "import":
+        target = module_file(repo_root, rel, entry[1], 0)
+        return ("module", target) if target is not None else None
+    _, module, level, symbol = entry
+    sub = module_file(repo_root, rel, f"{module}.{symbol}" if module else symbol, int(level))
+    if sub is not None:  # from pkg import mod — a submodule
+        return ("module", sub)
+    owner = module_file(repo_root, rel, module, int(level))
+    return ("symbol", owner, symbol) if owner is not None else None  # from pkg.mod import router
+
+
+class ImportRefs:
+    """:func:`import_refs`, one name at a time: a name is resolved (which checks the
+    filesystem) only when it is asked for."""
+
+    def __init__(self, root: Node, source: bytes, repo_root: Path | None, rel: str, *,
+                 anywhere: bool = False) -> None:
+        self._entries = _import_entries(root, source, anywhere)
+        self._repo_root, self._rel, self._anywhere = repo_root, rel, anywhere
+        self._done: dict[str, tuple[str, ...] | None] = {}
+
+    def get(self, name: str) -> tuple[str, ...] | None:
+        if name in self._done:
+            return self._done[name]
+        seen: dict[str, tuple[str, ...] | None] = {}
+        if self._repo_root is not None:
+            for entry in self._entries.get(name, []):
+                ref = _resolve_entry(entry, self._repo_root, self._rel)
+                if ref is not None:
+                    _bind(seen, name, ref, self._anywhere)
+        self._done[name] = seen.get(name)
+        return self._done[name]
+
+    def all(self) -> dict[str, tuple[str, ...]]:
+        return {name: ref for name in self._entries if (ref := self.get(name)) is not None}
+
+
+def import_refs(root: Node, source: bytes, repo_root: Path, rel: str, *,
+                anywhere: bool = False) -> dict[str, tuple[str, ...]]:
+    """Local name → what it refers to in the repo: ``("module", file)`` or
+    ``("symbol", file, name)``. Library imports are left out.
+
+    Module-level imports only, unless ``anywhere``: then an import inside a function counts too
+    (``def create_app(): from app.auth import bp``), and a name imported as two different things
+    in two places is left out."""
+    return ImportRefs(root, source, repo_root, rel, anywhere=anywhere).all()
 
 
 def _bind(seen: dict[str, tuple[str, ...] | None], name: str, ref: tuple[str, ...],
