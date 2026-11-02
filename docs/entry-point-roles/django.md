@@ -4,7 +4,8 @@ Parser: `src/breezeai_cog/parsers/python_django/` (`python-django`; URL includes
 
 The binding is the URL pattern (`path(…)` in `urlpatterns`), not the view: a view has no address of
 its own until a pattern names it. The record sits on the `path(…)` call and leads to the view in
-its own file (`handlerPath`, `handlerLine`).
+its own file (`handlerPath`, `handlerLine`). Django REST framework views reached through
+`path(…)` follow the same rows with `framework: drf` — see [DRF](drf.md).
 
 **Address.** `/` + the prefixes of the `include()`s that lead to the pattern from the root
 urlconf (`ROOT_URLCONF`) + the pattern, the way Django concatenates them (`api/` + `orders/<int:pk>/`

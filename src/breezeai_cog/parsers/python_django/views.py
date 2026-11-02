@@ -13,6 +13,7 @@ guessed.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -22,6 +23,7 @@ from tree_sitter import Node
 from ..additive import FactSpec, index_fact, register_fact
 from ..python_common import Origins, field_text, import_refs, keyword, literal, positional, string_list
 from ..treesitter import node_text
+from . import drf
 from .generics import (
     AUTH_MIXIN_MODULE, AUTH_MIXINS, CERTAIN_AUTH, DJANGO_BASES, DJANGO_VIEW_MODULES, DJANGO_VIEWS,
     LOGIN_NOT_REQUIRED, METHOD_DECORATORS, NOT_GUARDS, VERBS, short,
@@ -42,12 +44,20 @@ class FunctionView:
     decorators: tuple[Guard, ...] = ()
     #: The verbs a ``require_*`` decorator allows; None when it accepts any verb.
     methods: tuple[str, ...] | None = None
+    #: DRF ``@api_view([...])``: the verbs (``GET`` when no list is given); None when not one.
+    api_view: tuple[str, ...] | None = None
+    #: DRF ``@permission_classes([...])``; None when absent or not a literal list.
+    permissions: tuple[Guard, ...] | None = None
 
 
 @dataclass
 class Method:
     line: int
     decorators: tuple[Guard, ...] = ()
+    #: DRF ``@action(detail=…, methods=[…], url_path=…)``: (detail — None when it or the path is
+    #: not a literal, verbs — empty when not a literal, url path — None for the method name);
+    #: None when the method is not an action.
+    action: tuple[bool | None, tuple[str, ...], str | None] | None = None
 
 
 @dataclass
@@ -57,6 +67,13 @@ class ClassView:
     methods: dict[str, Method] = field(default_factory=dict)
     #: ``@method_decorator(x, name="dispatch")`` on the class: guards of every method.
     dispatch_decorators: tuple[Guard, ...] = ()
+    #: DRF class attributes. ``permission_classes``: None when not set here; ``unknown`` when set
+    #: to something that is not a literal list.
+    permissions: tuple[Guard, ...] | None = None
+    permissions_unknown: bool = False
+    serializer: str | None = None
+    lookup_field: str | None = None
+    lookup_url_kwarg: str | None = None
 
 
 @dataclass
@@ -123,6 +140,76 @@ def _methods_of(decorators: list[tuple[Guard, Node]], source: bytes) -> tuple[st
     return None
 
 
+def _names(node: Node | None, source: bytes, origins: Origins) -> tuple[Guard, ...] | None:
+    """A literal list / tuple of class names (``[IsAuthenticated, perms.IsOwner]``) as guards;
+    None when it is anything else."""
+    if node is None or node.type not in ("list", "tuple"):
+        return None
+    out: list[Guard] = []
+    for item in node.named_children:
+        if item.type not in ("identifier", "attribute"):
+            return None
+        written = node_text(item, source)
+        out.append((written, origins.qualified(written) or ""))
+    return tuple(out)
+
+
+def _api_view(decorators: list[tuple[Guard, Node]], source: bytes) -> tuple[str, ...] | None:
+    for (written, origin), expr in decorators:
+        if short(written) != "api_view" or not origin.startswith("rest_framework"):
+            continue
+        args = positional(expr) if expr.type == "call" else []
+        value = args[0] if args else (keyword(expr, source, "http_method_names") if expr.type == "call" else None)
+        values = string_list(value, source) if value is not None else None
+        return tuple(dict.fromkeys(v.upper() for v in values)) if values else ("GET",)
+    return None
+
+
+def _permission_decorator(decorators: list[tuple[Guard, Node]], source: bytes,
+                          origins: Origins) -> tuple[Guard, ...] | None:
+    for (written, origin), expr in decorators:
+        if short(written) == "permission_classes" and origin.startswith("rest_framework") \
+                and expr.type == "call" and positional(expr):
+            return _names(positional(expr)[0], source, origins)
+    return None
+
+
+def _action(decorators: list[tuple[Guard, Node]], source: bytes
+            ) -> tuple[bool | None, tuple[str, ...], str | None] | None:
+    """A DRF ``@action(…)``: (detail, verbs, url path)."""
+    for (written, origin), expr in decorators:
+        if short(written) != "action" or not origin.startswith("rest_framework"):
+            continue
+        detail_node = keyword(expr, source, "detail") if expr.type == "call" else None
+        detail = {"True": True, "False": False}.get(node_text(detail_node, source)) \
+            if detail_node is not None else None
+        methods_node = keyword(expr, source, "methods") if expr.type == "call" else None
+        methods = string_list(methods_node, source) if methods_node is not None else ["get"]
+        url_node = keyword(expr, source, "url_path") if expr.type == "call" else None
+        url_path = literal(url_node, source) if url_node is not None else None
+        verbs = tuple(dict.fromkeys(m.upper() for m in methods)) if methods is not None else ()
+        if url_node is not None and url_path is None:
+            detail = None  # a path that is not a literal: no address
+        return detail, verbs, url_path
+    return None
+
+
+def _class_attributes(view: "ClassView", body: Node, source: bytes, origins: Origins) -> None:
+    for member in body.named_children:
+        assign = member.named_children[0] if member.type == "expression_statement" and member.named_children else member
+        left = assign.child_by_field_name("left") if assign.type == "assignment" else None
+        if left is None or left.type != "identifier":
+            continue
+        name, right = node_text(left, source), assign.child_by_field_name("right")
+        if name == "permission_classes":
+            view.permissions = _names(right, source, origins)
+            view.permissions_unknown = view.permissions is None
+        elif name == "serializer_class" and right is not None and right.type in ("identifier", "attribute"):
+            view.serializer = node_text(right, source)
+        elif name in ("lookup_field", "lookup_url_kwarg"):
+            setattr(view, name, literal(right, source))
+
+
 def _base(node: Node, source: bytes, rel: str, local: set[str],
           imports: dict[str, tuple[str, ...]], origins: Origins) -> Base:
     written = node_text(node, source)
@@ -161,10 +248,12 @@ def _class(cdef: Node, decorated: Node | None, source: bytes, rel: str, local: s
         fdef = member.child_by_field_name("definition") if member.type == "decorated_definition" else member
         if fdef is None or fdef.type != "function_definition":
             continue
-        decorators = [g for guard, expr in (_decorators(member, source, origins)
-                                            if member.type == "decorated_definition" else [])
-                      for g in _unwrap_method_decorator(guard, expr, source, origins)]
-        view.methods[field_text(fdef, "name", source)] = Method(fdef.start_point[0] + 1, tuple(decorators))
+        raw = _decorators(member, source, origins) if member.type == "decorated_definition" else []
+        decorators = [g for guard, expr in raw for g in _unwrap_method_decorator(guard, expr, source, origins)]
+        view.methods[field_text(fdef, "name", source)] = Method(
+            fdef.start_point[0] + 1, tuple(decorators), _action(raw, source))
+    if body is not None:
+        _class_attributes(view, body, source, origins)
     return view
 
 
@@ -190,6 +279,8 @@ def file_views(root: Node, source: bytes, rel: str, repo_root: Path | None) -> F
             decorators=tuple(g for guard, expr in decorators
                              for g in _unwrap_method_decorator(guard, expr, source, origins)),
             methods=_methods_of(decorators, source),
+            api_view=_api_view(decorators, source),
+            permissions=_permission_decorator(decorators, source, origins),
         )
     return out
 
@@ -220,9 +311,23 @@ class ResolvedClass:
     decorators: tuple[Guard, ...] = ()
     #: The class's bases, in method resolution order (repo classes as ``("repo", file, name)``).
     mro: tuple[Base, ...] = ()
+    #: A DRF view (a base from ``rest_framework``).
+    drf: bool = False
+    #: A DRF viewset: routed by action, not by verb.
+    viewset: bool = False
+    #: Viewset action (``list``, …) → its handler.
+    actions: dict[str, Handler] = field(default_factory=dict)
+    #: ``@action`` methods: name → (handler, detail, verbs, url path).
+    extra: dict[str, tuple[Handler, bool | None, tuple[str, ...], str | None]] = field(default_factory=dict)
+    #: ``permission_classes`` of the class or the nearest base that sets it; None when none
+    #: does (DRF's default applies) — ``()`` when one sets something that is not a literal list.
+    permissions: tuple[Guard, ...] | None = None
+    #: ``serializer_class``; None when not set or when ``get_serializer_class`` chooses it.
+    serializer: str | None = None
+    lookup: str = "pk"
 
 
-def linearize(views: dict[str, FileViews], key: tuple[str, str]) -> list[Base]:
+def linearize(views: Mapping[str, FileViews], key: tuple[str, str]) -> list[Base]:
     """The class and its bases in method resolution order (depth first, left to right, each
     once — Python's C3 order for the single and mixin inheritance views use)."""
     out: list[Base] = []
@@ -246,7 +351,7 @@ def is_django_view(origin: str) -> bool:
     return origin.startswith(DJANGO_VIEW_MODULES)
 
 
-def resolve_class(views: dict[str, FileViews], file: str, name: str) -> ResolvedClass | None:
+def resolve_class(views: Mapping[str, FileViews], file: str, name: str) -> ResolvedClass | None:
     """The verbs a class-based view handles and who handles each, or None when the class is not
     in ``views``."""
     cls = views.get(file, FileViews()).classes.get(name)
@@ -273,12 +378,72 @@ def resolve_class(views: dict[str, FileViews], file: str, name: str) -> Resolved
                 if verb not in out.verbs:
                     out.verbs[verb] = Handler("get" if verb == "ANY" else verb.lower(), file, cls.line,
                                               inherited=True)
+        elif base[0] == "lib" and base[1].startswith(drf.MODULE):
+            _drf_base(views, out, short(base[1]))
+    if out.drf:
+        _drf_class(views, out)
     if "ANY" in out.verbs:  # RedirectView: every verb, whatever else is overridden
         out.verbs = {"ANY": out.verbs["ANY"]}
     if not out.verbs and dispatch is not None:
         out.verbs["ANY"] = dispatch
     out.decorators = tuple(decorators)
     return out
+
+
+def _repo_classes(views: Mapping[str, FileViews], resolved: ResolvedClass) -> list[tuple[str, ClassView]]:
+    out = []
+    for base in resolved.mro:
+        cls = views.get(base[1], FileViews()).classes.get(base[2]) if base[0] == "repo" else None
+        if cls is not None:
+            out.append((base[1], cls))
+    return out
+
+
+def _override(views: Mapping[str, FileViews], resolved: ResolvedClass, name: str) -> Handler | None:
+    """The repo's own definition of method ``name``, nearest first."""
+    for file, cls in _repo_classes(views, resolved):
+        method = cls.methods.get(name)
+        if method is not None:
+            return Handler(name, file, method.line, method.decorators)
+    return None
+
+
+def _drf_base(views: Mapping[str, FileViews], out: ResolvedClass, name: str) -> None:
+    """What a DRF base adds: a generic API view's verbs, a viewset's actions."""
+    out.drf = True
+    out.viewset = out.viewset or name in drf.VIEWSET_BASES
+    for verb, action in drf.API_VIEWS.get(name, ()):
+        if verb not in out.verbs:  # an overridden action (``def list``) handles it
+            out.verbs[verb] = _override(views, out, action) or Handler(action, out.file, out.line, inherited=True)
+    for action in drf.VIEWSET_ACTIONS.get(name, ()):
+        if action not in out.actions:
+            out.actions[action] = _override(views, out, action) or Handler(action, out.file, out.line,
+                                                                           inherited=True)
+
+
+def _drf_class(views: Mapping[str, FileViews], out: ResolvedClass) -> None:
+    """DRF attributes, nearest class first: actions defined in the repo, ``@action`` methods,
+    ``permission_classes``, ``serializer_class`` and the lookup."""
+    classes = _repo_classes(views, out)
+    lookup_field = lookup_kwarg = None
+    for file, cls in classes:
+        for name, method in cls.methods.items():
+            if out.viewset and name in drf.ACTION_ROUTES and name not in out.actions:
+                out.actions[name] = Handler(name, file, method.line, method.decorators)
+            if method.action is not None and name not in out.extra:
+                detail, verbs, url_path = method.action
+                out.extra[name] = (Handler(name, file, method.line, method.decorators), detail, verbs, url_path)
+        if out.permissions is None and (cls.permissions is not None or cls.permissions_unknown):
+            out.permissions = cls.permissions or ()
+        if out.serializer is None:
+            out.serializer = cls.serializer
+        lookup_field = lookup_field or cls.lookup_field
+        lookup_kwarg = lookup_kwarg or cls.lookup_url_kwarg
+    if any("get_serializer_class" in cls.methods for _, cls in classes):
+        out.serializer = None
+    out.lookup = lookup_kwarg or lookup_field or "pk"
+    if out.viewset:  # a viewset answers by action: its verbs come from the router or as_view()
+        out.verbs = {}
 
 
 def known_bases(resolved: ResolvedClass) -> bool:

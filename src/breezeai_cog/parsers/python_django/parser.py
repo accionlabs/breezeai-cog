@@ -10,6 +10,7 @@ from ..emits import apply
 from ..python.parser import PythonParser
 from ..python_common import Origins
 from ..treesitter import parse_source
+from . import drf
 from .urls import FRAMEWORK, detect_urls
 
 
@@ -31,9 +32,23 @@ class DjangoParser(PythonParser):
                                  repo_root=ctx.repo_root)
             if routes:
                 apply(record, routes, ctx.source, ctx.path)
-        if routes or Origins(root, ctx.source).imports_package("django"):
-            record.framework = self.label(root, ctx)
+        origins = Origins(root, ctx.source)
+        if origins.imports_package("rest_framework"):
+            record.framework = drf.FRAMEWORK
+        elif routes or origins.imports_package("django"):
+            record.framework = FRAMEWORK
         return record
 
-    def label(self, root: object, ctx: ParseContext) -> str:
-        return FRAMEWORK
+
+class DRFParser(DjangoParser):
+    """Django REST framework files: the Django parser's detection (DRF views reached through
+    ``path()`` are recorded with ``framework: drf``), owning the files that import DRF so they are
+    labelled ``drf``. Router registrations are recorded by the additive ``drf-routers`` detector
+    (``routers.py``), wherever they are."""
+
+    name = "python-drf"
+    priority = 9  # built on Django: wins a file both claim
+    frameworks = [drf.FRAMEWORK]
+
+    def claims(self, path: str, source: bytes) -> bool:
+        return b"rest_framework" in source
