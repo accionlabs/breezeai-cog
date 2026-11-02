@@ -141,23 +141,44 @@ def _dispatch(name: str, suffix: str, text: str) -> dict[str, Any]:
 
 def _dnn_manifest(text: str) -> dict[str, Any]:
     root = ET.fromstring(text)
+
     def local(tag: str) -> str:
         return tag.rsplit("}", 1)[-1].lower()
+
+    def child_text(element: ET.Element, name: str) -> str | None:
+        return next(
+            ((child.text or "").strip() for child in element if local(child.tag) == name),
+            None,
+        )
+
     module = next(
         (
-            child.text.strip()
-            for child in root.iter()
-            if local(child.tag) in {"foldername", "modulename", "name"} and child.text
+            (element.text or "").strip()
+            for element in root.iter()
+            if local(element.tag) == "foldername" and element.text and element.text.strip()
         ),
         None,
     )
+    if module is None:
+        module = next(
+            (
+                (element.text or "").strip()
+                for element in root.iter()
+                if local(element.tag) == "modulename" and element.text and element.text.strip()
+            ),
+            None,
+        )
     controls = []
     for element in root.iter():
         if local(element.tag) != "modulecontrol":
             continue
-        key = next((v for k, v in element.attrib.items() if local(k) == "controlkey"), None)
-        source = next((v for k, v in element.attrib.items() if local(k) == "controlsrc"), None)
-        if key and source:
+        key = child_text(element, "controlkey")
+        source = child_text(element, "controlsrc")
+        if key is None:
+            key = next((v for k, v in element.attrib.items() if local(k) == "controlkey"), None)
+        if source is None:
+            source = next((v for k, v in element.attrib.items() if local(k) == "controlsrc"), None)
+        if key is not None and source:
             controls.append({"controlKey": key, "source": source})
     return {
         "kind": "dnn-manifest",
@@ -175,7 +196,8 @@ def _package_json(text: str) -> dict[str, Any]:
     deps = dict(d.get("dependencies") or {})
     dev = dict(d.get("devDependencies") or {})
     workspace_deps = sorted(
-        name for name, spec in {**deps, **dev}.items()
+        name
+        for name, spec in {**deps, **dev}.items()
         if isinstance(spec, str) and spec.startswith(("workspace:", "file:", "link:"))
     )
     return {
@@ -210,7 +232,9 @@ def _tsconfig(name: str, text: str) -> dict[str, Any]:
             "outDir": co.get("outDir"),
             "rootDir": co.get("rootDir"),
             "strict": co.get("strict"),
-            "paths": dict(co.get("paths") or {}),  # alias → targets (targets are what a resolver needs)
+            "paths": dict(
+                co.get("paths") or {}
+            ),  # alias → targets (targets are what a resolver needs)
             "baseUrl": co.get("baseUrl"),
             "extends": d.get("extends"),
             "include": d.get("include"),

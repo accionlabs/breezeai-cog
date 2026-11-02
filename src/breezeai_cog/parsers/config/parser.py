@@ -62,7 +62,9 @@ class ConfigParser(BaseParser):
         name = Path(path).name  # glob-style config names the registry can't express
         if name.startswith("Dockerfile.") or name.startswith(".env."):
             return True
-        return is_dotnet_config(name)  # Web.config / App.config (+ transforms) — one source of truth
+        return is_dotnet_config(
+            name
+        )  # Web.config / App.config (+ transforms) — one source of truth
 
     def parse_file(self, ctx: ParseContext) -> FileRecord:
         text = ctx.source.decode("utf-8", "replace")

@@ -52,7 +52,9 @@ class WebFormsParser(CSharpParser):
     # Own the markup files too, so ``.aspx``/``.ascx``/``.master`` get a File node (was skipped).
     extensions: tuple[str, ...] = (*CSharpParser.extensions, *_MARKUP_EXT)
     template_extensions: tuple[str, ...] = _MARKUP_EXT  # the markup half only — .cs stays
-    priority = 10  # framework parser > base csharp (0); disjoint claims from csharp-aspnet
+    # DNN controllers commonly import System.Web.Http, so they also match csharp-aspnet.
+    # DNN must win that overlap; ordinary Web Forms files remain at the same parser behavior.
+    priority = 15
     frameworks = ["aspnet-webforms", "dnn"]
     # C# statement types + the markup nodes the Step-1 markup pass emits (capabilities honesty).
     statement_types = [*CSharpParser.statement_types, "element", "attribute"]
@@ -119,16 +121,20 @@ class WebFormsParser(CSharpParser):
             elif b"IServiceRouteMapper" in ctx.source:
                 record.framework = "dnn"
             routes = detect_webforms_pages(
-                record, root, ctx.path, page_routes(ctx.resolution_index))
+                record, root, ctx.path, page_routes(ctx.resolution_index)
+            )
             apply(record, routes, ctx.source, ctx.path)
             # A page, a user control, or a file composed into a master page is Web Forms code.
-            if routes or master_ep is not None or ctx.path.lower().endswith(".ascx.cs"):
+            if record.framework is None and (
+                routes or master_ep is not None or ctx.path.lower().endswith(".ascx.cs")
+            ):
                 record.framework = "aspnet-webforms"
             # Page→page navigation → routeKind=navigation statements (item 4).
             nav = detect_navigation(record, ctx.path, root, ctx.source, markup, ctx.repo_root)
             if nav:
                 apply(record, nav, ctx.source, ctx.path)
-                record.framework = "aspnet-webforms"
+                if record.framework is None:
+                    record.framework = "aspnet-webforms"
         # Cross-file IMPORTS edges (core field, NOT statement-gated): host→control mounts +
         # page→master composition. Deduped against existing imports, sorted for determinism.
         imports = resolve_mounts(markup, ctx.path, ctx.source, ctx.repo_root)

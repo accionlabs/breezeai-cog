@@ -10,6 +10,11 @@ from breezeai_cog.schemas import FileRecord
 CONTROLLER = b"""
 using DotNetNuke.Web.Api;
 namespace Demo {
+  public class RouteMapper : IServiceRouteMapper {
+    public void RegisterRoutes(IMapRoute map) {
+      map.MapHttpRoute("Demo", "default", "{controller}/{action}");
+    }
+  }
   public class OrdersController : DnnApiController {
     [DnnAuthorize] public object List() { return null; }
     [AllowAnonymous] [ValidateAntiForgeryToken] public object Preview() { return null; }
@@ -49,19 +54,44 @@ def test_dnn_manifest_mounts_portal_control(tmp_path: Path) -> None:
     module.mkdir(parents=True)
     (module / "Demo.dnn").write_text(
         "<dotnetnuke><foldername>Demo</foldername>"
-        '<moduleControl controlKey="Orders" controlSrc="DesktopModules/Demo/Orders.ascx" />'
+        "<moduleControl><controlKey>Orders</controlKey>"
+        "<controlSrc>DesktopModules/Demo/Orders.ascx</controlSrc></moduleControl>"
         "</dotnetnuke>",
         encoding="utf-8",
     )
     (module / "Orders.ascx").write_text("<%@ Control %>", encoding="utf-8")
     (module / "Orders.ascx.cs").write_bytes(CONTROL)
     records = _records(tmp_path)
-    mounts = [
-        s for r in records for s in r.statements
-        if s.routeKind == "mount"
-    ]
+    mounts = [s for r in records for s in r.statements if s.routeKind == "mount"]
     assert [(s.endpoint, s.handler) for s in mounts] == [
         ("/DesktopModules/Demo/Orders", "OrdersView")
     ]
     manifest = next(r for r in records if r.path.endswith("Demo.dnn"))
     assert manifest.importFiles == ["DesktopModules/Demo/Orders.ascx"]
+
+
+def test_dnn_manifest_preserves_empty_default_control_key(tmp_path: Path) -> None:
+    module = tmp_path / "DesktopModules" / "Nested" / "Demo"
+    module.mkdir(parents=True)
+    (module / "Demo.dnn").write_text(
+        "<dotnetnuke><moduleName>DemoPackage</moduleName>"
+        "<foldername>Nested/Demo</foldername><moduleControl>"
+        "<controlKey /><controlSrc>DesktopModules/Nested/Demo/View.ascx</controlSrc>"
+        "</moduleControl></dotnetnuke>",
+        encoding="utf-8",
+    )
+    (module / "View.ascx").write_text("<%@ Control %>", encoding="utf-8")
+    (module / "View.ascx.cs").write_bytes(CONTROL)
+    records = _records(tmp_path)
+    mounts = [s for r in records for s in r.statements if s.routeKind == "mount"]
+    assert [(s.endpoint, s.handler) for s in mounts] == [
+        ("/DesktopModules/Nested/Demo/", "OrdersView")
+    ]
+
+
+def test_dnn_non_controller_mention_is_not_a_route(tmp_path: Path) -> None:
+    (tmp_path / "Mention.cs").write_bytes(
+        b'class Mention { string Text = "DnnApiController PortalModuleBase"; }'
+    )
+    records = _records(tmp_path)
+    assert not [s for r in records for s in r.statements if s.framework == "dnn"]
