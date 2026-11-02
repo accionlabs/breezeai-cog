@@ -353,7 +353,7 @@ def test_pipeline_aggregates_composer_metadata_and_dependency_counts(tmp_path) -
     result = AnalysisService(Settings(jobs=1, out=tmp_path / "out")).analyze_repo(tmp_path)
     records = [json.loads(x) for x in gzip.open(result.out_path, "rt").read().splitlines()]
     meta = records[0]
-    composer = next(record for record in records if record["path"] == "composer.json")
+    composer = next(record for record in records if record.get("path") == "composer.json")
     assert composer["language"] == "config"
     assert composer["metadata"]["packageInfo"]["name"] == "acme/example"
     assert meta["configs"]["packageManagers"] == ["composer"]
