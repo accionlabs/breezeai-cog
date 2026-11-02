@@ -342,3 +342,20 @@ class Api extends io.vertx.core.AbstractVerticle {
 """
     rec = _parse(tmp_path, src, "src/Api.groovy")
     assert _routes(rec) == {("GET", "/admin/stats")}  # no record for the mount route itself
+
+
+def test_routematcher_variable_detected_by_type_and_worker_deploy(tmp_path) -> None:
+    """A ``def routes = new RouteMatcher()`` is a router whatever it is called, and the 2.x
+    ``deployWorkerVerticle`` is a ``verticle_deploy`` like ``deployVerticle``."""
+    src = b"""import org.vertx.groovy.core.http.RouteMatcher
+class G extends org.vertx.groovy.platform.Verticle {
+  def start() {
+    def routes = new RouteMatcher()
+    routes.get("/g/x") { req -> }
+    container.deployWorkerVerticle("p3.GW")
+  }
+}
+"""
+    rec = _parse(tmp_path, src, "G.groovy")
+    assert _routes(rec) == {("GET", "/g/x")}
+    assert [s.endpoint for s in rec.statements if s.semanticType == "verticle_deploy"] == ["p3.GW"]

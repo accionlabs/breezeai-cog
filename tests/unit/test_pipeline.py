@@ -76,7 +76,7 @@ def test_capabilities() -> None:
     caps = capabilities()
     assert "python" in caps["languages"]
     assert ".py" in caps["extensions"]
-    assert caps["schemaVersion"] == "2.3"
+    assert caps["schemaVersion"] == "2.4"
 
 
 def test_run_reports_progress(tmp_path) -> None:

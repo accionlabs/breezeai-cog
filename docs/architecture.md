@@ -125,7 +125,8 @@ Usage details are in the [User Guide](USER_GUIDE.md).
 ```mermaid
 flowchart TD
   A[Repository on disk] --> B["1 · Scan<br/>walk folders, apply ignores,<br/>classify by extension<br/><i>paths only, no file reads</i>"]
-  B --> C["2 · Build indexes<br/>once per language, optional"]
+  B --> O["1b · Decide shared files<br/>an extension two languages register<br/><i>e.g. .h: C or C++</i>"]
+  O --> C["2 · Build indexes<br/>once per language, optional"]
   C --> D["3 · Parse pool (parallel)"]
   subgraph D3 [" for each file, in a worker process "]
     D1[read file] --> D2["choose ONE parser<br/>claims + priority"] --> D4["parse once<br/>(tree-sitter)"] --> D5["extract<br/>classes · functions · statements"] --> D6["framework / additive<br/>detection"] --> D8["link handlers<br/>(handlerPath / handlerLine)"] --> D7[prune edges to<br/>skipped templates]
@@ -139,6 +140,7 @@ flowchart TD
 | Stage | Code | Runs | Cost |
 |---|---|---|---|
 | 1. Scan | `core/scanner.py`, `core/ignore.py`, `core/pipeline.py` | Once, main process | One directory walk |
+| 1b. Decide shared files | `core/ownership.py` | Once, only when a shared extension is present (may fan out) | One byte read of the competing languages' files |
 | 2. Build indexes | `BaseParser.build_index`, `pipeline._build_indexes` | Once per language, main process (may fan out) | Optional; usually one parse per file of that language |
 | 3. Parse | `core/executor.py`, `core/registry.py`, `parsers/**` | Once per file, in parallel | One parse + a fixed number of tree walks |
 | 4. Assemble | `pipeline._assemble`, `emit/split.py` | Streaming, main process | Linear in output |
@@ -178,7 +180,8 @@ Ignore rules come in layers. A path is kept when it is **included, or not ignore
 > **Why:** a large repo can have hundreds of thousands of files; reading each one just to
 > decide whether to parse it would double the I/O. **Cost:** a file is classified by its
 > extension, so a file with an unusual extension is reported as `unsupported` even if its
-> content is a known language.
+> content is a known language. The one exception comes after the scan: a file whose extension
+> two languages register gets its language from the repo's content ([§4.1b](#41b-files-two-languages-register)).
 
 > **Decision —** language ignore rules are applied after the walk, and only to files of that language.
 > **Why:** a rule that makes sense for one language breaks another. C#'s NuGet `packages/`
@@ -194,6 +197,31 @@ Ignore rules come in layers. A path is kept when it is **included, or not ignore
 Every skipped file is recorded with its reason in a `<repo>-skipped-report.json` sidecar, so a
 reviewer can explain every skipped extension.
 
+### 4.1b Files two languages register
+
+An extension normally belongs to one language. `.h` belongs to both C and C++, and most headers
+are valid in both, so the path can't decide it. For such a **shared** file the scan leaves the
+language open, and the ownership step (`core/ownership.py`) decides it once for the whole repo:
+
+```
+lib/list.h  ── included by lib/list.c (C) and app/main.cpp (C++) ──▶  C
+app/view.h  ── included by app/main.cpp only ──────────────────────▶  C++
+app/shape.h ── contains `class Shape {` ───────────────────────────▶  C++
+```
+
+The rules, in order: syntax only one language allows → the languages of the files that include
+it → the languages of its folder, then the repo → a declared default. Each language supplies
+its evidence through `BaseParser.ownership`. The decision then drives everything after it: the
+file's `language`, the index it joins and the parser that reads it.
+
+> **Decision —** a shared file's language is decided from the whole repo, before indexing.
+> **Why:** what settles `.h` (who includes it) is not in the file, so neither the path nor a
+> per-file `claims()` can settle it. **Cost:** when a shared extension is present, the competing
+> languages' files are read once more, as bytes; a header's language can change when the files
+> that include it change.
+
+Full design: [Shared extensions and related languages](architecture/shared-extensions-and-related-languages.md).
+
 ### 4.2 Repo-wide indexes
 
 Some facts can't be known from one file. For example, which file defines
@@ -202,6 +230,17 @@ parsing**, and returns data that every worker receives. Today it is used for thi
 fully-qualified names and constants, TypeScript path aliases, and C#/VB class inheritance.
 Additive detectors can add their own facts to it by registering them (`register_fact`,
 [§6](#6-the-parser-model)), so framework rules never have to live in the language's index code.
+
+A parser reads its own language's index, and after it the indexes of the languages it lists in
+`related_languages`: C++ reads the C index, so a C++ call to a function defined in a `.c` file
+resolves, and C reads the C++ index for the functions defined in `extern "C"`.
+
+> **Decision —** a parser reads related languages' indexes only after its own, and binds a name
+> from them only when they agree on one file.
+> **Why:** languages that call each other (C and C++) need each other's definitions, but a link
+> that resolves in the caller's own language today must keep resolving the same way. Each index
+> stays as it is, built by its own language. **Cost:** a name the caller's own language defines
+> never reaches a related language's definition; lookups across languages are by name only.
 
 > **Decision —** cross-file data is built once in a separate pre-pass, not shared between workers while parsing.
 > **Why:** workers then share no mutable state, so files can be parsed in any order, in
@@ -232,6 +271,9 @@ flowchart TD
 ```
 
 Rules:
+- The candidates are the parsers of the file's language. For a file whose extension two
+  languages register (`.h`), that is the language the ownership step decided
+  ([§4.1b](#41b-files-two-languages-register)), so a C header never goes to a C++ framework parser.
 - The language parser has priority 0 and claims everything, so every file has an owner.
 - A framework parser claims a file with a **cheap content check** (a substring search).
 - If a framework is built on another one, it gets a **higher** priority, so the derived
@@ -277,6 +319,10 @@ copying code.
 > **Why:** a single pathological file (generated or minified code) must not stall the run. The
 > limit is enforced inside tree-sitter, so it works on every OS. **Cost:** that file is
 > recorded as failed and has no record.
+>
+> The repo-wide index pre-pass (§4.2) gets the same limit when the language parser sets
+> `build_index_accepts_timeout` (C and C++ today); a file past it is left out of the index and
+> logged. Other languages' index parses are not bounded yet.
 
 ### 4.5 Parallel execution
 
@@ -478,7 +524,7 @@ classDiagram
 > file and needed in another. A registered fact keeps it in the framework's own module and in the
 > same registry as every other add-on, instead of a framework field on the language index or a new
 > parser-selection hook. **Cost:** a language must call `collect_additive` / `resolve_additive`
-> from its `build_index` to offer it (`INDEX_HOOKED_LANGUAGES`: C#, Go, GraphQL, Groovy, Java, Python, Ruby, Scala, TypeScript), and a detector that
+> from its `build_index` to offer it (`INDEX_HOOKED_LANGUAGES`: Apex, C, C++, C#, Go, GraphQL, Groovy, Java, PHP, Python, Ruby, Scala, TypeScript), and a detector that
 > emits for files with no marker cannot use a byte guard. Details:
 > [cross-file resolution §8](architecture/cross-file-resolution.md#a-framework-fact-from-another-file-a-registered-fact).
 
@@ -958,6 +1004,7 @@ src/breezeai_cog/
 │  ├─ detection/                   shared api / db / query classifiers
 │  ├─ vertx_common.py, dotnet_common.py, aspnet_common.py, aspnet_areas.py, quartz_common.py
 │  │                               helpers shared by one framework family
+│  ├─ cfamily_common/              the extraction and index C and C++ share
 │  ├─ <lang>/                      language parsers
 │  └─ <lang>_<framework>/          framework parsers
 ├─ emit/                           ids, NDJSON, gzip, sinks, statement splitting
@@ -984,7 +1031,8 @@ flowchart TD
 Dependencies point **one way**: entry points → services → core → parsers → schemas. Parsers
 never import from `core/`, `services/` or `server/`. Code shared between framework parsers
 should live in a shared module (like `vertx_common.py`) rather than one framework importing
-from another.
+from another. The same holds between languages: C and C++ share their extraction through
+`cfamily_common/`, which each subclasses with its own grammar, index and evidence.
 
 **Change zones.** How much review a change needs depends on where it lands:
 
@@ -993,7 +1041,7 @@ from another.
 | **Parser-local** | `parsers/<lang>_<framework>/`, its test file | That parser only |
 | **Language parser** | `parsers/<lang>/` | Every framework built on that language |
 | **Additive detector** | a module that calls `register_detector(...)` or `register_fact(...)`, or a changed `Gate` (`order`, `skip_fixtures`, `guard`) | Every file of that language, whichever parser owns it |
-| **Shared helper** | e.g. `parsers/vertx_common.py`, `quartz_common.py`, `aspnet_areas.py`, `handler_sites.py`, `aws_deploy.py` | Every parser that imports it |
+| **Shared helper** | e.g. `parsers/vertx_common.py`, `quartz_common.py`, `cfamily_common/` (C and C++), `aspnet_areas.py`, `handler_sites.py`, `aws_deploy.py` | Every parser that imports it |
 | **Core** | `schemas/`, `core/`, `emit/`, `parsers/base.py`, `treesitter.py`, `statements_common.py`, `comments_common.py`, `callresolve.py`, `constfold.py`, `index_common.py`, `additive.py`, `emits.py`, `enclosing.py`, `wiring.py`, `contract.py`, `detection/`, `cli.py`, `config.py` | Every parser — an architectural change |
 
 > **Decision —** parser-specific code stays in the parser's own directory.
@@ -1021,11 +1069,13 @@ from another.
 |---|---|---|
 | Scope | Static, read-only analysis; nothing is executed | [§1](#1-what-cog-is-and-is-not) |
 | Scope | cog writes a file; the backend builds the graph | [§1](#1-what-cog-is-and-is-not) |
-| Scan | Classify by path only; never read files during the scan | [§4.1](#41-scanning-and-file-selection) |
+| Scan | Classify by path only; never read files during the scan (exception: shared extensions, below) | [§4.1](#41-scanning-and-file-selection) |
+| Scan | A file whose extension two languages register gets its language from the whole repo, after the scan and before indexing | [§4.1b](#41b-files-two-languages-register) |
 | Scan | Language ignore rules are scoped to that language, after the walk | [§4.1](#41-scanning-and-file-selection) |
 | Scan | Template (markup) files are off by default | [§4.1](#41-scanning-and-file-selection) |
 | Index | Cross-file data is built once, before parsing; workers share nothing | [§4.2](#42-repo-wide-indexes) |
 | Index | Ambiguous entries become empty | [§4.2](#42-repo-wide-indexes) |
+| Index | A parser reads related languages' indexes after its own; they bind a name only when they agree | [§4.2](#42-repo-wide-indexes) |
 | Selection | One parser per file, chosen by `claims` + `priority` | [§4.3](#43-choosing-one-parser-per-file) |
 | Selection | Ownership is decided by a cheap substring check | [§4.3](#43-choosing-one-parser-per-file) |
 | Parsing | tree-sitter for every language | [§4.4](#44-parsing-and-extraction) |

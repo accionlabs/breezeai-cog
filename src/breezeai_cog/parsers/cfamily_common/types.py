@@ -1,4 +1,4 @@
-"""C++ receiver-type inference — the variable/member → class-type map that lets an
+"""C and C++ receiver-type inference — the variable/member → class-type map that lets an
 ``obj.method()`` / ``obj->method()`` call resolve to the class that declares the method.
 
 Precision-first (the extend-capture reliability rule: a wrong type is a wrong edge):

@@ -16,7 +16,8 @@ from typing import Any
 # 2.2: Statement.platform (IaC cloud provider) and Statement.endpoint (Terraform address);
 #      iac_data semantic type; module blocks yield Class records.
 # 2.3: additive optional `Statement.handlerPath` (the handler's file, when it is another file).
-SCHEMA_VERSION = "2.3"
+# 2.4: additive optional `Class.alias` (a C/C++ typedef'd type's tag).
+SCHEMA_VERSION = "2.4"
 
 
 def export_json_schema() -> dict[str, Any]:

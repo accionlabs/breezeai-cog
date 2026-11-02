@@ -69,6 +69,7 @@ from ..vertx_common import (
     join_path,
     method_lines,
     render_address,
+    router_vars,
     service_builder_vars,
     sub_router_bases,
 )
@@ -214,12 +215,14 @@ def _classify(
     consts: dict[str, str],
     aliases: dict[str, SemanticType],
     service_vars: dict[str, str] | None = None,
+    routers: frozenset[str] = frozenset(),
 ) -> tuple[SemanticType, str | None, str | None, str | None] | None:
     """→ (semanticType, method, endpoint, routeKind) or None. Falls back to an alias-wrapper
     match (``aliases``) when the direct decision table does not classify the call — the
     address is the wrapper call's own first argument, folded like any other."""
     method, first_str, first_arg, obj = _parts(call, source, consts)
-    info = classify_call(method, first_str, first_arg, obj, service_vars=service_vars)
+    info = classify_call(method, first_str, first_arg, obj, service_vars=service_vars,
+                         routers=routers)
     if info is not None:
         return info
     semantic = aliases.get(method)
@@ -422,6 +425,18 @@ def _registered_impl(call: Node, source: bytes) -> str | None:
     return None
 
 
+def _handler_class(arg: Node | None, source: bytes) -> str | None:
+    """The class of a handler given as ``new LoadHandler(…)`` (no anonymous body) — passed
+    directly or through a local assigned once in the enclosing method — else None."""
+    if arg is not None and arg.type == "identifier":
+        arg = _local_value(arg, node_text(arg, source), source)
+    if arg is None or arg.type != "object_creation_expression" \
+            or any(c.type == "class_body" for c in arg.named_children):
+        return None
+    typ = arg.child_by_field_name("type")
+    return node_text(typ, source).split("<", 1)[0] if typ is not None else None
+
+
 def _local_value(at: Node, name: str, source: bytes) -> Node | None:
     """The value given to ``name`` in the method enclosing ``at`` — a local initializer or an
     assignment (``impl = new Impl()``, also to a field) — when exactly one is found."""
@@ -491,13 +506,14 @@ def detect_vertx(
     # Routers a method of this file creates and returns: served where their factory is mounted.
     factories = _factory_routers(root, source) if b"Router.router" in source else {}
     service_vars = service_builder_vars(source) if b"setAddress" in source else {}
+    routers = router_vars(source)
 
     for call in calls:
         if (call.start_byte, call.end_byte) in suppress:  # wrapper plumbing → honest-null
             continue
         if (call.start_byte, call.end_byte) in mount_routes:  # a sub-router's mount path: wiring
             continue
-        info = _classify(call, source, consts, aliases, service_vars)
+        info = _classify(call, source, consts, aliases, service_vars, routers)
         if info is None:
             continue
         semantic, method, endpoint, route_kind = info
@@ -534,6 +550,12 @@ def detect_vertx(
             handlers = list(names) or [handler]
             # The code that runs is the implementing class's method (usually another file).
             impl = _registered_impl(call, source) if names else None
+        elif handler is None and semantic in HANDLER_SEMANTICS:
+            # `registerHandler(addr, new LoadHandler(eb))`: a Vert.x `Handler` has one method,
+            # so the code that runs is that class's `handle` (usually another file).
+            impl = _handler_class(_handler_arg(call, source), source)
+            if impl:
+                handlers = ["handle"]
 
         def site(name: str | None) -> tuple[int | None, str | None]:
             return handler_location(locate_method(index, "java", impl, name) if impl else None,

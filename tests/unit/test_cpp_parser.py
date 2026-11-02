@@ -582,15 +582,16 @@ def test_type_alias_declarator_forms_and_using_imports(tmp_path) -> None:
         ("type_definition", "Callback"),   # (*Callback)(int, int) -> Callback
         ("type_definition", "Buf"),        # Buf[16] -> Buf
         ("type_definition", "A"),          # multi-name: first name, both on `text`
-        ("type_definition", "Point"),      # typedef of an anonymous struct
+        ("field_declaration", "x"),        # a typedef'd struct is a class (below), not an alias
         ("alias_declaration", "Ptr"),      # alias template, unwrapped from the template
     ]
+    assert [(c.name, c.type) for c in rec.classes] == [("Point", "struct")]
     assert next(s for s in rec.statements if s.name == "A").text == "typedef int A, B;"
 
 
-def test_file_scope_prototypes_and_forward_decls_not_constants(tmp_path) -> None:
-    # The grammar spells a function prototype with the same `declaration` node as a
-    # constant, so only declarations without a function_declarator are values. Forward
+def test_file_scope_prototypes_are_declarations_and_forward_decls_are_not(tmp_path) -> None:
+    # A function prototype and a constant are both a `declaration`: each is a plain statement
+    # named after what it declares, and a prototype is never a Function. Forward
     # declarations are a class/struct/enum specifier and stay out entirely; `typedef` /
     # `using X = Y` are type aliases, captured as their own node types (asserted below).
     src = (b'void proto(int a);\n'
@@ -603,10 +604,12 @@ def test_file_scope_prototypes_and_forward_decls_not_constants(tmp_path) -> None
            b'namespace acme { void nsProto(); }\n'
            b'int definedFn(int a) { return a; }\n')
     rec = _parse_src(tmp_path, src, "p.h", capture=True)
-    # `Foo baz(1, 2);` is a variable definition; `Foo bar(Baz);` really is a function
-    # declaration in C++ (the most vexing parse), so only `baz` is a value.
+    # `Foo baz(1, 2);` is a variable definition; `Foo bar(Baz);` is a function declaration.
     assert [s.name for s in rec.statements
-            if s.parentId == rec.id and s.nodeType == "declaration"] == ["baz"]
+            if s.parentId == rec.id and s.nodeType == "declaration"] == [
+        "proto", "sproto", "bar", "baz", "nsProto",
+    ]
+    assert [f.name for f in rec.functions] == ["definedFn"]
     # The two type aliases are captured, each keeping its own grammar node type.
     assert [(s.nodeType, s.name) for s in rec.statements
             if s.nodeType in ("type_definition", "alias_declaration")] == [

@@ -92,8 +92,19 @@ def _parse_entry(path: str, repo_root: str, options: dict) -> FileRecord | None:
     except OSError:
         return None
 
-    base = base_parser_for(path)
-    parser = None
+    owner = options.get("owners", {}).get(path)  # decided language of a shared file
+    parser = select(
+        path, source, options["parse_timeout_micros"], owner
+    )  # exactly one parser per file (claims + priority)
+    if parser is None:  # pragma: no cover - classify already filtered
+        return None
+    base = base_parser_for(path, owner)
+    indexes = options.get("indexes", {})
+    index = indexes.get(base.name if base is not None else "")
+    related = {
+        name: indexes[name]
+        for name in getattr(base, "related_languages", ()) if name in indexes
+    }
     from ..parsers.statements_common import (
         begin_concat_tracking,
         set_concat_depth,
@@ -120,6 +131,7 @@ def _parse_entry(path: str, repo_root: str, options: dict) -> FileRecord | None:
             statement_text_limit=options["statement_text_limit"],
             parse_timeout_micros=options["parse_timeout_micros"],
             resolution_index=index,
+            related_indexes=related,
         )
         record = parser.parse_file(ctx)
         parser.link_handlers(record, ctx)
@@ -218,14 +230,17 @@ def _stop_listener(state: tuple) -> None:
 
 
 def parse_entries(
-    entries: list[ScanEntry], repo_root: str | Path, settings, indexes: dict | None = None
+    entries: list[ScanEntry], repo_root: str | Path, settings, indexes: dict | None = None,
+    owners: dict[str, str] | None = None,
 ) -> Iterator[tuple[str, FileRecord]]:
     """Yield ``(language, FileRecord)`` — parallel across processes, sequential when
     ``jobs == 1`` or there's nothing to parallelize. ``indexes`` maps parser-name →
-    repo-level ``build_index`` result (threaded into each ParseContext)."""
+    repo-level ``build_index`` result (threaded into each ParseContext); ``owners`` maps each
+    shared file to the language the ownership step decided for it."""
     repo_root = str(Path(repo_root))
     options = _options(settings)
     options["indexes"] = indexes or {}
+    options["owners"] = owners or {}
     jobs = settings.jobs if settings.jobs and settings.jobs > 0 else (os.cpu_count() or 1)
 
     if jobs <= 1 or len(entries) <= 1:

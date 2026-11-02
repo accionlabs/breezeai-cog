@@ -216,6 +216,21 @@ def _go_gin(n: int) -> str:
             f"func routes(r *gin.Engine, h *Handler) {{\n{body}}}\n{helpers}")
 
 
+def _c(n: int) -> str:
+    body = "".join(
+        f"/* ops {i} */\n"
+        f"#define MAX{i} {i}\n"
+        f"struct ops{i} {{ int (*run)(int); int count; }};\n"
+        f"static int helper{i}(int x) {{ return x + MAX{i}; }}\n"
+        f"int f{i}(struct ops{i} *o, int x) {{\n"
+        f"    if (x > 0) {{ return helper{i}(x); }} // note\n"
+        f"    return o->run(x);\n"
+        f"}}\n"
+        for i in range(n)
+    )
+    return f"#include <stdio.h>\n#include \"local.h\"\n{body}"
+
+
 SAMPLES: dict[str, tuple[str, Callable[[int], str]]] = {
     "java-vertx": ("V.java", _java_vertx),
     "groovy-vertx": ("Http.groovy", _groovy_vertx),
@@ -232,6 +247,7 @@ SAMPLES: dict[str, tuple[str, Callable[[int], str]]] = {
     "jslt": ("transform.jslt", _jslt),
     "go": ("p.go", _go),
     "go-gin": ("routes.go", _go_gin),
+    "c": ("mod.c", _c),
 }
 
 
@@ -276,3 +292,35 @@ def test_parse_cost_is_linear_in_file_size(name: str) -> None:
         f"{name}: doubling the file multiplied parse work by {ratio:.2f} "
         f"({small} → {large} lines) — something now scans per item found (§6.1)"
     )
+
+
+def _referrer_walk_lines(n: int) -> int:
+    """Python lines executed by the ownership step's rule-2 walk over a chain of ``n`` headers
+    each included by the next (``h1.h`` includes ``h0.h`` …, ``main.c`` includes the last) —
+    the shape where walking back from every header separately is quadratic."""
+    from breezeai_cog.core.ownership import _all_referrer_languages
+
+    headers = [f"h{i}.h" for i in range(n)]
+    referrers = {h: {headers[i + 1]} for i, h in enumerate(headers[:-1])}
+    referrers[headers[-1]] = {"main.c"}
+    count = 0
+
+    def trace(frame, event, arg):
+        nonlocal count
+        if event == "line":
+            count += 1
+        return trace
+
+    previous = sys.gettrace()
+    sys.settrace(trace)
+    try:
+        langs = _all_referrer_languages(set(headers), referrers, {"main.c": "c"}, {})
+    finally:
+        sys.settrace(previous)
+    assert langs[headers[0]] == {"c"}
+    return count
+
+
+def test_ownership_referrer_walk_is_linear_in_headers() -> None:
+    small, large = _referrer_walk_lines(SIZE), _referrer_walk_lines(2 * SIZE)
+    assert large / small < MAX_RATIO, f"{small} → {large} lines: the walk is no longer linear"
