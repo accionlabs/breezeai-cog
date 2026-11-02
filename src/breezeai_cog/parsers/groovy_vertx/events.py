@@ -39,6 +39,7 @@ from ..vertx_common import (
     join_path,
     method_lines,
     render_address,
+    router_vars,
     service_builder_vars,
     sub_router_bases,
 )
@@ -394,6 +395,7 @@ def detect_vertx_groovy(
     # Routers a method of this file creates and returns: served where their factory is mounted.
     factories = _factory_routers(root, source) if b"Router.router" in source else {}
     service_vars = service_builder_vars(source) if b"setAddress" in source else {}
+    routers = router_vars(source)
 
     for call in calls:
         if (call.start_byte, call.end_byte) in mount_routes:  # a sub-router's mount path: wiring
@@ -403,7 +405,7 @@ def detect_vertx_groovy(
             uses_routematcher and obj == "" and endpoint_path and "/" in endpoint_path
         )
         info = classify_call(method, endpoint_path, first_arg, obj, route_scope=route_scope,
-                             service_vars=service_vars)
+                             service_vars=service_vars, routers=routers)
         if info is None:
             continue
         semantic, verb, endpoint, route_kind = info
