@@ -76,12 +76,32 @@ end
 def test_rails_parser_claims_only_rails_sources(tmp_path: Path) -> None:
     parser = RailsParser()
     assert parser.claims("config/routes.rb", b"Rails.application.routes.draw do\nend")
+    assert parser.claims(
+        "app/controllers/api/users_controller.rb",
+        b"class UsersController < Api::BaseController\nend\n",
+    )
+    assert parser.claims(
+        "engines/foo/config/routes.rb",
+        b"Foo::Engine.routes.draw do\nend\n",
+    )
     assert not parser.claims("app.rb", b"class PlainRuby\nend")
     assert not parser.claims("lib/calc.rb", b"# Nothing to do with ApplicationController.\nclass Calculator; end")
     assert not parser.claims("lib/calc.rb", b'DOC = "ApplicationController"\nclass Calculator; end')
     assert not parser.claims("lib/chart.rb", b"chart.axes.routes.draw do\nend")
     assert parser.priority > 0
     assert parser.frameworks == ["rails"]
+
+
+def test_engine_routes_draw_are_extracted(tmp_path: Path) -> None:
+    source = b'''Foo::Engine.routes.draw do
+  get "/health", to: "health#show"
+end
+'''
+    record = RailsParser().parse_file(_context(tmp_path, "engines/foo/routes.rb", source))
+    routes = [item for item in record.statements if item.semanticType == "route"]
+
+    assert len(routes) == 1
+    assert routes[0].endpoint == "/health"
 
 
 def test_rails_namespace_and_scope_prefixes(tmp_path: Path) -> None:
@@ -362,12 +382,13 @@ def test_rails_dynamic_or_unsupported_prefix_leaves_endpoint_null(tmp_path: Path
     get "ok", to: "o#k"
   end
 '''
-    key = lambda route: (route[0] or "", route[1] or "", route[2] or "")
+    def key(route):
+        return route[0] or "", route[1] or "", route[2] or ""
     assert sorted(_rails_routes(tmp_path, body), key=key) == sorted([
         ("GET", None, "a#a"),
         ("GET", None, "b#b"),
         ("GET", None, "c#c"),
-        ("GET", None, "d#d"),
+        ("GET", "/sym/d", "d#d"),
         ("GET", None, "e#e"),
         ("GET", "/users", "users#index"),
         ("POST", "/users", "users#create"),
@@ -407,4 +428,57 @@ def test_rails_interpolated_paths_are_null_and_static_routes_remain_correct(
         ("GET", None, "admin#show"),
         ("GET", "/admin/static", "admin#index"),
         ("GET", "/admin/literal/#{id}", "admin#literal"),
+    ]
+
+
+def test_rails_resource_symbol_and_string_array_options(tmp_path: Path) -> None:
+    source = b'''Rails.application.routes.draw do
+  resources :users, only: %i[index show]
+  resources :posts, except: %w[destroy edit]
+  match "/multi", to: "multi#show", via: %w[get post]
+  resources :dynamic, only: ACTIONS
+end
+'''
+    record = RailsParser().parse_file(_context(tmp_path, "config/routes.rb", source))
+    routes = [item for item in record.statements if item.semanticType == "route"]
+    got = {(item.method, item.endpoint, item.handler) for item in routes}
+    assert got == {
+        ("GET", "/users", "users#index"),
+        ("GET", "/users/:id", "users#show"),
+        ("GET", "/posts", "posts#index"),
+        ("POST", "/posts", "posts#create"),
+        ("GET", "/posts/new", "posts#new"),
+        ("GET", "/posts/:id", "posts#show"),
+        ("PATCH", "/posts/:id", "posts#update"),
+        ("PUT", "/posts/:id", "posts#update"),
+        ("GET", "/multi", "multi#show"),
+        ("POST", "/multi", "multi#show"),
+    }
+
+
+def test_rails_singular_resource_controller_does_not_repluralize_plural_names(
+    tmp_path: Path,
+) -> None:
+    body = '''  resource :profile
+  resource :relationships
+  resource :security_key_options
+'''
+    handlers = {
+        route[2] for route in _rails_routes(tmp_path, body)
+        if route[2] is not None
+    }
+    assert "profiles#show" in handlers
+    assert "relationships#show" in handlers
+    assert "security_key_options#show" in handlers
+    assert not any(name.endswith(("relationshipses#show", "optionses#show")) for name in handlers)
+
+
+def test_rails_symbol_scope_and_string_resource_names(tmp_path: Path) -> None:
+    body = '''  scope :v1 do
+    resources "users", only: %i[index show]
+  end
+'''
+    assert _rails_routes(tmp_path, body) == [
+        ("GET", "/v1/users", "users#index"),
+        ("GET", "/v1/users/:id", "users#show"),
     ]

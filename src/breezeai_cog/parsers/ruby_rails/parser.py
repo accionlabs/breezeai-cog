@@ -7,10 +7,39 @@ from tree_sitter import Node
 from ...schemas import FileRecord
 from ..base import ParseContext
 from ..emits import apply
+from ..ruby.claims import _nodes, has_call, has_require, has_superclass
 from ..ruby.parser import RubyParser
-from ..treesitter import parse_source
-from ..ruby.claims import has_call, has_require, has_superclass
+from ..treesitter import node_text, parse_source
 from .routes import detect_rails_routes
+
+
+def _has_engine_routes_draw(root: Node, source: bytes) -> bool:
+    for node in _nodes(root):
+        if node.type != "call":
+            continue
+        method = node.child_by_field_name("method")
+        receiver = node.child_by_field_name("receiver")
+        if method is None or receiver is None or node_text(method, source) != "draw":
+            continue
+        receiver_text = node_text(receiver, source)
+        if receiver_text == "Engine.routes" or receiver_text.endswith("::Engine.routes"):
+            return True
+    return False
+
+
+def _has_controller_superclass(root: Node, source: bytes, path: str) -> bool:
+    if "controllers" not in path.replace("\\", "/").split("/"):
+        return False
+    for node in _nodes(root):
+        if node.type != "class":
+            continue
+        superclass = node.child_by_field_name("superclass")
+        if superclass is None:
+            continue
+        name = node_text(superclass, source).lstrip("<").strip().split("::")[-1]
+        if name.endswith("Controller"):
+            return True
+    return False
 
 
 class RailsParser(RubyParser):
@@ -26,16 +55,32 @@ class RailsParser(RubyParser):
         parsed_root: Node | None = None,
     ) -> bool:
         if not any(marker in source for marker in (
-            b"rails", b"Rails", b"ApplicationController", b"Rails.application.routes",
+            b"rails", b"Rails", b"ApplicationController", b"Controller", b"Engine.routes",
         )):
             return False
         root = parsed_root
         if root is None:
             root = parse_source("ruby", source, parse_timeout_micros).root_node
+        rails_routes = (
+            has_call(root, source, "Rails.application.routes", "draw")
+            or _has_engine_routes_draw(root, source)
+        )
+        rails_controller = (
+            has_superclass(root, source, {"ApplicationController"})
+            or _has_controller_superclass(root, source, path)
+        )
+        other_framework = (
+            has_require(root, source, {"grape"})
+            or has_superclass(root, source, {"Grape::API", "Grape::Endpoint"})
+            or has_require(root, source, {"sinatra", "sinatra/base"})
+            or has_superclass(root, source, {"Sinatra::Base", "Sinatra::Application"})
+        )
+        if other_framework and not (rails_routes or rails_controller):
+            return False
         return (
             has_require(root, source, {"rails", "action_controller/railtie"})
-            or has_superclass(root, source, {"ApplicationController"})
-            or has_call(root, source, "Rails.application.routes", "draw")
+            or rails_routes
+            or rails_controller
         )
 
     def parse_file(self, ctx: ParseContext) -> FileRecord:

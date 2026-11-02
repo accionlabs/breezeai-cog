@@ -2,15 +2,13 @@
 
 from __future__ import annotations
 
-import re
-
 from tree_sitter import Node
 
 from ...emit import disambiguate, function_id
 from ...schemas import Call, Function, Parameter, Statement
 from ..callresolve import CallResolver, noop_resolver
 from ..treesitter import line_span, node_text
-from .models import extract_param_types
+from .models import AnnotationCache
 from .statements import extract_statements
 
 _VISIBILITY_MARKERS = {"public", "protected", "private"}
@@ -92,38 +90,35 @@ def extract_params(
     return out
 
 
-def _symbol_names(parent: Node, source: bytes, call_name: str) -> set[str]:
-    """Return method names declared private via ``private :name`` or ``private :a, :b``.
-
-    Fixes C17: handles the ``private :method_name`` form (calling ``private`` with a symbol
-    argument naming a specific method) in addition to the existing section-marker form.
-    """
-    names: set[str] = set()
+def _named_visibility_calls(parent: Node, source: bytes) -> dict[str, tuple[str, bool]]:
+    result: dict[str, tuple[str, bool]] = {}
     for sibling in parent.named_children:
-        if sibling.type != "call":
-            continue
-        if sibling.child_by_field_name("receiver") is not None:
+        if sibling.type != "call" or sibling.child_by_field_name("receiver") is not None:
             continue
         method = sibling.child_by_field_name("method")
-        if method is None or node_text(method, source) != call_name:
+        marker = node_text(method, source) if method is not None else ""
+        if marker not in {*_VISIBILITY_MARKERS, "private_class_method"}:
             continue
         arguments = sibling.child_by_field_name("arguments")
         if arguments is None:
             continue
         for arg in arguments.named_children:
-            if arg.type in {"simple_symbol", "symbol", "string"}:
-                sym = node_text(arg, source).lstrip(":").strip()
-                if arg.type == "string" and len(sym) >= 2 and sym[0] in "'\"":
-                    sym = sym[1:-1]
-                if sym:
-                    names.add(sym)
-    return names
+            if arg.type not in {"simple_symbol", "symbol", "string"}:
+                continue
+            name = node_text(arg, source).lstrip(":").strip()
+            if arg.type == "string" and len(name) >= 2 and name[0] in "'\"":
+                name = name[1:-1]
+            if name:
+                result[name] = (
+                    "private" if marker == "private_class_method" else marker,
+                    marker == "private_class_method",
+                )
+    return result
 
 
 def _visibility_by_scope(parent: Node, source: bytes) -> dict[tuple[int, int], str]:
     """Compute method visibility for one scope in a single pass."""
-    private_by_symbol = _symbol_names(parent, source, "private")
-    private_class_by_symbol = _symbol_names(parent, source, "private_class_method")
+    named_visibility = _named_visibility_calls(parent, source)
     visibility = "private" if parent.type == "program" else "public"
     singleton_visibility = "public"
     result: dict[tuple[int, int], str] = {}
@@ -135,17 +130,24 @@ def _visibility_by_scope(parent: Node, source: bytes) -> dict[tuple[int, int], s
                 name_node = next((child for child in sibling.named_children if child.type == "identifier"), None)
             method_name = node_text(name_node, source) if name_node is not None else ""
             current_visibility = singleton_visibility if sibling.type == "singleton_method" else visibility
-            result[(sibling.start_byte, sibling.end_byte)] = (
-                "private" if (
-                    (sibling.type == "singleton_method" and method_name in private_class_by_symbol)
-                    or (sibling.type == "method" and method_name in private_by_symbol)
-                ) else current_visibility
-            )
+            explicit = named_visibility.get(method_name)
+            if explicit is not None and (
+                explicit[1] == (sibling.type == "singleton_method")
+            ):
+                current_visibility = explicit[0]
+            result[(sibling.start_byte, sibling.end_byte)] = current_visibility
             continue
         if sibling.type == "identifier":
             marker = node_text(sibling, source)
             if marker in _VISIBILITY_MARKERS:
                 visibility = marker
+            elif (
+                marker == "module_function"
+                and parent.type == "body_statement"
+                and parent.parent is not None
+                and parent.parent.type == "module"
+            ):
+                visibility = "private"
             continue
         if sibling.type != "call" or sibling.child_by_field_name("receiver") is not None:
             continue
@@ -158,6 +160,19 @@ def _visibility_by_scope(parent: Node, source: bytes) -> dict[tuple[int, int], s
                 # Bare visibility calls affect instance methods in class/module scopes.
                 # At file scope they affect Object's instance methods as well.
                 visibility = marker
+    if parent.type == "body_statement" and parent.parent is not None and parent.parent.type == "module":
+        module_functions = _module_function_methods(parent, source)
+        for sibling in parent.named_children:
+            key = (sibling.start_byte, sibling.end_byte)
+            if sibling.type not in {"method", "singleton_method"} or key not in module_functions:
+                continue
+            name_node = sibling.child_by_field_name("name")
+            name = node_text(name_node, source) if name_node is not None else ""
+            explicit = named_visibility.get(name)
+            if explicit is not None and not explicit[1]:
+                result[key] = explicit[0]
+            else:
+                result[key] = "private"
     return result
 
 
@@ -169,48 +184,52 @@ def _visibility(node: Node, source: bytes) -> str:
     return _visibility_by_scope(parent, source).get((node.start_byte, node.end_byte), "public")
 
 
-def _extract_return_type(node: Node, source: bytes) -> str | None:
+def _extract_return_type(
+    node: Node, source: bytes, annotation_cache: AnnotationCache | None = None
+) -> str | None:
     """Extract the return type from Sorbet sig or YARD @return comment preceding a method.
 
     Fixes C3: captures ``Function.returnType`` from:
     - Sorbet: ``sig { returns(SomeType) }``
     - YARD: ``# @return [SomeType]``
     """
-    parent = node.parent
-    if parent is None:
-        return None
-    children = parent.named_children
-    if node not in children:
-        return None
-    idx = children.index(node)
-    for sib in reversed(children[:idx]):
-        if sib.type == "comment":
-            text = node_text(sib, source)
-            m = re.search(r"@return\s+\[([A-Za-z0-9_:<>, ]+)\]", text)
-            if m:
-                return m.group(1).strip()
-        elif sib.type == "call":
-            m_node = sib.child_by_field_name("method")
-            if m_node is not None and node_text(m_node, source) == "sig":
-                # Look for .returns(T) inside the sig block
-                def find_returns(n: Node) -> str | None:
-                    if n.type == "call":
-                        meth = n.child_by_field_name("method")
-                        if meth is not None and node_text(meth, source) == "returns":
-                            args = n.child_by_field_name("arguments")
-                            if args is not None and args.named_children:
-                                return node_text(args.named_children[0], source)
-                    for c in n.named_children:
-                        result = find_returns(c)
-                        if result is not None:
-                            return result
-                    return None
-                result = find_returns(sib)
-                if result is not None:
-                    return result
-        else:
-            break
-    return None
+    cache = annotation_cache or AnnotationCache()
+    return cache.annotations(node, source).return_type
+
+
+def _module_function_methods(parent: Node, source: bytes) -> set[tuple[int, int]]:
+    names: set[str] = set()
+    all_following = False
+    methods: set[tuple[int, int]] = set()
+    for sibling in parent.named_children:
+        if sibling.type == "identifier" and node_text(sibling, source) == "module_function":
+            all_following = True
+            continue
+        if sibling.type in {"method", "singleton_method"}:
+            method_node = sibling.child_by_field_name("name")
+            method_name = node_text(method_node, source) if method_node is not None else ""
+            if all_following or method_name in names:
+                methods.add((sibling.start_byte, sibling.end_byte))
+            continue
+        if sibling.type != "call" or sibling.child_by_field_name("receiver") is not None:
+            continue
+        method = sibling.child_by_field_name("method")
+        if method is None or node_text(method, source) != "module_function":
+            continue
+        arguments = sibling.child_by_field_name("arguments")
+        if arguments is None or not arguments.named_children:
+            all_following = True
+            continue
+        for argument in arguments.named_children:
+            if argument.type in {"simple_symbol", "symbol", "string"}:
+                names.add(node_text(argument, source).lstrip(":").strip().strip("'\""))
+    for sibling in parent.named_children:
+        if sibling.type in {"method", "singleton_method"}:
+            method_node = sibling.child_by_field_name("name")
+            method_name = node_text(method_node, source) if method_node is not None else ""
+            if method_name in names:
+                methods.add((sibling.start_byte, sibling.end_byte))
+    return methods
 
 
 # Bare identifiers are ambiguous between method calls and local-variable
@@ -250,6 +269,7 @@ def build_function(
     *,
     parent_id: str,
     class_name: str | None,
+    id_owner: str | None = None,
     seen_ids: set[str],
     capture: bool,
     limit: int,
@@ -257,6 +277,7 @@ def build_function(
     typed_db_ids: frozenset[str] | None = None,
     visibility: str | None = None,
     is_static: bool = False,
+    annotation_cache: AnnotationCache | None = None,
 ) -> tuple[list[Function], list[Statement]]:
     is_singleton = node.type == "singleton_method"
     # singleton_method has the pattern: def self.foo(...) — name is the second identifier
@@ -270,9 +291,11 @@ def build_function(
         name_node = next((c for c in node.named_children if c.type == "identifier"), None)
     name = node_text(name_node, source) if name_node is not None else "<anonymous>"
     start, end = line_span(node)
-    fid = disambiguate(function_id(path, name, start, class_name=class_name), seen_ids)
+    fid = disambiguate(function_id(path, name, start, class_name=id_owner or class_name), seen_ids)
     params_node = node.child_by_field_name("parameters")
-    param_types = extract_param_types(node, source)
+    annotation_cache = annotation_cache or AnnotationCache()
+    annotations = annotation_cache.annotations(node, source)
+    param_types = annotations.param_types
     body = next((c for c in node.named_children if c.type == "body_statement"), None)
     fn = Function(
         id=fid,
@@ -282,7 +305,7 @@ def build_function(
         type="method",
         visibility=visibility if visibility is not None else _visibility(node, source),
         isStatic=True if is_singleton or is_static else None,  # C4: mark class methods as static
-        returnType=_extract_return_type(node, source),  # C3: capture return type
+        returnType=annotations.return_type,  # C3: capture return type
         params=extract_params(params_node, source, param_types=param_types),
         startLine=start,
         endLine=end,

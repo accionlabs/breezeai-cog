@@ -134,7 +134,7 @@ def test_existing_ruby_project_filenames_still_reach_extraction(tmp_path) -> Non
                for record in records.values())
 
 
-def test_ruby_class_metric_excludes_modules_and_counts_nested_classes(tmp_path) -> None:
+def test_ruby_class_metric_counts_classes_and_modules_including_nested(tmp_path) -> None:
     from breezeai_cog.config import Settings
     from breezeai_cog.core import pipeline
     from breezeai_cog.emit.sinks import MemorySink
@@ -149,19 +149,19 @@ def test_ruby_class_metric_excludes_modules_and_counts_nested_classes(tmp_path) 
         (
             "modules_only",
             "module Outer\n  module Inner\n  end\nend\n",
-            0,
+            2,
             [("Outer", "module"), ("Inner", "module")],
         ),
         (
             "classes_and_modules",
             "class Widget\nend\nmodule Helpers\nend\n",
-            1,
+            2,
             [("Widget", "class"), ("Helpers", "module")],
         ),
         (
             "nested_classes_and_modules",
             "class Outer\n  module Namespace\n    class Inner\n    end\n    module Nested\n    end\n  end\nend\n",
-            2,
+            4,
             [
                 ("Outer", "class"),
                 ("Namespace", "module"),
@@ -184,21 +184,21 @@ def test_ruby_class_metric_excludes_modules_and_counts_nested_classes(tmp_path) 
         assert [(node.name, node.type) for node in record.classes] == expected_nodes
 
 
-def test_project_loc_excludes_config_records_and_keeps_ruby_source(tmp_path) -> None:
+def test_project_loc_counts_config_records_and_keeps_ruby_source(tmp_path) -> None:
     from breezeai_cog.config import Settings
     from breezeai_cog.core import pipeline
     from breezeai_cog.emit.sinks import MemorySink
 
     cases = [
         ("ruby_source", {"app.rb": "class App\n  def run; end\nend\n"}, 3),
-        ("config_only", {"settings.json": '{\n  "enabled": true\n}\n'}, 0),
+        ("config_only", {"settings.json": '{\n  "enabled": true\n}\n'}, 3),
         (
             "mixed",
             {
                 "app.rb": "class App\n  def run; end\nend\n",
                 "settings.json": '{\n  "enabled": true\n}\n',
             },
-            3,
+            6,
         ),
     ]
     for name, files, expected_loc in cases:
@@ -216,7 +216,7 @@ def test_project_loc_excludes_config_records_and_keeps_ruby_source(tmp_path) -> 
         assert metadata.totalLinesOfCode == expected_loc
 
 
-def test_diff_metadata_loc_excludes_config_records() -> None:
+def test_diff_metadata_counts_config_record_loc() -> None:
     from breezeai_cog.schemas import FileRecord
     from breezeai_cog.services.diff import _InfraStreamSink
 
@@ -228,10 +228,10 @@ def test_diff_metadata_loc_excludes_config_records() -> None:
     sink.write(FileRecord(id="ruby", path="app.rb", type="code", language="ruby", loc=3))
     sink.write(FileRecord(id="json", path="config.json", type="config", language="config", loc=7))
 
-    assert sink.loc == 3
+    assert sink.loc == 10
 
 
-def test_diff_metadata_class_count_excludes_ruby_modules_only() -> None:
+def test_diff_metadata_class_count_includes_ruby_modules_and_non_ruby_classes() -> None:
     from breezeai_cog.schemas import Class, FileRecord
     from breezeai_cog.services.diff import _InfraStreamSink
 
@@ -267,7 +267,7 @@ def test_diff_metadata_class_count_excludes_ruby_modules_only() -> None:
         ],
     ))
 
-    assert sink.classes == 3
+    assert sink.classes == 4
 
 
 def _make_markup_repo(root) -> None:

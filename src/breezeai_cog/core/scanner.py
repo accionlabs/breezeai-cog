@@ -135,7 +135,7 @@ def scan(
                         on_skip(rel, "oversized", size=size)
                     continue
                 source_prefix = None
-                if language is None and source_classifier is not None:
+                if language is None and source_classifier is not None and not Path(rel).suffix:
                     try:
                         with open(entry.path, "rb") as source_file:
                             source_prefix = source_file.readline(_SOURCE_PREFIX_BYTES)

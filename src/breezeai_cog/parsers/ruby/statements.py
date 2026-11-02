@@ -2,13 +2,19 @@
 
 from __future__ import annotations
 
+import re
 from collections.abc import Iterator
 
 from tree_sitter import Node
 
 from ...schemas import Statement
-from ..statements_common import classify_statement, emit_enum_members, render_concat, resolve_endpoint
 from ..detection import text_has_query
+from ..statements_common import (
+    classify_statement,
+    emit_enum_members,
+    render_concat,
+    resolve_endpoint,
+)
 from ..treesitter import node_text
 from .mappings import CONTROL_FLOW, EMIT_TYPES
 
@@ -17,11 +23,12 @@ _SCOPE_TYPES = {"class", "module", "method", "singleton_method"}
 
 def _iter_statements(node: Node, source: bytes) -> Iterator[Node]:
     for child in node.named_children:
-        if child.type in EMIT_TYPES:
+        if child.type in EMIT_TYPES or (
+            child.type == "string"
+            and node.type in {"program", "body_statement"}
+            and text_has_query(node_text(child, source))
+        ):
             yield child
-        elif child.type == "string" and node.type in {"program", "body_statement"}:
-            if text_has_query(node_text(child, source)):
-                yield child
         if child.type in _SCOPE_TYPES:
             continue
         yield from _iter_statements(child, source)
@@ -74,6 +81,26 @@ def _call_details(call: Node, source: bytes) -> tuple[str, str, str | None] | No
     if override is not None:
         method = override
     return callee, method, endpoint
+
+
+def _call_details_with_redis_evidence(
+    call: Node, source: bytes
+) -> tuple[str, str, str | None] | None:
+    details = _call_details(call, source)
+    if details is None:
+        return None
+    receiver = call.child_by_field_name("receiver")
+    if receiver is not None:
+        receiver_name = node_text(receiver, source)
+        terminal = receiver_name.rsplit(".", 1)[-1].lower().lstrip("@")
+        if terminal in {"cache", "cachemanager", "cacheservice"} or terminal.endswith("cache"):
+            return None
+        if terminal.replace("_", "") in {"redis", "redisclient", "redisservice"} and not (
+            re.search(rb"(?m)^\s*require\s*[\(\s]*['\"]redis['\"]", source)
+            or re.search(rb"\bRedis\s*\.\s*new\b", source)
+        ):
+            return None
+    return details
 
 
 def _is_enum_like_module(body: Node, source: bytes) -> bool:
@@ -162,7 +189,7 @@ def extract_statements(
                 control_flow=CONTROL_FLOW,
                 call_type="call",
                 name_of=_name_of,
-                call_details=_call_details,
+                call_details=_call_details_with_redis_evidence,
                 language="ruby",
                 typed_db_ids=typed_db_ids,
             )

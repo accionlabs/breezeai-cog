@@ -237,3 +237,78 @@ def test_unreadable_ruby_shebang_prefix_is_skipped_safely(tmp_path, monkeypatch)
 
     monkeypatch.setattr(builtins, "open", unreadable_open)
     assert list(_scan_entries(repo, Settings(repo=repo, jobs=1))) == []
+
+
+def test_known_extensions_are_not_opened_for_source_classification(tmp_path, monkeypatch) -> None:
+    import builtins
+
+    unsupported = (
+        "image.svg",
+        "image.png",
+        "font.woff",
+        "notes.md",
+        "view.haml",
+        "style.scss",
+    )
+    for name in unsupported:
+        (tmp_path / name).write_text("unsupported content\n")
+    (tmp_path / "known.rb").write_text("puts :known\n")
+
+    original_open = builtins.open
+    opened: list[str] = []
+
+    def tracking_open(file, *args, **kwargs):
+        if str(file) in {str(tmp_path / name) for name in unsupported}:
+            opened.append(str(file))
+        return original_open(file, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "open", tracking_open)
+    source_classifications: list[str] = []
+
+    def source_classifier(path: str, _prefix: bytes) -> str | None:
+        source_classifications.append(path)
+        return None
+
+    entries = list(scan(
+        tmp_path,
+        lambda path: "ruby" if path.endswith(".rb") else None,
+        engine=IgnoreEngine.build(),
+        max_file_size=10_000,
+        source_classifier=source_classifier,
+    ))
+
+    assert opened == []
+    assert source_classifications == []
+    assert [(entry.path, entry.language) for entry in entries] == [("known.rb", "ruby")]
+
+
+def test_extensionless_ruby_shebang_is_opened_and_detected(tmp_path, monkeypatch) -> None:
+    import builtins
+
+    parser = RubyParser()
+    script = tmp_path / "run-ruby"
+    script.write_bytes(b"#!/usr/bin/env ruby\nputs :ok\n")
+
+    original_open = builtins.open
+    opened: list[str] = []
+
+    def tracking_open(file, *args, **kwargs):
+        if str(file) == str(script):
+            opened.append(str(file))
+        return original_open(file, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "open", tracking_open)
+
+    def source_classifier(path: str, prefix: bytes) -> str | None:
+        return parser.name if parser.matches_source(path, prefix) else None
+
+    entries = list(scan(
+        tmp_path,
+        lambda path: parser.name if parser.matches(path) else None,
+        engine=IgnoreEngine.build(),
+        max_file_size=10_000,
+        source_classifier=source_classifier,
+    ))
+
+    assert opened == [str(script)]
+    assert [(entry.path, entry.language) for entry in entries] == [("run-ruby", "ruby")]

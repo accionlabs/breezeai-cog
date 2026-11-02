@@ -54,7 +54,22 @@ def _is_app_receiver(call: Node, source: bytes) -> bool:
 
 
 def _method(call: Node, source: bytes) -> str | None:
-    if not _is_app_receiver(call, source):
+    receiver = call.child_by_field_name("receiver")
+    if receiver is None:
+        current = call.parent
+        while current is not None:
+            if current.type == "class" and not _is_app_class(current, source):
+                return None
+            if current.type == "call":
+                name = current.child_by_field_name("method")
+                owner = current.child_by_field_name("receiver")
+                if (
+                    name is not None and node_text(name, source) == "new"
+                    and owner is not None and node_text(owner, source) == "Sinatra"
+                ):
+                    break
+            current = current.parent
+    elif not _is_app_receiver(call, source):
         return None
     node = call.child_by_field_name("method")
     return node_text(node, source) if node is not None and node.type == "identifier" else None
@@ -85,29 +100,33 @@ def _http_method_value(node: Node, source: bytes) -> str | None:
     return method.upper() if method in _HTTP_METHODS else None
 
 
-def _literal_paths(nodes: list[Node], source: bytes) -> list[str]:
-    paths: list[str] = []
+def _literal_paths(nodes: list[Node], source: bytes) -> list[tuple[str | None, bool]]:
+    paths: list[tuple[str | None, bool]] = []
     for node in nodes:
         if node.type in {"hash", "pair"}:
             break  # route options/conditions follow the path arguments
-        path = _string_value(node, source)
-        if path is None:
-            return []  # do not emit a partial result when another path is dynamic
-        paths.append(path)
+        if node.type in {"regex", "regex_literal"}:
+            paths.append((node_text(node, source), True))
+        else:
+            paths.append((_string_value(node, source), False))
     return paths
 
 
 def _route_combinations(
     method: str, args: list[Node], source: bytes, *, allow_pathless: bool = False
-) -> list[tuple[str, str]]:
+) -> list[tuple[str, str | None, bool]]:
     if method != "route":
         paths = _literal_paths(args, source)
         if not args and allow_pathless:
-            paths = [""]
-        return [(method.upper(), path) for path in paths]
+            paths = [("", False)]
+        return [(method.upper(), path, is_regex) for path, is_regex in paths]
 
     methods: list[str] = []
-    for node in args:
+    method_nodes = args
+    array_methods = bool(args and args[0].type in {"array", "symbol_array"})
+    if array_methods:
+        method_nodes = list(args[0].named_children) + args[1:]
+    for node in method_nodes:
         value = _http_method_value(node, source)
         if value is None:
             break
@@ -115,10 +134,11 @@ def _route_combinations(
     if not methods:
         return []
 
-    paths = _literal_paths(args[len(methods) :], source)
-    if len(args) == len(methods) and allow_pathless:
-        paths = [""]
-    return [(verb, path) for verb in methods for path in paths]
+    consumed = 1 if array_methods else len(methods)
+    paths = _literal_paths(args[consumed:], source)
+    if len(args) == consumed and allow_pathless:
+        paths = [("", False)]
+    return [(verb, path, is_regex) for verb in methods for path, is_regex in paths]
 
 
 def _namespace_prefix(call: Node, source: bytes) -> tuple[str | None, bool] | None:
@@ -230,9 +250,11 @@ def _global_guards(root: Node, source: bytes) -> list[tuple[Node, int, int, str,
                 if literal is None:
                     continue  # a regex or variable path: coverage unknown
                 prefix = _namespace_prefix(call, source)
-                if prefix is None or prefix[0] is None:
+                if prefix is None:
                     continue
-                namespace_prefix, _ = prefix
+                namespace_prefix = prefix[0]
+                if namespace_prefix is None:
+                    continue
                 pattern = _pattern_re(_join_endpoint(namespace_prefix, literal))
             out.append((_scope(call, source), 1, call.start_byte, name, pattern))
     return out
@@ -255,6 +277,7 @@ def detect_sinatra_routes(root: Node, source: bytes, path: str, record: FileReco
     ``namespace`` blocks, for :func:`~..emits.apply`."""
     fallback = file_id(path)
     found: list[Emit] = []
+    emitted_calls: set[tuple[int, int]] = set()
     hooks = _global_guards(root, source) if b"before" in source or b"use " in source else []
 
     for call in _calls(root):
@@ -273,22 +296,31 @@ def detect_sinatra_routes(root: Node, source: bytes, path: str, record: FileReco
             continue
         line = call.start_point[0] + 1
         block = call.child_by_field_name("block")  # the handler: an anonymous block
-        for index, (verb, local) in enumerate(combinations):
-            endpoint = None if prefix is None else _join_endpoint(prefix, local)
+        for verb, local, is_regex in combinations:
+            endpoint = None if prefix is None or local is None else _join_endpoint(prefix, local)
             # Global guards don't assert auth (middleware is often logging or sessions).
             guards = _guards_for(call, endpoint, hooks) or None
             found.append(
-                Emit(call, dict(
-                    semanticType="route",
-                    method=verb,
-                    endpoint=endpoint,
-                    framework="sinatra",
-                    handlerLine=block.start_point[0] + 1 if block is not None else None,
-                    guards=guards,
-                    routeKind="route",
-                    isRegex=False,
-                ), enrich="same" if index == 0 else "never",
+                Emit(
+                    call,
+                    {
+                        "semanticType": "route",
+                        "method": verb,
+                        "endpoint": endpoint,
+                        "framework": "sinatra",
+                        "handlerLine": block.start_point[0] + 1
+                        if block is not None
+                        else None,
+                        "guards": guards,
+                        "routeKind": "route",
+                        "isRegex": is_regex,
+                    },
+                    enrich="same"
+                    if (call.start_byte, call.end_byte) not in emitted_calls
+                    else "never",
                     parent=owner_id(line, record.functions, record.classes, fallback),
-                    node_type="call")
+                    node_type="call",
+                )
             )
+            emitted_calls.add((call.start_byte, call.end_byte))
     return found

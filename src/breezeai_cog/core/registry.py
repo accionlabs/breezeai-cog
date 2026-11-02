@@ -17,7 +17,10 @@ from __future__ import annotations
 import importlib
 import inspect
 import pkgutil
+from dataclasses import dataclass
 from pathlib import Path
+from threading import RLock
+from typing import Callable
 
 from tree_sitter import Node
 
@@ -26,7 +29,57 @@ from ..parsers.additive import all_detectors
 from ..parsers.base import LanguageParser
 from ..schemas import SCHEMA_VERSION
 
-_REGISTRY: list[LanguageParser] = []
+
+@dataclass(frozen=True, slots=True)
+class _RegisteredParser:
+    parser: LanguageParser
+    invoke_claims: Callable[[str, bytes, int, Node | None], bool]
+
+
+_REGISTRY: list[_RegisteredParser] = []
+_REGISTRY_LOCK = RLock()
+
+
+def _registered_parser(parser: LanguageParser) -> _RegisteredParser:
+    """Normalize claims signatures once, when the parser enters the registry.
+
+    Built-in and external parsers may still implement the historical two-argument
+    ``claims(path, source)`` form. Signature inspection is registration-time only;
+    selection invokes the cached adapter with the complete registry contract.
+    """
+    claim: Callable[..., bool] = parser.claims
+    parameters = inspect.signature(claim).parameters
+    timeout_param = parameters.get("parse_timeout_micros")
+    if timeout_param is not None:
+        if timeout_param.kind is inspect.Parameter.POSITIONAL_ONLY:
+            timeout_mode = "positional"
+        else:
+            timeout_mode = "keyword"
+    elif any(p.kind is inspect.Parameter.VAR_KEYWORD for p in parameters.values()):
+        timeout_mode = "keyword"
+    elif any(p.kind is inspect.Parameter.VAR_POSITIONAL for p in parameters.values()):
+        timeout_mode = "positional"
+    else:
+        timeout_mode = "none"
+
+    parsed_root_param = parameters.get("parsed_root")
+    pass_parsed_root = (
+        parsed_root_param is not None
+        and parsed_root_param.kind is not inspect.Parameter.POSITIONAL_ONLY
+    )
+
+    def invoke(path: str, source: bytes, timeout: int, parsed_root: Node | None) -> bool:
+        args: list[object] = [path, source]
+        kwargs: dict[str, object] = {}
+        if timeout_mode == "positional":
+            args.append(timeout)
+        elif timeout_mode == "keyword":
+            kwargs["parse_timeout_micros"] = timeout
+        if parsed_root is not None and pass_parsed_root:
+            kwargs["parsed_root"] = parsed_root
+        return claim(*args, **kwargs)
+
+    return _RegisteredParser(parser, invoke)
 
 
 def register(parser: LanguageParser) -> LanguageParser:
@@ -36,21 +89,46 @@ def register(parser: LanguageParser) -> LanguageParser:
             f"parser {getattr(parser, 'name', parser)!r} schema_version {version!r} "
             f"!= {SCHEMA_VERSION!r}"
         )
-    _REGISTRY.append(parser)
+    entry = _registered_parser(parser)
+    with _REGISTRY_LOCK:
+        _REGISTRY.append(entry)
     return parser
 
 
 def clear() -> None:
-    _REGISTRY.clear()
+    with _REGISTRY_LOCK:
+        _REGISTRY.clear()
 
 
 def registered() -> list[LanguageParser]:
-    return list(_REGISTRY)
+    with _REGISTRY_LOCK:
+        return [entry.parser for entry in _REGISTRY]
 
 
+def _matching_entries(path: str | Path, source: bytes | None = None) -> list[_RegisteredParser]:
+    with _REGISTRY_LOCK:
+        entries = list(_REGISTRY)
+    candidates = []
+    for entry in entries:
+        parser = entry.parser
+        if parser.matches(path):
+            candidates.append(entry)
+            continue
+        matches_source = getattr(parser, "matches_source", None)
+        if source is not None and matches_source is not None and matches_source(path, source):
+            candidates.append(entry)
+    return candidates
+
+
+<<<<<<< HEAD
 def parsers_for(path: str | Path) -> list[LanguageParser]:
     """All registered parsers that claim this file by extension/filename."""
     return [p for p in _REGISTRY if p.matches(path)]
+=======
+def parsers_for(path: str | Path, source: bytes | None = None) -> list[LanguageParser]:
+    """Return parsers matching the path, optionally using a bounded source prefix."""
+    return [entry.parser for entry in _matching_entries(path, source)]
+>>>>>>> ce1dffc0 (Enhanced Ruby parser coverage and performance across Rails, Grape, and Sinatra)
 
 
 def language_candidates(path: str | Path) -> list[LanguageParser]:
@@ -94,7 +172,7 @@ def template_extensions() -> frozenset[str]:
     Read via ``getattr`` because ``template_extensions`` is an optional ``BaseParser``
     capability, not part of the ``LanguageParser`` Protocol."""
     return frozenset(
-        ext.lower() for p in _REGISTRY for ext in getattr(p, "template_extensions", ())
+        ext.lower() for p in registered() for ext in getattr(p, "template_extensions", ())
     )
 
 
@@ -102,6 +180,7 @@ def select(
     path: str | Path, source: bytes, parse_timeout_micros: int = 0, language: str | None = None
 ) -> LanguageParser | None:
     """The single parser that handles this file: the highest-priority candidate whose
+<<<<<<< HEAD
     ``claims(path, source)`` is True (the base language parser is the priority-0 fallback).
 
     ``language`` is the ownership step's decision for a shared file: only that language's
@@ -120,22 +199,33 @@ def select(
             else p.claims(str(path), source)
         )
     ]
+=======
+    ``claims(path, source, parse_timeout_micros, parsed_root)`` is True (the base language
+    parser is the priority-0 fallback). Legacy two-argument claim methods are adapted once
+    at registration."""
+    candidates = _matching_entries(path, source)
+    claiming = []
+    for entry in candidates:
+        if entry.invoke_claims(str(path), source, parse_timeout_micros, parsed_root):
+            claiming.append(entry.parser)
+>>>>>>> ce1dffc0 (Enhanced Ruby parser coverage and performance across Rails, Grape, and Sinatra)
     if not claiming:
         return None
     return max(claiming, key=lambda p: p.priority)
 
 
 def capabilities() -> dict[str, object]:
+    parsers = registered()
     return {
         "schemaVersion": SCHEMA_VERSION,
-        "languages": sorted({p.name for p in _REGISTRY}),
-        "extensions": sorted({e for p in _REGISTRY for e in p.extensions}),
+        "languages": sorted({p.name for p in parsers}),
+        "extensions": sorted({e for p in parsers for e in p.extensions}),
         "templateExtensions": sorted(template_extensions()),
         "frameworks": sorted(
-            {f for p in _REGISTRY for f in p.frameworks}
+            {f for p in parsers for f in p.frameworks}
             | {f for ds in all_detectors().values() for d in ds for f in d.frameworks}
         ),
-        "statementTypes": sorted({s for p in _REGISTRY for s in p.statement_types}),
+        "statementTypes": sorted({s for p in parsers for s in p.statement_types}),
         "additiveDetectors": {
             lang: [d.name for d in ds] for lang, ds in all_detectors().items()
         },
@@ -148,7 +238,7 @@ def discover_builtin() -> None:
     from .. import parsers as pkg
 
     skip = {"base", "treesitter", "detection"}
-    existing = {p.name for p in _REGISTRY}
+    existing = {p.name for p in registered()}
     for mod in pkgutil.iter_modules(pkg.__path__):
         if mod.name in skip:
             continue

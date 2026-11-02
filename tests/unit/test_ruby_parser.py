@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from breezeai_cog.parsers.base import ParseContext
 from breezeai_cog.parsers.ruby.parser import RubyParser
 
@@ -516,6 +518,105 @@ end
     assert any(item.name == "Inner" for item in rec.classes)
 
 
+def test_ruby_same_named_nested_classes_keep_unique_ids_and_owners(tmp_path: Path) -> None:
+    source = b'''module A
+  class Inner
+    def run
+    end
+  end
+end
+
+module B
+  class Inner
+    def run
+    end
+  end
+end
+'''
+    path = tmp_path / "namespaces.rb"
+    path.write_bytes(source)
+    rec = RubyParser().parse_file(ParseContext(
+        path="namespaces.rb", abs_path=path, source=source, repo_root=tmp_path,
+    ))
+
+    modules = {item.name: item for item in rec.classes if item.type == "module"}
+    inners = [item for item in rec.classes if item.name == "Inner"]
+    runs = [item for item in rec.functions if item.name == "run"]
+
+    assert set(modules) == {"A", "B"}
+    assert len(inners) == 2
+    assert len(runs) == 2
+    nodes = [*rec.classes, *rec.functions]
+    assert len({item.id for item in nodes}) == len(nodes)
+    assert {item.parentId for item in inners} == {modules["A"].id, modules["B"].id}
+    inner_by_id = {item.id: item for item in inners}
+    assert {item.parentId for item in runs} == set(inner_by_id)
+    assert {inner_by_id[item.parentId].parentId for item in runs} == {
+        modules["A"].id, modules["B"].id,
+    }
+    assert len({(item.parentId, item.name) for item in runs}) == 2
+
+
+def test_ruby_multiple_nested_class_levels_preserve_containment(tmp_path: Path) -> None:
+    source = b'''class Outer
+  def outer_method; end
+  class Inner
+    def inner_method; end
+    class Worker
+      def worker_method; end
+    end
+  end
+end
+'''
+    path = tmp_path / "levels.rb"
+    path.write_bytes(source)
+    rec = RubyParser().parse_file(ParseContext(
+        path="levels.rb", abs_path=path, source=source, repo_root=tmp_path,
+    ))
+
+    classes = {item.name: item for item in rec.classes}
+    methods = {item.name: item for item in rec.functions}
+    assert set(classes) == {"Outer", "Inner", "Worker"}
+    assert set(methods) == {"outer_method", "inner_method", "worker_method"}
+    nodes = [*rec.classes, *rec.functions]
+    assert len({item.id for item in nodes}) == 6
+    assert classes["Outer"].parentId == rec.id
+    assert classes["Inner"].parentId == classes["Outer"].id
+    assert classes["Worker"].parentId == classes["Inner"].id
+    assert methods["outer_method"].parentId == classes["Outer"].id
+    assert methods["inner_method"].parentId == classes["Inner"].id
+    assert methods["worker_method"].parentId == classes["Worker"].id
+
+
+def test_ruby_same_named_instance_and_class_methods_keep_distinct_owners(tmp_path: Path) -> None:
+    source = b'''class Alpha
+  def run; end
+  def self.run; end
+end
+
+class Beta
+  def run; end
+  def self.run; end
+end
+'''
+    path = tmp_path / "repeated_methods.rb"
+    path.write_bytes(source)
+    rec = RubyParser().parse_file(ParseContext(
+        path="repeated_methods.rb", abs_path=path, source=source, repo_root=tmp_path,
+    ))
+
+    classes = {item.name: item for item in rec.classes}
+    class_by_id = {item.id: item for item in rec.classes}
+    runs = [item for item in rec.functions if item.name == "run"]
+    assert len(runs) == 4
+    nodes = [*rec.classes, *rec.functions]
+    assert len({item.id for item in nodes}) == len(nodes)
+    assert {item.parentId for item in runs} == {classes["Alpha"].id, classes["Beta"].id}
+    assert {class_by_id[item.parentId].name for item in runs} == {"Alpha", "Beta"}
+    assert sum(item.isStatic is True for item in runs) == 2
+    assert sum(item.isStatic is None for item in runs) == 2
+
+
 def test_ruby_methods_in_singleton_class_are_static_and_owned_by_class(tmp_path: Path) -> None:
     source = b'''class Base
   class << self
@@ -851,6 +952,44 @@ def test_ruby_sorbet_and_yard_type_hints_recorded(tmp_path: Path) -> None:
     assert any("user.update" in k for k in calls), calls
 
 
+def test_ruby_method_annotation_summary_is_shared_by_consumers() -> None:
+    from breezeai_cog.parsers.ruby.functions import _extract_return_type
+    from breezeai_cog.parsers.ruby.models import (
+        AnnotationCache,
+        extract_param_types,
+        model_receivers,
+    )
+    from breezeai_cog.parsers.treesitter import parse_source
+
+    source = (b"class Handler\n"
+              b"  # @param account [OldAccount]\n"
+              b"  # @param account [Account]\n"
+              b"  # @return [String]\n"
+              b"  def load(account)\n    account\n  end\n"
+              b"  def untyped(value)\n    value\n  end\nend\n")
+    root = parse_source("ruby", source).root_node
+    methods = []
+    def collect(node):
+        if node.type == "method":
+            methods.append(node)
+        for child in node.named_children:
+            collect(child)
+    collect(root)
+    method = methods[0]
+    cache = AnnotationCache()
+
+    assert model_receivers(method, source, frozenset({"OldAccount"}), annotation_cache=cache) >= {"account"}
+    params = extract_param_types(method, source, cache)
+    assert params == {"account": "OldAccount"}
+    assert _extract_return_type(method, source, cache) == "String"
+    assert cache.annotations(method, source).param_types is params
+    assert len(cache._methods) == 1
+
+    untyped = cache.annotations(methods[1], source)
+    assert untyped.param_types == {}
+    assert untyped.return_type is None
+
+
 def test_ruby_association_resolved_parameters(tmp_path: Path) -> None:
     """Parameters resolved through has_many or belongs_to associations are recorded."""
     src = (
@@ -1063,6 +1202,20 @@ def test_ruby_model_index_includes_supported_non_rb_source(tmp_path: Path) -> No
     assert db_calls[0].dataAccessHint == "activerecord"
 
 
+@pytest.mark.parametrize(
+    "filename", ["severity.rake", "severity.gemspec", "Gemfile", "Rakefile"]
+)
+def test_ruby_model_index_keeps_supported_non_rb_candidates(
+    tmp_path: Path, filename: str
+) -> None:
+    model_file = tmp_path / filename
+    model_file.write_bytes(b"class Severity < ActiveRecord::Base\nend\n")
+
+    index = RubyParser().build_index(tmp_path, [model_file], jobs=1)
+
+    assert "Severity" in index
+
+
 def test_ruby_model_index_resolves_namespaced_superclasses_across_files(tmp_path: Path) -> None:
     base_file = tmp_path / "app" / "models" / "application_record.rb"
     base_file.parent.mkdir(parents=True)
@@ -1236,3 +1389,309 @@ def test_extensionless_ruby_model_script_contributes_to_model_index(tmp_path: Pa
         statement.semanticType == "db_method_call" and "User.find_by" in statement.text
         for statement in record.statements
     )
+
+
+def test_ruby_index_parses_shared_model_and_fact_file_once(tmp_path: Path, monkeypatch) -> None:
+    from breezeai_cog.parsers.ruby import index as ruby_index
+    from breezeai_cog.parsers.ruby_rails.callbacks import FACT as RAILS_CALLBACK_FACT
+
+    source = (
+        b"class User < ActiveRecord::Base\n"
+        b"  has_many :sessions\n"
+        b"end\n"
+        b"class Session < ActiveRecord::Base\nend\n"
+        b"class UsersController < ApplicationController\n"
+        b"  before_action :authenticate\n"
+        b"end\n"
+    )
+    file = tmp_path / "app.rb"
+    file.write_bytes(source)
+    parse_calls: list[tuple[str, bytes]] = []
+    original_parse_source = ruby_index.parse_source
+
+    def recording_parse_source(language: str, content: bytes, timeout_micros: int = 0):
+        parse_calls.append((language, content))
+        return original_parse_source(language, content, timeout_micros)
+
+    monkeypatch.setattr(ruby_index, "parse_source", recording_parse_source)
+    index = RubyParser().build_index(tmp_path, [file], jobs=1)
+
+    assert parse_calls == [("ruby", source)]
+    assert {"User", "Session"} <= index.models
+    assert index.associations["User"]["sessions"] == ("has_many", "Session")
+    assert index.facts[RAILS_CALLBACK_FACT]["UsersController"] == [
+        ("authenticate", None, ()),
+    ]
+
+
+def test_ruby_index_parses_fact_only_gate_without_model_class(
+    tmp_path: Path, monkeypatch
+) -> None:
+    from types import SimpleNamespace
+
+    from breezeai_cog.parsers.ruby import index as ruby_index
+
+    file = tmp_path / "fact_only.rb"
+    source = b"FACT_ONLY_GATE\n"
+    file.write_bytes(source)
+    parse_calls: list[bytes] = []
+    original_parse_source = ruby_index.parse_source
+
+    def recording_parse_source(language: str, content: bytes, timeout_micros: int = 0):
+        parse_calls.append(content)
+        return original_parse_source(language, content, timeout_micros)
+
+    monkeypatch.setattr(ruby_index, "parse_source", recording_parse_source)
+    monkeypatch.setattr(
+        ruby_index, "facts_for", lambda _language: [SimpleNamespace(gate=(b"FACT_ONLY_GATE",))]
+    )
+    monkeypatch.setattr(
+        ruby_index,
+        "collect_additive",
+        lambda _language, _root, content, _rel, _root_dir: {"test.fact": content.decode()},
+    )
+    monkeypatch.setattr(
+        ruby_index,
+        "resolve_additive",
+        lambda _language, collected, _index: {name: values[0] for name, values in collected.items()},
+    )
+
+    index = RubyParser().build_index(tmp_path, [file], jobs=1)
+
+    assert parse_calls == [source]
+    assert not index.models
+    assert index.facts == {"test.fact": source.decode()}
+
+
+def test_ruby_index_does_not_parse_files_without_consumer_gates(
+    tmp_path: Path, monkeypatch
+) -> None:
+    from breezeai_cog.parsers.ruby import index as ruby_index
+
+    file = tmp_path / "plain.rb"
+    file.write_bytes(b"puts :plain\n")
+    unsupported_file = tmp_path / "notes.md"
+    unsupported_file.write_bytes(b"documentation only\n")
+    parse_calls: list[bytes] = []
+
+    def recording_parse_source(language: str, content: bytes, timeout_micros: int = 0):
+        parse_calls.append(content)
+        raise AssertionError("index worker parsed a file with no consumer gate")
+
+    monkeypatch.setattr(ruby_index, "parse_source", recording_parse_source)
+    index = RubyParser().build_index(tmp_path, [file, unsupported_file], jobs=1)
+
+    assert parse_calls == []
+    assert not index.models
+    assert not index.facts
+
+
+def test_ruby_index_preserves_model_and_fact_parse_error_policies(
+    tmp_path: Path, monkeypatch, caplog
+) -> None:
+    from breezeai_cog.parsers.ruby import index as ruby_index
+
+    model_file = tmp_path / "model.rake"
+    model_file.write_bytes(b"class User < ActiveRecord::Base\nend\n")
+    fact_file = tmp_path / "controller.rb"
+    fact_file.write_bytes(
+        b"class UsersController < ApplicationController\n"
+        b"  before_action :authenticate\nend\n"
+    )
+
+    timeouts: list[int] = []
+
+    def unexpected_parse(_language: str, _source: bytes, timeout_micros: int = 0):
+        timeouts.append(timeout_micros)
+        raise RuntimeError("model parse failure")
+
+    monkeypatch.setattr(ruby_index, "parse_source", unexpected_parse)
+    model_only = RubyParser().build_index(tmp_path, [model_file], jobs=1)
+    assert not model_only.models
+    assert timeouts == [5_000_000]
+    assert "model.rake" in caplog.text
+    assert "model parse failure" in caplog.text
+
+    def value_error_parse(_language: str, _source: bytes, _timeout_micros: int = 0):
+        raise ValueError("bounded parse failure")
+
+    monkeypatch.setattr(ruby_index, "parse_source", value_error_parse)
+    value_error_index = RubyParser().build_index(tmp_path, [fact_file], jobs=1)
+    assert not value_error_index.facts
+    assert "controller.rb" in caplog.text
+    assert "bounded parse failure" in caplog.text
+
+    monkeypatch.setattr(ruby_index, "parse_source", unexpected_parse)
+    failed_index = RubyParser().build_index(tmp_path, [fact_file], jobs=1)
+    assert not failed_index.models
+    assert not failed_index.facts
+
+
+def test_ruby_index_serial_and_parallel_results_match(tmp_path: Path) -> None:
+    model_file = tmp_path / "user.rb"
+    model_file.write_bytes(
+        b"class User < ActiveRecord::Base\n  has_many :sessions\nend\n"
+        b"class Session < ActiveRecord::Base\nend\n"
+    )
+    controller_file = tmp_path / "users_controller.rb"
+    controller_file.write_bytes(
+        b"class UsersController < ApplicationController\n"
+        b"  before_action :authenticate\nend\n"
+    )
+    parser = RubyParser()
+
+    serial = parser.build_index(tmp_path, [model_file, controller_file], jobs=1)
+    parallel = parser.build_index(tmp_path, [model_file, controller_file], jobs=2)
+
+    assert parallel.models == serial.models
+    assert parallel.associations == serial.associations
+    assert parallel.facts == serial.facts
+
+
+def test_ruby_qualified_nested_ids_are_stable_across_declaration_order(tmp_path: Path) -> None:
+    sources = [
+        b'''class Outer
+  class Result
+    def from_outer; end
+  end
+end
+class Other
+  class Result
+    def from_other; end
+  end
+end
+''',
+        b'''class Other
+  class Result
+    def from_other; end
+  end
+end
+class Outer
+  class Result
+    def from_outer; end
+  end
+end
+''',
+    ]
+    records = []
+    for source in sources:
+        path = tmp_path / "nested.rb"
+        path.write_bytes(source)
+        records.append(RubyParser().parse_file(ParseContext(
+            path="nested.rb", abs_path=path, source=source, repo_root=tmp_path,
+        )))
+    for record in records:
+        assert {item.id for item in record.classes} == {
+            "nested.rb#Outer", "nested.rb#Outer.Result",
+            "nested.rb#Other", "nested.rb#Other.Result",
+        }
+        assert {item.id.rsplit("#", 1)[0] for item in record.functions} == {
+            "nested.rb#Outer.Result", "nested.rb#Other.Result",
+        }
+
+
+def test_ruby_concern_blocks_and_safe_generated_class_blocks_are_extracted(
+    tmp_path: Path,
+) -> None:
+    source = b'''module Concern
+  included do
+    def included_method; end
+  end
+  class_methods do
+    def class_method; end
+  end
+  prepended do
+    def prepended_method; end
+  end
+  Generated = Class.new do
+    def generated_method; end
+  end
+  class_eval do
+    def dynamic_method; end
+  end
+  instance_eval do
+    def dynamic_instance_method; end
+  end
+end
+'''
+    path = tmp_path / "concern.rb"
+    path.write_bytes(source)
+    record = RubyParser().parse_file(ParseContext(
+        path="concern.rb", abs_path=path, source=source, repo_root=tmp_path,
+    ))
+    methods = {item.name: item for item in record.functions}
+    assert set(methods) == {
+        "included_method", "class_method", "prepended_method", "generated_method",
+    }
+    assert methods["class_method"].isStatic is True
+    assert all(item.parentId == record.classes[0].id for item in methods.values())
+
+
+def test_ruby_symbol_visibility_module_function_and_private_constant(tmp_path: Path) -> None:
+    source = b'''class Visibility
+  def first; end
+  private :first
+  public :first
+  protected :second
+  def second; end
+  private_constant :Hidden
+  class Hidden; end
+end
+module Helpers
+  module_function
+  def private_helper; end
+  def public_helper; end
+  public :public_helper
+end
+module NamedHelpers
+  def helper; end
+  module_function :helper
+end
+'''
+    path = tmp_path / "visibility.rb"
+    path.write_bytes(source)
+    record = RubyParser().parse_file(ParseContext(
+        path="visibility.rb", abs_path=path, source=source, repo_root=tmp_path,
+    ))
+    methods = {item.name: item for item in record.functions}
+    hidden = next(item for item in record.classes if item.name == "Hidden")
+    assert methods["first"].visibility == "public"
+    assert methods["second"].visibility == "protected"
+    assert methods["private_helper"].isStatic is True
+    assert methods["private_helper"].visibility == "private"
+    assert methods["public_helper"].visibility == "public"
+    assert methods["helper"].isStatic is True
+    assert methods["helper"].visibility == "private"
+    assert hidden.visibility == "private"
+
+
+def test_ruby_generic_cache_receivers_are_not_redis_calls(tmp_path: Path) -> None:
+    source = b'''class CacheCalls
+  def run
+    cache.get("key")
+    Rails.cache.delete("key")
+    redis = Redis.new
+    redis.get("key")
+  end
+end
+'''
+    path = tmp_path / "cache.rb"
+    path.write_bytes(source)
+    record = RubyParser().parse_file(ParseContext(
+        path="cache.rb", abs_path=path, source=source, repo_root=tmp_path,
+        capture_statements=True,
+    ))
+    classified = [item for item in record.statements if item.semanticType == "db_method_call"]
+    assert len(classified) == 1
+    assert classified[0].dataAccessHint == "redis"
+
+
+def test_ruby_redis_named_receiver_requires_client_evidence(tmp_path: Path) -> None:
+    source = b'class CacheCalls\n  def run\n    redis.get("key")\n  end\nend\n'
+    path = tmp_path / "cache.rb"
+    path.write_bytes(source)
+    record = RubyParser().parse_file(ParseContext(
+        path="cache.rb", abs_path=path, source=source, repo_root=tmp_path,
+        capture_statements=True,
+    ))
+    assert not any(item.dataAccessHint == "redis" for item in record.statements)

@@ -172,7 +172,10 @@ route('GET', DYNAMIC_PATH) { 'unknown path' }
 '''
     record = SinatraParser().parse_file(_context(tmp_path, "app.rb", source))
 
-    assert not any(item.semanticType == "route" for item in record.statements)
+    assert [(item.method, item.endpoint) for item in record.statements
+            if item.semanticType == "route"] == [
+        ("GET", "/static"), ("GET", None), ("GET", None),
+    ]
 
 
 def test_sinatra_routes_require_literal_paths_and_capture(tmp_path: Path) -> None:
@@ -181,7 +184,8 @@ def test_sinatra_routes_require_literal_paths_and_capture(tmp_path: Path) -> Non
     with_capture = SinatraParser().parse_file(_context(tmp_path, "app.rb", source, True))
 
     assert not any(item.semanticType == "route" for item in without_capture.statements)
-    assert not any(item.semanticType == "route" for item in with_capture.statements)
+    assert [(item.method, item.endpoint) for item in with_capture.statements
+            if item.semanticType == "route"] == [("GET", None)]
 
 
 def test_sinatra_routes_ignore_receiver_qualified_http_calls(tmp_path: Path) -> None:
@@ -502,13 +506,55 @@ get "/outside/#{id}" do 'unknown path' end
 
     assert [(item.method, item.endpoint) for item in routes] == [
         ("GET", None),
+        ("GET", None),
         ("GET", "/api/v1/static"),
         ("GET", "/api/v1/literal/#{id}"),
+        ("GET", None),
     ]
     assert not any(
         item.endpoint in {"/n/hidden", "/api/v1/dynamic/", "/outside/"}
         for item in routes
     )
+
+
+def test_sinatra_unrelated_class_does_not_emit_receiverless_route(tmp_path: Path) -> None:
+    source = b'''require "sinatra"
+class NotSinatra
+  def run
+    get("/not") {}
+  end
+end
+'''
+    record = SinatraParser().parse_file(_context(tmp_path, "app.rb", source))
+    assert not any(item.semanticType == "route" for item in record.statements)
+
+
+def test_sinatra_claims_byte_prefilter_skips_unrelated_ruby(monkeypatch) -> None:
+    from breezeai_cog.parsers.ruby_sinatra import parser as sinatra_module
+
+    def unexpected_parse(*_args, **_kwargs):
+        raise AssertionError("Sinatra claims parsed source without Sinatra evidence")
+
+    monkeypatch.setattr(sinatra_module, "parse_source", unexpected_parse)
+    assert not SinatraParser().claims("ordinary.rb", b"class Ordinary; end\n")
+
+
+def test_sinatra_regex_and_dynamic_paths_keep_route_bindings(tmp_path: Path) -> None:
+    source = b'''require "sinatra"
+get %r{/users/\\d+} do
+end
+get route_path do
+end
+get "/static" do
+end
+'''
+    record = SinatraParser().parse_file(_context(tmp_path, "app.ru", source))
+    routes = [item for item in record.statements if item.semanticType == "route"]
+    assert len(routes) == 3
+    assert routes[0].isRegex is True
+    assert routes[0].endpoint is not None
+    assert routes[1].endpoint is None
+    assert (routes[2].endpoint, routes[2].isRegex) == ("/static", False)
 
 
 def test_pathless_unprefixed_route_is_not_emitted(tmp_path: Path) -> None:
