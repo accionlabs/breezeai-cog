@@ -273,15 +273,9 @@ def _assemble(
         sink.write(record)
         total_files += 1
         total_functions += len(record.functions)
-        file_classes = (
-            sum(cls.type != "module" for cls in record.classes)
-            if language == "ruby"
-            else len(record.classes)
-        )
-        total_classes += file_classes
+        total_classes += len(record.classes)
         total_statements += len(record.statements)
-        if record.type != "config":
-            total_loc += record.loc
+        total_loc += record.loc
         if record.type == "config":
             config_files += 1
             cfg.add(record.metadata or {})
@@ -292,7 +286,7 @@ def _assemble(
         if debug_on:  # gated: no structlog cost unless --verbose
             log.debug(
                 "parse.file.done", path=record.path, language=language,
-                functions=len(record.functions), classes=file_classes,
+                functions=len(record.functions), classes=len(record.classes),
                 statements=len(record.statements),
             )
             for v in validate_contract(record):  # entry-point contract check; output unchanged

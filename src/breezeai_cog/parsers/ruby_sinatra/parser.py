@@ -3,15 +3,16 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Iterator
 
 from tree_sitter import Node
 
 from ...schemas import FileRecord, Statement
 from ..base import ParseContext
 from ..emits import apply
+from ..ruby.claims import has_require, has_require_relative_helper
 from ..ruby.parser import RubyParser
 from ..treesitter import node_text, parse_source
-from ..ruby.claims import has_require, has_require_relative_helper
 from .routes import detect_sinatra_routes
 
 
@@ -25,7 +26,7 @@ def _statement_order(statement: Statement) -> tuple[int, int, int]:
 _SINATRA_SUPERCLASSES = {"Sinatra::Base", "Sinatra::Application"}
 
 
-def _nodes(root: Node):
+def _nodes(root: Node) -> Iterator[Node]:
     yield root
     for child in root.named_children:
         yield from _nodes(child)
@@ -66,16 +67,15 @@ def _has_sinatra_factory(root: Node, source: bytes) -> bool:
 
 
 def _has_sinatra_namespace(root: Node, source: bytes) -> bool:
-    if root.type == "scope_resolution":
-        if node_text(root, source).startswith("Sinatra::"):
-            return True
+    if root.type == "scope_resolution" and node_text(root, source).startswith("Sinatra::"):
+        return True
     return any(_has_sinatra_namespace(child, source) for child in root.named_children)
 
 
 class SinatraParser(RubyParser):
     name = "ruby-sinatra"
     priority = 10
-    frameworks = ["sinatra"]
+    frameworks = ["sinatra"]  # noqa: RUF012
 
     def claims(
         self,
@@ -84,6 +84,8 @@ class SinatraParser(RubyParser):
         parse_timeout_micros: int = 0,
         parsed_root: Node | None = None,
     ) -> bool:
+        if b"sinatra" not in source.lower():
+            return False
         root = parsed_root
         if root is None:
             root = parse_source("ruby", source, parse_timeout_micros).root_node

@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
 import re
 import shlex
+from collections.abc import Sequence
 from pathlib import Path
 
 from tree_sitter import Node
@@ -19,9 +19,10 @@ from ..treesitter import parse_source
 from .classes import build_class, iter_definitions
 from .functions import _visibility_by_scope, build_function, defined_names
 from .imports import extract_imports
-from .mappings import COMMENT_TYPES, CONTROL_FLOW, FRAMEWORKS, STATEMENT_TYPES
 from .index import RubyIndex, build_ruby_index
+from .mappings import COMMENT_TYPES, CONTROL_FLOW, FRAMEWORKS, STATEMENT_TYPES
 from .models import (
+    AnnotationCache,
     RubyModelIndex,
     declared_associations,
     declared_class_names,
@@ -38,7 +39,7 @@ _RUBY_FIXTURE_DIRS: frozenset[str] = frozenset({"spec", "test", "tests"})
 
 class RubyParser(BaseParser):
     name = "ruby"
-    extensions = (".rb", ".rake", ".gemspec", "Gemfile", "Rakefile")
+    extensions = (".rb", ".rake", ".gemspec", ".ru", "Gemfile", "Rakefile")
     _RUBY_INTERPRETER = re.compile(r"(?:ruby(?:\d+(?:\.\d+)*)?|jruby|truffleruby|rbx)\Z")
     schema_version = SCHEMA_VERSION
     statement_types = STATEMENT_TYPES
@@ -103,7 +104,7 @@ class RubyParser(BaseParser):
                 if arg in {"-u", "--unset", "-C", "--chdir"}:
                     index += 2
                     continue
-                if arg.startswith("--unset=") or arg.startswith("--chdir="):
+                if arg.startswith(("--unset=", "--chdir=")):
                     index += 1
                     continue
                 if arg in {"-i", "--ignore-environment", "-v", "--debug", "-"}:
@@ -121,7 +122,13 @@ class RubyParser(BaseParser):
 
         return cls._RUBY_INTERPRETER.fullmatch(interpreter) is not None
 
-    def claims(self, path: str, source: bytes, parse_timeout_micros: int = 0) -> bool:
+    def claims(
+        self,
+        path: str,
+        source: bytes,
+        parse_timeout_micros: int = 0,
+        parsed_root: Node | None = None,
+    ) -> bool:
         return True
 
     def build_index(
@@ -194,7 +201,10 @@ class RubyParser(BaseParser):
                         associations[simple_cls] = associations[cls_name]
 
         effective_models = frozenset(models)
-        typed_db_ids = model_receivers(root, source, effective_models, associations) or None
+        annotation_cache = AnnotationCache()
+        typed_db_ids = model_receivers(
+            root, source, effective_models, associations, annotation_cache=annotation_cache
+        ) or None
 
         functions: list[Function] = []
         classes = []
@@ -215,6 +225,7 @@ class RubyParser(BaseParser):
                     typed_db_ids=typed_db_ids,
                     models=effective_models,
                     associations=associations,
+                    annotation_cache=annotation_cache,
                 )
                 classes.extend(cls_list)
                 functions.extend(methods)
@@ -234,6 +245,7 @@ class RubyParser(BaseParser):
                     associations,
                     enclosing_class=None,
                     is_instance_method=False,
+                    annotation_cache=annotation_cache,
                 )
                 fns, fn_stmts = build_function(
                     node,
@@ -247,6 +259,7 @@ class RubyParser(BaseParser):
                     resolve=resolve,
                     typed_db_ids=method_receivers,
                     visibility=visibility,
+                    annotation_cache=annotation_cache,
                 )
                 functions.extend(fns)
                 statements.extend(fn_stmts)

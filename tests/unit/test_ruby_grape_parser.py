@@ -102,7 +102,9 @@ end
 '''
     record = GrapeParser().parse_file(_context(tmp_path, "api.rb", source))
 
-    assert not any(item.semanticType == "route" for item in record.statements)
+    routes = [item for item in record.statements if item.semanticType == "route"]
+    assert len(routes) == 1
+    assert routes[0].endpoint is None
 
 
 def test_grape_prefix_and_version_do_not_leak_between_api_classes(tmp_path: Path) -> None:
@@ -243,6 +245,50 @@ end
         # outer scope first; a hook with more than one statement names no guard
         "/admin/stats": (["authenticate!", "check_scope", "require_admin!"], None),
     }
+
+
+def test_grape_scope_summaries_keep_source_order_and_nested_inheritance(
+    tmp_path: Path, monkeypatch
+) -> None:
+    from breezeai_cog.parsers.ruby_grape import routes as route_module
+
+    source = b'''require "grape"
+class API < Grape::API
+  prefix :api
+  version "v1", using: :path
+  before { authenticate! }
+  get "/early" do
+  end
+  version "v2", using: :header
+  before { audit! }
+  namespace :admin do
+    before { admin! }
+    get "/users" do
+    end
+  end
+  get "/late" do
+  end
+end
+'''
+    summarized = []
+    original = route_module._ScopeSummaries.body
+
+    def count_body(self, body):
+        key = (body.start_byte, body.end_byte)
+        if key not in self._bodies:
+            summarized.append(key)
+        return original(self, body)
+
+    monkeypatch.setattr(route_module._ScopeSummaries, "body", count_body)
+    record = GrapeParser().parse_file(_context(tmp_path, "api.rb", source))
+    routes = {r.endpoint: (r.version, r.guards) for r in record.statements if r.semanticType == "route"}
+
+    assert routes == {
+        "/api/v1/early": ("v1", ["authenticate!"]),
+        "/api/admin/users": ("v2", ["authenticate!", "audit!", "admin!"]),
+        "/api/late": ("v2", ["authenticate!", "audit!"]),
+    }
+    assert len(summarized) == len(set(summarized))
 def test_grape_routes_skip_spec_files_but_not_application_source(tmp_path: Path) -> None:
     source = b"require 'grape'\nclass API < Grape::API\n  get '/x' do\n  end\nend\n"
     spec = GrapeParser().parse_file(_context(tmp_path, "spec/api_spec.rb", source))
@@ -273,7 +319,10 @@ def test_grape_interpolated_route_path_is_not_emitted_as_a_partial_literal(
   post :"sym#{x}" do
   end
 '''
-    assert _grape_routes(tmp_path, body) == []
+    assert _grape_routes(tmp_path, body) == [
+        ("GET", None), ("GET", None), ("GET", None),
+        ("GET", None), ("GET", None), ("POST", None),
+    ]
 
 
 def test_grape_interpolation_in_route_paths_is_dropped_but_unknown_prefixes_stay_null(
@@ -307,7 +356,7 @@ def test_grape_interpolated_path_version_is_not_guessed(tmp_path: Path) -> None:
   get '/a' do
   end
 '''
-    assert _grape_routes(tmp_path, body) == []
+    assert _grape_routes(tmp_path, body) == [("GET", None)]
 
 
 def test_grape_static_strings_and_parameters_still_emit(tmp_path: Path) -> None:
@@ -329,4 +378,55 @@ def test_grape_static_strings_and_parameters_still_emit(tmp_path: Path) -> None:
         ("GET", "/single/#{literal}"),
         ("GET", "/static"),
         ("GET", "/static/:id/sub/:name"),
+    ]
+
+
+def test_grape_multiple_paths_verbs_and_class_new_api(tmp_path: Path) -> None:
+    source = b'''require "grape"
+API = Class.new(Grape::API) do
+  route [:get, :post], ["/one", "/two"] do
+  end
+end
+'''
+    record = GrapeParser().parse_file(_context(tmp_path, "api.rb", source))
+    routes = [item for item in record.statements if item.semanticType == "route"]
+    assert [(item.method, item.endpoint) for item in routes] == [
+        ("GET", "/one"), ("GET", "/two"), ("POST", "/one"), ("POST", "/two"),
+    ]
+
+
+def test_grape_mounted_sub_api_prefix_and_unknown_mount_are_honest(tmp_path: Path) -> None:
+    source = b'''require "grape"
+class MainAPI < Grape::API
+  mount ChildAPI => "/child"
+end
+class ChildAPI < Grape::API
+  get "/users" do
+  end
+end
+'''
+    record = GrapeParser().parse_file(_context(tmp_path, "api.rb", source))
+    routes = [item for item in record.statements if item.semanticType == "route"]
+    assert [(item.method, item.endpoint) for item in routes] == [("GET", "/child/users")]
+
+    unknown = source.replace(b'ChildAPI => "/child"', b"ChildAPI")
+    record = GrapeParser().parse_file(_context(tmp_path, "unknown.rb", unknown))
+    routes = [item for item in record.statements if item.semanticType == "route"]
+    assert [(item.method, item.endpoint) for item in routes] == [("GET", None)]
+
+
+def test_grape_static_version_arrays_expand_each_version(tmp_path: Path) -> None:
+    source = b'''require "grape"
+class API < Grape::API
+  prefix :api
+  version %i[v1 v2], using: :path
+  get "/users" do
+  end
+end
+'''
+    record = GrapeParser().parse_file(_context(tmp_path, "api.rb", source))
+    routes = [item for item in record.statements if item.semanticType == "route"]
+    assert [(item.version, item.endpoint) for item in routes] == [
+        ("v1", "/api/v1/users"),
+        ("v2", "/api/v2/users"),
     ]

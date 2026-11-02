@@ -90,7 +90,9 @@ def match_api(
         return None
     # JavaScript/TypeScript's global fetch forms are standard HTTP calls. Ruby's
     # ``Hash#fetch``/``ENV.fetch`` share the suffix but are not outbound requests.
-    if low in _BARE_FUNCTIONS or (language != "ruby" and low.endswith(".fetch")):
+    if low in _BARE_FUNCTIONS or (
+        language != "ruby" and (m in _BARE_FUNCTIONS or low.endswith(".fetch"))
+    ):
         return "GET"
     # .NET (C#/VB) HttpClient uses async-suffixed verbs (``GetAsync``/``PostAsync``…);
     # strip a trailing ``async`` so they match the same verbs (precision preserved — a

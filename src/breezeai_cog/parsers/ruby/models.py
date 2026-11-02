@@ -24,8 +24,10 @@ genuine evidence too.
 
 from __future__ import annotations
 
+import logging
 import re
 from collections.abc import Iterator, Sequence
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Self
 
@@ -51,6 +53,8 @@ _ASSOC_KINDS = frozenset({"has_many", "belongs_to", "has_one", "has_and_belongs_
 _COLLECTION_ITERATORS = frozenset({
     "each", "find_each", "each_with_index", "filter", "select", "find_all", "map", "collect",
 })
+RUBY_INDEX_PARSE_TIMEOUT_MICROS = 5_000_000
+_logger = logging.getLogger(__name__)
 
 
 class RubyModelIndex(frozenset[str]):
@@ -297,32 +301,33 @@ def _file_info(
 ) -> tuple[list[tuple[str, str]], list[tuple[str, str, str, str]], list[str]]:
     """Picklable per-file worker for :func:`build_model_index` (one parse per file).
 
-    A file that cannot be read or parsed contributes nothing — a missing model is a known
-    gap, whereas failing the pre-pass would block the whole repository.
-
-    O2 fix: Uses the caller-supplied ``timeout_micros`` so pathological files are
-    time-bounded rather than running with no timeout (``timeout=0``).
-    O5 fix: Catches the broader ``Exception`` class (not just ``ValueError``) so large or
-    malformed files that trigger ``MemoryError`` or ``RecursionError`` inside the parser do
-    not crash the pool worker. ``BaseException`` (``KeyboardInterrupt``, ``SystemExit``) is
-    intentionally *not* caught so cancellation propagates correctly.
+    A file that cannot be read or parsed contributes nothing; its failure is logged and the
+    remaining files are still indexed. Ruby-local timeouts keep pathological files bounded.
     """
     _repo_root, abs_path, timeout_micros = args
     try:
         source = abs_path.read_bytes()
-    except OSError:
+    except OSError as exc:
+        _logger.warning("Ruby model index could not read %s: %s", abs_path, exc)
         return [], [], []
     if b"class" not in source:
         return [], [], []
     try:
-        root = parse_source("ruby", source, timeout_micros).root_node
-    except Exception:  # noqa: BLE001 — O5: robustness, not swallowing programming errors
+        root = parse_source(
+            "ruby", source, timeout_micros or RUBY_INDEX_PARSE_TIMEOUT_MICROS
+        ).root_node
+    except Exception as exc:  # noqa: BLE001
+        _logger.warning("Ruby model index parse failed for %s: %s", abs_path, exc)
         return [], [], []
-    return (
-        declared_parents(root, source),
-        declared_associations(root, source),
-        declared_class_names(root, source),
-    )
+    try:
+        return (
+            declared_parents(root, source),
+            declared_associations(root, source),
+            declared_class_names(root, source),
+        )
+    except Exception as exc:  # noqa: BLE001
+        _logger.warning("Ruby model index extraction failed for %s: %s", abs_path, exc)
+        return [], [], []
 
 
 def _file_parents(args: tuple[Path, Path]) -> list[tuple[str, str]]:
@@ -337,24 +342,14 @@ def resolve_models(parents: dict[str, str]) -> frozenset[str]:
     return resolve_model_names(pairs, list(parents))
 
 
-def build_model_index(
-    repo_root: Path, files: Sequence[Path], jobs: int = 1
-) -> RubyModelIndex:
-    """Repo-level pre-pass: every constant and association that names an ActiveRecord model.
-
-    Runs through the shared :func:`parallel_map` so it honours ``--jobs`` (serial at
-    ``jobs<=1``) like the parse stage, and reduces order-independently — the result is the
-    same set regardless of how the workers interleave.
-    """
-    root = Path(repo_root)
+def _model_candidate_files(files: Sequence[Path]) -> list[Path]:
+    """Files eligible for model discovery, preserving the historical input order."""
     # Import lazily to avoid the parser -> models -> parser import cycle. Use the parser's
     # source extensions and exact filename entries so indexing follows discovery support.
     from .parser import RubyParser
 
     ruby_extensions = RubyParser.extensions
-    ruby_files = [
-        f for f in files if f.suffix in ruby_extensions or f.name in ruby_extensions
-    ]
+    ruby_files = [f for f in files if f.suffix in ruby_extensions or f.name in ruby_extensions]
     known_files = set(ruby_files)
     ruby_parser = RubyParser()
     for path in files:
@@ -367,11 +362,15 @@ def build_model_index(
             continue
         if ruby_parser.matches_source(path, prefix):
             ruby_files.append(path)
-    if not ruby_files:
-        return RubyModelIndex(frozenset(), {})
-    per_file = parallel_map(
-        [(root, f, 0) for f in ruby_files], _file_info, jobs
-    )
+    return ruby_files
+
+
+def _model_index_from_info(
+    per_file: Sequence[
+        tuple[list[tuple[str, str]], list[tuple[str, str, str, str]], list[str]]
+    ],
+) -> RubyModelIndex:
+    """Reduce per-file model declarations in their original, deterministic order."""
     parent_pairs: list[tuple[str, str]] = []
     class_names: list[str] = []
     all_assocs: list[tuple[str, str, str, str]] = []
@@ -404,63 +403,136 @@ def build_model_index(
     return RubyModelIndex(all_models, by_model_assoc)
 
 
-def extract_param_types(method_node: Node, source: bytes) -> dict[str, str]:
+def build_model_index(
+    repo_root: Path, files: Sequence[Path], jobs: int = 1
+) -> RubyModelIndex:
+    """Repo-level pre-pass: every constant and association that names an ActiveRecord model.
+
+    Runs through the shared :func:`parallel_map` so it honours ``--jobs`` (serial at
+    ``jobs<=1``) like the parse stage, and reduces order-independently — the result is the
+    same set regardless of how the workers interleave.
+    """
+    root = Path(repo_root)
+    ruby_files = _model_candidate_files(files)
+    if not ruby_files:
+        return RubyModelIndex(frozenset(), {})
+    per_file = parallel_map(
+        [(root, f, 0) for f in ruby_files], _file_info, jobs
+    )
+    return _model_index_from_info(per_file)
+
+
+@dataclass(frozen=True)
+class MethodAnnotations:
+    param_types: dict[str, str]
+    return_type: str | None
+
+
+class AnnotationCache:
+    """Parse-local annotation results and sibling indexes shared by method consumers."""
+
+    def __init__(self) -> None:
+        self._scopes: dict[tuple[int, int], tuple[tuple[Node, ...], dict[tuple[int, int], int]]] = {}
+        self._methods: dict[tuple[int, int], MethodAnnotations] = {}
+
+    def annotations(self, method_node: Node, source: bytes) -> MethodAnnotations:
+        key = (method_node.start_byte, method_node.end_byte)
+        cached = self._methods.get(key)
+        if cached is not None:
+            return cached
+        parent = method_node.parent
+        types: dict[str, str] = {}
+        return_type: str | None = None
+        if parent is not None:
+            pkey = (parent.start_byte, parent.end_byte)
+            scope = self._scopes.get(pkey)
+            if scope is None:
+                children = tuple(parent.named_children)
+                scope = (children, {(n.start_byte, n.end_byte): i for i, n in enumerate(children)})
+                self._scopes[pkey] = scope
+            children, positions = scope
+            idx = positions.get(key)
+            if idx is not None:
+                outer_children: tuple[Node, ...] = ()
+                body_idx = 0
+                if parent.type == "body_statement" and parent.parent is not None:
+                    outer_parent = parent.parent
+                    okey = (outer_parent.start_byte, outer_parent.end_byte)
+                    outer_scope = self._scopes.get(okey)
+                    if outer_scope is None:
+                        outer_children = tuple(outer_parent.named_children)
+                        outer_scope = (outer_children, {
+                            (n.start_byte, n.end_byte): i for i, n in enumerate(outer_children)
+                        })
+                        self._scopes[okey] = outer_scope
+                    outer_children, outer_positions = outer_scope
+                    outer_idx = outer_positions.get((parent.start_byte, parent.end_byte))
+                    if outer_idx is None:
+                        outer_children = ()
+                    else:
+                        body_idx = outer_idx
+                preceding_groups = ((children, idx), (outer_children, body_idx))
+                stop = False
+                for siblings, limit in preceding_groups:
+                    if stop:
+                        break
+                    for sibling_index in range(limit - 1, -1, -1):
+                        sib = siblings[sibling_index]
+                        if sib.type == "comment":
+                            text = node_text(sib, source)
+                            m_yard = re.search(
+                                r"@param\s+(?:\[([A-Za-z0-9_:]+)\]\s+([a-z0-9_]+)|([a-z0-9_]+)\s+\[([A-Za-z0-9_:]+)\])",
+                                text,
+                            )
+                            if m_yard:
+                                typ = m_yard.group(1) or m_yard.group(4)
+                                name = m_yard.group(2) or m_yard.group(3)
+                                types[name] = typ
+                            m_rbs = re.search(r"#:\s*\((?:([a-z0-9_]+):\s*)?([A-Z][A-Za-z0-9_:]*)", text)
+                            if m_rbs and m_rbs.group(1):
+                                types[m_rbs.group(1)] = m_rbs.group(2)
+                            if return_type is None:
+                                m_return = re.search(r"@return\s+\[([A-Za-z0-9_:<>, ]+)\]", text)
+                                if m_return:
+                                    return_type = m_return.group(1).strip()
+                        elif sib.type == "call":
+                            m_node = sib.child_by_field_name("method")
+                            if m_node is not None and node_text(m_node, source) == "sig":
+                                def visit_sig(n: Node) -> None:
+                                    nonlocal return_type
+                                    if n.type == "call":
+                                        meth = n.child_by_field_name("method")
+                                        args = n.child_by_field_name("arguments")
+                                        if meth is not None and args is not None:
+                                            method_name = node_text(meth, source)
+                                            if method_name == "params":
+                                                for pair in args.named_children:
+                                                    if pair.type == "pair":
+                                                        k = pair.child_by_field_name("key")
+                                                        v = pair.child_by_field_name("value")
+                                                        if k is not None and v is not None:
+                                                            types[node_text(k, source).rstrip(":")] = node_text(v, source)
+                                            elif method_name == "returns" and args.named_children and return_type is None:
+                                                return_type = node_text(args.named_children[0], source)
+                                    for child in n.named_children:
+                                        visit_sig(child)
+                                visit_sig(sib)
+                        else:
+                            stop = True
+                            break
+        result = MethodAnnotations(types, return_type)
+        self._methods[key] = result
+        return result
+
+
+def extract_param_types(
+    method_node: Node, source: bytes, cache: AnnotationCache | None = None
+) -> dict[str, str]:
     """Extract declared parameter type hints from keywords, Sorbet sigs, YARD, or RBS."""
-    types: dict[str, str] = {}
-    parent = method_node.parent
-    if parent is not None:
-        children = parent.named_children
-        if method_node in children:
-            idx = children.index(method_node)
-            preceding = list(children[:idx])
-            if parent.type == "body_statement" and parent.parent is not None:
-                scope_children = parent.parent.named_children
-                if parent in scope_children:
-                    preceding = [
-                        *scope_children[:scope_children.index(parent)],
-                        *preceding,
-                    ]
-            for sib in reversed(preceding):
-                if sib.type == "comment":
-                    t = node_text(sib, source)
-                    m_yard = re.search(
-                        r"@param\s+(?:\[([A-Za-z0-9_:]+)\]\s+([a-z0-9_]+)|([a-z0-9_]+)\s+\[([A-Za-z0-9_:]+)\])",
-                        t,
-                    )
-                    if m_yard:
-                        typ = m_yard.group(1) or m_yard.group(4)
-                        nm = m_yard.group(2) or m_yard.group(3)
-                        types[nm] = typ
-                    m_rbs = re.search(r"#:\s*\((?:([a-z0-9_]+):\s*)?([A-Z][A-Za-z0-9_:]*)", t)
-                    if m_rbs:
-                        nm = m_rbs.group(1)
-                        typ = m_rbs.group(2)
-                        if nm:
-                            types[nm] = typ
-                elif sib.type == "call":
-                    m_node = sib.child_by_field_name("method")
-                    if m_node is not None and node_text(m_node, source) == "sig":
-                        def find_params(n: Node) -> None:
-                            if n.type == "call":
-                                m = n.child_by_field_name("method")
-                                if m is not None and node_text(m, source) == "params":
-                                    args = n.child_by_field_name("arguments")
-                                    if args is not None:
-                                        for pair in args.named_children:
-                                            if pair.type == "pair":
-                                                k = pair.child_by_field_name("key")
-                                                v = pair.child_by_field_name("value")
-                                                if k is not None and v is not None:
-                                                    types[node_text(k, source).rstrip(":")] = node_text(v, source)
-                            for c in n.named_children:
-                                find_params(c)
-
-                        find_params(sib)
-                else:
-                    break
-
-    params_node = method_node.child_by_field_name("parameters")
-    return types
+    if cache is not None:
+        return cache.annotations(method_node, source).param_types
+    cache = AnnotationCache()
+    return cache.annotations(method_node, source).param_types
 def models_from_parents(per_file: Sequence[list[tuple[str, str]]]) -> frozenset[str]:
     """Reduce per-file ``(class, superclass)`` pairs to the model constants (order-independent)."""
     by_name: dict[str, set[str]] = {}
@@ -489,6 +561,7 @@ def model_receivers(
     associations: dict[str, dict[str, tuple[str, str]]] | None = None,
     enclosing_class: str | None = None,
     is_instance_method: bool = False,
+    annotation_cache: AnnotationCache | None = None,
 ) -> frozenset[str]:
     """Receivers in one scope that carry a proven ActiveRecord model's identity.
 
@@ -525,7 +598,7 @@ def model_receivers(
                 names.add(f"self.{assoc_name}")
 
     if root.type in {"method", "singleton_method"}:
-        param_types = extract_param_types(root, source)
+        param_types = extract_param_types(root, source, annotation_cache)
         for p_name, p_type in param_types.items():
             if p_type in models or p_type.rsplit("::", 1)[-1] in models:
                 names.add(p_name)
@@ -534,28 +607,28 @@ def model_receivers(
             params_node = root.child_by_field_name("parameters")
             if params_node is not None:
                 for child in params_node.named_children:
-                    p_name = None
+                    param_name: str | None = None
                     if child.type == "identifier":
-                        p_name = node_text(child, source)
+                        param_name = node_text(child, source)
                     elif child.type in {"optional_parameter", "keyword_parameter"}:
                         nm = child.child_by_field_name("name")
                         if nm is not None:
-                            p_name = node_text(nm, source)
-                    if p_name and p_name not in var_models:
-                        if p_name in class_assocs:
-                            _kind, target = class_assocs[p_name]
+                            param_name = node_text(nm, source)
+                    if param_name and param_name not in var_models:
+                        if param_name in class_assocs:
+                            _kind, target = class_assocs[param_name]
                             if target in models or target.rsplit("::", 1)[-1] in models:
-                                names.add(p_name)
-                                var_models[p_name] = target
+                                names.add(param_name)
+                                var_models[param_name] = target
                         else:
                             for assoc_name, (kind, target) in class_assocs.items():
                                 if (
                                     kind in {"has_many", "has_and_belongs_to_many"}
-                                    and p_name == _singularize(assoc_name)
+                                    and param_name == _singularize(assoc_name)
                                     and (target in models or target.rsplit("::", 1)[-1] in models)
                                 ):
-                                    names.add(p_name)
-                                    var_models[p_name] = target
+                                    names.add(param_name)
+                                    var_models[param_name] = target
                                     break
 
     def _add_model_var(var_name: str, model_type: str) -> None:
@@ -603,11 +676,11 @@ def model_receivers(
                         if inner_rec is not None and inner_meth is not None:
                             inner_base = node_text(inner_rec, source)
                             inner_assoc = node_text(inner_meth, source)
-                            rec_model = var_models.get(inner_base) or (
+                            inner_rec_model = var_models.get(inner_base) or (
                                 enclosing_class if inner_base == "self" else None
                             )
-                            if rec_model:
-                                rec_assocs = assocs.get(rec_model) or assocs.get(rec_model.rsplit("::", 1)[-1]) or {}
+                            if inner_rec_model:
+                                rec_assocs = assocs.get(inner_rec_model) or assocs.get(inner_rec_model.rsplit("::", 1)[-1]) or {}
                                 if inner_assoc in rec_assocs and verb in _MODEL_PRODUCERS:
                                     _kind, target = rec_assocs[inner_assoc]
                                     if target in models or target.rsplit("::", 1)[-1] in models:

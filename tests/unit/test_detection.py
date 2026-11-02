@@ -21,6 +21,7 @@ def test_classify_api() -> None:
 def test_fetch_method_lookups_are_not_api_calls() -> None:
     assert classify_call("cop_config.fetch", "fetch", language="ruby") is None
     assert classify_call("ENV.fetch", "fetch", language="ruby") is None
+    assert classify_call("config.fetch", "fetch", language="ruby") is None
     for callee in ("window.fetch", "globalThis.fetch", "this.fetch", "self.fetch"):
         assert classify_call(callee, "fetch", language="ruby") is None
     assert classify_call("fetch", "fetch", language="ruby") == ("api_call", "GET", None)
@@ -32,6 +33,17 @@ def test_javascript_fetch_receivers_remain_api_calls() -> None:
             assert classify_call(callee, "fetch", language=language) == (
                 "api_call", "GET", None
             )
+
+
+def test_javascript_fetch_wrappers_are_api_calls() -> None:
+    for callee, method in (
+        ("this.apiFetch", "apiFetch"),
+        ("api.authFetch", "authFetch"),
+        ("ofetch.$fetch", "$fetch"),
+    ):
+        assert classify_call(callee, method, language="typescript") == (
+            "api_call", "GET", None
+        )
 
 
 def test_session_query_chain_is_db_not_http() -> None:

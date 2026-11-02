@@ -10,8 +10,13 @@ from ...emit import class_id, disambiguate
 from ...schemas import Class, ConstructorParam, Function, Statement
 from ..callresolve import CallResolver
 from ..treesitter import line_span, node_text
-from .functions import _visibility_by_scope, build_function, extract_params
-from .models import _qualified_name, model_class_identity, model_receivers
+from .functions import (
+    _module_function_methods,
+    _visibility_by_scope,
+    build_function,
+    extract_params,
+)
+from .models import AnnotationCache, _qualified_name, model_class_identity, model_receivers
 from .statements import extract_enum_members, extract_statements
 
 
@@ -23,6 +28,19 @@ def _name_of_class(node: Node, source: bytes) -> str:
     if name is not None:
         return node_text(name, source)
     return "<anonymous>"
+
+
+def _id_owner(node: Node, source: bytes) -> str:
+    lexical: list[str] = []
+    current = node.parent
+    while current is not None:
+        if current.type in {"class", "module"}:
+            lexical.append(_name_of_class(current, source).replace("::", "."))
+        current = current.parent
+    name = _name_of_class(node, source)
+    if not lexical:
+        return name
+    return ".".join([*reversed(lexical), name.replace("::", ".")])
 
 
 def _body_of(node: Node) -> Node | None:
@@ -66,14 +84,40 @@ def _conditional_definitions(body: Node, source: bytes) -> list[Node]:
         if child.type == "call":
             method = child.child_by_field_name("method")
             arguments = child.child_by_field_name("arguments")
+            receiver = child.child_by_field_name("receiver")
+            name = node_text(method, source) if method is not None else ""
             if (
                 method is not None
-                and node_text(method, source) in {"private", "protected", "public", "private_class_method"}
+                and name in {"private", "protected", "public", "private_class_method"}
                 and arguments is not None
             ):
                 for argument in arguments.named_children:
                     if argument.type in {"method", "singleton_method"}:
                         found.append(argument)
+            block = child.child_by_field_name("block")
+            receiver_name = node_text(receiver, source) if receiver is not None else ""
+            if block is not None and (
+                name in {"included", "class_methods", "prepended", "extended"}
+                or (name == "new" and receiver_name in {"Class", "Struct"})
+            ):
+                for block_child in block.named_children:
+                    if block_child.type in {"block_body", "body_statement"}:
+                        visit(block_child)
+            return
+        if child.type == "assignment":
+            value = child.child_by_field_name("right")
+            if value is not None and value.type == "call":
+                method = value.child_by_field_name("method")
+                receiver = value.child_by_field_name("receiver")
+                block = value.child_by_field_name("block")
+                if (
+                    method is not None and node_text(method, source) == "new"
+                    and receiver is not None and node_text(receiver, source) in {"Class", "Struct"}
+                    and block is not None
+                ):
+                    for block_child in block.named_children:
+                        if block_child.type in {"block_body", "body_statement"}:
+                            visit(block_child)
             return
         if child.type in {"begin", "rescue", "ensure"}:
             for nested in child.named_children:
@@ -117,6 +161,36 @@ def _superclass_of(node: Node, source: bytes) -> str | None:
     return text or None
 
 
+def _private_constant(body: Node | None, name: str, source: bytes) -> bool:
+    if body is None:
+        return False
+    private = False
+    for child in body.named_children:
+        if child.type != "call":
+            continue
+        method = child.child_by_field_name("method")
+        if method is None or node_text(method, source) != "private_constant":
+            continue
+        arguments = child.child_by_field_name("arguments")
+        if arguments is None:
+            continue
+        for arg in arguments.named_children:
+            if arg.type in {"simple_symbol", "symbol"}:
+                private = node_text(arg, source).lstrip(":") == name
+    return private
+
+
+def _inside_class_methods_block(node: Node, source: bytes) -> bool:
+    current = node.parent
+    while current is not None:
+        if current.type == "call":
+            method = current.child_by_field_name("method")
+            if method is not None and node_text(method, source) == "class_methods":
+                return True
+        current = current.parent
+    return False
+
+
 def _constructor_params(body: Node | None, source: bytes) -> list[ConstructorParam]:
     """Extract ConstructorParam list from the ``initialize`` method in a class body.
 
@@ -149,22 +223,26 @@ def build_class(
     typed_db_ids: frozenset[str] | None = None,
     models: frozenset[str] | set[str] | None = None,
     associations: dict[str, dict[str, tuple[str, str]]] | None = None,
+    annotation_cache: AnnotationCache | None = None,
 ) -> tuple[list[Class], list[Function], list[Statement]]:
     name = _name_of_class(node, source)
     resolve = resolve_for_scope(node)
     start, end = line_span(node)
-    cid = disambiguate(class_id(path, name), seen_ids)
+    qualified_name = _qualified_name(node, source) or name
+    id_owner = _id_owner(node, source)
+    cid = disambiguate(class_id(path, id_owner), seen_ids)
     body = _body_of(node)
     methods: list[Function] = []
     statements: list[Statement] = []
     nested_classes: list[Class] = []
     effective_models = models if models is not None else (typed_db_ids or frozenset())
     effective_assocs = associations or {}
-    qualified_name = _qualified_name(node, source) or name
+    annotation_cache = annotation_cache or AnnotationCache()
     scope_name = model_class_identity(qualified_name, list(effective_models))
 
     if body is not None:
         method_visibilities = _visibility_by_scope(body, source)
+        module_function_methods = _module_function_methods(body, source)
         class_receivers = model_receivers(
             node, source, effective_models, effective_assocs, enclosing_class=scope_name, is_instance_method=False
         ) or typed_db_ids
@@ -182,6 +260,7 @@ def build_class(
                 method_receivers = model_receivers(
                     child, source, effective_models, effective_assocs,
                     enclosing_class=scope_name, is_instance_method=(child.type == "method"),
+                    annotation_cache=annotation_cache,
                 )
                 fns, fn_stmts = build_function(
                     child,
@@ -189,6 +268,7 @@ def build_class(
                     path,
                     parent_id=cid,
                     class_name=name,
+                    id_owner=id_owner,
                     seen_ids=seen_ids,
                     capture=capture,
                     limit=limit,
@@ -199,6 +279,11 @@ def build_class(
                             or (_visibility_by_scope(child.parent, source).get(
                                 (child.start_byte, child.end_byte)
                             ) if child.parent is not None else None)),
+                    is_static=(
+                        node.type == "module"
+                        and (child.start_byte, child.end_byte) in module_function_methods
+                    ) or _inside_class_methods_block(child, source),
+                    annotation_cache=annotation_cache,
                 )
                 methods.extend(fns)
                 statements.extend(fn_stmts)
@@ -215,6 +300,7 @@ def build_class(
                     typed_db_ids=typed_db_ids,
                     models=effective_models,
                     associations=effective_assocs,
+                    annotation_cache=annotation_cache,
                 )
                 nested_classes.extend(sub_classes)
                 methods.extend(sub_methods)
@@ -235,6 +321,7 @@ def build_class(
                     method_receivers = model_receivers(
                         singleton_method, source, effective_models, effective_assocs,
                         enclosing_class=scope_name, is_instance_method=False,
+                        annotation_cache=annotation_cache,
                     )
                     fns, fn_stmts = build_function(
                         singleton_method,
@@ -242,6 +329,7 @@ def build_class(
                         path,
                         parent_id=cid,
                         class_name=name,
+                        id_owner=id_owner,
                         seen_ids=seen_ids,
                         capture=capture,
                         limit=limit,
@@ -251,6 +339,7 @@ def build_class(
                             (singleton_method.start_byte, singleton_method.end_byte)
                         ),
                         is_static=True,
+                        annotation_cache=annotation_cache,
                     )
                     methods.extend(fns)
                     statements.extend(fn_stmts)
@@ -261,7 +350,16 @@ def build_class(
         path=path,
         name=name,
         type="class" if node.type == "class" else "module",
-        visibility="public",
+        visibility=(
+            "private"
+            if node.parent is not None
+            and _private_constant(
+                node.parent if node.parent.type in {"body_statement", "program"} else None,
+                name.rsplit("::", 1)[-1],
+                source,
+            )
+            else "public"
+        ),
         startLine=start,
         endLine=end,
         extends=_superclass_of(node, source) if node.type == "class" else None,

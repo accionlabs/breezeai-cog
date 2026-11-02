@@ -9,9 +9,10 @@ from tree_sitter import Node
 from ...emit import file_id
 from ...schemas import FileRecord
 from ..emits import Emit
-from ..ruby.ownership import owner_id
 from ..handler_sites import handler_location, locate_method
-from ..inflect import plural as _plural, singular as _singular
+from ..inflect import plural as _plural
+from ..inflect import singular as _singular
+from ..ruby.ownership import owner_id
 from ..treesitter import node_text
 from .callbacks import callbacks_of, controller_class, guards_for
 
@@ -44,8 +45,14 @@ def _inside_routes_draw(call: Node, source: bytes) -> bool:
     while current is not None:
         if current.type == "call" and _method(current, source) == "draw":
             receiver = current.child_by_field_name("receiver")
-            if receiver is not None and node_text(receiver, source) == "Rails.application.routes":
-                return True
+            if receiver is not None:
+                receiver_text = node_text(receiver, source)
+                if (
+                    receiver_text == "Rails.application.routes"
+                    or receiver_text == "Engine.routes"
+                    or receiver_text.endswith("::Engine.routes")
+                ):
+                    return True
         current = current.parent
     return False
 
@@ -80,14 +87,24 @@ def _via_methods(arguments: list[Node], source: bytes) -> list[str | None]:
     per verb. ``via: :all`` → ``["ANY"]`` (one handler for every verb). No ``via:`` or a
     non-literal value → ``[None]`` (one record, method unknown — never a guessed verb)."""
     value = _option(arguments, source, "via")
-    items = list(value.named_children) if value is not None and value.type == "array" else [value]
-    verbs = [node_text(v, source).lstrip(":").upper() if v is not None and v.type == "simple_symbol"
-             else None for v in items]
+    items = _literal_array_items(value) if value is not None else []
+    if not items:
+        items = [value]
+    verbs = [
+        value.upper() if (value := _segment(item, source)) is not None else None
+        for item in items
+    ]
     if "ALL" in verbs:
         return ["ANY"]
     if not verbs or None in verbs:
         return [None]
     return list(dict.fromkeys(verbs))
+
+
+def _literal_array_items(node: Node) -> list[Node]:
+    if node.type in {"array", "symbol_array", "string_array"}:
+        return list(node.named_children)
+    return []
 
 
 def _handler(arguments: list[Node], source: bytes) -> str | None:
@@ -135,13 +152,15 @@ class _Resource:
         self.plural = _method(call, source) == "resources"
         args = _arguments(call)
         name = _segment(name_node, source)
-        self.ok = name is not None and name_node.type == "simple_symbol"
+        self.ok = name is not None and name_node.type in {"simple_symbol", "string"}
         self.name = name or ""
         path = _option(args, source, "path")
         seg = _segment(path, source) if path is not None else self.name
         controller = _option(args, source, "controller")
+        singular = _singular(self.name)
+        already_plural = singular is not None and _plural(singular) == self.name
         ctrl = _segment(controller, source) if controller is not None else (
-            self.name if self.plural else _plural(self.name))
+            self.name if self.plural or already_plural else _plural(self.name))
         param = _option(args, source, "param")
         param_name = _segment(param, source) if param is not None else "id"
         self.ok = self.ok and seg is not None and param_name is not None
@@ -161,7 +180,7 @@ class _Resource:
             value = _option(args, source, key)
             if value is None:
                 continue
-            items = list(value.named_children) if value.type == "array" else [value]
+            items = _literal_array_items(value) or [value]
             names = {_segment(i, source) for i in items}
             if None in names:
                 return None
@@ -194,8 +213,10 @@ def _segment(node: Node | None, source: bytes) -> str | None:
         return None
     if node.type == "string":
         return _string_value(node, source)
-    if node.type == "simple_symbol":
+    if node.type in {"simple_symbol", "bare_symbol"}:
         return node_text(node, source).lstrip(":")
+    if node.type == "bare_string":
+        return node_text(node, source)
     return None
 
 
@@ -216,7 +237,7 @@ def _scope_segment(call: Node, source: bytes) -> tuple[bool, str]:
     positional = [a for a in args if a.type != "pair"]
     if not positional:
         return True, ""  # namespace with no name is not valid Rails; scope module:/as: adds no path
-    if method == "scope" and positional[0].type != "string":
+    if method == "scope" and positional[0].type not in {"string", "simple_symbol"}:
         return False, ""
     seg = _segment(positional[0], source)
     return (seg is not None, seg or "")
@@ -274,9 +295,12 @@ def _nearest_resource(call: Node, source: bytes) -> _Resource | None:
     """The resource whose block a route is declared in (for its default controller)."""
     current = call.parent
     while current is not None:
-        if current.type == "call" and current.child_by_field_name("block") is not None:
-            if _method(current, source) in _RESOURCE_SCOPES:
-                return _resource_of(current, source)
+        if (
+            current.type == "call"
+            and current.child_by_field_name("block") is not None
+            and _method(current, source) in _RESOURCE_SCOPES
+        ):
+            return _resource_of(current, source)
         current = current.parent
     return None
 
@@ -366,9 +390,13 @@ def detect_rails_routes(
     its scope's path."""
     found: list[Emit] = []
     fallback = file_id(path)
+    emitted_by_call: dict[tuple[int, int], int] = {}
 
     def emit(call: Node, verb: str | None, endpoint: str | None, handler: str | None) -> None:
         line = call.start_point[0] + 1
+        key = (call.start_byte, call.end_byte)
+        emit_index = emitted_by_call.get(key, 0)
+        emitted_by_call[key] = emit_index + 1
         module = _route_module(call, source)
         guards = _route_guards(handler, module, index)
         # `users#show` → the `show` action of `UsersController`, where it is declared (Q14).
@@ -379,20 +407,26 @@ def detect_rails_routes(
         if site is not None and target is not None:
             handler = target[1]
         found.append(
-            Emit(call, dict(
-                semanticType="route",
-                method=verb,
-                endpoint=endpoint,
-                handler=handler,
-                handlerLine=handler_line,
-                handlerPath=handler_path,
-                guards=guards or None,
-                # Honest-null: assert auth only when a guard is present; absence is unknown.
-                authRequired=True if guards else None,
-                framework="rails",
-                routeKind="route",
-                isRegex=False,
-            ), parent=owner_id(line, record.functions, record.classes, fallback), node_type="call")
+            Emit(
+                call,
+                {
+                    "semanticType": "route",
+                    "method": verb,
+                    "endpoint": endpoint,
+                    "handler": handler,
+                    "handlerLine": handler_line,
+                    "handlerPath": handler_path,
+                    "guards": guards or None,
+                    # Honest-null: assert auth only when a guard is present; absence is unknown.
+                    "authRequired": True if guards else None,
+                    "framework": "rails",
+                    "routeKind": "route",
+                    "isRegex": False,
+                },
+                enrich="same" if emit_index == 0 else "never",
+                parent=owner_id(line, record.functions, record.classes, fallback),
+                node_type="call",
+            )
         )
 
     handler: str | None

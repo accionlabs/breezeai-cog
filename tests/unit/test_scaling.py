@@ -104,6 +104,36 @@ def _ruby(n: int) -> str:
     return f"class UserService\n{body}end\n"
 
 
+def _grape_flat(n: int) -> str:
+    routes = "".join(f'  get "/items/{i}" do\n    {i}\n  end\n' for i in range(n))
+    return f'require "grape"\nclass API < Grape::API\n  prefix :api\n  version "v1"\n{routes}end\n'
+
+
+def _grape_nested(n: int) -> str:
+    routes = "".join(f'      before {{ guard_{i}! }}\n      get "/{i}" do\n        {i}\n      end\n' for i in range(n))
+    return (f'require "grape"\nclass API < Grape::API\n  prefix :api\n  version "v1"\n'
+            f'  namespace :v2 do\n    namespace :items do\n{routes}    end\n  end\nend\n')
+
+
+def _ruby_models(n: int) -> str:
+    body = "".join(
+        f"  # @param account [Account]\n  # @return [Account]\n"
+        f"  def account_{i}(account:)\n    account\n  end\n"
+        for i in range(n)
+    )
+    return ("class Account < ApplicationRecord\nend\n"
+            "class User < ApplicationRecord\n  belongs_to :account\n" + body + "end\n")
+
+
+def _ruby_service(n: int) -> str:
+    body = "".join(
+        f"  # @param value [String]\n  # @return [String]\n"
+        f"  def call_{i}(value)\n    value\n  end\n"
+        for i in range(n)
+    )
+    return f"class Service\n{body}end\n"
+
+
 def _csharp(n: int) -> str:
     body = "".join(
         f"    /// <summary>M{i}</summary>\n"
@@ -192,6 +222,10 @@ SAMPLES: dict[str, tuple[str, Callable[[int], str]]] = {
     "typescript-express-aws": ("app.ts", _ts_express_aws),
     "python": ("mod.py", _python),
     "ruby": ("service.rb", _ruby),
+    "grape-flat": ("api.rb", _grape_flat),
+    "grape-nested": ("api.rb", _grape_nested),
+    "ruby-models": ("models.rb", _ruby_models),
+    "ruby-service": ("service.rb", _ruby_service),
     "csharp": ("C.cs", _csharp),
     "xsd": ("schema.xsd", _xsd),
     "wsdl": ("service.wsdl", _wsdl),
