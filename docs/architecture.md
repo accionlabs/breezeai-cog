@@ -692,6 +692,7 @@ the file:
   │                                                                                  │
   │  python          10   celery           python_celery/tasks.py            ✔       │
   │                  20   flask            python_flask/routes.py            ✔       │
+  │                  30   drf-routers      python_django/routers.py          ✔       │
   │                                                                                  │
   │  scala           10   akka-events      scala_akka/events.py                      │
   │                  20   spark            scala_spark/io.py                         │

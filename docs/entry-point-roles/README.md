@@ -21,7 +21,7 @@ When you add a framework construct to a parser, add its row here and its test.
 | Scala | [Play](play.md) · [Akka HTTP](akka-http.md) · [http4s](http4s.md) · [Akka actors](akka.md) |
 | Apex (Salesforce) | [Apex](apex.md) |
 | C# / VB.NET | [ASP.NET](aspnet.md) · [Web Forms](webforms.md) · [WCF / ASMX](wcf.md) · [HotChocolate](hotchocolate.md) · [graphql-dotnet](graphql-dotnet.md) · [AWS Lambda](lambda-csharp.md) · [AWS SDK](aws-sdk-csharp.md) · [Quartz.NET](quartz.md) |
-| Python | [FastAPI](fastapi.md) · [Flask](flask.md) · [Django](django.md) · [Celery](celery.md) |
+| Python | [FastAPI](fastapi.md) · [Flask](flask.md) · [Django](django.md) · [Django REST framework](drf.md) · [Celery](celery.md) |
 | Ruby | [Rails](rails.md) · [Sinatra](sinatra.md) · [Grape](grape.md) |
 | PHP | [Laravel](laravel.md) · [CodeIgniter](codeigniter.md) · [Slim](slim.md) · [Symfony](symfony.md) · [WordPress](wordpress.md) |
 | Go | [net/http](net-http.md) · [Gin](gin.md) · [Echo](echo.md) · [chi](chi.md) · [Fiber](fiber.md) · [gorilla/mux](gorilla-mux.md) · [gRPC](grpc-go.md) · [NATS](nats.md) · [Kafka](kafka-go.md) · [Scheduled jobs](scheduling-go.md) · [AWS Lambda](lambda-go.md) |
