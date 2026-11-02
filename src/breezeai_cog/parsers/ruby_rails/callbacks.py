@@ -65,10 +65,17 @@ Declared = tuple[str | None, tuple[str, ...], tuple[_Op, ...]]
 _CONSTANT = re.compile(r"(::)?[A-Z]\w*(::[A-Z]\w*)*")
 
 #: Callbacks that certainly reject an anonymous user: Devise's ``authenticate_<scope>!`` (and the
-#: ``authenticate(:scope)`` its route blocks are recorded as) and a short list of established names. Any other callback (``set_locale``, ``load_resource``,
-#: ``require_admin`` …) is a guard but does not establish that authentication is required.
+#: ``authenticate(:scope)`` its route blocks are recorded as), a short list of established names,
+#: and the ``require_logged_in_<user|moderator|admin>`` family (optionally ``_or_<status>``, as in
+#: ``require_logged_in_user_or_400``). The list is exact on purpose: a name that only mentions a
+#: user (``load_user``, ``find_user_from_rss_token``) or asks for the opposite
+#: (``require_no_user_or_redirect``) is a guard but does not establish that login is required.
 _DEVISE_AUTH = re.compile(r"authenticate_[a-z0-9_]+!|authenticated?\([a-z0-9_:]+\)")
-_AUTH_CALLBACKS = frozenset({"authenticate", "require_login", "authorize"})
+_LOGIN_FAMILY = re.compile(r"require_logged_in_(user|moderator|admin)(_or_\d+)?")
+_AUTH_CALLBACKS = frozenset({
+    "authenticate", "authenticate_user", "authorize", "ensure_logged_in", "login_required",
+    "require_login", "require_user",
+})
 
 
 def _symbols(node: Node | None, source: bytes) -> tuple[str, ...] | None:
@@ -249,7 +256,8 @@ def controller_class(handler: str) -> tuple[str, str] | None:
 
 def is_auth_guard(name: str) -> bool:
     """Whether the callback ``name`` certainly rejects anonymous users."""
-    return name in _AUTH_CALLBACKS or _DEVISE_AUTH.fullmatch(name) is not None
+    return (name in _AUTH_CALLBACKS or _DEVISE_AUTH.fullmatch(name) is not None
+            or _LOGIN_FAMILY.fullmatch(name) is not None)
 
 
 def guards_for(callbacks: list[Callback], action: str) -> list[str]:
