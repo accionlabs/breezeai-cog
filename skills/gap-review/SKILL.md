@@ -135,8 +135,11 @@ contract error. Then:
 - check the log for parse errors and timeouts;
 - spot-check a few files per category (controller, service, repository, config) line by line.
 
-For a change review, capture the same repo on `main` and on the branch and diff the two; every
-difference must be intended. For anything cross-file, also compare `--jobs 1` with `--jobs 2`.
+For a change review, capture the same repo on `main` and on the branch and compare the two file
+by file (by `path`: with `--jobs` above 1 the order of the files varies between runs); every
+difference must be intended. For anything cross-file, also compare `--jobs 1` with `--jobs 2`
+the same way: one process versus a pool shows state leaking between files and an index that
+doesn't reach the workers intact.
 
 **Step 9 — Architecture conformance ([architecture §17](../../docs/architecture.md#17-decisions-at-a-glance)).**
 Go through every row of "Decisions at a glance" and mark it **checked** (with the evidence),
@@ -167,7 +170,7 @@ before calling it a violation.
 | **Every parse has a time limit** (§4.4) | An embedded fragment is re-parsed without `ctx.parse_timeout_micros` | grep `parse` |
 | **Size limits only at output, by splitting** (§4.6) | The parser cuts a statement's `text` itself, so the output split can't recover it. A cut of a derived value (a name) needs its own reason | grep `cut` |
 | **Failures are isolated per file; fail loudly** (§4.5, §14) | An exception swallowed with no log (`pass` / `continue` / `return None`), so a broken file looks like an empty one | grep `except` |
-| **Deterministic ids and output** (§8) | Output order depends on iterating a `set`, or on time / randomness — two runs of the same commit differ | grep `nondeterminism`; confirm by capturing twice and diffing |
+| **Deterministic ids and records** (§8) | An id, a value or the order of items inside a file's record depends on iterating a `set`, or on time / randomness — two runs of the same commit give the same file a different record | grep `nondeterminism`; confirm by capturing twice and comparing the records file by file (by `path`). With `--jobs` above 1 the order of the files follows worker completion ([§4.5](../../docs/architecture.md#45-parallel-execution)), so a plain diff of two captures always differs and is not a finding |
 | **Static, read-only** (§1) | The parser runs code, starts a process or makes a network call | grep `execution` |
 | **`language` = format, `framework` = tool** (§12) | A config or data parser sets `language` to a tool (`terraform`) instead of the format (`hcl`) | `FileRecord.language` / `framework` in the capture |
 | **Database schemas outside the code contract** (§12) | DDL or Elasticsearch mappings emitted as code statements instead of going through `analyzers/` | The parser's statement kinds for `.sql` / mapping files |
