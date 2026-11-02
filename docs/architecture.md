@@ -1004,6 +1004,7 @@ src/breezeai_cog/
 │  ├─ detection/                   shared api / db / query classifiers
 │  ├─ vertx_common.py, dotnet_common.py, aspnet_common.py, aspnet_areas.py, quartz_common.py
 │  │                               helpers shared by one framework family
+│  ├─ cfamily_common/              the extraction and index C and C++ share
 │  ├─ <lang>/                      language parsers
 │  └─ <lang>_<framework>/          framework parsers
 ├─ emit/                           ids, NDJSON, gzip, sinks, statement splitting
@@ -1030,7 +1031,8 @@ flowchart TD
 Dependencies point **one way**: entry points → services → core → parsers → schemas. Parsers
 never import from `core/`, `services/` or `server/`. Code shared between framework parsers
 should live in a shared module (like `vertx_common.py`) rather than one framework importing
-from another.
+from another. The same holds between languages: C and C++ share their extraction through
+`cfamily_common/`, which each subclasses with its own grammar, index and evidence.
 
 **Change zones.** How much review a change needs depends on where it lands:
 
@@ -1039,7 +1041,7 @@ from another.
 | **Parser-local** | `parsers/<lang>_<framework>/`, its test file | That parser only |
 | **Language parser** | `parsers/<lang>/` | Every framework built on that language |
 | **Additive detector** | a module that calls `register_detector(...)` or `register_fact(...)`, or a changed `Gate` (`order`, `skip_fixtures`, `guard`) | Every file of that language, whichever parser owns it |
-| **Shared helper** | e.g. `parsers/vertx_common.py`, `quartz_common.py`, `aspnet_areas.py`, `handler_sites.py`, `aws_deploy.py` | Every parser that imports it |
+| **Shared helper** | e.g. `parsers/vertx_common.py`, `quartz_common.py`, `cfamily_common/` (C and C++), `aspnet_areas.py`, `handler_sites.py`, `aws_deploy.py` | Every parser that imports it |
 | **Core** | `schemas/`, `core/`, `emit/`, `parsers/base.py`, `treesitter.py`, `statements_common.py`, `comments_common.py`, `callresolve.py`, `constfold.py`, `index_common.py`, `additive.py`, `emits.py`, `enclosing.py`, `wiring.py`, `contract.py`, `detection/`, `cli.py`, `config.py` | Every parser — an architectural change |
 
 > **Decision —** parser-specific code stays in the parser's own directory.

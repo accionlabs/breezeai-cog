@@ -1,4 +1,4 @@
-"""C++ class / struct extraction → Class + flat member functions + statements.
+"""C and C++ class / struct / union / enum extraction → Class + flat members + statements.
 
 A ``class_specifier`` / ``struct_specifier`` has a ``name`` (type_identifier), an
 optional unnamed ``base_class_clause`` child (its ``type_identifier`` bases → the

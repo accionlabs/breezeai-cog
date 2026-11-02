@@ -16,7 +16,8 @@ import pytest
 from breezeai_cog import analyze_repo
 from breezeai_cog.parsers.base import ParseContext
 from breezeai_cog.parsers.c.parser import CParser
-from breezeai_cog.parsers.cpp.ownership import cpp_only_syntax, include_targets
+from breezeai_cog.parsers.cfamily_common.imports import include_targets
+from breezeai_cog.parsers.cpp.ownership import cpp_only_syntax
 from breezeai_cog.parsers.cpp.parser import CppParser
 from breezeai_cog.schemas import FileRecord
 

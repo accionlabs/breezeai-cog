@@ -1,4 +1,4 @@
-"""C++ AST node-type classification + capability metadata.
+"""C and C++ AST node-type classification + capability metadata.
 
 Node types are from the tree-sitter ``cpp`` grammar (language pack). C++ is a
 **best-effort** language: real translation units routinely parse with ``has_error``

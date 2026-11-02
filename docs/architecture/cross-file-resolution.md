@@ -102,7 +102,7 @@ What each index holds:
 | VB | class heritage (base class + attributes) | inherited controller routes |
 | TypeScript / JavaScript | `tsconfig`/`jsconfig` path aliases (per config scope); constant values; class heritage; **registered facts** (`index.facts`: Angular lazy-route mounts `angular.route-mounts` and their guards `angular.mount-guards`, Express mounts `express.router-mounts`, Fastify plugin prefixes `fastify.plugin-prefixes`, NestJS stub parents `nest.stub-parents` and prefixes `nest.prefixes`, Next.js apps `next.apps`, middleware matchers `next.middlewares` and base paths `next.base-paths`, LoopBack base paths `loopback.base-paths`, GraphQL root-field DTOs `graphql.sdl-root-fields` — read from `.graphql` files too, which the GraphQL parser owns; module exports and their declarations `typescript.declarations` — each file's exported names with the declared name and line, re-exports followed, for `handlerPath`, and the component of each `.vue` file `typescript.vue-components`; AWS Lambda handlers `aws.deployed-handlers` — read from `serverless.yml` / SAM templates) | aliased imports, inherited calls, route prefixes |
 | C++ | header basename → file; each file's local includes and who includes each header; free functions (a `static` one outside a header is never a target and makes its name ambiguous; one in a header is a target only for files that can see the header); the free functions defined in `extern "C"`; `Class::method`; `Class::field` types; heritage | `#include`, calls |
-| C | the C++ index, built over C files with the C grammar | `#include`, calls |
+| C | the same index as C++ (`cfamily_common/index.py`), built over C files with the C grammar | `#include`, calls |
 | Ruby | ActiveRecord model names; **registered facts** (`index.facts`: Rails controller `before_action` callbacks `rails.controller-callbacks`; method declarations `ruby.method-lines` — (controller, action) → file and line, for `handlerPath`) | recognising DB calls; Rails route guards and handlers |
 | GraphQL | **registered facts** (`index.facts`: client projects `graphql.client-configs` — read from `.graphqlrc.json`) | a downloaded client schema is not taken as this repo's operations |
 | HCL / Terraform | folder → `.tf` files | local `module` sources |
@@ -235,8 +235,8 @@ even if `items` has an in-repo type.
 | Java, Kotlin, Groovy, Scala | ✓ | ✓ | — | — |
 | Python | ✓ | — | — | — |
 | VB, Ruby | same file only | — | — | — |
-| C++ | own resolver (`cpp/index.py`): same file, `Class::method`, inherited, free functions, field types; then C's free functions | | | |
-| C | the C++ resolver: same file, free functions; then C++'s `extern "C"` functions | | | |
+| C++ | own resolver (`cfamily_common/index.py`, shared with C): same file, `Class::method`, inherited, free functions, field types; then C's free functions | | | |
+| C | the same resolver as C++: same file, free functions; then C++'s `extern "C"` functions | | | |
 
 > **Decision —** calls resolve to a file, not to a specific function.
 > **Why:** cog can usually prove the file (from imports and types), but not the overload — that

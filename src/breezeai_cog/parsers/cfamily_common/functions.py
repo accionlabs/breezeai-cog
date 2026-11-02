@@ -1,4 +1,4 @@
-"""C++ function / method + parameter + call extraction.
+"""C and C++ function / method + parameter + call extraction.
 
 The grammar shapes this parser relies on (discovered empirically):
 

@@ -1,4 +1,4 @@
-"""C++ ``#include`` extraction + in-repo header resolution.
+"""C and C++ ``#include`` extraction + in-repo header resolution.
 
 A ``preproc_include``'s ``path`` field is either a ``system_lib_string`` (``<string>`` —
 always external) or a ``string_literal`` (``"apply.h"`` — a local include we try to
@@ -10,6 +10,7 @@ import named by its include path — never as a fabricated in-repo edge."""
 
 from __future__ import annotations
 
+import re
 from collections.abc import Iterator, Sequence
 from pathlib import Path
 
@@ -18,6 +19,17 @@ from tree_sitter import Node
 from ...utils import repo_relative
 from ..index_common import record_distinct
 from ..treesitter import node_text
+
+_INCLUDE = re.compile(rb'^[ \t]*#[ \t]*include[ \t]*"([^"\n]+)"', re.M)
+
+
+def include_targets(source: bytes) -> list[str]:
+    """The local includes of a file, as written (``#include "a/list.h"`` → ``a/list.h``), read
+    as bytes without a parse. ``<…>`` includes name the system's or a library's headers and are
+    left out. The ownership step reads them as evidence; the index, for the headers a file can
+    see."""
+    return [m.decode("utf-8", "replace") for m in _INCLUDE.findall(source)]
+
 
 #: header basename (``apply.h``) → repo-relative path, or ``None`` when >1 file declares
 #: that basename (ambiguous → honest-null). Built by :func:`build_header_index`.

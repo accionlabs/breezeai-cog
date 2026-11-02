@@ -1,11 +1,11 @@
-"""Ownership evidence for the C family: C and C++ both register ``.h``.
+"""C++'s ownership proof: C and C++ both register ``.h``.
 
 The ownership step (``core/ownership.py``) reads every C and C++ file as bytes, before any
-parse, and asks two things of each:
+parse. Both languages report the headers a file includes
+(``cfamily_common/imports.py::include_targets``); a header included only from C files is C,
+only from C++ files C++, and from both C (C++ can include a C header; C cannot include a C++
+one). C++ also supplies:
 
-* :func:`include_targets` — the local headers it includes (``#include "list.h"``). A header
-  included only from C files is C, only from C++ files C++, and from both C (C++ can include
-  a C header; C cannot include a C++ one).
 * :func:`cpp_only_syntax` — whether a header uses syntax C does not have. Comments and string
   literals are ignored. Inside ``#if`` groups that test ``__cplusplus`` a C API header routinely
   adapts itself for C++ includers — its ``extern "C" {`` guard, C++ includes (``<cstddef>``),
@@ -21,8 +21,6 @@ send a C header to the C++ grammar on its own.
 from __future__ import annotations
 
 import re
-
-_INCLUDE = re.compile(rb'^[ \t]*#[ \t]*include[ \t]*"([^"\n]+)"', re.M)
 
 _COMMENT = re.compile(rb"/\*.*?\*/|//[^\n]*", re.S)
 _STRING = re.compile(rb'"(?:\\.|[^"\\\n])*"|\'(?:\\.|[^\'\\\n])*\'')
@@ -45,12 +43,6 @@ _CPP_DECLARATION = re.compile(
 _CPP_ADAPTER = re.compile(
     rb"^[ \t]*#[ \t]*include[ \t]*<[a-z_]+>|\busing[ \t]+namespace\b", re.M
 )
-
-
-def include_targets(source: bytes) -> list[str]:
-    """The local includes of a file, as written (``#include "a/list.h"`` → ``a/list.h``).
-    ``<…>`` includes name the system's or a library's headers and are not evidence."""
-    return [m.decode("utf-8", "replace") for m in _INCLUDE.findall(source)]
 
 
 def _split_cplusplus_blocks(source: bytes) -> tuple[bytes, bytes]:

@@ -296,8 +296,9 @@ only the evidence that applies to it:
 | `includes` (rule 2) | — | `c` | `c` |
 | `default_for` (rule 4) | — | `.h` | — |
 
-A language that doesn't register a shared extension supplies nothing. The C and C++ evidence
-lives in `parsers/cpp/ownership.py`. Comments and string literals never count. Inside an `#if`
+A language that doesn't register a shared extension supplies nothing. Both languages read a
+file's includes with `parsers/cfamily_common/imports.py::include_targets`; C++'s proof lives in
+`parsers/cpp/ownership.py`. Comments and string literals never count. Inside an `#if`
 group that tests `__cplusplus`, a C API header routinely has its `extern "C" {` guard and C++
 includes (`<cstddef>`); those are not proof. A C++ *declaration* there (`namespace`, `class`,
 `template <`, `std::`) is: such a header is written for both languages, and only the C++ grammar
@@ -400,7 +401,7 @@ mangling. The rules:
 | C++ | C++ function | existing C++ rules (classes, namespaces) |
 
 `#include` resolves the same way across the two languages. Each index maps its own headers'
-basenames, and a C++ file reads both maps as one (`cpp/imports.py::FamilyHeaders`): a basename
+basenames, and a C++ file reads both maps as one (`cfamily_common/imports.py::FamilyHeaders`): a basename
 resolves only when exactly one file in either language has it, as it did when every header was
 C++.
 
@@ -530,8 +531,9 @@ is a new `semanticType` value and goes through the normal proposal process.
 | `core/ownership.py` (new) | the ownership step: the byte scan (parallel, same `--jobs`), the rule order, the decisions |
 | `core/pipeline.py` | `_scan_entries` runs the step and labels shared files; `_build_indexes` groups by decided language |
 | `core/executor.py` | selects a shared file's parser by its decided language; passes each parser its related indexes |
-| `parsers/c/` (new) | `CParser`: the C++ extraction on the C grammar (`grammar = "c"`) |
-| `parsers/cpp/` | `grammar` setting; ownership evidence (`ownership.py`); `c_linkage` and the `static` rule in the index; walks guarded and `extern "C"` scopes; reads related indexes for calls and includes |
+| `parsers/cfamily_common/` (new) | the extraction, index, include handling and call resolver C and C++ share (`CFamilyParser`, `CFamilyIndex`), moved from `parsers/cpp/`; `grammar` setting; `c_linkage` and the `static` rule in the index; walks guarded and `extern "C"` scopes; reads related indexes for calls and includes |
+| `parsers/c/` (new) | `CParser(CFamilyParser)` on the C grammar; C's index and registered facts |
+| `parsers/cpp/` | `CppParser(CFamilyParser)` on the C++ grammar; C++'s index and registered facts; its ownership proof (`ownership.py`) |
 | `parsers/additive.py` | C and C++ call `run_additive`, so detectors can be added for them |
 
 Two interactions with existing options:
@@ -572,8 +574,8 @@ Two interactions with existing options:
 
 1. **Core mechanisms, no new language** (done). The ownership step and `related_languages`. With
    no parser opting in, captures were byte-identical before and after.
-2. **C parser** (done). `parsers/c/` reuses the C++ extraction through subclassing, so no helpers
-   moved. Adds the C/C++ ownership evidence, C++ → C and `extern "C"` lookups, and the two C++
+2. **C parser** (done). The C++ extraction moved to `parsers/cfamily_common/`, and C and C++
+   each subclass it with their own grammar, index and evidence. Adds the C/C++ ownership evidence, C++ → C and `extern "C"` lookups, and the two C++
    scope fixes in [§6](#6-how-c-and-c-link-end-to-end), checked with a before/after capture diff.
 3. **Later, on evidence.** Measure cross-language calls on JVM and .NET captures; adopt
    `related_languages` there if links are missing. Cross-runtime bindings (§7.3) follow as their
