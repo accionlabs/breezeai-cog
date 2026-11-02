@@ -14,7 +14,7 @@ from ..additive import run_additive
 from ..base import BaseParser, HandlerLocator, ParseContext
 from ..callresolve import make_resolver
 from ..comments_common import comment_statements_for
-from ..statements_common import emit_enum_members, reset_http_client_ids, set_http_client_ids
+from ..statements_common import emit_enum_members
 from ..treesitter import node_text, parse_source
 from ..php_route_common import walk
 from .classes import build_class
@@ -67,14 +67,6 @@ class PhpParser(BaseParser):
         return handler_locator(root, ctx.source, ctx.path, index, bindings)
 
     def extract(self, root: Node, ctx: ParseContext) -> FileRecord:
-        ids = collect_http_client_ids(root, ctx.source) if ctx.capture_statements else frozenset()
-        token = set_http_client_ids(ids)
-        try:
-            return self._extract(root, ctx)
-        finally:
-            reset_http_client_ids(token)
-
-    def _extract(self, root: Node, ctx: ParseContext) -> FileRecord:
         source, path = ctx.source, ctx.path
         fid = file_id(path)
         seen_ids: set[str] = set()
