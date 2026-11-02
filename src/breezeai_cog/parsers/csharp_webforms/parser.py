@@ -31,10 +31,17 @@ from .mounts import master_codebehind, read_sibling_markup, resolve_master, reso
 from .navigation import detect_navigation
 from .page_routes import page_routes
 from .routes import detect_webforms_pages
+from .dnn import detect_dnn_routes
 
 #: Web Forms code-behind imports System.Web.UI (Page/UserControl) — NOT the MVC/Core
 #: markers that select the sibling AspNetCoreParser, so the two claim disjoint files.
 _MARKERS = (b"System.Web.UI",)
+_DNN_MARKERS = (
+    b"DnnApiController",
+    b"IServiceRouteMapper",
+    b"PortalModuleBase",
+    b"DnnAuthorize",
+)
 #: Markup file suffixes this parser owns (Step 1). ``.aspx.cs`` etc. are code-behind (C#),
 #: handled by the inherited path; these bare suffixes are the markup.
 _MARKUP_EXT = (".aspx", ".ascx", ".master")
@@ -46,7 +53,7 @@ class WebFormsParser(CSharpParser):
     extensions: tuple[str, ...] = (*CSharpParser.extensions, *_MARKUP_EXT)
     template_extensions: tuple[str, ...] = _MARKUP_EXT  # the markup half only — .cs stays
     priority = 10  # framework parser > base csharp (0); disjoint claims from csharp-aspnet
-    frameworks = ["aspnet-webforms"]
+    frameworks = ["aspnet-webforms", "dnn"]
     # C# statement types + the markup nodes the Step-1 markup pass emits (capabilities honesty).
     statement_types = [*CSharpParser.statement_types, "element", "attribute"]
 
@@ -54,7 +61,7 @@ class WebFormsParser(CSharpParser):
         return (
             path.lower().endswith(_MARKUP_EXT)  # markup files (Step 1)
             or path.lower().endswith((".aspx.cs", ".ascx.cs", ".master.cs"))
-            or any(m in source for m in _MARKERS)
+            or any(m in source for m in (*_MARKERS, *_DNN_MARKERS))
         )
 
     def _parse_markup(self, ctx: ParseContext) -> FileRecord:
@@ -105,6 +112,12 @@ class WebFormsParser(CSharpParser):
         markup = read_sibling_markup(ctx.abs_path)  # read once — shared by all markup passes
         master_ep = resolve_master(markup, ctx.path, ctx.repo_root)  # → the master import edge
         if ctx.capture_statements:  # routes are statements — gated (spec A4)
+            dnn = detect_dnn_routes(record, root, ctx.path, ctx.resolution_index)
+            if dnn:
+                apply(record, dnn, ctx.source, ctx.path)
+                record.framework = "dnn"
+            elif b"IServiceRouteMapper" in ctx.source:
+                record.framework = "dnn"
             routes = detect_webforms_pages(
                 record, root, ctx.path, page_routes(ctx.resolution_index))
             apply(record, routes, ctx.source, ctx.path)
@@ -125,5 +138,6 @@ class WebFormsParser(CSharpParser):
         if imports:
             existing = set(record.importFiles)
             record.importFiles.extend(i for i in sorted(set(imports)) if i not in existing)
-            record.framework = "aspnet-webforms"
+            if record.framework is None:
+                record.framework = "aspnet-webforms"
         return record

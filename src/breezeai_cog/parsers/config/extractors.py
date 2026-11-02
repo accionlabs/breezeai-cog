@@ -77,6 +77,8 @@ RICH_JSON_NAMES: frozenset[str] = frozenset(
 
 
 def _dispatch(name: str, suffix: str, text: str) -> dict[str, Any]:
+    if suffix == ".dnn":
+        return _dnn_manifest(text)
     if name == "package.json":
         return _package_json(text)
     if name in ("tsconfig.json", "jsconfig.json"):
@@ -135,6 +137,34 @@ def _dispatch(name: str, suffix: str, text: str) -> dict[str, Any]:
     if suffix == ".gradle":
         return _gradle(name, text)
     return {}
+
+
+def _dnn_manifest(text: str) -> dict[str, Any]:
+    root = ET.fromstring(text)
+    def local(tag: str) -> str:
+        return tag.rsplit("}", 1)[-1].lower()
+    module = next(
+        (
+            child.text.strip()
+            for child in root.iter()
+            if local(child.tag) in {"foldername", "modulename", "name"} and child.text
+        ),
+        None,
+    )
+    controls = []
+    for element in root.iter():
+        if local(element.tag) != "modulecontrol":
+            continue
+        key = next((v for k, v in element.attrib.items() if local(k) == "controlkey"), None)
+        source = next((v for k, v in element.attrib.items() if local(k) == "controlsrc"), None)
+        if key and source:
+            controls.append({"controlKey": key, "source": source})
+    return {
+        "kind": "dnn-manifest",
+        "category": "dotnet",
+        "moduleName": module,
+        "moduleControls": controls,
+    }
 
 
 # ── JSON family ───────────────────────────────────────────────────────────────
