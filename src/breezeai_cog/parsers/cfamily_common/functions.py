@@ -288,8 +288,9 @@ def defined_names(root: Node, source: bytes) -> set[str]:
     return names
 
 
-def is_static_free_function(node: Node, source: bytes) -> bool:
-    """Whether a free ``function_definition`` is declared ``static``."""
+def is_declared_static(node: Node, source: bytes) -> bool:
+    """Whether a function definition or member declaration is written ``static``: on a free
+    function it means internal linkage, on a class member a static member."""
     return any(
         c.type == "storage_class_specifier" and node_text(c, source) == "static"
         for c in node.children
@@ -335,8 +336,9 @@ def build_function(
         path=path,
         name=name,
         type=kind,
-        # `static` on a free function: visible to its own file only (internal linkage).
-        isStatic=is_static_free_function(node, source) or None if kind == "function" else None,
+        # `static` on a free function: visible to its own file only (internal linkage). An
+        # out-of-class `Class::method` definition can't repeat `static`: left unknown.
+        isStatic=is_declared_static(node, source) or None if kind == "function" else None,
         params=extract_params(params, source),
         returnType=node_text(ret, source) if ret is not None else None,
         startLine=start,
@@ -391,6 +393,8 @@ def build_member_function(
         name=name,
         type=kind,
         visibility=visibility,
+        # A static member: `static` is written on its declaration in the class.
+        isStatic=is_declared_static(field_decl, source) or None,
         params=extract_params(params, source),
         returnType=node_text(ret, source) if ret is not None else None,
         startLine=start,

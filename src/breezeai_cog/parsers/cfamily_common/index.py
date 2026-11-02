@@ -46,7 +46,7 @@ from ..index_common import ClassHeritage, parallel_map, record_distinct, walk_he
 from ..treesitter import node_text, parse_source
 from .classes import _CLASS_TYPES, _heritage, _unwrap_template
 from .functions import (
-    function_declarator_of, has_declaration_error, is_static_free_function,
+    function_declarator_of, has_declaration_error, is_declared_static,
 )
 from .imports import FamilyHeaders, HeaderIndex, build_header_index, include_targets
 from .mappings import HEADER_EXTENSIONS, TRANSPARENT_SCOPES
@@ -129,7 +129,7 @@ def _file_local(node: Node, source: bytes, rel: str) -> bool:
     """A ``static`` free function outside a header: visible to its own file only."""
     if Path(rel).suffix.lower() in HEADER_EXTENSIONS:
         return False
-    return is_static_free_function(node, source)
+    return is_declared_static(node, source)
 
 
 def _record_def(

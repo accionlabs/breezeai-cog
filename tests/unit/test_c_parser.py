@@ -575,6 +575,32 @@ def test_a_static_free_function_is_static(tmp_path, parser) -> None:
     }
 
 
+def test_a_static_member_function_is_static_where_static_is_written(tmp_path) -> None:
+    record = _parse(
+        CppParser(),
+        tmp_path,
+        "pool.cpp",
+        "class Pool {\n"
+        "public:\n"
+        "    static Pool& instance();\n"
+        "    static int count() { return 0; }\n"
+        "    template <typename U> static U conv(U u) { return u; }\n"
+        "    int size() const;\n"
+        "};\n"
+        "Pool& Pool::instance() { static Pool p; return p; }\n"
+        "int Pool::size() const { return 0; }\n",
+    )
+    assert [(f.name, f.startLine, f.isStatic) for f in record.functions] == [
+        ("instance", 3, True),
+        ("count", 4, True),
+        ("conv", 5, True),
+        ("size", 6, None),
+        # C++ forbids `static` on an out-of-class definition, so it is not known there.
+        ("instance", 8, None),
+        ("size", 9, None),
+    ]
+
+
 # -- typedef'd types ----------------------------------------------------------------------------
 
 

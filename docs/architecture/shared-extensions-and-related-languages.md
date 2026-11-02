@@ -421,6 +421,11 @@ C++.
 > called from another file. In Java or C# the same field marks a class-level member; a C
 > function has no class, so on it the field can only mean file-local. **Cost:** a query on
 > `isStatic` across languages mixes the two meanings.
+>
+> A C++ (or CUDA) static member function has `isStatic: true` where `static` is written: on its
+> declaration or inline definition in the class. Its out-of-class definition (`Pool&
+> Pool::instance() { … }`) can't repeat the keyword, so there it stays empty: the class is
+> usually in another file.
 
 > **Decision —** `typedef struct [tag] { … } name;` (also `union`, `enum`) is a class named
 > `name`, with its fields or members; a tag that differs is the class's `alias`. A typedef
