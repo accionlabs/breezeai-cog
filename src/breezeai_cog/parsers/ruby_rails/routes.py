@@ -13,7 +13,7 @@ from ..ruby.ownership import owner_id
 from ..handler_sites import handler_location, locate_method
 from ..inflect import plural as _plural, singular as _singular
 from ..treesitter import node_text
-from .callbacks import callbacks_of, controller_class, guards_for
+from .callbacks import callbacks_of, controller_class, guards_for, is_auth_guard
 
 _HTTP_METHODS = {"get", "post", "put", "patch", "delete", "head", "options", "match"}
 
@@ -111,6 +111,8 @@ _MEMBER_SCOPES = {"member", "collection"}
 #: Blocks that add a path we do not compute (concerns mounted elsewhere, shallow nesting): a route
 #: inside one has a prefix we cannot resolve → its endpoint stays empty.
 _UNRESOLVED_SCOPES = {"concern", "nested", "shallow", "new"}
+#: Devise route blocks that only admit a signed-in user.
+_DEVISE_BLOCKS = {"authenticate", "authenticated"}
 
 #: The RESTful actions ``resources`` / ``resource`` declare: (action, verb, path suffix). ``{id}``
 #: is the member segment (``:id``, or ``:<param>``); singular resources have no index and no id.
@@ -308,6 +310,27 @@ def _route_module(call: Node, source: bytes) -> str | None:
     return "/".join(m.strip("/") for m in reversed(modules) if m.strip("/"))
 
 
+def _devise_guards(call: Node, source: bytes) -> list[str]:
+    """Guards from the Devise ``authenticate`` / ``authenticated`` blocks enclosing a route,
+    outermost first: ``authenticate :user do`` → ``authenticate(:user)``. Both only serve a
+    signed-in user (``authenticated`` falls through for anyone else). ``unauthenticated``
+    blocks, and every other block, add nothing. A scope that is not a literal symbol is not
+    named: ``authenticate``."""
+    guards: list[str] = []
+    current = call.parent
+    while current is not None:
+        if (current.type == "call" and current.child_by_field_name("block") is not None
+                and current.child_by_field_name("receiver") is None):
+            method = _method(current, source)
+            if method in _DEVISE_BLOCKS:
+                args = [a for a in _arguments(current) if a.type != "pair"]
+                scope = (_segment(args[0], source)
+                         if args and args[0].type == "simple_symbol" else None)
+                guards.append(f"{method}(:{scope})" if scope else str(method))
+        current = current.parent
+    return guards[::-1]
+
+
 def _route_guards(handler: str | None, module: str | None, index: object) -> list[str]:
     """The ``before_action`` guards of the controller action a route points at (``users#show`` →
     ``UsersController#show``, inside ``namespace :admin`` → ``Admin::UsersController``). Unknown
@@ -365,7 +388,8 @@ def detect_rails_routes(
     def emit(call: Node, verb: str | None, endpoint: str | None, handler: str | None) -> None:
         line = call.start_point[0] + 1
         module = _route_module(call, source)
-        guards = _route_guards(handler, module, index)
+        guards = _devise_guards(call, source)
+        guards += [g for g in _route_guards(handler, module, index) if g not in guards]
         # `users#show` → the `show` action of `UsersController`, where it is declared (Q14).
         target = controller_class(f"{module}/{handler}" if module else handler) \
             if handler is not None and module is not None else None
@@ -382,8 +406,9 @@ def detect_rails_routes(
                 handlerLine=handler_line,
                 handlerPath=handler_path,
                 guards=guards or None,
-                # Honest-null: assert auth only when a guard is present; absence is unknown.
-                authRequired=True if guards else None,
+                # Honest-null: assert auth only for a guard that certainly rejects anonymous
+                # users; any other callback (set_locale, load_resource …) leaves it unknown.
+                authRequired=True if any(is_auth_guard(g) for g in guards) else None,
                 framework="rails",
                 routeKind="route",
                 isRegex=False,

@@ -203,9 +203,387 @@ def test_rails_before_action_guards_from_the_controller(analyze_files) -> None:
         "/users": (["authenticate"], True),
         "/users/:id/ban": (["authenticate", "load_user", "admin_only"], True),
         # namespace :admin → Admin::StatsController, not the top-level StatsController
-        "/admin/stats": (["require_admin"], True),
+        # a guard, but `require_admin` is not a known authentication callback → auth unknown
+        "/admin/stats": (["require_admin"], None),
         "/open": (None, None),  # no callbacks; the if: callback above is never a guard
     }
+
+
+def test_rails_auth_required_only_for_authentication_callbacks(analyze_files) -> None:
+    routes = "Rails.application.routes.draw do\n" + "".join(
+        f"  get '/{n}', to: '{n}#index'\n"
+        for n in ("devise", "login", "authz", "plain", "mixed", "scoped")
+    ) + "end\n"
+
+    def ctrl(name: str, *callbacks: str) -> tuple[str, str]:
+        body = "".join(f"  {c}\n" for c in callbacks)
+        return (f"app/controllers/{name}_controller.rb",
+                f"class {name.capitalize()}Controller < ApplicationController\n{body}"
+                "  def index; end\nend\n")
+
+    files = dict([
+        ctrl("devise", "before_action :authenticate_user!"),
+        ctrl("login", "before_action :require_login"),
+        ctrl("authz", "before_action :authorize"),
+        ctrl("plain", "before_action :set_locale", "before_action :set_order",
+             "before_action :load_resource"),
+        ctrl("mixed", "before_action :set_locale", "before_action :authenticate"),
+        ctrl("scoped", "before_action :authenticate_admin!, only: :other"),
+    ])
+    files["config/routes.rb"] = routes
+    st = analyze_files(files)
+    got = {s.endpoint: (s.guards, s.authRequired) for s in st if s.semanticType == "route"}
+    assert got == {
+        "/devise": (["authenticate_user!"], True),
+        "/login": (["require_login"], True),
+        "/authz": (["authorize"], True),
+        # non-authentication callbacks stay in guards but never assert authRequired
+        "/plain": (["set_locale", "set_order", "load_resource"], None),
+        "/mixed": (["set_locale", "authenticate"], True),
+        # the Devise guard is limited to another action → no guard on this route
+        "/scoped": (None, None),
+    }
+
+
+def _guards(st: list, *endpoints: str) -> dict:
+    return {s.endpoint: s.guards for s in st
+            if s.semanticType == "route" and s.endpoint in endpoints}
+
+
+def _routes(*lines: str) -> str:
+    return "Rails.application.routes.draw do\n" + "".join(f"  {ln}\n" for ln in lines) + "end\n"
+
+
+def _controller(path: str, source: str) -> tuple[str, str]:
+    return f"app/controllers/{path}", source
+
+
+def test_rails_inherits_callbacks_from_parent_in_another_file(analyze_files) -> None:
+    st = analyze_files(dict([
+        ("config/routes.rb", _routes("get '/posts', to: 'posts#index'")),
+        _controller("application_controller.rb",
+                    "class ApplicationController < ActionController::Base\n"
+                    "  before_action :authenticate_user!\nend\n"),
+        _controller("posts_controller.rb",
+                    "class PostsController < ApplicationController\n"
+                    "  before_action :set_post\n  def index; end\nend\n"),
+    ]))
+    got = [s for s in st if s.semanticType == "route"]
+    assert [(s.guards, s.authRequired) for s in got] == [(["authenticate_user!", "set_post"], True)]
+
+
+def test_rails_inherits_across_several_levels_in_declaration_order(analyze_files) -> None:
+    st = analyze_files(dict([
+        ("config/routes.rb", _routes("get '/a', to: 'leaf#index'", "get '/b', to: 'mid#index'")),
+        _controller("application_controller.rb",
+                    "class ApplicationController < ActionController::Base\n"
+                    "  before_action :one\nend\n"),
+        _controller("mid_controller.rb",
+                    "class MidController < ApplicationController\n"
+                    "  before_action :two\n  def index; end\nend\n"),
+        _controller("leaf_controller.rb",
+                    "class LeafController < MidController\n"
+                    "  before_action :three\n  def index; end\nend\n"),
+    ]))
+    assert _guards(st, "/a", "/b") == {"/a": ["one", "two", "three"], "/b": ["one", "two"]}
+
+
+def test_rails_namespaced_parent_resolves_innermost_scope_first(analyze_files) -> None:
+    st = analyze_files(dict([
+        ("config/routes.rb", _routes(
+            "namespace :admin do", "  get 'users', to: 'users#index'",
+            "  get 'plain', to: 'plain#index'", "end")),
+        _controller("base_controller.rb",
+                    "class BaseController < ApplicationController\n"
+                    "  before_action :top_level\nend\n"),
+        _controller("admin/base_controller.rb",
+                    "module Admin\n  class BaseController < ApplicationController\n"
+                    "    before_action :admin_scoped\n  end\nend\n"),
+        # BaseController inside `module Admin` is Admin::BaseController, not ::BaseController
+        _controller("admin/users_controller.rb",
+                    "module Admin\n  class UsersController < BaseController\n"
+                    "    def index; end\n  end\nend\n"),
+        # no Admin::Nothing → falls out to the top-level one
+        _controller("admin/plain_controller.rb",
+                    "module Admin\n  class PlainController < ::BaseController\n"
+                    "    def index; end\n  end\nend\n"),
+    ]))
+    assert _guards(st, "/admin/users", "/admin/plain") == {
+        "/admin/users": ["admin_scoped"], "/admin/plain": ["top_level"]}
+
+
+def test_rails_parent_falls_back_to_top_level_constant(analyze_files) -> None:
+    st = analyze_files(dict([
+        ("config/routes.rb", _routes("namespace :admin do", "  get 'users', to: 'users#index'",
+                                      "end")),
+        _controller("application_controller.rb",
+                    "class ApplicationController < ActionController::Base\n"
+                    "  before_action :authenticate\nend\n"),
+        _controller("admin/users_controller.rb",
+                    "module Admin\n  class UsersController < ApplicationController\n"
+                    "    def index; end\n  end\nend\n"),
+    ]))
+    assert _guards(st, "/admin/users") == {"/admin/users": ["authenticate"]}
+
+
+def test_rails_child_skips_inherited_callbacks(analyze_files) -> None:
+    st = analyze_files(dict([
+        ("config/routes.rb", _routes(
+            "get '/s', to: 'pages#show'", "get '/i', to: 'pages#index'",
+            "get '/e', to: 'pages#edit'", "get '/c', to: 'clear#index'")),
+        _controller("application_controller.rb",
+                    "class ApplicationController < ActionController::Base\n"
+                    "  before_action :authenticate\n  before_action :audit\n"
+                    "  before_action :track\nend\n"),
+        _controller("pages_controller.rb",
+                    "class PagesController < ApplicationController\n"
+                    "  skip_before_action :authenticate, only: [:index]\n"
+                    "  skip_before_action :audit, except: :show\n"
+                    "  skip_before_action :track, only: :show\n"
+                    "  def show; end\n  def index; end\n  def edit; end\nend\n"),
+        _controller("clear_controller.rb",
+                    "class ClearController < ApplicationController\n"
+                    "  skip_before_action :authenticate\n  def index; end\nend\n"),
+    ]))
+    assert _guards(st, "/s", "/i", "/e", "/c") == {
+        "/s": ["authenticate", "audit"],   # track skipped on show; audit kept (except: show)
+        "/i": ["track"],  # authenticate skipped on index; audit (except: show) runs on show only
+        "/e": ["authenticate", "track"],
+        "/c": ["audit", "track"],
+    }
+
+
+def test_rails_unknown_parent_ends_inheritance(analyze_files) -> None:
+    st = analyze_files(dict([
+        ("config/routes.rb", _routes("get '/x', to: 'x#index'", "get '/y', to: 'y#index'")),
+        # Gem::BaseController is not a controller of this repo → nothing inherited from it
+        _controller("x_controller.rb",
+                    "class XController < Gem::BaseController\n"
+                    "  before_action :own\n  def index; end\nend\n"),
+        # a parent that is not a constant path cannot be resolved either
+        _controller("y_controller.rb",
+                    "class YController < Struct.new(:a)\n"
+                    "  before_action :own_y\n  def index; end\nend\n"),
+    ]))
+    assert _guards(st, "/x", "/y") == {"/x": ["own"], "/y": ["own_y"]}
+
+
+def test_rails_ambiguous_parent_ends_inheritance(analyze_files) -> None:
+    st = analyze_files(dict([
+        ("config/routes.rb", _routes("get '/x', to: 'x#index'")),
+        # BaseController is declared in two files with different callbacks → ambiguous
+        _controller("base_controller.rb",
+                    "class BaseController < ApplicationController\n  before_action :a\nend\n"),
+        _controller("legacy/base_controller.rb",
+                    "class BaseController < ApplicationController\n  before_action :b\nend\n"),
+        _controller("x_controller.rb",
+                    "class XController < BaseController\n"
+                    "  before_action :own\n  def index; end\nend\n"),
+    ]))
+    assert _guards(st, "/x") == {"/x": ["own"]}
+
+
+def test_rails_inheritance_cycle_terminates(analyze_files) -> None:
+    st = analyze_files(dict([
+        ("config/routes.rb", _routes("get '/a', to: 'a#index'")),
+        _controller("a_controller.rb",
+                    "class AController < BController\n  before_action :ga\n  def index; end\nend\n"),
+        _controller("b_controller.rb",
+                    "class BController < AController\n  before_action :gb\nend\n"),
+    ]))
+    assert [s.endpoint for s in st if s.semanticType == "route"] == ["/a"]
+
+
+def test_rails_legacy_filter_syntax_matches_action_syntax(analyze_files) -> None:
+    st = analyze_files(dict([
+        ("config/routes.rb", _routes("get '/s', to: 'old#show'", "get '/i', to: 'old#index'",
+                                      "get '/p', to: 'old#pre'")),
+        _controller("old_controller.rb",
+                    "class OldController < ApplicationController\n"
+                    "  before_filter :authenticate\n"
+                    "  before_filter :load, only: [:show]\n"
+                    "  append_before_filter :tail\n"
+                    "  prepend_before_filter :first\n"
+                    "  skip_before_filter :authenticate, only: :index\n"
+                    "  def show; end\n  def index; end\n  def pre; end\nend\n"),
+    ]))
+    got = {s.endpoint: (s.guards, s.authRequired) for s in st if s.semanticType == "route"}
+    assert got == {
+        "/s": (["authenticate", "load", "tail", "first"], True),
+        "/i": (["tail", "first"], None),  # authenticate skipped on index
+        "/p": (["authenticate", "tail", "first"], True),
+    }
+
+
+def test_rails_devise_authenticate_blocks_guard_their_routes(analyze_files) -> None:
+    st = analyze_files(dict([
+        ("config/routes.rb", _routes(
+            "get '/open', to: 'pages#home'",
+            "authenticate :user do",
+            "  get '/account', to: 'accounts#show'",
+            "  namespace :admin do",
+            "    authenticate :admin do",
+            "      get 'stats', to: 'stats#show'",
+            "    end",
+            "    get 'public', to: 'stats#public'",
+            "  end",
+            "end",
+            "authenticated :user do",
+            "  root to: 'dash#index'",
+            "end",
+            "unauthenticated do",
+            "  get '/welcome', to: 'pages#welcome'",
+            "end",
+            "scope '/v1' do",
+            "  get 'ping', to: 'pages#ping'",
+            "end")),
+        _controller("accounts_controller.rb",
+                    "class AccountsController < ApplicationController\n"
+                    "  before_action :authenticate_user!\n  before_action :set_locale\n"
+                    "  def show; end\nend\n"),
+    ]))
+    got = {s.endpoint: (s.guards, s.authRequired) for s in st if s.semanticType == "route"}
+    assert got == {
+        "/open": (None, None),
+        # the block's guard first, the controller's own after it
+        "/account": (["authenticate(:user)", "authenticate_user!", "set_locale"], True),
+        "/admin/stats": (["authenticate(:user)", "authenticate(:admin)"], True),
+        "/admin/public": (["authenticate(:user)"], True),
+        "/": (["authenticated(:user)"], True),
+        "/welcome": (None, None),  # unauthenticated block: not an auth requirement
+        "/v1/ping": (None, None),
+    }
+
+
+def test_rails_acronym_controller_matches_ignoring_case(analyze_files) -> None:
+    routes = _routes("namespace :api do", "  namespace :v1 do",
+                     "    get 'users', to: 'users#index'", "  end", "end")
+
+    def api(ns: str, guard: str, path: str) -> tuple[str, str]:
+        return _controller(
+            path, f"module {ns}\n  module V1\n    class UsersController < ApplicationController\n"
+                  f"      before_action :{guard}\n      def index; end\n    end\n  end\nend\n")
+
+    # Api::V1 in the route, API::V1 declared (inflection acronym) → the one controller
+    st = analyze_files(dict([("config/routes.rb", routes),
+                             api("API", "authenticate", "api/v1/users_controller.rb")]))
+    assert _guards(st, "/api/v1/users") == {"/api/v1/users": ["authenticate"]}
+
+
+def test_rails_acronym_exact_match_is_preferred(analyze_files) -> None:
+    routes = _routes("namespace :api do", "  namespace :v1 do",
+                     "    get 'users', to: 'users#index'", "  end", "end")
+    body = ("module {ns}\n  module V1\n    class UsersController < ApplicationController\n"
+            "      before_action :{g}\n      def index; end\n    end\n  end\nend\n")
+    # both spellings declared, but `Api::V1::UsersController` is exactly what the route names
+    st = analyze_files(dict([
+        ("config/routes.rb", routes),
+        _controller("api/v1/users_controller.rb", body.format(ns="Api", g="exact")),
+        _controller("api_acronym/v1/users_controller.rb", body.format(ns="API", g="acronym")),
+    ]))
+    assert _guards(st, "/api/v1/users") == {"/api/v1/users": ["exact"]}
+
+
+def test_rails_acronym_ambiguous_case_variants_are_not_guessed(analyze_files) -> None:
+    routes = _routes("namespace :api do", "  namespace :v1 do",
+                     "    get 'users', to: 'users#index'", "  end", "end")
+    body = ("module {ns}\n  module V1\n    class UsersController < ApplicationController\n"
+            "      before_action :{g}\n      def index; end\n    end\n  end\nend\n")
+    # neither is spelled like the route; both match ignoring case → no guess
+    st = analyze_files(dict([
+        ("config/routes.rb", routes),
+        _controller("a/users_controller.rb", body.format(ns="API", g="one")),
+        _controller("b/users_controller.rb", body.format(ns="ApI", g="two")),
+    ]))
+    assert _guards(st, "/api/v1/users") == {"/api/v1/users": None}
+
+
+def test_rails_acronym_no_matching_controller(analyze_files) -> None:
+    st = analyze_files(dict([
+        ("config/routes.rb", _routes("namespace :api do", "  get 'users', to: 'users#index'",
+                                      "end")),
+        _controller("api/accounts_controller.rb",
+                    "module API\n  class AccountsController < ApplicationController\n"
+                    "    before_action :authenticate\n  end\nend\n"),
+    ]))
+    assert _guards(st, "/api/users") == {"/api/users": None}
+
+
+def test_rails_ticket_examples_give_the_expected_output(analyze_files) -> None:
+    """The examples of BREEZEAI-1426, verbatim, against the ticket's expected tables."""
+    st = analyze_files({
+        "config/routes.rb": (
+            "Rails.application.routes.draw do\n"
+            "  get '/orders/:id', to: 'orders#show'\n"
+            "  get '/login', to: 'sessions#create'\n"
+            "  get '/admin/users', to: 'admin/users#index'\n"
+            "  get '/legacy', to: 'legacy#index'\n"
+            "  authenticate :user do\n    get '/reports', to: 'reports#index'\n  end\n"
+            "  namespace :api do\n    namespace :v1 do\n"
+            "      get '/users/:id', to: 'users#show'\n    end\n  end\n"
+            "end\n"),
+        "app/controllers/application_controller.rb": (
+            "class ApplicationController < ActionController::Base\n"
+            "  before_action :authenticate_user!\nend\n"),
+        "app/controllers/orders_controller.rb": (
+            "class OrdersController < ApplicationController\n  def show; end\nend\n"),
+        "app/controllers/sessions_controller.rb": (
+            "class SessionsController < ApplicationController\n"
+            "  skip_before_action :authenticate_user!, only: [:create]\n"
+            "  def create; end\nend\n"),
+        "app/controllers/admin/base_controller.rb": (
+            "module Admin\n  class BaseController < ApplicationController\n"
+            "    before_action :require_admin\n  end\nend\n"),
+        "app/controllers/admin/users_controller.rb": (
+            "module Admin\n  class UsersController < BaseController\n"
+            "    def index; end\n  end\nend\n"),
+        "app/controllers/legacy_controller.rb": (
+            "class LegacyController < ActionController::Base\n"
+            "  before_filter :require_login\n  def index; end\nend\n"),
+        "app/controllers/reports_controller.rb": (
+            "class ReportsController < ActionController::Base\n  def index; end\nend\n"),
+        "app/controllers/api/v1/users_controller.rb": (
+            "module API\n  module V1\n    class UsersController < ApplicationController\n"
+            "      before_action :authenticate_token!\n      def show; end\n"
+            "    end\n  end\nend\n"),
+    })
+    got = {s.endpoint: (s.guards, s.authRequired) for s in st if s.semanticType == "route"}
+    assert got == {
+        "/orders/:id": (["authenticate_user!"], True),
+        "/login": (None, None),
+        "/admin/users": (["authenticate_user!", "require_admin"], True),
+        "/legacy": (["require_login"], True),
+        "/reports": (["authenticate(:user)"], True),
+        # ApplicationController's authenticate_user! is inherited here too
+        "/api/v1/users/:id": (["authenticate_user!", "authenticate_token!"], True),
+    }
+
+
+def test_rails_orders_example_non_auth_callbacks_set_no_auth_required(analyze_files) -> None:
+    st = analyze_files({
+        "config/routes.rb": _routes("get '/orders/:id', to: 'orders#show'"),
+        "app/controllers/orders_controller.rb": (
+            "class OrdersController < ActionController::Base\n"
+            "  before_action :set_locale\n  before_action :set_order, only: [:show]\n"
+            "  def show; end\nend\n"),
+    })
+    got = [(s.guards, s.authRequired) for s in st if s.semanticType == "route"]
+    assert got == [(["set_locale", "set_order"], None)]
+
+
+def test_rails_redeclared_callback_replaces_the_inherited_one(analyze_files) -> None:
+    st = analyze_files(dict([
+        ("config/routes.rb", _routes("get '/a', to: 'child#index'", "get '/b', to: 'child#show'")),
+        _controller("base_controller.rb",
+                    "class BaseController < ApplicationController\n"
+                    "  before_action :title\n  before_action :load\nend\n"),
+        # `title` is declared again: it runs once, last, with the child's own only:
+        _controller("child_controller.rb",
+                    "class ChildController < BaseController\n"
+                    "  before_action :title, only: [:index]\n"
+                    "  def index; end\n  def show; end\nend\n"),
+    ]))
+    assert _guards(st, "/a", "/b") == {"/a": ["load", "title"], "/b": ["load"]}
 
 
 def test_rails_resources_root_member_and_collection(tmp_path: Path) -> None:
