@@ -236,6 +236,20 @@ build indexes at `jobs=1`). `fn` and every item must be picklable. The merge mus
   that omits the base clause yields to a concrete base) plus fully-qualified → simple-name
   projection (distinct types sharing a short name collapse to `None`).
 
+### Step 6a — Shared extensions and related languages (only when two languages meet)
+
+Two optional `BaseParser` settings, both used by C and C++ today
+([design](architecture/shared-extensions-and-related-languages.md)):
+
+- **`ownership`** — when the language registers an extension another language also registers
+  (`.h`), give the ownership step its evidence: an `Ownership` with `proves` (syntax only this
+  language allows), `references` (the files a file references, as written), `includes` (the
+  other languages whose files this one can reference) and `default_for`. Each is a module-level
+  function or a tuple; the step reads files as bytes and never parses them.
+- **`related_languages`** — the languages whose indexes this one may read after its own (C++
+  calls C functions). The parser finds them in `ctx.related_indexes` and must check its own index
+  first.
+
 ### Step 6b — `link_handlers` (when handlers are declared in other files)
 An entry point leads to its handler: `handler`, `handlerLine`, and `handlerPath` when the handler
 is declared in another file ([entry-point contract §5](architecture/entry-points.md)). Detectors
