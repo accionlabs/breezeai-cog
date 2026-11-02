@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from collections.abc import Iterator
 
 from tree_sitter import Node
@@ -37,13 +38,28 @@ def _string_value(node: Node | None, source: bytes) -> str | None:
     return node_text(content, source) if content is not None else ""
 
 
+#: The receiver of ``routes.draw``: ``Rails.application.routes``, or ``<AppName>::Application.routes``
+#: as Rails 3 and 4 apps write it (``RedmineApp::Application.routes.draw``).
+_ROUTES_RECEIVER = re.compile(r"Rails\.application\.routes|[A-Z]\w*(::[A-Z]\w*)*::Application\.routes")
+
+
+def _is_routes_draw(call: Node, source: bytes) -> bool:
+    if call.type != "call" or _method(call, source) != "draw":
+        return False
+    receiver = call.child_by_field_name("receiver")
+    return receiver is not None and _ROUTES_RECEIVER.fullmatch(node_text(receiver, source)) is not None
+
+
+def has_routes_draw(root: Node, source: bytes) -> bool:
+    """Whether the file declares routes with ``<receiver>.routes.draw``."""
+    return any(_is_routes_draw(call, source) for call in _calls(root))
+
+
 def _inside_routes_draw(call: Node, source: bytes) -> bool:
     current = call.parent
     while current is not None:
-        if current.type == "call" and _method(current, source) == "draw":
-            receiver = current.child_by_field_name("receiver")
-            if receiver is not None and node_text(receiver, source) == "Rails.application.routes":
-                return True
+        if _is_routes_draw(current, source):
+            return True
         current = current.parent
     return False
 

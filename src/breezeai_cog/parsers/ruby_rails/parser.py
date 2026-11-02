@@ -7,8 +7,8 @@ from ..base import ParseContext
 from ..emits import apply
 from ..ruby.parser import RubyParser
 from ..treesitter import parse_source
-from ..ruby.claims import has_call, has_require, has_superclass
-from .routes import detect_rails_routes
+from ..ruby.claims import has_require, has_superclass
+from .routes import detect_rails_routes, has_routes_draw
 
 
 class RailsParser(RubyParser):
@@ -19,13 +19,14 @@ class RailsParser(RubyParser):
     def claims(self, path: str, source: bytes, parse_timeout_micros: int = 0) -> bool:
         if not any(marker in source for marker in (
             b"rails", b"Rails", b"ApplicationController", b"Rails.application.routes",
+            b"Application.routes",
         )):
             return False
         root = parse_source("ruby", source, parse_timeout_micros).root_node
         return (
             has_require(root, source, {"rails", "action_controller/railtie"})
             or has_superclass(root, source, {"ApplicationController"})
-            or has_call(root, source, "Rails.application.routes", "draw")
+            or has_routes_draw(root, source)
         )
 
     def parse_file(self, ctx: ParseContext) -> FileRecord:

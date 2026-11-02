@@ -606,6 +606,42 @@ def test_rails_login_callbacks_with_their_own_names_set_auth_required(analyze_fi
     assert got == {**{n: ([n], True) for n in login}, **{n: ([n], None) for n in other}}
 
 
+def test_rails_3_and_4_application_routes_draw_yields_routes(analyze_files) -> None:
+    """``<AppName>::Application.routes.draw`` (Rails 3 and 4) is a route file, as is the
+    newer ``Rails.application.routes.draw``; the file needs no ``rails`` marker to be claimed."""
+    st = analyze_files({
+        "config/routes.rb": (
+            "MyApp::Application.routes.draw do\n"
+            "  get '/old', to: 'pages#old'\n"
+            "  namespace :admin do\n    get 'stats', to: 'stats#show'\n  end\n"
+            "end\n"),
+        "config/other/routes.rb": (
+            "Acme::Shop::Application.routes.draw do\n  get '/nested', to: 'pages#nested'\nend\n"),
+        "app/controllers/pages_controller.rb": (
+            "class PagesController < ApplicationController\n"
+            "  before_action :authenticate\n  def old; end\n  def nested; end\nend\n"),
+    })
+    got = {s.endpoint: (s.method, s.guards, s.authRequired)
+           for s in st if s.semanticType == "route"}
+    assert got == {
+        "/old": ("GET", ["authenticate"], True),
+        "/admin/stats": ("GET", None, None),
+        "/nested": ("GET", ["authenticate"], True),
+    }
+
+
+def test_rails_routes_draw_on_other_receivers_is_not_a_route_file(analyze_files) -> None:
+    st = analyze_files({
+        "config/routes.rb": "Rails.application.routes.draw do\n  get '/real', to: 'a#b'\nend\n",
+        "lib/chart.rb": (
+            "require 'rails'\n"
+            "MyApp.routes.draw do\n  get '/no-application', to: 'a#b'\nend\n"
+            "Chart::Application.routes.append do\n  get '/not-draw', to: 'a#b'\nend\n"
+            "chart.axes.routes.draw do\n  get '/lowercase', to: 'a#b'\nend\n"),
+    })
+    assert [s.endpoint for s in st if s.semanticType == "route"] == ["/real"]
+
+
 def test_rails_resources_root_member_and_collection(tmp_path: Path) -> None:
     source = b'''require "rails"
 Rails.application.routes.draw do
