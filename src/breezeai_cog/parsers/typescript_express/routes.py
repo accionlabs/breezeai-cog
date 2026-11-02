@@ -28,7 +28,7 @@ from ..typescript.imports import (
     _module_of, _require_module, relative_requires, resolve_const_value,
 )
 from ..wiring import compose_guards
-from .mounts import _PATH_EXPRESSIONS, express_mounts, mw_name, router_locals
+from .mounts import _PATH_EXPRESSIONS, express_mounts, is_router_call, mw_name, router_locals
 
 # HTTP-verb methods that register a route handler on an app/router.
 _HTTP_VERBS = {"get", "post", "put", "delete", "patch", "options", "head", "all"}
@@ -83,18 +83,13 @@ def plain_locals(root: Node, source: bytes) -> frozenset[str]:
             name, value = node.child_by_field_name("name"), node.child_by_field_name("value")
             if name is not None and name.type == "identifier" and value is not None:
                 plain = value.type in _PLAIN_VALUES or (
-                    value.type == "new_expression" and not _is_router_ctor(value, source))
+                    value.type == "new_expression" and not is_router_call(value, source))
                 kinds.setdefault(node_text(name, source), set()).add(plain)
         for c in node.named_children:
             walk(c)
 
     walk(root)
     return frozenset(n for n, k in kinds.items() if k == {True})
-
-
-def _is_router_ctor(node: Node, source: bytes) -> bool:
-    fn = node.child_by_field_name("constructor")
-    return fn is not None and node_text(fn, source) in {"Router", "express.Router"}
 
 
 def _string_value(node: Node, source: bytes) -> str | None:
@@ -687,11 +682,13 @@ def _global_guards(
         if not arg_nodes:
             continue
         if arg_nodes[0].type in ("string", "template_string"):  # a mount: app.use('/x', …, router)
+            # Every router of the mount gets the mount's middleware (``middleware`` never names a
+            # router, so routers mounted together are not each other's guards).
             local = [a for a in arg_nodes[1:]
                      if a.type == "identifier" and node_text(a, source) in routers]
-            if len(local) == 1:
-                router = node_text(local[0], source)
-                guards = [n for a in arg_nodes[1:] if a is not local[0] and (n := middleware(a))]
+            guards = [n for a in arg_nodes[1:] if (n := middleware(a))]
+            for r in local:
+                router = node_text(r, source)
                 entry = (receiver, call.start_byte, guards)
                 mounted[router] = entry if router not in mounted else None  # mounted twice → unclear
             continue
@@ -788,8 +785,11 @@ def detect_express(
             continue
         method, endpoint, handler, handler_line, guards, framework, route_kind = info
         if route_kind == "mount" and _mounts_served_router(
-                call, source, path, mounts.served, local_served):
+                call, source, path, mounts.served, local_served, routers):
             continue  # wiring: its prefix and middleware are on the router's routes
+        if route_kind == "mount":
+            handler, handler_line, guards = _mount_routers(
+                call, source, path, mounts.site_routers, routers, handler, handler_line, guards)
         receiver_of = _receiver(call, source)
         lost = receiver_of in unknown_receivers or (file_unknown and receiver_of not in receiver_base)
         served = _apply_base(
@@ -825,17 +825,43 @@ def detect_express(
     return found
 
 
+def _mount_routers(
+    call: Node, source: bytes, path: str, site_routers: dict[str, frozenset[str]],
+    routers: frozenset[str], handler: str | None, handler_line: int | None,
+    guards: list[str] | None,
+) -> tuple[str | None, int | None, list[str] | None]:
+    """A mount record's (handler, handlerLine, guards) when its arguments include known routers —
+    another file's confirmed routers (``express.router-mounts``) or this file's ``Router()``s: a
+    router is never a guard, and the handler is the router when there is exactly one (several →
+    none). Otherwise the record is left as :func:`_mount_parts` read it."""
+    known = site_routers.get(f"{path}:{call.start_point[0] + 1}:{call.start_point[1]}",
+                             frozenset()) | routers
+    args = call.child_by_field_name("arguments")
+    named = [a for a in (args.named_children[1:] if args is not None else [])
+             if a.type == "identifier" and node_text(a, source) in known]
+    if not named:
+        return handler, handler_line, guards
+    names = {node_text(a, source) for a in named}
+    kept = [g for g in guards or [] if g not in names and g != handler] + (
+        [handler] if handler is not None and handler not in names else [])
+    if len(named) == 1:
+        return node_text(named[0], source), named[0].start_point[0] + 1, kept or None
+    return None, None, kept or None
+
+
 def _mounts_served_router(call: Node, source: bytes, path: str, served: frozenset[str],
-                          local_served: set[str]) -> bool:
+                          local_served: set[str], routers: frozenset[str]) -> bool:
     """Whether a mount's router is confirmed and keeps its base — another file's router or
     factory (``express.router-mounts``), or a ``Router()`` of this file — so its routes record
     the prefix and the mount adds nothing."""
-    if f"{path}:{call.start_point[0] + 1}" in served:
+    if f"{path}:{call.start_point[0] + 1}:{call.start_point[1]}" in served:
         return True
     args = call.child_by_field_name("arguments")
-    return args is not None and any(
-        a.type == "identifier" and node_text(a, source) in local_served
-        for a in args.named_children[1:])
+    # Every router of this file the mount names must keep its base (``app.use('/api', a, b)``).
+    named = [node_text(a, source) for a in (args.named_children[1:] if args is not None else [])
+             if a.type == "identifier"]
+    mounted = [n for n in named if n in local_served or n in routers]
+    return bool(mounted) and all(n in local_served for n in mounted)
 
 
 def _detect(dc: DetectContext) -> Detection | None:

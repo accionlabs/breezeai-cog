@@ -530,3 +530,247 @@ def test_mount_base_built_from_constants_folds_or_leaves_no_address(analyze_file
         ("src/app.js", "ping"): "/api/local/ping",
         ("src/app.js", "x"): None,
     }
+
+
+def test_require_express_router_is_a_router_whatever_its_name(analyze_files) -> None:
+    # The constructor decides, not the variable: `r` is no router-like name.
+    st = analyze_files({
+        "package.json": _PKG,
+        "src/d.js": (
+            "const r = require('express').Router();\n"
+            "r.get('/d', (req, res) => res.json([]));\n"
+            "module.exports = r;\n"
+        ),
+    })
+    got = {(s.path, s.method, s.endpoint) for s in st if s.semanticType == "route"}
+    assert got == {("src/d.js", "GET", "/d")}
+
+
+def test_router_of_another_object_is_not_a_router(analyze_files) -> None:
+    # `$.Router()` / `require('other').Router()` build no Express router.
+    st = analyze_files({
+        "package.json": _PKG,
+        "src/a.js": (
+            "const q = $.Router();\nq.get('/a', (req, res) => res.json([]));\n"
+            "const w = require('other').Router();\nw.get('/b', (req, res) => res.json([]));\n"
+        ),
+    })
+    assert [s for s in st if s.semanticType == "route"] == []
+
+
+_MULTI_USERS = "import { Router } from 'express';\nconst router = Router();\nrouter.get('/users', list);\nexport default router;\n"
+_MULTI_ORDERS = "import { Router } from 'express';\nconst router = Router();\nrouter.get('/orders', list);\nexport default router;\n"
+
+
+def _route_rows(analyze_files, files: dict[str, str]):
+    st = analyze_files({"package.json": _PKG, **files})
+    return {(s.routeKind, s.method, s.endpoint, tuple(s.guards or ()), s.handler)
+            for s in st if s.semanticType == "route"}
+
+
+def test_two_routers_in_one_mount_both_get_the_prefix(analyze_files) -> None:
+    rows = _route_rows(analyze_files, {
+        "src/users.ts": _MULTI_USERS,
+        "src/orders.ts": _MULTI_ORDERS,
+        "src/app.ts": (
+            "import express from 'express';\nimport users from './users';\n"
+            "import orders from './orders';\nimport { auth } from 'some-auth';\n"
+            "const app = express();\napp.use('/api', auth, users, orders);\n"
+        ),
+    })
+    # both routers in the repo → no mount record; the other router is never a guard
+    assert rows == {("route", "GET", "/api/users", ("auth",), "list"),
+                    ("route", "GET", "/api/orders", ("auth",), "list")}
+
+
+def test_one_router_per_mount_still_works(analyze_files) -> None:
+    rows = _route_rows(analyze_files, {
+        "src/users.ts": _MULTI_USERS,
+        "src/orders.ts": _MULTI_ORDERS,
+        "src/app.ts": (
+            "import express from 'express';\nimport users from './users';\n"
+            "import orders from './orders';\nimport { auth } from 'some-auth';\n"
+            "const app = express();\napp.use('/api', auth, users);\napp.use('/api', orders);\n"
+        ),
+    })
+    assert rows == {("route", "GET", "/api/users", ("auth",), "list"),
+                    ("route", "GET", "/api/orders", (), "list")}
+
+
+def test_multi_router_mount_with_a_router_at_two_bases(analyze_files) -> None:
+    # `users` is also mounted at /v2: where it is served is unknown, so its routes have no
+    # address, and the multi-router mount keeps its record (its address is recorded nowhere else).
+    rows = _route_rows(analyze_files, {
+        "src/users.ts": _MULTI_USERS,
+        "src/orders.ts": _MULTI_ORDERS,
+        "src/app.ts": (
+            "import express from 'express';\nimport users from './users';\n"
+            "import orders from './orders';\nconst app = express();\n"
+            "app.use('/api', users, orders);\napp.use('/v2', users);\n"
+        ),
+    })
+    assert ("route", "GET", None, (), "list") in rows
+    assert ("route", "GET", "/api/orders", (), "list") in rows
+    assert any(r[0] == "mount" and r[2] == "/api" for r in rows)
+
+
+def test_same_file_two_routers_in_one_mount(analyze_files) -> None:
+    rows = _route_rows(analyze_files, {
+        "src/app.ts": (
+            "import express, { Router } from 'express';\nimport { auth } from 'some-auth';\n"
+            "const app = express();\nconst a = Router();\nconst b = Router();\n"
+            "a.get('/x', hx);\nb.get('/y', hy);\napp.use('/api', auth, a, b);\n"
+        ),
+    })
+    assert rows == {("route", "GET", "/api/x", ("auth",), "hx"),
+                    ("route", "GET", "/api/y", ("auth",), "hy")}
+
+
+def _handler_locations(analyze_files, files: dict[str, str]):
+    st = analyze_files({"package.json": _PKG, **files})
+    return {s.endpoint: (s.handler, s.handlerPath, s.handlerLine)
+            for s in st if s.semanticType == "route" and s.routeKind == "route"}
+
+
+def test_member_namespace_and_commonjs_handlers_are_located(analyze_files) -> None:
+    got = _handler_locations(analyze_files, {
+        "src/users.ts": "export function list(req, res) {\n  res.json([]);\n}\n",
+        "src/orders.ts": (
+            "export class OrderController {\n"
+            "  list(req, res) { res.json([]); }\n"
+            "  static health(req, res) { res.send('ok'); }\n"
+            "}\n"
+        ),
+        "src/legacy.js": "module.exports = {\n  show(req, res) { res.send('x'); },\n};\n",
+        "src/ping.js": "exports.ping = function (req, res) {\n  res.send('pong');\n};\n",
+        "src/app.ts": (
+            "import express from 'express';\n"
+            "import * as users from './users';\n"
+            "import { OrderController } from './orders';\n"
+            "const ctrl = require('./legacy');\n"
+            "const { ping } = require('./ping');\n"
+            "const oc = new OrderController();\n"
+            "const app = express();\n"
+            "app.get('/users',  users.list);\n"
+            "app.get('/orders', oc.list);\n"
+            "app.get('/legacy', ctrl.show);\n"
+            "app.get('/ping',   ping);\n"
+            "app.get('/static', OrderController.health);\n"
+        ),
+    })
+    assert got == {
+        "/users": ("users.list", "src/users.ts", 1),
+        "/orders": ("oc.list", "src/orders.ts", 2),
+        "/legacy": ("ctrl.show", "src/legacy.js", 2),
+        "/ping": ("ping", "src/ping.js", 1),
+        "/static": ("OrderController.health", "src/orders.ts", 3),
+    }
+
+
+def test_ambiguous_member_handlers_stay_unlocated(analyze_files) -> None:
+    got = _handler_locations(analyze_files, {
+        "src/a.ts": "export function list(req, res) {}\n",
+        "src/b.ts": "export function list(req, res) {}\n",
+        "src/barrel.ts": "export * from './a';\nexport * from './b';\n",  # `list` twice
+        "src/orders.ts": (
+            "export class C {\n  get x() { return 1; }\n  set x(v) {}\n"
+            "  list(req, res) {}\n  static health(req, res) {}\n}\n"
+        ),
+        "src/app.ts": (
+            "import express from 'express';\nimport * as api from './barrel';\n"
+            "import { C } from './orders';\nlet oc = new C();\nlet oc = new C();\n"
+            "const one = new C();\nconst app = express();\n"
+            "app.get('/a', api.list);\n"      # exported by two modules → ambiguous
+            "app.get('/b', oc.list);\n"       # instance declared twice → ambiguous
+            "app.get('/c', C.list);\n"        # an instance method through the class: not static
+            "app.get('/d', one.health);\n"    # a static method through an instance
+            "app.get('/e', one.x);\n"         # getter + setter → no single method
+            "app.get('/f', one.missing);\n"   # no such method (maybe inherited)
+        ),
+    })
+    assert {ep: loc for ep, (_, *loc) in got.items()} == {
+        ep: [None, None] for ep in ("/a", "/b", "/c", "/d", "/e", "/f")}
+
+
+def test_local_class_and_instance_handlers(analyze_files) -> None:
+    got = _handler_locations(analyze_files, {
+        "src/app.ts": (
+            "import express from 'express';\n"
+            "class Ctl {\n  list = (req, res) => res.json([]);\n  static ok(req, res) {}\n}\n"
+            "const ctl = new Ctl();\nconst app = express();\n"
+            "app.get('/l', ctl.list);\napp.get('/o', Ctl.ok);\n"
+        ),
+    })
+    assert got == {"/l": ("ctl.list", None, 3), "/o": ("Ctl.ok", None, 4)}
+
+
+def test_two_mounts_on_one_line_stay_apart(analyze_files) -> None:
+    # Mount sites are told apart by column too: one line, two `use` calls, each its own guards.
+    rows = _route_rows(analyze_files, {
+        "src/users.ts": _MULTI_USERS,
+        "src/orders.ts": _MULTI_ORDERS,
+        "src/app.ts": (
+            "import express from 'express';\nimport users from './users';\n"
+            "import orders from './orders';\nimport { auth } from 'some-auth';\n"
+            "const app = express();\napp.use('/api', auth, users); app.use('/api', orders);\n"
+        ),
+    })
+    assert rows == {("route", "GET", "/api/users", ("auth",), "list"),
+                    ("route", "GET", "/api/orders", (), "list")}
+
+
+def test_mount_record_never_lists_a_router_as_a_guard(analyze_files) -> None:
+    # `b` is also mounted at /other: the /api mount is not wiring, so it keeps a record — whose
+    # handler is no single router (two), and whose guards are not the routers.
+    st = analyze_files({"package.json": _PKG, "src/app.js": (
+        "const express = require('express');\nconst app = express();\n"
+        "const a = express.Router();\nconst b = express.Router();\n"
+        "a.get('/x', hx);\nb.get('/y', hy);\n"
+        "app.use('/api', auth, a, b);\napp.use('/other', b);\n"
+    )})
+    mounts = {(s.endpoint, s.handler, tuple(s.guards or ())) for s in st if s.routeKind == "mount"}
+    assert ("/api", None, ("auth",)) in mounts
+    assert all("a" not in g and "b" not in g for _, _, g in mounts)
+
+
+def test_cross_file_multi_router_mount_record(analyze_files) -> None:
+    rows = _route_rows(analyze_files, {
+        "src/users.ts": _MULTI_USERS,
+        "src/orders.ts": _MULTI_ORDERS,
+        "src/app.ts": (
+            "import express from 'express';\nimport users from './users';\n"
+            "import orders from './orders';\nimport { auth } from 'some-auth';\n"
+            "const app = express();\napp.use('/api', auth, users, orders);\napp.use('/v2', users);\n"
+        ),
+    })
+    assert ("mount", "ANY", "/api", ("auth",), None) in rows  # two routers: no single handler
+    assert ("route", "GET", "/api/orders", ("auth",), "list") in rows
+
+
+def test_local_router_is_not_a_guard_of_a_mounted_router(analyze_files) -> None:
+    rows = _route_rows(analyze_files, {
+        "src/users.js": (
+            "const express = require('express');\nconst r = express.Router();\n"
+            "r.get('/users', list);\nmodule.exports = r;\n"
+        ),
+        "src/app.js": (
+            "const express = require('express');\nconst users = require('./users');\n"
+            "const app = express();\nconst a = express.Router();\na.get('/a', ha);\n"
+            "app.use('/api', users, a);\n"
+        ),
+    })
+    assert ("route", "GET", "/api/users", (), "list") in rows
+    assert ("route", "GET", "/api/a", (), "ha") in rows
+
+
+def test_accessors_are_not_handlers(analyze_files) -> None:
+    got = _handler_locations(analyze_files, {
+        "src/orders.ts": "export class C {\n  get list() { return () => 1; }\n}\n",
+        "src/legacy.js": "module.exports = {\n  get show() { return () => 1; },\n};\n",
+        "src/app.ts": (
+            "import express from 'express';\nimport { C } from './orders';\n"
+            "const ctrl = require('./legacy');\nconst one = new C();\nconst app = express();\n"
+            "app.get('/a', one.list);\napp.get('/b', ctrl.show);\n"
+        ),
+    })
+    assert {ep: loc for ep, (_, *loc) in got.items()} == {"/a": [None, None], "/b": [None, None]}

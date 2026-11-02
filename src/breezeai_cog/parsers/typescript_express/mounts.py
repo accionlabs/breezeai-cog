@@ -36,6 +36,7 @@ from ..typescript.imports import (
     _relative_import_map,
     _path_pieces,
     _resolve_pieces,
+    _string_literal,
     _try_paths,
     relative_requires,
     require_specifier,
@@ -47,35 +48,55 @@ FACT = "express.router-mounts"
 #: A mount base as resolvable pieces (``("lit", "/v1")`` / ``("sym", "API")``), folded in
 #: ``_resolve``; None when a piece is dynamic (a call, ``process.env.X``).
 _Base = tuple[tuple[str, str], ...] | None
-#: An Express router-instance mount candidate: (mount site ``file:line``, target file, the name
-#: the target exports, base, the mount's own middleware). Confirmed against the target's router
-#: exports in ``_resolve``.
-_InstanceMount = tuple[str, str, str, _Base, tuple[str, ...]]
+#: An Express router-instance mount candidate: (mount site ``file:line:column``, target file,
+#: the name the target exports, base, its position among the mount's arguments after the path, the
+#: callable name of each of those arguments — None when unnamed). Confirmed against the target's
+#: router exports in ``_resolve``; the arguments that are not confirmed routers are the mount's
+#: middleware.
+_InstanceMount = tuple[str, str, str, _Base, int, tuple[str | None, ...]]
 #: A router-factory mount: (the factory's file, the mount site, base, the mount's own middleware).
 _FactoryMount = tuple[str, str, _Base, tuple[str, ...]]
 
 
-def _is_router_call(node: Node | None, source: bytes) -> bool:
-    """``Router(...)`` / ``express.Router(...)`` (optionally ``new``) — an Express router instance."""
+def _is_require_express(node: Node | None, source: bytes) -> bool:
+    """``require('express')``."""
+    if node is None or node.type != "call_expression":
+        return False
+    fn, args = node.child_by_field_name("function"), node.child_by_field_name("arguments")
+    first = args.named_children[0] if args is not None and len(args.named_children) == 1 else None
+    return (fn is not None and node_text(fn, source) == "require" and first is not None
+            and _string_literal(first, source) == "express")
+
+
+def is_router_call(node: Node | None, source: bytes) -> bool:
+    """``Router(...)`` / ``express.Router(...)`` / ``require('express').Router(...)`` (optionally
+    ``new``) — an Express router instance. The constructor decides, never the variable it is
+    bound to: ``$.Router()`` or ``require('other').Router()`` is not one."""
     if node is not None and node.type == "new_expression":
         fn = node.child_by_field_name("constructor")
     elif node is not None and node.type == "call_expression":
         fn = node.child_by_field_name("function")
     else:
         return False
-    return fn is not None and node_text(fn, source) in {"Router", "express.Router"}
+    if fn is None:
+        return False
+    if node_text(fn, source) in {"Router", "express.Router"}:
+        return True
+    prop = fn.child_by_field_name("property") if fn.type == "member_expression" else None
+    return (prop is not None and node_text(prop, source) == "Router"
+            and _is_require_express(fn.child_by_field_name("object"), source))
 
 
 def router_locals(root: Node, source: bytes) -> set[str]:
     """Variables bound to an Express router instance anywhere in the file
-    (``const r = Router()`` / ``express.Router()``)."""
+    (``const r = Router()`` / ``express.Router()`` / ``require('express').Router()``)."""
     out: set[str] = set()
 
     def walk(node: Node) -> None:
         if node.type == "variable_declarator":
             name = node.child_by_field_name("name")
             if (name is not None and name.type == "identifier"
-                    and _is_router_call(node.child_by_field_name("value"), source)):
+                    and is_router_call(node.child_by_field_name("value"), source)):
                 out.add(node_text(name, source))
         for c in node.named_children:
             walk(c)
@@ -105,9 +126,13 @@ class ExpressMounts:
     unknown_routers: dict[str, frozenset[str]] = field(default_factory=dict)
     factory_guards: dict[str, tuple[str, ...]] = field(default_factory=dict)
     router_guards: dict[str, dict[str, tuple[str, ...]]] = field(default_factory=dict)
-    #: The mount sites (``file:line``) whose router is confirmed and keeps their base: its
-    #: routes are recorded at the mount's prefix, so the mount itself is wiring, nothing more.
+    #: The mount sites (``file:line:column`` — two mounts may share a line) whose routers are
+    #: confirmed and keep their base: their routes are recorded at the mount's prefix, so the
+    #: mount itself is wiring, nothing more.
     served: frozenset[str] = frozenset()
+    #: Mount site → the names of its arguments that are confirmed routers, for a site that is not
+    #: served: its mount record names those routers, never as its guards.
+    site_routers: dict[str, frozenset[str]] = field(default_factory=dict)
 
 
 def mw_name(node: Node, source: bytes) -> str | None:
@@ -240,24 +265,36 @@ def _confirm_instance_mounts(
     candidates: list[_InstanceMount], router_exports: dict[str, dict[str, str]],
     consts: dict[str, str | None],
 ) -> tuple[dict[str, dict[str, str]], dict[str, dict[str, tuple[str, ...]]], set[str],
-           dict[str, frozenset[str]]]:
+           dict[str, frozenset[str]], dict[str, frozenset[str]]]:
     """Keep the router-instance mounts the target file confirms: the imported name is a
-    ``Router()`` that file exports. A mount site with more than one confirmed router is skipped.
-    A confirmed router whose base does not resolve, or that is mounted at >1 distinct base, is
-    returned as unknown (its routes have no address)."""
-    confirmed: dict[str, list[tuple[str, str, str | None, tuple[str, ...]]]] = {}
-    for site, target, exported, base, guards in candidates:
+    ``Router()`` that file exports. Every confirmed router of a mount site counts
+    (``app.use('/api', auth, users, orders)`` mounts both); its guards are the site's other
+    arguments that are not confirmed routers. A confirmed router whose base does not resolve, or
+    that is mounted at >1 distinct base, is returned as unknown (its routes have no address). A
+    site is served — its mount is wiring — when every confirmed router of it keeps its base."""
+    confirmed: dict[str, list[tuple[int, str, str, str | None, tuple[str | None, ...]]]] = {}
+    for site, target, exported, base, pos, names in candidates:
         router_var = router_exports.get(target, {}).get(exported)
         if router_var is not None:
             confirmed.setdefault(site, []).append(
-                (target, router_var, _fold(base, consts), guards))
-    hits = [(site, hit) for site, found in confirmed.items() if len(found) == 1 for hit in found]
+                (pos, target, router_var, _fold(base, consts), names))
+    hits: list[tuple[str, tuple[str, str, str | None, tuple[str, ...]]]] = []
+    site_routers: dict[str, frozenset[str]] = {}
+    for site, found in confirmed.items():
+        routers_at = {pos for pos, *_ in found}
+        site_routers[site] = frozenset(n for pos, *_, names in found if (n := names[pos]))
+        for _, target, router_var, value, names in found:
+            guards = tuple(n for i, n in enumerate(names) if i not in routers_at and n is not None)
+            hits.append((site, (target, router_var, value, guards)))
     wiring = [Wiring((target, local), "prefix", value, site)
               for site, (target, local, value, _) in hits]
     out: dict[str, dict[str, str]] = {}
     for (target, router_var), resolved in resolve_wiring(wiring).items():
         out.setdefault(target, {})[router_var] = resolved
-    served = {site for site, (target, local, _, _) in hits if local in out.get(target, {})}
+    kept: dict[str, bool] = {}
+    for site, (target, local, _, _) in hits:
+        kept[site] = kept.get(site, True) and local in out.get(target, {})
+    served = {site for site, ok in kept.items() if ok}
     guards_out: dict[str, dict[str, tuple[str, ...]]] = {}
     for (target, router_var), guards in _distinct_guards(
         ((target, local), guards) for _, (target, local, _, guards) in hits
@@ -267,7 +304,8 @@ def _confirm_instance_mounts(
     for _, (target, local, _, _) in hits:
         if local not in out.get(target, {}):
             unknown.setdefault(target, set()).add(local)
-    return out, guards_out, served, {t: frozenset(v) for t, v in unknown.items()}
+    return (out, guards_out, served, {t: frozenset(v) for t, v in unknown.items()},
+            {site: names for site, names in site_routers.items() if site not in served})
 
 
 def _collect_express_mounts(
@@ -287,6 +325,7 @@ def _collect_express_mounts(
     if not import_map and b"require(" not in source:
         return [], []
     exports_of = _relative_import_exports(root, source)
+    own_routers = router_locals(root, source) if b"Router" in source else set()
     mount_dir = (repo_root / rel).parent
     out: list[_FactoryMount] = []
     instances: list[_InstanceMount] = []
@@ -324,20 +363,26 @@ def _collect_express_mounts(
                         if len(specs) == 1:  # exactly one imported factory arg → unambiguous
                             resolved = _try_paths(mount_dir / specs[0], repo_root)
                             if resolved is not None:
-                                site = f"{rel}:{node.start_point[0] + 1}"
+                                site = f"{rel}:{node.start_point[0] + 1}:{node.start_point[1]}"
                                 guards = _names([a for a in arg_nodes[1:]
                                                  if a is not factories[0][0]], source)
                                 out.append((resolved, site, base, guards))
                         elif not specs:  # router instances: every imported identifier is a candidate
-                            site = f"{rel}:{node.start_point[0] + 1}"
-                            for a in arg_nodes[1:]:
+                            site = f"{rel}:{node.start_point[0] + 1}:{node.start_point[1]}"
+                            chain = arg_nodes[1:]
+                            # A router argument is never middleware: an inline require(), and a
+                            # Router() of this file (``app.use('/api', users, local)``).
+                            names = tuple(
+                                None if require_specifier(b, source) is not None
+                                or (b.type == "identifier" and node_text(b, source) in own_routers)
+                                else mw_name(b, source) for b in chain)
+                            for pos, a in enumerate(chain):
                                 inline = require_specifier(a, source)  # app.use('/x', require('./r'))
                                 imp = ((inline, "default") if inline is not None else
                                        exports_of.get(node_text(a, source)) if a.type == "identifier" else None)
                                 target = _try_paths(mount_dir / imp[0], repo_root) if imp else None
                                 if imp is not None and target is not None:
-                                    guards = _names([b for b in arg_nodes[1:] if b is not a], source)
-                                    instances.append((site, target, imp[1], base, guards))
+                                    instances.append((site, target, imp[1], base, pos, names))
         for c in node.named_children:
             walk(c)
 
@@ -371,7 +416,7 @@ def _resolve(values: list[_FileMounts], index: object) -> ExpressMounts | None:
         candidates.extend(file_instances)
         if exports:
             router_exports[rel] = exports
-    routers, router_guards, served, unknown_routers = _confirm_instance_mounts(
+    routers, router_guards, served, unknown_routers, site_routers = _confirm_instance_mounts(
         candidates, router_exports, consts)
     factory_bases = {scope[0]: base for scope, base in resolve_wiring(
         Wiring((target,), "prefix", _fold(base, consts), site)
@@ -385,6 +430,7 @@ def _resolve(values: list[_FileMounts], index: object) -> ExpressMounts | None:
         factory_guards=_distinct_guards((target, g) for target, _, _, g in factories),
         router_guards=router_guards,
         served=frozenset(served),
+        site_routers=site_routers,
     )
     return mounts if (mounts.factories or mounts.routers or mounts.unknown_factories
                       or mounts.unknown_routers) else None
