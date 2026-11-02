@@ -89,6 +89,43 @@ def _python(n: int) -> str:
     )
 
 
+def _python_flask(n: int) -> str:
+    body = "".join(
+        f"@bp.route('/items/{i}', methods=['GET', 'POST'])\n@login_required\n"
+        f"def item{i}():\n    return ''\n\n"
+        f"app.add_url_rule('/rule/{i}', view_func=item{i})\n"
+        for i in range(n)
+    )
+    return ("from flask import Flask, Blueprint\nfrom flask_login import login_required\n"
+            "app = Flask(__name__)\nbp = Blueprint('b', __name__, url_prefix='/b')\n"
+            f"app.register_blueprint(bp)\n{body}")
+
+
+def _python_django(n: int) -> str:
+    views = "".join(
+        f"class V{i}(LoginRequiredMixin, ListView):\n    def post(self, request):\n        pass\n"
+        f"@login_required\ndef f{i}(request):\n    pass\n"
+        for i in range(n)
+    )
+    patterns = "".join(f"    path('v{i}/', V{i}.as_view()),\n    path('f{i}/', f{i}),\n" for i in range(n))
+    return ("from django.urls import path\nfrom django.views.generic import ListView\n"
+            "from django.contrib.auth.mixins import LoginRequiredMixin\n"
+            "from django.contrib.auth.decorators import login_required\n"
+            f"{views}urlpatterns = [\n{patterns}]\n")
+
+
+def _python_drf(n: int) -> str:
+    views = "".join(
+        f"class S{i}(viewsets.ModelViewSet):\n    serializer_class = Ser{i}\n"
+        f"    @action(detail=True, methods=['post'])\n    def go(self, request, pk=None):\n        pass\n"
+        for i in range(n)
+    )
+    registers = "".join(f"router.register('s{i}', S{i})\n" for i in range(n))
+    return ("from rest_framework import viewsets\nfrom rest_framework.decorators import action\n"
+            "from rest_framework.routers import DefaultRouter\nrouter = DefaultRouter()\n"
+            f"{views}{registers}urlpatterns = router.urls\n")
+
+
 def _csharp(n: int) -> str:
     body = "".join(
         f"    /// <summary>M{i}</summary>\n"
@@ -251,6 +288,9 @@ SAMPLES: dict[str, tuple[str, Callable[[int], str]]] = {
     "typescript-express-aws": ("app.ts", _ts_express_aws),
     "typescript-backbone": ("app.ts", _ts_backbone),
     "python": ("mod.py", _python),
+    "python-flask": ("app.py", _python_flask),
+    "python-django": ("urls.py", _python_django),
+    "python-drf": ("urls.py", _python_drf),
     "csharp": ("C.cs", _csharp),
     "xsd": ("schema.xsd", _xsd),
     "wsdl": ("service.wsdl", _wsdl),
