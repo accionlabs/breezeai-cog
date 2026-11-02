@@ -18,6 +18,11 @@ declaration's name, file and line::
 line), re-exported from another file (``export { a as b } from './x'``, ``export *``), or an
 imported name exported again. :func:`resolve_export` follows re-exports to the declaration. A
 name exported twice differently, an export cycle, or a module outside the repo resolves to None.
+
+A CommonJS module's properties count as its named exports — ``module.exports = { show() {} }``,
+``exports.ping = function () {}`` — so ``require('./x').show`` resolves like an ES import. The
+methods of each top-level class are kept too (:func:`class_member`), for a handler written as
+``Class.method`` (a static method) or ``instance.method``.
 """
 
 from __future__ import annotations
@@ -25,7 +30,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from tree_sitter import Node
 
@@ -52,11 +57,21 @@ class Declaration:
 Export = tuple[str, str, int] | tuple[str, str, str]
 
 
+#: A class's methods: name → (line, static). A name defined twice (a getter and a setter,
+#: overloads) is left out.
+Methods = dict[str, tuple[int, bool]]
+
+
 @dataclass(frozen=True)
 class FileExports:
     exports: dict[str, Export] = field(default_factory=dict)
     #: Files whose names this one re-exports with ``export * from``.
     stars: tuple[str, ...] = ()
+    #: CommonJS properties (``module.exports = { a }`` / ``exports.a = …``) → export, consulted
+    #: after ``exports`` — never listed by :func:`export_names`.
+    commonjs: dict[str, Export] = field(default_factory=dict)
+    #: Top-level class name → its methods.
+    methods: dict[str, Methods] = field(default_factory=dict)
 
 
 def _resolve_relative(spec: str | None, rel: str, repo_root: Path | None) -> str | None:
@@ -100,6 +115,105 @@ def top_level_declarations(root: Node, source: bytes) -> dict[str, tuple[int, No
     for name in twice:
         del found[name]
     return found
+
+
+_FN_VALUES = ("arrow_function", "function_expression", "function", "generator_function")
+
+
+def _is_accessor(method: Node) -> bool:
+    """``get x() {}`` / ``set x(v) {}``."""
+    return any(c.type in ("get", "set") for c in method.children)
+
+
+def class_methods(cls: Node, source: bytes) -> Methods:
+    """The methods of a class node: ``m() {}`` / ``static m() {}``, and a field holding a
+    function (``m = () => {}``). A getter / setter is not a method: its name is left out."""
+    body = cls.child_by_field_name("body")
+    found: Methods = {}
+    twice: set[str] = set()
+    for m in body.named_children if body is not None else []:
+        if m.type == "public_field_definition":
+            value = m.child_by_field_name("value")
+            if value is None or value.type not in _FN_VALUES:
+                continue
+        elif m.type != "method_definition":
+            continue
+        nm = m.child_by_field_name("name") or m.child_by_field_name("property")
+        if nm is None or nm.type not in ("property_identifier", "private_property_identifier"):
+            continue
+        name = node_text(nm, source)
+        if name in found or _is_accessor(m):
+            twice.add(name)
+        found[name] = (nm.start_point[0] + 1, any(c.type == "static" for c in m.children))
+    for name in twice:
+        del found[name]
+    return found
+
+
+def top_level_classes(root: Node, source: bytes) -> dict[str, Methods]:
+    """Top-level class name → its methods (exported or not)."""
+    out: dict[str, Methods] = {}
+    for top in root.named_children:
+        decl = top.child_by_field_name("declaration") or top.child_by_field_name("value") \
+            if top.type == "export_statement" else top
+        if decl is not None and decl.type in _CLASS_NODES + ("class",):
+            nm = decl.child_by_field_name("name")
+            if nm is not None:
+                out[node_text(nm, source)] = class_methods(decl, source)
+    return out
+
+
+def _commonjs_exports(root: Node, source: bytes,
+                      local: Callable[[str], Export | None]) -> dict[str, Export]:
+    """The properties a CommonJS module exports: the keys of ``module.exports = { … }``, and
+    ``exports.x = …`` / ``module.exports.x = …``. A value naming a local declaration or import
+    exports that; a function written in place is declared there."""
+    out: dict[str, Export] = {}
+
+    def value_export(key: str, value: Node) -> Export | None:
+        if value.type == "identifier":
+            return local(node_text(value, source))
+        if value.type in _FN_VALUES:
+            return ("decl", key, value.start_point[0] + 1)
+        return None
+
+    for node in root.named_children:
+        expr = node.named_children[0] if node.type == "expression_statement" \
+            and node.named_children else None
+        if expr is None or expr.type != "assignment_expression":
+            continue
+        left, right = expr.child_by_field_name("left"), expr.child_by_field_name("right")
+        if left is None or right is None:
+            continue
+        target = node_text(left, source)
+        if target == "module.exports" and right.type == "object":
+            for p in right.named_children:
+                if p.type == "shorthand_property_identifier":
+                    found = local(node_text(p, source))
+                    key = node_text(p, source)
+                elif p.type == "pair":
+                    k, v = p.child_by_field_name("key"), p.child_by_field_name("value")
+                    if k is None or v is None:
+                        continue
+                    key = node_text(k, source).strip("'\"")
+                    found = value_export(key, v)
+                elif p.type == "method_definition":
+                    nm = p.child_by_field_name("name")
+                    if nm is None or _is_accessor(p):  # a getter / setter is not a function
+                        continue
+                    key = node_text(nm, source)
+                    found = ("decl", key, nm.start_point[0] + 1)
+                else:
+                    continue
+                if found is not None:
+                    out[key] = found
+        elif target.startswith(("exports.", "module.exports.")) and target.count(".") == \
+                (1 if target.startswith("exports.") else 2):
+            key = target.rsplit(".", 1)[-1]
+            found = value_export(key, right)
+            if found is not None:
+                out[key] = found
+    return out
 
 
 def import_bindings(root: Node, source: bytes) -> dict[str, tuple[str, str]]:
@@ -187,9 +301,11 @@ def _collect(root: Node, source: bytes, rel: str, repo_root: Path | None) -> Fil
         elif decl is not None:
             for declared, line, _ in _declared(decl, source):
                 exports[declared] = ("decl", declared, line)
-    if not exports and not stars:
+    commonjs = _commonjs_exports(root, source, local) if b"exports" in source else {}
+    methods = {c: m for c, m in top_level_classes(root, source).items() if m}
+    if not exports and not stars and not commonjs and not methods:
         return None
-    return FileExports(exports, tuple(stars))
+    return FileExports(exports, tuple(stars), commonjs, methods)
 
 
 def _resolve(values: list[tuple[str, FileExports]], index: Any) -> dict[str, FileExports] | None:
@@ -246,7 +362,7 @@ def resolve_export(index: Any | None, file: str, name: str,
     if entry is None:
         return None
     seen = _seen | {(file, name)}
-    exp = entry.exports.get(name)
+    exp = entry.exports.get(name) or (entry.commonjs.get(name) if name != "default" else None)
     if exp is None:
         if name == "default":
             return None
@@ -267,3 +383,14 @@ def export_names(index: Any | None, file: str,
     for star in entry.stars:
         names += [n for n in export_names(index, star, _seen | {file}) if n not in names]
     return names
+
+
+def class_member(index: Any | None, decl: Declaration, member: str,
+                 static: bool) -> Declaration | None:
+    """Method ``member`` of the class ``decl`` declares — a ``static`` one for ``Class.m``, an
+    instance one for ``obj.m``; None when the class has no such method (or an inherited one)."""
+    entry = module_exports(index).get(decl.file)
+    found = entry.methods.get(decl.name or "", {}).get(member) if entry is not None else None
+    if found is None or found[1] != static:
+        return None
+    return Declaration(member, decl.file, found[0])
