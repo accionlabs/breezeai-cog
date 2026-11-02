@@ -240,6 +240,78 @@ def test_razor_page_model_not_in_the_code_behind_stays_unlocated(analyze_files) 
     assert _page_record(analyze_files, "OrdersModel", twice)[1:] == (None, None)
 
 
+@pytest.mark.parametrize("path, directive, node_type, endpoint", [
+    # A bare @page is served at the page's place under Pages/; Index maps to its folder.
+    ("Pages/Index.cshtml", "@page", "synthetic", "/"),
+    ("Pages/Orders/Index.cshtml", "@page", "synthetic", "/Orders"),
+    ("Pages/Orders/Edit.cshtml", "@page", "synthetic", "/Orders/Edit"),
+    ("Areas/Admin/Pages/Users.cshtml", "@page", "synthetic", "/Admin/Users"),
+    ("src/Web/Pages/Privacy.cshtml", "@page", "synthetic", "/Privacy"),
+    # A relative template is joined to that address; an absolute one is kept.
+    ("Pages/Orders/Edit.cshtml", '@page "{id:int}"', "razor_page_directive", "/Orders/Edit/{id:int}"),
+    ("Pages/Orders/Index.cshtml", '@page "{handler?}"', "razor_page_directive", "/Orders/{handler?}"),
+    ("Pages/Orders/Edit.cshtml", '@page "/orders/edit"', "razor_page_directive", "/orders/edit"),
+    # Blazor Server's host page is a real page.
+    ("Pages/_Host.cshtml", '@page "/"', "razor_page_directive", "/"),
+    # Outside Pages/ the address is unknown: empty, never the bare template.
+    ("Views/Orders/Edit.cshtml", '@page "{id}"', "razor_page_directive", None),
+    ("Views/Orders/Edit.cshtml", "@page", "synthetic", None),
+    ("Pages/Orders/Edit.cshtml", '@page "~/x"', "razor_page_directive", None),
+])
+def test_razor_page_address(analyze_files, path, directive, node_type, endpoint) -> None:
+    cls = path.rsplit("/", 1)[-1].split(".")[0].lstrip("_") + "Model"
+    stmts = analyze_files({
+        path: f"{directive}\n@model {cls}\n<h1>x</h1>\n",
+        path + ".cs": f"namespace Shop.Pages;\npublic class {cls} : PageModel {{ }}\n",
+    }, templates=True)
+    [r] = [s for s in _eps(stmts) if s.path == path]
+    assert (r.nodeType, r.semanticType, r.routeKind, r.endpoint) == (
+        node_type, "route", "page", endpoint)
+    assert (r.text, r.startLine, r.handler, r.handlerPath, r.handlerLine) == (
+        directive, 1, cls, path + ".cs", 2)
+
+
+def test_bare_page_text_elsewhere_is_not_a_page(analyze_files) -> None:
+    # `@page` after markup is an expression (a C# `page` variable in a view), and MVC views
+    # and layouts without @page are no pages.
+    stmts = analyze_files({
+        "Views/Home/Index.cshtml": "@model HomeModel\n<h1>x</h1>\n@page\n",
+        "Pages/Shared/_Layout.cshtml": "<html>@RenderBody()</html>\n",
+    }, templates=True)
+    assert [s for s in stmts if s.semanticType == "route"] == []
+
+
+@pytest.mark.parametrize("model, name", [
+    ("Order[]", "Order[]"),
+    ("Order?", "Order?"),
+    ("Shop.Pages.OrdersModel<T>", "Shop.Pages.OrdersModel<T>"),
+])
+def test_razor_model_kept_as_written_and_never_a_handler(analyze_files, model, name) -> None:
+    # The grammar stops at `Order`; the name is the type as written, and a type that is not a
+    # plain or dotted class name is no page's own class — even when a class `Order` exists.
+    code_behind = "namespace Shop.Pages;\npublic class Order { }\npublic class OrdersModel<T> { }\n"
+    files = {"Pages/Orders.cshtml": f'@page "/orders"\n@model {model}\n<p class="x">y</p>\n',
+             "Pages/Orders.cshtml.cs": code_behind}
+    stmts = analyze_files(files, templates=True)
+    [r] = [s for s in _eps(stmts) if s.path == "Pages/Orders.cshtml"]
+    assert (r.handler, r.handlerPath, r.handlerLine) == (None, None, None)
+    [m] = [s for s in stmts if s.nodeType == "razor_model_directive"]
+    assert m.name == name
+    # `[]` leaves no stray expression behind.
+    assert not [s for s in stmts if s.nodeType == "razor_implicit_expression"
+                and not s.text.startswith("@")]
+
+
+def test_razor_page_global_qualified_model_is_located(analyze_files) -> None:
+    assert _page_record(analyze_files, "global::Shop.Pages.OrdersModel", _MODEL) == (
+        "global::Shop.Pages.OrdersModel", "Pages/Orders.cshtml.cs", 2)
+
+
+def test_razor_page_model_nested_in_another_class_is_not_located(analyze_files) -> None:
+    nested = "namespace Shop.Pages;\npublic class Outer { public class OrdersModel : PageModel { } }\n"
+    assert _page_record(analyze_files, "OrdersModel", nested) == ("OrdersModel", None, None)
+
+
 def test_blazor_page_handler_is_its_component(analyze_files) -> None:
     stmts = analyze_files({"Pages/Counter.razor": '@page "/counter"\n<h1>Counter</h1>\n'},
                           templates=True)

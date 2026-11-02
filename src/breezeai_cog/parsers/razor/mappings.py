@@ -16,6 +16,7 @@ STATEMENT_TYPES: list[str] = [
     "razor_html_attribute",
     "razor_foreach",
     "razor_if",
+    "synthetic",  # a bare @page: the grammar has no node for it (an ERROR of `@` + `at_page`)
 ]
 
 #: Framework this parser reports. Covers Razor views (``.cshtml``) and Blazor components
