@@ -7,13 +7,18 @@ SFC — we build a **shadow source** that blanks the islands (spaces, newlines p
 parse that with the ``html`` grammar. Byte offsets are unchanged, so every statement keeps its
 true line/column. (The island *bodies* — the embedded C# — are a later step.)
 
-Two things are captured here:
+Three things are captured here:
 
 * **Server-control event wiring** — an ``On<Event>="Method"`` attribute on a server control
   (``OnClick``, ``OnRowCommand``, …) → a statement with ``handler`` = the code-behind method,
   so a page method joins to the control that invokes it (the P1/P2 ``handler`` model).
 * **Server-control declarations** — an element whose tag is ``asp:``/``uc:`` prefixed or carries
-  ``runat="server"`` (the page's UI components).
+  ``runat="server"`` (the page's UI components). A user control registered by
+  ``<%@ Register Src TagPrefix TagName %>`` gets ``handler`` = its ``TagName`` and
+  ``handlerPath`` = its ``.ascx``, so the tag leads to the control it renders.
+* **Register directives** — one statement per ``<%@ Register %>``. The directive is blanked
+  before the html grammar runs (and the grammar has no rule for it), so there is no node:
+  ``nodeType`` is ``synthetic``.
 
 Ordinary HTML (``<div>``, ``class="…"``) is not emitted — no flood.
 """
@@ -50,6 +55,11 @@ _CODEBEHIND = re.compile(
 )
 
 
+#: A ``<%@ Register … %>`` directive (``[^%]`` stays inside it) and one ``Name="value"`` in it.
+_REGISTER = re.compile(rb"<%@\s*Register\b[^%]*%>", re.IGNORECASE)
+_DIRECTIVE_ATTR = re.compile(r"""(\w+)\s*=\s*["']([^"']*)["']""")
+
+
 def shadow_markup(source: bytes) -> bytes:
     """A same-length copy of ``source`` with every ``<% … %>`` island blanked to spaces
     (newlines kept), so the ``html`` grammar parses only the markup at true offsets."""
@@ -75,6 +85,53 @@ def resolve_codebehind(source: bytes, aspx_path: str, repo_root: Path) -> str | 
             return hit
     sibling = f"{aspx_path}.cs"  # Enrollment.aspx → Enrollment.aspx.cs
     return sibling if (repo_root / sibling).is_file() else None
+
+
+def register_controls(
+    source: bytes, path: str, repo_root: Path | None
+) -> dict[str, tuple[str, str]]:
+    """``prefix:name`` (lower-case; ASP.NET matches tags case-insensitively) → the ``TagName``
+    and the ``.ascx`` repo path, for each ``<%@ Register Src TagPrefix TagName %>`` whose ``.ascx`` exists. A
+    ``Namespace``/``Assembly`` Register names no file and is left out."""
+    if repo_root is None:
+        return {}
+    app_root = web_app_root(path, repo_root)
+    cur_dir = posixpath.dirname(path)
+    out: dict[str, tuple[str, str]] = {}
+    for m in _REGISTER.finditer(source):
+        attrs = {k.lower(): v.strip() for k, v in
+                 _DIRECTIVE_ATTR.findall(m.group(0).decode("utf-8", "replace"))}
+        prefix, name, src = attrs.get("tagprefix"), attrs.get("tagname"), attrs.get("src")
+        if not (prefix and name and src):
+            continue
+        rel = to_repo_path(src, cur_dir, app_root)
+        actual = ci_resolve(repo_root, rel) if rel and rel.lower().endswith(".ascx") else None
+        if actual is not None and actual != path:
+            out.setdefault(f"{prefix}:{name}".lower(), (name, actual))
+    return out
+
+
+def collect_register_statements(
+    source: bytes, path: str, parent_id: str, seen_ids: set[str], limit: int
+) -> list[Statement]:
+    """One ``synthetic`` statement per ``<%@ Register %>`` directive: wiring, so no
+    ``semanticType``."""
+    out: list[Statement] = []
+    for m in _REGISTER.finditer(source):
+        start = source.count(b"\n", 0, m.start()) + 1
+        col = m.start() - (source.rfind(b"\n", 0, m.start()) + 1)
+        text = m.group(0).decode("utf-8", "replace")
+        out.append(Statement(
+            id=disambiguate(statement_id(path, start, col), seen_ids),
+            parentId=parent_id,
+            nodeType="synthetic",
+            name="Register",
+            text=text if len(text) <= limit else text[:limit],
+            startLine=start,
+            endLine=start + m.group(0).count(b"\n"),
+            path=path,
+        ))
+    return out
 
 
 def resolve_control_mounts(source: bytes, path: str, repo_root: Path) -> list[tuple[str, int]]:
@@ -150,9 +207,12 @@ def _databind_field(value: str) -> str | None:
 
 
 def collect_markup_statements(
-    root: Node, source: bytes, path: str, parent_id: str, seen_ids: set[str], limit: int
+    root: Node, source: bytes, path: str, parent_id: str, seen_ids: set[str], limit: int,
+    controls: dict[str, tuple[str, str]] | None = None,
 ) -> list[Statement]:
-    """Walk the (island-blanked) markup tree; emit event-wiring + server-control statements."""
+    """Walk the (island-blanked) markup tree; emit event-wiring + server-control statements.
+    ``controls`` (:func:`register_controls`) leads a registered user-control tag to its
+    ``.ascx``."""
     out: list[Statement] = []
 
     def _emit(node: Node, **fields: object) -> None:
@@ -179,7 +239,12 @@ def collect_markup_statements(
                 tag = _tag_name(start, source)
                 if _is_server_control(tag, start, source):
                     # nodeType is the captured node's real type (the `element`), never hardcoded.
-                    _emit(node, nodeType=node.type, name=tag)
+                    control = (controls or {}).get(tag.lower()) if tag else None
+                    if control is not None:
+                        _emit(node, nodeType=node.type, name=tag,
+                              handler=control[0], handlerPath=control[1])
+                    else:
+                        _emit(node, nodeType=node.type, name=tag)
                 # On the control's attributes: event wiring (On<Event>="Method") and data
                 # bindings (Text='<%# Eval("Field") %>'). Both anchor to the real `attribute`
                 # node (nodeType = attr.type, never synthetic); a binding carries no
