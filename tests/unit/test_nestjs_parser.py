@@ -826,3 +826,83 @@ def test_api_response_type_as_written(analyze_files, decorator: str, dto: str) -
     )})
     [r] = [s for s in st if s.semanticType == "route"]
     assert r.responseDTO == dto
+
+
+_MS_PKG = '{"dependencies": {"@nestjs/core": "10", "@nestjs/microservices": "10"}}'
+
+
+def _outbound(analyze_files, src: str) -> list[tuple[str, str]]:
+    st = analyze_files({"package.json": _MS_PKG, "src/svc.ts": src})
+    return sorted((s.semanticType, s.endpoint or "")
+                  for s in st if s.semanticType in ("eventbus_send", "eventbus_publish"))
+
+
+def test_transport_clients_are_outbound(analyze_files) -> None:
+    out = _outbound(analyze_files, (
+        "import { Inject, Injectable } from '@nestjs/common';\n"
+        "import { ClientProxy, ClientKafka, ClientRMQ } from '@nestjs/microservices';\n"
+        "@Injectable()\nexport class Svc {\n"
+        "  constructor(\n"
+        "    @Inject('BILLING') private readonly billing: ClientProxy,\n"
+        "    @Inject('KAFKA')   private readonly kafka: ClientKafka,\n"
+        "    @Inject('RMQ')     private readonly rmq: ClientRMQ,\n"
+        "  ) {}\n"
+        "  a() { return this.billing.send('billing.charge', {}); }\n"
+        "  b() { this.kafka.emit('order.created', {}); }\n"
+        "  c() { return this.rmq.send({ cmd: 'stock' }, {}); }\n"
+        "}\n"
+    ))
+    assert out == [("eventbus_publish", "order.created"), ("eventbus_send", "billing.charge"),
+                   ("eventbus_send", '{"cmd":"stock"}')]
+
+
+def test_every_transport_client_alone_is_outbound(analyze_files) -> None:
+    # A file naming only the transport client (no ClientProxy) is read too.
+    for client in ("ClientNats", "ClientMqtt", "ClientRedis", "ClientTCP"):
+        out = _outbound(analyze_files, (
+            f"import {{ {client} }} from '@nestjs/microservices';\n"
+            f"export class Svc {{\n  private bus: {client};\n"
+            "  go() { this.bus.emit('x.happened', {}); }\n}\n"
+        ))
+        assert out == [("eventbus_publish", "x.happened")], client
+
+
+def test_transport_client_from_another_library_is_not_outbound(analyze_files) -> None:
+    out = _outbound(analyze_files, (
+        "import { Injectable } from '@nestjs/common';\n"
+        "import { ClientProxy } from '@nestjs/microservices';\n"
+        "import { ClientKafka } from 'my-kafka-lib';\n"
+        "@Injectable()\nexport class Svc {\n"
+        "  constructor(private readonly kafka: ClientKafka) {}\n"
+        "  b() { this.kafka.emit('order.created', {}); }\n}\n"
+    ))
+    assert out == []
+
+
+def test_client_grpc_is_not_outbound(analyze_files) -> None:
+    out = _outbound(analyze_files, (
+        "import { ClientGrpc } from '@nestjs/microservices';\n"
+        "export class Svc {\n  constructor(private readonly grpc: ClientGrpc) {}\n"
+        "  go() { return this.grpc.send('x', {}); }\n}\n"
+    ))
+    assert out == []
+
+
+def test_clients_are_found_in_files_other_parsers_own(analyze_files) -> None:
+    # A messaging client is additive: a LoopBack controller owns this file, not NestJS.
+    out = _outbound(analyze_files, (
+        "import { get } from '@loopback/rest';\n"
+        "import { ClientKafka } from '@nestjs/microservices';\n"
+        "export class C {\n  constructor(private readonly kafka: ClientKafka) {}\n"
+        "  @get('/x') x() { this.kafka.emit('order.created', {}); }\n}\n"
+    ))
+    assert out == [("eventbus_publish", "order.created")]
+
+
+def test_client_proxy_outside_nestjs_is_not_outbound(analyze_files) -> None:
+    # No NestJS import or controller: a `ClientProxy` here is another library's type.
+    out = _outbound(analyze_files, (
+        "export class D {\n  constructor(private c: ClientProxy) {}\n"
+        "  go() { this.c.emit('q', 1); }\n}\n"
+    ))
+    assert out == []

@@ -595,10 +595,13 @@ the file:
   │                  10   express          typescript_express/routes.py      ✔       │
   │                  15   fastify          typescript_fastify/routes.py      ✔       │
   │                  20   aws-events       typescript/aws_events.py                  │
+  │                  25   nestjs-clients   typescript_nestjs/outbound.py     ✔       │
   │                  30   sdk-calls        detection/sdk_calls.py                    │
   │                  40   graphql-client   typescript_graphql/routes.py      ✔       │
   │                  45   graphql-resol…   typescript_graphql/…modules.py    ✔       │
   │                  50   vue-routes       typescript_vue/routes.py          ✔       │
+  │                  52   react-routes     typescript_react/routes.py        ✔       │
+  │                  55   nextjs-routes    typescript_nextjs/routes.py       ✔       │
   │                  60   nextjs-pages     typescript_nextjs/pages.py        ✔       │
   │                  70   vue-navigation   typescript_vue/navigation.py      ✔       │
   │                  72   angular-navi…    typescript_angular/navigation.py  ✔       │
