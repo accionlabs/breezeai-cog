@@ -25,16 +25,17 @@ class SymfonyParser(PhpParser):
         # non-Symfony applications — Laravel, Drupal, Slim — so they are not ownership
         # evidence. Require Symfony's routing or framework namespace instead; the event
         # components are detected additively (php_symfony/events.py).
-        if b"illuminate\\" in lower:
-            return False
-        return (
+        if (
             b"namespace symfony\\" in lower
             or b"symfony\\component\\routing\\" in lower
             or b"symfony\\bundle\\frameworkbundle\\" in lower
-            or b"#[route" in lower
             or b"routingconfigurator" in lower
-            or (b"routecollection" in lower and b"symfony\\component\\routing" in lower)
-        )
+        ):
+            # Symfony's own namespaces are proof; an unrelated Illuminate import (a
+            # Collection, a Carbon helper) in the same file does not take the file away.
+            return True
+        # ``#[Route]`` alone is weak: Laravel route-attribute packages use the same name.
+        return b"#[route" in lower and b"illuminate\\" not in lower
 
     def parse_file(self, ctx: ParseContext) -> FileRecord:
         root = parse_source("php", ctx.source, ctx.parse_timeout_micros).root_node

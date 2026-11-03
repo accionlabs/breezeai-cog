@@ -254,6 +254,50 @@ Route::get('/h', function () {
     assert not any(statement.semanticType == "api_call" for statement in record.statements)
 
 
+def test_php_arrow_function_parameter_hides_the_file_client() -> None:
+    source = """<?php
+use GuzzleHttp\\Client;
+$c = new Client();
+$out = array_map(fn($c) => $c->get('https://x.example'), $items);
+$ok = fn() => $c->get('https://y.example');
+"""
+    record = _parse(PhpParser(), source)
+    calls = [s for s in record.statements if s.semanticType == "api_call"]
+    assert [call.endpoint for call in calls] == ["https://y.example"]
+
+
+def test_php_closure_captures_the_file_client_by_reference() -> None:
+    source = """<?php
+use GuzzleHttp\\Client;
+$c = new Client();
+$f = function () use (&$c) { $c->post('https://z.example'); };
+$g = function () use ($other, &$c) { $c->put('https://w.example'); };
+"""
+    record = _parse(PhpParser(), source)
+    calls = [s for s in record.statements if s.semanticType == "api_call"]
+    assert [(call.method, call.endpoint) for call in calls] == [
+        ("POST", "https://z.example"), ("PUT", "https://w.example"),
+    ]
+
+
+def test_php_laravel_routes_survive_a_slim_psr7_import() -> None:
+    source = b"<?php use Illuminate\\Support\\Facades\\Route; use Slim\\Psr7\\Response; Route::get('/x', fn() => 1);"
+    assert registry.select("routes/web.php", source).name == "php-laravel"
+    record = _parse(LaravelParser(), source.decode(), path="routes/web.php")
+    assert [(r.method, r.endpoint) for r in record.statements if r.semanticType == "route"] == [("GET", "/x")]
+
+
+def test_php_symfony_routes_survive_an_unrelated_illuminate_import() -> None:
+    source = b"""<?php
+use Illuminate\\Support\\Collection;
+use Symfony\\Component\\Routing\\Annotation\\Route;
+class A { #[Route('/a', methods: ['GET'])] public function a() {} }
+"""
+    assert registry.select("src/Controller/A.php", source).name == "php-symfony"
+    # a bare ``#[Route]`` next to an Illuminate import is a Laravel route-attribute package
+    assert registry.select("app/C.php", b"<?php use Illuminate\\Http\\Request; #[Route('/a')] class C {}").name == "php-laravel"
+
+
 def test_php_laravel_routes_capture_name_and_chained_middleware() -> None:
     source = """<?php
 use Illuminate\\Support\\Facades\\Route;

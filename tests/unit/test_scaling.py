@@ -245,6 +245,26 @@ def _kotlin_ktor(n: int) -> str:
             f"object Paths {{\n{consts}}}\n{tops}fun Route.r() {{\n{routes}}}\n")
 
 
+def _php_laravel(n: int) -> str:
+    # Receiver tracking: a file-level client, closures capturing it, typed properties and
+    # promoted parameters, and chained calls — each walks scopes, so a per-item scan shows.
+    body = "".join(
+        f"// route {i}\n"
+        f"Route::get('/r{i}', function () use ($c) {{ $c->get('https://h{i}.example'); }});\n"
+        f"$f{i} = fn($x) => $c->post('https://p{i}.example');\n"
+        for i in range(n)
+    )
+    classes = "".join(
+        f"class S{i} {{ public function __construct(private Client $http) {{}}\n"
+        f"  public function m{i}() {{ return $this->http->get('https://s{i}.example'); }} }}\n"
+        for i in range(n)
+    )
+    return (
+        "<?php\nuse GuzzleHttp\\Client;\nuse Illuminate\\Support\\Facades\\Route;\n"
+        f"$c = new Client();\n{body}{classes}"
+    )
+
+
 SAMPLES: dict[str, tuple[str, Callable[[int], str]]] = {
     "java-vertx": ("V.java", _java_vertx),
     "groovy-vertx": ("Http.groovy", _groovy_vertx),
@@ -262,6 +282,7 @@ SAMPLES: dict[str, tuple[str, Callable[[int], str]]] = {
     "java-struts2": ("OrderAction.java", _struts2),
     "struts2-xml": ("struts.xml", _struts2_xml),
     "kotlin-ktor": ("Routes.kt", _kotlin_ktor),
+    "php-laravel": ("routes/web.php", _php_laravel),
 }
 
 
