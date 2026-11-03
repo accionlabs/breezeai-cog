@@ -540,7 +540,10 @@ def test_a_function_named_after_a_macro_before_its_name_gets_its_real_name(tmp_p
 
 @pytest.mark.parametrize("parser", [CParser(), CppParser()], ids=["c", "cpp"])
 def test_a_macro_in_front_of_the_type_keeps_the_declaration(tmp_path, parser) -> None:
-    # `API` is a macro the grammar takes for the type; the real type lands in an error.
+    # `API` is a macro the grammar takes for the type; the real type lands in an error. When
+    # that is a type keyword (`int`), the type and the macro are certain: `returnType` is kept
+    # and the macro is a decorator. After a type name (`API node *`), which word is the macro
+    # can't be told: neither is recorded.
     record = _parse(
         parser,
         tmp_path,
@@ -556,19 +559,21 @@ def test_a_macro_in_front_of_the_type_keeps_the_declaration(tmp_path, parser) ->
         "int use(list *l) { return size_of(l) + fast(1); }\n",
     )
     assert [
-        (f.name, f.returnType, f.isStatic, [p.name for p in f.params]) for f in record.functions
+        (f.name, f.returnType, f.isStatic, [p.name for p in f.params], [d.name for d in f.decorators])
+        for f in record.functions
     ] == [
-        ("size_of", None, None, ["l"]),
-        ("first", None, None, ["l"]),
-        ("fast", None, True, ["x"]),
-        ("use", "int", None, ["l"]),
+        ("size_of", "int", None, ["l"], ["API"]),
+        ("first", None, None, ["l"], []),
+        ("fast", "int", True, ["x"], ["INLINE"]),
+        ("use", "int", None, ["l"], []),
     ]
     assert [(c.name, c.path) for c in record.functions[-1].calls] == [
         ("size_of", record.path), ("fast", record.path),
     ]
-    assert [s.name for s in record.statements if s.nodeType == "declaration"] == [
-        "table_len", "reset", "counter",
-    ]
+    assert [
+        (s.name, [d.name for d in s.decorators])
+        for s in record.statements if s.nodeType == "declaration"
+    ] == [("table_len", []), ("reset", ["API"]), ("counter", ["ATOMIC"])]
 
 
 @pytest.mark.parametrize("jobs", [1, 2])
@@ -863,6 +868,29 @@ def test_struct_with_a_macro_before_its_name_is_captured(tmp_path) -> None:
     rec = _parse(CParser(), tmp_path, "t.c", "struct API Tensor { int rank; };\nunion API U { int a; };\n")
     assert {c.name: c.type for c in rec.classes} == {"Tensor": "struct", "U": "union"}
     assert "rank" in {s.name for s in rec.statements}
+
+
+@pytest.mark.parametrize("parser", [CParser(), CppParser()], ids=["c", "cpp"])
+def test_attributes_and_certain_macros_are_decorators(tmp_path, parser) -> None:
+    # Attributes the grammar parses become decorators with their arguments, in source order,
+    # also one after the parameter list. A macro folded after `unsigned long` is certain too.
+    record = _parse(
+        parser,
+        tmp_path,
+        "attr.c" if parser.name == "c" else "attr.cpp",
+        "static __attribute__((noinline, format(printf, 2, 3))) int logf2(const char *f, int a);\n"
+        "void die(const char *m) __attribute__((noreturn));\n"
+        "unsigned long ZEXPORT crc(unsigned long c) { return c; }\n"
+        "uLong ZEXPORT adler(uLong a) { return a; }\n",
+    )
+    decorators = {
+        s.name: [(d.name, d.args) for d in s.decorators]
+        for s in [*record.statements, *record.functions] if s.name
+    }
+    assert decorators["logf2"] == [("noinline", []), ("format", ["printf", "2", "3"])]
+    assert decorators["die"] == [("noreturn", [])]
+    assert decorators["crc"] == [("ZEXPORT", [])]
+    assert decorators["adler"] == []  # `uLong` or `ZEXPORT`: either could be the macro
 
 
 def test_a_prototype_wrapped_in_a_parameter_macro_is_not_named_after_it(tmp_path) -> None:

@@ -50,6 +50,7 @@ from .classes import (
 from .functions import (
     build_function,
     DeclarationRead,
+    decorators_of,
     defined_names,
     function_declarator_of,
     has_declaration_error,
@@ -235,7 +236,7 @@ class CFamilyParser(BaseParser):
                         statements.append(
                             member_statement(
                                 node, source, path, parent_id=fid, limit=limit, seen_ids=seen_ids,
-                                name=name,
+                                name=name, decorators=decorators_of(node, source, read),
                             )
                         )
 

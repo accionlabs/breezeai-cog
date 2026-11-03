@@ -26,7 +26,7 @@ from collections.abc import Set as AbstractSet
 from tree_sitter import Node
 
 from ...emit import disambiguate, function_id
-from ...schemas import Call, Function, Parameter, Statement
+from ...schemas import Call, Decorator, Function, Parameter, Statement
 from ..callresolve import CallResolver, noop_resolver
 from ..treesitter import line_span, node_text
 from .mappings import TRANSPARENT_SCOPES
@@ -372,12 +372,39 @@ def _macro_prefixed(node: Node) -> bool:
 
 @dataclass(frozen=True)
 class DeclarationRead:
-    """How a file-scope declaration or definition is read: its declared ``name`` when a macro
-    moved it (else ``None``: the declarator's own), and whether its ``returnType`` can be
-    trusted."""
+    """How a declaration or definition is read: its declared ``name`` when a macro moved it
+    (else ``None``: the declarator's own) and whether its ``returnType`` can be trusted. Read
+    past a macro in front of a keyword type (``LUA_API int f``), the ``macro`` and the
+    ``return_type`` are both certain."""
 
     name: str | None = None
     return_type_known: bool = True
+    macro: str | None = None
+    return_type: str | None = None
+
+
+#: C's type keywords. One can't be a macro's name, so a word in front of them is the macro.
+_TYPE_KEYWORDS = frozenset({
+    "void", "char", "short", "int", "long", "float", "double", "signed", "unsigned", "bool",
+    "_Bool", "const", "volatile",
+})
+
+
+def _past_macro(node: Node, source: bytes) -> DeclarationRead:
+    """The read of a declaration with a macro in front of its type (:func:`_macro_prefixed`).
+    ``LUA_API int f`` and ``uLong ZEXPORT f`` parse the same way, so which word is the type is
+    unknown — unless the words after the first are all type keywords: then the first is the
+    macro and the keywords are the type (qualifiers left out, as for any return type)."""
+    words = [
+        node_text(w, source) for e in node.children if e.type == "ERROR" for w in e.children
+    ]
+    type_words = [w for w in words if w not in ("const", "volatile")]
+    ret = node.child_by_field_name("type")
+    if ret is None or not type_words or not all(w in _TYPE_KEYWORDS for w in words):
+        return DeclarationRead(return_type_known=False)
+    return DeclarationRead(
+        return_type_known=False, macro=node_text(ret, source), return_type=" ".join(type_words),
+    )
 
 
 def read_declaration(node: Node, source: bytes) -> DeclarationRead | None:
@@ -398,7 +425,7 @@ def read_declaration(node: Node, source: bytes) -> DeclarationRead | None:
     if is_macro_call_declarator(declarator):
         return None
     if _broken_spot(declarator) is None:
-        return DeclarationRead(return_type_known=not prefixed)
+        return _past_macro(node, source) if prefixed else DeclarationRead()
     name = _renamed_by_macro(declarator, source)
     return DeclarationRead(name=name, return_type_known=False) if name is not None else None
 
@@ -416,14 +443,14 @@ def is_macro_call_declarator(declarator: Node | None) -> bool:
     )
 
 
-def read_member(member: Node) -> DeclarationRead | None:
+def read_member(member: Node, source: bytes) -> DeclarationRead | None:
     """How to read a class member, or ``None`` to skip it because its header is broken. A
     macro in front of its type (``ESIMD_INLINE int row(int g) const``) is read past as at file
-    scope: the name and parameters come from clean syntax, ``returnType`` is unknown."""
+    scope: the name and parameters come from clean syntax."""
     if not has_declaration_error(member):
         return DeclarationRead()
     if _macro_prefixed(member):
-        return DeclarationRead(return_type_known=False)
+        return _past_macro(member, source)
     return None
 
 
@@ -453,6 +480,76 @@ def return_type(node: Node, source: bytes) -> str | None:
     if ret.type == "sized_type_specifier" and any(c.type == "type_identifier" for c in ret.children):
         return " ".join(node_text(c, source) for c in ret.children if c.type != "type_identifier")
     return node_text(ret, source)
+
+
+def read_return_type(node: Node, source: bytes, read: DeclarationRead) -> str | None:
+    """The ``returnType`` of a declaration as ``read``: past a macro only when it is certain."""
+    if read.return_type is not None:
+        return read.return_type
+    return return_type(node, source) if read.return_type_known else None
+
+
+#: Attribute syntax the grammar parses: ``[[nodiscard]]``, ``__attribute__((noinline))``,
+#: ``__declspec(dllexport)``.
+ATTRIBUTE_TYPES = ("attribute_declaration", "attribute_specifier", "ms_declspec_modifier")
+
+
+def attribute_decorators(node: Node, source: bytes) -> list[Decorator]:
+    """One ``Decorator`` per attribute in an attribute node: ``[[nodiscard, deprecated("x")]]``
+    → ``nodiscard``, ``deprecated("x")``; ``__attribute__((format(printf, 2, 3)))`` →
+    ``format`` with its arguments; ``[[gnu::always_inline]]`` keeps its namespace."""
+    out = []
+    if node.type == "attribute_declaration":
+        for attr in (c for c in node.named_children if c.type == "attribute"):
+            name = attr.child_by_field_name("name")
+            prefix = attr.child_by_field_name("prefix")
+            args = next((c for c in attr.named_children if c.type == "argument_list"), None)
+            if name is not None:
+                full = node_text(name, source)
+                if prefix is not None:
+                    full = f"{node_text(prefix, source)}::{full}"
+                out.append(Decorator(name=full, args=_args(args, source)))
+        return out
+    # `__attribute__((a, b(x)))` holds an argument list; `__declspec(a)` holds the words itself.
+    holder = next((c for c in node.named_children if c.type == "argument_list"), node)
+    for item in holder.named_children:
+        if item.type == "identifier":
+            out.append(Decorator(name=node_text(item, source)))
+        elif item.type == "call_expression":
+            fn = item.child_by_field_name("function")
+            if fn is not None:
+                out.append(Decorator(
+                    name=node_text(fn, source),
+                    args=_args(item.child_by_field_name("arguments"), source),
+                ))
+    return out
+
+
+def _args(arg_list: Node | None, source: bytes) -> list[str]:
+    return [node_text(a, source) for a in arg_list.named_children] if arg_list is not None else []
+
+
+def decorators_of(node: Node, source: bytes, read: DeclarationRead) -> list[Decorator]:
+    """The attributes and export / inline macros written on a function, prototype or member,
+    in source order: attributes the grammar parses (also one after the parameter list,
+    ``void die() __attribute__((noreturn))``), and a macro only where it is certainly one — in
+    front of a keyword type (``read.macro``) or after ``unsigned`` / ``long``, where a type
+    name can't stand (``unsigned long ZEXPORT crc32``)."""
+    found: list[tuple[int, list[Decorator]]] = []
+    fd = function_declarator_of(node.child_by_field_name("declarator"))
+    for holder in (node, fd):
+        for c in holder.children if holder is not None else ():
+            if c.type in ATTRIBUTE_TYPES:
+                found.append((c.start_byte, attribute_decorators(c, source)))
+    ret = node.child_by_field_name("type")
+    if read.macro is not None and ret is not None:
+        found.append((ret.start_byte, [Decorator(name=read.macro)]))
+    elif ret is not None and ret.type == "sized_type_specifier":
+        found.extend(
+            (c.start_byte, [Decorator(name=node_text(c, source))])
+            for c in ret.children if c.type == "type_identifier"
+        )
+    return [d for _, ds in sorted(found, key=lambda f: f[0]) for d in ds]
 
 
 def is_declared_static(node: Node, source: bytes) -> bool:
@@ -510,7 +607,8 @@ def build_function(
         # out-of-class `Class::method` definition can't repeat `static`: left unknown.
         isStatic=is_declared_static(node, source) or None if kind == "function" else None,
         params=extract_params(params, source),
-        returnType=return_type(node, source) if read.return_type_known else None,
+        decorators=decorators_of(node, source, read),
+        returnType=read_return_type(node, source, read),
         startLine=start,
         endLine=end,
         calls=_calls(
@@ -567,7 +665,8 @@ def build_member_function(
         # A static member: `static` is written on its declaration in the class.
         isStatic=is_declared_static(field_decl, source) or None,
         params=extract_params(params, source),
-        returnType=return_type(field_decl, source) if read.return_type_known else None,
+        decorators=decorators_of(field_decl, source, read),
+        returnType=read_return_type(field_decl, source, read),
         startLine=start,
         endLine=end,
         calls=_calls(

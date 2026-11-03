@@ -477,6 +477,12 @@ C++.
 > and the index read both the same way, so calls to these functions resolve. A C++ class member
 > is read past a macro in front of its type by the same rule (`ESIMD_INLINE int row(int g)
 > const`, `API static Model *load(…)`); any other broken member is still skipped.
+> **Why:** export, inline and attribute macros sit in front of most public C functions (redis,
+> lua, curl, zlib, llama.cpp); skipping them dropped thousands of functions and every call to
+> them. In both shapes the name and parameters come from clean syntax. **Cost:** `returnType`
+> is empty unless the words after the macro are C type keywords (`LUA_API int`, `LUA_API const
+> char *`): `LUA_API lua_Integer` and `uLong ZEXPORT` parse the same way, so which word is the
+> type can't be told.
 
 > **Decision —** a macro between `class` / `struct` / `union` and the class name (`class
 > OPENVINO_API GatherMatmul : public Op { … }`) is blanked and the file is parsed a second
@@ -492,13 +498,20 @@ C++.
 > `class` and the name, and attributes parse, so a bare word there is always such a macro. The
 > grammar takes it for the class name and reads the class body as a function body
 > (constructors as calls, `public:` as a label), which nothing can be recovered from safely;
-> without the macro it is an ordinary class. **Cost:** such a file is parsed twice. The macro's
-> name is not captured.
-> **Why:** export, inline and attribute macros sit in front of most public C functions (redis,
-> lua, curl, zlib, llama.cpp); skipping them dropped thousands of functions and every call to
-> them. In both shapes the name and parameters come from clean syntax. **Cost:** `returnType`
-> is empty for them: `LUA_API int` and `uLong ZEXPORT` parse the same way, so which word is the
-> type can't be told.
+> without the macro it is an ordinary class. **Cost:** such a file is parsed twice.
+
+> **Decision —** C/C++ attributes and the macros cog reads past are `decorators` on the
+> function, prototype, member or class, as annotations are in other languages: `[[nodiscard]]`,
+> `[[deprecated("use g")]]`, `__attribute__((format(printf, 2, 3)))` and `__declspec(dllexport)`
+> each give one decorator with its arguments, and an export or inline macro gives one with its
+> name (`LUA_API`, `ZEXPORT`, `OPENVINO_API`). A macro is recorded only where it is certainly
+> the macro: in front of a C type keyword (`LUA_API int f`), after `unsigned` / `long`
+> (`unsigned long ZEXPORT crc32`), or between `class` and the class name.
+> **Why:** the macro says how the code is built and exported (`GGML_API`, `CURL_EXTERN`), which
+> is lost otherwise; `decorators` already carries markers written in front of a declaration in
+> every other language and is stored by the backend. **Cost:** a macro beside a type name
+> (`uLong ZEXPORT f`, `CURL_EXTERN CURLcode f`) is not recorded, so the list is not complete; a
+> macro's meaning isn't seen (zlib's `local` is `static`, and `isStatic` stays empty).
 
 > **Decision —** a call links to a function defined in a header only when the calling file can
 > see that header: the file includes it, directly or through other includes, or — for a call

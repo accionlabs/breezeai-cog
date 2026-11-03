@@ -224,7 +224,7 @@ def _index_class(frag: CFamilyIndex, node: Node, source: bytes, rel: str, ns: st
         _class_heritage(frag, class_name).extends = _simple(extends)
     for member in body.named_children:
         member = _unwrap_template(member)
-        if read_member(member) is None:
+        if read_member(member, source) is None:
             continue
         if member.type in _MEMBER_FN_TYPES and _has_body(member):
             if function_declarator_of(member.child_by_field_name("declarator")) is not None:

@@ -158,7 +158,7 @@ def test_a_receiver_name_never_makes_an_http_or_db_call(tmp_path) -> None:
 def test_member_after_an_unexpanded_macro_keeps_its_name(tmp_path) -> None:
     # A macro the grammar can't expand (`Q_OBJECT`) runs into the next member, which reads as
     # a macro in front of its type. The member's name and parameters come from clean syntax and
-    # are kept; its return type is unknown (`int` sits in the error), so it is left empty.
+    # are kept; `int` is a type keyword, so the type is `int` and `Q_OBJECT` the macro.
     src = (
         b"class Widget {\n"
         b"    Q_OBJECT\n"
@@ -172,7 +172,8 @@ def test_member_after_an_unexpanded_macro_keeps_its_name(tmp_path) -> None:
     rec = CppParser().parse_file(ctx)
     assert "Widget" in {c.name for c in rec.classes}
     fns = {f.name: f for f in rec.functions}
-    assert fns["slotAfterMacro"].returnType is None
+    assert fns["slotAfterMacro"].returnType == "int"
+    assert [d.name for d in fns["slotAfterMacro"].decorators] == ["Q_OBJECT"]
     assert [p.name for p in fns["slotAfterMacro"].params] == ["x"]
     assert fns["cleanMethod"].returnType == "int"
 
@@ -180,7 +181,8 @@ def test_member_after_an_unexpanded_macro_keeps_its_name(tmp_path) -> None:
 def test_macro_prefixed_members_are_captured(tmp_path) -> None:
     # An export or inline macro in front of a member's type (`ESIMD_INLINE int row(int g)`)
     # reads as the type `ESIMD_INLINE` with `int` in an error. The member is kept with its
-    # name, parameters, `static` and calls; the return type is unknown.
+    # name, parameters, `static` and calls. After a keyword type the macro and the type are
+    # certain; after a type name (`API static Model *`) neither is recorded.
     src = (
         b"class Kernel {\n"
         b"public:\n"
@@ -193,9 +195,12 @@ def test_macro_prefixed_members_are_captured(tmp_path) -> None:
     fns = {f.name: f for f in rec.functions}
     assert set(fns) == {"row", "load"}
     assert fns["row"].type == "method" and fns["row"].visibility == "public"
-    assert fns["row"].returnType is None and [c.name for c in fns["row"].calls] == ["helper"]
+    assert fns["row"].returnType == "int" and [c.name for c in fns["row"].calls] == ["helper"]
+    assert [d.name for d in fns["row"].decorators] == ["ESIMD_INLINE"]
     assert fns["load"].isStatic is True and [p.name for p in fns["load"].params] == ["x"]
-    assert "count" in {s.name for s in rec.statements if s.nodeType == "field_declaration"}
+    assert fns["load"].returnType is None and fns["load"].decorators == []
+    fields = {s.name: s for s in rec.statements if s.nodeType == "field_declaration"}
+    assert [d.name for d in fields["count"].decorators] == ["API"]
 
 
 def test_member_with_a_broken_declarator_is_skipped(tmp_path) -> None:
@@ -230,10 +235,24 @@ def test_class_with_an_export_macro_before_its_name_is_captured(tmp_path) -> Non
     assert (classes["Model"].startLine, classes["Model"].endLine) == (2, 8)
     assert classes["Tensor"].type == "struct"
     assert classes["Final"].extends == "A" and classes["Final"].implements == ["B"]
+    assert [d.name for d in classes["Model"].decorators] == ["API"]
     fns = {f.name: f for f in rec.functions}
     assert fns["Model"].type == "constructor" and [p.name for p in fns["Model"].params] == ["n"]
     assert fns["size"].visibility == "public" and fns["size"].returnType == "int"
     assert {s.name for s in rec.statements if s.nodeType == "field_declaration"} == {"n_", "rank"}
+
+
+def test_class_and_member_attributes_are_decorators(tmp_path) -> None:
+    src = (
+        b"class [[deprecated]] D { [[gnu::always_inline]] int d(); };\n"
+        b"struct __declspec(dllexport) E { int e; };\n"
+        b"class Plain { int p(); };\n"
+    )
+    rec = _parse_src(tmp_path, src, "a.cpp")
+    assert {c.name: [d.name for d in c.decorators] for c in rec.classes} == {
+        "D": ["deprecated"], "E": ["dllexport"], "Plain": [],
+    }
+    assert [d.name for d in _fn(rec, "d").decorators] == ["gnu::always_inline"]
 
 
 def test_word_before_a_name_that_is_not_a_hidden_class_is_left_alone(tmp_path) -> None:

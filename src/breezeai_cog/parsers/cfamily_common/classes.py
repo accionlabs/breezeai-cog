@@ -17,16 +17,19 @@ import re
 from tree_sitter import Node
 
 from ...emit import class_id, disambiguate
-from ...schemas import Class, ClassType, ConstructorParam, Function, Statement
+from ...schemas import Class, ClassType, ConstructorParam, Decorator, Function, Statement
 from ..callresolve import CallResolver, noop_resolver
 from ..statements_common import emit_enum_members, member_statement
 from ..treesitter import line_span, node_text, parse_source
 from .functions import (
+    ATTRIBUTE_TYPES,
+    attribute_decorators,
     build_member_function,
+    decorators_of,
     extract_params,
+    is_macro_call_declarator,
     function_declarator_of,
     is_function_pointer,
-    is_macro_call_declarator,
     read_member,
 )
 from .mappings import MACRO_TYPES
@@ -123,6 +126,30 @@ def _reads_as_class(root: Node, name_span: tuple[int, int]) -> bool:
             return False
         node = node.parent
     return True
+
+
+_WORD = re.compile(rb"[A-Za-z_]\w*")
+
+
+def _head_decorators(node: Node, source: bytes) -> list[Decorator]:
+    """The attributes and the export macro between ``class`` and the class name, in source
+    order: ``class [[deprecated]] __declspec(dllexport) K``, ``class OPENVINO_API Op``. A macro
+    there was blanked before parsing (:func:`parse_cfamily`), so it is the one word in the
+    original source that no node covers."""
+    name = node.child_by_field_name("name")
+    if name is None or not node.children:
+        return []
+    out: list[Decorator] = []
+    cursor = node.children[0].end_byte  # after `class` / `struct` / `union`
+    for c in node.children[1:]:
+        if c.start_byte >= name.start_byte:
+            break
+        out.extend(Decorator(name=w.decode()) for w in _WORD.findall(source[cursor:c.start_byte]))
+        if c.type in ATTRIBUTE_TYPES:
+            out.extend(attribute_decorators(c, source))
+        cursor = c.end_byte
+    out.extend(Decorator(name=w.decode()) for w in _WORD.findall(source[cursor:name.start_byte]))
+    return out
 
 
 def parse_cfamily(grammar: str, source: bytes, timeout_micros: int) -> Node:
@@ -290,7 +317,7 @@ def build_class(
         visibility = "public" if is_public_default else "private"
         for member in body.named_children:
             member = _unwrap_template(member)
-            read = read_member(member)
+            read = read_member(member, source)
             if read is None:
                 continue  # corrupt declaration header — skip rather than emit fabricated data
             if member.type == "access_specifier":
@@ -346,6 +373,7 @@ def build_class(
                             member_statement(
                                 member, source, path, parent_id=cid, limit=limit, seen_ids=seen_ids,
                                 name=_declarator_name(member.child_by_field_name("declarator"), source),
+                                decorators=decorators_of(member, source, read),
                             )
                         )
                     continue
@@ -378,6 +406,7 @@ def build_class(
         startLine=start,
         endLine=end,
         alias=alias,
+        decorators=_head_decorators(node, source),
     )
     return [cls, *nested_classes], methods, statements
 
