@@ -385,6 +385,185 @@ def _sqlglot_statements(
         chunk_tokens = []
 
 
+# ---------------------------------------------------------------------------
+# PostgreSQL stored programs: CREATE [OR REPLACE] PROCEDURE | FUNCTION. sqlglot parses some
+# headers and degrades others to a generic ``Command``, so — like the T-SQL and Oracle paths —
+# the header is read from the statement text into the shared program record. The statement
+# chunk comes from sqlglot's tokenizer, which keeps a ``$$ … $$`` or ``'…'`` body whole.
+# ---------------------------------------------------------------------------
+
+_PG_ID = r'(?:"(?:[^"]|"")+"|[A-Za-z_][A-Za-z0-9_$]*)'
+_PG_PROG = re.compile(
+    r"^CREATE\s+(?:OR\s+REPLACE\s+)?(PROCEDURE|FUNCTION)\s+"
+    r"(?:(" + _PG_ID + r")\s*\.\s*)?(" + _PG_ID + r")\s*\(",
+    re.IGNORECASE,
+)
+# Type names of more than one word, which an unnamed parameter can consist of entirely.
+_PG_MULTIWORD_TYPE = (
+    r"double\s+precision"
+    r"|(?:national\s+)?(?:character|char)\s+varying(?:\s*\(\s*\d+\s*\))?"
+    r"|bit\s+varying(?:\s*\(\s*\d+\s*\))?"
+    r"|(?:timestamp|time)(?:\s*\(\s*\d+\s*\))?\s+with(?:out)?\s+time\s+zone"
+    r"|interval\s+(?:year|month|day|hour|minute|second)"
+    r"(?:\s+to\s+(?:month|hour|minute|second))?(?:\s*\(\s*\d+\s*\))?"
+)
+_PG_TYPE = (
+    r"(?:" + _PG_MULTIWORD_TYPE + r"|" + _PG_ID + r"(?:\s*\.\s*" + _PG_ID + r")?(?:\s*\([^()]*\))?)"
+    r"(?:\s*\[\s*\d*\s*\])*(?:\s*%\s*TYPE)?"
+)
+_PG_TYPE_ONLY = re.compile(_PG_TYPE, re.IGNORECASE)
+_PG_PARAM_MODE = re.compile(r"^(INOUT|IN|OUT|VARIADIC)\s+", re.IGNORECASE)
+_PG_PARAM_DEFAULT = re.compile(r"\s+DEFAULT\s+|\s*=\s*", re.IGNORECASE)
+_PG_RETURNS_TABLE = re.compile(r"\s*RETURNS\s+TABLE\s*\(", re.IGNORECASE)
+_PG_RETURNS = re.compile(r"\s*RETURNS\s+(SETOF\s+)?(" + _PG_TYPE + r")", re.IGNORECASE)
+# VARIADIC is an input parameter; the shared record has no separate value for it.
+_PG_DIRECTION = {"IN": "IN", "OUT": "OUT", "INOUT": "IN OUT", "VARIADIC": "IN"}
+
+
+def _pg_unquote(ident: str) -> str:
+    """A PostgreSQL identifier as written: ``"Quoted"`` loses its quotes (``""`` unescaped)."""
+    if len(ident) >= 2 and ident[0] == ident[-1] == '"':
+        return ident[1:-1].replace('""', '"')
+    return ident
+
+
+def _pg_type_text(text: str) -> str:
+    """A type as the other program records spell it: whitespace collapsed, upper-cased —
+    unless it carries a quoted identifier, whose case is significant."""
+    text = re.sub(r"\s+", " ", text.strip())
+    return text if '"' in text else text.upper()
+
+
+def _pg_skip_quoted(text: str, i: int) -> int:
+    """Index just past the ``'…'`` / ``"…"`` starting at ``i`` (doubled quote is an escape),
+    or -1 if it is never closed."""
+    q, j = text[i], i + 1
+    while True:
+        j = text.find(q, j)
+        if j < 0:
+            return -1
+        if not text.startswith(q * 2, j):
+            return j + 1
+        j += 2
+
+
+def _pg_close_paren(text: str, open_pos: int) -> int:
+    """Index of the ``)`` closing the ``(`` at ``open_pos``, skipping strings and quoted
+    identifiers (a default ``')'`` must not end the list); -1 if unbalanced."""
+    depth, i = 0, open_pos
+    while 0 <= i < len(text):
+        ch = text[i]
+        if ch in "'\"":
+            i = _pg_skip_quoted(text, i)
+            continue
+        if ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth -= 1
+            if depth == 0:
+                return i
+        i += 1
+    return -1
+
+
+def _pg_split_params(seg: str) -> list[str]:
+    """Split a parameter list on top-level commas, outside parentheses and quotes."""
+    items: list[str] = []
+    depth = start = i = 0
+    while 0 <= i < len(seg):
+        ch = seg[i]
+        if ch in "'\"":
+            i = _pg_skip_quoted(seg, i)
+            continue
+        if ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth -= 1
+        elif ch == "," and depth == 0:
+            items.append(seg[start:i].strip())
+            start = i + 1
+        i += 1
+    items.append(seg[start:].strip())
+    return [it for it in items if it]
+
+
+def _pg_param(item: str) -> dict[str, Any] | None:
+    """``[mode] [name] type [DEFAULT | = expr]`` → ``{name, direction, dataType}``. The name is
+    optional in PostgreSQL, so an unnamed parameter has ``name: None``. A parameter that does
+    not read as one is left out rather than guessed at."""
+    mode = "IN"
+    if mm := _PG_PARAM_MODE.match(item):
+        mode = mm.group(1).upper()
+        item = item[mm.end() :]
+    if dm := _PG_PARAM_DEFAULT.search(item):
+        item = item[: dm.start()]
+    item = item.strip()
+    name: str | None = None
+    if not _PG_TYPE_ONLY.fullmatch(item):
+        nm = re.match(_PG_ID, item)
+        if nm is None or not _PG_TYPE_ONLY.fullmatch(item[nm.end() :].strip()):
+            return None
+        name, item = _pg_unquote(nm.group()), item[nm.end() :]
+    return {"name": name, "direction": _PG_DIRECTION[mode], "dataType": _pg_type_text(item)}
+
+
+def _pg_body_is_whole(rest: str) -> bool:
+    """Whether the text after the parameter list holds the complete program body. A ``$tag$``
+    or ``'…'`` body must be closed (it is not when the tokenizer fell back to the naive ``;``
+    split); a SQL-standard ``BEGIN ATOMIC … END`` body is cut at its first inner ``;`` by the
+    statement splitter, so it never is."""
+    if dm := re.search(r"\bAS\s+(\$(?:[A-Za-z_][A-Za-z0-9_]*)?\$)", rest, re.IGNORECASE):
+        return rest.find(dm.group(1), dm.end()) >= 0
+    if sm := re.search(r"\bAS\s+'", rest, re.IGNORECASE):
+        return _pg_skip_quoted(rest, sm.end() - 1) >= 0
+    return not re.search(r"\bBEGIN\s+ATOMIC\b", rest, re.IGNORECASE)
+
+
+def _pg_return_type(rest: str) -> str | None:
+    """A function's ``RETURNS`` clause: ``TABLE(…)`` keeps its column list as written."""
+    if tm := _PG_RETURNS_TABLE.match(rest):
+        end = _pg_close_paren(rest, tm.end() - 1)
+        if end < 0:
+            return None
+        return "TABLE(" + re.sub(r"\s+", " ", rest[tm.end() : end].strip()) + ")"
+    if rm := _PG_RETURNS.match(rest):
+        return ("SETOF " if rm.group(1) else "") + _pg_type_text(rm.group(2))
+    return None
+
+
+def _parse_pg_program(raw: str) -> dict[str, Any] | None:
+    """Parse a PostgreSQL ``CREATE [OR REPLACE] PROCEDURE|FUNCTION`` statement into the
+    program record the T-SQL and Oracle paths produce. Returns ``None`` when the statement is
+    not one; raises ``ValueError`` when it is but its body is not complete in ``raw`` — a
+    truncated body is never stored."""
+    stmt = _raw_statement(raw)
+    m = _PG_PROG.match(stmt)
+    if not m:
+        return None
+    proc_type = m.group(1).lower()
+    open_pos = m.end() - 1
+    close = _pg_close_paren(stmt, open_pos)
+    if close < 0:
+        raise ValueError(f"unbalanced parameter list in CREATE {proc_type.upper()}")
+    rest = stmt[close + 1 :]
+    if not _pg_body_is_whole(rest):
+        raise ValueError(f"CREATE {proc_type.upper()} body is incomplete or BEGIN ATOMIC (not supported)")
+
+    schema = _pg_unquote(m.group(2)) if m.group(2) else None
+    name = _pg_unquote(m.group(3))
+    parameters = [p for item in _pg_split_params(stmt[open_pos + 1 : close]) if (p := _pg_param(item))]
+    return {
+        "name": name,
+        "schema": schema,
+        "fullName": f"{schema}.{name}" if schema else name,
+        "procedureType": proc_type,
+        "parameters": parameters,
+        "returnType": _pg_return_type(rest) if proc_type == "function" else None,
+        # Full program body — the complete CREATE statement, as on the T-SQL and Oracle paths.
+        "body": stmt,
+    }
+
+
 def _index(create: exp.Create, dialect: str) -> dict[str, Any]:
     idx = create.this
     name = idx.name if hasattr(idx, "name") else ""
@@ -435,10 +614,23 @@ def parse_ddl(text: str, filepath: str | None = None) -> dict[str, Any]:
     views: list[dict] = []
     all_indexes: list[dict] = []
     alters: list[exp.Alter] = []
+    procedures: list[dict[str, Any]] = []
     ok = failed = 0
     sample_errors: list[str] = []
 
     for raw, stmt in _sqlglot_statements(text, read, sample_errors):
+        if dialect == "postgresql":
+            try:
+                program = _parse_pg_program(raw)
+            except ValueError as exc:
+                failed += 1
+                if len(sample_errors) < 5:
+                    sample_errors.append(str(exc))
+                continue
+            if program is not None:
+                procedures.append(program)
+                ok += 1
+                continue
         if stmt is None:
             failed += 1
             continue
@@ -478,13 +670,13 @@ def parse_ddl(text: str, filepath: str | None = None) -> dict[str, Any]:
     for table in tables:
         _wire_columns(table)
 
-    # Non-Oracle dialects: stored programs / sequences are not extracted by the sqlglot
-    # path (unchanged from before). Oracle returns early above via _parse_oracle_ddl.
+    # Stored programs are extracted on this path for PostgreSQL only (_parse_pg_program);
+    # sequences are not. Oracle and T-SQL return early above with their own.
     return {
         "dialect": dialect,
         "tables": tables,
         "views": views,
-        "procedures": [],
+        "procedures": procedures,
         "allIndexes": all_indexes,
         "indexes": [i for i in all_indexes if i["tableName"] is None],
         "sequences": [],

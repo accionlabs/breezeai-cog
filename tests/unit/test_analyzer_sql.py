@@ -864,3 +864,87 @@ def test_bom_is_only_stripped_at_the_start() -> None:
     # A U+FEFF inside a statement is data, not a byte-order mark: leave it alone.
     r = parse_ddl("CREATE TABLE app.t (a text);\n-- note \ufeff here\nCREATE TABLE app.u (b text);\n", "schema_pg.sql")
     assert sorted(t["name"] for t in r["tables"]) == ["t", "u"]
+
+
+# PostgreSQL stored programs (BREEZEAI-958 DEF-3): procedures and functions were not extracted.
+def test_postgres_procedure_is_extracted_with_its_whole_body() -> None:
+    proc = (
+        "CREATE OR REPLACE PROCEDURE app.do_it(IN n int, OUT total numeric(10, 2), INOUT \"Msg\" text DEFAULT 'a;b')\n"
+        "LANGUAGE plpgsql\nAS $$\nBEGIN\n  RAISE NOTICE 'hi %; ok', n;\n  INSERT INTO app.t VALUES (1);\nEND;\n$$"
+    )
+    r = parse_ddl("CREATE TABLE app.t (id int);\n" + proc + ";\n", "schema_pg.sql")
+    assert [t["name"] for t in r["tables"]] == ["t"]
+    [p] = r["procedures"]
+    assert p == {
+        "name": "do_it",
+        "schema": "app",
+        "fullName": "app.do_it",
+        "procedureType": "procedure",
+        "parameters": [
+            {"name": "n", "direction": "IN", "dataType": "INT"},
+            {"name": "total", "direction": "OUT", "dataType": "NUMERIC(10, 2)"},
+            {"name": "Msg", "direction": "IN OUT", "dataType": "TEXT"},
+        ],
+        "returnType": None,
+        "body": proc,
+    }
+
+
+def test_postgres_procedure_only_file_is_not_empty() -> None:
+    # A procedure-only file used to extract nothing, so the upload was rejected as empty.
+    r = parse_ddl("CREATE PROCEDURE p() LANGUAGE plpgsql AS $$ BEGIN NULL; END $$;\n", "procs.sql")
+    assert r["dialect"] == "postgresql"
+    assert [p["fullName"] for p in r["procedures"]] == ["p"]
+
+
+@pytest.mark.parametrize(
+    ("header", "return_type"),
+    [
+        pytest.param("RETURNS integer", "INTEGER", id="scalar"),
+        pytest.param("RETURNS SETOF app.t", "SETOF APP.T", id="setof"),
+        pytest.param("RETURNS TABLE(id int, name text)", "TABLE(id int, name text)", id="table"),
+        pytest.param("RETURNS trigger", "TRIGGER", id="trigger"),
+        pytest.param("RETURNS character varying(20)", "CHARACTER VARYING(20)", id="multiword"),
+    ],
+)
+def test_postgres_function_return_type(header: str, return_type: str) -> None:
+    r = parse_ddl(f"CREATE FUNCTION app.f() {header} LANGUAGE sql AS $f$ SELECT 1 $f$;\n", "schema_pg.sql")
+    [f] = r["procedures"]
+    assert (f["procedureType"], f["returnType"]) == ("function", return_type)
+
+
+def test_postgres_function_with_a_quoted_body() -> None:
+    fn = "CREATE FUNCTION add(a integer, b integer) RETURNS integer LANGUAGE sql IMMUTABLE AS 'select a + b; -- it''s ok'"
+    [f] = parse_ddl(fn + ";\n", "schema_pg.sql")["procedures"]
+    assert f["body"] == fn
+    assert [p["name"] for p in f["parameters"]] == ["a", "b"]
+
+
+def test_postgres_parameter_names_are_optional() -> None:
+    fn = (
+        "CREATE FUNCTION f(integer, double precision, x double precision, \"Odd\"\"N\" text[], "
+        "VARIADIC nums numeric[] = '{}') RETURNS int LANGUAGE sql AS $$ SELECT 1 $$;\n"
+    )
+    [f] = parse_ddl(fn, "schema_pg.sql")["procedures"]
+    assert f["parameters"] == [
+        {"name": None, "direction": "IN", "dataType": "INTEGER"},
+        {"name": None, "direction": "IN", "dataType": "DOUBLE PRECISION"},
+        {"name": "x", "direction": "IN", "dataType": "DOUBLE PRECISION"},
+        {"name": 'Odd"N', "direction": "IN", "dataType": "TEXT[]"},
+        {"name": "nums", "direction": "IN", "dataType": "NUMERIC[]"},
+    ]
+
+
+def test_postgres_begin_atomic_body_is_not_stored_truncated() -> None:
+    # The statement splitter cuts a SQL-standard body at its first inner `;`, so the record
+    # would hold half a body: it is counted as failed instead.
+    r = parse_ddl("CREATE PROCEDURE p() BEGIN ATOMIC SELECT 1; SELECT 2; END;\n", "schema_pg.sql")
+    assert r["procedures"] == []
+    assert r["parseStats"]["failed"] == 1
+
+
+def test_mysql_programs_are_still_not_extracted() -> None:
+    # Only PostgreSQL programs are read on this path; MySQL bodies need DELIMITER handling.
+    r = parse_ddl("CREATE FUNCTION f() RETURNS INT DETERMINISTIC RETURN 1;\n", "schema_mysql.sql")
+    assert r["dialect"] == "mysql"
+    assert r["procedures"] == []
