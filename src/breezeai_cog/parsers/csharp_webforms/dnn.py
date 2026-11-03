@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import posixpath
 import xml.etree.ElementTree as ET
 from pathlib import Path
 from collections.abc import Iterator
@@ -12,7 +11,8 @@ from tree_sitter import Node
 
 from ...schemas import Class, Decorator, FileRecord, Function
 from ..additive import FactSpec, index_fact, register_fact
-from ..dotnet_common import ci_resolve, simple_attr_name, to_repo_path
+from ..dnn_common import parse_dnn_manifest, resolve_dnn_control_source
+from ..dotnet_common import simple_attr_name
 from ..emits import Emit
 from ..treesitter import node_text
 
@@ -24,38 +24,9 @@ _HTTP_METHODS = {
     "HttpPut": "PUT",
     "HttpDelete": "DELETE",
     "HttpPatch": "PATCH",
-    "AcceptVerbs": "ANY",
+    "HttpHead": "HEAD",
+    "HttpOptions": "OPTIONS",
 }
-
-
-def _local(tag: str) -> str:
-    return tag.rsplit("}", 1)[-1].lower()
-
-
-def _attribute(attrs: dict[str, str], name: str) -> str | None:
-    wanted = name.lower()
-    return next((value for key, value in attrs.items() if _local(key) == wanted), None)
-
-
-def _child_text(element: ET.Element, name: str) -> str | None:
-    return next(
-        ((child.text or "").strip() for child in element if _local(child.tag) == name),
-        None,
-    )
-
-
-def _manifest_module(root: ET.Element, rel: str) -> str:
-    for element in root.iter():
-        if _local(element.tag) == "foldername" and element.text:
-            value = element.text.strip()
-            if value:
-                return value
-    for element in root.iter():
-        if _local(element.tag) == "modulename" and element.text:
-            value = element.text.strip()
-            if value:
-                return value
-    return Path(rel).stem
 
 
 def _manifest_controls(
@@ -64,36 +35,23 @@ def _manifest_controls(
     repo_root: Path | None,
 ) -> list[dict[str, str]]:
     try:
-        root = ET.fromstring(source)
+        _, controls = parse_dnn_manifest(source)
     except ET.ParseError:
         return []
-    module = _manifest_module(root, rel)
     out: list[dict[str, str]] = []
-    for element in root.iter():
-        if _local(element.tag) != "modulecontrol":
+    if repo_root is None:
+        return out
+    for control in controls:
+        src = control["source"]
+        if not src.lower().endswith(".ascx"):
             continue
-        key = _child_text(element, "controlkey")
-        src = _child_text(element, "controlsrc")
-        if key is None:
-            key = _attribute(element.attrib, "controlkey")
-        if src is None:
-            src = _attribute(element.attrib, "controlsrc")
-        if key is None or not src or repo_root is None:
-            continue
-        relative = to_repo_path(src, posixpath.dirname(rel), "")
-        if relative is None or not relative.lower().endswith(".ascx"):
-            continue
-        actual = ci_resolve(repo_root, relative)
-        if actual is None and src.replace("\\", "/").lstrip("/").lower().startswith(
-            "desktopmodules/"
-        ):
-            actual = ci_resolve(repo_root, src.replace("\\", "/").lstrip("/"))
+        actual = resolve_dnn_control_source(repo_root, rel, src)
         if actual is None:
             continue
         out.append(
             {
-                "module": module,
-                "controlKey": key,
+                "module": control["module"],
+                "controlKey": control["controlKey"],
                 "source": actual,
                 "manifest": rel,
             }
@@ -144,16 +102,20 @@ def _called_name(invocation: Node, source: bytes) -> str | None:
     return node_text(function, source) if function.type == "identifier" else None
 
 
-def _positional_args(invocation: Node) -> list[Node]:
+def _arguments(invocation: Node, source: bytes) -> list[tuple[str | None, Node]]:
     arguments = invocation.child_by_field_name("arguments")
     if arguments is None:
         return []
-    values: list[Node] = []
+    values: list[tuple[str | None, Node]] = []
     for argument in arguments.named_children:
         if argument.type == "argument" and argument.named_children:
-            values.append(argument.named_children[-1])
+            name = argument.child_by_field_name("name")
+            value = argument.named_children[-1]
+            if name is value:
+                value = argument.named_children[0]
+            values.append((node_text(name, source) if name is not None else None, value))
         else:
-            values.append(argument)
+            values.append((None, argument))
     return values
 
 
@@ -166,13 +128,61 @@ def _string_literal(node: Node | None, source: bytes) -> str | None:
     return value[1:-1] if len(value) >= 2 and value[0] == '"' and value[-1] == '"' else None
 
 
-def _string_literals(node: Node, source: bytes) -> Iterator[str]:
-    if node.type in ("string_literal", "verbatim_string_literal"):
-        value = _string_literal(node, source)
-        if value is not None:
-            yield value
-    for child in node.named_children:
-        yield from _string_literals(child, source)
+def _string_array(node: Node | None, source: bytes) -> tuple[str, ...] | None:
+    if node is None:
+        return None
+    initializer = (
+        node
+        if node.type in ("array_initializer", "initializer_expression")
+        else next(
+            (
+                child
+                for child in node.named_children
+                if child.type in ("array_initializer", "initializer_expression")
+            ),
+            None,
+        )
+    )
+    if initializer is None:
+        return None
+    values: list[str] = []
+    for child in initializer.named_children:
+        value = _string_literal(child, source)
+        if value is None:
+            return None
+        values.append(value)
+    return tuple(values)
+
+
+def _route_arguments(invocation: Node, source: bytes) -> dict[str, Node]:
+    """Bind MapHttpRoute arguments to the documented IMapRoute parameter names."""
+    items = _arguments(invocation, source)
+    bound = {name.lower(): value for name, value in items if name is not None}
+    positional = [value for name, value in items if name is None]
+    names = ("moduleFolderName", "routeName", "url")
+    for name, value in zip(names, positional[:3], strict=False):
+        bound.setdefault(name.lower(), value)
+    tail = positional[3:]
+    if tail:
+        if len(tail) == 1 and _string_array(tail[0], source) is not None:
+            bound.setdefault("namespaces", tail[0])
+        else:
+            bound.setdefault("defaults", tail[0])
+            if len(tail) > 1:
+                bound.setdefault("constraints", tail[1])
+            if len(tail) > 2:
+                bound.setdefault("namespaces", tail[2])
+    return bound
+
+
+def _in_register_routes(node: Node, source: bytes) -> bool:
+    parent = node.parent
+    while parent is not None:
+        if parent.type == "method_declaration":
+            name = parent.child_by_field_name("name")
+            return name is not None and node_text(name, source) == "RegisterRoutes"
+        parent = parent.parent
+    return False
 
 
 def _walk(node: Node) -> Iterator[Node]:
@@ -187,27 +197,26 @@ def _route_registrations(
     rel: str,
     repo_root: Path | None,
 ) -> list[dict[str, str]] | None:
-    if root is None:
+    if root is None or b"IServiceRouteMapper" not in source:
         return None
     found: list[dict[str, str]] = []
     for node in _walk(root):
-        if node.type != "invocation_expression" or _called_name(node, source) != "MapHttpRoute":
+        if (
+            node.type != "invocation_expression"
+            or _called_name(node, source) != "MapHttpRoute"
+            or not _in_register_routes(node, source)
+        ):
             continue
-        args = _positional_args(node)
-        module = _string_literal(args[0] if args else None, source)
-        template = _string_literal(args[2] if len(args) > 2 else None, source)
-        namespaces = next(
-            (
-                values
-                for argument in args[3:]
-                if (values := list(_string_literals(argument, source)))
-            ),
-            [],
-        )
+        args = _route_arguments(node, source)
+        module = _string_literal(args.get("modulefoldername"), source)
+        template = _string_literal(args.get("url"), source)
+        namespaces = _string_array(args.get("namespaces"), source) or ()
+        if not module or template is None:
+            continue
         found.append(
             {
-                "module": module.replace("\\", "/").strip("/") if module else "",
-                "template": template or "{controller}/{action}",
+                "module": module.replace("\\", "/").strip("/"),
+                "template": template,
                 "namespaces": "|".join(namespaces),
                 "source": rel,
             }
@@ -247,63 +256,31 @@ def _route_for(path: str, class_name: str, index: Any | None) -> dict[str, str] 
         after_desktop = "/".join(parts[desktop + 1 :])
     except StopIteration:
         pass
-    route_matches = [
-        route
-        for route in registrations
-        if after_desktop == route["module"] or after_desktop.startswith(route["module"] + "/")
-    ]
-    if route_matches:
-        unique = {(route["module"], route["template"]) for route in route_matches}
-        return route_matches[0] if len(unique) == 1 else None
-    namespace_matches = []
     types = getattr(index, "types", {}) if index is not None else {}
-    for route in registrations:
+
+    def matches_namespace(route: dict[str, str]) -> bool:
         namespaces = set(filter(None, route.get("namespaces", "").split("|")))
-        if not namespaces or not route["module"]:
-            continue
-        if any(
+        if not namespaces:
+            return True
+        return any(
             fqn.rsplit(".", 1)[-1] == class_name
             and fqn.rsplit(".", 1)[0] in namespaces
             and path in paths
             for fqn, paths in types.items()
-        ):
-            namespace_matches.append(route)
-    if namespace_matches:
-        unique = {(route["module"], route["template"]) for route in namespace_matches}
-        return namespace_matches[0] if len(unique) == 1 else None
-    if any(not route["module"] for route in registrations):
-        return None
-    if registrations and len({route["module"] for route in registrations}) == 1:
-        return None
-    if after_desktop:
-        module = after_desktop.split("/", 1)[0]
-        return {"module": module, "template": "{controller}/{action}"}
-    controls = index_fact(index, FACT) or {}
-    control_matches = {
-        entry["module"]
-        for source_entries in controls.values()
-        for entry in source_entries
-        if path.startswith(source_entries[0]["manifest"].rsplit("/", 1)[0] + "/")
+        )
+
+    candidates = [
+        route
+        for route in registrations
+        if (after_desktop == route["module"] or after_desktop.startswith(route["module"] + "/"))
+        and matches_namespace(route)
+    ]
+    if not candidates:
+        candidates = [route for route in registrations if matches_namespace(route)]
+    unique = {
+        (route["module"], route["template"], route.get("namespaces", "")) for route in candidates
     }
-    if not control_matches:
-        control_matches = {entry["module"] for entries in controls.values() for entry in entries}
-    fallback_module: str | None = next(iter(control_matches)) if len(control_matches) == 1 else None
-    return (
-        {"module": fallback_module, "template": "{controller}/{action}"}
-        if fallback_module
-        else None
-    )
-
-
-def _controller_class(record: FileRecord) -> Class | None:
-    return next(
-        (
-            cls
-            for cls in record.classes
-            if (cls.extends or "").rsplit(".", 1)[-1] == "DnnApiController"
-        ),
-        None,
-    )
+    return candidates[0] if len(unique) == 1 else None
 
 
 def _module_control(record: FileRecord, path: str, index: Any | None) -> dict[str, str] | None:
@@ -313,12 +290,35 @@ def _module_control(record: FileRecord, path: str, index: Any | None) -> dict[st
     return entries[0] if len(entries) == 1 else None
 
 
-def _method(fn: Function) -> str:
-    attrs = _attrs(fn.decorators)
-    for attr, method in _HTTP_METHODS.items():
-        if attr in attrs:
-            return method
-    return "GET"
+def _accept_verbs(decorator: Decorator) -> tuple[str, ...] | None:
+    methods: list[str] = []
+    for raw in decorator.args:
+        value = raw.strip().strip('"').rsplit(".", 1)[-1].upper()
+        if value not in {"GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS"}:
+            return None
+        if value not in methods:
+            methods.append(value)
+    return tuple(methods) if methods else None
+
+
+def _methods(fn: Function) -> tuple[str | None, ...]:
+    methods: list[str] = []
+    dynamic_accept_verbs = False
+    for decorator in fn.decorators:
+        name = simple_attr_name(decorator.name)
+        if name == "AcceptVerbs":
+            accepted = _accept_verbs(decorator)
+            if accepted is None:
+                dynamic_accept_verbs = True
+            else:
+                methods.extend(value for value in accepted if value not in methods)
+        elif name in _HTTP_METHODS and _HTTP_METHODS[name] not in methods:
+            methods.append(_HTTP_METHODS[name])
+    if methods:
+        return tuple(methods)
+    if dynamic_accept_verbs:
+        return (None,)
+    return ("GET",)
 
 
 def _route_metadata(
@@ -328,7 +328,12 @@ def _route_metadata(
     attrs = _attrs([*cls.decorators, *fn.decorators])
     guards = [
         name
-        for name in ("DnnAuthorize", "DnnModuleAuthorize", "ValidateAntiForgeryToken")
+        for name in (
+            "DnnAuthorize",
+            "DnnModuleAuthorize",
+            "AllowAnonymous",
+            "ValidateAntiForgeryToken",
+        )
         if name in attrs
     ]
     if "AllowAnonymous" in attrs:
@@ -346,45 +351,48 @@ def _controller_routes(
     path: str,
     index: Any | None,
 ) -> list[Emit]:
-    cls = _controller_class(record)
-    if cls is None:
-        return []
-    route = _route_for(path, cls.name, index)
-    if route is None:
-        return []
     out: list[Emit] = []
-    for fn in record.functions:
-        if fn.parentId != cls.id or fn.type != "method" or fn.isStatic:
+    for cls in (
+        candidate
+        for candidate in record.classes
+        if (candidate.extends or "").rsplit(".", 1)[-1] == "DnnApiController"
+    ):
+        route = _route_for(path, cls.name, index)
+        if route is None:
             continue
-        if fn.visibility not in (None, "public") or "NonAction" in _attrs(fn.decorators):
-            continue
-        required, guards = _route_metadata(fn, cls)
-        controller = cls.name.removesuffix("Controller")
-        template = route["template"].strip("/")
-        template = template.replace("{controller}", controller).replace("{action}", fn.name)
-        endpoint = f"/DesktopModules/{route['module']}/API/{template}"
-        out.append(
-            Emit(
-                root,
-                dict(
-                    semanticType="route",
-                    method=_method(fn),
-                    endpoint=endpoint,
-                    framework="dnn",
-                    handler=fn.name,
-                    handlerLine=fn.startLine,
-                    routeKind="route",
-                    authRequired=required,
-                    guards=guards,
-                ),
-                parent=fn.id,
-                node_type="synthetic",
-                text=f"DNN {cls.name}.{fn.name}",
-                line=fn.startLine,
-                col=0,
-                end_line=fn.endLine,
-            )
-        )
+        for fn in record.functions:
+            if fn.parentId != cls.id or fn.type != "method" or fn.isStatic:
+                continue
+            if fn.visibility not in (None, "public") or "NonAction" in _attrs(fn.decorators):
+                continue
+            required, guards = _route_metadata(fn, cls)
+            controller = cls.name.removesuffix("Controller")
+            template = route["template"].strip("/")
+            template = template.replace("{controller}", controller).replace("{action}", fn.name)
+            endpoint = f"/DesktopModules/{route['module']}/API/{template}"
+            for method in _methods(fn):
+                out.append(
+                    Emit(
+                        root,
+                        dict(
+                            semanticType="route",
+                            method=method,
+                            endpoint=endpoint,
+                            framework="dnn",
+                            handler=fn.name,
+                            handlerLine=fn.startLine,
+                            routeKind="route",
+                            authRequired=required,
+                            guards=guards,
+                        ),
+                        parent=fn.id,
+                        node_type="synthetic",
+                        text=f"DNN {cls.name}.{fn.name}",
+                        line=fn.startLine,
+                        col=0,
+                        end_line=fn.endLine,
+                    )
+                )
     return out
 
 

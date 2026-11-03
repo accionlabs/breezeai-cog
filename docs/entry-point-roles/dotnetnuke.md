@@ -7,7 +7,7 @@ Parser: `src/breezeai_cog/parsers/csharp_webforms/` · Rules: [entry-point contr
 | `DnnApiController` public action | Binding | `route`, HTTP attribute or `GET`, `/DesktopModules/{module}/API/{controller}/{action}` | DNN dispatches the action through its Web API route |
 | `[DnnAuthorize]` | Guard | `guards: ["DnnAuthorize"]`, `authRequired: true` | Requires an authenticated DNN caller |
 | `[DnnModuleAuthorize]` | Guard | `guards: ["DnnModuleAuthorize"]`, `authRequired: true` | Requires the configured DNN module access level |
-| `[AllowAnonymous]` | Guard override | `authRequired: false` | Explicitly allows anonymous access |
+| `[AllowAnonymous]` | Guard override | `guards: ["AllowAnonymous"]`, `authRequired: false` | Explicitly allows anonymous access |
 | `[ValidateAntiForgeryToken]` | Guard | Included in `guards` | DNN validates the anti-forgery token before the action |
 | `PortalModuleBase` control named by `.dnn` `moduleControl` | Binding | `route`, `routeKind: mount`, `ANY`, `/DesktopModules/{module}/{controlKey}` | The manifest mounts the control without a source-code URL |
 | `IServiceRouteMapper.RegisterRoutes` | Wiring | No record | It supplies DNN's route convention for controller actions |

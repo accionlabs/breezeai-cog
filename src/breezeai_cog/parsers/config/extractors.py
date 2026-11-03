@@ -22,6 +22,8 @@ try:  # PyYAML is a core dep; degrade gracefully if somehow absent
 except Exception:  # pragma: no cover
     yaml = None
 
+from ..dnn_common import parse_dnn_manifest
+
 _EXT_CATEGORY = {
     ".json": "json",
     ".yaml": "yaml",
@@ -140,51 +142,12 @@ def _dispatch(name: str, suffix: str, text: str) -> dict[str, Any]:
 
 
 def _dnn_manifest(text: str) -> dict[str, Any]:
-    root = ET.fromstring(text)
-
-    def local(tag: str) -> str:
-        return tag.rsplit("}", 1)[-1].lower()
-
-    def child_text(element: ET.Element, name: str) -> str | None:
-        return next(
-            ((child.text or "").strip() for child in element if local(child.tag) == name),
-            None,
-        )
-
-    module = next(
-        (
-            (element.text or "").strip()
-            for element in root.iter()
-            if local(element.tag) == "foldername" and element.text and element.text.strip()
-        ),
-        None,
-    )
-    if module is None:
-        module = next(
-            (
-                (element.text or "").strip()
-                for element in root.iter()
-                if local(element.tag) == "modulename" and element.text and element.text.strip()
-            ),
-            None,
-        )
-    controls = []
-    for element in root.iter():
-        if local(element.tag) != "modulecontrol":
-            continue
-        key = child_text(element, "controlkey")
-        source = child_text(element, "controlsrc")
-        if key is None:
-            key = next((v for k, v in element.attrib.items() if local(k) == "controlkey"), None)
-        if source is None:
-            source = next((v for k, v in element.attrib.items() if local(k) == "controlsrc"), None)
-        if key is not None and source:
-            controls.append({"controlKey": key, "source": source})
+    module, controls = parse_dnn_manifest(text)
     return {
         "kind": "dnn-manifest",
         "category": "dotnet",
         "moduleName": module,
-        "moduleControls": controls,
+        "moduleControls": [dict(control) for control in controls],
     }
 
 

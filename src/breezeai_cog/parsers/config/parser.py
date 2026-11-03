@@ -17,7 +17,7 @@ from ...emit import file_id
 from ...schemas import SCHEMA_VERSION, FileRecord
 from ...utils import count_loc
 from ..base import BaseParser, ParseContext
-from ..dotnet_common import ci_resolve, to_repo_path
+from ..dnn_common import resolve_dnn_control_source
 from .extractors import extract_config, is_dotnet_config
 
 
@@ -75,14 +75,7 @@ class ConfigParser(BaseParser):
                 source = control.get("source")
                 if not isinstance(source, str):
                     continue
-                relative = to_repo_path(source, Path(ctx.path).parent.as_posix(), "")
-                if relative is None:
-                    continue
-                actual = ci_resolve(ctx.repo_root, relative)
-                if actual is None and source.replace("\\", "/").lstrip("/").lower().startswith(
-                    "desktopmodules/"
-                ):
-                    actual = ci_resolve(ctx.repo_root, source.replace("\\", "/").lstrip("/"))
+                actual = resolve_dnn_control_source(ctx.repo_root, ctx.path, source)
                 if actual is not None:
                     imports.append(actual)
         return FileRecord(
