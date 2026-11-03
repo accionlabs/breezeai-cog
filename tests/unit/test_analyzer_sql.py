@@ -948,3 +948,20 @@ def test_mysql_programs_are_still_not_extracted() -> None:
     r = parse_ddl("CREATE FUNCTION f() RETURNS INT DETERMINISTIC RETURN 1;\n", "schema_mysql.sql")
     assert r["dialect"] == "mysql"
     assert r["procedures"] == []
+
+
+def test_postgres_lines_that_look_like_sqlplus_directives_are_kept() -> None:
+    # SQL*Plus stripping ran on every non-T-SQL file: it deleted `SET …` inside a `$$` body,
+    # and `EXECUTE FUNCTION …;` ending a trigger, which merged the trigger into the next view.
+    proc = (
+        "CREATE PROCEDURE app.touch(p_id bigint) LANGUAGE plpgsql AS $$\nBEGIN\n"
+        "    UPDATE app.t AS o\n       SET n = n + 1\n     WHERE o.id = p_id;\nEND;\n$$"
+    )
+    view = "CREATE VIEW app.v AS SELECT id FROM app.t"
+    text = (
+        "CREATE TABLE app.t (id bigint, n int);\n" + proc + ";\n"
+        "CREATE TRIGGER trg BEFORE UPDATE ON app.t\nFOR EACH ROW\nEXECUTE FUNCTION app.f();\n" + view + ";\n"
+    )
+    r = parse_ddl(text, "schema_pg.sql")
+    assert [p["body"] for p in r["procedures"]] == [proc]
+    assert [v["definition"] for v in r["views"]] == [view]

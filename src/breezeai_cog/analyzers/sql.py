@@ -594,19 +594,20 @@ def parse_ddl(text: str, filepath: str | None = None) -> dict[str, Any]:
     # stay intact instead of being shredded by the naive `;` split), extracts tables/views/
     # indexes via sqlglot after stripping SQL Server storage clauses (_preprocess_tsql), AND
     # extracts stored programs (procedures/functions/triggers) via hand-rolled headers.
-    # SQL*Plus stripping is Oracle/generic-only — it would clobber T-SQL SET/PRINT/EXEC — so
-    # it is intentionally NOT applied on this branch.
+    # SQL*Plus stripping is Oracle-only — it would clobber T-SQL SET/PRINT/EXEC — so it is
+    # intentionally NOT applied on this branch.
     if dialect == "transactsql":
         return {"dialect": dialect, **_parse_tsql_ddl(text)}
-
-    text = _strip_sqlplus(text)
 
     # Oracle: sqlglot can't parse real Oracle dumps — physical-storage clauses on tables
     # (USING INDEX / STORAGE / PCTFREE / TABLESPACE / SEGMENT CREATION) make it raise a
     # ParseError, and PL/SQL program bodies degrade to a generic Command. So route the
     # whole Oracle dialect through the ported hand-rolled parser (see _parse_oracle_ddl).
+    # SQL*Plus directives belong to Oracle scripts only. Elsewhere their keywords start real
+    # SQL lines — ``SET`` in an UPDATE, ``EXECUTE`` in a PostgreSQL trigger or a ``$$`` body —
+    # and the scanner does not know ``$$`` quoting, so stripping would delete those lines.
     if dialect == "oracle":
-        return {"dialect": dialect, **_parse_oracle_ddl(text)}
+        return {"dialect": dialect, **_parse_oracle_ddl(_strip_sqlplus(text))}
 
     read = _SQLGLOT.get(dialect, "postgres")
 
