@@ -309,8 +309,8 @@ def test_entity_framework_verbs_are_dotnet_gated() -> None:
     # .NET languages: EF preserved
     assert classify_call("ctx.Users.ToListAsync", "ToListAsync", None, "csharp") == \
         ("db_method_call", "ToListAsync", "entity_framework")
-    assert classify_call("ctx.Users.Include", "Include", None, "vb") == \
-        ("db_method_call", "Include", "entity_framework")
+    assert classify_call("ctx.Users.AsNoTracking", "AsNoTracking", None, "vb") == \
+        ("db_method_call", "AsNoTracking", "entity_framework")
     # unknown language stays permissive (backward compatible)
     assert classify_call("ctx.Users.ToListAsync", "ToListAsync") == \
         ("db_method_call", "ToListAsync", "entity_framework")
@@ -414,6 +414,44 @@ def test_java_and_csharp_files_name_their_imported_orm(tmp_path) -> None:
     assert [s.dataAccessHint for s in rec.statements if s.semanticType == "db_method_call"] == [
         "hibernate"
     ]
+
+
+def test_ef_include_needs_an_ef_import_or_source(tmp_path) -> None:
+    from breezeai_cog.parsers.csharp.parser import CSharpParser
+    from breezeai_cog.parsers.detection.db_queries import match_db
+
+    # Script and style bundles share EF's eager-loading name.
+    assert match_db("bndSplendidScripts.Include", "Include", "csharp") is None
+    assert match_db('new ScriptBundle("~/b").Include', "Include", "csharp") is None
+    assert match_db("register.Include", "Include", "vb") is None
+    # EF: the file imports it, or the chain starts at a context / DbSet / IQueryable.
+    assert match_db("query.Include", "Include", "csharp", vendor="entity_framework") == \
+        "entity_framework"
+    assert match_db("dbContext.Speakers.Where(…).Include", "Include", "csharp") == \
+        "entity_framework"
+    assert match_db("context.Enrollments.Include(…).ThenInclude", "ThenInclude", "csharp") == \
+        "entity_framework"
+    assert match_db("query.Include", "Include", "csharp", vendor="hibernate") is None
+
+    def hints(src: bytes) -> list[str | None]:
+        rec = CSharpParser().parse_file(_ctx("Svc.cs", src, tmp_path))
+        return [s.dataAccessHint for s in rec.statements if s.semanticType == "db_method_call"]
+
+    body = (
+        b"class Svc {\n"
+        b"  object Load(IQueryable<Region> query) { return query.Include(x => x.Parent); }\n"
+        b"}\n"
+    )
+    assert hints(b"using Microsoft.EntityFrameworkCore;\n" + body) == ["entity_framework"]
+    assert hints(b"using System.Data.Entity;\n" + body) == ["entity_framework"]
+    assert hints(
+        b"using System.Web.Optimization;\n"
+        b"class BundleConfig {\n"
+        b'  static void Register(BundleCollection bundles) {\n'
+        b'    bundles.Add(new ScriptBundle("~/bundles/jquery").Include("~/Scripts/jquery.js"));\n'
+        b"  }\n"
+        b"}\n"
+    ) == []
 
 
 def test_sync_linq_terminals_require_ef_source() -> None:

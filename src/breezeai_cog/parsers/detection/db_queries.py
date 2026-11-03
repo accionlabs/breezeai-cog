@@ -59,8 +59,9 @@ _DB_METHODS: dict[str, tuple[str, ...]] = {
         "countasync", "longcountasync", "anyasync", "allasync",
         "minasync", "maxasync", "sumasync", "averageasync",
         "findasync", "addasync", "addrangeasync", "savechangesasync", "savechanges",
-        # EF-distinctive operators (no LINQ-to-Objects collision).
-        "include", "theninclude", "asnotracking", "astracking",
+        # EF-distinctive operators (no LINQ-to-Objects collision). `Include` / `ThenInclude`
+        # are not here: script bundles have them too (see `_EF_INCLUDE_VERBS`).
+        "asnotracking", "astracking",
         "fromsqlraw", "fromsqlinterpolated", "executesqlraw", "executesqlinterpolated",
     ),
     # NOTE: the synchronous LINQ terminals `tolist`/`toarray`/`firstordefault`/
@@ -282,6 +283,12 @@ _EF_LINQ_VERBS = frozenset({
     "tolist", "toarray", "firstordefault", "singleordefault", "lastordefault",
 })
 
+# EF's eager-loading operators. ASP.NET script and style bundles have the same name
+# (`ScriptBundle(...).Include("~/Scripts/jquery.js")`), so they count as EF only on proof: the
+# file imports EF (`Microsoft.EntityFrameworkCore` / `System.Data.Entity`, which declare them as
+# extension methods, so the call cannot compile without one) or the chain shows an EF source.
+_EF_INCLUDE_VERBS = frozenset({"include", "theninclude"})
+
 # Substrings in the FULL callee chain that positively mark an EF/queryable source, so a sync
 # LINQ terminal on it is a DB query, not LINQ-to-Objects. Scanned across the whole (lowercased)
 # chain because query operators sit between the source and the terminal
@@ -414,6 +421,9 @@ def match_db(callee: str, method: str, language: str | None = None,
     # the call chain shows a queryable/DbContext source; else LINQ-to-Objects — drop, don't tag.
     if m in _EF_LINQ_VERBS and language in _DOTNET:
         return "entity_framework" if _has_ef_source(low) else None
+    if m in _EF_INCLUDE_VERBS and language in _DOTNET:
+        ef = vendor == "entity_framework" or _has_ef_source(low)
+        return "entity_framework" if ef else None
     if _is_active_record_call(callee, method, language, typed_db_ids):
         return "activerecord"
     receiver = low.rsplit(".", 1)[0].rsplit(".", 1)[-1] if "." in low else ""
