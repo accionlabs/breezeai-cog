@@ -303,6 +303,55 @@ def test_inherited_call_in_a_class_with_an_export_macro_resolves(tmp_path) -> No
     assert next(c for c in _fn(rec, "Run").calls if c.name == "Shared").path == "base.cpp"
 
 
+#: A file the grammar can't parse as a whole (an `#if` splitting a definition from its body):
+#: its root is an ERROR holding every declaration flat.
+SPILL_SRC = (
+    b"int free_fn(int a) { return a; }\n"
+    b"int Other::run() { return free_fn(1); }\n"
+    b"    Widget(list_t init,\n"
+    b"           kind_t kind = kind_t::array)\n"
+    b"    {\n"
+    b"}\n"
+    b"    bool okay() const { return ok_; }\n"
+    b"inline namespace literals\n"
+    b"{\n"
+    b"inline namespace v1\n"
+    b"{\n"
+    b"#if !defined(OLD_CC) || CC_CHECK(4,9,0)\n"
+    b'    inline Widget operator ""_w(const char* s, std::size_t n)\n'
+    b"#else\n"
+    b'    inline Widget operator "" _w(const char* s, std::size_t n)\n'
+    b"{\n"
+)
+
+
+def test_members_spilled_to_file_scope_are_not_free_functions(tmp_path) -> None:
+    # Members of a class whose head was lost in the ERROR read as free functions. A definition
+    # that can only be a member (no return type: a constructor; a `field_identifier` name)
+    # proves it, and then no unqualified definition is trusted: absent beats wrong. A
+    # definition that names its owner (`Other::run`) is kept; a call to a dropped function
+    # doesn't resolve.
+    rec = _parse_src(tmp_path, SPILL_SRC, "spill.cpp")
+    assert [(f.name, f.type) for f in rec.functions] == [("run", "method")]
+    assert [(c.name, c.path) for c in rec.functions[0].calls] == [("free_fn", None)]
+
+
+def test_index_skips_definitions_of_a_file_with_spilled_members(tmp_path) -> None:
+    # The index reads the broken file the same way: a call from another file to one of its
+    # unqualified definitions doesn't resolve to it.
+    (tmp_path / "spill.cpp").write_bytes(SPILL_SRC)
+    (tmp_path / "use.cpp").write_bytes(b"int go() { return free_fn(2); }\n")
+    rec = _parse_with_index(tmp_path, "use.cpp")
+    assert next(c for c in _fn(rec, "go").calls if c.name == "free_fn").path is None
+
+
+def test_file_that_parses_keeps_its_free_functions(tmp_path) -> None:
+    # Without an ERROR root nothing is distrusted, even with a constructor-shaped definition.
+    src = b"Widget::Widget(int n) {}\nint free_fn(int a) { return a; }\n"
+    rec = _parse_src(tmp_path, src, "ok.cpp")
+    assert {f.name for f in rec.functions} == {"Widget", "free_fn"}
+
+
 def test_unresolved_local_include_is_external(tmp_path) -> None:
     # A local include with no matching repo file resolves to nothing (external), never a
     # fabricated in-repo path.

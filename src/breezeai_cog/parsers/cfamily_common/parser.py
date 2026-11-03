@@ -56,6 +56,8 @@ from .functions import (
     has_declaration_error,
     read_declaration,
     is_misread_declarator,
+    owner_is_explicit,
+    spilled_members,
 )
 from .imports import FamilyHeaders, extract_imports
 from .index import (
@@ -123,9 +125,12 @@ class CFamilyParser(BaseParser):
         related = [r for r in ctx.related_indexes.values() if isinstance(r, CFamilyIndex)]
         headers = FamilyHeaders(idx.headers if idx else {}, [r.headers for r in related])
         internal, external, _, _ = extract_imports(root, source, headers)
+        # Class members that spilled to file scope: unqualified definitions aren't emitted.
+        spilled = spilled_members(root, source, self.grammar != "c")
         graph = IncludeGraph(headers, [i for i in (idx, *related) if i is not None])
         resolve = make_cfamily_resolver(
-            defined_names(root, source), path, idx, [self.callable_in(r) for r in related],
+            defined_names(root, source, spilled), path, idx,
+            [self.callable_in(r) for r in related],
             header_visibility(path, internal, graph),
         )
 
@@ -139,6 +144,8 @@ class CFamilyParser(BaseParser):
                 node = _unwrap_template(child)
                 read = DeclarationRead()
                 if node.type in _DECLARATIONS:
+                    if spilled and not owner_is_explicit(node):
+                        continue  # maybe a member of a class the grammar lost: absent beats wrong
                     # A declaration or definition is read past a macro where that is safe
                     # (`read_declaration`); one whose name can't be trusted is skipped.
                     maybe_read = read_declaration(node, source)

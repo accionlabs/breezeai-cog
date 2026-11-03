@@ -47,7 +47,7 @@ from ..treesitter import node_text
 from .classes import _CLASS_TYPES, _heritage, _unwrap_template, parse_cfamily
 from .functions import (
     function_declarator_of, has_declaration_error, is_declared_static, read_declaration,
-    read_member,
+    owner_is_explicit, read_member, spilled_members,
 )
 from .imports import FamilyHeaders, HeaderIndex, build_header_index, include_targets
 from .mappings import HEADER_EXTENSIONS, TRANSPARENT_SCOPES
@@ -240,19 +240,25 @@ def _is_extern_c(node: Node, source: bytes) -> bool:
 
 
 def _index_scope(
-    frag: CFamilyIndex, scope: Node, source: bytes, rel: str, ns: str = "", c_linkage: bool = False
+    frag: CFamilyIndex, scope: Node, source: bytes, rel: str, ns: str = "",
+    c_linkage: bool = False, spilled: bool = False,
 ) -> None:
     """Walk a file/namespace scope, recording every definition. ``ns`` accumulates the
     enclosing namespace path so classes are keyed by their fully-qualified name; ``c_linkage``
-    is set inside ``extern "C"``."""
+    is set inside ``extern "C"``; ``spilled`` when class members spilled to file scope
+    (:func:`spilled_members`), so only definitions naming their owner are recorded."""
     for child in scope.named_children:
         node = _unwrap_template(child)
         if node.type == "linkage_specification":
-            _index_scope(frag, node, source, rel, ns, c_linkage or _is_extern_c(node, source))
+            _index_scope(
+                frag, node, source, rel, ns, c_linkage or _is_extern_c(node, source), spilled,
+            )
         elif node.type in TRANSPARENT_SCOPES:
-            _index_scope(frag, node, source, rel, ns, c_linkage)
+            _index_scope(frag, node, source, rel, ns, c_linkage, spilled)
         elif node.type == "declaration":
             continue  # a prototype or variable: nothing to index
+        elif node.type == "function_definition" and spilled and not owner_is_explicit(node):
+            continue
         elif node.type == "function_definition":
             read = read_declaration(node, source)
             if read is not None:
@@ -262,7 +268,10 @@ def _index_scope(
         elif node.type == "namespace_definition":
             body = node.child_by_field_name("body")
             if body is not None:
-                _index_scope(frag, body, source, rel, _join_ns(ns, _ns_name(node, source)))
+                _index_scope(
+                    frag, body, source, rel, _join_ns(ns, _ns_name(node, source)),
+                    spilled=spilled,
+                )
         elif node.type in _CLASS_TYPES:
             _index_class(frag, node, source, rel, ns)
 
@@ -282,7 +291,7 @@ def _index_one(
     try:
         root = parse_cfamily(grammar, source, timeout_micros)
         frag = CFamilyIndex(includes={rel: tuple(include_targets(source))})
-        _index_scope(frag, root, source, rel)
+        _index_scope(frag, root, source, rel, spilled=spilled_members(root, source, grammar != "c"))
         if collect is not None:
             frag.collected = collect(root, source, rel, Path(repo_root))
         return frag

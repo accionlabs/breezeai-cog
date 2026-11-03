@@ -500,6 +500,21 @@ C++.
 > (constructors as calls, `public:` as a label), which nothing can be recovered from safely;
 > without the macro it is an ordinary class. **Cost:** such a file is parsed twice.
 
+> **Decision —** when a C++ or CUDA file can't be parsed as a whole and members of a class
+> spilled out to file scope, only definitions that name their owner (`int Judge::decide()`)
+> are captured from the file's flat scope; unqualified functions and declarations are not. The
+> grammar then makes the file's root an `ERROR` holding every declaration flat, and the members
+> of a class whose head was lost in it read as free functions. A definition that can only be a
+> member proves the spill: a `field_identifier` name (the grammar's name for a member), an
+> unqualified destructor, `operator=` / `->` / `()` / `[]`, or a definition with no return type
+> (a constructor). Classes that parsed whole are kept, and the index and same-file call
+> resolution skip the same definitions.
+> **Why:** a member emitted as a free function of the file is a wrong owner and a wrong call
+> target, and in the flat scope a member can't be told from a real free function by its name.
+> **Cost:** real free functions in such a file are lost (in a large single-header library,
+> a few free operators beside hundreds of members). Files that parse, and broken files without
+> such proof — all broken C files among them — are read as before.
+
 > **Decision —** C/C++ attributes and the macros cog reads past are `decorators` on the
 > function, prototype, member or class, as annotations are in other languages: `[[nodiscard]]`,
 > `[[deprecated("use g")]]`, `__attribute__((format(printf, 2, 3)))` and `__declspec(dllexport)`

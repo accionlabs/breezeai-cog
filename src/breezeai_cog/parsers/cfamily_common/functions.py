@@ -258,16 +258,19 @@ def _calls(
     return calls
 
 
-def _defs_in(node: Node, source: bytes, names: set[str]) -> None:
+def _defs_in(node: Node, source: bytes, names: set[str], spilled: bool) -> None:
     """Collect free-function and out-of-class-method names defined in this subtree —
-    the same-file call-resolution set. Corrupt-header definitions are skipped."""
+    the same-file call-resolution set. Corrupt-header definitions are skipped, and so are
+    unqualified ones in a file with spilled members (:func:`spilled_members`)."""
     for c in node.named_children:
         if c.type == "namespace_definition":
             body = c.child_by_field_name("body")
             if body is not None:
-                _defs_in(body, source, names)
+                _defs_in(body, source, names, spilled)
         elif c.type == "template_declaration" or c.type in TRANSPARENT_SCOPES:
-            _defs_in(c, source, names)  # include guard, #if, extern "C" { … }
+            _defs_in(c, source, names, spilled)  # include guard, #if, extern "C" { … }
+        elif c.type == "function_definition" and spilled and not owner_is_explicit(c):
+            continue
         elif c.type == "function_definition" and (read := read_declaration(c, source)):
             fd = function_declarator_of(c.child_by_field_name("declarator"))
             if fd is None:
@@ -285,11 +288,74 @@ def _defs_in(node: Node, source: bytes, names: set[str]) -> None:
                     names.add(node_text(nm, source))
 
 
-def defined_names(root: Node, source: bytes) -> set[str]:
+def defined_names(root: Node, source: bytes, spilled: bool = False) -> set[str]:
     """Free-function / method names defined in this file (for same-file call resolution)."""
     names: set[str] = set()
-    _defs_in(root, source, names)
+    _defs_in(root, source, names, spilled)
     return names
+
+
+#: Operators C++ allows only as class members.
+_MEMBER_ONLY_OPERATORS = frozenset({"operator=", "operator->", "operator()", "operator[]"})
+
+
+def _member_shaped(node: Node, source: bytes, cpp: bool) -> bool:
+    """Whether a definition or declaration at file or namespace scope can only be a class
+    member: named by a ``field_identifier`` (the grammar's name for a member), or — in C++ —
+    an unqualified destructor, a member-only operator, or a definition with no return type (a
+    constructor; a free function needs one)."""
+    fd = function_declarator_of(node.child_by_field_name("declarator"))
+    inner = fd.child_by_field_name("declarator") if fd is not None else None
+    if inner is None:
+        return False
+    if inner.type == "field_identifier":
+        return True
+    if not cpp:
+        return False
+    return (
+        inner.type == "destructor_name"
+        or (inner.type == "operator_name"
+            and "".join(node_text(inner, source).split()) in _MEMBER_ONLY_OPERATORS)
+        or (node.type == "function_definition" and inner.type == "identifier"
+            and node.child_by_field_name("type") is None)
+    )
+
+
+def spilled_members(root: Node, source: bytes, cpp: bool) -> bool:
+    """Whether a file's class members spilled out to file scope. When the grammar can't parse
+    the file as a whole, its root is an ``ERROR`` holding every declaration flat, and the
+    members of a class whose head was lost in it read as free functions. One definition that
+    can only be a member (:func:`_member_shaped`) proves it; then no unqualified definition in
+    the file can be trusted to belong to the file."""
+    if root.type != "ERROR":
+        return False
+    stack = [root]
+    while stack:
+        scope = stack.pop()
+        for c in scope.named_children:
+            if c.type == "namespace_definition":
+                body = c.child_by_field_name("body")
+                if body is not None:
+                    stack.append(body)
+            elif c.type in ("template_declaration", "linkage_specification") or c.type in TRANSPARENT_SCOPES:
+                stack.append(c)
+            elif c.type in ("function_definition", "declaration") and _member_shaped(c, source, cpp):
+                return True
+    return False
+
+
+def owner_is_explicit(node: Node) -> bool:
+    """Whether a definition or declaration names its owner (``int Judge::decide()``,
+    ``int Cache::hits = 0;``) — kept even where spilled members make the file's flat
+    definitions untrustworthy."""
+    d = node.child_by_field_name("declarator")
+    while d is not None and d.type not in _DECLARED_NAME_NODES:
+        if d.type == "qualified_identifier":
+            return True
+        d = d.child_by_field_name("declarator") or next(
+            (c for c in d.named_children if c.type == "qualified_identifier"), None
+        )
+    return False
 
 
 #: Node types a declarator's chain ends at: the declared name.
