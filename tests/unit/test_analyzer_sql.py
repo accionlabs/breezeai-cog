@@ -1070,3 +1070,30 @@ def test_qualified_reference_to_a_non_default_schema_skips_the_unqualified_table
     )
     r = parse_ddl(text, "schema_pg.sql")
     assert all(t["indexes"] == [] for t in r["tables"])
+
+
+@pytest.mark.parametrize(
+    ("text", "filename"),
+    [
+        pytest.param(
+            "SET search_path TO app;\n"
+            "CREATE TABLE orders (id int, code text);\n"
+            "CREATE INDEX ix_code ON app.orders (code);\n"
+            "ALTER TABLE app.orders ADD CONSTRAINT pk_orders PRIMARY KEY (id);\n",
+            "schema_pg.sql",
+            id="postgres-search-path",
+        ),
+        pytest.param(
+            "CREATE TABLE [Orders] ([Id] INT NOT NULL, [Code] NVARCHAR(10))\nGO\n"
+            "CREATE INDEX [IX_Code] ON [sales].[Orders] ([Code])\nGO\n"
+            "ALTER TABLE [sales].[Orders] ADD CONSTRAINT [PK_Orders] PRIMARY KEY ([Id])\nGO\n",
+            "schema.sql",
+            id="tsql",
+        ),
+    ],
+)
+def test_qualified_reference_reaches_the_only_table_declared_without_schema(text: str, filename: str) -> None:
+    # No same-named table in another schema competes, so `app.orders` / `sales.Orders` is it.
+    (table,) = parse_ddl(text, filename)["tables"]
+    assert len(table["indexes"]) == 1
+    assert [c["constraintType"] for c in table["constraints"]] == ["PRIMARY_KEY"]

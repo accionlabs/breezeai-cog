@@ -292,8 +292,9 @@ class _TableLookup:
     table came last (DEF-958-01).
 
     A qualified reference takes the table in that schema; failing that, the table declared
-    without a schema, which lives in the default schema — so where the dialect's default is
-    known, only a reference to that default reaches it. An unqualified reference takes the
+    without a schema. Where the dialect's default is known and a same-named table in another
+    schema exists, only a reference to that default reaches the unqualified table; with no
+    such competitor any schema does (``SET search_path`` can make it anything). An unqualified reference takes the
     table when every same-named declaration is in one schema, else the one declared without a
     schema, else the one in the dialect's default schema. Anything still ambiguous resolves to
     ``None`` — leaving an index unattached is better than attaching it to the wrong table.
@@ -321,9 +322,11 @@ class _TableLookup:
             exact = [t for t in candidates if _schema_key(t) == wanted]
             if exact:
                 return exact[-1]
-            # A table declared without a schema is in the default one. With the default
+            # A table declared without a schema is usually in the default one, but a script can
+            # move it (`SET search_path`), so a non-default reference still reaches it unless a
+            # same-named table in another schema is the likelier target. With the default
             # unknown (Oracle's current user, MySQL's current database) any schema may be it.
-            if self._default and wanted != self._default:
+            if self._default and wanted != self._default and len(unqualified) < len(candidates):
                 return None
             return unqualified[-1] if unqualified else None
         if len({_schema_key(t) for t in candidates}) == 1:
