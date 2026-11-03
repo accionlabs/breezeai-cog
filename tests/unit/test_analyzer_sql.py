@@ -1101,3 +1101,55 @@ def test_plsql_unit_without_slash_ends_at_the_next_create() -> None:
     cleaned = _strip_sqlplus(text)
     assert "PROMPT after" not in cleaned
     assert sorted(t["name"] for t in parse_ddl(text, "mixed_ora.sql")["tables"]) == ["T", "U"]
+
+
+def test_tsql_sequence_with_bracketed_name() -> None:
+    # `\b` after `]` never matched, so a bracketed sequence was skipped without a trace.
+    [seq] = parse_ddl("CREATE SEQUENCE [dbo].[InvoiceSeq] START WITH 1000 INCREMENT BY 1\nGO\n", "seq_mssql.sql")[
+        "sequences"
+    ]
+    assert (seq["schema"], seq["name"], seq["startValue"], seq["increment"]) == ("dbo", "InvoiceSeq", 1000, 1)
+
+
+@pytest.mark.parametrize(
+    ("column", "expected"),
+    [
+        pytest.param(
+            "a_id bigint NOT NULL CONSTRAINT fk_a REFERENCES s.a (id) ON DELETE CASCADE",
+            {"name": "fk_a", "columns": ["a_id"], "refTableName": "a", "refColumns": ["id"], "refTableSchema": "s"},
+            id="named-qualified",
+        ),
+        pytest.param(
+            "a_id bigint REFERENCES a",  # no column list: the referenced PK, not known here
+            {"name": None, "columns": ["a_id"], "refTableName": "a", "refColumns": []},
+            id="no-columns",
+        ),
+    ],
+)
+def test_column_level_references_is_a_foreign_key(column: str, expected: dict) -> None:
+    [t] = parse_ddl(f"CREATE TABLE b (id int, {column});\n", "schema_pg.sql")["tables"]
+    [fk] = [c for c in t["constraints"] if c["constraintType"] == "FOREIGN_KEY"]
+    assert {k: fk.get(k) for k in expected} == expected
+    assert [c["name"] for c in t["columns"] if c["isForeignKey"]] == ["a_id"]
+
+
+def test_mysql_column_level_references_is_not_a_foreign_key() -> None:
+    # MySQL parses a column-level REFERENCES but creates no constraint for it.
+    [t] = parse_ddl("CREATE TABLE b (`a_id` INT REFERENCES a (id));\n", "schema_mysql.sql")["tables"]
+    assert t["constraints"] == []
+
+
+@pytest.mark.parametrize("options", ["WITHOUT ROWID", "STRICT", "WITHOUT ROWID, STRICT"])
+def test_sqlite_table_options_keep_the_table(options: str) -> None:
+    text = f"CREATE TABLE books (id INTEGER PRIMARY KEY, title TEXT NOT NULL) {options};\nCREATE TABLE t (a INTEGER);\n"
+    r = parse_ddl(text, "schema_sqlite.sql")
+    assert [t["name"] for t in r["tables"]] == ["books", "t"]
+    assert [c["name"] for c in r["tables"][0]["columns"]] == ["id", "title"]
+
+
+def test_create_the_parser_does_not_understand_is_counted_as_failed() -> None:
+    # sqlglot degrades this CREATE TABLE to a bare Command; it used to count as success.
+    r = parse_ddl("CREATE TABLE t (a int) INHERITS (p) TABLESPACE x;\nCREATE TABLE u (a int);\n", "schema_pg.sql")
+    assert [t["name"] for t in r["tables"]] == ["u"]
+    assert (r["parseStats"]["ok"], r["parseStats"]["failed"]) == (1, 1)
+    assert r["parseStats"]["sampleErrors"][0].startswith("CREATE TABLE not understood")

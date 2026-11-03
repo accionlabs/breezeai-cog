@@ -217,8 +217,15 @@ def _column(col: exp.ColumnDef, ordinal: int, dialect: str) -> dict[str, Any]:
 
 
 def _foreign_key(fk: exp.ForeignKey, table_name: str, cname: str | None = None) -> dict[str, Any]:
-    cols = [i.name for i in fk.expressions]
-    ref = fk.args.get("reference")
+    return _reference_record(fk.args.get("reference"), [i.name for i in fk.expressions], table_name, cname)
+
+
+def _reference_record(
+    ref: exp.Expression | None, cols: list[str], table_name: str, cname: str | None
+) -> dict[str, Any]:
+    """FOREIGN_KEY record for ``cols`` referencing ``ref`` (a ``REFERENCES t [(c, …)]``).
+    A reference that names no columns targets the referenced table's primary key, which is
+    not known here, so ``refColumns`` stays empty."""
     ref_table = ref_schema = None
     ref_cols: list[str] = []
     if isinstance(ref, exp.Reference):
@@ -288,6 +295,13 @@ def _table(create: exp.Create, dialect: str) -> dict[str, Any]:
         if isinstance(d, exp.ColumnDef):
             ordinal += 1
             columns.append(_column(d, ordinal, dialect))
+            # A column-level ``REFERENCES t (c)`` is a foreign key on that column. MySQL and
+            # MariaDB parse it but create no constraint (only the table-level FOREIGN KEY
+            # form does), so there it is not one.
+            if dialect not in ("mysql", "mariadb"):
+                for cc in d.args.get("constraints") or []:
+                    if isinstance(cc, exp.ColumnConstraint) and isinstance(cc.kind, exp.Reference):
+                        constraints.append(_reference_record(cc.kind, [d.name], name, cc.name or None))
             continue
         cname = d.name if isinstance(d, exp.Constraint) and d.name else None
         rec = _extract_constraint(d, name, cname)
@@ -348,6 +362,19 @@ def _view(create: exp.Create, dialect: str, raw: str) -> dict[str, Any]:
 
 
 _TRAILING_TERMINATOR = re.compile(r"\s*;\s*$")
+
+
+# SQLite table options after the column list: ``WITHOUT ROWID`` and/or ``STRICT``.
+_SQLITE_WITHOUT_ROWID = re.compile(
+    r"(\))(\s*(?:WITHOUT\s+ROWID|STRICT)(?:\s*,\s*(?:WITHOUT\s+ROWID|STRICT))*)(?=\s*(?:;|$))", re.IGNORECASE
+)
+# A CREATE of an object we capture: sqlglot returning a bare Command for one means it was not
+# understood, and the object would vanish without a trace unless it is counted as failed.
+_CAPTURED_CREATE = re.compile(
+    r"^CREATE\s+(?:OR\s+REPLACE\s+)?(?:(?:TEMP|TEMPORARY|UNLOGGED|UNIQUE|MATERIALIZED)\s+)*"
+    r"(TABLE|VIEW|INDEX)\b",
+    re.IGNORECASE,
+)
 
 
 def _raw_statement(stmt: str) -> str:
@@ -887,6 +914,11 @@ def parse_ddl(text: str, filepath: str | None = None) -> dict[str, Any]:
         return {"dialect": dialect, **_parse_oracle_ddl(_strip_sqlplus(text))}
 
     read = _SQLGLOT.get(dialect, "postgres")
+    if dialect == "sqlite":
+        # sqlglot degrades a CREATE TABLE ending in ``WITHOUT ROWID`` to a bare Command. The
+        # table options are storage/typing modes, not captured, so blank them in place (same
+        # length, so every later slice of ``text`` keeps its offsets).
+        text = _SQLITE_WITHOUT_ROWID.sub(lambda m: m.group(1) + " " * len(m.group(2)), text)
 
     procedures: list[dict[str, Any]] = []
     sequences: list[dict[str, Any]] = []
@@ -921,6 +953,11 @@ def parse_ddl(text: str, filepath: str | None = None) -> dict[str, Any]:
             continue
         if stmt is None:
             failed += 1
+            continue
+        if isinstance(stmt, exp.Command) and (cm := _CAPTURED_CREATE.match(_raw_statement(raw))):
+            failed += 1
+            if len(sample_errors) < 5:
+                sample_errors.append(f"CREATE {cm.group(1).upper()} not understood: {_raw_statement(raw)[:80]}")
             continue
         try:
             if isinstance(stmt, exp.Create):
@@ -1038,7 +1075,8 @@ _TSQL_PROG_FULL = re.compile(
     re.IGNORECASE | re.DOTALL,
 )
 _TSQL_SEQ = re.compile(
-    r"^\s*CREATE\s+SEQUENCE\s+(?:(" + _TSQL_ID + r")\.)?(" + _TSQL_ID + r")\b(.*)",
+    # ``(?![\w@#$])``, not ``\b``: after a ``[bracketed]`` name there is no word boundary.
+    r"^\s*CREATE\s+SEQUENCE\s+(?:(" + _TSQL_ID + r")\.)?(" + _TSQL_ID + r")(?![\w@#$])(.*)",
     re.IGNORECASE | re.DOTALL,
 )
 # User-defined TABLE type (TVP schema): CREATE TYPE [s].[n] AS TABLE ( col defs… ). Captures
