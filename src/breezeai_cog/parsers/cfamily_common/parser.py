@@ -35,7 +35,7 @@ from ...emit import file_id
 from ...schemas import SCHEMA_VERSION, FileRecord, Function, Statement
 from ...utils import count_loc
 from ..base import BaseParser, ParseContext
-from ..treesitter import node_text, parse_source
+from ..treesitter import node_text
 from .classes import (
     _CLASS_TYPES,
     TYPE_ALIAS_TYPES,
@@ -43,6 +43,7 @@ from .classes import (
     _unwrap_template,
     build_class,
     build_enum,
+    parse_cfamily,
     type_alias_statement,
     typedef_type,
 )
@@ -100,7 +101,7 @@ class CFamilyParser(BaseParser):
     build_index_accepts_timeout = True
 
     def parse_file(self, ctx: ParseContext) -> FileRecord:
-        root = parse_source(self.grammar, ctx.source, ctx.parse_timeout_micros).root_node
+        root = parse_cfamily(self.grammar, ctx.source, ctx.parse_timeout_micros)
         return self.extract(root, ctx)
 
     def callable_in(self, related: CFamilyIndex) -> dict[str, str | None]:

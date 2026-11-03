@@ -206,6 +206,84 @@ def test_member_with_a_broken_declarator_is_skipped(tmp_path) -> None:
     assert {f.name for f in rec.functions} == {"ok"}
 
 
+def test_class_with_an_export_macro_before_its_name_is_captured(tmp_path) -> None:
+    # `class API Model : public Base { … }`: the grammar takes the macro for the class name and
+    # reads the class as a function. The macro is blanked and the file read again, so the
+    # class comes out whole: name, bases, members and lines.
+    src = (
+        b"namespace ns {\n"
+        b"class API Model : public Base {\n"
+        b"public:\n"
+        b"    Model(int n);\n"
+        b"    int size() const;\n"
+        b"private:\n"
+        b"    int n_;\n"
+        b"};\n"
+        b"struct API Tensor { int rank; };\n"
+        b"class API Final final : public A, private B { void run(); };\n"
+        b"}\n"
+    )
+    rec = _parse_src(tmp_path, src, "m.hpp", capture=True)
+    classes = {c.name: c for c in rec.classes}
+    assert set(classes) == {"Model", "Tensor", "Final"}
+    assert classes["Model"].extends == "Base" and classes["Model"].type == "class"
+    assert (classes["Model"].startLine, classes["Model"].endLine) == (2, 8)
+    assert classes["Tensor"].type == "struct"
+    assert classes["Final"].extends == "A" and classes["Final"].implements == ["B"]
+    fns = {f.name: f for f in rec.functions}
+    assert fns["Model"].type == "constructor" and [p.name for p in fns["Model"].params] == ["n"]
+    assert fns["size"].visibility == "public" and fns["size"].returnType == "int"
+    assert {s.name for s in rec.statements if s.nodeType == "field_declaration"} == {"n_", "rank"}
+
+
+def test_word_before_a_name_that_is_not_a_hidden_class_is_left_alone(tmp_path) -> None:
+    # Only a class head the grammar misread is read again: a brace-initialized variable, a
+    # forward declaration, a member defined out of class and text in a comment or a string
+    # stay as they are.
+    src = (
+        b"struct Point p{1, 2};\n"
+        b"class API Fwd;\n"
+        b"struct stat Holder::st_ = {};\n"
+        b"// class API InComment { };\n"
+        b'const char *s = "class API InString {";\n'
+        b"class Clean final { int c(); };\n"
+    )
+    rec = _parse_src(tmp_path, src, "w.cpp", capture=True)
+    assert [c.name for c in rec.classes] == ["Clean"]
+    assert {"p", "Fwd", "st_", "s"} <= {s.name for s in rec.statements if s.nodeType == "declaration"}
+
+
+def test_class_that_still_breaks_without_its_export_macro_is_not_read_again(tmp_path) -> None:
+    # `Bad`'s body has another macro the grammar can't place (`MY_OP(…)` with no `;`), so even
+    # without `API` its head lands in an error and its methods would read as free functions.
+    # Its macro is kept: `Bad` stays uncaptured, and `Good` in the same file is still read.
+    src = (
+        b"class API Good : public B { public: int ok(); };\n"
+        b"class API Bad : public B {\n"
+        b"public:\n"
+        b'    MY_OP("Bad", "", ns::B)\n'
+        b"    Bad() = default;\n"
+        b"    int get() const { return 1; }\n"
+        b"};\n"
+    )
+    rec = _parse_src(tmp_path, src, "g.cpp")
+    assert [c.name for c in rec.classes] == ["Good"]
+    assert {f.name for f in rec.functions} == {"ok"}
+
+
+def test_inherited_call_in_a_class_with_an_export_macro_resolves(tmp_path) -> None:
+    # The index reads the class the same way, so its base class is known and a call to an
+    # inherited method resolves.
+    (tmp_path / "base.h").write_bytes(b"class Base { public: int Shared(); };\n")
+    (tmp_path / "base.cpp").write_bytes(b'#include "base.h"\nint Base::Shared() { return 1; }\n')
+    (tmp_path / "derived.h").write_bytes(
+        b'#include "base.h"\nclass API Derived : public Base { int Run(); };\n')
+    (tmp_path / "derived.cpp").write_bytes(
+        b'#include "derived.h"\nint Derived::Run() { return Shared(); }\n')
+    rec = _parse_with_index(tmp_path, "derived.cpp")
+    assert next(c for c in _fn(rec, "Run").calls if c.name == "Shared").path == "base.cpp"
+
+
 def test_unresolved_local_include_is_external(tmp_path) -> None:
     # A local include with no matching repo file resolves to nothing (external), never a
     # fabricated in-repo path.

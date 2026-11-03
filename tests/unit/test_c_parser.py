@@ -855,3 +855,11 @@ def test_a_lambda_or_loop_variable_call_is_not_linked_in_cpp(tmp_path) -> None:
         },
     )
     assert _calls(_capture(repo, 1)["main.cpp"], "main") == {"each": None, "step": None}
+
+
+def test_struct_with_a_macro_before_its_name_is_captured(tmp_path) -> None:
+    # `struct API Tensor { … };` reads as a function named `Tensor` until the macro is
+    # blanked and the file read again.
+    rec = _parse(CParser(), tmp_path, "t.c", "struct API Tensor { int rank; };\nunion API U { int a; };\n")
+    assert {c.name: c.type for c in rec.classes} == {"Tensor": "struct", "U": "union"}
+    assert "rank" in {s.name for s in rec.statements}

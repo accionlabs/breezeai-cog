@@ -12,13 +12,15 @@ and ``private`` in a class, updated by ``access_specifier`` labels in the body."
 
 from __future__ import annotations
 
+import re
+
 from tree_sitter import Node
 
 from ...emit import class_id, disambiguate
 from ...schemas import Class, ClassType, ConstructorParam, Function, Statement
 from ..callresolve import CallResolver, noop_resolver
 from ..statements_common import emit_enum_members, member_statement
-from ..treesitter import line_span, node_text
+from ..treesitter import line_span, node_text, parse_source
 from .functions import (
     build_member_function,
     extract_params,
@@ -67,6 +69,83 @@ def _defines(spec: Node) -> bool:
 #: ``field_declaration``; a constructor/destructor (no return type) is a ``declaration``;
 #: an inline definition (or ``= default``) is a ``function_definition``.
 _MEMBER_FN_TYPES = ("field_declaration", "function_definition", "declaration")
+
+#: ``class WORD Name [final] :`` or ``{`` — a word between the class keyword and the class
+#: name. Only a candidate: the tree decides (:func:`_class_macro_words`).
+_CLASS_HEAD_WITH_WORD = re.compile(
+    rb"\b(?:class|struct|union)\s+([A-Za-z_]\w*)\s+([A-Za-z_]\w*)\s*(?:final\s*)?(?::(?!:)|\{)"
+)
+_SPECIFIERS = ("class_specifier", "struct_specifier", "union_specifier")
+
+#: A macro's byte span and the class name's byte span after it.
+_MacroWord = tuple[tuple[int, int], tuple[int, int]]
+
+
+def _class_macro_words(root: Node, source: bytes) -> list[_MacroWord]:
+    """Macros written between ``class`` and the class name: ``class OPENVINO_API GatherMatmul
+    : public Op { … }``. In C++ only an attribute can sit there, and ``alignas`` / ``[[…]]``
+    parse; a bare word is an export macro the grammar can't expand. It takes the macro for the
+    class name and reads the class as a function or a broken declaration, so the class is lost.
+    A word counts only when the grammar did misread it that way: the name of a head with no
+    body, whose declaration is a function definition or has an error — a clean ``struct Point
+    p{1, 2};`` is a variable."""
+    words = []
+    for m in _CLASS_HEAD_WITH_WORD.finditer(source):
+        word = root.descendant_for_byte_range(m.start(1), m.end(1))
+        head = word.parent if word is not None else None
+        if (
+            word is None or head is None or word.type != "type_identifier"
+            or word.start_byte != m.start(1) or word.end_byte != m.end(1)
+            or head.type not in _SPECIFIERS or head.child_by_field_name("body") is not None
+        ):
+            continue
+        owner = head.parent
+        if owner is not None and (owner.type == "function_definition" or owner.has_error):
+            words.append(((m.start(1), m.end(1)), (m.start(2), m.end(2))))
+    return words
+
+
+def _reads_as_class(root: Node, name_span: tuple[int, int]) -> bool:
+    """Whether the name at ``name_span`` heads a class with a body, outside any error — the
+    class parsed whole once its macro was blanked."""
+    name = root.descendant_for_byte_range(*name_span)
+    head = name.parent if name is not None else None
+    if (
+        name is None or head is None or name.type != "type_identifier"
+        or (name.start_byte, name.end_byte) != name_span
+        or head.type not in _SPECIFIERS or head.child_by_field_name("body") is None
+    ):
+        return False
+    node: Node | None = head
+    while node is not None:
+        if node.type == "ERROR":
+            return False
+        node = node.parent
+    return True
+
+
+def parse_cfamily(grammar: str, source: bytes, timeout_micros: int) -> Node:
+    """Parse a C-family file. When a macro between ``class`` and the class name hid a class
+    (:func:`_class_macro_words`), the file is parsed once more with that word blanked to
+    spaces: the class then reads as written without the macro, at the same byte offsets and
+    lines, so names and text are still read from the original ``source``. A class that still
+    doesn't parse whole without its macro (another macro breaks its body) keeps the macro, and
+    stays as uncaptured as before."""
+    root = parse_source(grammar, source, timeout_micros).root_node
+    words = _class_macro_words(root, source)
+    for _ in range(2):  # blank all; if some class still breaks, blank only the others once
+        if not words:
+            return root
+        blanked = bytearray(source)
+        for (start, end), _name in words:
+            blanked[start:end] = b" " * (end - start)
+        reparsed = parse_source(grammar, bytes(blanked), timeout_micros).root_node
+        whole = [w for w in words if _reads_as_class(reparsed, w[1])]
+        if whole == words:
+            return reparsed
+        words = whole
+    return root
+
 
 def typedef_type(node: Node, source: bytes) -> tuple[Node, str, str | None] | None:
     """``typedef struct [tag] { … } name;`` (also ``union`` / ``enum``) → the specifier, the

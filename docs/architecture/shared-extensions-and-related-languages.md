@@ -473,9 +473,24 @@ C++.
 > before the parameter list — in C, the word before a function's `(` is its name. The parser
 > and the index read both the same way, so calls to these functions resolve. A C++ class member
 > is read past a macro in front of its type by the same rule (`ESIMD_INLINE int row(int g)
-> const`, `API static Model *load(…)`); any other broken member is still skipped. A macro
-> between `class` and the class name (`class API Model { … }`) is not read past: the grammar
-> parses the whole class as a function, so the class and its members are not captured.
+> const`, `API static Model *load(…)`); any other broken member is still skipped.
+
+> **Decision —** a macro between `class` / `struct` / `union` and the class name (`class
+> OPENVINO_API GatherMatmul : public Op { … }`) is blanked and the file is parsed a second
+> time, so the class is read as if the macro weren't written. The word is blanked only where
+> the grammar misread the class because of it: the head has no body and sits in a function
+> definition or a broken declaration. The blank keeps the same length, so lines and byte offsets
+> don't move, and names and text are still read from the original source. A class that still
+> doesn't parse whole without the macro — another macro in its body breaks it — keeps the macro
+> and stays uncaptured: read again, its head would sit in an error and its methods would read
+> as free functions. The index parses the file the same way.
+> **Why:** export macros (`OPENVINO_API`, Qt's `Q_CORE_EXPORT`, Chromium's `BASE_EXPORT`)
+> sit there in most public headers of a C++ library. In C++ only an attribute can stand between
+> `class` and the name, and attributes parse, so a bare word there is always such a macro. The
+> grammar takes it for the class name and reads the class body as a function body
+> (constructors as calls, `public:` as a label), which nothing can be recovered from safely;
+> without the macro it is an ordinary class. **Cost:** such a file is parsed twice. The macro's
+> name is not captured.
 > **Why:** export, inline and attribute macros sit in front of most public C functions (redis,
 > lua, curl, zlib, llama.cpp); skipping them dropped thousands of functions and every call to
 > them. In both shapes the name and parameters come from clean syntax. **Cost:** `returnType`

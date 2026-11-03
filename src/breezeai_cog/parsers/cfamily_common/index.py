@@ -43,8 +43,8 @@ from ...utils import repo_relative
 from ..additive import collect_fact_sources, facts_for, split_fact_sources
 from ..callresolve import CallResolver
 from ..index_common import ClassHeritage, parallel_map, record_distinct, walk_heritage
-from ..treesitter import node_text, parse_source
-from .classes import _CLASS_TYPES, _heritage, _unwrap_template
+from ..treesitter import node_text
+from .classes import _CLASS_TYPES, _heritage, _unwrap_template, parse_cfamily
 from .functions import (
     function_declarator_of, has_declaration_error, is_declared_static, read_declaration,
     read_member,
@@ -280,7 +280,7 @@ def _index_one(
     except OSError:
         return None
     try:
-        root = parse_source(grammar, source, timeout_micros).root_node
+        root = parse_cfamily(grammar, source, timeout_micros)
         frag = CFamilyIndex(includes={rel: tuple(include_targets(source))})
         _index_scope(frag, root, source, rel)
         if collect is not None:
