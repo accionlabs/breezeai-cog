@@ -863,3 +863,19 @@ def test_struct_with_a_macro_before_its_name_is_captured(tmp_path) -> None:
     rec = _parse(CParser(), tmp_path, "t.c", "struct API Tensor { int rank; };\nunion API U { int a; };\n")
     assert {c.name: c.type for c in rec.classes} == {"Tensor": "struct", "U": "union"}
     assert "rank" in {s.name for s in rec.statements}
+
+
+def test_a_prototype_wrapped_in_a_parameter_macro_is_not_named_after_it(tmp_path) -> None:
+    # Old-style headers wrap the parameter list in a macro: `int f OF((int a));`. With unnamed
+    # parameters it reads as a function named `OF` whose one parameter has no type. Skipped:
+    # no statement named after the macro, and no decorator taken from the real name.
+    record = _parse(
+        CParser(), tmp_path, "of.h",
+        "local int gz_init OF((gz_statep));\n"
+        "long call_seek OF((const def *p, int o));\n"
+        "typedef voidpf (ZCALLBACK *open_func) OF((voidpf opaque, int mode));\n"
+        "int kept(int a);\n",
+    )
+    assert [s.name for s in record.statements if s.nodeType == "declaration"] == ["kept"]
+    # The typedef stays a statement (its text is the API), without a name taken from `OF`.
+    assert [s.name for s in record.statements if s.nodeType == "type_definition"] == [None]

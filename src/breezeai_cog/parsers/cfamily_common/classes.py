@@ -26,6 +26,7 @@ from .functions import (
     extract_params,
     function_declarator_of,
     is_function_pointer,
+    is_macro_call_declarator,
     read_member,
 )
 from .mappings import MACRO_TYPES
@@ -233,10 +234,13 @@ def type_alias_statement(
 
     Only these two node types are aliases: ``using namespace std;`` and ``using std::swap;``
     are a ``using_declaration`` (an import, not a declaration) and never reach here."""
+    declarator = node.child_by_field_name("declarator")
     name = (
         _declarator_name(node.child_by_field_name("name"), source)
         if node.type == "alias_declaration"
-        else _declarator_name(node.child_by_field_name("declarator"), source)
+        # `typedef voidpf (*open_func) OF((voidpf opaque));` would be named after the macro.
+        else None if is_macro_call_declarator(declarator)
+        else _declarator_name(declarator, source)
     )
     return member_statement(
         node, source, path, parent_id=parent_id, limit=limit, seen_ids=seen_ids, name=name

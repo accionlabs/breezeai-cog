@@ -395,10 +395,25 @@ def read_declaration(node: Node, source: bytes) -> DeclarationRead | None:
     if node.type == "function_definition" and is_macro_row(node, source):
         return None
     declarator = node.child_by_field_name("declarator")
+    if is_macro_call_declarator(declarator):
+        return None
     if _broken_spot(declarator) is None:
         return DeclarationRead(return_type_known=not prefixed)
     name = _renamed_by_macro(declarator, source)
     return DeclarationRead(name=name, return_type_known=False) if name is not None else None
+
+
+def is_macro_call_declarator(declarator: Node | None) -> bool:
+    """Whether a "function" is a macro call around the real one: zlib's ``local int gz_init
+    OF((gz_statep));`` reads as a function named ``OF`` whose one parameter has no type — the
+    grammar inserts a missing one, which a real parameter list never needs."""
+    fd = function_declarator_of(declarator)
+    params = fd.child_by_field_name("parameters") if fd is not None else None
+    return params is not None and any(
+        p.type == "parameter_declaration"
+        and (t := p.child_by_field_name("type")) is not None and t.is_missing
+        for p in params.named_children
+    )
 
 
 def read_member(member: Node) -> DeclarationRead | None:

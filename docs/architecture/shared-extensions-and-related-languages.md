@@ -459,7 +459,10 @@ C++.
 > `unsigned long` (a type name can't follow `unsigned` / `long` in C, so `ZEXPORT` is a macro);
 > a declaration or definition with an error on the way to its name is skipped (`int f
 > OF((int a, int b));` would be named `b`, `voidpf ZLIB_INTERNAL zcalloc(…)` would be a
-> function named `ZLIB_INTERNAL`); and a row of macro calls the grammar reads as one function
+> function named `ZLIB_INTERNAL`); a declaration whose parameter list has a parameter with no
+> type is a macro call around the real one and is skipped (`local int gz_init OF((gz_statep));`
+> reads as a function named `OF`; a typedef written that way keeps its statement, without a
+> name); and a row of macro calls the grammar reads as one function
 > named after the macro (`GEN(a) GEN(b)` followed by a function) is not emitted. An error in an
 > initializer, in a parameter list or after an initialized variable's name leaves the name
 > intact. **Cost:** calls into macros have no `CALLS` edge; a function whose name the grammar
