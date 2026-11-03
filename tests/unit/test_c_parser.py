@@ -509,21 +509,19 @@ def test_a_declaration_with_a_broken_declarator_is_not_named_after_a_parameter(t
         CParser(), tmp_path, "zlib.h",
         "int deflate OF((int strm, int flush));\n"
         "int deflateEnd(int strm);\n"
-        # A macro before a typedef'd return type: the grammar names it after the type.
+        # A type before the name, with a macro in front: the name is the word before `(`.
         "API_FUNC size_type table_len(table *t);\n"
         # An error in the initializer or after the name leaves the name intact.
         "struct item items[] = {\n  {1},\n#ifdef EXTRA\n  {2},\n#endif\n};\n"
         "oid_t mech_oid ALIGN8 = { 9, 0 };\n",
     )
     assert [s.name for s in record.statements if s.nodeType == "declaration"] == [
-        "deflateEnd", "items", "mech_oid",
+        "deflateEnd", "table_len", "items", "mech_oid",
     ]
 
 
 @pytest.mark.parametrize("parser", [CParser(), CppParser()], ids=["c", "cpp"])
-def test_a_function_is_never_named_after_a_macro_before_its_name(tmp_path, parser) -> None:
-    # `INTERNAL` sits between the return type and the name: the grammar names the function
-    # `INTERNAL` and puts the real name in an error. Neither name is emitted.
+def test_a_function_named_after_a_macro_before_its_name_gets_its_real_name(tmp_path, parser) -> None:
     record = _parse(
         parser,
         tmp_path,
@@ -533,7 +531,64 @@ def test_a_function_is_never_named_after_a_macro_before_its_name(tmp_path, parse
         # A macro between `*` and the name leaves the name intact.
         "const char * EXPORT version(void) { return 0; }\n",
     )
-    assert [f.name for f in record.functions] == ["plain", "version"]
+    # `zalloc`: the grammar reads `INTERNAL` as the name, and the word right before `(` — the
+    # real name — is recovered from the error; `returnType` is then unknown.
+    assert [(f.name, f.returnType) for f in record.functions] == [
+        ("zalloc", None), ("plain", "int"), ("version", "char"),
+    ]
+
+
+@pytest.mark.parametrize("parser", [CParser(), CppParser()], ids=["c", "cpp"])
+def test_a_macro_in_front_of_the_type_keeps_the_declaration(tmp_path, parser) -> None:
+    # `API` is a macro the grammar takes for the type; the real type lands in an error.
+    record = _parse(
+        parser,
+        tmp_path,
+        "api.c" if parser.name == "c" else "api.cpp",
+        "API int size_of(list *l) { return 0; }\n"
+        "API node *first(list *l) { return 0; }\n"
+        "static INLINE int fast(int x) { return x; }\n"
+        "API_FUNC size_type table_len(table *t);\n"
+        "API void reset(list *l);\n"
+        "static ATOMIC int counter = 0;\n"
+        # Two declarators (a calling convention before the name): no name to show, skipped.
+        "IMPORT errno_t __cdecl reopen(FILE **f);\n"
+        "int use(list *l) { return size_of(l) + fast(1); }\n",
+    )
+    assert [
+        (f.name, f.returnType, f.isStatic, [p.name for p in f.params]) for f in record.functions
+    ] == [
+        ("size_of", None, None, ["l"]),
+        ("first", None, None, ["l"]),
+        ("fast", None, True, ["x"]),
+        ("use", "int", None, ["l"]),
+    ]
+    assert [(c.name, c.path) for c in record.functions[-1].calls] == [
+        ("size_of", record.path), ("fast", record.path),
+    ]
+    assert [s.name for s in record.statements if s.nodeType == "declaration"] == [
+        "table_len", "reset", "counter",
+    ]
+
+
+@pytest.mark.parametrize("jobs", [1, 2])
+def test_a_macro_prefixed_function_is_a_call_target_in_other_files(tmp_path, jobs) -> None:
+    repo = _repo(
+        tmp_path / "r",
+        {
+            "lib/api.h": "API int size_of(list *l);\nAPI_FUNC size_type table_len(table *t);\n",
+            "lib/api.c": (
+                '#include "api.h"\n'
+                "API int size_of(list *l) { return 0; }\n"
+                "API_FUNC size_type table_len(table *t) { return 0; }\n"
+            ),
+            "app/main.c": (
+                '#include "api.h"\nint main(void) { return size_of(0) + table_len(0); }\n'
+            ),
+        },
+    )
+    main = _capture(repo, jobs)["app/main.c"]
+    assert _calls(main, "main") == {"size_of": "lib/api.c", "table_len": "lib/api.c"}
 
 
 @pytest.mark.parametrize("jobs", [1, 2])

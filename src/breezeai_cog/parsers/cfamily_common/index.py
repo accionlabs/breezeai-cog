@@ -46,7 +46,7 @@ from ..index_common import ClassHeritage, parallel_map, record_distinct, walk_he
 from ..treesitter import node_text, parse_source
 from .classes import _CLASS_TYPES, _heritage, _unwrap_template
 from .functions import (
-    function_declarator_of, has_declaration_error, is_declared_static, is_misnamed_definition,
+    function_declarator_of, has_declaration_error, is_declared_static, read_declaration,
 )
 from .imports import FamilyHeaders, HeaderIndex, build_header_index, include_targets
 from .mappings import HEADER_EXTENSIONS, TRANSPARENT_SCOPES
@@ -134,7 +134,7 @@ def _file_local(node: Node, source: bytes, rel: str) -> bool:
 
 def _record_def(
     frag: CFamilyIndex, node: Node, source: bytes, rel: str, class_name: str | None,
-    c_linkage: bool = False,
+    c_linkage: bool = False, name: str | None = None,
 ) -> None:
     """Record one function/method **definition** into a per-file fragment.
 
@@ -150,7 +150,7 @@ def _record_def(
     if inner is None:
         return
     if inner.type == "identifier":
-        name = node_text(inner, source)
+        name = name or node_text(inner, source)  # `name`: one a macro moved (read_declaration)
         if class_name is not None:  # inline member definition
             _record_qual(frag, class_name, name, rel)
         elif name and _file_local(node, source, rel):
@@ -250,6 +250,12 @@ def _index_scope(
             _index_scope(frag, node, source, rel, ns, c_linkage or _is_extern_c(node, source))
         elif node.type in TRANSPARENT_SCOPES:
             _index_scope(frag, node, source, rel, ns, c_linkage)
+        elif node.type == "declaration":
+            continue  # a prototype or variable: nothing to index
+        elif node.type == "function_definition":
+            read = read_declaration(node, source)
+            if read is not None:
+                _record_def(frag, node, source, rel, None, c_linkage, name=read.name)
         elif has_declaration_error(node):
             continue
         elif node.type == "namespace_definition":
@@ -258,8 +264,6 @@ def _index_scope(
                 _index_scope(frag, body, source, rel, _join_ns(ns, _ns_name(node, source)))
         elif node.type in _CLASS_TYPES:
             _index_class(frag, node, source, rel, ns)
-        elif node.type == "function_definition" and not is_misnamed_definition(node, source):
-            _record_def(frag, node, source, rel, None, c_linkage)
 
 
 def _index_one(

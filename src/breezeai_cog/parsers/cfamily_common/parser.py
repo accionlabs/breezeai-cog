@@ -48,11 +48,11 @@ from .classes import (
 )
 from .functions import (
     build_function,
-    declarator_name_is_broken,
+    DeclarationRead,
     defined_names,
     function_declarator_of,
     has_declaration_error,
-    is_misnamed_definition,
+    read_declaration,
     is_misread_declarator,
 )
 from .imports import FamilyHeaders, extract_imports
@@ -65,6 +65,10 @@ from .statements import macro_statement
 from .mappings import (
     COMMENT_TYPES, CONTROL_FLOW, FRAMEWORKS, MACRO_TYPES, STATEMENT_TYPES, TRANSPARENT_SCOPES,
 )
+
+
+#: File-scope nodes that ``read_declaration`` decides on.
+_DECLARATIONS = ("declaration", "function_definition")
 
 
 def _is_include_guard(node: Node, source: bytes) -> bool:
@@ -131,9 +135,17 @@ class CFamilyParser(BaseParser):
         def process(scope: Node, ns: str = "") -> None:
             for child in scope.named_children:
                 node = _unwrap_template(child)
+                read = DeclarationRead()
+                if node.type in _DECLARATIONS:
+                    # A declaration or definition is read past a macro where that is safe
+                    # (`read_declaration`); one whose name can't be trusted is skipped.
+                    maybe_read = read_declaration(node, source)
+                    if maybe_read is None:
+                        continue
+                    read = maybe_read
                 if node.type in TRANSPARENT_SCOPES:
                     process(node, ns)  # include guard / preproc conditional / extern "C" — recurse
-                elif has_declaration_error(node):
+                elif node.type not in _DECLARATIONS and has_declaration_error(node):
                     continue  # corrupt header — skip rather than emit fabricated data
                 elif node.type == "namespace_definition":
                     body = node.child_by_field_name("body")
@@ -158,8 +170,7 @@ class CFamilyParser(BaseParser):
                         classes.append(enum_cls)
                         statements.extend(enum_stmts)
                 elif node.type == "function_definition":
-                    if not is_misnamed_definition(node, source):
-                        _emit_function(node, ns)
+                    _emit_function(node, ns, read)
                 elif node.type in MACRO_TYPES and capture and not _is_include_guard(node, source):
                     statements.append(
                         macro_statement(
@@ -213,20 +224,21 @@ class CFamilyParser(BaseParser):
                     # to the file, matching how `process` already flattens namespaces. A
                     # declarator the grammar misread (a macro taken for the type) is skipped.
                     # So is one with an error on the way to its name: zlib's `int f OF((int a,
-                    # int b));` reads as a variable named after the last parameter.
+                    # int b));` reads as a variable named after the last parameter. One read
+                    # past a macro (`read_declaration`) is kept only with a name to show.
                     declarator = node.child_by_field_name("declarator")
-                    if (
-                        not declarator_name_is_broken(declarator)
-                        and not is_misread_declarator(declarator)
+                    name = read.name or _declarator_name(declarator, source)
+                    if not is_misread_declarator(declarator) and (
+                        name is not None or read.return_type_known
                     ):
                         statements.append(
                             member_statement(
                                 node, source, path, parent_id=fid, limit=limit, seen_ids=seen_ids,
-                                name=_declarator_name(declarator, source),
+                                name=name,
                             )
                         )
 
-        def _emit_function(node: Node, ns: str) -> None:
+        def _emit_function(node: Node, ns: str, read: DeclarationRead) -> None:
             fd = function_declarator_of(node.child_by_field_name("declarator"))
             inner = fd.child_by_field_name("declarator") if fd is not None else None
             if inner is None:
@@ -242,12 +254,13 @@ class CFamilyParser(BaseParser):
                 fn, fn_stmts = build_function(
                     node, source, path,
                     parent_id=cid or fid, seen_ids=seen_ids, capture=capture, limit=limit,
-                    resolve=resolve, class_name=class_simple, kind="method",
+                    resolve=resolve, class_name=class_simple, kind="method", read=read,
                 )
             else:
                 fn, fn_stmts = build_function(
                     node, source, path,
                     parent_id=fid, seen_ids=seen_ids, capture=capture, limit=limit, resolve=resolve,
+                    read=read,
                 )
             if not fn.name:
                 return  # nameless (unparseable declarator) — skip

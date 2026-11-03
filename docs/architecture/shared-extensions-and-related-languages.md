@@ -465,6 +465,19 @@ C++.
 > intact. **Cost:** calls into macros have no `CALLS` edge; a function whose name the grammar
 > lost is not captured.
 
+> **Decision —** a declaration or definition with a macro in front is read past the macro in
+> two shapes, and in no others: a macro in front of the type (`LUA_API int lua_gettop(…)`, read
+> as the type `LUA_API` with `int` in an error) when the error is bare words between the type
+> and a clean declarator; and a macro or type in front of the name (`LUALIB_API lua_Integer
+> luaL_len(…)`, read as a function named `lua_Integer`) when the error is the one word right
+> before the parameter list — in C, the word before a function's `(` is its name. The parser
+> and the index read both the same way, so calls to these functions resolve.
+> **Why:** export, inline and attribute macros sit in front of most public C functions (redis,
+> lua, curl, zlib, llama.cpp); skipping them dropped thousands of functions and every call to
+> them. In both shapes the name and parameters come from clean syntax. **Cost:** `returnType`
+> is empty for them: `LUA_API int` and `uLong ZEXPORT` parse the same way, so which word is the
+> type can't be told.
+
 > **Decision —** a call links to a function defined in a header only when the calling file can
 > see that header: the file includes it, directly or through other includes, or — for a call
 > written in a header — every file that includes that header can see it. An include is looked

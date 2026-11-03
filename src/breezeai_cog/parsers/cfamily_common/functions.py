@@ -19,6 +19,8 @@ The grammar shapes this parser relies on (discovered empirically):
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 from collections.abc import Set as AbstractSet
 
 from tree_sitter import Node
@@ -266,17 +268,16 @@ def _defs_in(node: Node, source: bytes, names: set[str]) -> None:
                 _defs_in(body, source, names)
         elif c.type == "template_declaration" or c.type in TRANSPARENT_SCOPES:
             _defs_in(c, source, names)  # include guard, #if, extern "C" { … }
-        elif (
-            c.type == "function_definition" and not has_declaration_error(c)
-            and not is_misnamed_definition(c, source)
-        ):
+        elif c.type == "function_definition" and (read := read_declaration(c, source)):
             fd = function_declarator_of(c.child_by_field_name("declarator"))
             if fd is None:
                 continue
             inner = fd.child_by_field_name("declarator")
             if inner is None:
                 continue
-            if inner.type == "identifier":
+            if read.name is not None:
+                names.add(read.name)
+            elif inner.type == "identifier":
                 names.add(node_text(inner, source))
             elif inner.type == "qualified_identifier":
                 nm = inner.child_by_field_name("name")
@@ -295,9 +296,10 @@ def defined_names(root: Node, source: bytes) -> set[str]:
 _DECLARED_NAME_NODES = ("field_identifier", "identifier", "type_identifier")
 
 
-def declarator_name_is_broken(node: Node | None) -> bool:
-    """Whether an error on the way from a declarator to its declared name makes the name
-    untrustworthy. Where the error sits decides it:
+def _broken_spot(node: Node | None) -> tuple[Node, Node | None, Node] | None:
+    """The first error on the way from a declarator to its declared name that makes the name
+    untrustworthy, as ``(declarator node, its inner declarator, the error)``. Where the error
+    sits decides it:
 
     * **after** the name it follows, the "name" was a type or a macro and the real name is in
       the error: ``LUAI_FUNC lua_Unsigned luaH_getn(…)`` and ``voidpf ZLIB_INTERNAL zcalloc(…)``
@@ -319,11 +321,84 @@ def declarator_name_is_broken(node: Node | None) -> bool:
             inner = node.child_by_field_name("name")
         for err in (c for c in node.children if c.type == "ERROR"):
             if inner is None or node.type == "parenthesized_declarator":
-                return True
+                return node, inner, err
             if err.start_byte >= inner.end_byte and node.type != "init_declarator":
-                return True
+                return node, inner, err
         node = inner
-    return False
+    return None
+
+
+def _renamed_by_macro(declarator: Node | None, source: bytes) -> str | None:
+    """The real name of a function whose type sits where its name should be:
+    ``LUALIB_API lua_Integer luaL_len(…)`` reads as a function ``lua_Integer`` with ``luaL_len``
+    in an error. In C the word right before a function's ``(`` is its name, so when the error is
+    exactly one bare word between the misread name and the parameter list, that word is the
+    name. Any other broken shape gives ``None``."""
+    spot = _broken_spot(declarator)
+    if spot is None:
+        return None
+    node, inner, err = spot
+    params = node.child_by_field_name("parameters")
+    errors = [c for c in node.children if c.type == "ERROR"]
+    if (
+        node.type != "function_declarator" or inner is None or inner.type != "identifier"
+        or params is None or errors != [err]
+        or err.child_count != 1 or err.children[0].type != "identifier"
+        or err.start_byte < inner.end_byte or err.end_byte > params.start_byte
+    ):
+        return None
+    return node_text(err.children[0], source)
+
+
+def _macro_prefixed(node: Node) -> bool:
+    """Whether a declaration's only errors come from a macro in front of its type:
+    ``LUA_API int lua_gettop(…)`` reads as the type ``LUA_API`` with ``int`` in an error. That
+    holds when the type is a plain name, every error sits between it and the declarator and is
+    made of bare words, and the declarator — name and parameters — has no error at all."""
+    if node.type not in ("declaration", "function_definition"):
+        return False
+    ret = node.child_by_field_name("type")
+    declarator = node.child_by_field_name("declarator")
+    if ret is None or ret.type != "type_identifier" or declarator is None or declarator.has_error:
+        return False
+    errors = [c for c in node.children if c.type == "ERROR" or c.is_missing]
+    return bool(errors) and all(
+        c.type == "ERROR" and c.child_count > 0
+        and all(w.type == "identifier" for w in c.children)
+        and ret.end_byte <= c.start_byte and c.end_byte <= declarator.start_byte
+        for c in errors
+    )
+
+
+@dataclass(frozen=True)
+class DeclarationRead:
+    """How a file-scope declaration or definition is read: its declared ``name`` when a macro
+    moved it (else ``None``: the declarator's own), and whether its ``returnType`` can be
+    trusted."""
+
+    name: str | None = None
+    return_type_known: bool = True
+
+
+def read_declaration(node: Node, source: bytes) -> DeclarationRead | None:
+    """How to read a file-scope ``declaration`` / ``function_definition``, or ``None`` to skip
+    it because its name can't be trusted. A macro the grammar can't expand is read past only in
+    two shapes: a macro in front of the type (``LUA_API int f(…)``) and a macro or type in front
+    of the name (``LUALIB_API lua_Integer luaL_len(…)``). Then the name and parameters come from
+    clean syntax, and ``returnType`` is unknown: ``LUA_API int`` and ``uLong ZEXPORT`` parse the
+    same way, so which word is the type can't be told."""
+    prefixed = False
+    if has_declaration_error(node):
+        if not _macro_prefixed(node):
+            return None
+        prefixed = True
+    if node.type == "function_definition" and is_macro_row(node, source):
+        return None
+    declarator = node.child_by_field_name("declarator")
+    if _broken_spot(declarator) is None:
+        return DeclarationRead(return_type_known=not prefixed)
+    name = _renamed_by_macro(declarator, source)
+    return DeclarationRead(name=name, return_type_known=False) if name is not None else None
 
 
 def is_macro_row(node: Node, source: bytes) -> bool:
@@ -340,14 +415,6 @@ def is_macro_row(node: Node, source: bytes) -> bool:
         macro is not None and inner is not None
         and node_text(macro, source) == node_text(inner, source)
     )
-
-
-def is_misnamed_definition(node: Node, source: bytes) -> bool:
-    """Whether a ``function_definition``'s name can't be trusted: a row of macro calls read as
-    one function, or an error on the way to its name (``voidpf ZLIB_INTERNAL zcalloc(…)`` reads
-    as a function named ``ZLIB_INTERNAL``). Such a definition is not emitted or indexed."""
-    return is_macro_row(node, source) or declarator_name_is_broken(
-        node.child_by_field_name("declarator"))
 
 
 def return_type(node: Node, source: bytes) -> str | None:
@@ -384,10 +451,12 @@ def build_function(
     class_name: str | None = None,
     id_owner: str | None = None,
     kind: str = "function",
+    read: DeclarationRead = DeclarationRead(),
 ) -> tuple[Function, list[Statement]]:
     """A ``function_definition`` → a ``Function`` (+ its flat statements). ``kind`` is
     ``"function"`` for a free function or ``"method"`` for an out-of-class ``Class::method``
-    definition; ``class_name`` qualifies the id (and, for a method, is the declaring class)."""
+    definition; ``class_name`` qualifies the id (and, for a method, is the declaring class).
+    ``read`` carries a name a macro moved and whether the return type is known."""
     fd = function_declarator_of(node.child_by_field_name("declarator"))
     inner = fd.child_by_field_name("declarator") if fd is not None else None
     if inner is not None and inner.type == "qualified_identifier":
@@ -395,6 +464,8 @@ def build_function(
         name = node_text(nm, source) if nm is not None else ""
     else:
         name = node_text(inner, source) if inner is not None else ""
+    if read.name is not None:
+        name = read.name
 
     start, end = line_span(node)
     # The id carries the qualified owner (`Outer.Inner`) so a nested type's methods are
@@ -413,7 +484,7 @@ def build_function(
         # out-of-class `Class::method` definition can't repeat `static`: left unknown.
         isStatic=is_declared_static(node, source) or None if kind == "function" else None,
         params=extract_params(params, source),
-        returnType=return_type(node, source),
+        returnType=return_type(node, source) if read.return_type_known else None,
         startLine=start,
         endLine=end,
         calls=_calls(
