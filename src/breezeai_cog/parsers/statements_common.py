@@ -91,6 +91,10 @@ def summarize_skipped_concats(path: str) -> str | None:
 # (callee, method, first_string_arg) or None for a single call node.
 CallDetails = Callable[[Node, bytes], "tuple[str, str, str | None] | None"]
 NameOf = Callable[[Node, bytes], "str | None"]
+# (semanticType, method, endpoint, dataAccessHint) or None for one call-like node. A language
+# whose constructs the shared heuristics cannot classify (Apex DML / inline SOQL) supplies this
+# instead of ``call_details``; it replaces ``classify_call`` for that language.
+ClassifyNode = Callable[[Node, bytes], "tuple[str, str | None, str | None, str | None] | None"]
 
 
 def _trailing_comment_end(node: Node, source: bytes) -> int:
@@ -298,6 +302,7 @@ def classify_statement(
     typed_db_ids: "frozenset[str] | None" = None,
     decorators: "list[Decorator] | None" = None,
     local_names: Collection[str] = (),
+    classify: ClassifyNode | None = None,
 ) -> list[Statement]:
     # ``code_text`` (comment-free) drives query/semantic detection; ``display_text`` is what
     # lands on the record — for a normal statement it folds in a same-line trailing comment
@@ -312,9 +317,18 @@ def classify_statement(
     end = node.end_point[0] + 1
 
     # All api/db/query hits in this statement's own expression, deduped by (kind, method).
-    hits: list[tuple[str, str, str | None, str | None, Node]] = []
-    seen_hit: set[tuple[str, str]] = set()
+    hits: list[tuple[str, str | None, str | None, str | None, Node]] = []
+    seen_hit: set[tuple[str, str | None]] = set()
     for call in _calls_in_statement(node, emit_types, call_type, stmt_expr, container_types):
+        if classify is not None:
+            node_hit = classify(call, source)
+            if node_hit is None:
+                continue
+            sem, meth, ep, dh = node_hit
+            if (sem, meth) not in seen_hit:
+                seen_hit.add((sem, meth))
+                hits.append((sem, meth, ep, dh, call))
+            continue
         det = call_details(call, source)
         if det is None:
             continue
@@ -359,28 +373,36 @@ def classify_statement(
                 path=path,
             )
         )
-        for semantic, method_value, endpoint, hint, call in hits:
+        for hit_semantic, hit_method, hit_endpoint, hit_hint, call in hits:
             cs, ccol = call.start_point[0] + 1, call.start_point[1]
             records.append(
                 Statement(
                     id=disambiguate(statement_id(path, cs, ccol), seen_ids),
                     parentId=parent_id,
                     nodeType=call.type,
-                    semanticType=cast(SemanticType, semantic),
+                    semanticType=cast(SemanticType, hit_semantic),
                     text=node_text(call, source),
-                    method=method_value,
-                    endpoint=endpoint,
-                    dataAccessHint=hint,
+                    method=hit_method,
+                    endpoint=hit_endpoint,
+                    dataAccessHint=hit_hint,
                     startLine=cs,
                     endLine=call.end_point[0] + 1,
                     path=path,
                 )
             )
         return records
+    semantic: SemanticType | None
+    method_value: str | None
+    endpoint: str | None
+    hint: str | None
     if hits:
-        semantic, method_value, endpoint, hint, _ = hits[0]
+        semantic_value, method_value, endpoint, hint, _ = hits[0]
+        semantic = cast(SemanticType, semantic_value)
     else:
-        semantic = method_value = endpoint = hint = None
+        semantic = None
+        method_value = None
+        endpoint = None
+        hint = None
         if text_has_query(code_text):  # raw SQL/Cypher string literal, no classified call
             semantic = "query_statement"
     records.append(
@@ -388,7 +410,7 @@ def classify_statement(
             id=disambiguate(statement_id(path, start, col), seen_ids),
             parentId=parent_id,
             nodeType=node.type,
-            semanticType=semantic,
+            semanticType=cast(SemanticType, semantic),
             text=display_text,
             name=name_of(node, source),
             method=method_value,
@@ -401,18 +423,18 @@ def classify_statement(
         )
     )
     # One synthetic record per additional hit, at the same span (fields stay single-valued).
-    for semantic, method_value, endpoint, hint, call in hits[1:]:
+    for hit_semantic, hit_method, hit_endpoint, hit_hint, call in hits[1:]:
         cs, ccol = call.start_point[0] + 1, call.start_point[1]
         records.append(
             Statement(
                 id=disambiguate(statement_id(path, cs, ccol), seen_ids),
                 parentId=parent_id,
                 nodeType=call.type,
-                semanticType=semantic,
+                semanticType=cast(SemanticType, hit_semantic),
                 text=node_text(call, source),
-                method=method_value,
-                endpoint=endpoint,
-                dataAccessHint=hint,
+                method=hit_method,
+                endpoint=hit_endpoint,
+                dataAccessHint=hit_hint,
                 startLine=start,
                 endLine=end,
                 path=path,
@@ -457,7 +479,7 @@ def member_statement(
     seen_ids: set[str],
     name: str | None = None,
     decorators: "list[Decorator] | None" = None,
-    semantic_type: str | None = None,
+    semantic_type: SemanticType | None = None,
 ) -> Statement:
     """One flat declaration Statement for ``node`` (``nodeType`` = the AST node, ``text`` =
     its source). ``name`` defaults to the member's declared name; ``semantic_type`` marks the

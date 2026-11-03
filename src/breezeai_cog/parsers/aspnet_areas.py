@@ -256,7 +256,8 @@ class Area:
 NO_AREA = Area(None, None, None, False)
 
 
-def _attribute(cls_node: Node, name: str, source: bytes) -> Node | None:
+def attribute_node(cls_node: Node, name: str, source: bytes) -> Node | None:
+    """The ``[name]`` / ``[nameAttribute]`` attribute on a declaration, or None."""
     for attrs in cls_node.named_children:
         if attrs.type != "attribute_list":
             continue
@@ -269,7 +270,7 @@ def _attribute(cls_node: Node, name: str, source: bytes) -> Node | None:
     return None
 
 
-def _attr_args(attr: Node, source: bytes) -> tuple[list[Node], dict[str, Node]]:
+def attribute_args(attr: Node, source: bytes) -> tuple[list[Node], dict[str, Node]]:
     """(positional argument values, named argument values) of an attribute."""
     args = next((c for c in attr.named_children if c.type == "attribute_argument_list"), None)
     positional: list[Node] = []
@@ -291,18 +292,18 @@ def controller_area(cls_node: Node | None, source: bytes, path: str, index: Any 
         return NO_AREA
     namespace = namespace_of(cls_node, source)
     route_prefix: object = None
-    route_area = _attribute(cls_node, "RouteArea", source)
+    route_area = attribute_node(cls_node, "RouteArea", source)
     if route_area is not None:
-        positional, named = _attr_args(route_area, source)
+        positional, named = attribute_args(route_area, source)
         value = named.get("AreaPrefix") or (positional[0] if positional else None)
         route_prefix = string_value(value, source, index, namespace) if value is not None \
             else UNKNOWN
         if route_prefix is None:
             route_prefix = UNKNOWN
     token: object = None
-    core_area = _attribute(cls_node, "Area", source)
+    core_area = attribute_node(cls_node, "Area", source)
     if core_area is not None:
-        positional, _ = _attr_args(core_area, source)
+        positional, _ = attribute_args(core_area, source)
         token = string_value(positional[0], source, index, namespace) if positional else None
         if token is None:
             token = UNKNOWN

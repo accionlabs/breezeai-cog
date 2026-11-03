@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import re
+
 from tree_sitter import Node
 
 from ...emit import disambiguate, function_id
@@ -200,3 +202,34 @@ def method_nodes(root: Node, source: bytes) -> dict[tuple[str, int], Node]:
                 out[(node_text(name, source), n.start_point[0] + 1)] = n
         stack.extend(n.named_children)
     return out
+
+
+#: Wrappers that are not part of the payload: async results and HTTP results (contract:
+#: ``requestDTO`` / ``responseDTO`` are the declared payload type with these removed).
+_NON_PAYLOAD_WRAPPERS = frozenset({
+    "Mono", "CompletableFuture", "CompletionStage", "Callable", "DeferredResult", "Uni",
+    "ResponseEntity", "HttpEntity", "Optional",
+})
+#: Declared types that carry no payload: no body, or a response that is not a declared type
+#: (a raw ``ResponseEntity``, JAX-RS ``Response``, a Spring MVC view).
+_NO_PAYLOAD = frozenset({
+    "void", "Void", "?", "ResponseEntity", "HttpEntity", "Response", "ModelAndView",
+})
+_TYPE_ANNOTATION = re.compile(r"@[\w.]+(\([^()]*\))?\s*")
+
+
+def payload_type(declared: str | None) -> str | None:
+    """A handler's declared request / response type → the payload type as written, with async
+    and HTTP-result wrappers removed (``ResponseEntity<List<UserDTO>>`` → ``List<UserDTO>``,
+    ``Mono<OrderDto>`` → ``OrderDto``). Lists, arrays, pages, maps and the application's own
+    generics stay as declared. None when no payload is declared (``void``,
+    ``ResponseEntity<Void>``, JAX-RS ``Response``)."""
+    if not declared:
+        return None
+    t = " ".join(_TYPE_ANNOTATION.sub("", declared).split())
+    while "<" in t and t.endswith(">"):
+        outer = t[: t.index("<")].strip().rsplit(".", 1)[-1]
+        if outer not in _NON_PAYLOAD_WRAPPERS:
+            break
+        t = t[t.index("<") + 1: -1].strip()
+    return None if not t or t.rsplit(".", 1)[-1] in _NO_PAYLOAD else t

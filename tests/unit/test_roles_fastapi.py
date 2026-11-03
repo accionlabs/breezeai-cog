@@ -175,3 +175,42 @@ def test_router_from_a_factory_not_found_included_has_no_address(analyze_files) 
         "from fastapi import APIRouter\ndef make_router():\n    r = APIRouter()\n"
         "    @r.get('/{uid}')\n    def get_user(uid: int):\n        return {}\n    return r\n")})
     assert [(s.method, s.endpoint) for s in _eps(st)] == [("GET", None)]
+
+
+USERS = ("from fastapi import APIRouter\nrouter = APIRouter(prefix='/users')\n"
+         "@router.get('/{uid}')\ndef get_user(uid: int):\n    return {}\n")
+
+
+def test_app_made_in_a_factory_is_the_root(analyze_files) -> None:
+    # create_app() builds the application: its routes and the routers it includes are served
+    # from the root, as for a module-level app.
+    st = analyze_files({"app/__init__.py": "", "app/users.py": USERS, "app/main.py": (
+        "from fastapi import FastAPI\nfrom app.users import router as users_router\n"
+        "def create_app():\n    app = FastAPI()\n"
+        "    app.include_router(users_router, prefix='/api')\n"
+        "    @app.get('/health')\n    def health():\n        return {}\n    return app\n")})
+    assert sorted((s.method, s.endpoint) for s in _eps(st)) == [
+        ("GET", "/api/users/{uid}"), ("GET", "/health")]
+
+
+def test_mounted_sub_application_has_no_address(analyze_files) -> None:
+    # A sub-application is served under the mount path, which is not followed: no address,
+    # never the bare path — whether it is made at module level or by a factory.
+    st = analyze_files({"app/__init__.py": "", "app/v1.py": (
+        "from fastapi import FastAPI\nv1 = FastAPI()\n"
+        "@v1.get('/items')\ndef items():\n    return []\n"), "app/v2.py": (
+        "from fastapi import FastAPI\ndef create_v2():\n    v2 = FastAPI()\n"
+        "    @v2.get('/orders')\n    def orders():\n        return []\n    return v2\n"),
+        "app/main.py": (
+        "from fastapi import FastAPI\nfrom app.v1 import v1\nfrom app.v2 import create_v2\n"
+        "app = FastAPI()\nsub = create_v2()\napp.mount('/v1', v1)\napp.mount('/v2', sub)\n"
+        "@app.get('/ping')\ndef ping():\n    return 1\n")})
+    assert sorted((s.method, s.endpoint or "") for s in _eps(st)) == [
+        ("GET", ""), ("GET", ""), ("GET", "/ping")]
+
+
+def test_sub_application_mounted_in_the_same_file_has_no_address(analyze_files) -> None:
+    st = analyze_files({"main.py": (
+        "from fastapi import FastAPI\napp = FastAPI()\nsub = FastAPI()\n"
+        "@sub.get('/items')\ndef items():\n    return []\napp.mount('/v1', sub)\n")})
+    assert [(s.method, s.endpoint) for s in _eps(st)] == [("GET", None)]

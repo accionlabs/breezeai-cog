@@ -14,7 +14,8 @@ Q9 — a global guard's name goes into ``guards`` of every binding it **certainl
 
 Each file contributes raw facts (:func:`collect_guard_facts`); :func:`resolve_guards` reduces the
 repo's facts per module. Honest-null: a pattern that is not a literal makes that guard's coverage
-unknown, so it is not added anywhere. Patterns are matched against the endpoint **within** the
+unknown, so it is not added anywhere — so is a filter class that declares ``shouldNotFilter``
+(it skips requests by a runtime check: config flags, matchers, the method). Patterns are matched against the endpoint **within** the
 servlet context (before the context path is joined), as the servlet container and Spring do.
 """
 
@@ -55,6 +56,8 @@ class GuardFacts:
     jaxrs_filters: list[tuple[str, tuple[str, ...]]] = field(default_factory=list)
     #: annotation types declared with ``@NameBinding``.
     name_bindings: list[str] = field(default_factory=list)
+    #: filter classes that declare ``shouldNotFilter`` (coverage unknown, wherever registered).
+    skipping: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -258,33 +261,37 @@ def collect_guard_facts(root: Node, source: bytes, rel: str) -> GuardFacts | Non
         cls = node_text(nm, source)
         anns = {_ann_name(a, source): a for a in _annotations(decl)}
         supers = _supertypes(decl, source)
+        body = decl.child_by_field_name("body")
+        methods = [m for m in (body.named_children if body is not None else [])
+                   if m.type == "method_declaration"]
         if supers & _FILTER_TYPES:
+            if any(node_text(n, source) == "shouldNotFilter"
+                   for m in methods if (n := m.child_by_field_name("name")) is not None):
+                facts.skipping.append(cls)
             if "WebFilter" in anns:
                 facts.filters.append((cls, _web_filter_patterns(anns["WebFilter"], source)))
             elif anns.keys() & _BEAN_ANNOTATIONS:
                 facts.filters.append((cls, ("/*",)))
         if "ContainerRequestFilter" in supers and "Provider" in anns:
             facts.jaxrs_filters.append((cls, tuple(anns)))
-        body = decl.child_by_field_name("body")
         fields = _field_types(body, source)
-        for m in body.named_children if body is not None else []:
-            if m.type != "method_declaration":
-                continue
+        for m in methods:
             mname = m.child_by_field_name("name")
             if mname is not None and node_text(mname, source) == "addInterceptors":
                 facts.interceptors += _interceptors(m, source, fields)
             facts.registrations += _registrations(m, source)
     has_any = (facts.filters or facts.registrations or facts.interceptors
-               or facts.jaxrs_filters or facts.name_bindings)
+               or facts.jaxrs_filters or facts.name_bindings or facts.skipping)
     return facts if has_any else None
 
 
 def resolve_guards(facts: list[GuardFacts]) -> dict[str, ModuleGuards]:
     """Per module: its servlet filters (a registration overrides a bean's ``/*``; differing
-    registrations of one filter → unknown → dropped), interceptors (those with a non-literal
+    registrations of one filter, or a ``shouldNotFilter`` → unknown → dropped), interceptors (those with a non-literal
     pattern dropped) and JAX-RS filters (name bindings matched repo-wide). The result does not
     depend on the order of ``facts``."""
     bindings = {b for f in facts for b in f.name_bindings}
+    skipping = {c for f in facts for c in f.skipping}
     out: dict[str, ModuleGuards] = {}
     beans: dict[str, dict[str, Patterns]] = {}
     regs: dict[str, dict[str, Patterns]] = {}
@@ -303,7 +310,7 @@ def resolve_guards(facts: list[GuardFacts]) -> dict[str, ModuleGuards]:
     for module in set(beans) | set(regs):
         merged = {**beans.get(module, {}), **regs.get(module, {})}
         out.setdefault(module, ModuleGuards()).filters = sorted(
-            (n, p) for n, p in merged.items() if p is not None
+            (n, p) for n, p in merged.items() if p is not None and n not in skipping
         )
     return out
 

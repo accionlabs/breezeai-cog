@@ -14,6 +14,8 @@ case. Assertions below reflect that difference. Oracle fixtures use ``*_ora.sql`
 
 from __future__ import annotations
 
+import pytest
+
 from breezeai_cog.analyzers.sql import _strip_sqlplus, detect_dialect, parse_ddl
 
 # A trimmed Oracle SQL*Plus script in the shape of a real schema install script:
@@ -765,3 +767,100 @@ def test_oracle_package_body_with_dynamic_create_view_is_a_procedure() -> None:
     assert [p["name"] for p in r["procedures"]] == ["P"]
     assert r["views"] == []
     assert r["parseStats"]["failed"] == 0
+
+
+# ── Windows line endings and byte-order marks (BREEZEAI-958, QA defect 2) ───────────────────────
+# SQL Server tooling writes CRLF scripts, often with a UTF-8 BOM. `$` in a multiline regex stops
+# before `\n` only, so a `GO\r` line never matched the batch separator: the file stayed ONE batch
+# and the route answered 422 "No DDL objects could be extracted". A BOM is not `\s`, so it sat in
+# front of the first CREATE and silently dropped that object.
+
+_VIEW_STMT = (
+    "CREATE VIEW [dbo].[VW_Test] AS\n"
+    "-- shows active students\n"
+    "SELECT  s.[Id],\n"
+    "        s.[Name]   -- student name\n"
+    "FROM   [dbo].[Student] s\n"
+    "WHERE  s.[Id]=1"
+)
+_TSQL_SCRIPT = (
+    "CREATE TABLE [dbo].[Student] (\n"
+    "    [Id] INT NOT NULL PRIMARY KEY,\n"
+    "    [Name] NVARCHAR(100) NULL\n"
+    ")\n"
+    "GO\n"
+    f"{_VIEW_STMT}\n"
+    "GO\n"
+    "CREATE PROCEDURE [dbo].[usp_Get] @id INT AS\n"
+    "BEGIN\n"
+    "    SELECT * FROM [dbo].[Student] WHERE [Id] = @id;\n"
+    "END\n"
+    "GO\n"
+)
+
+
+def _crlf(text: str) -> str:
+    return text.replace("\n", "\r\n")
+
+
+def test_tsql_crlf_script_extracts_every_object() -> None:
+    r = parse_ddl(_crlf(_TSQL_SCRIPT), "schema_mssql.sql")
+    assert r["dialect"] == "transactsql"
+    assert [t["name"] for t in r["tables"]] == ["Student"]
+    assert [v["name"] for v in r["views"]] == ["VW_Test"]
+    assert [p["name"] for p in r["procedures"]] == ["usp_Get"]
+    assert r["parseStats"]["failed"] == 0
+
+
+def test_tsql_crlf_view_definition_stays_verbatim() -> None:
+    # AC2 is "stored exactly as the source file": the separator is consumed, the view text is not
+    # rewritten, so a CRLF source keeps its CRLF rather than being folded to LF.
+    (view,) = parse_ddl(_crlf(_TSQL_SCRIPT), "schema_mssql.sql")["views"]
+    assert view["definition"] == _crlf(_VIEW_STMT)
+
+
+def test_tsql_crlf_result_matches_lf_result() -> None:
+    lf = parse_ddl(_TSQL_SCRIPT, "schema_mssql.sql")
+    crlf = parse_ddl(_crlf(_TSQL_SCRIPT), "schema_mssql.sql")
+    assert [c["name"] for c in crlf["tables"][0]["columns"]] == [c["name"] for c in lf["tables"][0]["columns"]]
+    assert crlf["procedures"][0]["body"].replace("\r\n", "\n") == lf["procedures"][0]["body"]
+    assert crlf["parseStats"] == lf["parseStats"]
+
+
+@pytest.mark.parametrize(
+    "separator",
+    ["GO\r\n", "go\r\n", "  GO  \r\n", "GO 3\r\n", "GO -- end of batch\r\n", "GO\n", "GO"],
+    ids=["upper", "lower", "padded", "count", "comment", "lf", "no-eol"],
+)
+def test_tsql_go_separator_variants(separator: str) -> None:
+    # No `;` between the two tables, so only a working GO split can tell them apart.
+    sep = "\r\n" if separator.endswith("\r\n") else "\n"
+    text = f"CREATE TABLE [dbo].[A] ([Id] INT){sep}{separator}"
+    if separator == "GO":
+        text += "\nCREATE TABLE [dbo].[B] ([Id] INT)\n"
+    else:
+        text += f"CREATE TABLE [dbo].[B] ([Id] INT){sep}"
+    r = parse_ddl(text, "schema_mssql.sql")
+    assert sorted(t["name"] for t in r["tables"]) == ["A", "B"]
+
+
+@pytest.mark.parametrize(
+    "text, filename, expected",
+    [
+        ("\ufeff" + _TSQL_SCRIPT, "schema_mssql.sql", "Student"),
+        ("\ufeff" + _crlf(_TSQL_SCRIPT), "schema_mssql.sql", "Student"),
+        ("\ufeffCREATE TABLE app.t (a text, b int);\nCREATE INDEX ix ON app.t (a);\n", "schema_pg.sql", "t"),
+    ],
+    ids=["tsql-lf", "tsql-crlf", "postgres"],
+)
+def test_leading_bom_does_not_drop_the_first_object(text: str, filename: str, expected: str) -> None:
+    # The first object is the one a BOM used to hide — and it is the *table* in all three.
+    r = parse_ddl(text, filename)
+    assert [t["name"] for t in r["tables"]] == [expected]
+    assert r["parseStats"]["failed"] == 0
+
+
+def test_bom_is_only_stripped_at_the_start() -> None:
+    # A U+FEFF inside a statement is data, not a byte-order mark: leave it alone.
+    r = parse_ddl("CREATE TABLE app.t (a text);\n-- note \ufeff here\nCREATE TABLE app.u (b text);\n", "schema_pg.sql")
+    assert sorted(t["name"] for t in r["tables"]) == ["t", "u"]

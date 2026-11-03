@@ -13,6 +13,7 @@ Python reimplementation of `breezeai-code-ontology-generator`.
 - **[Extending Capture](skills/extend-capture/SKILL.md)** — add a new language, framework, or cross-cutting detector (start here); reliability-first discipline.
 - **[Parser Reference](docs/parser-reference.md)** — the mechanical step-by-step for building a parser.
 - **[Parser Review & Gap Analysis Guide](docs/parser-review-guide.md)** — how to review a parser and write a gap analysis report.
+- **[Gap Review](skills/gap-review/SKILL.md)** — the procedure an engineer or agent runs to apply that guide, with a capture-check script.
 - **[Template Capture](docs/template-capture.md)** — how `.html` / `.vue` / `.cshtml` / `.aspx` are handled, and why they are skipped by default.
 
 ## Supported languages & frameworks
@@ -23,18 +24,25 @@ Python reimplementation of `breezeai-code-ontology-generator`.
 |---|---|---|
 | TypeScript / JavaScript | `.ts .tsx .mts .cts .js .jsx .mjs .cjs` `.vue` ‡ | NestJS (& routing-controllers), Angular, Express, React, Vue, Next.js (App + Pages Router API routes), LoopBack, GraphQL (schema-first + code-first + an in-house resolver framework, server + client ops); AWS SNS/SQS/EventBridge/Lambda/S3/SES/CloudFront/Kinesis/DynamoDB/API Gateway/Cognito/SSM Parameter Store (additive); HubSpot/Chargebee/Salesforce SDKs (additive) |
 | Python | `.py` | FastAPI |
+| PHP | `.php .phtml` | Laravel, CodeIgniter 4, Slim, Symfony; WordPress hooks, Laravel Event/Bus and Symfony EventDispatcher/Messenger (additive) |
 | Ruby | `.rb` | Rails (**NEW in the Python target**), Sinatra (**NEW in the Python target**), Grape (**NEW in the Python target**) |
 | Java | `.java` | Spring Boot, JAX-RS, Vert.x |
 | C# | `.cs .asmx .svc` `.cshtml .razor .aspx .ascx .master` ‡ | ASP.NET (MVC / Web API / Minimal API / Web Forms), Razor Pages (`.cshtml`), Blazor (`.razor`), WCF / ASMX (SOAP), .NET ServiceHost, GraphQL (graphql-dotnet + HotChocolate — attribute, type-extension and fluent-descriptor styles, incl. field resolvers and subscription topics); Lucene.NET index reads/writes (additive) |
 | VB.NET | `.vb` | ASP.NET |
 | Kotlin | `.kt` | Ktor |
-| Scala | `.scala .sc` | Play (P2), Akka / http4s / Spark (P3) |
+| Go | `.go` `go.mod` `go.sum` | net/http (`ServeMux`, Go 1.22 patterns), Gin, Echo, chi, Fiber, gorilla/mux, gRPC services from generated `ServiceDesc`, NATS, Kafka (kafka-go / sarama / confluent), robfig/cron and `time` tickers; AWS Lambda handlers (`lambda.Start`, trigger from the event type); database access by receiver type — database/sql, sqlx, GORM, pgx, MongoDB, go-redis (additive) — group / mount prefixes followed across files |
+| Scala | `.scala .sc .mill` | Play (P2), Akka / http4s / Spark (P3); outbound HTTP calls through a typed Play WS, http4s, sttp, akka-http, Spring RestTemplate or java.net.http client, and scalaj `Http(…)` |
+| Apex | `.cls .trigger` | REST resources (`@RestResource`), Lightning (`@AuraEnabled`), SOAP `webservice`, triggers (record changes, Platform Events, Change Data Capture), scheduled Apex (`System.schedule`); SOQL / SOSL / DML, HTTP callouts and `EventBus.publish` |
 | C++ | `.cpp .cc .cxx .c++ .hpp .h .hh .hxx .inl .ipp` | — |
+| C | `.c .h` (`.h` shared with C++: each header goes to the language that includes it) | — ; calls between C and C++ resolve (C → C++ only through `extern "C"`) |
 | Groovy † | `.groovy` | Vert.x |
 | HTML | `.html .htm` ‡ | Framework-neutral template parser — detects Angular 2+ (grammar-parsed), AngularJS, Vue, Thymeleaf from `templateUrl` resolution or markup fingerprints; htmx / Alpine.js / Stimulus carried as `behaviors` |
 | GraphQL | `.graphql .gql .graphqls` | Schema-first SDL — types, fields, operations and resolvers |
 | HCL / Terraform | `.tf .tfvars .hcl` | HCL (HashiCorp Configuration Language) — top-level blocks as statements; `module` blocks as Classes (with `constructorParams` for input variables); module and provider sources as `externalImports`; Terraform-specific detection via `hcl_terraform` |
 | Prisma | `.prisma` | Prisma Schema Language — `model` → `data_model` entity, `enum` / `datasource` / `generator` blocks (full body on `text`) |
+| XSD | `.xsd` | XML Schema — global `element` / `complexType` → `data_model` entity (`endpoint`/`framework` set, full body on `text`); `simpleType` / `group` / `attributeGroup` captured the same way but structural-only (reusable fragments, not entities); `import` / `include` recorded; a relative `schemaLocation` in the repo → `importFiles`, a URL → `externalImports` |
+| WSDL | `.wsdl` | WSDL 1.1 (SOAP) — `message` → `data_model` entity; every `portType` operation → a plain statement with its `PortType/Operation` address and DTOs (wiring, not an entry point: the implementing code is the binding), independent of whether a `binding` implements it; `wsdl:import` / embedded-schema locations → `importFiles` / `externalImports`; reuses the XSD walker for embedded `<types>` schemas |
+| JSLT | `.jslt` | JSON query/transform language — hand-rolled structural scan (no tree-sitter grammar): `def` → `Function` (untyped params, same-file `calls[]` resolved), `import` / `let` declarations plus the trailing module expression |
 | Structured JSON / data | `.json` (+ YAML/TOML config) | Whole-document capture as a TOON `structured_data` statement |
 | Config | `package.json`, `tsconfig`, `Dockerfile`, `docker-compose`, `pom.xml`, `requirements.txt`, `build.gradle`, `.csproj` / `.vbproj` / `.sln`, `Makefile`, … | — |
 
@@ -55,6 +63,14 @@ always to *missing* nodes, never wrong ones — the parser fabricates nothing it
 **Target Spec §2.4 note:** `rails`, `sinatra`, and `grape` are emitted framework values and are
 new in the Python target. The local capture schema accepts open framework strings; the external
 backend allow-list must add these values before ingestion can rely on them being retained.
+
+PHP framework values (`laravel`, `codeigniter`, `slim`, `symfony`, and `wordpress`) are also
+emitted as open framework strings. WordPress action/filter registrations use
+`semanticType: "eventbus_consumer"` rather than appearing as HTTP routes. Blade views
+(`.blade.php`) remain unsupported and are not classified as PHP source.
+
+PHP `.phtml` files are treated as markup templates and are skipped unless
+`--capture-templates` is enabled.
 
 ## Layout
 

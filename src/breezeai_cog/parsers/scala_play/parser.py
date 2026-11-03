@@ -24,9 +24,10 @@ from ..emits import apply
 from ..scala.parser import ScalaParser
 from ..treesitter import parse_source
 from .actions import detect_play_actions, detect_play_sird_routes
+from .handlers import FACT as HANDLERS_FACT, collect_route_handlers, route_handler
 from .includes import (
     FACT, collect_includes, is_routes_file, resolve_includes, router_name, router_prefix,
-    served_routers,
+    router_unknown, served_routers,
 )
 from .routes import extract_routes
 
@@ -44,7 +45,7 @@ class ScalaPlayParser(ScalaParser):
         record = self.extract(root, ctx)  # inherited Scala extraction (one parse)
         if ctx.capture_statements and not self.is_fixture_file(ctx.path):
             sird_routes = detect_play_sird_routes(
-                root, ctx.source, record, index=ctx.resolution_index,
+                root, ctx.source, record, index=ctx.resolution_index, repo_root=ctx.repo_root,
             )
             apply(record, sird_routes, ctx.source, ctx.path)
             # Actions are handlers of conf/routes / SIRD bindings — they label the file, no record.
@@ -69,20 +70,35 @@ class PlayRoutesParser(BaseParser):
 
     def build_index(self, repo_root: Path, files: Sequence[Path], jobs: int = 1) -> PlayRoutesIndex:
         values = []
+        texts: list[tuple[str, str]] = []
         for f in files:
             try:
-                found = collect_includes(f.read_bytes(), repo_relative(f, repo_root))
+                source = f.read_bytes()
             except OSError:
                 continue
+            rel = repo_relative(f, repo_root)
+            texts.append((rel, source.decode("utf-8", "replace")))
+            found = collect_includes(source, rel)
             if found is not None:
                 values.append(found)
+        facts: dict[str, Any] = {}
         fact = resolve_includes(values)
-        return PlayRoutesIndex({FACT: fact} if fact is not None else {})
+        if fact is not None:
+            facts[FACT] = fact
+        # Each binding's controller method (:mod:`.handlers`): the routes index is the only
+        # one this parser gets, so the few controller files it names are read here.
+        handlers = collect_route_handlers(Path(repo_root), texts)
+        if handlers:
+            facts[HANDLERS_FACT] = handlers
+        return PlayRoutesIndex(facts)
 
     def parse_file(self, ctx: ParseContext) -> FileRecord:
         text = ctx.source.decode("utf-8", "replace")
-        prefix = router_prefix(ctx.resolution_index, router_name(ctx.path))
-        statements = (extract_routes(text, ctx.path, prefix, served_routers(ctx.resolution_index))
+        prefix = router_prefix(ctx.resolution_index, router_name(ctx.path), ctx.path)
+        index = ctx.resolution_index
+        unknown = router_unknown(index, router_name(ctx.path), ctx.path)
+        statements = (extract_routes(text, ctx.path, prefix, served_routers(index, ctx.path),
+                                     lambda h: route_handler(index, ctx.path, h), unknown=unknown)
                       if ctx.capture_statements else [])
         return FileRecord(
             id=file_id(ctx.path),

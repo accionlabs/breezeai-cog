@@ -77,10 +77,16 @@ How it works (`core/pipeline.py::_build_indexes`):
   once, in the main process, over all its files.
 - Large indexes are built in parallel with `parallel_map` (`parsers/index_common.py`), using the
   same `--jobs` as parsing.
-- The result must be picklable. It is handed to every worker as `ctx.resolution_index`.
+- The result must be picklable. It is handed to every worker (through a temp file the worker
+  loads at start, see [architecture §4.5](../architecture.md#45-parallel-execution)) as
+  `ctx.resolution_index`.
 - **Framework parsers use their language's index.** A Spring or Vert.x file gets the Java index.
   The one exception: a framework parser that owns an extension no language parser owns (Vue's
   `.vue`, WebForms' `.aspx`) gets an index built over just those files.
+- **Related languages.** A parser also receives the indexes of the languages it lists in
+  `related_languages`, as `ctx.related_indexes`, and reads them only after its own: C++ reads the
+  C index, C reads the C++ index
+  ([shared extensions and related languages](shared-extensions-and-related-languages.md)).
 - If an index build fails, a warning (`build_index.failed`) is logged and that language runs
   **without** an index: fewer links, never a crash.
 
@@ -88,15 +94,17 @@ What each index holds:
 
 | Language | Holds | Used for |
 |---|---|---|
-| Java, Groovy | fully-qualified class name → file; `Class.FIELD` → constant value; **registered facts** (method declarations `java.method-lines` — (class, method) → file and line, for `handlerPath`; Java: `index.facts` — Vert.x service interfaces `vertx.service-interfaces`, Spring context paths `spring.context-paths` and module properties `spring.properties`, JAX-RS application paths and sub-resource bases `jaxrs.prefixes`, servlet filters / interceptors / JAX-RS request filters `java.web-guards`) | imports, same-package types, event addresses / route paths |
+| Java, Groovy | fully-qualified class name → file; `Class.FIELD` → constant value; **registered facts** (method declarations `java.method-lines` — (class, method) → file and line, for `handlerPath`; Java: `index.facts` — Vert.x service interfaces `vertx.service-interfaces`, Spring context paths `spring.context-paths` and module properties `spring.properties`, JAX-RS application paths and sub-resource bases `jaxrs.prefixes`, servlet filters / interceptors / JAX-RS request filters `java.web-guards`; Java and Groovy: Vert.x router factories mounted as sub-routers `vertx.mounted-factories`) | imports, same-package types, event addresses / route paths |
 | Kotlin | fully-qualified class name → file | imports, same-package types |
-| Scala | fully-qualified class name → file; **registered facts** (`index.facts`: Play router includes `play.router-includes` — read from the routes files, which the Play routes parser owns) | imports, same-package types, SIRD router prefixes |
+| Scala | fully-qualified class name → file; **registered facts** (method declarations `scala.method-lines` — (class, method) → file and line, for `handlerPath`; `index.facts`: Play router includes `play.router-includes` — read from the routes files, which the Play routes parser owns) | imports, same-package types, SIRD router prefixes and handlers |
 | Play routes files | the `->` router includes, resolved to each router's prefix | route prefixes of included routes files |
-| C# | type → files; global `using`s; project roots (`.csproj`), their MSBuild `using`s and project references; class heritage incl. methods; extension methods; implemented interfaces; **registered facts** (string constants `csharp.string-constants` and MVC area registrations `aspnet.area-registrations`, for area route prefixes; method declarations `csharp.method-lines` — (class, method) → file and line, for `handlerPath`; `index.facts`: HotChocolate registered roots, WCF `.svc` hosts — read from `.svc` files, which the ServiceHost parser owns — Web Forms `MapPageRoute` URLs `webforms.page-routes`, HotChocolate source-generated DataLoaders `hotchocolate.data-loaders`) | type resolution, inherited calls, extension calls, routes |
+| C# | type → files; global `using`s; project roots (`.csproj`), their MSBuild `using`s and project references; class heritage incl. methods; extension methods; implemented interfaces; **registered facts** (string constants `csharp.string-constants` and MVC area registrations `aspnet.area-registrations`, for area route prefixes; method declarations `csharp.method-lines` — (class, method) → file and line, for `handlerPath`; minimal-API group extensions `aspnet.group-extensions` — an extension method on `RouteGroupBuilder` → the prefix of the one group it is called on; `index.facts`: HotChocolate registered roots `hotchocolate.registered-roots`, graphql-dotnet schema roots `graphql-dotnet.schema-roots`, WCF `.svc` hosts `wcf.svc-hosts` — read from `.svc` files, which the ServiceHost parser owns — Web Forms `MapPageRoute` URLs `webforms.page-routes`, HotChocolate source-generated DataLoaders `hotchocolate.data-loaders`, AWS Lambda handlers `aws.deployed-handlers` — read from `serverless.yml` / SAM templates) | type resolution, inherited calls, extension calls, routes |
 | VB | class heritage (base class + attributes) | inherited controller routes |
-| TypeScript / JavaScript | `tsconfig`/`jsconfig` path aliases (per config scope); constant values; class heritage; **registered facts** (`index.facts`: Angular lazy-route mounts `angular.route-mounts`, Express mounts `express.router-mounts`, Fastify plugin prefixes `fastify.plugin-prefixes`, NestJS stub parents `nest.stub-parents` and prefixes `nest.prefixes`, Next.js apps `next.apps`, middleware matchers `next.middlewares` and base paths `next.base-paths`, LoopBack base paths `loopback.base-paths`, GraphQL root-field DTOs `graphql.sdl-root-fields` — read from `.graphql` files too, which the GraphQL parser owns; module exports and their declarations `typescript.declarations` — each file's exported names with the declared name and line, re-exports followed, for `handlerPath`) | aliased imports, inherited calls, route prefixes |
-| C++ | header basename → file; free functions; `Class::method`; `Class::field` types; heritage | `#include`, calls |
-| Ruby | ActiveRecord model names; **registered facts** (`index.facts`: Rails controller `before_action` callbacks `rails.controller-callbacks`) | recognising DB calls; Rails route guards |
+| TypeScript / JavaScript | `tsconfig`/`jsconfig` path aliases (per config scope); constant values; class heritage; **registered facts** (`index.facts`: Angular lazy-route mounts `angular.route-mounts` and their guards `angular.mount-guards`, Express mounts `express.router-mounts`, Fastify plugin prefixes `fastify.plugin-prefixes`, NestJS stub parents `nest.stub-parents` and prefixes `nest.prefixes`, Next.js apps `next.apps`, middleware matchers `next.middlewares` and base paths `next.base-paths`, LoopBack base paths `loopback.base-paths`, GraphQL root-field DTOs `graphql.sdl-root-fields` — read from `.graphql` files too, which the GraphQL parser owns; module exports and their declarations `typescript.declarations` — each file's exported names with the declared name and line, re-exports followed, for `handlerPath`, and the component of each `.vue` file `typescript.vue-components`; AWS Lambda handlers `aws.deployed-handlers` — read from `serverless.yml` / SAM templates) | aliased imports, inherited calls, route prefixes |
+| C++ | header basename → file; each file's local includes and who includes each header; free functions (a `static` one outside a header is never a target and makes its name ambiguous; one in a header is a target only for files that can see the header); the free functions defined in `extern "C"`; `Class::method`; `Class::field` types; heritage | `#include`, calls |
+| C | the same index as C++ (`cfamily_common/index.py`), built over C files with the C grammar | `#include`, calls |
+| Ruby | ActiveRecord model names; **registered facts** (`index.facts`: Rails controller `before_action` callbacks `rails.controller-callbacks`; method declarations `ruby.method-lines` — (controller, action) → file and line, for `handlerPath`) | recognising DB calls; Rails route guards and handlers |
+| GraphQL | **registered facts** (`index.facts`: client projects `graphql.client-configs` — read from `.graphqlrc.json`) | a downloaded client schema is not taken as this repo's operations |
 | HCL / Terraform | folder → `.tf` files | local `module` sources |
 | HTML | template → owning component | linking templates to components |
 | Python | **registered facts** (`index.facts`): FastAPI wiring `fastapi.wiring` — `APIRouter` variables (own prefix, dependencies), `include_router` sites (also routers imported from other files), app middleware, module-level string constants used as prefixes; Celery task names `celery.tasks` | route prefixes and guards of routers mounted in another file |
@@ -136,7 +144,7 @@ How each language turns an import into a file:
 | TypeScript / JavaScript | Relative paths from the file's folder; otherwise the nearest `tsconfig`/`jsconfig` path alias. Tries the exact file, `.js`→`.ts` rewrites, known extensions, then `index.*`. Re-exports, literal dynamic `import()` and CommonJS `require('…')` (anywhere in the file; a top-level `const x = require(…)` / `const { a } = require(…)` also binds the names for `calls[].path`) count too. | anything not found on disk |
 | Python | `import a.b` / `from a.b import x` from the repo root first; relative imports walk up folders. Tries `a/b.py`, then `a/b/__init__.py`. Then the folders Python could find it in from the file (an app run from its own folder): a dotted import under a non-package folder above the file (a `sys.path` entry), a single name only in a script's own folder; either under a declared project (`pyproject.toml` / `setup.py` / `setup.cfg`) and its `src/`. Only ancestors, never a sibling app; found at two places → not linked | anything not found, or ambiguous |
 | Ruby | Only `require_relative` | every `require`; unresolved `require_relative` |
-| C++ | `#include "x.h"` looked up by file **basename** in the index | `<system>` includes; unknown or ambiguous basenames |
+| C++, C | `#include "x.h"` looked up by file **basename** across the C and C++ indexes (a header is in one of them) | `<system>` includes; unknown or ambiguous basenames |
 
 **Example — a TypeScript path alias**
 
@@ -227,7 +235,12 @@ even if `items` has an in-repo type.
 | Java, Kotlin, Groovy, Scala | ✓ | ✓ | — | — |
 | Python | ✓ | — | — | — |
 | VB, Ruby | same file only | — | — | — |
-| C++ | own resolver (`cpp/index.py`): same file, `Class::method`, inherited, free functions, field types | | | |
+| C++ | own resolver (`cfamily_common/index.py`, shared with C): same file, `Class::method`, inherited, free functions, field types; then C's free functions | | | |
+| C | the same resolver as C++: same file, free functions; then C++'s `extern "C"` functions | | | |
+
+In C and C++, a call through a parameter or local variable of the calling function (a function
+pointer, a lambda, a `std::function`) is never resolved: it calls whatever the variable holds, not
+a function of that name. A prototype declared inside the body still names a function.
 
 > **Decision —** calls resolve to a file, not to a specific function.
 > **Why:** cog can usually prove the file (from imports and types), but not the overload — that
@@ -325,12 +338,12 @@ Some frameworks build a route from pieces in several files. These use the index 
 | Express | `app.use("/api", router)` in one file + `router.get("/orders")` in another → `/api/orders`. The router is a factory call (`usersRouter()`) or an imported `Router()` instance — kept only when the router's file confirms it exports a `Router()`, so an imported middleware is never a prefix. A router mounted at two bases keeps its own path | registered fact `express.router-mounts` (`typescript_express/mounts.py`), one base per router via the shared `resolve_wiring` |
 | Fastify | `app.register(users, { prefix: "/users" })` in one file + `fastify.get("/:id")` in the plugin's file → `/users/:id`; registrations chain, and a `fastify-plugin` plugin ignores the prefix. `@fastify/autoload` gives each file in its folder a prefix from the folder path, `options.prefix` and the file's `autoPrefix`, the same way the package walks the folder. A plugin registered at two prefixes, or with one that can't be read, has an empty endpoint | registered fact `fastify.plugin-prefixes` (`typescript_fastify/plugins.py`) |
 | Angular | lazy-loaded child routes under a parent path | TypeScript index: route mounts |
-| FastAPI | `app.include_router(orders.router, prefix="/api")` in one file + `router = APIRouter(prefix="/orders")` in another → `/api/orders/…`. A constant prefix (`API_PREFIX = "/v1"`) is resolved; a settings attribute is not (the environment can override it) → endpoint empty. A router included at two places keeps its own path | Python index: `fastapi.wiring` fact |
+| FastAPI | `app.include_router(orders.router, prefix="/api")` in one file + `router = APIRouter(prefix="/orders")` in another → `/api/orders/…`. A constant prefix (`API_PREFIX = "/v1"`) is resolved; a settings attribute is not (the environment can override it) → endpoint empty. A router included at two places is served at both: its routes' endpoint is empty, never its own path alone | Python index: `fastapi.wiring` fact |
 | ASP.NET | base controller route prefix + action route | heritage ([§6](#6-inheritance-heritage)) |
 | WebForms | `MapPageRoute` URL → `.aspx` page | C# index: `webforms.page-routes` fact |
 | HotChocolate | `AddQueryType<BookQueries>()` in `Program.cs` → `BookQueries.cs` is a query root | registered fact ([below](#a-framework-fact-from-another-file-a-registered-fact)) |
 | WCF REST | `<%@ ServiceHost Service="Shop.OrderService" %>` in any `.svc` → the class's (or, for an interface contract, its one implementer's) `[WebGet]` operations are served under that `.svc` path. Matched by fully-qualified type name; a type named by two `.svc` files → no host | registered fact `wcf.svc-hosts`, collected from another parser's files (`FactSpec.sources`) |
-| Play | `-> /admin admin.Routes` in `conf/routes` + `GET /users …` in `conf/admin.routes` → `/admin/users`; `-> /v1/posts v1.post.PostRouter` + a SIRD `case GET(p"/$id")` in that class → `/v1/posts/{id}`. A routes file defines the router named after it (`conf/routes` → `router.Routes`, served at the root), so includes chain. A router included twice, or not included at all, keeps its own paths | `scala_play/includes.py`: the routes parser's own index for routes files; registered fact `play.router-includes` on the Scala index for SIRD classes (matched by fully-qualified name) |
+| Play | `-> /admin admin.Routes` in `conf/routes` + `GET /users …` in `conf/admin.routes` → `/admin/users`; `-> /v1/posts v1.post.PostRouter` + a SIRD `case GET(p"/$id")` in that class → `/v1/posts/{id}`. A routes file defines the router named after it (`conf/routes` → `router.Routes`, served at the root), so includes chain. A name is unique only within one Play project (`<project>/conf/…`): an include names its own project's router, else the one other project that defines it; two other projects → neither is tied to it, so their address is unknown. A router included at two prefixes is served at each: its bindings' endpoint is empty. A router not included at all keeps its own paths | `scala_play/includes.py`: the routes parser's own index for routes files; registered fact `play.router-includes` on the Scala index for SIRD classes (matched by fully-qualified name) |
 | AWS Lambda (TypeScript, C#) | `serverless.yml` `functions:` and SAM templates (`AWS::Serverless::Function`, YAML or JSON `serverless.template`) → each handler (`src/handler.onOrder`, `Assembly::Namespace.Type::Method`) gets its events' addresses (queue, topic, schedule, HTTP path); one record per event; a variable or reference leaves the address empty | registered fact `aws.deployed-handlers` (`parsers/aws_deploy.py`) on the TypeScript and C# indexes, collected from `.yml` / `.yaml` / `.json` / `.template` (`FactSpec.sources`) |
 | Terraform | local `module` source → the `.tf` files it loads | HCL index |
 
@@ -394,6 +407,77 @@ How a registered name is bound to a file uses the C# rules — the same ones imp
 > with no marker cannot use a byte guard — its first check is a dictionary lookup instead; and the
 > framework's own parser must share an ownership check with the detector so the two never both emit.
 
+### Leading an entry point to its handler
+
+Every entry point leads to the code that handles it: `handler` (its name), `handlerLine` and,
+when it is declared in another file, `handlerPath`
+([entry-point contract](entry-points.md)). A handler in the same file is easy: the detector
+has its node and sets `handlerLine`. A handler in **another** file is found through the index.
+Everything for this lives in `parsers/handler_sites.py`:
+
+| The detector knows … | Call | Languages | Used by |
+|---|---|---|---|
+| a class and a method | `locate_method(index, lang, cls, method)` — the `*.method-lines` fact | C#, Java, Groovy, PHP, Ruby, Scala | ASP.NET, HotChocolate, Spring functional routes, Vert.x, Quartz, Rails, WCF, Play SIRD |
+| a module and an exported name | `locate_export(index, module_file, name)` — the `typescript.declarations` fact, re-exports followed | TypeScript / JavaScript | GraphQL resolver modules |
+| only a name written in this file | nothing — it names the handler; `link_handlers` locates it after parsing | TypeScript / JavaScript (every TS framework parser) | React, Angular, Vue, Next.js pages |
+
+Whichever found the declaration, `handler_location(site, own_path)` turns it into
+`(handlerLine, handlerPath)`: `handlerPath` only when the file is not the record's own. The rule
+lives in that one place.
+
+The `*.method-lines` fact is keyed by the class's simple name, so two classes of one name are
+ambiguous. A detector that knows which files the class binds to passes them as `within=`, and
+only the sites in those files count: the C# Quartz detector binds the job class by the C# rules
+(`type_files`: namespaces, `using`s, projects), so two examples that each declare their own
+`SimpleJob` are told apart; WCF passes the files of the contract's one implementing type; a
+Play SIRD router passes the one file its receiver's declared type (`controller: PostController`,
+read from the router class alone) resolves to through the router's imports or package, so `v1`
+and `v2` controllers of one name are told apart — and two candidates leave it unlocated.
+
+Play's `conf/routes` is parsed by its own base parser, which has no Scala or Java index to ask.
+Its `build_index` reads the controllers the routes name instead, in Play's project layout
+(`scala_play/handlers.py`): a `<Class>.scala` / `.java` under the project's `app/` whose
+`package` is the route's, read with the same collectors as the `*.method-lines` facts
+(`method_sites`).
+
+Razor (`.cshtml`) is its own base parser too. Its `handler_locator` reads the page's code-behind
+`<page>.cshtml.cs` and finds the `@model` class there (`razor/page_models.py`) — the shared
+`link_handlers` loop writes the result, as for TypeScript.
+
+`BaseParser.link_handlers` is the same loop for every language: it takes each record that names a
+handler without a location, asks the language's lookup (`handler_locator(ctx)`; default: none),
+and writes the result through `handler_location`. A language supplies only the lookup —
+TypeScript's (`typescript/handlers.py`) follows the file's imports and lazy loads through
+`typescript.declarations`. PHP's (`php/handlers.py`) reads `Class@method` / an invokable class
+from `php.method-lines`, limited to the class's file when the routes file's `use` imports or a
+fully qualified name say which one, and a plain function name from the file's own declarations.
+A found PHP handler is written as the method name (`UserController@index` → `index` +
+`handlerPath`), as Rails and Play do; an unfound one keeps the name as written.
+
+```csharp
+// Jobs/Startup.cs — the Quartz detector knows the job class and its method
+q.AddJob<ExampleJob>(…);                          // → timer, handler "Execute"
+// locate_method(index, "csharp", "ExampleJob", "Execute") → ("Jobs/ExampleJob.cs", 19)
+// → handlerPath "Jobs/ExampleJob.cs", handlerLine 19
+```
+
+```tsx
+// src/routes/index.tsx — the React detector knows only the component's name
+import ProjectList from '../components/pages/projects';
+<Route path="/" element={<ProjectList/>} />       // → page, handler "ProjectList"
+// link_handlers: ProjectList ← import '../components/pages/projects' → its default export
+// → handlerPath "src/components/pages/projects.tsx", handlerLine 128
+```
+
+The loop runs in the worker right after `parse_file`. The lookup is asked for only when a record
+names a handler with no location, so TypeScript re-parses only those files — in practice a few
+route files per repo. A `.vue` SFC is never re-parsed: its script is not the whole file.
+
+Honest-null applies: a handler that can't be found, or is declared twice (two classes of one
+name, a name imported from two places), leaves `handlerPath` and `handlerLine` empty — never a
+guessed file. Python, Kotlin and Scala (apart from Play routes) have no way yet: their handlers
+carry a `handlerLine` in the record's own file only.
+
 ---
 
 ## 9. Links to skipped template files
@@ -415,7 +499,7 @@ the link would point at nothing. After each file is parsed, `core/executor.py::_
 | Limitation | Effect |
 |---|---|
 | `extends` is not resolved by cog, and the backend matches it by exact name | Qualified or generic parents (`a.b.Base`, `Repo<T>`) get no `EXTENDS` edge; same-name classes all get one |
-| C++ includes resolve by basename | Two `util.h` files in different folders → both unresolved |
+| C and C++ `#include "x.h"` resolves to the file next to the includer, else to a unique basename | Two `util.h` files reached only through an include path → both unresolved |
 | Python resolves absolute imports from the repo root only | `src/`-layout projects (package under `src/`) resolve poorly |
 | Ruby `require_relative "x/y"` (no `./`) resolves from the repo root | It should resolve from the file's own folder |
 | TypeScript heritage: any class name used in two files → `None` | Even identical duplicates block inherited-call resolution |

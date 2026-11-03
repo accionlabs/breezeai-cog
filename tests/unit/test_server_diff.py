@@ -401,3 +401,62 @@ def test_parser_failure_still_reports_parse_stream(captured: _Captured, monkeypa
         "error": "Parse/stream failed: tree-sitter grammar missing",
         "failedStep": "parse_stream",
     }
+
+
+# --- failures are written to the log file, not only the response ---------------------
+
+def _log_text(tmp_path: Path) -> str:
+    return "\n".join(p.read_text() for p in sorted(tmp_path.glob("*.log")))
+
+
+@pytest.fixture
+def file_log(tmp_path: Path):
+    from breezeai_cog.logging import setup_logging
+
+    setup_logging(Settings(log_to_file=True, log_location=tmp_path))
+    return tmp_path
+
+
+def test_upload_failure_is_logged_with_step_and_cause(captured: _Captured, file_log: Path) -> None:
+    client = _make_failing_client(captured, close_exc=RuntimeError("CompleteMultipartUpload 500"))
+    r = client.post("/api/analyze-diff", json=BODY)
+    assert r.status_code == 500
+    text = _log_text(file_log)
+    assert "message=request.failed" in text and "ERROR" in text
+    assert "path=/api/analyze-diff" in text and "status=500" in text and "failedStep=upload" in text
+    assert "Upload failed: CompleteMultipartUpload 500" in text
+    assert "RuntimeError: CompleteMultipartUpload 500" in text  # the cause's traceback
+
+
+def test_logged_failure_scrubs_credentials(captured: _Captured, file_log: Path) -> None:
+    client = _make_failing_client(
+        captured, acquire_exc=RuntimeError("git clone failed: https://x:ghp_secret@github.com/a/b")
+    )
+    assert client.post("/api/analyze-diff", json=BODY).status_code == 502
+    text = _log_text(file_log)
+    assert "failedStep=git_acquire" in text
+    assert "ghp_secret" not in text  # neither in the message nor in the chained traceback
+
+
+def test_client_error_is_logged_as_warning(captured: _Captured, file_log: Path) -> None:
+    client = _make_client(captured, filter_set=None, deleted=[])
+    assert client.post("/api/analyze-diff", json={"repoUrl": "x"}).status_code == 400
+    text = _log_text(file_log)
+    assert "WARNING" in text and "status=400" in text and "Traceback" not in text
+
+
+def test_unhandled_exception_is_logged_and_returns_json(
+    captured: _Captured, file_log: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from breezeai_cog.server import routes as routes_mod
+
+    def boom(*args, **kwargs):
+        raise KeyError("unexpected")
+
+    monkeypatch.setattr(routes_mod, "parse_repo_url", boom)
+    client = _make_failing_client(captured)
+    r = client.post("/api/analyze-diff", json=BODY)
+    assert r.status_code == 500
+    assert r.json() == {"error": "Internal Server Error"}
+    text = _log_text(file_log)
+    assert "status=500" in text and "KeyError" in text and "Traceback" in text

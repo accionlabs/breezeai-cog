@@ -147,7 +147,7 @@ def test_computed_path_is_empty_unless_literal(tmp_path) -> None:
 
 def test_request_and_response_dto(tmp_path) -> None:
     # R2: capture requestDTO from the @requestBody() param type and responseDTO from the
-    # handler return type.
+    # handler return type, as declared (only Promise<…> removed).
     src = (
         b"import {get, post, requestBody} from '@loopback/rest';\n"
         b"export class C {\n"
@@ -166,10 +166,11 @@ def test_request_and_response_dto(tmp_path) -> None:
     routes = {s.handler: s for s in LoopBackParser().parse_file(ctx).statements
               if s.semanticType == "route"}
     assert routes["clean"].requestDTO == "CleanDataDTO"
-    assert routes["clean"].responseDTO is None            # Promise<object> → no DTO
+    assert routes["clean"].responseDTO == "object"        # Promise<object> → object
     assert routes["find"].requestDTO is None
-    assert routes["find"].responseDTO == "ResponseApi"     # first PascalCase non-wrapper
-    assert routes["inline"].requestDTO is None             # anonymous inline object → no name
+    assert routes["find"].responseDTO == "ResponseApi<Timezone[]>"
+    assert routes["inline"].requestDTO == "{a: number; b: string}"  # an inline object type
+    assert routes["inline"].responseDTO is None           # Promise<void> → no payload
 
 
 def test_authenticate_guards(tmp_path) -> None:

@@ -23,6 +23,8 @@ relationships are left to the backend relationship phase (honest-null — no inv
 
 from __future__ import annotations
 
+import re
+
 from tree_sitter import Node
 
 from ...emit import class_id, disambiguate, file_id, statement_id
@@ -95,6 +97,11 @@ def base_type_name(node: Node | None, src: bytes) -> str | None:
         if found is not None:
             return found
     return None
+
+
+def type_text(node: Node | None, src: bytes) -> str | None:
+    """A type reference as written (``[Post!]!``) — what ``requestDTO`` / ``responseDTO`` hold."""
+    return " ".join(node_text(node, src).split()) or None if node is not None else None
 
 
 def _named_types(node: Node, src: bytes) -> list[str]:
@@ -219,7 +226,8 @@ def _fragment_name(n: Node, src: bytes) -> str | None:
 
 
 def request_dto(field: Node, src: bytes) -> str | None:
-    """A root field's request DTO — the ``input``/``data`` arg (else the first) base type."""
+    """A root field's request DTO — the ``input``/``data`` arg (else the first) type, as
+    written (``CreateOrderInput!``)."""
     args = child_of_type(field, "arguments_definition")
     if args is None:
         return None
@@ -227,7 +235,7 @@ def request_dto(field: Node, src: bytes) -> str | None:
     if not inputs:
         return None
     chosen = next((i for i in inputs if _name(i, src) in ("input", "data")), inputs[0])
-    return base_type_name(child_of_type(chosen, "type"), src)
+    return type_text(child_of_type(chosen, "type"), src)
 
 
 def _resolve_roots(root: Node, src: bytes) -> dict[str, str]:
@@ -269,7 +277,7 @@ def root_field_dtos(root: Node, src: bytes) -> list[tuple[str, str, str | None, 
                     name = _name(field, src) if field.type == "field_definition" else None
                     if name is not None:
                         out.append((type_name, name, request_dto(field, src),
-                                    base_type_name(child_of_type(field, "type"), src)))
+                                    type_text(child_of_type(field, "type"), src)))
             continue
         stack.extend(n.named_children)
     return out
@@ -281,7 +289,9 @@ def root_field_dtos(root: Node, src: bytes) -> list[tuple[str, str, str | None, 
 def _is_relay_field(name: str, request: str | None, response: str | None) -> bool:
     """The Relay Global Object Identification fields: ``node(id: ID!): Node`` and
     ``nodes(ids: [ID!]!): [Node]!``."""
-    return name in ("node", "nodes") and request == "ID" and response == "Node"
+    def base(t: str | None) -> str:
+        return re.sub(r"[\[\]!\s]", "", t or "")
+    return name in ("node", "nodes") and base(request) == "ID" and base(response) == "Node"
 
 
 def extract_graphql(
@@ -341,7 +351,7 @@ def extract_graphql(
             if name is None:
                 continue
             req = request_dto(field, source)
-            resp = base_type_name(child_of_type(field, "type"), source)
+            resp = type_text(child_of_type(field, "type"), source)
             # A Relay node field is served by the server framework itself (Hot Chocolate,
             # graphql-relay): no resolver of ours declares it, so the SDL is its only record.
             served = relay_routes and kind == "query" and _is_relay_field(name, req, resp)

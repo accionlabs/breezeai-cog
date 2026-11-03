@@ -16,13 +16,16 @@ from __future__ import annotations
 
 import re
 from collections.abc import Callable, Iterable
+from dataclasses import dataclass, field
 from typing import Any
 
 from tree_sitter import Node
 
 from ..schemas import Function, SemanticType
+from .additive import index_fact
 from .constfold import init_tokens, resolve_tokens
 from .emits import Emit
+from .index_common import record_distinct
 from .statements_common import render_concat
 from .treesitter import node_text
 
@@ -46,6 +49,9 @@ EVENTBUS: dict[str, SemanticType] = {
 #: delay in milliseconds) is the ``endpoint`` when it is a number literal; anything else is
 #: unknown → empty.
 TIMERS = {"setTimer": "TIMER", "setPeriodic": "PERIODIC"}
+#: Deployment calls → ``verticle_deploy``: 3.x+ ``deployVerticle`` and the 2.x ``Container``
+#: family (``deployWorkerVerticle``, ``deployModule``); the first argument names what starts.
+DEPLOYS = {"deployVerticle", "deployWorkerVerticle", "deployModule"}
 HTTP_VERBS = {"get", "post", "put", "delete", "patch", "options", "head"}
 
 #: Service proxies: the builder ``setAddress(...)`` is called on decides the side. The service
@@ -82,10 +88,26 @@ ROUTE_RECEIVERS = {"route", "rm", "routematcher"}
 
 
 def is_route_receiver(obj_l: str) -> bool:
-    """Whether a (lower-cased) receiver denotes a Router / RouteMatcher."""
+    """Whether a (lower-cased) receiver denotes a Router / RouteMatcher by its name."""
     return bool(obj_l) and (
         "router" in obj_l or "routematcher" in obj_l or obj_l in ROUTE_RECEIVERS
     )
+
+
+#: A variable, field or parameter declared with a router type, whatever its name:
+#: ``RouteMatcher routes = …`` / ``private Router api;`` / ``(Router r)``, plus an untyped
+#: ``def m = new RouteMatcher()`` (Groovy) or ``var r = Router.router(vertx)`` (Java 10+).
+_ROUTER_TYPED = re.compile(rb"\b(?:RouteMatcher|Router)\s+(\w+)\s*[=;,)]")
+_ROUTER_ASSIGNED = re.compile(rb"\b(\w+)\s*=\s*(?:new\s+RouteMatcher\s*\(|Router\.router\s*\()")
+
+
+def router_vars(source: bytes) -> frozenset[str]:
+    """Names declared as a ``Router`` / ``RouteMatcher`` in this file, so a route call on
+    ``routes`` or ``a`` counts by its declared type, not only by the receiver's name."""
+    if b"Router" not in source and b"RouteMatcher" not in source:
+        return frozenset()
+    return frozenset(n.decode() for rx in (_ROUTER_TYPED, _ROUTER_ASSIGNED)
+                     for n in rx.findall(source))
 
 
 def is_bus_receiver(obj: str) -> bool:
@@ -104,16 +126,19 @@ def classify_call(
     *,
     route_scope: bool = False,
     service_vars: dict[str, str] | None = None,
+    routers: frozenset[str] = frozenset(),
 ) -> tuple[SemanticType, str | None, str | None, str | None] | None:
     """Map one call to ``(semanticType, method, endpoint, routeKind)`` or ``None``.
 
     ``path``      the first string-literal argument, already rendered by the caller (Java:
                   literal text; Groovy: GString → ``{name}`` placeholders).
-    ``first_arg`` raw text of the first argument — the fallback name for ``deployVerticle``
+    ``first_arg`` raw text of the first argument — the fallback name for a :data:`DEPLOYS` call
                   (event-bus addresses never fall back to it: unresolved → empty).
     ``obj``       the receiver text (``""`` for a bare, unqualified call).
     ``service_vars`` variable → service-proxy builder type (:func:`service_builder_vars`), so a
                   ``setAddress`` on a builder held in a variable still finds its side.
+    ``routers``   names this file declares as a ``Router`` / ``RouteMatcher``
+                  (:func:`router_vars`): such a receiver is a router whatever its name.
     ``route_scope`` marks a *bare* HTTP-verb call (no receiver) that the caller has
                   determined is lexically inside a RouteMatcher scope — the Vert.x 2.x
                   ``rm.with { get('/x', h) }`` idiom — so it should still count as a route.
@@ -123,6 +148,7 @@ def classify_call(
     starts with a placeholder. The receiver check (or ``route_scope``) is the real signal.
     """
     obj_l = obj.lower()
+    is_router = is_route_receiver(obj_l) or router_name(obj) in routers
 
     if method in EVENTBUS and is_bus_receiver(obj):
         # The address is resolved or empty — never the symbol or a {…} placeholder (Q15): a
@@ -131,16 +157,16 @@ def classify_call(
     if method in TIMERS:
         delay = (first_arg or "").replace("_", "").rstrip("lL")
         return "timer", TIMERS[method], delay if delay.isdigit() else None, None
-    if method == "deployVerticle":
+    if method in DEPLOYS:
         return "verticle_deploy", None, path or first_arg, None
     if method == "setAddress":
         side = _service_side(obj, service_vars)
         if side is None:
             return None
         return side, None, _known_path(path) if path else None, None
-    if method in HTTP_VERBS and path and (is_route_receiver(obj_l) or route_scope):
+    if method in HTTP_VERBS and path and (is_router or route_scope):
         return "route", method.upper(), _known_path(path), "route"
-    if method == "route" and path and is_route_receiver(obj_l):
+    if method == "route" and path and is_router:
         return "route", None, _known_path(path), "route"
     return None
 
@@ -194,6 +220,61 @@ MOUNT_SUB_ROUTER = "mountSubRouter"
 SubRouterMount = tuple[str, str, str | None]
 
 
+def router_name(text: str) -> str:
+    """A router reference as one name: ``this.apiRouter`` and ``apiRouter`` are the same field."""
+    return text[5:] if text.startswith("this.") else text
+
+
+# ── Router factories mounted elsewhere: a registered fact on the Java and Groovy indexes ────
+#: A method that creates a ``Router``, adds routes and returns it serves those routes wherever
+#: its caller puts the result — under a prefix when the caller mounts it
+#: (``mountSubRouter("/api", UserApi.router(vertx))``), at the root when it is the main router
+#: (``requestHandler(createRouter())``). The caller is usually another file, so the mounts of
+#: factory calls are collected repo-wide: ``Class.method`` → the prefix it is mounted at.
+MOUNTED_FACTORIES = "vertx.mounted-factories"
+
+#: One factory mount, as collected: (``Class.method`` — or the bare method name when the class
+#: is not known from the call, prefix or None when it does not resolve, whether the class is
+#: known).
+FactoryMount = tuple[str, str | None, bool]
+
+
+@dataclass(frozen=True)
+class MountedFactories:
+    #: ``Class.method`` → its mount prefix; None = mounted where cog cannot tell (a prefix that
+    #: does not resolve, two different prefixes, or a mount under a sub-router).
+    prefixes: dict[str, str | None] = field(default_factory=dict)
+    #: method names mounted on a call whose class is not known (``api.router()``): any factory
+    #: of that name may be the one mounted.
+    by_name: frozenset[str] = frozenset()
+
+
+def resolve_mounted_factories(values: list[list[FactoryMount]], index: Any) -> MountedFactories | None:
+    prefixes: dict[str, str | None] = {}
+    by_name: set[str] = set()
+    for per_file in values:
+        for key, prefix, qualified in per_file:
+            if qualified:
+                record_distinct(prefixes, key, prefix)
+            else:
+                by_name.add(key)
+    return MountedFactories(prefixes, frozenset(by_name)) if prefixes or by_name else None
+
+
+def factory_mount(index: Any | None, cls: str, method: str) -> tuple[bool, str | None]:
+    """(mounted?, prefix) for the factory ``cls.method``: not mounted anywhere → (False, None)
+    (its routes keep their own path — it may be the main router); mounted → its prefix, or None
+    when where is unknown."""
+    fact: MountedFactories | None = index_fact(index, MOUNTED_FACTORIES)
+    if fact is None:
+        return False, None
+    key = f"{cls}.{method}"
+    if key in fact.prefixes:
+        found = fact.prefixes[key]
+        return True, (_mount_prefix(found) if found is not None and "{" not in found else None)
+    return (True, None) if method in fact.by_name else (False, None)
+
+
 def _mount_prefix(path: str) -> str:
     """``/api/*`` → ``/api``: the wildcard only says "everything under"."""
     p = path[:-1] if path.endswith("*") else path
@@ -203,23 +284,29 @@ def _mount_prefix(path: str) -> str:
 def sub_router_bases(mounts: Iterable[SubRouterMount]) -> dict[str, str | None]:
     """Sub-router variable → the base its routes are served under, composed through nested
     sub-routers (``api`` on ``router`` at ``/api``, ``v1`` on ``api`` at ``/v1`` → ``/api/v1``).
-    None = a mount path on the way does not resolve (the routes' address is unknown). A
-    sub-router mounted at two different prefixes, or in a cycle, is absent: its routes keep
-    their own path (honest-null)."""
+    None = a mount path on the way does not resolve, or the sub-router is mounted at two
+    different prefixes (served at each): the routes' address is unknown. A cycle is absent: its
+    routes keep their own path."""
     local: dict[str, tuple[str, str | None] | None] = {}
+    twice: set[str] = set()
     for sub, parent, prefix in mounts:
         # Vert.x path parameters are `:id`; a `{name}` in a rendered mount path is an unresolved
         # part (render_address placeholder) — the prefix is unknown.
         known = prefix is not None and "{" not in prefix
+        sub, parent = router_name(sub), router_name(parent)
         entry = (parent, _mount_prefix(prefix) if known and prefix is not None else None)
-        local[sub] = entry if local.get(sub, entry) == entry else None
+        if local.get(sub, entry) != entry:
+            twice.add(sub)
+        local[sub] = entry
 
     unknown = object()
 
     def base(var: str, seen: frozenset[str]) -> object:
         entry = local.get(var)
+        if var in twice:
+            return unknown  # served under each of its mounts
         if entry is None or var in seen:
-            return None  # ambiguous, or a cycle
+            return None  # a cycle
         parent, prefix = entry
         if prefix is None:
             return unknown
@@ -268,6 +355,7 @@ def handler_info(
     - Inline lambda / closure / anonymous ``new Handler<>() {…}``: no name; its line.
     - ``this::h`` / ``this.&h``: ``h``, line of its declaration in this file (``methods``).
     - ``other::h`` / a handler variable: the name; declared elsewhere, so no line.
+    - ``this`` (the class itself implements ``Handler``): ``handle``, its line in this file.
     - Anything else (a factory call ``Handler.create()``): nothing — honest-null."""
     if arg is None:
         return None, None
@@ -282,6 +370,8 @@ def handler_info(
         if not name.isidentifier():
             return None, None
         return name, methods.get(name) if receiver.strip() == "this" else None
+    if arg.type == "this" or (arg.type == "identifier" and node_text(arg, source) == "this"):
+        return "handle", methods.get("handle")
     if arg.type == "identifier":
         return node_text(arg, source), None
     return None, None

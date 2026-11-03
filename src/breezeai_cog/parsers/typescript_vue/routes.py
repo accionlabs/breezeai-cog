@@ -271,7 +271,7 @@ def _emit(
                 ),
                 "guards": (outer[0] + list(inherited) + own + outer[1]) or None,
             },
-            parent=file_id(path), text=entry_text(elem, source), node_type="synthetic",
+            parent=file_id(path), text=entry_text(elem, source),
         ))
     if children is not None and children.type == "array":
         for child in children.named_children:

@@ -5,7 +5,7 @@ Two groups, both language-agnostic (they read names, type strings and repo paths
 nodes) so C# and VB parsers share them verbatim:
 
 * **attribute / type names** — :func:`simple_attr_name` (``[HttpGetAttribute]`` →
-  ``HttpGet``) and :func:`response_dto` (``Task<ActionResult<Foo>>`` → ``Foo``);
+  ``HttpGet``) and :func:`response_dto` (``Task<ActionResult<List<Foo>>>`` → ``List<Foo>``);
 * **IIS virtual paths** — :func:`web_app_root` (the ``web.config`` application root),
   :func:`to_repo_path` (``~/Controls/Nav.ascx`` → repo-relative) and :func:`ci_resolve`
   (case-insensitive lookup returning the real on-disk casing);
@@ -42,10 +42,45 @@ def _has_top_level_comma(type_args: str) -> bool:
     return False
 
 
+#: Wrappers that are not part of the payload: async results and HTTP results (contract:
+#: ``requestDTO`` / ``responseDTO`` are the declared payload type with these removed).
+_NON_PAYLOAD_WRAPPERS = frozenset({
+    "Task", "ValueTask", "ActionResult", "Ok", "Created", "CreatedAtRoute", "Accepted",
+    "AcceptedAtRoute",
+})
+#: Declared types that carry no payload: no body, or a result that declares no type.
+_NO_PAYLOAD = frozenset({
+    "void", "Void", "Task", "ValueTask", "IActionResult", "ActionResult", "IResult",
+    "IHttpActionResult", "HttpResponseMessage", "JsonResult", "ContentResult", "ViewResult",
+    "PartialViewResult", "FileResult", "ObjectResult", "StatusCodeResult", "RedirectResult",
+})
+_VB_GENERIC_RE = re.compile(r"^([\w.]+)\(Of (.*)\)$")
+
+
 def response_dto(return_type: str | None) -> str | None:
-    """Unwrap ``Task<…>`` / ``ActionResult<…>`` / ``Task(Of …)`` to the payload type;
-    bare action results (``IActionResult``/``ActionResult``/``void``) → None. A trailing ``?``
-    (nullable reference annotation) is dropped so the result names a real type."""
+    """A handler's declared return type → the payload type as written, with async and
+    HTTP-result wrappers removed (``Task<ActionResult<List<Foo>>>`` → ``List<Foo>``,
+    ``Task(Of Foo)`` → ``Foo``); lists, arrays and nullable types stay as declared. None when
+    no payload type is declared (``void``, ``Task``, ``IActionResult``)."""
+    t = " ".join((return_type or "").split())
+    while True:
+        vb = _VB_GENERIC_RE.match(t)
+        if "<" in t and t.endswith(">"):
+            outer, inner = t[: t.index("<")], t[t.index("<") + 1: -1]
+        elif vb is not None:
+            outer, inner = vb.group(1), vb.group(2)
+        else:
+            break
+        if outer.strip().rsplit(".", 1)[-1] not in _NON_PAYLOAD_WRAPPERS \
+                or _has_top_level_comma(inner):
+            break
+        t = inner.strip()
+    return None if not t or t.rsplit(".", 1)[-1] in _NO_PAYLOAD else t
+
+
+def innermost_type(return_type: str | None) -> str | None:
+    """The innermost single type argument, as a type name: ``Task<Session>`` → ``Session``
+    (a generic with several arguments keeps its own name; a trailing ``?`` is dropped)."""
     if not return_type:
         return None
     t = return_type.strip()

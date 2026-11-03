@@ -10,8 +10,12 @@ A recurring-job registration names one job method and its schedule, so it is a b
 
 * **Receiver.** ``RecurringJob`` or a name declared in the file as ``IRecurringJobManager`` /
   ``RecurringJobManager``. ``AddOrUpdate`` alone is not enough: ``ConcurrentDictionary`` has one.
-* **Handler.** The method the job lambda calls (``c => c.Run()`` → ``Run``), with its declaration
-  line when it is declared once in this file. A lambda that is not a single call → no handler.
+* **Handler.** The method the job lambda calls (``c => c.Run()`` → ``Run``). A lambda that is not
+  a single call → no handler. Where it is declared (``handlerLine`` / ``handlerPath``,
+  :func:`..handler_sites.locate_method`) needs its class: the type argument for a call on the
+  lambda's parameter (``AddOrUpdate<Cleanup>(…, c => c.Run())``), the receiver when it binds to a
+  type (``() => Reports.Send()``), the class the registration is written in for a bare call
+  (``() => Send()``). A variable receiver, an inherited method, two declarations → no line.
 * **Schedule** (``endpoint``): the argument after the lambda — a string literal, or a ``Cron``
   helper whose arguments are literals (``Cron.Daily`` / ``Cron.Daily()`` → ``0 0 * * *``,
   ``Cron.Daily(2, 30)`` → ``30 2 * * *``, ``Cron.Weekly(DayOfWeek.Friday, hour: 3)`` →
@@ -27,7 +31,9 @@ from tree_sitter import Node
 
 from ..additive import DetectContext, Detection, Detector, Gate, register_detector
 from ..emits import Emit
+from ..handler_sites import handler_location, locate_method
 from ..treesitter import node_text
+from .imports import CSharpIndex, in_scope_namespaces, type_files
 
 #: ``Hangfire.Cron`` helpers → (parameters with their defaults, the expression). As in
 #: ``Hangfire.Core/Cron.cs``: ``Daily(int hour, int minute)`` → ``$"{minute} {hour} * * *"``,
@@ -50,6 +56,7 @@ _CRON_HELPERS: dict[str, tuple[tuple[tuple[str, int | None], ...], str]] = {
 _DAYS = {d: i for i, d in enumerate(
     ("Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"))}
 
+_CLASSES = ("class_declaration", "struct_declaration", "record_declaration")
 _MANAGER_DECL = re.compile(rb"\bI?RecurringJobManager\s+(\w+)")
 
 
@@ -72,8 +79,9 @@ def _callee(call: Node, source: bytes) -> tuple[str, str] | None:
     return node_text(recv, source), node_text(name, source).split("<", 1)[0]
 
 
-def _job_method(lam: Node, source: bytes) -> str | None:
-    """The method a job lambda calls: ``c => c.Run()`` / ``() => Reports.Send(x)`` → the name."""
+def _job_call(lam: Node, source: bytes) -> tuple[str | None, str] | None:
+    """The method a job lambda calls, with its receiver: ``c => c.Run()`` → ("c", "Run"),
+    ``() => Reports.Send(x)`` → ("Reports", "Send"), ``() => Send()`` → (None, "Send")."""
     body = lam.child_by_field_name("body")
     if body is None or body.type != "invocation_expression":
         return None
@@ -81,9 +89,41 @@ def _job_method(lam: Node, source: bytes) -> str | None:
     if fn is None:
         return None
     if fn.type == "member_access_expression":
+        recv = fn.child_by_field_name("expression")
         name = fn.child_by_field_name("name")
-        return node_text(name, source).split("<", 1)[0] if name is not None else None
-    return node_text(fn, source) if fn.type == "identifier" else None
+        if recv is None or name is None:
+            return None
+        return node_text(recv, source), node_text(name, source).split("<", 1)[0]
+    return (None, node_text(fn, source)) if fn.type == "identifier" else None
+
+
+def _lambda_params(lam: Node, source: bytes) -> set[str]:
+    params = lam.child_by_field_name("parameters")
+    if params is None:
+        return set()
+    if params.type == "implicit_parameter":  # ``c => …``
+        return {node_text(params, source)}
+    return {node_text(p.child_by_field_name("name") or p, source) for p in params.named_children
+            if p.type == "parameter"}
+
+
+def _type_argument(call: Node, source: bytes) -> str | None:
+    """``RecurringJob.AddOrUpdate<Cleanup>(…)`` → ``Cleanup``; None without exactly one."""
+    fn = call.child_by_field_name("function")
+    name = fn.child_by_field_name("name") if fn is not None else None
+    targs = next((c for c in name.named_children if c.type == "type_argument_list"), None) \
+        if name is not None else None
+    if targs is None or len(targs.named_children) != 1:
+        return None
+    return node_text(targs.named_children[0], source)
+
+
+def _enclosing_class(node: Node, source: bytes) -> str | None:
+    cur = node.parent
+    while cur is not None and cur.type not in _CLASSES:
+        cur = cur.parent
+    nm = cur.child_by_field_name("name") if cur is not None else None
+    return node_text(nm, source) if nm is not None else None
 
 
 def _int(arg: Node, source: bytes) -> int | None:
@@ -145,9 +185,37 @@ def _detect(dc: DetectContext) -> Detection | None:
     source = dc.source
     receivers = {"RecurringJob", "Hangfire.RecurringJob"}
     receivers |= {m.decode() for m in _MANAGER_DECL.findall(source)}
-    declared: dict[str, int | None] = {}
-    for f in dc.record.functions:
-        declared[f.name] = f.startLine if f.name not in declared else None
+    index = dc.ctx.resolution_index
+    own_classes = {c.name for c in dc.record.classes}
+    scopes: set[str] | None = None
+
+    def files_of(cls: str) -> set[str]:
+        """The files ``cls`` binds to by C# rules (as the Quartz detector binds a job class)."""
+        nonlocal scopes
+        if cls in own_classes:
+            return {dc.path}
+        if not isinstance(index, CSharpIndex):
+            return set()
+        if scopes is None:
+            scopes = in_scope_namespaces(dc.root, source) | index.global_usings
+        return type_files(cls, scopes, index, dc.path)
+
+    def locate(call: Node, lam: Node) -> tuple[str | None, tuple[str, int] | None]:
+        """(handler, its declaration site) — see the module docstring."""
+        target = _job_call(lam, source)
+        if target is None:
+            return None, None
+        recv, method = target
+        if recv is None:  # a bare call: the registering class's own method
+            cls = _enclosing_class(call, source)
+            return method, locate_method(index, "csharp", cls, method, within={dc.path})
+        if recv in _lambda_params(lam, source):
+            # the type argument: a type, so its simple name alone when it binds to no file
+            cls = _type_argument(call, source)
+            files = files_of(cls) if cls else set()
+            return method, locate_method(index, "csharp", cls, method, within=files or None)
+        files = files_of(recv)  # a static call — only when the receiver binds to a type
+        return method, locate_method(index, "csharp", recv, method, within=files) if files else None
     found: list[Emit] = []
     for call in _walk(dc.root, "invocation_expression"):
         parts = _callee(call, source)
@@ -161,13 +229,14 @@ def _detect(dc: DetectContext) -> Detection | None:
         lam_at = next((i for i, a in enumerate(args) if a.type == "lambda_expression"), None)
         if lam_at is None:
             continue
-        handler = _job_method(args[lam_at], source)
+        handler, site = locate(call, args[lam_at])
+        line, path = handler_location(site, dc.path)
         schedule = _schedule(args[lam_at + 1], source) if lam_at + 1 < len(args) else None
         found.append(Emit(
             call,
             {"semanticType": "timer", "framework": "hangfire", "method": "PERIODIC",
              "endpoint": schedule, "handler": handler,
-             "handlerLine": declared.get(handler) if handler else None},
+             "handlerLine": line, "handlerPath": path},
             enrich="unclassified",
         ))
     return Detection(found, label="hangfire") if found else None

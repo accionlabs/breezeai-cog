@@ -223,8 +223,10 @@ def detect_grape_routes(root: Node, source: bytes, path: str, record: FileRecord
                 framework="grape",
                 handlerLine=block.start_point[0] + 1 if block is not None else None,
                 guards=guards or None,
-                # Honest-null: assert auth only when a guard is present; absence is unknown.
-                authRequired=True if guards else None,
+                # A ``before`` hook runs ahead of every route in its scope — auth, a header, a
+                # locale: a scope-level guard never asserts auth (``compose_guards``), so
+                # authRequired stays unknown.
+                authRequired=None,
                 routeKind="route",
                 isRegex=False,
             ), parent=owner_id(line, record.functions, record.classes, fallback), node_type="call")

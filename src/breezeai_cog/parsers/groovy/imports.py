@@ -11,10 +11,14 @@ from __future__ import annotations
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 from tree_sitter import Node
 
 from ...utils import repo_relative
+from ..additive import (
+    collect_additive, collect_fact_sources, resolve_additive, split_fact_sources,
+)
 from ..constfold import Token, resolve_all
 from ..index_common import parallel_map, record_distinct, seed_same_package
 from ..treesitter import node_text, parse_source
@@ -37,6 +41,9 @@ class GroovyIndex:
 
     fqcn: FqcnIndex = field(default_factory=dict)
     consts: dict[str, str] = field(default_factory=dict)
+    #: Facts registered with ``register_fact`` (fact name → fact), resolved once before
+    #: parsing. Read with :func:`~..additive.index_fact`; see ``parsers/additive.py``.
+    facts: dict[str, Any] = field(default_factory=dict)
 
 
 def _has_decl_error(node: Node) -> bool:
@@ -59,15 +66,16 @@ def _type_name(node: Node, source: bytes) -> str | None:
     return node_text(nm, source) if nm is not None else None
 
 
-#: One file's contribution: ``{package.TypeName: rel}`` and ``{Class.FIELD: tokens}``.
-_IndexFrag = tuple[dict[str, str], dict[str, list[Token]]]
+#: One file's contribution: ``{package.TypeName: rel}``, ``{Class.FIELD: tokens}`` and what the
+#: registered facts collect from it.
+_IndexFrag = tuple[dict[str, str], dict[str, list[Token]], dict[str, Any]]
 
 
-def _fqcn_index_one(args: tuple[str, str]) -> _IndexFrag | None:
+def _fqcn_index_one(args: tuple[str, str, str]) -> _IndexFrag | None:
     """Parse one Groovy file (once) → its ``{package.TypeName: rel}`` FQCN entries **and**
     its ``static final String`` constants as ``{Class.FIELD: tokens}`` (qualified only — a
     bare field name is meaningless cross-file). Picklable worker; ``None`` on failure."""
-    file_s, rel = args
+    file_s, rel, repo_root = args
     try:
         source = Path(file_s).read_bytes()
     except OSError:
@@ -82,7 +90,7 @@ def _fqcn_index_one(args: tuple[str, str]) -> _IndexFrag | None:
                 if name is not None:
                     fqcn_frag[f"{package}.{name}" if package else name] = rel
         const_frag = {k: v for k, v in collect_constants(root, source).items() if "." in k}
-        return fqcn_frag, const_frag
+        return fqcn_frag, const_frag, collect_additive("groovy", root, source, rel, Path(repo_root))
     except Exception as exc:  # parse OR a pathologically deep AST walk (RecursionError) — skip
         from ...logging import get_logger
         get_logger("breezeai_cog.index").warning(
@@ -96,18 +104,26 @@ def build_fqcn_index(repo_root: Path, files: Sequence[Path], jobs: int = 1) -> G
     """Repo-level pre-pass (one parse per file): FQCN → path map for imports + the repo-wide
     ``Class.FIELD → value`` constant map for address folding. A name declared in >1 file with
     a differing value collapses to ``None`` (ambiguous → honest-null; simply not folded)."""
-    args = [(str(f), repo_relative(f, repo_root)) for f in files]
+    files, fact_files = split_fact_sources("groovy", list(files))
+    args = [(str(f), repo_relative(f, repo_root), str(repo_root)) for f in files]
+    # registered fact name → per-file values: fact-source files (another parser's), then our own
+    collected: dict[str, list[Any]] = collect_fact_sources("groovy", fact_files, repo_root, jobs)
     fqcn: FqcnIndex = {}
     raw_consts: dict[str, list[Token] | None] = {}
     for frag in parallel_map(args, _fqcn_index_one, jobs):
         if frag is None:
             continue
-        fqcn_frag, const_frag = frag
+        fqcn_frag, const_frag, facts = frag
         for name, rel in fqcn_frag.items():
             record_distinct(fqcn, name, rel)
         for name, tokens in const_frag.items():
             record_distinct(raw_consts, name, tokens)
-    return GroovyIndex(fqcn=fqcn, consts=resolve_all(raw_consts))
+        for name, value in facts.items():
+            collected.setdefault(name, []).append(value)
+    index = GroovyIndex(fqcn=fqcn, consts=resolve_all(raw_consts))
+    # Registered facts may need the whole index, so they resolve after it is built.
+    index.facts.update(resolve_additive("groovy", collected, index))
+    return index
 
 
 def _resolve(fqcn: str, is_static: bool, index: FqcnIndex | None) -> str | None:

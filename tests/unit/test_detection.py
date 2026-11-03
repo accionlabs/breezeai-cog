@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from breezeai_cog.parsers.base import ParseContext
 from breezeai_cog.parsers.detection import classify_call
 from breezeai_cog.parsers.python.parser import PythonParser
@@ -576,3 +578,44 @@ def test_api_hints_ignore_call_arguments() -> None:
     assert match_api("this.http.post", "post") == "POST"
     assert match_api("axios.get", "get") == "GET"
 
+
+def test_php_classifier_does_not_guess_plain_receivers() -> None:
+    from breezeai_cog.parsers.detection import classify_call
+
+    assert classify_call("builder.where", "where", language="php") is None
+    assert classify_call("this.model.findAll", "findAll", language="php") is None
+    assert classify_call("cache.get", "get", language="php") is None
+    assert classify_call("stmt.fetch", "fetch", language="php") is None
+    assert classify_call("this.client.fetch", "fetch", language="php") is None
+    # PHP HTTP calls come from the evidence-based php-http-calls detector, not names.
+    assert classify_call("http.get", "get", language="php") is None
+
+
+def test_php_cannot_activate_javascript_orm_mappings() -> None:
+    from breezeai_cog.parsers.detection import classify_call
+
+    for callee, method in (
+        ("Model.findAll", "findAll"),
+        ("repository.upsert", "upsert"),
+        ("ddb.putItem", "putItem"),
+    ):
+        assert classify_call(callee, method, language="php") is None
+
+
+
+@pytest.mark.parametrize(
+    "text, is_sql",
+    [
+        ("TRUNCATE TABLE users", True),
+        ("truncate users;", True),
+        ("TRUNCATE users", True),
+        ("TRUNCATE ONLY public.users CASCADE", True),
+        ("TRUNCATE users RESTART IDENTITY", True),
+        ("Truncate nothing in AOF %s to timestamp %ld\n", False),  # a C format string
+        ("Truncate the log", False),
+    ],
+)
+def test_truncate_needs_sql_structure(text: str, is_sql: bool) -> None:
+    from breezeai_cog.parsers.detection.queries import is_query
+
+    assert is_query("printf", text) is is_sql

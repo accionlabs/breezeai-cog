@@ -238,3 +238,45 @@ def test_job_class_in_another_file_leads_to_its_handler(analyze_files) -> None:
         "  public Task Execute(IJobExecutionContext context) { return Task.CompletedTask; }\n}\n")})
     [r] = _eps(st, CS)
     assert (r.handler, r.handlerPath, r.handlerLine) == ("Execute", "Api/Jobs/ReportJob.cs", 3)
+
+
+def _job_in(ns: str) -> str:
+    return (f"using Quartz;\nnamespace {ns};\npublic class SimpleJob : IJob {{\n"
+            "  public Task Execute(IJobExecutionContext context) { return Task.CompletedTask; }\n}\n")
+
+
+def test_same_named_job_classes_bind_by_namespace(analyze_files) -> None:
+    # Two examples each declare their own SimpleJob: the scheduling file's namespace says which
+    # one it means, as the compiler does.
+    program = """using Quartz;
+namespace Examples.Two;
+public class Example {
+  async Task Run(IScheduler scheduler) {
+    IJobDetail job = JobBuilder.Create<SimpleJob>().Build();
+    ITrigger trigger = TriggerBuilder.Create().WithCronSchedule("0 0 1 * * ?").Build();
+    await scheduler.ScheduleJob(job, trigger);
+  }
+}
+"""
+    st = analyze_files({"Two/Example.cs": program, "Two/SimpleJob.cs": _job_in("Examples.Two"),
+                        "One/SimpleJob.cs": _job_in("Examples.One")})
+    [r] = _eps(st, "Two/Example.cs")
+    assert (r.handler, r.handlerPath, r.handlerLine) == ("Execute", "Two/SimpleJob.cs", 4)
+
+
+def test_same_named_job_class_not_in_scope_stays_unknown(analyze_files) -> None:
+    # Neither SimpleJob is in the scheduling file's scope: no file is guessed.
+    program = """using Quartz;
+namespace Examples.Three;
+public class Example {
+  async Task Run(IScheduler scheduler) {
+    IJobDetail job = JobBuilder.Create<SimpleJob>().Build();
+    ITrigger trigger = TriggerBuilder.Create().WithCronSchedule("0 0 1 * * ?").Build();
+    await scheduler.ScheduleJob(job, trigger);
+  }
+}
+"""
+    st = analyze_files({"Three/Example.cs": program, "Two/SimpleJob.cs": _job_in("Examples.Two"),
+                        "One/SimpleJob.cs": _job_in("Examples.One")})
+    [r] = _eps(st, "Three/Example.cs")
+    assert (r.handler, r.handlerPath, r.handlerLine) == ("Execute", None, None)

@@ -164,7 +164,7 @@ What this means for cog:
 | Label | Policy | Stored | Notes |
 |---|---|---|---|
 | `File` | **Open** — everything except a strip list | `type`, `language`, `loc`, `framework`, `platform`, `uiRole`, `externalImports` (array), `imports` (= `importFiles`, array), `exports` (JSON string), `metadata` (JSON string), **and any extra key** | Removed: `id`, `functions`, `classes`, `importFiles`, `statements`. Added: `name`, `repositoryName`, `description`, `projectUuid`, `codeOntologyId`. |
-| `Class` | **Open** — everything except a strip list | `name`, `type`, lines, `visibility`, `isAbstract`, `isSealed`, `uiRole`, `extends` (string), `implements` / `decorators` / `constructorParams` / `metadata` / `generics` (JSON strings), **and any extra key** | Removed: `id` (→ `captureId`), `parentId`. `path` = the file's path. |
+| `Class` | **Open** — everything except a strip list | `name`, `type`, lines, `visibility`, `isAbstract`, `isSealed`, `uiRole`, `extends` (string), `alias` (string), `implements` / `decorators` / `constructorParams` / `metadata` / `generics` (JSON strings), **and any extra key** | Removed: `id` (→ `captureId`), `parentId`. `path` = the file's path. |
 | `Function` | **Allow-list** | `captureId`, `name`, `path`, lines, `type`, `returnType`, and when present `visibility`, `isStatic`, `isAsync`, `receiverType`, `uiRole`, `generics`; `params` / `decorators` / `metadata` / `calls` as JSON strings | `parentId` not stored. `path` = the file's path. **Any other field is dropped.** |
 | `Statement` | **Allow-list** | `captureId`, `nodeType`, `semanticType`, `text`, `name`, `path`, lines, `method`, `endpoint`, `framework`, `handler`, `handlerLine`, `handlerPath` (backend change needed: not stored before it), `routeKind`, `isRegex`, `version`, `authRequired`, `requestDTO`, `responseDTO`, `dataAccessHint`, `platform`, `uiRole`, `isPartial`; `guards` / `keyFields` / `dataLoaders` as arrays; `decorators` as a JSON string | `parentId` not stored — the backend stores `parentName` and `parentType` (`function` / `class` / `file`) instead. `method` / `endpoint` default to `""`. **Any other field is dropped.** |
 
@@ -208,7 +208,7 @@ graph. The same information is available per file in `File.metadata` of the conf
 |---|---|---|
 | `File` | Yes | path, name, language, framework, type, LOC, UI role, platform, imports, external imports, function signatures, class names, **`metadata`** |
 | `Function` | Yes | name, file, type, visibility, modifiers, decorator names, params, return type, generics, called names, **`metadata`** |
-| `Class` | Yes | kind, name, file, modifiers, decorator names, constructor params, `extends`, `implements`, generics, **`metadata`** |
+| `Class` | Yes | kind, name, file, modifiers, decorator names, constructor params, `extends`, `implements`, generics, **`metadata`** (not `alias`: stored and filterable, not embedded) |
 | `Statement` | **No** | — (statement embedding is switched off in `graph-embed.service.ts`; there is no Statement vector index) |
 
 How agents reach the graph (Breeze MCP tools → backend):

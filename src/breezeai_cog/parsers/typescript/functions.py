@@ -78,9 +78,8 @@ def _type_text(annotation: Node | None, source: bytes) -> str | None:
     return node_text(annotation, source).lstrip(":").strip() or None
 
 
-# Type-expression → DTO name: skip generic wrappers/primitives, take the first PascalCase
-# name (``Promise<OrderDto[]>`` → ``OrderDto``, ``void``/``object`` → None). Shared by the
-# route parsers (NestJS keeps a private copy; LoopBack uses this) for responseDTO capture.
+# Type-expression → the class type it names: skip generic wrappers/primitives, take the first
+# PascalCase name (``Promise<OrderDto[]>`` → ``OrderDto``, ``void``/``object`` → None).
 _DTO_ID_RE = re.compile(r"[A-Za-z_$][\w$]*")
 _NON_DTO_TYPES = {
     "Promise", "Observable", "Array", "Map", "Set", "Record", "Partial", "Readonly",
@@ -90,18 +89,43 @@ _NON_DTO_TYPES = {
 
 
 def dto_from_type(t: str | None) -> str | None:
+    """The first PascalCase type name in a type expression past wrappers and built-in types
+    (``Promise<OrderDto[]>`` → ``OrderDto``; ``string`` → None) — whether a type names a class.
+    The DTO fields themselves hold the declared type as written (:func:`payload_type`)."""
     if not t:
         return None
     for tok in _DTO_ID_RE.findall(t):
         if tok in _NON_DTO_TYPES or not tok[0].isupper():
             continue
-        return tok
+        return str(tok)
     return None
 
 
+#: Async wrappers, not part of the payload (contract: ``requestDTO`` / ``responseDTO`` are the
+#: declared payload type with these removed).
+_ASYNC_WRAPPER_RE = re.compile(r"^(?:Promise|Observable)\s*<(.*)>$", re.DOTALL)
+#: Declared types that carry no payload: no body, nothing declared (``any``), or the
+#: framework's response object (Express ``Response``: the handler writes the body to it).
+_NO_PAYLOAD_TYPES = frozenset({"void", "never", "undefined", "any", "unknown", "Response"})
+
+
+def payload_type(t: str | None) -> str | None:
+    """A handler's declared request / response type → the payload type as written, with
+    ``Promise<…>`` / ``Observable<…>`` removed (``Promise<OrderDto[]>`` → ``OrderDto[]``,
+    ``Promise<string>`` → ``string``); arrays, unions, namespaces and object types stay as
+    declared. None when every member of the type carries no payload (``void``,
+    ``Promise<any>``, ``Promise<Response | void>``)."""
+    t = " ".join((t or "").split())
+    while (m := _ASYNC_WRAPPER_RE.match(t)) is not None:
+        t = m.group(1).strip()
+    if not t or all(p.strip() in _NO_PAYLOAD_TYPES for p in t.split("|")):
+        return None
+    return t
+
+
 def return_dto(member: Node, source: bytes) -> str | None:
-    """Handler return type → responseDTO (``Promise<TimezoneDto[]>`` → ``TimezoneDto``)."""
-    return dto_from_type(_type_text(member.child_by_field_name("return_type"), source))
+    """Handler return type → responseDTO (``Promise<TimezoneDto[]>`` → ``TimezoneDto[]``)."""
+    return payload_type(_type_text(member.child_by_field_name("return_type"), source))
 
 
 def _visibility(node: Node, source: bytes) -> str:

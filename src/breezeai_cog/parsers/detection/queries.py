@@ -25,7 +25,9 @@ _SQL_RE = re.compile(
     r"|ALTER\s+TABLE\b"
     r"|WITH\b[\s\S]+\bAS\b[\s\S]+\bSELECT\b"
     r"|MERGE\s+INTO\b"
-    r"|TRUNCATE\s+(TABLE\b)?"
+    # `TRUNCATE TABLE x`, or `TRUNCATE x` ending there — not a sentence ("Truncate nothing in AOF")
+    r"|TRUNCATE\s+TABLE\b"
+    r"|TRUNCATE\s+(?:ONLY\s+)?[\w.\"`\[\]]+\s*(?:[;,)]|CASCADE\b|RESTART\b|CONTINUE\b|$)"
     r")",
     re.IGNORECASE,
 )
