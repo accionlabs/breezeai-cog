@@ -76,12 +76,14 @@ _QQUOTE_CLOSERS = {"[": "]", "{": "}", "(": ")", "<": ">"}
 
 def _scan_line(line: str, state: list[Any]) -> list[Any]:
     """Advance the string/comment scanner across one physical line and return the
-    resulting ``[in_str, in_block, q_end]`` state. Tracks normal ``'…'`` strings (with
-    ``''`` escapes), Oracle ``q'X…X'`` alternative quoting, and ``/* … */`` block
-    comments — all of which can span lines — while treating ``--`` as a line comment.
-    This is what lets a multi-line ``COMMENT … IS '…'`` survive directive stripping and
-    prevents a stray apostrophe in a comment from flipping string state."""
-    in_str, in_block, q_end = state
+    resulting ``[in_str, in_block, q_end, last]`` state, ``last`` being the line's last
+    non-blank character outside strings and comments (``None`` if it has none). Tracks
+    normal ``'…'`` strings (with ``''`` escapes), Oracle ``q'X…X'`` alternative quoting,
+    and ``/* … */`` block comments — all of which can span lines — while treating ``--`` as
+    a line comment. This is what lets a multi-line ``COMMENT … IS '…'`` survive directive
+    stripping and prevents a stray apostrophe in a comment from flipping string state."""
+    in_str, in_block, q_end = state[:3]
+    last: str | None = None
     i, n = 0, len(line)
     while i < n:
         if in_block:
@@ -93,13 +95,13 @@ def _scan_line(line: str, state: list[Any]) -> list[Any]:
             j = line.find(q_end, i)
             if j == -1:
                 break
-            i, q_end = j + len(q_end), None
+            i, q_end, last = j + len(q_end), None, "'"
         elif in_str:
             if line[i] == "'":
                 if i + 1 < n and line[i + 1] == "'":
                     i += 2  # '' -> escaped quote, stay in string
                 else:
-                    in_str, i = False, i + 1
+                    in_str, i, last = False, i + 1, "'"
             else:
                 i += 1
         else:
@@ -117,24 +119,53 @@ def _scan_line(line: str, state: list[Any]) -> list[Any]:
                 delim = line[i + 2] if i + 2 < n else "'"
                 q_end, i = _QQUOTE_CLOSERS.get(delim, delim) + "'", i + 3
             elif line[i] == "'":
-                in_str, i = True, i + 1
+                in_str, i, last = True, i + 1, "'"
             else:
+                if not line[i].isspace():
+                    last = line[i]
                 i += 1
-    return [in_str, in_block, q_end]
+    return [in_str, in_block, q_end, last]
+
+
+# A statement SQL*Plus reads as a PL/SQL block: it ends only at a line holding just ``/``.
+_PLSQL_UNIT = re.compile(
+    r"^\s*(?:CREATE\s+(?:OR\s+REPLACE\s+)?(?:(?:NON)?EDITIONABLE\s+)?"
+    r"(?:PROCEDURE|FUNCTION|PACKAGE|TRIGGER|TYPE)\b|DECLARE\b|BEGIN\b)",
+    re.IGNORECASE,
+)
 
 
 def _strip_sqlplus(text: str) -> str:
-    """Remove SQL*Plus client directive lines so the remainder is pure SQL. A directive
-    line is dropped only when the scanner is not currently inside a string or block
-    comment, so continuation lines of a multi-line literal are preserved."""
+    """Remove SQL*Plus client directive lines so the remainder is pure SQL. As in SQL*Plus,
+    a directive is recognised only *between* statements: never inside a string or block
+    comment, a SQL statement not yet ended by ``;``, or a PL/SQL block (which runs to its
+    ``/`` line). So ``SET col = …`` in an UPDATE and ``EXECUTE IMMEDIATE`` in a procedure
+    body stay. A PL/SQL unit left without its ``/`` is taken to end where an unindented
+    ``CREATE`` follows a line ending in ``;``."""
     out: list[str] = []
-    state = [False, False, None]  # [in_str, in_block, q_end]
+    state: list[Any] = [False, False, None, None]  # [in_str, in_block, q_end, last]
+    in_stmt = in_plsql = False
+    ended_semicolon = True
     for line in text.splitlines():
         inside = state[0] or state[1] or state[2] is not None
-        if not inside and (line.strip() == "/" or _SQLPLUS_DIRECTIVE.match(line)):
-            continue  # SQL*Plus directive or run-buffer terminator — not SQL, and not
-            # scanned for state (a directive cannot legally open a SQL string).
+        if not inside:
+            if line.strip() == "/":
+                in_stmt = in_plsql = False
+                ended_semicolon = True
+                continue  # run-buffer terminator — not SQL
+            if not in_stmt and _SQLPLUS_DIRECTIVE.match(line):
+                continue  # SQL*Plus directive between statements — not SQL
+            if in_plsql and ended_semicolon and re.match(r"CREATE\s", line, re.IGNORECASE):
+                in_stmt = in_plsql = False
+        starts = not inside and not in_stmt
         state = _scan_line(line, state)
+        last = state[3]
+        if starts and last is not None:
+            in_stmt, in_plsql = True, bool(_PLSQL_UNIT.match(line))
+        if last is not None:
+            ended_semicolon = last == ";"
+            if ended_semicolon and not in_plsql and not (state[0] or state[1] or state[2] is not None):
+                in_stmt = False
         out.append(line)
     return "\n".join(out)
 

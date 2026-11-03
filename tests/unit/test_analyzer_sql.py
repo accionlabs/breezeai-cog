@@ -1068,3 +1068,36 @@ def test_sequences_on_the_sqlglot_path(text: str, filename: str, expected: dict)
 def test_sequence_options_left_unwritten_stay_null() -> None:
     [seq] = parse_ddl("CREATE SEQUENCE plain_seq;\n", "schema_pg.sql")["sequences"]
     assert (seq["startWith"], seq["incrementBy"], seq["cache"]) == (None, None, None)
+
+
+# SQL*Plus recognises its directives only between statements. Inside a statement or a PL/SQL
+# block, a line starting with SET / EXECUTE / HOST … is SQL and must survive the strip.
+def test_sqlplus_keywords_inside_a_plsql_body_are_kept() -> None:
+    body = (
+        "CREATE OR REPLACE PROCEDURE HR.RAISE_SALARY (p_emp_id IN NUMBER, p_pct IN NUMBER) AS\n"
+        "BEGIN\n    UPDATE HR.EMPLOYEES\n       SET SALARY = SALARY * (1 + p_pct / 100)\n"
+        "     WHERE EMP_ID = p_emp_id;\n    EXECUTE IMMEDIATE 'ANALYZE TABLE HR.EMPLOYEES COMPUTE STATISTICS';\nEND;"
+    )
+    text = "SET DEFINE OFF\nPROMPT procs\n" + body + "\n/\nPROMPT done\n"
+    cleaned = _strip_sqlplus(text)
+    assert body in cleaned
+    assert "PROMPT" not in cleaned and "SET DEFINE" not in cleaned
+    [p] = parse_ddl(text, "procs_ora.sql")["procedures"]
+    assert "SET SALARY = SALARY" in p["body"] and "EXECUTE IMMEDIATE" in p["body"]
+
+
+def test_column_named_like_a_directive_is_kept() -> None:
+    text = "CREATE TABLE audit_log (\n  id NUMBER(10),\n  host VARCHAR2(128),\n  desc_text VARCHAR2(10)\n);\n"
+    [t] = parse_ddl(text, "audit_ora.sql")["tables"]
+    assert [c["name"] for c in t["columns"]] == ["ID", "HOST", "DESC_TEXT"]
+
+
+def test_plsql_unit_without_slash_ends_at_the_next_create() -> None:
+    # A unit missing its `/` must not swallow the directives that follow the next statement.
+    text = (
+        "CREATE OR REPLACE PROCEDURE p AS\nBEGIN\n  NULL;\nEND;\n"
+        "CREATE TABLE t (id NUMBER(10));\nPROMPT after\nCREATE TABLE u (id NUMBER(10));\n"
+    )
+    cleaned = _strip_sqlplus(text)
+    assert "PROMPT after" not in cleaned
+    assert sorted(t["name"] for t in parse_ddl(text, "mixed_ora.sql")["tables"]) == ["T", "U"]
