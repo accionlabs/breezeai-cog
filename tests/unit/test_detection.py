@@ -155,6 +155,76 @@ def test_typescript_statement_detection(tmp_path) -> None:
     assert by_sem["db_method_call"].dataAccessHint == "typeorm"
 
 
+def _queries(parser, name: str, src: bytes, tmp_path) -> list[str]:
+    rec = parser.parse_file(_ctx(name, src, tmp_path))
+    return [s.text for s in rec.statements if s.semanticType == "query_statement"]
+
+
+_SPLIT_STRINGS = [
+    # The SQL keyword starts one literal, the rest comes from a separate one: not a query.
+    ("php", "lang.php",
+     b"<?php\nreturn array(\n    'Select' => 'Choose',\n    'Open' => 'Open file',\n"
+     b"    'Copy' => 'Copy from clipboard',\n);\n"),
+    ("typescript", "labels.ts",
+     b"export const labels = {\n  select: 'Select',\n  hint: 'Pick a value from the list',\n};\n"),
+    ("javascript", "menu.js", b'const items = ["Select", "Import data from file"];\n'),
+    ("java", "Items.java",
+     b'class Items {\n  static final String[] ITEMS = {"Select", "Import data from file"};\n}\n'),
+    ("csharp", "Items.cs",
+     b'class Items {\n  void F() { Show("Select", "Import data from file"); }\n}\n'),
+    ("python", "menu.py", b'MENU = ["Update", "Set as default"]\n'),
+]
+
+_REAL_SQL = [
+    # One literal, or literals the language concatenates in one expression: a query.
+    ("php", "repo.php", b"<?php\n$sql = 'SELECT id FROM users';\n"),
+    ("php", "repo2.php", b"<?php\n$sql = 'SELECT ' . $cols . ' FROM users WHERE id = ?';\n"),
+    ("typescript", "repo.ts", b"const q = `SELECT id FROM users WHERE id = ${id}`;\n"),
+    ("javascript", "repo.js", b'const q = "SELECT id " + "FROM users";\n'),
+    ("java", "Repo.java", b'class Repo {\n  static final String SQL = "SELECT id FROM users";\n}\n'),
+    ("java", "Repo2.java",
+     b'class Repo {\n  String q(String t) { return "SELECT id FROM " + t + " WHERE a = 1"; }\n}\n'),
+    ("csharp", "Repo.cs",
+     b'class Repo {\n  void F() {\n    sSQL = "select " + Sql.FormatSelectFields(arr) + ControlChars.CrLf\n'
+     b'         + "  from vwACCOUNTS_List" + ControlChars.CrLf;\n  }\n}\n'),
+    ("csharp", "Repo2.cs", b'class Repo {\n  const string Q = @"UPDATE users SET name = @n";\n}\n'),
+    ("python", "repo.py", b'QUERY = "SELECT name FROM orders WHERE id = %s"\n'),
+    ("python", "repo2.py", b'QUERY = ("SELECT name "\n         "FROM orders")\n'),
+    ("vb", "Repo.vb",
+     b'Class Repo\n  Sub F()\n    Dim s = "select " & sCols & " from vwACCOUNTS"\n  End Sub\nEnd Class\n'),
+]
+
+
+def _parser(lang: str):
+    from breezeai_cog.parsers.csharp.parser import CSharpParser
+    from breezeai_cog.parsers.java.parser import JavaParser
+    from breezeai_cog.parsers.php.parser import PhpParser
+    from breezeai_cog.parsers.vb.parser import VbParser
+
+    return {"php": PhpParser, "typescript": TypeScriptParser, "javascript": TypeScriptParser,
+            "java": JavaParser, "csharp": CSharpParser, "python": PythonParser, "vb": VbParser}[lang]()
+
+
+@pytest.mark.parametrize(("lang", "name", "src"), _SPLIT_STRINGS, ids=[c[1] for c in _SPLIT_STRINGS])
+def test_sql_keywords_from_separate_literals_are_not_a_query(lang, name, src, tmp_path) -> None:
+    assert _queries(_parser(lang), name, src, tmp_path) == []
+
+
+@pytest.mark.parametrize(("lang", "name", "src"), _REAL_SQL, ids=[c[1] for c in _REAL_SQL])
+def test_sql_in_one_string_value_is_a_query(lang, name, src, tmp_path) -> None:
+    assert len(_queries(_parser(lang), name, src, tmp_path)) == 1
+
+
+def test_string_has_query() -> None:
+    from breezeai_cog.parsers.detection import string_has_query
+    assert string_has_query(["SELECT id FROM users"])
+    assert string_has_query(["select ", None, None, "  from vwACCOUNTS"])
+    assert string_has_query(["\tprint 'alter table ", None, " add X null';"])  # quoted inside
+    assert not string_has_query(["Select"])
+    assert not string_has_query(["Copy from clipboard"])
+    assert not string_has_query(["Pick a value from the list"])
+
+
 def test_query_statement_detection() -> None:
     from breezeai_cog.parsers.detection import classify_call, text_has_query
 

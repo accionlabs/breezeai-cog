@@ -21,6 +21,7 @@ concise-bodied lambda (``x => repo.save(x)``) is still classified here.
 from __future__ import annotations
 
 import contextvars
+import re
 from collections.abc import Callable, Collection, Iterator
 from typing import cast
 
@@ -29,7 +30,7 @@ from tree_sitter import Node
 from ..emit import disambiguate, statement_id
 from ..schemas import Decorator, Statement
 from ..schemas.enums import SemanticType
-from .detection import classify_call, text_has_query, vendor_from_imports
+from .detection import classify_call, string_has_query, text_has_query, vendor_from_imports
 from .treesitter import first_line, node_text
 
 # Per-file collector for concatenations skipped by the fold cap. ``render_concat`` records
@@ -294,6 +295,83 @@ _BODY_BLOCK_TYPES = frozenset({
 })
 
 
+# ── SQL in a statement's strings ─────────────────────────────────────────────
+# ``text_has_query`` reads the statement's source, so its match can start in one string and end
+# in an unrelated later one (``'Select' => 'Choose', 'Copy' => 'Copy from'``). A statement it
+# flags is confirmed on its strings: each literal alone, or the literals of one concatenation
+# together (``"select " + cols + " from t"``) — never literals that are only list elements,
+# map values or separate arguments. Node types across the grammars:
+_STRING_LITERALS = frozenset({
+    "string_literal", "string", "verbatim_string_literal", "raw_string_literal",
+    "interpolated_string_expression", "template_string", "encapsed_string",
+    "interpreted_string_literal",
+})
+#: Adjacent literals the language joins (Python, C/C++ ``"a" "b"``).
+_ADJACENT_STRINGS = frozenset({"concatenated_string"})
+#: Binary nodes that concatenate strings with one of ``_CONCAT_OPS``: ``+``, PHP ``.``, VB ``&``.
+_BINARY = frozenset({
+    "binary_expression", "binary_operator", "binary", "additive_expression", "infix_expression",
+})
+_CONCAT_OPS = frozenset({"+", ".", "&"})
+#: Single-child wrappers some grammars put around an operand (VB ``expression`` / ``literal``).
+_OPERAND_WRAPPERS = frozenset({"expression", "literal", "parenthesized_expression"})
+#: A literal's prefix (``@``, ``$``, ``f``, ``s``, ``r``…), its quotes and its content.
+_QUOTED = re.compile(r"""^[A-Za-z@$]*("{3}|'{3}|"|'|`)(.*)\1$""", re.S)
+
+
+def _string_content(node: Node, source: bytes) -> str:
+    text = node_text(node, source)
+    m = _QUOTED.match(text)
+    return m.group(2) if m else text
+
+
+def _unwrap(node: Node) -> Node:
+    while node.type in _OPERAND_WRAPPERS and node.named_child_count == 1:
+        node = node.named_children[0]
+    return node
+
+
+def _is_concat(node: Node, source: bytes) -> bool:
+    if node.type not in _BINARY or node.named_child_count < 2:
+        return False
+    left, right = node.named_children[0], node.named_children[-1]
+    return source[left.end_byte:right.start_byte].decode("utf-8", "replace").strip() in _CONCAT_OPS
+
+
+def _string_values(node: Node, source: bytes) -> Iterator[list[str | None]]:
+    """Each string value in ``node``: the contents of its literals, ``None`` for a non-literal
+    operand of a concatenation. Iterative, so a generated thousand-part concatenation is safe."""
+    stack = [node]
+    while stack:
+        n = _unwrap(stack.pop())
+        if n.type in _STRING_LITERALS:
+            yield [_string_content(n, source)]
+        elif n.type in _ADJACENT_STRINGS:
+            yield [_string_content(c, source) for c in n.named_children]
+        elif _is_concat(n, source):
+            parts: list[str | None] = []
+            todo = [n]
+            while todo:
+                x = _unwrap(todo.pop())
+                if _is_concat(x, source):
+                    todo += [x.named_children[-1], x.named_children[0]]
+                elif x.type in _STRING_LITERALS:
+                    parts.append(_string_content(x, source))
+                elif x.type in _ADJACENT_STRINGS:
+                    parts += [_string_content(c, source) for c in x.named_children]
+                else:
+                    parts.append(None)
+                    stack.append(x)  # its own strings (a call's arguments) are values of their own
+            yield parts
+        else:
+            stack.extend(n.named_children)
+
+
+def node_has_query(node: Node, source: bytes) -> bool:
+    """True if one of the statement's string values holds SQL (see ``string_has_query``)."""
+    return any(string_has_query(parts) for parts in _string_values(node, source))
+
+
 def _control_flow_header(node: Node, source: bytes) -> str:
     """A control-flow statement's header (its condition/clause). When the condition spans
     multiple lines, keep it whole up to the body block (so it isn't truncated to the first
@@ -427,7 +505,9 @@ def classify_statement(
         method_value = None
         endpoint = None
         hint = None
-        if text_has_query(code_text):  # raw SQL/Cypher string literal, no classified call
+        # Raw SQL in a string literal, no classified call: the text check is the cheap filter,
+        # the strings confirm it.
+        if text_has_query(code_text) and node_has_query(node, source):
             semantic = "query_statement"
     records.append(
         Statement(
