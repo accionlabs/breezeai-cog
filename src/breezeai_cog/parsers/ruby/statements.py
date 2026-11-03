@@ -96,7 +96,19 @@ def _call_details_with_redis_evidence(
     if details is None:
         return None
     receiver = call.child_by_field_name("receiver")
-    if details[1].lower() == "fetch" and receiver is not None:
+    receiver_text = node_text(receiver, source).lower() if receiver is not None else ""
+    method = details[1].lower()
+    # Ruby-local exclusions for ordinary methods that collide with HTTP verbs in the
+    # shared classifier. Keep the shared, cross-language classifier unchanged.
+    if method == "fetch" and receiver is None:
+        return None
+    if method == "delete" and receiver_text.split(".")[-1].lstrip("@") in {
+        "session", "cookies",
+    }:
+        return None
+    if receiver_text.endswith("request.session") and method == "options":
+        return None
+    if method == "fetch" and receiver is not None:
         return None
     if details[1].lower() in _ACTIVE_RECORD_METHODS:
         receiver_name = node_text(receiver, source) if receiver is not None else ""
@@ -198,23 +210,36 @@ def extract_statements(
             node.type == "string" and text_has_query(node_text(node, source))
         ):
             continue
-        out.extend(
-            classify_statement(
-                node,
-                source,
-                path,
-                parent_id=parent_id,
-                limit=limit,
-                seen_ids=seen_ids,
-                emit_types=EMIT_TYPES,
-                control_flow=CONTROL_FLOW,
-                call_type="call",
-                name_of=_name_of,
-                call_details=lambda call, src: _call_details_with_redis_evidence(
-                    call, src, typed_db_ids
-                ),
-                language="ruby",
-                typed_db_ids=classifier_db_ids,
-            )
+        classified = classify_statement(
+            node,
+            source,
+            path,
+            parent_id=parent_id,
+            limit=limit,
+            seen_ids=seen_ids,
+            emit_types=EMIT_TYPES,
+            control_flow=CONTROL_FLOW,
+            call_type="call",
+            name_of=_name_of,
+            call_details=lambda call, src: _call_details_with_redis_evidence(
+                call, src, typed_db_ids
+            ),
+            language="ruby",
+            typed_db_ids=classifier_db_ids,
         )
+        # A wrapper/DSL block is not itself a database query because SQL text occurs
+        # somewhere in its body. Its inner SQL statement is visited independently.
+        if node.type == "call" and any(
+            node_text(node.child_by_field_name("method"), source) == dsl
+            for dsl in ("safety_assured", "class_methods")
+            if node.child_by_field_name("method") is not None
+        ):
+            classified = [s for s in classified if s.semanticType != "query_statement"]
+        # Only Ruby-local evidence supports ActiveRecord and Redis here. The generic
+        # shared classifier's vendor-name hints do not establish another Ruby DB client.
+        classified = [
+            s for s in classified
+            if s.dataAccessHint in {None, "activerecord", "redis"}
+        ]
+        out.extend(classified)
     return out

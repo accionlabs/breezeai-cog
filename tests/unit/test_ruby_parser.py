@@ -102,7 +102,7 @@ end
     assert not any(statement.nodeType in {"class", "module", "method"} for statement in rec.statements)
 
 
-def test_ruby_fetch_lookups_are_not_http_but_bare_fetch_keeps_existing_behavior(
+def test_ruby_fetch_lookups_and_bare_fetch_are_not_http(
     tmp_path: Path,
 ) -> None:
     source = b'''def read_config
@@ -119,7 +119,52 @@ end
     ))
 
     calls = [item for item in record.statements if item.semanticType == "api_call"]
-    assert [(item.method, item.endpoint) for item in calls] == [("GET", "/remote")]
+    assert calls == []
+
+
+def test_ruby_http_calls_and_non_http_delete_methods(tmp_path: Path) -> None:
+    source = b'''def run
+  HTTP.get("https://example.test")
+  Net::HTTP.get("https://example.test")
+  @http.post("https://example.test")
+  session.delete(:key)
+  cookies.delete(:key)
+  request.session.options
+end
+'''
+    path = tmp_path / "api.rb"
+    path.write_bytes(source)
+    record = RubyParser().parse_file(ParseContext(
+        path="api.rb", abs_path=path, source=source, repo_root=tmp_path,
+        capture_statements=True,
+    ))
+    calls = [item for item in record.statements if item.semanticType == "api_call"]
+    assert len(calls) == 3
+    assert {item.method for item in calls} == {"GET", "POST"}
+
+
+def test_ruby_dsl_blocks_do_not_become_queries_and_keep_inner_sql(tmp_path: Path) -> None:
+    source = b'''def run
+  safety_assured do
+    execute("SELECT * FROM users")
+  end
+  class_methods do
+    "SELECT * FROM users"
+  end
+end
+'''
+    path = tmp_path / "queries.rb"
+    path.write_bytes(source)
+    record = RubyParser().parse_file(ParseContext(
+        path="queries.rb", abs_path=path, source=source, repo_root=tmp_path,
+        capture_statements=True,
+    ))
+    queries = [item for item in record.statements if item.semanticType == "query_statement"]
+    assert queries
+    assert not any(item.text.lstrip().startswith(("safety_assured", "class_methods"))
+                   for item in queries)
+    assert not any(item.dataAccessHint in {"django", "typeorm", "mongodb"}
+                   for item in record.statements)
 
 
 def test_ruby_api_url_interpolation_is_null_but_static_urls_are_preserved(
@@ -513,7 +558,7 @@ end
     build = next(item for item in rec.functions if item.name == "build")
     assert builder.startLine == 1
     assert builder.extends == "Rack::Base"
-    assert builder.id.endswith("Rack::Builder")
+    assert builder.id.endswith("Rack.Builder")
     assert build.parentId == builder.id
     assert any(item.name == "Inner" for item in rec.classes)
 
@@ -1566,6 +1611,27 @@ end
         assert {item.id.rsplit("#", 1)[0] for item in record.functions} == {
             "nested.rb#Outer.Result", "nested.rb#Other.Result",
         }
+
+
+def test_ruby_compact_and_nested_namespace_class_ids_match(tmp_path: Path) -> None:
+    declarations = (
+        b"module A\n  class B\n    def x; end\n  end\nend\n",
+        b"class A::B\n  def x; end\nend\n",
+    )
+    results = []
+    for source in declarations:
+        path = tmp_path / "same.rb"
+        path.write_bytes(source)
+        record = RubyParser().parse_file(ParseContext(
+            path="same.rb", abs_path=path, source=source, repo_root=tmp_path,
+        ))
+        cls = next(item for item in record.classes if item.name in {"B", "A::B"})
+        method = next(item for item in record.functions if item.name == "x")
+        results.append((cls.id, cls.name, method.id))
+    assert results == [
+        ("same.rb#A.B", "B", "same.rb#A.B#x@3"),
+        ("same.rb#A.B", "A::B", "same.rb#A.B#x@2"),
+    ]
 
 
 def test_ruby_concern_blocks_and_safe_generated_class_blocks_are_extracted(

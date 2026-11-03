@@ -9,7 +9,7 @@ from ..base import ParseContext
 from ..emits import apply
 from ..ruby.parser import RubyParser
 from ..treesitter import parse_source
-from .routes import detect_rails_routes
+from .routes import detect_rails_routes, drawn_route_prefix, is_drawn_route_file
 
 _RAILS_REQUIRE = re.compile(
     rb"""(?m)^\s*require(?:_relative)?\s*(?:\(\s*)?['"](?:rails|action_controller/railtie)['"]"""
@@ -35,6 +35,9 @@ class RailsParser(RubyParser):
     frameworks = ["rails"]
 
     def claims(self, path: str, source: bytes) -> bool:
+        normalized = path.replace("\\", "/")
+        if normalized.startswith("config/routes/") and normalized.endswith(".rb"):
+            return re.search(rb"(?m)^\s*(?:get|post|put|patch|delete|match|root)\b", source) is not None
         if not any(
             marker in source.lower()
             for marker in (b"rails", b"engine", b"controller", b"actioncontroller")
@@ -62,7 +65,15 @@ class RailsParser(RubyParser):
         root = parse_source("ruby", ctx.source, ctx.parse_timeout_micros).root_node
         record = self.extract(root, ctx)
         if ctx.capture_statements and not self.is_fixture_file(ctx.path):
-            routes = detect_rails_routes(root, ctx.source, ctx.path, record, ctx.resolution_index)
+            split_routes = (
+                ctx.path.replace("\\", "/").startswith("config/routes/")
+                and is_drawn_route_file(ctx.resolution_index, ctx.path)
+            )
+            routes = detect_rails_routes(
+                root, ctx.source, ctx.path, record, ctx.resolution_index,
+                split_routes=split_routes,
+                split_prefix=drawn_route_prefix(ctx.resolution_index, ctx.path),
+            )
             if routes:
                 apply(record, routes, ctx.source, ctx.path)
                 record.framework = "rails"

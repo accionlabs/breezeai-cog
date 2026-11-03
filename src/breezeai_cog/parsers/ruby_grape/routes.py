@@ -435,7 +435,9 @@ def _mount_prefixes(root: Node, source: bytes) -> dict[str, list[str | None]]:
             prefix = _literal_path(prefix_node, source)
         else:
             child, prefix = first, None
-        mounts.setdefault(node_text(child, source).lstrip(":"), []).append(prefix)
+        values = mounts.setdefault(node_text(child, source).lstrip(":"), [])
+        if prefix not in values:
+            values.append(prefix)
     return mounts
 
 
@@ -479,6 +481,9 @@ def detect_grape_routes(root: Node, source: bytes, path: str, record: FileRecord
         key = (call.start_byte, call.end_byte)
         api_name = _api_class_name(call, source)
         mount_prefixes = mounts.get(api_name, []) if api_name is not None else []
+        if mount_prefixes and None in mount_prefixes:
+            known = [value for value in mount_prefixes if value is not None]
+            mount_prefixes = known if known else [None]
         if not mount_prefixes:
             mount_prefixes = [""]
         version_values = versions if isinstance(versions, tuple) else (versions,)

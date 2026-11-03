@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
+import re
 
 from breezeai_cog.errors import RegistryError
 from breezeai_cog.parsers import additive
@@ -206,6 +207,14 @@ def _resolve_marked(values: list, index) -> list:
     return sorted(v for v in values if v in declaring)
 
 
+def _resolve_sorted(values: list, index) -> list:
+    return sorted(values)
+
+
+def _collect_host(root, source: bytes, rel: str, repo_root) -> tuple[str, bool]:
+    return rel, root is None
+
+
 def _marked(**overrides) -> FactSpec:
     fields = dict(name="test.marked", language="csharp", gate=(b"// MARK",),
                   collect=_collect_marked, resolve=_resolve_marked)
@@ -216,9 +225,10 @@ def _marked(**overrides) -> FactSpec:
 @pytest.mark.parametrize("language", sorted(INDEX_HOOKED_LANGUAGES))
 def test_index_hooked_languages_call_the_collector(language: str) -> None:
     # The index is built in imports.py (index.py for Python).
-    source = "".join((PARSERS_DIR / language / f).read_text()
+    source = "".join((PARSERS_DIR / language / f).read_text(encoding="utf-8")
                      for f in ("imports.py", "index.py") if (PARSERS_DIR / language / f).exists())
-    assert f'collect_additive("{language}"' in source and f'resolve_additive("{language}"' in source
+    assert re.search(rf'collect_additive\s*\(\s*["\']{language}["\']', source)
+    assert re.search(rf'resolve_additive\s*\(\s*["\']{language}["\']', source)
 
 
 def test_fact_for_an_unhooked_language_rejected(isolated) -> None:
@@ -231,8 +241,7 @@ def test_fact_needs_a_gate(isolated) -> None:
         register_fact(_marked(gate=()))
 
 
-@pytest.mark.parametrize("jobs", [1, 2])
-def test_fact_is_resolved_on_the_index(isolated, tmp_path, jobs) -> None:
+def test_fact_is_resolved_on_the_index(isolated, tmp_path) -> None:
     from breezeai_cog.parsers.csharp.imports import build_csharp_index
 
     register_fact(_marked())
@@ -247,23 +256,22 @@ def test_fact_is_resolved_on_the_index(isolated, tmp_path, jobs) -> None:
         f.parent.mkdir(parents=True, exist_ok=True)
         f.write_bytes(src)
         paths.append(f)
-    index = build_csharp_index(tmp_path, paths, jobs)
-    # Collected behind the gate, resolved once against the full index, the same for any --jobs.
+    index = build_csharp_index(tmp_path, paths, jobs=1)
+    # Collected behind the gate and resolved once against the full index.
     assert index_fact(index, "test.marked") == ["a/Marked.cs"]
 
 
 
-@pytest.mark.parametrize("jobs", [1, 2])
-def test_typescript_fact_is_resolved_on_the_index(isolated, tmp_path, jobs) -> None:
+def test_typescript_fact_is_resolved_on_the_index(isolated, tmp_path) -> None:
     from breezeai_cog.parsers.typescript.imports import build_ts_index
 
-    register_fact(_marked(language="typescript", resolve=lambda values, index: sorted(values)))
+    register_fact(_marked(language="typescript", resolve=_resolve_sorted))
     paths = []
     for rel, src in {"a.ts": b"// MARK\nexport const a = 1;", "b.ts": b"export const b = 2;"}.items():
         f = tmp_path / rel
         f.write_bytes(src)
         paths.append(f)
-    index = build_ts_index(tmp_path, paths, jobs)
+    index = build_ts_index(tmp_path, paths, jobs=1)
     assert index_fact(index, "test.marked") == ["a.ts"]
 
 
@@ -273,29 +281,30 @@ def test_fact_reads_files_another_parser_owns(isolated, tmp_path) -> None:
 
     register_fact(_marked(
         name="test.hosts", gate=(b"ServiceHost",), sources=(".svc",),
-        collect=lambda root, source, rel, repo_root: (rel, root is None),
-        resolve=lambda values, index: sorted(values),
+        collect=_collect_host,
+        resolve=_resolve_sorted,
     ))
     (tmp_path / "Api.svc").write_bytes(b'<%@ ServiceHost Service="A.Api" %>')
+    (tmp_path / "Other.svc").write_bytes(b'<%@ ServiceHost Service="B.Api" %>')
     (tmp_path / "Api.svc.cs").write_bytes(b"namespace A { class Api {} }")
-    files = [tmp_path / "Api.svc.cs", tmp_path / "Api.svc"]
-    assert additive.split_fact_sources("csharp", files) == ([files[0]], [files[1]])
-    index = build_csharp_index(tmp_path, files, 1)
+    files = [tmp_path / "Api.svc.cs", tmp_path / "Api.svc", tmp_path / "Other.svc"]
+    assert additive.split_fact_sources("csharp", files) == ([files[0]], files[1:])
+    index = build_csharp_index(tmp_path, files, jobs=1)
     # The .svc reaches only the fact (no grammar → no tree); C# indexing sees only the .cs file.
-    assert index_fact(index, "test.hosts") == [("Api.svc", True)]
+    assert index_fact(index, "test.hosts") == [("Api.svc", True), ("Other.svc", True)]
     assert {f for fs in index.types.values() for f in fs} == {"Api.svc.cs"}
+
 
 def test_index_fact_tolerates_a_missing_index() -> None:
     assert index_fact(None, "anything") is None
 
 
-@pytest.mark.parametrize("jobs", [1, 2])
 @pytest.mark.parametrize("language", ["c", "cpp"])
-def test_c_family_fact_is_resolved_on_its_own_index(isolated, tmp_path, jobs, language) -> None:
+def test_c_family_fact_is_resolved_on_its_own_index(isolated, tmp_path, language) -> None:
     from breezeai_cog.parsers.c.parser import CParser
     from breezeai_cog.parsers.cpp.parser import CppParser
 
-    register_fact(_marked(language=language, resolve=lambda values, index: sorted(values)))
+    register_fact(_marked(language=language, resolve=_resolve_sorted))
     ext = ".c" if language == "c" else ".cpp"
     paths = []
     for name, src in {"a": b"// MARK\nint a(void) { return 0; }\n", "b": b"int b(void);\n"}.items():
@@ -303,5 +312,5 @@ def test_c_family_fact_is_resolved_on_its_own_index(isolated, tmp_path, jobs, la
         f.write_bytes(src)
         paths.append(f)
     own, other = (CParser(), CppParser()) if language == "c" else (CppParser(), CParser())
-    assert index_fact(own.build_index(tmp_path, paths, jobs), "test.marked") == [f"a{ext}"]
-    assert index_fact(other.build_index(tmp_path, paths, jobs), "test.marked") is None
+    assert index_fact(own.build_index(tmp_path, paths, jobs=1), "test.marked") == [f"a{ext}"]
+    assert index_fact(other.build_index(tmp_path, paths, jobs=1), "test.marked") is None

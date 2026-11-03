@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 from collections.abc import Iterator
+from pathlib import PurePosixPath
+from typing import Any
 
 from tree_sitter import Node
 
 from ...emit import file_id
 from ...schemas import FileRecord
+from ..additive import FactSpec, index_fact, register_fact
 from ..emits import Emit
 from ..handler_sites import handler_location, locate_method
 from ..inflect import plural as _plural
@@ -17,6 +20,45 @@ from ..treesitter import node_text
 from .callbacks import callbacks_of, controller_class, guards_for
 
 _HTTP_METHODS = {"get", "post", "put", "patch", "delete", "head", "options", "match"}
+_DRAW_FACT = "rails.drawn-route-files"
+
+
+def _collect_draws(root: Node, source: bytes, rel: str, _repo_root: Any) -> list[tuple[str, str | None]] | None:
+    if PurePosixPath(rel).as_posix() != "config/routes.rb":
+        return None
+    found: list[tuple[str, str | None]] = []
+    for call in _calls(root):
+        if _method(call, source) != "draw":
+            continue
+        args = _arguments(call)
+        name = _segment(args[0], source) if args else None
+        if name is not None:
+            found.append((name, _route_prefix(call, source)))
+    return found or None
+
+
+def _resolve_draws(values: list[list[tuple[str, str | None]]], _index: Any) -> dict[str, str | None] | None:
+    grouped: dict[str, set[str | None]] = {}
+    for name, prefix in (item for group in values for item in group):
+        grouped.setdefault(f"config/routes/{name}.rb", set()).add(prefix)
+    return {path: next(iter(prefixes)) if len(prefixes) == 1 else None
+            for path, prefixes in grouped.items()} or None
+
+
+def is_drawn_route_file(index: Any | None, path: str) -> bool:
+    normalized = PurePosixPath(path.replace("\\", "/")).as_posix()
+    return normalized in (index_fact(index, _DRAW_FACT) or {})
+
+
+def drawn_route_prefix(index: Any | None, path: str) -> str | None:
+    normalized = PurePosixPath(path.replace("\\", "/")).as_posix()
+    return (index_fact(index, _DRAW_FACT) or {}).get(normalized)
+
+
+register_fact(FactSpec(
+    name=_DRAW_FACT, language="ruby", gate=(b"draw",), collect=_collect_draws,
+    resolve=_resolve_draws,
+))
 
 
 def _calls(root: Node) -> Iterator[Node]:
@@ -40,7 +82,9 @@ def _string_value(node: Node | None, source: bytes) -> str | None:
     return "".join(node_text(part, source) for part in parts)
 
 
-def _inside_routes_draw(call: Node, source: bytes) -> bool:
+def _inside_routes_draw(call: Node, source: bytes, split_routes: bool = False) -> bool:
+    if split_routes:
+        return True
     current = call.parent
     while current is not None:
         if current.type == "call" and _method(current, source) == "draw":
@@ -381,7 +425,8 @@ def _root_handler(args: list[Node], source: bytes) -> str | None:
 
 
 def detect_rails_routes(
-    root: Node, source: bytes, path: str, record: FileRecord, index: object = None
+    root: Node, source: bytes, path: str, record: FileRecord, index: object = None,
+    *, split_routes: bool = False, split_prefix: str | None = "",
 ) -> list[Emit]:
     """Explicit Rails route DSL bindings, for :func:`~..emits.apply`; unresolved values stay
     null. ``index`` (the Ruby repo index) supplies the controller callbacks
@@ -395,6 +440,8 @@ def detect_rails_routes(
     emitted_by_call: dict[tuple[int, int], int] = {}
 
     def emit(call: Node, verb: str | None, endpoint: str | None, handler: str | None) -> None:
+        if split_routes:
+            endpoint = _join(split_prefix, endpoint) if endpoint is not None and split_prefix is not None else None
         line = call.start_point[0] + 1
         key = (call.start_byte, call.end_byte)
         emit_index = emitted_by_call.get(key, 0)
@@ -404,10 +451,27 @@ def detect_rails_routes(
         # `users#show` → the `show` action of `UsersController`, where it is declared (Q14).
         target = controller_class(f"{module}/{handler}" if module else handler) \
             if handler is not None and module is not None else None
-        site = locate_method(index, "ruby", *target) if target is not None else None
+        controller_path = (
+            f"app/controllers/{module + '/' if module else ''}{handler.split('#', 1)[0]}_controller.rb"
+            if handler is not None else None
+        )
+        site = locate_method(
+            index, "ruby", *target, within=(controller_path,) if controller_path else None
+        ) if target is not None else None
+        if site is None and target is not None:
+            controller_name, action = target
+            owners = {
+                cls.id for cls in record.classes
+                if cls.name.replace("::", ".") == controller_name.replace("::", ".")
+            }
+            local_methods = [
+                fn for fn in record.functions
+                if fn.parentId in owners and fn.name == action
+            ]
+            if len(local_methods) == 1:
+                site = (path, local_methods[0].startLine)
         handler_line, handler_path = handler_location(site, path)
-        if site is not None and target is not None:
-            handler = target[1]
+        handler = target[1] if site is not None and target is not None else None
         found.append(
             Emit(
                 call,
@@ -420,7 +484,8 @@ def detect_rails_routes(
                     "handlerPath": handler_path,
                     "guards": guards or None,
                     # Honest-null: assert auth only when a guard is present; absence is unknown.
-                    "authRequired": True if guards else None,
+                    # A before_action is a guard, but it does not prove authentication.
+                    "authRequired": None,
                     "framework": "rails",
                     "routeKind": "route",
                     "isRegex": False,
@@ -435,7 +500,7 @@ def detect_rails_routes(
     endpoint: str | None
     for call in _calls(root):
         method = _method(call, source)
-        if method is None or not _inside_routes_draw(call, source):
+        if method is None or not _inside_routes_draw(call, source, split_routes):
             continue
         args = _arguments(call)
         if method in _RESOURCE_SCOPES:

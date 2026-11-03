@@ -37,7 +37,7 @@ def _id_owner(node: Node, source: bytes) -> str:
         if current.type in {"class", "module"}:
             lexical.append(_name_of_class(current, source).replace("::", "."))
         current = current.parent
-    name = _name_of_class(node, source)
+    name = _name_of_class(node, source).replace("::", ".")
     if not lexical:
         return name
     return ".".join([*reversed(lexical), name.replace("::", ".")])
@@ -97,8 +97,9 @@ def _conditional_definitions(body: Node, source: bytes) -> list[Node]:
             block = child.child_by_field_name("block")
             receiver_name = node_text(receiver, source) if receiver is not None else ""
             if block is not None and (
-                name in {"included", "class_methods", "prepended", "extended"}
+                name in {"included", "class_methods", "prepended", "extended", "concerning"}
                 or (name == "new" and receiver_name in {"Class", "Struct"})
+                or (name == "define" and receiver_name == "Data")
             ):
                 for block_child in block.named_children:
                     if block_child.type in {"block_body", "body_statement"}:
@@ -112,7 +113,7 @@ def _conditional_definitions(body: Node, source: bytes) -> list[Node]:
                 block = value.child_by_field_name("block")
                 if (
                     method is not None and node_text(method, source) == "new"
-                    and receiver is not None and node_text(receiver, source) in {"Class", "Struct"}
+                    and receiver is not None and node_text(receiver, source) in {"Class", "Struct", "Data"}
                     and block is not None
                 ):
                     for block_child in block.named_children:
