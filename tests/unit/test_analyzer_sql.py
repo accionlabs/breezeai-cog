@@ -943,11 +943,11 @@ def test_postgres_begin_atomic_body_is_not_stored_truncated() -> None:
     assert r["parseStats"]["failed"] == 1
 
 
-def test_mysql_programs_are_still_not_extracted() -> None:
-    # Only PostgreSQL programs are read on this path; MySQL bodies need DELIMITER handling.
-    r = parse_ddl("CREATE FUNCTION f() RETURNS INT DETERMINISTIC RETURN 1;\n", "schema_mysql.sql")
+def test_mysql_single_statement_function_needs_no_delimiter() -> None:
+    fn = "CREATE FUNCTION f() RETURNS INT DETERMINISTIC RETURN 1"
+    r = parse_ddl(fn + ";\n", "schema_mysql.sql")
     assert r["dialect"] == "mysql"
-    assert r["procedures"] == []
+    assert [(p["procedureType"], p["returnType"], p["body"]) for p in r["procedures"]] == [("function", "INT", fn)]
 
 
 def test_postgres_lines_that_look_like_sqlplus_directives_are_kept() -> None:
@@ -965,3 +965,106 @@ def test_postgres_lines_that_look_like_sqlplus_directives_are_kept() -> None:
     r = parse_ddl(text, "schema_pg.sql")
     assert [p["body"] for p in r["procedures"]] == [proc]
     assert [v["definition"] for v in r["views"]] == [view]
+
+
+# MySQL / MariaDB stored programs: a compound body is written between DELIMITER commands.
+_MYSQL_PROC = (
+    "CREATE DEFINER=`root`@`localhost` PROCEDURE `shop`.`add_order`"
+    "(IN p_total DECIMAL(10,2), OUT p_id INT, INOUT `p note` VARCHAR(20))\n"
+    "BEGIN\n  INSERT INTO orders(total) VALUES (p_total); -- inline ; comment\n"
+    "  SET p_id = LAST_INSERT_ID();\n  SELECT 'a $$ in a string';\nEND"
+)
+_MYSQL_FUNC = (
+    "CREATE FUNCTION order_count(p_status ENUM('Open','Closed')) RETURNS INT UNSIGNED\nDETERMINISTIC\n"
+    "BEGIN\n  DECLARE n INT;\n  SELECT COUNT(*) INTO n FROM orders;\n  RETURN n;\nEND"
+)
+_MYSQL_SCRIPT = (
+    "CREATE TABLE `orders` (`id` INT NOT NULL AUTO_INCREMENT, `total` DECIMAL(10,2), PRIMARY KEY (`id`));\n"
+    "DROP PROCEDURE IF EXISTS `add_order`;\n"
+    "DELIMITER $$\n" + _MYSQL_PROC + "$$\n" + _MYSQL_FUNC + " $$\n"
+    "CREATE TRIGGER trg BEFORE INSERT ON orders FOR EACH ROW BEGIN SET NEW.total = 0; END$$\n"
+    "DELIMITER ;\n"
+    "CREATE VIEW v_orders AS SELECT id, total FROM orders;\n"
+    "CREATE INDEX ix_total ON orders (total);\n"
+)
+
+
+def test_mysql_programs_between_delimiters_are_extracted_whole() -> None:
+    r = parse_ddl(_MYSQL_SCRIPT, "schema_mysql.sql")
+    proc, func = r["procedures"]
+    assert proc == {
+        "name": "add_order",
+        "schema": "shop",
+        "fullName": "shop.add_order",
+        "procedureType": "procedure",
+        "parameters": [
+            {"name": "p_total", "direction": "IN", "dataType": "DECIMAL(10,2)"},
+            {"name": "p_id", "direction": "OUT", "dataType": "INT"},
+            {"name": "p note", "direction": "IN OUT", "dataType": "VARCHAR(20)"},
+        ],
+        "returnType": None,
+        "body": _MYSQL_PROC,
+    }
+    assert (func["name"], func["returnType"], func["body"]) == ("order_count", "INT UNSIGNED", _MYSQL_FUNC)
+    assert func["parameters"] == [{"name": "p_status", "direction": "IN", "dataType": "ENUM('Open','Closed')"}]
+
+
+def test_mysql_delimiter_blocks_leave_the_rest_of_the_script_intact() -> None:
+    r = parse_ddl(_MYSQL_SCRIPT, "schema_mysql.sql")
+    assert [t["name"] for t in r["tables"]] == ["orders"]
+    assert [v["definition"] for v in r["views"]] == ["CREATE VIEW v_orders AS SELECT id, total FROM orders"]
+    assert [i["name"] for i in r["allIndexes"]] == ["ix_total"]
+    assert r["parseStats"]["failed"] == 0
+
+
+def test_mysqldump_double_semicolon_delimiter() -> None:
+    proc = "CREATE DEFINER=`app`@`%` PROCEDURE `p`()\nBEGIN\n  SELECT 1;\nEND"
+    r = parse_ddl("DELIMITER ;;\n" + proc + " ;;\nDELIMITER ;\nCREATE TABLE t (a int);\n", "dump_mysql.sql")
+    assert [p["body"] for p in r["procedures"]] == [proc]
+    assert [t["name"] for t in r["tables"]] == ["t"]
+
+
+def test_mysql_compound_body_without_delimiter_is_not_stored_truncated() -> None:
+    # Under `;` the body ends at its first inner `;`: reported as failed, never half-stored.
+    r = parse_ddl("CREATE PROCEDURE p() BEGIN SELECT 1; END;\n", "schema_mysql.sql")
+    assert r["procedures"] == []
+    assert r["parseStats"]["failed"] == 1
+
+
+# CREATE SEQUENCE on PostgreSQL and MariaDB, in the Oracle sequence record shape.
+@pytest.mark.parametrize(
+    ("text", "filename", "expected"),
+    [
+        pytest.param(
+            "CREATE SEQUENCE IF NOT EXISTS app.order_seq AS bigint INCREMENT BY 5 MINVALUE 1 NO MAXVALUE "
+            "START WITH 1000 CACHE 10 NO CYCLE OWNED BY app.orders.id;\n",
+            "schema_pg.sql",
+            {"schema": "app", "name": "order_seq", "startWith": 1000, "incrementBy": 5, "minValue": 1,
+             "maxValue": None, "cache": 10, "cycle": False},
+            id="postgres",
+        ),
+        pytest.param(
+            "CREATE OR REPLACE SEQUENCE s1 START WITH 100 INCREMENT BY 10 MINVALUE=1 NOMAXVALUE CACHE 20 CYCLE;\n",
+            "schema_mariadb.sql",
+            {"schema": None, "name": "s1", "startWith": 100, "incrementBy": 10, "minValue": 1,
+             "maxValue": None, "cache": 20, "cycle": True},
+            id="mariadb",
+        ),
+        pytest.param(
+            "CREATE SEQUENCE `db`.`s2` NOCACHE NOCYCLE;\n",
+            "schema_mariadb.sql",
+            {"schema": "db", "name": "s2", "startWith": None, "incrementBy": None, "minValue": None,
+             "maxValue": None, "cache": 0, "cycle": False},
+            id="mariadb-quoted",
+        ),
+    ],
+)
+def test_sequences_on_the_sqlglot_path(text: str, filename: str, expected: dict) -> None:
+    [seq] = parse_ddl(text, filename)["sequences"]
+    assert {k: seq[k] for k in expected} == expected
+    assert seq["order"] is None  # an Oracle-only option
+
+
+def test_sequence_options_left_unwritten_stay_null() -> None:
+    [seq] = parse_ddl("CREATE SEQUENCE plain_seq;\n", "schema_pg.sql")["sequences"]
+    assert (seq["startWith"], seq["incrementBy"], seq["cache"]) == (None, None, None)
