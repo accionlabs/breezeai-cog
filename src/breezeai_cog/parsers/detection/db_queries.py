@@ -307,6 +307,12 @@ def _is_prisma_chain(low: str) -> bool:
 
 def match_db(callee: str, method: str, language: str | None = None,
              typed_db_ids: "frozenset[str] | None" = None) -> str | None:
+    if language in {"php", "go"}:
+        # PHP and Go data access is recorded from evidence by their own detectors — PHP from
+        # imports, types and model classes (php/data_access.py), Go from the receiver's declared
+        # type (go_database/access.py). A name match here would be a guess: it would tag a Go
+        # `repo.Update` as TypeORM or an in-memory `cache.Get` as Redis.
+        return None
     m = method.lower()
     low = callee.lower()
     if m in _PRISMA_VERBS and _is_prisma_chain(low):
@@ -379,6 +385,7 @@ def match_db(callee: str, method: str, language: str | None = None,
         if receiver and any(receiver.endswith(s) for s in _NON_DB_RECEIVERS):
             return None  # a cache/collection/UI-state/etc. receiver — not data access
         return "orm"
+
     if m in _DJANGO_VERBS and (language is None or language in _PYTHON) and (
         ".objects." in low or low.startswith("objects.") or "queryset" in low
     ):

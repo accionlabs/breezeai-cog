@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 
+import pytest
 from jsonschema import Draft202012Validator
 
 from breezeai_cog.core import registry
@@ -173,6 +174,27 @@ def test_rest_endpoint_is_under_the_svc(analyze_files) -> None:
     assert got[("Other/Rest.svc.cs", "GetImportItem")] == ("POST", None)
 
 
+@pytest.mark.parametrize(("template", "endpoint"), [
+    ('"lit/{id}"', "/Svc/Order.svc/lit/{id}"),
+    ("Routes.GetOrder", "/Svc/Order.svc/orders/{id}"),  # a constant, from another file
+    ('Routes.GetOrder + "/x"', None),  # a concatenation: not read → unknown, not the operation
+    ("Routes.Missing", None),
+])
+def test_uri_template_constant(analyze_files, template: str, endpoint: str | None) -> None:
+    stmts = analyze_files({
+        "Svc/Order.svc": '<%@ ServiceHost Service="Shop.OrderSvc" CodeBehind="Order.svc.cs" %>',
+        "Svc/Routes.cs": 'namespace Shop {\n  public static class Routes { public const string GetOrder = "orders/{id}"; }\n}\n',
+        "Svc/Order.svc.cs": (
+            "using System.ServiceModel;\nusing System.ServiceModel.Web;\nnamespace Shop {\n"
+            "  [ServiceContract]\n  public class OrderSvc {\n"
+            f"    [OperationContract, WebGet(UriTemplate = {template})]\n"
+            '    public string Get(string id) { return ""; }\n  }\n}\n'
+        ),
+    })
+    [r] = [s for s in stmts if s.framework == "wcf" and s.semanticType == "route"]
+    assert r.endpoint == endpoint
+
+
 def test_default_service_name_strips_leading_i() -> None:
     # no Name= arg → ISiteService → SiteService
     src = b"using System.ServiceModel;\nnamespace X {\n[ServiceContract] public interface ISiteService {\n[OperationContract] void Ping();\n} }"
@@ -306,8 +328,8 @@ def _wcf_handlers(stmts) -> dict[str, tuple[str | None, int | None]]:
 
 
 def test_interface_contract_handler_is_the_implementing_method(analyze_files) -> None:
-    # One implementer in another file: the method with a body runs → Class.Method, no line
-    # (the record is in the interface's file; handlerPath does not exist yet).
+    # One implementer in another file: the method with a body runs → Class.Method, led there
+    # (handlerPath + its line), an explicit implementation (`IOrderService.Cancel`) included.
     stmts = analyze_files({
         "IOrderService.cs": _CONTRACT,
         "OrderService.svc.cs": (
@@ -317,9 +339,10 @@ def test_interface_contract_handler_is_the_implementing_method(analyze_files) ->
         ),
     })
     assert _wcf_handlers(stmts) == {
-        "OrderService/GetOrder": ("OrderService.GetOrder", None),
-        "OrderService/Cancel": ("OrderService.Cancel", None),
+        "OrderService/GetOrder": ("OrderService.GetOrder", 3),
+        "OrderService/Cancel": ("OrderService.Cancel", 4),
     }
+    assert {s.handlerPath for s in stmts if s.framework == "wcf"} == {"OrderService.svc.cs"}
 
 
 def test_interface_contract_with_two_implementers_keeps_the_interface_method(analyze_files) -> None:

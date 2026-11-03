@@ -404,6 +404,10 @@ def _index(create: exp.Create, dialect: str) -> dict[str, Any]:
 
 
 def parse_ddl(text: str, filepath: str | None = None) -> dict[str, Any]:
+    # A leading UTF-8 byte-order mark (SSMS "Save As" and many Windows editors write one) is not
+    # whitespace to ``\s``, so it would sit in front of the first CREATE and make that statement
+    # unrecognisable — silently dropping the first object. Strip it once, for every dialect.
+    text = text.removeprefix("\ufeff")
     dialect = detect_dialect(text, filepath)
 
     # T-SQL / SQL Server: a dedicated path (see _parse_tsql_ddl), fully separate from Oracle.
@@ -535,8 +539,13 @@ def _preprocess_tsql(text: str) -> str:
 # A T-SQL identifier: [bracketed] | "quoted" | bare (may start with @/# for params/temp).
 _TSQL_ID = r'(?:\[[^\]]+\]|"[^"]+"|[A-Za-z_@#][A-Za-z0-9_@#$]*)'
 
-# GO batch separator: a line that is only GO (optionally with a batch count), case-insensitive.
-_TSQL_GO = re.compile(r"(?im)^[ \t]*GO(?:[ \t]+\d+)?[ \t]*(?:--[^\n]*)?$")
+# GO batch separator: a line that is only GO (optionally with a batch count and a trailing ``--``
+# comment), case-insensitive. The ``\r?`` before ``$`` is load-bearing: in multiline mode ``$``
+# matches only before ``\n``, so on a CRLF script (the norm for SQL Server tooling on Windows)
+# every GO line is ``GO\r`` and would never match — the whole file would stay ONE batch and
+# nothing would be extracted. The ``\r`` is consumed as part of the separator, so the text on
+# either side keeps its own line endings and a verbatim slice (a view definition) is unchanged.
+_TSQL_GO = re.compile(r"(?im)^[ \t]*GO(?:[ \t]+\d+)?[ \t]*(?:--[^\r\n]*)?\r?$")
 
 # A program batch (kept whole, never split on inner ``;``).
 _TSQL_PROG = re.compile(

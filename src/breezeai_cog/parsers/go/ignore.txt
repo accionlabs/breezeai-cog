@@ -1,0 +1,12 @@
+# Go per-language ignore defaults (applied post-scan, Go files only). `vendor/` and `*_test.go`
+# are covered by the global defaults.
+#
+# Generated mocks (mockgen, mockery, counterfeiter): fake implementations of the repo's
+# interfaces. They duplicate every method name, which makes name-based handler lookups
+# ambiguous, and they are never served.
+*_mock.go
+mock_*.go
+# Kubernetes code generators (deepcopy, conversion, defaults).
+zz_generated*.go
+# Protobuf output (*.pb.go, *_grpc.pb.go) is kept on purpose: the gRPC route detector reads the
+# service method names from the generated ServiceDesc.

@@ -193,9 +193,10 @@ def detect_fastify(root: Node, source: bytes, path: str, record: FileRecord,
                  "method": method, "endpoint": _join_path(prefix, route_path)},
                 fill={"handler": handler, "handlerLine": line,
                       "guards": compose_guards(list(outer), list(scope.guards), before, hooks),
-                      # Only a route's own hooks assert auth (as for Express); hooks shared by
-                      # many routes are often logging or parsing.
-                      "authRequired": True if hooks else None},
+                      # A hook — the route's own too — may validate, log or parse as well as
+                      # authenticate, and fastify.auth([...]) only combines the app's own
+                      # checks: listed in guards, none asserts auth.
+                      "authRequired": None},
                 enrich="any",
             ))
     return found

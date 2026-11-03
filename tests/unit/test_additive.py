@@ -56,8 +56,13 @@ def test_inventory_in_run_order() -> None:
     assert inventory == {
         "csharp": ["lambda-handlers", "lucene", "hotchocolate-registered-roots",
                    "generic-handlers", "hangfire", "quartz"],
+        "go": ["go-net-http", "go-gin", "go-echo", "go-chi", "go-fiber", "go-gorilla-mux", "go-grpc",
+               "go-nats", "go-kafka", "go-scheduling", "go-database",
+               "go-lambda"],
         "java": ["quartz"],
         "python": ["celery"],
+        "php": ["wordpress-hooks", "laravel-events", "symfony-events", "php-data-access",
+                "php-http-calls"],
         "scala": ["akka-events", "spark"],
         "typescript": ["express", "fastify", "aws-events", "sdk-calls", "graphql-client",
                        "graphql-resolver-modules", "vue-routes",
@@ -218,7 +223,7 @@ def test_index_hooked_languages_call_the_collector(language: str) -> None:
 
 def test_fact_for_an_unhooked_language_rejected(isolated) -> None:
     with pytest.raises(RegistryError, match="no index hook"):
-        register_fact(_marked(language="php"))
+        register_fact(_marked(language="kotlin"))
 
 
 def test_fact_needs_a_gate(isolated) -> None:
@@ -282,3 +287,21 @@ def test_fact_reads_files_another_parser_owns(isolated, tmp_path) -> None:
 
 def test_index_fact_tolerates_a_missing_index() -> None:
     assert index_fact(None, "anything") is None
+
+
+@pytest.mark.parametrize("jobs", [1, 2])
+@pytest.mark.parametrize("language", ["c", "cpp"])
+def test_c_family_fact_is_resolved_on_its_own_index(isolated, tmp_path, jobs, language) -> None:
+    from breezeai_cog.parsers.c.parser import CParser
+    from breezeai_cog.parsers.cpp.parser import CppParser
+
+    register_fact(_marked(language=language, resolve=lambda values, index: sorted(values)))
+    ext = ".c" if language == "c" else ".cpp"
+    paths = []
+    for name, src in {"a": b"// MARK\nint a(void) { return 0; }\n", "b": b"int b(void);\n"}.items():
+        f = tmp_path / f"{name}{ext}"
+        f.write_bytes(src)
+        paths.append(f)
+    own, other = (CParser(), CppParser()) if language == "c" else (CppParser(), CParser())
+    assert index_fact(own.build_index(tmp_path, paths, jobs), "test.marked") == [f"a{ext}"]
+    assert index_fact(other.build_index(tmp_path, paths, jobs), "test.marked") is None

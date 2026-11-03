@@ -24,11 +24,12 @@ the cases where the markup genuinely *is* the logic.
 
 ## What counts as a template
 
-Eight extensions, owned by four parsers. Each parser declares only its **markup** half — the
+Nine extensions, owned by five parsers. Each parser declares only its **markup** half — the
 code half is captured either way.
 
 | Extension | Parser | Also owns (always captured) |
 |---|---|---|
+| `.phtml` | `php` | `.php` |
 | `.html` `.htm` | `html` | — |
 | `.cshtml` `.razor` | `razor` | — |
 | `.aspx` `.ascx` `.master` | `csharp-webforms` | `.cs`, including `.aspx.cs` code-behind |

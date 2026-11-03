@@ -11,7 +11,7 @@ from tree_sitter import Node
 
 from ..additive import DetectContext, Detection, Detector, Gate, register_detector
 from ..index_common import record_distinct
-from ..method_lines import locate_method
+from ..handler_sites import locate_method
 from ..quartz_common import Call, detect_quartz
 from ..treesitter import node_text
 

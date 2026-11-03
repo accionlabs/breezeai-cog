@@ -169,3 +169,32 @@ def test_http_client_call_is_not_entry_point(analyze_files) -> None:
     }""")
     )
     assert [r.endpoint for r in _eps(st)] == ["/proxy"]
+
+
+def _auth(analyze_files, open_block: str, nested: str = "") -> dict[str, bool | None]:
+    inner = (f"            {nested} {{\n                get(\"/inner\") {{ call.respondText(\"i\") }}\n"
+             "            }\n") if nested else ""
+    st = analyze_files(_app(f"""    routing {{
+        {open_block} {{
+            get("/feed") {{ call.respondText("f") }}
+{inner}        }}
+    }}"""))
+    return {r.endpoint: r.authRequired for r in _eps(st)}
+
+
+def test_required_authenticate_asserts_auth(analyze_files) -> None:
+    for block in ('authenticate("jwt")', "authenticate", 'authenticate("jwt", optional = false)',
+                  'authenticate("jwt", strategy = AuthenticationStrategy.Required)'):
+        assert _auth(analyze_files, block) == {"/feed": True}, block
+
+
+def test_optional_or_unreadable_authenticate_leaves_auth_unknown(analyze_files) -> None:
+    # Anonymous calls may get through: the guard is listed, authRequired stays empty.
+    for block in ('authenticate("jwt", optional = true)', 'authenticate("jwt", optional = flag)',
+                  'authenticate("jwt", strategy = AuthenticationStrategy.Optional)'):
+        assert _auth(analyze_files, block) == {"/feed": None}, block
+
+
+def test_required_block_inside_an_optional_one_asserts_auth(analyze_files) -> None:
+    got = _auth(analyze_files, 'authenticate("jwt", optional = true)', 'authenticate("admin")')
+    assert got == {"/feed": None, "/inner": True}

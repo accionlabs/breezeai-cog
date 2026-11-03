@@ -36,7 +36,7 @@ class WcfParser(CSharpParser):
         record = self.extract(root, ctx)  # inherited C# extraction (one parse)
         if ctx.capture_statements:  # routes are statements — gated (spec A4)
             routes = detect_wcf_services(
-                record, root, ctx.repo_root, ctx.resolution_index,
+                record, root, ctx.source, ctx.repo_root, ctx.resolution_index,
             ) or detect_asmx_services(record, root, ctx.repo_root)
             if routes:
                 apply(record, routes, ctx.source, ctx.path)

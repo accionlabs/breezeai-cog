@@ -20,10 +20,12 @@ Wiring has no record (contract §4): a path-only parent (nested routes, no eleme
 element whose children include an index or empty-path child, which always fills its outlet), a
 pathless layout route, and v7 ``layout()`` / ``prefix()``. A layout whose element is a guard
 (``<Route element={<ProtectedRoute/>}>``, with or without a path) puts its name in the children's
-``guards``; an element counts as a guard only by its name (:func:`_is_guard_element`) — any other
+``guards``; an element counts as a guard only by whole words of its name (:func:`_is_guard_element`) — any other
 layout is plain wiring (when unsure, record less)."""
 
 from __future__ import annotations
+
+import re
 
 from tree_sitter import Node
 
@@ -85,16 +87,30 @@ def _component_name(value: Node | None, source: bytes) -> str | None:
 
 # ---- layouts and guard elements ------------------------------------------------
 
-#: Name parts that mark a pathless layout element as a guard (``ProtectedRoute``, ``RequireAuth``,
-#: ``PrivateOutlet``, ``AuthGuard``); a name that also says it is a layout / page is not one.
-_GUARD_PARTS = ("Protected", "Private", "Require", "Guard", "Authenticated", "Authorized")
-_NOT_GUARD_PARTS = ("Layout", "Page", "Shell")
+#: Words of a layout element's name that mark it as a guard (``ProtectedRoute``, ``PrivateOutlet``,
+#: ``AuthGuard``); a name that also says it is a layout / page is not one.
+_GUARD_WORDS = frozenset({"Protected", "Private", "Guard", "Authenticated", "Authorized"})
+#: ``Require`` counts only before one of these (``RequireAuth``, ``RequireRole``), not in
+#: ``RequiredFieldsNotice`` / ``RequireJsLoader``.
+_REQUIRE_WHAT = frozenset({"Auth", "Login", "User", "Role", "Admin", "Permission", "Session"})
+_NOT_GUARD_WORDS = frozenset({"Layout", "Page", "Shell"})
+_NEGATIONS = frozenset({"Non", "Not", "No"})
+_WORD_RE = re.compile(r"[A-Z][a-z0-9]*|[a-z0-9]+")
 
 
 def _is_guard_element(name: str | None) -> bool:
+    """Whether a layout element's name says it is a guard, by whole words of the name (split at
+    capitals): ``ProtectedRoute``, ``AuthGuard``, ``RequireAuth`` — not ``UnprotectedRoute``,
+    ``NonAuthorizedRedirect``, ``RequiredFieldsNotice``, nor a name that also says it is a layout
+    / page."""
     if not name:
         return False
-    return any(p in name for p in _GUARD_PARTS) and not any(p in name for p in _NOT_GUARD_PARTS)
+    words = _WORD_RE.findall(name.rsplit(".", 1)[-1])
+    if _NOT_GUARD_WORDS.intersection(words):
+        return False
+    before = [None, *words[:-1]]  # a guard word after a negation (NonAuthorized…) is not one
+    return any(w in _GUARD_WORDS and prev not in _NEGATIONS for prev, w in zip(before, words)) \
+        or any(w == "Require" and nxt in _REQUIRE_WHAT for w, nxt in zip(words, words[1:]))
 
 
 # ---- JSX <Route> form -------------------------------------------------------

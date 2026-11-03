@@ -109,6 +109,27 @@ def _calls(
     calls: list[Call] = []
     seen: set[str] = set()
 
+    def record(n: Node) -> None:
+        if n.type != "call_expression":
+            return
+        fn = n.child_by_field_name("function")
+        if fn is None:
+            return
+        name: str = ""
+        receiver: str | None = None
+        if fn.type == "generic_function":
+            fn = fn.child_by_field_name("function") or (fn.named_children[0] if fn.named_children else fn)
+        if fn.type == "field_expression":
+            val = fn.child_by_field_name("value")
+            field = fn.child_by_field_name("field")
+            name = node_text(field, source) if field is not None else ""
+            receiver = node_text(val, source) if val is not None else None
+        elif fn.type == "identifier":
+            name = node_text(fn, source)
+        if name and name not in seen:
+            seen.add(name)
+            calls.append(Call(name=name, path=resolve(name, receiver)))
+
     def visit(n: Node) -> None:
         # Descend through control flow and lambdas — those calls belong to the nearest
         # named enclosing function — but stop at ``barriers``: the spans of nested
@@ -116,33 +137,11 @@ def _calls(
         for child in n.named_children:
             if _span(child) in barriers:
                 continue
-            if child.type == "call_expression":
-                fn = child.child_by_field_name("function")
-                if fn is not None:
-                    name: str = ""
-                    receiver: str | None = None
-                    if fn.type == "field_expression":
-                        val = fn.child_by_field_name("value")
-                        field = fn.child_by_field_name("field")
-                        name = node_text(field, source) if field is not None else ""
-                        receiver = node_text(val, source) if val is not None else None
-                    elif fn.type == "identifier":
-                        name = node_text(fn, source)
-                    elif fn.type == "generic_function":
-                        gfn = fn.child_by_field_name("function") or (fn.named_children[0] if fn.named_children else None)
-                        if gfn is not None:
-                            if gfn.type == "field_expression":
-                                val = gfn.child_by_field_name("value")
-                                field = gfn.child_by_field_name("field")
-                                name = node_text(field, source) if field is not None else ""
-                                receiver = node_text(val, source) if val is not None else None
-                            elif gfn.type == "identifier":
-                                name = node_text(gfn, source)
-                    if name and name not in seen:
-                        seen.add(name)
-                        calls.append(Call(name=name, path=resolve(name, receiver)))
+            record(child)
             visit(child)
 
+    # An expression-bodied ``def f() = a.b()`` has the call as its body, not inside it.
+    record(body)
     visit(body)
     return calls
 

@@ -21,7 +21,9 @@ from tree_sitter import Node
 from ...emit import function_id
 from ...schemas import Decorator
 from ...parsers.typescript.decorators import decorator
-from ...parsers.typescript.functions import _type_text, extract_params
+from ...parsers.typescript.functions import (
+    dto_from_type, extract_params, payload_type, return_dto,
+)
 from ..additive import FactSpec, index_fact, register_fact
 from ..emits import Emit
 from ..index_common import record_distinct
@@ -57,6 +59,8 @@ _GRAPHQL_OPS = {"Query": "query", "Mutation": "mutation", "Subscription": "subsc
 _FIELD_RESOLVERS = {"ResolveField", "ResolveProperty"}
 # Extracts the return type from a @ResolveField(() => Brand) / @ResolveField(() => [Brand]) arg.
 _RESOLVE_RETURN_RE = re.compile(r"=>\s*\[?\s*([A-Za-z_$][\w$]*)")
+#: The whole return-type thunk expression: ``() => [Brand]`` → ``[Brand]``.
+_RETURN_TYPE_EXPR_RE = re.compile(r"=>\s*(\[\s*[A-Za-z_$][\w.$]*\s*\]|[A-Za-z_$][\w.$]*)")
 # Singleton-only variant (no leading `[`): distinguishes a grouping-object return
 # `@Mutation(() => NotificationsMutation)` from an array return `@Query(() => [Brand])`.
 # Grouping resolvers always return a singleton shell; entity queries return arrays.
@@ -82,32 +86,7 @@ def _graphql_op_name(d: Decorator, mname: str) -> str:
                 return m.group(0)
     return mname
 _RESPONSE_DECORATORS = {"ApiResponse", "ApiOkResponse", "ApiCreatedResponse"}
-_TYPE_PROP_RE = re.compile(r"\btype\s*:\s*\[?\s*([A-Za-z_$][\w.$]*)")
-# return-type → responseDTO: skip generic wrappers and primitives, take the first
-# PascalCase type name (``Promise<OrderDto[]>`` → ``OrderDto``, ``void`` → None).
-_ID_RE = re.compile(r"[A-Za-z_$][\w$]*")
-_NON_DTO_TYPES = {
-    "Promise", "Observable", "Array", "Map", "Set", "Record", "Partial", "Readonly",
-    "void", "any", "unknown", "never", "null", "undefined", "string", "number",
-    "boolean", "object", "bigint", "symbol", "this", "true", "false",
-    # NestJS/GraphQL scalar wrappers used as @ResolveField return types (e.g. () => Number)
-    "Number", "String", "Boolean",
-}
-
-
-def _dto_from_type(t: str | None) -> str | None:
-    if not t:
-        return None
-    for tok in _ID_RE.findall(t):
-        if tok in _NON_DTO_TYPES or not tok[0].isupper():
-            continue
-        return tok
-    return None
-
-
-def _return_dto(member: Node, source: bytes) -> str | None:
-    """Handler return type → responseDTO (fallback when no ``@ApiResponse``)."""
-    return _dto_from_type(_type_text(member.child_by_field_name("return_type"), source))
+_TYPE_PROP_RE = re.compile(r"\btype\s*:\s*(\[\s*[A-Za-z_$][\w.$]*\s*\]|[A-Za-z_$][\w.$]*)")
 # `@Controller({ path: 'orders', host: '...' })` — pull the string `path` out of the
 # object form (the string form `@Controller('orders')` is handled directly).
 _PATH_PROP_RE = re.compile(r"""\bpath\s*:\s*['"`]([^'"`]*)['"`]""")
@@ -204,14 +183,15 @@ def _guards(decs: list[Node], source: bytes, *, interceptors: bool = False) -> l
 
 
 def _response_dto(decs: list[Node], source: bytes) -> str | None:
-    """``@ApiResponse({ type: Dto })`` / ApiOkResponse / ApiCreatedResponse → Dto."""
+    """``@ApiResponse({ type: Dto })`` / ApiOkResponse / ApiCreatedResponse → ``Dto`` (an array
+    ``type: [Dto]`` as written)."""
     for dec in decs:
         d = decorator(dec, source)
         if d.name in _RESPONSE_DECORATORS:
             for arg in d.args:
                 m = _TYPE_PROP_RE.search(arg)
                 if m:
-                    return m.group(1)
+                    return "".join(m.group(1).split())
     return None
 
 
@@ -219,19 +199,19 @@ def _request_dto(member: Node, source: bytes) -> str | None:
     """Declared type of the ``@Body``-decorated parameter → requestDTO."""
     for p in extract_params(member.child_by_field_name("parameters"), source):
         if any(d.name == "Body" for d in p.decorators):
-            return p.type or None
+            return payload_type(p.type)
     return None
 
 
 def _field_resolver_return_dto(dec: Decorator) -> str | None:
-    """Extract the GraphQL return type from ``@ResolveField(() => Brand)`` — the first
-    identifier after ``=>`` in the first decorator arg, skipping primitive scalars."""
+    """The GraphQL return type of ``@ResolveField(() => Brand)`` / ``@Query(() => [Brand])``, as
+    written (``Brand`` / ``[Brand]``); None when the thunk names no type."""
     if not dec.args:
         return None
-    m = _RESOLVE_RETURN_RE.search(dec.args[0])
-    if m is None:
+    m = _RETURN_TYPE_EXPR_RE.search(dec.args[0])
+    if m is None or dto_from_type(m.group(1)) is None:
         return None
-    return _dto_from_type(m.group(1))
+    return "".join(m.group(1).split())
 
 
 def _resolver_type_arg(decs: list[Node], source: bytes) -> str | None:
@@ -345,8 +325,8 @@ register_fact(FactSpec(
 
 
 def _args_dto(member: Node, source: bytes) -> str | None:
-    """The requestDTO for a ``@ResolveField`` method — the first ``@Args()``-decorated
-    parameter whose declared type is a non-primitive class (e.g. ``GetBrandsArgs``).
+    """The requestDTO for a ``@ResolveField`` method — the declared type, as written, of the
+    first ``@Args()``-decorated parameter of a non-primitive class type (``GetBrandsArgs``).
     Prefers a parameter named ``input``/``data`` (conventional DTO name), then takes the
     first class-typed ``@Args()`` param. Returns ``None`` when all ``@Args`` are scalars."""
     preferred: str | None = None
@@ -354,9 +334,9 @@ def _args_dto(member: Node, source: bytes) -> str | None:
     for p in extract_params(member.child_by_field_name("parameters"), source):
         if not any(d.name == "Args" for d in p.decorators):
             continue
-        t = _dto_from_type(p.type)
-        if t is None:
-            continue
+        if dto_from_type(p.type) is None:
+            continue  # a scalar, not the DTO among several scalar args
+        t = payload_type(p.type)
         if first_class is None:
             first_class = t
         if p.name in ("input", "data") and preferred is None:
@@ -552,7 +532,7 @@ def detect_nest_routes(
                                     version=_version(pending, source) or ctrl_version,
                                     requestDTO=_request_dto(member, source),
                                     responseDTO=(_response_dto(pending, source)
-                                                 or _return_dto(member, source)),
+                                                 or return_dto(member, source)),
                                     **common,
                                 ), parent=parent, node_type="synthetic"))
                         continue
@@ -596,7 +576,7 @@ def detect_nest_routes(
                             method=gql.upper(),
                             endpoint=_graphql_op_name(d, mname),
                             routeKind=gql,
-                            responseDTO=_field_resolver_return_dto(d) or _return_dto(member, source),
+                            responseDTO=_field_resolver_return_dto(d) or return_dto(member, source),
                         )
                     elif fld is not None:  # @ResolveField/@ResolveProperty field resolver
                         if stub_method is not None:
@@ -608,7 +588,7 @@ def detect_nest_routes(
                                 endpoint=f"{stub_type}.{mname}",
                                 routeKind=stub_method.lower(),
                                 requestDTO=_args_dto(member, source),
-                                responseDTO=_field_resolver_return_dto(d) or _return_dto(member, source),
+                                responseDTO=_field_resolver_return_dto(d) or return_dto(member, source),
                             )
                         else:
                             # `Parent.field` when @Resolver(() => T) names the parent type, else
@@ -623,7 +603,7 @@ def detect_nest_routes(
                                 endpoint=f"{parent_type}.{mname}" if parent_type else mname,
                                 routeKind="field_resolver",
                                 requestDTO=_args_dto(member, source),
-                                responseDTO=_field_resolver_return_dto(d) or _return_dto(member, source),
+                                responseDTO=_field_resolver_return_dto(d) or return_dto(member, source),
                             )
                     routes.append(Emit(dec, fields, parent=parent, node_type="synthetic"))
             pending = []

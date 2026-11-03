@@ -102,12 +102,102 @@ def _csharp(n: int) -> str:
     return f"namespace A;\npublic class C {{\n{body}}}\n"
 
 
+def _xsd(n: int) -> str:
+    body = "".join(
+        f'  <!-- field {i} -->\n  <xs:element name="f{i}" type="xs:string"/>\n' for i in range(n)
+    )
+    return (
+        '<?xml version="1.0"?>\n'
+        '<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema">\n'
+        f"{body}"
+        "</xs:schema>\n"
+    )
+
+
+def _wsdl(n: int) -> str:
+    messages = "".join(
+        f'  <wsdl:message name="M{i}Request"/>\n  <wsdl:message name="M{i}Response"/>\n'
+        for i in range(n)
+    )
+    operations = "".join(
+        f"    <!-- op {i} -->\n"
+        f'    <wsdl:operation name="Op{i}">\n'
+        f'      <wsdl:input message="tns:M{i}Request"/>\n'
+        f'      <wsdl:output message="tns:M{i}Response"/>\n'
+        f"    </wsdl:operation>\n"
+        for i in range(n)
+    )
+    return (
+        '<?xml version="1.0"?>\n'
+        '<wsdl:definitions xmlns:tns="urn:x" xmlns:wsdl="http://schemas.xmlsoap.org/wsdl/">\n'
+        f"{messages}"
+        '  <wsdl:portType name="Port">\n'
+        f"{operations}"
+        "  </wsdl:portType>\n"
+        "</wsdl:definitions>\n"
+    )
+
+
+def _jslt(n: int) -> str:
+    body = "".join(f"// doc for f{i}\ndef f{i}(x)\n  x + {i} // note\n\n" for i in range(n))
+    return f"{body}f0(1)\n"
+
+
+def _go(n: int) -> str:
+    body = "".join(
+        f"// doc for F{i}\n"
+        f'const Path{i} = "/r{i}"\n'
+        f"type T{i} struct{{ N int }}\n"
+        f"type I{i} interface{{ Get{i}(a, b int) (int, error) }}\n"
+        f"func (t *T{i}) F{i}(x int, rest ...string) error {{\n"
+        f"\tgo func() {{ http.Get(Path{i}) }}()\n"
+        f"\tswitch x {{\n\tcase {i}:\n\t\tx++ // note\n\t}}\n"
+        f"\treturn nil\n"
+        f"}}\n"
+        for i in range(n)
+    )
+    return f'package p\n\nimport "net/http"\n\n{body}'
+
+
+def _go_gin(n: int) -> str:
+    body = "".join(
+        f"\tg{i} := r.Group(\"/g{i}\")\n"
+        f"\tg{i}.GET(\"/a\", h.List{i}) // note\n"
+        f"\tg{i}.POST(\"/b\", func(c *gin.Context) {{ mount{i}(g{i}) }})\n"
+        for i in range(n)
+    )
+    helpers = "".join(f"func mount{i}(g *gin.RouterGroup) {{ g.PUT(\"/c\", put) }}\n" for i in range(n))
+    return (f'package p\n\nimport "github.com/gin-gonic/gin"\n\n'
+            f"func routes(r *gin.Engine, h *Handler) {{\n{body}}}\n{helpers}")
+
+
+def _c(n: int) -> str:
+    body = "".join(
+        f"/* ops {i} */\n"
+        f"#define MAX{i} {i}\n"
+        f"struct ops{i} {{ int (*run)(int); int count; }};\n"
+        f"static int helper{i}(int x) {{ return x + MAX{i}; }}\n"
+        f"int f{i}(struct ops{i} *o, int x) {{\n"
+        f"    if (x > 0) {{ return helper{i}(x); }} // note\n"
+        f"    return o->run(x);\n"
+        f"}}\n"
+        for i in range(n)
+    )
+    return f"#include <stdio.h>\n#include \"local.h\"\n{body}"
+
+
 SAMPLES: dict[str, tuple[str, Callable[[int], str]]] = {
     "java-vertx": ("V.java", _java_vertx),
     "groovy-vertx": ("Http.groovy", _groovy_vertx),
     "typescript-express-aws": ("app.ts", _ts_express_aws),
     "python": ("mod.py", _python),
     "csharp": ("C.cs", _csharp),
+    "xsd": ("schema.xsd", _xsd),
+    "wsdl": ("service.wsdl", _wsdl),
+    "jslt": ("transform.jslt", _jslt),
+    "go": ("p.go", _go),
+    "go-gin": ("routes.go", _go_gin),
+    "c": ("mod.c", _c),
 }
 
 
@@ -152,3 +242,35 @@ def test_parse_cost_is_linear_in_file_size(name: str) -> None:
         f"{name}: doubling the file multiplied parse work by {ratio:.2f} "
         f"({small} → {large} lines) — something now scans per item found (§6.1)"
     )
+
+
+def _referrer_walk_lines(n: int) -> int:
+    """Python lines executed by the ownership step's rule-2 walk over a chain of ``n`` headers
+    each included by the next (``h1.h`` includes ``h0.h`` …, ``main.c`` includes the last) —
+    the shape where walking back from every header separately is quadratic."""
+    from breezeai_cog.core.ownership import _all_referrer_languages
+
+    headers = [f"h{i}.h" for i in range(n)]
+    referrers = {h: {headers[i + 1]} for i, h in enumerate(headers[:-1])}
+    referrers[headers[-1]] = {"main.c"}
+    count = 0
+
+    def trace(frame, event, arg):
+        nonlocal count
+        if event == "line":
+            count += 1
+        return trace
+
+    previous = sys.gettrace()
+    sys.settrace(trace)
+    try:
+        langs = _all_referrer_languages(set(headers), referrers, {"main.c": "c"}, {})
+    finally:
+        sys.settrace(previous)
+    assert langs[headers[0]] == {"c"}
+    return count
+
+
+def test_ownership_referrer_walk_is_linear_in_headers() -> None:
+    small, large = _referrer_walk_lines(SIZE), _referrer_walk_lines(2 * SIZE)
+    assert large / small < MAX_RATIO, f"{small} → {large} lines: the walk is no longer linear"

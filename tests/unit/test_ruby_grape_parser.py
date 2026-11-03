@@ -139,8 +139,10 @@ end
 '''
     record = GrapeParser().parse_file(_context(tmp_path, "api.rb", source))
     got = {s.endpoint: (s.guards, s.authRequired) for s in record.statements if s.semanticType == "route"}
+    # A before hook is a scope-level guard: listed, but it never asserts auth (it may set a
+    # header or a locale) — authRequired stays unknown.
     assert got == {
-        "/early": (["authenticate!"], True),
+        "/early": (["authenticate!"], None),
         # outer scope first; a hook with more than one statement names no guard
-        "/admin/stats": (["authenticate!", "check_scope", "require_admin!"], True),
+        "/admin/stats": (["authenticate!", "check_scope", "require_admin!"], None),
     }

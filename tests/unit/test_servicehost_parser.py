@@ -11,6 +11,7 @@ from jsonschema import Draft202012Validator
 
 from breezeai_cog.core import registry
 from breezeai_cog.emit import to_line
+from breezeai_cog.parsers.contract import is_entry_point
 from breezeai_cog.parsers.base import ParseContext
 from breezeai_cog.parsers.dotnet_servicehost.parser import ServiceHostParser
 from breezeai_cog.schemas import FileRecord
@@ -175,7 +176,24 @@ def test_svc_dataservice_factory_reclassifies_to_odata_rest() -> None:
     # DataServiceHostFactory → the .svc is actually an OData REST endpoint, not SOAP RPC.
     rec = _parse(SVC_VIRTUAL_CODEBEHIND, "grid-odata-crud/Products.svc")
     assert rec.framework == "odata"
-    assert "Factory=" in _routes(rec)[0].text
+    [s] = rec.statements
+    assert "Factory=" in s.text
+
+
+def test_odata_host_keeps_a_mount_record_of_its_address() -> None:
+    # No code declares an OData service's entity sets: the host is the only record of the URL.
+    [s] = _parse(SVC_VIRTUAL_CODEBEHIND, "grid-odata-crud/Products.svc").statements
+    assert (s.semanticType, s.routeKind, s.method, s.endpoint, s.handler, s.framework,
+            s.nodeType) == ("route", "mount", "ANY", "/grid-odata-crud/Products.svc", "Products",
+                            "odata", "synthetic")
+    assert not is_entry_point(s)  # wiring: the address is kept, not counted as an entry point
+
+
+def test_soap_and_rest_hosts_stay_plain() -> None:
+    for src, name in ((SVC_FULL, "Services/OrderService.svc"),
+                      (SVC_WEBHTTP_FACTORY, "Api/CatalogService.svc"),
+                      (SVC_NO_CODEBEHIND, "Services/Order.svc"), (ASMX_FULL, "P.asmx")):
+        assert len(_routes(_parse(src, name))) == 1
 
 
 def test_svc_webservicehost_factory_reclassifies_to_wcf_rest() -> None:

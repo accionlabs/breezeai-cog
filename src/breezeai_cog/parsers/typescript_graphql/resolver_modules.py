@@ -29,7 +29,8 @@ from ...emit import file_id
 from ..additive import DetectContext, Detection, Detector, Gate, register_detector
 from ..emits import Emit
 from ..treesitter import first_line, node_text
-from ..typescript.declarations import export_names, import_bindings, resolve_export
+from ..handler_sites import handler_location, locate_export
+from ..typescript.declarations import export_names, import_bindings
 from ..typescript.imports import _resolve
 from .sdl_fields import root_field_dto
 
@@ -70,15 +71,16 @@ def _detect(dc: DetectContext) -> Detection | None:
             continue
         kind = _ROOT_TYPES[root_type]
         for op in export_names(index, module):
-            decl = resolve_export(index, module, op)
+            decl = locate_export(index, module, op)
             if decl is None:
                 continue
+            handler_line, handler_path = handler_location((decl.file, decl.line), dc.path)
             request_dto, response_dto = root_field_dto(index, root_type, op)
             routes.append(Emit(pair, dict(
                 semanticType="route", method=kind.upper(), endpoint=op,
                 requestDTO=request_dto, responseDTO=response_dto, framework="graphql",
-                handler=decl.name, handlerLine=decl.line,
-                handlerPath=decl.file if decl.file != dc.path else None, routeKind=kind,
+                handler=decl.name, handlerLine=handler_line, handlerPath=handler_path,
+                routeKind=kind,
             ), parent=file_id(dc.path), text=first_line(node_text(pair, dc.source))[:120]))
     return Detection(routes, label="graphql") if routes else None
 

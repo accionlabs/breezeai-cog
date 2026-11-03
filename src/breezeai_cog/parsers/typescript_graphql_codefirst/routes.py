@@ -35,7 +35,7 @@ from ..emits import Emit
 # Reuse the SDL DTO helpers — the decorator's SDL fragment is re-parsed with the GraphQL
 # grammar (below), so `!`/`[]` wrappers and the argument list are handled by the grammar, not
 # by hand, exactly as the resolver-map/SDL detector does for `gql`` templates.
-from ..graphql.sdl import base_type_name, child_of_type, request_dto
+from ..graphql.sdl import child_of_type, request_dto, type_text
 from ..treesitter import node_text, parse_source
 from ..typescript.decorators import decorator
 from ..typescript.functions import extract_params
@@ -44,20 +44,19 @@ _OPS = {"Query": "query", "Mutation": "mutation", "Subscription": "subscription"
 _AUTH_DECORATORS = {"RequireScopes", "RequireAPIScope", "Authorized"}
 _LEADING_ID_RE = re.compile(r"[A-Za-z_$][\w$]*")
 
-#: GraphQL built-in scalars are not DTOs — an operation over ``ID``/``String`` carries no
-#: payload type, so those are dropped (honest-null), mirroring the primitive filtering the
-#: NestJS/resolver-map detectors apply.
-_GQL_SCALARS = frozenset({"ID", "String", "Int", "Float", "Boolean"})
-#: TS type wrappers/primitives skipped when reading a DTO off an ``@Arg`` parameter type.
+#: TS type wrappers skipped when reading a DTO off an ``@Arg`` parameter type, and types that
+#: carry no payload. A built-in type or scalar (``Int``, ``Date``) is the declared type: kept,
+#: as the SDL parser keeps ``Int`` (docs/architecture/statement-model.md, DTO fields).
 _TS_NON_DTO = frozenset(
-    {"string", "number", "boolean", "any", "unknown", "void", "object", "Date",
+    {"string", "number", "boolean", "any", "unknown", "void", "object",
      "Array", "Promise", "Record", "Partial"}
 )
 
 
 _NAME_OPTION_RE = re.compile(r"""\bname\s*:\s*['"`]([A-Za-z_$][\w$]*)['"`]""")
-#: type-graphql return type thunk: ``() => [Recipe]`` / ``returns => Recipe``.
-_RETURN_THUNK_RE = re.compile(r"=>\s*\[?\s*([A-Za-z_$][\w$]*)")
+#: type-graphql return type thunk: ``() => [Recipe]`` / ``returns => Recipe`` — the type
+#: expression (group 1) and its type name (group 2).
+_RETURN_THUNK_RE = re.compile(r"=>\s*(\[\s*([A-Za-z_$][\w.$]*)\s*\]|([A-Za-z_$][\w.$]*))")
 
 
 def _op_name(d: Decorator, mname: str) -> str:
@@ -77,9 +76,11 @@ def _op_name(d: Decorator, mname: str) -> str:
 
 
 def _thunk_dto(d: Decorator) -> str | None:
-    """responseDTO from a type-graphql return thunk (``() => [Recipe]`` → ``Recipe``)."""
+    """responseDTO from a type-graphql return thunk, as written (``() => [Recipe]`` →
+    ``[Recipe]``)."""
     m = _RETURN_THUNK_RE.search(d.args[0]) if d.args else None
-    return _dto_or_none(m.group(1)) if m and m.group(1)[:1].isupper() else None
+    name = (m.group(2) or m.group(3)) if m else None
+    return "".join(m.group(1).split()) if m and name and name[:1].isupper() else None
 
 
 def _sdl_fragment(arg: str) -> str | None:
@@ -90,8 +91,9 @@ def _sdl_fragment(arg: str) -> str | None:
 
 
 def _dto_or_none(name: str | None) -> str | None:
-    """A DTO type name, or None for an absent/built-in-scalar type (honest-null)."""
-    return name if name and name not in _GQL_SCALARS else None
+    """The declared type name, built-in scalars (``Int``, ``String``) included; None when
+    absent."""
+    return name or None
 
 
 def _first_field_definition(root: Node) -> Node | None:
@@ -108,7 +110,7 @@ def _sdl_dtos(fragment: str, timeout_micros: int) -> tuple[str | None, str | Non
     """(requestDTO, responseDTO) from an operation's SDL fragment. The fragment is wrapped into
     a parseable object type and walked with the GraphQL grammar, reusing the SDL DTO helpers:
     requestDTO is the ``input``/``data`` arg (else the first), responseDTO the return type — each
-    reduced to its base name (``[OrderLine!]!`` → ``OrderLine``). Scalars → None."""
+    as written (``[OrderLine!]!``), scalars included."""
     wrapped = b"type Query {\n" + fragment.encode("utf-8") + b"\n}"
     try:
         root = parse_source("graphql", wrapped, timeout_micros).root_node
@@ -118,7 +120,7 @@ def _sdl_dtos(fragment: str, timeout_micros: int) -> tuple[str | None, str | Non
     if field is None:
         return None, None
     req = _dto_or_none(request_dto(field, wrapped))
-    res = _dto_or_none(base_type_name(child_of_type(field, "type"), wrapped))
+    res = _dto_or_none(type_text(child_of_type(field, "type"), wrapped))
     return req, res
 
 
@@ -135,16 +137,17 @@ def _ts_base_type(t: str | None) -> str | None:
 
 def _arg_request_dto(member: Node, source: bytes) -> str | None:
     """Fallback requestDTO from the method's ``@Arg('input'|'data')`` parameter (else the first
-    ``@Arg``) as its base class type — used when the SDL fragment declares no input type."""
+    ``@Arg`` of a class type), its type as written — used when the SDL fragment declares no
+    input type."""
     preferred: str | None = None
     first: str | None = None
     for p in extract_params(member.child_by_field_name("parameters"), source):
         arg = next((d for d in p.decorators if d.name == "Arg"), None)
         if arg is None:
             continue
-        t = _ts_base_type(p.type)
-        if t is None:
-            continue
+        if _ts_base_type(p.type) is None:
+            continue  # a scalar argument
+        t = " ".join(p.type.split())
         if first is None:
             first = t
         argname = arg.args[0].strip("'\"` ") if arg.args else ""

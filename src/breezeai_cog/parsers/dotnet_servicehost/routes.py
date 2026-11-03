@@ -13,8 +13,8 @@ Forms ``<%@ Register %>`` pass. The load-bearing value is the class FQN (``Servi
 interface may have several implementers; only the host says which one is served / which class
 backs the endpoint URL).
 
-Both emit a ``route`` reusing existing vocabulary (``routeKind="rpc"``, ``method="RPC"``; the
-``framework`` differs — ``wcf`` vs ``asmx`` — both already valid enum values). The per-type
+The directive is wiring: a plain statement (an OData host keeps a ``mount`` record, see
+:func:`detect_service_host`); the ``framework`` label differs — ``wcf`` vs ``asmx``. The per-type
 differences (directive keyword, FQN attribute name, framework label) are **data** in
 :data:`DIRECTIVES`, not branches. Attributes may appear in any order, span lines, and vary in
 case.
@@ -68,6 +68,11 @@ _PROTOCOL_FACTORIES: dict[str, str] = {
 }
 
 
+#: Protocols whose endpoints no code declares (OData entity sets): the host keeps a ``mount``
+#: record of its address. A SOAP / REST host's operations are recorded from its class instead.
+_MOUNTED_PROTOCOLS = frozenset({"odata"})
+
+
 def spec_for(path: str) -> _HostSpec | None:
     """The directive spec for a path's extension (``.svc``/``.asmx``), else None."""
     return DIRECTIVES.get(posixpath.splitext(path)[1].lower())
@@ -112,8 +117,10 @@ def detect_service_host(
     The directive is wiring (contract §4): it names the class that serves the address, and the
     operations — recorded from the class (``csharp_wcf``) under this file's path — are the
     bindings. So its statement stays **plain**: the directive text, no ``semanticType``,
-    endpoint, handler or ``routeKind``. Nothing when the path is neither type, the file has no
-    directive, or the directive names no concrete class (honest-null)."""
+    endpoint, handler or ``routeKind`` — except an OData host's (:data:`_MOUNTED_PROTOCOLS`): a
+    ``route`` / ``mount`` record of ``/<.svc path>``, ``handler`` the class, since no code
+    declares its entity sets. Nothing when the path is neither type, the file has no directive,
+    or the directive names no concrete class (honest-null)."""
     spec = spec_for(rel_path)
     if spec is None:
         return None, None, []
@@ -151,4 +158,10 @@ def detect_service_host(
         endLine=source[: m.end()].count(b"\n") + 1,
         path=rel_path,
     )
+    if framework in _MOUNTED_PROTOCOLS:
+        # An OData service's endpoints (its entity sets) are served by the framework, not
+        # declared in code: no operation records them, so the host keeps a mount record of its
+        # address (contract §4 — a mount whose routes aren't in the repo).
+        stmt.semanticType, stmt.routeKind, stmt.method = "route", "mount", "ANY"
+        stmt.endpoint, stmt.handler, stmt.framework = "/" + rel_path.lstrip("/"), cls, framework
     return stmt, framework, imports

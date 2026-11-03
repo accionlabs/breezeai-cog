@@ -4,7 +4,10 @@ and sub-resource locators.
 Two constructs put a prefix in front of a JAX-RS resource's routes from outside its class:
 
 * ``@ApplicationPath("/api")`` on the ``Application`` subclass — the base of every resource of
-  that application (scoped to the Maven/Gradle module, like the Spring context path).
+  that application (scoped to the Maven/Gradle module, like the Spring context path). The same
+  base may be set in the module's ``web.xml`` or properties instead (:mod:`.config`); sources
+  that disagree make it unknown. A module with no base of its own, in a repo where another module
+  sets one, may be served by that module's application: its base is unknown too.
 * a **sub-resource locator** — a resource method with ``@Path`` and no HTTP-verb annotation,
   returning another resource class: ``@Path("/items") public ItemRes items()`` on
   ``@Path("/orders") class OrderRes`` serves ``ItemRes``'s methods under ``/orders/items``.
@@ -30,6 +33,7 @@ from tree_sitter import Node
 from ..additive import FactSpec, index_fact, register_fact
 from ..java.config import module_of
 from ..treesitter import node_text
+from .config import PROPERTY_KEYS, property_bases, web_xml_bases
 
 FACT = "jaxrs.prefixes"
 
@@ -102,6 +106,9 @@ class JaxrsFacts:
     #: index) — a locator's returned type is matched by simple name, so a name declared twice in
     #: the repo is not followed.
     nested: list[str] = field(default_factory=list)
+    #: (repo root, module) of a file with a resource class — its module's configured base is
+    #: read once in ``_resolve``.
+    module_root: tuple[str, str] | None = None
 
 
 def _annotations(decl: Node) -> list[Node]:
@@ -258,8 +265,11 @@ def resolve_jaxrs(
         return resolve_value(v, consts)
 
     app: dict[str, str | None] = {}
-    class_paths: dict[str, PathValue] = {}
-    locators: dict[str, list[tuple[str, PathValue]]] = {}
+    class_paths: dict[str, PathValue] = {}  # any root resource of that simple name (is it one?)
+    # returned class → (owner, locator path, the owner file's own @Path values): a locator is
+    # declared in its owner, so the owner's @Path is the one in that file — never another
+    # package's class of the same simple name.
+    locators: dict[str, list[tuple[str, PathValue, dict[str, PathValue]]]] = {}
     declared = dict(top_level)  # class simple name → how many declarations in the repo
     for f in facts:
         for cls in f.nested:
@@ -271,22 +281,24 @@ def resolve_jaxrs(
             app[module] = resolved
         class_paths.update(f.class_paths)
         for owner, path, returned in f.locators:
-            locators.setdefault(returned, []).append((owner, path))
+            locators.setdefault(returned, []).append((owner, path, f.class_paths))
 
-    def base_of(cls: str, seen: frozenset[str]) -> object:
-        """A class's base: its own @Path, else its locator base; None if not a resource,
-        _UNKNOWN if unresolved or ambiguous-unknown."""
-        if cls in class_paths:
-            own = value(class_paths[cls])
+    def base_of(cls: str, seen: frozenset[str], own_file: dict[str, PathValue]) -> object:
+        """A locator owner's base: its own @Path in its file, else its locator base; None if not
+        a resource, _UNKNOWN if unresolved, or a sub-resource whose name is declared twice."""
+        if cls in own_file:
+            own = value(own_file[cls])
             return own if own is not None else _UNKNOWN
+        if cls in locators and declared.get(cls) != 1:
+            return _UNKNOWN  # reached by a locator, but which class of that name is unknown
         return sub_base(cls, seen)
 
     def sub_base(cls: str, seen: frozenset[str]) -> object:
         if cls in seen or declared.get(cls) != 1:
             return None
         candidates: set[object] = set()
-        for owner, path in locators.get(cls, []):
-            parent = base_of(owner, seen | {cls})
+        for owner, path, owner_file in locators.get(cls, []):
+            parent = base_of(owner, seen | {cls}, owner_file)
             if parent is None:  # the locator's class is not a resource
                 continue
             local = value(path)
@@ -323,7 +335,41 @@ def jaxrs_prefixes(index: Any | None) -> JaxrsPrefixes:
 
 
 def _collect(root: Node, source: bytes, rel: str, repo_root: Path | None) -> JaxrsFacts | None:
-    return collect_jaxrs_facts(root, source, rel)
+    facts = collect_jaxrs_facts(root, source, rel)
+    module = module_of(rel)
+    if facts is not None and repo_root is not None and module is not None \
+            and (facts.class_paths or facts.app_paths):
+        facts.module_root = (str(repo_root), module)
+    return facts
+
+
+def module_bases(app: dict[str, str | None], modules: set[tuple[str, str]]) -> dict[str, str | None]:
+    """Module → its application base, from every source (:mod:`.config`): ``@ApplicationPath``
+    (``app``), ``web.xml`` and properties. Two sources that disagree, or a Quarkus key together
+    with ``@ApplicationPath`` (Quarkus joins them), → None. A module with no source, while another
+    module has one, → None; with no source anywhere → absent (no prefix)."""
+    out: dict[str, str | None] = {}
+    for repo, module in sorted(modules):
+        values: list[str | None] = []
+        joined = False
+        if module in app:
+            values.append(app[module])
+        module_dir = Path(repo) / module if module else Path(repo)
+        values.extend(web_xml_bases(module_dir))
+        for key, value in property_bases(Path(repo), module):
+            values.append(value)
+            joined = joined or PROPERTY_KEYS[key]
+        if not values:
+            continue
+        distinct = set(values)
+        out[module] = None if len(distinct) > 1 or None in distinct or (
+            joined and module in app) else values[0]
+    for module in app:
+        out.setdefault(module, app[module])
+    if out:
+        for _, module in modules:
+            out.setdefault(module, None)  # another module sets a base: this one may be under it
+    return out
 
 
 def _resolve(values: list[JaxrsFacts], index: Any) -> JaxrsPrefixes | None:
@@ -334,6 +380,7 @@ def _resolve(values: list[JaxrsFacts], index: Any) -> JaxrsPrefixes | None:
         simple = fqcn.rsplit(".", 1)[-1]
         top_level[simple] = top_level.get(simple, 0) + (1 if rel is not None else 2)
     app_paths, sub_bases = resolve_jaxrs(values, getattr(index, "consts", None) or {}, top_level)
+    app_paths = module_bases(app_paths, {f.module_root for f in values if f.module_root})
     if not app_paths and not sub_bases:
         return None
     return JaxrsPrefixes(app_paths, sub_bases)

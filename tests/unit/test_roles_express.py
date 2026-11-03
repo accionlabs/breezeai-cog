@@ -218,3 +218,47 @@ def test_object_named_like_a_router_is_not_a_receiver(analyze_files) -> None:
                         "import express from 'express';\n"
                         "export function register(router) { router.get('/p', h); }\n"})
     assert [s.endpoint for s in _eps(st) if s.path == "src/routes.js"] == ["/p"]
+
+
+def _chain(analyze_files, chain: str):
+    st = _app(analyze_files, f"app.route('/items'){chain};\n")
+    return sorted((s.method, s.handler, s.guards, s.authRequired)
+                  for s in st if s.semanticType == "route" and s.endpoint == "/items")
+
+
+def test_route_all_before_verbs_is_their_middleware(analyze_files) -> None:
+    # .all(auth) runs before every verb chained after it: it guards them, it is not a route.
+    # Like other middleware that runs first, it does not assert authRequired.
+    assert _chain(analyze_files, ".all(authenticate).get(list).post(create)") == [
+        ("GET", "list", ["authenticate"], None), ("POST", "create", ["authenticate"], None)]
+    assert _chain(analyze_files, ".all(a).all(b).get(list)") == [
+        ("GET", "list", ["a", "b"], None)]
+
+
+def test_route_all_last_or_alone_is_a_catch_all_route(analyze_files) -> None:
+    assert _chain(analyze_files, ".get(list).all(notAllowed)") == [
+        ("ANY", "notAllowed", None, None), ("GET", "list", None, None)]
+    assert _chain(analyze_files, ".all(handler)") == [("ANY", "handler", None, None)]
+
+
+def test_only_a_certain_express_jwt_asserts_auth(analyze_files) -> None:
+    body = (
+        "const { expressjwt } = require('express-jwt');\n"
+        "const checkJwt = expressjwt({ secret: 's', algorithms: ['HS256'] });\n"
+        "const maybeJwt = expressjwt({ secret: 's', algorithms: ['HS256'], credentialsRequired: false });\n"
+        "const someJwt = expressjwt({ secret: 's', algorithms: ['HS256'] }).unless({ path: ['/x'] });\n"
+        "app.get('/a', checkJwt, a);\n"
+        "app.get('/b', maybeJwt, b);\n"
+        "app.get('/c', someJwt, c);\n"
+        "app.get('/d', validate(schema), d);\n"
+        "app.get('/e', requireAuth, e);\n"
+    )
+    st = _app(analyze_files, body)
+    got = {s.endpoint: (s.guards, s.authRequired) for s in st if s.semanticType == "route"}
+    assert got == {
+        "/a": (["checkJwt"], True),     # rejects a request without a valid token
+        "/b": (["maybeJwt"], None),     # credentialsRequired: false — anonymous passes
+        "/c": (["someJwt"], None),      # .unless(...) exempts some paths
+        "/d": (["validate"], None),     # validation is not authentication
+        "/e": (["requireAuth"], None),  # the app's own check: its effect is not certain
+    }

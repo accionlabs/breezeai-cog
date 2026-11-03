@@ -71,7 +71,8 @@ _DOTNET_VERBS = {
 
 
 def match_api(
-    callee: str, method: str, http_client_ids: "frozenset[str] | None" = None
+    callee: str, method: str, http_client_ids: "frozenset[str] | None" = None,
+    language: str | None = None,
 ) -> str | None:
     """Return the HTTP verb (uppercased) if ``callee.method(...)`` is an HTTP call.
 
@@ -83,6 +84,11 @@ def match_api(
     """
     m = method.lower()
     low = callee.lower()
+    # PHP HTTP calls are recorded from evidence (the imported Http facade, typed Guzzle /
+    # Symfony clients) by the php-http-calls detector; a receiver-name match here would be a
+    # guess (``$this->httpCache->get()``) — see php/http_calls.py.
+    if language == "php":
+        return None
     if m in _BARE_FUNCTIONS or low in _BARE_FUNCTIONS or low.endswith(".fetch"):
         return "GET"
     # .NET (C#/VB) HttpClient uses async-suffixed verbs (``GetAsync``/``PostAsync``…);

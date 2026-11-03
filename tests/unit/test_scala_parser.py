@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
 from jsonschema import Draft202012Validator  # type: ignore[import-untyped]
 
 from breezeai_cog.core.registry import capabilities, discover_builtin
@@ -109,6 +110,29 @@ def test_imports_and_fqcn_resolution(tmp_path: Path) -> None:
     # FQCN resolved imports
     assert any(p.endswith("com/acme/repo/OrderRepo.scala") for p in rec.importFiles)
     assert any(p.endswith("com/acme/util/DateHelper.scala") for p in rec.importFiles)
+
+
+@pytest.mark.parametrize("arrow", ["=>", "as"])
+def test_renamed_imports_are_recorded(tmp_path: Path, arrow: str) -> None:
+    """Scala 2 renames with ``=>``, Scala 3 with ``as`` — both import the original name."""
+    src = f"""package com.acme.orders
+
+import cats.effect.{{IO {arrow} CIO}}
+import com.acme.util.{{DateHelper {arrow} DH}}
+
+class Report {{
+  def stamp(): String = {{
+    DH.today()
+  }}
+}}
+""".encode()
+    rec, _ = _parse(tmp_path, src)
+    assert "cats.effect.IO" in rec.externalImports
+    assert "src/main/scala/com/acme/util/DateHelper.scala" in rec.importFiles
+    stamp = next(f for f in rec.functions if f.name == "stamp")
+    assert {(c.name, c.path) for c in stamp.calls} == {
+        ("today", "src/main/scala/com/acme/util/DateHelper.scala")
+    }
 
 
 def test_types_and_case_classes(tmp_path: Path) -> None:
@@ -317,6 +341,71 @@ object Outer {
   }
 }
 """
+
+
+EXPRESSION_BODIES_SRC = b"""package com.acme.orders
+
+class Report {
+  def direct(): String = DH.today()
+  def outer(): String = fmt(DH.today())
+  def branch(a: Boolean): String = if (a) left() else right()
+  def wrapper(): Int = {
+    def inner(): Int = hidden()
+    inner()
+  }
+  def expressionWrapper(): Int = run(() => helper())
+}
+"""
+
+
+def test_expression_bodied_def_records_its_calls(tmp_path: Path) -> None:
+    """``def f() = a.b()`` has the call *as* its body; it was skipped, inner calls kept."""
+    rec, _ = _parse(tmp_path, EXPRESSION_BODIES_SRC)
+    calls = {f.name: [c.name for c in f.calls] for f in rec.functions}
+    assert calls["direct"] == ["today"]
+    assert calls["outer"] == ["fmt", "today"]
+    assert sorted(calls["branch"]) == ["left", "right"]
+    # a nested def keeps its own calls; a lambda's belong to the enclosing def
+    assert calls["wrapper"] == ["inner"]
+    assert calls["inner"] == ["hidden"]
+    assert calls["expressionWrapper"] == ["run", "helper"]
+
+
+def _statements_of(body: str) -> list[tuple[str, str | None, str | None, str | None]]:
+    src = f"""package p
+import play.api.libs.ws.WSClient
+class R(ws: WSClient, db: Database) {{
+  {body}
+}}
+""".encode()
+    rec = ScalaParser().parse_file(
+        ParseContext(path="R.scala", abs_path=Path("R.scala"), source=src,
+                     repo_root=Path.cwd(), capture_statements=True)
+    )
+    return [(s.nodeType, s.semanticType, s.method, s.endpoint) for s in rec.statements]
+
+
+@pytest.mark.parametrize(
+    "expr",
+    [
+        'ws.url("/x").get()',
+        'if (a) ws.url("/x").get() else ws.url("/y").post(b)',
+        'x match {\n    case 1 => ws.url("/x").get()\n    case _ => ws.url("/y").delete()\n  }',
+        'Future {\n    // absorbed into the statement\n    db.withConnection { c => SQL"select 1".as(p) }\n  }',
+    ],
+)
+def test_expression_bodied_def_captures_what_a_braced_one_does(expr: str) -> None:
+    """``def f() = expr`` had no statements at all; it must match ``def f() = { expr }``."""
+    expression = _statements_of(f"def f() = {expr}")
+    braced = _statements_of(f"def f() = {{\n  {expr}\n  }}")
+    assert expression == braced
+    assert expression
+
+
+def test_expression_bodied_def_records_its_api_call() -> None:
+    assert _statements_of('def f() = ws.url("/x").get()') == [
+        ("call_expression", "api_call", "GET", "/x")
+    ]
 
 
 def test_nested_def_is_captured_as_its_own_function(tmp_path: Path) -> None:

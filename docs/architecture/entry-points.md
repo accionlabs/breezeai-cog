@@ -243,7 +243,7 @@ match.
 |---|---|---|
 | HTTP | Full path with every prefix applied (verb goes in `method`) | `/api/v2/orders/{id}` |
 | SOAP | `<Service>.asmx/<Operation>` or `<Contract>/<Operation>` | `Orders.asmx/GetOrder` |
-| gRPC | `<Service>/<Method>` | `OrderService/GetOrder` |
+| gRPC | `<Service>/<Method>`, the service by its full name — with the proto package when the `.proto` declares one, as gRPC itself names the method (`/orders.OrderService/GetOrder` on the wire, without the leading `/`) | `orders.OrderService/GetOrder`, `OrderService/GetOrder` (no package) |
 | GraphQL | Operation field name (type goes in `method`); for a field under a stub parent, `<StubType>.<field>` | `bookById`, `NotificationsMutation.create` |
 | GraphQL entity / node resolver | The type it resolves | `Book` |
 | WebSocket message | The event name; `<namespace>#<event>` when the gateway sets a socket.io namespace, written as a client writes it in `io('http://host/chat')`. Not a URL: the connection URL and port are shared by every handler, and `#` keeps the address from reading as a path | `msg`, `/chat#msg` |
@@ -327,7 +327,7 @@ there.
 |---|---|---|
 | `@GetMapping` / `@PostMapping` / … / `@RequestMapping` on a method | Binding | One handler, inbound API |
 | `@RequestMapping` on a controller class | Wiring | Prefix for the class's bindings |
-| `server.servlet.context-path` in `application.properties` / `.yml` | Wiring | Prefix for every HTTP binding |
+| `server.servlet.context-path` in `application.properties` / `.yml` | Wiring | Prefix for every HTTP binding served by the servlet — not WebFlux.fn routes, which take `spring.webflux.base-path` |
 | `@KafkaListener` / `@RabbitListener` / `@JmsListener` / `@SqsListener` on a method | Binding | `eventbus_consumer`, topic or queue as `endpoint` |
 | `@Scheduled(cron = …)` on a method | Binding | `timer`, cron expression as `endpoint` |
 | `@PreAuthorize`, `HandlerInterceptor`, servlet `Filter` | Guard | Run before many handlers |

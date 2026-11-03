@@ -29,3 +29,22 @@ rapidjson/
 pugixml/
 xercesc/
 zlib/
+
+# ...except the library's own repository: its public headers live in include/<name>/ at the
+# root (curl's include/curl/curl.h). A vendored copy keeps its parent folder (third_party/,
+# deps/, lib/curl/...), which these root-anchored lines never match.
+!/include/boost/
+!/include/openssl/
+!/include/log4cpp/
+!/include/log4cxx/
+!/include/log4cplus/
+!/include/curl/
+!/include/curlpp/
+!/include/gmp/
+!/include/icu/
+!/include/poco/
+!/include/jsoncpp/
+!/include/rapidjson/
+!/include/pugixml/
+!/include/xercesc/
+!/include/zlib/

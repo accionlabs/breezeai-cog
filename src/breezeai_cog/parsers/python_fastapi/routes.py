@@ -17,7 +17,9 @@ from .file_facts import app_middleware as _app_middleware
 from .file_facts import calls as _calls
 from .file_facts import dependencies as _dependencies
 from .file_facts import literal as _literal
+from .file_facts import mounted_names as _mounted_names
 from .file_facts import prefix_kwarg as _prefix_kwarg
+from .auth import certain_auth
 from .wiring import fastapi_wiring
 
 # HTTP verbs (+ websocket) exposed as decorator methods on FastAPI app/router objects.
@@ -72,7 +74,8 @@ def _router_bases(
     ``app = FastAPI(dependencies=…)`` gives every route of the app its guards.
 
     A router never included in this file keeps its own prefix and guards (no wiring seen). A
-    router included at more than one place keeps its own too (ambiguous). A prefix that exists
+    router included at more than one place is served at each: its base is :data:`_UNKNOWN`
+    (never its own prefix alone, an address it is not served at). A prefix that exists
     but is not a literal makes the base :data:`_UNKNOWN`. Includes of routers from other files
     (``app.include_router(orders.router)``) are not resolved here. The third map gives each
     router the outermost app/router it is reached from in this file (itself when not included)."""
@@ -108,7 +111,9 @@ def _router_bases(
     def wiring(name: str, seen: frozenset[str]) -> tuple[str | object, list[str], str]:
         prefix, deps = own.get(name, ""), own_deps.get(name, [])
         sites = includes.get(name, set())
-        if len(sites) != 1 or name in seen:  # not included here, or ambiguous, or a cycle
+        if len(sites) > 1:  # served under each include: no single address
+            return _UNKNOWN, deps, name
+        if not sites or name in seen:  # not included here, or a cycle
             return prefix, deps, name
         (parent, mount, mount_deps), = sites
         parent_base, parent_deps, top = wiring(parent, seen | {name})
@@ -117,6 +122,11 @@ def _router_bases(
             return _UNKNOWN, guards, top
         return f"{parent_base}{mount}{prefix}", guards, top
 
+    # A sub-application mounted in this file (``app.mount("/v1", sub)``): served under a path
+    # this pass does not follow, so its address is unknown.
+    for name in _mounted_names(root, source) if b".mount(" in source else ():
+        if name in own:
+            own[name] = _UNKNOWN
     resolved = {name: wiring(name, frozenset()) for name in own}
     return ({k: v[0] for k, v in resolved.items()},
             {k: v[1] for k, v in resolved.items()},
@@ -126,7 +136,7 @@ def _router_bases(
 def _routes(dec: Node, fdef: Node, source: bytes, path: str, class_name: str | None,
             bases: dict[str, str | object],
             router_guards: dict[str, list[str]], roots: dict[str, str],
-            middleware: dict[str, list[str]]) -> list[Emit]:
+            middleware: dict[str, list[str]], auth: frozenset[str] = frozenset()) -> list[Emit]:
     call = dec.named_children[0] if dec.named_children else None
     if call is None or call.type != "call":
         return []
@@ -153,7 +163,8 @@ def _routes(dec: Node, fdef: Node, source: bytes, path: str, class_name: str | N
     served = bases.get(receiver_name, "")
     # Guards: the app's middleware (decision Q9: a global guard on every binding it covers),
     # then the router's / app's inherited dependencies, then the route's own (outer first).
-    # Only dependencies assert auth: app middleware is often logging or CORS.
+    # Only a security-scheme dependency asserts auth (:mod:`.auth`): middleware is often logging
+    # or CORS, a dependency often a DB session or paging.
     scoped = router_guards.get(receiver_name, []) + _dependencies(call, source)
     guards = middleware.get(roots.get(receiver_name, receiver_name), []) + scoped
     if served is _UNKNOWN:
@@ -170,8 +181,9 @@ def _routes(dec: Node, fdef: Node, source: bytes, path: str, class_name: str | N
             handler=name,
             handlerLine=handler_line,
             guards=guards or None,
-            # Honest-null: assert auth only when a guard is present; absence is unknown.
-            authRequired=True if scoped else None,
+            # Only a dependency that certainly rejects an anonymous call asserts auth
+            # (:mod:`.auth`); any other is listed, its effect unknown.
+            authRequired=True if auth.intersection(scoped) else None,
             routeKind="ws" if m == "WEBSOCKET" else "route",
         ), parent=parent, node_type="synthetic")
         for m in methods
@@ -221,6 +233,8 @@ def detect_routes(
         )
         middleware = _app_middleware(root, source) if b"middleware" in source else {}
 
+    auth = certain_auth(root, source)
+
     def walk(node: Node, class_name: str | None) -> None:
         for child in node.named_children:
             if child.type == "class_definition":
@@ -237,7 +251,7 @@ def detect_routes(
                 elif fdef is not None:
                     for dec in (c for c in child.named_children if c.type == "decorator"):
                         routes.extend(_routes(dec, fdef, source, path, class_name,
-                                              bases, router_guards, roots, middleware))
+                                              bases, router_guards, roots, middleware, auth))
                     body = fdef.child_by_field_name("body")
                     if body is not None:
                         walk(body, class_name)

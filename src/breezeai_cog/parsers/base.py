@@ -9,12 +9,18 @@ cross-file context simply omit it; the pipeline calls it via ``getattr``.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from importlib import resources
 from pathlib import Path
-from typing import Any, Protocol, Sequence, runtime_checkable
+from typing import Any, Callable, Mapping, Protocol, Sequence, runtime_checkable
 
 from ..schemas import SCHEMA_VERSION, FileRecord
+
+
+#: A language's handler lookup: the handler name as written → ``(handler, (file, line))`` — the
+#: name to keep (a path-shaped name becomes the declared one, or None when unknown) and where it
+#: is declared (None: not found) — or None to leave the record as it is.
+HandlerLocator = Callable[[str], tuple[str | None, tuple[str, int] | None] | None]
 
 
 def _read_sibling_lines(obj: object, filename: str) -> list[str]:
@@ -57,6 +63,29 @@ class ParseContext:
     statement_text_limit: int = 8000  # max captured code statement text/body length
     parse_timeout_micros: int = 0  # cross-platform tree-sitter timeout (0 = none)
     resolution_index: Any | None = None  # result of the language's build_index, or None
+    #: The indexes of the languages in the parser's ``related_languages`` that were built for
+    #: this run, by language name. Empty when the language declares none.
+    related_indexes: Mapping[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class Ownership:
+    """The evidence a language gives the ownership step (``core/ownership.py``), which decides
+    the language of a file whose extension several languages register (``.h``: C and C++).
+
+    Every hook is optional. Functions must be module-level (they are pickled to the workers of
+    a parallel scan) and must only read bytes: the step runs before any parse."""
+
+    #: Rule 1: True when ``source`` uses syntax only this language allows (C++ ``namespace``).
+    proves: Callable[[bytes], bool] | None = None
+    #: Rule 2: the files ``source`` references, as written (``#include "list.h"`` → ``list.h``).
+    references: Callable[[bytes], list[str]] | None = None
+    #: Rule 2: the other languages whose files this language can reference (C++ includes C
+    #: headers; C cannot include C++ ones). A file referenced from several languages goes to
+    #: the candidate every referring language can reference.
+    includes: tuple[str, ...] = ()
+    #: Rule 4: the shared extensions this language takes when no other rule decides.
+    default_for: tuple[str, ...] = ()
 
 
 @runtime_checkable
@@ -94,6 +123,16 @@ class BaseParser:
     #: ``.ts``/``.js`` + ``.vue``) and only the markup half is gated. Optional, like
     #: ``priority``/``build_index`` — deliberately absent from the Protocol above.
     template_extensions: tuple[str, ...] = ()
+    #: Languages whose indexes this parser may read after its own (C++ calls C functions).
+    #: The pipeline hands their indexes to every parser of the language as
+    #: ``ctx.related_indexes``. A lookup checks the parser's own index first.
+    related_languages: tuple[str, ...] = ()
+    #: Evidence for the ownership step, for a language that registers an extension another
+    #: language also registers. ``None`` for every other language.
+    ownership: Ownership | None = None
+    #: Set when ``build_index`` takes ``parse_timeout_micros``: the pipeline then passes the
+    #: run's parse timeout, so the index parse is bounded like the parse stage.
+    build_index_accepts_timeout: bool = False
 
     def matches(self, path: str | Path) -> bool:
         """Whether this parser handles ``path`` by name/extension (the candidacy gate,
@@ -120,9 +159,35 @@ class BaseParser:
         return None
 
     def link_handlers(self, record: FileRecord, ctx: ParseContext) -> None:
-        """After ``parse_file``: lead each entry point whose handler is declared elsewhere to that
-        declaration (``handlerLine``, and ``handlerPath`` for another file) through the repo
-        index. Languages that can do it override this; the default leaves the record as is."""
+        """After ``parse_file``: lead each entry point that names its handler but not where it is
+        declared to that declaration (``handlerLine``, and ``handlerPath`` for another file).
+
+        The loop and its rules are the same for every language: only unlocated records, the
+        "own file → no ``handlerPath``" rule (:func:`~.handler_sites.handler_location`), and
+        honest-null — a name the language can't find is left as it is. A language supplies only
+        the lookup, :meth:`handler_locator`, which is asked for only when a record needs it."""
+        if not ctx.capture_statements:
+            return
+        from .handler_sites import handler_location, unlocated  # handler_sites imports this module
+
+        pending = [s for s in record.statements if unlocated(s)]
+        if not pending:
+            return
+        locate = self.handler_locator(ctx)
+        if locate is None:
+            return
+        for s in pending:
+            found = locate(s.handler or "")
+            if found is None:
+                continue
+            s.handler, site = found
+            s.handlerLine, s.handlerPath = handler_location(site, ctx.path)
+
+    def handler_locator(self, ctx: ParseContext) -> HandlerLocator | None:
+        """This file's handler lookup for :meth:`link_handlers`, or None when the language
+        locates nothing after parsing (the default). Detectors that know the class look their
+        handler up inline instead (:mod:`.handler_sites`)."""
+        return None
 
     def ignore_patterns(self) -> list[str]:
         """Per-language ignore defaults (layer 2) — from sibling ``ignore.txt``."""

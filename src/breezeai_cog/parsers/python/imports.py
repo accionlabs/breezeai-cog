@@ -29,6 +29,8 @@ name present in the linked file.
 
 from __future__ import annotations
 
+import os
+import sys
 from pathlib import Path
 
 from tree_sitter import Node
@@ -52,52 +54,81 @@ def _module_file(base: Path, parts: list[str]) -> Path | None:
     return None
 
 
+#: Whether a name check must confirm the exact case: macOS and Windows file systems match
+#: ``Utils.py`` for ``utils.py``; Python's import does not.
+_CASE_INSENSITIVE_FS = sys.platform in ("darwin", "win32")
+
+
 class _Roots:
     """The folders an absolute import of one file may resolve under, beyond the repository root
-    (see the module docstring). One per file; folder listings are cached for its imports."""
+    (see the module docstring). One per file. Each folder is asked about the few names that
+    decide (the module, ``__init__.py``, a project file), never listed whole: the cost of an
+    import is the number of folders above the file, not their size. Answers are memoised for
+    this file's imports."""
 
     def __init__(self, file_path: str, repo_root: Path) -> None:
         self.repo_root = repo_root
         self.folder = (repo_root / file_path).parent
+        self._seen: dict[tuple[Path, str], bool] = {}
         self._listing: dict[Path, frozenset[str]] = {}
+        self._above: list[Path] | None = None
 
-    def _names(self, folder: Path) -> frozenset[str]:
-        if folder not in self._listing:
-            try:
-                self._listing[folder] = frozenset(p.name for p in folder.iterdir())
-            except OSError:
-                self._listing[folder] = frozenset()
-        return self._listing[folder]
+    def _has(self, folder: Path, name: str) -> bool:
+        """Whether ``folder`` holds an entry named exactly ``name``."""
+        key = (folder, name)
+        found = self._seen.get(key)
+        if found is None:
+            found = os.path.exists(os.path.join(folder, name))
+            if found and _CASE_INSENSITIVE_FS:
+                if folder not in self._listing:
+                    try:
+                        self._listing[folder] = frozenset(os.listdir(folder))
+                    except OSError:
+                        self._listing[folder] = frozenset()
+                found = name in self._listing[folder]
+            self._seen[key] = found
+        return found
 
     def _ancestors(self) -> list[Path]:
         """The file's folder up to (not including) the repository root, which is tried first."""
-        out: list[Path] = []
-        folder = self.folder
-        while folder != self.repo_root and self.repo_root in folder.parents:
-            out.append(folder)
-            folder = folder.parent
-        return out
+        if self._above is None:
+            self._above = []
+            folder = self.folder
+            while folder != self.repo_root and self.repo_root in folder.parents:
+                self._above.append(folder)
+                folder = folder.parent
+        return self._above
 
     def _is_package(self, folder: Path) -> bool:
-        return "__init__.py" in self._names(folder)
+        return self._has(folder, "__init__.py")
 
     def _declares_project(self, folder: Path) -> bool:
-        return any(name in self._names(folder) for name in _PROJECT_FILES)
+        return any(self._has(folder, name) for name in _PROJECT_FILES)
+
+    def _holds(self, folder: Path, first: str) -> bool:
+        return self._has(folder, first) or self._has(folder, f"{first}.py")
 
     def candidates(self, parts: list[str]) -> list[Path]:
+        # The module's first name is asked first: most imports that reach here are the standard
+        # library's or an installed package's, found in no folder above the file.
+        first = parts[0]
         folders: list[Path] = []
         for folder in self._ancestors():
+            here = self._holds(folder, first)
+            src = self._has(folder, "src") and self._holds(folder / "src", first)
+            if not (here or src):
+                continue
             if self._declares_project(folder):
-                folders.append(folder)
-                if (folder / "src").is_dir() and not self._is_package(folder / "src"):
+                if here:
+                    folders.append(folder)
+                if src and not self._is_package(folder / "src"):
                     folders.append(folder / "src")
-            elif len(parts) > 1 and not self._is_package(folder):
+            elif here and len(parts) > 1 and not self._is_package(folder):
                 folders.append(folder)
-        if len(parts) == 1 and not self._is_package(self.folder) and self.folder not in folders:
+        if (len(parts) == 1 and self.folder not in folders and self._holds(self.folder, first)
+                and not self._is_package(self.folder)):
             folders.insert(0, self.folder)  # a script: its own folder is on sys.path
-        first = parts[0]
-        return [folder for folder in folders
-                if first in self._names(folder) or f"{first}.py" in self._names(folder)]
+        return folders
 
     def resolve(self, parts: list[str]) -> Path | None:
         found = {f for folder in self.candidates(parts) if (f := _module_file(folder, parts))}

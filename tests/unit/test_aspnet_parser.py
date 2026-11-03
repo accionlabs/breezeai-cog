@@ -5,6 +5,8 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
 from jsonschema import Draft202012Validator
 
 from breezeai_cog.core import registry
@@ -610,3 +612,19 @@ def test_wiring_only_route_config_keeps_aspnet_label(tmp_path) -> None:
     assert rec.framework == "aspnet"
     assert [s.endpoint for s in rec.statements if s.semanticType == "route"] == [
         "/{controller}/{action}/{id}"]
+
+
+@pytest.mark.parametrize(("declared", "dto"), [
+    # async and HTTP-result wrappers are removed; the payload stays as declared
+    ("Task<ActionResult<List<OrderDto>>>", "List<OrderDto>"),
+    ("Task(Of ActionResult(Of OrderDto))", "OrderDto"),  # VB
+    ("Ok<OrderDto>", "OrderDto"),
+    ("Task<IEnumerable<OrderDto>>", "IEnumerable<OrderDto>"),
+    ("OrderDto[]", "OrderDto[]"), ("OrderDto?", "OrderDto?"),
+    ("Dictionary<string, int>", "Dictionary<string, int>"),
+    ("void", None), ("Task", None), ("IActionResult", None), ("Task<IActionResult>", None),
+    ("HttpResponseMessage", None),
+])
+def test_response_dto_is_the_declared_payload_type(declared: str, dto: str | None) -> None:
+    from breezeai_cog.parsers.dotnet_common import response_dto
+    assert response_dto(declared) == dto

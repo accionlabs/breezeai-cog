@@ -300,3 +300,16 @@ def test_lazy_mount_guards_reach_the_loaded_routes(analyze_files) -> None:
     )
     [r] = _eps(st, "src/app/admin/admin.routes.ts")
     assert (r.handler, r.guards) == ("ReportsComponent", ["authGuard"])
+
+
+def test_route_records_are_their_route_objects(analyze_files) -> None:
+    # nodeType is the tree-sitter type of the route object, not "synthetic": the node exists
+    st = _routes(
+        analyze_files,
+        "export const routes: Routes = [\n  { path: 'users', component: UserListComponent },\n"
+        "  { path: 'admin', loadChildren: () => import('./admin').then(m => m.AdminModule) },\n"
+        "  { path: 'old', redirectTo: 'users' },\n];\n",
+    )
+    got = {(s.routeKind, s.nodeType) for s in st
+           if s.semanticType == "route" and s.path == "src/app/app.routes.ts"}
+    assert got == {("page", "object"), ("mount", "object"), ("navigation", "object")}
