@@ -316,6 +316,40 @@ def test_entity_framework_verbs_are_dotnet_gated() -> None:
         ("db_method_call", "ToListAsync", "entity_framework")
 
 
+def test_receiver_hints_name_only_products_of_the_file_language() -> None:
+    from breezeai_cog.parsers.detection.db_queries import match_db
+    # A repository / entity manager / session is data access in any language, but TypeORM and
+    # SQLAlchemy exist only in Node and Python: elsewhere the hint is the generic `orm`.
+    assert match_db("orderRepository.findById", "findById", "java") == "orm"
+    assert match_db("entityManager.persist", "persist", "java") == "orm"
+    assert match_db("session.save", "save", "java") == "orm"
+    assert match_db("repo.Save", "Save", "csharp") == "orm"
+    assert match_db("repository.create", "create", "python") == "orm"
+    # In their own language, and with no language, the product is kept.
+    assert match_db("orderRepository.findById", "findById", "typescript") == "typeorm"
+    assert match_db("db.session.query", "query", "python") == "sqlalchemy"
+    assert match_db("orderRepository.findById", "findById") == "typeorm"
+
+
+def test_distinctive_verbs_of_another_language_need_a_db_receiver() -> None:
+    from breezeai_cog.parsers.detection.db_queries import match_db
+    # Stream, collection and claims methods share names with Prisma / Sequelize verbs.
+    assert match_db("names.stream().filter(n).findFirst", "findFirst", "java") is None
+    assert match_db("nums.findAll", "findAll", "groovy") is None
+    assert match_db("Array.FindAll", "FindAll", "csharp") is None
+    assert match_db("identity.FindFirst", "FindFirst", "csharp") is None
+    # On a repository receiver it is still data access.
+    assert match_db("prisma.user.findFirst", "findFirst", "java") == "orm"
+    assert match_db("logRepository.findAll", "findAll", "java") == "orm"
+    assert match_db("repo.findAll", "findAll", "java") == "orm"
+    # In Node, and with no language, the verb alone still names the product.
+    assert match_db("User.findAll", "findAll", "javascript") == "sequelize"
+    assert match_db("db.user.findFirst", "findFirst", "typescript") == "prisma"
+    assert match_db("repo.findAll", "findAll") == "sequelize"
+    # Portable driver verbs are not gated.
+    assert match_db("collection.insertOne", "insertOne", "java") == "mongodb"
+
+
 def test_sync_linq_terminals_require_ef_source() -> None:
     # Sync LINQ terminals (ToList/FirstOrDefault/…) run over BOTH a DbSet (EF → SQL) and an
     # in-memory List/array/ZipArchive (LINQ-to-Objects → no DB). Tag EF only with a queryable

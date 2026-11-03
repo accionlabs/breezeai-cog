@@ -5,9 +5,10 @@ Returns an inferred ``dataAccessHint`` (the DB/ORM) for a normalized call, else
 distinctive method names map directly; ambiguous ORM verbs (``findOne``/``save``…)
 are refined by receiver hints.
 
-Mostly language-agnostic, with one language-aware gate: an optional ``language`` tag
-suppresses Entity-Framework verbs in known non-.NET files (see ``_DOTNET``) so that,
-e.g., ``.include()`` in TypeScript is not mislabeled as EF. High-collision generic
+An optional ``language`` tag keeps a product out of files where it cannot exist:
+Entity-Framework verbs only in .NET files (``.include()`` in TypeScript is not EF), and
+the Node and Python ORMs only in their own language (``_RECEIVER_HINTS``,
+``_PRODUCT_LANGUAGES``) — a Java repository call is ``orm``, not TypeORM. High-collision generic
 verbs (``find``/``create``/…) require a positive DB receiver rather than defaulting to
 ``orm`` — this is what keeps ``Array.find`` / ``dict.update`` / ``Cookies.remove`` out.
 
@@ -118,16 +119,53 @@ _ACTIVE_RECORD_METHODS = (
 )
 _RUBY_CONSTANT_RECEIVER = re.compile(r"[A-Z][A-Za-z0-9_]*(?:::[A-Z][A-Za-z0-9_]*)*")
 
-# Receiver substring -> hint (refines _GENERIC).
+# Language families, used to keep a product's name out of files where that product cannot
+# exist. Every gate fires only on a language we know: an unknown language (``None``) stays
+# permissive.
+#
+# Languages whose files may legitimately use Entity Framework verbs. EF method names
+# (``ToListAsync``/``Include``/…) collide with unrelated code in other stacks — most
+# painfully ``.include()``, which is TypeORM/array/RxJS in JS but EF in C#. When we KNOW
+# the file is a non-.NET language we treat the EF match as a collision and fall through.
+_DOTNET = frozenset({"csharp", "vb"})
+
+# Django and SQLAlchemy are Python-only; suppress Django-queryset verbs in known non-Python
+# files so that TypeScript ``response.objects.filter()`` is not mislabelled as Django.
+_PYTHON = frozenset({"python"})
+
+# TypeORM, Sequelize, Prisma and Mongoose are Node libraries.
+_JSTS = frozenset({"typescript", "javascript"})
+
+# Receiver substring -> (hint, languages the product ships for) — refines _GENERIC.
 # Needles checked via `needle in low` (full lowercased callee). Ambiguous short tokens
 # ("session", "objects") require a dot-anchored match so they don't fire on *containing*
 # identifiers like ``sessionFactory`` / ``productObjects``; others are distinctive enough
 # (``prisma``, ``sequelize``, ``mongoose``, ``repository``) that substring is fine.
-_RECEIVER_HINTS = (
-    ("prisma", "prisma"), ("sequelize", "sequelize"), ("mongoose", "mongodb"),
-    ("repository", "typeorm"), ("repo", "typeorm"), ("entitymanager", "typeorm"),
-    ("session", "sqlalchemy"), ("queryset", "django"), ("objects", "django"),
+#
+# The receiver shows data access, but ``…repository``, ``entityManager`` and ``session`` are
+# as idiomatic in Java, C# and Python as in Node, so it cannot name the product: a Java
+# ``orderRepository.findById`` is not TypeORM, a Hibernate ``session.save`` is not SQLAlchemy.
+# In a known language the product does not ship for, the hint is the generic ``orm``.
+_RECEIVER_HINTS: tuple[tuple[str, str, frozenset[str]], ...] = (
+    ("prisma", "prisma", _JSTS), ("sequelize", "sequelize", _JSTS),
+    ("mongoose", "mongodb", _JSTS),
+    ("repository", "typeorm", _JSTS), ("repo", "typeorm", _JSTS),
+    ("entitymanager", "typeorm", _JSTS),
+    ("session", "sqlalchemy", _PYTHON), ("queryset", "django", _PYTHON),
+    ("objects", "django", _PYTHON),
 )
+
+# Product -> the languages it ships for, for the products the DISTINCTIVE verb table names.
+# Those verbs are ordinary words elsewhere: ``findFirst`` is ``java.util.stream`` and a .NET
+# ``ClaimsPrincipal`` method, ``findAll`` a Groovy collection method, a Spring Data repository
+# method and ``Array.FindAll``. In another language the verb is not evidence of the product,
+# nor of data access, so the receiver has to show it (see ``match_db``). Products absent here
+# are portable: Mongo/Redis/DynamoDB/ES/Neo4j driver verbs appear across languages, and the EF
+# verbs have their own ``_DOTNET`` gate.
+_PRODUCT_LANGUAGES: dict[str, frozenset[str]] = {
+    "sequelize": _JSTS, "prisma": _JSTS, "typeorm": _JSTS,
+    "django": _PYTHON, "sqlalchemy": _PYTHON,
+}
 # Needles that must appear as a whole dot-segment (not as a prefix/suffix of a longer name).
 # e.g. "session" must match "db.session.query" but NOT "sessionFactory.create".
 _ANCHORED_HINTS: frozenset[str] = frozenset({"session", "objects"})
@@ -152,17 +190,6 @@ _DJANGO_VERBS = {"filter", "get", "all", "exclude", "annotate", "values"}
 # Neo4j runs Cypher via ``session.run(...)`` / ``tx.run(...)``. ``run`` is too generic to
 # list as a distinctive method, so require a driver/session/transaction-ish receiver.
 _NEO4J_RUN_RECEIVERS = ("session", "tx", "transaction", "driver", "neo4j")
-
-# Languages whose files may legitimately use Entity Framework verbs. EF method names
-# (``ToListAsync``/``Include``/…) collide with unrelated code in other stacks — most
-# painfully ``.include()``, which is TypeORM/array/RxJS in JS but EF in C#. When we KNOW
-# the file is a non-.NET language we treat the EF match as a collision and fall through;
-# an unknown language (``None``) stays permissive for backward compatibility.
-_DOTNET = frozenset({"csharp", "vb"})
-
-# Django is Python-only; suppress Django-queryset verbs in known non-Python files so that
-# TypeScript ``response.objects.filter()`` is not mislabelled as Django (mirrors the EF gate).
-_PYTHON = frozenset({"python"})
 
 # Generic verbs that collide heavily with ordinary (non-DB) code: ``find`` is
 # ``Array.prototype.find``, ``update`` is ``dict.update``/``Map.set``-adjacent, ``create``
@@ -315,13 +342,20 @@ def match_db(callee: str, method: str, language: str | None = None,
         return None
     m = method.lower()
     low = callee.lower()
-    if m in _PRISMA_VERBS and _is_prisma_chain(low):
+    if m in _PRISMA_VERBS and _is_prisma_chain(low) and (language is None or language in _JSTS):
         return "prisma"
+    # A distinctive verb whose product cannot exist in this language falls through to the
+    # receiver evidence below, as a high-collision verb: `logRepository.findAll()` is still data
+    # access (`orm`), while `names.stream().findFirst()` and `Array.FindAll(…)` drop out.
+    gated = False
     if m in _DISTINCTIVE:
         db = _DISTINCTIVE[m]
+        langs = _PRODUCT_LANGUAGES.get(db)
+        if langs is not None and language is not None and language not in langs:
+            gated = True
         # A receiverless distinctive verb is a local/helper call, not a database access.
         # This is defense-in-depth for callers that do not provide local_names.
-        if callee != method and not (
+        elif callee != method and not (
             db == "entity_framework" and language is not None and language not in _DOTNET
         ):
             return db
@@ -359,8 +393,8 @@ def match_db(callee: str, method: str, language: str | None = None,
     if receiver and (receiver in cache_receivers or receiver.endswith("redis")):
         if m in _CACHE_VERBS or m in ("delete", "remove"):
             return "redis"
-    if m in _GENERIC:
-        for needle, hint in _RECEIVER_HINTS:  # positive vendor hint wins
+    if m in _GENERIC or gated:
+        for needle, hint, langs in _RECEIVER_HINTS:  # positive vendor hint wins
             if needle not in low:
                 continue
             # Anchored needles must appear as a dot-segment, not embedded in a longer name
@@ -368,8 +402,9 @@ def match_db(callee: str, method: str, language: str | None = None,
             if needle in _ANCHORED_HINTS:
                 if not (f".{needle}." in low or low.startswith(f"{needle}.")):
                     continue
-            return hint
-        if m in _HIGH_COLLISION:
+            # The receiver shows data access; the product named must ship for this language.
+            return "orm" if language is not None and language not in langs else hint
+        if m in _HIGH_COLLISION or gated:
             # Non-DB receivers (canvas ctx, logger, cache, …) are never data access — bail
             # early before the suffix heuristic can misfire (e.g. ``ctx.save()``).
             if receiver and any(receiver.endswith(s) for s in _NON_DB_RECEIVERS):
