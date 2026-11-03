@@ -844,6 +844,43 @@ def test_tsql_go_separator_variants(separator: str) -> None:
     assert sorted(t["name"] for t in r["tables"]) == ["A", "B"]
 
 
+_T1 = "CREATE TABLE [dbo].[T1] ([Id] INT)\nGO\n"
+_V1 = "CREATE VIEW [dbo].[V1] AS SELECT [Id] FROM [dbo].[T1]\nGO\n"
+
+
+@pytest.mark.parametrize("eol", ["\n", "\r\n"], ids=["lf", "crlf"])
+def test_tsql_go_inside_a_block_comment_is_not_a_separator(eol: str) -> None:
+    # Splitting there left `end note */ CREATE VIEW …` as a batch and dropped the view.
+    text = (_T1 + "/* note\nGO\nend note */\n" + _V1).replace("\n", eol)
+    r = parse_ddl(text, "schema_mssql.sql")
+    assert [t["name"] for t in r["tables"]] == ["T1"]
+    assert [v["name"] for v in r["views"]] == ["V1"]
+
+
+def test_tsql_go_inside_a_string_keeps_the_procedure_body_whole() -> None:
+    body = "CREATE PROCEDURE [dbo].[P1] AS\nBEGIN\n  SELECT 'it''s the first line\nGO\nsecond line' AS x\nEND"
+    r = parse_ddl(_T1 + body + "\nGO\n" + _V1, "schema_mssql.sql")
+    assert [p["body"] for p in r["procedures"]] == [body]
+    assert [v["name"] for v in r["views"]] == ["V1"]
+
+
+def test_tsql_go_inside_a_string_keeps_the_view_definition_verbatim() -> None:
+    view = "CREATE VIEW [dbo].[V2] AS SELECT 'a\nGO\nb' AS x"
+    r = parse_ddl(_T1 + view + "\nGO\n", "schema_mssql.sql")
+    assert [v["definition"] for v in r["views"]] == [view]
+
+
+def test_tsql_apostrophe_in_a_line_comment_does_not_hide_the_next_go() -> None:
+    r = parse_ddl(_T1 + "-- don't split here\n" + _V1, "schema_mssql.sql")
+    assert [v["name"] for v in r["views"]] == ["V1"]
+
+
+def test_tsql_unclosed_quote_still_splits_on_every_go() -> None:
+    # A malformed batch must not swallow the rest of the file: the stray quote masks nothing.
+    r = parse_ddl(_T1 + "SELECT 'oops\nGO\n" + _V1, "schema_mssql.sql")
+    assert [v["name"] for v in r["views"]] == ["V1"]
+
+
 @pytest.mark.parametrize(
     "text, filename, expected",
     [

@@ -684,12 +684,75 @@ def _split_tsql_semicolons(sql: str) -> list[str]:
     return stmts
 
 
+def _tsql_quoted_spans(text: str) -> list[tuple[int, int]]:
+    """The ``(start, end)`` spans of every closed block comment (nested, as T-SQL allows),
+    ``'..'`` string, ``[..]`` identifier and ``".."`` identifier, in order. A ``GO`` line
+    inside one is text, not a batch separator — SSMS and sqlcmd do not split there either.
+    An opener left unclosed at end of file masks nothing: a malformed script still splits
+    on every ``GO`` line rather than swallowing the rest of the file into one batch."""
+    spans: list[tuple[int, int]] = []
+    i, n = 0, len(text)
+    closers = {"'": "'", "[": "]", '"': '"'}
+    while i < n:
+        ch = text[i]
+        if text.startswith("--", i):  # a line comment ends before any GO line
+            nl = text.find("\n", i)
+            i = n if nl < 0 else nl + 1
+        elif text.startswith("/*", i):
+            depth, j = 1, i + 2
+            for m in _BLOCK_COMMENT_TOKEN.finditer(text, j):
+                depth += 1 if m.group() == "/*" else -1
+                if depth == 0:
+                    j = m.end()
+                    break
+            if depth:
+                i += 2
+            else:
+                spans.append((i, j))
+                i = j
+        elif ch in closers:
+            close, j = closers[ch], i + 1
+            while True:
+                j = text.find(close, j)
+                if j < 0 or not text.startswith(close * 2, j):
+                    break
+                j += 2  # doubled closer is an escape ('' ]] "")
+            if j < 0:
+                i += 1
+            else:
+                spans.append((i, j + 1))
+                i = j + 1
+        else:
+            i += 1
+    return spans
+
+
+_BLOCK_COMMENT_TOKEN = re.compile(r"/\*|\*/")
+
+
+def _split_tsql_batches(text: str) -> list[str]:
+    """Split a T-SQL script on its ``GO`` lines, skipping any inside a comment, string or
+    bracketed identifier (see :func:`_tsql_quoted_spans`)."""
+    spans = _tsql_quoted_spans(text)
+    batches: list[str] = []
+    start = k = 0
+    for m in _TSQL_GO.finditer(text):
+        while k < len(spans) and spans[k][1] <= m.start():
+            k += 1
+        if k < len(spans) and spans[k][0] < m.start():
+            continue
+        batches.append(text[start : m.start()])
+        start = m.end()
+    batches.append(text[start:])
+    return batches
+
+
 def _split_tsql_statements(text: str) -> list[str]:
     """T-SQL statement splitter: split into ``GO`` batches; a program batch (PROCEDURE/
     FUNCTION/TRIGGER) is kept WHOLE (its body has inner ``;`` we must not cut on), every other
     batch is split on top-level ``;``. This keeps stored-program bodies intact."""
     out: list[str] = []
-    for batch in _TSQL_GO.split(text):
+    for batch in _split_tsql_batches(text):
         b = batch.strip()
         if not b:
             continue
