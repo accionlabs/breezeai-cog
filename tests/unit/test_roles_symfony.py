@@ -20,6 +20,14 @@ def test_method_attribute_is_binding(analyze_files) -> None:
     assert (r.handler, r.handlerLine, r.handlerPath) == ("list", 6, None)
 
 
+def test_uppercase_test_directory_is_not_a_route_source(analyze_files) -> None:
+    assert _eps(analyze_files, {
+        "Tests/Controller/BlogTest.php": ATTR + (
+            "class BlogTest\n{\n    #[Route('/blog')]\n    public function list() {}\n}\n"
+        )
+    }) == []
+
+
 def test_class_attribute_is_wiring_and_invokable_binds(analyze_files) -> None:
     eps = _eps(analyze_files, {
         "src/Controller/Admin.php": ATTR + "#[Route('/admin', name: 'admin_')]\nclass Admin\n{\n"

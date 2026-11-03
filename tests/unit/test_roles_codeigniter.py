@@ -26,6 +26,15 @@ def test_verb_call_is_binding(analyze_files) -> None:
     assert (r.handler, r.handlerPath, r.handlerLine) == ("show", "app/Controllers/Users.php", 6)
 
 
+def test_documentation_routes_are_not_live_entry_points(analyze_files) -> None:
+    statements = analyze_files({
+        "user_guide_src/Controllers/Example.php": HEAD + "$routes->get('users', 'Users::show');\n",
+    })
+    assert not any(
+        statement.semanticType == "route" for statement in statements
+    )
+
+
 def test_add_and_any_are_any(analyze_files) -> None:
     eps = _eps(analyze_files, "$routes->add('a', 'A::a');\n$routes->any('b', 'B::b');\n")
     assert sorted((r.method, r.endpoint) for r in eps) == [("ANY", "/a"), ("ANY", "/b")]

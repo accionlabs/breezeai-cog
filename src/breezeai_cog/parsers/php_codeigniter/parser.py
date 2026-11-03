@@ -345,6 +345,8 @@ class CodeIgniterParser(PhpParser):
     frameworks = ["codeigniter"]
 
     def claims(self, path: str, source: bytes) -> bool:
+        if b"namespace illuminate\\" in source.lower():
+            return False
         if _CODEIGNITER_DECLARATION.search(source):
             return True
         # A filename is not framework evidence.  Route configuration without an
@@ -356,6 +358,7 @@ class CodeIgniterParser(PhpParser):
         record = self.extract(root, ctx)
         record.framework = "codeigniter"
         if ctx.capture_statements and not self.is_fixture_file(ctx.path):
-            detect_codeigniter_routes(root, ctx.source, ctx.path, record)
+            if not _CODEIGNITER_DOC.search(ctx.path.replace("\\", "/").encode()):
+                detect_codeigniter_routes(root, ctx.source, ctx.path, record)
             _detect_codeigniter_events(root, ctx.source, ctx.path, record)
         return record
