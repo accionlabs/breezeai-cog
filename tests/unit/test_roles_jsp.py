@@ -77,3 +77,19 @@ def test_fixture_page_is_none(analyze_files) -> None:
     st = analyze_files({**WEB_XML, f"{WEB}/fixtures/demo.jsp": '<a href="x.jsp">x</a>'},
                        templates=True)
     assert _eps(st) == [] and not any(s.routeKind == "navigation" for s in st)
+
+
+def test_conventional_web_root_without_web_inf(analyze_files) -> None:
+    # Servlet 3+ needs no web.xml, so these web roots have no WEB-INF folder.
+    st = analyze_files({
+        "nb/nbproject/project.xml": "<project/>",
+        "nb/web/index.jsp": "<h1>NetBeans</h1>",
+        "mvn/src/main/webapp/shop/list.jsp": "<h1>Maven</h1>",
+        "ecl/WebContent/a.jsp": "<h1>Eclipse</h1>",
+        "other/web/page.jsp": "<h1>a web/ folder of no project</h1>",
+    }, templates=True)
+    assert sorted((r.path, r.endpoint) for r in _eps(st)) == [
+        ("ecl/WebContent/a.jsp", "/a.jsp"),
+        ("mvn/src/main/webapp/shop/list.jsp", "/shop/list.jsp"),
+        ("nb/web/index.jsp", "/index.jsp"),
+    ]

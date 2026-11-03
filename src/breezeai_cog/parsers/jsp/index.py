@@ -27,8 +27,8 @@ from pathlib import Path
 
 from ...utils import repo_relative
 from ..java_struts2.common import (
-    EXTENSION_KEY, PROPERTIES_LEVEL, STRUTS_ROOT, WEB_XML_LEVEL, XML_LEVEL, Layered,
-    read_properties, suffix_of, web_xml_constants, xml_constants,
+    EXTENSION_KEY, PROPERTIES_LEVEL, STRUTS_ROOT, WEB_XML_LEVEL, XML_LEVEL, Layered, bare_of,
+    namespace_key, read_properties, suffix_of, web_xml_constants, xml_constants,
 )
 from ..java_struts2.facts import module_key
 from ..java_struts2.views import VIEW_TYPES, result_target, web_root
@@ -74,6 +74,12 @@ class JspIndex:
     struts_suffixes: dict[str, str | None] = field(default_factory=dict)
     #: View file → namespaces of the actions rendering it; None when they disagree.
     struts_views: dict[str, tuple[str, ...] | None] = field(default_factory=dict)
+    #: Module → the actions its ``struts.xml`` files declare, ``(namespace_key, name or
+    #: wildcard pattern)``, so a link written without an extension is resolved only when it
+    #: names one of them.
+    struts_actions: dict[str, tuple[tuple[str, str], ...]] = field(default_factory=dict)
+    #: Module → whether its actions also answer without an extension (Struts' default).
+    struts_bare: dict[str, bool] = field(default_factory=dict)
 
     def java_file(self, fqcn: str) -> str | None:
         """The in-repo source of ``com.acme.Foo`` (or of ``com.acme.Outer.Inner``'s outer
@@ -117,7 +123,8 @@ def build_jsp_index(repo_root: Path) -> JspIndex:
             elif name.lower().endswith(".xml"):
                 struts.read(here / name)
     return JspIndex(webapps, {k: tuple(v) for k, v in java.items()}, tlds,
-                    struts.suffixes(), struts.views())
+                    struts.suffixes(), struts.views(), struts.actions_by_module(),
+                    struts.bare())
 
 
 #: The largest XML file read as a possible Struts2 configuration.
@@ -130,6 +137,7 @@ class _Struts:
     def __init__(self, repo_root: Path) -> None:
         self.repo_root = repo_root
         self.constants = Layered()  # struts.action.extension per module, Struts' precedence
+        self.actions: dict[str, set[tuple[str, str]]] = {}
         self.namespaces: dict[str, set[str] | None] = {}
 
     def read(self, path: Path) -> None:
@@ -154,6 +162,10 @@ class _Struts:
         web = web_root(self.repo_root, "" if rel_dir == "." else rel_dir)
         for package in _children(doc, "package"):
             ns = package.get("namespace") or ""
+            if "${" not in ns:
+                self.actions.setdefault(module, set()).update(
+                    (namespace_key(ns), a.get("name") or "") for a in _children(package, "action")
+                    if a.get("name") and "{" not in (a.get("name") or ""))
             if "tiles" in (package.get("extends") or "") or "${" in ns:
                 continue
             for holder in [*_children(package, "action"), *_children(package, "global-results")]:
@@ -185,6 +197,13 @@ class _Struts:
 
     def suffixes(self) -> dict[str, str | None]:
         return {module: suffix_of(found) for module, found in self.constants.resolve().items()}
+
+    def bare(self) -> dict[str, bool]:
+        resolved = self.constants.resolve()
+        return {module: bare_of(resolved.get(module, {})) for module in self.actions}
+
+    def actions_by_module(self) -> dict[str, tuple[tuple[str, str], ...]]:
+        return {module: tuple(sorted(found)) for module, found in self.actions.items()}
 
     def views(self) -> dict[str, tuple[str, ...] | None]:
         return {k: (tuple(sorted(v)) if v is not None else None)

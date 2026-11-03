@@ -65,14 +65,14 @@ from ..emits import Emit
 from ..treesitter import node_text
 from .common import (
     DEFAULT_LOCATORS, DEFAULT_SUFFIX, FRAMEWORK, LOCATORS_KEY, MAP_ALL_KEY, MAPPER_KEY,
-    RESULT_PATH_KEY, SUFFIX_KEY, action_endpoint, convention_name, convention_namespace,
-    suffix_of,
+    RESULT_PATH_KEY, SUFFIX_KEY, ActionTable, action_endpoint, bare_of, convention_name,
+    convention_namespace, namespace_key, suffix_of,
 )
 from .facts import (
     CONVENTION, PACKAGE_NAMESPACES, SETTINGS, annotation_name, annotation_values,
     module_settings, namespaces_of, string_value,
 )
-from .views import CONVENTION_RESULT_PATH, VIEW_EXTENSIONS, result_target, web_root
+from .views import CONVENTION_RESULT_PATH, VIEW_EXTENSIONS, VIEW_TYPES, result_target, web_root
 
 #: The Convention annotations' package (Struts 2.1 onwards, unchanged in 7.x).
 _ANNOTATIONS = b"org.apache.struts2.convention.annotation"
@@ -115,6 +115,7 @@ class _Rules:
     def __init__(self, settings: dict[str, str | None],
                  packages: dict[str, tuple[str, ...] | None], package: str) -> None:
         self.suffix = suffix_of(settings)  # None: the module's sources disagree
+        self.bare = bare_of(settings)  # actions also answer without the extension
         locators = settings.get(LOCATORS_KEY)
         self.locators = (tuple(x.strip() for x in locators.split(",") if x.strip())
                          if locators else DEFAULT_LOCATORS)
@@ -211,7 +212,32 @@ def _class_routes(cls: Node, source: bytes, rules: _Rules,
     if out:  # class-level results serve every action of the class
         for result in class_results:
             out.extend(_result_emits(result, source, namespaces, rules, None))
+    if rules.bare:
+        _bare_redirects(out, rules)
     return out
+
+
+def _bare_redirects(emits: list[Emit], rules: _Rules) -> None:
+    """A redirect written without an extension (``location = "list"``) that names one of the
+    class's own actions leads to that action's address (``/list.action``)."""
+    suffix = rules.suffix or ""
+    declared = []
+    for emit in emits:
+        endpoint = emit.fields.get("endpoint")
+        if emit.fields.get("routeKind") == "route" and isinstance(endpoint, str):
+            base = endpoint[: -len(suffix)] if suffix and endpoint.endswith(suffix) else endpoint
+            namespace, name = posixpath.split(base)
+            declared.append((namespace_key(namespace), name))
+    table = ActionTable(declared)
+    for emit in emits:
+        endpoint = emit.fields.get("endpoint")
+        if emit.fields.get("routeKind") != "navigation" or not isinstance(endpoint, str):
+            continue
+        namespace, name = posixpath.split(endpoint)
+        if name and "." not in name:
+            serving = table.serving(namespace, name)
+            if serving is not None:
+                emit.fields["endpoint"] = action_endpoint(serving, name, rules.suffix)
 
 
 def _action_emits(ann: Node, source: bytes, namespaces: tuple[str | None, ...], rules: _Rules,
@@ -246,7 +272,9 @@ def _result_emits(result: Node, source: bytes, namespaces: tuple[str | None, ...
     location = attr("location") or attr("value")
     targets = []
     for ns in namespaces:
-        base = rules.result_base(ns) if kind != "redirectAction" and kind != "chain" else ns
+        # Only a view lives under the Convention result folder; a redirect or an action is
+        # reached from the action's own URL, so it resolves against the namespace.
+        base = rules.result_base(ns) if kind in VIEW_TYPES else ns
         target = result_target(kind, location, base, None, rules.suffix, rules.repo_root,
                                rules.web)
         if target is not None and target.endpoint is not None:

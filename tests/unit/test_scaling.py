@@ -204,6 +204,7 @@ def _jsp(n: int) -> str:
         f"<% for (int i = 0; i < {i}; i++) {{ %><li><%= f{i}(i) %> ${{x{i}.a}}</li><% }} %>\n"
         f"<!-- note {i} -->\n"
         f'<a href="x{i}.action">l</a><s:form action="a{i}"/><c:url value="/p{i}.jsp"/>\n'
+        f'<a href="<s:url action="n{i}"/>">n</a><a href="bare{i}">b</a>\n'
         for i in range(n)
     )
     return (f'<%@ taglib prefix="c" uri="jakarta.tags.core" %>\n'

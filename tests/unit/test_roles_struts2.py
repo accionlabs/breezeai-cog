@@ -336,6 +336,21 @@ public class ReportAction {
     assert [s.startLine for s in st if s.routeKind == "navigation"] == [5, 6, 3]
 
 
+def test_relative_redirect_result_resolves_against_the_namespace(analyze_files) -> None:
+    # Regression: a redirect is reached from the action's URL, never the Convention view folder.
+    src = """package com.shop.actions.admin;
+import org.apache.struts2.convention.annotation.*;
+public class PersonAction {
+    @Action(value = "delete", results = {@Result(name = "success", location = "list", type = "redirect"),
+        @Result(name = "input", location = "form.jsp")})
+    public String execute() { return "success"; }
+}
+"""
+    st = analyze_files({f"{JAVA}/com/shop/actions/admin/PersonAction.java": src})
+    assert _navs(st) == [("success", "/admin/list", "struts2"),
+                         ("input", "/WEB-INF/content/admin/form.jsp", "struts2")]
+
+
 def test_convention_implicit_results(analyze_files) -> None:
     st = analyze_files({
         **POM,
@@ -546,3 +561,75 @@ def test_class_in_two_source_roots_is_not_located(analyze_files) -> None:
     [r] = _eps(st)
     assert (r.handler, r.handlerPath, r.handlerLine) == (
         "com.shop.web.LoginAction.execute", None, None)
+
+
+# ── Extension-less addresses (Struts' default `action,,`), default-namespace fallback ─────
+
+_BARE = {
+    f"{RES}/struts.xml": _xml(
+        '<package name="p"><action name="bookList" class="x.Books" method="list">'
+        "<result>/bookList.jsp</result></action>\n"
+        '<action name="saveBook" class="x.Books" method="save">'
+        '<result type="redirect">bookList</result></action>\n'
+        '<action name="*Book" class="x.Books" method="{1}"/></package>\n'),
+    f"{WEB}/WEB-INF/web.xml": "<web-app/>",
+    f"{WEB}/bookList.jsp": ('<form action="saveBook" method="post"></form>'
+                            '<a href="bookList">list</a><a href="editBook?id=${b.id}">edit</a>'
+                            '<a href="unknownThing">x</a><a href="css/site">y</a>'),
+}
+
+
+def test_extension_less_links_and_redirects_name_known_actions(analyze_files) -> None:
+    st = analyze_files(_BARE, templates=True)
+    assert _navs(st, f"{WEB}/bookList.jsp") == [
+        ("form", "/saveBook.action", "jsp"),
+        ("a", "/bookList.action", "jsp"),
+        ("a", "/editBook.action", "jsp"),  # served by the `*Book` wildcard action
+    ]  # `unknownThing` and `css/site` name no action: no link
+    redirect = [e for n, e, _ in _navs(st, f"{RES}/struts.xml") if n == "success" and "book" in e.lower()]
+    assert "/bookList.action" in redirect  # `<result type="redirect">bookList` pairs now
+
+
+def test_extension_less_links_need_an_extension_list_allowing_it(analyze_files) -> None:
+    files = dict(_BARE)
+    files[f"{RES}/struts.xml"] = files[f"{RES}/struts.xml"].replace(
+        "<struts>\n", '<struts>\n<constant name="struts.action.extension" value="do"/>\n')
+    assert _navs(analyze_files(files, templates=True), f"{WEB}/bookList.jsp") == []
+
+
+def test_default_namespace_answers_any_namespace(analyze_files) -> None:
+    st = analyze_files({
+        f"{RES}/struts.xml": _xml(
+            '<package name="a"><action name="listrequest"/></package>\n'
+            '<package name="b" namespace="/admin"><action name="users"/>'
+            "<action name=\"listrequest\"/></package>\n"
+            '<package name="c" namespace="/x"><action name="home">'
+            "<result>/WEB-INF/home.jsp</result></action></package>\n"),
+        f"{WEB}/WEB-INF/home.jsp": (
+            '<%@ taglib prefix="s" uri="/struts-tags" %>'
+            '<s:url action="listrequest" namespace="/datatables"/>'  # no such namespace: default
+            '<s:url action="listrequest" namespace="/admin"/>'       # declared there: kept
+            '<s:url action="users" namespace="/nowhere"/>'),         # not in default: as written
+    }, templates=True)
+    assert [e for n, e, _ in _navs(st, f"{WEB}/WEB-INF/home.jsp")] == [
+        "/listrequest.action", "/admin/listrequest.action", "/nowhere/users.action"]
+
+
+# ── URL tags inside an attribute ──────────────────────────────────────────────────────────
+
+def test_url_tag_inside_an_attribute_is_navigation(analyze_files) -> None:
+    st = analyze_files({
+        f"{RES}/struts.xml": _xml('<package name="p" namespace="/p"><action name="home">'
+                                  "<result>/WEB-INF/home.jsp</result></action></package>\n"),
+        f"{WEB}/WEB-INF/home.jsp": (
+            '<%@ taglib prefix="s" uri="/struts-tags" %>\n'
+            '<%@ taglib prefix="c" uri="jakarta.tags.core" %>\n'
+            '<a href="<s:url action="list"/>">list</a>\n'
+            "<a href='<c:url value=\"/help.jsp\"/>'>help</a>\n"
+            '<s:url action="edit" var="u"/>\n'           # a real element: recorded once
+            '<a href="<x:url action="nope"/>">x</a>\n'),  # unbound prefix: nothing
+    }, templates=True)
+    got = [(n, e, s.startLine) for s in st if s.routeKind == "navigation"
+           and s.path == f"{WEB}/WEB-INF/home.jsp" for n, e in [(s.name, s.endpoint)]]
+    assert sorted(got) == [("c:url", "/help.jsp", 4), ("s:url", "/p/edit.action", 5),
+                           ("s:url", "/p/list.action", 3)]

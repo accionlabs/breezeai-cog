@@ -20,6 +20,8 @@ from __future__ import annotations
 
 import re
 import xml.etree.ElementTree as ET
+from collections.abc import Iterable
+from functools import lru_cache
 from pathlib import Path
 
 FRAMEWORK = "struts2"
@@ -129,6 +131,71 @@ def suffix_of(settings: dict[str, str | None]) -> str | None:
         return extension(None)
     value = settings[EXTENSION_KEY]
     return None if value is None else extension(value)
+
+
+def bare_of(settings: dict[str, str | None]) -> bool:
+    """Whether a module's actions also answer without an extension (``/login`` as well as
+    ``/login.action``): Struts' default ``action,,`` allows it, and so does any configured value
+    with an empty entry. A value its sources disagree on allows nothing for certain."""
+    if EXTENSION_KEY not in settings:
+        return True
+    value = settings[EXTENSION_KEY]
+    return value is not None and "${" not in value and any(
+        not part.strip() for part in value.split(","))
+
+
+def namespace_key(namespace: str) -> str:
+    """One spelling per namespace: ``""`` for the default and root ones, else ``/a/b``."""
+    stripped = namespace.strip("/")
+    return "/" + stripped if stripped else ""
+
+
+def name_matches(pattern: str, name: str) -> bool:
+    """Whether action ``name`` is served by the action declared as ``pattern``: a literal name,
+    or a wildcard (``*`` any characters but ``/``, ``**`` any characters)."""
+    if "*" not in pattern:
+        return pattern == name
+    return _wildcard(pattern).fullmatch(name) is not None
+
+
+@lru_cache(maxsize=4096)
+def _wildcard(pattern: str) -> re.Pattern[str]:
+    return re.compile("".join(".*" if part == "**" else "[^/]*" if part == "*" else re.escape(part)
+                              for part in re.split(r"(\*\*|\*)", pattern)))
+
+
+class ActionTable:
+    """A module's declared actions, ``(namespace_key, name or wildcard pattern)``, as a
+    name → namespaces table plus the few wildcard patterns. Build it once per file; a lookup
+    then costs one dict access plus the wildcards, never a scan of every declared action."""
+
+    def __init__(self, actions: Iterable[tuple[str, str]]) -> None:
+        literal: dict[str, set[str]] = {}
+        wildcards: list[tuple[str, str]] = []
+        for ns, pattern in actions:
+            if "*" in pattern:
+                wildcards.append((ns, pattern))
+            else:
+                literal.setdefault(pattern, set()).add(ns)
+        self._literal = literal
+        self._wildcards = wildcards
+
+    def __bool__(self) -> bool:
+        return bool(self._literal or self._wildcards)
+
+    def serving(self, namespace: str | None, name: str) -> str | None:
+        """The namespace that serves action ``name`` requested in ``namespace``: the namespace
+        itself when it declares it, else the default namespace (which answers any namespace).
+        With ``namespace`` unknown (None), only an action the default namespace alone declares
+        is certain."""
+        found = set(self._literal.get(name, ()))
+        found.update(ns for ns, pattern in self._wildcards if name_matches(pattern, name))
+        if namespace is not None:
+            key = namespace_key(namespace)
+            if key in found:
+                return key
+            return "" if "" in found else None
+        return "" if found == {""} else None
 
 
 def extension(value: str | None) -> str | None:

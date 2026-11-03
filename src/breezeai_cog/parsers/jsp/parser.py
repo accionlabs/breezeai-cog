@@ -30,11 +30,18 @@ fixture) is recorded on the element that leads elsewhere:
   ``<s:a action>``, ``<s:submit action>``, ``<s:action name>`` — ``framework: struts2``,
   ``endpoint`` = the action's address. The namespace is the tag's ``namespace``, else the one
   namespace whose actions render this page (``struts.xml`` results; a Convention view under
-  ``WEB-INF/content/<namespace>/``); the extension is the configured one. A DMI suffix
-  (``save!input``) is dropped: the address is the action's.
+  ``WEB-INF/content/<namespace>/``); the extension is the configured one. A namespace that does
+  not declare the action falls back to the default namespace, which answers any namespace, and
+  an action only the default namespace declares needs no page namespace. A DMI suffix
+  (``save!input``) is dropped: the address is the action's. A URL tag written inside another
+  tag's attribute (``<a href="<s:url action='list'/>">``, which the html grammar cannot see) is
+  found by a scan of the markup, for bound Struts / JSTL prefixes only.
 * links: ``<a href>``, ``<form action>``, ``<jsp:forward page>``, JSTL ``<c:url value>`` /
   ``<c:redirect url>``, ``<s:url value>`` / ``<s:a href>`` — ``framework: jsp`` — when the target
-  is an action (its extension, ``.action`` or ``.do``) or a page (``.jsp`` / ``.jspx``). A
+  is an action (its extension, ``.action`` or ``.do``) or a page (``.jsp`` / ``.jspx``) — or,
+  written without an extension (``href="bookList"``), when it names an action the module's
+  ``struts.xml`` declares and its extension list allows a bare address (Struts' default
+  ``action,,``): that action's address, so no address is guessed. A
   leading ``${pageContext.request.contextPath}`` / ``<%= request.getContextPath() %>`` is the
   application's own root and is dropped. A relative target resolves against the page's own URL
   for a page served directly; a page under ``WEB-INF`` is reached at the URL of the action that
@@ -47,7 +54,9 @@ prefixed tag still keeps its plain ``element`` record.
 
 ``language`` is ``jsp``; ``uiRole`` is ``component`` for a tag file and ``template`` otherwise.
 A page served directly is an **entry point** (contract: a page reached by URL): a ``.jsp`` /
-``.jspx`` inside a web application (the directory holding ``WEB-INF``) and outside ``WEB-INF``
+``.jspx`` inside a web application (the directory holding ``WEB-INF``, or with no ``WEB-INF`` a
+conventional web folder: ``src/main/webapp``, ``WebContent``, ``WebRoot``, a NetBeans ``web/``)
+and outside ``WEB-INF``
 gets one ``route`` record, ``GET``, ``routeKind: page``, ``endpoint`` = its URL from the web
 root (``/shop/index.jsp``), ``handler`` = the page itself (its file name, ``handlerLine`` 1).
 A page under ``WEB-INF`` has no URL (an action or servlet renders it), a fragment (``.jspf``) and
@@ -60,7 +69,7 @@ from __future__ import annotations
 import posixpath
 import re
 from pathlib import Path
-from typing import Sequence
+from typing import Any, Sequence
 
 from tree_sitter import Node
 
@@ -74,7 +83,7 @@ from ..java.functions import build_method
 from ..java.mappings import COMMENT_TYPES, CONTROL_FLOW
 from ..java.statements import extract_statements
 from ..java_web_guards import servlet_match
-from ..java_struts2.common import action_endpoint, extension
+from ..java_struts2.common import ActionTable, action_endpoint, extension
 from ..java_struts2.facts import module_key
 from ..treesitter import node_text, parse_source
 from .index import JspIndex, PropertyGroup, WebApp, build_jsp_index
@@ -119,6 +128,9 @@ _STRUTS_LINKS = {"url": "value", "a": "href"}
 _CONTEXT_PATH = re.compile(
     r"^(?:\$\{\s*pageContext\.request\.contextPath\s*\}|<%=\s*request\.getContextPath\(\)\s*%>)")
 _DYNAMIC = ("${", "#{", "%{", "<%")
+#: A URL tag written anywhere, an attribute value included: ``<s:url action="x"/>``.
+_URL_TAG = re.compile(rb"<([\w.-]+):(url|a)\b((?:[^<>\"']|\"[^\"]*\"|'[^']*')*)/?>")
+_TAG_ATTR = re.compile(r"""([\w:.-]+)\s*=\s*(?:"([^"]*)"|'([^']*)')""")
 _ACTION_SUFFIXES = (".action", ".do")
 _PAGE_SUFFIXES = (".jsp", ".jspx")
 
@@ -162,6 +174,9 @@ class JspParser(BaseParser):
         page.navigation = not self.is_fixture_file(path)
         page.read_markup(root, src, statements if ctx.capture_statements else None, fid,
                          seen_ids, ctx.statement_text_limit)
+        if ctx.capture_statements and page.navigation:
+            page.read_nested_urls(markup, src, statements, lines, fid, seen_ids,
+                                  ctx.statement_text_limit)
 
         functions: list[Function] = []
         classes: list[Class] = []
@@ -292,6 +307,8 @@ class _Page:
         self.jstl_core: set[str] = set()  # prefixes bound to JSTL core
         self.struts_tags: set[str] = set()  # prefixes bound to the Struts2 tags
         self.navigation = True  # record navigation (not in a fixture)
+        self.element_starts: set[int] = set()  # elements the markup walk has seen
+        self._actions: ActionTable | None = None  # the module's Struts actions, on first use
 
     # ── references ──────────────────────────────────────────────────────────────────────
 
@@ -458,6 +475,7 @@ class _Page:
                               if c.type in ("start_tag", "self_closing_tag")), None)
                 tag = _tag_name(start, src) if start is not None else None
                 if start is not None and tag:
+                    self.element_starts.add(node.start_byte)
                     attrs = _attrs(start, src)
                     if ":" in tag:
                         self._action(tag, attrs)
@@ -475,6 +493,29 @@ class _Page:
                 out.append(_node_statement(node, src, self.path, fid, seen_ids, limit,
                                            semanticType="comment"))
             stack.extend(reversed(node.named_children))
+
+    def read_nested_urls(self, markup: bytes, src: bytes, out: list[Statement], lines: Lines,
+                         fid: str, seen_ids: set[str], limit: int) -> None:
+        """URL tags the markup walk cannot see because they sit inside another tag's attribute
+        (``<a href="<s:url action='list'/>">``, the usual Struts idiom): a navigation record for
+        each one whose target resolves. Only tags of a bound Struts or JSTL prefix count."""
+        if not self.struts_tags and not self.jstl_core:
+            return
+        for m in _URL_TAG.finditer(markup):
+            if m.start() in self.element_starts:
+                continue  # an element the walk already recorded
+            prefix = m.group(1).decode("utf-8", "replace")
+            if prefix not in self.struts_tags and prefix not in self.jstl_core:
+                continue
+            tag = f"{prefix}:{m.group(2).decode()}"
+            attrs = {a.group(1): a.group(2) if a.group(2) is not None else a.group(3)
+                     for a in _TAG_ATTR.finditer(m.group(3).decode("utf-8", "replace"))}
+            nav = self._navigation(tag, attrs)
+            if nav is None or nav[1] is None:
+                continue
+            out.append(_statement(src, lines, m.start(), m.end(), self.path, fid, seen_ids, limit,
+                                  nodeType="element", name=tag, semanticType="route",
+                                  routeKind="navigation", framework=nav[0], endpoint=nav[1]))
 
     def _navigation(self, tag: str, attrs: dict[str, str]) -> tuple[str, str | None] | None:
         """``(framework, endpoint)`` when the element leads to an action or a page."""
@@ -521,7 +562,40 @@ class _Page:
         if namespace is None:
             found = self._page_namespaces()
             namespace = found[0] if found is not None and len(found) == 1 else None
+        actions = self._struts_actions()
+        if actions:
+            # The namespace that really serves it: the default namespace answers any
+            # namespace, and an action only the default namespace declares needs no page one.
+            serving = actions.serving(namespace, action)
+            if serving is not None:
+                namespace = serving
         return action_endpoint(namespace, action, suffix)
+
+    def _module_value(self, values: dict[str, Any]) -> Any:
+        """This page's module entry of a per-module index map (else the repo-level one)."""
+        for module in (module_key(self.path), ""):
+            if module in values:
+                return values[module]
+        return None
+
+    def _struts_actions(self) -> ActionTable:
+        """This page's module's actions, built once per page."""
+        if self._actions is None:
+            found = self._module_value(self.index.struts_actions) if self.index else None
+            self._actions = ActionTable(found or ())
+        return self._actions
+
+    def _bare_action(self, path: str) -> str | None:
+        """A link written without an extension (``bookList``, ``/admin/save``) that names an
+        action of this module, when its actions answer without one: that action's address,
+        with its extension. Anything else is not resolved: never a guessed action."""
+        if self.index is None or not self._module_value(self.index.struts_bare):
+            return None
+        namespace, name = posixpath.split(path)
+        if not name or "." in name:
+            return None
+        serving = self._struts_actions().serving(namespace, name)
+        return action_endpoint(serving, name, self._suffix()) if serving is not None else None
 
     def _link(self, url: str) -> tuple[str, str | None] | None:
         """A link to an action or a page: ``("jsp", endpoint)``, else None."""
@@ -532,24 +606,32 @@ class _Page:
         suffix = self._suffix()
         kinds = (*_ACTION_SUFFIXES, *_PAGE_SUFFIXES, *((suffix,) if suffix else ()))
         if not target.lower().endswith(kinds):
-            return None
+            # No extension: a link only when it names an action of this module.
+            if not target or any(d in target for d in _DYNAMIC):
+                return None
+            resolved = self._resolve(target)
+            found = self._bare_action(resolved) if resolved is not None else None
+            return ("jsp", found) if found is not None else None
         if any(d in target for d in _DYNAMIC):
             return "jsp", None
+        return "jsp", self._resolve(target)
+
+    def _resolve(self, target: str) -> str | None:
+        """A link's context-relative path: absolute as written; relative against the page's
+        URL, or for a page under ``WEB-INF`` against the one namespace that renders it."""
         if target.startswith("/"):
-            return "jsp", posixpath.normpath(target)
+            return posixpath.normpath(target)
         if self.web_root is None:
-            return "jsp", None
+            return None
         if "/WEB-INF/" in "/" + self.path:
-            # Reached at the rendering action's URL: relative to its namespace, when it is one.
             found = self._page_namespaces()
             if not found or len(found) != 1:
-                return "jsp", None
+                return None
             base = found[0]
         else:
             base = posixpath.dirname(self.url())
         resolved = posixpath.normpath(posixpath.join(base, target))
-        return "jsp", resolved if resolved.startswith("/") and not resolved.startswith("/..") \
-            else None
+        return resolved if resolved.startswith("/") and not resolved.startswith("/..") else None
 
     def _action(self, tag: str, attrs: dict[str, str]) -> None:
         prefix, local = tag.split(":", 1)
@@ -570,9 +652,16 @@ class _Page:
                     break
 
 
+#: Web application folders a build tool or IDE declares by convention, recognised even with no
+#: ``WEB-INF`` (a Servlet 3+ application needs no ``web.xml``).
+_WEB_FOLDERS = ("WebContent", "WebRoot")
+
+
 def _web_root(path: str, repo_root: Path, index: JspIndex | None) -> str | None:
     """The web application holding ``path``: the nearest ancestor directory with ``WEB-INF``
-    (from the index when there is one, else from the disk)."""
+    (from the index when there is one, else from the disk); failing that, the nearest
+    conventional web folder — Maven's ``src/main/webapp``, Eclipse's ``WebContent`` /
+    ``WebRoot``, or a NetBeans project's ``web/`` (beside its ``nbproject/``)."""
     parts = path.split("/")[:-1]
     for depth in range(len(parts), -1, -1):
         root = "/".join(parts[:depth])
@@ -581,6 +670,11 @@ def _web_root(path: str, repo_root: Path, index: JspIndex | None) -> str | None:
                 return root
         elif (repo_root / root / "WEB-INF").is_dir():
             return root
+    for depth in range(len(parts), 0, -1):
+        name, parent = parts[depth - 1], parts[: depth - 1]
+        if (name in _WEB_FOLDERS or (name == "webapp" and parent[-2:] == ["src", "main"])
+                or (name == "web" and (repo_root.joinpath(*parent) / "nbproject").is_dir())):
+            return "/".join(parts[:depth])
     return None
 
 

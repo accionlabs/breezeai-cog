@@ -43,7 +43,8 @@ from ..treesitter import node_text
 from ..xml_common import child_elements, document_root, element_attr, element_tag
 from .common import (
     FRAMEWORK, PROPERTIES_LEVEL, STRUTS_ROOT, WEB_XML_LEVEL, XML_LEVEL, Layered, action_endpoint,
-    read_properties, suffix_of, web_xml_constants, xml_constants,
+    ActionTable, bare_of, namespace_key, read_properties, suffix_of, web_xml_constants,
+    xml_constants,
 )
 from .views import Target, result_target, web_root
 
@@ -85,12 +86,14 @@ class Struts2ConfigParser(BaseParser):
                 record.importFiles.append(included)
         # Routes and navigation are statements (gated); view edges are core and always kept.
         emit = ctx.capture_statements and not self.is_fixture_file(path)
-        suffix = _suffix(ctx.repo_root, path, source)
+        suffix, bare = _suffix(ctx.repo_root, path, source)
         web = web_root(ctx.repo_root, posixpath.dirname(path))
         handlers = _Handlers(ctx)
         seen: set[str] = set()
         limit = ctx.statement_text_limit
-        for package in (c for c in children if element_tag(c, source) == "package"):
+        packages = [c for c in children if element_tag(c, source) == "package"]
+        declared = ActionTable(_declared_actions(packages, source) if bare else ())
+        for package in packages:
             namespace: str | None = element_attr(package, source, "namespace") or ""
             if namespace is not None and "${" in namespace:
                 namespace = None
@@ -111,6 +114,7 @@ class Struts2ConfigParser(BaseParser):
                     target = _result(result, source, namespace, suffix, ctx.repo_root, web, tiles)
                     if target is None:
                         continue
+                    target = _bare_redirect(target, declared, suffix)
                     if target.file is not None and target.file not in record.importFiles:
                         record.importFiles.append(target.file)
                     if emit and target.endpoint is not None:
@@ -202,8 +206,37 @@ def _sibling(repo_root: Path, path: str, ref: str | None) -> str | None:
     return rel if (repo_root / rel).is_file() else None
 
 
-def _suffix(repo_root: Path, path: str, source: bytes) -> str | None:
-    """The action suffix for this configuration's actions, from ``struts.action.extension`` as
+def _declared_actions(packages: list[Node], source: bytes) -> tuple[tuple[str, str], ...]:
+    """``(namespace_key, name or pattern)`` of every action this configuration declares."""
+    out = []
+    for package in packages:
+        namespace = element_attr(package, source, "namespace") or ""
+        if "${" in namespace:
+            continue
+        for action in child_elements(package):
+            name = element_attr(action, source, "name")
+            if element_tag(action, source) == "action" and name and "{" not in name:
+                out.append((namespace_key(namespace), name))
+    return tuple(out)
+
+
+def _bare_redirect(target: Target, declared: ActionTable, suffix: str | None) -> Target:
+    """A redirect written without an extension (``bookList``) that names an action declared
+    here leads to that action's address (``/bookList.action``); anything else is kept."""
+    if not declared or target.endpoint is None:
+        return target
+    namespace, name = posixpath.split(target.endpoint)
+    if not name or "." in name:
+        return target
+    serving = declared.serving(namespace, name)
+    if serving is None:
+        return target
+    return Target(action_endpoint(serving, name, suffix), target.file)
+
+
+def _suffix(repo_root: Path, path: str, source: bytes) -> tuple[str | None, bool]:
+    """``(suffix, bare)``: the action suffix for this configuration's actions, from
+    ``struts.action.extension`` as
     Struts resolves it (:class:`.common.Layered`): ``<constant>`` in this file and in the
     classpath root's ``struts.xml`` (the nearest one at or above it), overridden by
     ``struts.properties`` there, overridden by the Struts filter's init-param in the web
@@ -225,7 +258,8 @@ def _suffix(repo_root: Path, path: str, source: bytes) -> str | None:
     web = web_root(repo_root, posixpath.dirname(path))
     if web is not None:
         layered.add("", WEB_XML_LEVEL, web_xml_constants(_read(repo_root / web / "WEB-INF" / "web.xml")))
-    return suffix_of(layered.resolve().get("", {}))
+    settings = layered.resolve().get("", {})
+    return suffix_of(settings), bare_of(settings)
 
 
 def _read(path: Path) -> bytes:
