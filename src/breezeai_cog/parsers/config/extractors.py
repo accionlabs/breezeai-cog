@@ -72,13 +72,15 @@ def extract_config(path: str, text: str) -> dict[str, Any]:
 #: captures every OTHER non-empty ``.json`` in full, but routes these to their rich extraction
 #: even though they are non-empty. Keep in step with the ``.json`` name-cases in ``_dispatch``.
 RICH_JSON_NAMES: frozenset[str] = frozenset(
-    {"package.json", "tsconfig.json", "jsconfig.json", "mod.json"}
+    {"package.json", "composer.json", "tsconfig.json", "jsconfig.json", "mod.json"}
 )
 
 
 def _dispatch(name: str, suffix: str, text: str) -> dict[str, Any]:
     if name == "package.json":
         return _package_json(text)
+    if name == "composer.json":
+        return _composer_json(text)
     if name in ("tsconfig.json", "jsconfig.json"):
         return _tsconfig(name, text)
     if name == "project.json":
@@ -165,6 +167,73 @@ def _package_json(text: str) -> dict[str, Any]:
         "dependencyCount": len(deps),
         "devDependencyCount": len(dev),
     }
+
+
+def _composer_json(text: str) -> dict[str, Any]:
+    d = json.loads(text)
+    if not isinstance(d, dict):
+        raise ValueError("composer.json must hold a JSON object")
+    deps = _composer_packages(d.get("require"))
+    dev = _composer_packages(d.get("require-dev"))
+    info: dict[str, Any] = {
+        "name": d.get("name"),
+        "version": d.get("version"),
+        "description": d.get("description"),
+        "type": d.get("type"),
+        "scripts": sorted(d["scripts"]) if isinstance(d.get("scripts"), dict) else None,
+        "platform": _composer_platform(d.get("require"), d.get("require-dev")) or None,
+        "autoload": _composer_autoload(d) or None,
+        "dependencies": deps,
+        "devDependencies": dev,
+    }
+    return {
+        "kind": "composer.json",
+        "category": "json",
+        "packageManager": "composer",
+        # Unknown values are left out, not written as null (a composer.json has no required key).
+        "packageInfo": {k: v for k, v in info.items() if v is not None},
+        "dependencyCount": len(deps),
+        "devDependencyCount": len(dev),
+    }
+
+
+def _is_composer_platform(name: str) -> bool:
+    low = name.lower()
+    return low in {"php", "hhvm"} or low.startswith(("php-", "ext-", "lib-"))
+
+
+def _composer_packages(value: Any) -> dict[str, Any]:
+    """Keep package requirements while excluding Composer platform constraints."""
+    if not isinstance(value, dict):
+        return {}
+    return {name: spec for name, spec in value.items()
+            if isinstance(name, str) and not _is_composer_platform(name)}
+
+
+def _composer_platform(*sections: Any) -> dict[str, Any]:
+    """The ``php`` / ``ext-*`` / ``lib-*`` constraints, which are not packages but say what the
+    project runs on (``require`` wins over ``require-dev`` for the same name)."""
+    found: dict[str, Any] = {}
+    for section in reversed(sections):
+        if isinstance(section, dict):
+            found.update({n: s for n, s in section.items()
+                          if isinstance(n, str) and _is_composer_platform(n)})
+    return found
+
+
+def _composer_autoload(d: dict[str, Any]) -> dict[str, Any]:
+    """PSR-4 / PSR-0 namespace → directories, from ``autoload`` and ``autoload-dev``."""
+    out: dict[str, Any] = {}
+    for key in ("autoload", "autoload-dev"):
+        section = d.get(key)
+        if not isinstance(section, dict):
+            continue
+        for standard in ("psr-4", "psr-0"):
+            mapping = section.get(standard)
+            if isinstance(mapping, dict):
+                out.setdefault(standard, {}).update(
+                    {ns: paths for ns, paths in mapping.items() if isinstance(ns, str)})
+    return out
 
 
 def _tsconfig(name: str, text: str) -> dict[str, Any]:
