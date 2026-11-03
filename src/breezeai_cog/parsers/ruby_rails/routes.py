@@ -106,6 +106,20 @@ def _arguments(call: Node) -> list[Node]:
     return list(arguments.named_children) if arguments is not None else []
 
 
+def _route_path_arguments(arguments: list[Node], source: bytes) -> list[Node | None]:
+    """The positional path(s) of an HTTP route, excluding option hashes and keyword pairs."""
+    if arguments:
+        rocket = _hash_rocket(arguments[0], source)
+        if rocket is not None:
+            return [rocket[0]]
+    paths = [
+        argument
+        for argument in arguments
+        if argument.type not in {"pair", "hash", "hash_splat_argument"}
+    ]
+    return paths or [None]
+
+
 def _hash_rocket(argument: Node | None, source: bytes) -> tuple[Node | None, Node | None] | None:
     """``'/login' => 'sessions#create'`` (a ``pair`` written with ``=>``) → (path node, target
     node); None for any other argument (a keyword pair like ``to:`` / ``via:`` uses ``:``)."""
@@ -154,9 +168,8 @@ def _literal_array_items(node: Node) -> list[Node]:
 
 
 def _handler(arguments: list[Node], source: bytes) -> str | None:
-    """The ``to: 'controller#action'`` target. The action lives in the controller's file, so
-    the route has no ``handlerLine`` (the line of the ``to:`` string is not the handler)."""
-    for argument in arguments[1:]:
+    """The route's controller/action target, if it is literal."""
+    for argument in arguments:
         if argument.type == "pair":
             key = argument.child_by_field_name("key")
             value = argument.child_by_field_name("value")
@@ -164,6 +177,12 @@ def _handler(arguments: list[Node], source: bytes) -> str | None:
                 if value is not None and value.type == "string":
                     return _string_value(value, source)
                 return None
+    controller = _option(arguments, source, "controller")
+    action = _option(arguments, source, "action")
+    controller_name = _segment(controller, source)
+    action_name = _segment(action, source)
+    if controller_name is not None and action_name is not None:
+        return f"{controller_name}#{action_name}"
     return None
 
 
@@ -530,24 +549,35 @@ def detect_rails_routes(
         rocket = _hash_rocket(args[0], source) if args else None
         if rocket is not None:  # post '/login' => 'sessions#create'
             path_node, target = rocket
-            local = _string_value(path_node, source)
+            path_nodes = [path_node]
             handler = _string_value(target, source)
         else:
-            local = _segment(args[0], source) if args and args[0].type != "pair" else None
+            path_nodes = _route_path_arguments(args, source)
             handler = _handler(args, source)
         on = _segment(_option(args, source, "on"), source)
-        if on is None and _option(args, source, "on") is not None:
-            local = None  # on: given by a non-literal → the nesting is unknown
+        invalid_on = on is None and _option(args, source, "on") is not None
         owner = _nearest_resource(call, source)
-        if handler is None and rocket is None and owner is not None and owner.controller:
-            named = _action_name(local)  # inside a resource: get :preview → photos#preview
-            handler = f"{owner.controller}#{named}" if named else None
         route_prefix = _route_prefix(call, source, on)
-        # A literal path under literal scopes → the full path; an unresolved path or scope prefix
-        # leaves the address unknown → empty (never a path missing its prefix).
-        endpoint = (_join(route_prefix, local)
-                    if local is not None and route_prefix is not None else None)
         methods = _via_methods(args, source) if method == "match" else [method.upper()]
-        for route_verb in methods:  # match … via: [:get, :post] → one binding per verb
-            emit(call, route_verb, endpoint, handler)
+        for path_node in path_nodes:
+            local = (
+                _string_value(path_node, source)
+                if rocket is not None and path_node is not None
+                else _segment(path_node, source)
+            )
+            if invalid_on:
+                local = None  # on: given by a non-literal → the nesting is unknown
+            route_handler = handler
+            if route_handler is None and rocket is None and owner is not None and owner.controller:
+                named = _action_name(local)  # inside a resource: get :preview → photos#preview
+                route_handler = f"{owner.controller}#{named}" if named else None
+            # A literal path under literal scopes → the full path; an unresolved path or scope
+            # prefix leaves the address unknown → empty (never a path missing its prefix).
+            endpoint = (
+                _join(route_prefix, local)
+                if local is not None and route_prefix is not None
+                else None
+            )
+            for route_verb in methods:  # match … via: [:get, :post] → one binding per verb
+                emit(call, route_verb, endpoint, route_handler)
     return found

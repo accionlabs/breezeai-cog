@@ -33,6 +33,55 @@ def test_rails_routes_and_base_extraction(tmp_path: Path) -> None:
     assert routes[0].handlerLine == 4
 
 
+def test_rails_http_routes_emit_each_positional_path(tmp_path: Path) -> None:
+    source = b"""class UsersController < ApplicationController
+  def show; end
+  def index; end
+  def update; end
+  def create; end
+  def destroy; end
+end
+
+Rails.application.routes.draw do
+  get :single, to: "users#show"
+  get :following, :followers, to: "users#show"
+  get "/alpha", "/beta", to: "users#index", as: :named
+  namespace :admin do
+    get :first, :second, to: "users#show"
+  end
+  scope path: "/api" do
+    patch :edit_one, :edit_two, controller: "users", action: :update
+  end
+  post :create_one, :create_two, controller: :users, action: :create
+  delete "/destroy_one", "/destroy_two", to: "users#destroy"
+  get :hash_one, :hash_two, { as: :not_a_path }, to: "users#show"
+end
+"""
+    record = RailsParser().parse_file(_context(tmp_path, "config/routes.rb", source))
+    routes = [item for item in record.statements if item.semanticType == "route"]
+
+    assert sorted((item.method, item.endpoint, item.handler) for item in routes) == sorted(
+        [
+            ("GET", "/single", "show"),
+            ("GET", "/following", "show"),
+            ("GET", "/followers", "show"),
+            ("GET", "/alpha", "index"),
+            ("GET", "/beta", "index"),
+            ("GET", "/admin/first", None),
+            ("GET", "/admin/second", None),
+            ("PATCH", "/api/edit_one", "update"),
+            ("PATCH", "/api/edit_two", "update"),
+            ("POST", "/create_one", "create"),
+            ("POST", "/create_two", "create"),
+            ("DELETE", "/destroy_one", "destroy"),
+            ("DELETE", "/destroy_two", "destroy"),
+            ("GET", "/hash_one", "show"),
+            ("GET", "/hash_two", "show"),
+        ]
+    )
+    assert len({item.id for item in routes}) == len(routes)
+
+
 def test_rails_routes_are_gated_and_dynamic_paths_are_honest_null(tmp_path: Path) -> None:
     source = b'''require "rails"\nPATH = ENV["PATH"]\nRails.application.routes.draw do\n  get PATH, to: "users#index"\nend\n'''
     without_capture = RailsParser().parse_file(_context(tmp_path, "config/routes.rb", source, False))
