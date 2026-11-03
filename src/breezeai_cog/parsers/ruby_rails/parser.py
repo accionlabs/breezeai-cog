@@ -7,8 +7,18 @@ from ..base import ParseContext
 from ..emits import apply
 from ..ruby.parser import RubyParser
 from ..treesitter import parse_source
-from ..ruby.claims import has_require, has_superclass
-from .routes import detect_rails_routes, has_routes_draw
+from .routes import detect_rails_routes
+
+#: A file is Rails when its source says so: a controller (``< ApplicationController``), a route
+#: file (``Rails.application.routes.draw``, or ``<App>::Application.routes.draw`` as Rails 3 and 4
+#: write it), or a Rails require. A cheap substring search, so ``claims`` does not parse the file a
+#: second time.
+_CLAIM_MARKERS = (
+    b"< ApplicationController", b"<ApplicationController",
+    b"Rails.application.routes.draw", b"Application.routes.draw",
+    b"require 'rails'", b'require "rails"',
+    b"require 'action_controller/railtie'", b'require "action_controller/railtie"',
+)
 
 
 class RailsParser(RubyParser):
@@ -17,17 +27,7 @@ class RailsParser(RubyParser):
     frameworks = ["rails"]
 
     def claims(self, path: str, source: bytes, parse_timeout_micros: int = 0) -> bool:
-        if not any(marker in source for marker in (
-            b"rails", b"Rails", b"ApplicationController", b"Rails.application.routes",
-            b"Application.routes",
-        )):
-            return False
-        root = parse_source("ruby", source, parse_timeout_micros).root_node
-        return (
-            has_require(root, source, {"rails", "action_controller/railtie"})
-            or has_superclass(root, source, {"ApplicationController"})
-            or has_routes_draw(root, source)
-        )
+        return any(marker in source for marker in _CLAIM_MARKERS)
 
     def parse_file(self, ctx: ParseContext) -> FileRecord:
         root = parse_source("ruby", ctx.source, ctx.parse_timeout_micros).root_node

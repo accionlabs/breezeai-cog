@@ -50,11 +50,6 @@ def _is_routes_draw(call: Node, source: bytes) -> bool:
     return receiver is not None and _ROUTES_RECEIVER.fullmatch(node_text(receiver, source)) is not None
 
 
-def has_routes_draw(root: Node, source: bytes) -> bool:
-    """Whether the file declares routes with ``<receiver>.routes.draw``."""
-    return any(_is_routes_draw(call, source) for call in _calls(root))
-
-
 def _inside_routes_draw(call: Node, source: bytes) -> bool:
     current = call.parent
     while current is not None:
