@@ -195,6 +195,45 @@ def _ts_backbone(n: int) -> str:
         for i in range(n)
     )
     return f"import Backbone from 'backbone';\n{body}"
+def _jsp(n: int) -> str:
+    body = "".join(
+        f"<%-- doc for row {i} --%>\n"
+        f'<%@ include file="part{i}.jspf" %>\n'
+        f"<%! int f{i}(int x) {{ return x + {i}; }} %>\n"
+        f'<c:forEach items="${{rows{i}}}" var="r"><t:cell v="${{r.name}}"/></c:forEach>\n'
+        f"<% for (int i = 0; i < {i}; i++) {{ %><li><%= f{i}(i) %> ${{x{i}.a}}</li><% }} %>\n"
+        f"<!-- note {i} -->\n"
+        f'<a href="x{i}.action">l</a><s:form action="a{i}"/><c:url value="/p{i}.jsp"/>\n'
+        for i in range(n)
+    )
+    return (f'<%@ taglib prefix="c" uri="jakarta.tags.core" %>\n'
+            f'<%@ taglib prefix="s" uri="/struts-tags" %>\n'
+            f'<%@ taglib prefix="t" tagdir="/WEB-INF/tags" %>\n{body}')
+
+
+def _struts2(n: int) -> str:
+    body = "".join(
+        f'    @Actions({{@Action("a{i}"), @Action(value = "/abs/b{i}", results = '
+        f'{{@Result(location = "v{i}.jsp"), @Result(type = "redirectAction", location = "a{i}")}})}})\n'
+        f"    public String m{i}() {{ return SUCCESS; }} // note\n"
+        for i in range(n)
+    )
+    return ("package com.shop.actions.admin;\n"
+            "import org.apache.struts2.convention.annotation.*;\n"
+            "import com.opensymphony.xwork2.ActionSupport;\n"
+            '@Namespace("/admin")\n'
+            f"public class OrderAction extends ActionSupport {{\n{body}}}\n")
+
+
+def _struts2_xml(n: int) -> str:
+    packages = "".join(
+        f'  <package name="p{i}" namespace="/n{i}" extends="struts-default">\n'
+        f'    <action name="a{i}" class="com.shop.A{i}" method="m{i}"><result>/a.jsp</result></action>\n'
+        f'    <action name="b{i}_*" class="com.shop.{{1}}Action"/>\n'
+        f"  </package>\n"
+        for i in range(n)
+    )
+    return f'<?xml version="1.0"?>\n<struts>\n{packages}</struts>\n'
 
 
 SAMPLES: dict[str, tuple[str, Callable[[int], str]]] = {
@@ -210,6 +249,9 @@ SAMPLES: dict[str, tuple[str, Callable[[int], str]]] = {
     "go": ("p.go", _go),
     "go-gin": ("routes.go", _go_gin),
     "c": ("mod.c", _c),
+    "jsp": ("page.jsp", _jsp),
+    "java-struts2": ("OrderAction.java", _struts2),
+    "struts2-xml": ("struts.xml", _struts2_xml),
 }
 
 
