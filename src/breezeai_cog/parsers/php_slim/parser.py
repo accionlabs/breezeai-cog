@@ -193,6 +193,13 @@ class SlimParser(PhpParser):
 
     def claims(self, path: str, source: bytes) -> bool:
         lower = source.lower()
+        normalized_path = path.lower().replace("\\", "/")
+        if (
+            b"namespace wordpress\\" in lower
+            or "/wordpress/" in f"/{normalized_path}"
+            or normalized_path.endswith("/scoper.inc.php")
+        ):
+            return False
         # Slim's PSR-7 and exception classes appear in other stacks' bridges; a file that
         # also registers Laravel routes is Laravel's, and its routes would be lost here.
         if b"illuminate\\support\\facades\\route" in lower or b"illuminate\\routing\\" in lower:

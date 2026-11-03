@@ -588,6 +588,29 @@ class Plugin {
     assert not any(s.semanticType == "route" for s in record.statements)
 
 
+def test_framework_claims_reject_foreign_framework_namespaces() -> None:
+    illuminate_router = (
+        b"<?php namespace Illuminate\\Routing; "
+        b"$routes->get('/route', 'Controller@method'); "
+        b"use Symfony\\Component\\Routing\\Route;"
+    )
+    assert not CodeIgniterParser().claims("Router.php", illuminate_router)
+    assert not SymfonyParser().claims("Router.php", illuminate_router)
+    assert (
+        registry.select("src/Illuminate/Routing/Router.php", illuminate_router).name
+        == "php-laravel"
+    )
+
+    vendor_slim = b"<?php namespace WordPress\\AiClientDependencies\\Slim\\Http;"
+    assert not SlimParser().claims(
+        "wp-includes/php-ai-client/third-party/Http/Response.php", vendor_slim
+    )
+    assert not SlimParser().claims("tools/php-ai-client/scoper.inc.php", b"$prefix = 'Slim\\';")
+    assert registry.select(
+        "wp-includes/php-ai-client/third-party/Http/Response.php", vendor_slim
+    ).name == "php"
+
+
 def test_codeigniter_query_builder_db_method_calls() -> None:
     source = """<?php
 namespace App\\Models;
