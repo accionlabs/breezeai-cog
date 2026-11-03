@@ -3,19 +3,62 @@
 from __future__ import annotations
 
 from collections.abc import Iterator
+from pathlib import PurePosixPath
+from typing import Any
 
 from tree_sitter import Node
 
 from ...emit import file_id
 from ...schemas import FileRecord
+from ..additive import FactSpec, index_fact, register_fact
 from ..emits import Emit
-from ..ruby.ownership import owner_id
 from ..handler_sites import handler_location, locate_method
-from ..inflect import plural as _plural, singular as _singular
+from ..inflect import plural as _plural
+from ..inflect import singular as _singular
+from ..ruby.ownership import owner_id
 from ..treesitter import node_text
 from .callbacks import callbacks_of, controller_class, guards_for
 
 _HTTP_METHODS = {"get", "post", "put", "patch", "delete", "head", "options", "match"}
+_DRAW_FACT = "rails.drawn-route-files"
+
+
+def _collect_draws(root: Node, source: bytes, rel: str, _repo_root: Any) -> list[tuple[str, str | None]] | None:
+    if PurePosixPath(rel).as_posix() != "config/routes.rb":
+        return None
+    found: list[tuple[str, str | None]] = []
+    for call in _calls(root):
+        if _method(call, source) != "draw":
+            continue
+        args = _arguments(call)
+        name = _segment(args[0], source) if args else None
+        if name is not None:
+            found.append((name, _route_prefix(call, source)))
+    return found or None
+
+
+def _resolve_draws(values: list[list[tuple[str, str | None]]], _index: Any) -> dict[str, str | None] | None:
+    grouped: dict[str, set[str | None]] = {}
+    for name, prefix in (item for group in values for item in group):
+        grouped.setdefault(f"config/routes/{name}.rb", set()).add(prefix)
+    return {path: next(iter(prefixes)) if len(prefixes) == 1 else None
+            for path, prefixes in grouped.items()} or None
+
+
+def is_drawn_route_file(index: Any | None, path: str) -> bool:
+    normalized = PurePosixPath(path.replace("\\", "/")).as_posix()
+    return normalized in (index_fact(index, _DRAW_FACT) or {})
+
+
+def drawn_route_prefix(index: Any | None, path: str) -> str | None:
+    normalized = PurePosixPath(path.replace("\\", "/")).as_posix()
+    return (index_fact(index, _DRAW_FACT) or {}).get(normalized)
+
+
+register_fact(FactSpec(
+    name=_DRAW_FACT, language="ruby", gate=(b"draw",), collect=_collect_draws,
+    resolve=_resolve_draws,
+))
 
 
 def _calls(root: Node) -> Iterator[Node]:
@@ -33,17 +76,27 @@ def _method(call: Node, source: bytes) -> str | None:
 def _string_value(node: Node | None, source: bytes) -> str | None:
     if node is None or node.type != "string":
         return None
-    content = next((child for child in node.named_children if child.type == "string_content"), None)
-    return node_text(content, source) if content is not None else ""
+    parts = node.named_children
+    if any(part.type not in {"string_content", "escape_sequence"} for part in parts):
+        return None
+    return "".join(node_text(part, source) for part in parts)
 
 
-def _inside_routes_draw(call: Node, source: bytes) -> bool:
+def _inside_routes_draw(call: Node, source: bytes, split_routes: bool = False) -> bool:
+    if split_routes:
+        return True
     current = call.parent
     while current is not None:
         if current.type == "call" and _method(current, source) == "draw":
             receiver = current.child_by_field_name("receiver")
-            if receiver is not None and node_text(receiver, source) == "Rails.application.routes":
-                return True
+            if receiver is not None:
+                receiver_text = node_text(receiver, source)
+                if (
+                    receiver_text == "Rails.application.routes"
+                    or receiver_text == "Engine.routes"
+                    or receiver_text.endswith("::Engine.routes")
+                ):
+                    return True
         current = current.parent
     return False
 
@@ -51,6 +104,20 @@ def _inside_routes_draw(call: Node, source: bytes) -> bool:
 def _arguments(call: Node) -> list[Node]:
     arguments = call.child_by_field_name("arguments")
     return list(arguments.named_children) if arguments is not None else []
+
+
+def _route_path_arguments(arguments: list[Node], source: bytes) -> list[Node | None]:
+    """The positional path(s) of an HTTP route, excluding option hashes and keyword pairs."""
+    if arguments:
+        rocket = _hash_rocket(arguments[0], source)
+        if rocket is not None:
+            return [rocket[0]]
+    paths = [
+        argument
+        for argument in arguments
+        if argument.type not in {"pair", "hash", "hash_splat_argument"}
+    ]
+    return paths or [None]
 
 
 def _hash_rocket(argument: Node | None, source: bytes) -> tuple[Node | None, Node | None] | None:
@@ -78,9 +145,15 @@ def _via_methods(arguments: list[Node], source: bytes) -> list[str | None]:
     per verb. ``via: :all`` → ``["ANY"]`` (one handler for every verb). No ``via:`` or a
     non-literal value → ``[None]`` (one record, method unknown — never a guessed verb)."""
     value = _option(arguments, source, "via")
-    items = list(value.named_children) if value is not None and value.type == "array" else [value]
-    verbs = [node_text(v, source).lstrip(":").upper() if v is not None and v.type == "simple_symbol"
-             else None for v in items]
+    items: list[Node | None] = []
+    if value is not None:
+        items.extend(_literal_array_items(value))
+    if not items:
+        items.append(value)
+    verbs = [
+        segment.upper() if (segment := _segment(item, source)) is not None else None
+        for item in items
+    ]
     if "ALL" in verbs:
         return ["ANY"]
     if not verbs or None in verbs:
@@ -88,10 +161,15 @@ def _via_methods(arguments: list[Node], source: bytes) -> list[str | None]:
     return list(dict.fromkeys(verbs))
 
 
+def _literal_array_items(node: Node) -> list[Node]:
+    if node.type in {"array", "symbol_array", "string_array"}:
+        return list(node.named_children)
+    return []
+
+
 def _handler(arguments: list[Node], source: bytes) -> str | None:
-    """The ``to: 'controller#action'`` target. The action lives in the controller's file, so
-    the route has no ``handlerLine`` (the line of the ``to:`` string is not the handler)."""
-    for argument in arguments[1:]:
+    """The route's controller/action target, if it is literal."""
+    for argument in arguments:
         if argument.type == "pair":
             key = argument.child_by_field_name("key")
             value = argument.child_by_field_name("value")
@@ -99,6 +177,12 @@ def _handler(arguments: list[Node], source: bytes) -> str | None:
                 if value is not None and value.type == "string":
                     return _string_value(value, source)
                 return None
+    controller = _option(arguments, source, "controller")
+    action = _option(arguments, source, "action")
+    controller_name = _segment(controller, source)
+    action_name = _segment(action, source)
+    if controller_name is not None and action_name is not None:
+        return f"{controller_name}#{action_name}"
     return None
 
 
@@ -133,13 +217,15 @@ class _Resource:
         self.plural = _method(call, source) == "resources"
         args = _arguments(call)
         name = _segment(name_node, source)
-        self.ok = name is not None and name_node.type == "simple_symbol"
+        self.ok = name is not None and name_node.type in {"simple_symbol", "string"}
         self.name = name or ""
         path = _option(args, source, "path")
         seg = _segment(path, source) if path is not None else self.name
         controller = _option(args, source, "controller")
+        singular = _singular(self.name)
+        already_plural = singular is not None and _plural(singular) == self.name
         ctrl = _segment(controller, source) if controller is not None else (
-            self.name if self.plural else _plural(self.name))
+            self.name if self.plural or already_plural else _plural(self.name))
         param = _option(args, source, "param")
         param_name = _segment(param, source) if param is not None else "id"
         self.ok = self.ok and seg is not None and param_name is not None
@@ -159,7 +245,7 @@ class _Resource:
             value = _option(args, source, key)
             if value is None:
                 continue
-            items = list(value.named_children) if value.type == "array" else [value]
+            items = _literal_array_items(value) or [value]
             names = {_segment(i, source) for i in items}
             if None in names:
                 return None
@@ -192,8 +278,10 @@ def _segment(node: Node | None, source: bytes) -> str | None:
         return None
     if node.type == "string":
         return _string_value(node, source)
-    if node.type == "simple_symbol":
+    if node.type in {"simple_symbol", "bare_symbol"}:
         return node_text(node, source).lstrip(":")
+    if node.type == "bare_string":
+        return node_text(node, source)
     return None
 
 
@@ -203,6 +291,7 @@ def _scope_segment(call: Node, source: bytes) -> tuple[bool, str]:
     ``namespace :admin`` → ``admin`` (``path:`` overrides it); ``scope '/v1'`` / ``scope path: '/v1'``
     → ``/v1``; ``scope module: 'x'`` (no path) → ``""``. A path given by anything but a literal
     → unresolved."""
+    method = _method(call, source)
     args = _arguments(call)
     for a in args:
         if a.type == "pair":
@@ -213,6 +302,8 @@ def _scope_segment(call: Node, source: bytes) -> tuple[bool, str]:
     positional = [a for a in args if a.type != "pair"]
     if not positional:
         return True, ""  # namespace with no name is not valid Rails; scope module:/as: adds no path
+    if method == "scope" and positional[0].type not in {"string", "simple_symbol"}:
+        return False, ""
     seg = _segment(positional[0], source)
     return (seg is not None, seg or "")
 
@@ -269,9 +360,12 @@ def _nearest_resource(call: Node, source: bytes) -> _Resource | None:
     """The resource whose block a route is declared in (for its default controller)."""
     current = call.parent
     while current is not None:
-        if current.type == "call" and current.child_by_field_name("block") is not None:
-            if _method(current, source) in _RESOURCE_SCOPES:
-                return _resource_of(current, source)
+        if (
+            current.type == "call"
+            and current.child_by_field_name("block") is not None
+            and _method(current, source) in _RESOURCE_SCOPES
+        ):
+            return _resource_of(current, source)
         current = current.parent
     return None
 
@@ -350,7 +444,8 @@ def _root_handler(args: list[Node], source: bytes) -> str | None:
 
 
 def detect_rails_routes(
-    root: Node, source: bytes, path: str, record: FileRecord, index: object = None
+    root: Node, source: bytes, path: str, record: FileRecord, index: object = None,
+    *, split_routes: bool = False, split_prefix: str | None = "",
 ) -> list[Emit]:
     """Explicit Rails route DSL bindings, for :func:`~..emits.apply`; unresolved values stay
     null. ``index`` (the Ruby repo index) supplies the controller callbacks
@@ -361,40 +456,70 @@ def detect_rails_routes(
     its scope's path."""
     found: list[Emit] = []
     fallback = file_id(path)
+    emitted_by_call: dict[tuple[int, int], int] = {}
 
     def emit(call: Node, verb: str | None, endpoint: str | None, handler: str | None) -> None:
+        if split_routes:
+            endpoint = _join(split_prefix, endpoint) if endpoint is not None and split_prefix is not None else None
         line = call.start_point[0] + 1
+        key = (call.start_byte, call.end_byte)
+        emit_index = emitted_by_call.get(key, 0)
+        emitted_by_call[key] = emit_index + 1
         module = _route_module(call, source)
         guards = _route_guards(handler, module, index)
         # `users#show` → the `show` action of `UsersController`, where it is declared (Q14).
         target = controller_class(f"{module}/{handler}" if module else handler) \
             if handler is not None and module is not None else None
-        site = locate_method(index, "ruby", *target) if target is not None else None
+        controller_path = (
+            f"app/controllers/{module + '/' if module else ''}{handler.split('#', 1)[0]}_controller.rb"
+            if handler is not None else None
+        )
+        site = locate_method(
+            index, "ruby", *target, within=(controller_path,) if controller_path else None
+        ) if target is not None else None
+        if site is None and target is not None:
+            controller_name, action = target
+            owners = {
+                cls.id for cls in record.classes
+                if cls.name.replace("::", ".") == controller_name.replace("::", ".")
+            }
+            local_methods = [
+                fn for fn in record.functions
+                if fn.parentId in owners and fn.name == action
+            ]
+            if len(local_methods) == 1:
+                site = (path, local_methods[0].startLine)
         handler_line, handler_path = handler_location(site, path)
-        if site is not None and target is not None:
-            handler = target[1]
+        handler = target[1] if site is not None and target is not None else None
         found.append(
-            Emit(call, dict(
-                semanticType="route",
-                method=verb,
-                endpoint=endpoint,
-                handler=handler,
-                handlerLine=handler_line,
-                handlerPath=handler_path,
-                guards=guards or None,
-                # Honest-null: assert auth only when a guard is present; absence is unknown.
-                authRequired=True if guards else None,
-                framework="rails",
-                routeKind="route",
-                isRegex=False,
-            ), parent=owner_id(line, record.functions, record.classes, fallback), node_type="call")
+            Emit(
+                call,
+                {
+                    "semanticType": "route",
+                    "method": verb,
+                    "endpoint": endpoint,
+                    "handler": handler,
+                    "handlerLine": handler_line,
+                    "handlerPath": handler_path,
+                    "guards": guards or None,
+                    # Honest-null: assert auth only when a guard is present; absence is unknown.
+                    # A before_action is a guard, but it does not prove authentication.
+                    "authRequired": None,
+                    "framework": "rails",
+                    "routeKind": "route",
+                    "isRegex": False,
+                },
+                enrich="same" if emit_index == 0 else "never",
+                parent=owner_id(line, record.functions, record.classes, fallback),
+                node_type="call",
+            )
         )
 
     handler: str | None
     endpoint: str | None
     for call in _calls(root):
         method = _method(call, source)
-        if method is None or not _inside_routes_draw(call, source):
+        if method is None or not _inside_routes_draw(call, source, split_routes):
             continue
         args = _arguments(call)
         if method in _RESOURCE_SCOPES:
@@ -424,24 +549,35 @@ def detect_rails_routes(
         rocket = _hash_rocket(args[0], source) if args else None
         if rocket is not None:  # post '/login' => 'sessions#create'
             path_node, target = rocket
-            local = _string_value(path_node, source)
+            path_nodes = [path_node]
             handler = _string_value(target, source)
         else:
-            local = _segment(args[0], source) if args and args[0].type != "pair" else None
+            path_nodes = _route_path_arguments(args, source)
             handler = _handler(args, source)
         on = _segment(_option(args, source, "on"), source)
-        if on is None and _option(args, source, "on") is not None:
-            local = None  # on: given by a non-literal → the nesting is unknown
+        invalid_on = on is None and _option(args, source, "on") is not None
         owner = _nearest_resource(call, source)
-        if handler is None and rocket is None and owner is not None and owner.controller:
-            named = _action_name(local)  # inside a resource: get :preview → photos#preview
-            handler = f"{owner.controller}#{named}" if named else None
         route_prefix = _route_prefix(call, source, on)
-        # A literal path under literal scopes → the full path; an unresolved path or scope prefix
-        # leaves the address unknown → empty (never a path missing its prefix).
-        endpoint = (_join(route_prefix, local)
-                    if local is not None and route_prefix is not None else None)
         methods = _via_methods(args, source) if method == "match" else [method.upper()]
-        for route_verb in methods:  # match … via: [:get, :post] → one binding per verb
-            emit(call, route_verb, endpoint, handler)
+        for path_node in path_nodes:
+            local = (
+                _string_value(path_node, source)
+                if rocket is not None and path_node is not None
+                else _segment(path_node, source)
+            )
+            if invalid_on:
+                local = None  # on: given by a non-literal → the nesting is unknown
+            route_handler = handler
+            if route_handler is None and rocket is None and owner is not None and owner.controller:
+                named = _action_name(local)  # inside a resource: get :preview → photos#preview
+                route_handler = f"{owner.controller}#{named}" if named else None
+            # A literal path under literal scopes → the full path; an unresolved path or scope
+            # prefix leaves the address unknown → empty (never a path missing its prefix).
+            endpoint = (
+                _join(route_prefix, local)
+                if local is not None and route_prefix is not None
+                else None
+            )
+            for route_verb in methods:  # match … via: [:get, :post] → one binding per verb
+                emit(call, route_verb, endpoint, route_handler)
     return found

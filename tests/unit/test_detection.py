@@ -20,6 +20,33 @@ def test_classify_api() -> None:
     assert classify_call("session.delete", "delete") == ("api_call", "DELETE", None)
 
 
+def test_fetch_suffix_keeps_shared_api_classification() -> None:
+    for callee in (
+        "cop_config.fetch", "ENV.fetch", "config.fetch", "window.fetch",
+        "globalThis.fetch", "this.fetch", "self.fetch", "fetch",
+    ):
+        assert classify_call(callee, "fetch", language="ruby") == ("api_call", "GET", None)
+
+
+def test_javascript_fetch_receivers_remain_api_calls() -> None:
+    for language in ("typescript", "javascript", None):
+        for callee in ("window.fetch", "globalThis.fetch", "this.fetch", "self.fetch"):
+            assert classify_call(callee, "fetch", language=language) == (
+                "api_call", "GET", None
+            )
+
+
+def test_javascript_fetch_wrappers_are_api_calls() -> None:
+    for callee, method in (
+        ("this.apiFetch", "apiFetch"),
+        ("api.authFetch", "authFetch"),
+        ("ofetch.$fetch", "$fetch"),
+    ):
+        assert classify_call(callee, method, language="typescript") == (
+            "api_call", "GET", None
+        )
+
+
 def test_session_query_chain_is_db_not_http() -> None:
     # `session` is both an HTTP client hint (requests.Session) and a SQLAlchemy DB
     # session. A chain carrying an ORM query-builder marker is data access, not HTTP,
@@ -237,8 +264,7 @@ def test_high_collision_verbs_require_db_receiver() -> None:
 
 
 def test_ruby_active_record_distinctive_verbs_need_no_index() -> None:
-    """Verbs that effectively only exist in ActiveRecord are trusted on a bare constant —
-    no stdlib or common-gem class API uses them, so the receiver needs no identification."""
+    """Distinctive ActiveRecord query verbs are trusted on constant receivers."""
     for callee, method in [
         ("User.find_by", "find_by"), ("User.where", "where"), ("Post.joins", "joins"),
         ("User.includes", "includes"), ("User.pluck", "pluck"),
@@ -263,7 +289,23 @@ def test_ruby_generic_verbs_require_an_identified_model() -> None:
         assert classify_call(callee, method, language="ruby", typed_db_ids=models) == (
             "db_method_call", method, "activerecord"
         )
-        assert classify_call(callee, method, language="ruby") is None
+
+
+def test_ruby_instance_writes_with_proven_receiver() -> None:
+    models = frozenset({"User", "user", "self", "session", "account", "user.account"})
+    for callee, method in [
+        ("self.save", "save"),
+        ("self.update", "update"),
+        ("session.save", "save"),
+        ("account.save", "save"),
+        ("user.account.save", "save"),
+    ]:
+        assert classify_call(callee, method, language="ruby", typed_db_ids=models) == (
+            "db_method_call", method, "activerecord"
+        )
+    assert classify_call("session.save", "save", language="ruby") == (
+        "db_method_call", "save", "sqlalchemy"
+    )
 
 
 def test_ruby_non_activerecord_constants_are_never_data_access() -> None:

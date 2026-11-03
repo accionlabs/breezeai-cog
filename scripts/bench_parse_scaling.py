@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import argparse
 import gc
+import statistics
 import sys
 import time
 from pathlib import Path
@@ -39,8 +40,9 @@ def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("samples", nargs="*", metavar="SAMPLE",
                     help=f"which samples (default: all of {', '.join(sorted(SAMPLES))})")
-    ap.add_argument("--min", type=int, default=500, help="smallest size (methods/routes)")
-    ap.add_argument("--max", type=int, default=4000, help="largest size (methods/routes)")
+    ap.add_argument("--min", type=int, default=250, help="smallest size (methods/routes)")
+    ap.add_argument("--max", type=int, default=2000, help="largest size (methods/routes)")
+    ap.add_argument("--repeats", type=int, default=3, help="runs per sample size; report medians")
     args = ap.parse_args()
     unknown = sorted(set(args.samples) - set(SAMPLES))
     if unknown:
@@ -52,14 +54,21 @@ def main() -> None:
         rel, generate = SAMPLES[name]
         _parse_seconds(rel, generate(5).encode())  # warm one-time caches
         print(name)
+        per_item: dict[int, float] = {}
         n = args.min
         while n <= args.max:
             source = generate(n).encode()
-            seconds = _parse_seconds(rel, source)
+            measurements = [_parse_seconds(rel, source) for _ in range(args.repeats)]
+            seconds = statistics.median(measurements)
             lines = source.count(b"\n")
             print(f"  n={n:6d}  lines={lines:7d}  {seconds * 1000:10.1f} ms"
                   f"  {seconds / n * 1e6:8.1f} µs per item")
+            per_item[n] = seconds / n
             n *= 2
+        if args.min in per_item and args.max in per_item:
+            ratio = per_item[args.max] / per_item[args.min]
+            print(f"  normalized per-item ratio ({args.min}→{args.max}): {ratio:.3f}"
+                  f"  {'MEETS' if ratio <= 1.3 else 'above'} target ≤1.3")
 
 
 if __name__ == "__main__":
