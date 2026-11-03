@@ -14,7 +14,10 @@ from ..treesitter import node_text
 
 def _attribute(node: Node, source: bytes) -> Decorator:
     name_node = node.child_by_field_name("name")
-    name = node_text(name_node, source).rsplit(".", 1)[-1] if name_node is not None else ""
+    # Drop the namespace qualifier, never a dot inside the type arguments:
+    # `Ns.ExtendObjectType<Ns.Book>` → `ExtendObjectType<Ns.Book>`.
+    base, lt, type_args = (node_text(name_node, source) if name_node is not None else "").partition("<")
+    name = base.rsplit(".", 1)[-1] + lt + type_args
     args: list[str] = []
     arglist = next((c for c in node.named_children if c.type == "attribute_argument_list"), None)
     if arglist is not None:

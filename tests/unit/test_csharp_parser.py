@@ -742,3 +742,18 @@ def test_declarations_inside_conditional_compilation_are_captured(tmp_path) -> N
     rec = _parse_repo(tmp_path, {"Gen.cs": _PREPROC}, "Gen.cs")
     assert sorted(c.name for c in rec.classes) == ["Fallback", "Generator", "ReleaseOnly"]
     assert sorted(f.name for f in rec.functions) == ["Dump", "Next", "Run"]
+
+
+def test_attribute_name_keeps_qualified_type_arguments() -> None:
+    src = b"""namespace Demo {
+  [HotChocolate.Types.ExtendObjectType<Demo.Mutation>]
+  [Serializable]
+  [System.Obsolete("x")]
+  public class Extras { }
+}
+"""
+    rec = CSharpParser().parse_file(
+        ParseContext(path="Extras.cs", abs_path=None, source=src, repo_root=None))
+    [cls] = rec.classes
+    assert [d.name for d in cls.decorators] == [
+        "ExtendObjectType<Demo.Mutation>", "Serializable", "Obsolete"]

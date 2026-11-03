@@ -1245,3 +1245,81 @@ def test_descriptor_authorize_guards_every_field() -> None:
     # mirroring class-level [Authorize].
     assert ops["notifyLowStock"].guards == ["Authorize"]
     assert ops["restock"].guards == ["Authorize", "Authorize(Ops)"]
+
+
+# The generic forms name the extended type as a type argument.
+GENERIC_EXTENSIONS = b'''using HotChocolate;
+using HotChocolate.Types;
+namespace Catalog {
+  public class Query { }
+  public class Mutation { }
+  public class Session { public string Title { get; set; } }
+  [ExtendObjectType<Query>]
+  public class BookQueries { public Book[] GetBooks() => null; }
+  [ExtendObjectType<Catalog.Mutation>]
+  public class BookMutations { public Book AddBook(string title) => null; }
+  [ExtendObjectTypeAttribute<global::Catalog.Session>]
+  public class SessionExtras { public string GetLabel([Parent] Session session) => session.Title; }
+}
+'''
+
+# HotChocolate 14 source-generator style: the methods extend Session; Configure describes it too.
+SOURCE_GENERATED = b'''using HotChocolate;
+using HotChocolate.Types;
+namespace Catalog {
+  [ObjectType<Session>]
+  public static partial class SessionType {
+    static partial void Configure(IObjectTypeDescriptor<Session> descriptor) {
+      descriptor.Field("code").Resolve(ctx => ctx.Parent<Session>().Id.ToString());
+    }
+    public static int Duration([Parent("StartTime EndTime")] Session session) => 0;
+    public static Speaker[] GetSpeakersAsync([Parent] Session session) => null;
+    public static string Helper(string value) => value;
+  }
+}
+'''
+
+SUBSCRIBE_WITH = b'''using HotChocolate;
+using HotChocolate.Types;
+namespace Catalog {
+  [SubscriptionType]
+  public static partial class AttendeeSubscriptions {
+    [Subscribe(With = nameof(SubscribeToOnCheckedInAsync))]
+    public static CheckIn OnCheckedIn(int sessionId, [EventMessage] int attendeeId) => null;
+    public static ValueTask<ISourceStream<int>> SubscribeToOnCheckedInAsync(
+        int sessionId, ITopicEventReceiver receiver) => default;
+    [Subscribe]
+    public static Order OnOrder([EventMessage] Order order) => order;
+  }
+}
+'''
+
+
+def test_generic_extend_object_type_resolves_its_target() -> None:
+    rec = _parse(CSharpHotChocolateParser(), GENERIC_EXTENSIONS, "Extensions.cs")
+    assert sorted((s.method, s.endpoint, s.handler) for s in _routes(rec)) == [
+        ("MUTATION", "addBook", "AddBook"),
+        ("QUERY", "books", "GetBooks"),
+        ("RESOLVE_FIELD", "Session.label", "GetLabel"),
+    ]
+
+
+def test_source_generated_object_type_resolvers() -> None:
+    assert CSharpHotChocolateParser().claims("SessionType.cs", SOURCE_GENERATED)
+    rec = _parse(CSharpHotChocolateParser(), SOURCE_GENERATED, "SessionType.cs")
+    # Parent-bound methods and the parent-reading fluent field; Helper binds no parent.
+    assert sorted((s.routeKind, s.endpoint, s.handler) for s in _routes(rec)) == [
+        ("field_resolver", "Session.code", None),
+        ("field_resolver", "Session.duration", "Duration"),
+        ("field_resolver", "Session.speakers", "GetSpeakersAsync"),
+    ]
+
+
+def test_plain_object_type_attribute_is_not_a_marker() -> None:
+    src = b'[ObjectType("Book")]\npublic class Book { public string Title { get; set; } }\n'
+    assert not CSharpHotChocolateParser().claims("Book.cs", src)
+
+
+def test_subscribe_with_stream_method_is_not_an_operation() -> None:
+    rec = _parse(CSharpHotChocolateParser(), SUBSCRIBE_WITH, "AttendeeSubscriptions.cs")
+    assert sorted(s.endpoint for s in _routes(rec)) == ["onCheckedIn", "onOrder"]
