@@ -64,8 +64,8 @@ def namespace_of(root: Node, source: bytes) -> str:
     return ""
 
 
-def _index_one(args: tuple[str, str, str]) -> tuple[dict[str, str], dict[str, Any]] | None:
-    file_path, relative_path, repo_root = args
+def _index_one(args: tuple[str, str, str, int]) -> tuple[dict[str, str], dict[str, Any]] | None:
+    file_path, relative_path, repo_root, timeout_micros = args
     try:
         source = Path(file_path).read_bytes()
     except OSError as exc:
@@ -75,7 +75,7 @@ def _index_one(args: tuple[str, str, str]) -> tuple[dict[str, str], dict[str, An
         )
         return None
     try:
-        root = parse_source("php", source, 0).root_node
+        root = parse_source("php", source, timeout_micros).root_node
         namespace = namespace_of(root, source)
         found: dict[str, str] = {}
 
@@ -99,10 +99,13 @@ def _index_one(args: tuple[str, str, str]) -> tuple[dict[str, str], dict[str, An
         return None
 
 
-def build_fqcn_index(repo_root: Path, files: Sequence[Path], jobs: int = 1) -> PhpIndex:
+def build_fqcn_index(
+    repo_root: Path, files: Sequence[Path], jobs: int = 1, parse_timeout_micros: int = 0
+) -> PhpIndex:
     own, fact_files = split_fact_sources("php", list(files))
     collected: dict[str, list[Any]] = collect_fact_sources("php", fact_files, repo_root, jobs)
-    args = [(str(path), repo_relative(path, repo_root), str(repo_root)) for path in own]
+    args = [(str(path), repo_relative(path, repo_root), str(repo_root), parse_timeout_micros)
+            for path in own]
     fqcn: dict[str, str | None] = {}
     for fragment in parallel_map(args, _index_one, jobs):
         if fragment is None:

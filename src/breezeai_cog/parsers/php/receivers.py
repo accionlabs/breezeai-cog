@@ -237,12 +237,22 @@ def outermost_calls(dc: DetectContext, rules: Rules) -> Iterator[tuple[Node, lis
     found: list[tuple[Node, list[Node], str]] = []
 
     def captured(node: Node) -> set[str]:
+        """Variables a closure's ``use (...)`` clause imports — by value or by reference."""
         use = next((c for c in node.named_children
                     if c.type == "anonymous_function_use_clause"), None)
-        return {
-            node_text(c, dc.source) for c in use.named_children
-            if c.type == "variable_name"
-        } if use is not None else set()
+        if use is None:
+            return set()
+        names: set[str] = set()
+        for item in use.named_children:
+            variable = item.named_children[0] if item.type == "by_ref" and item.named_children else item
+            if variable.type == "variable_name":
+                names.add(node_text(variable, dc.source))
+        return names
+
+    def parameter_names(node: Node) -> set[str]:
+        params = node.child_by_field_name("parameters")
+        names = (p.child_by_field_name("name") for p in params.named_children) if params is not None else ()
+        return {node_text(n, dc.source) for n in names if n is not None}
 
     def visit(node: Node, scope: Mapping[str, str], props: Mapping[str, str],
               this_kind: str | None) -> None:
@@ -252,7 +262,9 @@ def outermost_calls(dc: DetectContext, rules: Rules) -> Iterator[tuple[Node, lis
                 continue
             if child.type in _SCOPES:
                 if child.type == "arrow_function":
-                    inherited = scope
+                    # A parameter of the same name hides the outer variable, typed or not.
+                    shadowed = parameter_names(child)
+                    inherited = {name: kind for name, kind in scope.items() if name not in shadowed}
                 elif child.type == "anonymous_function":
                     names = captured(child)
                     inherited = {name: kind for name, kind in scope.items() if name in names}

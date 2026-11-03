@@ -141,10 +141,6 @@ def match_api(
         m = _DOTNET_VERBS.get(m, m)
     if m not in _HTTP_VERBS:
         return None
-    if language == "php" and not any(
-        hint in _receiver_text(low) for hint in ("http", "guzzle", "curl", "restclient", "apiclient")
-    ):
-        return None
     if m == "request" and method != "request":
         # Capitalized Request (...) is a constructor or model type, not an outbound HTTP request call
         return None

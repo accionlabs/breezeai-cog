@@ -88,6 +88,37 @@ def test_composer_json_extracts_package_and_dependency_metadata() -> None:
     assert rec.metadata["devDependencyCount"] == 1
 
 
+def test_composer_json_keeps_platform_requirements_autoload_and_scripts() -> None:
+    info = _parse(
+        "composer.json",
+        {
+            "name": "acme/example", "type": "project",
+            "require": {"php": "^8.2", "ext-json": "*", "laravel/framework": "^11.0"},
+            "require-dev": {"ext-xdebug": "*"},
+            "autoload": {"psr-4": {"App\\": "app/"}},
+            "autoload-dev": {"psr-4": {"Tests\\": "tests/"}},
+            "scripts": {"test": "phpunit", "lint": "pint"},
+        },
+    ).metadata["packageInfo"]
+    assert info["type"] == "project"
+    assert info["platform"] == {"php": "^8.2", "ext-json": "*", "ext-xdebug": "*"}
+    assert info["autoload"] == {"psr-4": {"App\\": "app/", "Tests\\": "tests/"}}
+    assert info["scripts"] == ["lint", "test"]
+    assert info["dependencies"] == {"laravel/framework": "^11.0"}
+
+
+def test_composer_json_leaves_out_unknown_values() -> None:
+    info = _parse("composer.json", {"name": "acme/example"}).metadata["packageInfo"]
+    assert "version" not in info and "platform" not in info and "autoload" not in info
+
+
+def test_composer_json_with_a_non_object_root_is_a_config_parse_error() -> None:
+    ctx = ParseContext(path="composer.json", abs_path=None, source=b"[1, 2]", repo_root=".")
+    rec = JsonParser().parse_file(ctx)
+    assert rec.language == "config"
+    assert "must hold a JSON object" in rec.metadata["parseError"]
+
+
 def test_composer_json_allows_omitted_optional_sections() -> None:
     rec = _parse("composer.json", {"name": "acme/example"})
     assert rec.metadata["packageInfo"]["name"] == "acme/example"
