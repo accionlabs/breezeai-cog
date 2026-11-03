@@ -29,7 +29,7 @@ from tree_sitter import Node
 from ..emit import disambiguate, statement_id
 from ..schemas import Decorator, Statement
 from ..schemas.enums import SemanticType
-from .detection import classify_call, text_has_query
+from .detection import classify_call, text_has_query, vendor_from_imports
 from .treesitter import first_line, node_text
 
 # Per-file collector for concatenations skipped by the fold cap. ``render_concat`` records
@@ -64,6 +64,29 @@ def reset_http_client_ids(token: "contextvars.Token[frozenset[str]]") -> None:
 def current_http_client_ids() -> frozenset[str]:
     """Return the HTTP-client names active for the file being extracted."""
     return _http_client_ids.get()
+
+
+# Per-file ORM named by the file's imports (detection.vendor_from_imports), for the shared
+# db-call classifier. A parser starts it empty around a file (begin_datastore_vendor, reset in a
+# finally like _http_client_ids) and sets it once it has read the imports.
+_datastore_vendor: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+    "datastore_vendor", default=None
+)
+
+
+def begin_datastore_vendor() -> "contextvars.Token[str | None]":
+    """Start the current file with no imported ORM; returns a token for
+    :func:`end_datastore_vendor` (in a ``finally``)."""
+    return _datastore_vendor.set(None)
+
+
+def set_datastore_vendor(external_imports: "list[str] | None") -> None:
+    """Record the ORM the current file's external imports name."""
+    _datastore_vendor.set(vendor_from_imports(external_imports))
+
+
+def end_datastore_vendor(token: "contextvars.Token[str | None]") -> None:
+    _datastore_vendor.reset(token)
 
 
 def begin_concat_tracking() -> None:
@@ -341,6 +364,7 @@ def classify_statement(
             language,
             typed_db_ids=typed_db_ids,
             http_client_ids=current_http_client_ids() or None,
+            vendor=_datastore_vendor.get(),
         )
         if classified is None:
             continue

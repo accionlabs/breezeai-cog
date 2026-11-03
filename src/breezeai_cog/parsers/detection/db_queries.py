@@ -87,6 +87,42 @@ for _db, _methods in _DB_METHODS.items():
     for _m in _methods:
         _DISTINCTIVE.setdefault(_m, _db)
 
+# The ORM a file's own imports name: an import (``FileRecord.externalImports`` entry, matched
+# case-insensitively as the name itself or a dotted child) -> hint. It names the product only
+# where the call already proves data access and the language left it the generic ``orm``, and
+# only on a receiver that is itself a data-access handle (``_VENDOR_RECEIVERS``): the import
+# says the file uses Hibernate, not that every call in it does. The first entry that matches
+# wins, so Spring Data JPA (whose default provider is Hibernate) is ``jpa``. A service that
+# imports only its own repository interface names no product and stays ``orm``.
+#
+# On the JVM only the API a call goes through counts, not its package: Ebean and other ORMs use
+# the ``jakarta.persistence`` annotations and exceptions too, so an imported
+# ``PersistenceException`` or ``@Entity`` says nothing about the calls. A C# ``using`` always
+# names a namespace, so the .NET entries are namespaces.
+_VENDOR_BY_IMPORT: tuple[tuple[str, str], ...] = (
+    ("org.springframework.data.jpa", "jpa"),
+    ("org.hibernate.session", "hibernate"),
+    ("org.hibernate.sessionfactory", "hibernate"),
+    ("org.hibernate.statelesssession", "hibernate"),
+    ("jakarta.persistence.entitymanager", "jpa"),
+    ("jakarta.persistence.entitymanagerfactory", "jpa"),
+    ("javax.persistence.entitymanager", "jpa"),
+    ("javax.persistence.entitymanagerfactory", "jpa"),
+    ("nhibernate", "hibernate"),
+    ("microsoft.entityframeworkcore", "entity_framework"),
+    ("system.data.entity", "entity_framework"),
+)
+
+
+def vendor_from_imports(external_imports: "list[str] | None") -> str | None:
+    """The ORM named by a file's external imports (``_VENDOR_BY_IMPORT``), else ``None``."""
+    lows = [i.lower() for i in external_imports or ()]
+    for prefix, hint in _VENDOR_BY_IMPORT:
+        if any(i == prefix or i.startswith(prefix + ".") for i in lows):
+            return hint
+    return None
+
+
 # Ambiguous ORM verbs -> generic hint, refined by receiver below.
 _GENERIC = {
     "findone", "findbyid", "find", "save", "create", "update", "delete", "remove",
@@ -224,6 +260,18 @@ _DB_RECEIVER_SUFFIXES = (
     "datasource", "queryrunner", "database", "manager", "connection", "conn",
 )
 
+# Receiver terminal-segment suffixes that are a data-access handle of the ORM itself, so the
+# file's imported ORM (``vendor_from_imports``) can name the product of a call on one. Narrower
+# than ``_DB_RECEIVER_SUFFIXES``: a ``…collection``/``…model``/``…connection`` is data access
+# but not necessarily through the imported ORM.
+_VENDOR_RECEIVERS = ("repository", "repo", "dao", "entitymanager", "session")
+
+
+def _orm(receiver: str, vendor: str | None) -> str:
+    """``vendor`` on an ORM data-access handle, else the generic ``orm``."""
+    return vendor if vendor and receiver.endswith(_VENDOR_RECEIVERS) else "orm"
+
+
 # Synchronous LINQ terminal operators that are AMBIGUOUS: identical method names run over
 # both a DbSet/IQueryable (EF → a SQL round-trip) and an in-memory List/array/ZipArchive
 # (LINQ-to-Objects → no DB). Their async twins stay in _DISTINCTIVE (in-memory collections
@@ -333,7 +381,10 @@ def _is_prisma_chain(low: str) -> bool:
 
 
 def match_db(callee: str, method: str, language: str | None = None,
-             typed_db_ids: "frozenset[str] | None" = None) -> str | None:
+             typed_db_ids: "frozenset[str] | None" = None,
+             vendor: str | None = None) -> str | None:
+    """The ``dataAccessHint`` of a call, else ``None``. ``vendor`` is the ORM the file's
+    imports name (:func:`vendor_from_imports`); it only ever replaces a would-be ``orm``."""
     if language in {"php", "go"}:
         # PHP and Go data access is recorded from evidence by their own detectors — PHP from
         # imports, types and model classes (php/data_access.py), Go from the receiver's declared
@@ -403,7 +454,9 @@ def match_db(callee: str, method: str, language: str | None = None,
                 if not (f".{needle}." in low or low.startswith(f"{needle}.")):
                     continue
             # The receiver shows data access; the product named must ship for this language.
-            return "orm" if language is not None and language not in langs else hint
+            if language is not None and language not in langs:
+                return _orm(receiver, vendor)
+            return hint
         if m in _HIGH_COLLISION or gated:
             # Non-DB receivers (canvas ctx, logger, cache, …) are never data access — bail
             # early before the suffix heuristic can misfire (e.g. ``ctx.save()``).
@@ -415,11 +468,11 @@ def match_db(callee: str, method: str, language: str | None = None,
                 return "orm" if receiver in typed_db_ids else None
             # Opt-in heuristic (Python, non-class TS, etc.): positive DB suffix wins.
             if receiver and any(receiver.endswith(s) for s in _DB_RECEIVER_SUFFIXES):
-                return "orm"
+                return _orm(receiver, vendor)
             return None
         if receiver and any(receiver.endswith(s) for s in _NON_DB_RECEIVERS):
             return None  # a cache/collection/UI-state/etc. receiver — not data access
-        return "orm"
+        return _orm(receiver, vendor)
 
     if m in _DJANGO_VERBS and (language is None or language in _PYTHON) and (
         ".objects." in low or low.startswith("objects.") or "queryset" in low

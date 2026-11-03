@@ -350,6 +350,72 @@ def test_distinctive_verbs_of_another_language_need_a_db_receiver() -> None:
     assert match_db("collection.insertOne", "insertOne", "java") == "mongodb"
 
 
+def test_vendor_from_imports() -> None:
+    from breezeai_cog.parsers.detection import vendor_from_imports
+    assert vendor_from_imports(["org.hibernate.Session"]) == "hibernate"
+    assert vendor_from_imports(["jakarta.persistence.EntityManager"]) == "jpa"
+    assert vendor_from_imports(["javax.persistence.EntityManagerFactory"]) == "jpa"
+    # Annotations and exceptions are shared with other ORMs (Ebean): not evidence of the API.
+    assert vendor_from_imports(["jakarta.persistence.PersistenceException"]) is None
+    assert vendor_from_imports(["javax.persistence.*", "org.hibernate.annotations.Type"]) is None
+    # Spring Data JPA runs on Hibernate by default but is named for what the code uses.
+    assert vendor_from_imports(
+        ["org.springframework.data.jpa.repository.JpaRepository", "org.hibernate.Session"]
+    ) == "jpa"
+    assert vendor_from_imports(["NHibernate", "System.Linq"]) == "hibernate"
+    assert vendor_from_imports(["Microsoft.EntityFrameworkCore"]) == "entity_framework"
+    assert vendor_from_imports(["org.hibernateish.Thing", "java.util.List"]) is None
+    assert vendor_from_imports(None) is None
+
+
+def test_imported_orm_names_calls_on_an_orm_handle() -> None:
+    from breezeai_cog.parsers.detection.db_queries import match_db
+    # Where the language left `orm`, the file's imported ORM names the product on a repository,
+    # DAO, entity manager or session receiver.
+    assert match_db("this.entityManager.persist", "persist", "java", vendor="jpa") == "jpa"
+    assert match_db("session.save", "save", "java", vendor="hibernate") == "hibernate"
+    assert match_db("orderRepository.findById", "findById", "java", vendor="jpa") == "jpa"
+    assert match_db("userDao.findOne", "findOne", "java", vendor="hibernate") == "hibernate"
+    assert match_db("logRepository.findAll", "findAll", "java", vendor="jpa") == "jpa"
+    # Data access on another kind of receiver stays generic: the import is about the file.
+    assert match_db("items.collection.remove", "remove", "csharp", vendor="hibernate") == "orm"
+    assert match_db("userModel.findOne", "findOne", "java", vendor="jpa") == "orm"
+    # The vendor never creates a detection nor overrides a named product.
+    assert match_db("names.stream().findFirst", "findFirst", "java", vendor="jpa") is None
+    assert match_db("orderRepository.findById", "findById", "typescript", vendor="jpa") == "typeorm"
+    assert match_db("collection.insertOne", "insertOne", "java", vendor="jpa") == "mongodb"
+
+
+def test_java_and_csharp_files_name_their_imported_orm(tmp_path) -> None:
+    from breezeai_cog.parsers.csharp.parser import CSharpParser
+    from breezeai_cog.parsers.java.parser import JavaParser
+
+    java = (
+        b"import jakarta.persistence.EntityManager;\n"
+        b"class OrderStore {\n"
+        b"  EntityManager entityManager;\n"
+        b"  void add(Order o) { entityManager.persist(o); }\n"
+        b"}\n"
+    )
+    rec = JavaParser().parse_file(_ctx("OrderStore.java", java, tmp_path))
+    assert [s.dataAccessHint for s in rec.statements if s.semanticType == "db_method_call"] == ["jpa"]
+    plain = java.replace(b"import jakarta.persistence.EntityManager;\n", b"")
+    rec = JavaParser().parse_file(_ctx("Plain.java", plain, tmp_path))
+    assert [s.dataAccessHint for s in rec.statements if s.semanticType == "db_method_call"] == ["orm"]
+
+    cs = (
+        b"using NHibernate;\n"
+        b"class OrderStore {\n"
+        b"  ISession session;\n"
+        b"  void Add(Order o) { session.Save(o); }\n"
+        b"}\n"
+    )
+    rec = CSharpParser().parse_file(_ctx("OrderStore.cs", cs, tmp_path))
+    assert [s.dataAccessHint for s in rec.statements if s.semanticType == "db_method_call"] == [
+        "hibernate"
+    ]
+
+
 def test_sync_linq_terminals_require_ef_source() -> None:
     # Sync LINQ terminals (ToList/FirstOrDefault/…) run over BOTH a DbSet (EF → SQL) and an
     # in-memory List/array/ZipArchive (LINQ-to-Objects → no DB). Tag EF only with a queryable

@@ -151,6 +151,20 @@ flowchart TD
   D -- no --> N[no meaning]
 ```
 
+`dataAccessHint` names the product, in order of evidence:
+1. **A distinctive method:** `insertOne` → `mongodb`.
+2. **The receiver:** `orderRepository.findOne` → `typeorm`. A product is named only in a language
+   it ships for, so a Java or C# repository call gets the generic `orm`. A Node or Python ORM
+   verb in another language (`stream().findFirst()`) needs a data-access receiver too.
+3. **The file's own ORM import:** where step 2 left `orm` and the receiver is a repository, DAO,
+   entity manager or session, the file's import of the ORM's API names it: Hibernate `Session` /
+   `SessionFactory` → `hibernate`, JPA `EntityManager` or Spring Data JPA → `jpa`, the
+   `NHibernate` namespace → `hibernate`, `Microsoft.EntityFrameworkCore` → `entity_framework`
+   (Java, Kotlin, Groovy, Scala, C#, VB). A `jakarta.persistence` annotation or exception is not
+   enough: other ORMs (Ebean) use them too.
+4. **Otherwise `orm`:** data access whose product the file doesn't show. A service that
+   receives its repository by injection usually imports only that interface, so it stays `orm`.
+
 The order matters: API is checked first (so Django's `objects.get` is not mistaken for an HTTP
 GET only because of its name), and raw queries before ORM calls (so `createNativeQuery("SELECT …")`
 is a `query_statement`). If no call matches but the statement contains a string with real SQL
