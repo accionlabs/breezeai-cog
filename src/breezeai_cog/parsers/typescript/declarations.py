@@ -21,8 +21,8 @@ name exported twice differently, an export cycle, or a module outside the repo r
 
 A CommonJS module's properties count as its named exports — ``module.exports = { show() {} }``,
 ``exports.ping = function () {}`` — so ``require('./x').show`` resolves like an ES import. The
-methods of each top-level class are kept too (:func:`class_member`), for a handler written as
-``Class.method`` (a static method) or ``instance.method``.
+methods of each exported top-level class are kept too (:func:`class_member`), for a handler written
+as ``Class.method`` (a static method) or ``instance.method``.
 """
 
 from __future__ import annotations
@@ -70,7 +70,7 @@ class FileExports:
     #: CommonJS properties (``module.exports = { a }`` / ``exports.a = …``) → export, consulted
     #: after ``exports`` — never listed by :func:`export_names`.
     commonjs: dict[str, Export] = field(default_factory=dict)
-    #: Top-level class name → its methods.
+    #: Exported top-level class name → its methods.
     methods: dict[str, Methods] = field(default_factory=dict)
 
 
@@ -243,8 +243,31 @@ def import_bindings(root: Node, source: bytes) -> dict[str, tuple[str, str]]:
     return out
 
 
+def _is_require(node: Node, source: bytes) -> bool:
+    """``require(…)`` or ``require(…).member``."""
+    if node.type == "member_expression":
+        node = node.child_by_field_name("object") or node
+    fn = node.child_by_field_name("function") if node.type == "call_expression" else None
+    return fn is not None and node_text(fn, source) == "require"
+
+
 def _collect(root: Node, source: bytes, rel: str, repo_root: Path | None) -> FileExports | None:
+    from .imports import require_specifier
+
     decls = top_level_declarations(root, source)
+
+    def _required(value: Node) -> Export | None:
+        """``require('./x')`` → the module's default export; ``require('./x').y`` → its ``y``. A
+        package or a non-literal path → None: unknown, never the ``require`` line."""
+        member = None
+        if value.type == "member_expression":
+            prop = value.child_by_field_name("property")
+            member = node_text(prop, source) if prop is not None else None
+            value = value.child_by_field_name("object") or value
+        spec = require_specifier(value, source)
+        target = _resolve_relative(spec, rel, repo_root) if spec is not None else None
+        return ("from", target, member or "default") if target is not None else None
+
     imports = import_bindings(root, source)
     exports: dict[str, Export] = {}
     stars: list[str] = []
@@ -252,6 +275,9 @@ def _collect(root: Node, source: bytes, rel: str, repo_root: Path | None) -> Fil
     def local(name: str) -> Export | None:
         """The export of a local name: its declaration here, or the import it re-exports."""
         if name in decls:
+            value = decls[name][1]
+            if _is_require(value, source):
+                return _required(value)  # `const x = require('./x')` re-exports, it declares nothing
             return ("decl", name, decls[name][0])
         if name in imports:
             spec, imported = imports[name]
@@ -299,10 +325,19 @@ def _collect(root: Node, source: bytes, rel: str, repo_root: Path | None) -> Fil
                 exports["default"] = ("decl", node_text(nm, source) if nm is not None else "",
                                       (inner or node).start_point[0] + 1)
         elif decl is not None:
-            for declared, line, _ in _declared(decl, source):
+            for declared, line, value in _declared(decl, source):
+                if _is_require(value, source):  # `export const x = require('./x')` re-exports
+                    found = _required(value)
+                    if found is not None:
+                        exports[declared] = found
+                    continue
                 exports[declared] = ("decl", declared, line)
     commonjs = _commonjs_exports(root, source, local) if b"exports" in source else {}
-    methods = {c: m for c, m in top_level_classes(root, source).items() if m}
+    # Only a class this file exports is looked up from another file (:func:`class_member` starts
+    # from an export); a class used here is read from its node. The index is copied to every
+    # worker, so it keeps nothing else.
+    exported = {e[1] for e in (*exports.values(), *commonjs.values()) if e[0] == "decl"}
+    methods = {c: m for c, m in top_level_classes(root, source).items() if m and c in exported}
     if not exports and not stars and not commonjs and not methods:
         return None
     return FileExports(exports, tuple(stars), commonjs, methods)

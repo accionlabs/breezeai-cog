@@ -112,6 +112,66 @@ def _member_target(
     return class_member(index, decl, member, static)
 
 
+#: Nodes that open a scope a ``const`` / ``let`` / parameter can shadow a top-level name in: a
+#: function, a block, a loop (``for (let x …)``), a ``switch`` body and a ``catch`` clause.
+_SCOPES = frozenset({"function_declaration", "generator_function_declaration",
+                     "function_expression", "function", "generator_function", "arrow_function",
+                     "method_definition", "statement_block", "for_statement", "for_in_statement",
+                     "switch_body", "catch_clause"})
+#: Declarations that bind their name in the enclosing scope.
+_NAMED_DECLS = frozenset({"function_declaration", "generator_function_declaration",
+                          "class_declaration", "abstract_class_declaration"})
+#: A scope's own bindings: a function's parameters, ``catch (e)``, ``for (const x of …)``.
+_SCOPE_BINDINGS = ("parameters", "parameter", "left")
+
+
+def _pattern_names(node: Node | None, source: bytes) -> set[str]:
+    """The names a binding pattern binds: ``x``, ``{ a, b: c }``, ``[d, ...e]``, ``f = 1``."""
+    if node is None:
+        return set()
+    if node.type in ("identifier", "shorthand_property_identifier_pattern"):
+        return {node_text(node, source)}
+    if node.type in ("assignment_pattern", "object_assignment_pattern"):
+        return _pattern_names(node.child_by_field_name("left") or node.named_children[0], source)
+    if node.type == "pair_pattern":
+        return _pattern_names(node.child_by_field_name("value"), source)
+    if node.type in ("required_parameter", "optional_parameter"):
+        return _pattern_names(node.child_by_field_name("pattern"), source)
+    out: set[str] = set()
+    if node.type in ("object_pattern", "array_pattern", "rest_pattern", "formal_parameters"):
+        for c in node.named_children:
+            out |= _pattern_names(c, source)
+    return out
+
+
+def _local_scopes(root: Node, source: bytes) -> list[tuple[int, int, frozenset[str]]]:
+    """Every function / block / loop / ``catch`` below the top level → (first line, last line,
+    the names declared directly in it). Top-level names are not in it: they are what a local
+    shadows. Walked with an explicit stack (a deep expression must not exhaust recursion)."""
+    scopes: list[tuple[Node, set[str]]] = []
+    stack: list[tuple[Node, set[str] | None]] = [(root, None)]
+    while stack:
+        node, names = stack.pop()
+        own = names
+        if node.type in _SCOPES:
+            own = set()
+            scopes.append((node, own))
+            for field in _SCOPE_BINDINGS:
+                bound = node.child_by_field_name(field)
+                if bound is not None and (field != "left" or node.type == "for_in_statement"):
+                    own |= _pattern_names(bound, source)
+        if names is not None:  # the top level (``names is None``) is not a local scope
+            if node.type == "variable_declarator":
+                names |= _pattern_names(node.child_by_field_name("name"), source)
+            elif node.type in _NAMED_DECLS:
+                nm = node.child_by_field_name("name")
+                if nm is not None:
+                    names.add(node_text(nm, source))
+        stack.extend((c, own) for c in node.named_children)
+    return [(n.start_point[0] + 1, n.end_point[0] + 1, frozenset(names))
+            for n, names in scopes if names]
+
+
 def handler_locator(root: Node, source: bytes, path: str, repo_root: Path | None,
                     index: Any | None) -> HandlerLocator:
     """This file's lookup for :meth:`~..base.BaseParser.link_handlers`."""
@@ -132,9 +192,21 @@ def handler_locator(root: Node, source: bytes, path: str, repo_root: Path | None
         prev = then_members.get(m.group(3), m.group(1))
         then_members[m.group(3)] = m.group(1) if prev == m.group(1) else None
 
-    def locate(name: str) -> tuple[str | None, tuple[str, int] | None] | None:
+    scopes: list[tuple[int, int, frozenset[str]]] | None = None
+
+    def shadowed(name: str, line: int) -> bool:
+        """Whether a function or block around ``line`` declares ``name`` again: the record then
+        names that local, not the top-level declaration or import."""
+        nonlocal scopes
+        if scopes is None:
+            scopes = _local_scopes(root, source)
+        return any(start <= line <= end and name in names for start, end, names in scopes)
+
+    def locate(name: str, line: int | None = None) -> tuple[str | None, tuple[str, int] | None] | None:
         target: tuple[str, str] | None = None
         path_shaped = bool(_SPECIFIER_RE.match(name))
+        if not path_shaped and line is not None and shadowed(name.split(".", 1)[0], line):
+            return None  # a local of the same name: where it is declared is not looked up
         if path_shaped:
             target = (name, "default")
         elif name in decls:

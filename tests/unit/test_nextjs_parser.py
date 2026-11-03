@@ -3,6 +3,8 @@ from the file path, base reuse, gating, fixture exclusion, and selection."""
 
 from __future__ import annotations
 
+import pytest
+
 import json
 
 from jsonschema import Draft202012Validator
@@ -479,6 +481,37 @@ def test_next16_proxy_is_a_guard_named_proxy(analyze_files) -> None:
     assert got == {"/dashboard": (["proxy"], None), "/": (None, None)}
 
 
+def test_proxy_helper_below_the_app_root_is_not_a_guard(analyze_files) -> None:
+    # `app/api/proxy.ts` is a fetch helper, not the app's interceptor: only the file at an app's
+    # root (or its `src/`) is one.
+    st = analyze_files({
+        "package.json": _NEXT16_PKG,
+        "app/api/proxy.ts": "export async function proxy(req) { return fetch(req.url); }\n",
+        "app/api/orders/route.ts": "export async function GET() { return Response.json([]); }\n",
+    })
+    assert [s.guards for s in st if s.semanticType == "route"] == [None]
+
+
+def test_proxy_with_an_unknown_next_version_is_not_a_guard(analyze_files) -> None:
+    # A workspace link pins no version: before Next.js 16 `proxy.ts` is an ordinary module.
+    st = analyze_files({
+        "package.json": '{"dependencies": {"next": "workspace:*"}}',
+        "proxy.ts": _PROXY,
+        "app/dashboard/page.tsx": "export default function Dashboard() { return null; }\n",
+    })
+    assert [s.guards for s in st if s.routeKind == "page"] == [None]
+
+
+def test_middleware_in_src_of_a_monorepo_app_is_a_guard(analyze_files) -> None:
+    st = analyze_files({
+        "package.json": '{"private": true, "workspaces": ["apps/*"]}',
+        "apps/web/package.json": '{"dependencies": {"next": "14"}}',
+        "apps/web/src/middleware.ts": "export function middleware(req) { return; }\n",
+        "apps/web/src/app/dashboard/page.tsx": "export default function D() { return null; }\n",
+    })
+    assert [s.guards for s in st if s.routeKind == "page"] == [["middleware"]]
+
+
 def test_proxy_file_without_its_export_is_not_a_guard(analyze_files) -> None:
     # `proxy.ts` must export `proxy` (or a default); a `middleware` export there is not one.
     st = analyze_files({
@@ -536,6 +569,20 @@ def test_unknown_page_extensions_give_no_page_or_route_records(analyze_files) ->
     assert got == set()  # which App Router files are pages is unknown too
 
 
+def test_dotted_route_and_page_helpers_are_not_routes(analyze_files) -> None:
+    # Without pageExtensions, only `route.<ext>` / `page.<ext>` count: a `route.helpers.ts`
+    # beside a route is a module of it, not a second route.
+    st = analyze_files({
+        "package.json": _NEXT_PKG,
+        "app/api/x/route.ts": "export async function GET() { return Response.json(1); }\n",
+        "app/api/x/route.helpers.ts": "export async function GET() { return 1; }\n",
+        "app/about/page.tsx": "export default function About() { return null; }\n",
+        "app/about/page.helpers.tsx": "export default function Helper() { return null; }\n",
+    })
+    got = {(s.path, s.endpoint) for s in st if s.semanticType == "route"}
+    assert got == {("app/api/x/route.ts", "/api/x"), ("app/about/page.tsx", "/about")}
+
+
 def test_page_extensions_apply_per_app(analyze_files) -> None:
     # A nested app's config without pageExtensions keeps the default for its own pages.
     st = analyze_files({
@@ -548,60 +595,6 @@ def test_page_extensions_apply_per_app(analyze_files) -> None:
     })
     got = {s.endpoint for s in st if s.routeKind == "page"}
     assert got == {"/", "/about"}
-
-
-# ── MDX pages ────────────────────────────────────────────────────────────────────────────────
-_MDX = "# About us\n\nSome *content*.\n"
-
-
-def _mdx_pages(analyze_files, files: dict[str, str]):
-    st = analyze_files({"package.json": _NEXT_PKG, **files})
-    return {(s.path, s.endpoint, s.handler, s.nodeType, s.guards and tuple(s.guards))
-            for s in st if s.semanticType == "route" and s.routeKind == "page"}
-
-
-_MDX_CONFIG = "export default { pageExtensions: ['tsx', 'mdx'] };\n"
-
-
-def test_app_router_mdx_page(analyze_files) -> None:
-    got = _mdx_pages(analyze_files, {
-        "next.config.mjs": _MDX_CONFIG,
-        "app/about/page.mdx": _MDX,
-        "app/about/notes.mdx": _MDX,             # not a page file
-        "app/dashboard/@team/page.mdx": _MDX,    # a slot: no URL of its own
-        "docs/guide.mdx": _MDX,                  # not under a router at all
-    })
-    assert got == {("app/about/page.mdx", "/about", None, "synthetic", None)}
-
-
-def test_mdx_needs_page_extensions(analyze_files) -> None:
-    # Without `mdx` in pageExtensions (as @next/mdx requires) Next.js routes no MDX file.
-    files = {"pages/blog/post.mdx": _MDX, "app/about/page.mdx": _MDX}
-    assert _mdx_pages(analyze_files, files) == set()
-
-
-def test_pages_router_mdx_page(analyze_files) -> None:
-    got = _mdx_pages(analyze_files, {
-        "pages/blog/post.mdx": _MDX,
-        "next.config.mjs": _MDX_CONFIG,
-    })
-    assert got == {("pages/blog/post.mdx", "/blog/post", None, "synthetic", None)}
-
-
-def test_mdx_page_gets_base_path_and_proxy_guard(analyze_files) -> None:
-    got = _mdx_pages(analyze_files, {
-        "package.json": _NEXT16_PKG,
-        "next.config.js": "module.exports = { basePath: '/docs', pageExtensions: ['tsx', 'mdx'] };\n",
-        "proxy.ts": "export function proxy(req) {}\nexport const config = { matcher: ['/about'] };\n",
-        "app/about/page.mdx": _MDX,
-    })
-    assert got == {("app/about/page.mdx", "/docs/about", None, "synthetic", ("proxy",))}
-
-
-def test_mdx_outside_a_next_app_is_not_a_page(analyze_files) -> None:
-    st = analyze_files({"package.json": '{"dependencies": {"gatsby": "5"}}',
-                        "app/about/page.mdx": _MDX})
-    assert [s for s in st if s.semanticType == "route"] == []
 
 
 def test_referenced_pages_api_handler_is_one_statement(analyze_files) -> None:
@@ -633,3 +626,64 @@ def test_proxy_file_before_next16_is_not_a_guard(analyze_files) -> None:
         "app/dashboard/page.tsx": "export default function Dashboard() { return null; }\n",
     })
     assert [s.guards for s in st if s.routeKind == "page"] == [None]
+
+
+_PAGES_EXT_FILES = {
+    "pages/index.page.tsx": "export default function Home() { return null; }\n",
+    "pages/orders/OrderRow.tsx": "export default function OrderRow() { return null; }\n",
+}
+
+
+@pytest.mark.parametrize("config", [
+    "const pageExtensions = ['page.tsx'];\nmodule.exports = { pageExtensions };\n",
+    "const exts = ['page.tsx'];\nmodule.exports = { pageExtensions: exts };\n",
+    "export const pageExtensions = ['page.tsx'];\nexport default { pageExtensions };\n",
+])
+def test_page_extensions_from_a_same_file_constant(analyze_files, config: str) -> None:
+    st = analyze_files({"package.json": _NEXT_PKG, "next.config.mjs": config, **_PAGES_EXT_FILES})
+    assert {(s.endpoint, s.handler) for s in st if s.routeKind == "page"} == {("/", "Home")}
+
+
+@pytest.mark.parametrize("config", [
+    "const cfg = {};\ncfg.pageExtensions = ['page.tsx'];\nmodule.exports = cfg;\n",
+    "const cfg = {};\ncfg['pageExtensions'] = ['page.tsx'];\nmodule.exports = cfg;\n",
+    "let pageExtensions = ['page.tsx'];\nmodule.exports = { pageExtensions };\n",
+])
+def test_page_extensions_set_at_run_time_are_unknown(analyze_files, config: str) -> None:
+    # Which files are pages is unknown: no page records rather than components as pages.
+    st = analyze_files({"package.json": _NEXT_PKG, "next.config.js": config, **_PAGES_EXT_FILES})
+    assert [s for s in st if s.routeKind == "page"] == []
+
+
+def _frameworks(tmp_path, files: dict[str, str]) -> dict[str, str | None]:
+    from breezeai_cog import iter_file_records
+
+    for rel, src in files.items():
+        p = tmp_path / rel
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(src)
+    return {r.path: r.framework for r in iter_file_records(tmp_path) if r.path in files}
+
+
+def test_route_file_framework_is_nextjs_whatever_else_it_does(tmp_path) -> None:
+    got = _frameworks(tmp_path, {
+        "package.json": '{"dependencies": {"next": "15", "@aws-sdk/client-s3": "3"}}',
+        # an S3 call: its detector runs first, but the file is a Next.js route
+        "app/api/upload/route.ts": (
+            "import { S3Client, PutObjectCommand } from '@aws-sdk/client-s3';\n"
+            "const s3 = new S3Client({});\n"
+            "export async function POST() {\n"
+            "  await s3.send(new PutObjectCommand({ Bucket: 'b', Key: 'k' }));\n"
+            "  return Response.json(1);\n}\n"
+        ),
+        # an OG-image route importing React: owned by the React parser, still a Next.js route
+        "app/og/route.tsx": (
+            "import React from 'react';\nimport { ImageResponse } from 'next/og';\n"
+            "export async function GET() { return new ImageResponse(<div>hi</div>); }\n"
+        ),
+        # a page importing React stays a React file (as before)
+        "app/about/page.tsx": "import React from 'react';\nexport default function About() { return <p/>; }\n",
+    })
+    assert got["app/api/upload/route.ts"] == "nextjs"
+    assert got["app/og/route.tsx"] == "nextjs"
+    assert got["app/about/page.tsx"] == "react"

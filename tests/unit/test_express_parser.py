@@ -774,3 +774,167 @@ def test_accessors_are_not_handlers(analyze_files) -> None:
         ),
     })
     assert {ep: loc for ep, (_, *loc) in got.items()} == {"/a": [None, None], "/b": [None, None]}
+
+
+def test_mount_guards_are_the_middleware_before_each_router(analyze_files) -> None:
+    # Express runs a mount's arguments in order: `requireAuth` runs only after `users` passes the
+    # request on, so it guards `orders` and not `users`; `notFound` runs after both, so it guards
+    # neither.
+    rows = _route_rows(analyze_files, {
+        "src/users.ts": _MULTI_USERS,
+        "src/orders.ts": _MULTI_ORDERS,
+        "src/app.ts": (
+            "import express from 'express';\nimport users from './users';\n"
+            "import orders from './orders';\nimport { requireAuth, notFound } from 'some-auth';\n"
+            "const app = express();\napp.use('/api', users, requireAuth, orders, notFound);\n"
+        ),
+    })
+    assert rows == {("route", "GET", "/api/users", (), "list"),
+                    ("route", "GET", "/api/orders", ("requireAuth",), "list")}
+
+
+def test_same_file_mount_guards_are_the_middleware_before_each_router(analyze_files) -> None:
+    rows = _route_rows(analyze_files, {
+        "src/app.js": (
+            "const express = require('express');\nconst app = express();\n"
+            "const pub = express.Router();\nconst priv = express.Router();\n"
+            "pub.get('/health', (req, res) => res.send('ok'));\n"
+            "priv.get('/me', (req, res) => res.send('me'));\n"
+            "app.use('/api', cors(), pub, requireAuth, priv, notFound);\n"
+        ),
+    })
+    got = {(endpoint, guards) for _, _, endpoint, guards, _ in rows}
+    assert ("/api/health", ("cors",)) in got
+    assert ("/api/me", ("cors", "requireAuth")) in got
+    assert not any("notFound" in guards for _, guards in got)
+
+
+def test_factory_mount_guards_are_the_middleware_before_it(analyze_files) -> None:
+    st = analyze_files({
+        "package.json": _PKG,
+        "src/users.js": (
+            "import { Router } from 'express';\nexport function usersRouter() {\n"
+            "  const router = Router();\n  router.get('/:id', getUser);\n  return router;\n}\n"
+        ),
+        "src/app.js": (
+            "import express from 'express';\nimport { usersRouter } from './users.js';\n"
+            "const app = express();\napp.use('/users', requireAuth, usersRouter(), notFound);\n"
+        ),
+    })
+    [r] = [s for s in st if s.semanticType == "route" and s.path == "src/users.js"]
+    assert (r.endpoint, r.guards) == ("/users/:id", ["requireAuth"])
+
+
+def test_commonjs_re_export_of_a_require_is_never_the_require_line(analyze_files) -> None:
+    got = _handler_locations(analyze_files, {
+        "src/handlers/getUser.js": "module.exports = function getUser(req, res) { res.send(1); };\n",
+        "src/handlers/listUsers.js": "export default function listUsers(req, res) {\n  res.send([]);\n}\n",
+        "src/handlers/util.js": "exports.ping = function (req, res) {\n  res.send('pong');\n};\n",
+        "src/handlers/index.js": (
+            "const getUser = require('./getUser');\n"      # `module.exports = fn`: unknown
+            "const listUsers = require('./listUsers');\n"  # a default export: located
+            "const ping = require('./util').ping;\n"       # a member of the module: located
+            "const lodash = require('lodash');\n"          # a package: unknown
+            "module.exports = { getUser, listUsers, ping, lodash };\n"
+        ),
+        "src/app.js": (
+            "const express = require('express');\nconst app = express();\n"
+            "const handlers = require('./handlers');\n"
+            "app.get('/u', handlers.getUser);\napp.get('/l', handlers.listUsers);\n"
+            "app.get('/p', handlers.ping);\napp.get('/x', handlers.lodash);\n"
+        ),
+    })
+    assert got == {
+        "/u": ("handlers.getUser", None, None),
+        "/l": ("handlers.listUsers", "src/handlers/listUsers.js", 1),
+        "/p": ("handlers.ping", "src/handlers/util.js", 1),
+        "/x": ("handlers.lodash", None, None),
+    }
+
+
+def test_a_local_shadowing_a_top_level_name_is_not_located(analyze_files) -> None:
+    got = _handler_locations(analyze_files, {
+        "src/ctl.ts": (
+            "export class UserController {\n  list(req, res) {}\n}\n"
+            "export class AdminController {\n  list(req, res) {}\n}\n"
+        ),
+        "src/app.ts": (
+            "import express from 'express';\n"
+            "import { UserController, AdminController } from './ctl';\n"
+            "const controller = new UserController();\n"
+            "function handler(req, res) {}\n"
+            "const app = express();\n"
+            "app.get('/users', controller.list);\n"          # the top-level instance: located
+            "function admin() {\n"
+            "  const controller = new AdminController();\n"  # shadows it
+            "  app.get('/admin', controller.list);\n"
+            "}\n"
+            "function unrelated() {\n  const controller = 1;\n}\n"
+            "app.get('/top', handler);\n"                     # a sibling scope's local: located
+        ),
+    })
+    assert got["/users"] == ("controller.list", "src/ctl.ts", 2)
+    assert got["/admin"] == ("controller.list", None, None)
+    assert got["/top"][2] == 4
+
+
+def test_class_methods_are_indexed_only_for_exported_classes(tmp_path) -> None:
+    from breezeai_cog.parsers.typescript.declarations import _collect
+    from breezeai_cog.parsers.treesitter import parse_source
+
+    src = (b"class Hidden {\n  a() {}\n}\nclass Ctl {\n  b() {}\n}\n"
+           b"export { Ctl as Controller };\nexport default class Main {\n  c() {}\n}\n")
+    root = parse_source("typescript", src).root_node
+    got = _collect(root, src, "src/x.ts", tmp_path)
+    assert got is not None and set(got.methods) == {"Ctl", "Main"}
+
+
+def test_aliased_and_default_exported_class_handlers_are_located(analyze_files) -> None:
+    got = _handler_locations(analyze_files, {
+        "src/ctl.ts": "class Ctl {\n  static b(req, res) {}\n}\nexport { Ctl as Controller };\n",
+        "src/main.ts": "export default class Main {\n  static c(req, res) {}\n}\n",
+        "src/app.ts": (
+            "import express from 'express';\nimport { Controller } from './ctl';\n"
+            "import Main from './main';\nconst app = express();\n"
+            "app.get('/b', Controller.b);\napp.get('/c', Main.c);\n"
+        ),
+    })
+    assert got == {"/b": ("Controller.b", "src/ctl.ts", 2), "/c": ("Main.c", "src/main.ts", 2)}
+
+
+def test_loop_switch_and_catch_bindings_shadow_only_their_own_body(analyze_files) -> None:
+    got = _handler_locations(analyze_files, {
+        "src/users.ts": "export function list(req, res) {}\n",
+        "src/app.ts": (
+            "import express from 'express';\nimport { list } from './users';\n"
+            "const app = express();\n"
+            "function setup(xs, k) {\n"
+            "  for (let list = 0; list < 1; list++) {}\n"   # the loop's own `list`
+            "  switch (k) { case 1: { const list = 2; } }\n"
+            "  app.get('/after', list);\n"                   # the import again: located
+            "  for (const list of xs) {\n"
+            "    app.get('/loop', list);\n"                  # the loop variable: not located
+            "  }\n"
+            "  try { k(); }\n"
+            "  catch (list) {\n"
+            "    app.get('/catch', list);\n"                 # the caught error: not located
+            "  }\n"
+            "}\n"
+        ),
+    })
+    assert got["/after"] == ("list", "src/users.ts", 1)
+    assert got["/loop"][1:] == (None, None)
+    assert got["/catch"][1:] == (None, None)
+
+
+def test_es_export_of_a_require_is_never_the_require_line(analyze_files) -> None:
+    got = _handler_locations(analyze_files, {
+        "src/users.ts": "export function list(req, res) {\n  res.json([]);\n}\n",
+        "src/index.ts": "export const users = require('./users');\nexport const pkg = require('lodash');\n",
+        "src/app.ts": (
+            "import express from 'express';\nimport { users, pkg } from './index';\n"
+            "const app = express();\napp.get('/u', users.list);\napp.get('/p', pkg.list);\n"
+        ),
+    })
+    assert got["/p"][1:] == (None, None)
+    assert got["/u"] == ("users.list", None, None)  # never the `require` line of src/index.ts

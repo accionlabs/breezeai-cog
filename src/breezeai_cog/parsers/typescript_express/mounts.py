@@ -269,7 +269,7 @@ def _confirm_instance_mounts(
     """Keep the router-instance mounts the target file confirms: the imported name is a
     ``Router()`` that file exports. Every confirmed router of a mount site counts
     (``app.use('/api', auth, users, orders)`` mounts both); its guards are the site's other
-    arguments that are not confirmed routers. A confirmed router whose base does not resolve, or
+    arguments before it that are not confirmed routers. A confirmed router whose base does not resolve, or
     that is mounted at >1 distinct base, is returned as unknown (its routes have no address). A
     site is served — its mount is wiring — when every confirmed router of it keeps its base."""
     confirmed: dict[str, list[tuple[int, str, str, str | None, tuple[str | None, ...]]]] = {}
@@ -283,8 +283,11 @@ def _confirm_instance_mounts(
     for site, found in confirmed.items():
         routers_at = {pos for pos, *_ in found}
         site_routers[site] = frozenset(n for pos, *_, names in found if (n := names[pos]))
-        for _, target, router_var, value, names in found:
-            guards = tuple(n for i, n in enumerate(names) if i not in routers_at and n is not None)
+        for pos, target, router_var, value, names in found:
+            # Express runs a mount's arguments in order: only those before a router guard it (a
+            # trailing handler runs after it, e.g. a 404 fallback).
+            guards = tuple(n for i, n in enumerate(names[:pos])
+                           if i not in routers_at and n is not None)
             hits.append((site, (target, router_var, value, guards)))
     wiring = [Wiring((target, local), "prefix", value, site)
               for site, (target, local, value, _) in hits]
@@ -364,8 +367,9 @@ def _collect_express_mounts(
                             resolved = _try_paths(mount_dir / specs[0], repo_root)
                             if resolved is not None:
                                 site = f"{rel}:{node.start_point[0] + 1}:{node.start_point[1]}"
-                                guards = _names([a for a in arg_nodes[1:]
-                                                 if a is not factories[0][0]], source)
+                                # only the arguments before the factory run first (guard it)
+                                at = arg_nodes.index(factories[0][0])
+                                guards = _names(arg_nodes[1:at], source)
                                 out.append((resolved, site, base, guards))
                         elif not specs:  # router instances: every imported identifier is a candidate
                             site = f"{rel}:{node.start_point[0] + 1}:{node.start_point[1]}"

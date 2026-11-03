@@ -21,8 +21,6 @@ leaves the endpoint empty (never the symbol it was read from)."""
 
 from __future__ import annotations
 
-from functools import cache
-from typing import Any
 
 from tree_sitter import Node
 
@@ -31,7 +29,7 @@ from ..additive import DetectContext, Detection, Detector, Gate, register_detect
 from ..emits import Emit
 from ..treesitter import first_line, node_text
 from ..typescript.declarations import import_bindings
-from .patterns import message_pattern
+from .patterns import claims_nest, message_pattern
 
 _KIND: dict[str, SemanticType] = {"send": "eventbus_send", "emit": "eventbus_publish"}
 #: Transport clients of ``@nestjs/microservices`` with ClientProxy's ``send`` / ``emit``.
@@ -139,18 +137,11 @@ def nest_framework(source: bytes) -> str:
     return "nestjs-like"  # custom / re-exported decorators (matches the legacy label)
 
 
-@cache
-def _nest_parser() -> Any:
-    from .parser import NestJSParser  # the parser module imports this one
-
-    return NestJSParser()
-
-
 def _detect(dc: DetectContext) -> Detection | None:
     # The files the NestJS parser claims (a `@nestjs/` / routing-controllers import, or a
     # decorator controller), whatever parser owns them: a `ClientProxy` / `ClientKafka` without
     # one is some other library's type.
-    if not _nest_parser().claims(dc.path, dc.source):
+    if not claims_nest(dc.source):
         return None
     sends = detect_client_proxy_calls(
         dc.root, dc.source, framework=nest_framework(dc.source),

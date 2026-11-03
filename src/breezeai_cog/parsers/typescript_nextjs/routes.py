@@ -307,8 +307,9 @@ def detect_nextjs_routes(
 
     if is_app_router_route_file(path):
         exts = page_extensions(index, path)
-        if exts is None or (exts and page_stem(path.rsplit("/", 1)[-1], exts) != "route"):
-            return []  # not a `route` file with one of the app's pageExtensions, or unknown
+        if exts is None or page_stem(path.rsplit("/", 1)[-1], exts) != "route":
+            return []  # not a `route` file with one of the app's pageExtensions (`route.helpers.ts`
+            # is a module beside the route, not one), or they are unknown
         verb_lines = _exported_verb_lines(root, source)
         endpoint = endpoint_from_path(path)
         routes: list[Emit] = []
@@ -406,4 +407,5 @@ def _detect(dc: DetectContext) -> Detection | None:
 register_detector(Detector(
     name="nextjs-routes", gate=Gate("typescript", order=55, guard=b"export", skip_fixtures=True),
     detect=_detect, frameworks=("nextjs",),
+    label_priority=1,  # a route file is a Next.js file, whatever SDK calls it makes
 ))

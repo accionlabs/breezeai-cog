@@ -8,23 +8,14 @@ per-file by ``claims``."""
 
 from __future__ import annotations
 
-import re
-
 from ...schemas import FileRecord
 from ..base import ParseContext
 from ..emits import apply
 from ..treesitter import parse_source
 from ..typescript.parser import TypeScriptParser
 from .outbound import nest_framework
+from .patterns import claims_nest
 from .routes import detect_nest_routes
-
-# Framework-agnostic controller-route signature: a ``@Controller``/``@JsonController``
-# class decorator plus at least one HTTP-verb *method* decorator. Matches NestJS,
-# routing-controllers, Ts.ED, and hand-rolled/re-exported decorator modules (e.g. a repo's
-# local ``./core`` wrapper) — the old Node parser detected all of these as "nestjs-like".
-_CONTROLLER_SIG = re.compile(rb"@(?:Json)?Controller\b")
-_VERB_SIG = re.compile(rb"@(?:Get|Post|Put|Patch|Delete|Options|Head|All)\b")
-
 
 class NestJSParser(TypeScriptParser):
     name = "typescript-nestjs"
@@ -35,11 +26,7 @@ class NestJSParser(TypeScriptParser):
     frameworks = ["nestjs", "routing-controllers", "nestjs-like"]
 
     def claims(self, path: str, source: bytes) -> bool:
-        if b"@nestjs/" in source or b"routing-controllers" in source:
-            return True
-        # Custom / re-exported decorator modules: detect the pattern itself (a @Controller
-        # class with HTTP-verb method decorators), not the import source.
-        return bool(_CONTROLLER_SIG.search(source) and _VERB_SIG.search(source))
+        return claims_nest(source)
 
     @staticmethod
     def _framework(source: bytes) -> str:

@@ -25,7 +25,8 @@ ascending ``order``.
 **What it produces.** ``detect`` returns a :class:`Detection`: the statements it found as
 :class:`~.emits.Emit` values and an optional file-level framework label. The runner applies the
 emits with :func:`~.emits.apply`, which owns the shared output rules (enrich in place or append,
-statement ids, parents), and sets the label only while ``record.framework`` is still ``None``.
+statement ids, parents), and sets one label only when ``record.framework`` is still ``None``: the highest
+``label_priority``, then the first to run.
 A detector never edits the record itself.
 
 **Facts from other files.** Some detections need a fact that lives in *another* file: a class
@@ -133,6 +134,10 @@ class Detector:
     detect: Callable[[DetectContext], Detection | None]
     #: Framework labels this detector can emit (statement or file level), for ``capabilities``.
     frameworks: tuple[str, ...] = ()
+    #: Which file-level label wins when several detectors label one file: the highest; on a tie
+    #: the first to run. A route detector whose framework decides what the file *is* (a Next.js
+    #: ``route.ts``) ranks above one that only finds calls in it (an S3 client).
+    label_priority: int = 0
 
     @property
     def language(self) -> str:
@@ -328,6 +333,7 @@ def run_additive(
     if not ctx.capture_statements:
         return
     dc = DetectContext(root, ctx, record, is_fixture, bindings=bindings, types=types)
+    label: tuple[int, str] | None = None
     for detector in detectors_for(language):
         if not detector.gate.admits(ctx.source, is_fixture=is_fixture):
             continue
@@ -335,8 +341,10 @@ def run_additive(
         if found is None:
             continue
         apply(record, found.emits, ctx.source, ctx.path)
-        if found.label and record.framework is None:
-            record.framework = found.label
+        if found.label and (label is None or detector.label_priority > label[0]):
+            label = (detector.label_priority, found.label)
+    if label is not None and record.framework is None:
+        record.framework = label[1]
 
 
 def collect_additive(

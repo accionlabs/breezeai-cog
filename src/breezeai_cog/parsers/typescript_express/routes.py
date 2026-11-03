@@ -165,7 +165,7 @@ def _mount_parts(
 ) -> tuple[str | None, int | None, list[str] | None]:
     """Split a mount's arg chain (everything after the path) into (handler, handlerLine, guards):
     the mounted sub-router — the single bare internally-imported ``factory()`` call — is the
-    handler, and the surrounding middleware are guards. When the router is not cleanly
+    handler, and the middleware before it are guards. When the router is not cleanly
     identifiable (0 or >1 such calls), fall back to the Express default (last arg is the handler,
     the rest are guards)."""
     routers = [n for n in chain if _is_internal_factory_call(n, source, bindings)]
@@ -173,7 +173,7 @@ def _mount_parts(
         router = routers[0]
         fn = router.child_by_field_name("function")
         handler = node_text(fn, source) if fn is not None else None
-        guards = _guard_names([n for n in chain if n is not router], source)
+        guards = _guard_names(chain[:chain.index(router)], source)  # those after it run later
         return handler, router.start_point[0] + 1, guards
     if not chain:
         return None, None, None
@@ -682,13 +682,14 @@ def _global_guards(
         if not arg_nodes:
             continue
         if arg_nodes[0].type in ("string", "template_string"):  # a mount: app.use('/x', …, router)
-            # Every router of the mount gets the mount's middleware (``middleware`` never names a
-            # router, so routers mounted together are not each other's guards).
-            local = [a for a in arg_nodes[1:]
-                     if a.type == "identifier" and node_text(a, source) in routers]
-            guards = [n for a in arg_nodes[1:] if (n := middleware(a))]
-            for r in local:
+            # Each router of the mount gets the middleware before it: Express runs the arguments
+            # in order, so a trailing handler (a 404 fallback) never guards it, and ``middleware``
+            # never names a router, so routers mounted together are not each other's guards.
+            for i, r in enumerate(arg_nodes):
+                if i == 0 or r.type != "identifier" or node_text(r, source) not in routers:
+                    continue
                 router = node_text(r, source)
+                guards = [n for a in arg_nodes[1:i] if (n := middleware(a))]
                 entry = (receiver, call.start_byte, guards)
                 mounted[router] = entry if router not in mounted else None  # mounted twice → unclear
             continue
@@ -832,18 +833,18 @@ def _mount_routers(
 ) -> tuple[str | None, int | None, list[str] | None]:
     """A mount record's (handler, handlerLine, guards) when its arguments include known routers —
     another file's confirmed routers (``express.router-mounts``) or this file's ``Router()``s: a
-    router is never a guard, and the handler is the router when there is exactly one (several →
-    none). Otherwise the record is left as :func:`_mount_parts` read it."""
+    router is never a guard, the guards are the middleware before the first router, and the handler
+    is the router when there is exactly one (several → none). Otherwise the record is left as :func:`_mount_parts` read it."""
     known = site_routers.get(f"{path}:{call.start_point[0] + 1}:{call.start_point[1]}",
                              frozenset()) | routers
     args = call.child_by_field_name("arguments")
-    named = [a for a in (args.named_children[1:] if args is not None else [])
-             if a.type == "identifier" and node_text(a, source) in known]
+    chain = args.named_children[1:] if args is not None else []
+    named = [a for a in chain if a.type == "identifier" and node_text(a, source) in known]
     if not named:
         return handler, handler_line, guards
-    names = {node_text(a, source) for a in named}
-    kept = [g for g in guards or [] if g not in names and g != handler] + (
-        [handler] if handler is not None and handler not in names else [])
+    # Guards are the middleware before the first router (Express runs the arguments in order);
+    # a trailing handler runs after the routers, so it is neither a guard nor the handler.
+    kept = _guard_names(chain[:chain.index(named[0])], source)
     if len(named) == 1:
         return node_text(named[0], source), named[0].start_point[0] + 1, kept or None
     return None, None, kept or None

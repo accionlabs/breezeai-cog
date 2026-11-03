@@ -10,6 +10,7 @@ from ...schemas import FileRecord
 from ..base import ParseContext
 from ..treesitter import parse_source
 from ..typescript.parser import TypeScriptParser
+from ..typescript_nextjs.routes import is_route_file
 from .components import mark_react_components, mark_react_hooks
 from .routes import REACT_GUARDS as _REACT_GUARDS
 
@@ -34,7 +35,9 @@ class ReactParser(TypeScriptParser):
         # framework axis: every file this parser claims IS a React file — stamp it
         # unconditionally so "list React files" is answerable, not only on route files. The
         # JS/TS distinction lives on the orthogonal `language` axis (.tsx -> typescript,
-        # .jsx -> javascript), set by the base extractor.
-        record.framework = "react"
+        # .jsx -> javascript), set by the base extractor. A Next.js route handler file that
+        # imports React (an OG-image `route.tsx`) stays a Next.js file.
+        if not (record.framework == "nextjs" and is_route_file(ctx.path, ctx.source)):
+            record.framework = "react"
         # Routes: the additive ``react-routes`` detector, already run inside extract().
         return record

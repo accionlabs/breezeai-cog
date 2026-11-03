@@ -115,16 +115,40 @@ def _collect_page_extensions(
     if not rel.rsplit("/", 1)[-1].startswith("next.config."):
         return None
     found: list[tuple[str, ...] | None] = []
+    consts: dict[str, Node] = {}  # top-level `const name = <value>`, for `{ pageExtensions }`
+    for node in root.named_children:
+        if node.type == "export_statement":
+            node = node.child_by_field_name("declaration") or node
+        if node.type == "lexical_declaration" and node_text(node, source).startswith("const"):
+            for vd in node.named_children:
+                name, value = vd.child_by_field_name("name"), vd.child_by_field_name("value")
+                if name is not None and value is not None and name.type == "identifier":
+                    consts[node_text(name, source)] = value
+
+    def literal(value: Node | None) -> tuple[str, ...] | None:
+        """A literal array of strings → its extensions; anything else is unknown."""
+        if value is None or value.type != "array":
+            return None
+        items = [_string_literal(c, source) for c in value.named_children if c.type != "comment"]
+        return tuple(i.lstrip(".") for i in items if i is not None) \
+            if items and None not in items else None
 
     def walk(n: Node) -> None:
         if n.type == "pair":
             key, value = n.child_by_field_name("key"), n.child_by_field_name("value")
             if key is not None and value is not None \
                     and node_text(key, source).strip("'\"") == "pageExtensions":
-                items = [_string_literal(c, source) for c in value.named_children
-                         if c.type != "comment"] if value.type == "array" else [None]
-                found.append(tuple(i.lstrip(".") for i in items if i is not None)
-                             if items and None not in items else None)
+                found.append(literal(consts.get(node_text(value, source))
+                                     if value.type == "identifier" else value))
+        elif n.type == "shorthand_property_identifier" \
+                and node_text(n, source) == "pageExtensions":
+            found.append(literal(consts.get("pageExtensions")))  # `{ pageExtensions }`
+        elif n.type == "assignment_expression":
+            left = n.child_by_field_name("left")
+            # `cfg.pageExtensions = …` / `cfg['pageExtensions'] = …`: set at run time → unknown
+            if left is not None and left.type in ("member_expression", "subscript_expression") \
+                    and node_text(left, source).rstrip("]'\"").endswith("pageExtensions"):
+                found.append(None)
         for c in n.named_children:
             walk(c)
 
@@ -246,9 +270,15 @@ def _collect_middleware(
     if app.name == "src":
         app = app.parent
     app_dir = "" if str(app) == "." else str(app)
-    major = _next_major(repo_root, app_dir) if kind == "proxy" else None
-    if major is not None and major < 16:
-        return None  # before Next.js 16 a `proxy.ts` is an ordinary module, not the interceptor
+    # Only the file at an app's root (or its `src/`) is the interceptor: an `app/api/proxy.ts`
+    # helper is an ordinary module. The app root is checked in its own directory, not by walking
+    # up, so a nested helper never borrows the repo's `next` dependency.
+    if repo_root is None or not _is_next_app(str(repo_root), app_dir):
+        return None
+    if kind == "proxy":
+        major = _next_major(repo_root, app_dir)
+        if major is None or major < 16:
+            return None  # before Next.js 16 (or unknown) a `proxy.ts` is an ordinary module
     return app_dir, (kind, matcher)
 
 
