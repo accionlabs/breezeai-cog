@@ -280,18 +280,27 @@ def _table(create: exp.Create, dialect: str) -> dict[str, Any]:
 _DEFAULT_SCHEMA = {"transactsql": "dbo", "postgresql": "public"}
 
 
+def _schema_key(table: dict[str, Any]) -> str:
+    """A table's schema for comparison: case-insensitive, with no schema as ``""``."""
+    return (table.get("schema") or "").casefold()
+
+
 class _TableLookup:
     """Finds the table a ``CREATE INDEX`` or ``ALTER TABLE`` refers to. Tables in different
     schemas can share a name (``dbo.Orders`` and ``sales.Orders``), so the bare name is not
     enough: keying by it attached ``dbo``'s indexes and constraints to whichever same-named
     table came last (DEF-958-01).
 
-    A qualified reference takes the table in that schema; failing that, the one same-named
-    table declared without a schema (it lives in the default schema). An unqualified reference
-    takes the only same-named table, else the one declared without a schema, else the one in
-    the dialect's default schema. Anything still ambiguous resolves to ``None`` — leaving an
-    index unattached is better than attaching it to the wrong table. Schemas compare
-    case-insensitively; names compare as written, as before."""
+    A qualified reference takes the table in that schema; failing that, the table declared
+    without a schema, which lives in the default schema — so where the dialect's default is
+    known, only a reference to that default reaches it. An unqualified reference takes the
+    table when every same-named declaration is in one schema, else the one declared without a
+    schema, else the one in the dialect's default schema. Anything still ambiguous resolves to
+    ``None`` — leaving an index unattached is better than attaching it to the wrong table.
+
+    One table can be declared more than once (a drop-and-recreate script, concatenated
+    migrations); those declarations are the same table, so the last one wins, as the old
+    name-keyed dict did. Schemas compare case-insensitively; names compare as written."""
 
     def __init__(self, tables: list[dict[str, Any]] | None = None, default_schema: str | None = None) -> None:
         self._by_name: dict[str, list[dict[str, Any]]] = {}
@@ -306,18 +315,23 @@ class _TableLookup:
         candidates = self._by_name.get(name or "") or []
         if not candidates:
             return None
+        unqualified = [t for t in candidates if not t.get("schema")]
         if schema:
-            # Last wins, as the old dict did when one script declares the same table twice.
-            exact = [t for t in candidates if (t.get("schema") or "").casefold() == schema.casefold()]
+            wanted = schema.casefold()
+            exact = [t for t in candidates if _schema_key(t) == wanted]
             if exact:
                 return exact[-1]
-        elif len(candidates) == 1:
-            return candidates[0]
-        unqualified = [t for t in candidates if not t.get("schema")]
-        if len(unqualified) == 1:
-            return unqualified[0]
-        if not schema and self._default:
-            in_default = [t for t in candidates if (t.get("schema") or "").casefold() == self._default]
+            # A table declared without a schema is in the default one. With the default
+            # unknown (Oracle's current user, MySQL's current database) any schema may be it.
+            if self._default and wanted != self._default:
+                return None
+            return unqualified[-1] if unqualified else None
+        if len({_schema_key(t) for t in candidates}) == 1:
+            return candidates[-1]
+        if unqualified:
+            return unqualified[-1]
+        if self._default:
+            in_default = [t for t in candidates if _schema_key(t) == self._default]
             if in_default:
                 return in_default[-1]
         return None

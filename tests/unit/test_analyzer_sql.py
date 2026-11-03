@@ -1008,3 +1008,65 @@ def test_oracle_column_comment_follows_a_rename_in_its_own_schema() -> None:
     tables = _by_schema(parse_ddl(text, "schema_ora.sql"))
     assert {c["name"]: c.get("comment") for c in tables["HR"]["columns"]} == {"ID": None, "REF": "hr code"}
     assert {c["name"]: c.get("comment") for c in tables["SALES"]["columns"]} == {"ID": None, "CODE": "sales code"}
+
+
+# One table declared twice (drop-and-recreate, concatenated migrations) is the same table, not
+# an ambiguity: an unqualified index, ALTER or comment lands on the last declaration.
+_REDECLARED_SCRIPTS = [
+    pytest.param(
+        "CREATE TABLE orders (id int, code text);\n"
+        "DROP TABLE orders;\n"
+        "CREATE TABLE orders (id int, code text);\n"
+        "CREATE INDEX ix_code ON orders (code);\n"
+        "ALTER TABLE orders ADD CONSTRAINT pk_orders PRIMARY KEY (id);\n",
+        "schema_pg.sql",
+        id="postgres",
+    ),
+    pytest.param(
+        "CREATE TABLE [dbo].[Orders] ([Id] INT NOT NULL, [Code] NVARCHAR(10))\nGO\n"
+        "CREATE TABLE [dbo].[Orders] ([Id] INT NOT NULL, [Code] NVARCHAR(10))\nGO\n"
+        "CREATE INDEX [IX_Code] ON [Orders] ([Code])\nGO\n"
+        "ALTER TABLE [Orders] ADD CONSTRAINT [PK_Orders] PRIMARY KEY ([Id])\nGO\n",
+        "schema.sql",
+        id="tsql",
+    ),
+    pytest.param(
+        "CREATE TABLE HR.ORDERS (ID NUMBER, CODE VARCHAR2(10));\n"
+        "CREATE TABLE HR.ORDERS (ID NUMBER, CODE VARCHAR2(10));\n"
+        "CREATE INDEX IX_CODE ON ORDERS (CODE);\n"
+        "ALTER TABLE ORDERS ADD CONSTRAINT PK_ORDERS PRIMARY KEY (ID);\n",
+        "schema_ora.sql",
+        id="oracle",
+    ),
+]
+
+
+@pytest.mark.parametrize(("text", "filename"), _REDECLARED_SCRIPTS)
+def test_redeclared_table_keeps_its_index_and_constraint(text: str, filename: str) -> None:
+    first, last = parse_ddl(text, filename)["tables"]
+    assert len(last["indexes"]) == 1
+    assert [c["constraintType"] for c in last["constraints"]] == ["PRIMARY_KEY"]
+    assert first["indexes"] == []
+    assert first["constraints"] == []
+
+
+def test_oracle_comment_reaches_a_redeclared_table() -> None:
+    text = (
+        "CREATE TABLE HR.ORDERS (ID NUMBER, CODE VARCHAR2(10));\n"
+        "CREATE TABLE HR.ORDERS (ID NUMBER, CODE VARCHAR2(10));\n"
+        "COMMENT ON TABLE ORDERS IS 'orders';\n"
+    )
+    first, last = parse_ddl(text, "schema_ora.sql")["tables"]
+    assert last["comment"] == "orders"
+    assert first.get("comment") is None
+
+
+def test_qualified_reference_to_a_non_default_schema_skips_the_unqualified_table() -> None:
+    # `CREATE TABLE orders` is public.orders, so `ON hr.orders` names neither declared table.
+    text = (
+        "CREATE TABLE orders (id int, code text);\n"
+        "CREATE TABLE sales.orders (id int, code text);\n"
+        "CREATE INDEX ix_code ON hr.orders (code);\n"
+    )
+    r = parse_ddl(text, "schema_pg.sql")
+    assert all(t["indexes"] == [] for t in r["tables"])
