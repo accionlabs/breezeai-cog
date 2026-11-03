@@ -642,6 +642,26 @@ def test_rails_routes_draw_on_other_receivers_is_not_a_route_file(analyze_files)
     assert [s.endpoint for s in st if s.semanticType == "route"] == ["/real"]
 
 
+def test_rails_claims_does_not_parse_the_file(monkeypatch) -> None:
+    """``claims`` is a substring check: the one parse of a file is ``parse_file``'s."""
+    from breezeai_cog.parsers.ruby_rails import parser as rails_parser
+
+    def boom(*args: object, **kwargs: object) -> None:
+        raise AssertionError("claims() parsed the file")
+
+    monkeypatch.setattr(rails_parser, "parse_source", boom)
+    claims = RailsParser().claims
+    assert claims("config/routes.rb", b"Rails.application.routes.draw do\nend")
+    assert claims("config/routes.rb", b"MyApp::Application.routes.draw do\nend")
+    assert claims("app/controllers/a_controller.rb", b"class A < ApplicationController\nend")
+    assert claims("app/controllers/a_controller.rb", b"class A <ApplicationController\nend")
+    assert claims("config/application.rb", b"require 'rails'\n")
+    assert claims("config/application.rb", b'require "action_controller/railtie"\n')
+    assert not claims("lib/calc.rb", b"class Calculator; end")
+    assert not claims("lib/chart.rb", b"chart.axes.routes.draw do\nend")
+    assert not claims("lib/chart.rb", b"MyApp.routes.draw do\nend")
+
+
 def test_rails_resources_root_member_and_collection(tmp_path: Path) -> None:
     source = b'''require "rails"
 Rails.application.routes.draw do
