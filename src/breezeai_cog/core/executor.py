@@ -114,14 +114,6 @@ def _parse_entry(path: str, repo_root: str, options: dict) -> FileRecord | None:
     set_concat_depth(options.get("max_concat_depth"))  # apply configured cap in this process
     begin_concat_tracking()  # collect concats the fold cap skips, for one per-file summary
     try:
-        parser = select(
-            path,
-            source,
-            options["parse_timeout_micros"],
-        )  # exactly one parser per file (claims + priority)
-        if parser is None:  # pragma: no cover - classify already filtered
-            return None
-        index = options.get("indexes", {}).get(base.name if base is not None else "")
         ctx = ParseContext(
             path=path,
             abs_path=Path(abs_path),
@@ -137,10 +129,7 @@ def _parse_entry(path: str, repo_root: str, options: dict) -> FileRecord | None:
         parser.link_handlers(record, ctx)
     except Exception as exc:  # per-file isolation (incl. parse timeout)
         get_logger("breezeai_cog.worker").warning(
-            "parse.file.failed",
-            path=path,
-            parser=parser.name if parser is not None else (base.name if base is not None else None),
-            error=str(exc),
+            "parse.file.failed", path=path, parser=parser.name, error=str(exc)
         )
         return None
     _prune_template_edges(record, options.get("template_extensions") or frozenset())
