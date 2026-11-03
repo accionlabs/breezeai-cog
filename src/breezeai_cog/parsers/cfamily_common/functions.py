@@ -355,7 +355,7 @@ def _macro_prefixed(node: Node) -> bool:
     ``LUA_API int lua_gettop(…)`` reads as the type ``LUA_API`` with ``int`` in an error. That
     holds when the type is a plain name, every error sits between it and the declarator and is
     made of bare words, and the declarator — name and parameters — has no error at all."""
-    if node.type not in ("declaration", "function_definition"):
+    if node.type not in ("declaration", "function_definition", "field_declaration"):
         return False
     ret = node.child_by_field_name("type")
     declarator = node.child_by_field_name("declarator")
@@ -399,6 +399,17 @@ def read_declaration(node: Node, source: bytes) -> DeclarationRead | None:
         return DeclarationRead(return_type_known=not prefixed)
     name = _renamed_by_macro(declarator, source)
     return DeclarationRead(name=name, return_type_known=False) if name is not None else None
+
+
+def read_member(member: Node) -> DeclarationRead | None:
+    """How to read a class member, or ``None`` to skip it because its header is broken. A
+    macro in front of its type (``ESIMD_INLINE int row(int g) const``) is read past as at file
+    scope: the name and parameters come from clean syntax, ``returnType`` is unknown."""
+    if not has_declaration_error(member):
+        return DeclarationRead()
+    if _macro_prefixed(member):
+        return DeclarationRead(return_type_known=False)
+    return None
 
 
 def is_macro_row(node: Node, source: bytes) -> bool:
@@ -512,10 +523,12 @@ def build_member_function(
     limit: int,
     resolve: CallResolver = noop_resolver,
     id_owner: str | None = None,
+    read: DeclarationRead = DeclarationRead(),
 ) -> tuple[Function, list[Statement]]:
     """An in-class member-function **declaration** (``field_declaration`` with a
     ``function_declarator``, no body) → a flat method ``Function``. An inline
-    **definition** carries a ``body`` and its calls/statements are captured too."""
+    **definition** carries a ``body`` and its calls/statements are captured too. ``read``
+    says whether the return type is known (see :func:`read_member`)."""
     fd = function_declarator_of(field_decl.child_by_field_name("declarator"))
     name_node = fd.child_by_field_name("declarator") if fd is not None else None
     while name_node is not None and name_node.type == "parenthesized_declarator":
@@ -539,7 +552,7 @@ def build_member_function(
         # A static member: `static` is written on its declaration in the class.
         isStatic=is_declared_static(field_decl, source) or None,
         params=extract_params(params, source),
-        returnType=return_type(field_decl, source),
+        returnType=return_type(field_decl, source) if read.return_type_known else None,
         startLine=start,
         endLine=end,
         calls=_calls(

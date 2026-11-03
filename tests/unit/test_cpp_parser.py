@@ -155,14 +155,14 @@ def test_a_receiver_name_never_makes_an_http_or_db_call(tmp_path) -> None:
     assert kinds == {"query_statement"}
 
 
-def test_malformed_declaration_not_fabricated(tmp_path) -> None:
-    # A macro the grammar can't expand (`Q_OBJECT`) makes the enclosing member declaration
-    # an ERROR node. Such a corrupt-header member must be SKIPPED, not emitted as a
-    # fabricated method — absent beats wrong. The clean method after it is still recovered.
+def test_member_after_an_unexpanded_macro_keeps_its_name(tmp_path) -> None:
+    # A macro the grammar can't expand (`Q_OBJECT`) runs into the next member, which reads as
+    # a macro in front of its type. The member's name and parameters come from clean syntax and
+    # are kept; its return type is unknown (`int` sits in the error), so it is left empty.
     src = (
         b"class Widget {\n"
         b"    Q_OBJECT\n"
-        b"    int brokenSlot(int x);\n"
+        b"    int slotAfterMacro(int x);\n"
         b"    int cleanMethod(int y);\n"
         b"};\n"
     )
@@ -170,9 +170,40 @@ def test_malformed_declaration_not_fabricated(tmp_path) -> None:
     p.write_bytes(src)
     ctx = ParseContext(path="w.cpp", abs_path=p, source=src, repo_root=tmp_path)
     rec = CppParser().parse_file(ctx)
-    assert "Widget" in {c.name for c in rec.classes}  # class skeleton recovered
-    assert "brokenSlot" not in {f.name for f in rec.functions}  # corrupt member not fabricated
-    assert "cleanMethod" in {f.name for f in rec.functions}  # clean member still captured
+    assert "Widget" in {c.name for c in rec.classes}
+    fns = {f.name: f for f in rec.functions}
+    assert fns["slotAfterMacro"].returnType is None
+    assert [p.name for p in fns["slotAfterMacro"].params] == ["x"]
+    assert fns["cleanMethod"].returnType == "int"
+
+
+def test_macro_prefixed_members_are_captured(tmp_path) -> None:
+    # An export or inline macro in front of a member's type (`ESIMD_INLINE int row(int g)`)
+    # reads as the type `ESIMD_INLINE` with `int` in an error. The member is kept with its
+    # name, parameters, `static` and calls; the return type is unknown.
+    src = (
+        b"class Kernel {\n"
+        b"public:\n"
+        b"    ESIMD_INLINE int row(int g) const { return helper(g); }\n"
+        b"    API static Model *load(int x);\n"
+        b"    API int count;\n"
+        b"};\n"
+    )
+    rec = _parse_src(tmp_path, src, "k.cpp", capture=True)
+    fns = {f.name: f for f in rec.functions}
+    assert set(fns) == {"row", "load"}
+    assert fns["row"].type == "method" and fns["row"].visibility == "public"
+    assert fns["row"].returnType is None and [c.name for c in fns["row"].calls] == ["helper"]
+    assert fns["load"].isStatic is True and [p.name for p in fns["load"].params] == ["x"]
+    assert "count" in {s.name for s in rec.statements if s.nodeType == "field_declaration"}
+
+
+def test_member_with_a_broken_declarator_is_skipped(tmp_path) -> None:
+    # The macro-prefix reading needs a clean declarator: an error inside the parameter list
+    # or after it still drops the member.
+    src = b"class Odd {\n    API int f(int a b);\n    API int g(int a) b c;\n    int ok();\n};\n"
+    rec = _parse_src(tmp_path, src, "o.cpp")
+    assert {f.name for f in rec.functions} == {"ok"}
 
 
 def test_unresolved_local_include_is_external(tmp_path) -> None:

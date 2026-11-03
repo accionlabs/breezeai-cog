@@ -471,7 +471,11 @@ C++.
 > and a clean declarator; and a macro or type in front of the name (`LUALIB_API lua_Integer
 > luaL_len(…)`, read as a function named `lua_Integer`) when the error is the one word right
 > before the parameter list — in C, the word before a function's `(` is its name. The parser
-> and the index read both the same way, so calls to these functions resolve.
+> and the index read both the same way, so calls to these functions resolve. A C++ class member
+> is read past a macro in front of its type by the same rule (`ESIMD_INLINE int row(int g)
+> const`, `API static Model *load(…)`); any other broken member is still skipped. A macro
+> between `class` and the class name (`class API Model { … }`) is not read past: the grammar
+> parses the whole class as a function, so the class and its members are not captured.
 > **Why:** export, inline and attribute macros sit in front of most public C functions (redis,
 > lua, curl, zlib, llama.cpp); skipping them dropped thousands of functions and every call to
 > them. In both shapes the name and parameters come from clean syntax. **Cost:** `returnType`

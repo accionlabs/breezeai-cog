@@ -47,6 +47,7 @@ from ..treesitter import node_text, parse_source
 from .classes import _CLASS_TYPES, _heritage, _unwrap_template
 from .functions import (
     function_declarator_of, has_declaration_error, is_declared_static, read_declaration,
+    read_member,
 )
 from .imports import FamilyHeaders, HeaderIndex, build_header_index, include_targets
 from .mappings import HEADER_EXTENSIONS, TRANSPARENT_SCOPES
@@ -223,7 +224,7 @@ def _index_class(frag: CFamilyIndex, node: Node, source: bytes, rel: str, ns: st
         _class_heritage(frag, class_name).extends = _simple(extends)
     for member in body.named_children:
         member = _unwrap_template(member)
-        if has_declaration_error(member):
+        if read_member(member) is None:
             continue
         if member.type in _MEMBER_FN_TYPES and _has_body(member):
             if function_declarator_of(member.child_by_field_name("declarator")) is not None:

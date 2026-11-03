@@ -23,8 +23,8 @@ from .functions import (
     build_member_function,
     extract_params,
     function_declarator_of,
-    has_declaration_error,
     is_function_pointer,
+    read_member,
 )
 from .mappings import MACRO_TYPES
 from .statements import macro_statement
@@ -207,7 +207,8 @@ def build_class(
         visibility = "public" if is_public_default else "private"
         for member in body.named_children:
             member = _unwrap_template(member)
-            if has_declaration_error(member):
+            read = read_member(member)
+            if read is None:
                 continue  # corrupt declaration header — skip rather than emit fabricated data
             if member.type == "access_specifier":
                 visibility = node_text(member, source)
@@ -269,7 +270,7 @@ def build_class(
                     member, source, path,
                     parent_id=cid, class_name=name, id_owner=qualified, visibility=visibility,
                     seen_ids=seen_ids,
-                    capture=capture, limit=limit, resolve=resolve,
+                    capture=capture, limit=limit, resolve=resolve, read=read,
                 )
                 methods.append(fn)
                 statements.extend(fn_statements)
