@@ -141,6 +141,7 @@ flowchart TD
 |---|---|---|---|
 | 1. Scan | `core/scanner.py`, `core/ignore.py`, `core/pipeline.py` | Once, main process | One directory walk |
 | 1b. Decide shared files | `core/ownership.py` | Once, only when a shared extension is present (may fan out) | One byte read of the competing languages' files |
+| 1c. Find Nx projects | `core/nx.py` | Once, main process | One read of each `project.json` of an Nx workspace and of the root `nx.json` / `workspace.json` |
 | 2. Build indexes | `BaseParser.build_index`, `pipeline._build_indexes` | Once per language, main process (may fan out) | Optional; usually one parse per file of that language |
 | 3. Parse | `core/executor.py`, `core/registry.py`, `parsers/**` | Once per file, in parallel | One parse + a fixed number of tree walks |
 | 4. Assemble | `pipeline._assemble`, `emit/split.py` | Streaming, main process | Linear in output |
@@ -221,6 +222,35 @@ file's `language`, the index it joins and the parser that reads it.
 > that include it change.
 
 Full design: [Shared extensions and related languages](architecture/shared-extensions-and-related-languages.md).
+
+### 4.1c Nx projects
+
+In an Nx monorepo every file belongs to a project: the one whose root is its nearest ancestor
+folder. `core/nx.py` finds the projects once, before parsing, and the executor sets the file's
+`project` and `projectRoot` after its parser has run, whatever its language:
+
+```
+nx.json
+apps/web/project.json      {"name": "web"}   ─▶ apps/web/src/main.ts      project: web, projectRoot: apps/web
+libs/shared/project.json   {}                ─▶ libs/shared/src/index.ts  projectRoot: libs/shared (no name)
+tools/build.ts                               ─▶ (no project)
+```
+
+A project is a `project.json` inside an Nx workspace (a `nx.json` in its folder or one above),
+or an entry with a `root` in the project map of the root `nx.json` / `workspace.json` (older Nx).
+The name is only the one the configuration writes (`"name"`, or the map key).
+
+> **Decision —** project ownership is a repo-level step in `core/`, not a `build_index` or a
+> registered fact.
+> **Why:** those are per language, and a project holds files of every language (TypeScript, CSS,
+> JSON, C#…). **Cost:** one read of the Nx configuration files per run and a prefix lookup per
+> file.
+
+> **Decision —** `project.json` / `workspace.json` are Nx files only under a `nx.json`, and a
+> project without a `"name"` has no `project`.
+> **Why:** other tools use those names (a .NET Core 1.0 `project.json`), and a folder name or a
+> clone directory is not the project's name; Nx itself rejects a project without one.
+> **Cost:** a workspace whose `nx.json` is not in the repository gets no projects.
 
 ### 4.2 Repo-wide indexes
 
