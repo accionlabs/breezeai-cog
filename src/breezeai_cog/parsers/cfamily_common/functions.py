@@ -21,7 +21,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from collections.abc import Set as AbstractSet
+from collections.abc import Sequence, Set as AbstractSet
 
 from tree_sitter import Node
 
@@ -271,27 +271,37 @@ def _defs_in(node: Node, source: bytes, names: set[str], spilled: bool) -> None:
             _defs_in(c, source, names, spilled)  # include guard, #if, extern "C" { … }
         elif c.type == "function_definition" and spilled and not owner_is_explicit(c):
             continue
-        elif c.type == "function_definition" and (read := read_declaration(c, source)):
-            fd = function_declarator_of(c.child_by_field_name("declarator"))
-            if fd is None:
-                continue
-            inner = fd.child_by_field_name("declarator")
-            if inner is None:
-                continue
-            if read.name is not None:
-                names.add(read.name)
-            elif inner.type == "identifier":
-                names.add(node_text(inner, source))
-            elif inner.type == "qualified_identifier":
-                nm = inner.child_by_field_name("name")
-                if nm is not None:
-                    names.add(node_text(nm, source))
+        elif c.type == "function_definition":
+            _add_def_name(c, source, names)
 
 
-def defined_names(root: Node, source: bytes, spilled: bool = False) -> set[str]:
-    """Free-function / method names defined in this file (for same-file call resolution)."""
+def _add_def_name(fn: Node, source: bytes, names: set[str]) -> None:
+    """Add a function definition's name to the same-file set, when it can be trusted."""
+    read = read_declaration(fn, source)
+    fd = function_declarator_of(fn.child_by_field_name("declarator"))
+    inner = fd.child_by_field_name("declarator") if fd is not None else None
+    if read is None or inner is None:
+        return
+    if read.name is not None:
+        names.add(read.name)
+    elif inner.type == "identifier":
+        names.add(node_text(inner, source))
+    elif inner.type == "qualified_identifier":
+        nm = inner.child_by_field_name("name")
+        if nm is not None:
+            names.add(node_text(nm, source))
+
+
+def defined_names(
+    root: Node, source: bytes, spilled: bool = False, extra: Sequence[Node] = (),
+) -> set[str]:
+    """Free-function / method names defined in this file (for same-file call resolution).
+    ``extra`` are definitions found only by a second parse (``branches.branch_fix``)."""
     names: set[str] = set()
     _defs_in(root, source, names, spilled)
+    for fn in extra:
+        if fn.type == "function_definition" and not (spilled and not owner_is_explicit(fn)):
+            _add_def_name(fn, source, names)
     return names
 
 

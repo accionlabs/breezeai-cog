@@ -933,3 +933,100 @@ def test_a_keyword_is_never_a_declared_name(tmp_path, parser) -> None:
 def test_a_word_reserved_only_in_cpp_is_a_name_in_c(tmp_path) -> None:
     record = _parse(CParser(), tmp_path, "new.c", "void f(void) { int new = 1; char *typename = 0; }\n")
     assert {"new", "typename"} <= {s.name for s in record.statements}
+
+
+#: A function whose braces two `#ifdef` blocks split: one opens a brace (`} else {`), a later one
+#: closes it. The compiler sees both or neither; the grammar reads both and can't match them.
+SPLIT_BRACES = """static void dump(int kind, int a) {
+  switch (kind) {
+  case 1: {
+    if (a) {
+      put(1);
+    } else {
+#ifdef USE_DEC
+      const char *lit = literal();
+      if (lit) {
+        put_lit(lit);
+      } else {
+#endif
+        double d = value();
+        if (d != d) {
+          put(2);
+        } else {
+          put(3);
+        }
+      }
+#ifdef USE_DEC
+    }
+#endif
+    break;
+  }
+  default:
+    put(4);
+  }
+}
+
+#ifdef _WIN32
+int platform(void) { return 1; }
+#else
+int platform(void) { return 2; }
+#endif
+
+void after_one(int y) { use(y); }
+void after_two(int z) { dump(z, 1); }
+"""
+
+
+@pytest.mark.parametrize("parser", [CParser(), CppParser()], ids=["c", "cpp"])
+def test_a_function_whose_braces_a_conditional_splits_ends_where_it_ends(tmp_path, parser) -> None:
+    # Read once more with each conditional resolved to its first branch, the function ends at
+    # its own `}`: the functions after it are captured, their calls no longer credited to it.
+    # Those come from that second reading, so of `platform` only the first branch's is there
+    # (before, neither was: both sat inside `dump`).
+    record = _parse(parser, tmp_path, "split.c" if parser.name == "c" else "split.cpp", SPLIT_BRACES)
+    fns = [(f.name, f.startLine, f.endLine) for f in record.functions]
+    assert fns == [("dump", 1, 28), ("platform", 31, 31), ("after_one", 36, 36), ("after_two", 37, 37)]
+    dump = record.functions[0]
+    assert {c.name for c in dump.calls} == {"put", "literal", "put_lit", "value"}
+    assert [(c.name, c.path) for c in record.functions[-1].calls] == [("dump", record.path)]
+
+
+@pytest.mark.parametrize("jobs", [1, 2])
+def test_a_function_after_split_braces_is_a_call_target(tmp_path, jobs) -> None:
+    repo = _repo(
+        tmp_path / "r",
+        {"src/split.c": SPLIT_BRACES, "src/use.c": "void go(void) { after_one(1); }\n"},
+    )
+    assert _calls(_capture(repo, jobs)["src/use.c"], "go") == {"after_one": "src/split.c"}
+
+
+def test_a_conditional_outside_a_split_function_keeps_both_branches(tmp_path) -> None:
+    # Only the span a split function wrongly covered is read from the second parse: a function
+    # defined in both branches elsewhere in the file keeps both definitions.
+    text = (
+        "#ifdef _WIN32\nint platform(void) { return 1; }\n#else\nint platform(void) { return 2; }\n#endif\n"
+        + SPLIT_BRACES.split("#ifdef _WIN32")[0]
+    )
+    record = _parse(CParser(), tmp_path, "both.c", text)
+    assert [f.name for f in record.functions] == ["platform", "platform", "dump"]
+    assert record.functions[2].endLine == 33
+
+
+def test_a_class_after_split_braces_is_captured(tmp_path) -> None:
+    # Everything in the span the split function covered comes from the second parse: a class
+    # with its methods, inside its namespace, as well as functions.
+    text = SPLIT_BRACES.split("#ifdef _WIN32")[0] + (
+        "namespace ui {\n"
+        "    struct spinner {\n"
+        "        spinner() { start(); }\n"
+        "        ~spinner() { stop(); }\n"
+        "    };\n"
+        "    static void show(int m) { log(m); }\n"
+        "}\n"
+    )
+    record = _parse(CppParser(), tmp_path, "ui.cpp", text)
+    assert [(c.name, c.startLine, c.endLine) for c in record.classes] == [("spinner", 31, 34)]
+    assert [(f.name, f.type) for f in record.functions] == [
+        ("dump", "function"), ("spinner", "constructor"), ("~spinner", "method"),
+        ("show", "function"),
+    ]

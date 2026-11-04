@@ -29,6 +29,8 @@ call there is :meth:`CFamilyParser.callable_in`.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
+
 from tree_sitter import Node
 
 from ...emit import file_id
@@ -59,6 +61,7 @@ from .functions import (
     owner_is_explicit,
     spilled_members,
 )
+from .branches import branch_fix, enclosing_scope
 from .imports import FamilyHeaders, extract_imports
 from .index import (
     CFamilyIndex, IncludeGraph, _join_ns, _ns_name, header_visibility, make_cfamily_resolver,
@@ -127,9 +130,11 @@ class CFamilyParser(BaseParser):
         internal, external, _, _ = extract_imports(root, source, headers)
         # Class members that spilled to file scope: unqualified definitions aren't emitted.
         spilled = spilled_members(root, source, self.grammar != "c")
+        # Functions whose braces a conditional split: read from a second parse (`branches`).
+        fix = branch_fix(root, source, self.grammar, ctx.parse_timeout_micros)
         graph = IncludeGraph(headers, [i for i in (idx, *related) if i is not None])
         resolve = make_cfamily_resolver(
-            defined_names(root, source, spilled), path, idx,
+            defined_names(root, source, spilled, fix.extra if fix else ()), path, idx,
             [self.callable_in(r) for r in related],
             header_visibility(path, internal, graph),
         )
@@ -139,9 +144,14 @@ class CFamilyParser(BaseParser):
         statements: list[Statement] = []
         class_map: dict[str, str] = {}  # simple class name → class id (out-of-class method attach)
 
-        def process(scope: Node, ns: str = "") -> None:
-            for child in scope.named_children:
+        def process(scope: Node, ns: str = "", second: Sequence[Node] = ()) -> None:
+            """Walk a scope's members — or, given ``second``, nodes from the second parse."""
+            for child in second or scope.named_children:
                 node = _unwrap_template(child)
+                if fix is not None and not second:
+                    if node.start_byte in fix.skip:
+                        continue  # inside a function the normal parse cut short
+                    node = fix.replace.get(node.start_byte, node)
                 read = DeclarationRead()
                 if node.type in _DECLARATIONS:
                     if spilled and not owner_is_explicit(node):
@@ -291,6 +301,9 @@ class CFamilyParser(BaseParser):
             return idx.classdecl.get(class_fqn)  # exact node id, or None when ambiguous/unknown
 
         process(root)
+        for extra in fix.extra if fix is not None else ():
+            # What the normal parse swallowed into the function before it.
+            process(root, enclosing_scope(extra, source)[0], [extra])
 
         if capture:
             statements.extend(

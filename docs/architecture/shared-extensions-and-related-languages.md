@@ -502,6 +502,22 @@ C++.
 > (constructors as calls, `public:` as a label), which nothing can be recovered from safely;
 > without the macro it is an ordinary class. **Cost:** such a file is parsed twice.
 
+> **Decision —** a function whose braces a preprocessor conditional splits is read from a second
+> parse where the normal one gets its end wrong. When one `#ifdef` block opens a brace (`} else {`)
+> and a later one closes it, the compiler sees both or neither, but the grammar reads both and
+> can't match them: the body runs on into the functions after it (lost, their calls credited to
+> it) or stops short. A file where a function body with a parse error holds a conditional is
+> parsed again with each conditional resolved to its first branch — directive lines, later
+> branches and `#if 0` blocks blanked, lines and offsets kept. Where both parses agree on where a
+> function starts but not where it ends, the function is read from the second parse, and so is
+> everything in the span the first one covered wrongly (functions, classes, declarations);
+> everything else comes from the normal parse. The index and same-file call resolution read the file the same way.
+> **Why:** the second parse is the compiler's view under one consistent configuration, so its
+> braces match; it can't replace the normal parse, which captures both branches of a conditional
+> (the second drops every `#else`-only definition), so it only settles where a function ends.
+> **Cost:** the corrected function's calls in later branches are not captured, nor are
+> `#else`-only definitions inside the span it had swallowed (before, none of them were).
+
 > **Decision —** when a C++ or CUDA file can't be parsed as a whole and members of a class
 > spilled out to file scope, only definitions that name their owner (`int Judge::decide()`)
 > are captured from the file's flat scope; unqualified functions and declarations are not. The
