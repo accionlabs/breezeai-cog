@@ -87,6 +87,14 @@ def _join(base: str, sub: str) -> str:
     return "/" + "/".join(parts) if parts else "/"
 
 
+def _full_path(prefix: str | None, path: Node, source: bytes) -> str | None:
+    """A route's full path: its parents' ``prefix`` joined with its own ``path``. ``None`` when
+    either is not written as a literal (``path: BASE``): the address is unknown, never the
+    constant's name."""
+    own = literal(path, source)
+    return None if prefix is None or own is None else _join(prefix, own)
+
+
 def _handler(component: Node | None, source: bytes) -> str | None:
     """The component a route renders: a bare identifier (``component: UserList`` ->
     ``UserList``) or a lazy import's specifier (``() => import('./X.vue')`` -> ``./X.vue``).
@@ -237,13 +245,13 @@ def _has_empty_path_child(children: Node | None, source: bytes) -> bool:
 
 
 #: Route name → full path of the one route with that name in this file; ``None`` when the name
-#: is declared more than once or the route's own path is not a literal, so no single page is
-#: meant (an ancestor's path is composed as the page record composes it).
+#: is declared more than once (no single page is meant) or its path, or an ancestor's, is not a
+#: literal (the address is unknown). Composed as the page record composes it.
 _RouteNames = dict[str, str | None]
 _NO_NAMES: _RouteNames = {}
 
 
-def _collect_names(elem: Node, prefix: str, source: bytes, names: _RouteNames) -> None:
+def _collect_names(elem: Node, prefix: str | None, source: bytes, names: _RouteNames) -> None:
     """Record ``name`` → full path of this route object and, recursively, of its children."""
     if elem.type != "object":
         return
@@ -251,11 +259,11 @@ def _collect_names(elem: Node, prefix: str, source: bytes, names: _RouteNames) -
     path = pairs.get("path")
     if path is None:
         return
-    full = _join(prefix, _string_val(path, source))
+    full = _full_path(prefix, path, source)
     name = pairs.get("name")
     if name is not None and name.type == "string":
         key = _string_val(name, source)
-        names[key] = full if key not in names and path.type == "string" else None
+        names[key] = full if key not in names else None
     children = pairs.get("children")
     if children is not None and children.type == "array":
         for child in children.named_children:
@@ -310,7 +318,7 @@ def _redirect_record(elem: Node, source: bytes, path: str, names: _RouteNames,
 
 
 def _emit(
-    elem: Node, prefix: str, source: bytes, path: str, routes: list[Emit],
+    elem: Node, prefix: str | None, source: bytes, path: str, routes: list[Emit],
     outer: _RouterGuards = _NO_ROUTER_GUARDS, inherited: tuple[str, ...] = (),
     names: _RouteNames = _NO_NAMES,
 ) -> None:
@@ -329,7 +337,7 @@ def _emit(
     pairs = _pairs(elem, source)
     if "path" not in pairs:
         return
-    full = _join(prefix, _string_val(pairs["path"], source))
+    full = _full_path(prefix, pairs["path"], source)
     # A page is a route with a component of its own that is not a layout (a path-only parent is
     # a prefix). A pure redirect (no component) is an outbound navigation to its target, like
     # Angular's redirectTo. A shell with a component and a redirect (its default child) is still

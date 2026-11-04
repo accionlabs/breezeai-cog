@@ -885,3 +885,30 @@ def test_component_with_redirect_stays_a_page_only(tmp_path) -> None:
     kinds = {s.endpoint: s.routeKind for s in rec.statements if s.semanticType == "route"}
     assert kinds["/table"] == "page"
     assert "navigation" not in kinds.values()
+
+
+def test_a_path_that_is_not_a_literal_leaves_the_address_empty(tmp_path) -> None:
+    # `path: BASE` is a constant: the page under it and a redirect naming that page have no
+    # known address — never `/BASE/kids`, the constant's name.
+    src = b"""const BASE = '/family'
+const routes = [
+  { path: BASE, children: [{ path: 'kids', name: 'kids', component: Kids }] },
+  { path: `/${BASE}/pets`, name: 'pets', component: Pets },
+  { path: `/home`, name: 'home', component: Home },
+  { path: '/tokids', redirect: { name: 'kids' } },
+  { path: '/topets', redirect: { name: 'pets' } },
+  { path: '/tohome', redirect: { name: 'home' } },
+]
+export default routes
+"""
+    rec = _parse_base("src/router/index.js", src, tmp_path)
+    got = sorted(((s.routeKind, s.handler or s.text.split(",")[0], s.endpoint or "")
+                  for s in rec.statements if s.semanticType == "route"))
+    assert got == [
+        ("navigation", "{ path: '/tohome'", "/home"),  # a template string without `${}` is read
+        ("navigation", "{ path: '/tokids'", ""),
+        ("navigation", "{ path: '/topets'", ""),
+        ("page", "Home", "/home"),
+        ("page", "Kids", ""),
+        ("page", "Pets", ""),
+    ]
