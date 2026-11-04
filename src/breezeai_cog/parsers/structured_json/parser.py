@@ -3,7 +3,7 @@
 It routes each JSON to one of two representations:
 
 * **Rich config** — named build/config files with a dedicated extractor (``package.json``,
-  ``tsconfig`` / ``jsconfig``, ``mod.json``, Nx ``project.json`` / ``nx.json`` / ``workspace.json``
+  ``tsconfig`` / ``jsconfig``, ``mod.json``, Nx ``nx.json``, and ``project.json`` / ``workspace.json`` inside an Nx workspace
   — see ``config.extractors.RICH_JSON_NAMES``) and
   any empty/scalar JSON with nothing to capture. These become ``type="config"``,
   ``language="config"`` records whose ``metadata`` is the extractor's structural summary
@@ -31,7 +31,8 @@ from ...emit import file_id, statement_id
 from ...schemas import SCHEMA_VERSION, FileRecord, Statement
 from ...utils import count_loc
 from ..base import BaseParser, ParseContext
-from ..config.extractors import RICH_JSON_NAMES, extract_config
+from ..config.extractors import NX_ONLY_JSON_NAMES, RICH_JSON_NAMES, extract_config
+from ..config.nx import in_nx_workspace
 from .toon import encode
 
 
@@ -72,7 +73,7 @@ class JsonParser(BaseParser):
         loc = count_loc(text)
         # Named-rich configs, and empty/scalar JSON with nothing to capture, are config records
         # handled by the shared extractor; every other non-empty JSON is captured in full.
-        if Path(ctx.path).name in RICH_JSON_NAMES or not self._is_capturable(data):
+        if self._is_rich(ctx) or not self._is_capturable(data):
             return FileRecord(
                 id=file_id(ctx.path),
                 path=ctx.path,
@@ -82,6 +83,15 @@ class JsonParser(BaseParser):
                 metadata=extract_config(ctx.path, text),
             )
         return self._capture(ctx, data, loc)
+
+    @staticmethod
+    def _is_rich(ctx: ParseContext) -> bool:
+        """A named config with a rich extractor; ``project.json`` / ``workspace.json`` only in an
+        Nx workspace — elsewhere they are another tool's files and are captured in full."""
+        name = Path(ctx.path).name
+        if name not in RICH_JSON_NAMES:
+            return False
+        return name not in NX_ONLY_JSON_NAMES or in_nx_workspace(ctx.path, ctx.repo_root)
 
     @staticmethod
     def _is_capturable(data: Any) -> bool:

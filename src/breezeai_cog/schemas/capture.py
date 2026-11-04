@@ -188,8 +188,8 @@ class FileRecord(BaseModel):
     framework: str | None = None
     # iac-only: dominant cloud provider across this file's statements
     platform: str | None = None
-    # Nx ownership, populated by the repository-level project resolver. These stay absent for
-    # files outside a discovered project root; the resolver never guesses from folder names.
+    # The Nx project the file is in (``core.nx``): its name as the configuration writes it (None
+    # when it writes none) and its root folder. Absent outside an Nx project.
     project: str | None = None
     projectRoot: str | None = None
     #: UI role of the node when it is a frontend component or state unit — one of

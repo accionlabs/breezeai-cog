@@ -1,9 +1,18 @@
 """Nx workspace discovery and deterministic file-to-project assignment.
 
-Nx project ownership is a repository fact, not a parser concern.  This module builds the
-small, picklable index in the parent process and the executor uses it after each file is
-parsed.  Resolution is deliberately lexical: the nearest discovered project root wins;
-unknown roots and project names are left unset rather than inferred from arbitrary folders.
+Nx project ownership is a repository fact that applies to files of every language, so it is
+not a parser concern. This module builds a small, picklable index in the parent process; the
+executor stamps ``project`` / ``projectRoot`` on each record after it is parsed.
+
+* A project is a ``project.json`` inside an Nx workspace (a ``nx.json`` at or above it), or an
+  entry with a ``root`` in the project map of the repository's ``nx.json`` / ``workspace.json``
+  (older Nx). Any other ``project.json`` belongs to another tool and is not read.
+* A file belongs to the project whose root is its nearest ancestor (``apps/webx`` is not inside
+  ``apps/web``).
+* The name is the one the configuration writes: ``"name"`` of ``project.json``, else the key of
+  the project map for that root. Without one, ``project`` is left empty (Nx itself rejects a
+  project without a name); ``projectRoot`` still groups the files. A root is never inferred
+  from ``sourceRoot``.
 """
 
 from __future__ import annotations
@@ -14,14 +23,15 @@ from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any, Sequence
 
+from ..parsers.config.nx import in_nx_workspace
 from .scanner import ScanEntry
 
 
 @dataclass(frozen=True, slots=True)
 class NxProject:
-    """One verified Nx project root and its graph-facing name."""
+    """One Nx project root and the name its configuration gives it (None when it gives none)."""
 
-    name: str
+    name: str | None
     root: str  # repository-relative POSIX path; ``""`` is the repository root
 
 
@@ -41,41 +51,38 @@ class NxProjectIndex:
 
 
 def discover_nx_projects(repo_root: Path, entries: Sequence[ScanEntry]) -> NxProjectIndex:
-    """Discover explicit ``project.json`` roots and legacy project maps.
+    """The Nx projects of the repository: ``project.json`` files of an Nx workspace, and the
+    project maps of a root ``nx.json`` / ``workspace.json``.
 
     ``entries`` is used for project files so normal scanner scope (ignore rules and language
-    filters) is respected.  Root ``nx.json`` / ``workspace.json`` are checked directly because
-    they are the source of ownership for older layouts and may be outside a language filter.
+    filters) is respected. The root ``nx.json`` / ``workspace.json`` are read directly: older
+    layouts keep project ownership there, and a language filter may leave them out.
     """
-    explicit: dict[str, NxProject] = {}
-    project_paths = {
-        _normalise_rel(entry.path): repo_root / entry.path
-        for entry in entries
-        if Path(entry.path).name == "project.json"
-    }
-    for rel, path in sorted(project_paths.items()):
-        data = _read_json(path)
-        root = _normalise_rel(str(PurePosixPath(rel).parent))
-        name = _project_name(data, root, repo_root)
-        if name:
-            explicit[root] = NxProject(name=name, root=root)
-
-    legacy: dict[str, NxProject] = {}
-    for filename in ("nx.json", "workspace.json"):
-        path = repo_root / filename
-        if not path.is_file():
+    explicit: dict[str, str | None] = {}
+    for entry in entries:
+        rel = _normalise_rel(entry.path)
+        if PurePosixPath(rel).name != "project.json" or not in_nx_workspace(rel, repo_root):
             continue
-        data = _read_json(path)
-        for name, value in _project_map(data).items():
-            map_root = _map_root(value)
-            if map_root is None:
-                continue
-            project_name = name.strip()
-            if project_name:
-                legacy.setdefault(map_root, NxProject(name=project_name, root=map_root))
+        name = _read_json(repo_root / rel).get("name")
+        root = _normalise_rel(str(PurePosixPath(rel).parent))
+        explicit[root] = (name.strip() or None) if isinstance(name, str) else None
 
-    # A real per-project project.json is authoritative over an older root-level map.
-    merged = {**legacy, **explicit}
+    legacy: dict[str, str] = {}
+    if (repo_root / "nx.json").is_file():
+        for filename in ("nx.json", "workspace.json"):
+            path = repo_root / filename
+            if not path.is_file():
+                continue
+            for key, value in _project_map(_read_json(path)).items():
+                map_root = _map_root(value)
+                if map_root is not None and isinstance(key, str) and key.strip():
+                    legacy.setdefault(map_root, key.strip())
+
+    # A per-project project.json is authoritative over an older root-level map; a project.json
+    # without a name keeps the map's name for the same root.
+    merged = {root: NxProject(name=name, root=root) for root, name in legacy.items()}
+    for root, name in explicit.items():
+        merged[root] = NxProject(name=name or legacy.get(root), root=root)
     return NxProjectIndex(tuple(sorted(merged.values(), key=_project_sort_key)))
 
 
@@ -93,22 +100,12 @@ def _project_map(data: dict[str, Any]) -> dict[str, Any]:
     return value if isinstance(value, dict) else {}
 
 
-def _project_name(data: dict[str, Any], root: str, repo_root: Path) -> str:
-    name = data.get("name")
-    if isinstance(name, str) and name.strip():
-        return name.strip()
-    # The fallback is the directory explicitly containing project.json.  For a root project,
-    # the repository directory is the only available directory identity.
-    return PurePosixPath(root).name if root else repo_root.name
-
-
 def _map_root(value: Any) -> str | None:
-    raw: Any = value
-    if isinstance(value, dict):
-        raw = value.get("root") if "root" in value else None
-        if raw is None:
-            source_root = value.get("sourceRoot")
-            raw = str(PurePosixPath(source_root).parent) if isinstance(source_root, str) else None
+    """The root a project-map entry declares: ``"apps/web"`` or ``{"root": "apps/web"}``.
+
+    ``sourceRoot`` alone does not say where the project is (``apps/web`` or ``apps/web/src``),
+    so an entry without a root is skipped."""
+    raw = value.get("root") if isinstance(value, dict) else value
     if not isinstance(raw, str):
         return None
     root = _normalise_rel(raw)

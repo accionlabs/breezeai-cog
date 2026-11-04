@@ -12,14 +12,12 @@ import os
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Iterator
+from typing import Callable, Iterator
 
 from .._version import __version__
-from ..config import Settings
 from ..emit import split_oversized_statements
 from ..logging import DETAIL_LOGGER, get_logger
 from ..parsers.additive import fact_sources
-from ..parsers.base import LanguageParser
 from ..parsers.contract import validate as validate_contract
 from ..schemas import FileRecord, ProjectMetaData
 from . import executor
@@ -47,7 +45,7 @@ def _classifier(languages: set[str] | None) -> Callable[[str], str | None]:
     return classify
 
 
-def _template_skip_rule(settings: Settings) -> Callable[[str], str | None] | None:
+def _template_skip_rule(settings) -> Callable[[str], str | None] | None:
     """The ``skip_rule`` that drops markup/view files, or ``None`` when
     ``--capture-templates`` is on.
 
@@ -68,7 +66,7 @@ def _template_skip_rule(settings: Settings) -> Callable[[str], str | None] | Non
     return skip_rule
 
 
-def _warn_if_only_template_languages(settings: Settings, gate_on: bool) -> None:
+def _warn_if_only_template_languages(settings, gate_on: bool) -> None:
     """Warn when ``--language`` selects only parsers that own nothing but markup, while the
     template gate is on — otherwise the run silently produces zero files."""
     if not gate_on or not settings.languages:
@@ -186,7 +184,7 @@ def _build_indexes(
             repo_root / e.path for e in entries
             if str(e.path).lower().endswith(exts) and repo_root / e.path not in own
         ]
-    indexes: dict[str, Any] = {}
+    indexes: dict[str, object] = {}
     for name, base in bases.items():
         start = time.perf_counter()
         try:
@@ -211,9 +209,7 @@ def _build_indexes(
     return indexes
 
 
-def iter_records(
-    repo_root: str | Path, settings: Settings
-) -> Iterator[tuple[ScanEntry, FileRecord]]:
+def iter_records(repo_root: str | Path, settings) -> Iterator[tuple[ScanEntry, FileRecord]]:
     """Sequential, in-process scan + parse (streaming)."""
     repo_root = Path(repo_root)
     entries = _scan_entries(repo_root, settings)
@@ -244,7 +240,7 @@ class _ConfigSummary:
         self.dep_total = self.dep_prod = self.dep_dev = 0
         self.captured_documents = 0
 
-    def add(self, md: dict[str, Any]) -> None:
+    def add(self, md: dict) -> None:
         self.by_type[md.get("category", "other")] = self.by_type.get(md.get("category", "other"), 0) + 1
         # A ``format`` marks a data document captured in full (its content serialized, e.g. as
         # TOON) rather than reduced to a summary. Format-neutral: any full-capture parser sets
@@ -267,7 +263,7 @@ class _ConfigSummary:
             self.services.update(dc.get("services", []))
             self.ports.update(dc.get("exposedPorts", []))
 
-    def result(self, total: int) -> dict[str, Any]:
+    def result(self, total: int) -> dict:
         return {
             "totalConfigFiles": total,
             "capturedDataDocuments": self.captured_documents,
@@ -286,7 +282,7 @@ class _ConfigSummary:
 def _assemble(
     repo_root: Path,
     records: Iterator[tuple[str, FileRecord]],
-    sink: Any,
+    sink,
     *,
     statement_text_limit: int = 0,
     max_statement_parts: int = 0,
@@ -294,7 +290,7 @@ def _assemble(
     skips: dict[str, int] | None = None,
     debug_on: bool = False,
     progress: Callable[[int, int], None] | None = None,
-    summary_out: dict[str, Any] | None = None,
+    summary_out: dict | None = None,
 ) -> ProjectMetaData:
     """Stream (language, record) pairs to the sink and accumulate projectMetaData.
 
@@ -385,10 +381,10 @@ def _assemble(
 
 
 def run(
-    repo_root: str | Path, settings: Settings, sink: Any,
+    repo_root: str | Path, settings, sink,
     *,
     progress: Callable[[int, int], None] | None = None,
-    summary_out: dict[str, Any] | None = None,
+    summary_out: dict | None = None,
 ) -> ProjectMetaData:
     """Full analysis to a sink (parallel) → assembled projectMetaData.
 
@@ -428,7 +424,7 @@ def run(
     return meta
 
 
-def run_inprocess(repo_root: str | Path, settings: Settings, sink: Any) -> ProjectMetaData:
+def run_inprocess(repo_root: str | Path, settings, sink) -> ProjectMetaData:
     """Full analysis to a sink, **sequential and in-process** (no spawn pool) — the
     server `/api/analyze` path, where file lists are small and per-request pool
     startup would dominate."""
