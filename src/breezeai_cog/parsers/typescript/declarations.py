@@ -167,8 +167,13 @@ def _commonjs_exports(root: Node, source: bytes,
                       local: Callable[[str], Export | None]) -> dict[str, Export]:
     """The properties a CommonJS module exports: the keys of ``module.exports = { … }``, and
     ``exports.x = …`` / ``module.exports.x = …``. A value naming a local declaration or import
-    exports that; a function written in place is declared there."""
+    exports that; a function written in place is declared there.
+
+    Top-level statements are read in order, as the module runs them: a ``module.exports = …``
+    replaces the exported object, so it drops everything exported before it, and an
+    ``exports.x = …`` after it sets a property of the replaced object, which is not exported."""
     out: dict[str, Export] = {}
+    replaced = False  # ``exports`` no longer is ``module.exports``
 
     def value_export(key: str, value: Node) -> Export | None:
         if value.type == "identifier":
@@ -186,7 +191,11 @@ def _commonjs_exports(root: Node, source: bytes,
         if left is None or right is None:
             continue
         target = node_text(left, source)
-        if target == "module.exports" and right.type == "object":
+        if target == "module.exports":
+            out.clear()
+            replaced = True
+            if right.type != "object":
+                continue
             for p in right.named_children:
                 if p.type == "shorthand_property_identifier":
                     found = local(node_text(p, source))
@@ -209,6 +218,8 @@ def _commonjs_exports(root: Node, source: bytes,
                     out[key] = found
         elif target.startswith(("exports.", "module.exports.")) and target.count(".") == \
                 (1 if target.startswith("exports.") else 2):
+            if replaced and target.startswith("exports."):
+                continue
             key = target.rsplit(".", 1)[-1]
             found = value_export(key, right)
             if found is not None:

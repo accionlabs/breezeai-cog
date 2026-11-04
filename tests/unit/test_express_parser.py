@@ -776,6 +776,48 @@ def test_accessors_are_not_handlers(analyze_files) -> None:
     assert {ep: loc for ep, (_, *loc) in got.items()} == {"/a": [None, None], "/b": [None, None]}
 
 
+def test_a_replaced_module_exports_object_exports_nothing(analyze_files) -> None:
+    # Node runs the assignments in order: the second `module.exports = …` replaces the first
+    # object, and `exports.c` after it sets a property of an object that is no longer exported.
+    # `module.exports.d` writes to the current object, so it is exported.
+    got = _handler_locations(analyze_files, {
+        "src/legacy.js": (
+            "exports.early = function (req, res) {};\n"
+            "module.exports = { a(req, res) {} };\n"
+            "module.exports = { b(req, res) {} };\n"
+            "exports.c = function (req, res) {};\n"
+            "module.exports.d = function (req, res) {};\n"
+        ),
+        "src/app.js": (
+            "const express = require('express');\nconst legacy = require('./legacy');\n"
+            "const app = express();\n"
+            "app.get('/early', legacy.early);\napp.get('/a', legacy.a);\n"
+            "app.get('/b', legacy.b);\napp.get('/c', legacy.c);\napp.get('/d', legacy.d);\n"
+        ),
+    })
+    assert {ep: loc for ep, (_, *loc) in got.items()} == {
+        "/early": [None, None],
+        "/a": [None, None],
+        "/b": ["src/legacy.js", 3],
+        "/c": [None, None],
+        "/d": ["src/legacy.js", 5],
+    }
+
+
+def test_module_exports_replaced_by_a_non_object_exports_no_earlier_keys(analyze_files) -> None:
+    got = _handler_locations(analyze_files, {
+        "src/legacy.js": (
+            "module.exports = { a(req, res) {} };\n"
+            "module.exports = function main(req, res) {};\n"
+        ),
+        "src/app.js": (
+            "const express = require('express');\nconst legacy = require('./legacy');\n"
+            "const app = express();\napp.get('/a', legacy.a);\n"
+        ),
+    })
+    assert {ep: loc for ep, (_, *loc) in got.items()} == {"/a": [None, None]}
+
+
 def test_mount_guards_are_the_middleware_before_each_router(analyze_files) -> None:
     # Express runs a mount's arguments in order: `requireAuth` runs only after `users` passes the
     # request on, so it guards `orders` and not `users`; `notFound` runs after both, so it guards
