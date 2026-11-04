@@ -39,7 +39,7 @@ def _variable_locator(dc: DetectContext, found: Scan) -> Variable:
             lookup = handler_locator(
                 dc.root, dc.source, dc.path, dc.ctx.repo_root, dc.ctx.resolution_index
             )
-        hit = lookup(name)
+        hit = lookup(name, None)  # the file's own declarations were checked above
         if hit is None:
             return name, None, None
         line, path = handler_location(hit[1], dc.path)
