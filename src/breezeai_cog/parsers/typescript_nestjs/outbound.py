@@ -122,7 +122,7 @@ def detect_client_proxy_calls(
             {"semanticType": _KIND[node_text(prop, source)],
              "endpoint": message_pattern(first, source, consts) if first is not None else None,
              "framework": framework},
-            enrich="unclassified", node_type="synthetic",
+            enrich="unclassified",
             text=first_line(node_text(call, source))[:200],
         ))
     return found

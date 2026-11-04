@@ -856,6 +856,18 @@ def test_transport_clients_are_outbound(analyze_files) -> None:
                    ("eventbus_send", '{"cmd":"stock"}')]
 
 
+def test_a_send_appended_beside_another_reports_its_call_node(analyze_files) -> None:
+    # Two sends in one statement: the first classifies the statement, the second is a record of
+    # its own, anchored at its call.
+    st = analyze_files({"package.json": _MS_PKG, "src/svc.ts": (
+        "import { ClientProxy } from '@nestjs/microservices';\n"
+        "export class Svc {\n  private bus: ClientProxy;\n"
+        "  go() { return Promise.all([this.bus.send('a', {}), this.bus.send('b', {})]); }\n}\n"
+    )})
+    sends = sorted((s.endpoint, s.nodeType) for s in st if s.semanticType == "eventbus_send")
+    assert sends == [("a", "return_statement"), ("b", "call_expression")]
+
+
 def test_every_transport_client_alone_is_outbound(analyze_files) -> None:
     # A file naming only the transport client (no ClientProxy) is read too.
     for client in ("ClientNats", "ClientMqtt", "ClientRedis", "ClientTCP"):
