@@ -383,6 +383,18 @@ def test_query_declaration_is_cut_and_params_are_kept(analyze_files) -> None:
     assert sorted(r.endpoint for r in _eps(st, STATES)) == ["/items", "/items/{id:int}"]
 
 
+def test_question_mark_inside_a_parameter_pattern_is_not_a_query(analyze_files) -> None:
+    st = _states(
+        analyze_files,
+        "  $stateProvider.state('a', { url: '/x/{id:[0-9]?}' });\n"
+        "  $stateProvider.state('b', { url: '/y/{id:[0-9]{1,8}}?tab' });\n"
+        "  $stateProvider.state('c', { url: '/z/{slug:[a-z#]+}#top' });\n",
+    )
+    assert sorted(r.endpoint for r in _eps(st, STATES)) == [
+        "/x/{id:[0-9]?}", "/y/{id:[0-9]{1,8}}", "/z/{slug:[a-z#]+}",
+    ]
+
+
 def test_object_form_state(analyze_files) -> None:
     st = _states(
         analyze_files, "  $stateProvider.state({ name: 'x', url: '/x', component: 'xPage' });\n"

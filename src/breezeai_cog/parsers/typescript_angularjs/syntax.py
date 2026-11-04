@@ -237,8 +237,18 @@ def handler_of(node: Node, source: bytes) -> Handler:
 
 
 def cut_query(path: str) -> str:
-    """The address without a query declaration or fragment (``/users?page`` → ``/users``)."""
-    return re.split(r"[?#]", path, maxsplit=1)[0]
+    """The address without a query declaration or fragment (``/users?page`` → ``/users``). A
+    ``?`` or ``#`` inside a ui-router parameter is part of its pattern, not a query:
+    ``/x/{id:[0-9]?}`` and ``/x/{id:[0-9]{1,8}}`` are kept whole."""
+    depth = 0
+    for i, ch in enumerate(path):
+        if ch == "{":
+            depth += 1
+        elif ch == "}" and depth:
+            depth -= 1
+        elif ch in "?#" and not depth:
+            return path[:i]
+    return path
 
 
 def call_emit(mc: MethodCall, source: bytes, fields: dict[str, object]) -> Emit:
