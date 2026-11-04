@@ -708,8 +708,67 @@ def test_prototypes_are_declaration_statements_not_functions(tmp_path, parser) -
         ("declaration", "list_free"),
         ("declaration", "list_parenthesized"),
         ("declaration", "forward"),
+        ("declaration", "lua_gettop"),
     ]
     assert record.functions == []
+
+
+@pytest.mark.parametrize("parser", [CParser(), CppParser()], ids=["c", "cpp"])
+def test_a_parenthesized_name_after_a_macro_and_a_keyword_type_is_recovered(tmp_path, parser) -> None:
+    record = _parse(
+        parser,
+        tmp_path,
+        "lapi.c",
+        "LUA_API void (lua_settop) (lua_State *L, int idx);\n"
+        "LUA_API unsigned int (lua_rawlen) (lua_State *L, int idx);\n"
+        # A type name, not a keyword, in front: it may be a type and a name-building macro.
+        "LUALIB_API lua_Integer (luaL_len) (lua_State *L, int idx);\n"
+        "LUA_API int (lua_gettop) (lua_State *L) { return 0; }\n"
+        "LUA_API lua_Number (lua_tonumber) (lua_State *L) { return 0; }\n",
+    )
+    assert [
+        (s.name, [d.name for d in s.decorators])
+        for s in record.statements if s.nodeType == "declaration"
+    ] == [("lua_settop", ["LUA_API"]), ("lua_rawlen", ["LUA_API"])]
+    assert [
+        (f.name, f.returnType, [d.name for d in f.decorators], [p.name for p in f.params])
+        for f in record.functions
+    ] == [("lua_gettop", "int", ["LUA_API"], ["L"])]
+
+
+def test_a_parenthesized_member_name_after_a_macro_is_recovered(tmp_path) -> None:
+    record = _parse(
+        CppParser(),
+        tmp_path,
+        "k.h",
+        "class K {\n"
+        "  API int (f) (int a);\n"
+        "  API unsigned long (g) (int a) { return 0; }\n"
+        "  API size_type (h) (int a);\n"
+        "};\n",
+    )
+    assert [
+        (f.name, f.returnType, [d.name for d in f.decorators]) for f in record.functions
+    ] == [("f", "int", ["API"]), ("g", "unsigned long", ["API"])]
+
+
+@pytest.mark.parametrize("jobs", [1, 2])
+def test_a_parenthesized_name_is_a_call_target(tmp_path, jobs) -> None:
+    repo = _repo(
+        tmp_path / "r",
+        {
+            "lib/lapi.h": "LUA_API int (lua_gettop) (lua_State *L);\n",
+            "lib/lapi.c": (
+                '#include "lapi.h"\n'
+                "LUA_API int (lua_gettop) (lua_State *L) { return 0; }\n"
+                "int lua_top1(lua_State *L) { return lua_gettop(L) + 1; }\n"
+            ),
+            "app/main.c": '#include "lapi.h"\nint main(void) { return lua_gettop(0); }\n',
+        },
+    )
+    files = _capture(repo, jobs)
+    assert _calls(files["app/main.c"], "main") == {"lua_gettop": "lib/lapi.c"}
+    assert _calls(files["lib/lapi.c"], "lua_top1") == {"lua_gettop": "lib/lapi.c"}
 
 
 def test_prototypes_follow_the_statement_gate(tmp_path) -> None:

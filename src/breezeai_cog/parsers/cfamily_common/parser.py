@@ -244,10 +244,11 @@ class CFamilyParser(BaseParser):
                     # declarator the grammar misread (a macro taken for the type) is skipped.
                     # So is one with an error on the way to its name: zlib's `int f OF((int a,
                     # int b));` reads as a variable named after the last parameter. One read
-                    # past a macro (`read_declaration`) is kept only with a name to show.
+                    # past a macro (`read_declaration`) is kept only with a name to show; a
+                    # misread one only with the name `read_declaration` recovered.
                     declarator = node.child_by_field_name("declarator")
                     name = read.name or _declarator_name(declarator, source)
-                    if not is_misread_declarator(declarator) and (
+                    if (read.name is not None or not is_misread_declarator(declarator)) and (
                         name is not None or read.return_type_known
                     ):
                         statements.append(

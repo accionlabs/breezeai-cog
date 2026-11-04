@@ -483,13 +483,55 @@ def _past_macro(node: Node, source: bytes) -> DeclarationRead:
     )
 
 
+def _parenthesized_name(node: Node, source: bytes) -> DeclarationRead | None:
+    """The read of a misread declarator (:func:`is_misread_declarator`), or ``None`` when it
+    can't be read. ``LUA_API int (lua_gettop) (lua_State *L);`` — the name parenthesized so a
+    macro of that name can't expand — reads as a function ``int`` taking ``lua_gettop``. A
+    keyword can't be a name or a macro, so when the misread "name" is a type keyword and the
+    inner parentheses hold one bare word, the word in front is the macro, the keyword the return
+    type and the bare word the name. ``LUALIB_API lua_Integer (luaL_len)`` is not read: it is
+    also how a type and a name-building macro (``int MANGLE(f)(…)``) look."""
+    fd = function_declarator_of(node.child_by_field_name("declarator"))
+    inner = fd.child_by_field_name("declarator") if fd is not None else None
+    word = inner.child_by_field_name("declarator") if inner is not None else None
+    wrapped = inner.child_by_field_name("parameters") if inner is not None else None
+    ret = node.child_by_field_name("type")
+    if word is None or wrapped is None or ret is None or node_text(word, source) not in _TYPE_KEYWORDS:
+        return None
+    params = wrapped.named_children
+    if (
+        len(params) != 1 or params[0].type != "parameter_declaration"
+        or params[0].child_by_field_name("declarator") is not None
+        or (name := params[0].child_by_field_name("type")) is None
+        or name.type != "type_identifier" or len(params[0].named_children) != 1
+    ):
+        return None
+    if ret.type == "type_identifier":  # LUA_API int (f)
+        macro, keywords = ret, []
+    elif ret.type == "sized_type_specifier":  # LUA_API unsigned int (f)
+        macros = [c for c in ret.children if c.type == "type_identifier"]
+        if len(macros) != 1 or macros[0] is not ret.children[0]:
+            return None
+        macro, keywords = macros[0], [node_text(c, source) for c in ret.children[1:]]
+    else:
+        return None
+    return DeclarationRead(
+        name=node_text(name, source), return_type_known=False, macro=node_text(macro, source),
+        return_type=" ".join([*keywords, node_text(word, source)]),
+    )
+
+
 def read_declaration(node: Node, source: bytes) -> DeclarationRead | None:
     """How to read a file-scope ``declaration`` / ``function_definition``, or ``None`` to skip
     it because its name can't be trusted. A macro the grammar can't expand is read past only in
-    two shapes: a macro in front of the type (``LUA_API int f(…)``) and a macro or type in front
-    of the name (``LUALIB_API lua_Integer luaL_len(…)``). Then the name and parameters come from
-    clean syntax, and ``returnType`` is unknown: ``LUA_API int`` and ``uLong ZEXPORT`` parse the
-    same way, so which word is the type can't be told."""
+    three shapes: a macro in front of the type (``LUA_API int f(…)``), a macro or type in front
+    of the name (``LUALIB_API lua_Integer luaL_len(…)``) and a macro in front of a keyword type
+    and a parenthesized name (``LUA_API int (lua_gettop)(…)``, :func:`_parenthesized_name`).
+    Then the name and parameters come from clean syntax; ``returnType`` is unknown in the second
+    shape and in the first unless the type is keywords: ``LUA_API int`` and ``uLong ZEXPORT``
+    parse the same way, so which word is the type can't be told."""
+    if is_misread_declarator(node.child_by_field_name("declarator")):
+        return None if has_declaration_error(node) else _parenthesized_name(node, source)
     prefixed = False
     if has_declaration_error(node):
         if not _macro_prefixed(node):
@@ -522,7 +564,10 @@ def is_macro_call_declarator(declarator: Node | None) -> bool:
 def read_member(member: Node, source: bytes) -> DeclarationRead | None:
     """How to read a class member, or ``None`` to skip it because its header is broken. A
     macro in front of its type (``ESIMD_INLINE int row(int g) const``) is read past as at file
-    scope: the name and parameters come from clean syntax."""
+    scope: the name and parameters come from clean syntax, and so is a misread parenthesized
+    name (``API int (f)(int a);``)."""
+    if is_misread_declarator(member.child_by_field_name("declarator")):
+        return None if has_declaration_error(member) else _parenthesized_name(member, source)
     if not has_declaration_error(member):
         return DeclarationRead()
     if _macro_prefixed(member):
@@ -717,12 +762,13 @@ def build_member_function(
     """An in-class member-function **declaration** (``field_declaration`` with a
     ``function_declarator``, no body) → a flat method ``Function``. An inline
     **definition** carries a ``body`` and its calls/statements are captured too. ``read``
-    says whether the return type is known (see :func:`read_member`)."""
+    says whether the return type is known and carries a name a macro moved (see
+    :func:`read_member`)."""
     fd = function_declarator_of(field_decl.child_by_field_name("declarator"))
     name_node = fd.child_by_field_name("declarator") if fd is not None else None
     while name_node is not None and name_node.type == "parenthesized_declarator":
         name_node = name_node.named_children[0] if name_node.named_children else None  # (f)(int)
-    name = node_text(name_node, source) if name_node is not None else ""
+    name = read.name or (node_text(name_node, source) if name_node is not None else "")
     start, end = line_span(field_decl)
     # The id carries the qualified owner (`Outer.Inner`) so a nested type's methods are
     # identified unambiguously; `class_name` stays simple for call resolution.

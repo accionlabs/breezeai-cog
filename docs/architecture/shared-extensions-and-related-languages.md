@@ -486,6 +486,20 @@ C++.
 > char *`): `LUA_API lua_Integer` and `uLong ZEXPORT` parse the same way, so which word is the
 > type can't be told.
 
+> **Decision —** a name parenthesized after a macro and a type keyword (`LUA_API int
+> (lua_gettop) (lua_State *L);`, Lua's guard against a macro of the same name) is recovered.
+> The grammar reads it as a function named `int` that returns a function, which C and C++ never
+> allow, so the tree is always a misreading. A type keyword can't be a name or a macro, so when
+> the misread name is one and the inner parentheses hold one bare word, the word in front is
+> the macro (a decorator), the keywords are the return type and the bare word is the name. The
+> same holds for a class member, and the parser and the index read both the same way. Any
+> other function-returning-function shape is skipped, at file scope and in a class alike.
+> **Why:** Lua writes its whole API this way (lua.h, lauxlib.h, lualib.h, and every project that
+> embeds it); the prototypes were lost and a definition was named `int (luaL_loadstring)`.
+> **Cost:** a type name in front (`LUALIB_API lua_Integer (luaL_len)`) stays skipped: it is
+> also how a type and a name-building macro look (`int MANGLE(f)(…)`), so the name would be a
+> guess.
+
 > **Decision —** a macro between `class` / `struct` / `union` and the class name (`class
 > OPENVINO_API GatherMatmul : public Op { … }`) is blanked and the file is parsed a second
 > time, so the class is read as if the macro weren't written. The word is blanked only where

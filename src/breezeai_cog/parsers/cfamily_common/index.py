@@ -151,8 +151,10 @@ def _record_def(
     inner = fd.child_by_field_name("declarator") if fd is not None else None
     if inner is None:
         return
-    if inner.type == "identifier":
-        name = name or node_text(inner, source)  # `name`: one a macro moved (read_declaration)
+    if inner.type == "identifier" or (name is not None and inner.type == "function_declarator"):
+        # `name`: one a macro moved (read_declaration / read_member), also out of a misread
+        # `LUA_API int (f)(…)`
+        name = name or node_text(inner, source)
         if class_name is not None:  # inline member definition
             _record_qual(frag, class_name, name, rel)
         elif name and _file_local(node, source, rel):
@@ -225,11 +227,12 @@ def _index_class(frag: CFamilyIndex, node: Node, source: bytes, rel: str, ns: st
         _class_heritage(frag, class_name).extends = _simple(extends)
     for member in body.named_children:
         member = _unwrap_template(member)
-        if read_member(member, source) is None:
+        read = read_member(member, source)
+        if read is None:
             continue
         if member.type in _MEMBER_FN_TYPES and _has_body(member):
             if function_declarator_of(member.child_by_field_name("declarator")) is not None:
-                _record_def(frag, member, source, rel, class_name)
+                _record_def(frag, member, source, rel, class_name, name=read.name)
         elif member.type in _CLASS_TYPES:  # nested type — qualified under this class
             _index_class(frag, member, source, rel, fqn)
 
