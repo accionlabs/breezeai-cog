@@ -188,6 +188,13 @@ a one-per-file parser. There are **two hook points** — choose by the shape of 
   (e.g. `parsers/typescript_express/routes.py`; the registry is `parsers/additive.py`). Do **not** edit the language parser: its `extract` already ends
   with `run_additive(<language>, …)`, which runs every registered detector for that language,
   so it fires for every file of the language and layers underneath whichever framework won.
+  **Where the module goes:** with what it detects. A framework that has its own parser package
+  → that package (`csharp_webforms/handlers.py`). A separate library or SDK → its own
+  detector-only package `parsers/<lang>_<library>/` whose `__init__.py` is a docstring and
+  an empty `PARSERS` list (`csharp_hangfire/jobs.py`, `go_kafka/events.py`) — never the base
+  `<lang>/` package, which every framework parser of the language inherits. Rules shared by
+  several languages go in a top-level module (`quartz_common.py`); `parsers/detection/` is only
+  for the shared text-level classifiers. Discovery finds the module wherever it is.
   Its `detect` **returns** what it found (`Detection` of `Emit`s: node + fields + whether it
   may enrich the statement already there); the registry writes it (`parsers/emits.py` `apply`:
   enrich in place or append, ids, parents). `detect(dc)` gets a `DetectContext`: `dc.root`,
@@ -391,10 +398,12 @@ src/breezeai_cog/parsers/
 ├─ additive.py             # detector + fact registry (register_detector, register_fact, run_additive)
 ├─ emits.py                # Emit + apply: the one place detector output is written
 ├─ contract.py             # entry-point contract check (validate)
-├─ detection/              # shared cross-language classifiers (api/db/query) — reuse, don't fork
-├─ <lang>/                 # one base language parser package per language
-└─ <lang>_<framework>/     # framework parsers (subclass the base; one wins per file) and
-                           # detector-only packages (register detectors / facts)
+├─ detection/              # shared cross-language text-level classifiers (api/db/query) only
+├─ <lang>/                 # one base language parser package per language (the language only)
+├─ <lang>_<framework>/     # framework parsers (subclass the base; one wins per file), or
+│                          # detector-only packages for a framework without a parser
+└─ <lang>_<library>/       # detector-only packages for a separate library or SDK
+                           # (PARSERS = []; register detectors / facts), e.g. csharp_hangfire/
 ```
 
 ## 9. Reliability checklist

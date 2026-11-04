@@ -537,6 +537,20 @@ classDiagram
 > disappear. **Cost:** additive detectors run for every file of the language, so they must be
 > cheap and guarded by a byte check.
 
+> **Decision —** a detector or fact lives with what it detects. If that is the language itself,
+> or a framework that has its own parser package, it lives in that package. If it is a separate
+> library or SDK, it lives in a detector-only package `parsers/<lang>_<library>/` (an
+> `__init__.py` with an empty `PARSERS` list, e.g. `csharp_hangfire/`, `go_kafka/`). Code shared
+> across frameworks or languages is a top-level module (`quartz_common.py`, `aws_deploy.py`);
+> `parsers/detection/` holds only the shared text-level classifiers.
+> **Why:** the base language package is inherited by every framework parser of the language, so
+> it is the strictest change zone; a library detector there makes a library change look like a
+> language change. One folder per library keeps everything about it, and its tests, together.
+> **Cost:** more small packages. The test for a module in a base package: *does the base parser
+> use it for every file of the language?* If not, and it detects one library or framework, it
+> belongs in that library's or framework's package. Some library detectors still sit in a base
+> package (the `code in` column below) until they are moved.
+
 > **Decision —** additive detectors self-register (`parsers/additive.py`); the language parser
 > only calls `run_additive(<language>, …)` once.
 > **Why:** adding a detector touches only its own module, not the language parser that every
@@ -1041,7 +1055,8 @@ src/breezeai_cog/
 │  │                               helpers shared by one framework family
 │  ├─ cfamily_common/              the extraction and index C and C++ share
 │  ├─ <lang>/                      language parsers
-│  └─ <lang>_<framework>/          framework parsers
+│  ├─ <lang>_<framework>/          framework parsers
+│  └─ <lang>_<library>/            detector-only packages: a library's additive detectors
 ├─ emit/                           ids, NDJSON, gzip, sinks, statement splitting
 ├─ analyzers/                      database schema analysers (server only)
 ├─ services/                       use cases: analysis, upload, diff, notify
@@ -1073,7 +1088,7 @@ from another. The same holds between languages: C and C++ share their extraction
 
 | Zone | Paths | Affects |
 |---|---|---|
-| **Parser-local** | `parsers/<lang>_<framework>/`, its test file | That parser only |
+| **Parser-local** | `parsers/<lang>_<framework>/`, `parsers/<lang>_<library>/`, its test file | That parser only (a library package's detectors: see *Additive detector*) |
 | **Language parser** | `parsers/<lang>/` | Every framework built on that language |
 | **Additive detector** | a module that calls `register_detector(...)` or `register_fact(...)`, or a changed `Gate` (`order`, `skip_fixtures`, `guard`) | Every file of that language, whichever parser owns it |
 | **Shared helper** | e.g. `parsers/vertx_common.py`, `quartz_common.py`, `cfamily_common/` (C and C++), `aspnet_areas.py`, `handler_sites.py`, `aws_deploy.py` | Every parser that imports it |
@@ -1121,6 +1136,7 @@ from another. The same holds between languages: C and C++ share their extraction
 | Output | Size limits applied in one place, by splitting, not truncating | [§4.6](#46-assembly-and-output) |
 | Parsers | Framework parsers subclass their language parser | [§6](#6-the-parser-model) |
 | Parsers | Cross-cutting libraries are additive detectors | [§6](#6-the-parser-model) |
+| Parsers | A detector lives with what it detects: the language or framework package, or its library's own `<lang>_<library>/` package | [§6](#6-the-parser-model) |
 | Parsers | Additive detectors self-register; the language parser calls one runner | [§6](#6-the-parser-model) |
 | Parsers | A fact from another file is a registered fact, built by `build_index` | [§6](#6-the-parser-model) |
 | Parsers | Detectors return emits; one applier writes them; one validator checks the contract | [§6](#6-the-parser-model) |
