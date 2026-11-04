@@ -658,6 +658,7 @@ the file:
   │                  40   generic-handlers csharp_webforms/handlers.py       ✔       │
   │                  50   hangfire         csharp_hangfire/jobs.py           ✔       │
   │                  60   quartz           csharp_quartz/jobs.py             ✔       │
+  │                  70   aws-sdk-calls    csharp_aws/sdk_calls.py           ✔       │
   │                                                                                  │
   │  java            10   quartz           java/quartz.py                    ✔       │
   │                                                                                  │
