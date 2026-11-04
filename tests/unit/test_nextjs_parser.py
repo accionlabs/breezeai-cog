@@ -461,6 +461,25 @@ def test_records_report_the_node_they_stand_for(analyze_files) -> None:
     }
 
 
+def test_a_handler_declaration_that_is_an_api_call_keeps_it(analyze_files) -> None:
+    # `sdk-calls` classified the one-line declaration as the outbound call; the route is a
+    # record beside it, at the same node, not an overwrite of it.
+    st = analyze_files({
+        "package.json": _NEXT_PKG,
+        "pages/api/proxy.ts": (
+            "const handler = async (req, res) =>\n"
+            "  res.json(await (await fetch('https://api.example.com/b')).json());\n"
+            "export default handler;\n"
+        ),
+    })
+    got = sorted((s.semanticType, s.nodeType, s.startLine, s.endpoint)
+                 for s in st if s.semanticType in ("route", "api_call"))
+    assert got == [
+        ("api_call", "lexical_declaration", 1, "https://api.example.com/b"),
+        ("route", "lexical_declaration", 1, "/api/proxy"),
+    ]
+
+
 _NEXT16_PKG = '{"dependencies": {"next": "^16.0.0", "react": "19"}}'
 _PROXY = (
     "import { NextResponse } from 'next/server';\n"

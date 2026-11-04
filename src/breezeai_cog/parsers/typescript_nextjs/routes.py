@@ -51,7 +51,7 @@ from tree_sitter import Node
 
 import re
 
-from ...emit import file_id, function_id
+from ...emit import file_id, function_id, statement_id
 from ...schemas import FileRecord
 from ..additive import DetectContext, Detection, Detector, Gate, register_detector
 from ..emits import Emit
@@ -287,7 +287,8 @@ def _route(
             "isRegex": False,
         },
         # The node may already be a statement of the base extraction (a referenced handler's
-        # `const handler = …`): that statement becomes the route, never a copy beside it.
+        # `const handler = …`): that statement becomes the route, never a copy beside it
+        # (unless an earlier detector classified it — see ``_beside_classified``).
         enrich="same" if node is not None else "never",
         parent=parent, node_type=None if node is not None else "synthetic",
         text=None if node is not None else f"{method} {local}",
@@ -401,7 +402,19 @@ def _detect(dc: DetectContext) -> Detection | None:
     routes = detect_nextjs_routes(
         dc.root, dc.source, dc.path, dc.record, index=dc.ctx.resolution_index,
     )
+    _beside_classified(routes, dc.record, dc.path)
     return Detection(routes, label="nextjs") if routes else None
+
+
+def _beside_classified(routes: list[Emit], record: FileRecord, path: str) -> None:
+    """A route anchored at a statement an earlier detector already classified gets a record
+    beside it instead of overwriting it: in ``const handler = (req, res) => axios.get(…)``
+    the declaration is the outbound ``api_call`` and stays one."""
+    classified = {s.id for s in record.statements if s.semanticType is not None}
+    for emit in routes:
+        col = emit.col if emit.col is not None else emit.node.start_point[1]
+        if emit.enrich == "same" and statement_id(path, emit.start_line, col) in classified:
+            emit.enrich = "never"
 
 
 register_detector(Detector(
