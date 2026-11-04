@@ -23,7 +23,7 @@ Python reimplementation of `breezeai-code-ontology-generator`.
 | Language | Extensions | Framework / detector support |
 |---|---|---|
 | TypeScript / JavaScript | `.ts .tsx .mts .cts .js .jsx .mjs .cjs` `.vue` ‡ | NestJS (& routing-controllers), Angular, Express, React, Vue, Next.js (App + Pages Router API routes), LoopBack, GraphQL (schema-first + code-first + an in-house resolver framework, server + client ops); AWS SNS/SQS/EventBridge/Lambda/S3/SES/CloudFront/Kinesis/DynamoDB/API Gateway/Cognito/SSM Parameter Store (additive); HubSpot/Chargebee/Salesforce SDKs (additive) |
-| Python | `.py` | FastAPI |
+| Python | `.py` | FastAPI; Django (`urlpatterns` → one route per view and verb, class-based views and their bases followed across files, `include()` chains from `ROOT_URLCONF`, auth decorators / mixins and agreed `MIDDLEWARE` as guards); Django REST framework (router registrations → one route per viewset action and `@action`, generic API views, `@api_view`, `permission_classes` as guards, `serializer_class` as DTOs); Flask (additive — routes, `add_url_rule`, `MethodView`, blueprint prefixes followed across files, `before_request` hooks and Flask-Login as guards) |
 | PHP | `.php .phtml` | Laravel, CodeIgniter 4, Slim, Symfony; WordPress hooks, Laravel Event/Bus and Symfony EventDispatcher/Messenger (additive) |
 | Ruby | `.rb` | Rails (**NEW in the Python target**), Sinatra (**NEW in the Python target**), Grape (**NEW in the Python target**) |
 | Java | `.java` | Spring Boot, JAX-RS, Vert.x |
@@ -63,6 +63,9 @@ always to *missing* nodes, never wrong ones — the parser fabricates nothing it
 **Target Spec §2.4 note:** `rails`, `sinatra`, and `grape` are emitted framework values and are
 new in the Python target. The local capture schema accepts open framework strings; the external
 backend allow-list must add these values before ingestion can rely on them being retained.
+
+Python framework values `flask`, `django` and `drf` are emitted the same way and need the same
+Target Spec §2.4 and backend allow-list entries.
 
 PHP framework values (`laravel`, `codeigniter`, `slim`, `symfony`, and `wordpress`) are also
 emitted as open framework strings. WordPress action/filter registrations use

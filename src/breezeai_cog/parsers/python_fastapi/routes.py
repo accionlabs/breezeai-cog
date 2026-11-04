@@ -14,9 +14,9 @@ from ..treesitter import node_text
 from .file_facts import ROUTERS as _ROUTERS
 from .file_facts import UNKNOWN as _UNKNOWN
 from .file_facts import app_middleware as _app_middleware
-from .file_facts import calls as _calls
+from ..python_common import calls as _calls
 from .file_facts import dependencies as _dependencies
-from .file_facts import literal as _literal
+from ..python_common import literal as _literal
 from .file_facts import mounted_names as _mounted_names
 from .file_facts import prefix_kwarg as _prefix_kwarg
 from .auth import certain_auth
