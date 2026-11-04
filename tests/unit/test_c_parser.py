@@ -640,6 +640,32 @@ def test_a_macro_in_front_of_the_type_keeps_the_declaration(tmp_path, parser) ->
     ] == [("table_len", []), ("reset", ["API"]), ("counter", ["ATOMIC"])]
 
 
+@pytest.mark.parametrize("parser", [CParser(), CppParser()], ids=["c", "cpp"])
+def test_a_macro_folded_into_unsigned_keeps_the_declaration(tmp_path, parser) -> None:
+    # `LUALIB_API unsigned int f` reads as the type `LUALIB_API unsigned` with `int` in an error.
+    record = _parse(
+        parser,
+        tmp_path,
+        "seed.c",
+        "LUALIB_API unsigned int make_seed(lua_State *L) { return 0; }\n"
+        "local unsigned char *h2b(const char *hex) { return 0; }\n"
+        "API signed char sign_of(int x);\n"
+        # A type name, not a keyword, in the error: which word is the macro can't be told.
+        "API unsigned seed_t other(void);\n",
+    )
+    assert [
+        (f.name, f.returnType, [p.name for p in f.params], [d.name for d in f.decorators])
+        for f in record.functions
+    ] == [
+        ("make_seed", "unsigned int", ["L"], ["LUALIB_API"]),
+        ("h2b", "unsigned char", ["hex"], ["local"]),
+    ]
+    assert [
+        (s.name, [d.name for d in s.decorators])
+        for s in record.statements if s.nodeType == "declaration"
+    ] == [("sign_of", ["API"])]
+
+
 @pytest.mark.parametrize("jobs", [1, 2])
 def test_a_macro_prefixed_function_is_a_call_target_in_other_files(tmp_path, jobs) -> None:
     repo = _repo(

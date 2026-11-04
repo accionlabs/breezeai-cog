@@ -436,16 +436,35 @@ def _renamed_by_macro(declarator: Node | None, source: bytes) -> str | None:
     return node_text(err.children[0], source)
 
 
-def _macro_prefixed(node: Node) -> bool:
+def _sized_macro(ret: Node) -> Node | None:
+    """The macro in ``API unsigned`` — a type the grammar folded from a macro and ``unsigned`` /
+    ``signed`` / ``long`` / ``short``: its one name, written first. ``None`` for any other type."""
+    names = [c for c in ret.children if c.type == "type_identifier"]
+    if ret.type != "sized_type_specifier" or len(names) != 1 or names[0] is not ret.children[0]:
+        return None
+    return names[0]
+
+
+def _macro_prefixed(node: Node, source: bytes) -> bool:
     """Whether a declaration's only errors come from a macro in front of its type:
     ``LUA_API int lua_gettop(…)`` reads as the type ``LUA_API`` with ``int`` in an error. That
     holds when the type is a plain name, every error sits between it and the declarator and is
-    made of bare words, and the declarator — name and parameters — has no error at all."""
+    made of bare words, and the declarator — name and parameters — has no error at all.
+    ``LUALIB_API unsigned int f(…)`` reads as the type ``LUALIB_API unsigned`` with ``int`` in an
+    error: there the words must all be type keywords."""
     if node.type not in ("declaration", "function_definition", "field_declaration"):
         return False
     ret = node.child_by_field_name("type")
     declarator = node.child_by_field_name("declarator")
-    if ret is None or ret.type != "type_identifier" or declarator is None or declarator.has_error:
+    if ret is None or declarator is None or declarator.has_error:
+        return False
+    if ret.type != "type_identifier" and (
+        _sized_macro(ret) is None
+        or any(
+            node_text(w, source) not in _TYPE_KEYWORDS
+            for e in node.children if e.type == "ERROR" for w in e.children
+        )
+    ):
         return False
     errors = [c for c in node.children if c.type == "ERROR" or c.is_missing]
     return bool(errors) and all(
@@ -488,6 +507,13 @@ def _past_macro(node: Node, source: bytes) -> DeclarationRead:
     ret = node.child_by_field_name("type")
     if ret is None or not type_words or not all(w in _TYPE_KEYWORDS for w in words):
         return DeclarationRead(return_type_known=False)
+    macro = _sized_macro(ret)
+    if macro is not None:  # `API unsigned` + `int`
+        keywords = [node_text(c, source) for c in ret.children if c is not macro]
+        return DeclarationRead(
+            return_type_known=False, macro=node_text(macro, source),
+            return_type=" ".join([*keywords, *type_words]),
+        )
     return DeclarationRead(
         return_type_known=False, macro=node_text(ret, source), return_type=" ".join(type_words),
     )
@@ -544,7 +570,7 @@ def read_declaration(node: Node, source: bytes) -> DeclarationRead | None:
         return None if has_declaration_error(node) else _parenthesized_name(node, source)
     prefixed = False
     if has_declaration_error(node):
-        if not _macro_prefixed(node):
+        if not _macro_prefixed(node, source):
             return None
         prefixed = True
     if node.type == "function_definition" and is_macro_row(node, source):
@@ -580,7 +606,7 @@ def read_member(member: Node, source: bytes) -> DeclarationRead | None:
         return None if has_declaration_error(member) else _parenthesized_name(member, source)
     if not has_declaration_error(member):
         return DeclarationRead()
-    if _macro_prefixed(member):
+    if _macro_prefixed(member, source):
         return _past_macro(member, source)
     return None
 

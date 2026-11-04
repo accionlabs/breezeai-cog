@@ -489,7 +489,10 @@ C++.
 > before the parameter list — in C, the word before a function's `(` is its name. The parser
 > and the index read both the same way, so calls to these functions resolve. A C++ class member
 > is read past a macro in front of its type by the same rule (`ESIMD_INLINE int row(int g)
-> const`, `API static Model *load(…)`); any other broken member is still skipped.
+> const`, `API static Model *load(…)`); any other broken member is still skipped. A macro the
+> grammar folds into `unsigned` / `signed` / `long` / `short` (`LUALIB_API unsigned int f(…)`
+> reads as the type `LUALIB_API unsigned` with `int` in an error) is read past the same way,
+> when the error holds only type keywords.
 > **Why:** export, inline and attribute macros sit in front of most public C functions (redis,
 > lua, curl, zlib, llama.cpp); skipping them dropped thousands of functions and every call to
 > them. In both shapes the name and parameters come from clean syntax. **Cost:** `returnType`
