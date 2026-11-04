@@ -255,6 +255,50 @@ def _blank(source: bytes, spans: list[tuple[int, int]]) -> bytes:
     return bytes(out)
 
 
+#: ``#ifdef __cplusplus`` / ``#if defined(__cplusplus)`` holding one line, then ``#endif``: the
+#: two halves of the guard around a C API, ``extern "C" {`` and ``}``.
+_GUARD = (
+    rb'^[ \t]*#[ \t]*if(?:def[ \t]+__cplusplus|[ \t]+defined[ \t]*\(?[ \t]*__cplusplus[ \t]*\)?)'
+    rb'[ \t]*(?://[^\n]*)?\n([ \t]*%s[^\n]*\n)[ \t]*#[ \t]*endif[^\n]*'
+)
+_GUARD_OPEN = re.compile(_GUARD % rb'extern[ \t]+"C"[ \t]*\{', re.M)
+_GUARD_CLOSE = re.compile(_GUARD % rb'\}', re.M)
+
+#: A guard pair's blanked spans and the region it encloses.
+_Guard = tuple[list[tuple[int, int]], tuple[int, int]]
+
+
+def _collapsed_guards(root: Node, source: bytes, grammar: str) -> list[_Guard]:
+    """The ``extern "C"`` guard of a file whose parse collapsed around it. Both ``#ifdef
+    __cplusplus`` blocks are read at once, so ``{`` and ``}`` sit in separate conditionals; when
+    the grammar's recovery fails, the file reads as one error. ``__cplusplus`` is defined exactly
+    when a C++ compiler reads the file, so the guard is resolved as that compiler would: for C++
+    and CUDA only the directive lines go, and ``extern "C" { … }`` stays a block; for C the whole
+    guard goes. Only a file with an error at file scope, and with one guard pair, counts."""
+    if root.type != "ERROR" and not any(c.type == "ERROR" for c in root.children):
+        return []
+    opens, closes = list(_GUARD_OPEN.finditer(source)), list(_GUARD_CLOSE.finditer(source))
+    if len(opens) != 1 or len(closes) != 1 or opens[0].end() > closes[0].start():
+        return []
+    spans = []
+    for m in (opens[0], closes[0]):
+        if grammar == "c":
+            spans.append((m.start(), m.end()))
+        else:
+            spans += [(m.start(), m.start(1)), (m.end(1), m.end())]
+    return [(spans, (opens[0].start(), closes[0].end()))]
+
+
+def _reads_without_collapse(root: Node, region: tuple[int, int]) -> bool:
+    """Whether no file-scope error overlaps a resolved guard's region."""
+    if root.type == "ERROR":
+        return False
+    start, end = region
+    return not any(
+        c.type == "ERROR" and c.start_byte < end and c.end_byte > start for c in root.children
+    )
+
+
 def parse_cfamily(grammar: str, source: bytes, timeout_micros: int) -> Node:
     """Parse a C-family file. Two macros the grammar can't expand hide what they are written on,
     and are blanked to spaces for a second parse:
@@ -262,7 +306,10 @@ def parse_cfamily(grammar: str, source: bytes, timeout_micros: int) -> Node:
     * a macro between ``class`` and the class name (:func:`_class_macro_words`): the class then
       reads as written without it;
     * a macro wrapped around a declaration (:func:`_declaration_wrappers`): ``DEPRECATED(`` and
-      ``, "msg")`` go, and the declaration reads as written.
+      ``, "msg")`` go, and the declaration reads as written;
+
+    and an ``extern "C"`` guard the file's parse collapsed around is resolved as the compiler
+    for the grammar's language would (:func:`_collapsed_guards`).
 
     Lines and byte offsets don't move, so names and text are still read from the original
     ``source``. A blank is kept only where what it hid now parses whole (a class with its body,
@@ -270,16 +317,19 @@ def parse_cfamily(grammar: str, source: bytes, timeout_micros: int) -> Node:
     root = parse_source(grammar, source, timeout_micros).root_node
     words = _class_macro_words(root, source)
     wrappers = _declaration_wrappers(root, source)
+    guards = _collapsed_guards(root, source, grammar)
     for _ in range(2):  # blank all; if some still break, blank only the others once
-        if not words and not wrappers:
+        if not words and not wrappers and not guards:
             return root
         spans = [w[0] for w in words] + [s for w in wrappers for s in w[:2]]
+        spans += [s for g in guards for s in g[0]]
         reparsed = parse_source(grammar, _blank(source, spans), timeout_micros).root_node
         whole_words = [w for w in words if _reads_as_class(reparsed, w[1])]
         whole_wrappers = [w for w in wrappers if _reads_as_declaration(reparsed, w)]
-        if whole_words == words and whole_wrappers == wrappers:
+        whole_guards = [g for g in guards if _reads_without_collapse(reparsed, g[1])]
+        if whole_words == words and whole_wrappers == wrappers and whole_guards == guards:
             return reparsed
-        words, wrappers = whole_words, whole_wrappers
+        words, wrappers, guards = whole_words, whole_wrappers, whole_guards
     return root
 
 

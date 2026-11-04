@@ -546,6 +546,19 @@ C++.
 > of their 600 public prototypes. The notice is what an agent needs to know about a deprecated
 > function. **Cost:** such a file is parsed twice (sharing the class-head parse).
 
+> **Decision —** an `extern "C"` guard the file's parse collapsed around is resolved as the
+> compiler for the file's language would, in the same second parse. In `#ifdef __cplusplus` /
+> `extern "C" {` / `#endif` … `#ifdef __cplusplus` / `}` / `#endif` the grammar reads both
+> blocks, so `{` and `}` sit in separate conditionals; when more conditional code follows, its
+> recovery fails and the whole file reads as one error, with only its comments captured.
+> `__cplusplus` is defined exactly when a C++ compiler reads the file: for C++ and CUDA only the
+> directive lines are blanked, so `extern "C" { … }` stays a block and its functions keep their C
+> linkage; for C both guard blocks are blanked. Only a file with an error at file scope and one
+> guard pair is touched, and the blank is kept only where no file-scope error is left over it.
+> **Why:** curl's `curl.h` and llama.cpp's `mtmd.h`, `mtmd-helper.h` and `ggml-impl.h` captured
+> nothing, and a guard around two vendor prototypes in `aclnn_ops.cpp` hid the 20 functions
+> after it. **Cost:** other `__cplusplus`-only code is still read as both branches, as before.
+
 > **Decision —** a function whose braces a preprocessor conditional splits is read from a second
 > parse where the normal one gets its end wrong. When one `#ifdef` block opens a brace (`} else {`)
 > and a later one closes it, the compiler sees both or neither, but the grammar reads both and

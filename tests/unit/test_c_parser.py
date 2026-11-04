@@ -426,6 +426,69 @@ def test_a_class_defined_with_a_variable_is_a_call_target(tmp_path, jobs) -> Non
     assert _calls(_capture(repo, jobs)["app/main.cpp"], "main") == {"count": "lib/reg.hpp"}
 
 
+#: A C API guarded for C++ includers, followed by C++-only sections: the grammar reads both
+#: `#ifdef __cplusplus` blocks, can't match `{` with `}`, and the whole file reads as one error.
+GUARDED_API = """#ifndef API_H
+#define API_H
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+struct api_ctx;
+struct api_params { int n; };
+API_EXPORT struct api_ctx * api_init(struct api_params params);
+static inline int api_version(void) { return 3; }
+
+#ifdef __cplusplus
+} // extern "C"
+#endif
+
+#ifdef __cplusplus
+struct api_usage {
+    std::map<int, int> mem;
+};
+API_EXPORT struct api_usage api_get_usage(const char * path);
+#endif
+
+#ifdef __cplusplus
+namespace api {
+struct ctx_deleter {
+    void operator()(api_ctx * c) { api_free(c); }
+};
+}
+#endif
+
+#endif
+"""
+
+
+@pytest.mark.parametrize("parser", [CParser(), CppParser()], ids=["c", "cpp"])
+def test_a_collapsed_extern_c_guard_is_resolved_as_the_compiler_would(tmp_path, parser) -> None:
+    record = _parse(parser, tmp_path, "api.h", GUARDED_API)
+    assert [c.name for c in record.classes][:1] == ["api_params"]
+    assert [f.name for f in record.functions][:1] == ["api_version"]
+    assert "api_init" in [s.name for s in record.statements if s.nodeType == "declaration"]
+
+
+@pytest.mark.parametrize("jobs", [1, 2])
+def test_a_resolved_guard_keeps_c_linkage_for_cpp(tmp_path, jobs) -> None:
+    # The header is C++ (its namespace proves it); a C file can call a function in its
+    # `extern "C"` block, so the block must stay one.
+    repo = _repo(
+        tmp_path / "r",
+        {
+            "lib/api.h": GUARDED_API,
+            "app/main.c": '#include "../lib/api.h"\nint main(void) { return api_version(); }\n',
+            "app/tool.cpp": '#include "../lib/api.h"\nint tool() { return api_version(); }\n',
+        },
+    )
+    files = _capture(repo, jobs)
+    assert files["lib/api.h"]["language"] == "cpp"
+    assert _calls(files["app/main.c"], "main") == {"api_version": "lib/api.h"}
+    assert _calls(files["app/tool.cpp"], "tool") == {"api_version": "lib/api.h"}
+
+
 # -- a C header adapting itself for C++ includers stays C ---------------------------------------
 
 
