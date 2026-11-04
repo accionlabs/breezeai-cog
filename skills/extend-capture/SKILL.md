@@ -158,8 +158,9 @@ a role, record one entry point per binding, and keep wiring (mounts, prefixes, r
 as plain statements. Lead each entry point to its handler with `parsers/handler_sites.py`: a
 detector that knows the class calls `locate_method` (or `locate_export` for a TS module) and
 writes the result with `handler_location`; one that knows only a name written in the file names
-the handler and lets the parser's `handler_locator` (TypeScript) find it — never guess a file
-(see
+the handler and lets the parser's `handler_locator` (TypeScript) find it; one whose handler
+names are not symbols (a registered key, an object's member) looks them up itself and sets
+`locates_handlers=True` on its `Detector` — never guess a file (see
 [leading an entry point to its handler](../../docs/architecture/cross-file-resolution.md#leading-an-entry-point-to-its-handler)).
 Write the role table (in
 [`docs/entry-point-roles/`](../../docs/entry-point-roles/README.md)) and its

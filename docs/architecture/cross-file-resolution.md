@@ -446,7 +446,10 @@ Razor (`.cshtml`) is its own base parser too. Its `handler_locator` reads the pa
 
 `BaseParser.link_handlers` is the same loop for every language: it takes each record that names a
 handler without a location, asks the language's lookup (`handler_locator(ctx)`; default: none),
-and writes the result through `handler_location`. A language supplies only the lookup —
+and writes the result through `handler_location`. Records of a framework whose detector locates
+its own handlers (`Detector.locates_handlers`, e.g. AngularJS, whose `controller: 'ListCtrl'`
+names a registration, not a symbol) are left out: the generic lookup would bind any function of
+that name. A language supplies only the lookup —
 TypeScript's (`typescript/handlers.py`) follows the file's imports and lazy loads through
 `typescript.declarations`. PHP's (`php/handlers.py`) reads `Class@method` / an invokable class
 from `php.method-lines`, limited to the class's file when the routes file's `use` imports or a
