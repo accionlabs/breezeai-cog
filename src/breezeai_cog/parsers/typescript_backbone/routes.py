@@ -7,10 +7,14 @@ One ``route`` record per binding, at the binding:
   assembled from spreads, or is passed as ``new Router({ routes })``.
 * **Programmatic routes** - ``router.route(path, name, callback)`` on a router instance, an
   alias of one, or ``this`` inside a router class.
-* **History root** - ``Backbone.history.start({ root })`` prefixes every endpoint once, only
-  when exactly one root is configured with a literal ``pushState: true``. The file's own call
-  decides; a file without one takes the root all other calls in the repo agree on
-  (``backbone.history-root`` fact), usually set in ``main.js``.
+* **History root** - ``Backbone.history.start({ pushState: true, root })`` prefixes every
+  endpoint once. The file's own calls decide; a file without one takes the root every call in
+  the repo agrees on (``backbone.history-root`` fact), usually set in ``main.js``. A hash-based
+  start, or one without ``root``, counts as no prefix, so two apps never share one's root.
+* **Handlers** - a name (``'show'``) is a method of that router, located there or left without a
+  line; a function given directly is located like any TypeScript handler (in the file, or through
+  its import). The generic lookup is not used (``locates_handlers``): a top-level ``show``
+  elsewhere in the file is not the router's method.
 
 Paths are kept as Backbone writes them (``:param``, ``(optional)``, ``*splat``). A path that
 cannot be resolved to a literal is never guessed: the entry or ``route()`` call is skipped.
@@ -18,9 +22,13 @@ cannot be resolved to a literal is never guessed: the entry or ``route()`` call 
 
 from __future__ import annotations
 
+from typing import Callable
+
 from ..additive import (DetectContext, Detection, Detector, FactSpec, Gate, index_fact,
                         register_detector, register_fact)
 from ..emits import Emit
+from ..handler_sites import handler_location
+from ..typescript.handlers import handler_locator
 from .backbone import (_FRAMEWORK, _Class, _Values, _args, _key, _kind, _new_target,
                        _object_props, _scope, _text, _unwrap, _walk)
 
@@ -37,10 +45,12 @@ def _line(node) -> int:
 # --------------------------------------------------------------------------- history root
 
 def _history_roots(root, src: bytes, values: _Values) -> list:
-    """Roots of the ``Backbone.history.start({ root })`` calls of a file, normalised (``/app/`` -> ``app``).
+    """The root each ``Backbone.history.start(...)`` call of a file puts its routes under,
+    normalised (``/app/`` -> ``app``).
 
-    A root that is not a literal is ``None`` (ambiguous). Only ``pushState: true`` calls count:
-    a hash-based router (the default) lives after ``#``, not under the root.
+    Every call counts, so that two apps of one repo are never given one app's root: a hash-based
+    start (the default; routes live after ``#``) or one without ``root`` puts them under ``""``.
+    ``None`` when it is not known: options, ``pushState`` or ``root`` that are not literals.
     """
     found: list = []
     for node in _walk(root):
@@ -56,14 +66,19 @@ def _history_roots(root, src: bytes, values: _Values) -> list:
             continue
         args = _args(node)
         options = values.object(args[0]) if args else None
+        if args and options is None:  # ``start(opts)``: the options are not known
+            found.append(None)
+            continue
         props = _object_props(options, src) if options is not None else {}
-        if "root" not in props:
-            continue
         push = props.get("pushState")
-        if push is None or _text(push, src) != "true":  # hash mode (the default) or not a literal
-            continue
-        value = values.string(props["root"])
-        found.append(value.strip("/") if value is not None else None)
+        mode = _text(push, src) if push is not None else "false"
+        if mode not in ("true", "false"):
+            found.append(None)
+        elif mode == "false" or "root" not in props:  # hash mode, or pushState at the site root
+            found.append("")
+        else:
+            value = values.string(props["root"])
+            found.append(value.strip("/") if value is not None else None)
     return found
 
 
@@ -106,8 +121,31 @@ def _join(base: str, path: str) -> str:
 
 # --------------------------------------------------------------------------- bindings
 
-def _handler_fields(value, owner: dict, values: _Values, src: bytes) -> dict:
-    """The handler a route points at, as the code writes it, plus its line when local."""
+#: name -> ``handlerLine`` / ``handlerPath`` of a function given by name, where found
+_Locate = Callable[[str], dict]
+
+
+def _locator(dc: DetectContext) -> _Locate:
+    """Where a function named directly (``'x': showX``) is declared: in the file or through its
+    import, as the TypeScript handler lookup finds it. Built on first use."""
+    lookup = None
+
+    def locate(name: str) -> dict:
+        nonlocal lookup
+        if lookup is None:
+            lookup = handler_locator(
+                dc.root, dc.source, dc.path, dc.ctx.repo_root, dc.ctx.resolution_index
+            )
+        hit = lookup(name, None)
+        line, path = handler_location(hit[1], dc.path) if hit is not None else (None, None)
+        return {k: v for k, v in (("handlerLine", line), ("handlerPath", path)) if v is not None}
+
+    return locate
+
+
+def _handler_fields(value, owner: dict, values: _Values, src: bytes, locate: _Locate) -> dict:
+    """The handler a route points at, as the code writes it, plus where it is declared when
+    known: a name is a method of the router (``owner``); a function given directly is looked up."""
     name = values.string(value)
     if name is not None:
         fields: dict = {"handler": name}
@@ -118,7 +156,8 @@ def _handler_fields(value, owner: dict, values: _Values, src: bytes) -> dict:
     if value.type in _FUNCTIONS:
         return {"handlerLine": _line(value)}
     if value.type == "identifier":
-        return {"handler": _text(value, src)}
+        name = _text(value, src)
+        return {"handler": name, **locate(name)}
     if value.type == "member_expression":
         return {"handler": _text(value.child_by_field_name("property"), src)}
     return {}
@@ -145,7 +184,8 @@ def _table_node(prop):
     return prop
 
 
-def _table_routes(props: dict, cls: _Class | None, base: str, values: _Values, src: bytes) -> list[Emit]:
+def _table_routes(props: dict, cls: _Class | None, base: str, values: _Values, src: bytes,
+                  locate: _Locate) -> list[Emit]:
     """The bindings of ``routes`` / ``appRoutes`` among the properties of a router."""
     found = []
     for table_name in _TABLES:
@@ -167,13 +207,13 @@ def _table_routes(props: dict, cls: _Class | None, base: str, values: _Values, s
             if path is None or value is None:
                 continue
             fields = _route_fields(base, path)
-            fields.update(_handler_fields(value, owner, values, src))
+            fields.update(_handler_fields(value, owner, values, src, locate))
             found.append(Emit(pair, fields))
     return found
 
 
 def _route_call(call, args: list, cls: _Class | None, base: str, values: _Values,
-                src: bytes) -> Emit | None:
+                src: bytes, locate: _Locate) -> Emit | None:
     """``router.route(path, name, callback)`` / ``router.route(path, callback)``."""
     regex = args[0].type == "regex"
     path = _text(args[0], src) if regex else values.string(args[0])
@@ -184,9 +224,9 @@ def _route_call(call, args: list, cls: _Class | None, base: str, values: _Values
         fields["isRegex"] = True
     owner = cls.props if cls else {}
     if len(args) >= 3:  # the callback; the name only names the ``route:name`` event
-        fields.update(_handler_fields(args[2], owner, values, src))
+        fields.update(_handler_fields(args[2], owner, values, src, locate))
     elif len(args) == 2:  # a callback, or just the name (the callback is then this[name])
-        fields.update(_handler_fields(args[1], owner, values, src))
+        fields.update(_handler_fields(args[1], owner, values, src, locate))
     return Emit(call, fields, enrich="same")
 
 
@@ -202,11 +242,12 @@ def _detect_routes(dc: DetectContext) -> Detection | None:
     values = scope.values
     shared = index_fact(dc.ctx.resolution_index, _ROOT_FACT) or {}
     base = _history_base(root, src, values, shared.get("root"))
+    locate = _locator(dc)
 
     found: list[Emit] = []
     for cls in scope.classes:
         if cls.kind == "Router":
-            found.extend(_table_routes(cls.props, cls, base, values, src))
+            found.extend(_table_routes(cls.props, cls, base, values, src, locate))
 
     for node in _walk(root):
         if node.type == "call_expression":
@@ -221,7 +262,7 @@ def _detect_routes(dc: DetectContext) -> Detection | None:
             if target is None and obj is not None and obj.type == "new_expression":
                 target = _new_target(obj, src, scope.by_name, scope.roots)  # ``new AppRouter().route(...)``
             if target is not None and target.kind == "Router":
-                emit = _route_call(node, args, target.cls, base, values, src)
+                emit = _route_call(node, args, target.cls, base, values, src, locate)
                 if emit is not None:
                     found.append(emit)
         elif node.type == "new_expression":  # new AppRouter({ routes: {...} })
@@ -232,7 +273,7 @@ def _detect_routes(dc: DetectContext) -> Detection | None:
             args = _args(node)
             options = values.object(args[0]) if args else None
             if options is not None:
-                found.extend(_table_routes(_object_props(options, src), cls, base, values, src))
+                found.extend(_table_routes(_object_props(options, src), cls, base, values, src, locate))
 
     # A table inherited or shared by several routers is one binding, at one place.
     unique: dict = {}
@@ -251,4 +292,6 @@ register_detector(Detector(
     gate=Gate("typescript", order=_ORDER, guard=b"oute", skip_fixtures=True),
     detect=_detect_routes,
     frameworks=(_FRAMEWORK,),
+    # `'orders/:id': 'show'` names a method of the router; a top-level `show` is not it.
+    locates_handlers=True,
 ))

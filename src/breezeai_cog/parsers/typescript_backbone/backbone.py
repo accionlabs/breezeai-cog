@@ -5,7 +5,7 @@ Finds two things in a file that uses Backbone (routes live in ``routes.py``):
 * **API calls** - ``fetch`` / ``save`` / ``destroy`` / ``sync`` on a model and
   ``fetch`` / ``create`` on a collection, as ``api_call`` with the verb taken from the
   method and the endpoint resolved from ``url`` / ``urlRoot`` where they are literals.
-* **View role** - ``View.extend`` / ``extends View`` is tagged ``uiRole: view``.
+* **View role** - ``View.extend`` / ``extends View`` is a UI component, ``uiRole: component``.
 
 A detector only finds: every result is an ``Emit`` and the registry writes it. The class
 collection helpers here are shared with ``routes.py``.
@@ -43,6 +43,7 @@ class _Class:
     parent: str = ""  # unresolved base class name, for classes deriving from another class
     inherited: dict = field(default_factory=dict)  # url / urlRoot from a base in another file
     offline: bool = False  # a model whose collection stores locally (``localStorage`` / its own ``sync``)
+    gives_id: bool = False  # a base in another file may give the id itself (:func:`_id_given_by_class`)
 
     def string(self, key: str) -> str | None:
         if key in self.props:
@@ -372,10 +373,10 @@ def _collect_classes(root, src: bytes, external: dict | None = None,
                 continue
             if base is not None and base.kind:
                 c.kind, c.props = base.kind, {**base.props, **c.props}
-                c.inherited = base.inherited
+                c.inherited, c.gives_id = base.inherited, base.gives_id
                 changed = True
             elif base is None and c.parent and name in (external or {}):
-                c.kind, url, urlroot = external[name]
+                c.kind, url, urlroot, c.gives_id = external[name]
                 c.inherited = {k: v for k, v in (("url", url), ("urlRoot", urlroot)) if v}
                 changed = True
     return classes if keep_all else [c for c in classes if c.kind]
@@ -535,21 +536,52 @@ def _new_target(new, src: bytes, by_name: dict, roots: dict) -> _Target | None:
     return _Target(kind, cls, _newness(_args(new), cls, src))
 
 
+_SETS_ATTRIBUTES = re.compile(r"\.set\s*\(")
+
+
+def _id_given_by_class(cls: _Class | None, id_attr: str, src: bytes) -> bool:
+    """Whether the class itself may give a model its id: ``defaults`` holding the id attribute
+    (or not written as a plain object), or an ``initialize`` / ``constructor`` that calls
+    ``set(...)`` or names the id attribute. ``new Counter()`` is then not known to be new."""
+    if cls is None:
+        return False
+    if cls.gives_id:
+        return True
+    defaults = cls.props.get("defaults")
+    if defaults is not None:
+        if defaults.type != "object":  # ``defaults()`` / a variable: its keys are not read
+            return True
+        for child in defaults.named_children:
+            if child.type == "spread_element":
+                return True
+            if child.type == "pair" and _key(child.child_by_field_name("key"), src) == id_attr:
+                return True
+    word = re.compile(r"\b" + re.escape(id_attr) + r"\b")
+    for name in ("initialize", "constructor"):
+        body = cls.props.get(name)
+        if body is not None:
+            text = _text(body, src)
+            if _SETS_ATTRIBUTES.search(text) or word.search(text):
+                return True
+    return False
+
+
 def _newness(args: list, cls: _Class | None, src: bytes) -> bool | None:
     """``isNew()`` as the constructor arguments settle it: no id attribute -> new, one -> not new.
 
-    ``None`` when they do not: a variable, a spread, or an ``idAttribute`` that is not known.
+    ``None`` when they do not: a variable, a spread, an ``idAttribute`` that is not known, or a
+    class that may set the id itself (:func:`_id_given_by_class`).
     """
+    id_attr = "id"
+    if cls is not None and "idAttribute" in cls.props:
+        id_attr = cls.string("idAttribute") or ""
+        if not id_attr:
+            return None
     if not args:
-        return True
+        return None if _id_given_by_class(cls, id_attr, src) else True
     attrs = args[0]
     if attrs.type != "object":
         return None
-    id_attr = "id"
-    if cls is not None and "idAttribute" in cls.props:
-        id_attr = cls.string("idAttribute")
-        if id_attr is None:
-            return None
     for child in attrs.named_children:
         if child.type == "spread_element":
             return None
@@ -562,7 +594,7 @@ def _newness(args: list, cls: _Class | None, src: bytes) -> bool | None:
         if key == id_attr:
             return False
     base_elsewhere = cls is not None and (cls.node is None or bool(cls.inherited))  # idAttribute unseen
-    return None if base_elsewhere else True
+    return None if base_elsewhere or _id_given_by_class(cls, id_attr, src) else True
 
 
 # --------------------------------------------------------------------------- api calls
@@ -582,7 +614,10 @@ def _endpoint(target: _Target, verb: str | None) -> str:
         return ""
     if verb == "POST" or (verb == "GET" and target.is_new):  # a model with no id is addressed by the root
         return root
-    return root.rstrip("/") + "/:id"
+    if verb == "GET" and target.is_new is None:  # with or without the id: not known
+        return ""
+    # PUT / PATCH / DELETE are only sent for a model that has an id; ``{id}`` as other api_calls write it
+    return root.rstrip("/") + "/{id}"
 
 
 def _offline(cls: _Class | None) -> bool:
@@ -610,7 +645,10 @@ def _save_verb(args: list, target: _Target, src: bytes) -> str | None:
     patch = _object_props(options, src).get("patch")
     if patch is None or _text(patch, src) == "false":
         return _SAVE_VERBS[target.is_new]
-    return "PATCH" if _text(patch, src) == "true" else None
+    if _text(patch, src) != "true":
+        return None
+    # Backbone creates a new model whatever ``patch`` says: ``isNew() ? POST : PATCH``
+    return {True: "POST", False: "PATCH", None: None}[target.is_new]
 
 
 def _api_call(call, prop: str, objtext: str, args: list, resolve, src: bytes) -> Emit | None:
@@ -644,15 +682,23 @@ def _api_call(call, prop: str, objtext: str, args: list, resolve, src: bytes) ->
 
 # --------------------------------------------------------------------------- cross-file base classes
 
+def _gives_id(c: _Class, src: bytes) -> bool:
+    """:func:`_id_given_by_class` for a class read on its own (an unknown ``idAttribute`` counts)."""
+    id_attr = c.string("idAttribute") if "idAttribute" in c.props else "id"
+    return not id_attr or _id_given_by_class(c, id_attr, src)
+
+
 def _collect_fact(root, source: bytes, rel: str, repo_root) -> list | None:
-    """Each named class of the file: ``(name, kind, parent, url, urlRoot)``; ``window.Todo`` is ``Todo``."""
-    found = [(c.name.rsplit(".", 1)[-1], c.kind, c.parent.rsplit(".", 1)[-1], c.string("url"), c.string("urlRoot"))
+    """Each named class of the file: ``(name, kind, parent, url, urlRoot, gives_id)``; ``window.Todo``
+    is ``Todo``."""
+    found = [(c.name.rsplit(".", 1)[-1], c.kind, c.parent.rsplit(".", 1)[-1], c.string("url"),
+              c.string("urlRoot"), _gives_id(c, source))
              for c in _collect_classes(root, source, keep_all=True) if c.name]
     return found or None
 
 
 def _resolve_fact(values: list, index) -> dict | None:
-    """name -> ``(kind, url, urlRoot)`` for the classes whose Backbone kind is certain.
+    """name -> ``(kind, url, urlRoot, gives_id)`` for the classes whose Backbone kind is certain.
 
     A name declared twice with different shapes is ambiguous and left out (honest-null)."""
     seen: dict = {}
@@ -666,15 +712,68 @@ def _resolve_fact(values: list, index) -> dict | None:
         for name, entry in seen.items():
             if entry is None or name in resolved:
                 continue
-            _, kind, parent, url, urlroot = entry
+            _, kind, parent, url, urlroot, gives_id = entry
             if not kind:
                 base = resolved.get(parent)
                 if base is None:
                     continue
                 kind, url, urlroot = base[0], url or base[1], urlroot or base[2]
-            resolved[name] = (kind, url, urlroot)
+                gives_id = gives_id or base[3]
+            resolved[name] = (kind, url, urlroot, gives_id)
             changed = True
     return resolved or None
+
+
+def _is_require(node) -> bool:
+    """``require('x')`` or ``require('x').Name``."""
+    node = _unwrap(node)
+    while node is not None and node.type == "member_expression":
+        node = node.child_by_field_name("object")
+    if node is None or node.type != "call_expression":
+        return False
+    fn = node.child_by_field_name("function")
+    return fn is not None and fn.type == "identifier" and fn.text == b"require"
+
+
+def _visible(external: dict, root, src: bytes) -> dict:
+    """The classes of other files this file can mean by their names.
+
+    A name the file declares itself (``const Todo = mongoose.model(...)``) is not the other
+    file's class. In a file that imports (``import`` / ``require``), only an imported name is;
+    a file that imports nothing (script tags sharing globals) sees every name."""
+    if not external:
+        return external
+    declared: set = set()
+    imported: set = set()
+    modules = False
+    for node in _walk(root):
+        if node.type == "import_statement":
+            modules = True
+            for n in _walk(node):
+                if n.type == "import_specifier":  # ``{ Todo as T }`` binds T
+                    local = n.child_by_field_name("alias") or n.child_by_field_name("name")
+                    if local is not None:
+                        imported.add(_text(local, src))
+                elif n.type == "identifier" and n.parent is not None and n.parent.type in (
+                        "import_clause", "namespace_import"):
+                    imported.add(_text(n, src))
+        elif node.type == "variable_declarator":
+            name, value = node.child_by_field_name("name"), node.child_by_field_name("value")
+            if name is None:
+                continue
+            if _is_require(value):  # ``const Todo = require('./todo')`` / ``const { Todo } = require(...)``
+                modules = True
+                for n in _walk(name):
+                    if n.type in ("identifier", "shorthand_property_identifier_pattern"):
+                        imported.add(_text(n, src))
+            elif name.type == "identifier":
+                declared.add(_text(name, src))
+        elif node.type in ("function_declaration", "class_declaration"):
+            name = node.child_by_field_name("name")
+            if name is not None:
+                declared.add(_text(name, src))
+    return {name: entry for name, entry in external.items()
+            if name not in declared and (not modules or name in imported)}
 
 
 # --------------------------------------------------------------------------- detector
@@ -763,14 +862,14 @@ def _build_scope(dc: DetectContext) -> _Scope:
     ``new ImportedRouter()`` resolves to a router and ``new ImportedTodo()`` to a model.
     """
     root, src = dc.root, dc.source
-    external = index_fact(dc.ctx.resolution_index, _FACT)
+    external = _visible(index_fact(dc.ctx.resolution_index, _FACT) or {}, root, src)
     roots = _backbone_names(root, src)
     values = _Values(root, src)
     classes = _collect_classes(root, src, external, roots=roots, values=values)
     by_name = _by_name(classes)
-    for name, (kind, url, urlroot) in (external or {}).items():
+    for name, (kind, url, urlroot, gives_id) in (external or {}).items():
         if kind in ("Model", "Collection", "Router") and name not in by_name:
-            by_name[name] = _Class(kind, name, None, {}, src,
+            by_name[name] = _Class(kind, name, None, {}, src, gives_id=gives_id,
                                    inherited={k: v for k, v in (("url", url), ("urlRoot", urlroot)) if v})
     for node in _walk(root):  # ``Todo.prototype.urlRoot = '/api'``
         if node.type == "assignment_expression":
@@ -801,7 +900,7 @@ def _detect_backbone(dc: DetectContext) -> Detection | None:
     found: list[Emit] = []
     for cls in scope.classes:
         if cls.kind == "View":
-            found.append(Emit(cls.node, {"uiRole": "view", "framework": _FRAMEWORK}, enrich="starts"))
+            found.append(Emit(cls.node, {"uiRole": "component", "framework": _FRAMEWORK}, enrich="starts"))
 
     for node in _walk(root):
         if node.type != "call_expression":

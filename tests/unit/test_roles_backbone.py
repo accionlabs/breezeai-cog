@@ -201,9 +201,9 @@ def test_model_calls_resolve_urlroot_and_http_methods(analyze_files) -> None:
     ]
     assert len(calls) == 4
     assert {(s.method, s.endpoint) for s in calls} == {
-        ("GET", "/todos/:id"),
-        ("PUT", "/todos/:id"),
-        ("DELETE", "/todos/:id"),
+        ("GET", "/todos/{id}"),
+        ("PUT", "/todos/{id}"),
+        ("DELETE", "/todos/{id}"),
         ("POST", "/todos"),
     }
     assert all(s.framework == "backbone" for s in calls)
@@ -221,7 +221,7 @@ def test_backbone_sync_maps_operation_to_http_method(analyze_files) -> None:
         s for s in statements
         if s.semanticType == "api_call" and s.framework == "backbone"
     ]
-    assert (call.method, call.endpoint) == ("GET", "/todos/:id")
+    assert (call.method, call.endpoint) == ("GET", "/todos/{id}")
 
 
 def test_collection_calls_resolve_literal_url(analyze_files) -> None:
@@ -274,14 +274,14 @@ def test_unrelated_fetch_is_not_tagged_as_backbone(analyze_files) -> None:
     )
 
 
-def test_backbone_views_are_tagged_as_views(analyze_files) -> None:
+def test_backbone_views_are_tagged_as_components(analyze_files) -> None:
     statements = _backbone(
         analyze_files,
         "const TodoView = Backbone.View.extend({ render() {} });\n"
         "class SearchView extends Backbone.View {}\n",
     )
 
-    views = [s for s in statements if s.uiRole == "view"]
+    views = [s for s in statements if s.uiRole == "component"]
     assert len(views) == 2
     assert all(s.framework == "backbone" for s in views)
 
@@ -337,7 +337,7 @@ def test_derived_models_and_instance_aliases_keep_backbone_endpoint(analyze_file
         s for s in statements
         if s.semanticType == "api_call" and s.framework == "backbone"
     ]
-    assert (call.method, call.endpoint) == ("GET", "/todos/:id")
+    assert (call.method, call.endpoint) == ("GET", "/todos/{id}")
 
 
 def test_cross_file_base_model_endpoint_is_inherited(analyze_files) -> None:
@@ -358,7 +358,7 @@ def test_cross_file_base_model_endpoint_is_inherited(analyze_files) -> None:
         s for s in statements
         if s.semanticType == "api_call" and s.framework == "backbone"
     ]
-    assert (call.method, call.endpoint) == ("GET", "/todos/:id")
+    assert (call.method, call.endpoint) == ("GET", "/todos/{id}")
 
 
 def test_prototype_urlroot_is_used_for_model_calls(analyze_files) -> None:
@@ -374,7 +374,7 @@ def test_prototype_urlroot_is_used_for_model_calls(analyze_files) -> None:
         s for s in statements
         if s.semanticType == "api_call" and s.framework == "backbone"
     ]
-    assert (call.method, call.endpoint) == ("GET", "/api/todos/:id")
+    assert (call.method, call.endpoint) == ("GET", "/api/todos/{id}")
 
 
 def test_inline_model_instance_fetch_is_captured(analyze_files) -> None:
@@ -388,7 +388,7 @@ def test_inline_model_instance_fetch_is_captured(analyze_files) -> None:
         s for s in statements
         if s.semanticType == "api_call" and s.framework == "backbone"
     ]
-    assert (call.method, call.endpoint) == ("GET", "/todos/:id")
+    assert (call.method, call.endpoint) == ("GET", "/todos/{id}")
 
 
 def test_custom_model_methods_are_not_captured_as_backbone_calls(analyze_files) -> None:
@@ -440,10 +440,225 @@ def test_marionette_mn_alias_routes_and_views_are_captured(analyze_files) -> Non
     )
 
     assert [s.endpoint for s in statements if s.semanticType == "route"] == ["/items/:id"]
-    assert sum(1 for s in statements if getattr(s, "uiRole", None) == "view") == 1
+    assert sum(1 for s in statements if getattr(s, "uiRole", None) == "component") == 1
 
 
 def test_mn_without_the_marionette_shape_is_not_backbone(analyze_files) -> None:
     statements = analyze_files({"src/app.js": "const x = Mn.Foo.extend({ routes: { a: 'b' } });\n"})
 
     assert not [s for s in statements if s.semanticType == "route"]
+
+
+def _calls(statements) -> list[tuple[str | None, str | None]]:
+    return [
+        (s.method, s.endpoint) for s in statements
+        if s.semanticType == "api_call" and s.framework == "backbone"
+    ]
+
+
+def test_patch_on_a_new_model_is_a_post(analyze_files) -> None:
+    # Backbone: isNew() ? create : (patch ? patch : update) — a new model is created.
+    statements = _backbone(
+        analyze_files,
+        "const Todo = Backbone.Model.extend({ urlRoot: '/todos' });\n"
+        "new Todo({ title: 'a' }).save(null, { patch: true });\n"
+        "new Todo({ id: 7 }).save({ done: true }, { patch: true });\n",
+    )
+    assert _calls(statements) == [("POST", "/todos"), ("PATCH", "/todos/{id}")]
+
+
+def test_a_fetch_whose_model_may_or_may_not_have_an_id_has_no_endpoint(analyze_files) -> None:
+    statements = _backbone(
+        analyze_files,
+        "const Session = Backbone.Model.extend({\n"
+        "  urlRoot: '/session',\n"
+        "  refresh() { return this.fetch(); },\n"
+        "});\n",
+    )
+    assert _calls(statements) == [("GET", None)]
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "defaults: { id: 0 }",
+        "defaults() { return { title: '' }; }",
+        "initialize() { this.set('id', 42); }",
+        "initialize(attrs) { this.id = attrs.key; }",
+    ],
+)
+def test_a_class_that_may_give_the_id_itself_leaves_save_unknown(analyze_files, body) -> None:
+    statements = _backbone(
+        analyze_files,
+        "const Counter = Backbone.Model.extend({ urlRoot: '/counters', " + body + " });\n"
+        "new Counter().save();\n",
+    )
+    assert _calls(statements) == [(None, None)]
+
+
+def test_an_initialize_that_sets_no_attribute_keeps_the_post(analyze_files) -> None:
+    statements = _backbone(
+        analyze_files,
+        "const Todo = Backbone.Model.extend({\n"
+        "  urlRoot: '/todos',\n"
+        "  initialize() { this.listenTo(this, 'change', this.log); },\n"
+        "});\n"
+        "new Todo().save();\n",
+    )
+    assert _calls(statements) == [("POST", "/todos")]
+
+
+def test_a_base_in_another_file_that_may_give_the_id_leaves_save_unknown(analyze_files) -> None:
+    statements = analyze_files({
+        "src/models.js": (
+            "import Backbone from 'backbone';\n"
+            "export const Counter = Backbone.Model.extend({ urlRoot: '/counters', defaults: { id: 0 } });\n"
+            "export const Todo = Backbone.Model.extend({ urlRoot: '/todos' });\n"
+        ),
+        "src/use.js": (
+            "// backbone models\n"
+            "import { Counter, Todo } from './models';\n"
+            "new Counter().save();\n"
+            "new Todo().save();\n"
+        ),
+    })
+    assert _calls(statements) == [(None, None), ("POST", "/todos")]
+
+
+@pytest.mark.parametrize(
+    "use",
+    [
+        # declared here: the other file's Backbone `Todo` is not this one
+        "// migrated from backbone\n"
+        "const mongoose = require('mongoose');\n"
+        "const Todo = mongoose.model('Todo', new mongoose.Schema({}));\n"
+        "async function h() { const t = new Todo({ title: 'a' }); await t.save(); }\n",
+        # a file that imports, but not `Todo`: a global of that name is not the other file's
+        "// backbone\n"
+        "import { Todo as T } from './orm';\n"
+        "new Todo({ id: 1 }).fetch();\n",
+    ],
+)
+def test_a_class_of_another_file_is_only_the_one_this_file_means(analyze_files, use) -> None:
+    statements = analyze_files({
+        "src/models.js": (
+            "import Backbone from 'backbone';\n"
+            "export const Todo = Backbone.Model.extend({ urlRoot: '/todos' });\n"
+        ),
+        "src/use.js": use,
+    })
+    assert _calls(statements) == []
+
+
+def test_a_script_without_imports_sees_the_classes_of_other_files(analyze_files) -> None:
+    statements = analyze_files({
+        "js/models.js": "app.Todo = Backbone.Model.extend({ urlRoot: '/todos' });\n",
+        "js/views.js": "// backbone\nnew app.Todo({ id: 1 }).fetch();\n",
+    })
+    assert _calls(statements) == [("GET", "/todos/{id}")]
+
+
+def test_a_required_class_of_another_file_is_used(analyze_files) -> None:
+    statements = analyze_files({
+        "src/models.js": (
+            "const Backbone = require('backbone');\n"
+            "exports.Todo = Backbone.Model.extend({ urlRoot: '/todos' });\n"
+        ),
+        "src/use.js": (
+            "// backbone\n"
+            "const Todo = require('./models').Todo;\n"
+            "new Todo({ id: 1 }).fetch();\n"
+        ),
+    })
+    assert _calls(statements) == [("GET", "/todos/{id}")]
+
+
+def _endpoints(statements) -> set[str | None]:
+    return {s.endpoint for s in statements if s.semanticType == "route"}
+
+
+def test_another_app_without_a_root_keeps_its_routes_unprefixed(analyze_files) -> None:
+    statements = analyze_files({
+        "app/main.js": (
+            "import Backbone from 'backbone';\n"
+            "Backbone.history.start({ pushState: true, root: '/app/' });\n"
+        ),
+        "app/router.js": (
+            "import Backbone from 'backbone';\n"
+            "const R = Backbone.Router.extend({ routes: { 'home': 'home' }, home() {} });\n"
+        ),
+        "admin/router.js": (
+            "import Backbone from 'backbone';\n"
+            "const A = Backbone.Router.extend({ routes: { 'dash': 'dash' }, dash() {} });\n"
+            "Backbone.history.start({ pushState: true });\n"
+        ),
+    })
+    # The repo's starts disagree, so the router without its own start gets no prefix.
+    assert _endpoints(statements) == {"/home", "/dash"}
+
+
+def test_a_hash_based_start_elsewhere_also_counts(analyze_files) -> None:
+    statements = analyze_files({
+        "app/main.js": (
+            "import Backbone from 'backbone';\n"
+            "Backbone.history.start({ pushState: true, root: '/app/' });\n"
+        ),
+        "legacy/main.js": "import Backbone from 'backbone';\nBackbone.history.start();\n",
+        "app/router.js": (
+            "import Backbone from 'backbone';\n"
+            "const R = Backbone.Router.extend({ routes: { 'home': 'home' }, home() {} });\n"
+        ),
+    })
+    assert _endpoints(statements) == {"/home"}
+
+
+def test_a_root_every_start_agrees_on_is_applied(analyze_files) -> None:
+    statements = analyze_files({
+        "app/main.js": (
+            "import Backbone from 'backbone';\n"
+            "Backbone.history.start({ pushState: true, root: '/app/' });\n"
+        ),
+        "app/router.js": (
+            "import Backbone from 'backbone';\n"
+            "const R = Backbone.Router.extend({ routes: { 'home': 'home' }, home() {} });\n"
+        ),
+    })
+    assert _endpoints(statements) == {"/app/home"}
+
+
+def test_a_handler_name_is_the_routers_method_never_a_same_named_function(analyze_files) -> None:
+    statements = analyze_files({
+        "src/base.js": (
+            "import Backbone from 'backbone';\n"
+            "export const BaseRouter = Backbone.Router.extend({ show(id) {} });\n"
+        ),
+        "src/router.js": (
+            "import Backbone from 'backbone';\n"
+            "import { BaseRouter } from './base';\n"
+            "function show() { return 'a helper'; }\n"
+            "const R = BaseRouter.extend({ routes: { 'orders/:id': 'show' } });\n"
+        ),
+    })
+    [route] = [s for s in statements if s.semanticType == "route"]
+    assert (route.handler, route.handlerLine, route.handlerPath) == ("show", None, None)
+
+
+def test_a_handler_given_as_a_function_is_located_through_its_import(analyze_files) -> None:
+    statements = analyze_files({
+        "src/handlers.js": "export function showOrder(id) {}\n",
+        "src/router.js": (
+            "import Backbone from 'backbone';\n"
+            "import { showOrder } from './handlers';\n"
+            "function list() {}\n"
+            "const R = Backbone.Router.extend({ routes: { 'orders/:id': showOrder, 'orders': list } });\n"
+        ),
+    })
+    routes = sorted(
+        ((s.endpoint, s.handler, s.handlerLine, s.handlerPath)
+         for s in statements if s.semanticType == "route"),
+        key=str,
+    )
+    assert routes == [
+        ("/orders", "list", 3, None),
+        ("/orders/:id", "showOrder", 1, "src/handlers.js"),
+    ]
