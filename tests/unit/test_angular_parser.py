@@ -340,6 +340,29 @@ def test_redirect_const_target_resolved_and_unresolved(tmp_path) -> None:
     assert navs == [(3, "/diagnostics"), (4, None)]
 
 
+def test_redirect_target_drops_query_and_fragment(tmp_path) -> None:
+    # BREEZEAI-1369: the router picks the page by path only, so '?…' / '#…' are page data.
+    src = _routes_src("{ path: 'tab', redirectTo: '/home?tab=1' }",
+                      "{ path: 'help', redirectTo: '/docs#faq' }",
+                      "{ path: 'both', redirectTo: '/a?x=1#y' }",
+                      "{ path: 'home', component: HomeComponent }")
+    assert _navs(src, tmp_path) == [(3, "/home"), (4, "/docs"), (5, "/a")]
+
+
+def test_redirect_target_keeps_param_segments_and_source_text(tmp_path) -> None:
+    src = _routes_src("{ path: 'u', redirectTo: '/users/:id?x=1' }")
+    assert _navs(src, tmp_path) == [(3, "/users/:id")]
+    nav = next(s for s in _parse_routes_file(src, tmp_path).statements if s.routeKind == "navigation")
+    assert nav.text == "{ path: 'u', redirectTo: '/users/:id?x=1' }"  # the redirect stays visible
+
+
+def test_relative_redirect_target_drops_query_before_composing(tmp_path) -> None:
+    src = _routes_src("{ path: 'home', component: HomeComponent }",
+                      "{ path: 'p', children: [{ path: 'old', redirectTo: 'new?x=1#y' }] }",
+                      "{ path: 'q', children: [{ path: '', redirectTo: '?tab=1' }] }")
+    assert _navs(src, tmp_path) == [(4, "/p/new"), (5, "/q")]  # '?tab=1' alone → the parent prefix
+
+
 _ORG_REDIRECT_ROUTING = b'''import { RouterModule, Routes } from '@angular/router';
 export const routes: Routes = [
   { path: '', redirectTo: 'projects', pathMatch: 'full' },
