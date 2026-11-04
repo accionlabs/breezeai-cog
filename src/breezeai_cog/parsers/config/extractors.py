@@ -22,6 +22,8 @@ try:  # PyYAML is a core dep; degrade gracefully if somehow absent
 except Exception:  # pragma: no cover
     yaml = None
 
+from ..dnn_common import parse_dnn_manifest
+
 _EXT_CATEGORY = {
     ".json": "json",
     ".yaml": "yaml",
@@ -77,6 +79,8 @@ RICH_JSON_NAMES: frozenset[str] = frozenset(
 
 
 def _dispatch(name: str, suffix: str, text: str) -> dict[str, Any]:
+    if suffix == ".dnn":
+        return _dnn_manifest(text)
     if name == "package.json":
         return _package_json(text)
     if name in ("tsconfig.json", "jsconfig.json"):
@@ -137,6 +141,16 @@ def _dispatch(name: str, suffix: str, text: str) -> dict[str, Any]:
     return {}
 
 
+def _dnn_manifest(text: str) -> dict[str, Any]:
+    module, controls = parse_dnn_manifest(text)
+    return {
+        "kind": "dnn-manifest",
+        "category": "dotnet",
+        "moduleName": module,
+        "moduleControls": [dict(control) for control in controls],
+    }
+
+
 # ── JSON family ───────────────────────────────────────────────────────────────
 def _package_json(text: str) -> dict[str, Any]:
     d = json.loads(text)
@@ -145,7 +159,8 @@ def _package_json(text: str) -> dict[str, Any]:
     deps = dict(d.get("dependencies") or {})
     dev = dict(d.get("devDependencies") or {})
     workspace_deps = sorted(
-        name for name, spec in {**deps, **dev}.items()
+        name
+        for name, spec in {**deps, **dev}.items()
         if isinstance(spec, str) and spec.startswith(("workspace:", "file:", "link:"))
     )
     return {
@@ -180,7 +195,9 @@ def _tsconfig(name: str, text: str) -> dict[str, Any]:
             "outDir": co.get("outDir"),
             "rootDir": co.get("rootDir"),
             "strict": co.get("strict"),
-            "paths": dict(co.get("paths") or {}),  # alias → targets (targets are what a resolver needs)
+            "paths": dict(
+                co.get("paths") or {}
+            ),  # alias → targets (targets are what a resolver needs)
             "baseUrl": co.get("baseUrl"),
             "extends": d.get("extends"),
             "include": d.get("include"),

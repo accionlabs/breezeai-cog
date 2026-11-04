@@ -17,6 +17,7 @@ from ...emit import file_id
 from ...schemas import SCHEMA_VERSION, FileRecord
 from ...utils import count_loc
 from ..base import BaseParser, ParseContext
+from ..dnn_common import resolve_dnn_control_source
 from .extractors import extract_config, is_dotnet_config
 
 
@@ -33,6 +34,7 @@ class ConfigParser(BaseParser):
         ".toml",
         ".ini",
         ".xml",
+        ".dnn",
         ".gradle",
         ".sbt",
         ".csproj",
@@ -60,15 +62,28 @@ class ConfigParser(BaseParser):
         name = Path(path).name  # glob-style config names the registry can't express
         if name.startswith("Dockerfile.") or name.startswith(".env."):
             return True
-        return is_dotnet_config(name)  # Web.config / App.config (+ transforms) — one source of truth
+        return is_dotnet_config(
+            name
+        )  # Web.config / App.config (+ transforms) — one source of truth
 
     def parse_file(self, ctx: ParseContext) -> FileRecord:
         text = ctx.source.decode("utf-8", "replace")
+        metadata = extract_config(ctx.path, text)
+        imports: list[str] = []
+        if ctx.path.lower().endswith(".dnn") and ctx.repo_root is not None:
+            for control in metadata.get("moduleControls", []):
+                source = control.get("source")
+                if not isinstance(source, str):
+                    continue
+                actual = resolve_dnn_control_source(ctx.repo_root, ctx.path, source)
+                if actual is not None:
+                    imports.append(actual)
         return FileRecord(
             id=file_id(ctx.path),
             path=ctx.path,
             type="config",
             language="config",
             loc=count_loc(text),
-            metadata=extract_config(ctx.path, text),
+            metadata=metadata,
+            importFiles=sorted(set(imports)),
         )
