@@ -462,7 +462,9 @@ C++.
 > function named `ZLIB_INTERNAL`); a declaration whose parameter list has a parameter with no
 > type is a macro call around the real one and is skipped (`local int gz_init OF((gz_statep));`
 > reads as a function named `OF`; a typedef written that way keeps its statement, without a
-> name); and a row of macro calls the grammar reads as one function
+> name); a keyword reserved in both C and C++ is never a declared name (`LOCALS` with no `;`
+> before `if (a) {…}` reads as a variable `if`), so such a statement keeps its text without a
+> name; and a row of macro calls the grammar reads as one function
 > named after the macro (`GEN(a) GEN(b)` followed by a function) is not emitted. An error in an
 > initializer, in a parameter list or after an initialized variable's name leaves the name
 > intact. **Cost:** calls into macros have no `CALLS` edge; a function whose name the grammar

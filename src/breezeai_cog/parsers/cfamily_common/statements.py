@@ -15,7 +15,7 @@ from ..statements_common import (
     classify_statement, member_statement, render_concat, resolve_endpoint,
 )
 from ..treesitter import node_text
-from .mappings import CONTROL_FLOW, EMIT_TYPES, MACRO_TYPES, NESTED_SCOPES
+from .mappings import CONTROL_FLOW, EMIT_TYPES, KEYWORDS, MACRO_TYPES, NESTED_SCOPES
 
 _CALL_TYPE = "call_expression"
 
@@ -34,7 +34,7 @@ def _name_of(node: Node, source: bytes) -> str | None:
         if nxt is None or nxt is decl:
             break
         decl = nxt
-    if decl is not None and decl.type == "identifier":
+    if decl is not None and decl.type == "identifier" and node_text(decl, source) not in KEYWORDS:
         return node_text(decl, source)
     return None
 

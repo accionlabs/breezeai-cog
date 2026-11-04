@@ -79,3 +79,13 @@ HEADER_EXTENSIONS = frozenset({".h", ".hh", ".hpp", ".hxx", ".h++", ".ipp", ".in
 COMMENT_TYPES = {"comment"}
 
 FRAMEWORKS: list[str] = []
+
+#: Keywords reserved in both C and C++: never a declared name. A macro the grammar can't place
+#: makes it read one as a name: `LOCALS` (no `;`) then `if (a) {…}` reads as a variable `if`.
+#: A word reserved in only one of them (`restrict`, `new`, `class`) is a valid name in the other.
+KEYWORDS = frozenset({
+    "auto", "break", "case", "char", "const", "continue", "default", "do", "double", "else",
+    "enum", "extern", "float", "for", "goto", "if", "inline", "int", "long", "register",
+    "return", "short", "signed", "sizeof", "static", "struct", "switch", "typedef", "union",
+    "unsigned", "void", "volatile", "while",
+})

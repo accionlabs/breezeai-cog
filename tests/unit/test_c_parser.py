@@ -907,3 +907,29 @@ def test_a_prototype_wrapped_in_a_parameter_macro_is_not_named_after_it(tmp_path
     assert [s.name for s in record.statements if s.nodeType == "declaration"] == ["kept"]
     # The typedef stays a statement (its text is the API), without a name taken from `OF`.
     assert [s.name for s in record.statements if s.nodeType == "type_definition"] == [None]
+
+
+@pytest.mark.parametrize("parser", [CParser(), CppParser()], ids=["c", "cpp"])
+def test_a_keyword_is_never_a_declared_name(tmp_path, parser) -> None:
+    # A macro the grammar can't place runs into the next statement: `LOCALS` (no `;`) then
+    # `if (a == 1) {…}` reads as a variable `if`, `OF((void))` as one named `void`. The
+    # statements stay (their text is the code), without a name.
+    record = _parse(
+        parser,
+        tmp_path,
+        "kw.c" if parser.name == "c" else "kw.cpp",
+        "void makefixed OF((void));\n"
+        "void f(int a) {\n"
+        "    LOCALS\n"
+        "    if (a == 1) { g(); }\n"
+        "    int count = 1;\n"
+        "}\n",
+    )
+    names = {s.name for s in record.statements if s.nodeType == "declaration"}
+    assert names & {"if", "void", "int"} == set()
+    assert "count" in names
+
+
+def test_a_word_reserved_only_in_cpp_is_a_name_in_c(tmp_path) -> None:
+    record = _parse(CParser(), tmp_path, "new.c", "void f(void) { int new = 1; char *typename = 0; }\n")
+    assert {"new", "typename"} <= {s.name for s in record.statements}

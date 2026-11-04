@@ -32,7 +32,7 @@ from .functions import (
     is_function_pointer,
     read_member,
 )
-from .mappings import MACRO_TYPES
+from .mappings import KEYWORDS, MACRO_TYPES
 from .statements import macro_statement
 
 #: Aggregate specifiers that become a ``Class`` node, mapped to their ``type``. A union is
@@ -239,11 +239,13 @@ _NAME_NODES = ("field_identifier", "identifier", "type_identifier")
 
 def _declarator_name(node: Node | None, source: bytes) -> str | None:
     """Innermost declared name, unwrapping pointer/reference/array/init/function
-    declarators (``* kName`` → ``kName``, ``(*Callback)(int)`` → ``Callback``)."""
+    declarators (``* kName`` → ``kName``, ``(*Callback)(int)`` → ``Callback``). A keyword is
+    never one: the grammar misread a macro."""
     if node is None:
         return None
     if node.type in _NAME_NODES:
-        return node_text(node, source)
+        text = node_text(node, source)
+        return text if text not in KEYWORDS else None
     inner = node.child_by_field_name("declarator") or next(
         (c for c in node.named_children
          if c.type in _NAME_NODES or c.type.endswith("declarator")),
