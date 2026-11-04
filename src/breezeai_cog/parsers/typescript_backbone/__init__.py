@@ -6,4 +6,4 @@ class fact); ``routes`` finds router route tables, ``router.route(...)`` and the
 
 from . import backbone, routes  # noqa: F401  (each registers its detector)
 
-PARSERS: list = []
+PARSERS: list[object] = []

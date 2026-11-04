@@ -22,7 +22,10 @@ cannot be resolved to a literal is never guessed: the entry or ``route()`` call 
 
 from __future__ import annotations
 
-from typing import Callable
+from pathlib import Path
+from typing import Any, Callable
+
+from tree_sitter import Node
 
 from ..additive import (DetectContext, Detection, Detector, FactSpec, Gate, index_fact,
                         register_detector, register_fact)
@@ -38,13 +41,13 @@ _FUNCTIONS = ("function_expression", "function", "arrow_function")
 _ROOT_FACT = "backbone.history-root"  # the root set by a history.start in another file
 
 
-def _line(node) -> int:
-    return node.start_point[0] + 1
+def _line(node: Node) -> int:
+    return int(node.start_point[0]) + 1
 
 
 # --------------------------------------------------------------------------- history root
 
-def _history_roots(root, src: bytes, values: _Values) -> list:
+def _history_roots(root: Node, src: bytes, values: _Values) -> list[str | None]:
     """The root each ``Backbone.history.start(...)`` call of a file puts its routes under,
     normalised (``/app/`` -> ``app``).
 
@@ -52,7 +55,7 @@ def _history_roots(root, src: bytes, values: _Values) -> list:
     start (the default; routes live after ``#``) or one without ``root`` puts them under ``""``.
     ``None`` when it is not known: options, ``pushState`` or ``root`` that are not literals.
     """
-    found: list = []
+    found: list[str | None] = []
     for node in _walk(root):
         if node.type != "call_expression":
             continue
@@ -82,7 +85,7 @@ def _history_roots(root, src: bytes, values: _Values) -> list:
     return found
 
 
-def _single_root(roots: list) -> str | None:
+def _single_root(roots: list[str | None]) -> str | None:
     """``/app`` when every root agrees on one non-empty value; else None (never a guess)."""
     only = set(roots)
     if len(only) != 1 or None in only:
@@ -91,7 +94,7 @@ def _single_root(roots: list) -> str | None:
     return "/" + root if root else None
 
 
-def _history_base(root, src: bytes, values: _Values, index_root: str | None) -> str:
+def _history_base(root: Node, src: bytes, values: _Values, index_root: str | None) -> str:
     """The base path of the file's routes.
 
     The file's own ``history.start`` decides when it has one (ambiguous -> no base). Otherwise
@@ -101,12 +104,12 @@ def _history_base(root, src: bytes, values: _Values, index_root: str | None) -> 
     return (_single_root(roots) or "") if roots else (index_root or "")
 
 
-def _collect_root_fact(root, source: bytes, _rel: str, _repo_root) -> list | None:
+def _collect_root_fact(root: Node, source: bytes, _rel: str, _repo_root: Path | None) -> list[str | None] | None:
     roots = _history_roots(root, source, _Values(root, source))
     return roots or None
 
 
-def _resolve_root_fact(values: list, _index) -> dict | None:
+def _resolve_root_fact(values: list[list[str | None]], _index: object) -> dict[str, str] | None:
     """``{"root": "/app"}`` when the whole repo agrees on one root, else nothing."""
     root = _single_root([r for roots in values for r in roots])
     return {"root": root} if root else None
@@ -122,7 +125,7 @@ def _join(base: str, path: str) -> str:
 # --------------------------------------------------------------------------- bindings
 
 #: name -> ``handlerLine`` / ``handlerPath`` of a function given by name, where found
-_Locate = Callable[[str], dict]
+_Locate = Callable[[str], dict[str, Any]]
 
 
 def _locator(dc: DetectContext) -> _Locate:
@@ -130,7 +133,7 @@ def _locator(dc: DetectContext) -> _Locate:
     import, as the TypeScript handler lookup finds it. Built on first use."""
     lookup = None
 
-    def locate(name: str) -> dict:
+    def locate(name: str) -> dict[str, Any]:
         nonlocal lookup
         if lookup is None:
             lookup = handler_locator(
@@ -143,12 +146,13 @@ def _locator(dc: DetectContext) -> _Locate:
     return locate
 
 
-def _handler_fields(value, owner: dict, values: _Values, src: bytes, locate: _Locate) -> dict:
+def _handler_fields(value: Node, owner: dict[str, Node], values: _Values, src: bytes,
+                    locate: _Locate) -> dict[str, Any]:
     """The handler a route points at, as the code writes it, plus where it is declared when
     known: a name is a method of the router (``owner``); a function given directly is looked up."""
     name = values.string(value)
     if name is not None:
-        fields: dict = {"handler": name}
+        fields: dict[str, Any] = {"handler": name}
         target = owner.get(name)
         if target is not None:
             fields["handlerLine"] = _line(target)
@@ -163,7 +167,7 @@ def _handler_fields(value, owner: dict, values: _Values, src: bytes, locate: _Lo
     return {}
 
 
-def _route_fields(base: str, path: str) -> dict:
+def _route_fields(base: str, path: str) -> dict[str, Any]:
     return {
         "semanticType": "route",
         "framework": _FRAMEWORK,
@@ -172,7 +176,7 @@ def _route_fields(base: str, path: str) -> dict:
     }
 
 
-def _table_node(prop):
+def _table_node(prop: Node | None) -> Node | None:
     """The object a ``routes`` property holds, or the one its function returns (Backbone calls it)."""
     if prop is not None and (prop.type == "method_definition" or prop.type in _FUNCTIONS):
         body = prop.child_by_field_name("body")  # ``routes() {}`` / ``routes: function () {}`` / ``() => ({})``
@@ -184,7 +188,7 @@ def _table_node(prop):
     return prop
 
 
-def _table_routes(props: dict, cls: _Class | None, base: str, values: _Values, src: bytes,
+def _table_routes(props: dict[str, Node], cls: _Class | None, base: str, values: _Values, src: bytes,
                   locate: _Locate) -> list[Emit]:
     """The bindings of ``routes`` / ``appRoutes`` among the properties of a router."""
     found = []
@@ -212,7 +216,7 @@ def _table_routes(props: dict, cls: _Class | None, base: str, values: _Values, s
     return found
 
 
-def _route_call(call, args: list, cls: _Class | None, base: str, values: _Values,
+def _route_call(call: Node, args: list[Node], cls: _Class | None, base: str, values: _Values,
                 src: bytes, locate: _Locate) -> Emit | None:
     """``router.route(path, name, callback)`` / ``router.route(path, callback)``."""
     regex = args[0].type == "regex"
@@ -267,16 +271,16 @@ def _detect_routes(dc: DetectContext) -> Detection | None:
                     found.append(emit)
         elif node.type == "new_expression":  # new AppRouter({ routes: {...} })
             ctor = _text(node.child_by_field_name("constructor"), src)
-            cls = scope.by_name.get(ctor) or scope.by_name.get(ctor.rsplit(".", 1)[-1])
-            if (cls.kind if cls else _kind(ctor, scope.roots)) != "Router":
+            router = scope.by_name.get(ctor) or scope.by_name.get(ctor.rsplit(".", 1)[-1])
+            if (router.kind if router else _kind(ctor, scope.roots)) != "Router":
                 continue
             args = _args(node)
             options = values.object(args[0]) if args else None
             if options is not None:
-                found.extend(_table_routes(_object_props(options, src), cls, base, values, src, locate))
+                found.extend(_table_routes(_object_props(options, src), router, base, values, src, locate))
 
     # A table inherited or shared by several routers is one binding, at one place.
-    unique: dict = {}
+    unique: dict[tuple[Any, ...], Emit] = {}
     for emit in found:
         key = (emit.node.start_byte, emit.node.end_byte, tuple(sorted(emit.fields.items())))
         unique.setdefault(key, emit)
