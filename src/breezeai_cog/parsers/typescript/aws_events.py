@@ -26,20 +26,19 @@ Consumers / entry points (``aws-lambda`` handler types on an exported const):
 **Endpoint honesty:** the address (TopicArn/QueueUrl) is usually an injected config
 symbol (``this.topicArn``), and the queue→Lambda binding lives in infra (Terraform/CDK),
 not the code — so ``endpoint`` is set only from a *string literal*, else left ``None``. A literal
-queue URL / topic ARN / bus ARN is written by name (:func:`address_name`), the form a consumer
+queue URL / topic ARN / bus ARN is written by name (:func:`..aws_sdk_common.address_name`), the form a consumer
 records, so the two meet on one address. A
 symbol is never passed off as a resolved address (the producer→consumer edge is a backend
 enrichment concern, not this parser's). Mutates ``record``; returns a file framework label."""
 
 from __future__ import annotations
 
-import re
-
 from tree_sitter import Node
 
 from ...schemas import SemanticType
 from ..additive import DetectContext, Detection, Detector, Gate, register_detector
 from ..aws_deploy import deployed_handlers
+from ..aws_sdk_common import ADDRESS_KEYS, AWS_EVIDENCE_KEYS, DIRECT_ADDRESS_KEYS, address_name
 from ..emits import Emit
 from ..treesitter import node_text
 
@@ -78,23 +77,6 @@ _ROUTE_HANDLERS = {"APIGatewayProxyHandler", "APIGatewayProxyHandlerV2", "ALBHan
 # schedule lives in deployment config, so the endpoint stays empty.
 _TIMER_HANDLERS = {"ScheduledHandler"}
 _TIMER_PARAM_TYPES = {"ScheduledEvent"}
-# Keys in an SDK argument object that name the destination address.
-_ADDRESS_KEYS = {"TopicArn", "TargetArn", "QueueUrl", "EventBusName", "PhoneNumber"}
-# Subset of the above that also *proves* the call is AWS — needed by the ``publish`` guard
-# below. ``PhoneNumber`` is excluded: every SMS vendor (Twilio, Vonage, MessageBird) names
-# that field the same way, so it identifies a destination but not a provider. The remaining
-# keys are AWS-specific strings, so for them naming a destination and proving AWS coincide.
-_AWS_EVIDENCE_KEYS = _ADDRESS_KEYS - {"PhoneNumber"}
-# Address keys that reach exactly one recipient. SNS names its API ``Publish`` for every
-# destination, but only a *topic* fans out, so an SMS is point-to-point — the distinction
-# Vert.x draws between ``publish()`` and ``send()``. Nothing can subscribe to a phone
-# number, so calling it a publish would assert a one-to-many relationship that cannot exist.
-#
-# ``TargetArn`` is deliberately absent: the Publish API accepts *either* a platform-endpoint
-# ARN (one device) *or* a topic ARN (fan-out) there, and the value is usually an injected
-# symbol, so its cardinality is not knowable from the call site. It keeps the fan-out
-# default rather than being guessed — a coarse classification beats a wrong one.
-_DIRECT_ADDRESS_KEYS = {"PhoneNumber"}
 
 # AWS Lambda *event* parameter types → framework. Used to recognise an UNTYPED handler
 # (``export const handler = async (event: S3Event) => …`` / ``exports.handler = …``) — the
@@ -150,26 +132,6 @@ def _walk(root: Node, types: frozenset[str]) -> list[Node]:
     return out
 
 
-#: A literal SQS queue URL — ``https://sqs.<region>.amazonaws.com/<account>/<queue>`` or the legacy
-#: ``https://<region>.queue.amazonaws.com/<account>/<queue>``.
-_QUEUE_URL = re.compile(
-    r"^https?://(?:sqs\.[\w-]+|[\w-]+\.queue)\.amazonaws\.com(?:\.cn)?/\d+/(?P<name>[\w.-]+)/?$"
-)
-#: A literal SNS topic / EventBridge bus ARN.
-_TOPIC_ARN = re.compile(r"^arn:aws[\w-]*:sns:[\w-]+:\d+:(?P<name>[\w.-]+)$")
-_BUS_ARN = re.compile(r"^arn:aws[\w-]*:events:[\w-]+:\d+:event-bus/(?P<name>[\w.-]+)$")
-_NAME_FORMS = {"QueueUrl": _QUEUE_URL, "TopicArn": _TOPIC_ARN, "EventBusName": _BUS_ARN}
-
-
-def address_name(key: str, value: str) -> str:
-    """The name a literal address stands for, written as its consumer writes it: a queue URL →
-    the queue (``…amazonaws.com/123/orders`` → ``orders``), a topic or bus ARN → the topic /
-    bus. Anything not exactly in that form is kept as written."""
-    form = _NAME_FORMS.get(key)
-    m = form.match(value) if form is not None else None
-    return m["name"] if m is not None else value
-
-
 def _address(args: Node | None, source: bytes) -> tuple[str | None, str | None]:
     """(literal endpoint, matched address key) from an SDK call's first object argument.
     Endpoint is set only from a plain string literal — a symbol (``this.topicArn``) stays
@@ -188,7 +150,7 @@ def _address(args: Node | None, source: bytes) -> tuple[str | None, str | None]:
             if pair.type != "pair":
                 continue
             key = pair.child_by_field_name("key")
-            if key is None or node_text(key, source) not in _ADDRESS_KEYS:
+            if key is None or node_text(key, source) not in ADDRESS_KEYS:
                 continue
             matched_key = node_text(key, source)
             value = pair.child_by_field_name("value")
@@ -222,7 +184,7 @@ def _producer(call: Node, source: bytes) -> tuple[SemanticType, str, str | None,
         endpoint, key = _address(first.child_by_field_name("arguments"), source)
         # framework stays aws-sns either way — the transport is unchanged, and an SMS send
         # must remain visible to "what talks to SNS?"; only the delivery shape differs.
-        if cname == "PublishCommand" and key in _DIRECT_ADDRESS_KEYS:
+        if cname == "PublishCommand" and key in DIRECT_ADDRESS_KEYS:
             sem = "eventbus_send"
         return sem, cname, endpoint, fw
 
@@ -230,9 +192,9 @@ def _producer(call: Node, source: bytes) -> tuple[SemanticType, str, str | None,
     if info2 is not None:
         sem, fw, needs_hint = info2
         endpoint, key = _address(args, source)
-        if needs_hint and key not in _AWS_EVIDENCE_KEYS and "sns" not in receiver:
+        if needs_hint and key not in AWS_EVIDENCE_KEYS and "sns" not in receiver:
             return None
-        if method == "publish" and key in _DIRECT_ADDRESS_KEYS:
+        if method == "publish" and key in DIRECT_ADDRESS_KEYS:
             sem = "eventbus_send"
         return sem, method, endpoint, fw
     return None
