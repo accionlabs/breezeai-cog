@@ -67,6 +67,34 @@ def test_lazy_component_is_binding(analyze_files) -> None:
     assert not r.handler
 
 
+VITE_ALIAS = (
+    "import { fileURLToPath, URL } from 'node:url';\n"
+    "import { defineConfig } from 'vite';\n"
+    "export default defineConfig({\n"
+    "  resolve: { alias: { '@': fileURLToPath(new URL('./src', import.meta.url)) } },\n"
+    "});\n"
+)
+HOME_VUE = "<template><p/></template>\n<script>\nexport default { name: 'RwvHome' };\n</script>\n"
+
+
+def test_lazy_component_through_a_vite_alias_is_binding(analyze_files) -> None:
+    # `@/views/Home` is a Vite `resolve.alias` entry: it leads to the component like the relative form.
+    st = _routes(
+        analyze_files, "  { path: '/', component: () => import('@/views/Home') },\n",
+        **{"vite.config.js": VITE_ALIAS, "src/views/Home.vue": HOME_VUE},
+    )
+    [r] = _at(st, "/")
+    assert (r.handler, r.handlerPath, r.handlerLine) == ("RwvHome", "src/views/Home.vue", 3)
+    # An alias that can't be read statically leaves the import external: no name, no file.
+    st = _routes(
+        analyze_files, "  { path: '/', component: () => import('@/views/Home') },\n",
+        **{"vite.config.js": VITE_ALIAS.replace("fileURLToPath(new URL('./src', import.meta.url))", "srcDir"),
+           "src/views/Home.vue": HOME_VUE},
+    )
+    [r] = _at(st, "/")
+    assert (r.handler, r.handlerPath, r.handlerLine) == (None, None, None)
+
+
 def test_named_views_default_component_is_handler(analyze_files) -> None:
     st = _routes(
         analyze_files, "  { path: '/home', components: { default: Home, sidebar: Side } },\n"

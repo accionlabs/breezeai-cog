@@ -7,7 +7,7 @@ Parser: `src/breezeai_cog/parsers/typescript_vue/` (`routes.py` route configs, `
 | Construct | Role | Record | Why |
 |---|---|---|---|
 | `{ path, component: X }` in a routes array (`createRouter` / `new VueRouter`) | Binding | `route`, `routeKind: page`, `endpoint` = full path, `handler` = `X` | One component reached by URL |
-| `{ path, component: () => import('./X.vue') }` | Binding | as above, `handler` = the component name, never the import path | One component, loaded lazily; the file goes in `handlerPath` |
+| `{ path, component: () => import('./X.vue') }` (the specifier relative, or through a `tsconfig` / Vite alias) | Binding | as above, `handler` = the component name, never the import path | One component, loaded lazily; the file goes in `handlerPath` |
 | `{ path, components: { default: X, … } }` (named views) | Binding | `handler` = the `default` component | The default view is the page |
 | `{ path, children }` (no component) | Wiring | statement stays plain; `path` prefixes the children | No handler of its own |
 | `{ path, component, children }` with a child `path: ''` | Wiring | statement stays plain; prefix for the children | A layout: a child always fills its `<router-view>` |
