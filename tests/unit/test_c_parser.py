@@ -666,6 +666,43 @@ def test_a_macro_folded_into_unsigned_keeps_the_declaration(tmp_path, parser) ->
     ] == [("sign_of", ["API"])]
 
 
+@pytest.mark.parametrize("parser", [CParser(), CppParser()], ids=["c", "cpp"])
+def test_a_macro_wrapped_around_a_declaration_is_read_past(tmp_path, parser) -> None:
+    # The grammar can't read a declaration as a macro argument; its error used to run on over
+    # the clean declarations after the wrapper.
+    record = _parse(
+        parser,
+        tmp_path,
+        "api.h",
+        "LLAMA_API int a1(int x);\n"
+        'DEPRECATED(LLAMA_API int load(const char * p, int q), "use open");\n'
+        "LLAMA_API int a2(int x);\n"
+        "LLAMA_API struct model * a3(const char * p);\n"
+        "DEPRECATED(LLAMA_API int32_t n_vocab(const struct vocab * v), // classification\n"
+        '    "use vocab_n");\n'
+        "GGML_DEPRECATED(\n"
+        "    GGML_API void add1(struct tensor * a),\n"
+        '    "use add");\n'
+        "LLAMA_API int a4(void);\n"
+        # Inside a body, a call is a call.
+        'int f(void) { CHECK(g(1), "msg"); return 0; }\n',
+    )
+    assert [
+        (s.name, [(d.name, d.args) for d in s.decorators if d.name.endswith("DEPRECATED")])
+        for s in record.statements if s.nodeType == "declaration"
+    ] == [
+        ("a1", []),
+        ("load", [("DEPRECATED", ['"use open"'])]),
+        ("a2", []),
+        ("a3", []),
+        ("n_vocab", [("DEPRECATED", ['"use vocab_n"'])]),
+        ("add1", [("GGML_DEPRECATED", ['"use add"'])]),
+        ("a4", []),
+    ]
+    assert [(f.name, [c.name for c in f.calls]) for f in record.functions] == [("f", ["CHECK", "g"])]
+    assert [s.startLine for s in record.statements if s.name == "add1"] == [8]
+
+
 @pytest.mark.parametrize("jobs", [1, 2])
 def test_a_macro_prefixed_function_is_a_call_target_in_other_files(tmp_path, jobs) -> None:
     repo = _repo(

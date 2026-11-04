@@ -532,6 +532,20 @@ C++.
 > (constructors as calls, `public:` as a label), which nothing can be recovered from safely;
 > without the macro it is an ordinary class. **Cost:** such a file is parsed twice.
 
+> **Decision —** a macro wrapped around a whole declaration (`DEPRECATED(LLAMA_API int
+> llama_n_vocab(const struct llama_vocab * vocab), "use llama_vocab_n_tokens instead");`) is
+> blanked in the same second parse as a class-head macro: `DEPRECATED(` and `, "…")` become
+> spaces, and the declaration reads as written. A wrapper counts only outside a function body,
+> with a first argument that ends in a parameter list, string literals (and comments) as its
+> other arguments, and `;` right after it; the blank is kept only where it leaves one
+> declaration, outside any error, running through that `;`. The wrapper is the declaration's
+> decorator, with its strings as arguments (`DEPRECATED("use llama_vocab_n_tokens instead")`).
+> The statement's `text` is the declaration's span, from its first word through the `;`.
+> **Why:** the grammar can't read a declaration as a macro argument, and its error runs on over
+> the clean declarations after the wrapper: llama.cpp's `llama.h` and `ggml.h` lost about 500
+> of their 600 public prototypes. The notice is what an agent needs to know about a deprecated
+> function. **Cost:** such a file is parsed twice (sharing the class-head parse).
+
 > **Decision —** a function whose braces a preprocessor conditional splits is read from a second
 > parse where the normal one gets its end wrong. When one `#ifdef` block opens a brace (`} else {`)
 > and a later one closes it, the compiler sees both or neither, but the grammar reads both and

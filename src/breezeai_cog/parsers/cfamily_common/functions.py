@@ -19,6 +19,8 @@ The grammar shapes this parser relies on (discovered empirically):
 
 from __future__ import annotations
 
+import re
+
 from dataclasses import dataclass
 
 from collections.abc import Sequence, Set as AbstractSet
@@ -701,6 +703,23 @@ def _args(arg_list: Node | None, source: bytes) -> list[str]:
     return [node_text(a, source) for a in arg_list.named_children] if arg_list is not None else []
 
 
+_WRAPPER_BEFORE = re.compile(rb"([A-Za-z_]\w*)[ \t]*\(\s*\Z")
+_STRING_LITERAL = re.compile(rb'"(?:[^"\\\n]|\\.)*"')
+
+
+def wrapper_decorator(node: Node, source: bytes) -> Decorator | None:
+    """The macro wrapped around a declaration, ``DEPRECATED(LLAMA_API int f(int a), "use
+    g");``, with its string arguments. The wrapper was blanked before parsing
+    (``classes.parse_cfamily``), so ``NAME(`` sits right before the declaration in the original
+    source, where no node covers it, and the strings between the declarator and the ``;``."""
+    m = _WRAPPER_BEFORE.search(source, max(node.start_byte - 256, 0), node.start_byte)
+    declarator = node.child_by_field_name("declarator")
+    if m is None or declarator is None:
+        return None
+    args = _STRING_LITERAL.findall(source, declarator.end_byte, node.end_byte)
+    return Decorator(name=m.group(1).decode(), args=[a.decode("utf-8", "replace") for a in args])
+
+
 def decorators_of(node: Node, source: bytes, read: DeclarationRead) -> list[Decorator]:
     """The attributes and export / inline macros written on a function, prototype or member,
     in source order: attributes the grammar parses (also one after the parameter list,
@@ -708,6 +727,8 @@ def decorators_of(node: Node, source: bytes, read: DeclarationRead) -> list[Deco
     front of a keyword type (``read.macro``) or after ``unsigned`` / ``long``, where a type
     name can't stand (``unsigned long ZEXPORT crc32``)."""
     found: list[tuple[int, list[Decorator]]] = []
+    if node.type == "declaration" and (wrapper := wrapper_decorator(node, source)) is not None:
+        found.append((node.start_byte - 1, [wrapper]))
     fd = function_declarator_of(node.child_by_field_name("declarator"))
     for holder in (node, fd):
         for c in holder.children if holder is not None else ():

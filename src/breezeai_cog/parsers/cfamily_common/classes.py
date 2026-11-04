@@ -152,26 +152,134 @@ def _head_decorators(node: Node, source: bytes) -> list[Decorator]:
     return out
 
 
+#: ``NAME(`` at the start of a line: a candidate wrapper macro around a declaration.
+_WRAPPER_HEAD = re.compile(rb"^[ \t]*([A-Za-z_]\w*)[ \t]*\(", re.M)
+#: The arguments after a wrapper's declaration: string literals, commas and comments only.
+_STRING_ARGS = re.compile(rb'(?:\s|,|//[^\n]*|/\*.*?\*/|"(?:[^"\\\n]|\\.)*")*', re.S)
+_PARAMS_END = re.compile(rb"\)(?:\s|//[^\n]*|/\*.*?\*/)*\Z", re.S)
+
+
+def _close_paren(source: bytes, start: int) -> tuple[int, int | None] | None:
+    """For an argument list opened just before ``start``: the offset of its closing ``)`` and
+    of its first top-level comma (``None`` when it has one argument). Strings, character
+    literals and comments are skipped; ``None`` when it never closes."""
+    depth, comma, i, n = 1, None, start, len(source)
+    while i < n:
+        c = source[i]
+        if c in (0x22, 0x27):  # a string or character literal
+            quote, i = c, i + 1
+            while i < n and source[i] != quote:
+                i += 2 if source[i] == 0x5C else 1
+        elif source.startswith(b"//", i):
+            i = source.find(b"\n", i)
+            if i < 0:
+                return None
+        elif source.startswith(b"/*", i):
+            i = source.find(b"*/", i)
+            if i < 0:
+                return None
+            i += 1
+        elif c in b"([{":
+            depth += 1
+        elif c in b")]}":
+            depth -= 1
+            if depth == 0:
+                return i, comma
+        elif c == 0x2C and depth == 1 and comma is None:
+            comma = i
+        i += 1
+    return None
+
+
+#: A wrapper's two blanked spans (``NAME(`` and ``, "msg")``) and where its declaration starts.
+_Wrapper = tuple[tuple[int, int], tuple[int, int], int]
+
+
+def _declaration_wrappers(root: Node, source: bytes) -> list[_Wrapper]:
+    """Macros wrapped around a whole declaration: ``DEPRECATED(LLAMA_API int f(int a), "use
+    g");``. The grammar can't read a declaration as a macro argument, and its error runs on
+    over the clean declarations after it. A wrapper counts only outside a function body, with
+    a first argument ending in a parameter list, string literals as its other arguments, and
+    ``;`` right after it."""
+    if not root.has_error:
+        return []
+    found = []
+    for m in _WRAPPER_HEAD.finditer(source):
+        node: Node | None = root.descendant_for_byte_range(m.start(1), m.end(1))
+        while node is not None and node.type != "compound_statement":
+            node = node.parent
+        if node is not None:
+            continue  # inside a function body: a call
+        closed = _close_paren(source, m.end())
+        if closed is None:
+            continue
+        close, comma = closed
+        if comma is None:
+            continue
+        first = source[m.end():comma]
+        if (
+            b"(" not in first or _PARAMS_END.search(first) is None
+            or _STRING_ARGS.fullmatch(source, comma, close) is None
+            or b'"' not in source[comma:close]
+            or not source[close + 1:close + 64].lstrip().startswith(b";")
+        ):
+            continue
+        decl = m.end() + len(first) - len(first.lstrip())
+        found.append(((m.start(1), m.end()), (comma, close + 1), decl))
+    return found
+
+
+def _reads_as_declaration(root: Node, wrapper: _Wrapper) -> bool:
+    """Whether a wrapper's declaration parsed whole once the wrapper was blanked: one
+    declaration from its first word through the ``;`` after the wrapper, outside any error.
+    Whether its name can be trusted is ``functions.read_declaration``'s to say, as for any other."""
+    (_, _), (_, end), start = wrapper
+    node: Node | None = root.descendant_for_byte_range(start, start)
+    while node is not None and not (node.type == "declaration" and node.start_byte == start):
+        node = node.parent
+    if node is None or node.end_byte <= end:
+        return False
+    while node is not None:
+        if node.type == "ERROR":
+            return False
+        node = node.parent
+    return True
+
+
+def _blank(source: bytes, spans: list[tuple[int, int]]) -> bytes:
+    """``source`` with ``spans`` turned to spaces; newlines stay, so lines and offsets don't
+    move."""
+    out = bytearray(source)
+    for start, end in spans:
+        out[start:end] = bytes(b if b == 0x0A else 0x20 for b in source[start:end])
+    return bytes(out)
+
+
 def parse_cfamily(grammar: str, source: bytes, timeout_micros: int) -> Node:
-    """Parse a C-family file. When a macro between ``class`` and the class name hid a class
-    (:func:`_class_macro_words`), the file is parsed once more with that word blanked to
-    spaces: the class then reads as written without the macro, at the same byte offsets and
-    lines, so names and text are still read from the original ``source``. A class that still
-    doesn't parse whole without its macro (another macro breaks its body) keeps the macro, and
-    stays as uncaptured as before."""
+    """Parse a C-family file. Two macros the grammar can't expand hide what they are written on,
+    and are blanked to spaces for a second parse:
+
+    * a macro between ``class`` and the class name (:func:`_class_macro_words`): the class then
+      reads as written without it;
+    * a macro wrapped around a declaration (:func:`_declaration_wrappers`): ``DEPRECATED(`` and
+      ``, "msg")`` go, and the declaration reads as written.
+
+    Lines and byte offsets don't move, so names and text are still read from the original
+    ``source``. A blank is kept only where what it hid now parses whole (a class with its body,
+    a declaration without an error); if one doesn't, the others are tried once more alone."""
     root = parse_source(grammar, source, timeout_micros).root_node
     words = _class_macro_words(root, source)
-    for _ in range(2):  # blank all; if some class still breaks, blank only the others once
-        if not words:
+    wrappers = _declaration_wrappers(root, source)
+    for _ in range(2):  # blank all; if some still break, blank only the others once
+        if not words and not wrappers:
             return root
-        blanked = bytearray(source)
-        for (start, end), _name in words:
-            blanked[start:end] = b" " * (end - start)
-        reparsed = parse_source(grammar, bytes(blanked), timeout_micros).root_node
-        whole = [w for w in words if _reads_as_class(reparsed, w[1])]
-        if whole == words:
+        spans = [w[0] for w in words] + [s for w in wrappers for s in w[:2]]
+        reparsed = parse_source(grammar, _blank(source, spans), timeout_micros).root_node
+        whole_words = [w for w in words if _reads_as_class(reparsed, w[1])]
+        whole_wrappers = [w for w in wrappers if _reads_as_declaration(reparsed, w)]
+        if whole_words == words and whole_wrappers == wrappers:
             return reparsed
-        words = whole
+        words, wrappers = whole_words, whole_wrappers
     return root
 
 
