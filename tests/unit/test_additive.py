@@ -67,7 +67,7 @@ def test_inventory_in_run_order() -> None:
         "typescript": ["express", "fastify", "aws-events", "nestjs-clients", "sdk-calls",
                        "graphql-client",
                        "graphql-resolver-modules", "vue-routes", "react-routes",
-                       "nextjs-routes", "nextjs-pages", "vue-navigation", "angular-navigation",
+                       "nextjs-routes", "nextjs-pages", "backbone", "backbone-routes", "vue-navigation", "angular-navigation",
                        "react-navigation", "angularjs"],
     }
 
