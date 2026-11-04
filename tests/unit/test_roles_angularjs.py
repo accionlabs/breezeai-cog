@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 from breezeai_cog.parsers.contract import is_entry_point
 
 ROUTES = "app/routes.js"
@@ -580,6 +582,28 @@ def test_resource_defined_in_the_file_is_not_the_angular_service(analyze_files) 
     src = "const $resource = (u) => fetch(u);\n$resource('/not/angular');\n"
     st = analyze_files({SERVICES: src})
     assert not [s for s in st if s.framework == "angularjs"]
+
+
+@pytest.mark.parametrize("binding", [
+    "const $resource = require('./my-rest');\n",
+    "import $resource from './my-rest';\n",
+    "import { $resource } from './my-rest';\n",
+    "const { $resource } = require('./my-rest');\n",
+    "let $resource;\n",
+])
+def test_resource_bound_by_the_file_is_not_the_angular_service(analyze_files, binding) -> None:
+    st = analyze_files({SERVICES: binding + "$resource('/api/own');\n"})
+    assert not [s for s in st if s.framework == "angularjs"]
+
+
+@pytest.mark.parametrize("binding", [
+    "import { $resource as rest } from './my-rest';\n",  # binds `rest`
+    "const { $resource: rest } = lib;\n",                 # binds `rest`
+])
+def test_resource_under_another_local_name_is_still_the_service(analyze_files, binding) -> None:
+    src = binding + "angular.module('a').factory('P', function ($resource) {\n" \
+        "  return $resource('/api/p');\n});\n"
+    assert [r[1] for r in _api(analyze_files({SERVICES: src}))] == ["/api/p"]
 
 
 def test_address_without_a_leading_slash_is_left_empty(analyze_files) -> None:

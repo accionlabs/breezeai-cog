@@ -47,6 +47,10 @@ class Scan:
     modules: set[str] = field(default_factory=set)
     #: Calls of the injected ``$resource`` service: ``$resource('/api/users/:id')``.
     resources: list[Node] = field(default_factory=list)
+    #: ``$resource`` is bound by an import or a variable declaration of this file
+    #: (``const $resource = require('./rest')``), so it is not the injected service. A function
+    #: parameter does not count: that is how AngularJS injects it.
+    resource_bound: bool = False
 
 
 def scan(root: Node, source: bytes) -> Scan:
@@ -70,7 +74,14 @@ def scan(root: Node, source: bytes) -> Scan:
             "class_declaration",
         ):
             _declare(found, node.child_by_field_name("name"), node, source)
+        elif node.type == "import_statement":
+            clause = next((c for c in node.named_children if c.type == "import_clause"), None)
+            if clause is not None and _names_resource(clause, source):
+                found.resource_bound = True
         elif node.type == "variable_declarator":
+            pattern = node.child_by_field_name("name")
+            if pattern is not None and _names_resource(pattern, source):
+                found.resource_bound = True
             value = node.child_by_field_name("value")
             if value is not None and value.type in (
                 "function_expression",
@@ -99,6 +110,24 @@ def _method_call(node: Node) -> MethodCall | None:
     if receiver is None or method is None or method.type != "property_identifier":
         return None
     return MethodCall(node, receiver, method, args)
+
+
+def _names_resource(pattern: Node, source: bytes) -> bool:
+    """Whether a binding pattern or import clause binds the local name ``$resource``."""
+    stack = [pattern]
+    while stack:
+        node = stack.pop()
+        if node.type in ("identifier", "shorthand_property_identifier_pattern") and \
+                node_text(node, source) == "$resource":
+            parent = node.parent
+            # `{ $resource: rest }` / `import { $resource as rest }` bind `rest`, not `$resource`
+            if not (parent is not None and (
+                (parent.type == "pair_pattern" and parent.child_by_field_name("key") == node)
+                or (parent.type == "import_specifier"
+                    and parent.child_by_field_name("alias") not in (None, node)))):
+                return True
+        stack.extend(node.named_children)
+    return False
 
 
 def _bind_module(found: Scan, name: Node | None, source: bytes) -> None:

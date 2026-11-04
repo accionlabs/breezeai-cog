@@ -16,8 +16,8 @@ from .syntax import FRAMEWORK, Scan
 
 
 def resource_emits(found: Scan, source: bytes) -> list[Emit]:
-    if "$resource" in found.declared:  # a function of the file's own, not the injected service
-        return []
+    if "$resource" in found.declared or found.resource_bound:
+        return []  # the file's own function, import or variable, not the injected service
     emits: list[Emit] = []
     for call in found.resources:
         args = call.child_by_field_name("arguments")
