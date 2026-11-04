@@ -22,7 +22,10 @@ from breezeai_cog.core import registry
 from breezeai_cog.parsers.base import ParseContext
 
 #: JSON filenames the shared extractor handles richly — captured in full otherwise.
-NAME_RICH = {"package.json", "tsconfig.json", "jsconfig.json", "mod.json"}
+NAME_RICH = {
+    "package.json", "tsconfig.json", "jsconfig.json", "mod.json",
+    "project.json", "nx.json", "workspace.json",
+}
 
 CONFIG = "config"
 CAPTURE = "structured-json"
@@ -37,6 +40,11 @@ _CASES = [
     pytest.param("jsconfig.json", {"compilerOptions": {"baseUrl": "."}}, CONFIG,
                  id="named:jsconfig.json"),
     pytest.param("mod.json", {"main": "Verticle", "requires": {}}, CONFIG, id="named:mod.json"),
+    pytest.param("project.json", {"name": "web", "targets": {"build": {}}}, CONFIG,
+                 id="named:project.json"),
+    pytest.param("nx.json", {"targetDefaults": {"build": {}}}, CONFIG, id="named:nx.json"),
+    pytest.param("workspace.json", {"projects": {"web": "apps/web"}}, CONFIG,
+                 id="named:workspace.json"),
 
     # ── data (record arrays) ────────────────────────────────────────────────────
     pytest.param("n8n-workflow.json", {"nodes": [{"id": "1"}], "connections": {}}, CAPTURE,

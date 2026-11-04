@@ -3,7 +3,8 @@
 It routes each JSON to one of two representations:
 
 * **Rich config** — named build/config files with a dedicated extractor (``package.json``,
-  ``tsconfig`` / ``jsconfig``, ``mod.json`` — see ``config.extractors.RICH_JSON_NAMES``) and
+  ``tsconfig`` / ``jsconfig``, ``mod.json``, Nx ``project.json`` / ``nx.json`` / ``workspace.json``
+  — see ``config.extractors.RICH_JSON_NAMES``) and
   any empty/scalar JSON with nothing to capture. These become ``type="config"``,
   ``language="config"`` records whose ``metadata`` is the extractor's structural summary
   (``topLevelKeys``, dependencies, build tool, …).

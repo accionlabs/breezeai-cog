@@ -5,6 +5,8 @@ from __future__ import annotations
 import gzip
 import json
 
+import pytest
+
 import breezeai_cog
 from breezeai_cog import analyze_repo, capabilities, iter_file_records
 
@@ -70,6 +72,72 @@ def test_iter_file_records(tmp_path) -> None:
     records = list(iter_file_records(repo))
     assert sorted(r.path for r in records) == ["app.py", "util.py"]
     assert all(isinstance(r.loc, int) for r in records)
+
+
+@pytest.mark.parametrize("jobs", [1, 2])
+def test_nx_rich_configs_and_project_ownership_through_pipeline(tmp_path, jobs) -> None:
+    repo = tmp_path / "nx-repo"
+    (repo / "apps" / "web" / "src").mkdir(parents=True)
+    (repo / "apps" / "web" / "src" / "nested").mkdir()
+    (repo / "apps" / "api" / "src").mkdir(parents=True)
+    (repo / "libs" / "shared" / "src").mkdir(parents=True)
+    (repo / "tools").mkdir()
+    (repo / "nx.json").write_text(json.dumps({"targetDefaults": {"build": {}}}))
+    (repo / "apps" / "web" / "project.json").write_text(json.dumps({
+        "name": "web", "implicitDependencies": ["api"], "targets": {"build": {}}
+    }))
+    (repo / "apps" / "web" / "src" / "nested" / "project.json").write_text(
+        json.dumps({"name": "nested", "targets": {"test": {}}})
+    )
+    (repo / "apps" / "api" / "project.json").write_text(json.dumps({
+        "name": "api", "targets": {"build": {}}
+    }))
+    (repo / "libs" / "shared" / "project.json").write_text(json.dumps({
+        "targets": {"build": {}}
+    }))
+    (repo / "apps" / "web" / "src" / "main.ts").write_text("export const web = true;\n")
+    (repo / "apps" / "web" / "src" / "nested" / "feature.ts").write_text(
+        "export const nested = true;\n"
+    )
+    (repo / "apps" / "api" / "src" / "main.ts").write_text("export const api = true;\n")
+    (repo / "libs" / "shared" / "src" / "index.ts").write_text("export const shared = true;\n")
+    (repo / "tools" / "outside.ts").write_text("export const outside = true;\n")
+
+    result = analyze_repo(repo, jobs=jobs)
+    lines = gzip.open(result.out_path, "rt", encoding="utf-8").read().splitlines()
+    records = {record["path"]: record for record in map(json.loads, lines[1:])}
+
+    assert records["nx.json"]["language"] == "config"
+    assert records["nx.json"]["metadata"]["kind"] == "nx.json"
+    assert records["nx.json"]["metadata"]["buildTool"] == "nx"
+    assert records["nx.json"]["metadata"]["projectInfo"] == {"projects": {}}
+    assert "project" not in records["nx.json"]
+    assert records["apps/web/project.json"]["language"] == "config"
+    assert records["apps/web/project.json"]["metadata"]["buildTool"] == "nx"
+    assert records["apps/web/project.json"]["project"] == "web"
+    assert records["apps/web/project.json"]["metadata"]["kind"] == "project.json"
+    assert records["apps/web/project.json"]["metadata"]["projectInfo"]["implicitDependencies"] == ["api"]
+    assert records["apps/web/src/main.ts"]["project"] == "web"
+    assert records["apps/web/src/main.ts"]["projectRoot"] == "apps/web"
+    assert records["apps/web/src/nested/feature.ts"]["project"] == "nested"
+    assert records["apps/web/src/nested/feature.ts"]["projectRoot"] == "apps/web/src/nested"
+    assert records["apps/api/src/main.ts"]["project"] == "api"
+    assert records["libs/shared/src/index.ts"]["project"] == "shared"
+    assert "project" not in records["tools/outside.ts"]
+    assert "projectRoot" not in records["tools/outside.ts"]
+
+
+def test_legacy_workspace_project_map_assigns_files(tmp_path) -> None:
+    repo = tmp_path / "legacy-nx"
+    (repo / "apps" / "web" / "src").mkdir(parents=True)
+    (repo / "workspace.json").write_text(json.dumps({
+        "projects": {"web": {"root": "apps/web"}},
+    }))
+    (repo / "apps" / "web" / "src" / "main.ts").write_text("export const web = true;\n")
+    records = {record.path: record for record in iter_file_records(repo)}
+
+    assert records["apps/web/src/main.ts"].project == "web"
+    assert records["apps/web/src/main.ts"].projectRoot == "apps/web"
 
 
 def test_capabilities() -> None:
