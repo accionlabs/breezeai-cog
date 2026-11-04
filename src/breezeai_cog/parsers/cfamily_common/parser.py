@@ -56,6 +56,7 @@ from .functions import (
     decorators_of,
     defined_names,
     function_declarator_of,
+    function_name_node,
     has_declaration_error,
     read_declaration,
     is_misread_declarator,
@@ -252,7 +253,7 @@ class CFamilyParser(BaseParser):
 
         def _emit_function(node: Node, ns: str, read: DeclarationRead) -> None:
             fd = function_declarator_of(node.child_by_field_name("declarator"))
-            inner = fd.child_by_field_name("declarator") if fd is not None else None
+            inner = function_name_node(fd)
             if inner is None:
                 return  # not a recognizable function — do not fabricate
             if inner.type == "qualified_identifier":

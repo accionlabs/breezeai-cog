@@ -83,6 +83,21 @@ def function_declarator_of(declarator: Node | None) -> Node | None:
     return inner if inner is not None and inner.type == "function_declarator" else None
 
 
+def function_name_node(fd: Node | None) -> Node | None:
+    """The node naming a ``function_declarator``'s function: its ``declarator``, with
+    parentheses around the name removed — ``int (f)(int)`` declares ``f``, a guard against a
+    macro named ``f``. A function pointer's parentheses hold a pointer, not a name, and stay."""
+    inner = fd.child_by_field_name("declarator") if fd is not None else None
+    while inner is not None and inner.type == "parenthesized_declarator":
+        named = inner.named_children
+        if len(named) != 1 or named[0].type not in (
+            "identifier", "field_identifier", "qualified_identifier", "parenthesized_declarator",
+        ):
+            break
+        inner = named[0]
+    return inner
+
+
 def is_misread_declarator(declarator: Node | None) -> bool:
     """Whether ``declarator`` is a function returning a function — not valid C or C++, so the
     grammar misread it. ``LUA_API int (lua_gettop) (lua_State *L);`` reads as a function
@@ -289,7 +304,7 @@ def _add_def_name(fn: Node, source: bytes, names: set[str]) -> None:
     """Add a function definition's name to the same-file set, when it can be trusted."""
     read = read_declaration(fn, source)
     fd = function_declarator_of(fn.child_by_field_name("declarator"))
-    inner = fd.child_by_field_name("declarator") if fd is not None else None
+    inner = function_name_node(fd)
     if read is None or inner is None:
         return
     if read.name is not None:
@@ -325,7 +340,7 @@ def _member_shaped(node: Node, source: bytes, cpp: bool) -> bool:
     an unqualified destructor, a member-only operator, or a definition with no return type (a
     constructor; a free function needs one)."""
     fd = function_declarator_of(node.child_by_field_name("declarator"))
-    inner = fd.child_by_field_name("declarator") if fd is not None else None
+    inner = function_name_node(fd)
     if inner is None:
         return False
     if inner.type == "field_identifier":
@@ -620,7 +635,7 @@ def is_macro_row(node: Node, source: bytes) -> bool:
         return False
     macro = ret.child_by_field_name("name")
     fd = function_declarator_of(node.child_by_field_name("declarator"))
-    inner = fd.child_by_field_name("declarator") if fd is not None else None
+    inner = function_name_node(fd)
     return (
         macro is not None and inner is not None
         and node_text(macro, source) == node_text(inner, source)
@@ -738,7 +753,7 @@ def build_function(
     definition; ``class_name`` qualifies the id (and, for a method, is the declaring class).
     ``read`` carries a name a macro moved and whether the return type is known."""
     fd = function_declarator_of(node.child_by_field_name("declarator"))
-    inner = fd.child_by_field_name("declarator") if fd is not None else None
+    inner = function_name_node(fd)
     if inner is not None and inner.type == "qualified_identifier":
         nm = inner.child_by_field_name("name")
         name = node_text(nm, source) if nm is not None else ""
@@ -801,9 +816,7 @@ def build_member_function(
     says whether the return type is known and carries a name a macro moved (see
     :func:`read_member`)."""
     fd = function_declarator_of(field_decl.child_by_field_name("declarator"))
-    name_node = fd.child_by_field_name("declarator") if fd is not None else None
-    while name_node is not None and name_node.type == "parenthesized_declarator":
-        name_node = name_node.named_children[0] if name_node.named_children else None  # (f)(int)
+    name_node = function_name_node(fd)  # `(f)(int)` names `f`
     name = read.name or (node_text(name_node, source) if name_node is not None else "")
     start, end = line_span(field_decl)
     # The id carries the qualified owner (`Outer.Inner`) so a nested type's methods are

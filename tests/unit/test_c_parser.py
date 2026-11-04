@@ -901,6 +901,27 @@ def test_a_parenthesized_member_name_after_a_macro_is_recovered(tmp_path) -> Non
 
 
 @pytest.mark.parametrize("jobs", [1, 2])
+def test_a_definition_with_a_parenthesized_name_is_named_without_them(tmp_path, jobs) -> None:
+    repo = _repo(
+        tmp_path / "r",
+        {
+            "lib/lib.c": (
+                "int (plain)(int a) { return a; }\n"
+                "LUALIB_API lua_State *(luaL_newstate) (void) { return 0; }\n"
+                # A pointer to a function is a variable, not a definition.
+                "int (*hook)(int) = 0;\n"
+            ),
+            "app/main.c": "int main(void) { return plain(1) + (luaL_newstate() != 0); }\n",
+        },
+    )
+    files = _capture(repo, jobs)
+    assert [f["name"] for f in files["lib/lib.c"]["functions"]] == ["plain", "luaL_newstate"]
+    assert _calls(files["app/main.c"], "main") == {
+        "plain": "lib/lib.c", "luaL_newstate": "lib/lib.c",
+    }
+
+
+@pytest.mark.parametrize("jobs", [1, 2])
 def test_a_parenthesized_name_is_a_call_target(tmp_path, jobs) -> None:
     repo = _repo(
         tmp_path / "r",

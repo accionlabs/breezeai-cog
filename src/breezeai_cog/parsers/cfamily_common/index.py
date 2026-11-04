@@ -46,8 +46,8 @@ from ..index_common import ClassHeritage, parallel_map, record_distinct, walk_he
 from ..treesitter import node_text
 from .classes import _CLASS_TYPES, _heritage, _unwrap_template, defined_type, parse_cfamily
 from .functions import (
-    function_declarator_of, has_declaration_error, is_declared_static, read_declaration,
-    owner_is_explicit, read_member, spilled_members,
+    function_declarator_of, function_name_node, has_declaration_error, is_declared_static,
+    owner_is_explicit, read_declaration, read_member, spilled_members,
 )
 from .branches import BranchFix, branch_fix, enclosing_scope
 from .imports import FamilyHeaders, HeaderIndex, build_header_index, include_targets
@@ -149,7 +149,7 @@ def _record_def(
       constructor by an ``identifier``) → ``qual[f"{class_name}::{name}"]``.
     """
     fd = function_declarator_of(node.child_by_field_name("declarator"))
-    inner = fd.child_by_field_name("declarator") if fd is not None else None
+    inner = function_name_node(fd)
     if inner is None:
         return
     if (

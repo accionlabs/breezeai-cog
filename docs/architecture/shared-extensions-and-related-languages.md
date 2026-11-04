@@ -507,7 +507,9 @@ C++.
 > the misread name is one and the inner parentheses hold one bare word, the word in front is
 > the macro (a decorator), the keywords are the return type and the bare word is the name. The
 > same holds for a class member, and the parser and the index read both the same way. Any
-> other function-returning-function shape is skipped, at file scope and in a class alike.
+> other function-returning-function shape is skipped, at file scope and in a class alike. A
+> parenthesized name read cleanly (`int (f)(int a) {…}`, `LUALIB_API lua_State *(luaL_newstate)
+> (void) {…}`) is named without its parentheses, in the parser and the index alike.
 > **Why:** Lua writes its whole API this way (lua.h, lauxlib.h, lualib.h, and every project that
 > embeds it); the prototypes were lost and a definition was named `int (luaL_loadstring)`.
 > **Cost:** a type name in front (`LUALIB_API lua_Integer (luaL_len)`) stays skipped: it is
