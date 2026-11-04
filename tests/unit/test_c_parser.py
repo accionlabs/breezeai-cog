@@ -643,6 +643,64 @@ def test_a_call_resolves_into_a_header_only_when_the_file_includes_it(tmp_path, 
     assert _calls(records["src/user.c"], "user") == {"util_max": "src/util.c"}
 
 
+@pytest.mark.parametrize("jobs", [1, 2])
+def test_a_call_to_an_inline_member_resolves_where_its_header_is_seen(tmp_path, jobs) -> None:
+    repo = _repo(
+        tmp_path,
+        {
+            "lib/cache.hpp": (
+                "class Cache {\n"
+                "public:\n"
+                "  int hits() const { return n_; }\n"
+                "  void touch() { n_ = hits() + 1; }\n"
+                "  static Cache *global() { return nullptr; }\n"
+                "  int n_ = 0;\n"
+                "};\n"
+                "class LruCache : public Cache { public: void evict() { touch(); } };\n"
+            ),
+            "app/main.cpp": (
+                '#include "../lib/cache.hpp"\n'
+                "int report(Cache &c) { c.touch(); return c.hits() + Cache::global()->n_; }\n"
+            ),
+            # Built against a copy cog doesn't see: `<cache.hpp>` names no repo file.
+            "app/other.cpp": "#include <cache.hpp>\nint other(Cache &c) { return c.hits(); }\n",
+        },
+    )
+    records = _capture(repo, jobs)
+    assert _calls(records["app/main.cpp"], "report") == {
+        "touch": "lib/cache.hpp", "hits": "lib/cache.hpp", "global": "lib/cache.hpp",
+    }
+    assert _calls(records["lib/cache.hpp"], "touch") == {"hits": "lib/cache.hpp"}
+    assert _calls(records["lib/cache.hpp"], "evict") == {"touch": "lib/cache.hpp"}  # inherited
+    assert _calls(records["app/other.cpp"], "other") == {"hits": None}
+
+
+def test_a_variable_named_like_a_class_is_typed_not_read_as_the_class(tmp_path) -> None:
+    repo = _repo(
+        tmp_path,
+        {
+            "lib/arena.hpp": "struct arena { int parse() const; };\n",
+            "lib/arena.cpp": '#include "arena.hpp"\nint arena::parse() const { return 0; }\n',
+            "lib/parser.hpp": "class parser { public: int parse() { return 1; } };\n",
+            "app/main.cpp": (
+                '#include "../lib/arena.hpp"\n#include "../lib/parser.hpp"\n'
+                "int run(const arena & parser) { return parser.parse(); }\n"
+                "int run_auto() { static const auto parser = make(); return parser.parse(); }\n"
+                "int run_cast(void *p) {\n"
+                "  const auto * parser = static_cast<const arena *>(p); return parser->parse();\n"
+                "}\n"
+                "int run_struct() { struct arena parser; return parser.parse(); }\n"
+            ),
+        },
+    )
+    records = _capture(repo, 1)
+    assert _calls(records["app/main.cpp"], "run") == {"parse": "lib/arena.cpp"}
+    assert _calls(records["app/main.cpp"], "run_cast") == {"parse": "lib/arena.cpp"}
+    assert _calls(records["app/main.cpp"], "run_struct") == {"parse": "lib/arena.cpp"}
+    # Its type unknown, the local still isn't the class.
+    assert _calls(records["app/main.cpp"], "run_auto") == {"make": None, "parse": None}
+
+
 def test_the_include_closure_crosses_languages_and_cycles(tmp_path) -> None:
     repo = _repo(
         tmp_path,

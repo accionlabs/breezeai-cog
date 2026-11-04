@@ -8,8 +8,8 @@ Precision-first (the extend-capture reliability rule: a wrong type is a wrong ed
   but a container does **not** (``vector<Foo>`` stays ``vector`` — ``.size()`` is the
   container's method, not ``Foo``'s);
 * ``auto`` is inferred only when the initializer literally carries the type
-  (``make_shared<Foo>()``, ``make_unique<Foo>()``, ``new Foo()``) — never from a call's
-  return type, which we cannot see;
+  (``make_shared<Foo>()``, ``make_unique<Foo>()``, ``new Foo()``, ``static_cast<Foo *>(p)``)
+  — never from a call's return type, which we cannot see;
 * a variable **reassigned** after its declaration is demoted to unknown (its later type may
   differ from the declared one), and a name declared with two differing types collapses to
   unknown. Both are honest-null: no edge rather than a possibly-wrong one.
@@ -29,6 +29,8 @@ from ..treesitter import node_text
 #: methods (``vector<T>::size``) to the element type.
 _SMART_PTRS = frozenset({"shared_ptr", "unique_ptr", "weak_ptr"})
 _MAKE_FNS = frozenset({"make_shared", "make_unique"})
+#: Casts whose target type is the result's type (``static_cast<Foo *>(p)`` is a ``Foo *``).
+_CASTS = frozenset({"static_cast", "dynamic_cast", "reinterpret_cast", "const_cast"})
 _DECLARATORS = ("init_declarator", "pointer_declarator", "reference_declarator",
                 "array_declarator", "identifier", "field_identifier", "qualified_identifier")
 
@@ -57,6 +59,8 @@ def type_name(tnode: Node | None, source: bytes) -> str | None:
     t = tnode.type
     if t == "type_identifier":
         return node_text(tnode, source)
+    if t in ("struct_specifier", "class_specifier") and tnode.child_by_field_name("body") is None:
+        return type_name(tnode.child_by_field_name("name"), source)  # `struct Foo foo;`
     if t == "qualified_identifier":  # N::Foo or std::shared_ptr<Foo> — resolve the last part
         last = tnode.named_children[-1] if tnode.named_children else None
         return type_name(last, source) if last is not None else None
@@ -72,7 +76,8 @@ def type_name(tnode: Node | None, source: bytes) -> str | None:
 
 def _auto_type(value: Node | None, source: bytes) -> str | None:
     """The class type of an ``auto`` initializer, only when it is literally type-bearing:
-    ``new T(...)``, ``make_shared<T>()``, ``make_unique<T>()``. Any other initializer
+    ``new T(...)``, ``make_shared<T>()``, ``make_unique<T>()``, ``static_cast<T *>(p)`` (and
+    the other casts). Any other initializer
     (a call whose return type we cannot see, a conditional, …) → ``None``."""
     if value is None:
         return None
@@ -84,7 +89,7 @@ def _auto_type(value: Node | None, source: bytes) -> str | None:
             fn = fn.named_children[-1] if fn.named_children else None
         if fn is not None and fn.type == "template_function":
             nm = next((c for c in fn.named_children if c.type == "identifier"), None)
-            if nm is not None and node_text(nm, source) in _MAKE_FNS:
+            if nm is not None and node_text(nm, source) in _MAKE_FNS | _CASTS:
                 args = _template_args(fn)
                 return _first_type_arg(args, source) if args is not None else None
     return None

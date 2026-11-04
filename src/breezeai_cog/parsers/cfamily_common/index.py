@@ -145,13 +145,18 @@ def _record_def(
       (``None``), it is never a target;
     * out-of-class ``Scope::name`` (declarator is a ``qualified_identifier``) → ``qual`` under
       the full scope and the trailing ``Class::method``;
-    * inline member definition inside ``class_name`` → ``qual[f"{class_name}::{name}"]``.
+    * inline member definition inside ``class_name`` (named by a ``field_identifier``; a
+      constructor by an ``identifier``) → ``qual[f"{class_name}::{name}"]``.
     """
     fd = function_declarator_of(node.child_by_field_name("declarator"))
     inner = fd.child_by_field_name("declarator") if fd is not None else None
     if inner is None:
         return
-    if inner.type == "identifier" or (name is not None and inner.type == "function_declarator"):
+    if (
+        inner.type == "identifier"
+        or (inner.type == "field_identifier" and class_name is not None)
+        or (name is not None and inner.type == "function_declarator")
+    ):
         # `name`: one a macro moved (read_declaration / read_member), also out of a misread
         # `LUA_API int (f)(…)`
         name = name or node_text(inner, source)
@@ -536,8 +541,8 @@ def make_cfamily_resolver(
     → every C function; C → the C++ functions inside ``extern "C"``). A bare call checks them
     only when its own language has no definition of the name, and binds only when they agree.
 
-    ``sees`` (see :func:`header_visibility`) limits a free function defined in a header to
-    the headers the file can see: the one definition cog sees may not be the one the file is
+    ``sees`` (see :func:`header_visibility`) limits a free function or method defined in a
+    header to the headers the file can see: the one definition cog sees may not be the one the file is
     built with — a vendored copy in an ignored folder is invisible, and its calls would land
     on the first-party copy.
 
@@ -569,7 +574,7 @@ def make_cfamily_resolver(
         if not scope:
             return None
         key = _class_method_key(scope, name)
-        return qual.get(key) if key is not None else None
+        return _visible(qual.get(key)) if key is not None else None
 
     def _inherited(owner: str | None, name: str) -> str | None:
         """A method ``owner`` inherits: walk its base chain nearest-first, the first ancestor
@@ -583,7 +588,7 @@ def make_cfamily_resolver(
             return None
         for anc in walk_heritage(simple, start.extends, heritage).ancestors:
             if name in anc.methods:
-                return anc.methods[name]
+                return _visible(anc.methods[name])
         return None
 
     def _receiver_type(receiver: str, owner: str | None, types: dict[str, str | None]) -> str | None:
@@ -614,9 +619,13 @@ def make_cfamily_resolver(
             return _method(owner, name) or _inherited(owner, name)
         if receiver in ("super", "base", "MyBase"):  # explicit base call → an inherited method
             return _inherited(owner, name)
-        # A qualified A::b() has a class scope as receiver; an obj.m() has a variable. Try the
-        # scope reading first (harmless miss when the receiver is a variable — no class is named
-        # like a lowercase var), then type the receiver and resolve Type::method.
+        # A qualified A::b() has a class scope as receiver; an obj.m() has a variable. A known
+        # variable (a local, a param or a member field) is only typed: a class may share its
+        # name (`common_peg_arena & parser` and a `class parser`). Anything else is read as a
+        # scope first, then typed, and resolves Type::method.
+        var = receiver[len("this->"):] if receiver.startswith("this->") else receiver
+        if var in types or (owner and f"{owner}::{var}" in fields):
+            return _method(_receiver_type(receiver, owner, types), name)
         return _method(receiver, name) or _method(_receiver_type(receiver, owner, types), name)
 
     return resolve

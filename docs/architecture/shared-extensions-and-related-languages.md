@@ -574,6 +574,19 @@ C++.
 > include of a repo header, or a name found through the build's include path that several
 > folders share. A function defined in a source file is still linked by name.
 
+> **Decision —** a C++ method defined inside its class (`int hits() const { … }`) is a call
+> target under `Class::method`, like one defined outside it, and a method's call links into a
+> header by the same visibility rule as a free function's. An `obj.m()` / `obj->m()` receiver
+> that is a local, a parameter or a member field is only typed, never read as a class of the
+> same name; a local declared `struct Foo foo` or `auto p = static_cast<Foo *>(…)` (any of the
+> four casts) is typed `Foo`, and one of no readable type (`auto p = make()`) is unknown.
+> **Why:** most C++ methods are written in their class, so calls to them never resolved and a
+> bare call inside a class fell through to an unrelated free function of the same name. Once
+> they are targets, a variable named like a class (`const arena & parser` beside a `class
+> parser`) would link to that class. **Cost:** an overload defined both in the class and outside
+> it (`get_lr()` and `get_lr(float)`) is ambiguous and left unresolved, as is a call on a local
+> of unknown type that used to borrow the type of a member field it shadows.
+
 > **Decision —** include guards and `extern "C" { … }` blocks are walked even when they contain
 > a parse error, and each declaration in them is checked on its own.
 > **Why:** a C API header splits `extern "C" {` and its `}` across two `#ifdef __cplusplus`

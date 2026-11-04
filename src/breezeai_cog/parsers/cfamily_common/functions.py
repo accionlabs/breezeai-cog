@@ -250,7 +250,17 @@ def _calls(
                     if name and name not in seen:
                         seen.add(name)
                         through_variable = receiver is None and name in variables
-                        path = None if through_variable else resolve(name, receiver, owner, types)
+                        call_types = types
+                        fn = child.child_by_field_name("function")
+                        if (
+                            fn is not None and fn.type == "field_expression"
+                            and receiver is not None and receiver in variables
+                            and receiver not in (types or {})
+                        ):
+                            # `p.m()` on a local of unknown type (`auto p = …`): a variable,
+                            # never a class that shares its name.
+                            call_types = {**(types or {}), receiver: None}
+                        path = None if through_variable else resolve(name, receiver, owner, call_types)
                         calls.append(Call(name=name, path=path))
             visit(child)
 
