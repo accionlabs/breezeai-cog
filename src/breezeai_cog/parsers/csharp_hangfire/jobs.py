@@ -33,7 +33,7 @@ from ..additive import DetectContext, Detection, Detector, Gate, register_detect
 from ..emits import Emit
 from ..handler_sites import handler_location, locate_method
 from ..treesitter import node_text
-from .imports import CSharpIndex, in_scope_namespaces, type_files
+from ..csharp.imports import CSharpIndex, in_scope_namespaces, type_files
 
 #: ``Hangfire.Cron`` helpers → (parameters with their defaults, the expression). As in
 #: ``Hangfire.Core/Cron.cs``: ``Daily(int hour, int minute)`` → ``$"{minute} {hour} * * *"``,

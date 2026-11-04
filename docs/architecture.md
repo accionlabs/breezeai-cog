@@ -638,12 +638,12 @@ the file:
   │                  74   react-navigation typescript_react/navigation.py    ✔       │
   │                  80   angularjs        typescript_angularjs/detector.py  ✔       │
   │                                                                                  │
-  │  csharp          10   lambda-handlers  csharp/lambda_events.py           ✔       │
-  │                  20   lucene           csharp/lucene.py                          │
+  │  csharp          10   lambda-handlers  csharp_aws/lambda_events.py       ✔       │
+  │                  20   lucene           csharp_lucene/search.py                   │
   │                  30   hotchocolate-…   csharp_hotchocolate/…roots.py     ✔       │
   │                  40   generic-handlers csharp_webforms/handlers.py       ✔       │
-  │                  50   hangfire         csharp/hangfire.py                ✔       │
-  │                  60   quartz           csharp/quartz.py                  ✔       │
+  │                  50   hangfire         csharp_hangfire/jobs.py           ✔       │
+  │                  60   quartz           csharp_quartz/jobs.py             ✔       │
   │                                                                                  │
   │  java            10   quartz           java/quartz.py                    ✔       │
   │                                                                                  │

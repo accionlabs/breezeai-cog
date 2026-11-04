@@ -4,7 +4,7 @@ A Lucene index is as load-bearing as a database, but every call into it lands as
 ``searcher.Search(q, 50)`` and ``writer.AddDocument(doc)`` are invisible as data access, so
 "what touches the search index" has no answer.
 
-**Additive** (like :mod:`lambda_events`): searching an index is an orthogonal capability, not a
+**Additive** (like :mod:`..csharp_aws.lambda_events`): searching an index is an orthogonal capability, not a
 framework identity. The same file is routinely an ASP.NET controller *and* a Lucene consumer, so
 this runs inside ``CSharpParser.extract`` on top of whatever else the file is. A peer parser
 claiming the file would displace the aspnet/wcf detector and lose the file's routes.
