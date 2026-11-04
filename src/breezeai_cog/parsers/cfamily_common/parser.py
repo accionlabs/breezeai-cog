@@ -45,6 +45,7 @@ from .classes import (
     _unwrap_template,
     build_class,
     build_enum,
+    defined_type,
     parse_cfamily,
     type_alias_statement,
     typedef_type,
@@ -162,6 +163,10 @@ class CFamilyParser(BaseParser):
                     if maybe_read is None:
                         continue
                     read = maybe_read
+                    if (spec := defined_type(node)) is not None:
+                        # `struct point { int x, y; } origin;` defines the type as well as the
+                        # variable, whose statement follows below.
+                        _emit_type(spec)
                 if node.type in TRANSPARENT_SCOPES:
                     process(node, ns)  # include guard / preproc conditional / extern "C" — recurse
                 elif node.type not in _DECLARATIONS and has_declaration_error(node):
@@ -170,24 +175,8 @@ class CFamilyParser(BaseParser):
                     body = node.child_by_field_name("body")
                     if body is not None:  # flatten members to the file, but track the ns path
                         process(body, _join_ns(ns, _ns_name(node, source)))
-                elif node.type in _CLASS_TYPES:
-                    cls_list, methods, cls_stmts = build_class(
-                        node, source, path,
-                        parent_id=fid, seen_ids=seen_ids, capture=capture, limit=limit, resolve=resolve,
-                    )
-                    classes.extend(cls_list)
-                    functions.extend(methods)
-                    statements.extend(cls_stmts)
-                    for c in cls_list:
-                        class_map.setdefault(c.name, c.id)
-                elif node.type == "enum_specifier":
-                    enum_cls, enum_stmts = build_enum(
-                        node, source, path, parent_id=fid, seen_ids=seen_ids,
-                        capture=capture, limit=limit,
-                    )
-                    if enum_cls is not None:
-                        classes.append(enum_cls)
-                        statements.extend(enum_stmts)
+                elif node.type in _CLASS_TYPES or node.type == "enum_specifier":
+                    _emit_type(node)
                 elif node.type == "function_definition":
                     _emit_function(node, ns, read)
                 elif node.type in MACRO_TYPES and capture and not _is_include_guard(node, source):
@@ -201,26 +190,7 @@ class CFamilyParser(BaseParser):
                     # — C's usual way to declare a struct, enum or union. It is a class under
                     # the typedef's name, the one code writes; a different tag is its `alias`.
                     spec, type_name, tag = typedef
-                    alias = tag if tag is not None and tag != type_name else None
-                    if spec.type == "enum_specifier":
-                        enum_cls, enum_stmts = build_enum(
-                            spec, source, path, parent_id=fid, seen_ids=seen_ids,
-                            capture=capture, limit=limit, name=type_name, alias=alias,
-                        )
-                        if enum_cls is not None:
-                            classes.append(enum_cls)
-                            statements.extend(enum_stmts)
-                    else:
-                        cls_list, methods, cls_stmts = build_class(
-                            spec, source, path, parent_id=fid, seen_ids=seen_ids,
-                            capture=capture, limit=limit, resolve=resolve, name=type_name,
-                            alias=alias,
-                        )
-                        classes.extend(cls_list)
-                        functions.extend(methods)
-                        statements.extend(cls_stmts)
-                        for c in cls_list:
-                            class_map.setdefault(c.name, c.id)
+                    _emit_type(spec, type_name, tag if tag is not None and tag != type_name else None)
                 elif node.type in TYPE_ALIAS_TYPES and capture:
                     # `typedef X Y;` / `using Y = X;` at file or namespace scope. C++ carries
                     # much of its vocabulary in typedefs, and the aliased type stays on the
@@ -257,6 +227,28 @@ class CFamilyParser(BaseParser):
                                 name=name, decorators=decorators_of(node, source, read),
                             )
                         )
+
+        def _emit_type(spec: Node, name: str | None = None, alias: str | None = None) -> None:
+            """A struct / class / union / enum definition → its class (and members). ``name``
+            names it instead of its tag (a typedef's name); ``alias`` is the tag when it differs."""
+            if spec.type == "enum_specifier":
+                enum_cls, enum_stmts = build_enum(
+                    spec, source, path, parent_id=fid, seen_ids=seen_ids,
+                    capture=capture, limit=limit, name=name, alias=alias,
+                )
+                if enum_cls is not None:
+                    classes.append(enum_cls)
+                    statements.extend(enum_stmts)
+                return
+            cls_list, methods, cls_stmts = build_class(
+                spec, source, path, parent_id=fid, seen_ids=seen_ids,
+                capture=capture, limit=limit, resolve=resolve, name=name, alias=alias,
+            )
+            classes.extend(cls_list)
+            functions.extend(methods)
+            statements.extend(cls_stmts)
+            for c in cls_list:
+                class_map.setdefault(c.name, c.id)
 
         def _emit_function(node: Node, ns: str, read: DeclarationRead) -> None:
             fd = function_declarator_of(node.child_by_field_name("declarator"))

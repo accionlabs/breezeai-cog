@@ -441,6 +441,17 @@ C++.
 > class's embedding text. The same applies to C-style typedefs in C++. An alias declared on
 > its own (`using A = B;`, `typedef B A;`) stays a statement, as in every other language.
 
+> **Decision —** a named struct, class, union or enum defined in the same declaration as a
+> variable (`static struct config { int level; } cfg;`) is a class like any other definition,
+> and the variable keeps its `declaration` statement; the index reads the class too. In a
+> class, a member declared with its nested type (`struct node { … } root;`, `union { … } u;`)
+> is a field statement beside the nested class. An anonymous type at file scope (`struct {
+> … } cfg;`) has no name to give a class, and stays the variable's statement only.
+> **Why:** C writes one-off globals this way (redis's `config`, `sentinelState`), and the class,
+> its fields and its methods were lost; the members declared with their type were the only
+> fields of a class that weren't captured. **Cost:** none known; naming an anonymous type after
+> its variable would be a guess.
+
 > **Decision —** a file-scope function prototype (`int list_len(const node_t *head);`) is a
 > plain `declaration` statement named after the function, not a `Function`.
 > **Why:** a C header's prototypes are its module's API, and nothing else captured them. A

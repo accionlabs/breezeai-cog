@@ -59,8 +59,8 @@ def type_name(tnode: Node | None, source: bytes) -> str | None:
     t = tnode.type
     if t == "type_identifier":
         return node_text(tnode, source)
-    if t in ("struct_specifier", "class_specifier") and tnode.child_by_field_name("body") is None:
-        return type_name(tnode.child_by_field_name("name"), source)  # `struct Foo foo;`
+    if t in ("struct_specifier", "class_specifier"):  # `struct Foo foo;`, `struct Foo {…} foo;`
+        return type_name(tnode.child_by_field_name("name"), source)
     if t == "qualified_identifier":  # N::Foo or std::shared_ptr<Foo> — resolve the last part
         last = tnode.named_children[-1] if tnode.named_children else None
         return type_name(last, source) if last is not None else None

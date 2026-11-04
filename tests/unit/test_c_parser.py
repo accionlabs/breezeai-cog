@@ -362,6 +362,70 @@ def test_a_member_function_with_a_parenthesized_name_is_still_a_method(tmp_path)
     assert [f.name for f in record.functions] == ["f"]
 
 
+@pytest.mark.parametrize("parser", [CParser(), CppParser()], ids=["c", "cpp"])
+def test_a_type_defined_with_a_variable_is_a_class(tmp_path, parser) -> None:
+    record = _parse(
+        parser,
+        tmp_path,
+        "g.c",
+        "struct point { int x; int y; } origin;\n"
+        "static struct config { int level; } cfg = {1};\n"
+        "struct { int a; } anon_var;\n"
+        "union u { int a; float b; } uv;\n"
+        "enum color { RED, GREEN } c;\n"
+        "void f(void) { struct local { int a; } l; }\n",
+    )
+    assert [(c.name, c.type) for c in record.classes] == [
+        ("point", "struct"), ("config", "struct"), ("u", "union"), ("color", "enum"),
+    ]
+    assert [(s.nodeType, s.name, s.parentId) for s in record.statements if s.parentId != "g.c#f@6"] == [
+        ("field_declaration", "x", "g.c#point"),
+        ("field_declaration", "y", "g.c#point"),
+        ("declaration", "origin", "g.c"),
+        ("field_declaration", "level", "g.c#config"),
+        ("declaration", "cfg", "g.c"),
+        ("declaration", "anon_var", "g.c"),
+        ("field_declaration", "a", "g.c#u"),
+        ("field_declaration", "b", "g.c#u"),
+        ("declaration", "uv", "g.c"),
+        ("enumerator", "RED", "g.c#color"),
+        ("enumerator", "GREEN", "g.c#color"),
+        ("declaration", "c", "g.c"),
+    ]
+
+
+def test_a_member_declared_with_its_nested_type_is_a_field(tmp_path) -> None:
+    record = _parse(
+        CppParser(),
+        tmp_path,
+        "trie.h",
+        "struct trie {\n"
+        "  struct node { int v; } root;\n"
+        "  union { int i; float f; } u;\n"
+        "  struct leaf { int w; };\n"
+        "};\n",
+    )
+    assert [c.name for c in record.classes] == ["trie", "node", "leaf"]
+    assert [(s.name, s.parentId) for s in record.statements] == [
+        ("v", "trie.h#trie.node"), ("root", "trie.h#trie"), ("u", "trie.h#trie"),
+        ("w", "trie.h#trie.leaf"),
+    ]
+
+
+@pytest.mark.parametrize("jobs", [1, 2])
+def test_a_class_defined_with_a_variable_is_a_call_target(tmp_path, jobs) -> None:
+    repo = _repo(
+        tmp_path,
+        {
+            "lib/reg.hpp": "struct registry { int count() const { return 0; } } global_registry;\n",
+            "app/main.cpp": (
+                '#include "../lib/reg.hpp"\nint main() { registry r; return r.count(); }\n'
+            ),
+        },
+    )
+    assert _calls(_capture(repo, jobs)["app/main.cpp"], "main") == {"count": "lib/reg.hpp"}
+
+
 # -- a C header adapting itself for C++ includers stays C ---------------------------------------
 
 

@@ -194,6 +194,21 @@ def typedef_type(node: Node, source: bytes) -> tuple[Node, str, str | None] | No
     return spec, node_text(names[0], source), node_text(tag, source) if tag is not None else None
 
 
+def defined_type(node: Node) -> Node | None:
+    """The named struct / class / union / enum a ``declaration`` defines along with its
+    variables (``struct point { int x, y; } origin;``), or ``None``. An anonymous one has no
+    name to give a class."""
+    if node.type != "declaration":
+        return None
+    spec = node.child_by_field_name("type")
+    if (
+        spec is None or spec.type not in _NESTED_TYPE_SPECS or not _defines(spec)
+        or spec.child_by_field_name("name") is None
+    ):
+        return None
+    return spec
+
+
 #: The two C++ type-alias declarations. ``using namespace …`` / ``using Ns::name`` are a
 #: ``using_declaration`` instead — an import, deliberately not in this set.
 TYPE_ALIAS_TYPES = ("type_definition", "alias_declaration")
@@ -363,6 +378,17 @@ def build_class(
                     nested_classes.extend(sub_classes)
                     methods.extend(sub_methods)
                     statements.extend(sub_statements)
+                declarator = member.child_by_field_name("declarator")
+                if capture and member.type == "field_declaration" and declarator is not None:
+                    # `struct node { … } root;` also declares a member, named even when the
+                    # type is anonymous (`union { … } u;`).
+                    statements.append(
+                        member_statement(
+                            member, source, path, parent_id=cid, limit=limit, seen_ids=seen_ids,
+                            name=_declarator_name(declarator, source),
+                            decorators=decorators_of(member, source, read),
+                        )
+                    )
             elif member.type in _MEMBER_FN_TYPES:
                 declarator = member.child_by_field_name("declarator")
                 if function_declarator_of(declarator) is None or is_function_pointer(declarator):

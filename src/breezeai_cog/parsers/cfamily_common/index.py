@@ -44,7 +44,7 @@ from ..additive import collect_fact_sources, facts_for, split_fact_sources
 from ..callresolve import CallResolver
 from ..index_common import ClassHeritage, parallel_map, record_distinct, walk_heritage
 from ..treesitter import node_text
-from .classes import _CLASS_TYPES, _heritage, _unwrap_template, parse_cfamily
+from .classes import _CLASS_TYPES, _heritage, _unwrap_template, defined_type, parse_cfamily
 from .functions import (
     function_declarator_of, has_declaration_error, is_declared_static, read_declaration,
     owner_is_explicit, read_member, spilled_members,
@@ -270,7 +270,11 @@ def _index_scope(
         elif node.type in TRANSPARENT_SCOPES:
             _index_scope(frag, node, source, rel, ns, c_linkage, spilled, fix)
         elif node.type == "declaration":
-            continue  # a prototype or variable: nothing to index
+            # A prototype or variable: nothing to index, unless it defines a class as well
+            # (`struct point { … } origin;`).
+            spec = defined_type(node)
+            if spec is not None and spec.type in _CLASS_TYPES and not has_declaration_error(node):
+                _index_class(frag, spec, source, rel, ns)
         elif node.type == "function_definition" and spilled and not owner_is_explicit(node):
             continue
         elif node.type == "function_definition":
