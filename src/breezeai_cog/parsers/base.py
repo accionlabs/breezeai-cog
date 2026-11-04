@@ -170,9 +170,9 @@ class BaseParser:
         the lookup, :meth:`handler_locator`, which is asked for only when a record needs it."""
         if not ctx.capture_statements:
             return
-        from .handler_sites import handler_location, unlocated  # handler_sites imports this module
+        from .handler_sites import handler_location, pending as unlocated_records  # imports this module
 
-        pending = [s for s in record.statements if unlocated(s)]
+        pending = unlocated_records(record)
         if not pending:
             return
         locate = self.handler_locator(ctx)

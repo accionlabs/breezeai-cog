@@ -72,5 +72,8 @@ register_detector(
         gate=Gate("typescript", order=80, skip_fixtures=True),
         detect=_detect,
         frameworks=(FRAMEWORK,),
+        # `controller: 'ListCtrl'` names a registration, looked up in `angularjs.registrations`;
+        # a function of that name in the file is not necessarily the one registered under it.
+        locates_handlers=True,
     )
 )

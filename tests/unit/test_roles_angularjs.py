@@ -266,6 +266,22 @@ def test_controller_registered_twice_is_not_located(analyze_files) -> None:
     assert _located(st) == {"/a": ("Dup", None, None)}
 
 
+def test_a_same_named_function_is_not_the_registered_controller(analyze_files) -> None:
+    # `'ListCtrl'` is registered twice, so it is not located; the helper function of the same
+    # name in the routes file is not either registration and is never taken for it.
+    st = analyze_files({
+        ROUTES: (
+            "function ListCtrl() {}\n"
+            "angular.module('shop').config(function ($routeProvider) {\n"
+            "  $routeProvider.when('/a', { controller: 'ListCtrl' });\n"
+            "});\n"
+        ),
+        CTRL: "angular.module('a').controller('ListCtrl', function () {});\n",
+        "app/other.js": "angular.module('b').controller('ListCtrl', function () {});\n",
+    })
+    assert _located(st) == {"/a": ("ListCtrl", None, None)}
+
+
 def test_controller_with_an_unreadable_registration_is_not_located(analyze_files) -> None:
     st = _routes(
         analyze_files,
