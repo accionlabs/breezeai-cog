@@ -126,7 +126,7 @@ def repo_to_json_tree(
         None, "--user-api-key", help="Backend API key, sent as `api-key` (with --upload; env: API_KEY).",
     ),
     upload_timeout: Optional[float] = typer.Option(
-        None, "--upload-timeout", min=0,
+        None, "--upload-timeout", min=1.0,
         help="Per-repo upload timeout in seconds — caps both the upload request and the wait "
              "for the backend to finish processing; the repo fails past this "
              "(default 900 = 15 min; env: BREEZEAI_COG_UPLOAD_TIMEOUT).",
