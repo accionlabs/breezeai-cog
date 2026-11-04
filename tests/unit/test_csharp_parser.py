@@ -717,6 +717,27 @@ def test_http_client_calls_are_api_calls(tmp_path) -> None:
     }
 
 
+def test_http_client_held_in_a_var_local_is_a_client(tmp_path) -> None:
+    # `var` declares no type: the client is known from what the local is initialised with.
+    src = b'''using System.Net.Http;
+class Jobs {
+  async Task Run(IHttpClientFactory factory) {
+    var client = new HttpClient();
+    await client.GetAsync("api/orders");
+    var billing = factory.CreateClient("billing");
+    await billing.PostAsJsonAsync("api/invoices", 1);
+    var repo = new Repository();
+    await repo.GetAsync("not/http");
+  }
+}
+'''
+    ctx = ParseContext(path="Jobs.cs", abs_path=None, source=src, repo_root=tmp_path,
+                       capture_statements=True)
+    rec = CSharpParser().parse_file(ctx)
+    got = {(s.startLine, s.method, s.endpoint) for s in rec.statements if s.semanticType == "api_call"}
+    assert got == {(5, "GET", "api/orders"), (7, "POST", "api/invoices")}
+
+
 _PREPROC = """#if DEBUG
 using System;
 namespace Tests

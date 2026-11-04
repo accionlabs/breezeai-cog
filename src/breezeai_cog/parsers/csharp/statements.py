@@ -141,8 +141,9 @@ def collect_http_client_ids(root: Node, source: bytes, types: dict[str, str]) ->
                     node_text(typ, source).rsplit(".", 1)[-1] in _HTTP_CLIENT_TYPES:
                 ids.add(node_text(name, source))
         elif n.type == "variable_declarator":
+            # By position: a tree-sitter Node is a new object on every lookup, so `is` never matches.
             name = n.child_by_field_name("name")
-            value = next((c for c in n.named_children if c is not name), None)
+            value = n.named_children[1] if len(n.named_children) > 1 else None
             if name is not None and value is not None and _creates_client(value, source):
                 ids.add(node_text(name, source))
         for c in n.named_children:
