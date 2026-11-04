@@ -58,7 +58,7 @@ from ..handler_sites import handler_location, locate_export
 from ..typescript.declarations import export_names, import_bindings
 from ..typescript.imports import TsAliasIndex, _resolve
 from .resolver_objects import resolver_object
-from .sdl_fields import declares_root_fields, root_field_dto
+from .sdl_fields import declares_root_field, root_field_dto
 
 # The root operation types (mirrors ``routes._ROOT_TYPES``).
 _ROOT_TYPES = {"Query": "query", "Mutation": "mutation", "Subscription": "subscription"}
@@ -153,13 +153,14 @@ def _detect(dc: DetectContext) -> Detection | None:
         module = _resolve(spec, dc.path, dc.ctx.repo_root, index) if spec is not None else None
         if module is None or export is None or export == "default":
             continue
-        # Under a `Query` key a named object is GraphQL only with a resolver map or a schema.
-        if export != "*" and not (
-            _in_resolvers_map(pair, dc.source) or declares_root_fields(index)
-        ):
-            continue
         operations = (_namespace_operations(index, module) if export == "*"
                       else _named_operations(index, module, export))
+        # Under a `Query` key a named object is GraphQL when its holder is named like a resolver
+        # map; otherwise only the properties the schema declares under that root type are
+        # (`registry = { Query: handlers }` in a CQRS bus is not, whatever the repo's schema).
+        if export != "*" and not _in_resolvers_map(pair, dc.source):
+            operations = [op for op in operations
+                          if declares_root_field(index, root_type, op[0])]
         routes += [_route(dc, pair, root_type, op) for op in operations]
     return Detection(routes, label="graphql") if routes else None
 

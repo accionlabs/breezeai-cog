@@ -517,3 +517,31 @@ def test_named_import_root_is_read_where_the_repo_declares_a_schema(analyze_file
     }
     st = _run(analyze_files, {**files, "src/schema.graphql": "type Query { books: [Book] }\n"})
     assert {r.endpoint for r in _eps(st) if r.path == "src/server.ts"} == {"books"}
+
+
+def test_without_a_resolver_map_only_the_fields_the_schema_declares_are_read(analyze_files) -> None:
+    # A CQRS bus beside a schema: `getUser` / `listUsers` are not declared under `type Query`,
+    # so they are not GraphQL operations; `books` is, though the holder names no resolver map.
+    st = _run(analyze_files, {
+        "src/schema.graphql": "type Query { books: [Book] }\n",
+        "src/queries.ts": QUERIES_TS,
+        "src/server.ts": IMPORT_QUERIES + "export default { Query: queries };\n",
+        "src/cqrs/handlers.ts": "export const handlers = {\n  getUser: () => null,\n"
+                                "  listUsers: () => [],\n};\n",
+        "src/cqrs/bus.ts": "import { handlers } from './handlers';\n"
+                           "export const registry = { Query: handlers, Command: {} };\n",
+    })
+    assert {(r.path, r.endpoint) for r in _eps(st)} == {("src/server.ts", "books")}
+
+
+def test_a_schema_field_declared_with_conflicting_dtos_still_counts(analyze_files) -> None:
+    # `books` is declared twice with different types, so it keeps no DTO — but it is still a
+    # declared field of `type Query`, so the property is an operation.
+    st = _run(analyze_files, {
+        "src/a.graphql": "type Query { books: [Book] }\n",
+        "src/b.graphql": "type Query { books: [Novel] }\n",
+        "src/queries.ts": QUERIES_TS,
+        "src/server.ts": IMPORT_QUERIES + "export default { Query: queries };\n",
+    })
+    got = {(r.endpoint, r.responseDTO) for r in _eps(st) if r.path == "src/server.ts"}
+    assert got == {("books", None)}

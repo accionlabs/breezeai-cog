@@ -12,7 +12,9 @@ The request and response types live on the SDL side. This fact collects every ro
 DTOs while the TypeScript index is built — from ``.graphql`` files (owned by the GraphQL parser,
 read through ``FactSpec.sources``) and from SDL embedded in TS ``gql`` templates — so the
 resolver-map record carries ``requestDTO`` / ``responseDTO``. A field declared twice with
-different DTOs is left without (honest-null).
+different DTOs is left without (honest-null). Every declared field is kept, with or without
+DTOs: whether the schema declares ``Query.x`` decides whether a ``Query: <import>`` property is
+an operation (:func:`declares_root_field`).
 """
 
 from __future__ import annotations
@@ -43,11 +45,12 @@ def root_field_dto(index: Any | None, type_name: str, field: str) -> tuple[str |
     return dtos.get((type_name, field), (None, None))
 
 
-def declares_root_fields(index: TsAliasIndex | None) -> bool:
-    """Whether the repo declares any GraphQL root field in SDL — a schema file or an embedded
-    ``gql`` schema — which is what makes a ``Query: <import>`` key GraphQL and not another
-    ``Query`` map."""
-    return bool(index_fact(index, FACT))
+def declares_root_field(index: TsAliasIndex | None, type_name: str, field: str) -> bool:
+    """Whether the repo's SDL — a schema file or an embedded ``gql`` schema — declares
+    ``type_name.field``: what makes a property under a ``Query: <import>`` key a GraphQL
+    operation when nothing else says the object is a resolver map."""
+    dtos: RootFieldDtos = index_fact(index, FACT) or {}
+    return (type_name, field) in dtos
 
 
 def _embedded(root: Node, source: bytes) -> list[tuple[str, str, str | None, str | None]]:
@@ -81,7 +84,8 @@ def _resolve(values: list[list[tuple[str, str, str | None, str | None]]], index:
         (f for per_file in values for f in per_file), key=lambda f: (f[0], f[1])
     ):
         record_distinct(dtos, (type_name, field), (request, response))
-    out = {k: v for k, v in dtos.items() if v is not None and v != (None, None)}
+    # a field declared with differing DTOs is still declared: kept, without DTOs
+    out = {k: (v if v is not None else (None, None)) for k, v in dtos.items()}
     return out or None
 
 
