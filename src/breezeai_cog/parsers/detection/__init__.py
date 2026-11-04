@@ -5,6 +5,8 @@ classify it — so API/DB detection isn't reimplemented per language.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
+
 from .api_calls import match_api
 from .db_queries import match_db, vendor_from_imports
 from .queries import is_query, string_has_query, text_has_query
@@ -18,6 +20,7 @@ def classify_call(
     typed_db_ids: "frozenset[str] | None" = None,
     http_client_ids: "frozenset[str] | None" = None,
     vendor: str | None = None,
+    typed_receivers: "Mapping[str, str] | None" = None,
 ) -> tuple[str, str, str | None] | None:
     """Classify a normalized call into ``(semanticType, method, dataAccessHint)``.
 
@@ -28,7 +31,8 @@ def classify_call(
 
     ``arg`` = the call's first string literal (for SQL sniffing). ``language`` = the source
     language tag, passed to :func:`match_db` for its language gates (``None`` = unknown, stays
-    permissive); ``vendor`` = the ORM the file's imports name (``vendor_from_imports``).
+    permissive); ``vendor`` = the ORM the file's imports name (``vendor_from_imports``);
+    ``typed_receivers`` = names declared as a datastore client type → that product.
     API is tried first (so ``objects.get`` is a Django query, not an HTTP GET);
     raw queries before ORM (so ``createNativeQuery("SELECT …")`` is a ``query_statement``).
     """
@@ -37,7 +41,8 @@ def classify_call(
         return "api_call", verb, None
     if is_query(method, arg):
         return "query_statement", method, None
-    hint = match_db(callee, method, language, typed_db_ids=typed_db_ids, vendor=vendor)
+    hint = match_db(callee, method, language, typed_db_ids=typed_db_ids, vendor=vendor,
+                    typed_receivers=typed_receivers)
     if hint is not None:
         return "db_method_call", method, hint
     return None

@@ -486,6 +486,64 @@ def test_java_and_csharp_files_name_their_imported_orm(tmp_path) -> None:
     ]
 
 
+def test_dynamodb_dotnet_async_operations_are_distinctive() -> None:
+    from breezeai_cog.parsers.detection.db_queries import match_db
+
+    assert match_db("_dynamo.PutItemAsync", "PutItemAsync", "csharp") == "dynamodb"
+    assert match_db("client.BatchWriteItemAsync", "BatchWriteItemAsync", "csharp") == "dynamodb"
+    assert match_db("client.TransactWriteItemsAsync", "TransactWriteItemsAsync", "vb") == "dynamodb"
+    assert match_db("PutItemAsync", "PutItemAsync", "csharp") is None  # no receiver: a local call
+
+
+def test_typed_datastore_receivers_name_the_product() -> None:
+    from breezeai_cog.parsers.detection.db_queries import match_db
+
+    typed = {"_ctx": "dynamodb", "Orders": "dynamodb"}
+    assert match_db("_ctx.SaveAsync", "SaveAsync", "csharp", typed_receivers=typed) == "dynamodb"
+    assert match_db("this._ctx.LoadAsync", "LoadAsync", "csharp", typed_receivers=typed) == \
+        "dynamodb"
+    assert match_db("Orders.Query", "Query", "csharp", typed_receivers=typed) == "dynamodb"
+    # The verb alone is not evidence: another receiver, or a verb the product doesn't have.
+    assert match_db("_cache.SaveAsync", "SaveAsync", "csharp", typed_receivers=typed) is None
+    assert match_db("_cache.SaveAsync", "SaveAsync", "csharp") is None
+    assert match_db("_ctx.Dispose", "Dispose", "csharp", typed_receivers=typed) is None
+
+
+def test_csharp_dynamodb_clients_are_recognised_by_declared_type(tmp_path) -> None:
+    from breezeai_cog.parsers.csharp.parser import CSharpParser
+
+    def hints(src: bytes) -> list[tuple[str, str | None]]:
+        rec = CSharpParser().parse_file(_ctx("Store.cs", src, tmp_path))
+        return [(s.method or "", s.dataAccessHint) for s in rec.statements
+                if s.semanticType == "db_method_call"]
+
+    body = (
+        b"class OrderStore {\n"
+        b"  private readonly IDynamoDBContext _ctx;\n"
+        b"  private readonly ICache _cache;\n"
+        b"  private Table Orders { get; }\n"
+        b"  async Task Save(Order o, IAmazonDynamoDB dynamo) {\n"
+        b"    await _ctx.SaveAsync(o);\n"
+        b"    await _cache.SaveAsync(o);\n"
+        b"    await Orders.GetItemAsync(o.Id);\n"
+        b"    await dynamo.QueryAsync(request);\n"
+        b"    var client = new AmazonDynamoDBClient();\n"
+        b"    await client.ScanAsync(scan);\n"
+        b"  }\n"
+        b"}\n"
+    )
+    assert hints(b"using Amazon.DynamoDBv2;\nusing Amazon.DynamoDBv2.DataModel;\n" + body) == [
+        ("SaveAsync", "dynamodb"), ("GetItemAsync", "dynamodb"), ("QueryAsync", "dynamodb"),
+        ("ScanAsync", "dynamodb"),
+    ]
+    # Without the SDK import (global usings), the DynamoDB-named types still count; a class
+    # named ``Table`` does not.
+    assert hints(body) == [
+        ("SaveAsync", "dynamodb"), ("QueryAsync", "dynamodb"), ("ScanAsync", "dynamodb"),
+    ]
+    assert hints(body.replace(b"DynamoDB", b"Document")) == []
+
+
 def test_ef_include_needs_an_ef_import_or_source(tmp_path) -> None:
     from breezeai_cog.parsers.csharp.parser import CSharpParser
     from breezeai_cog.parsers.detection.db_queries import match_db

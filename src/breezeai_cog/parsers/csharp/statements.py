@@ -3,6 +3,8 @@ call detection."""
 
 from __future__ import annotations
 
+from collections.abc import Mapping
+
 from tree_sitter import Node
 
 from ...schemas import Decorator, Statement
@@ -161,6 +163,64 @@ def _creates_client(value: Node, source: bytes) -> bool:
             fn.type == "member_access_expression" else None
         return name is not None and node_text(name, source) == "CreateClient"
     return False
+
+
+def type_name(typ: str) -> str:
+    """The simple name of a declared type: ``Amazon.S3.IAmazonS3?`` → ``IAmazonS3``,
+    ``Lazy<T>`` → ``Lazy``."""
+    return typ.split("<", 1)[0].rstrip("?").rsplit(".", 1)[-1]
+
+
+def collect_typed_names(
+    root: Node, source: bytes, types: dict[str, str], wanted: Mapping[str, str],
+) -> dict[str, str]:
+    """Names in this file that hold one of the ``wanted`` types (simple type name → label):
+    declared with it (field, parameter, local — ``types`` from ``type_map`` — or property), or
+    initialised from ``new T(…)`` (``var client = new AmazonS3Client()``) → their label."""
+    found = {name: wanted[type_name(typ)] for name, typ in types.items()
+             if type_name(typ) in wanted}
+
+    def walk(n: Node) -> None:
+        if n.type == "property_declaration":
+            typ, name = n.child_by_field_name("type"), n.child_by_field_name("name")
+            if typ is not None and name is not None and \
+                    type_name(node_text(typ, source)) in wanted:
+                found[node_text(name, source)] = wanted[type_name(node_text(typ, source))]
+        elif n.type == "variable_declarator" and len(n.named_children) > 1:
+            # Children are the name, then the initialiser (node objects are not identical
+            # across lookups, so compare by position, not ``is``).
+            name, value = n.named_children[0], n.named_children[1]
+            if value.type == "object_creation_expression":
+                typ = value.child_by_field_name("type")
+                label = wanted.get(type_name(node_text(typ, source))) if typ is not None else None
+                if label is not None:
+                    found.setdefault(node_text(name, source), label)
+        for c in n.named_children:
+            walk(c)
+
+    walk(root)
+    return found
+
+
+#: AWS SDK for .NET DynamoDB client types → ``dataAccessHint``. Their names are distinctive, so
+#: they count without the file's own import (a project's global usings may supply it).
+_DATASTORE_TYPES = {
+    "IAmazonDynamoDB": "dynamodb", "AmazonDynamoDBClient": "dynamodb",
+    "IDynamoDBContext": "dynamodb", "DynamoDBContext": "dynamodb",
+}
+#: ``Table`` (the DynamoDB document model) is a common class name: it counts only in a file that
+#: imports the DynamoDB SDK.
+_DATASTORE_TYPES_WITH_IMPORT = {**_DATASTORE_TYPES, "Table": "dynamodb"}
+
+
+def collect_datastore_receivers(root: Node, source: bytes, types: dict[str, str]) -> dict[str, str]:
+    """Names declared as a datastore client type → product, for the shared db-call classifier
+    (``_ctx.SaveAsync(order)`` on an ``IDynamoDBContext`` is DynamoDB; on anything else it is
+    not data access)."""
+    if b"DynamoDB" not in source:
+        return {}
+    wanted = _DATASTORE_TYPES_WITH_IMPORT if b"Amazon.DynamoDBv2" in source else _DATASTORE_TYPES
+    return collect_typed_names(root, source, types, wanted)
 
 
 def _span(node: Node) -> tuple[int, int]:

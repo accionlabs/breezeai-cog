@@ -155,7 +155,10 @@ flowchart TD
 1. **A distinctive method:** `insertOne` → `mongodb`.
 2. **The receiver:** `orderRepository.findOne` → `typeorm`. A product is named only in a language
    it ships for, so a Java or C# repository call gets the generic `orm`. A Node or Python ORM
-   verb in another language (`stream().findFirst()`) needs a data-access receiver too.
+   verb in another language (`stream().findFirst()`) needs a data-access receiver too. A
+   receiver whose declared type is the product's client counts for that product's generic verbs:
+   in a C# file importing the DynamoDB SDK, `_ctx.SaveAsync(order)` on an `IDynamoDBContext` →
+   `dynamodb`, while `_cache.SaveAsync(order)` stays an ordinary call.
 3. **The file's own ORM import:** where step 2 left `orm` and the receiver is a repository, DAO,
    entity manager or session, the file's import of the ORM's API names it: Hibernate `Session` /
    `SessionFactory` → `hibernate`, JPA `EntityManager` or Spring Data JPA → `jpa`, the

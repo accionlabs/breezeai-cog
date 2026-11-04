@@ -22,7 +22,7 @@ from __future__ import annotations
 
 import contextvars
 import re
-from collections.abc import Callable, Collection, Iterator
+from collections.abc import Callable, Collection, Iterator, Mapping
 from typing import cast
 
 from tree_sitter import Node
@@ -88,6 +88,26 @@ def set_datastore_vendor(external_imports: "list[str] | None") -> None:
 
 def end_datastore_vendor(token: "contextvars.Token[str | None]") -> None:
     _datastore_vendor.reset(token)
+
+
+# Per-file names declared as a datastore client type → product (``{"_table": "dynamodb"}``), for
+# the shared db-call classifier's typed-receiver gate. Set and reset by the parser around a file,
+# like _http_client_ids.
+_datastore_receivers: contextvars.ContextVar[Mapping[str, str] | None] = contextvars.ContextVar(
+    "datastore_receivers", default=None
+)
+
+
+def set_datastore_receivers(
+    receivers: Mapping[str, str] | None,
+) -> "contextvars.Token[Mapping[str, str] | None]":
+    """Set the per-file datastore-client names; returns a token for
+    :func:`reset_datastore_receivers` (in a ``finally``)."""
+    return _datastore_receivers.set(receivers)
+
+
+def reset_datastore_receivers(token: "contextvars.Token[Mapping[str, str] | None]") -> None:
+    _datastore_receivers.reset(token)
 
 
 def begin_concat_tracking() -> None:
@@ -443,6 +463,7 @@ def classify_statement(
             typed_db_ids=typed_db_ids,
             http_client_ids=current_http_client_ids() or None,
             vendor=_datastore_vendor.get(),
+            typed_receivers=_datastore_receivers.get() or None,
         )
         if classified is None:
             continue

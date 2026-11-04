@@ -21,6 +21,7 @@ classified as ``query_statement`` before this runs.
 from __future__ import annotations
 
 import re
+from collections.abc import Mapping
 
 # DB/ORM -> distinctive method names (lowercased). Order matters: on a name collision
 # the first DB wins (mirrors the legacy reverse-map "first one wins").
@@ -47,6 +48,10 @@ _DB_METHODS: dict[str, tuple[str, ...]] = {
     "dynamodb": (
         "putitem", "deleteitem", "updateitem",
         "batchgetitem", "batchwriteitem", "transactgetitems", "transactwriteitems",
+        # AWS SDK for .NET names its operations with an ``Async`` suffix.
+        "putitemasync", "deleteitemasync", "updateitemasync",
+        "batchgetitemasync", "batchwriteitemasync", "transactgetitemsasync",
+        "transactwriteitemsasync",
     ),
     "elasticsearch": ("msearch",),
     "firebase": ("getdocs", "getdoc", "setdoc", "updatedoc", "deletedoc", "adddoc", "onsnapshot"),
@@ -381,6 +386,20 @@ _PRISMA_VERBS = frozenset({
 })
 
 
+# Verbs that count on a receiver whose declared type names the product (``typed_receivers``:
+# name → product, collected by the language parser). These are too generic to trust by name
+# (``SaveAsync``, ``QueryAsync``, ``Load``) — the declared client type is the evidence.
+_DYNAMODB_TYPED = frozenset({
+    "getitem", "putitem", "updateitem", "deleteitem", "query", "scan",
+    "batchgetitem", "batchwriteitem", "transactgetitems", "transactwriteitems",
+    "executestatement", "batchexecutestatement", "executetransaction",
+    "save", "load", "delete", "fromquery", "fromscan", "executebatchget", "executebatchwrite",
+})
+_TYPED_VERBS: dict[str, frozenset[str]] = {
+    "dynamodb": _DYNAMODB_TYPED | frozenset(v + "async" for v in _DYNAMODB_TYPED),
+}
+
+
 def _is_prisma_chain(low: str) -> bool:
     """The receiver chain is a real Prisma-client access (`prisma.` root or a `.prisma.`
     segment, e.g. `this.prisma.user.findMany`)."""
@@ -389,9 +408,11 @@ def _is_prisma_chain(low: str) -> bool:
 
 def match_db(callee: str, method: str, language: str | None = None,
              typed_db_ids: "frozenset[str] | None" = None,
-             vendor: str | None = None) -> str | None:
+             vendor: str | None = None,
+             typed_receivers: "Mapping[str, str] | None" = None) -> str | None:
     """The ``dataAccessHint`` of a call, else ``None``. ``vendor`` is the ORM the file's
-    imports name (:func:`vendor_from_imports`); it only ever replaces a would-be ``orm``."""
+    imports name (:func:`vendor_from_imports`); it only ever replaces a would-be ``orm``.
+    ``typed_receivers`` maps a name declared as a datastore client type to its product."""
     if language in {"php", "go"}:
         # PHP and Go data access is recorded from evidence by their own detectors — PHP from
         # imports, types and model classes (php/data_access.py), Go from the receiver's declared
@@ -400,6 +421,10 @@ def match_db(callee: str, method: str, language: str | None = None,
         return None
     m = method.lower()
     low = callee.lower()
+    if typed_receivers and "." in callee:
+        product = typed_receivers.get(callee.rsplit(".", 1)[0].rsplit(".", 1)[-1])
+        if product is not None and m in _TYPED_VERBS.get(product, ()):
+            return product
     if m in _PRISMA_VERBS and _is_prisma_chain(low) and (language is None or language in _JSTS):
         return "prisma"
     # A distinctive verb whose product cannot exist in this language falls through to the
