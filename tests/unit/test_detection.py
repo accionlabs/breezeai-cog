@@ -845,6 +845,26 @@ def test_api_hints_ignore_call_arguments() -> None:
     assert match_api("axios.get", "get") == "GET"
 
 
+def test_dotnet_session_remove_is_session_state() -> None:
+    # ASP.NET session state is neither data access nor an HTTP client, whatever the file's ORM.
+    for vendor in (None, "entity_framework", "hibernate"):
+        assert classify_call("HttpContext.Session.Remove", "Remove", language="csharp",
+                             vendor=vendor) is None
+        assert classify_call("Session.Remove", "Remove", language="vb", vendor=vendor) is None
+    assert classify_call("Session.Get", "Get", language="csharp") is None
+    assert classify_call("HttpContext.Session.Get", "Get", language="csharp") is None
+    # NHibernate / RavenDB sessions (they Delete, never Remove) stay data access: NHibernate
+    # when the file imports it, else the generic orm, never the file's EF.
+    nh = {"language": "csharp", "vendor": "hibernate"}
+    assert classify_call("session.Delete", "Delete", **nh) == ("db_method_call", "Delete", "hibernate")
+    assert classify_call("this.session.Save", "Save", **nh) == ("db_method_call", "Save", "hibernate")
+    assert classify_call("session.Query", "Query", language="csharp",
+                         vendor="entity_framework") == ("db_method_call", "Query", "orm")
+    # Other languages keep their session readings.
+    assert classify_call("session.query", "query", language="python")[2] == "sqlalchemy"
+    assert classify_call("requests.Session.get", "get", language="python")[0] == "api_call"
+
+
 def test_php_classifier_does_not_guess_plain_receivers() -> None:
     from breezeai_cog.parsers.detection import classify_call
 

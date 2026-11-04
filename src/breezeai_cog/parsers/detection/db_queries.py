@@ -488,6 +488,14 @@ def match_db(callee: str, method: str, language: str | None = None,
             if needle in _ANCHORED_HINTS:
                 if not (f".{needle}." in low or low.startswith(f"{needle}.")):
                     continue
+            # In .NET a ``Session`` is ASP.NET session state or an NHibernate / RavenDB session.
+            # ``Remove`` is the one session-state method that reaches here, and the database
+            # sessions have none (they ``Delete``); any other call is data access, whose
+            # product is NHibernate only when the file imports it, never the file's EF.
+            if needle == "session" and language in _DOTNET:
+                if m == "remove" or "httpcontext.session" in low:
+                    return None
+                return "hibernate" if vendor == "hibernate" else "orm"
             # The receiver shows data access; the product named must ship for this language.
             if language is not None and language not in langs:
                 return _orm(receiver, vendor)
