@@ -46,7 +46,7 @@ from typing import Any
 from tree_sitter import Node
 
 from ..schemas import FileRecord, Statement
-from .additive import FactSpec, index_fact, register_fact
+from .additive import FactSpec, frameworks_locating_handlers, index_fact, register_fact
 from .treesitter import node_text
 
 #: language → (class-like node types, method node types).
@@ -152,14 +152,26 @@ def handler_location(site: _Site | None, own_path: str) -> tuple[int | None, str
 HANDLED = frozenset({"route", "eventbus_consumer", "timer"})
 
 
-def unlocated(s: Statement) -> bool:
-    """An entry point that names its handler but not where it is declared."""
+def unlocated(s: Statement, located_by_detector: Collection[str] = ()) -> bool:
+    """An entry point that names its handler but not where it is declared, and whose
+    framework is not in ``located_by_detector`` (:func:`pending`)."""
     return (s.semanticType in HANDLED and bool(s.handler) and s.handlerLine is None
-            and s.handlerPath is None)
+            and s.handlerPath is None and s.framework not in located_by_detector)
+
+
+def pending(record: FileRecord) -> list[Statement]:
+    """The records :meth:`~.base.BaseParser.link_handlers` looks up: unlocated ones, except
+    those of a framework whose detector locates its handlers itself
+    (:attr:`~.additive.Detector.locates_handlers`) — a name it left unlocated is not a symbol."""
+    found = [s for s in record.statements if unlocated(s)]
+    if not found:
+        return found
+    located_by_detector = frameworks_locating_handlers()
+    return [s for s in found if s.framework not in located_by_detector]
 
 
 def needs_location(record: FileRecord) -> bool:
-    return any(unlocated(s) for s in record.statements)
+    return bool(pending(record))
 
 
 def method_sites(language: str, root: Node, source: bytes, rel: str) -> list[tuple[_Key, _Site]]:

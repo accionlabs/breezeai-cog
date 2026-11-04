@@ -273,6 +273,11 @@ class calls `locate_method` / `locate_export` from `handler_sites.py` itself. A 
 be found, or is declared twice, keeps `handlerPath` and `handlerLine` empty — and a `handler`
 written as a module path becomes empty, never the path.
 
+When a handler name is **not a symbol** of the language — a key the framework registered
+(AngularJS `controller: 'ListCtrl'`) or a member of an object the detector read — the detector
+looks it up itself and registers with `locates_handlers=True`. Its frameworks' records then skip
+`link_handlers`: a name it left unlocated stays unlocated, never bound to a same-named function.
+
 ### Step 7 — Register
 ```python
 # parsers/<lang>/__init__.py

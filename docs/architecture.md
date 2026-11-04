@@ -606,6 +606,7 @@ the file:
   │                  70   vue-navigation   typescript_vue/navigation.py      ✔       │
   │                  72   angular-navi…    typescript_angular/navigation.py  ✔       │
   │                  74   react-navigation typescript_react/navigation.py    ✔       │
+  │                  80   angularjs        typescript_angularjs/detector.py  ✔       │
   │                                                                                  │
   │  csharp          10   lambda-handlers  csharp/lambda_events.py           ✔       │
   │                  20   lucene           csharp/lucene.py                          │
@@ -884,7 +885,8 @@ Other places that resolve values:
 - **Handlers** (`handlerPath` / `handlerLine`): an entry point whose handler is declared in
   another file is led to it through the index (`parsers/handler_sites.py`) — by the detector
   (`locate_method` / `locate_export`) or after parsing by `link_handlers`, one loop for every
-  language with a per-language lookup (`handler_locator`; TypeScript today). See
+  language with a per-language lookup (`handler_locator`; TypeScript, PHP, Razor), skipped for a
+  detector that locates its own handlers (`Detector.locates_handlers`). See
   [leading an entry point to its handler](architecture/cross-file-resolution.md#leading-an-entry-point-to-its-handler).
 
 Detail page: [Cross-file resolution](architecture/cross-file-resolution.md).

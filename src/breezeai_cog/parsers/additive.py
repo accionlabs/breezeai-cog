@@ -138,6 +138,12 @@ class Detector:
     #: the first to run. A route detector whose framework decides what the file *is* (a Next.js
     #: ``route.ts``) ranks above one that only finds calls in it (an S3 client).
     label_priority: int = 0
+    #: The detector locates every handler it names itself, and leaves one it cannot place
+    #: unlocated on purpose: the name is a key it registered or a member of an object it read
+    #: (AngularJS ``controller: 'ListCtrl'``), not a symbol the language's generic lookup can
+    #: find. Records labelled with one of its ``frameworks`` skip
+    #: :meth:`~.base.BaseParser.link_handlers`, which would bind a same-named function.
+    locates_handlers: bool = False
 
     @property
     def language(self) -> str:
@@ -249,6 +255,15 @@ def detectors_for(language: str) -> list[Detector]:
 def all_detectors() -> dict[str, list[Detector]]:
     discover_detectors()
     return {lang: list(ds) for lang, ds in sorted(_DETECTORS.items())}
+
+
+def frameworks_locating_handlers() -> frozenset[str]:
+    """The framework labels of every detector that locates its own handlers
+    (:attr:`Detector.locates_handlers`)."""
+    discover_detectors()
+    return frozenset(
+        fw for ds in _DETECTORS.values() for d in ds if d.locates_handlers for fw in d.frameworks
+    )
 
 
 def facts_for(language: str) -> list[FactSpec]:
