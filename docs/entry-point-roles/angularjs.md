@@ -29,7 +29,7 @@ not the injected service. An address that is not a path (no leading `/`) is left
 | `component: 'userDetail'` | — | `handler` = `userDetail`, located through the `.component('userDetail', …)` registration | Handler named as the state writes it |
 | `views: { … }` | Binding | `route`, `page`; `handler` set only when exactly one view names a controller or component, else empty | The address is certain; "one handler" is not |
 | `$urlRouterProvider.otherwise('/x')` | Outbound | `route`, `routeKind: navigation`, `endpoint` = `/x`; empty for a function | Default redirect |
-| `.controller(name, …)` / `.component(name, …)` / `.directive(name, …)` on `angular.module(…)` | None | a statement with `name`, `uiRole` (`controller`, `component`, `directive`), `framework: angularjs`, no `semanticType` | Declares a UI unit, not an entry point |
+| `.controller(name, …)` / `.component(name, …)` / `.directive(name, …)` on `angular.module(…)` | None | a statement with `name`, `framework: angularjs`, no `semanticType`; `uiRole` `component` / `directive` (a controller has no `uiRole` value, so its registration carries only the name) | Declares a UI unit, not an entry point |
 | `.service(name, …)` / `.factory(name, …)` | None | nothing (not UI units; Angular's `@Injectable` is likewise left unmarked) | |
 | `$resource('/api/users/:id')` | Outbound | `api_call`, `endpoint` = the url (unset when it isn't a literal), `method` unset: one resource declares several verbs | Our code calling out |
 | `$http.get(…)` | Outbound | `api_call` (shared classifier; only where the extractor reaches the call) | |

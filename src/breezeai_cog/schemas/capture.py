@@ -190,8 +190,8 @@ class FileRecord(BaseModel):
     platform: str | None = None
     #: UI role of the node when it is a frontend component or state unit — one of
     #: ``component`` / ``page`` / ``layout`` / ``store`` / ``composable`` / ``hook`` /
-    #: ``directive`` / ``controller`` (open string). Set by the parser on the node that *is* the
-    #: component (File for an SFC, Class/Function/Statement for other declaration forms); absent
+    #: ``directive`` (open string). Set by the parser on the node that *is* the component
+    #: (File for an SFC, Class/Function/Statement for other declaration forms); absent
     #: otherwise. Framework-neutral marker so "list components" is one query across parsers.
     uiRole: str | None = None
     importFiles: list[str] = Field(default_factory=list)  # in-repo paths → builds IMPORTS

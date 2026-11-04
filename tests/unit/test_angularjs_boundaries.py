@@ -11,7 +11,7 @@ from breezeai_cog.parsers.contract import is_entry_point
 
 
 def _angularjs(stmts):
-    return [s for s in stmts if s.framework == "angularjs" or s.uiRole == "controller"]
+    return [s for s in stmts if s.framework == "angularjs"]
 
 
 def test_when_on_other_receivers_is_not_a_route(analyze_files) -> None:
@@ -40,7 +40,7 @@ def test_vue_global_registrations_are_not_angularjs(analyze_files) -> None:
         }
     )
     assert not _angularjs(st)
-    assert not [s for s in st if s.uiRole in {"controller", "directive"}]
+    assert not [s for s in st if s.uiRole == "directive"]
 
 
 def test_http_in_a_named_function_stays_an_api_call(analyze_files) -> None:

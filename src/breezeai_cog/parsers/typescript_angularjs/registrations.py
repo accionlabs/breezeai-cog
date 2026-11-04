@@ -10,8 +10,9 @@ AngularJS names a unit with a string and registers its function on a module::
 A registration counts only when its receiver is proved to be a module: a chain that starts at
 ``angular.module(…)``, or a variable assigned from one in the same file. ``.controller(…)`` and
 ``.directive(…)`` also exist in other libraries (``Vue.directive``), and a bare ``app`` defined
-in another file is not proof. Each registration becomes a statement carrying its ``name`` and
-``uiRole``; ``.service`` / ``.factory`` are not UI units and are not recorded.
+in another file is not proof. Each registration becomes a statement carrying its ``name``, and
+a ``uiRole`` when the unit has one (``component``, ``directive``; a controller has no uiRole
+value); ``.service`` / ``.factory`` are not UI units and are not recorded.
 
 A route names its controller with the same string, usually from another file. While the
 TypeScript index is built, ``_collect`` reads every file's registrations and ``_resolve`` keeps
@@ -54,8 +55,11 @@ from .syntax import (
 
 FACT = "angularjs.registrations"
 
-#: Registration method → the ``uiRole`` of the unit it declares.
-UI_ROLES = {"controller": "controller", "component": "component", "directive": "directive"}
+#: Registration method → the ``uiRole`` of the unit it declares; ``None`` when the uiRole list
+#: has no value for it (a controller), so the registration is a plain statement with its name.
+UI_ROLES: dict[str, str | None] = {
+    "controller": None, "component": "component", "directive": "directive",
+}
 #: The kinds a route can name, and so the kinds the fact holds.
 LOOKED_UP = frozenset({"controller", "component"})
 
@@ -148,7 +152,11 @@ def registrations(found: Scan, source: bytes, root: Node) -> list[Registration]:
 
 
 def registration_emits(found: list[Registration], source: bytes) -> list[Emit]:
-    return [call_emit(r.call, source, {"name": r.name, "uiRole": UI_ROLES[r.kind]}) for r in found]
+    return [
+        call_emit(r.call, source, {"name": r.name, "uiRole": UI_ROLES[r.kind]}
+                  if UI_ROLES[r.kind] else {"name": r.name})
+        for r in found
+    ]
 
 
 def _sites(found: list[Registration], rel: str) -> list[tuple[Key, Site | Import | None]]:

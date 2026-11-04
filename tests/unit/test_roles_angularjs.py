@@ -162,7 +162,7 @@ def _registered(stmts, path: str = CTRL):
     return sorted(
         (s.startLine, s.name, s.uiRole, s.framework)
         for s in stmts
-        if s.path == path and s.uiRole is not None
+        if s.path == path and s.framework == "angularjs" and s.name and s.semanticType is None
     )
 
 
@@ -176,7 +176,7 @@ def test_registrations_on_a_module_chain_are_tagged(analyze_files) -> None:
         "  .component('cartBadge', { templateUrl: 'badge.html' });\n"
     )
     assert _registered(analyze_files({CTRL: src})) == [
-        (2, "ListCtrl", "controller", "angularjs"),
+        (2, "ListCtrl", None, "angularjs"),
         (5, "priceTag", "directive", "angularjs"),
         (6, "cartBadge", "component", "angularjs"),
     ]
@@ -191,7 +191,7 @@ def test_registration_on_a_module_variable_is_tagged(analyze_files) -> None:
         "other.directive('b', function () {});\n"
     )
     assert _registered(analyze_files({CTRL: src})) == [
-        (2, "A", "controller", "angularjs"),
+        (2, "A", None, "angularjs"),
         (5, "b", "directive", "angularjs"),
     ]
 
@@ -523,7 +523,7 @@ def test_registration_written_across_lines_is_found(analyze_files) -> None:
         },
     )
     assert _located(st) == {"/a": ("Avengers", CTRL, 5)}
-    assert _registered(st) == [(4, "Avengers", "controller", "angularjs")]
+    assert _registered(st) == [(4, "Avengers", None, "angularjs")]
 
 
 def test_chained_registrations_on_a_module_variable_are_all_found(analyze_files) -> None:
@@ -535,8 +535,8 @@ def test_chained_registrations_on_a_module_variable_are_all_found(analyze_files)
         "  .component('dComp', { template: 'x' });\n"
     )
     assert [r[1:3] for r in _registered(analyze_files({CTRL: src}))] == [
-        ("A", "controller"),
-        ("B", "controller"),
+        ("A", None),
+        ("B", None),
         ("cDir", "directive"),
         ("dComp", "component"),
     ]
