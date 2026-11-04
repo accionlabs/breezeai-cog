@@ -50,6 +50,12 @@ class TsAliasIndex:
     #: means *its own* ``src``), so resolution picks the **nearest** enclosing config — never a
     #: sibling package's same-named alias. When set, this supersedes ``paths``/``base_dir``.
     alias_scopes: tuple[tuple[str, dict[str, list[str]]], ...] = ()
+    #: Vite ``resolve.alias`` scopes: ``(folder_abs, (patterns of each vite.config.* there,
+    #: in name order))`` sorted deepest-first. A folder may hold several configs (``vite.config.ts``
+    #: and ``vite.config.e2e.ts``) and which one a build loads is not in the code, so an import
+    #: resolves through the nearest folder only when every config there resolves it to the same
+    #: file; a config that can't be read counts with no patterns (see :func:`_vite_agreed`).
+    vite_scopes: tuple[tuple[str, tuple[dict[str, list[str]], ...]], ...] = ()
     const_values: dict[str, str | None] = field(default_factory=dict)
     #: simple class name → heritage (base + method→file), for resolving inherited `this.M()`
     #: calls to the declaring base file. A name declared in >1 file → ``None`` (ambiguous).
@@ -140,27 +146,34 @@ def _collect_tsconfig_paths(cfg: Path, seen: set[Path], out: dict[str, list[str]
 def build_alias_index(repo_root: Path) -> TsAliasIndex | None:
     """Collect path aliases from **every** tsconfig and Vite config in the tree (not just the
     root), each scope carrying absolute targets so an app's ``@/*`` resolves against its own
-    package. Scopes are ordered deepest-first for nearest-config resolution; where a tsconfig
-    and a Vite config share a folder, the tsconfig's scope is tried first."""
-    from .vite_aliases import vite_alias_scope  # it imports this module
+    package. Scopes are ordered deepest-first for nearest-config resolution. The Vite configs of
+    one folder form one scope; they are kept only when some config in the repo declares an alias
+    that can be read (otherwise none of them can resolve anything)."""
+    from .vite_aliases import vite_alias_patterns  # it imports this module
 
     scopes: list[tuple[str, dict[str, list[str]]]] = []
-    vite_scopes: list[tuple[str, dict[str, list[str]]]] = []
+    vite: dict[str, list[dict[str, list[str]]]] = {}
     for cfg in _iter_alias_configs(repo_root):
         if _is_vite_config(cfg.name):
-            vite_scope = vite_alias_scope(cfg, repo_root)
-            if vite_scope is not None:
-                vite_scopes.append(vite_scope)
+            vite.setdefault(str(cfg.parent.resolve()), []).append(
+                vite_alias_patterns(cfg, repo_root)
+            )
             continue
         paths: dict[str, list[str]] = {}
         _collect_tsconfig_paths(cfg, set(), paths)  # fresh cycle-guard per config
         if paths:
             scopes.append((str(cfg.parent.resolve()), paths))
-    scopes += vite_scopes
-    if not scopes:
+    vite_scopes = (
+        [(d, tuple(configs)) for d, configs in vite.items()]
+        if any(p for configs in vite.values() for p in configs) else []
+    )
+    if not scopes and not vite_scopes:
         return None
     scopes.sort(key=lambda s: len(Path(s[0]).parts), reverse=True)
-    return TsAliasIndex(base_dir=str(repo_root), paths={}, alias_scopes=tuple(scopes))
+    vite_scopes.sort(key=lambda s: len(Path(s[0]).parts), reverse=True)
+    return TsAliasIndex(
+        base_dir=str(repo_root), paths={}, alias_scopes=tuple(scopes), vite_scopes=tuple(vite_scopes)
+    )
 
 
 def _string_literal(node: Node | None, source: bytes) -> str | None:
@@ -593,6 +606,7 @@ def build_ts_index(repo_root: Path, files: Sequence[Path], jobs: int = 1) -> TsA
         base_dir=alias.base_dir if alias else str(repo_root),
         paths=alias.paths if alias else {},
         alias_scopes=alias.alias_scopes if alias else (),
+        vite_scopes=alias.vite_scopes if alias else (),
         const_values=const_values,
         class_heritage=class_heritage,
     )
@@ -665,19 +679,45 @@ def _match_alias(
     return None
 
 
+def _encloses(cfg_dir: Path, file_dir: Path) -> bool:
+    return cfg_dir == file_dir or cfg_dir in file_dir.parents
+
+
+def _vite_agreed(
+    module: str, configs: tuple[dict[str, list[str]], ...], repo_root: Path
+) -> str | None:
+    """The file every Vite config of one folder resolves ``module`` to, or None when any of them
+    resolves it elsewhere or not at all — ``vite.config.ts`` and ``vite.config.e2e.ts`` may alias
+    ``@`` to different folders, and which one a build loads is not written in the code."""
+    hits = {_match_alias(module, paths, repo_root, None) for paths in configs}
+    return hits.pop() if len(hits) == 1 else None
+
+
 def _resolve_alias(module: str, index: TsAliasIndex, repo_root: Path, file_path: str) -> str | None:
-    if index.alias_scopes:
-        # Nearest-config wins: try each enclosing tsconfig scope deepest-first, so an app's
-        # `@/*` resolves against its own `src`, never a sibling package's same-named alias.
-        file_dir = (repo_root / file_path).parent.resolve()
-        for cfg_dir, paths in index.alias_scopes:
-            cd = Path(cfg_dir)
-            if cd == file_dir or cd in file_dir.parents:
-                resolved = _match_alias(module, paths, repo_root, None)
-                if resolved:
-                    return resolved
-        return None
-    return _match_alias(module, index.paths, repo_root, Path(index.base_dir))
+    if not (index.alias_scopes or index.vite_scopes):
+        return _match_alias(module, index.paths, repo_root, Path(index.base_dir))
+    # Nearest-config wins: try each enclosing tsconfig scope deepest-first, so an app's `@/*`
+    # resolves against its own `src`, never a sibling package's same-named alias. Of the Vite
+    # configs only the nearest folder's apply (Vite reads one config, never an outer one's
+    # aliases), tried after a tsconfig of the same folder.
+    file_dir = (repo_root / file_path).parent.resolve()
+    vite = next(
+        ((Path(d), configs) for d, configs in index.vite_scopes if _encloses(Path(d), file_dir)),
+        None,
+    )
+    for cfg_dir, paths in index.alias_scopes:
+        cd = Path(cfg_dir)
+        if not _encloses(cd, file_dir):
+            continue
+        if vite is not None and len(cd.parts) < len(vite[0].parts):
+            resolved = _vite_agreed(module, vite[1], repo_root)
+            if resolved:
+                return resolved
+            vite = None
+        resolved = _match_alias(module, paths, repo_root, None)
+        if resolved:
+            return resolved
+    return _vite_agreed(module, vite[1], repo_root) if vite is not None else None
 
 
 def _resolve(module: str, file_path: str, repo_root: Path, index: TsAliasIndex | None) -> str | None:

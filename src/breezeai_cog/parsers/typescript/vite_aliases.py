@@ -6,9 +6,11 @@ A Vite project writes its ``@`` alias in ``vite.config.*``, not in a ``tsconfig`
       resolve: { alias: { '@': fileURLToPath(new URL('./src', import.meta.url)) } },
     });
 
-This module reads those entries into the scope the ``tsconfig`` ``paths`` aliases already use,
-``(config dir, {pattern: [absolute targets]})``, so ``@/views/Home`` resolves like any aliased
-import. Vite matches a string key against the import itself or ``key/…``, so ``'@'`` gives two
+This module reads those entries into the patterns the ``tsconfig`` ``paths`` aliases already use,
+``{pattern: [absolute targets]}``, so ``@/views/Home`` resolves like any aliased import. Which
+config a build loads is not in the code (``vite --config``), so an import resolves only through
+the Vite configs of the nearest folder that has any, and only when they all resolve it to the
+same file; an outer folder's config is never used instead. Vite matches a string key against the import itself or ``key/…``, so ``'@'`` gives two
 patterns: ``@`` and ``@/*``.
 
 Only what the source states literally is read. Anything else is left alone and the import stays
@@ -41,8 +43,6 @@ from tree_sitter import Node
 from ...logging import get_logger
 from ..treesitter import node_text, parse_source
 from .imports import _pair_key_name, _string_literal, _unwrap_const_expr
-
-AliasScope = tuple[str, dict[str, list[str]]]
 
 #: What a Vite config calls its own folder: ``__dirname`` (CommonJS / shimmed) or
 #: ``import.meta.dirname``.
@@ -180,17 +180,17 @@ def _patterns(
     return patterns
 
 
-def vite_alias_scope(cfg: Path, repo_root: Path) -> AliasScope | None:
-    """One ``vite.config.*`` as an alias scope, or None when it declares no alias that can be
-    read. A config that can't be read or parsed is skipped with a warning, never aborts indexing."""
+def vite_alias_patterns(cfg: Path, repo_root: Path) -> dict[str, list[str]]:
+    """The alias patterns one ``vite.config.*`` declares in a form that can be read; empty when
+    it declares none. A config that can't be read or parsed gives none, with a warning, and never
+    aborts indexing."""
     try:
         source = cfg.read_bytes()
         if b"alias" not in source:
-            return None
+            return {}
         root = parse_source("typescript", source, 0).root_node
         alias = _member(_member(_config_object(root, source), "resolve", source), "alias", source)
-        config_dir = cfg.parent.resolve()
-        patterns = _patterns(_entries(alias, source), config_dir, repo_root, source)
+        return _patterns(_entries(alias, source), cfg.parent.resolve(), repo_root, source)
     except Exception as exc:  # an unreadable file (OSError) or a parser failure; skip this config
         get_logger("breezeai_cog.index").warning(
             "vite.alias.skipped",
@@ -198,5 +198,4 @@ def vite_alias_scope(cfg: Path, repo_root: Path) -> AliasScope | None:
             error_type=type(exc).__name__,
             error=str(exc),
         )
-        return None
-    return (str(config_dir), patterns) if patterns else None
+        return {}

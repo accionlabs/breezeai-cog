@@ -55,8 +55,8 @@ def test_scope_crosses_the_process_boundary(tmp_path) -> None:
     _with_src(tmp_path, _config("{ '@': " + URL_FORM + " }"))
     index = build_alias_index(tmp_path)
     assert index is not None
-    assert pickle.loads(pickle.dumps(index)).alias_scopes == index.alias_scopes
-    cfg_dir, patterns = index.alias_scopes[0]
+    assert pickle.loads(pickle.dumps(index)).vite_scopes == index.vite_scopes
+    [(cfg_dir, (patterns,))] = index.vite_scopes
     assert cfg_dir == str(tmp_path.resolve())
     assert patterns == {"@": [str(tmp_path / "src")], "@/*": [str(tmp_path / "src") + "/*"]}
 
@@ -205,28 +205,86 @@ def test_the_nearest_enclosing_config_wins(tmp_path) -> None:
     assert _resolved(tmp_path, "@/x", "src/main.ts") == "src/x.ts"
 
 
-def test_configs_in_one_folder_are_read_in_name_order(tmp_path, monkeypatch) -> None:
-    # The first config's target wins, so the order must not depend on the file system's listing.
-    from breezeai_cog.parsers.typescript import imports
-
-    real_walk = imports.os.walk
-
-    def listed_backwards(top):
-        for dirpath, dirnames, filenames in real_walk(top):
-            yield dirpath, dirnames, sorted(filenames, reverse=True)
-
-    monkeypatch.setattr(imports.os, "walk", listed_backwards)
-    _repo(
-        tmp_path,
+def _two_configs(root: Path, e2e_target: str) -> Path:
+    return _repo(
+        root,
         {
-            "vite.config.js": _config("{ '@': path.resolve(__dirname, 'a') }"),
-            "vite.config.ts": _config("{ '@': path.resolve(__dirname, 'b') }"),
-            "a/x.ts": "",
-            "b/x.ts": "",
+            "vite.config.ts": _config("{ '@': path.resolve(__dirname, 'src') }"),
+            "vite.config.e2e.ts": _config("{ '@': path.resolve(__dirname, '" + e2e_target + "') }"),
+            "src/x.ts": "",
+            "e2e-stubs/x.ts": "",
             "main.ts": "",
         },
     )
-    assert _resolved(tmp_path, "@/x", "main.ts") == "a/x.ts"
+
+
+def test_configs_of_one_folder_that_agree_resolve(tmp_path) -> None:
+    _two_configs(tmp_path, "src")
+    assert _resolved(tmp_path, "@/x", "main.ts") == "src/x.ts"
+
+
+def test_configs_of_one_folder_that_disagree_leave_the_import_external(tmp_path) -> None:
+    # `vite --config vite.config.e2e.ts` loads the other one: which file `@/x` is depends on it.
+    _two_configs(tmp_path, "e2e-stubs")
+    assert _resolved(tmp_path, "@/x", "main.ts") is None
+
+
+@pytest.mark.parametrize(
+    "other",
+    [
+        "export default defineConfig({ plugins: [] });",  # no alias
+        "export default defineConfig(() => ({ resolve: { alias: { '@': "
+        + RESOLVE_FORM
+        + " } } }));",  # function form, not read
+    ],
+)
+def test_a_config_beside_that_does_not_resolve_it_leaves_the_import_external(
+    tmp_path, other
+) -> None:
+    _with_src(tmp_path, _config("{ '@': " + RESOLVE_FORM + " }"), "vite.config.ts")
+    _repo(tmp_path, {"vite.config.e2e.ts": other})
+    assert _resolved(tmp_path, "@/views/Home") is None
+
+
+def test_one_target_missing_in_another_config_leaves_the_import_external(tmp_path) -> None:
+    # Both configs are read; only `src/x.ts` exists, `e2e-stubs/y.ts` does not.
+    _two_configs(tmp_path, "e2e-stubs")
+    _repo(tmp_path, {"src/y.ts": ""})
+    assert _resolved(tmp_path, "@/y", "main.ts") is None
+
+
+def test_an_outer_config_never_stands_in_for_the_nearest(tmp_path) -> None:
+    # `packages/web` has its own config, written in the function form (not read): Vite never
+    # applies the root's `@`, so the root's `src/x.ts` must not be linked.
+    _repo(
+        tmp_path,
+        {
+            "vite.config.ts": _config("{ '@': " + RESOLVE_FORM + " }"),
+            "src/x.ts": "",
+            "packages/web/vite.config.ts": "export default defineConfig(({ mode }) => ({"
+            " resolve: { alias: { '@': " + RESOLVE_FORM + " } } }));",
+            "packages/web/src/x.ts": "",
+            "packages/web/src/main.ts": "",
+            "packages/lib/src/main.ts": "",
+        },
+    )
+    assert _resolved(tmp_path, "@/x", "packages/web/src/main.ts") is None
+    # a package without a config of its own is served by the root's
+    assert _resolved(tmp_path, "@/x", "packages/lib/src/main.ts") == "src/x.ts"
+
+
+def test_a_deeper_tsconfig_is_tried_before_the_nearest_vite_folder(tmp_path) -> None:
+    _repo(
+        tmp_path,
+        {
+            "vite.config.ts": _config("{ '@': " + RESOLVE_FORM + " }"),
+            "src/x.ts": "",
+            "app/tsconfig.json": '{ "compilerOptions": { "paths": { "@/*": ["./lib/*"] } } }',
+            "app/lib/x.ts": "",
+            "app/main.ts": "",
+        },
+    )
+    assert _resolved(tmp_path, "@/x", "app/main.ts") == "app/lib/x.ts"
 
 
 def test_tsconfig_and_vite_config_in_one_folder_both_apply(tmp_path) -> None:
@@ -299,7 +357,12 @@ def test_unreadable_config_is_skipped_with_a_warning(tmp_path, monkeypatch) -> N
     _with_src(tmp_path / "app", _config("{ '@': " + URL_FORM + " }"))
     index = build_alias_index(tmp_path)
     assert index is not None
-    assert [d for d, _ in index.alias_scopes] == [str((tmp_path / "app").resolve())]
+    # the unreadable config still counts for its folder, with nothing to resolve through
+    assert [(d, [bool(p) for p in configs]) for d, configs in index.vite_scopes] == [
+        (str((tmp_path / "app").resolve()), [True]),
+        (str(tmp_path.resolve()), [False]),
+    ]
+    assert _resolve("@/views/Home", "app/src/main.ts", tmp_path, index) == "app/src/views/Home.vue"
     [(event, fields)] = warnings
     assert event == "vite.alias.skipped"
     assert fields["error_type"] == "FileNotFoundError"

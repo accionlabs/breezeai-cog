@@ -181,7 +181,22 @@ export default defineConfig({
 ```
 It becomes a scope for `apps/web`, like a `tsconfig` — `@` and `@/*` both point at `apps/web/src` (Vite
 matches the key itself or `key/…`, so `@vue/x` is not touched). If a `tsconfig` in the same
-folder declares the same pattern, the `tsconfig` is tried first; several Vite configs in one folder are read in name order.
+folder declares the same pattern, the `tsconfig` is tried first.
+
+Which Vite config a build loads is not in the code (`vite --config vite.config.e2e.ts`), so the
+Vite configs of the **nearest folder that has any** decide together:
+
+| Nearest folder holds | `import … from '@/utils/api'` |
+|---|---|
+| one config, `'@'` → `src` | `importFiles: ["…/src/utils/api.ts"]` |
+| `vite.config.ts` and `vite.config.e2e.ts`, both `'@'` → `src` | `importFiles: ["…/src/utils/api.ts"]` |
+| `vite.config.ts` `'@'` → `src`, `vite.config.e2e.ts` `'@'` → `e2e-stubs` | `externalImports: ["@/utils/api"]` |
+| a config that can't be read (function form) or has no `'@'` | `externalImports`, even when a parent folder's config declares `'@'` |
+
+> **Decision —** every Vite config in the nearest folder must agree, and an outer folder's
+> config never stands in.
+> **Why:** Vite reads one config and does not merge a parent's. Choosing among configs, or
+> falling back to the root's, links to a file the build may never use.
 
 | Entry | Read |
 |---|---|
