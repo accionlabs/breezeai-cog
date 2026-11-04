@@ -17,10 +17,12 @@ from typing import Any, Callable, Mapping, Protocol, Sequence, runtime_checkable
 from ..schemas import SCHEMA_VERSION, FileRecord
 
 
-#: A language's handler lookup: the handler name as written → ``(handler, (file, line))`` — the
-#: name to keep (a path-shaped name becomes the declared one, or None when unknown) and where it
-#: is declared (None: not found) — or None to leave the record as it is.
-HandlerLocator = Callable[[str], tuple[str | None, tuple[str, int] | None] | None]
+#: A language's handler lookup: the handler name as written, and the line of the record that
+#: names it (a lookup may use it to see a local name shadowing a top-level one) →
+#: ``(handler, (file, line))`` — the name to keep (a path-shaped name becomes the declared one, or
+#: None when unknown) and where it is declared (None: not found) — or None to leave the record as
+#: it is.
+HandlerLocator = Callable[[str, int | None], tuple[str | None, tuple[str, int] | None] | None]
 
 
 def _read_sibling_lines(obj: object, filename: str) -> list[str]:
@@ -177,7 +179,7 @@ class BaseParser:
         if locate is None:
             return
         for s in pending:
-            found = locate(s.handler or "")
+            found = locate(s.handler or "", s.startLine)
             if found is None:
                 continue
             s.handler, site = found

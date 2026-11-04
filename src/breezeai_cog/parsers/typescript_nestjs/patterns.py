@@ -91,3 +91,19 @@ def message_pattern(arg: Node, source: bytes, consts: dict[str, str | None]) -> 
     if isinstance(v, str):
         return v
     return json.dumps(v, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+
+
+# Framework-agnostic controller-route signature: a ``@Controller``/``@JsonController``
+# class decorator plus at least one HTTP-verb *method* decorator. Matches NestJS,
+# routing-controllers, Ts.ED, and hand-rolled/re-exported decorator modules (e.g. a repo's
+# local ``./core`` wrapper) — the old Node parser detected all of these as "nestjs-like".
+_CONTROLLER_SIG = re.compile(rb"@(?:Json)?Controller\b")
+_VERB_SIG = re.compile(rb"@(?:Get|Post|Put|Patch|Delete|Options|Head|All)\b")
+
+
+def claims_nest(source: bytes) -> bool:
+    """A file the NestJS parser claims: a ``@nestjs/`` / routing-controllers import, or a
+    decorator controller. Shared by the parser and the ``nestjs-clients`` detector."""
+    if b"@nestjs/" in source or b"routing-controllers" in source:
+        return True
+    return bool(_CONTROLLER_SIG.search(source) and _VERB_SIG.search(source))

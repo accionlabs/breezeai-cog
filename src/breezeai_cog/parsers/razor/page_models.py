@@ -74,7 +74,7 @@ def page_model_locator(abs_path: Path, rel: str, timeout_micros: int = 0) -> Han
     classes = class_sites(root, source)
     code_behind_rel = rel + ".cs"
 
-    def locate(name: str) -> tuple[str | None, tuple[str, int] | None] | None:
+    def locate(name: str, line: int | None = None) -> tuple[str | None, tuple[str, int] | None] | None:
         if "<" in name:
             return None  # a generic type is not the page's own class
         qualifier, _, simple = name.strip().rpartition(".")

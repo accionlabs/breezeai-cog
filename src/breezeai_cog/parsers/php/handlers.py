@@ -69,7 +69,7 @@ def handler_locator(root: Node, source: bytes, path: str, index: PhpIndex | None
                     bindings: dict[str, str]) -> HandlerLocator:
     functions: dict[str, list[int]] | None = None
 
-    def locate(handler: str) -> tuple[str | None, tuple[str, int] | None] | None:
+    def locate(handler: str, line: int | None = None) -> tuple[str | None, tuple[str, int] | None] | None:
         nonlocal functions
         written = handler.strip().lstrip("\\")
         cls, _, method = written.rpartition("@")

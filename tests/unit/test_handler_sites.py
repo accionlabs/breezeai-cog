@@ -41,7 +41,7 @@ class _Parser(BaseParser):
 
     def handler_locator(self, ctx: ParseContext) -> HandlerLocator | None:
         self.asked += 1
-        return self.sites.get
+        return lambda name, line=None: self.sites.get(name)
 
 
 class _Plain(BaseParser):

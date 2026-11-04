@@ -265,10 +265,13 @@ def handler_locator(self, ctx):           # asked for only when a record has an 
 
 The loop writes the result through `handler_location` (`parsers/handler_sites.py`), so
 `handlerPath` is set only for another file. TypeScript implements the lookup
-(`parsers/typescript/handlers.py`, fact `typescript.declarations`); the default has none. A
-detector that knows the class calls `locate_method` / `locate_export` from `handler_sites.py`
-itself. A name that can't be found, or is declared twice, keeps `handlerPath` and `handlerLine`
-empty — and a `handler` written as a module path becomes empty, never the path.
+(`parsers/typescript/handlers.py`, fact `typescript.declarations`): an imported or required
+name, a module member (`ns.fn` — `import * as ns` / `require`, CommonJS `module.exports` /
+`exports.x` properties included), a static method (`Class.m`) and an instance's method
+(`obj.m`, `obj` a top-level `new Class()`); the default has none. A detector that knows the
+class calls `locate_method` / `locate_export` from `handler_sites.py` itself. A name that can't
+be found, or is declared twice, keeps `handlerPath` and `handlerLine` empty — and a `handler`
+written as a module path becomes empty, never the path.
 
 ### Step 7 — Register
 ```python

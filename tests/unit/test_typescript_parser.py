@@ -1237,7 +1237,8 @@ def test_express_mount_guards_reach_the_mounted_routes(tmp_path) -> None:
     )
     [route] = [s for s in rec.statements if s.semanticType == "route"]
     assert (route.method, route.endpoint) == ("POST", "/orders")
-    assert route.guards == ["Auth.check", "rateLimit"]
+    # Express runs a mount's arguments in order: `rateLimit` after the router never guards it.
+    assert route.guards == ["Auth.check"]
     assert route.authRequired is None  # middleware on the mount does not assert auth
 
 
