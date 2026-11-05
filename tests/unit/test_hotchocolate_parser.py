@@ -1089,6 +1089,21 @@ def test_project_file_usings_bring_namespaces_into_scope(tmp_path) -> None:
                                    "App/Mutation.cs": {"Mutation": "mutation"}}
 
 
+def test_project_file_at_the_repo_root_is_a_project(tmp_path) -> None:
+    # A single-project repo keeps its .csproj at the root: its usings reach Program.cs too.
+    index = _repo_index(tmp_path, {
+        "App.csproj": b'<Project><ItemGroup><Using Include="SubscriptionDemo" /></ItemGroup></Project>',
+        "Program.cs": b"b.AddGraphQLServer().AddQueryType<Query>();",
+        "Query.cs": b"namespace SubscriptionDemo { public class Query { public int GetX() => 1; } }",
+        "Lib/Lib.csproj": b"<Project />",
+        "Lib/Util.cs": b"namespace Lib { class Util { } }",
+    })
+    assert index.project_roots == ["Lib", ""]
+    assert index.project_of("Program.cs") == "" and index.project_of("Lib/Util.cs") == "Lib"
+    assert index.project_usings == {"": {"SubscriptionDemo"}}
+    assert _roots(index).files == {"Query.cs": {"Query": "query"}}
+
+
 def test_extension_of_a_registered_root_yields_operations(tmp_path) -> None:
     # The target is declared in another file, so it resolves through the name-only lookup.
     ext = b"""using HotChocolate.Types;
@@ -1323,3 +1338,4 @@ def test_plain_object_type_attribute_is_not_a_marker() -> None:
 def test_subscribe_with_stream_method_is_not_an_operation() -> None:
     rec = _parse(CSharpHotChocolateParser(), SUBSCRIBE_WITH, "AttendeeSubscriptions.cs")
     assert sorted(s.endpoint for s in _routes(rec)) == ["onCheckedIn", "onOrder"]
+
