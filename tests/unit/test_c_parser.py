@@ -816,6 +816,33 @@ def test_a_call_to_a_function_the_grammar_joined_to_its_type_resolves(tmp_path) 
     assert _calls(_capture(repo, 1)["m.cpp"], "main") == {"backend_init": "b.cpp"}
 
 
+@pytest.mark.parametrize("parser", [CParser(), CppParser()], ids=["c", "cpp"])
+def test_a_deprecation_macro_on_an_enum_member_is_its_decorator(tmp_path, parser) -> None:
+    # `B_NSS CURL_DEPRECATED(8.3.0, "") = 3,`: the grammar put the macro and the value in errors,
+    # so the member lost its value. The macro is blanked for a second parse and is the
+    # member's decorator; the member keeps its `= value`.
+    src = (
+        "typedef enum {\n"
+        "  B_NONE = 0,\n"
+        '  B_NSS          CURL_DEPRECATED(8.3.0, "") = 3,\n'
+        "  B_OBS = 4,\n"
+        '  B_COPY         CURL_DEPRECATED(7.56.0, "Use curl_mime_name()"),\n'
+        "  B_LAST\n"
+        "} backend;\n"
+    )
+    rec = _parse(parser, tmp_path, "e.h", src)
+    members = {s.name: s for s in rec.statements if s.semanticType == "enum_member"}
+    assert list(members) == ["B_NONE", "B_NSS", "B_OBS", "B_COPY", "B_LAST"]
+    assert members["B_NSS"].text.endswith("= 3")
+    assert [(d.name, d.args) for d in members["B_NSS"].decorators] == [
+        ("CURL_DEPRECATED", ["8.3.0", '""']),
+    ]
+    assert [(d.name, d.args) for d in members["B_COPY"].decorators] == [
+        ("CURL_DEPRECATED", ["7.56.0", '"Use curl_mime_name()"']),
+    ]
+    assert members["B_OBS"].decorators == [] and members["B_LAST"].decorators == []
+
+
 def test_a_k_and_r_definition_with_a_calling_convention_macro_is_read(tmp_path) -> None:
     rec = _parse(
         CParser(), tmp_path, "gz.c",

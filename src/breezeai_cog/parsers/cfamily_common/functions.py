@@ -1038,6 +1038,22 @@ def _macros_before_declarator(node: Node, source: bytes) -> tuple[int, list[Deco
     return start, items
 
 
+def enumerator_decorators(member: Node, source: bytes) -> list[Decorator]:
+    """The macro after an enum member's name, ``CURLSSLBACKEND_NSS CURL_DEPRECATED(8.3.0, "") =
+    3``, with its arguments. It was blanked before parsing (``classes.parse_cfamily``), so it is
+    the text between the name and the ``=`` (or the member's end) that no node covers."""
+    name = member.child_by_field_name("name")
+    if name is None:
+        return []
+    stop = next((c for c in member.children if c.type == "="), None)
+    end = stop.start_byte if stop is not None else member.end_byte
+    text = source[name.end_byte:end]
+    if not text.strip() and stop is None and member.next_sibling is not None:
+        text = source[member.end_byte:member.next_sibling.start_byte]  # no `= value`: up to `,`
+    items = _macro_items(text)
+    return items if items and all(d.args for d in items) else []
+
+
 _MACRO_NAME = re.compile(rb"[A-Za-z_]\w*")
 
 

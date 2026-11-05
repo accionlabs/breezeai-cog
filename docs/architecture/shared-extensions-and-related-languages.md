@@ -657,6 +657,15 @@ C++.
 > definitions in the six repos sampled, two redis functions lost, fourteen locals captured as
 > globals). **Cost:** such a file is parsed twice (sharing the class-head parse).
 
+> **Decision —** a macro with arguments after an enum member's name (`CURLSSLBACKEND_NSS
+> CURL_DEPRECATED(8.3.0, "") = 3,`) is blanked in the shared second parse and becomes the
+> member's decorator with its arguments. The grammar put the macro and the `= value` in errors,
+> so the member lost its value. A candidate is a macro in capitals right after an enumerator the
+> grammar followed with an error, closing before `=`, `,` or `}`; the blank is kept only where
+> the member then parses whole.
+> **Why:** this is how curl marks its deprecated options and backends, and the value is part of
+> the API. **Cost:** such a file is parsed twice (sharing the class-head parse).
+
 > **Decision —** a macro written as a whole member of a class or struct body
 > (`OPENVINO_MATCHER_PASS_RTTI("…")`, jemalloc's `LOCKEDINT_MTX_DECLARE(mtx)`) is blanked in the
 > same second parse. A line that is only `NAME(…)` has no `;` and no body, so it can't be a

@@ -26,6 +26,7 @@ from .functions import (
     attribute_decorators,
     build_member_function,
     decorators_of,
+    enumerator_decorators,
     extract_params,
     is_macro_call_declarator,
     function_declarator_of,
@@ -746,6 +747,49 @@ def _reads_as_whole_define(root: Node, cut: _CutDefine) -> bool:
     )
 
 
+_ENUM_MACRO = re.compile(rb"[ \t]*([A-Z][A-Z0-9_]*)[ \t]*\(")
+_ENUM_MEMBER_END = re.compile(rb"[ \t\r\n]*[=,}]")
+
+
+def _enumerator_macros(root: Node, source: bytes) -> list[tuple[tuple[int, int], int]]:
+    """Macros with arguments after an enum member's name: ``CURLSSLBACKEND_NSS
+    CURL_DEPRECATED(8.3.0, "") = 3,``. The grammar reads the member up to its name and puts the
+    macro and the ``= value`` in errors, so the value is lost. A candidate is a macro in capitals
+    right after an enumerator that the grammar followed with an error, ending before ``=``,
+    ``,`` or ``}``; the member's start is kept so the second parse can be checked."""
+    if not root.has_error:
+        return []
+    found = []
+    stack = [root]
+    while stack:
+        node = stack.pop()
+        if node.type != "enumerator":
+            stack.extend(node.children)
+            continue
+        after = node.next_sibling
+        m = _ENUM_MACRO.match(source, node.end_byte)
+        if after is None or after.type != "ERROR" or m is None:
+            continue
+        closed = _close_paren(source, m.end())
+        if closed is None or _ENUM_MEMBER_END.match(source, closed[0] + 1) is None:
+            continue
+        found.append(((m.start(1), closed[0] + 1), node.start_byte))
+    return found
+
+
+def _reads_as_enumerator(root: Node, macro: tuple[tuple[int, int], int]) -> bool:
+    """Whether the member now parses whole past the blanked macro, in an enum body without an
+    error after it."""
+    (_, end), start = macro
+    node: Node | None = root.descendant_for_byte_range(start, start + 1)
+    while node is not None and node.type != "enumerator":
+        node = node.parent
+    if node is None or node.start_byte != start or node.parent is None:
+        return False
+    after = node.next_sibling
+    return not node.has_error and (after is None or after.type != "ERROR")
+
+
 def _blank(source: bytes, spans: list[tuple[int, int]]) -> bytes:
     """``source`` with ``spans`` turned to spaces; newlines stay, so lines and offsets don't
     move."""
@@ -822,6 +866,8 @@ def parse_cfamily(grammar: str, source: bytes, timeout_micros: int) -> Node:
       ``CURL_DEPRECATED(…)`` goes, and the function reads as written;
     * a block comment that ended a ``#define`` early (:func:`_cut_defines`): the comments in its
       continued body go, and it runs to its last line;
+    * a macro after an enum member's name (:func:`_enumerator_macros`): ``CURL_DEPRECATED(…)``
+      goes, and the member reads with its value;
 
     and an ``extern "C"`` guard the file's parse collapsed around is resolved as the compiler
     for the grammar's language would (:func:`_collapsed_guards`).
@@ -840,16 +886,18 @@ def parse_cfamily(grammar: str, source: bytes, timeout_micros: int) -> Node:
     attributes = _attributes_before_initializer(root, source)
     named = _macros_before_name(root, source)
     defines = _cut_defines(root, source)
+    enumerators = _enumerator_macros(root, source)
     for _ in range(2):  # blank all; if some still break, blank only the others once
         if not (
             words or wrappers or guards or members or trailing or tagged or qualifiers or attributes
-            or named or defines
+            or named or defines or enumerators
         ):
             return root
         spans = [w[0] for w in words] + [s for w in wrappers for s in w[:2]]
         spans += [s for g in guards for s in g[0]] + members + [t[0] for t in trailing]
         spans += [t[0] for t in tagged] + [q[0] for q in qualifiers] + [a[0] for a in attributes]
         spans += [n[0] for n in named] + [c for d in defines for c in d[0]]
+        spans += [e[0] for e in enumerators]
         reparsed = parse_source(grammar, _blank(source, spans), timeout_micros).root_node
         whole_words = [w for w in words if _reads_as_class(reparsed, w[1])]
         whole_wrappers = [w for w in wrappers if _reads_as_declaration(reparsed, w)]
@@ -861,15 +909,17 @@ def parse_cfamily(grammar: str, source: bytes, timeout_micros: int) -> Node:
         whole_attributes = [a for a in attributes if _reads_as_initialised(reparsed, a)]
         whole_named = [n for n in named if _reads_as_named_function(reparsed, n)]
         whole_defines = [d for d in defines if _reads_as_whole_define(reparsed, d)]
+        whole_enumerators = [e for e in enumerators if _reads_as_enumerator(reparsed, e)]
         if (whole_words, whole_wrappers, whole_guards, whole_members, whole_trailing,
-                whole_tagged, whole_qualifiers, whole_attributes, whole_named, whole_defines) == (
+                whole_tagged, whole_qualifiers, whole_attributes, whole_named, whole_defines,
+                whole_enumerators) == (
                     words, wrappers, guards, members, trailing, tagged, qualifiers, attributes,
-                    named, defines):
+                    named, defines, enumerators):
             return reparsed
         words, wrappers, guards = whole_words, whole_wrappers, whole_guards
         members, trailing, tagged = whole_members, whole_trailing, whole_tagged
         qualifiers, attributes, named = whole_qualifiers, whole_attributes, whole_named
-        defines = whole_defines
+        defines, enumerators = whole_defines, whole_enumerators
     return root
 
 
@@ -1184,6 +1234,9 @@ def build_enum(
         if capture
         else []
     )
+    members = [c for c in body.named_children if c.type == "enumerator"]
+    for member, statement in zip(members, statements, strict=False):
+        statement.decorators = enumerator_decorators(member, source)
     return cls, statements
 
 
