@@ -529,6 +529,82 @@ def _reads_as_definition(root: Node, macro: tuple[tuple[int, int], int]) -> bool
     return True
 
 
+#: ``name[N] __attribute__((aligned(16))) =`` (or ``;``) — a candidate attribute (or an
+#: attribute macro in capitals) between a declarator and its initializer or the end.
+_ATTRIBUTE_BEFORE_INIT = re.compile(rb"(?<=[\]\w])[ \t]*\b(__attribute__[ \t]*\(\(|[A-Z][A-Z0-9_]*[ \t]*\()")
+_INIT_NEXT = re.compile(rb"[ \t\r\n]*(?:=(?!=)|;)")
+
+
+def _attributes_before_initializer(root: Node, source: bytes) -> list[tuple[tuple[int, int], int]]:
+    """Attributes between a declarator and its initializer: ``float acc[8]
+    __attribute__((aligned(32))) = { 0 };``. The grammar reads an attribute in front of a
+    declarator but not here; the declaration breaks and its error runs on over what follows (a
+    whole file of functions). The same holds before the ``;`` of a declaration without an
+    initializer (``int8_t buf[64] __attribute__((aligned(16)));``) — there only
+    ``__attribute__`` itself, as a macro before ``;`` can be a parameter list (``int f
+    OF((int a));``). A candidate counts only where the grammar failed on it and ``=`` or ``;``
+    follows; that offset is kept so the second parse can be checked to read a declaration
+    there."""
+    if not root.has_error:
+        return []
+    found = []
+    for m in _ATTRIBUTE_BEFORE_INIT.finditer(source):
+        node: Node | None = root.descendant_for_byte_range(m.start(1), m.start(1) + 1)
+        failed = False
+        while node is not None:
+            if node.type == "ERROR" or (node.parent is not None and node.has_error):
+                failed = True  # an error, or a broken node below the file's root
+            if node.type in ("comment", "preproc_arg", "string_literal"):
+                failed = False
+                break
+            node = node.parent
+        if not failed:
+            continue
+        closed = _close_paren(source, m.end())
+        if closed is None:
+            continue
+        end = closed[0] + 1
+        if source[m.start(1):m.start(1) + 13] == b"__attribute__":
+            if not source.startswith(b")", end):
+                continue
+            end += 1  # `__attribute__((…))` closes twice
+        equals = _INIT_NEXT.match(source, end)
+        if equals is None:
+            continue
+        if source[equals.end() - 1] == 0x3B and not source.startswith(b"__attribute__", m.start(1)):
+            continue  # `int f OF((int a));`: before `;` a macro can be a parameter list
+        found.append(((m.start(1), end), equals.end() - 1))
+    return found
+
+
+def _reads_as_initialised(root: Node, attribute: tuple[tuple[int, int], int]) -> bool:
+    """Whether the ``=`` after a blanked attribute now belongs to an initialised declarator of a
+    declaration (or the ``;`` ends one) outside any error, with no error of its own in its
+    header."""
+    at = attribute[1]
+    node: Node | None = root.descendant_for_byte_range(at, at + 1)
+    if node is None or node.parent is None:
+        return False
+    if node.type == "=":
+        if node.parent.type != "init_declarator":
+            return False
+        decl = node.parent.parent
+    elif node.type == ";":
+        decl = node.parent
+    else:
+        return False
+    if decl is None or decl.type != "declaration" or any(
+        c.type == "ERROR" or c.is_missing for c in decl.children
+    ):
+        return False
+    up: Node | None = decl
+    while up is not None:
+        if up.type == "ERROR":
+            return False
+        up = up.parent
+    return True
+
+
 def _blank(source: bytes, spans: list[tuple[int, int]]) -> bytes:
     """``source`` with ``spans`` turned to spaces; newlines stay, so lines and offsets don't
     move."""
@@ -598,6 +674,9 @@ def parse_cfamily(grammar: str, source: bytes, timeout_micros: int) -> Node:
       ``UNITTEST`` goes, and ``struct stsentry *hsts_check(…)`` reads as written;
     * a qualifier macro that made a C++ definition read as a variable
       (:func:`_misread_qualifier_macros`): ``RESTRICT`` goes, and the definition reads as written;
+    * an attribute between a declarator and its initializer
+      (:func:`_attributes_before_initializer`): ``__attribute__((aligned(16)))`` goes, and the
+      declaration reads as written;
 
     and an ``extern "C"`` guard the file's parse collapsed around is resolved as the compiler
     for the grammar's language would (:func:`_collapsed_guards`).
@@ -613,12 +692,15 @@ def parse_cfamily(grammar: str, source: bytes, timeout_micros: int) -> Node:
     trailing = _trailing_macros(root, source)
     tagged = _tag_type_macros(root, source)
     qualifiers = _misread_qualifier_macros(root, source) if grammar != "c" else []
+    attributes = _attributes_before_initializer(root, source)
     for _ in range(2):  # blank all; if some still break, blank only the others once
-        if not (words or wrappers or guards or members or trailing or tagged or qualifiers):
+        if not (
+            words or wrappers or guards or members or trailing or tagged or qualifiers or attributes
+        ):
             return root
         spans = [w[0] for w in words] + [s for w in wrappers for s in w[:2]]
         spans += [s for g in guards for s in g[0]] + members + [t[0] for t in trailing]
-        spans += [t[0] for t in tagged] + [q[0] for q in qualifiers]
+        spans += [t[0] for t in tagged] + [q[0] for q in qualifiers] + [a[0] for a in attributes]
         reparsed = parse_source(grammar, _blank(source, spans), timeout_micros).root_node
         whole_words = [w for w in words if _reads_as_class(reparsed, w[1])]
         whole_wrappers = [w for w in wrappers if _reads_as_declaration(reparsed, w)]
@@ -627,13 +709,14 @@ def parse_cfamily(grammar: str, source: bytes, timeout_micros: int) -> Node:
         whole_trailing = [t for t in trailing if _reads_with_trailing_macro_gone(reparsed, t)]
         whole_tagged = [t for t in tagged if _reads_with_tag_type(reparsed, t)]
         whole_qualifiers = [q for q in qualifiers if _reads_as_definition(reparsed, q)]
+        whole_attributes = [a for a in attributes if _reads_as_initialised(reparsed, a)]
         if (whole_words, whole_wrappers, whole_guards, whole_members, whole_trailing,
-                whole_tagged, whole_qualifiers) == (
-                    words, wrappers, guards, members, trailing, tagged, qualifiers):
+                whole_tagged, whole_qualifiers, whole_attributes) == (
+                    words, wrappers, guards, members, trailing, tagged, qualifiers, attributes):
             return reparsed
         words, wrappers, guards = whole_words, whole_wrappers, whole_guards
         members, trailing, tagged = whole_members, whole_trailing, whole_tagged
-        qualifiers = whole_qualifiers
+        qualifiers, attributes = whole_qualifiers, whole_attributes
     return root
 
 

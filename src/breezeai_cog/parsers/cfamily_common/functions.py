@@ -827,6 +827,7 @@ def decorators_of(node: Node, source: bytes, read: DeclarationRead) -> list[Deco
     if (trailing := trailing_decorator(node, source)) is not None:
         found.append((node.end_byte, [trailing]))
     found.extend((at, [d]) for at, d in _tag_type_macro(node, source))
+    found.extend((at, [d]) for at, d in _initializer_attributes(node, source))
     return [d for _, ds in sorted(found, key=lambda f: f[0]) for d in ds]
 
 
@@ -848,6 +849,46 @@ def _tag_type_macro(node: Node, source: bytes) -> list[tuple[int, Decorator]]:
     if m is None or m.group(1) in (b"static", b"extern", b"inline", b"const", b"volatile"):
         return []
     return [(m.start(1), Decorator(name=m.group(1).decode()))]
+
+
+_ATTRIBUTE_TEXT = re.compile(rb"\s*__attribute__\s*\(\((.*)\)\)\s*", re.S)
+_ATTRIBUTE_ITEM = re.compile(rb"\s*([A-Za-z_]\w*)\s*(?:\((.*)\))?\s*", re.S)
+
+
+def _initializer_attributes(node: Node, source: bytes) -> list[tuple[int, Decorator]]:
+    """The attribute between a variable's declarator and its initializer (or ``;``), ``lut[64]
+    __attribute__((aligned(VLEN))) = {…}`` → ``aligned`` with ``VLEN``. It was blanked before
+    parsing (``classes.parse_cfamily``), so it is the text between the declarator and the ``=``
+    that no node covers."""
+    declarator = node.child_by_field_name("declarator") if node.type == "declaration" else None
+    if declarator is None:
+        return []
+    if declarator.type == "init_declarator":  # `lut[64] __attribute__((…)) = {…}`
+        inner = declarator.child_by_field_name("declarator")
+        stop = next((c for c in declarator.children if c.type == "="), None)
+    elif function_declarator_of(declarator) is None:  # `buf[64] __attribute__((…));`
+        inner = declarator
+        stop = node.children[-1] if node.children and node.children[-1].type == ";" else None
+    else:
+        return []  # a prototype's trailing attribute is `trailing_decorator`'s
+    if inner is None or stop is None:
+        return []
+    start, end = inner.end_byte, stop.start_byte
+    m = _ATTRIBUTE_TEXT.fullmatch(source, start, end)
+    items = _split_args(m.group(1)) if m is not None else []
+    if m is None:
+        bare = _TRAILING_TEXT.fullmatch(source, start, end)
+        if bare is None or bare.group(2) is None:
+            return []
+        args = _split_args(bare.group(2))
+        return [(start, Decorator(name=bare.group(1).decode(), args=args))]
+    out = []
+    for item in items:
+        im = _ATTRIBUTE_ITEM.fullmatch(item.encode())
+        if im is not None:
+            args = _split_args(im.group(2)) if im.group(2) is not None else []
+            out.append((start, Decorator(name=im.group(1).decode(), args=args)))
+    return out
 
 
 _TRAILING_TEXT = re.compile(rb"\s*([A-Za-z_]\w*)\s*(?:\((.*)\))?\s*", re.S)

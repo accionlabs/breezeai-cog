@@ -516,6 +516,19 @@ C++.
 > also how a type and a name-building macro look (`int MANGLE(f)(…)`), so the name would be a
 > guess.
 
+> **Decision —** an attribute between a declarator and its initializer or `;` (`static const
+> __fp16 lut[64] __attribute__((aligned(VLEN))) = {…};`, `float buf[8] __attribute__((aligned(16)));`)
+> is blanked in the shared second parse; on a file-scope variable it is the decorator (`aligned`
+> with `VLEN`). The grammar reads `__attribute__` in front of a declarator but not there: the
+> declaration breaks and its error runs on over what follows, often the whole file. A candidate
+> is `__attribute__((…))`, or before `=` an attribute macro in capitals, right after a name or
+> `]`, where the grammar failed on it; before `;` only `__attribute__` itself counts, since a
+> macro there can be a parameter list (`int f OF((int a));`). The blank is kept only where a
+> declaration then reads whole through that `=` or `;`.
+> **Why:** aligned buffers are written this way in SIMD and DSP code: llama.cpp's Hexagon
+> kernels lost about 70 functions to ten such declarations. **Cost:** such a file is parsed
+> twice (sharing the class-head parse).
+
 > **Decision —** a macro in front of a `struct` / `union` / `enum` return type (`UNITTEST struct
 > stsentry *hsts_check(…)`, `GGML_API struct ggml_tensor * ggml_add(…);`) is the decorator, and
 > the tagged type the `returnType` (`struct stsentry`). A tag type can't follow a type, so the

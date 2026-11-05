@@ -705,6 +705,30 @@ def test_a_macro_before_a_struct_return_type_is_its_decorator(tmp_path, parser) 
     assert decls["origin"].decorators == []
 
 
+@pytest.mark.parametrize("parser", [CParser(), CppParser()], ids=["c", "cpp"])
+def test_an_attribute_before_an_initializer_is_read_past(tmp_path, parser) -> None:
+    # The grammar reads `__attribute__` in front of a declarator, not between it and `=`: the
+    # declaration broke and its error ran on over the functions after it. It is blanked for a
+    # second parse; on a file-scope variable it is the decorator.
+    src = (
+        "static const float lut[4] __attribute__((aligned(VLEN))) = { 1.f, 2.f, 3.f, 4.f };\n"
+        "static char buf[64] __attribute__((aligned(16)));\n"
+        "int after(int a) { return a; }\n"
+        "void kernel(void) {\n"
+        "    float acc[8] __attribute__((aligned(32))) = { 0.0f };\n"
+        "    if (acc[0] == lut[0]) use(acc);  /* x __attribute__((y)) = z */\n"
+        "}\n"
+        "int last(int b) { return after(b); }\n"
+    )
+    rec = _parse(parser, tmp_path, "k.c", src)
+    assert [f.name for f in rec.functions] == ["after", "kernel", "last"]
+    lut = next(s for s in rec.statements if s.name == "lut")
+    assert [(d.name, d.args) for d in lut.decorators] == [("aligned", ["VLEN"])]
+    assert lut.text.startswith("static const float lut[4] __attribute__((aligned(VLEN))) = {")
+    buf = next(s for s in rec.statements if s.name == "buf")
+    assert [(d.name, d.args) for d in buf.decorators] == [("aligned", ["16"])]
+
+
 def test_a_k_and_r_definition_with_a_calling_convention_macro_is_read(tmp_path) -> None:
     rec = _parse(
         CParser(), tmp_path, "gz.c",
