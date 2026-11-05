@@ -95,6 +95,27 @@ def _auto_type(value: Node | None, source: bytes) -> str | None:
     return None
 
 
+def qualifier_macro_name(param: Node) -> Node | None:
+    """The real name of a parameter written with a qualifier macro after its ``*``: ``float *
+    GGML_RESTRICT s``. The grammar takes the macro for the name and leaves ``s`` in an error after
+    the parameter; no ``T * A B`` is valid C or C++, so ``A`` is a macro (``RESTRICT``, ``FAR``)
+    and ``B`` the name. Only a lone word right before ``,`` or ``)`` counts."""
+    err = param.next_sibling
+    after = err.next_sibling if err is not None else None
+    if (
+        err is None or err.type != "ERROR" or err.child_count != 1
+        or err.children[0].type != "identifier"
+        or after is None or after.type not in (",", ")")
+    ):
+        return None
+    node = param.child_by_field_name("declarator")
+    if node is None or node.type != "pointer_declarator":
+        return None
+    while node is not None and node.type == "pointer_declarator":
+        node = node.child_by_field_name("declarator")
+    return err.children[0] if node is not None and node.type == "identifier" else None
+
+
 def _declared_name(declarator: Node | None, source: bytes) -> str | None:
     """The variable/field name inside a (possibly pointer/reference/init) declarator."""
     node = declarator
@@ -140,7 +161,11 @@ def build_type_map(body: Node | None, params: Node | None, source: bytes) -> dic
         for p in params.named_children:
             if p.type in ("parameter_declaration", "optional_parameter_declaration"):
                 bt = type_name(p.child_by_field_name("type"), source)
-                name = _declared_name(p.child_by_field_name("declarator"), source)
+                name_node = qualifier_macro_name(p)
+                name = (
+                    node_text(name_node, source) if name_node is not None
+                    else _declared_name(p.child_by_field_name("declarator"), source)
+                )
                 if name is not None and bt:
                     record_distinct(types, name, bt)
     reassigned: set[str] = set()

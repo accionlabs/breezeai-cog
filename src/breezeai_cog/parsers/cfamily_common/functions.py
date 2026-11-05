@@ -33,7 +33,7 @@ from ..callresolve import CallResolver, noop_resolver
 from ..treesitter import line_span, node_text
 from .mappings import TRANSPARENT_SCOPES
 from .statements import extract_statements
-from .types import build_type_map
+from .types import build_type_map, qualifier_macro_name
 
 #: Declarator wrappers that sit between a declaration's ``type`` and the real
 #: ``function_declarator`` / name (``int* f()``, ``int& g()``, ``int (*p)()``).
@@ -138,6 +138,27 @@ def _first_identifier(node: Node | None) -> Node | None:
     return None
 
 
+def param_name_node(param: Node) -> Node | None:
+    """A ``parameter_declaration``'s name node — past a qualifier macro
+    (:func:`qualifier_macro_name`); ``None`` when unnamed."""
+    return qualifier_macro_name(param) or _first_identifier(param.child_by_field_name("declarator"))
+
+
+def has_error_besides_qualifier_macros(node: Node) -> bool:
+    """Whether ``node`` has a parse error other than the name a qualifier macro pushed out of a
+    parameter (:func:`qualifier_macro_name`)."""
+    if not node.has_error:
+        return False
+    if node.is_missing:
+        return True
+    if node.type == "ERROR":
+        prev = node.prev_sibling
+        return prev is None or prev.type != "parameter_declaration" or (
+            qualifier_macro_name(prev) is None
+        )
+    return any(has_error_besides_qualifier_macros(c) for c in node.children)
+
+
 def extract_params(params_node: Node | None, source: bytes) -> list[Parameter]:
     """Parameters from a ``parameter_list``. Name from the declarator's identifier
     (honest-null ``""`` when unnamed); type from the ``type`` field (bare base type —
@@ -149,7 +170,7 @@ def extract_params(params_node: Node | None, source: bytes) -> list[Parameter]:
         if p.type not in ("parameter_declaration", "optional_parameter_declaration"):
             continue
         tnode = p.child_by_field_name("type")
-        name_node = _first_identifier(p.child_by_field_name("declarator"))
+        name_node = param_name_node(p)
         out.append(Parameter(
             name=node_text(name_node, source) if name_node is not None else "",
             type=node_text(tnode, source) if tnode is not None else "",
@@ -210,7 +231,11 @@ def variable_names(body: Node | None, params: Node | None, source: bytes) -> set
     def add_params(plist: Node) -> None:
         for p in plist.named_children:
             if p.type in ("parameter_declaration", "optional_parameter_declaration"):
-                name = _declared_variable(p.child_by_field_name("declarator"), source)
+                name_node = qualifier_macro_name(p)
+                name = (
+                    node_text(name_node, source) if name_node is not None
+                    else _declared_variable(p.child_by_field_name("declarator"), source)
+                )
                 if name:
                     names.add(name)
 
@@ -473,7 +498,7 @@ def _macro_prefixed(node: Node, source: bytes) -> bool:
         return False
     ret = node.child_by_field_name("type")
     declarator = node.child_by_field_name("declarator")
-    if ret is None or declarator is None or declarator.has_error:
+    if ret is None or declarator is None or has_error_besides_qualifier_macros(declarator):
         return False
     if ret.type != "type_identifier" and (
         _sized_macro(ret) is None

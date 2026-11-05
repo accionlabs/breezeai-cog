@@ -542,6 +542,33 @@ def test_the_index_parse_honours_the_parse_timeout(tmp_path) -> None:
 
 
 @pytest.mark.parametrize("parser", [CParser(), CppParser()], ids=["c", "cpp"])
+def test_a_qualifier_macro_after_a_star_is_not_the_parameter_name(tmp_path, parser) -> None:
+    # `float * GGML_RESTRICT s`: the grammar takes the macro for the name and leaves `s` in an
+    # error. No `T * A B` is valid, so `s` is the name — in definitions, in prototypes (which a
+    # macro in front of the type no longer blocks) and in the variables a body can't call.
+    src = (
+        "API void q(const float * GGML_RESTRICT x, block * RESTRICT y, int k);\n"
+        "static void dot(int n, float ** FAR s, size_t bs) { use(n, s); }\n"
+    )
+    rec = _parse(parser, tmp_path, "q.c", src)
+    fns = {f.name: f for f in rec.functions}
+    assert [(p.name, p.type) for p in fns["dot"].params] == [
+        ("n", "int"), ("s", "float"), ("bs", "size_t"),
+    ]
+    decl = next(s for s in rec.statements if s.nodeType == "declaration" and s.name == "q")
+    assert [d.name for d in decl.decorators] == ["API"]
+
+
+def test_a_receiver_written_with_a_qualifier_macro_is_typed(tmp_path) -> None:
+    repo = _repo(tmp_path / "r", {
+        "m.cpp": "struct Model { int go(); };\n"
+                 "int Model::go() { return 1; }\n"
+                 "int run(const Model * RESTRICT m) { return m->go(); }\n",
+    })
+    assert _calls(_capture(repo, 1)["m.cpp"], "run") == {"go": "m.cpp"}
+
+
+@pytest.mark.parametrize("parser", [CParser(), CppParser()], ids=["c", "cpp"])
 def test_a_macro_line_in_a_struct_body_is_read_past(tmp_path, parser) -> None:
     # `LOCKEDINT_MTX_DECLARE(mtx)` expands to a member (or nothing) and has no `;`; the grammar
     # reads it as the type of the next field, which loses its own name and type.

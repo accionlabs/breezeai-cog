@@ -516,6 +516,19 @@ C++.
 > also how a type and a name-building macro look (`int MANGLE(f)(…)`), so the name would be a
 > guess.
 
+> **Decision —** a qualifier macro between a parameter's `*` and its name (`float *
+> GGML_RESTRICT s`, `float ** FAR s`) is read past: the parameter is named `s`. The grammar
+> takes the macro for the name and leaves the real name in an error right after the parameter;
+> no `T * A B` is valid C or C++, so when that error holds one bare word before the next `,` or
+> `)`, the word is the name. The parameter list then counts as clean for reading past a macro in
+> front of the return type, and the parser, the variables a body can't call and the receiver
+> types all use the same name. The macro itself is not captured (a parameter has no decorators).
+> **Why:** restrict and pointer macros are standard in performance and portable C: llama.cpp
+> had 1,330 parameters named `GGML_RESTRICT` or `RESTRICT`, and every `GGML_API` prototype with
+> one was lost. **Cost:** none — the tree is already there. In C++ a definition whose first
+> parameter is `Name * MACRO p` (no `const`, a type name) still reads as a variable initialised
+> with `Name * MACRO` and is lost, as before.
+
 > **Decision —** a macro between `class` / `struct` / `union` and the class name (`class
 > OPENVINO_API GatherMatmul : public Op { … }`) is blanked and the file is parsed a second
 > time, so the class is read as if the macro weren't written. The word is blanked only where
