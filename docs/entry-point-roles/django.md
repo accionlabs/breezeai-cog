@@ -1,6 +1,6 @@
 # Django — entry-point roles
 
-Parser: `src/breezeai_cog/parsers/python_django/` (`python-django`; URL includes, `ROOT_URLCONF` and settings across files: the `django.urlconf` fact; views declared in other files: the `django.views` fact) · Rules: [entry-point contract](../architecture/entry-points.md) · Tests: `tests/unit/test_roles_django.py`
+Parser: `src/breezeai_cog/parsers/python_django/` (`python-django`; URL includes, `ROOT_URLCONF` and settings across files: the `django.urlconf` fact; views declared in other files: the `django.views` fact; Channels consumers: the additive `django-channels` detector and the `django.channels` fact) · Rules: [entry-point contract](../architecture/entry-points.md) · Tests: `tests/unit/test_roles_django.py`
 
 The binding is the URL pattern (`path(…)` in `urlpatterns`), not the view: a view has no address of
 its own until a pattern names it. The record sits on the `path(…)` call and leads to the view in
@@ -30,5 +30,7 @@ root — or reaches from two places — has an unknown address: its patterns' `e
 | `LoginRequiredMixin`, `PermissionRequiredMixin`, `UserPassesTestMixin` as a base | Guard | the mixin in `guards`; the first two set `authRequired: true` | Runs in `dispatch`, before the method |
 | `MIDDLEWARE = [...]` in settings — only when every settings module in the repo that sets it agrees and none changes it later (`+=`, `.append`) | Guard | each middleware, as written, in `guards` of every route (outermost). `LoginRequiredMiddleware` (Django 5.1) sets `authRequired: true`, unless the view is `@login_not_required` | Runs before every view |
 | `@csrf_exempt`, `@cache_page`, `@never_cache`, `@vary_on_headers`, `@xframe_options_*`, `@sensitive_post_parameters` | None | — | Change how the response is built, not who may call |
+| Django Channels: `path(route, ChatConsumer.as_asgi())` / `re_path(…)` in a list routed by `URLRouter` (Channels 3+), or `path(route, ChatConsumer)` with a consumer class (Channels 2) | Binding | `route`, `framework: django`, `handler` = the consumer class (located). A websocket consumer (a base from `channels.generic.websocket`) → `method: WEBSOCKET`, `routeKind: ws`; an `AsyncHttpConsumer` → `method: ANY`, `routeKind: route`; another consumer → the protocol of the `ProtocolTypeRouter` key (`"websocket"` / `"http"`) it is routed under, and no record when that is unknown. Recorded by the additive `django-channels` detector (`channels.py`) | The consumer accepts the connection |
+| `ProtocolTypeRouter({"websocket": AuthMiddlewareStack(URLRouter(patterns))})` / `path(prefix, URLRouter(patterns))` | Wiring | — (the root of the Channels addresses, `/`; a nested router's prefix joined into its patterns, as `include()`). A list routed from no `ProtocolTypeRouter` the code shows, or from two places, has no address. Middleware around a router is not a guard (`AuthMiddlewareStack` only reads the session) | Points at patterns; the `django.channels` fact |
 | `requests` / `httpx` call | Outbound | `api_call` | Our code calling out |
 | Models, forms, admin `register`, signals, management commands | None | — | Not inbound HTTP |
