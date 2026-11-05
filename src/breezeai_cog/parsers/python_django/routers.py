@@ -14,14 +14,16 @@ defines, the ones its DRF bases provide, and its ``@action`` methods.
 It is an additive detector, not part of the DRF parser: ``router.register(…)`` often sits in a
 file that never imports DRF (``from shop.routers import router``), which no parser could claim.
 It records a route only on a router the code shows to be DRF's (``DefaultRouter()`` /
-``SimpleRouter()``, here or imported), so ``admin.site.register(…)`` is never one.
+``SimpleRouter()``, here or imported), so ``admin.site.register(…)`` is never one — or made from
+a repo subclass of them that keeps DRF's routes (:func:`~.views.standard_router`: it may add to
+them, never replace them).
 """
 
 from __future__ import annotations
 
-from tree_sitter import Node
-
 from pathlib import Path
+
+from tree_sitter import Node
 
 from ..additive import DetectContext, Detection, Detector, Gate, register_detector
 from ..emits import Emit
@@ -30,7 +32,7 @@ from . import drf
 from .patterns import Part, as_path, join
 from .urlconf import django_urlconf, local_routers, router_ref
 from .urls import Route, UrlFile, handler_route, record
-from .views import ResolvedClass, resolve_class
+from .views import ResolvedClass, resolve_class, standard_router
 
 
 def _routes(f: UrlFile, resolved: ResolvedClass, prefix: str | None, slash: str
@@ -56,7 +58,7 @@ def detect_routers(root: Node, source: bytes, path: str, f: UrlFile) -> list[Emi
     """The DRF routes of the ``router.register(…)`` calls of one file, for
     :func:`~..emits.apply`."""
     wiring = django_urlconf(f.ctx_index)
-    local = local_routers(root, source, f.origins)
+    local = local_routers(root, source, f.origins, path, f.imports)
     out: list[Emit] = []
     for call in calls(root):
         fn = call.child_by_field_name("function")
@@ -64,8 +66,12 @@ def detect_routers(root: Node, source: bytes, path: str, f: UrlFile) -> list[Emi
             continue
         ref = router_ref(fn.child_by_field_name("object"), source, path, local, f.imports)
         served = wiring.routers.get(ref[1], {}).get(ref[2]) if wiring is not None and ref is not None else None
-        if ref is None or (served is None and ref[2] not in local):
+        made = served[2] if served is not None else local[ref[2]][1] if ref is not None and ref[2] in local \
+            and ref[1] == path else None
+        if ref is None or (served is None and (ref[1] != path or ref[2] not in local)):
             continue  # not a DRF router the code shows
+        if made is not None and not standard_router(f.views, *made):
+            continue  # a router class of the repo's own that changes the routes DRF generates
         viewset = argument(call, source, 1, "viewset")
         target = f.target(viewset) if viewset is not None else None
         resolved = resolve_class(f.views, *target) if target is not None else None

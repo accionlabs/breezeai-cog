@@ -126,6 +126,13 @@ def _python_drf(n: int) -> str:
             f"{views}{registers}urlpatterns = router.urls\n")
 
 
+def _python_drf_router_subclass(n: int) -> str:
+    return _python_drf(n).replace(
+        "router = DefaultRouter()\n",
+        "class ApiRouter(DefaultRouter):\n    def __init__(self):\n        super().__init__()\n"
+        "        self.routes[0].mapping.update({'put': 'bulk_update'})\nrouter = ApiRouter()\n")
+
+
 def _csharp(n: int) -> str:
     body = "".join(
         f"    /// <summary>M{i}</summary>\n"
@@ -291,6 +298,7 @@ SAMPLES: dict[str, tuple[str, Callable[[int], str]]] = {
     "python-flask": ("app.py", _python_flask),
     "python-django": ("urls.py", _python_django),
     "python-drf": ("urls.py", _python_drf),
+    "python-drf-router-subclass": ("urls.py", _python_drf_router_subclass),
     "csharp": ("C.cs", _csharp),
     "xsd": ("schema.xsd", _xsd),
     "wsdl": ("service.wsdl", _wsdl),

@@ -57,6 +57,10 @@ ACTION_ROUTES: dict[str, tuple[str, bool]] = {
 }
 
 ROUTERS = frozenset({"rest_framework.routers.DefaultRouter", "rest_framework.routers.SimpleRouter"})
+#: Router methods that build the URLs and the verb → action mapping: a subclass that overrides one
+#: is not a standard router.
+ROUTER_URL_METHODS = frozenset({"get_routes", "get_urls", "get_method_map", "get_lookup_regex",
+                                "_get_dynamic_route", "urls"})
 
 #: Permission classes that reject an anonymous caller on every method.
 CERTAIN_PERMISSIONS = frozenset({
