@@ -134,6 +134,19 @@ _PLSQL_UNIT = re.compile(
     re.IGNORECASE,
 )
 
+# An unindented SQL*Plus directive that cannot begin a line of PL/SQL, so after a line ending
+# in ``;`` it ends a PL/SQL unit left without its ``/``. ``SET`` counts only with a SQL*Plus
+# option not followed by ``=`` (``SET col = …`` in an UPDATE, ``SET TRANSACTION`` and
+# ``EXECUTE IMMEDIATE`` stay PL/SQL).
+_SQLPLUS_UNIT_END = re.compile(
+    r"(?:prompt|pro|spool|rem(?:ark)?|whenever|show)(?:\s|$)"
+    r"|set\s+(?:define|echo|feedback|feed|serveroutput|serverout|verify|ver|termout|term|"
+    r"heading|head|pagesize|pages|linesize|lines|timing|scan|sqlblanklines|trimspool|trimout|"
+    r"long|escape|concat|newpage|wrap|colsep|autocommit|arraysize|numwidth|sqlprefix|tab)\b"
+    r"(?!\s*=)",
+    re.IGNORECASE,
+)
+
 
 def _strip_sqlplus(text: str) -> str:
     """Remove SQL*Plus client directive lines so the remainder is pure SQL. As in SQL*Plus,
@@ -141,7 +154,8 @@ def _strip_sqlplus(text: str) -> str:
     comment, a SQL statement not yet ended by ``;``, or a PL/SQL block (which runs to its
     ``/`` line). So ``SET col = …`` in an UPDATE and ``EXECUTE IMMEDIATE`` in a procedure
     body stay. A PL/SQL unit left without its ``/`` is taken to end where an unindented
-    ``CREATE`` follows a line ending in ``;``."""
+    ``CREATE``, or an unindented directive that cannot be PL/SQL (``_SQLPLUS_UNIT_END``),
+    follows a line ending in ``;``; that directive is dropped."""
     out: list[str] = []
     state: list[Any] = [False, False, None, None]  # [in_str, in_block, q_end, last]
     in_stmt = in_plsql = False
@@ -155,8 +169,12 @@ def _strip_sqlplus(text: str) -> str:
                 continue  # run-buffer terminator — not SQL
             if not in_stmt and _SQLPLUS_DIRECTIVE.match(line):
                 continue  # SQL*Plus directive between statements — not SQL
-            if in_plsql and ended_semicolon and re.match(r"CREATE\s", line, re.IGNORECASE):
-                in_stmt = in_plsql = False
+            if in_plsql and ended_semicolon:
+                if _SQLPLUS_UNIT_END.match(line):
+                    in_stmt = in_plsql = False
+                    continue  # unit left without its ``/`` ends; the directive is not SQL
+                if re.match(r"CREATE\s", line, re.IGNORECASE):
+                    in_stmt = in_plsql = False
         starts = not inside and not in_stmt
         state = _scan_line(line, state)
         last = state[3]
@@ -295,9 +313,10 @@ def _table(create: exp.Create, dialect: str) -> dict[str, Any]:
         if isinstance(d, exp.ColumnDef):
             ordinal += 1
             columns.append(_column(d, ordinal, dialect))
-            # A column-level ``REFERENCES t (c)`` is a foreign key on that column. MySQL and
-            # MariaDB parse it but create no constraint (only the table-level FOREIGN KEY
-            # form does), so there it is not one.
+            # A column-level ``REFERENCES t (c)`` is a foreign key on that column. Whether
+            # MySQL/MariaDB create one depends on the server version (MariaDB and MySQL up to
+            # 8.x parse and ignore it; MySQL 9.0 enforces it) and the script does not say which,
+            # so on those dialects it is left out: missing, never wrong.
             if dialect not in ("mysql", "mariadb"):
                 for cc in d.args.get("constraints") or []:
                     if isinstance(cc, exp.ColumnConstraint) and isinstance(cc.kind, exp.Reference):
@@ -387,8 +406,8 @@ def _raw_statement(stmt: str) -> str:
 
 def _sqlglot_statements(
     text: str, read: str, sample_errors: list[str]
-) -> Iterator[tuple[str, exp.Expr | None]]:
-    """Yield ``(raw_chunk, expression)`` per statement of a Postgres / MySQL / SQLite file.
+) -> Iterator[tuple[str, exp.Expr | None, str | None]]:
+    """Yield ``(raw_chunk, expression, error)`` per statement of a Postgres / MySQL / SQLite file.
 
     The file is tokenized once with sqlglot's own dialect tokenizer and cut at its ``;``
     tokens, then each chunk's tokens are parsed on their own. Because the tokenizer is the
@@ -399,8 +418,9 @@ def _sqlglot_statements(
     position also means a view that sqlglot degrades to a generic ``Command`` simply has no
     view record; it can never hand its text to a later view of the same bare name.
 
-    A chunk that fails to parse yields ``None`` (counted as failed by the caller, first few
-    errors sampled). If the tokenizer itself rejects the file (e.g. an unterminated string)
+    A chunk that fails to parse yields ``None`` and sqlglot's message as ``error``; the caller
+    samples that message only if it counts the chunk as failed, so a chunk it reads by other
+    means (a PostgreSQL program, a sequence) leaves no error behind. If the tokenizer itself rejects the file (e.g. an unterminated string)
     the old naive ``;`` split + ``parse_one`` per piece is used so partial files still yield
     whatever parses; ``raw_chunk`` is then that naive piece.
     """
@@ -414,11 +434,9 @@ def _sqlglot_statements(
             if not raw.strip():
                 continue
             try:
-                yield raw, sqlglot.parse_one(raw, read=read)
+                yield raw, sqlglot.parse_one(raw, read=read), None
             except Exception as exc2:
-                if len(sample_errors) < 5:
-                    sample_errors.append(str(exc2))
-                yield raw, None
+                yield raw, None, str(exc2)
         return
 
     parser = dialect.parser()
@@ -435,11 +453,10 @@ def _sqlglot_statements(
         if chunk_tokens:  # a blank run between two ``;`` (or trailing whitespace) is not a statement
             try:
                 parsed = parser.parse(chunk_tokens, text)
-                yield raw, parsed[0] if parsed else None
             except Exception as exc:
-                if len(sample_errors) < 5:
-                    sample_errors.append(str(exc))
-                yield raw, None
+                yield raw, None, str(exc)
+            else:
+                yield raw, parsed[0] if parsed else None, None
         chunk_tokens = []
 
 
@@ -460,6 +477,7 @@ _PG_PROG = re.compile(
 _PG_MULTIWORD_TYPE = (
     r"double\s+precision"
     r"|(?:national\s+)?(?:character|char)\s+varying(?:\s*\(\s*\d+\s*\))?"
+    r"|national\s+(?:character|char)(?:\s*\(\s*\d+\s*\))?"
     r"|bit\s+varying(?:\s*\(\s*\d+\s*\))?"
     r"|(?:timestamp|time)(?:\s*\(\s*\d+\s*\))?\s+with(?:out)?\s+time\s+zone"
     r"|interval\s+(?:year|month|day|hour|minute|second)"
@@ -547,8 +565,9 @@ def _pg_split_params(seg: str) -> list[str]:
 
 def _pg_param(item: str) -> dict[str, Any] | None:
     """``[mode] [name] type [DEFAULT | = expr]`` → ``{name, direction, dataType}``. The name is
-    optional in PostgreSQL, so an unnamed parameter has ``name: None``. A parameter that does
-    not read as one is left out rather than guessed at."""
+    optional in PostgreSQL, so an unnamed parameter has ``name: None``. ``None`` when the
+    parameter does not read as one; the caller then fails the whole program rather than
+    record a signature with a parameter missing."""
     mode = "IN"
     if mm := _PG_PARAM_MODE.match(item):
         mode = mm.group(1).upper()
@@ -609,7 +628,13 @@ def _parse_pg_program(raw: str) -> dict[str, Any] | None:
 
     schema = _pg_unquote(m.group(2)) if m.group(2) else None
     name = _pg_unquote(m.group(3))
-    parameters = [p for item in _pg_split_params(stmt[open_pos + 1 : close]) if (p := _pg_param(item))]
+    parameters: list[dict[str, Any]] = []
+    for item in _pg_split_params(stmt[open_pos + 1 : close]):
+        param = _pg_param(item)
+        if param is None:
+            # Dropping it would shift every later parameter into its place: a wrong signature.
+            raise ValueError(f"parameter not understood in CREATE {proc_type.upper()} {name}: {item[:60]}")
+        parameters.append(param)
     return {
         "name": name,
         "schema": schema,
@@ -811,7 +836,7 @@ def _parse_mysql_program(stmt: str, kind: str, kind_end: int) -> dict[str, Any] 
         )
     return_type: str | None = None
     if kind == "function" and (rm := _MY_RETURNS.match(stmt, close + 1)):
-        return_type = re.sub(r"\s+", " ", rm.group(1)).upper()
+        return_type = _my_type_text(rm.group(1))
     schema = _unquote_any(m.group(1)) if m.group(1) else None
     name = _unquote_any(m.group(2))
     return {
@@ -934,7 +959,7 @@ def parse_ddl(text: str, filepath: str | None = None) -> dict[str, Any]:
     all_indexes: list[dict] = []
     alters: list[exp.Alter] = []
 
-    for raw, stmt in _sqlglot_statements(text, read, sample_errors):
+    for raw, stmt, parse_error in _sqlglot_statements(text, read, sample_errors):
         if dialect == "postgresql":
             try:
                 program = _parse_pg_program(raw)
@@ -953,6 +978,8 @@ def parse_ddl(text: str, filepath: str | None = None) -> dict[str, Any]:
             continue
         if stmt is None:
             failed += 1
+            if parse_error and len(sample_errors) < 5:
+                sample_errors.append(parse_error)
             continue
         if isinstance(stmt, exp.Command) and (cm := _CAPTURED_CREATE.match(_raw_statement(raw))):
             failed += 1
@@ -2740,12 +2767,12 @@ def _parse_oracle_ddl(text: str) -> dict[str, Any]:
                 col["comment"] = cc
 
     for idx in indexes:
-        table = table_map.get(idx["tableName"]) or table_map.get(idx["tableFullName"])
-        if table:
-            for col in table["columns"]:
+        owner = table_map.get(idx["tableName"]) or table_map.get(idx["tableFullName"])
+        if owner:
+            for col in owner["columns"]:
                 if col["name"] in idx["columns"]:
                     col["isIndexed"] = True
-            table.setdefault("indexes", []).append(idx)
+            owner.setdefault("indexes", []).append(idx)
     for table in tables:
         table.setdefault("indexes", [])
 

@@ -1103,6 +1103,68 @@ def test_plsql_unit_without_slash_ends_at_the_next_create() -> None:
     assert sorted(t["name"] for t in parse_ddl(text, "mixed_ora.sql")["tables"]) == ["T", "U"]
 
 
+@pytest.mark.parametrize(
+    ("text", "table"),
+    [
+        (
+            "CREATE OR REPLACE TYPE t_list AS TABLE OF VARCHAR2(30);\nSET DEFINE OFF\nCREATE TABLE a (id NUMBER(10));\n",
+            "A",
+        ),
+        (
+            "CREATE OR REPLACE PROCEDURE p AS\nBEGIN\n  NULL;\nEND;\nSPOOL off\nCREATE TABLE b (id NUMBER(10));\n",
+            "B",
+        ),
+    ],
+)
+def test_directive_after_plsql_unit_without_slash_keeps_the_next_table(text: str, table: str) -> None:
+    # A directive in the gap was glued to the next CREATE, which was then lost.
+    r = parse_ddl(text, "mixed_ora.sql")
+    assert [t["name"] for t in r["tables"]] == [table]
+    assert not any("SET DEFINE" in e or "SPOOL" in e for e in r["parseStats"]["sampleErrors"])
+
+
+def test_set_column_after_semicolon_in_plsql_unit_stays_in_the_body() -> None:
+    # `SET define = …` assigns a column; it is not the SQL*Plus option and must not end the unit.
+    body = (
+        "CREATE OR REPLACE PROCEDURE p AS\nBEGIN\n  NULL;\nUPDATE t\nSET define = 1;\n"
+        "  NULL;\nEND;"
+    )
+    cleaned = _strip_sqlplus(body + "\n/\n")
+    assert "SET define = 1;" in cleaned
+    [p] = parse_ddl(body + "\n/\n", "procs_ora.sql")["procedures"]
+    assert "SET define = 1;" in p["body"]
+
+
+def test_postgres_unreadable_parameter_fails_the_program() -> None:
+    # Dropping the unread parameter made `b` look like the first and only argument.
+    r = parse_ddl(
+        "CREATE FUNCTION f(a national character(10) collate x, b int) RETURNS int AS $$ SELECT 1 $$ LANGUAGE sql;",
+        "f_pg.sql",
+    )
+    assert r["procedures"] == []
+    assert r["parseStats"]["failed"] == 1
+    assert r["parseStats"]["sampleErrors"][0].startswith("parameter not understood in CREATE FUNCTION f")
+
+
+def test_postgres_national_character_parameter() -> None:
+    r = parse_ddl(
+        "CREATE FUNCTION f(a national character(10), b int) RETURNS int AS $$ SELECT 1 $$ LANGUAGE sql;", "f_pg.sql"
+    )
+    [p] = r["procedures"]
+    assert p["parameters"] == [
+        {"name": "a", "direction": "IN", "dataType": "NATIONAL CHARACTER(10)"},
+        {"name": "b", "direction": "IN", "dataType": "INT"},
+    ]
+    # sqlglot rejects the header, but the program was read: no error is reported for it.
+    assert (r["parseStats"]["ok"], r["parseStats"]["failed"], r["parseStats"]["sampleErrors"]) == (1, 0, [])
+
+
+def test_mysql_returns_enum_keeps_value_case() -> None:
+    text = "DELIMITER $$\nCREATE FUNCTION g() RETURNS ENUM('a','B') DETERMINISTIC BEGIN RETURN 'a'; END$$\nDELIMITER ;\n"
+    [p] = parse_ddl(text, "g_mysql.sql")["procedures"]
+    assert p["returnType"] == "ENUM('a','B')"
+
+
 def test_tsql_sequence_with_bracketed_name() -> None:
     # `\b` after `]` never matched, so a bracketed sequence was skipped without a trace.
     [seq] = parse_ddl("CREATE SEQUENCE [dbo].[InvoiceSeq] START WITH 1000 INCREMENT BY 1\nGO\n", "seq_mssql.sql")[
@@ -1134,7 +1196,8 @@ def test_column_level_references_is_a_foreign_key(column: str, expected: dict) -
 
 
 def test_mysql_column_level_references_is_not_a_foreign_key() -> None:
-    # MySQL parses a column-level REFERENCES but creates no constraint for it.
+    # Whether MySQL creates a constraint from a column-level REFERENCES depends on the server
+    # version (9.0 enforces it), so it is left out: missing, never wrong.
     [t] = parse_ddl("CREATE TABLE b (`a_id` INT REFERENCES a (id));\n", "schema_mysql.sql")["tables"]
     assert t["constraints"] == []
 
