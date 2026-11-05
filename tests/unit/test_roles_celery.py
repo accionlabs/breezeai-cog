@@ -125,3 +125,38 @@ def test_delay_on_something_else_has_no_record(analyze_files) -> None:
     views = "import time\ndef run(job):\n    job.delay(3)\n    time.delay()\n"
     st = analyze_files(_repo(**{"proj/views.py": views}))
     assert _celery(st, "proj/views.py") == []
+
+
+# ── Only a Celery app's tasks and sends ───────────────────────────────────────────────────────
+def test_send_task_is_a_send_only_on_a_celery_app(analyze_files) -> None:
+    st = analyze_files(_repo(**{
+        "proj/queue.py": "class JobQueue:\n    def send_task(self, name):\n        print(name)\n\n"
+                         "queue = JobQueue()\nqueue.send_task('cleanup')\n",
+        "proj/local.py": "from celery import Celery\napp = Celery('x')\napp.send_task('a.b')\n",
+        "proj/imported.py": "from proj.celery import app as celery_app\ncelery_app.send_task('c.d')\n",
+        "proj/current.py": "from celery import current_app\ncurrent_app.send_task('e.f')\n",
+        "proj/dotted.py": "import celery\ncelery.current_app.send_task('g.h')\n",
+    }))
+    sends = {(s.path, s.endpoint) for s in _celery(st) if s.semanticType == "eventbus_send"}
+    assert sends == {("proj/local.py", "a.b"), ("proj/imported.py", "c.d"),
+                     ("proj/current.py", "e.f"), ("proj/dotted.py", "g.h")}
+
+
+def test_dot_task_decorator_is_a_task_only_on_a_celery_app(analyze_files) -> None:
+    st = analyze_files(_repo(**{"proj/jobs.py": (
+        "import scheduler\nfrom celery import shared_task, current_app\n"
+        "from proj.celery import app\n\n"
+        "@scheduler.task\ndef tick():\n    pass\n\n"
+        "@app.task(name='jobs.imported')\ndef imported():\n    pass\n\n"
+        "@current_app.task(name='jobs.current')\ndef current():\n    pass\n\n"
+        "@shared_task\ndef shared():\n    pass\n")}))
+    got = {s.handler: s.endpoint for s in _celery(st, "proj/jobs.py")
+           if s.semanticType == "eventbus_consumer"}
+    assert got == {"imported": "jobs.imported", "current": "jobs.current", "shared": None}
+
+
+def test_a_task_of_a_non_app_name_gives_no_record_even_when_the_project_uses_celery(
+        analyze_files) -> None:
+    st = analyze_files(_repo(**{"proj/other.py": (
+        "import celery\nimport scheduler\n\n@scheduler.task\ndef tick():\n    pass\n")}))
+    assert _celery(st, "proj/other.py") == []

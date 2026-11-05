@@ -21,6 +21,11 @@ written:
 Otherwise the name is unknown (``None``). The module is the file's dotted path, walking up while
 each folder has an ``__init__.py``. Collected from every file (gate: Celery markers), resolved
 once: file → function → name, and name → the function, for the Celery detector (:mod:`.celery`).
+
+Only a Celery app's tasks count. ``@shared_task`` always does; ``@<x>.task`` does when ``<x>`` is
+a Celery app (:class:`Receivers`): a variable assigned ``Celery(…)`` at module level of this file
+or of the file it is imported from, or ``celery.current_app``. ``@scheduler.task`` is not Celery,
+whatever else the project uses. The same test decides whether ``<x>.send_task(…)`` is a send.
 """
 
 from __future__ import annotations
@@ -34,6 +39,7 @@ from tree_sitter import Node
 
 from ..additive import FactSpec, index_fact, register_fact
 from ..index_common import record_distinct
+from ..python_common import ImportRefs, Origins, top_statements
 from ..treesitter import node_text
 
 FACT = "celery.tasks"
@@ -52,6 +58,8 @@ class TaskDef:
     explicit: str | None
     decorator: Node
     definition: Node
+    #: ``x`` of ``@x.task``; ``None`` for ``@shared_task``.
+    receiver: Node | None = None
 
 
 @dataclass(frozen=True)
@@ -60,6 +68,8 @@ class CeleryTasks:
     by_file: dict[str, dict[str, str | None]] = field(default_factory=dict)
     #: task name → (file, function); a name two tasks share → ``None``.
     by_name: dict[str, tuple[str, str] | None] = field(default_factory=dict)
+    #: file → the variables that hold a Celery app (``app = Celery(…)`` at module level).
+    apps: dict[str, frozenset[str]] = field(default_factory=dict)
 
 
 def celery_tasks(index: Any | None) -> CeleryTasks | None:
@@ -108,8 +118,8 @@ def positional(call: Node) -> list[Node]:
 
 
 def task_defs(root: Node, source: bytes) -> list[TaskDef]:
-    """Functions decorated ``@shared_task`` / ``@<app>.task`` (with or without arguments), in a
-    file that uses Celery."""
+    """Functions decorated ``@shared_task`` / ``@<x>.task`` (with or without arguments), in a file
+    that uses Celery. Whether ``<x>`` is a Celery app is for :class:`Receivers` to say."""
     if b"celery" not in source and b"shared_task" not in source:
         return []
     out: list[TaskDef] = []
@@ -126,16 +136,95 @@ def task_defs(root: Node, source: bytes) -> list[TaskDef]:
             call = expr if expr is not None and expr.type == "call" else None
             target = call.child_by_field_name("function") if call is not None else expr
             text = node_text(target, source) if target is not None else ""
-            if text not in ("shared_task", "celery.shared_task") and not (
-                    target is not None and target.type == "attribute" and text.endswith(".task")):
+            shared = text in ("shared_task", "celery.shared_task")
+            receiver = target.child_by_field_name("object") if target is not None and \
+                target.type == "attribute" and text.endswith(".task") else None
+            if not shared and receiver is None:
                 continue
             explicit: str | None = None
             value = kwarg(call, "name", source) if call is not None else None
             if value is not None:
                 explicit = string(value, source) or UNKNOWN_NAME
-            out.append(TaskDef(node_text(name, source), explicit, dec, fdef))
+            out.append(TaskDef(node_text(name, source), explicit, dec, fdef, receiver))
             break
     return out
+
+
+# ── Celery apps ────────────────────────────────────────────────────────────────────────────
+
+_APP_CLASSES = frozenset({"celery.Celery", "celery.app.Celery", "celery.app.base.Celery"})
+_CURRENT_APP = frozenset({"celery.current_app", "celery._state.current_app"})
+
+#: Where a receiver's app is: ``("current",)`` (``celery.current_app``), ``("local", name)`` (a
+#: variable of this file) or ``("ext", file, name)`` (a variable of the file it is imported from).
+Ref = tuple[str, ...]
+
+
+def _is_app_class(callee: str, origins: Origins) -> bool:
+    qualified = origins.qualified(callee)
+    if qualified is None:  # not imported by name: only `from celery import *` explains `Celery`
+        return callee == "Celery" and "celery" in origins.star
+    return qualified in _APP_CLASSES
+
+
+def local_apps(root: Node, source: bytes, origins: Origins) -> frozenset[str]:
+    """Module-level variables assigned ``Celery(…)`` — and never anything else (a name that is
+    also another value is not known to be an app)."""
+    state: dict[str, bool] = {}
+    for node in top_statements(root):
+        if node.type != "assignment":
+            continue
+        left, right = node.child_by_field_name("left"), node.child_by_field_name("right")
+        if left is None or left.type != "identifier":
+            continue
+        fn = right.child_by_field_name("function") if right is not None and right.type == "call" else None
+        app = fn is not None and _is_app_class(node_text(fn, source), origins)
+        name = node_text(left, source)
+        state[name] = state.get(name, True) and app
+    return frozenset(name for name, app in state.items() if app)
+
+
+class Receivers:
+    """Whether an expression (``app`` of ``app.task`` / ``app.send_task``) is a Celery app."""
+
+    def __init__(self, root: Node, source: bytes, repo_root: Path | None, rel: str) -> None:
+        self._source = source
+        self._origins = Origins(root, source)
+        self.local = local_apps(root, source, self._origins)
+        self._imports = ImportRefs(root, source, repo_root, rel)
+
+    def ref(self, expr: Node | None) -> Ref | None:
+        if expr is None:
+            return None
+        text = node_text(expr, self._source)
+        if self._origins.qualified(text) in _CURRENT_APP:
+            return ("current",)
+        if expr.type == "identifier":
+            if text in self.local and self._imports.get(text) is None:
+                return ("local", text)
+            ref = self._imports.get(text)
+            return ("ext", ref[1], ref[2]) if ref is not None and ref[0] == "symbol" else None
+        if expr.type == "attribute":  # `proj_celery.app`: a module imported, its variable
+            obj, attr = expr.child_by_field_name("object"), expr.child_by_field_name("attribute")
+            ref = self._imports.get(node_text(obj, self._source)) \
+                if obj is not None and obj.type == "identifier" else None
+            if ref is not None and ref[0] == "module" and attr is not None:
+                return ("ext", ref[1], node_text(attr, self._source))
+        return None
+
+    def task_ref(self, task: TaskDef) -> Ref | None:
+        """The app a task is registered on: ``("shared",)`` for ``@shared_task``."""
+        return ("shared",) if task.receiver is None else self.ref(task.receiver)
+
+
+def is_app(ref: Ref | None, apps: dict[str, frozenset[str]]) -> bool:
+    """Whether ``ref`` (from :meth:`Receivers.ref` / :meth:`~Receivers.task_ref`) is a Celery
+    app, given the module-level apps of every file."""
+    if ref is None:
+        return False
+    if ref[0] in ("shared", "current", "local"):
+        return True
+    return ref[2] in apps.get(ref[1], frozenset())
 
 
 def beat_entries(root: Node, source: bytes) -> Iterator[tuple[Node, Node | None, Node | None]]:
@@ -181,7 +270,8 @@ def module_name(rel: str, repo_root: Path | None) -> str | None:
 class _FileTasks:
     rel: str
     module: str | None
-    tasks: tuple[tuple[str, str | None], ...]  # (function, explicit name)
+    tasks: tuple[tuple[str, str | None, Ref | None], ...]  # (function, explicit name, its app)
+    apps: frozenset[str]  # module-level Celery app variables
     used: frozenset[str]  # task names written as literals
     modules: frozenset[str]  # task modules named in Celery's configuration
 
@@ -193,7 +283,8 @@ def _strings(node: Node | None, source: bytes) -> list[str]:
 
 
 def _collect(root: Node, source: bytes, rel: str, repo_root: Path | None) -> _FileTasks | None:
-    tasks = tuple((t.function, t.explicit) for t in task_defs(root, source))
+    receivers = Receivers(root, source, repo_root, rel)
+    tasks = tuple((t.function, t.explicit, receivers.task_ref(t)) for t in task_defs(root, source))
     used: set[str] = set()
     modules: set[str] = set()
     for _, task, _ in beat_entries(root, source):
@@ -219,18 +310,22 @@ def _collect(root: Node, source: bytes, rel: str, repo_root: Path | None) -> _Fi
             name = node_text(left, source).rsplit(".", 1)[-1] if left is not None else ""
             if name in _CONFIG_LISTS:
                 modules.update(_strings(node.child_by_field_name("right"), source))
-    if not tasks and not used and not modules:
+    if not tasks and not used and not modules and not receivers.local:
         return None
-    return _FileTasks(rel, module_name(rel, repo_root), tasks, frozenset(used), frozenset(modules))
+    return _FileTasks(rel, module_name(rel, repo_root), tasks, receivers.local,
+                      frozenset(used), frozenset(modules))
 
 
 def _resolve(values: list[_FileTasks], index: object) -> CeleryTasks | None:
     used = {n for v in values for n in v.used}
     modules = {m for v in values for m in v.modules}
+    apps = {v.rel: v.apps for v in values if v.apps}
     by_file: dict[str, dict[str, str | None]] = {}
     by_name: dict[str, tuple[str, str] | None] = {}
     for v in values:
-        for function, explicit in v.tasks:
+        for function, explicit, app in v.tasks:
+            if not is_app(app, apps):  # `@scheduler.task`: not a Celery task
+                continue
             name: str | None
             if explicit is not None:
                 name = None if explicit == UNKNOWN_NAME else explicit
@@ -240,7 +335,7 @@ def _resolve(values: list[_FileTasks], index: object) -> CeleryTasks | None:
             record_distinct(by_file.setdefault(v.rel, {}), function, name)
             if name is not None:
                 record_distinct(by_name, name, (v.rel, function))
-    return CeleryTasks(by_file, by_name) if by_file else None
+    return CeleryTasks(by_file, by_name, apps) if by_file or apps else None
 
 
 register_fact(FactSpec(

@@ -10,11 +10,14 @@
                 "schedule": crontab(hour=2, minute=0)}                    handler cleanup
     sender.add_periodic_task(30.0, ping.s())      → timer              celery  PERIODIC 30000
 
-* **Task** (binding, at its decorator): ``endpoint`` is its name from the ``celery.tasks`` fact
+* **Task** (binding, at its decorator): ``@shared_task`` or ``@<app>.task`` on a Celery app —
+  never ``@scheduler.task``. ``endpoint`` is its name from the ``celery.tasks`` fact
   (:mod:`.celery_tasks`) — given by ``name=``, or Celery's default name when the code confirms
   it; otherwise empty, never a guess.
 * **Send** (outbound): ``.delay(…)`` / ``.apply_async(…)`` on a task of this file or one imported
-  from another file (an aliased import is followed to the original name); ``send_task("…")``.
+  from another file (an aliased import is followed to the original name); ``send_task("…")`` on a
+  Celery app (``Celery(…)`` of this file or of the file it is imported from, or
+  ``celery.current_app`` — not any object with a ``send_task`` method).
   ``endpoint`` is the task's name, written as its consumer writes it.
 * **Beat entry / periodic task** (binding, a second trigger of the task, like a GraphQL
   subscription's topic): ``endpoint`` the schedule — ``crontab(…)`` as a cron expression
@@ -32,7 +35,7 @@ from ..emits import Emit
 from ..treesitter import first_line, node_text
 from .celery_tasks import (
     UNKNOWN_NAME,
-    beat_entries, celery_tasks, kwarg, positional, string, task_defs, walk,
+    Receivers, beat_entries, celery_tasks, is_app, kwarg, positional, string, task_defs, walk,
 )
 
 _SENDS = frozenset({"delay", "apply_async"})
@@ -136,7 +139,9 @@ def _detect(dc: DetectContext) -> Detection | None:
     functions = {(f.name, f.startLine): f for f in record.functions}
     found: list[Emit] = []
 
-    defs = task_defs(dc.root, source)
+    apps = fact.apps if fact is not None else {}
+    receivers = Receivers(dc.root, source, dc.ctx.repo_root, path)
+    defs = [t for t in task_defs(dc.root, source) if is_app(receivers.task_ref(t), apps)]
     mine = {t.function: t.definition.start_point[0] + 1 for t in defs}
     for t in defs:
         line = t.definition.start_point[0] + 1
@@ -203,6 +208,8 @@ def _detect(dc: DetectContext) -> Detection | None:
                 found.append(Emit(node, {"semanticType": "eventbus_send", "framework": "celery",
                                          "endpoint": name_of(ref)}, enrich="own"))
         elif method == "send_task":
+            if not is_app(receivers.ref(fn_node.child_by_field_name("object")), apps):
+                continue  # a user class's own `send_task` method
             args = positional(node)
             found.append(Emit(node, {"semanticType": "eventbus_send", "framework": "celery",
                                      "endpoint": string(args[0], source) if args else None},
