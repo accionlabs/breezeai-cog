@@ -292,7 +292,7 @@ discoverable. Skip `.vue` and all of that goes with it.
 | `.razor` | `razor` | `component` | same, plus `@code { }` methods as **Functions** |
 | `.aspx` `.ascx` `.master` | `aspnet-webforms` | `template` | `element` / `attribute`, with `handler=` for `On<Event>` wiring |
 | `.vue` | `vue` | `component` | `directive_attribute`, `interpolation`, plus `<script>` Functions and Classes |
-| `.jsp` `.jspx` `.jspf` | `jsp` | `template` | a page served directly (outside `WEB-INF`) → a `route` (`routeKind: page`, its URL); `jsp_directive`, `el_expression`, `jsp_comment`, prefixed `element`s (actions, JSTL, custom tags); `<%! %>` methods as **Functions**, scriptlet code as Java statements; includes, tag files, `.tld`s and imported classes as `importFiles`; links and Struts2 tags (`s:form`, `s:url`) to actions and pages as `navigation` |
+| `.jsp` `.jspx` `.jspf` | `jsp` | `template` | a page served directly (outside `WEB-INF`) → a `route` (`routeKind: page`, its URL); directives, EL and JSP comments (`nodeType: synthetic` — there is no JSP grammar; directives keep their keyword in `name`, comments carry `semanticType: comment`), prefixed `element`s (actions, JSTL, custom tags); `<%! %>` methods as **Functions**, scriptlet code as Java statements; includes, tag files, `.tld`s and imported classes as `importFiles`; links and Struts2 tags (`s:form`, `s:url`) to actions and pages as `navigation` |
 | `.tag` `.tagx` | `jsp` | `component` | same as a page |
 
 `uiRole` separates a **template** (a view rendered by something else) from a **component** (a

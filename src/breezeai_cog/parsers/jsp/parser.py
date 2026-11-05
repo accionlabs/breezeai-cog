@@ -185,12 +185,12 @@ class JspParser(BaseParser):
                 if i.kind == "comment":
                     statements.append(_statement(
                         src, lines, i.start, i.end, path, fid, seen_ids, ctx.statement_text_limit,
-                        nodeType="jsp_comment", semanticType="comment"))
+                        nodeType="synthetic", semanticType="comment"))
             if not page.el_ignored(settings, tag_file):
                 for start, end in el_spans(markup, deferred=page.deferred(settings)):
                     statements.append(_statement(
                         src, lines, start, end, path, fid, seen_ids, ctx.statement_text_limit,
-                        nodeType="el_expression",
+                        nodeType="synthetic",
                         name=src[start + 2:end - 1].decode("utf-8", "replace").strip()))
         if any(i.kind in CODE_KINDS for i in islands):
             statements.extend(_java(src, islands, path, fid, ctx, seen_ids, functions, classes))
@@ -385,7 +385,7 @@ class _Page:
             attrs = directive_attrs(src, i)
             if out is not None:
                 out.append(_statement(src, lines, i.start, i.end, self.path, fid, seen_ids, limit,
-                                      nodeType="jsp_directive", name=i.name))
+                                      nodeType="synthetic", name=i.name))
             if i.name == "include":
                 for key, value in attrs:
                     if key == "file":
@@ -514,7 +514,7 @@ class _Page:
             if nav is None or nav[1] is None:
                 continue
             out.append(_statement(src, lines, m.start(), m.end(), self.path, fid, seen_ids, limit,
-                                  nodeType="element", name=tag, semanticType="route",
+                                  nodeType="synthetic", name=tag, semanticType="route",
                                   routeKind="navigation", framework=nav[0], endpoint=nav[1]))
 
     def _navigation(self, tag: str, attrs: dict[str, str]) -> tuple[str, str | None] | None:

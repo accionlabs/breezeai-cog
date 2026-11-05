@@ -633,3 +633,7 @@ def test_url_tag_inside_an_attribute_is_navigation(analyze_files) -> None:
            and s.path == f"{WEB}/WEB-INF/home.jsp" for n, e in [(s.name, s.endpoint)]]
     assert sorted(got) == [("c:url", "/help.jsp", 4), ("s:url", "/p/edit.action", 5),
                            ("s:url", "/p/list.action", 3)]
+    # A tag found inside an attribute has no grammar node; the real element keeps its own.
+    kinds = {s.startLine: s.nodeType for s in st if s.routeKind == "navigation"
+             and s.path == f"{WEB}/WEB-INF/home.jsp"}
+    assert kinds == {3: "synthetic", 4: "synthetic", 5: "element"}

@@ -1,7 +1,9 @@
 """Capability metadata for the JSP parser.
 
 There is no JSP tree-sitter grammar, so the JSP constructs themselves (directives, EL, JSP
-comments) are found by :mod:`.scanner` and carry the names the JSP specification gives them.
+comments, and URL tags nested inside another tag's attribute) are found by :mod:`.scanner` and
+have no grammar node: their records are ``synthetic``. Directives keep their keyword in ``name``,
+EL its expression, and comments carry ``semanticType: comment``.
 Markup is parsed with the ``html`` grammar and scriptlet code with the ``java`` grammar, so
 those statements keep their real grammar node types.
 """
@@ -17,8 +19,8 @@ EXTENSIONS: tuple[str, ...] = (".jsp", ".jspx", ".jspf", ".tag", ".tagx")
 #: Tag files are reusable components; everything else is a view.
 TAG_FILE_EXTENSIONS: tuple[str, ...] = (".tag", ".tagx")
 
-#: Construct names from the JSP specification (found by the scanner, not a grammar).
-JSP_TYPES: list[str] = ["jsp_directive", "jsp_comment", "el_expression"]
+#: Scanner-found constructs have no grammar node.
+JSP_TYPES: list[str] = ["synthetic"]
 
 #: ``html`` grammar node types emitted: a directly served page (its root ``document``), prefixed
 #: action / custom-tag elements and links, HTML comments.

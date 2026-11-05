@@ -48,6 +48,28 @@ def _names(rec: FileRecord, node_type: str) -> list:
     return [s.name for s in _types(rec, node_type)]
 
 
+def _jsp_kind(s) -> str | None:
+    """What a scanner-found (``synthetic``) record is, told apart by its syntax."""
+    if s.nodeType != "synthetic":
+        return None
+    if s.semanticType == "comment":
+        return "comment"
+    text = s.text.lstrip()
+    if text.startswith(("<%@", "<jsp:directive")):
+        return "directive"
+    if text.startswith(("${", "#{")):
+        return "el"
+    return None
+
+
+def _jsp(rec: FileRecord, kind: str) -> list:
+    return [s for s in rec.statements if _jsp_kind(s) == kind]
+
+
+def _jsp_names(rec: FileRecord, kind: str) -> list:
+    return [s.name for s in _jsp(rec, kind)]
+
+
 def _valid(rec: FileRecord) -> None:
     errors = list(Draft202012Validator(FileRecord.model_json_schema(by_alias=True)).iter_errors(
         json.loads(to_line(rec))))
@@ -101,8 +123,8 @@ _SHOP = {
 
 def test_jsp10_directives_comments_and_actions(tmp_path) -> None:
     rec = _parse(_repo(tmp_path, _SHOP), "web/index.jsp")
-    assert _names(rec, "jsp_directive") == ["page", "include"]
-    [jsp_comment] = _types(rec, "jsp_comment")
+    assert _jsp_names(rec, "directive") == ["page", "include"]
+    [jsp_comment] = _jsp(rec, "comment")
     assert jsp_comment.semanticType == "comment" and "%> in it" in jsp_comment.text
     assert [s.semanticType for s in _types(rec, "comment")] == ["comment"]
     assert _names(rec, "element") == ["jsp:useBean", "jsp:include", "jsp:forward"]
@@ -180,7 +202,7 @@ _JSP12_XML = """<jsp:root xmlns:jsp="http://java.sun.com/JSP/Page" version="1.2"
 def test_jsp12_xml_syntax_matches_standard_syntax(tmp_path) -> None:
     repo = _repo(tmp_path, {"doc.jsp": _JSP12_XML, "part.jspf": "p"})
     rec = _parse(repo, "doc.jsp")
-    assert _names(rec, "jsp_directive") == ["page", "include"]
+    assert _jsp_names(rec, "directive") == ["page", "include"]
     assert [f.name for f in rec.functions] == ["size"]
     ifs = [s.text for s in rec.statements if s.nodeType == "if_statement"]
     assert ifs == ["if (a < b && ok) { save(); }", "if (a < b && ok) { load(); }"]
@@ -222,19 +244,19 @@ def test_jsp20_tag_files_and_prelude(tmp_path) -> None:
 
 def test_jsp20_el_in_template_text(tmp_path) -> None:
     rec = _parse(_repo(tmp_path, _TAGS), "web/cards.jsp")
-    assert _names(rec, "el_expression") == ["shop.name", "shop.phone", "cells", "a.b"]
+    assert _jsp_names(rec, "el") == ["shop.name", "shop.phone", "cells", "a.b"]
     # `\${literal}` is escaped text, never EL
-    assert "literal" not in _names(rec, "el_expression")
+    assert "literal" not in _jsp_names(rec, "el")
 
 
 def test_jsp20_tag_file(tmp_path) -> None:
     repo = _repo(tmp_path, _TAGS)
     card = _parse(repo, "web/WEB-INF/tags/ui/card.tag")
     assert card.uiRole == "component"
-    assert _names(card, "jsp_directive") == ["tag", "attribute"]
-    assert _names(card, "el_expression") == ["title"]
+    assert _jsp_names(card, "directive") == ["tag", "attribute"]
+    assert _jsp_names(card, "el") == ["title"]
     row = _parse(repo, "web/WEB-INF/tags/ui/row.tagx")
-    assert _names(row, "el_expression") == ["cells"] and _names(row, "jsp_directive") == ["tag"]
+    assert _jsp_names(row, "el") == ["cells"] and _jsp_names(row, "directive") == ["tag"]
 
 
 def test_el_is_text_before_servlet_24(tmp_path) -> None:
@@ -245,8 +267,8 @@ def test_el_is_text_before_servlet_24(tmp_path) -> None:
         "w/old.jsp": "<p>${price}</p>",
         "w/on.jsp": '<%@ page isELIgnored="false" %><p>${price}</p>',
     })
-    assert _types(_parse(repo, "w/old.jsp"), "el_expression") == []
-    assert _names(_parse(repo, "w/on.jsp"), "el_expression") == ["price"]
+    assert _jsp(_parse(repo, "w/old.jsp"), "el") == []
+    assert _jsp_names(_parse(repo, "w/on.jsp"), "el") == ["price"]
 
 
 def test_el_ignored_by_page_or_property_group(tmp_path) -> None:
@@ -258,9 +280,9 @@ def test_el_ignored_by_page_or_property_group(tmp_path) -> None:
         "w/b.jsp": '<%@ page isELIgnored="true" %>${x}',
         "w/c.jsp": "${x}",
     })
-    assert _types(_parse(repo, "w/legacy/a.jsp"), "el_expression") == []
-    assert _types(_parse(repo, "w/b.jsp"), "el_expression") == []
-    assert _names(_parse(repo, "w/c.jsp"), "el_expression") == ["x"]
+    assert _jsp(_parse(repo, "w/legacy/a.jsp"), "el") == []
+    assert _jsp(_parse(repo, "w/b.jsp"), "el") == []
+    assert _jsp_names(_parse(repo, "w/c.jsp"), "el") == ["x"]
 
 
 # ── JSP 2.1: deferred EL ───────────────────────────────────────────────────────────────────
@@ -273,9 +295,9 @@ def test_jsp21_deferred_el(tmp_path) -> None:
         "v/WEB-INF/web.xml": '<web-app version="2.4"/>',
         "v/c.jsp": "#{bean.name}",
     })
-    assert _names(_parse(repo, "w/a.jsp"), "el_expression") == ["bean.name", "now"]
-    assert _types(_parse(repo, "w/b.jsp"), "el_expression") == []
-    assert _types(_parse(repo, "v/c.jsp"), "el_expression") == []  # JSP 2.0: `#{` is text
+    assert _jsp_names(_parse(repo, "w/a.jsp"), "el") == ["bean.name", "now"]
+    assert _jsp(_parse(repo, "w/b.jsp"), "el") == []
+    assert _jsp(_parse(repo, "v/c.jsp"), "el") == []  # JSP 2.0: `#{` is text
 
 
 # ── JSP 2.2 / 2.3: EL method calls and EL 3.0 ──────────────────────────────────────────────
@@ -287,10 +309,10 @@ def test_jsp23_el_braces_strings_and_lambdas(tmp_path) -> None:
             "${'a } in a string'}\n"
             '${"x" += "}"}\n')
     rec = _parse(_repo(tmp_path, {"a.jsp": page}), "a.jsp")
-    assert _names(rec, "el_expression") == [
+    assert _jsp_names(rec, "el") == [
         "cart.total(tax)", "[1,2,3].stream().filter(x -> x > 1).toList()",
         "{'a':1, 'b':2}['a']", "'a } in a string'", '"x" += "}"']
-    assert [s.startLine for s in _types(rec, "el_expression")] == [1, 2, 3, 4, 5]
+    assert [s.startLine for s in _jsp(rec, "el")] == [1, 2, 3, 4, 5]
 
 
 # ── JSP 3.0 / 3.1: Jakarta ─────────────────────────────────────────────────────────────────
@@ -321,7 +343,7 @@ def test_jsp40_removed_constructs_are_tolerated(tmp_path) -> None:
             '  <jsp:params><jsp:param name="tz" value="UTC"/></jsp:params>\n'
             "  <jsp:fallback>No applets</jsp:fallback>\n</jsp:plugin>\n")
     rec = _parse(_repo(tmp_path, {"a.jsp": page}), "a.jsp")
-    assert _names(rec, "jsp_directive") == ["page"]
+    assert _jsp_names(rec, "directive") == ["page"]
     assert "jsp:plugin" in _names(rec, "element")
     _valid(rec)
 
@@ -386,7 +408,7 @@ def test_selection_and_capabilities() -> None:
         assert registry.select(name, b"").name == "jsp"
     caps = registry.capabilities()
     assert {".jsp", ".jspx", ".jspf", ".tag", ".tagx"} <= set(caps["templateExtensions"])
-    assert "jsp" in caps["frameworks"] and "el_expression" in caps["statementTypes"]
+    assert "jsp" in caps["frameworks"] and "synthetic" in caps["statementTypes"]
     registry.clear()
 
 
