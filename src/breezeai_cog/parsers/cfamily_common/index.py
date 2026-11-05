@@ -47,6 +47,7 @@ from ..treesitter import node_text
 from .classes import _CLASS_TYPES, _heritage, _unwrap_template, defined_type, parse_cfamily
 from .functions import (
     function_declarator_of, function_name_node, has_declaration_error, is_declared_static,
+    is_inserted_scope,
     owner_is_explicit, read_declaration, read_member, spilled_members,
 )
 from .branches import BranchFix, branch_fix, enclosing_scope
@@ -156,6 +157,7 @@ def _record_def(
         inner.type == "identifier"
         or (inner.type == "field_identifier" and class_name is not None)
         or (name is not None and inner.type == "function_declarator")
+        or (name is not None and is_inserted_scope(inner))
     ):
         # `name`: one a macro moved (read_declaration / read_member), also out of a misread
         # `LUA_API int (f)(…)`

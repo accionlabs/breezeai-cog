@@ -110,6 +110,48 @@ def is_misread_declarator(declarator: Node | None) -> bool:
     return inner is not None and inner.type == "function_declarator"
 
 
+def _inserted_scope(inner: Node | None) -> Node | None:
+    """The ``::`` the grammar inserted to join a type and a function's name, or ``None``. In
+    C++ ``GGML_API ggml_backend_t ggml_backend_cuda_init(int device)`` reads as a function
+    ``ggml_backend_t::ggml_backend_cuda_init`` (``GGML_API`` its type) — the macro taken for the
+    type and the real type for a scope, joined by a missing ``::``."""
+    node = inner
+    while node is not None and node.type == "qualified_identifier":
+        missing = next((c for c in node.children if c.is_missing), None)
+        if missing is not None:
+            return missing
+        node = node.child_by_field_name("name")
+    return None
+
+
+def is_inserted_scope(inner: Node | None) -> bool:
+    """Whether a function's ``Scope::name`` is a type and a name the grammar joined
+    (:func:`_inserted_scope`): a free function, not a method of ``Scope``."""
+    return _inserted_scope(inner) is not None
+
+
+def _inserted_scope_read(node: Node, source: bytes) -> DeclarationRead | None:
+    """The read of ``MACRO type name(…)`` that the grammar joined into ``type::name``. The name
+    is the word after the inserted ``::``. The part before is the return type only when it is
+    qualified or a template (``sycl::esimd::simd<float, 16>``), which no macro can be named
+    like; then the word in front is the macro. Before a plain name (``ggml_backend_t``) which
+    word is the type can't be told, as for ``uLong ZEXPORT f``."""
+    inner = function_name_node(function_declarator_of(node.child_by_field_name("declarator")))
+    missing = _inserted_scope(inner)
+    if inner is None or missing is None:
+        return None
+    name = source[missing.end_byte:inner.end_byte].decode("utf-8", "replace").strip()
+    if not name.isidentifier():
+        return None
+    prefix = source[inner.start_byte:missing.start_byte].decode("utf-8", "replace").strip()
+    ret = node.child_by_field_name("type")
+    if ("::" in prefix or "<" in prefix) and ret is not None and ret.type == "type_identifier":
+        return DeclarationRead(
+            name=name, return_type_known=False, macro=node_text(ret, source), return_type=prefix,
+        )
+    return DeclarationRead(name=name, return_type_known=False)
+
+
 def is_function_pointer(declarator: Node | None) -> bool:
     """Whether ``declarator`` declares a pointer (or reference) *to* a function —
     ``size_t (*read)(void *, size_t)`` — which is a variable, not a function. Its
@@ -515,10 +557,17 @@ def _macro_prefixed(node: Node, source: bytes) -> bool:
     errors = [c for c in node.children if c.type == "ERROR" or c.is_missing]
     return bool(errors) and all(
         c.type == "ERROR" and c.child_count > 0
-        and all(w.type == "identifier" for w in c.children)
+        and (
+            all(w.type in ("identifier", "primitive_type") for w in c.children)
+            or (c.child_count == 1 and c.children[0].type in _QUALIFIED_TYPES)
+        )
         and ret.end_byte <= c.start_byte and c.end_byte <= declarator.start_byte
         for c in errors
     )
+
+
+#: Types no macro can be named like: ``sycl::half``, ``std::vector<int>``.
+_QUALIFIED_TYPES = ("qualified_identifier", "template_type")
 
 
 @dataclass(frozen=True)
@@ -532,6 +581,8 @@ class DeclarationRead:
     return_type_known: bool = True
     macro: str | None = None
     return_type: str | None = None
+    #: Further macros after ``macro``, in order: ``static __device__ __forceinline__ int f``.
+    more_macros: tuple[str, ...] = ()
 
 
 #: C's type keywords. One can't be a macro's name, so a word in front of them is the macro.
@@ -546,11 +597,30 @@ def _past_macro(node: Node, source: bytes) -> DeclarationRead:
     ``LUA_API int f`` and ``uLong ZEXPORT f`` parse the same way, so which word is the type is
     unknown — unless the words after the first are all type keywords: then the first is the
     macro and the keywords are the type (qualifiers left out, as for any return type)."""
-    words = [
-        node_text(w, source) for e in node.children if e.type == "ERROR" for w in e.children
-    ]
-    type_words = [w for w in words if w not in ("const", "volatile")]
+    errors = [e for e in node.children if e.type == "ERROR"]
     ret = node.child_by_field_name("type")
+    if (
+        ret is not None and ret.type == "type_identifier" and len(errors) == 1
+        and errors[0].child_count == 1 and errors[0].children[0].type in _QUALIFIED_TYPES
+    ):  # `__dpct_inline__ sycl::half f`: a qualified type can't be a macro, so the word is
+        return DeclarationRead(
+            return_type_known=False, macro=node_text(ret, source),
+            return_type=node_text(errors[0].children[0], source),
+        )
+    words = [node_text(w, source) for e in errors for w in e.children]
+    lead = 0
+    while lead < len(words) and words[lead] not in _TYPE_KEYWORDS:
+        lead += 1
+    if (
+        ret is not None and ret.type == "type_identifier" and 0 < lead < len(words)
+        and all(w in _TYPE_KEYWORDS for w in words[lead:])
+        and any(w not in ("const", "volatile") for w in words[lead:])
+    ):  # `__device__ __forceinline__ unsigned int f`: words before keywords are all macros
+        return DeclarationRead(
+            return_type_known=False, macro=node_text(ret, source), more_macros=tuple(words[:lead]),
+            return_type=" ".join(w for w in words[lead:] if w not in ("const", "volatile")),
+        )
+    type_words = [w for w in words if w not in ("const", "volatile")]
     if (
         ret is not None and ret.type == "type_identifier" and len(type_words) == 2
         and type_words[0] in ("struct", "union", "enum") and type_words[1] not in _TYPE_KEYWORDS
@@ -647,7 +717,11 @@ def read_declaration(node: Node, source: bytes) -> DeclarationRead | None:
     and a parenthesized name (``LUA_API int (lua_gettop)(…)``, :func:`_parenthesized_name`).
     Then the name and parameters come from clean syntax; ``returnType`` is unknown in the second
     shape and in the first unless the type is keywords: ``LUA_API int`` and ``uLong ZEXPORT``
-    parse the same way, so which word is the type can't be told."""
+    parse the same way, so which word is the type can't be told. A type and name the grammar
+    joined, ``GGML_API ggml_backend_t f(…)`` read as ``ggml_backend_t::f``, is read
+    by :func:`_inserted_scope_read`."""
+    if is_inserted_scope(function_name_node(function_declarator_of(node.child_by_field_name("declarator")))):
+        return None if has_declaration_error(node) else _inserted_scope_read(node, source)
     if is_misread_declarator(node.child_by_field_name("declarator")):
         return None if has_declaration_error(node) else _parenthesized_name(node, source)
     prefixed = False
@@ -685,7 +759,10 @@ def read_member(member: Node, source: bytes) -> DeclarationRead | None:
     """How to read a class member, or ``None`` to skip it because its header is broken. A
     macro in front of its type (``ESIMD_INLINE int row(int g) const``) is read past as at file
     scope: the name and parameters come from clean syntax, and so is a misread parenthesized
-    name (``API int (f)(int a);``)."""
+    name (``API int (f)(int a);``), and a type and name the grammar joined
+    (:func:`_inserted_scope_read`)."""
+    if is_inserted_scope(function_name_node(function_declarator_of(member.child_by_field_name("declarator")))):
+        return None if has_declaration_error(member) else _inserted_scope_read(member, source)
     if is_misread_declarator(member.child_by_field_name("declarator")):
         return None if has_declaration_error(member) else _parenthesized_name(member, source)
     if not has_declaration_error(member):
@@ -805,7 +882,7 @@ def decorators_of(node: Node, source: bytes, read: DeclarationRead) -> list[Deco
                 found.append((c.start_byte, attribute_decorators(c, source)))
     ret = node.child_by_field_name("type")
     if read.macro is not None and ret is not None:
-        found.append((ret.start_byte, [Decorator(name=read.macro)]))
+        found.append((ret.start_byte, [Decorator(name=m) for m in (read.macro, *read.more_macros)]))
     elif ret is not None and ret.type == "sized_type_specifier":
         found.extend(
             (c.start_byte, [Decorator(name=node_text(c, source))])

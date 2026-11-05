@@ -57,6 +57,7 @@ from .functions import (
     defined_names,
     function_declarator_of,
     function_name_node,
+    is_inserted_scope,
     has_declaration_error,
     read_declaration,
     is_misread_declarator,
@@ -260,7 +261,7 @@ class CFamilyParser(BaseParser):
             inner = function_name_node(fd)
             if inner is None:
                 return  # not a recognizable function — do not fabricate
-            if inner.type == "qualified_identifier":
+            if inner.type == "qualified_identifier" and not is_inserted_scope(inner):
                 # `A::B::Cls::method` — the class is everything but the last component. The
                 # class's fully-qualified name is the enclosing namespace path plus that prefix,
                 # so a definition binds only to a class whose whole path matches.

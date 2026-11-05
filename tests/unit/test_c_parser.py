@@ -782,6 +782,40 @@ def test_a_comment_before_a_line_continuation_does_not_end_a_define(tmp_path, pa
     assert "/* five bytes */" in macro.text
 
 
+def test_stacked_macros_and_qualified_types_after_a_macro_are_read(tmp_path) -> None:
+    # Words before keyword types are all macros; a qualified or template type can't be a macro,
+    # so the word before it is one. C++ joins `MACRO type name(` into `type::name` with an
+    # inserted `::`: that is a free function named `name` (it was a method `type::name`
+    # returning the macro), with the type as `returnType` only when it is qualified.
+    src = (
+        "static __device__ __forceinline__ unsigned int vcmp(unsigned int a) { return a; }\n"
+        "static __dpct_inline__ sycl::half hmax(const sycl::half a) { return a; }\n"
+        "static ESIMD_INLINE sycl::esimd::simd<float, 16> unpack(int n) { return n; }\n"
+        "static A B float twice(int n) { return n; }\n"
+        "GGML_API ggml_backend_t backend_init(int device) { return 0; }\n"
+        "GGML_API ggml_backend_t backend_reg(void);\n"
+    )
+    rec = _parse(CppParser(), tmp_path, "g.hpp", src)
+    got = [(f.name, f.type, f.returnType, [d.name for d in f.decorators]) for f in rec.functions]
+    assert got == [
+        ("vcmp", "function", "unsigned int", ["__device__", "__forceinline__"]),
+        ("hmax", "function", "sycl::half", ["__dpct_inline__"]),
+        ("unpack", "function", "sycl::esimd::simd<float, 16>", ["ESIMD_INLINE"]),
+        ("twice", "function", "float", ["A", "B"]),
+        ("backend_init", "function", None, []),
+    ]
+    assert "backend_reg" in {s.name for s in rec.statements if s.nodeType == "declaration"}
+
+
+def test_a_call_to_a_function_the_grammar_joined_to_its_type_resolves(tmp_path) -> None:
+    repo = _repo(tmp_path / "r", {
+        "b.h": "GGML_API ggml_backend_t backend_init(int device);\n",
+        "b.cpp": '#include "b.h"\nGGML_API ggml_backend_t backend_init(int device) { return 0; }\n',
+        "m.cpp": '#include "b.h"\nint main() { backend_init(0); return 0; }\n',
+    })
+    assert _calls(_capture(repo, 1)["m.cpp"], "main") == {"backend_init": "b.cpp"}
+
+
 def test_a_k_and_r_definition_with_a_calling_convention_macro_is_read(tmp_path) -> None:
     rec = _parse(
         CParser(), tmp_path, "gz.c",

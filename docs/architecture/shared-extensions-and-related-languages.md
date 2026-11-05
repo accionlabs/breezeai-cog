@@ -542,6 +542,20 @@ C++.
 > the export macro on most of llama.cpp's and curl's struct-returning API was lost. **Cost:** in
 > C such a file is parsed twice (sharing the class-head parse).
 
+> **Decision —** macros in front of a return type are read past in two more shapes where the
+> macro is still certain. Several words before a keyword type are all macros (`static __device__
+> __forceinline__ unsigned int f`: both are decorators, `unsigned int` the `returnType`); a word
+> before a qualified or template type is a macro, since no macro can be named `sycl::half`
+> (`static __dpct_inline__ sycl::half f`). C++ also joins `MACRO type name(` into `type::name`
+> with a `::` it inserts (`GGML_API ggml_backend_t ggml_backend_cuda_init(int device)`): that is
+> a free function named `name` — the parser, the index and same-file resolution read it so — with
+> the type as `returnType` (and the word in front as the decorator) only when the type is
+> qualified or a template; before a plain type name, which word is the type can't be told.
+> **Why:** these were captured as methods of a class named after the return type, with the macro
+> as their `returnType` (`float2 warp_reduce_sum`, typed `method`, returning `__dpct_inline__`),
+> and calls to them didn't resolve; HIP and SYCL helpers with stacked qualifiers were lost.
+> **Cost:** none — the tree is already there.
+
 > **Decision —** a calling-convention or export macro between a keyword return type and the
 > name (`int ZEXPORT unzOpen(…)`, `void WINAPI f(…)`, also in a K&R definition or a class
 > member) is read past: the keyword type is the `returnType` and the macro the decorator. After
