@@ -104,3 +104,13 @@ def test_outbound_addresses_are_written_like_entry_points() -> None:
     assert _rules(_route(semanticType="api_call", routeKind=None, endpoint="/users/{id}")) == []
     assert _rules(_route(routeKind="navigation", endpoint="${BASE}/x")) == [("outbound", "error")]
     assert _rules(_route(semanticType="eventbus_send", endpoint="")) == [("outbound", "error")]
+
+
+def test_django_views_used_directly_are_framework_served() -> None:
+    for handler in ("TemplateView", "RedirectView", "serve", "PasswordResetView"):
+        assert _rules(_route(handler=handler, handlerLine=None, framework="django")) == [], handler
+    # A repo view, or a library's that is not Django's, still leads somewhere: a gap when it can't.
+    assert _rules(_route(handler="HomeView", handlerLine=None, framework="django")) == [("handlerLine", "gap")]
+    assert _rules(_route(handler=None, handlerLine=None, framework="django")) == [("handler", "gap")]
+    # Only for Django records.
+    assert _rules(_route(handler="serve", handlerLine=None)) == [("handlerLine", "gap")]

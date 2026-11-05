@@ -215,7 +215,7 @@ def view_routes(f: UrlFile, view: Node, depth: int = 0) -> list[Route]:
         origin = f.origins.qualified(node_text(cls, source)) or ""
         if is_django_view(origin):  # TemplateView.as_view(…): served by Django's own code
             verbs: tuple[str | None, ...] = DJANGO_VIEWS.get(short(origin), (None,))
-            return [Route(m) for m in verbs]
+            return [Route(m, short(origin)) for m in verbs]
         return [Route(None, short(node_text(cls, source)))]
     if view.type not in ("identifier", "attribute"):
         return []
