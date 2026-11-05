@@ -22,6 +22,7 @@ So each file contributes its includes, its ``ROOT_URLCONF`` and its settings
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -30,7 +31,8 @@ from tree_sitter import Node
 
 from ..additive import FactSpec, index_fact, register_fact
 from ..python_common import (
-    Origins, calls, field_text, import_refs, keyword, literal, string_list, top_statements,
+    ImportRefs, Origins, calls, field_text, import_refs, keyword, literal, positional, string_list,
+    top_statements,
 )
 from ..treesitter import node_text
 from . import drf
@@ -58,8 +60,8 @@ class FileUrlconf:
     root: str | None = None
     #: Settings set here: name → value (None: not a literal, or changed after it is set).
     settings: dict[str, tuple[str, ...] | None] = field(default_factory=dict)
-    #: DRF routers made here: variable → whether its addresses end with ``/``.
-    routers: dict[str, bool] = field(default_factory=dict)
+    #: DRF routers made here (see :data:`Router`).
+    routers: dict[str, Router] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -68,8 +70,10 @@ class DjangoUrlconf:
     served: dict[str, tuple[Part, ...] | None] = field(default_factory=dict)
     #: Settings every settings module agrees on: name → value.
     settings: dict[str, tuple[str, ...]] = field(default_factory=dict)
-    #: File → {router variable → (the patterns above its own — None when unknown, trailing ``/``)}.
-    routers: dict[str, dict[str, tuple[tuple[Part, ...] | None, bool]]] = field(default_factory=dict)
+    #: File → {router variable → (the patterns above its own — None when unknown, trailing ``/``,
+    #: the repo class it is made from — None for DRF's own)}.
+    routers: dict[str, dict[str, tuple[tuple[Part, ...] | None, bool, tuple[str, str] | None]]] = \
+        field(default_factory=dict)
 
 
 def django_urlconf(index: Any | None) -> DjangoUrlconf | None:
@@ -77,26 +81,73 @@ def django_urlconf(index: Any | None) -> DjangoUrlconf | None:
     return found
 
 
-def local_routers(root: Node, source: bytes, origins: Origins) -> dict[str, bool]:
-    """``router = DefaultRouter(trailing_slash=False)`` anywhere in the file: variable → whether
-    its addresses end with ``/``. A router whose ``trailing_slash`` is not a literal is left out."""
-    out: dict[str, bool] = {}
+#: A router variable: (whether its addresses end with ``/``, the repo class it is made from —
+#: ``(file, name)``, confirmed a standard router where it is used — or None for DRF's own).
+Router = tuple[bool, tuple[str, str] | None]
+
+
+def _router_class(fn: Node, source: bytes, rel: str, local: set[str],
+                  imports: ImportRefs | dict[str, tuple[str, ...]] | None) -> tuple[str, str] | None:
+    """(file, name) of the repo class a router constructor names: ``NetBoxRouter`` declared in
+    this file or imported, or ``routers.NetBoxRouter`` of an imported module."""
+    if fn.type == "identifier":
+        name = node_text(fn, source)
+        if name in local:
+            return rel, name
+        ref = imports.get(name) if imports is not None else None
+        return (ref[1], ref[2]) if ref is not None and ref[0] == "symbol" else None
+    obj = fn.child_by_field_name("object") if fn.type == "attribute" else None
+    ref = imports.get(node_text(obj, source)) if imports is not None and obj is not None \
+        and obj.type == "identifier" else None
+    return (ref[1], field_text(fn, "attribute", source)) if ref is not None and ref[0] == "module" else None
+
+
+def local_routers(root: Node, source: bytes, origins: Origins, rel: str = "",
+                  imports: ImportRefs | dict[str, tuple[str, ...]] | None = None) -> dict[str, Router]:
+    """``router = DefaultRouter(trailing_slash=False)`` anywhere in the file: variable → (whether
+    its addresses end with ``/``, the repo class for ``router = NetBoxRouter()`` — a class whose
+    name holds ``Router``, resolved through ``imports``). A router whose ``trailing_slash`` is
+    not a literal is left out."""
+    out: dict[str, Router] = {}
+    classes: set[str] | None = None
     for call in calls(root):
         fn, parent = call.child_by_field_name("function"), call.parent
         if fn is None or parent is None or parent.type != "assignment" or parent.child_by_field_name("right") != call:
             continue
         left = parent.child_by_field_name("left")
         written = node_text(fn, source)
-        if left is None or left.type != "identifier" or (origins.qualified(written) or "") not in drf.ROUTERS:
+        if left is None or left.type != "identifier":
             continue
-        slash = keyword(call, source, "trailing_slash")
+        origin = origins.qualified(written) or ""
+        cls: tuple[str, str] | None = None
+        if origin not in drf.ROUTERS:
+            if "Router" not in written or origin.startswith(drf.MODULE) or fn.type not in ("identifier", "attribute"):
+                continue
+            if classes is None:
+                classes = {field_text(c, "name", source) for c in _module_classes(root)}
+            cls = _router_class(fn, source, rel, classes, imports)
+            if cls is None:
+                continue
+        args = [a for a in positional(call) if a.type not in ("list_splat", "dictionary_splat")]
+        if cls is not None and args:
+            continue  # a repo class's own parameters: not certainly DRF's trailing_slash
+        slash = keyword(call, source, "trailing_slash") or (args[0] if args else None)  # SimpleRouter(True)
         flag = {"True": True, "False": False}.get(node_text(slash, source)) if slash is not None else True
         if flag is not None:
-            out[node_text(left, source)] = flag
+            out[node_text(left, source)] = (flag, cls)
     return out
 
 
-def router_ref(node: Node | None, source: bytes, rel: str, routers: dict[str, bool] | set[str],
+def _module_classes(root: Node) -> list[Node]:
+    out = []
+    for stmt in root.named_children:
+        inner = stmt.child_by_field_name("definition") if stmt.type == "decorated_definition" else stmt
+        if inner is not None and inner.type == "class_definition":
+            out.append(inner)
+    return out
+
+
+def router_ref(node: Node | None, source: bytes, rel: str, routers: Mapping[str, object] | set[str],
                imports: dict[str, tuple[str, ...]]) -> Target | None:
     """The router ``node`` names: one made in this file, an imported one (``from api.routers
     import router``) or an attribute of an imported module (``api.router``)."""
@@ -117,7 +168,7 @@ def router_ref(node: Node | None, source: bytes, rel: str, routers: dict[str, bo
 
 
 def include_target(target: tuple[str, object], source: bytes, rel: str, repo_root: Path | None,
-                   imports: dict[str, tuple[str, ...]], routers: dict[str, bool] | None = None) -> Target | None:
+                   imports: dict[str, tuple[str, ...]], routers: Mapping[str, object] | None = None) -> Target | None:
     """The repo module or DRF router an include names (``"shop.urls"``, an imported
     ``shop_urls``, ``router.urls``), or None."""
     kind, value = target
@@ -213,7 +264,8 @@ def file_urlconf(root: Node, source: bytes, rel: str, repo_root: Path | None) ->
     if root_urlconf is not None and repo_root is not None:
         out.root = module_target(root_urlconf, rel, repo_root)
     origins = Origins(root, source)
-    out.routers = local_routers(root, source, origins) if b"Router(" in source else {}
+    out.routers = local_routers(root, source, origins, rel, ImportRefs(root, source, repo_root, rel)) \
+        if b"Router" in source else {}
     found = urlconf(root, source, origins) if b"urlpatterns" in source else None
     if found is not None:
         out.has_patterns = True
@@ -259,14 +311,14 @@ def resolve_urlconf(files: dict[str, FileUrlconf]) -> DjangoUrlconf:
             (value,) = values
             assert value is not None
             settings[name] = value
-    routers: dict[str, dict[str, tuple[tuple[Part, ...] | None, bool]]] = {}
+    routers: dict[str, dict[str, tuple[tuple[Part, ...] | None, bool, tuple[str, str] | None]]] = {}
     for rel, f in files.items():
-        for var, slash in f.routers.items():
+        for var, (slash, cls) in f.routers.items():
             at = sites.get(("router", rel, var), [])
             parent_base = served(at[0][0], frozenset()) if len(at) == 1 else None
             parts = at[0][1] if len(at) == 1 else None
             routers.setdefault(rel, {})[var] = (
-                parent_base + parts if parent_base is not None and parts is not None else None, slash)
+                parent_base + parts if parent_base is not None and parts is not None else None, slash, cls)
     return DjangoUrlconf(served={m: served(m, frozenset()) for m in modules}, settings=settings,
                          routers=routers)
 
@@ -284,6 +336,6 @@ def _resolve(values: list[tuple[str, FileUrlconf]], index: Any) -> DjangoUrlconf
 
 register_fact(FactSpec(
     name=FACT, language="python", gate=(b"urlpatterns", b"ROOT_URLCONF", b"MIDDLEWARE", b"REST_FRAMEWORK",
-                                           b"Router("),
+                                           b"Router"),
     collect=_collect, resolve=_resolve,
 ))

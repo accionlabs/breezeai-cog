@@ -205,3 +205,63 @@ def test_http_client_call_is_outbound(analyze_files) -> None:
         "from shop.views import ping\nurlpatterns = [path('ping/', ping)]\n",
         "import requests\n@api_view(['GET'])\ndef ping(request):\n    return requests.get('https://example.com')\n"))
     assert [s.method for s in st if s.semanticType == "api_call"] == ["GET"]
+
+
+def _custom_router(body: str) -> dict[str, str]:
+    files = _project(
+        "from shop.views import OrderViewSet\nfrom project.routers import ShopRouter\nrouter = ShopRouter()\n"
+        "router.register('orders', OrderViewSet)\nurlpatterns = [path('api/', include(router.urls))]\n",
+        "class OrderViewSet(viewsets.ReadOnlyModelViewSet):\n    pass\n")
+    files["project/routers.py"] = "from rest_framework.routers import DefaultRouter\n" \
+                                  "class ShopRouter(DefaultRouter):\n" + body
+    return files
+
+
+def test_repo_router_subclass_that_adds_to_the_routes_is_a_standard_router(analyze_files) -> None:
+    st = analyze_files(_custom_router(
+        "    def __init__(self, *args, **kwargs):\n        super().__init__(*args, **kwargs)\n"
+        "        self.routes[0].mapping.update({'put': 'bulk_update'})\n"
+        "    def get_api_root_view(self, api_urls=None):\n        pass\n"))
+    assert sorted((s.method, s.endpoint, s.handler) for s in _eps(st)) == [
+        ("GET", "/api/orders/", "list"), ("GET", "/api/orders/<pk>/", "retrieve")]
+
+
+def test_repo_router_subclass_of_a_subclass(analyze_files) -> None:
+    files = _custom_router("    pass\n")
+    files["project/urls.py"] = files["project/urls.py"].replace(
+        "from project.routers import ShopRouter\nrouter = ShopRouter()",
+        "from project.routers import ShopRouter\nclass ApiRouter(ShopRouter):\n    pass\nrouter = ApiRouter()")
+    assert len(_eps(analyze_files(files))) == 2
+
+
+def test_repo_router_subclass_that_changes_the_routes_is_not_one(analyze_files) -> None:
+    for body in ("    routes = []\n",
+                 "    def __init__(self):\n        super().__init__()\n        self.routes = []\n",
+                 "    def get_routes(self, viewset):\n        return []\n",
+                 "    def __init__(self):\n        super().__init__(trailing_slash=False)\n",
+                 "    def __init__(self, slash=False):\n        super().__init__(slash)\n",
+                 "    def __init__(self, slash=False):\n        DefaultRouter.__init__(self, slash)\n",
+                 "    def get_urls(self):\n        return []\n",
+                 "    @property\n    def urls(self):\n        return []\n"):
+        assert _eps(analyze_files(_custom_router(body))) == [], body
+
+
+def test_router_subclass_of_another_library_is_not_one(analyze_files) -> None:
+    files = _custom_router("    pass\n")
+    files["project/routers.py"] = ("from rest_framework_nested.routers import NestedSimpleRouter\n"
+                                   "class ShopRouter(NestedSimpleRouter):\n    pass\n")
+    assert _eps(analyze_files(files)) == []
+
+
+def test_aliased_router_and_positional_trailing_slash(analyze_files) -> None:
+    st = analyze_files(_project(
+        ROUTER.replace("router = DefaultRouter()", "from rest_framework.routers import SimpleRouter as R\n"
+                                                   "router = R(False)"),
+        "class OrderViewSet(viewsets.ReadOnlyModelViewSet):\n    pass\n"))
+    assert sorted(s.endpoint for s in _eps(st)) == ["/api/orders", "/api/orders/<pk>"]
+
+
+def test_repo_router_made_with_positional_arguments_is_not_read(analyze_files) -> None:
+    files = _custom_router("    def __init__(self, *args, **kwargs):\n        super().__init__(*args, **kwargs)\n")
+    files["project/urls.py"] = files["project/urls.py"].replace("router = ShopRouter()", "router = ShopRouter(False)")
+    assert _eps(analyze_files(files)) == []

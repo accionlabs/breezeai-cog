@@ -74,6 +74,11 @@ class ClassView:
     serializer: str | None = None
     lookup_field: str | None = None
     lookup_url_kwarg: str | None = None
+    #: The class assigns ``routes`` (``routes = […]``, ``self.routes = …``), names
+    #: ``trailing_slash`` or passes a positional argument to its base's ``__init__`` (where DRF's
+    #: routers take ``trailing_slash``): as a DRF router subclass, the addresses it generates are
+    #: not certainly DRF's.
+    rewrites_routes: bool = False
 
 
 @dataclass
@@ -260,7 +265,37 @@ def _class(cdef: Node, decorated: Node | None, source: bytes, rel: str, local: s
             fdef.start_point[0] + 1, tuple(decorators), _action(raw, source))
     if body is not None:
         _class_attributes(view, body, source, origins)
+        text = source[body.start_byte:body.end_byte]
+        view.rewrites_routes = any(m in text for m in (b"routes", b"trailing_slash", b"__init__(")) \
+            and _rewrites_routes(body, source)
     return view
+
+
+def _rewrites_routes(body: Node, source: bytes) -> bool:
+    """Whether a class body assigns ``routes`` / ``self.routes`` or names ``trailing_slash``."""
+    stack = list(body.named_children)
+    while stack:
+        node = stack.pop()
+        if node.type in ("identifier", "attribute") and node_text(node, source).endswith("trailing_slash"):
+            return True
+        if node.type in ("assignment", "augmented_assignment"):
+            left = node.child_by_field_name("left")
+            if left is not None and node_text(left, source) in ("routes", "self.routes"):
+                return True
+        if node.type == "call" and _positional_to_base_init(node, source):
+            return True
+        stack.extend(node.named_children)
+    return False
+
+
+def _positional_to_base_init(call: Node, source: bytes) -> bool:
+    """``super().__init__(x)`` / ``Base.__init__(self, x)``: a positional argument other than
+    ``*args``."""
+    written = field_text(call, "function", source)
+    if not written.endswith(".__init__"):
+        return False
+    args = [a for a in positional(call) if a.type not in ("list_splat", "dictionary_splat")]
+    return len(args) > (0 if written == "super().__init__" else 1)
 
 
 def file_views(root: Node, source: bytes, rel: str, repo_root: Path | None) -> FileViews:
@@ -452,6 +487,25 @@ def _drf_class(views: Mapping[str, FileViews], out: ResolvedClass) -> None:
         out.verbs = {}
 
 
+def standard_router(views: Mapping[str, FileViews], file: str, name: str) -> bool:
+    """Whether the repo class ``name`` is a DRF router that generates DRF's standard routes: built
+    on ``DefaultRouter`` / ``SimpleRouter`` through repo classes only, none of which assigns
+    ``routes``, changes ``trailing_slash`` or overrides a method that builds the URLs
+    (:data:`~.drf.ROUTER_URL_METHODS`). A subclass that only adds to the routes (a mapping on an
+    existing route) still serves the standard ones."""
+    found = False
+    for base in linearize(views, (file, name)):
+        if base[0] == "repo":
+            cls = views.get(base[1], FileViews()).classes.get(base[2])
+            if cls is None or cls.rewrites_routes or drf.ROUTER_URL_METHODS & cls.methods.keys():
+                return False
+        elif base[0] == "lib" and base[1] in drf.ROUTERS:
+            found = True
+        elif base != ("unknown", "object"):
+            return False
+    return found
+
+
 def known_bases(resolved: ResolvedClass) -> bool:
     """Whether every base is in the repo or one of Django's views whose methods are known — so
     the verbs found are all the verbs the view handles."""
@@ -494,6 +548,7 @@ def _resolve(values: list[tuple[str, FileViews]], index: Any) -> dict[str, FileV
 register_fact(FactSpec(
     # A view module need not import Django (``def orders(request)``, a subclass of a project base
     # view): function views take ``request``, class-based views have ``View`` in a base's name.
-    name=FACT, language="python", gate=(b"django", b"rest_framework", b"request", b"View"),
+    # DRF router subclasses are read too: ``Router`` in a class name.
+    name=FACT, language="python", gate=(b"django", b"rest_framework", b"request", b"View", b"Router"),
     collect=_collect, resolve=_resolve,
 ))
