@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import pytest
 
-from breezeai_cog.analyzers.sql import _strip_sqlplus, detect_dialect, parse_ddl
+from breezeai_cog.analyzers.sql import _strip_leading_noise, _strip_sqlplus, detect_dialect, parse_ddl
 
 # A trimmed Oracle SQL*Plus script in the shape of a real schema install script:
 # rem/Prompt/SET directives between statements, a multi-line COMMENT string, and all
@@ -875,10 +875,55 @@ def test_tsql_apostrophe_in_a_line_comment_does_not_hide_the_next_go() -> None:
     assert [v["name"] for v in r["views"]] == ["V1"]
 
 
-def test_tsql_unclosed_quote_still_splits_on_every_go() -> None:
-    # A malformed batch must not swallow the rest of the file: the stray quote masks nothing.
+def test_tsql_never_closed_quote_still_splits_on_every_go() -> None:
+    # A malformed batch must not swallow the rest of the file: a quote no later quote closes
+    # masks nothing. (`_V1` has no quote to close it.)
     r = parse_ddl(_T1 + "SELECT 'oops\nGO\n" + _V1, "schema_mssql.sql")
     assert [v["name"] for v in r["views"]] == ["V1"]
+
+
+def test_tsql_stray_quote_closed_later_hides_the_go_between() -> None:
+    # As in SSMS and sqlcmd, the stray quote pairs with the quote before `x`: the GO between
+    # them is string text, so V9 shares the SELECT's batch and is not captured. Pinned so the
+    # behaviour is a documented choice, not an accident.
+    view = "CREATE VIEW [dbo].[V9] AS SELECT 'x' AS c\nGO\n"
+    r = parse_ddl(_T1 + "SELECT 'oops\nGO\n" + view + _V1, "schema_mssql.sql")
+    assert [v["name"] for v in r["views"]] == ["V1"]
+
+
+@pytest.mark.parametrize(
+    "comment",
+    ["/* a /* b */ c */\n", "/* a /* b */\nGO\n*/\n", "/* a\n/* b */\n*/\n"],
+    ids=["inline", "go-inside", "multiline"],
+)
+def test_tsql_nested_comment_before_an_object_keeps_it(comment: str) -> None:
+    # The leading-comment strip stopped at the first `*/`, leaving `c */ CREATE VIEW …`, and
+    # the view was dropped with failed: 0.
+    r = parse_ddl(_T1 + comment + _V1, "schema_mssql.sql")
+    assert [v["name"] for v in r["views"]] == ["V1"]
+    assert r["views"][0]["definition"] == "CREATE VIEW [dbo].[V1] AS SELECT [Id] FROM [dbo].[T1]"
+    assert r["parseStats"]["failed"] == 0
+
+
+def test_tsql_semicolon_inside_a_nested_comment_does_not_split() -> None:
+    # The `;` after the inner `*/` is still inside the outer comment.
+    text = "/* a /* b; */ c; */\nCREATE TABLE [dbo].[T2] ([Id] INT);\nCREATE TABLE [dbo].[T3] ([Id] INT)\nGO\n"
+    r = parse_ddl(text, "schema_mssql.sql")
+    assert [t["name"] for t in r["tables"]] == ["T2", "T3"]
+
+
+def test_tsql_nested_comment_before_a_procedure_keeps_it_a_program() -> None:
+    body = "CREATE PROCEDURE [dbo].[P2] AS\nBEGIN\n  SELECT 1;\n  SELECT 2;\nEND"
+    r = parse_ddl(_T1 + "/* a /* b */ c */\n" + body + "\nGO\n", "schema_mssql.sql")
+    assert [p["body"] for p in r["procedures"]] == [body]
+
+
+def test_only_tsql_reads_block_comments_as_nested() -> None:
+    # Oracle and MySQL end a block comment at its first `*/`; the default must not change that.
+    text = "/* a /* b */ c */ CREATE VIEW v"
+    assert _strip_leading_noise(text) == "c */ CREATE VIEW v"
+    assert _strip_leading_noise(text, nested=True) == "CREATE VIEW v"
+    assert _strip_leading_noise("/* never closed CREATE VIEW v", nested=True) == "/* never closed CREATE VIEW v"
 
 
 @pytest.mark.parametrize(

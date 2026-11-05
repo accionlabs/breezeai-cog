@@ -319,12 +319,13 @@ def _view(create: exp.Create, dialect: str, raw: str) -> dict[str, Any]:
 _TRAILING_TERMINATOR = re.compile(r"\s*;\s*$")
 
 
-def _raw_statement(stmt: str) -> str:
+def _raw_statement(stmt: str, nested: bool = False) -> str:
     """Verbatim statement text from one ``;``-delimited chunk: *leading* whitespace and
     comments are dropped so the text starts at the ``CREATE`` keyword, and trailing
     whitespace plus a terminating ``;`` are removed. Everything in between — interior and
-    trailing comments, spacing, quoting, hints — is left exactly as written."""
-    return _TRAILING_TERMINATOR.sub("", _strip_leading_noise(stmt)).rstrip()
+    trailing comments, spacing, quoting, hints — is left exactly as written. ``nested`` as
+    in :func:`_strip_leading_noise`."""
+    return _TRAILING_TERMINATOR.sub("", _strip_leading_noise(stmt, nested)).rstrip()
 
 
 def _sqlglot_statements(
@@ -586,24 +587,47 @@ def _tsql_unquote(ident: str) -> str:
     return ident
 
 
-def _strip_leading_noise(b: str) -> str:
-    """Drop leading whitespace + line/block comments so the CREATE keyword is at position 0."""
+_BLOCK_COMMENT_TOKEN = re.compile(r"/\*|\*/")
+
+
+def _block_comment_end(text: str, start: int, nested: bool) -> int:
+    """Index just past the ``*/`` closing the ``/*`` at ``start``, or -1 if it is never
+    closed. ``nested`` (T-SQL) counts inner ``/* … */`` pairs, so ``/* a /* b */ c */`` closes
+    at its last ``*/``; otherwise (Oracle, MySQL) the first ``*/`` closes it."""
+    if not nested:
+        end = text.find("*/", start + 2)
+        return -1 if end < 0 else end + 2
+    depth = 1
+    for m in _BLOCK_COMMENT_TOKEN.finditer(text, start + 2):
+        depth += 1 if m.group() == "/*" else -1
+        if depth == 0:
+            return m.end()
+    return -1
+
+
+def _strip_leading_noise(b: str, nested: bool = False) -> str:
+    """Drop leading whitespace + line/block comments so the CREATE keyword is at position 0.
+    ``nested`` reads block comments as T-SQL does (see :func:`_block_comment_end`); an
+    unclosed block comment is left in place."""
     prev = None
     while prev != b:
         prev = b
         b = re.sub(r"^\s+", "", b)
         b = re.sub(r"^--[^\n]*\n?", "", b)
-        b = re.sub(r"^/\*.*?\*/\s*", "", b, flags=re.DOTALL)
+        if b.startswith("/*") and (end := _block_comment_end(b, 0, nested)) >= 0:
+            b = b[end:]
     return b
 
 
 def _split_tsql_semicolons(sql: str) -> list[str]:
     """Split a non-program batch on top-level ``;`` while respecting ``'..'`` strings (``''``
-    escape), ``[..]``/``".."`` identifiers, ``--``/``/* */`` comments, and parentheses."""
+    escape), ``[..]``/``".."`` identifiers, ``--`` comments, ``/* */`` comments (nested, as
+    T-SQL allows), and parentheses."""
     stmts: list[str] = []
     buf: list[str] = []
     i, n = 0, len(sql)
-    in_s = in_b = in_d = lc = bc = False
+    in_s = in_b = in_d = lc = False
+    bc = 0  # block-comment nesting depth
     depth = 0
     while i < n:
         ch = sql[i]
@@ -618,7 +642,11 @@ def _split_tsql_semicolons(sql: str) -> list[str]:
             if ch == "*" and nx == "/":
                 buf.append(nx)
                 i += 2
-                bc = False
+                bc -= 1
+            elif ch == "/" and nx == "*":
+                buf.append(nx)
+                i += 2
+                bc += 1
             else:
                 i += 1
         elif in_s:
@@ -645,7 +673,7 @@ def _split_tsql_semicolons(sql: str) -> list[str]:
             buf.append(ch)
             i += 1
         elif ch == "/" and nx == "*":
-            bc = True
+            bc = 1
             buf.append(ch)
             buf.append(nx)
             i += 2
@@ -688,8 +716,10 @@ def _tsql_quoted_spans(text: str) -> list[tuple[int, int]]:
     """The ``(start, end)`` spans of every closed block comment (nested, as T-SQL allows),
     ``'..'`` string, ``[..]`` identifier and ``".."`` identifier, in order. A ``GO`` line
     inside one is text, not a batch separator — SSMS and sqlcmd do not split there either.
-    An opener left unclosed at end of file masks nothing: a malformed script still splits
-    on every ``GO`` line rather than swallowing the rest of the file into one batch."""
+    An opener never closed masks nothing, so the rest of the file is not swallowed into one
+    batch. A stray quote that a *later* quote does close is read as a string, as SSMS and
+    sqlcmd read it: every ``GO`` between the two is text, and an object in that stretch is
+    lost with the batch."""
     spans: list[tuple[int, int]] = []
     i, n = 0, len(text)
     closers = {"'": "'", "[": "]", '"': '"'}
@@ -699,13 +729,8 @@ def _tsql_quoted_spans(text: str) -> list[tuple[int, int]]:
             nl = text.find("\n", i)
             i = n if nl < 0 else nl + 1
         elif text.startswith("/*", i):
-            depth, j = 1, i + 2
-            for m in _BLOCK_COMMENT_TOKEN.finditer(text, j):
-                depth += 1 if m.group() == "/*" else -1
-                if depth == 0:
-                    j = m.end()
-                    break
-            if depth:
+            j = _block_comment_end(text, i, nested=True)
+            if j < 0:
                 i += 2
             else:
                 spans.append((i, j))
@@ -725,9 +750,6 @@ def _tsql_quoted_spans(text: str) -> list[tuple[int, int]]:
         else:
             i += 1
     return spans
-
-
-_BLOCK_COMMENT_TOKEN = re.compile(r"/\*|\*/")
 
 
 def _split_tsql_batches(text: str) -> list[str]:
@@ -756,7 +778,7 @@ def _split_tsql_statements(text: str) -> list[str]:
         b = batch.strip()
         if not b:
             continue
-        if _TSQL_PROG.match(_strip_leading_noise(b)):
+        if _TSQL_PROG.match(_strip_leading_noise(b, nested=True)):
             out.append(b)
         else:
             out.extend(_split_tsql_semicolons(b))
@@ -942,7 +964,7 @@ def _parse_tsql_ddl(text: str) -> dict[str, Any]:
             sample_errors.append(msg[:200])
 
     for stmt in _split_tsql_statements(text):
-        s = _strip_leading_noise(stmt)
+        s = _strip_leading_noise(stmt, nested=True)
         if not s:
             continue
         try:
@@ -981,7 +1003,7 @@ def _parse_tsql_ddl(text: str) -> dict[str, Any]:
                 tables.append(tbl)
                 ok += 1
             elif kind == "view" and isinstance(node, exp.Create):
-                views.append(_view(node, "transactsql", raw=_raw_statement(s)))
+                views.append(_view(node, "transactsql", raw=_raw_statement(s, nested=True)))
                 ok += 1
             elif kind == "index" and isinstance(node, exp.Create):
                 all_indexes.append(_index(node, "transactsql"))
