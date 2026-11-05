@@ -586,6 +586,51 @@ def test_a_macro_after_a_keyword_return_type_is_read_past(tmp_path, parser) -> N
     assert [d.name for d in decls["tick"].decorators] == ["WINAPI"]
 
 
+@pytest.mark.parametrize("parser", [CParser(), CppParser()], ids=["c", "cpp"])
+def test_an_attribute_macro_after_a_prototype_is_its_decorator(tmp_path, parser) -> None:
+    # `CURL_PRINTF(1, 2)` expands to `__attribute__((format(printf, 1, 2)))`, which the grammar
+    # reads there; the macro broke the whole prototype. It is blanked for a second parse and
+    # becomes the decorator, with its arguments. A K&R definition and a call in a body are not
+    # touched.
+    src = (
+        "void errorf(const char *fmt, ...) CURL_PRINTF(1, 2);\n"
+        "CURL_EXTERN int curl_mprintf(const char *format, ...)\n"
+        "  CURL_TEMP_PRINTF(1, 2);\n"
+        "int f(void) WARN_UNUSED_RESULT;\n"
+        "int body(int x) { if (x) LOG(x); return x; }\n"
+        "// a note (in parentheses)\n"
+        'DEPRECATED(API void old(int a), "use new");\n'
+    )
+    rec = _parse(parser, tmp_path, "m.h", src)
+    assert "old" in {s.name for s in rec.statements if s.nodeType == "declaration"}
+    decls = {s.name: s for s in rec.statements if s.nodeType == "declaration"}
+    assert [(d.name, d.args) for d in decls["errorf"].decorators] == [("CURL_PRINTF", ["1", "2"])]
+    assert decls["errorf"].text == "void errorf(const char *fmt, ...) CURL_PRINTF(1, 2);"
+    assert [d.name for d in decls["curl_mprintf"].decorators] == [
+        "CURL_EXTERN", "CURL_TEMP_PRINTF",
+    ]
+    assert [(d.name, d.args) for d in decls["f"].decorators] == [("WARN_UNUSED_RESULT", [])]
+    assert [f.name for f in rec.functions] == ["body"]
+
+
+def test_an_attribute_macro_after_a_member_is_not_a_field(tmp_path) -> None:
+    # In a class the grammar read `WARN_UNUSED_RESULT` as a field's name; the member is a method.
+    src = (
+        "struct S {\n"
+        "    int f(int a) WARN_UNUSED_RESULT;\n"
+        "    virtual void g() = 0;\n"
+        "    void h() const;\n"
+        "    int n;\n"
+        "};\n"
+    )
+    rec = _parse(CppParser(), tmp_path, "s.h", src)
+    fns = {f.name: f for f in rec.functions}
+    assert set(fns) == {"f", "g", "h"}
+    assert [d.name for d in fns["f"].decorators] == ["WARN_UNUSED_RESULT"]
+    assert fns["g"].decorators == [] and fns["h"].decorators == []
+    assert [s.name for s in rec.statements if s.nodeType == "field_declaration"] == ["n"]
+
+
 def test_a_k_and_r_definition_with_a_calling_convention_macro_is_read(tmp_path) -> None:
     rec = _parse(
         CParser(), tmp_path, "gz.c",

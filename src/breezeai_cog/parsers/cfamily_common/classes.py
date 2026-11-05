@@ -337,6 +337,74 @@ def _reads_as_members(root: Node, span: tuple[int, int]) -> bool:
     return True
 
 
+#: ``) NAME(args);`` or ``) NAME;`` — a candidate attribute macro after a declaration's
+#: parameter list: ``void errorf(const char *fmt, ...) CURL_PRINTF(1, 2);``.
+_TRAILING_MACRO = re.compile(rb"\)[ \t\r\n]*(?:([A-Za-z_]\w*)[ \t]*\(|([A-Z][A-Z0-9_]*)[ \t\r\n]*;)")
+_SEMICOLON_NEXT = re.compile(rb"[ \t\r\n]*;")
+_DECLARATION_TYPES = ("declaration", "field_declaration")
+
+#: A trailing macro's blanked span, and the offsets of the ``)`` before it and the ``;`` after.
+_Trailing = tuple[tuple[int, int], int, int]
+
+
+def _trailing_macros(root: Node, source: bytes) -> list[_Trailing]:
+    """Attribute macros after a declaration's parameter list: ``void errorf(const char *fmt,
+    ...) CURL_PRINTF(1, 2);``, ``CURLcode f(void) WARN_UNUSED_RESULT;``. They expand to
+    ``__attribute__((…))``, which the grammar reads there, but a macro breaks the declaration. A
+    candidate counts only where the grammar failed on it or cut the declaration before it short,
+    outside a function body; a bare word
+    only in capitals (``int f(a) int a;`` is a K&R definition)."""
+    if not root.has_error:
+        return []
+    found = []
+    for m in _TRAILING_MACRO.finditer(source):
+        paren = root.descendant_for_byte_range(m.start(), m.start() + 1)
+        if paren is None or paren.type != ")" or paren.parent is None or (
+            paren.parent.type != "parameter_list"
+        ):
+            continue  # not the end of a parameter list (a comment, a macro body, a call)
+        word = 1 if m.group(1) is not None else 2
+        failed, in_body = False, False
+        for at in (m.start(), m.start(word)):  # the `)` (a declaration cut short) and the macro
+            node: Node | None = root.descendant_for_byte_range(at, at + 1)
+            while node is not None and node.type != "compound_statement":
+                if node.type == "ERROR" or (node.type in _DECLARATION_TYPES and node.has_error):
+                    failed = True
+                node = node.parent
+            in_body = in_body or node is not None
+        if in_body or not failed:
+            continue
+        end = m.end(2)
+        if word == 1:
+            closed = _close_paren(source, m.end())
+            if closed is None:
+                continue
+            end = closed[0] + 1
+        semicolon = _SEMICOLON_NEXT.match(source, end)
+        if semicolon is None:
+            continue
+        found.append(((m.start(word), end), m.start(), semicolon.end() - 1))
+    return found
+
+
+def _reads_with_trailing_macro_gone(root: Node, trailing: _Trailing) -> bool:
+    """Whether a blanked trailing macro left a declaration that parses whole: its parameter list
+    ends at the ``)`` and the declaration at the ``;``, outside any error."""
+    _, paren, semicolon = trailing
+    node: Node | None = root.descendant_for_byte_range(paren, paren + 1)
+    if node is None or node.parent is None or node.parent.type != "parameter_list":
+        return False
+    while node is not None and node.type not in _DECLARATION_TYPES:
+        node = node.parent
+    if node is None or node.end_byte != semicolon + 1:
+        return False
+    while node is not None:
+        if node.type == "ERROR":
+            return False
+        node = node.parent
+    return True
+
+
 def _blank(source: bytes, spans: list[tuple[int, int]]) -> bytes:
     """``source`` with ``spans`` turned to spaces; newlines stay, so lines and offsets don't
     move."""
@@ -400,6 +468,8 @@ def parse_cfamily(grammar: str, source: bytes, timeout_micros: int) -> Node:
       ``, "msg")`` go, and the declaration reads as written;
     * a macro written as a whole class member (:func:`_member_macros`): the line goes, and the
       members around it read as written;
+    * an attribute macro after a declaration's parameter list (:func:`_trailing_macros`):
+      ``CURL_PRINTF(1, 2)`` goes, and the declaration reads as written;
 
     and an ``extern "C"`` guard the file's parse collapsed around is resolved as the compiler
     for the grammar's language would (:func:`_collapsed_guards`).
@@ -412,22 +482,24 @@ def parse_cfamily(grammar: str, source: bytes, timeout_micros: int) -> Node:
     wrappers = _declaration_wrappers(root, source)
     guards = _collapsed_guards(root, source, grammar)
     members = _member_macros(root, source)
+    trailing = _trailing_macros(root, source)
     for _ in range(2):  # blank all; if some still break, blank only the others once
-        if not words and not wrappers and not guards and not members:
+        if not words and not wrappers and not guards and not members and not trailing:
             return root
         spans = [w[0] for w in words] + [s for w in wrappers for s in w[:2]]
-        spans += [s for g in guards for s in g[0]] + members
+        spans += [s for g in guards for s in g[0]] + members + [t[0] for t in trailing]
         reparsed = parse_source(grammar, _blank(source, spans), timeout_micros).root_node
         whole_words = [w for w in words if _reads_as_class(reparsed, w[1])]
         whole_wrappers = [w for w in wrappers if _reads_as_declaration(reparsed, w)]
         whole_guards = [g for g in guards if _reads_without_collapse(reparsed, g[1])]
         whole_members = [s for s in members if _reads_as_members(reparsed, s)]
-        if (whole_words, whole_wrappers, whole_guards, whole_members) == (
-            words, wrappers, guards, members
+        whole_trailing = [t for t in trailing if _reads_with_trailing_macro_gone(reparsed, t)]
+        if (whole_words, whole_wrappers, whole_guards, whole_members, whole_trailing) == (
+            words, wrappers, guards, members, trailing
         ):
             return reparsed
         words, wrappers, guards = whole_words, whole_wrappers, whole_guards
-        members = whole_members
+        members, trailing = whole_members, whole_trailing
     return root
 
 

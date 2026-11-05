@@ -571,6 +571,19 @@ C++.
 > of their 600 public prototypes. The notice is what an agent needs to know about a deprecated
 > function. **Cost:** such a file is parsed twice (sharing the class-head parse).
 
+> **Decision —** an attribute macro after a declaration's parameter list (`void errorf(const
+> char *fmt, ...) CURL_PRINTF(1, 2);`, `int f(void) WARN_UNUSED_RESULT;`) is blanked in the same
+> second parse, and becomes the declaration's decorator with its arguments. Such a macro
+> expands to `__attribute__((…))`, which the grammar reads there, but as a macro it breaks the
+> prototype (or, in a class, becomes a field named after the macro). A candidate is `NAME(…)`,
+> or a bare word in capitals, between a `)` and `;`, outside a function body, where the grammar
+> failed on it or cut the declaration before it short; the blank is kept only where the
+> declaration then parses whole through that `;`. A K&R definition (`int f(a) int a;`) is not a
+> candidate. The macro is read from the original source, between the declarator and the `;`.
+> **Why:** printf-format and unused-result macros are common on C library prototypes: curl lost
+> about 60 of its internal and public prototypes this way. **Cost:** such a file is parsed twice
+> (sharing the class-head parse).
+
 > **Decision —** a macro written as a whole member of a class or struct body
 > (`OPENVINO_MATCHER_PASS_RTTI("…")`, jemalloc's `LOCKEDINT_MTX_DECLARE(mtx)`) is blanked in the
 > same second parse. A line that is only `NAME(…)` has no `;` and no body, so it can't be a

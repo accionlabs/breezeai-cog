@@ -813,7 +813,47 @@ def decorators_of(node: Node, source: bytes, read: DeclarationRead) -> list[Deco
         ):
             found.append((err.start_byte, [Decorator(name=node_text(err.children[0], source))]))
         pointer = inner
+    if (trailing := trailing_decorator(node, source)) is not None:
+        found.append((node.end_byte, [trailing]))
     return [d for _, ds in sorted(found, key=lambda f: f[0]) for d in ds]
+
+
+_TRAILING_TEXT = re.compile(rb"\s*([A-Za-z_]\w*)\s*(?:\((.*)\))?\s*", re.S)
+
+
+def _split_args(text: bytes) -> list[str]:
+    """Top-level comma-separated arguments, trimmed: ``1, f(a, b)`` → ``1``, ``f(a, b)``."""
+    out, depth, start = [], 0, 0
+    for i, c in enumerate(text):
+        if c in b"([{":
+            depth += 1
+        elif c in b")]}":
+            depth -= 1
+        elif c == 0x2C and depth == 0:
+            out.append(text[start:i])
+            start = i + 1
+    out.append(text[start:])
+    return [a.strip().decode("utf-8", "replace") for a in out if a.strip()]
+
+
+def trailing_decorator(node: Node, source: bytes) -> Decorator | None:
+    """The attribute macro after a declaration's parameter list, ``void errorf(const char *fmt,
+    ...) CURL_PRINTF(1, 2);``, with its arguments. It was blanked before parsing
+    (``classes.parse_cfamily``), so it is the text between the declarator and the ``;`` that no
+    node covers."""
+    if node.type not in ("declaration", "field_declaration") or not node.children:
+        return None
+    declarator = node.child_by_field_name("declarator")
+    last = node.children[-1]
+    if declarator is None or last.type != ";" or function_declarator_of(declarator) is None:
+        return None
+    if any(declarator.end_byte <= c.start_byte < last.start_byte for c in node.children):
+        return None
+    m = _TRAILING_TEXT.fullmatch(source, declarator.end_byte, last.start_byte)
+    if m is None:
+        return None
+    args = _split_args(m.group(2)) if m.group(2) is not None else []
+    return Decorator(name=m.group(1).decode(), args=args)
 
 
 def is_declared_static(node: Node, source: bytes) -> bool:
