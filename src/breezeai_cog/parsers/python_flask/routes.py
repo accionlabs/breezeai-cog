@@ -1,5 +1,7 @@
 """Flask route detection — the ``flask`` additive detector: ``@app.route`` / ``@bp.get``
-decorators and ``add_url_rule`` calls.
+decorators and ``add_url_rule`` calls, and the REST extensions' resources: Flask-RESTful /
+Flask-RESTX ``add_resource`` calls, Flask-RESTX ``@ns.route`` and Flask-Smorest ``@blp.route`` on a
+class.
 
 Each binding gets one ``route`` record per HTTP method (role table:
 ``docs/entry-point-roles/flask.md``). The address is the rule joined to the prefix the app or
@@ -39,7 +41,10 @@ CERTAIN_AUTH = frozenset({
     "flask_login.utils.login_required", "flask_login.utils.fresh_login_required",
 })
 #: Bytes a file with a Flask route or a Flask import must contain (the detector's own guard).
-_MARKERS = (b"flask", b"route(", b"add_url_rule", *(f".{v}(".encode() for v in VERBS))
+_MARKERS = (b"flask", b"route(", b"add_url_rule", b"add_resource", *(f".{v}(".encode() for v in VERBS))
+#: The REST extensions whose ``add_resource`` / class ``route`` a receiver the code does not
+#: resolve may belong to.
+_REST_PACKAGES = ("flask_restful", "flask_restx", "flask_smorest")
 
 
 class _File:
@@ -61,6 +66,8 @@ class _File:
         self.function_ids = {f.id for f in dc.record.functions}
         # A receiver the code does not resolve is Flask's only in a Flask (not FastAPI) file.
         self.flask_file = origins.imports_package("flask") and not origins.imports_package("fastapi")
+        self.rest_file = any(origins.imports_package(p) for p in _REST_PACKAGES)
+        self.local_resources = set(wiring.resources.get(path, {}))
         self.functions: dict[str, tuple[int, list[str]]] = {}
         for stmt in root.named_children:
             fdef = stmt.child_by_field_name("definition") if stmt.type == "decorated_definition" else stmt
@@ -74,13 +81,32 @@ class _File:
         """(served prefix — None when unknown, guards) of the app or blueprint ``receiver``;
         ``(None, ())`` for a receiver the code does not resolve, in a Flask file; None when the
         receiver is not Flask's."""
+        found = self.container(receiver)
+        if found is not None:
+            return found
+        return (None, ()) if self.flask_file else None
+
+    def container(self, receiver: Node | None) -> tuple[str | None, tuple[str, ...]] | None:
+        """:meth:`served` for an app or blueprint the code shows; None otherwise."""
         ref = ref_of(receiver, self.source, self.path, self.local, self.imports)
+        if ref is None:
+            return None
+        file, var = key_of(ref, self.path)
+        return self.wiring.served.get(file, {}).get(var)
+
+    def resource_prefix(self, receiver: Node | None) -> tuple[str | None, tuple[str, ...]] | None:
+        """(the prefix the URLs of a Flask-RESTful / RESTX Api or RESTX namespace ``receiver``
+        are appended to — None when unknown, guards); ``(None, ())`` for a receiver the code
+        does not resolve, in a file of those extensions; None when it is not one."""
+        ref = ref_of(receiver, self.source, self.path, self.local_resources, self.imports)
         if ref is not None:
             file, var = key_of(ref, self.path)
-            found = self.wiring.served.get(file, {}).get(var)
+            found = self.wiring.resources.get(file, {}).get(var)
             if found is not None:
                 return found
-        return (None, ()) if self.flask_file else None
+            if self.wiring.served.get(file, {}).get(var) is not None:
+                return None  # an app or a blueprint: not an extension's container
+        return (None, ()) if self.rest_file else None
 
     def view_class(self, node: Node) -> tuple[str, ViewClass, str] | None:
         """(name, view, declaring file) of the class ``node`` names, in this file or imported."""
@@ -124,10 +150,21 @@ def _route_call(dec: Node, source: bytes) -> tuple[Node, str, str] | None:
     return call, node_text(attr, source), rule
 
 
-def _is_add_url_rule(call: Node, source: bytes) -> bool:
+def _call_attribute(call: Node, source: bytes) -> str | None:
+    """The method a call is made with (``api.add_resource(…)`` → ``add_resource``)."""
     fn = call.child_by_field_name("function")
     attr = fn.child_by_field_name("attribute") if fn is not None and fn.type == "attribute" else None
-    return attr is not None and node_text(attr, source) == "add_url_rule"
+    return node_text(attr, source) if attr is not None else None
+
+
+def _attribute_name(dec: Node, source: bytes) -> str | None:
+    """The method a decorator call is made with (``@ns.route("/")`` → ``route``)."""
+    call = dec.named_children[0] if dec.named_children else None
+    return _call_attribute(call, source) if call is not None and call.type == "call" else None
+
+
+def _is_add_url_rule(call: Node, source: bytes) -> bool:
+    return _call_attribute(call, source) == "add_url_rule"
 
 
 def _methods(value: Node | None, source: bytes, default: list[str | None]) -> list[str | None]:
@@ -228,9 +265,80 @@ def _add_url_rule(f: _File, call: Node) -> list[Emit]:
                    f.certain(decorators)) for m in _methods(explicit, source, ["GET"])]
 
 
+def _resource_records(f: _File, node: Node, cls: tuple[str, ViewClass, str] | None, written: str,
+                      endpoints: list[str | None], guards: tuple[str, ...], synthetic: bool) -> list[Emit]:
+    """One record per URL and HTTP method of a resource class (a ``MethodView``): its verb
+    methods; one record with no method, at the class, when it defines none here; one record
+    named as written when the class is not in the repo."""
+    node_type = "synthetic" if synthetic else None
+    out: list[Emit] = []
+    for endpoint in endpoints:
+        if cls is None:
+            out.append(_route(node, None, endpoint, written.rsplit(".", 1)[-1], None, None, list(guards),
+                              False, node_type=node_type))
+            continue
+        name, view, file = cls
+        verbs = view.verbs or {"": view.line}
+        out.extend(_route(node, verb.upper() or None, endpoint, verb or name,
+                          *handler_location((file, line), f.path), list(guards), False, node_type=node_type)
+                   for verb, line in verbs.items())
+    return out
+
+
+def _urls(args: list[Node], source: bytes, prefix: str | None, flask_join: bool) -> list[str | None]:
+    """The address of each URL argument; None for one that is not a literal or a prefix that is
+    not known."""
+    out: list[str | None] = []
+    for arg in args:
+        url = literal(arg, source)
+        if url is None or prefix is None:
+            out.append(None)
+        else:
+            out.append(join(prefix, url) if flask_join else prefix + url)
+    return out
+
+
+def _add_resource(f: _File, call: Node) -> list[Emit]:
+    """``api.add_resource(Todo, "/todos/<id>", "/todo/<id>")`` (Flask-RESTful, Flask-RESTX)."""
+    args = positional(call)
+    found = f.resource_prefix(receiver(call))
+    if found is None or len(args) < 2 or args[0].type not in ("identifier", "attribute"):
+        return []
+    prefix, guards = found
+    return _resource_records(f, call, f.view_class(args[0]), node_text(args[0], f.source),
+                             _urls(args[1:], f.source, prefix, False), guards, False)
+
+
+def _class_route(f: _File, decorated: Node, cdef: Node) -> list[Emit]:
+    """``@ns.route("/<id>")`` (Flask-RESTX) / ``@blp.route("/")`` (Flask-Smorest) on a class."""
+    source = f.source
+    name = field_text(cdef, "name", source)
+    out: list[Emit] = []
+    for dec in (d for d in decorated.named_children if d.type == "decorator"):
+        call = dec.named_children[0] if dec.named_children else None
+        fn = call.child_by_field_name("function") if call is not None and call.type == "call" else None
+        if call is None or fn is None or fn.type != "attribute" or field_text(fn, "attribute", source) != "route":
+            continue
+        args = positional(call)
+        served = f.container(receiver(call))
+        resource = f.resource_prefix(receiver(call)) if served is None else None
+        if served is not None:  # a Flask-Smorest (Flask) blueprint
+            endpoints, guards = _urls(args, source, served[0], True), served[1]
+        elif resource is not None:
+            endpoints, guards = _urls(args, source, resource[0], False), resource[1]
+        else:
+            continue
+        view = f.classes.get(name)
+        out.extend(_resource_records(f, dec, (name, view, f.path) if view is not None else None, name,
+                                     endpoints, guards, True))
+    return out
+
+
 def _candidates(root: Node, source: bytes) -> list[tuple[str, Node, Node | None, str | None]]:
     """Route-shaped constructs, in source order: ``("decorated", definition, function,
-    enclosing class)`` and ``("call", add_url_rule call, None, None)``. One walk; nothing is
+    enclosing class)``, ``("class", definition, class, None)`` (a ``route`` decorator on a class),
+    ``("call", add_url_rule call, None, None)`` and ``("resource", add_resource call, None,
+    None)``. One walk; nothing is
     resolved yet."""
     out: list[tuple[str, Node, Node | None, str | None]] = []
 
@@ -244,12 +352,17 @@ def _candidates(root: Node, source: bytes) -> list[tuple[str, Node, Node | None,
                         out.append(("decorated", child, inner, class_name))
                     walk(inner, class_name)
                 elif inner is not None and inner.type == "class_definition":
+                    if any(_attribute_name(d, source) == "route"
+                           for d in child.named_children if d.type == "decorator"):
+                        out.append(("class", child, inner, None))
                     walk(inner, field_text(inner, "name", source))
             elif child.type == "class_definition":
                 walk(child, field_text(child, "name", source))
             else:
                 if child.type == "call" and _is_add_url_rule(child, source):
                     out.append(("call", child, None, None))
+                elif child.type == "call" and _call_attribute(child, source) == "add_resource":
+                    out.append(("resource", child, None, None))
                 walk(child, class_name)
 
     walk(root, None)
@@ -270,6 +383,10 @@ def _detect(dc: DetectContext) -> Detection | None:
     for kind, node, fdef, class_name in candidates:
         if kind == "decorated" and fdef is not None:
             found.extend(_decorated(f, node, fdef, class_name))
+        elif kind == "class" and fdef is not None:
+            found.extend(_class_route(f, node, fdef))
+        elif kind == "resource":
+            found.extend(_add_resource(f, node))
         else:
             found.extend(_add_url_rule(f, node))
     if not found and not imports_flask:

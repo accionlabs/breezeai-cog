@@ -133,6 +133,21 @@ def _python_drf_router_subclass(n: int) -> str:
         "        self.routes[0].mapping.update({'put': 'bulk_update'})\nrouter = ApiRouter()\n")
 
 
+def _python_flask_rest(n: int) -> str:
+    body = "".join(
+        f"@ns.route('/r{i}/<id>')\nclass R{i}(Resource):\n    def get(self, id):\n        pass\n"
+        f"    def put(self, id):\n        pass\n"
+        f"api.add_resource(R{i}, '/x{i}', '/y{i}')\n"
+        f"@blp.route('/m{i}')\nclass M{i}(MethodView):\n    def post(self):\n        pass\n"
+        for i in range(n)
+    )
+    return ("from flask import Flask\nfrom flask.views import MethodView\n"
+            "from flask_restx import Api, Resource\nfrom flask_smorest import Api as SApi, Blueprint\n"
+            "app = Flask(__name__)\napi = Api(app, prefix='/v1')\nns = api.namespace('things')\n"
+            "blp = Blueprint('b', __name__, url_prefix='/b')\nsapi = SApi(app)\nsapi.register_blueprint(blp)\n"
+            f"{body}")
+
+
 def _csharp(n: int) -> str:
     body = "".join(
         f"    /// <summary>M{i}</summary>\n"
@@ -299,6 +314,7 @@ SAMPLES: dict[str, tuple[str, Callable[[int], str]]] = {
     "python-django": ("urls.py", _python_django),
     "python-drf": ("urls.py", _python_drf),
     "python-drf-router-subclass": ("urls.py", _python_drf_router_subclass),
+    "python-flask-rest": ("api.py", _python_flask_rest),
     "csharp": ("C.cs", _csharp),
     "xsd": ("schema.xsd", _xsd),
     "wsdl": ("service.wsdl", _wsdl),
