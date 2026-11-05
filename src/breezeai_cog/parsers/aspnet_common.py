@@ -31,7 +31,7 @@ from tree_sitter import Node
 
 from .emits import Emit
 from ..schemas import Decorator, FileRecord, Function
-from .dotnet_common import response_dto, simple_attr_name
+from .dotnet_common import named_arg, response_dto, simple_attr_name
 from .index_common import walk_heritage
 from .aspnet_areas import (
     NO_AREA, UNKNOWN, Area, controller_area, convention_endpoint,
@@ -76,11 +76,12 @@ FRAMEWORK_SERVED: frozenset[str] = frozenset(_HEALTH_METHODS | _GRAPHQL_MOUNTS |
 
 
 def _first_arg(dec: Decorator) -> str:
-    """First positional (non-named) attribute arg — the route template, if any."""
+    """First positional (non-named) attribute arg — the route template, if any. Told apart by
+    its key, not by an ``=``: ``api/{page=1}`` is a template with a default value."""
     for raw in dec.args:
-        s = raw.strip()
-        if "=" not in s or s.lstrip().startswith('"'):
-            return s.strip('"')
+        key, value = named_arg(raw)
+        if key is None:
+            return value.strip('"')
     return ""
 
 

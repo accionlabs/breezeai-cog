@@ -182,9 +182,8 @@ def _chained_calls(field_call: Node, source: bytes) -> Iterator[tuple[str, Node]
 
 
 def _call_args(call: Node, source: bytes) -> list[str]:
-    """Argument texts in the form the base parser records attribute arguments — a string
-    literal unquoted, anything else as written — so a fluent guard reads like its attribute
-    twin."""
+    """Argument texts in the form a guard label reads attribute arguments — a string literal
+    unquoted, anything else as written — so a fluent guard reads like its attribute twin."""
     args = call.child_by_field_name("arguments")
     out: list[str] = []
     for arg in args.named_children if args is not None else []:

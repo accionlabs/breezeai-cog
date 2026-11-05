@@ -22,7 +22,7 @@ from tree_sitter import Node
 
 from ...logging import get_logger
 from ...schemas import Class, Decorator, FileRecord, Function
-from ..dotnet_common import innermost_type, response_dto, simple_attr_name
+from ..dotnet_common import innermost_type, named_arg, response_dto, simple_attr_name
 from ..emits import Emit
 from ..handler_sites import handler_location, locate_method
 from ..treesitter import first_line, node_text
@@ -140,8 +140,16 @@ def _guard_labels(authorizations: list[list[str]]) -> list[str]:
 
 def guards_of(cls: Class, fn: Function) -> list[str]:
     """``[Authorize]`` guards inherited from the class plus the method's own, deduped."""
-    return _guard_labels([dec.args for decorators in (cls.decorators, fn.decorators)
+    return _guard_labels([[_guard_arg(a) for a in dec.args]
+                          for decorators in (cls.decorators, fn.decorators)
                           for dec in decorators if simple_attr_name(dec.name) == AUTHORIZE_ATTR])
+
+
+def _guard_arg(arg: str) -> str:
+    """A string argument by its value, as the fluent ``.Authorize("P")`` gives it:
+    ``Policy = "P"`` → ``P``."""
+    key, value = named_arg(arg)
+    return value.strip('"') if key is not None and value.startswith('"') else arg
 
 
 
@@ -361,7 +369,9 @@ def extend_target(cls: Class) -> str | None:
             return target
         if simple_attr_name(dec.name) != EXTEND_ATTR or not dec.args:
             continue
-        arg = dec.args[0].strip()
+        key, arg = named_arg(dec.args[0])
+        if key not in (None, "Name"):
+            continue
         if ":" in arg and not arg.startswith(('"', "typeof(")):
             arg = arg.split(":", 1)[1].strip()  # named argument → keep the value
         if arg.startswith("typeof(") and arg.endswith(")"):
@@ -377,21 +387,21 @@ def is_object_type(cls: Class) -> bool:
 
 
 def stream_methods(methods: list[Function]) -> set[str]:
-    """Methods named by ``[Subscribe(With = nameof(M))]``: each supplies a subscription's event
-    stream and is not a field itself. (``With = "M"`` cannot be told apart: a literal attribute
-    argument is captured without its name.)"""
+    """Methods named by ``[Subscribe(With = nameof(M))]`` / ``[Subscribe(With = "M")]``: each
+    supplies a subscription's event stream and is not a field itself."""
     out: set[str] = set()
     for fn in methods:
         for dec in fn.decorators:
             if simple_attr_name(dec.name) != SUBSCRIBE_ATTR:
                 continue
             for arg in dec.args:
-                key, eq, value = arg.partition("=")
-                if not eq or key.strip() != SUBSCRIBE_WITH:
+                key, value = named_arg(arg)
+                if key != SUBSCRIBE_WITH:
                     continue
-                value = value.strip()
                 if value.startswith("nameof(") and value.endswith(")"):
                     out.add(value[len("nameof("): -1].strip().rsplit(".", 1)[-1])
+                elif len(value) > 1 and value.startswith('"') and value.endswith('"'):
+                    out.add(value[1:-1].strip())
     out.discard("")
     return out
 

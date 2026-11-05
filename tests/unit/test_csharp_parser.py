@@ -778,3 +778,27 @@ def test_attribute_name_keeps_qualified_type_arguments() -> None:
     [cls] = rec.classes
     assert [d.name for d in cls.decorators] == [
         "ExtendObjectType<Demo.Mutation>", "Serializable", "Obsolete"]
+
+
+def test_named_attribute_arguments_keep_their_key(tmp_path) -> None:
+    # A positional string is kept unquoted; a named argument as written, so `Roles` and
+    # `Policy` stay told apart and a route name is not read as its path.
+    from breezeai_cog.parsers.dotnet_common import named_arg
+
+    src = b'''class C {
+  [HttpGet("{id}", Name = "GetOrder", Order = 2)]
+  [Authorize(Roles = "Admin", Policy = "P")]
+  [Route("api/{page=1}")]
+  void M() { }
+}
+'''
+    ctx = ParseContext(path="C.cs", abs_path=None, source=src, repo_root=tmp_path)
+    [fn] = CSharpParser().parse_file(ctx).functions
+    assert [(d.name, d.args) for d in fn.decorators] == [
+        ("HttpGet", ["{id}", 'Name = "GetOrder"', "Order = 2"]),
+        ("Authorize", ['Roles = "Admin"', 'Policy = "P"']),
+        ("Route", ["api/{page=1}"]),
+    ]
+    assert named_arg('Name = "GetOrder"') == ("Name", '"GetOrder"')
+    assert named_arg("api/{page=1}") == (None, "api/{page=1}")
+    assert named_arg("a == b") == (None, "a == b")

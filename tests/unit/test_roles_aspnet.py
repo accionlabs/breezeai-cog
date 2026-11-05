@@ -584,3 +584,20 @@ def test_routes_mapped_in_program_are_unchanged(analyze_files) -> None:
         'app.MapGroup("/todos").MapTodos();\n'), "TodoEndpoints.cs": _TODO_ENDPOINTS})
     assert [(s.method, s.endpoint) for s in _eps(stmts) if s.path == "Program.cs"] == [
         ("GET", "/api/ping")]
+
+
+def test_route_name_is_not_its_path(analyze_files) -> None:
+    # `Name = "…"` names the route for link generation; a template with a default value is a
+    # template, not a named argument.
+    stmts = analyze_files({"OrdersController.cs": '''using Microsoft.AspNetCore.Mvc;
+[ApiController]
+[Route("api/orders")]
+public class OrdersController : ControllerBase {
+    [HttpGet(Name = "GetOrders")]
+    public IActionResult List() => Ok();
+    [HttpGet("page/{page=1}", Name = "GetPage")]
+    public IActionResult Page(int page) => Ok();
+}
+'''})
+    assert sorted((r.method, r.endpoint) for r in _eps(stmts)) == [
+        ("GET", "/api/orders"), ("GET", "/api/orders/page/{page=1}")]

@@ -1339,3 +1339,23 @@ def test_subscribe_with_stream_method_is_not_an_operation() -> None:
     rec = _parse(CSharpHotChocolateParser(), SUBSCRIBE_WITH, "AttendeeSubscriptions.cs")
     assert sorted(s.endpoint for s in _routes(rec)) == ["onCheckedIn", "onOrder"]
 
+
+def test_named_attribute_arguments_are_read_by_key() -> None:
+    # A named argument keeps its key: `Name = "Query"` extends the query root, and a literal
+    # `With = "StreamBooks"` names the stream method, which is not a field of its own.
+    src = b'''using HotChocolate;
+using HotChocolate.Types;
+namespace Catalog {
+  [ExtendObjectType(Name = "Query")]
+  public class BookQueries { public Book GetBook(int id) => null; }
+  [ExtendObjectType(Name = "Subscription")]
+  public class BookSubscriptions {
+    [Subscribe(With = "StreamBooks")]
+    public Book OnBookAdded([EventMessage] Book book) => book;
+    public IAsyncEnumerable<Book> StreamBooks() => null;
+  }
+}
+'''
+    rec = _parse(CSharpHotChocolateParser(), src, "Books.cs")
+    kinds = {s.endpoint: s.routeKind for s in _routes(rec)}
+    assert kinds == {"book": "query", "onBookAdded": "subscription"}
