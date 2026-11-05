@@ -227,3 +227,107 @@ def test_http_client_call_is_outbound(analyze_files) -> None:
     )})
     assert [s.method for s in st if s.semanticType == "api_call"] == ["GET"]
     assert len(_eps(st)) == 1
+
+
+# ── Flask-RESTful, Flask-RESTX, Flask-Smorest ────────────────────────────────────────────
+
+TODO = ("class Todo(Resource):\n"
+        "    def get(self, todo_id):\n        pass\n"
+        "    def put(self, todo_id):\n        pass\n")
+
+
+def test_restful_add_resource_is_one_binding_per_url_and_method(analyze_files) -> None:
+    st = analyze_files({
+        "app.py": ("from flask import Flask\nfrom flask_restful import Api\nfrom resources import Todo\n"
+                   "app = Flask(__name__)\napi = Api(app, prefix='/v1')\n"
+                   "api.add_resource(Todo, '/todos/<todo_id>', '/todo/<todo_id>')\n"),
+        "resources.py": "from flask_restful import Resource\n" + TODO,
+    })
+    assert sorted((s.method, s.endpoint, s.handler, s.handlerLine, s.handlerPath) for s in _eps(st)) == [
+        ("GET", "/v1/todo/<todo_id>", "get", 3, "resources.py"),
+        ("GET", "/v1/todos/<todo_id>", "get", 3, "resources.py"),
+        ("PUT", "/v1/todo/<todo_id>", "put", 5, "resources.py"),
+        ("PUT", "/v1/todos/<todo_id>", "put", 5, "resources.py")]
+    r = _one(st, "GET", "/v1/todo/<todo_id>")
+    assert (r.framework, r.routeKind, r.path) == ("flask", "route", "app.py")
+
+
+def test_restful_api_on_a_blueprint_and_init_app(analyze_files) -> None:
+    st = analyze_files({
+        "api.py": ("from flask import Blueprint\nfrom flask_restful import Api, Resource\n"
+                   "bp = Blueprint('api', __name__, url_prefix='/api')\napi = Api(bp)\n" + TODO
+                   + "api.add_resource(Todo, '/todos/<todo_id>')\n"),
+        "late.py": ("from flask_restful import Api, Resource\napi = Api()\n" + TODO
+                    + "api.add_resource(Todo, '/late')\n"),
+        "app.py": ("from flask import Flask\nfrom api import bp\nfrom late import api as late_api\n"
+                   "def create_app():\n    app = Flask(__name__)\n    app.register_blueprint(bp)\n"
+                   "    late_api.init_app(app)\n    return app\n"),
+    })
+    assert sorted(((s.method, s.endpoint) for s in _eps(st)), key=str) == [
+        ("GET", "/api/todos/<todo_id>"), ("GET", "/late"), ("PUT", "/api/todos/<todo_id>"), ("PUT", "/late")]
+
+
+def test_restx_namespace_route_on_a_class(analyze_files) -> None:
+    st = analyze_files({
+        "zoo/__init__.py": ("from flask_restx import Api\nfrom .cat import api as cat_api\n"
+                            "api = Api(prefix='/api')\napi.add_namespace(cat_api)\n"),
+        "zoo/cat.py": ("from flask_restx import Namespace, Resource\napi = Namespace('cats')\n"
+                       "@api.route('/<id>')\n@api.param('id', 'The cat')\nclass Cat(Resource):\n"
+                       "    def get(self, id):\n        pass\n"),
+        "app.py": "from flask import Flask\nfrom zoo import api\napp = Flask(__name__)\napi.init_app(app)\n",
+    })
+    (r,) = _eps(st)
+    assert (r.method, r.endpoint, r.handler, r.handlerLine, r.path) == ("GET", "/api/cats/<id>", "get", 6, "zoo/cat.py")
+
+
+def test_restx_api_namespace_with_a_path_and_add_namespace_path(analyze_files) -> None:
+    st = analyze_files({"app.py": (
+        "from flask import Flask\nfrom flask_restx import Api, Namespace, Resource\n"
+        "app = Flask(__name__)\napi = Api(app)\n"
+        "todos = api.namespace('todos', path='/tasks/')\n"
+        "dogs = Namespace('dogs')\napi.add_namespace(dogs, path='/hounds')\n"
+        "@todos.route('/')\nclass List(Resource):\n    def post(self):\n        pass\n"
+        "@dogs.route('/<id>')\nclass Dog(Resource):\n    def delete(self, id):\n        pass\n"
+        "@api.route('/ping')\nclass Ping(Resource):\n    def get(self):\n        pass\n")})
+    assert sorted((s.method, s.endpoint) for s in _eps(st)) == [
+        ("DELETE", "/hounds/<id>"), ("GET", "/ping"), ("POST", "/tasks/")]
+
+
+def test_smorest_blueprint_route_on_a_method_view(analyze_files) -> None:
+    st = analyze_files({
+        "resources/store.py": ("from flask.views import MethodView\nfrom flask_smorest import Blueprint\n"
+                               "blp = Blueprint('stores', __name__, url_prefix='/shop')\n"
+                               "@blp.route('/store/<id>')\nclass Store(MethodView):\n"
+                               "    def get(self, id):\n        pass\n    def delete(self, id):\n        pass\n"
+                               "@blp.route('/health')\ndef health():\n    pass\n"),
+        "app.py": ("from flask import Flask\nfrom flask_smorest import Api\n"
+                   "from resources.store import blp as StoreBlueprint\n"
+                   "def create_app():\n    app = Flask(__name__)\n    api = Api(app)\n"
+                   "    api.register_blueprint(StoreBlueprint)\n    return app\n"),
+    })
+    assert sorted((s.method, s.endpoint, s.handler) for s in _eps(st)) == [
+        ("DELETE", "/shop/store/<id>", "delete"), ("GET", "/shop/health", "health"),
+        ("GET", "/shop/store/<id>", "get")]
+
+
+def test_rest_resources_without_a_known_container(analyze_files) -> None:
+    st = analyze_files({"app.py": (
+        "from flask_restful import Api\nfrom ext import api, Remote\n" + "from flask_restful import Resource\n"
+        + TODO + "api.add_resource(Todo, '/todos')\napi.add_resource(Remote, '/remote')\n")})
+    assert sorted(((s.method, s.endpoint, s.handler) for s in _eps(st)), key=str) == [
+        ("GET", None, "get"), ("PUT", None, "put"), (None, None, "Remote")]
+
+
+def test_add_resource_and_class_route_of_something_else_are_not_routes(analyze_files) -> None:
+    st = analyze_files({"app.py": (
+        "from flask import Flask\napp = Flask(__name__)\nregistry.add_resource(Thing, '/x')\n"
+        "@router.route('/y')\nclass Y:\n    def get(self):\n        pass\n")})
+    assert _eps(st) == []
+
+
+def test_smorest_blueprint_registered_where_the_code_does_not_show_has_no_address(analyze_files) -> None:
+    st = analyze_files({"app.py": (
+        "from flask import Flask\nfrom flask.views import MethodView\nfrom flask_smorest import Api, Blueprint\n"
+        "app = Flask(__name__)\nblp = Blueprint('b', __name__)\nApi(app).register_blueprint(blp)\n"
+        "@blp.route('/m')\nclass M(MethodView):\n    def post(self):\n        pass\n")})
+    assert [(s.method, s.endpoint, s.handler) for s in _eps(st)] == [("POST", None, "post")]

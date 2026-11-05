@@ -15,6 +15,18 @@ each file's wiring (:func:`file_wiring`) is collected once per repository and co
   own prefix alone;
 * ``before_request`` hooks are guards of the routes of the app or blueprint they are registered
   on (and of the blueprints registered on it); ``before_app_request`` hooks, of the whole app.
+
+The REST extensions add their own containers, composed the same way:
+
+* a Flask-RESTful / Flask-RESTX ``Api(app_or_blueprint, prefix=…)`` (or ``api.init_app(app)``)
+  serves its resources at the app's or blueprint's prefix + its own ``prefix``;
+* a Flask-RESTX ``Namespace("cats", path=…)`` (or ``api.namespace(…)``) added to one ``Api``
+  (``api.add_namespace(ns, path=…)``) serves at the Api's prefix + its path (``/cats`` by default);
+* a Flask-Smorest ``Blueprint`` is a Flask blueprint; its ``Api(app).register_blueprint(blp)``
+  registers it on the app.
+
+Their prefixes are joined to a resource's URL by plain concatenation, as the extensions do
+(:data:`FlaskWiring.resources`), not by Flask's ``url_prefix`` join.
 """
 
 from __future__ import annotations
@@ -41,7 +53,12 @@ Ref = tuple[str, ...]
 Spec = tuple[str, ...]
 
 _APP_CLASSES = frozenset({"flask.Flask"})
-_BLUEPRINT_CLASSES = frozenset({"flask.Blueprint", "flask.blueprints.Blueprint"})
+_BLUEPRINT_CLASSES = frozenset({"flask.Blueprint", "flask.blueprints.Blueprint",
+                                "flask_smorest.Blueprint", "flask_smorest.blueprint.Blueprint"})
+#: The REST extensions' ``Api`` classes → which extension.
+API_CLASSES = {"flask_restful.Api": "restful", "flask_restx.Api": "restx", "flask_restx.api.Api": "restx",
+               "flask_smorest.Api": "smorest"}
+_NAMESPACE_CLASSES = frozenset({"flask_restx.Namespace", "flask_restx.namespace.Namespace"})
 #: HTTP verbs a ``MethodView`` dispatches to a method of the same name.
 VERBS = ("get", "post", "put", "patch", "delete")
 
@@ -72,6 +89,16 @@ class FileWiring:
     hooks: list[tuple[Ref, str, bool]] = field(default_factory=list)
     #: Class-based views declared at module level.
     classes: dict[str, ViewClass] = field(default_factory=dict)
+    #: REST extension ``Api`` variable → (extension, the app or blueprint it is made with — None
+    #: when not given, its ``prefix``).
+    apis: dict[str, tuple[str, Ref | None, Spec]] = field(default_factory=dict)
+    #: ``x.init_app(app)``: (x, app). Kept for every receiver; only an ``Api``'s count.
+    inits: list[tuple[Ref, Ref]] = field(default_factory=list)
+    #: Flask-RESTX namespace variable → (its own path — ``/`` + name by default, whether it is
+    #: made by ``Namespace(…)``; else by ``x.namespace(…)``, a namespace only if ``x`` is an Api).
+    namespaces: dict[str, tuple[Spec, bool]] = field(default_factory=dict)
+    #: (Api, namespace added to it, the ``path`` it is added at — None when not given).
+    attached: list[tuple[Ref, Ref, Spec | None]] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -80,6 +107,9 @@ class FlaskWiring:
     served: dict[str, dict[str, tuple[str | None, tuple[str, ...]]]] = field(default_factory=dict)
     #: File → its class-based views.
     classes: dict[str, dict[str, ViewClass]] = field(default_factory=dict)
+    #: File → {Flask-RESTful / RESTX ``Api`` or RESTX namespace variable → (the prefix its
+    #: resources' URLs are appended to — None when unknown, guards)}.
+    resources: dict[str, dict[str, tuple[str | None, tuple[str, ...]]]] = field(default_factory=dict)
 
 
 def flask_wiring(index: Any | None) -> FlaskWiring | None:
@@ -126,6 +156,40 @@ def _spec(call: Node, source: bytes) -> Spec | None:
         return None
     text = literal(value, source)
     return ("lit", text) if text is not None else ("unknown",)
+
+
+def _literal_spec(value: Node | None, source: bytes, default: str | None) -> Spec:
+    if value is None or value.type == "none":
+        return ("lit", default) if default is not None else ("unknown",)
+    text = literal(value, source)
+    return ("lit", text) if text is not None else ("unknown",)
+
+
+def _namespace_path(call: Node, source: bytes) -> Spec:
+    """A RESTX namespace's path: ``path=``, else ``/`` + its name, without a trailing ``/``."""
+    path = keyword(call, source, "path")
+    if path is not None and path.type != "none":
+        text = literal(path, source)
+        return ("lit", text.rstrip("/")) if text is not None else ("unknown",)
+    args = positional(call)
+    name = literal(args[0] if args else keyword(call, source, "name"), source)
+    return ("lit", ("/" + name).rstrip("/")) if name is not None else ("unknown",)
+
+
+def _attribute_call(call: Node, source: bytes) -> str | None:
+    fn = call.child_by_field_name("function")
+    return field_text(fn, "attribute", source) if fn is not None and fn.type == "attribute" else None
+
+
+def _api_kind(call: Node, source: bytes, origins: Origins) -> str | None:
+    fn = call.child_by_field_name("function")
+    return API_CLASSES.get(origins.qualified(node_text(fn, source)) or "") if fn is not None else None
+
+
+def argument_ref(node: Node | None, source: bytes, rel: str, local: set[str],
+                 imports: dict[str, tuple[str, ...]]) -> Ref | None:
+    """:func:`ref_of`, for an argument: a name only (a call or a literal is not a variable)."""
+    return ref_of(node, source, rel, local, imports) if node is not None and node.type in ("identifier", "attribute") else None
 
 
 def _is(call: Node, source: bytes, origins: Origins, classes: frozenset[str]) -> bool:
@@ -191,7 +255,26 @@ def file_wiring(root: Node, source: bytes, rel: str, repo_root: Path | None) -> 
         elif _is(call, source, origins, _BLUEPRINT_CLASSES):
             spec = _spec(call, source)
             out.blueprints[name] = spec if spec is not None else ("lit", "")
-    local = out.apps | set(out.blueprints)
+        elif (kind := _api_kind(call, source, origins)) is not None:
+            out.apis[name] = (kind, None, _literal_spec(keyword(call, source, "prefix"), source, ""))
+        elif _is(call, source, origins, _NAMESPACE_CLASSES):
+            out.namespaces[name] = (_namespace_path(call, source), True)
+        elif _attribute_call(call, source) == "namespace":  # ns = api.namespace("todos")
+            out.namespaces[name] = (_namespace_path(call, source), False)
+    local = out.apps | set(out.blueprints) | set(out.apis) | set(out.namespaces)
+    for call in all_calls:  # Api(app): the app, once every local name is known
+        parent = call.parent
+        target = parent.child_by_field_name("left") if parent is not None and parent.type == "assignment" else None
+        name = node_text(target, source) if target is not None and target.type == "identifier" else ""
+        if name in out.apis and parent is not None and parent.child_by_field_name("right") == call:
+            args = positional(call)
+            app = argument_ref(args[0] if args else keyword(call, source, "app"), source, rel, local, imports)
+            out.apis[name] = (out.apis[name][0], app, out.apis[name][2])
+        elif name in out.namespaces and _attribute_call(call, source) == "namespace":
+            fn = call.child_by_field_name("function")
+            api = ref_of(fn.child_by_field_name("object") if fn is not None else None, source, rel, local, imports)
+            if api is not None:
+                out.attached.append((api, ("local", name), None))
     for call in all_calls:
         fn = call.child_by_field_name("function")
         attr = fn.child_by_field_name("attribute") if fn is not None and fn.type == "attribute" else None
@@ -207,6 +290,15 @@ def file_wiring(root: Node, source: bytes, rel: str, repo_root: Path | None) -> 
             child = ref_of(args[0], source, rel, local, imports)
             if child is not None:
                 out.registrations.append((receiver, child, _spec(call, source)))
+        elif method == "init_app":
+            app = ref_of(args[0], source, rel, local, imports)
+            if app is not None:
+                out.inits.append((receiver, app))
+        elif method == "add_namespace":
+            ns = ref_of(args[0], source, rel, local, imports)
+            path = keyword(call, source, "path") or (args[1] if len(args) > 1 else None)
+            if ns is not None:
+                out.attached.append((receiver, ns, _literal_spec(path, source, None) if path is not None else None))
         elif method in ("before_request", "before_app_request") and args[0].type == "identifier":
             out.hooks.append((receiver, node_text(args[0], source), method == "before_app_request"))
     for stmt in root.named_children:  # @app.before_request on a function
@@ -241,12 +333,15 @@ def resolve_wiring(files: dict[str, FileWiring]) -> FlaskWiring:
     """Compose the files' wiring: each app's and blueprint's served prefix and guards."""
     apps = {(rel, v) for rel, f in files.items() for v in f.apps}
     blueprints = {(rel, v): s for rel, f in files.items() for v, s in f.blueprints.items()}
+    apis = _api_targets(files)
     sites: dict[Key, list[tuple[Key, Spec | None]]] = {}
     for rel, f in files.items():
         for receiver, child, spec in f.registrations:
-            target = key_of(child, rel)
+            target, at = key_of(child, rel), key_of(receiver, rel)
+            if at in apis:  # Flask-Smorest's Api(app).register_blueprint(blp): on the app
+                at = apis[at][1] or _UNKNOWN
             if target in blueprints:
-                sites.setdefault(target, []).append((key_of(receiver, rel), spec))
+                sites.setdefault(target, []).append((at, spec))
     own_hooks: dict[Key, list[str]] = {}
     app_wide: dict[Key, list[str]] = {}  # blueprint → its before_app_request hooks
     for rel, f in files.items():
@@ -279,6 +374,7 @@ def resolve_wiring(files: dict[str, FileWiring]) -> FlaskWiring:
         return result
 
     resolved = {node: served(node, frozenset()) for node in sorted(apps | set(blueprints))}
+    resources = _resources(files, apis, resolved)
     # before_app_request hooks of every blueprint served under an app guard all of that app.
     whole: dict[Key, list[str]] = {}
     for node in sorted(app_wide):
@@ -289,12 +385,69 @@ def resolve_wiring(files: dict[str, FileWiring]) -> FlaskWiring:
     for (rel, var), (prefix, guards, root) in resolved.items():
         guards = tuple(whole.get(root, ())) + guards if root is not None else guards
         out.setdefault(rel, {})[var] = (prefix, tuple(dict.fromkeys(guards)))
-    return FlaskWiring(served=out, classes={rel: f.classes for rel, f in files.items() if f.classes})
+    return FlaskWiring(served=out, classes={rel: f.classes for rel, f in files.items() if f.classes},
+                       resources=resources)
+
+
+#: A container the code does not show: served nowhere known.
+_UNKNOWN: Key = ("", "")
+
+
+def _api_targets(files: dict[str, FileWiring]) -> dict[Key, tuple[str, Key | None, Spec]]:
+    """Every REST extension ``Api`` → (extension, the app or blueprint it serves — given to the
+    constructor, else the one ``init_app`` call; None when unknown, its ``prefix``)."""
+    inits: dict[Key, list[Key]] = {}
+    for rel, f in files.items():
+        for receiver, app in f.inits:
+            inits.setdefault(key_of(receiver, rel), []).append(key_of(app, rel))
+    out: dict[Key, tuple[str, Key | None, Spec]] = {}
+    for rel, f in files.items():
+        for var, (kind, target, prefix) in f.apis.items():
+            given = [key_of(target, rel)] if target is not None else []
+            at = given + inits.get((rel, var), [])
+            out[(rel, var)] = (kind, at[0] if len(at) == 1 else None, prefix)
+    return out
+
+
+def _resources(files: dict[str, FileWiring], apis: dict[Key, tuple[str, Key | None, Spec]],
+               resolved: dict[Key, tuple[str | None, tuple[str, ...], Key | None]]
+               ) -> dict[str, dict[str, tuple[str | None, tuple[str, ...]]]]:
+    """The prefix each Flask-RESTful / RESTX Api and RESTX namespace appends its resources' URLs
+    to: the served prefix of the app or blueprint + the Api's ``prefix`` (+ the namespace's path)."""
+    prefixes: dict[Key, tuple[str | None, tuple[str, ...]]] = {}
+    for key, (kind, target, prefix) in apis.items():
+        if kind == "smorest":
+            continue
+        base, guards, _ = resolved.get(target, (None, (), None)) if target is not None else (None, (), None)
+        prefixes[key] = (base + prefix[1] if base is not None and prefix[0] == "lit" else None, guards)
+    added: dict[Key, list[tuple[Key, Spec | None]]] = {}
+    for rel, f in files.items():
+        for api, ns, path in f.attached:
+            added.setdefault(key_of(ns, rel), []).append((key_of(api, rel), path))
+    for rel, f in files.items():
+        for var, (own, certain) in f.namespaces.items():
+            at = added.get((rel, var), [])
+            restx = [(api, path) for api, path in at if apis.get(api, ("",))[0] == "restx"]
+            if not certain and not restx:
+                continue  # x.namespace(…) on something that is not a RESTX Api
+            ns_prefix: str | None = None
+            ns_guards: tuple[str, ...] = ()
+            if len(at) == 1 and restx:
+                (api, path) = restx[0]
+                api_prefix, ns_guards = prefixes[api]
+                spec = path if path is not None else own
+                ns_prefix = api_prefix + spec[1] if api_prefix is not None and spec[0] == "lit" else None
+            prefixes[(rel, var)] = (ns_prefix, ns_guards)
+    out: dict[str, dict[str, tuple[str | None, tuple[str, ...]]]] = {}
+    for (rel, var), value in sorted(prefixes.items()):
+        out.setdefault(rel, {})[var] = value
+    return out
 
 
 def _collect(root: Node, source: bytes, rel: str, repo_root: Path | None) -> tuple[str, FileWiring] | None:
     facts = file_wiring(root, source, rel, repo_root)
-    if not (facts.apps or facts.blueprints or facts.registrations or facts.hooks or facts.classes):
+    if not (facts.apps or facts.blueprints or facts.registrations or facts.hooks or facts.classes
+            or facts.apis or facts.namespaces or facts.attached or facts.inits):
         return None
     return rel, facts
 
