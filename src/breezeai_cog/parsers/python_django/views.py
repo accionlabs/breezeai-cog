@@ -548,7 +548,9 @@ def _resolve(values: list[tuple[str, FileViews]], index: Any) -> dict[str, FileV
 register_fact(FactSpec(
     # A view module need not import Django (``def orders(request)``, a subclass of a project base
     # view): function views take ``request``, class-based views have ``View`` in a base's name.
-    # DRF router subclasses are read too: ``Router`` in a class name.
-    name=FACT, language="python", gate=(b"django", b"rest_framework", b"request", b"View", b"Router"),
+    # DRF router subclasses and Channels consumers are read too: ``Router`` / ``Consumer`` in a
+    # class name.
+    name=FACT, language="python", gate=(b"django", b"rest_framework", b"request", b"View", b"Router",
+                                       b"Consumer"),
     collect=_collect, resolve=_resolve,
 ))

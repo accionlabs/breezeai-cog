@@ -148,6 +148,18 @@ def _python_flask_rest(n: int) -> str:
             f"{body}")
 
 
+def _python_channels(n: int) -> str:
+    consumers = "".join(f"class C{i}(AsyncWebsocketConsumer):\n    async def connect(self):\n        pass\n"
+                        for i in range(n))
+    patterns = "".join(f"    re_path(r'ws/c{i}/(?P<room>\\w+)/$', C{i}.as_asgi()),\n    path('p{i}/', C{i}),\n"
+                       for i in range(n))
+    return ("from django.urls import path, re_path\n"
+            "from channels.routing import ProtocolTypeRouter, URLRouter\n"
+            "from channels.generic.websocket import AsyncWebsocketConsumer\n"
+            f"{consumers}websocket_urlpatterns = [\n{patterns}]\n"
+            "application = ProtocolTypeRouter({'websocket': URLRouter(websocket_urlpatterns)})\n")
+
+
 def _csharp(n: int) -> str:
     body = "".join(
         f"    /// <summary>M{i}</summary>\n"
@@ -315,6 +327,7 @@ SAMPLES: dict[str, tuple[str, Callable[[int], str]]] = {
     "python-drf": ("urls.py", _python_drf),
     "python-drf-router-subclass": ("urls.py", _python_drf_router_subclass),
     "python-flask-rest": ("api.py", _python_flask_rest),
+    "python-channels": ("routing.py", _python_channels),
     "csharp": ("C.cs", _csharp),
     "xsd": ("schema.xsd", _xsd),
     "wsdl": ("service.wsdl", _wsdl),

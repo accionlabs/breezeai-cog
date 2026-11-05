@@ -299,3 +299,83 @@ def test_lambda_view_is_anonymous(analyze_files) -> None:
     r = _one(st, "ANY", "/ping/")
     assert (r.handler, r.handlerLine) == (None, 2)
 
+
+# ── Django Channels ───────────────────────────────────────────────────────────────────────
+
+ASGI = ("from channels.routing import ProtocolTypeRouter, URLRouter\n"
+        "from channels.auth import AuthMiddlewareStack\n"
+        "import chat.routing\n"
+        "application = ProtocolTypeRouter({\n"
+        "    'websocket': AuthMiddlewareStack(URLRouter(chat.routing.websocket_urlpatterns)),\n"
+        "})\n")
+CONSUMERS = ("from channels.generic.websocket import AsyncWebsocketConsumer\n"
+             "class ChatConsumer(AsyncWebsocketConsumer):\n"
+             "    async def connect(self):\n        pass\n")
+
+
+def _channels(routing: str, asgi: str = ASGI, consumers: str = CONSUMERS) -> dict[str, str]:
+    return {"project/asgi.py": asgi, "chat/__init__.py": "", "chat/consumers.py": consumers,
+            "chat/routing.py": "from django.urls import path, re_path\nfrom . import consumers\n" + routing}
+
+
+def test_channels_consumer_is_one_websocket_binding(analyze_files) -> None:
+    st = analyze_files(_channels(
+        "websocket_urlpatterns = [re_path(r'ws/chat/(?P<room>\\w+)/$', consumers.ChatConsumer.as_asgi())]\n"))
+    (r,) = _eps(st)
+    assert (r.method, r.routeKind, r.endpoint, r.isRegex, r.framework) == (
+        "WEBSOCKET", "ws", "/ws/chat/(?P<room>\\w+)/", True, "django")
+    assert (r.handler, r.handlerLine, r.handlerPath, r.path) == (
+        "ChatConsumer", 2, "chat/consumers.py", "chat/routing.py")
+
+
+def test_channels_nested_router_joins_its_prefix(analyze_files) -> None:
+    asgi = ASGI.replace("URLRouter(chat.routing.websocket_urlpatterns)",
+                        "URLRouter([path('ws/', URLRouter(chat.routing.websocket_urlpatterns))])")
+    asgi = "from django.urls import path\n" + asgi
+    st = analyze_files(_channels(
+        "websocket_urlpatterns = [path('chat/<str:room>/', consumers.ChatConsumer.as_asgi())]\n", asgi))
+    assert [(r.endpoint, r.isRegex) for r in _eps(st)] == [("/ws/chat/<str:room>/", False)]
+
+
+def test_channels_2_consumer_class_inline_in_the_router(analyze_files) -> None:
+    asgi = ("from django.urls import path\nfrom channels.routing import ProtocolTypeRouter, URLRouter\n"
+            "from chat.consumers import ChatConsumer\n"
+            "application = ProtocolTypeRouter({'websocket': URLRouter([path('chat/stream/', ChatConsumer)])})\n")
+    st = analyze_files({"project/asgi.py": asgi, "chat/__init__.py": "", "chat/consumers.py": CONSUMERS})
+    (r,) = _eps(st)
+    assert (r.method, r.endpoint, r.handler, r.handlerPath) == (
+        "WEBSOCKET", "/chat/stream/", "ChatConsumer", "chat/consumers.py")
+
+
+def test_channels_http_consumer_and_protocol_from_the_router(analyze_files) -> None:
+    consumers = (CONSUMERS + "from channels.generic.http import AsyncHttpConsumer\n"
+                 "class Feed(AsyncHttpConsumer):\n    pass\n"
+                 "from channels.consumer import AsyncConsumer\nclass Raw(AsyncConsumer):\n    pass\n")
+    st = analyze_files(_channels(
+        "websocket_urlpatterns = [path('feed/', consumers.Feed.as_asgi()), path('raw/', consumers.Raw.as_asgi())]\n",
+        consumers=consumers))
+    assert sorted((r.method, r.routeKind, r.endpoint, r.handler) for r in _eps(st)) == [
+        ("ANY", "route", "/feed/", "Feed"), ("WEBSOCKET", "ws", "/raw/", "Raw")]
+
+
+def test_channels_routing_reached_from_nowhere_has_no_address(analyze_files) -> None:
+    st = analyze_files(_channels(
+        "websocket_urlpatterns = [path('chat/', consumers.ChatConsumer.as_asgi()),\n"
+        "                         path('lib/', consumers.Unknown.as_asgi())]\n", asgi=""))
+    # The repo consumer says its protocol; a consumer the code does not show, under no router, does not.
+    assert [(r.method, r.endpoint, r.handler) for r in _eps(st)] == [("WEBSOCKET", None, "ChatConsumer")]
+
+
+def test_channels_list_routed_twice_has_no_address(analyze_files) -> None:
+    asgi = ASGI.replace("URLRouter(chat.routing.websocket_urlpatterns)),",
+                        "URLRouter(chat.routing.websocket_urlpatterns)),\n"
+                        "    'http': URLRouter(chat.routing.websocket_urlpatterns),")
+    st = analyze_files(_channels(
+        "websocket_urlpatterns = [path('chat/', consumers.ChatConsumer.as_asgi())]\n", asgi))
+    assert [r.endpoint for r in _eps(st)] == [None]
+
+
+def test_a_view_that_is_not_a_consumer_is_not_a_channels_binding(analyze_files) -> None:
+    st = analyze_files(_channels(
+        "def page(request):\n    pass\nwebsocket_urlpatterns = [path('page/', page)]\n"))
+    assert _eps(st) == []
