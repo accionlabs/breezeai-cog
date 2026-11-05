@@ -292,6 +292,13 @@ discoverable. Skip `.vue` and all of that goes with it.
 | `.aspx` `.ascx` `.master` | `aspnet-webforms` | `template` | `element` / `attribute`, with `handler=` for `On<Event>` wiring |
 | `.vue` | `vue` | `component` | `directive_attribute`, `interpolation`, plus `<script>` Functions and Classes |
 
+**Inline scripts.** In `.html`, `.cshtml`/`.razor` and `.aspx`/`.ascx`/`.master`, the bodies of
+inline `<script>` blocks are read for jQuery AJAX calls (`$.ajax`, `$.get`, `$.post`, `$.getJSON`,
+`$.getScript`, `$(…).load`), each an `api_call` at its real line in the markup file. A `$` call
+counts only when the page shows jQuery is loaded (a `jquery*.js` script, an `asp:ScriptReference`,
+or a Razor layout / `_ViewStart` chain that loads it). `$.ajax({ url: … })` counts without that
+evidence. No other inline-script code is captured yet.
+
 `uiRole` separates a **template** (a view rendered by something else) from a **component** (a
 unit owning both markup and code). `.razor` and `.vue` are components; `.cshtml` and `.aspx`
 are templates.

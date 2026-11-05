@@ -66,7 +66,7 @@ def test_inventory_in_run_order() -> None:
                 "guzzle-http-calls", "symfony-http-calls", "psr-http-calls"],
         "scala": ["akka-events", "spark"],
         "typescript": ["express", "fastify", "aws-events", "nestjs-clients", "hubspot",
-                       "chargebee", "ts-force", "apollo", "aws-sdk-calls",
+                       "chargebee", "ts-force", "apollo", "aws-sdk-calls", "jquery-calls",
                        "graphql-client",
                        "graphql-resolver-modules", "vue-routes", "react-routes",
                        "nextjs-routes", "nextjs-pages", "backbone", "backbone-routes", "vue-navigation", "angular-navigation",

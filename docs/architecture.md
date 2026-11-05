@@ -646,6 +646,7 @@ the file:
   │                  32   ts-force         typescript_tsforce/calls.py               │
   │                  33   apollo           typescript_apollo/calls.py                │
   │                  34   aws-sdk-calls    typescript_aws/sdk_calls.py               │
+  │                  35   jquery-calls     typescript_jquery/calls.py                │
   │                  40   graphql-client   typescript_graphql/routes.py      ✔       │
   │                  45   graphql-resol…   typescript_graphql/…modules.py    ✔       │
   │                  50   vue-routes       typescript_vue/routes.py          ✔       │
@@ -730,7 +731,7 @@ For example, `order.controller.ts` imports both `@nestjs/common` and `@aws-sdk/c
      express         → no Express app or router → nothing
      fastify         → no Fastify instance      → nothing
      aws-events      → SQS send found → ENRICH Statement@L11 → framework=aws-sqs, endpoint=ORDER_QUEUE
-     hubspot … aws-sdk-calls → nothing (no SDK import)
+     hubspot … jquery-calls → nothing (no SDK import, no jQuery)
      graphql-…, vue-…, nextjs-…, *-navigation → nothing (most stop at a cheap first check)
  nestjs detection    → + Statement  POST /orders   (after extract returns)
  ─────────────────────────────────────────────────────────────────────────────
