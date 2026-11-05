@@ -50,7 +50,7 @@ def test_every_struts2_generation(tmp_path, version) -> None:
         '<package name="p" namespace="/n" extends="struts-default">\n'
         '  <action name="a" class="x.A"/>\n</package>\n'))
     [r] = rec.statements
-    assert (r.endpoint, r.handler, r.nodeType) == ("/n/a.action", "x.A.execute", "element")
+    assert (r.endpoint, r.handler, r.nodeType) == ("/n/a.action", "execute", "element")
     assert rec.framework == "struts2"
     errors = list(Draft202012Validator(FileRecord.model_json_schema(by_alias=True))
                   .iter_errors(json.loads(to_line(rec))))

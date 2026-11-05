@@ -3,14 +3,16 @@ includes) is a routes file.
 
 Each ``<action>`` of a ``<package>`` is a **binding**: one ``route`` record on the ``<action>``
 element, ``method`` ``ANY`` (an action answers every verb), ``endpoint``
-``<namespace>/<name><extension>`` (:mod:`.common`), ``handler`` ``<class>.<method>`` as written
-(``method`` defaults to ``execute``). The record leads to the action method in its Java source:
+``<namespace>/<name><extension>`` (:mod:`.common`), ``handler`` the action method's name
+(``method`` defaults to ``execute``), like every other framework's route; the class is reached
+through ``handlerPath`` / ``handlerLine``. The record leads to the action method in its Java source:
 the class is looked up under the source roots next to the configuration (``src/main/java``,
 ``src``, ``JavaSource``, …), and the method's declaration line read from that file.
 
 Honest-null: a wildcard class or method (``{1}``) names no handler; an action with no ``class``
 runs the framework's ``ActionSupport`` and names none either; a Spring bean id (``class="login"``)
-is kept as written but not located; a placeholder extension or namespace leaves the endpoint
+names its method but is not located (the bean id stays in the record's ``text``, as does a
+class that is not in the repository); a placeholder extension or namespace leaves the endpoint
 empty. A wildcard **name** (``user_*``) is kept in the endpoint as written: it is the address
 pattern the action answers. Dynamic method invocation (``login!save.action``) adds no records.
 
@@ -136,7 +138,7 @@ def _route(action: Node, source: bytes, path: str, parent: str, seen: set[str],
         return None
     cls = element_attr(action, source, "class")
     method = element_attr(action, source, "method") or "execute"
-    handler = f"{cls}.{method}" if cls and "{" not in cls and "{" not in method else None
+    handler = method if cls and "{" not in cls and "{" not in method else None
     line, handler_path = handlers.locate(cls, method) if handler else (None, None)
     return _statement(
         action, source, path, parent, seen, limit,

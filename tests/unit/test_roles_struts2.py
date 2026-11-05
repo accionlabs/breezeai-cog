@@ -40,7 +40,7 @@ def test_action_element_is_binding(analyze_files) -> None:
     assert (r.semanticType, r.method, r.routeKind, r.framework, r.endpoint) == (
         "route", "ANY", "route", "struts2", "/admin/login.action")
     assert (r.handler, r.handlerPath, r.handlerLine, r.startLine) == (
-        "com.shop.web.LoginAction.save", f"{JAVA}/com/shop/web/LoginAction.java", 5, 4)
+        "save", f"{JAVA}/com/shop/web/LoginAction.java", 5, 4)
 
 
 def test_action_method_defaults_to_execute(analyze_files) -> None:
@@ -51,7 +51,7 @@ def test_action_method_defaults_to_execute(analyze_files) -> None:
     })
     [r] = _eps(st, f"{RES}/struts.xml")
     assert (r.endpoint, r.handler, r.handlerLine) == (
-        "/in.action", "com.shop.web.LoginAction.execute", 4)
+        "/in.action", "execute", 4)
 
 
 def test_unlocated_class_keeps_handler_as_written(analyze_files) -> None:
@@ -59,8 +59,8 @@ def test_unlocated_class_keeps_handler_as_written(analyze_files) -> None:
         '<package name="p"><action name="a" class="loginBean"/>'
         '<action name="b" class="com.gone.Missing"/></package>\n')})
     a, b = _eps(st)
-    assert (a.handler, a.handlerPath, a.handlerLine) == ("loginBean.execute", None, None)
-    assert (b.handler, b.handlerPath, b.handlerLine) == ("com.gone.Missing.execute", None, None)
+    assert (a.handler, a.handlerPath, a.handlerLine) == ("execute", None, None)
+    assert (b.handler, b.handlerPath, b.handlerLine) == ("execute", None, None)
 
 
 def test_action_without_class_has_no_handler(analyze_files) -> None:
@@ -560,7 +560,7 @@ def test_class_in_two_source_roots_is_not_located(analyze_files) -> None:
     })
     [r] = _eps(st)
     assert (r.handler, r.handlerPath, r.handlerLine) == (
-        "com.shop.web.LoginAction.execute", None, None)
+        "execute", None, None)
 
 
 # ── Extension-less addresses (Struts' default `action,,`), default-namespace fallback ─────
