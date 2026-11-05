@@ -529,7 +529,7 @@ _P = {"aspx": WebFormsParser, "cshtml": RazorParser, "razor": RazorParser, "html
 )
 def test_server_generated_jquery_reference_is_evidence(tmp_path, ext: str, reference: str) -> None:
     got = _calls(tmp_path, reference + "\n" + _SHORTHANDS, f"p.{ext}", _P[ext]())
-    assert got == [(l + 1, m, e) for l, m, e in _SHORTHAND_CALLS]  # lines stay true to the file
+    assert got == [(line + 1, m, e) for line, m, e in _SHORTHAND_CALLS]  # lines stay true to the file
 
 
 @pytest.mark.parametrize(
@@ -600,7 +600,7 @@ def test_layout_bundle_is_evidence_for_the_view(tmp_path) -> None:
 )
 def test_server_expression_is_never_an_endpoint(tmp_path, ext: str, js: str, expected) -> None:
     page = "<script>\n" + js + "\n</script>\n"
-    assert [(l - 1, m, e) for l, m, e in _calls(tmp_path, page, f"p.{ext}", _P[ext]())] == expected
+    assert [(line - 1, m, e) for line, m, e in _calls(tmp_path, page, f"p.{ext}", _P[ext]())] == expected
 
 
 # --- D3: commented-out markup is dead --------------------------------------------------------
