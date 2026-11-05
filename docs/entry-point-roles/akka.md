@@ -1,6 +1,6 @@
 # Akka / Pekko actors — entry-point roles
 
-Detector: `src/breezeai_cog/parsers/scala/events.py` (additive detector `akka-events`) · Rules: [entry-point contract](../architecture/entry-points.md) · Tests: `tests/unit/test_roles_akka.py`
+Detector: `src/breezeai_cog/parsers/scala_akka/events.py` (additive detector `akka-events`) · Rules: [entry-point contract](../architecture/entry-points.md) · Tests: `tests/unit/test_roles_akka.py`
 
 | Construct | Role | Record | Why |
 |---|---|---|---|

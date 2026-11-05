@@ -661,7 +661,7 @@ the file:
   │                  70   aws-sdk-calls    csharp_aws/sdk_calls.py           ✔       │
   │                  80   graphql-client   csharp_graphql_client/…ions.py    ✔       │
   │                                                                                  │
-  │  java            10   quartz           java/quartz.py                    ✔       │
+  │  java            10   quartz           java_quartz/jobs.py               ✔       │
   │                                                                                  │
   │  go              10   go-net-http      go_nethttp/routes.py              ✔       │
   │                  20   go-gin           go_gin/routes.py                  ✔       │
@@ -676,10 +676,10 @@ the file:
   │                 110   go-database      go_database/access.py                     │
   │                 120   go-lambda        go_lambda/handlers.py             ✔       │
   │                                                                                  │
-  │  python          10   celery           python/celery.py                  ✔       │
+  │  python          10   celery           python_celery/tasks.py            ✔       │
   │                                                                                  │
-  │  scala           10   akka-events      scala/events.py                           │
-  │                  20   spark            scala/spark.py                            │
+  │  scala           10   akka-events      scala_akka/events.py                      │
+  │                  20   spark            scala_spark/io.py                         │
   │                                                                                  │
   │  php             10   wordpress-hooks  php/wordpress.py                          │
   │                  20   laravel-events   php_laravel/events.py                     │

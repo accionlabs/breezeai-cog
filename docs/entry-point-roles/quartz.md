@@ -1,6 +1,6 @@
 # Quartz (Java) and Quartz.NET (C#) — entry-point roles
 
-Parser: `src/breezeai_cog/parsers/quartz_common.py` (shared rules), `java/quartz.py`, `csharp_quartz/jobs.py` (additive detectors) · Rules: [entry-point contract](../architecture/entry-points.md) · Tests: `tests/unit/test_roles_quartz.py`
+Parser: `src/breezeai_cog/parsers/quartz_common.py` (shared rules), `java_quartz/jobs.py`, `csharp_quartz/jobs.py` (additive detectors) · Rules: [entry-point contract](../architecture/entry-points.md) · Tests: `tests/unit/test_roles_quartz.py`
 
 A job class says what runs, a trigger says when. The binding is the first construct that names both.
 

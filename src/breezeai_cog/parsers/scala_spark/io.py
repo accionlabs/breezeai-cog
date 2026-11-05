@@ -19,8 +19,8 @@ from ..additive import DetectContext, Detection, Detector, Gate, register_detect
 from ..base import ParseContext
 from ..emits import Emit
 from ..treesitter import node_text
-from .functions import type_map
-from .statements import _call_details, find_enclosing_parent_id
+from ..scala.functions import type_map
+from ..scala.statements import _call_details, find_enclosing_parent_id
 
 # Mapping of Spark terminal operations -> (semanticType, dataAccessHint, method)
 # Currently using D7 fallback: ("db_method_call", "spark", <method>)
