@@ -640,7 +640,11 @@ the file:
   │                  15   fastify          typescript_fastify/routes.py      ✔       │
   │                  20   aws-events       typescript_aws/events.py                  │
   │                  25   nestjs-clients   typescript_nestjs/outbound.py     ✔       │
-  │                  30   sdk-calls        detection/sdk_calls.py                    │
+  │                  30   hubspot          typescript_hubspot/calls.py               │
+  │                  31   chargebee        typescript_chargebee/calls.py             │
+  │                  32   ts-force         typescript_tsforce/calls.py               │
+  │                  33   apollo           typescript_apollo/calls.py                │
+  │                  34   aws-sdk-calls    typescript_aws/sdk_calls.py               │
   │                  40   graphql-client   typescript_graphql/routes.py      ✔       │
   │                  45   graphql-resol…   typescript_graphql/…modules.py    ✔       │
   │                  50   vue-routes       typescript_vue/routes.py          ✔       │
@@ -720,7 +724,7 @@ For example, `order.controller.ts` imports both `@nestjs/common` and `@aws-sdk/c
      express         → no Express app or router → nothing
      fastify         → no Fastify instance      → nothing
      aws-events      → SQS send found → ENRICH Statement@L11 → framework=aws-sqs, endpoint=ORDER_QUEUE
-     sdk-calls       → nothing
+     hubspot … aws-sdk-calls → nothing (no SDK import)
      graphql-…, vue-…, nextjs-…, *-navigation → nothing (most stop at a cheap first check)
  nestjs detection    → + Statement  POST /orders   (after extract returns)
  ─────────────────────────────────────────────────────────────────────────────

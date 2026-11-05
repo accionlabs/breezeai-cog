@@ -462,7 +462,7 @@ def test_records_report_the_node_they_stand_for(analyze_files) -> None:
 
 
 def test_a_handler_declaration_that_is_an_api_call_keeps_it(analyze_files) -> None:
-    # `sdk-calls` classified the one-line declaration as the outbound call; the route is a
+    # The shared HTTP classifier classified the one-line declaration as the outbound call; the route is a
     # record beside it, at the same node, not an overwrite of it.
     st = analyze_files({
         "package.json": _NEXT_PKG,

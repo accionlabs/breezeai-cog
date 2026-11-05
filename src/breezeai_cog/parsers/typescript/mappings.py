@@ -77,6 +77,6 @@ FRAMEWORKS = [
     # AWS messaging / Lambda (see typescript_aws/events.py) — transport carried on statement.framework.
     "aws-sns", "aws-sqs", "aws-eventbridge", "aws-lambda", "aws-apigw",
     "aws-dynamodb", "aws-kinesis", "aws-s3", "aws-ses",
-    # AWS vendor-SDK api_call (see detection/sdk_calls.py) — same transport field.
+    # AWS vendor-SDK api_call (see typescript_aws/sdk_calls.py) — same transport field.
     "aws-cognito", "aws-ssm",
 ]

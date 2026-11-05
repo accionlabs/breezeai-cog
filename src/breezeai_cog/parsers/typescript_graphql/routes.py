@@ -389,7 +389,7 @@ def _detect_client_ops(
 # Client ops appear in ANY TS file that imports a gql tag — most of which are owned by the
 # base TypeScriptParser (or Angular/NestJS), not GraphQLParser (whose ``claims`` fires only
 # on resolver-maps / server SDL). So expose the client pass as an additive detector, run for
-# every TS file from ``TypeScriptParser.extract`` (like ``detect_express``/``detect_sdk_calls``).
+# every TS file from ``TypeScriptParser.extract`` (like the Express and vendor-SDK detectors).
 def detect_graphql_client(
     root: Node, source: bytes, path: str, timeout_micros: int = 0
 ) -> list[Emit]:
