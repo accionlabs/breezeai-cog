@@ -18,8 +18,8 @@ from collections.abc import Iterator
 
 from tree_sitter import Node
 
-from ..emits import Emit
-from ..treesitter import node_text
+from .emits import Emit
+from .treesitter import node_text
 
 
 def walk(node: Node) -> Iterator[Node]:

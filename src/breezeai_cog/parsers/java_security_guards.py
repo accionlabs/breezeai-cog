@@ -26,7 +26,7 @@ from __future__ import annotations
 import re
 from typing import NamedTuple
 
-from ...schemas import Decorator
+from ..schemas import Decorator
 
 #: Annotation → the family a method annotation overrides the class one within.
 _FAMILIES = {

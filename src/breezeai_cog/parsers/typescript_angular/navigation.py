@@ -18,7 +18,7 @@ from tree_sitter import Node
 from ..additive import DetectContext, Detection, Detector, Gate, register_detector
 from ..emits import Emit
 from ..treesitter import node_text
-from ..typescript.navigation import first_arg, literal, navigation, walk
+from ..navigation_common import first_arg, literal, navigation, walk
 
 _METHODS = frozenset({"navigate", "navigateByUrl"})
 _ROUTER_PARAM = re.compile(rb"\b(?:private|public|protected|readonly)\s+(?:readonly\s+)?(\w+)\s*:\s*Router\b")

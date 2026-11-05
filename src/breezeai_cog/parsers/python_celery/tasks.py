@@ -11,7 +11,7 @@
     sender.add_periodic_task(30.0, ping.s())      → timer              celery  PERIODIC 30000
 
 * **Task** (binding, at its decorator): ``endpoint`` is its name from the ``celery.tasks`` fact
-  (:mod:`.celery_tasks`) — given by ``name=``, or Celery's default name when the code confirms
+  (:mod:`.task_names`) — given by ``name=``, or Celery's default name when the code confirms
   it; otherwise empty, never a guess.
 * **Send** (outbound): ``.delay(…)`` / ``.apply_async(…)`` on a task of this file or one imported
   from another file (an aliased import is followed to the original name); ``send_task("…")``.
@@ -30,7 +30,7 @@ from tree_sitter import Node
 from ..additive import DetectContext, Detection, Detector, Gate, register_detector
 from ..emits import Emit
 from ..treesitter import first_line, node_text
-from .celery_tasks import (
+from .task_names import (
     UNKNOWN_NAME,
     beat_entries, celery_tasks, kwarg, positional, string, task_defs, walk,
 )

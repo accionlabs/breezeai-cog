@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from ..emits import Emit
 from ..treesitter import entry_text
-from ..typescript.navigation import literal
+from ..navigation_common import literal
 from .syntax import FRAMEWORK, Scan
 
 

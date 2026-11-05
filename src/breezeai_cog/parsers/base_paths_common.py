@@ -22,8 +22,8 @@ from typing import Any, Literal
 
 from tree_sitter import Node
 
-from ..treesitter import node_text
-from .imports import _path_pieces, _resolve_pieces
+from .treesitter import node_text
+from .typescript.imports import _path_pieces, _resolve_pieces
 
 #: One file's base paths: (its directory, the path pieces of each ``basePath`` it sets —
 #: ``None`` for a dynamic value; an empty list = a Next.js config that sets none).

@@ -24,7 +24,7 @@ from tree_sitter import Node
 from ..additive import DetectContext, Detection, Detector, Gate, register_detector
 from ..base import ParseContext
 from ..treesitter import node_text
-from .functions import type_map
+from ..scala.functions import type_map
 
 
 def _is_receive_handler(fn_node: Node, source: bytes) -> bool:

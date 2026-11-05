@@ -56,7 +56,7 @@ from ...schemas import FileRecord
 from ..additive import DetectContext, Detection, Detector, Gate, register_detector
 from ..emits import Emit
 from ..treesitter import node_text
-from ..typescript.base_paths import app_base_path
+from ..base_paths_common import app_base_path
 from .facts import next_base_paths, next_middlewares, page_extensions, page_stem
 
 _VERBS = {"GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"}

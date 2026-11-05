@@ -10,7 +10,7 @@ from tree_sitter import Node
 
 from ..emits import Emit
 from ..treesitter import entry_text, node_text
-from ..typescript.navigation import literal
+from ..navigation_common import literal
 
 FRAMEWORK = "angularjs"
 

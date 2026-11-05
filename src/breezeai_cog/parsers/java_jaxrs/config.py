@@ -11,7 +11,7 @@ under can be set outside the code:
       <servlet-mapping><servlet-name>jersey</servlet-name><url-pattern>/rest/*</url-pattern>
       → /rest
 
-* the module's base ``application.properties`` / ``.yml`` (:func:`..java.config.spring_properties`):
+* the module's base ``application.properties`` / ``.yml`` (:func:`..java_spring_config.spring_properties`):
   Quarkus ``quarkus.rest.path`` / ``quarkus.resteasy.path``, Spring Boot's
   ``spring.jersey.application-path``.
 
@@ -24,7 +24,7 @@ from __future__ import annotations
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
-from ..java.config import spring_properties
+from ..java_spring_config import spring_properties
 
 _WEB_XML = "src/main/webapp/WEB-INF/web.xml"
 _JAXRS_SERVLETS = frozenset({

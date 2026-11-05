@@ -17,7 +17,7 @@
       export const config = { matcher: ["/admin/:path*"] };
 
 * ``next.base-paths`` — app directory (a ``next.config.*`` file's) → its ``basePath``
-  (:mod:`..typescript.base_paths`, shared with LoopBack). Every config file counts, one that
+  (:mod:`..base_paths_common`, shared with LoopBack). Every config file counts, one that
   sets no ``basePath`` too: it marks its directory as an app.
 * ``next.page-extensions`` — app directory → its ``pageExtensions``: the file endings that make
   a Pages Router file a page (``['page.tsx', 'api.ts']``: ``index.page.tsx`` is ``/``,
@@ -39,7 +39,7 @@ from tree_sitter import Node
 
 from ..additive import FactSpec, index_fact, register_fact
 from ..treesitter import node_text
-from ..typescript.base_paths import BasePathRaw, collect_base_path, resolve_base_paths
+from ..base_paths_common import BasePathRaw, collect_base_path, resolve_base_paths
 from ..typescript.imports import _load_jsonc, _string_literal
 
 APPS = "next.apps"

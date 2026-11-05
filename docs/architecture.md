@@ -548,8 +548,9 @@ classDiagram
 > language change. One folder per library keeps everything about it, and its tests, together.
 > **Cost:** more small packages. The test for a module in a base package: *does the base parser
 > use it for every file of the language?* If not, and it detects one library or framework, it
-> belongs in that library's or framework's package. Some library detectors still sit in a base
-> package (the `code in` column below) until they are moved.
+> belongs in that library's or framework's package. For PHP: a library the language ships
+> stays in `parsers/php/`; Laravel, Doctrine, CodeIgniter, Guzzle, Symfony and PSR-18 each have
+> their own package.
 
 > **Decision —** additive detectors self-register (`parsers/additive.py`); the language parser
 > only calls `run_additive(<language>, …)` once.
@@ -638,9 +639,13 @@ the file:
   │  typescript    order  detector         code in                    [skips tests]  │
   │                  10   express          typescript_express/routes.py      ✔       │
   │                  15   fastify          typescript_fastify/routes.py      ✔       │
-  │                  20   aws-events       typescript/aws_events.py                  │
+  │                  20   aws-events       typescript_aws/events.py                  │
   │                  25   nestjs-clients   typescript_nestjs/outbound.py     ✔       │
-  │                  30   sdk-calls        detection/sdk_calls.py                    │
+  │                  30   hubspot          typescript_hubspot/calls.py               │
+  │                  31   chargebee        typescript_chargebee/calls.py             │
+  │                  32   ts-force         typescript_tsforce/calls.py               │
+  │                  33   apollo           typescript_apollo/calls.py                │
+  │                  34   aws-sdk-calls    typescript_aws/sdk_calls.py               │
   │                  40   graphql-client   typescript_graphql/routes.py      ✔       │
   │                  45   graphql-resol…   typescript_graphql/…modules.py    ✔       │
   │                  50   vue-routes       typescript_vue/routes.py          ✔       │
@@ -661,7 +666,7 @@ the file:
   │                  70   aws-sdk-calls    csharp_aws/sdk_calls.py           ✔       │
   │                  80   graphql-client   csharp_graphql_client/…ions.py    ✔       │
   │                                                                                  │
-  │  java            10   quartz           java/quartz.py                    ✔       │
+  │  java            10   quartz           java_quartz/jobs.py               ✔       │
   │                                                                                  │
   │  go              10   go-net-http      go_nethttp/routes.py              ✔       │
   │                  20   go-gin           go_gin/routes.py                  ✔       │
@@ -676,16 +681,21 @@ the file:
   │                 110   go-database      go_database/access.py                     │
   │                 120   go-lambda        go_lambda/handlers.py             ✔       │
   │                                                                                  │
-  │  python          10   celery           python/celery.py                  ✔       │
+  │  python          10   celery           python_celery/tasks.py            ✔       │
   │                                                                                  │
-  │  scala           10   akka-events      scala/events.py                           │
-  │                  20   spark            scala/spark.py                            │
+  │  scala           10   akka-events      scala_akka/events.py                      │
+  │                  20   spark            scala_spark/io.py                         │
   │                                                                                  │
-  │  php             10   wordpress-hooks  php/wordpress.py                          │
+  │  php             10   wordpress-hooks  php_wordpress/hooks.py                    │
   │                  20   laravel-events   php_laravel/events.py                     │
   │                  30   symfony-events   php_symfony/events.py                     │
-  │                  40   php-data-access  php/data_access.py                        │
-  │                  50   php-http-calls   php/http_calls.py                         │
+  │                  40   laravel-data-…   php_laravel/data_access.py                │
+  │                  41   doctrine-data-…  php_doctrine/data_access.py               │
+  │                  42   codeigniter-d…   php_codeigniter/data_access.py            │
+  │                  50   laravel-http-…   php_laravel/http_calls.py                 │
+  │                  51   guzzle-http-c…   php_guzzle/http_calls.py                  │
+  │                  52   symfony-http-…   php_symfony/http_calls.py                 │
+  │                  53   psr-http-calls   php_psr/http_calls.py                     │
   │                                                                                  │
   │  Kotlin · Groovy · Ruby · VB · C++ · HCL                                         │
   │   └─ no additive hook yet: shared classifiers only                               │
@@ -720,7 +730,7 @@ For example, `order.controller.ts` imports both `@nestjs/common` and `@aws-sdk/c
      express         → no Express app or router → nothing
      fastify         → no Fastify instance      → nothing
      aws-events      → SQS send found → ENRICH Statement@L11 → framework=aws-sqs, endpoint=ORDER_QUEUE
-     sdk-calls       → nothing
+     hubspot … aws-sdk-calls → nothing (no SDK import)
      graphql-…, vue-…, nextjs-…, *-navigation → nothing (most stop at a cheap first check)
  nestjs detection    → + Statement  POST /orders   (after extract returns)
  ─────────────────────────────────────────────────────────────────────────────
@@ -1053,8 +1063,11 @@ src/breezeai_cog/
 │  ├─ contract.py                  entry-point contract check
 │  ├─ handler_sites.py, aws_deploy.py  facts shared by several languages; where a handler is declared
 │  ├─ detection/                   shared api / db / query classifiers
-│  ├─ vertx_common.py, dotnet_common.py, aspnet_common.py, aspnet_areas.py, quartz_common.py
-│  │                               helpers shared by one framework family
+│  ├─ vertx_common.py, dotnet_common.py, aspnet_common.py, aspnet_areas.py, quartz_common.py,
+│  │  java_spring_config.py, java_web_guards.py, java_security_guards.py,
+│  │  base_paths_common.py, navigation_common.py, typescript_sdk_common.py, aws_sdk_common.py,
+│  │  php_route_common.py, php_data_access_common.py, php_http_common.py
+│  │                               helpers shared by several frameworks or libraries
 │  ├─ cfamily_common/              the extraction and index C and C++ share
 │  ├─ <lang>/                      language parsers
 │  ├─ <lang>_<framework>/          framework parsers

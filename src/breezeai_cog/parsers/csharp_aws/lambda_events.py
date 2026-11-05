@@ -4,7 +4,7 @@ A .NET Lambda's entry point is the handler method
 ``public Task FunctionHandler(S3Event evt, ILambdaContext context)``, which otherwise lands as
 an ordinary method. This detector surfaces it as an entry point whose ``framework`` is the
 trigger's service (``aws-s3``, ``aws-sqs``, ``aws-apigw``, …; the file is labelled
-``aws-lambda``), mirroring the TypeScript ``aws_events`` handler detection — including its
+``aws-lambda``), mirroring the TypeScript ``typescript_aws/events.py`` handler detection — including its
 semanticType split: event-source triggers are ``eventbus_consumer``, HTTP-facing events
 (APIGateway/ALB) are ``route``. ``endpoint`` stays empty: the queue, bucket or path is set in
 deployment config, not in the handler (the method name is not an address).
@@ -84,7 +84,7 @@ def _base_type(param: Node, source: bytes) -> str | None:
 def _handler_kind(method: Node, source: bytes) -> tuple[SemanticType, str, str | None] | None:
     """→ (semanticType, framework, routeKind) if this method is a Lambda handler — its parameter
     list has ILambdaContext AND a recognised AWS event type — else None. Matches the TS
-    ``aws_events`` modelling of the same concept: event-source triggers are
+    ``typescript_aws/events.py`` modelling of the same concept: event-source triggers are
     ``eventbus_consumer`` (routeKind ``None``); HTTP-facing events (APIGateway/ALB) are
     ``route`` (routeKind ``"route"``)."""
     params = method.child_by_field_name("parameters")

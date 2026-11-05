@@ -415,7 +415,7 @@ def match_db(callee: str, method: str, language: str | None = None,
     ``typed_receivers`` maps a name declared as a datastore client type to its product."""
     if language in {"php", "go"}:
         # PHP and Go data access is recorded from evidence by their own detectors — PHP from
-        # imports, types and model classes (php/data_access.py), Go from the receiver's declared
+        # imports, types and model classes (php_data_access_common.py), Go from the receiver's declared
         # type (go_database/access.py). A name match here would be a guess: it would tag a Go
         # `repo.Update` as TypeORM or an in-memory `cache.Get` as Redis.
         return None

@@ -17,7 +17,7 @@ from __future__ import annotations
 from tree_sitter import Node
 
 from ..emits import Emit
-from ..typescript.navigation import literal
+from ..navigation_common import literal
 from .registrations import Env, handler_fields
 from .syntax import (
     MethodCall,

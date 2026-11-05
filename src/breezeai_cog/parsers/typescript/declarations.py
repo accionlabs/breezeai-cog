@@ -27,7 +27,6 @@ as ``Class.method`` (a static method) or ``instance.method``.
 
 from __future__ import annotations
 
-import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
@@ -38,7 +37,9 @@ from ..additive import FactSpec, index_fact, register_fact
 from ..treesitter import node_text
 
 FACT = "typescript.declarations"
-VUE_FACT = "typescript.vue-components"
+#: Facts named ``typescript.declarations.<x>`` add the exports of files another parser owns (a
+#: Vue single-file component: ``typescript_vue/exports.py``); this module's own fact wins.
+FACT_PREFIX = FACT + "."
 
 _FUNCTION_NODES = ("function_declaration", "generator_function_declaration")
 _CLASS_NODES = ("class_declaration", "abstract_class_declaration")
@@ -369,32 +370,13 @@ register_fact(FactSpec(
     collect=_collect_with_path, resolve=_resolve,
 ))
 
-# A Vue single-file component exports itself as `default`: its name is the `name` option
-# (`defineOptions({ name: 'X' })`, or `name:` in `export default { … }`), else — Vue's own rule —
-# the file name; its line is the `<script setup>` tag or the `export default`.
-_VUE_NAME_RE = re.compile(rb"""(?:defineOptions\(\s*\{[^}]*?|export\s+default\s*(?:defineComponent\(\s*)?\{[^}]*?)\bname\s*:\s*['"]([\w$-]+)['"]""", re.S)
-_VUE_DECL_RE = re.compile(rb"<script\b[^>]*\bsetup\b|export\s+default\b")
-
-
-def _collect_vue(root: object, source: bytes, rel: str,
-                 repo_root: Path | None) -> tuple[str, FileExports] | None:
-    decl = _VUE_DECL_RE.search(source)
-    if decl is None:
-        return None
-    m = _VUE_NAME_RE.search(source)
-    name = m.group(1).decode() if m else Path(rel).stem
-    line = source.count(b"\n", 0, decl.start()) + 1
-    return rel, FileExports({"default": ("decl", name, line)})
-
-
-register_fact(FactSpec(
-    name=VUE_FACT, language="typescript", gate=(b"<script",), sources=(".vue",),
-    collect=_collect_vue, resolve=_resolve,
-))
-
-
 def module_exports(index: Any | None) -> dict[str, FileExports]:
-    return {**(index_fact(index, VUE_FACT) or {}), **(index_fact(index, FACT) or {})}
+    facts = getattr(index, "facts", None) or {}
+    merged: dict[str, FileExports] = {}
+    for name in sorted(n for n in facts if n.startswith(FACT_PREFIX)):
+        merged.update(facts[name] or {})
+    merged.update(index_fact(index, FACT) or {})
+    return merged
 
 
 def resolve_export(index: Any | None, file: str, name: str,

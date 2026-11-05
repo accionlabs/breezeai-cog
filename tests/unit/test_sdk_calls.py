@@ -1,4 +1,5 @@
-"""Vendor-SDK outbound-call detection (detection/sdk_calls.py, additive on TypeScriptParser):
+"""Vendor-SDK outbound-call detection (the typescript_hubspot, typescript_chargebee,
+typescript_tsforce, typescript_apollo and typescript_aws additive detectors on TypeScriptParser):
 import-keyed client resolution, api_call reuse, honest-null, and false-positive guards."""
 
 from __future__ import annotations
