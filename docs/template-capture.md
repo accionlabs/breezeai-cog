@@ -24,7 +24,7 @@ the cases where the markup genuinely *is* the logic.
 
 ## What counts as a template
 
-Nine extensions, owned by five parsers. Each parser declares only its **markup** half — the
+The gated extensions and the parsers that own them. Each parser declares only its **markup** half — the
 code half is captured either way.
 
 | Extension | Parser | Also owns (always captured) |
@@ -34,6 +34,7 @@ code half is captured either way.
 | `.cshtml` `.razor` | `razor` | — |
 | `.aspx` `.ascx` `.master` | `csharp-webforms` | `.cs`, including `.aspx.cs` code-behind |
 | `.vue` | `typescript-vue` | `.ts` `.tsx` `.js` `.jsx` … |
+| `.jsp` `.jspx` `.jspf` `.tag` `.tagx` | `jsp` | — |
 
 For the live list, ask the tool — it is generated from the parsers, never hand-maintained:
 
@@ -51,7 +52,7 @@ Two details worth knowing:
 ### Markup that is *not* gated
 
 Plenty of other files contain markup tags. The flag does not touch them — it only ever
-applies to the eight extensions above.
+applies to the extensions above.
 
 **Always captured, flag or no flag:**
 
@@ -68,10 +69,10 @@ like `.aspx` does, but they describe service endpoints, so they stay in the grap
 **Never captured, flag or no flag** — these have no parser at all, so they are reported as
 `unsupported` in either mode:
 
-`.jsp` · `.hbs` · `.mustache` · `.ejs` · `.erb` · `.twig` · `.blade.php` · `.vm` · `.ftl` ·
+`.hbs` · `.mustache` · `.ejs` · `.erb` · `.twig` · `.blade.php` · `.vm` · `.ftl` ·
 `.jinja` · `.pug` · `.svelte` · `.xhtml` · `.resx`
 
-If a JSP or Handlebars template is missing from your graph, `--capture-templates` will not
+If a Handlebars template is missing from your graph, `--capture-templates` will not
 bring it back — that format is simply not supported yet.
 
 ---
@@ -291,6 +292,8 @@ discoverable. Skip `.vue` and all of that goes with it.
 | `.razor` | `razor` | `component` | same, plus `@code { }` methods as **Functions** |
 | `.aspx` `.ascx` `.master` | `aspnet-webforms` | `template` | `element` / `attribute`, with `handler=` for `On<Event>` wiring |
 | `.vue` | `vue` | `component` | `directive_attribute`, `interpolation`, plus `<script>` Functions and Classes |
+| `.jsp` `.jspx` `.jspf` | `jsp` | `template` | a page served directly (outside `WEB-INF`) → a `route` (`routeKind: page`, its URL); directives, EL and JSP comments (`nodeType: synthetic` — there is no JSP grammar; directives keep their keyword in `name`, comments carry `semanticType: comment`), prefixed `element`s (actions, JSTL, custom tags); `<%! %>` methods as **Functions**, scriptlet code as Java statements; includes, tag files, `.tld`s and imported classes as `importFiles`; links and Struts2 tags (`s:form`, `s:url`) to actions and pages as `navigation` |
+| `.tag` `.tagx` | `jsp` | `component` | same as a page |
 
 **Inline scripts.** In `.html`, `.cshtml`/`.razor` and `.aspx`/`.ascx`/`.master`, the bodies of
 inline `<script>` blocks are read for jQuery AJAX calls (`$.ajax`, `$.get`, `$.post`, `$.getJSON`,
@@ -314,6 +317,7 @@ are templates.
 | Angular (`.html` templates) | ⚠️ Partly | Components and routing survive; template bindings and `routerLink` navigation do not |
 | Vue (`.vue` SFCs) | ❌ No | The `<script>` block is real code — methods, stores, composables |
 | Razor Pages / Blazor | ❌ No | `@page` routes and `@code` methods exist **only** in the markup |
+| JSP (Servlet / Struts / Spring MVC views) | ❌ No | Page routes, scriptlet code, includes, tag-file edges and links to actions exist **only** in the pages |
 
 If you select a language that owns nothing but templates while the gate is on, the run would
 produce nothing — so it warns rather than failing silently:
