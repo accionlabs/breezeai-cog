@@ -550,9 +550,19 @@ C++.
 > types all use the same name. The macro itself is not captured (a parameter has no decorators).
 > **Why:** restrict and pointer macros are standard in performance and portable C: llama.cpp
 > had 1,330 parameters named `GGML_RESTRICT` or `RESTRICT`, and every `GGML_API` prototype with
-> one was lost. **Cost:** none — the tree is already there. In C++ a definition whose first
-> parameter is `Name * MACRO p` (no `const`, a type name) still reads as a variable initialised
-> with `Name * MACRO` and is lost, as before.
+> one was lost. **Cost:** none — the tree is already there. In C++ a definition whose
+> parameters are all `Name * MACRO p` (a type name, no `const`) reads as a variable initialised
+> with `Name * MACRO`; the next decision reads it.
+
+> **Decision —** a C++ definition that a qualifier macro made read as a variable (`void
+> unpack(tile_t * RESTRICT tile, const void * RESTRICT p) { … }`, read as `unpack` initialised
+> with `tile_t * RESTRICT`, its body a stray block) is read from the shared second parse with
+> the macros blanked. It happens when no parameter has an unambiguous type. A macro counts only
+> in exactly that shape — a declaration initialised with an argument list and followed at once
+> by `{ … }`, an `A * MACRO` argument followed by an error starting with the parameter's name —
+> and the blank is kept only where a function definition with a clean header then starts there.
+> **Why:** the whole function was lost. **Cost:** such a file is parsed twice (sharing the
+> class-head parse); one case in the six repos sampled.
 
 > **Decision —** a macro between `class` / `struct` / `union` and the class name (`class
 > OPENVINO_API GatherMatmul : public Op { … }`) is blanked and the file is parsed a second

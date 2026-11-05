@@ -715,6 +715,26 @@ def test_a_k_and_r_definition_with_a_calling_convention_macro_is_read(tmp_path) 
     ]
 
 
+def test_a_cpp_definition_misread_as_a_variable_by_a_qualifier_macro_is_read(tmp_path) -> None:
+    # With no parameter of an unambiguous type, C++ reads `run(Model * RESTRICT m)` as a
+    # variable initialised with `Model * RESTRICT` and the body as a stray block. The macro is
+    # blanked for a second parse, which reads the definition (a template one too).
+    src = (
+        "struct Model { int go(); };\n"
+        "int run(Model * RESTRICT m) { return m->go(); }\n"
+        "void unpack(tile_t * RESTRICT tile, const void * RESTRICT p) { use(tile); }\n"
+        "int run2(Model * RESTRICT m, int k) { return k; }\n"
+        "template<typename T>\nvoid fill(T * RESTRICT out) { out[0] = 0; }\n"
+        "int scale = width * HEIGHT;\n"
+    )
+    rec = _parse(CppParser(), tmp_path, "r.cpp", src)
+    fns = {f.name: f for f in rec.functions}
+    assert set(fns) == {"go", "run", "unpack", "run2", "fill"}
+    assert [(p.name, p.type) for p in fns["unpack"].params] == [("tile", "tile_t"), ("p", "void")]
+    assert [p.name for p in fns["run2"].params] == ["m", "k"]
+    assert "scale" in {s.name for s in rec.statements if s.nodeType == "declaration"}
+
+
 def test_a_receiver_written_with_a_qualifier_macro_is_typed(tmp_path) -> None:
     repo = _repo(tmp_path / "r", {
         "m.cpp": "struct Model { int go(); };\n"

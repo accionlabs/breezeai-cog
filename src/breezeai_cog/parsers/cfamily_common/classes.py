@@ -466,6 +466,69 @@ def _reads_with_tag_type(root: Node, tagged: tuple[tuple[int, int], int]) -> boo
     return True
 
 
+def _misread_qualifier_macros(root: Node, source: bytes) -> list[tuple[tuple[int, int], int]]:
+    """Qualifier macros in a C++ definition read as a variable: ``void unpack(tile_t * RESTRICT
+    tile, const void * RESTRICT p) { … }``. When no parameter has an unambiguous type, C++ reads
+    the name and parentheses as a variable initialised with ``tile_t * RESTRICT`` (``tile`` left
+    in an error) and the body as a stray block. A macro counts only in exactly that shape: a
+    declaration whose one declarator is initialised with an argument list, followed at once by
+    ``{ … }``, where an ``A * MACRO`` argument is followed by an error starting with one word (the
+    name; the parameters after it may be in the error too). Its
+    start is kept so the second parse can be checked to read a definition there."""
+    if not root.has_error:
+        return []
+    found: list[tuple[tuple[int, int], int]] = []
+    stack = [root]
+    while stack:
+        node = stack.pop()
+        for c in node.children:
+            if c.type not in ("compound_statement", "field_declaration_list"):
+                stack.append(c)
+        if node.type != "declaration":
+            continue
+        holder = node.parent if node.parent is not None and node.parent.type == "template_declaration" else node
+        body = holder.next_sibling
+        init = node.child_by_field_name("declarator")
+        args = init.child_by_field_name("value") if init is not None and init.type == "init_declarator" else None
+        if body is None or body.type != "compound_statement" or args is None or args.type != "argument_list":
+            continue
+        macros = []
+        for c in args.named_children:
+            err = c.next_sibling
+            right = c.child_by_field_name("right") if c.type == "binary_expression" else None
+            op = c.child_by_field_name("operator") if right is not None else None
+            if (
+                right is not None and op is not None and right.type == "identifier"
+                and source[op.start_byte:right.start_byte].strip() == b"*"
+                and err is not None and err.type == "ERROR"
+                and err.children and err.children[0].type == "identifier"
+                and (err.child_count == 1 or err.children[1].type == ",")
+            ):
+                macros.append((right.start_byte, right.end_byte))
+        if macros:
+            found.extend((m, node.start_byte) for m in macros)
+    return found
+
+
+def _reads_as_definition(root: Node, macro: tuple[tuple[int, int], int]) -> bool:
+    """Whether a function definition starts where the misread declaration did, outside any error
+    and with a clean header."""
+    start = macro[1]
+    node: Node | None = root.descendant_for_byte_range(start, start + 1)
+    while node is not None and not (node.type == "function_definition" and node.start_byte == start):
+        node = node.parent
+    if node is None or any(c.type == "ERROR" or c.is_missing for c in node.children):
+        return False
+    declarator = node.child_by_field_name("declarator")
+    if declarator is None or declarator.has_error:
+        return False
+    while node is not None:
+        if node.type == "ERROR":
+            return False
+        node = node.parent
+    return True
+
+
 def _blank(source: bytes, spans: list[tuple[int, int]]) -> bytes:
     """``source`` with ``spans`` turned to spaces; newlines stay, so lines and offsets don't
     move."""
@@ -533,6 +596,8 @@ def parse_cfamily(grammar: str, source: bytes, timeout_micros: int) -> Node:
       ``CURL_PRINTF(1, 2)`` goes, and the declaration reads as written;
     * a macro in front of a ``struct`` / ``union`` / ``enum`` type (:func:`_tag_type_macros`):
       ``UNITTEST`` goes, and ``struct stsentry *hsts_check(…)`` reads as written;
+    * a qualifier macro that made a C++ definition read as a variable
+      (:func:`_misread_qualifier_macros`): ``RESTRICT`` goes, and the definition reads as written;
 
     and an ``extern "C"`` guard the file's parse collapsed around is resolved as the compiler
     for the grammar's language would (:func:`_collapsed_guards`).
@@ -547,12 +612,13 @@ def parse_cfamily(grammar: str, source: bytes, timeout_micros: int) -> Node:
     members = _member_macros(root, source)
     trailing = _trailing_macros(root, source)
     tagged = _tag_type_macros(root, source)
+    qualifiers = _misread_qualifier_macros(root, source) if grammar != "c" else []
     for _ in range(2):  # blank all; if some still break, blank only the others once
-        if not (words or wrappers or guards or members or trailing or tagged):
+        if not (words or wrappers or guards or members or trailing or tagged or qualifiers):
             return root
         spans = [w[0] for w in words] + [s for w in wrappers for s in w[:2]]
         spans += [s for g in guards for s in g[0]] + members + [t[0] for t in trailing]
-        spans += [t[0] for t in tagged]
+        spans += [t[0] for t in tagged] + [q[0] for q in qualifiers]
         reparsed = parse_source(grammar, _blank(source, spans), timeout_micros).root_node
         whole_words = [w for w in words if _reads_as_class(reparsed, w[1])]
         whole_wrappers = [w for w in wrappers if _reads_as_declaration(reparsed, w)]
@@ -560,11 +626,14 @@ def parse_cfamily(grammar: str, source: bytes, timeout_micros: int) -> Node:
         whole_members = [s for s in members if _reads_as_members(reparsed, s)]
         whole_trailing = [t for t in trailing if _reads_with_trailing_macro_gone(reparsed, t)]
         whole_tagged = [t for t in tagged if _reads_with_tag_type(reparsed, t)]
+        whole_qualifiers = [q for q in qualifiers if _reads_as_definition(reparsed, q)]
         if (whole_words, whole_wrappers, whole_guards, whole_members, whole_trailing,
-                whole_tagged) == (words, wrappers, guards, members, trailing, tagged):
+                whole_tagged, whole_qualifiers) == (
+                    words, wrappers, guards, members, trailing, tagged, qualifiers):
             return reparsed
         words, wrappers, guards = whole_words, whole_wrappers, whole_guards
         members, trailing, tagged = whole_members, whole_trailing, whole_tagged
+        qualifiers = whole_qualifiers
     return root
 
 
