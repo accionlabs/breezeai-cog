@@ -1340,6 +1340,134 @@ def test_a_conditional_outside_a_split_function_keeps_both_branches(tmp_path) ->
     assert record.functions[2].endLine == 33
 
 
+#: curl's shape: an `else if` written inside an `#ifndef` can't be attached by the grammar. In a
+#: file this small the function stays a function and its body is repaired; in curl's `http.c` the
+#: error reaches file scope (see `LOST_FILE`).
+LOST_TO_A_CONDITIONAL = """#include "setup.h"
+
+#ifndef DISABLE_HTTP
+
+struct auth { int avail; int picked; };
+
+static int has_bearer(int c) { return c; }
+
+static int pick(struct auth *a, int creds)
+{
+  if(a->avail & 1)
+    a->picked = 1;
+#ifndef DISABLE_BEARER
+  else if((a->avail & 2) && has_bearer(creds))
+    a->picked = 2;
+#endif
+  else
+    a->picked = 0;
+  return a->picked;
+}
+
+#ifdef _WIN32
+static int platform(void) { return 1; }
+#else
+static int platform_posix(void) { return 2; }
+#endif
+
+#define HTTP_MAX 8
+
+int http_done(struct auth *a) { return pick(a, platform()); }
+
+#endif
+"""
+
+
+@pytest.mark.parametrize("parser", [CParser(), CppParser()], ids=["c", "cpp"])
+def test_what_a_conditional_lost_at_file_scope_is_captured(tmp_path, parser) -> None:
+    record = _parse(parser, tmp_path, "http.c", LOST_TO_A_CONDITIONAL)
+    assert [c.name for c in record.classes] == ["auth"]
+    # Only the lost region is read from the second parse: the `#ifdef _WIN32` after it parses
+    # normally and keeps both branches.
+    assert [f.name for f in record.functions] == [
+        "has_bearer", "pick", "platform", "platform_posix", "http_done",
+    ]
+    pick = record.functions[1]
+    assert (pick.startLine, pick.endLine) == (9, 20)
+    assert [(c.name, c.path) for c in pick.calls] == [("has_bearer", "http.c")]
+    assert [s.name for s in record.statements if s.nodeType == "preproc_def"] == ["HTTP_MAX"]
+
+
+#: ggml-hexagon's shape: a split brace in a function inside a file-wide `#ifndef` — the error
+#: reaches file scope and swallows the function itself, so no function body is there to repair.
+LOST_FILE = """#ifndef NO_HEX
+static int first(void) { return 0; }
+
+static int mode_from_str(const char * s) {
+    for (int i = 0; i < 3; i++) {
+#if defined(_MSC_VER)
+        if (_stricmp(s, names[i]) == 0) {
+#else
+        if (strcasecmp(s, names[i]) == 0) {
+#endif
+            return i;
+        }
+    }
+    return -1;
+}
+
+struct session { int n; };
+
+int hex_last(void) { return first(); }
+#endif
+"""
+
+
+@pytest.mark.parametrize("parser", [CParser(), CppParser()], ids=["c", "cpp"])
+def test_a_file_lost_to_a_split_brace_is_captured(tmp_path, parser) -> None:
+    record = _parse(parser, tmp_path, "hex.c", LOST_FILE)
+    assert [c.name for c in record.classes] == ["session"]
+    assert [(f.name, f.startLine, f.endLine) for f in record.functions] == [
+        ("first", 2, 2), ("mode_from_str", 4, 15), ("hex_last", 19, 19),
+    ]
+    assert [c.name for c in record.functions[1].calls] == ["_stricmp"]  # the first branch
+    assert [(c.name, c.path) for c in record.functions[2].calls] == [("first", "hex.c")]
+
+
+@pytest.mark.parametrize("parser", [CParser(), CppParser()], ids=["c", "cpp"])
+def test_what_the_second_parse_also_misreads_is_not_supplied(tmp_path, parser) -> None:
+    # The grammar can't read an attribute between a declarator and its initializer: in the
+    # second parse too, `lut`'s head reads as a declaration with its `{` lost in an error. It
+    # stays lost rather than becoming a prototype named `lut`.
+    text = LOST_FILE.replace(
+        "struct session { int n; };\n",
+        "static int lut(int i) {\n"
+        "    static const int t[2] __attribute__((aligned(128))) = { 1, 2 };\n"
+        "    return t[i];\n"
+        "}\n\n"
+        "struct session { int n; };\n",
+    )
+    record = _parse(parser, tmp_path, "hex.c", text)
+    assert [f.name for f in record.functions] == ["first", "mode_from_str", "hex_last"]
+    assert [
+        s.name for s in record.statements if s.nodeType == "declaration" and s.parentId == "hex.c"
+    ] == []
+
+
+@pytest.mark.parametrize("jobs", [1, 2])
+def test_a_function_lost_to_a_conditional_is_a_call_target(tmp_path, jobs) -> None:
+    repo = _repo(
+        tmp_path / "r",
+        {
+            "lib/http.c": LOST_TO_A_CONDITIONAL,
+            "lib/hex.c": LOST_FILE,
+            "lib/http.h": "int http_done(struct auth *a);\nint hex_last(void);\n",
+            "app/main.c": (
+                '#include "../lib/http.h"\n'
+                "int main(void) { return http_done(0) + hex_last(); }\n"
+            ),
+        },
+    )
+    assert _calls(_capture(repo, jobs)["app/main.c"], "main") == {
+        "http_done": "lib/http.c", "hex_last": "lib/hex.c",
+    }
+
+
 def test_a_class_after_split_braces_is_captured(tmp_path) -> None:
     # Everything in the span the split function covered comes from the second parse: a class
     # with its methods, inside its namespace, as well as functions.

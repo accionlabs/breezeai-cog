@@ -575,6 +575,20 @@ C++.
 > **Cost:** the corrected function's calls in later branches are not captured, nor are
 > `#else`-only definitions inside the span it had swallowed (before, none of them were).
 
+> **Decision —** the same second parse also supplies what an error at file scope swallowed,
+> when that error holds a conditional. An `else if` written inside an `#ifndef` (curl's
+> `http.c`), or a split brace in a function, can turn everything after it — up to the end of a
+> file-wide `#ifndef` — into one error the parser can't read, so no function is left to repair.
+> The definitions and declarations the second parse finds inside that error's span are read from
+> it; anything else it finds there, and anything it misread too (a `}` it had to insert, a brace
+> lost in an error outside a function body), is not. A file whose whole root is an error is left
+> as it is.
+> **Why:** a file-wide error loses every function after the break: curl's `http.c` lost 102
+> functions, llama.cpp's `ggml-hexagon.cpp` 190. The second parse reads that region as one build
+> configuration would. **Cost:** as for split braces — the recovered region is read under the
+> first branch of each conditional, and its `#else`-only definitions stay lost; a call in a
+> recovered function is the one that configuration makes.
+
 > **Decision —** when a C++ or CUDA file can't be parsed as a whole and members of a class
 > spilled out to file scope, only definitions that name their owner (`int Judge::decide()`)
 > are captured from the file's flat scope; unqualified functions and declarations are not. The

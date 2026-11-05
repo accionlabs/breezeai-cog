@@ -13,9 +13,14 @@ on into the functions after it (which are lost, their calls credited to it) or s
 Such a file is parsed a second time with every conditional resolved one consistent way: the
 directive lines, the branches after the first and ``#if 0`` blocks blanked to spaces, so lines
 and byte offsets don't move. That parse is only a second opinion: it drops every ``#else``-only
-definition, so it never replaces the normal one. It is used only where the two disagree about
-where a function ends — then the function is read from it, and so are the functions the normal
-parse swallowed.
+definition, so it never replaces the normal one. It is used only where the normal parse lost
+something:
+
+* where the two disagree about where a function ends — then the function is read from it, and
+  so are the functions the normal parse swallowed;
+* inside an error at file scope that holds a conditional — an ``else if`` written inside an
+  ``#ifndef``, or a split brace in a function the error swallowed, can turn the rest of the file
+  into one error the parser can't read. What the second parse finds there is read from it.
 """
 
 from __future__ import annotations
@@ -31,6 +36,14 @@ from .mappings import TRANSPARENT_SCOPES
 _DIRECTIVE = re.compile(rb"^\s*#\s*(if|ifdef|ifndef|elif|else|endif)\b(.*)$")
 _DIRECTIVE_IN = re.compile(rb"^[ \t]*#[ \t]*(?:if|ifdef|ifndef|elif|else|endif)\b", re.M)
 _NOT_SPACE = re.compile(rb"\S")
+
+#: What the second parse may supply: definitions and declarations. Anything else it finds at
+#: file scope (a bare ``while`` from a macro's continuation lines) is its own misreading.
+_SUPPLIED = frozenset({
+    "function_definition", "declaration", "type_definition", "alias_declaration",
+    "class_specifier", "struct_specifier", "union_specifier", "enum_specifier",
+    "template_declaration", "preproc_def", "preproc_function_def", "concept_definition",
+})
 
 
 def blank_conditionals(source: bytes) -> bytes:
@@ -86,6 +99,27 @@ def _split_body(fn: Node, source: bytes) -> bool:
     )
 
 
+def _trustworthy(node: Node, source: bytes) -> bool:
+    """Whether a node the second parse found can be taken as read. Not when it misread too:
+    its last token is a ``}`` the grammar inserted to close a body it lost track of (the node
+    runs on to wherever it gave up), or an error outside a function body swallowed a brace (a
+    function's head read as a declaration, its ``{`` lost in the error)."""
+    last = node
+    while last.children:
+        last = last.children[-1]
+    if last.is_missing:
+        return False
+    body = node.child_by_field_name("body") if node.type == "function_definition" else None
+    stack = [c for c in node.children if c != body]
+    while stack:
+        n = stack.pop()
+        if n.type == "ERROR" and (b"{" in source[n.start_byte:n.end_byte]
+                                  or b"}" in source[n.start_byte:n.end_byte]):
+            return False
+        stack.extend(n.children)
+    return True
+
+
 @dataclass
 class BranchFix:
     """How to read a file whose function braces a conditional split. ``replace`` maps a
@@ -100,34 +134,46 @@ class BranchFix:
 
 
 def branch_fix(root: Node, source: bytes, grammar: str, timeout_micros: int) -> BranchFix | None:
-    """The corrections for a file, or ``None`` when its functions need none (the usual case:
-    no function body holds a broken conditional, or both parses agree)."""
-    if not root.has_error or b"#if" not in source:
+    """The corrections for a file, or ``None`` when it needs none (the usual case: no function
+    body and no file-scope error holds a broken conditional, or both parses agree)."""
+    if not root.has_error or root.type == "ERROR" or b"#if" not in source:
         return None
     first = _top_level(root)
-    if not any(n.type == "function_definition" and _split_body(n, source) for n in first):
+    lost = [  # file-scope errors with a conditional in them: everything in them is lost
+        (n.start_byte, n.end_byte) for n in first
+        if n.type == "ERROR" and _DIRECTIVE_IN.search(source, n.start_byte, n.end_byte) is not None
+    ]
+    if not lost and not any(
+        n.type == "function_definition" and _split_body(n, source) for n in first
+    ):
         return None
     second = _top_level(parse_source(grammar, blank_conditionals(source), timeout_micros).root_node)
     second_fns = {n.start_byte: n for n in second if n.type == "function_definition"}
     fix = BranchFix()
-    spans: list[tuple[int, int]] = []  # where the normal parse's extent was wrong
+    spans: list[tuple[int, int]] = list(lost)  # where the normal parse is wrong or lost
     for n in first:
         other = second_fns.get(n.start_byte)
-        if n.type == "function_definition" and other is not None and other.end_byte != n.end_byte:
+        if (
+            n.type == "function_definition" and other is not None
+            and other.end_byte != n.end_byte and _trustworthy(other, source)
+        ):
             fix.replace[n.start_byte] = other
             spans.append((min(n.end_byte, other.end_byte), max(n.end_byte, other.end_byte)))
     if not spans:
         return None
-    first_starts = {n.start_byte for n in first}
+    first_starts = {n.start_byte for n in first if n.type != "ERROR"}
     for start, end in spans:
         fix.skip.update(s for s in first_starts if start <= s < end)
         fix.extra.extend(
             n for n in second
             if start <= n.start_byte < end and n.start_byte not in first_starts
             and n.start_byte not in fix.replace
-            and n.type != "namespace_definition"  # its members are listed themselves
+            and n.type in _SUPPLIED  # a namespace's members are listed themselves
+            and _trustworthy(n, source)
         )
-    fix.extra.sort(key=lambda n: n.start_byte)
+    fix.extra = sorted({n.start_byte: n for n in fix.extra}.values(), key=lambda n: n.start_byte)
+    for n in fix.extra:  # one that runs past the lost span covers what the normal parse had there
+        fix.skip.update(s for s in first_starts if n.start_byte <= s < n.end_byte)
     return fix
 
 
