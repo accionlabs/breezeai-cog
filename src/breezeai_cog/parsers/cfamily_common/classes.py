@@ -405,6 +405,67 @@ def _reads_with_trailing_macro_gone(root: Node, trailing: _Trailing) -> bool:
     return True
 
 
+_TAG_KEYWORDS = (b"struct", b"union", b"enum")
+
+
+def _tag_type_macros(root: Node, source: bytes) -> list[tuple[tuple[int, int], int]]:
+    """Macros in front of a ``struct`` / ``union`` / ``enum`` type: ``UNITTEST struct stsentry
+    *hsts_check(…)``, ``CURL_EXTERN struct curl_slist *curl_slist_append(…);``. The C grammar
+    splits such a line into a broken ``UNITTEST struct`` (its ``;`` missing) and ``stsentry
+    *hsts_check(…)``, losing the tag keyword and the macro. A macro counts only in exactly that
+    split: a declaration of a type name, the keyword and a missing ``;``, followed at once by a
+    declaration or definition whose type is a plain name."""
+    if not root.has_error:
+        return []
+    found = []
+    stack = [root]
+    while stack:
+        node = stack.pop()
+        for c in node.children:
+            if c.type in ("compound_statement", "field_declaration_list"):
+                continue
+            stack.append(c)
+        if node.type != "declaration":
+            continue
+        kids = [c for c in node.children if c.type != "storage_class_specifier"]
+        after = node.next_sibling
+        if (
+            len(kids) != 3 or kids[0].type != "type_identifier"
+            or kids[1].type != "identifier"
+            or source[kids[1].start_byte:kids[1].end_byte] not in _TAG_KEYWORDS
+            or not kids[2].is_missing
+            or after is None or after.type not in ("declaration", "function_definition")
+            or (ret := after.child_by_field_name("type")) is None
+            or ret.type != "type_identifier" or after.start_byte != ret.start_byte
+        ):
+            continue
+        found.append(((kids[0].start_byte, kids[0].end_byte), kids[1].start_byte))
+    return found
+
+
+def _reads_with_tag_type(root: Node, tagged: tuple[tuple[int, int], int]) -> bool:
+    """Whether a blanked macro left a declaration or definition whose type is the tagged type
+    (starting at its keyword), outside any error and with no error of its own in its header."""
+    keyword = tagged[1]
+    node: Node | None = root.descendant_for_byte_range(keyword, keyword + 1)
+    while node is not None and node.type not in ("declaration", "function_definition"):
+        node = node.parent
+    if node is None:
+        return False
+    ret = node.child_by_field_name("type")
+    if (
+        ret is None or ret.type not in ("struct_specifier", "union_specifier", "enum_specifier")
+        or ret.start_byte != keyword
+        or any(c.type == "ERROR" or c.is_missing for c in node.children)
+    ):
+        return False
+    while node is not None:
+        if node.type == "ERROR":
+            return False
+        node = node.parent
+    return True
+
+
 def _blank(source: bytes, spans: list[tuple[int, int]]) -> bytes:
     """``source`` with ``spans`` turned to spaces; newlines stay, so lines and offsets don't
     move."""
@@ -470,6 +531,8 @@ def parse_cfamily(grammar: str, source: bytes, timeout_micros: int) -> Node:
       members around it read as written;
     * an attribute macro after a declaration's parameter list (:func:`_trailing_macros`):
       ``CURL_PRINTF(1, 2)`` goes, and the declaration reads as written;
+    * a macro in front of a ``struct`` / ``union`` / ``enum`` type (:func:`_tag_type_macros`):
+      ``UNITTEST`` goes, and ``struct stsentry *hsts_check(…)`` reads as written;
 
     and an ``extern "C"`` guard the file's parse collapsed around is resolved as the compiler
     for the grammar's language would (:func:`_collapsed_guards`).
@@ -483,23 +546,25 @@ def parse_cfamily(grammar: str, source: bytes, timeout_micros: int) -> Node:
     guards = _collapsed_guards(root, source, grammar)
     members = _member_macros(root, source)
     trailing = _trailing_macros(root, source)
+    tagged = _tag_type_macros(root, source)
     for _ in range(2):  # blank all; if some still break, blank only the others once
-        if not words and not wrappers and not guards and not members and not trailing:
+        if not (words or wrappers or guards or members or trailing or tagged):
             return root
         spans = [w[0] for w in words] + [s for w in wrappers for s in w[:2]]
         spans += [s for g in guards for s in g[0]] + members + [t[0] for t in trailing]
+        spans += [t[0] for t in tagged]
         reparsed = parse_source(grammar, _blank(source, spans), timeout_micros).root_node
         whole_words = [w for w in words if _reads_as_class(reparsed, w[1])]
         whole_wrappers = [w for w in wrappers if _reads_as_declaration(reparsed, w)]
         whole_guards = [g for g in guards if _reads_without_collapse(reparsed, g[1])]
         whole_members = [s for s in members if _reads_as_members(reparsed, s)]
         whole_trailing = [t for t in trailing if _reads_with_trailing_macro_gone(reparsed, t)]
-        if (whole_words, whole_wrappers, whole_guards, whole_members, whole_trailing) == (
-            words, wrappers, guards, members, trailing
-        ):
+        whole_tagged = [t for t in tagged if _reads_with_tag_type(reparsed, t)]
+        if (whole_words, whole_wrappers, whole_guards, whole_members, whole_trailing,
+                whole_tagged) == (words, wrappers, guards, members, trailing, tagged):
             return reparsed
         words, wrappers, guards = whole_words, whole_wrappers, whole_guards
-        members, trailing = whole_members, whole_trailing
+        members, trailing, tagged = whole_members, whole_trailing, whole_tagged
     return root
 
 

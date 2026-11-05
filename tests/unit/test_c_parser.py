@@ -681,6 +681,30 @@ def test_an_attribute_macro_after_a_member_is_not_a_field(tmp_path) -> None:
     assert [s.name for s in rec.statements if s.nodeType == "field_declaration"] == ["n"]
 
 
+@pytest.mark.parametrize("parser", [CParser(), CppParser()], ids=["c", "cpp"])
+def test_a_macro_before_a_struct_return_type_is_its_decorator(tmp_path, parser) -> None:
+    # C splits `UNITTEST struct stsentry *f(…)` into `UNITTEST struct` and `stsentry *f(…)`,
+    # losing the keyword and the macro; C++ reads the macro as the type with `struct stsentry`
+    # in an error. A tag type can't follow a type, so the word in front is the macro.
+    src = (
+        "static UNITTEST struct stsentry *hsts_check(struct hsts *h, int n)\n{\n  return 0;\n}\n"
+        "CURL_EXTERN struct curl_slist *curl_slist_append(struct curl_slist *list,\n"
+        "                                                 const char *data);\n"
+        "API enum color pick(int a);\n"
+        "struct point *origin(void);\n"
+    )
+    rec = _parse(parser, tmp_path, "s.c", src)
+    fn = rec.functions[0]
+    assert (fn.name, fn.returnType, [d.name for d in fn.decorators]) == (
+        "hsts_check", "struct stsentry", ["UNITTEST"],
+    )
+    assert fn.isStatic is True
+    decls = {s.name: s for s in rec.statements if s.nodeType == "declaration"}
+    assert [d.name for d in decls["curl_slist_append"].decorators] == ["CURL_EXTERN"]
+    assert [d.name for d in decls["pick"].decorators] == ["API"]
+    assert decls["origin"].decorators == []
+
+
 def test_a_k_and_r_definition_with_a_calling_convention_macro_is_read(tmp_path) -> None:
     rec = _parse(
         CParser(), tmp_path, "gz.c",

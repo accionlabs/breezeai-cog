@@ -551,6 +551,13 @@ def _past_macro(node: Node, source: bytes) -> DeclarationRead:
     ]
     type_words = [w for w in words if w not in ("const", "volatile")]
     ret = node.child_by_field_name("type")
+    if (
+        ret is not None and ret.type == "type_identifier" and len(type_words) == 2
+        and type_words[0] in ("struct", "union", "enum") and type_words[1] not in _TYPE_KEYWORDS
+    ):  # `API struct ggml_tensor * f`: a tag type can't follow a type, so `API` is the macro
+        return DeclarationRead(
+            return_type_known=False, macro=node_text(ret, source), return_type=" ".join(type_words),
+        )
     if ret is None or not type_words or not all(w in _TYPE_KEYWORDS for w in words):
         return DeclarationRead(return_type_known=False)
     macro = _sized_macro(ret)
@@ -819,7 +826,28 @@ def decorators_of(node: Node, source: bytes, read: DeclarationRead) -> list[Deco
         pointer = inner
     if (trailing := trailing_decorator(node, source)) is not None:
         found.append((node.end_byte, [trailing]))
+    found.extend((at, [d]) for at, d in _tag_type_macro(node, source))
     return [d for _, ds in sorted(found, key=lambda f: f[0]) for d in ds]
+
+
+_TAG_TYPES = ("struct_specifier", "union_specifier", "enum_specifier")
+_BLANKED_WORD = re.compile(rb"[ \t]*([A-Za-z_]\w*)[ \t]*\Z")
+
+
+def _tag_type_macro(node: Node, source: bytes) -> list[tuple[int, Decorator]]:
+    """The macro in front of a ``struct`` / ``union`` / ``enum`` return type, ``UNITTEST struct
+    stsentry *hsts_check(…)``. It was blanked before parsing (``classes.parse_cfamily``), so it is
+    the one word right before the type that no node covers: after ``static`` inside the node, or
+    at the start of its line."""
+    ret = node.child_by_field_name("type")
+    if ret is None or ret.type not in _TAG_TYPES:
+        return []
+    before = [c for c in node.children if c.end_byte <= ret.start_byte]
+    start = before[-1].end_byte if before else source.rfind(b"\n", 0, ret.start_byte) + 1
+    m = _BLANKED_WORD.fullmatch(source, start, ret.start_byte)
+    if m is None or m.group(1) in (b"static", b"extern", b"inline", b"const", b"volatile"):
+        return []
+    return [(m.start(1), Decorator(name=m.group(1).decode()))]
 
 
 _TRAILING_TEXT = re.compile(rb"\s*([A-Za-z_]\w*)\s*(?:\((.*)\))?\s*", re.S)

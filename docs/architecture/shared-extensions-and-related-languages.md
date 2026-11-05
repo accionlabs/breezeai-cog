@@ -516,6 +516,19 @@ C++.
 > also how a type and a name-building macro look (`int MANGLE(f)(…)`), so the name would be a
 > guess.
 
+> **Decision —** a macro in front of a `struct` / `union` / `enum` return type (`UNITTEST struct
+> stsentry *hsts_check(…)`, `GGML_API struct ggml_tensor * ggml_add(…);`) is the decorator, and
+> the tagged type the `returnType` (`struct stsentry`). A tag type can't follow a type, so the
+> word in front is the macro. C splits such a line into a broken `UNITTEST struct` (its `;`
+> missing) and `stsentry *hsts_check(…)`; exactly that split is blanked in the shared second
+> parse and kept only where the declaration then reads whole with the tagged type, and the
+> macro is read back as the one word before the type that no node covers. C++ reads the macro as
+> the type with `struct stsentry` in an error, and is read past as for a keyword type. The
+> statement's `text` starts at the keyword.
+> **Why:** the `returnType` was `stsentry`, a name C doesn't define (only `struct stsentry`), and
+> the export macro on most of llama.cpp's and curl's struct-returning API was lost. **Cost:** in
+> C such a file is parsed twice (sharing the class-head parse).
+
 > **Decision —** a calling-convention or export macro between a keyword return type and the
 > name (`int ZEXPORT unzOpen(…)`, `void WINAPI f(…)`, also in a K&R definition or a class
 > member) is read past: the keyword type is the `returnType` and the macro the decorator. After
