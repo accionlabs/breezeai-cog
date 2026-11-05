@@ -632,6 +632,17 @@ C++.
 > **Why:** curl's deprecated form and socket APIs were lost. **Cost:** such a file is parsed
 > twice (sharing the class-head parse).
 
+> **Decision —** a `#define` that a block comment ended early is read whole. The grammar ends a
+> macro definition at a `/* … */` right before a line's `\` (or turns it into an error), and the
+> rest of its body reads as file-scope code: locals captured as globals, and the function after
+> it lost. A definition counts when such a comment sits in its continued lines and the grammar's
+> node there doesn't run to its last line; its block comments are blanked in the shared second
+> parse, and the blank is kept only where the definition then runs to its last line without an
+> error. Its statement's `text` still holds the comments.
+> **Why:** commenting a macro's lines this way is common (redis, curl, lua, llama.cpp: nine
+> definitions in the six repos sampled, two redis functions lost, fourteen locals captured as
+> globals). **Cost:** such a file is parsed twice (sharing the class-head parse).
+
 > **Decision —** a macro written as a whole member of a class or struct body
 > (`OPENVINO_MATCHER_PASS_RTTI("…")`, jemalloc's `LOCKEDINT_MTX_DECLARE(mtx)`) is blanked in the
 > same second parse. A line that is only `NAME(…)` has no `;` and no body, so it can't be a

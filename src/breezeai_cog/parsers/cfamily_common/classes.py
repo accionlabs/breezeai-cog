@@ -685,6 +685,67 @@ def _reads_as_named_function(root: Node, macro: tuple[tuple[int, int], int]) -> 
     return True
 
 
+_BLOCK_COMMENT = re.compile(rb"/\*.*?\*/", re.S)
+
+
+def _continued_end(source: bytes, start: int) -> int:
+    """Where a preprocessor directive starting at ``start`` really ends: the end of the first
+    line that doesn't end in ``\\``."""
+    i = start
+    while True:
+        nl = source.find(b"\n", i)
+        if nl < 0:
+            return len(source)
+        if not source[i:nl].rstrip(b" \t\r").endswith(b"\\"):
+            return nl
+        i = nl + 1
+
+
+#: A cut-short macro's block comments, where it starts and where it really ends.
+_CutDefine = tuple[list[tuple[int, int]], int, int]
+
+
+_DEFINE_LINE = re.compile(rb"^[ \t]*#[ \t]*define\b", re.M)
+_COMMENT_BEFORE_CONTINUATION = re.compile(rb"\*/[ \t]*\\\r?\n")
+
+
+def _cut_defines(root: Node, source: bytes) -> list[_CutDefine]:
+    """Macro definitions the grammar ends early. A ``/* … */`` comment right before a line's
+    ``\\`` ends the ``#define`` there (or makes it an error), and the rest of its body reads as
+    file-scope code that breaks what follows (a function after it is lost). A definition counts
+    when such a comment sits in its continued lines and the grammar's node there doesn't run to
+    its last line; its block comments are blanked for a second parse, and its text still comes
+    from the original source."""
+    if not root.has_error or b"*/" not in source:
+        return []
+    found = []
+    for m in _DEFINE_LINE.finditer(source):
+        end = _continued_end(source, m.start())
+        if _COMMENT_BEFORE_CONTINUATION.search(source, m.start(), end + 1) is None:
+            continue
+        hash_at = source.index(b"#", m.start())
+        node: Node | None = root.descendant_for_byte_range(hash_at, hash_at + 1)
+        while node is not None and node.parent is not None and node.parent.start_byte == hash_at:
+            node = node.parent
+        if node is not None and node.end_byte >= end and not node.has_error:
+            continue  # the grammar read it whole
+        comments = [c.span() for c in _BLOCK_COMMENT.finditer(source, hash_at, end)]
+        found.append((comments, hash_at, end))
+    return found
+
+
+def _reads_as_whole_define(root: Node, cut: _CutDefine) -> bool:
+    """Whether the macro definition now runs to its last continued line."""
+    _, start, end = cut
+    node: Node | None = root.descendant_for_byte_range(start, start + 1)
+    while node is not None and node.type not in ("preproc_def", "preproc_function_def"):
+        node = node.parent
+    return (
+        node is not None and node.start_byte == start and node.end_byte >= end
+        and not node.has_error
+    )
+
+
 def _blank(source: bytes, spans: list[tuple[int, int]]) -> bytes:
     """``source`` with ``spans`` turned to spaces; newlines stay, so lines and offsets don't
     move."""
@@ -759,6 +820,8 @@ def parse_cfamily(grammar: str, source: bytes, timeout_micros: int) -> Node:
       declaration reads as written;
     * a macro with arguments between a return type and the name (:func:`_macros_before_name`):
       ``CURL_DEPRECATED(…)`` goes, and the function reads as written;
+    * a block comment that ended a ``#define`` early (:func:`_cut_defines`): the comments in its
+      continued body go, and it runs to its last line;
 
     and an ``extern "C"`` guard the file's parse collapsed around is resolved as the compiler
     for the grammar's language would (:func:`_collapsed_guards`).
@@ -776,16 +839,17 @@ def parse_cfamily(grammar: str, source: bytes, timeout_micros: int) -> Node:
     qualifiers = _misread_qualifier_macros(root, source) if grammar != "c" else []
     attributes = _attributes_before_initializer(root, source)
     named = _macros_before_name(root, source)
+    defines = _cut_defines(root, source)
     for _ in range(2):  # blank all; if some still break, blank only the others once
         if not (
             words or wrappers or guards or members or trailing or tagged or qualifiers or attributes
-            or named
+            or named or defines
         ):
             return root
         spans = [w[0] for w in words] + [s for w in wrappers for s in w[:2]]
         spans += [s for g in guards for s in g[0]] + members + [t[0] for t in trailing]
         spans += [t[0] for t in tagged] + [q[0] for q in qualifiers] + [a[0] for a in attributes]
-        spans += [n[0] for n in named]
+        spans += [n[0] for n in named] + [c for d in defines for c in d[0]]
         reparsed = parse_source(grammar, _blank(source, spans), timeout_micros).root_node
         whole_words = [w for w in words if _reads_as_class(reparsed, w[1])]
         whole_wrappers = [w for w in wrappers if _reads_as_declaration(reparsed, w)]
@@ -796,14 +860,16 @@ def parse_cfamily(grammar: str, source: bytes, timeout_micros: int) -> Node:
         whole_qualifiers = [q for q in qualifiers if _reads_as_definition(reparsed, q)]
         whole_attributes = [a for a in attributes if _reads_as_initialised(reparsed, a)]
         whole_named = [n for n in named if _reads_as_named_function(reparsed, n)]
+        whole_defines = [d for d in defines if _reads_as_whole_define(reparsed, d)]
         if (whole_words, whole_wrappers, whole_guards, whole_members, whole_trailing,
-                whole_tagged, whole_qualifiers, whole_attributes, whole_named) == (
+                whole_tagged, whole_qualifiers, whole_attributes, whole_named, whole_defines) == (
                     words, wrappers, guards, members, trailing, tagged, qualifiers, attributes,
-                    named):
+                    named, defines):
             return reparsed
         words, wrappers, guards = whole_words, whole_wrappers, whole_guards
         members, trailing, tagged = whole_members, whole_trailing, whole_tagged
         qualifiers, attributes, named = whole_qualifiers, whole_attributes, whole_named
+        defines = whole_defines
     return root
 
 

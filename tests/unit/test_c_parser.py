@@ -756,6 +756,32 @@ def test_more_attribute_macro_shapes_are_read_past(tmp_path, parser) -> None:
     assert "DEPRECATED_X" not in decls  # not a prototype named after the macro
 
 
+@pytest.mark.parametrize("parser", [CParser(), CppParser()], ids=["c", "cpp"])
+def test_a_comment_before_a_line_continuation_does_not_end_a_define(tmp_path, parser) -> None:
+    # The grammar ends a `#define` at a `/* … */` right before a line's `\`; the rest of the body
+    # read as file-scope code and broke the function after it. The comments are blanked for a
+    # second parse; the macro's text keeps them.
+    src = (
+        "#define DECODE(p, len) do {                 \\\n"
+        "    if ((p)[0] < 254) {                      \\\n"
+        "        (len) = 1; /* one byte */            \\\n"
+        "    } else {                                 \\\n"
+        "        (len) = 5; /* five bytes */          \\\n"
+        "    }                                        \\\n"
+        "} while(0)\n"
+        "\n"
+        "int encode(unsigned char *p, unsigned int len) {\n"
+        "    return helper(p, len);\n"
+        "}\n"
+        "int helper(unsigned char *p, unsigned int len) { return len; }\n"
+    )
+    rec = _parse(parser, tmp_path, "z.c", src)
+    assert [f.name for f in rec.functions] == ["encode", "helper"]
+    macro = next(s for s in rec.statements if s.nodeType == "preproc_function_def")
+    assert (macro.name, macro.startLine, macro.endLine) == ("DECODE", 1, 7)
+    assert "/* five bytes */" in macro.text
+
+
 def test_a_k_and_r_definition_with_a_calling_convention_macro_is_read(tmp_path) -> None:
     rec = _parse(
         CParser(), tmp_path, "gz.c",
