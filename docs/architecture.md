@@ -548,8 +548,9 @@ classDiagram
 > language change. One folder per library keeps everything about it, and its tests, together.
 > **Cost:** more small packages. The test for a module in a base package: *does the base parser
 > use it for every file of the language?* If not, and it detects one library or framework, it
-> belongs in that library's or framework's package. Some library detectors still sit in a base
-> package (the `code in` column below) until they are moved.
+> belongs in that library's or framework's package. For PHP: a library the language ships
+> stays in `parsers/php/`; Laravel, Doctrine, CodeIgniter, Guzzle, Symfony and PSR-18 each have
+> their own package.
 
 > **Decision —** additive detectors self-register (`parsers/additive.py`); the language parser
 > only calls `run_additive(<language>, …)` once.
@@ -685,11 +686,16 @@ the file:
   │  scala           10   akka-events      scala_akka/events.py                      │
   │                  20   spark            scala_spark/io.py                         │
   │                                                                                  │
-  │  php             10   wordpress-hooks  php/wordpress.py                          │
+  │  php             10   wordpress-hooks  php_wordpress/hooks.py                    │
   │                  20   laravel-events   php_laravel/events.py                     │
   │                  30   symfony-events   php_symfony/events.py                     │
-  │                  40   php-data-access  php/data_access.py                        │
-  │                  50   php-http-calls   php/http_calls.py                         │
+  │                  40   laravel-data-…   php_laravel/data_access.py                │
+  │                  41   doctrine-data-…  php_doctrine/data_access.py               │
+  │                  42   codeigniter-d…   php_codeigniter/data_access.py            │
+  │                  50   laravel-http-…   php_laravel/http_calls.py                 │
+  │                  51   guzzle-http-c…   php_guzzle/http_calls.py                  │
+  │                  52   symfony-http-…   php_symfony/http_calls.py                 │
+  │                  53   psr-http-calls   php_psr/http_calls.py                     │
   │                                                                                  │
   │  Kotlin · Groovy · Ruby · VB · C++ · HCL                                         │
   │   └─ no additive hook yet: shared classifiers only                               │

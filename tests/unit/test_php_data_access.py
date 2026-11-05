@@ -1,4 +1,5 @@
-"""PHP data access is recorded only on evidence (php/data_access.py)."""
+"""PHP data access is recorded only on evidence (php_data_access_common.py and a detector
+per library)."""
 
 from __future__ import annotations
 

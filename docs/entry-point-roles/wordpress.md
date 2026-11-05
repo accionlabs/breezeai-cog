@@ -1,6 +1,6 @@
 # WordPress — entry-point roles
 
-Detector: `src/breezeai_cog/parsers/php/wordpress.py` (additive — runs on every PHP file) ·
+Detector: `src/breezeai_cog/parsers/php_wordpress/hooks.py` (additive — runs on every PHP file) ·
 Rules: [entry-point contract](../architecture/entry-points.md) · Tests: `tests/unit/test_roles_wordpress.py`
 
 A hook callback is written as registered and led to its declaration after parsing
