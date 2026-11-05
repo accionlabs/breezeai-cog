@@ -13,6 +13,9 @@ wiring facts (:mod:`.file_facts`) are collected once per repository and composed
 * a router included at more than one place is served at each of them: its address is unknown
   (``None``), never its own prefix alone — an address it is not served at;
 * a router in an include cycle keeps its own prefix;
+* an include this analysis cannot read (the router comes from a function call, a configuration
+  value or a list built at run time) may mount any router: while one exists, a router with no
+  readable include has an unknown address — never its own prefix alone;
 * a prefix that exists but cannot be resolved makes the address unknown (``None``);
 * a prefix given by a module-level string constant (``API_PREFIX = "/api/v1"``, in this file or
   imported) is resolved; a settings attribute (``settings.API_V1_PREFIX``) is not — the
@@ -98,17 +101,21 @@ def _resolve(values: list[tuple[str, str, FileFacts]], index: Any) -> FastapiWir
         for var, (spec, deps) in f.routers.items():
             own[(rel, var)] = (value(spec), deps)
     sites: dict[Node_, set[tuple[Node_, str | None, tuple[str, ...]]]] = {}
+    unreadable = any(f.unreadable_includes for f in facts.values())
     for rel, f in facts.items():
         for receiver, child, spec, deps in f.includes:
             if child[0] == "factory":  # the router the factory function creates and returns
                 made = facts[child[1]].factories.get(child[2]) if child[1] in facts else None
-                if made is None:
+                if made is None:  # a function that is not a router factory this analysis reads
+                    unreadable = True
                     continue
                 target: Node_ = (child[1], made)
             else:
                 target = (rel, child[1]) if child[0] == "local" else (child[1], child[2])
             if target in own:
                 sites.setdefault(target, set()).add(((rel, receiver), value(spec), deps))
+            else:  # a name of the repo that is not a router: a value, an alias — not readable
+                unreadable = True
 
     mounted = set().union(*(f.mounted for f in facts.values()))
     memo: dict[Node_, Wiring] = {}
@@ -123,9 +130,10 @@ def _resolve(values: list[tuple[str, str, FileFacts]], index: Any) -> FastapiWir
             # An app is the root of its routes, wherever it is made (``create_app()``) — unless
             # it may be a mounted sub-application: then where it is served is unknown.
             result: Wiring = ((None if (maker or node[1]) in mounted else prefix), deps, node)
-        elif not at and node[1] in facts[node[0]].local_routers:
-            # Made inside a function and not found included: served wherever the function's
-            # result is mounted — unknown, never the bare path.
+        elif not at and (node[1] in facts[node[0]].local_routers or unreadable):
+            # Made inside a function and not found included — or some include cannot be read
+            # and may be this router's: served wherever it is mounted — unknown, never the
+            # bare path.
             result = (None, deps, node)
         elif len(at) > 1:  # served under each include: no single address
             result = (None, deps, node)
