@@ -1,4 +1,4 @@
-"""jQuery AJAX ``api_call`` detection (detection/jquery_calls.py): positive forms, false-positive
+"""jQuery AJAX ``api_call`` detection (typescript_jquery/calls.py): positive forms, false-positive
 guards, and inline ``<script>`` blocks in .cshtml/.html/.aspx through the real markup parsers."""
 
 from __future__ import annotations

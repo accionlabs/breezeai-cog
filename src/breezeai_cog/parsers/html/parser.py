@@ -38,7 +38,7 @@ from ...schemas import SCHEMA_VERSION, FileRecord
 from ...utils import count_loc
 from ..base import BaseParser, ParseContext
 from ..comments_common import comment_statements_for
-from ..detection.jquery_calls import detect_inline_jquery
+from ..typescript_jquery.calls import detect_inline_jquery
 from ..treesitter import parse_source
 from .fingerprint import detect_behaviors, detect_rendering_framework
 from .index import HtmlTemplateIndex, build_html_template_index

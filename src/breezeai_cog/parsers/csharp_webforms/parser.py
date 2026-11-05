@@ -19,7 +19,7 @@ from ...schemas import FileRecord
 from ...utils import count_loc
 from ..base import ParseContext
 from ..csharp.parser import CSharpParser
-from ..detection.jquery_calls import detect_inline_jquery
+from ..typescript_jquery.calls import detect_inline_jquery
 from ..emits import apply
 from ..treesitter import parse_source
 from .markup import (

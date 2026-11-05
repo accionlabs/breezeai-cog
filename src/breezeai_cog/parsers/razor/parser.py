@@ -25,7 +25,7 @@ from ...schemas import SCHEMA_VERSION, FileRecord
 from ...utils import count_loc
 from ..base import BaseParser, HandlerLocator, ParseContext
 from ..csharp.functions import build_method
-from ..detection.jquery_calls import detect_inline_jquery
+from ..typescript_jquery.calls import detect_inline_jquery
 from ..treesitter import parse_source
 from .mappings import FRAMEWORKS, STATEMENT_TYPES
 from .page_models import page_model_locator
