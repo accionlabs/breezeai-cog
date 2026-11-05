@@ -24,7 +24,7 @@ from tree_sitter import Node
 
 from ...schemas import Class, Decorator, FileRecord, Function
 from ..aspnet_areas import attribute_args, attribute_node, namespace_of, string_value
-from ..dotnet_common import code_behind_host, response_dto, simple_attr_name
+from ..dotnet_common import code_behind_host, named_arg, response_dto, simple_attr_name
 from ..emits import Emit
 from ..handler_sites import handler_location, locate_method
 from .svc_hosts import SVC_SERVICE_RE, svc_hosts
@@ -46,9 +46,9 @@ def _has_attr(decorators: list[Decorator], name: str) -> bool:
     the full ``…Attribute`` form (e.g. ``[ServiceContractAttribute]``)."""
     return any(simple_attr_name(d.name) == name for d in decorators)
 
-# NOTE: the C# attribute extractor reduces a string-literal named arg (``Name = "X"``) to its
-# bare value ("X") — the key is dropped (see csharp/functions.py). So named args cannot be
-# looked up by key; we recover them by the *shape* of the value instead.
+# The C# attribute reader keeps a named argument as written (``Name = "X"``) and a positional
+# string unquoted; ``named_arg`` splits the key off. The VB reader drops the key, so a key-less
+# argument is still read by the shape of its value.
 
 
 #: A ``UriTemplate`` that is set but cannot be read (not a literal or a known constant).
@@ -89,19 +89,21 @@ def _uri_template(method: Node | None, source: bytes, index: object | None) -> o
 def _verb_arg(dec: Decorator) -> str | None:
     """The ``Method = "…"`` value of a WebInvoke — the arg that is an HTTP verb."""
     for a in dec.args:
-        s = a.strip().upper()
-        if s in _HTTP_VERBS:
+        key, value = named_arg(a)
+        s = value.strip('"').strip().upper()
+        if key in (None, "Method") and s in _HTTP_VERBS:
             return s
     return None
 
 
 def _name_arg(decorators: list[Decorator], attr: str) -> str | None:
     """The bare-identifier ``Name="X"`` value on the given attribute, if present (a plain
-    identifier — not a namespace URI)."""
+    identifier — not a namespace URI). A key-less arg is a reader that drops keys (VB)."""
     for d in decorators:
         if simple_attr_name(d.name) == attr:
             for a in d.args:
-                s = a.strip()
+                key, value = named_arg(a)
+                s = value.strip('"').strip() if key == "Name" else (value if key is None else "")
                 if s and not any(c in s for c in "=/.:"):
                     return s
     return None

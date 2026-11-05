@@ -14,7 +14,7 @@ from ..index_common import record_distinct
 from ..handler_sites import locate_method
 from ..quartz_common import Call, detect_quartz
 from ..treesitter import node_text
-from .imports import CSharpIndex, in_scope_namespaces, type_files
+from ..csharp.imports import CSharpIndex, in_scope_namespaces, type_files
 
 
 #: A trailing positional argument that is a cancellation token (``ScheduleJob(job, trigger, ct)``).

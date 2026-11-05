@@ -20,6 +20,7 @@ from ..base import BaseParser, ParseContext
 from ..callresolve import make_resolver
 from ..comments_common import comment_statements_for
 from ..treesitter import parse_source
+from ..statements_common import begin_datastore_vendor, end_datastore_vendor, set_datastore_vendor
 from .classes import build_class
 from .functions import build_function, defined_names, type_map
 from .imports import ScalaIndex, build_fqcn_index, extract_imports, visible_names
@@ -63,8 +64,12 @@ class ScalaParser(BaseParser):
             if ctx.capture_statements
             else {}
         )
-        with scoped_http_clients(clients):
-            return self._extract(root, ctx)
+        token = begin_datastore_vendor()  # set by _extract from the imports; never leaks
+        try:
+            with scoped_http_clients(clients):
+                return self._extract(root, ctx)
+        finally:
+            end_datastore_vendor(token)
 
     def _extract(self, root: Node, ctx: ParseContext) -> FileRecord:
         source, path = ctx.source, ctx.path
@@ -77,6 +82,7 @@ class ScalaParser(BaseParser):
         internal, external, _, bindings = extract_imports(
             root, source, path, ctx.repo_root, fqcn
         )
+        set_datastore_vendor(external)
         local_defs = defined_names(root, source)
         types = type_map(root, source)
         resolve = make_resolver(bindings, local_defs, path, types)

@@ -102,7 +102,12 @@ def match_api(
     if m == "request" and method != "request":
         # Capitalized Request (...) is a constructor or model type, not an outbound HTTP request call
         return None
-    is_client = any(hint in _receiver_text(low) for hint in _CLIENT_HINTS)
+    receiver = _receiver_text(low)
+    # In .NET a ``…session`` is ASP.NET session state or an NHibernate ``ISession``, never an
+    # HTTP client (the ``session`` hint is Python's ``requests.Session``); so is the
+    # ``HttpContext.Session`` the ``http`` hint would otherwise match.
+    dotnet_session = language in ("csharp", "vb") and receiver.rsplit(".", 1)[-1].endswith("session")
+    is_client = not dotnet_session and any(hint in receiver for hint in _CLIENT_HINTS)
     if not is_client and http_client_ids:
         # names are original-case identifiers; the receiver is the segment before the first dot
         # (``service.get`` → ``service``), or the whole callee for a bare call (``request``).

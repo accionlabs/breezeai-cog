@@ -197,6 +197,20 @@ def test_client_operations_detected_via_base_parser(tmp_path) -> None:
     assert routes["items"].routeKind == "query"
 
 
+def test_client_root_fragment_spread_names_its_fields(tmp_path) -> None:
+    # A root spread of a fragment in the same template calls that fragment's fields; the record
+    # sits on the spread, the operation's own root selection.
+    src = b"""import { gql } from '@apollo/client';
+export const GET_PEOPLE = gql`
+  query GetPeople { ...people }
+  fragment people on Query { people { id } }
+`;
+"""
+    rec = _parse_base(tmp_path, src, "people.ts")
+    assert [(s.startLine, s.endpoint, s.handler, s.text) for s in rec.statements
+            if s.semanticType == "api_call"] == [(3, "people", "GetPeople", "...people")]
+
+
 def test_client_ops_ignore_plain_template_and_server_sdl(tmp_path) -> None:
     # A plain (untagged) template literal that merely contains the word "query" is NOT a
     # GraphQL client op.

@@ -53,6 +53,11 @@ Check that:
 - the change is **framework-neutral** — no framework names, imports or annotations hard-coded
   in the language parser (see `extend-capture` §6, "Never bake framework-specific logic into a
   base language parser");
+- it belongs in the base package at all: the base parser uses it for every file of the
+  language. A detector for a separate library or SDK goes in its own detector-only package
+  `parsers/<lang>_<library>/`, and one for a framework with its own parser goes in that
+  framework's package ([architecture §6](architecture.md#6-the-parser-model), "a detector or
+  fact lives with what it detects");
 - if it is a structure-shaped detector, it is a registered additive detector
   (`register_detector`, `extend-capture` §3C) with a cheap byte guard, not an unconditional
   walk or a new hard-coded call in `extract`; a new detector or a changed `order` shows up in
@@ -101,10 +106,12 @@ src/breezeai_cog/parsers/<lang>_<framework>/
 tests/unit/test_<framework>_parser.py, tests/unit/test_roles_<framework>.py
 ```
 
-A **detector-only** package (an additive detector; owns no file — e.g. `typescript_fastify/`):
+A **detector-only** package (an additive detector; owns no file — e.g. `typescript_fastify/`
+for a framework, `csharp_hangfire/` or `go_kafka/` for a library). A library's detectors go here,
+never in the base `<lang>/` package:
 
 ```
-src/breezeai_cog/parsers/<lang>_<framework>/
+src/breezeai_cog/parsers/<lang>_<framework>/   or   <lang>_<library>/
 ├─ __init__.py      # PARSERS = []
 ├─ routes.py        # register_detector(Detector(name, Gate(...), detect)) -> Detection of Emits
 └─ plugins.py       # register_fact(FactSpec(...)) when it needs data from other files

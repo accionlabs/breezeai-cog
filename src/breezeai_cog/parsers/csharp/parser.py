@@ -23,7 +23,15 @@ from ...utils import count_loc
 from ..additive import run_additive
 from ..base import BaseParser, ParseContext
 from ..callresolve import make_resolver
-from ..statements_common import reset_http_client_ids, set_http_client_ids
+from ..statements_common import (
+    begin_datastore_vendor,
+    end_datastore_vendor,
+    reset_datastore_receivers,
+    reset_http_client_ids,
+    set_datastore_receivers,
+    set_datastore_vendor,
+    set_http_client_ids,
+)
 from ..treesitter import parse_source
 from .classes import build_class
 from .functions import defined_names, type_map
@@ -35,7 +43,7 @@ from .imports import (
 )
 from ..comments_common import comment_statements_for
 from .mappings import COMMENT_TYPES, CONTROL_FLOW, FRAMEWORKS, STATEMENT_TYPES
-from .statements import collect_http_client_ids
+from .statements import collect_datastore_receivers, collect_http_client_ids
 
 _CLASS_TYPES = (
     "class_declaration", "interface_declaration", "enum_declaration",
@@ -73,12 +81,21 @@ class CSharpParser(BaseParser):
     def extract(self, root: Node, ctx: ParseContext) -> FileRecord:
         # Names holding an HttpClient, for the shared outbound-call classifier — set for this
         # file's extraction only (reset in a finally so a reused worker never leaks them).
-        ids = (collect_http_client_ids(root, ctx.source, type_map(root, ctx.source))
-               if ctx.capture_statements else frozenset())
+        # Names declared as a DynamoDB client, for the shared db-call classifier — same lifetime.
+        ids: frozenset[str] = frozenset()
+        receivers: dict[str, str] = {}
+        if ctx.capture_statements:
+            types = type_map(root, ctx.source)
+            ids = collect_http_client_ids(root, ctx.source, types)
+            receivers = collect_datastore_receivers(root, ctx.source, types)
         token = set_http_client_ids(ids)
+        stores = set_datastore_receivers(receivers or None)
+        vendor = begin_datastore_vendor()  # set by _extract from the imports; never leaks
         try:
             return self._extract(root, ctx)
         finally:
+            end_datastore_vendor(vendor)
+            reset_datastore_receivers(stores)
             reset_http_client_ids(token)
 
     def _extract(self, root: Node, ctx: ParseContext) -> FileRecord:
@@ -90,6 +107,7 @@ class CSharpParser(BaseParser):
         internal, external, _, bindings = extract_imports(
             root, source, path, ctx.resolution_index
         )
+        set_datastore_vendor(external)
         local_names = defined_names(root, source)
         # A `using static Ns.Type` puts Type's members in scope unqualified, so a bare
         # `M()` needs them bound; `local_names` keeps a same-file declaration winning.
