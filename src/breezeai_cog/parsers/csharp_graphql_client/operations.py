@@ -20,7 +20,8 @@ are the operation kind. The operation document is read with the ``graphql`` gram
 **The document only from literals:** the ``Query`` of a ``new GraphQLRequest { … }`` /
 ``new GraphQLRequest(query, …)`` on the call or on a local the call passes, as a string literal
 (regular, verbatim or raw), a concatenation of literals, or a ``const`` / ``static readonly``
-field of this file holding one. Anything else — or a document with several operations and no
+string field holding one, resolved through the ``csharp.string-constants`` fact
+(``aspnet_areas.constant_string``). Anything else — or a document with several operations and no
 literal ``OperationName`` to pick one — still records the call (``method`` from the client method:
 ``SendQueryAsync`` is a query) with ``endpoint`` empty.
 """
@@ -33,6 +34,7 @@ from collections.abc import Iterator
 from tree_sitter import Node
 
 from ..additive import DetectContext, Detection, Detector, Gate, register_detector
+from ..aspnet_areas import constant_string
 from ..csharp.functions import type_map
 from ..csharp.statements import collect_typed_names
 from ..emits import Emit
@@ -67,25 +69,23 @@ def _iter(root: Node, kind: str) -> Iterator[Node]:
         stack.extend(reversed(node.named_children))
 
 
-def _string(node: Node, source: bytes, consts: dict[str, Node], depth: int = 0) -> str | None:
-    """The value of a string expression built only from literals (or this file's string
-    constants), else ``None``."""
+def _string(node: Node, source: bytes, index: object, depth: int = 0) -> str | None:
+    """The value of a string expression built only from literals and string constants, else
+    ``None``."""
     if depth > 8:
         return None
     if node.type == "parenthesized_expression" and node.named_children:
-        return _string(node.named_children[0], source, consts, depth + 1)
+        return _string(node.named_children[0], source, index, depth + 1)
     if node.type == "binary_expression":
         left, right = node.child_by_field_name("left"), node.child_by_field_name("right")
         op = node.child_by_field_name("operator")
         if left is None or right is None or op is None or node_text(op, source) != "+":
             return None
-        a = _string(left, source, consts, depth + 1)
-        b = _string(right, source, consts, depth + 1) if a is not None else None
+        a = _string(left, source, index, depth + 1)
+        b = _string(right, source, index, depth + 1) if a is not None else None
         return a + b if a is not None and b is not None else None
-    if node.type in ("identifier", "member_access_expression"):
-        name = node_text(node, source).rsplit(".", 1)[-1]
-        value = consts.get(name)
-        return _string(value, source, consts, depth + 1) if value is not None else None
+    if node.type in ("identifier", "member_access_expression", "qualified_name"):
+        return constant_string(node, source, index)
     text = node_text(node, source)
     if node.type == "verbatim_string_literal":
         return text[2:-1].replace('""', '"')
@@ -95,26 +95,6 @@ def _string(node: Node, source: bytes, consts: dict[str, Node], depth: int = 0) 
     if node.type == "string_literal" and len(text) >= 2:
         return _ESCAPE.sub(lambda m: _ESCAPES.get(m.group(1), m.group(0)), text[1:-1])
     return None
-
-
-def _string_constants(root: Node, source: bytes) -> dict[str, Node]:
-    """``const`` / ``static readonly`` string fields of this file → their initializer; a name
-    declared twice is dropped (which one a reference means is not known here)."""
-    found: dict[str, Node] = {}
-    dropped: set[str] = set()
-    for field in _iter(root, "field_declaration"):
-        mods = {node_text(m, source) for m in field.named_children if m.type == "modifier"}
-        if "const" not in mods and not {"static", "readonly"} <= mods:
-            continue
-        decl = child_of_type(field, "variable_declaration")
-        for d in decl.named_children if decl is not None else []:
-            if d.type != "variable_declarator" or len(d.named_children) < 2:
-                continue
-            name = node_text(d.named_children[0], source)
-            if name in found:
-                dropped.add(name)
-            found[name] = d.named_children[1]
-    return {k: v for k, v in found.items() if k not in dropped}
 
 
 def _receiver_and_method(call: Node, source: bytes) -> tuple[Node, str] | None:
@@ -216,11 +196,11 @@ def _operation(document: str, wanted: str | None, timeout: int) -> tuple[Node, s
     return ops[0][0], ops[0][1], body
 
 
-def detect_graphql_client_calls(root: Node, source: bytes, timeout: int = 0) -> list[Emit]:
+def detect_graphql_client_calls(root: Node, source: bytes, timeout: int = 0,
+                                index: object = None) -> list[Emit]:
     clients = collect_typed_names(root, source, type_map(root, source), _CLIENT_TYPES)
     if not clients:
         return []
-    consts: dict[str, Node] | None = None
     found: list[Emit] = []
     for call in _iter(root, "invocation_expression"):
         parts = _receiver_and_method(call, source)
@@ -230,11 +210,9 @@ def detect_graphql_client_calls(root: Node, source: bytes, timeout: int = 0) -> 
         resolved = None
         creation = _request(call, source)
         if creation is not None:
-            if consts is None:
-                consts = _string_constants(root, source)
             query, name = _query_and_name(creation, source)
-            document = _string(query, source, consts) if query is not None else None
-            wanted = _string(name, source, consts) if name is not None else None
+            document = _string(query, source, index) if query is not None else None
+            wanted = _string(name, source, index) if name is not None else None
             if document is not None and (name is None or wanted is not None):
                 resolved = _operation(document, wanted, timeout)
         if resolved is None:
@@ -264,7 +242,8 @@ def detect_graphql_client_calls(root: Node, source: bytes, timeout: int = 0) -> 
 
 
 def _detect(dc: DetectContext) -> Detection | None:
-    found = detect_graphql_client_calls(dc.root, dc.source, dc.ctx.parse_timeout_micros)
+    found = detect_graphql_client_calls(dc.root, dc.source, dc.ctx.parse_timeout_micros,
+                                        dc.ctx.resolution_index)
     return Detection(found) if found else None
 
 

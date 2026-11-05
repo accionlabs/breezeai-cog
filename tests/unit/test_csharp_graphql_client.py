@@ -4,6 +4,7 @@ shape, gated on the receiver's declared client type; the document only from lite
 from __future__ import annotations
 
 from breezeai_cog.parsers.base import ParseContext
+from breezeai_cog.parsers.csharp.imports import build_csharp_index
 from breezeai_cog.parsers.csharp.parser import CSharpParser
 from breezeai_cog.schemas import FileRecord
 
@@ -32,9 +33,14 @@ public class ShopApi {
 '''
 
 
-def _parse(src: bytes, name: str = "ShopApi.cs") -> FileRecord:
-    ctx = ParseContext(path=name, abs_path=None, source=src, repo_root=None,
-                       capture_statements=True)
+def _parse(tmp_path, src: bytes, name: str = "ShopApi.cs") -> FileRecord:
+    # The repo index carries the string constants a document can be written in.
+    f = tmp_path / name
+    f.parent.mkdir(parents=True, exist_ok=True)
+    f.write_bytes(src)
+    ctx = ParseContext(path=name, abs_path=f, source=src, repo_root=tmp_path,
+                       capture_statements=True,
+                       resolution_index=build_csharp_index(tmp_path, [f]))
     return CSharpParser().parse_file(ctx)
 
 
@@ -43,8 +49,8 @@ def _ops(rec: FileRecord) -> list[tuple]:
             for s in rec.statements if s.semanticType == "api_call" and s.framework == "graphql"]
 
 
-def test_one_api_call_per_root_field() -> None:
-    assert _ops(_parse(CLIENT)) == [
+def test_one_api_call_per_root_field(tmp_path) -> None:
+    assert _ops(_parse(tmp_path, CLIENT)) == [
         (14, "QUERY", "query", "orders", "Orders", "OrderFilter!"),
         (16, "MUTATION", "mutation", "placeOrder", "PlaceOrder", None),
         (17, "QUERY", "query", None, None, None),        # the document is not a literal
@@ -54,15 +60,15 @@ def test_one_api_call_per_root_field() -> None:
     ]
 
 
-def test_first_root_field_enriches_the_call_statement() -> None:
-    rec = _parse(CLIENT)
+def test_first_root_field_enriches_the_call_statement(tmp_path) -> None:
+    rec = _parse(tmp_path, CLIENT)
     first = next(s for s in rec.statements if s.endpoint == "orders")
     second = next(s for s in rec.statements if s.endpoint == "customer")
     assert first.nodeType == "expression_statement"
     assert second.nodeType == "invocation_expression" and second.id != first.id
 
 
-def test_untyped_receivers_are_not_graphql() -> None:
+def test_untyped_receivers_are_not_graphql(tmp_path) -> None:
     src = b'''using GraphQL;
 class Other {
   private readonly IApiClient _api;
@@ -72,8 +78,8 @@ class Other {
   }
 }
 '''
-    assert _ops(_parse(src)) == []
+    assert _ops(_parse(tmp_path, src)) == []
 
 
-def test_fixture_files_are_skipped() -> None:
-    assert _ops(_parse(CLIENT, "__mocks__/ShopApi.cs")) == []
+def test_fixture_files_are_skipped(tmp_path) -> None:
+    assert _ops(_parse(tmp_path, CLIENT, "__mocks__/ShopApi.cs")) == []
