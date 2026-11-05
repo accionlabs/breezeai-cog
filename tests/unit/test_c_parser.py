@@ -541,6 +541,56 @@ def test_the_index_parse_honours_the_parse_timeout(tmp_path) -> None:
 # -- macros -------------------------------------------------------------------------------------
 
 
+_SPLIT_CASE = """\
+int step{i}(int mode)
+{{
+    int local{i} = mode;
+    switch (mode) {{
+#ifdef FAST
+    case 1: {{
+#else
+    case 2: {{
+#endif
+        local{i} = helper(local{i});
+        break;
+    }}
+    }}
+    return local{i};
+}}
+"""
+#: Four functions whose `case … {` a conditional splits: the grammar gives up on the whole file
+#: (its root is an error) and the functions' locals read as file-scope declarations.
+ROOT_ERROR = (
+    "int helper(int a) { return a; }\n"
+    + "".join(_SPLIT_CASE.format(i=i) for i in range(4))
+    + "int after(int b) { return step0(b); }\n"
+)
+
+
+@pytest.mark.parametrize("parser", [CParser(), CppParser()], ids=["c", "cpp"])
+def test_a_file_whose_parse_is_one_error_is_read_from_the_second_parse(tmp_path, parser) -> None:
+    rec = _parse(parser, tmp_path, "steps.c", ROOT_ERROR)
+    assert sorted((f.name, f.startLine, f.endLine) for f in rec.functions) == [
+        ("after", 62, 62), ("helper", 1, 1),
+        ("step0", 2, 16), ("step1", 17, 31), ("step2", 32, 46), ("step3", 47, 61),
+    ]
+    file_scope = [s.name for s in rec.statements if s.nodeType == "declaration" and s.parentId == "steps.c"]
+    assert file_scope == []  # the locals belong to their functions
+    assert {s.name: s.parentId for s in rec.statements if s.name == "local1"} == {
+        "local1": "steps.c#step1@17",
+    }
+
+
+def test_a_call_into_a_function_the_second_parse_recovered_resolves(tmp_path) -> None:
+    repo = _repo(tmp_path / "r", {
+        "steps.c": ROOT_ERROR,
+        "main.c": "int step2(int mode);\nint main(void) { return step2(1); }\n",
+    })
+    records = _capture(repo, 1)
+    assert _calls(records["main.c"], "main") == {"step2": "steps.c"}
+    assert _calls(records["steps.c"], "after") == {"step0": "steps.c"}
+
+
 @pytest.mark.parametrize("parser", [CParser(), CppParser()], ids=["c", "cpp"])
 def test_a_qualifier_macro_after_a_star_is_not_the_parameter_name(tmp_path, parser) -> None:
     # `float * GGML_RESTRICT s`: the grammar takes the macro for the name and leaves `s` in an

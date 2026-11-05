@@ -136,7 +136,9 @@ class CFamilyParser(BaseParser):
         fix = branch_fix(root, source, self.grammar, ctx.parse_timeout_micros)
         graph = IncludeGraph(headers, [i for i in (idx, *related) if i is not None])
         resolve = make_cfamily_resolver(
-            defined_names(root, source, spilled, fix.extra if fix else ()), path, idx,
+            defined_names(
+                root, source, spilled, fix.extra if fix else (), fix is not None and fix.whole,
+            ), path, idx,
             [self.callable_in(r) for r in related],
             header_visibility(path, internal, graph),
         )
@@ -150,13 +152,15 @@ class CFamilyParser(BaseParser):
             """Walk a scope's members — or, given ``second``, nodes from the second parse."""
             for child in second or scope.named_children:
                 node = _unwrap_template(child)
+                from_second = bool(second) and fix is not None and fix.whole
                 if fix is not None and not second:
                     if node.start_byte in fix.skip:
                         continue  # inside a function the normal parse cut short
+                    from_second = fix.whole and node.start_byte in fix.replace
                     node = fix.replace.get(node.start_byte, node)
                 read = DeclarationRead()
                 if node.type in _DECLARATIONS:
-                    if spilled and not owner_is_explicit(node):
+                    if spilled and not owner_is_explicit(node) and not from_second:
                         continue  # maybe a member of a class the grammar lost: absent beats wrong
                     # A declaration or definition is read past a macro where that is safe
                     # (`read_declaration`); one whose name can't be trusted is skipped.

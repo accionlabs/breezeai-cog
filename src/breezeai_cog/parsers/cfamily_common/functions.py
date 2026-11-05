@@ -346,13 +346,17 @@ def _add_def_name(fn: Node, source: bytes, names: set[str]) -> None:
 
 def defined_names(
     root: Node, source: bytes, spilled: bool = False, extra: Sequence[Node] = (),
+    extra_whole: bool = False,
 ) -> set[str]:
     """Free-function / method names defined in this file (for same-file call resolution).
-    ``extra`` are definitions found only by a second parse (``branches.branch_fix``)."""
+    ``extra`` are definitions found only by a second parse (``branches.branch_fix``); with
+    ``extra_whole`` that parse read the file whole, so none of them is a spilled member."""
     names: set[str] = set()
     _defs_in(root, source, names, spilled)
     for fn in extra:
-        if fn.type == "function_definition" and not (spilled and not owner_is_explicit(fn)):
+        if fn.type == "function_definition" and (
+            extra_whole or not (spilled and not owner_is_explicit(fn))
+        ):
             _add_def_name(fn, source, names)
     return names
 

@@ -131,13 +131,18 @@ class BranchFix:
     replace: dict[int, Node] = field(default_factory=dict)
     extra: list[Node] = field(default_factory=list)
     skip: set[int] = field(default_factory=set)
+    #: The normal parse's root was an error and the second parse read the file whole: what the
+    #: second parse supplies is class members inside their classes, never spilled ones.
+    whole: bool = False
 
 
 def branch_fix(root: Node, source: bytes, grammar: str, timeout_micros: int) -> BranchFix | None:
     """The corrections for a file, or ``None`` when it needs none (the usual case: no function
     body and no file-scope error holds a broken conditional, or both parses agree)."""
-    if not root.has_error or root.type == "ERROR" or b"#if" not in source:
+    if not root.has_error or b"#if" not in source:
         return None
+    if root.type == "ERROR":
+        return _root_error_fix(root, source, grammar, timeout_micros)
     first = _top_level(root)
     lost = [  # file-scope errors with a conditional in them: everything in them is lost
         (n.start_byte, n.end_byte) for n in first
@@ -175,6 +180,36 @@ def branch_fix(root: Node, source: bytes, grammar: str, timeout_micros: int) -> 
     for n in fix.extra:  # one that runs past the lost span covers what the normal parse had there
         fix.skip.update(s for s in first_starts if n.start_byte <= s < n.end_byte)
     return fix
+
+
+def _root_error_fix(
+    root: Node, source: bytes, grammar: str, timeout_micros: int,
+) -> BranchFix | None:
+    """The corrections for a file whose whole parse is one error. A conditional can do that —
+    zlib's ``inflate.c`` splits an ``if (`` across ``#ifdef GUNZIP`` / ``#else`` — and then the
+    statements and locals of the broken function read as file-scope nodes. When the second parse
+    (conditionals resolved to their first branch) reads the file without a root error, each
+    file- or namespace-scope node it finds that the normal parse doesn't have as such is read
+    from it, and the normal parse's nodes inside it are skipped. The normal parse's nodes outside
+    every such node (an ``#else``-only definition) stay."""
+    second_root = parse_source(grammar, blank_conditionals(source), timeout_micros).root_node
+    if second_root.type == "ERROR":
+        return None
+    first = {n.start_byte: n for n in _top_level(root) if n.type != "ERROR"}
+    fix = BranchFix(whole=True)
+    for n in _top_level(second_root):
+        if n.type not in _SUPPLIED or not _trustworthy(n, source):
+            continue
+        same = first.get(n.start_byte)
+        if same is not None and same.type == n.type and same.end_byte == n.end_byte:
+            continue  # both parses read it the same way
+        if same is not None and same.type == n.type == "function_definition":
+            fix.replace[n.start_byte] = n
+            fix.skip.update(s for s in first if n.start_byte < s < n.end_byte)
+        else:
+            fix.extra.append(n)
+            fix.skip.update(s for s in first if n.start_byte <= s < n.end_byte)
+    return fix if fix.replace or fix.extra else None
 
 
 def enclosing_scope(node: Node, source: bytes) -> tuple[str, bool]:

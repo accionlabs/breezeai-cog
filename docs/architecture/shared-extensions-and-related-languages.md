@@ -635,13 +635,26 @@ C++.
 > file-wide `#ifndef` — into one error the parser can't read, so no function is left to repair.
 > The definitions and declarations the second parse finds inside that error's span are read from
 > it; anything else it finds there, and anything it misread too (a `}` it had to insert, a brace
-> lost in an error outside a function body), is not. A file whose whole root is an error is left
-> as it is.
+> lost in an error outside a function body), is not.
 > **Why:** a file-wide error loses every function after the break: curl's `http.c` lost 102
 > functions, llama.cpp's `ggml-hexagon.cpp` 190. The second parse reads that region as one build
 > configuration would. **Cost:** as for split braces — the recovered region is read under the
 > first branch of each conditional, and its `#else`-only definitions stay lost; a call in a
 > recovered function is the one that configuration makes.
+
+> **Decision —** a file whose whole parse is one error is read from the same second parse when
+> that parse reads it without one. A conditional can make the grammar give up on the entire file
+> (zlib's `inflate.c` splits an `if (` across `#ifdef GUNZIP` / `#else`); the functions after the
+> break are lost, and the statements and locals of the broken ones read as file-scope
+> declarations — 173 locals were captured as globals across nine such files. Each file- or
+> namespace-scope node the second parse finds that the normal parse doesn't have as such
+> (functions, classes, declarations, `#define`s, and only ones it read whole) is read from it, and
+> the normal parse's nodes inside it are skipped; the normal parse's nodes outside every such
+> node, an `#else`-only definition among them, stay. What the second parse supplies sits in its
+> classes, so the spilled-member rule below doesn't apply to it.
+> **Why:** the normal parse of such a file is wrong in places it can't tell, while the second
+> parse reads it whole under one build configuration. **Cost:** as for split braces — one more parse
+> for such a file (ten in the six repos sampled), and the first branch of each conditional.
 
 > **Decision —** when a C++ or CUDA file can't be parsed as a whole and members of a class
 > spilled out to file scope, only definitions that name their owner (`int Judge::decide()`)

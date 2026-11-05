@@ -259,9 +259,11 @@ def _index_scope(
     reads functions whose braces a conditional split from a second parse (``branches``)."""
     for child in scope.named_children:
         node = _unwrap_template(child)
+        from_second = False
         if fix is not None:
             if node.start_byte in fix.skip:
                 continue
+            from_second = fix.whole and node.start_byte in fix.replace
             node = fix.replace.get(node.start_byte, node)
         if node.type == "linkage_specification":
             _index_scope(
@@ -275,7 +277,10 @@ def _index_scope(
             spec = defined_type(node)
             if spec is not None and spec.type in _CLASS_TYPES and not has_declaration_error(node):
                 _index_class(frag, spec, source, rel, ns)
-        elif node.type == "function_definition" and spilled and not owner_is_explicit(node):
+        elif (
+            node.type == "function_definition" and spilled and not from_second
+            and not owner_is_explicit(node)
+        ):
             continue
         elif node.type == "function_definition":
             read = read_declaration(node, source)
@@ -318,7 +323,9 @@ def _index_one(
             node = _unwrap_template(extra)
             if node.type == "function_definition":
                 read = read_declaration(node, source)
-                if read is not None and not (spilled and not owner_is_explicit(node)):
+                if read is not None and (
+                    (fix is not None and fix.whole) or not (spilled and not owner_is_explicit(node))
+                ):
                     _record_def(frag, node, source, rel, None, c_linkage, name=read.name)
             elif node.type in _CLASS_TYPES:
                 _index_class(frag, node, source, rel, ns)
