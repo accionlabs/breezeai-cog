@@ -49,7 +49,9 @@ from ...schemas import Class, Statement
 from ..additive import DetectContext, Detection, Detector, Gate, register_detector
 from ..emits import Emit
 from .sdl_fields import root_field_dto
-from ..graphql.operations import OPERATION_KINDS, operation_request_dto, root_fields
+from ..graphql.operations import (
+    OPERATION_KINDS, fragment_definitions, operation_request_dto, root_fields,
+)
 from ..graphql.sdl import child_of_type, extract_graphql
 from ..treesitter import first_line, node_text, parse_source
 
@@ -306,15 +308,21 @@ def _emit_client_ops(
     op_name_node = child_of_type(op_def, "name")
     op_name = node_text(op_name_node, sdl) if op_name_node is not None else None
     request_dto = operation_request_dto(op_def, sdl)
-    for field in root_fields(op_def):
+    doc = op_def
+    while doc.parent is not None:
+        doc = doc.parent
+    for anchor, field in root_fields(op_def, fragment_definitions(doc)):
         name = child_of_type(field, "name")
-        line = row_base + name.start_point[0] + 1
+        # The record sits on the operation's own root selection: the field, or the fragment
+        # spread that brings it in.
+        at = name if anchor.type == "field" else anchor
+        line = row_base + at.start_point[0] + 1
         # Column only shifts on the template's first row (body starts after the backtick);
         # later rows begin at column 0 within the body.
-        col = name.start_point[1] + (col_base if name.start_point[0] == 0 else 0)
+        col = at.start_point[1] + (col_base if at.start_point[0] == 0 else 0)
         # The field sits in the template's own GraphQL tree, so its span is given in TS terms.
         routes.append(Emit(
-            field,
+            anchor,
             {
                 "semanticType": "api_call",
                 "method": kind.upper(),
@@ -327,8 +335,8 @@ def _emit_client_ops(
                 "requestDTO": request_dto,
             },
             parent=file_id(path), node_type="synthetic",
-            text=first_line(node_text(field, sdl))[:120],
-            line=line, col=col, end_line=row_base + field.end_point[0] + 1,
+            text=first_line(node_text(anchor, sdl))[:120],
+            line=line, col=col, end_line=row_base + anchor.end_point[0] + 1,
         ))
 
 

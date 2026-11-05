@@ -237,6 +237,29 @@ def test_operations_and_fragment(tmp_path) -> None:
     assert frag.name == "UserFields" and frag.endpoint == "User"
 
 
+def test_root_fragment_spreads_name_the_fields_they_bring(tmp_path) -> None:
+    # The endpoint is the server field the operation calls, never the operation's own name: a
+    # root spread is followed into a fragment of the same document (nested spreads too); one
+    # defined elsewhere leaves the endpoint empty.
+    rec = _parse(tmp_path, "people.graphql", """\
+query GetPeople { ...people }
+query GetBoth { ...people ... on Query { me { id } } }
+query GetOther { ...Elsewhere }
+fragment people on Query { people { id } ...more }
+fragment more on Query { personById(id: 1) { id } }
+""")
+    calls = [(s.startLine, s.handler, s.endpoint, s.nodeType, s.text)
+             for s in rec.statements if s.semanticType == "api_call"]
+    assert calls == [
+        (1, "GetPeople", "people", "fragment_spread", "...people"),
+        (1, "GetPeople", "personById", "fragment_spread", "...people"),
+        (2, "GetBoth", "people", "fragment_spread", "...people"),
+        (2, "GetBoth", "personById", "fragment_spread", "...people"),
+        (2, "GetBoth", "me", "inline_fragment", "... on Query { me { id } }"),
+        (3, "GetOther", None, "operation_definition", "query GetOther { ...Elsewhere }"),
+    ]
+
+
 def test_multiline_operation_captured_in_full(tmp_path) -> None:
     rec = _parse(tmp_path, "projects.graphql", MULTILINE_OP)
     op = _by(rec, "GetProjects", "field")

@@ -83,3 +83,21 @@ class Other {
 
 def test_fixture_files_are_skipped(tmp_path) -> None:
     assert _ops(_parse(tmp_path, CLIENT, "__mocks__/ShopApi.cs")) == []
+
+
+def test_root_fragment_spread_names_its_fields(tmp_path) -> None:
+    # A document whose root is a fragment of the same document calls that fragment's fields.
+    src = b'''using GraphQL;
+using GraphQL.Client.Http;
+class People {
+  private readonly GraphQLHttpClient _client;
+  async Task Run() {
+    await _client.SendQueryAsync<object>(new GraphQLRequest { Query = @"
+      query GetPeople { ...people }
+      fragment people on Query { people { id } }" });
+    await _client.SendQueryAsync<object>(new GraphQLRequest { Query = "query GetOther { ...Elsewhere }" });
+  }
+}
+'''
+    assert [(e, h) for _, _, _, e, h, _ in _ops(_parse(tmp_path, src))] == [
+        ("people", "GetPeople"), (None, "GetOther")]

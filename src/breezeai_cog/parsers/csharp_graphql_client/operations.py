@@ -38,7 +38,9 @@ from ..aspnet_areas import constant_string
 from ..csharp.functions import type_map
 from ..csharp.statements import collect_typed_names
 from ..emits import Emit
-from ..graphql.operations import OPERATION_KINDS, operation_request_dto, root_fields
+from ..graphql.operations import (
+    OPERATION_KINDS, fragment_definitions, operation_request_dto, root_fields,
+)
 from ..graphql.sdl import child_of_type
 from ..treesitter import first_line, node_text, parse_source
 
@@ -178,8 +180,10 @@ def _query_and_name(creation: Node, source: bytes) -> tuple[Node | None, Node | 
     return query, name
 
 
-def _operation(document: str, wanted: str | None, timeout: int) -> tuple[Node, str, bytes] | None:
-    """(operation_definition, kind, document bytes) — the one named ``wanted``, or the only one."""
+def _operation(document: str, wanted: str | None,
+               timeout: int) -> tuple[Node, str, bytes, dict[str, Node]] | None:
+    """(operation_definition, kind, document bytes, its fragments) — the one named ``wanted``, or
+    the only one."""
     body = document.encode()
     gql = parse_source("graphql", body, timeout).root_node
     ops: list[tuple[Node, str, str | None]] = []
@@ -193,7 +197,7 @@ def _operation(document: str, wanted: str | None, timeout: int) -> tuple[Node, s
         ops = [o for o in ops if o[2] == wanted]
     if len(ops) != 1:
         return None
-    return ops[0][0], ops[0][1], body
+    return ops[0][0], ops[0][1], body, fragment_definitions(gql)
 
 
 def detect_graphql_client_calls(root: Node, source: bytes, timeout: int = 0,
@@ -223,18 +227,19 @@ def detect_graphql_client_calls(root: Node, source: bytes, timeout: int = 0,
                 enrich="unclassified", text=text,
             ))
             continue
-        op, kind, body = resolved
+        op, kind, body, fragments = resolved
         op_name_node = child_of_type(op, "name")
         op_name = node_text(op_name_node, body) if op_name_node is not None else None
         request_dto = operation_request_dto(op, body)
-        for field in root_fields(op):
-            name_node = child_of_type(field, "name")
-            if name_node is None:
-                continue
+        # One record per root field; a root brought in only by a fragment of another document
+        # leaves one record with an empty endpoint.
+        names: list[str | None] = [node_text(n, body) for _, f in root_fields(op, fragments)
+                                   if (n := child_of_type(f, "name")) is not None]
+        for endpoint in names or [None]:
             found.append(Emit(
                 call,
                 {"semanticType": "api_call", "method": kind.upper(), "framework": "graphql",
-                 "routeKind": kind, "endpoint": node_text(name_node, body)},
+                 "routeKind": kind, "endpoint": endpoint},
                 fill={"handler": op_name, "requestDTO": request_dto},
                 enrich="unclassified", text=text,
             ))
