@@ -8,8 +8,13 @@ ambiguous, no guards), looked up by the route's ``controller#action`` handler.
 
 Only what the syntax states is recorded: ``before_action :a, :b`` with literal ``only:`` /
 ``except:`` action lists. A callback with ``if:`` / ``unless:`` (may not run), a block, or a
-non-symbol argument names no guard. Callbacks of a parent controller are included only when that
-parent is declared in the same file.
+non-symbol argument names no guard.
+
+Callbacks are inherited down the ``< Parent`` chain across files. Each controller's callbacks
+and skips are recorded in order with its parent constant and lexical scope; the parent is
+resolved the way Ruby resolves a constant (innermost enclosing module first, then outward to
+the top level) once every file is known. A parent that is not a controller in the repo, or is
+declared ambiguously, ends the chain: nothing is inherited past it, never a guessed parent.
 
 ``skip_before_action`` removes a callback — inherited ones included — from the actions it names::
 
@@ -23,6 +28,8 @@ callback cannot be read removes every callback: a guard is never kept where it m
 
 from __future__ import annotations
 
+import re
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -30,7 +37,7 @@ from tree_sitter import Node
 
 from ..additive import FactSpec, index_fact, register_fact
 from ..index_common import record_distinct
-from ..ruby.models import _iter_classes, _qualified_name, _superclass_name
+from ..ruby.models import _class_name, _iter_classes, _qualified_name
 from ..treesitter import node_text
 
 FACT = "rails.controller-callbacks"
@@ -45,8 +52,30 @@ Skip = tuple[tuple[str, ...] | None, tuple[str, ...] | None, tuple[str, ...]]
 #: A class body's callbacks and skips, in declaration order: one of the two is set.
 _Op = tuple[Callback | None, Skip | None]
 
-_BEFORE = {"before_action", "prepend_before_action"}
-_SKIP = {"skip_before_action"}
+#: ``*_filter`` is the pre-Rails-5.1 spelling of every ``*_action`` callback; same behaviour.
+_BEFORE = {"before_action", "prepend_before_action", "append_before_action",
+           "before_filter", "prepend_before_filter", "append_before_filter"}
+_SKIP = {"skip_before_action", "skip_before_filter"}
+
+#: What one controller contributes: (parent constant as written, lexical scopes innermost
+#: first, its callbacks and skips in order). Tuples only: two declarations of a class compare
+#: equal when they agree.
+Declared = tuple[str | None, tuple[str, ...], tuple[_Op, ...]]
+
+_CONSTANT = re.compile(r"(::)?[A-Z]\w*(::[A-Z]\w*)*")
+
+#: Callbacks that certainly reject an anonymous user: Devise's ``authenticate_<scope>!`` (and the
+#: ``authenticate(:scope)`` its route blocks are recorded as), a short list of established names,
+#: and the ``require_logged_in_<user|moderator|admin>`` family (optionally ``_or_<status>``, as in
+#: ``require_logged_in_user_or_400``). The list is exact on purpose: a name that only mentions a
+#: user (``load_user``, ``find_user_from_rss_token``) or asks for the opposite
+#: (``require_no_user_or_redirect``) is a guard but does not establish that login is required.
+_DEVISE_AUTH = re.compile(r"authenticate_[a-z0-9_]+!|authenticated?\([a-z0-9_:]+\)")
+_LOGIN_FAMILY = re.compile(r"require_logged_in_(user|moderator|admin)(_or_\d+)?")
+_AUTH_CALLBACKS = frozenset({
+    "authenticate", "authenticate_user", "authorize", "ensure_logged_in", "login_required",
+    "require_login", "require_user",
+})
 
 
 def _symbols(node: Node | None, source: bytes) -> tuple[str, ...] | None:
@@ -160,38 +189,58 @@ def _class_ops(cls: Node, source: bytes) -> list[_Op]:
 
 
 def _run(callbacks: list[Callback], ops: list[_Op]) -> list[Callback]:
-    """``callbacks`` (inherited) followed by a class's own callbacks and skips, in order."""
+    """``callbacks`` (inherited) followed by a class's own callbacks and skips, in order. Declaring
+    a callback again replaces the earlier one of that name (Rails moves it to the end, with the
+    new ``only:`` / ``except:``), so a guard is never listed twice."""
     out = list(callbacks)
     for callback, skip in ops:
         if callback is not None:
+            out = [c for c in out if c[0] != callback[0]]
             out.append(callback)
         elif skip is not None:
             out = _apply_skip(out, skip)
     return out
 
 
-def controller_callbacks(root: Node, source: bytes) -> list[tuple[str, list[Callback]]]:
-    """``(qualified controller name, callbacks)`` for every ``*Controller`` class in one file,
-    parent callbacks first when the parent is declared in the same file."""
-    if b"before_action" not in source:
-        return []
-    own: dict[str, list[_Op]] = {}
-    parents: dict[str, str] = {}
+def _parent_constant(cls: Node, source: bytes) -> str | None:
+    """The superclass as a constant path (``Base``, ``Admin::Base``, ``::Base``), else None
+    (``Struct.new(...)``, a variable …)."""
+    superclass = cls.child_by_field_name("superclass")
+    if superclass is None or not superclass.named_children:
+        return None
+    text = node_text(superclass.named_children[0], source).strip()
+    return text if _CONSTANT.fullmatch(text) else None
+
+
+def _lexical_scopes(cls: Node, source: bytes) -> tuple[str, ...]:
+    """The scopes a constant in ``class X < Parent`` is looked up in, innermost first: each
+    enclosing ``module`` / ``class`` adds its name to the one outside it (``module A::B`` is one
+    scope, ``A::B``, not ``A`` then ``A::B``). The class's own name is not one of them."""
+    names: list[str] = []
+    current = cls.parent
+    while current is not None:
+        if current.type in {"class", "module"}:
+            outer = _class_name(current, source)
+            if outer is None:
+                return ()  # an enclosing scope we cannot name — resolving would be a guess
+            names.append(outer)
+        current = current.parent
+    scopes: list[str] = []
+    for name in reversed(names):
+        scopes.append(f"{scopes[-1]}::{name}" if scopes else name)
+    return tuple(reversed(scopes))
+
+
+def controller_callbacks(root: Node, source: bytes) -> list[tuple[str, Declared]]:
+    """``(qualified controller name, declaration)`` for every ``*Controller`` class in one file."""
+    out: list[tuple[str, Declared]] = []
     for cls in _iter_classes(root):
         name = _qualified_name(cls, source)
         if name is None or not name.endswith("Controller"):
             continue
-        own[name] = _class_ops(cls, source)
-        parent = _superclass_name(cls, source)
-        if parent is not None:
-            parents[name] = parent
-
-    def chain(name: str, seen: frozenset[str]) -> list[Callback]:
-        parent = parents.get(name)
-        inherited = chain(parent, seen | {name}) if parent in own and parent not in seen else []
-        return _run(inherited, own.get(name, []))
-
-    return [(name, chain(name, frozenset())) for name in own]
+        out.append((name, (_parent_constant(cls, source), _lexical_scopes(cls, source),
+                           tuple(_class_ops(cls, source)))))
+    return out
 
 
 def controller_class(handler: str) -> tuple[str, str] | None:
@@ -205,34 +254,98 @@ def controller_class(handler: str) -> tuple[str, str] | None:
     return "::".join(parts) + "Controller", action
 
 
+def is_auth_guard(name: str) -> bool:
+    """Whether the callback ``name`` certainly rejects anonymous users."""
+    return (name in _AUTH_CALLBACKS or _DEVISE_AUTH.fullmatch(name) is not None
+            or _LOGIN_FAMILY.fullmatch(name) is not None)
+
+
 def guards_for(callbacks: list[Callback], action: str) -> list[str]:
     """The guard names that run before ``action``, in declaration order."""
     return [name for name, only, exclude in callbacks
             if (only is None or action in only) and action not in exclude]
 
 
+@dataclass(frozen=True, slots=True)
+class Controllers:
+    """The resolved fact: callbacks by exact controller name, plus which declared controller a
+    name written in another case means (``Api::V1::UsersController`` for ``API::V1::…``; None
+    when two declared controllers differ only by case)."""
+
+    by_name: dict[str, list[Callback]]
+    folded: dict[str, str | None]
+
+
 def callbacks_of(index: Any | None, controller: str) -> list[Callback] | None:
-    """The ``before_action`` callbacks of ``controller``, or None when unknown."""
-    found: dict[str, list[Callback]] = index_fact(index, FACT) or {}
-    return found.get(controller)
+    """The ``before_action`` callbacks of ``controller``, or None when unknown.
+
+    The name a route spells (``api/v1/users`` → ``Api::V1::UsersController``) differs in case
+    from a controller declared under a Rails acronym (``API::V1::UsersController``). The exact
+    name is tried first; failing that, the one declared controller that matches ignoring case
+    — never a choice between several."""
+    found: Controllers | None = index_fact(index, FACT)
+    if found is None:
+        return None
+    if controller in found.by_name:
+        return found.by_name[controller]
+    name = found.folded.get(controller.lower())
+    return found.by_name.get(name) if name is not None else None
 
 
 def _collect(
     root: Node, source: bytes, rel: str, repo_root: Path | None,
-) -> list[tuple[str, list[Callback]]] | None:
+) -> list[tuple[str, Declared]] | None:
     return controller_callbacks(root, source) or None
 
 
-def _resolve(
-    values: list[list[tuple[str, list[Callback]]]], index: Any,
-) -> dict[str, list[Callback]] | None:
-    callbacks: dict[str, list[Callback] | None] = {}
+def _parent_of(name: str, declared: Declared, known: dict[str, Declared | None]) -> str | None:
+    """The controller ``name`` inherits from, or None when it cannot be established: no parent,
+    a parent that is not a controller of this repo, or one declared ambiguously. Lookup is
+    Ruby's: the innermost enclosing scope first, then outward to the top level. The class
+    being defined is skipped — ``module Admin; class UsersController < UsersController`` names
+    the top-level one."""
+    parent, scopes, _ = declared
+    if parent is None:
+        return None
+    if parent.startswith("::"):
+        candidates = [parent[2:]]
+    else:
+        candidates = [f"{scope}::{parent}" for scope in scopes] + [parent]
+    for candidate in candidates:
+        if candidate == name or candidate not in known:
+            continue
+        return candidate if known[candidate] is not None else None
+    return None
+
+
+def _resolve(values: list[list[tuple[str, Declared]]], index: Any) -> Controllers | None:
+    known: dict[str, Declared | None] = {}
     for per_file in values:
-        for name, entries in per_file:
-            record_distinct(callbacks, name, entries)
-    return {k: v for k, v in callbacks.items() if v is not None} or None
+        for name, declared in per_file:
+            record_distinct(known, name, declared)
+    resolved: dict[str, list[Callback]] = {}
+
+    def callbacks(name: str, seen: frozenset[str]) -> list[Callback]:
+        if name in resolved:
+            return resolved[name]
+        declared = known[name]
+        assert declared is not None
+        parent = _parent_of(name, declared, known)
+        inherited: list[Callback] = []
+        if parent is not None and parent not in seen:  # a cycle ends the chain too
+            inherited = callbacks(parent, seen | {name})
+        resolved[name] = _run(inherited, list(declared[2]))
+        return resolved[name]
+
+    result = {name: callbacks(name, frozenset()) for name, d in known.items() if d is not None}
+    by_name = {k: v for k, v in result.items() if v}
+    # Every declared name counts, ambiguous ones too: a case-variant of one is not a unique match.
+    folded: dict[str, str | None] = {}
+    for name in known:
+        record_distinct(folded, name.lower(), name)
+    return Controllers(by_name, folded) if by_name else None
 
 
 register_fact(FactSpec(
-    name=FACT, language="ruby", gate=(b"before_action",), collect=_collect, resolve=_resolve,
+    name=FACT, language="ruby", gate=(b"Controller",), collect=_collect, resolve=_resolve,
 ))
