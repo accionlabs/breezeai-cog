@@ -53,6 +53,11 @@ Check that:
 - the change is **framework-neutral** — no framework names, imports or annotations hard-coded
   in the language parser (see `extend-capture` §6, "Never bake framework-specific logic into a
   base language parser");
+- it belongs in the base package at all: the base parser uses it for every file of the
+  language. A detector for a separate library or SDK goes in its own detector-only package
+  `parsers/<lang>_<library>/`, and one for a framework with its own parser goes in that
+  framework's package ([architecture §6](architecture.md#6-the-parser-model), "a detector or
+  fact lives with what it detects");
 - if it is a structure-shaped detector, it is a registered additive detector
   (`register_detector`, `extend-capture` §3C) with a cheap byte guard, not an unconditional
   walk or a new hard-coded call in `extract`; a new detector or a changed `order` shows up in
@@ -101,10 +106,12 @@ src/breezeai_cog/parsers/<lang>_<framework>/
 tests/unit/test_<framework>_parser.py, tests/unit/test_roles_<framework>.py
 ```
 
-A **detector-only** package (an additive detector; owns no file — e.g. `typescript_fastify/`):
+A **detector-only** package (an additive detector; owns no file — e.g. `typescript_fastify/`
+for a framework, `csharp_hangfire/` or `go_kafka/` for a library). A library's detectors go here,
+never in the base `<lang>/` package:
 
 ```
-src/breezeai_cog/parsers/<lang>_<framework>/
+src/breezeai_cog/parsers/<lang>_<framework>/   or   <lang>_<library>/
 ├─ __init__.py      # PARSERS = []
 ├─ routes.py        # register_detector(Detector(name, Gate(...), detect)) -> Detection of Emits
 └─ plugins.py       # register_fact(FactSpec(...)) when it needs data from other files
@@ -163,7 +170,7 @@ parser can be confidently wrong. Check every one of them against real code:
 |---|---|---|
 | File ownership | `claims()` | A file that only *mentions* `io.vertx` in a comment or string is claimed as Vert.x. |
 | `semanticType` = `api_call` / `query_statement` / `db_method_call` | `parsers/detection/` (`classify_call`) | `cache.get(key)` tagged as an HTTP `GET`; `"select an option"` tagged as SQL; `list.find(x)` tagged as a DB call. |
-| `semanticType` = `route` | framework `routes.py` | A test helper `router.get(...)` in a non-fixture file; a method named `get` on an unrelated object; a mount, layout or redirect recorded as a page (wiring, not an entry point; an Angular `redirectTo` is a `navigation` record — see the [entry-point contract](architecture/entry-points.md)). |
+| `semanticType` = `route` | framework `routes.py` | A test helper `router.get(...)` in a non-fixture file; a method named `get` on an unrelated object; a mount, layout or redirect recorded as a page (wiring, not an entry point; an Angular `redirectTo` and a Vue `redirect` are `navigation` records — see the [entry-point contract](architecture/entry-points.md)). |
 | `semanticType` = `eventbus_send` / `eventbus_publish` / `eventbus_consumer` | e.g. `parsers/java_vertx/events.py` | A user wrapper method also called `send(...)` tagged as an event-bus send. |
 | `semanticType` = `service_proxy`, `verticle_deploy`, `timer` | framework detectors | A class with an annotation that merely shares the simple name `ProxyGen` from another library. |
 | `endpoint`, `method`, `routeKind` | detectors, constant folding (`constfold.py`) | An endpoint folded from the wrong constant; a path concatenated from a router prefix that is never mounted; a child route missing the prefix of the router it is mounted under; a handler or method name used as `endpoint`. |

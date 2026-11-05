@@ -43,11 +43,14 @@ from ...utils import repo_relative
 from ..additive import collect_fact_sources, facts_for, split_fact_sources
 from ..callresolve import CallResolver
 from ..index_common import ClassHeritage, parallel_map, record_distinct, walk_heritage
-from ..treesitter import node_text, parse_source
-from .classes import _CLASS_TYPES, _heritage, _unwrap_template
+from ..treesitter import node_text
+from .classes import _CLASS_TYPES, _heritage, _unwrap_template, defined_type, parse_cfamily
 from .functions import (
-    function_declarator_of, has_declaration_error, is_static_free_function,
+    function_declarator_of, function_name_node, has_declaration_error, is_declared_static,
+    is_inserted_scope,
+    owner_is_explicit, read_declaration, read_member, spilled_members,
 )
+from .branches import BranchFix, branch_fix, enclosing_scope
 from .imports import FamilyHeaders, HeaderIndex, build_header_index, include_targets
 from .mappings import HEADER_EXTENSIONS, TRANSPARENT_SCOPES
 from .types import field_types
@@ -129,12 +132,12 @@ def _file_local(node: Node, source: bytes, rel: str) -> bool:
     """A ``static`` free function outside a header: visible to its own file only."""
     if Path(rel).suffix.lower() in HEADER_EXTENSIONS:
         return False
-    return is_static_free_function(node, source)
+    return is_declared_static(node, source)
 
 
 def _record_def(
     frag: CFamilyIndex, node: Node, source: bytes, rel: str, class_name: str | None,
-    c_linkage: bool = False,
+    c_linkage: bool = False, name: str | None = None,
 ) -> None:
     """Record one function/method **definition** into a per-file fragment.
 
@@ -143,14 +146,22 @@ def _record_def(
       (``None``), it is never a target;
     * out-of-class ``Scope::name`` (declarator is a ``qualified_identifier``) → ``qual`` under
       the full scope and the trailing ``Class::method``;
-    * inline member definition inside ``class_name`` → ``qual[f"{class_name}::{name}"]``.
+    * inline member definition inside ``class_name`` (named by a ``field_identifier``; a
+      constructor by an ``identifier``) → ``qual[f"{class_name}::{name}"]``.
     """
     fd = function_declarator_of(node.child_by_field_name("declarator"))
-    inner = fd.child_by_field_name("declarator") if fd is not None else None
+    inner = function_name_node(fd)
     if inner is None:
         return
-    if inner.type == "identifier":
-        name = node_text(inner, source)
+    if (
+        inner.type == "identifier"
+        or (inner.type == "field_identifier" and class_name is not None)
+        or (name is not None and inner.type == "function_declarator")
+        or (name is not None and is_inserted_scope(inner))
+    ):
+        # `name`: one a macro moved (read_declaration / read_member), also out of a misread
+        # `LUA_API int (f)(…)`
+        name = name or node_text(inner, source)
         if class_name is not None:  # inline member definition
             _record_qual(frag, class_name, name, rel)
         elif name and _file_local(node, source, rel):
@@ -223,11 +234,12 @@ def _index_class(frag: CFamilyIndex, node: Node, source: bytes, rel: str, ns: st
         _class_heritage(frag, class_name).extends = _simple(extends)
     for member in body.named_children:
         member = _unwrap_template(member)
-        if has_declaration_error(member):
+        read = read_member(member, source)
+        if read is None:
             continue
         if member.type in _MEMBER_FN_TYPES and _has_body(member):
             if function_declarator_of(member.child_by_field_name("declarator")) is not None:
-                _record_def(frag, member, source, rel, class_name)
+                _record_def(frag, member, source, rel, class_name, name=read.name)
         elif member.type in _CLASS_TYPES:  # nested type — qualified under this class
             _index_class(frag, member, source, rel, fqn)
 
@@ -239,27 +251,54 @@ def _is_extern_c(node: Node, source: bytes) -> bool:
 
 
 def _index_scope(
-    frag: CFamilyIndex, scope: Node, source: bytes, rel: str, ns: str = "", c_linkage: bool = False
+    frag: CFamilyIndex, scope: Node, source: bytes, rel: str, ns: str = "",
+    c_linkage: bool = False, spilled: bool = False, fix: BranchFix | None = None,
 ) -> None:
     """Walk a file/namespace scope, recording every definition. ``ns`` accumulates the
     enclosing namespace path so classes are keyed by their fully-qualified name; ``c_linkage``
-    is set inside ``extern "C"``."""
+    is set inside ``extern "C"``; ``spilled`` when class members spilled to file scope
+    (:func:`spilled_members`), so only definitions naming their owner are recorded; ``fix``
+    reads functions whose braces a conditional split from a second parse (``branches``)."""
     for child in scope.named_children:
         node = _unwrap_template(child)
+        from_second = False
+        if fix is not None:
+            if node.start_byte in fix.skip:
+                continue
+            from_second = fix.whole and node.start_byte in fix.replace
+            node = fix.replace.get(node.start_byte, node)
         if node.type == "linkage_specification":
-            _index_scope(frag, node, source, rel, ns, c_linkage or _is_extern_c(node, source))
+            _index_scope(
+                frag, node, source, rel, ns, c_linkage or _is_extern_c(node, source), spilled, fix,
+            )
         elif node.type in TRANSPARENT_SCOPES:
-            _index_scope(frag, node, source, rel, ns, c_linkage)
+            _index_scope(frag, node, source, rel, ns, c_linkage, spilled, fix)
+        elif node.type == "declaration":
+            # A prototype or variable: nothing to index, unless it defines a class as well
+            # (`struct point { … } origin;`).
+            spec = defined_type(node)
+            if spec is not None and spec.type in _CLASS_TYPES and not has_declaration_error(node):
+                _index_class(frag, spec, source, rel, ns)
+        elif (
+            node.type == "function_definition" and spilled and not from_second
+            and not owner_is_explicit(node)
+        ):
+            continue
+        elif node.type == "function_definition":
+            read = read_declaration(node, source)
+            if read is not None:
+                _record_def(frag, node, source, rel, None, c_linkage, name=read.name)
         elif has_declaration_error(node):
             continue
         elif node.type == "namespace_definition":
             body = node.child_by_field_name("body")
             if body is not None:
-                _index_scope(frag, body, source, rel, _join_ns(ns, _ns_name(node, source)))
+                _index_scope(
+                    frag, body, source, rel, _join_ns(ns, _ns_name(node, source)),
+                    spilled=spilled, fix=fix,
+                )
         elif node.type in _CLASS_TYPES:
             _index_class(frag, node, source, rel, ns)
-        elif node.type == "function_definition":
-            _record_def(frag, node, source, rel, None, c_linkage)
 
 
 def _index_one(
@@ -275,9 +314,23 @@ def _index_one(
     except OSError:
         return None
     try:
-        root = parse_source(grammar, source, timeout_micros).root_node
+        root = parse_cfamily(grammar, source, timeout_micros)
         frag = CFamilyIndex(includes={rel: tuple(include_targets(source))})
-        _index_scope(frag, root, source, rel)
+        spilled = spilled_members(root, source, grammar != "c")
+        fix = branch_fix(root, source, grammar, timeout_micros)
+        _index_scope(frag, root, source, rel, spilled=spilled, fix=fix)
+        for extra in fix.extra if fix is not None else ():
+            # What the normal parse swallowed into the function before it.
+            ns, c_linkage = enclosing_scope(extra, source)
+            node = _unwrap_template(extra)
+            if node.type == "function_definition":
+                read = read_declaration(node, source)
+                if read is not None and (
+                    (fix is not None and fix.whole) or not (spilled and not owner_is_explicit(node))
+                ):
+                    _record_def(frag, node, source, rel, None, c_linkage, name=read.name)
+            elif node.type in _CLASS_TYPES:
+                _index_class(frag, node, source, rel, ns)
         if collect is not None:
             frag.collected = collect(root, source, rel, Path(repo_root))
         return frag
@@ -501,8 +554,8 @@ def make_cfamily_resolver(
     → every C function; C → the C++ functions inside ``extern "C"``). A bare call checks them
     only when its own language has no definition of the name, and binds only when they agree.
 
-    ``sees`` (see :func:`header_visibility`) limits a free function defined in a header to
-    the headers the file can see: the one definition cog sees may not be the one the file is
+    ``sees`` (see :func:`header_visibility`) limits a free function or method defined in a
+    header to the headers the file can see: the one definition cog sees may not be the one the file is
     built with — a vendored copy in an ignored folder is invisible, and its calls would land
     on the first-party copy.
 
@@ -534,7 +587,7 @@ def make_cfamily_resolver(
         if not scope:
             return None
         key = _class_method_key(scope, name)
-        return qual.get(key) if key is not None else None
+        return _visible(qual.get(key)) if key is not None else None
 
     def _inherited(owner: str | None, name: str) -> str | None:
         """A method ``owner`` inherits: walk its base chain nearest-first, the first ancestor
@@ -548,7 +601,7 @@ def make_cfamily_resolver(
             return None
         for anc in walk_heritage(simple, start.extends, heritage).ancestors:
             if name in anc.methods:
-                return anc.methods[name]
+                return _visible(anc.methods[name])
         return None
 
     def _receiver_type(receiver: str, owner: str | None, types: dict[str, str | None]) -> str | None:
@@ -579,9 +632,13 @@ def make_cfamily_resolver(
             return _method(owner, name) or _inherited(owner, name)
         if receiver in ("super", "base", "MyBase"):  # explicit base call → an inherited method
             return _inherited(owner, name)
-        # A qualified A::b() has a class scope as receiver; an obj.m() has a variable. Try the
-        # scope reading first (harmless miss when the receiver is a variable — no class is named
-        # like a lowercase var), then type the receiver and resolve Type::method.
+        # A qualified A::b() has a class scope as receiver; an obj.m() has a variable. A known
+        # variable (a local, a param or a member field) is only typed: a class may share its
+        # name (`common_peg_arena & parser` and a `class parser`). Anything else is read as a
+        # scope first, then typed, and resolves Type::method.
+        var = receiver[len("this->"):] if receiver.startswith("this->") else receiver
+        if var in types or (owner and f"{owner}::{var}" in fields):
+            return _method(_receiver_type(receiver, owner, types), name)
         return _method(receiver, name) or _method(_receiver_type(receiver, owner, types), name)
 
     return resolve

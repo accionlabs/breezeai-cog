@@ -19,10 +19,13 @@ from ...schemas import FileRecord
 from ...utils import count_loc
 from ..base import ParseContext
 from ..csharp.parser import CSharpParser
+from ..typescript_jquery.calls import detect_inline_jquery
 from ..emits import apply
 from ..treesitter import parse_source
 from .markup import (
     collect_markup_statements,
+    collect_register_statements,
+    register_controls,
     resolve_codebehind,
     resolve_control_mounts,
     shadow_markup,
@@ -48,7 +51,8 @@ class WebFormsParser(CSharpParser):
     priority = 10  # framework parser > base csharp (0); disjoint claims from csharp-aspnet
     frameworks = ["aspnet-webforms"]
     # C# statement types + the markup nodes the Step-1 markup pass emits (capabilities honesty).
-    statement_types = [*CSharpParser.statement_types, "element", "attribute"]
+    # ``synthetic``: a ``<%@ Register %>`` directive, which the html grammar never sees.
+    statement_types = [*CSharpParser.statement_types, "element", "attribute", "synthetic"]
 
     def claims(self, path: str, source: bytes) -> bool:
         return (
@@ -90,11 +94,16 @@ class WebFormsParser(CSharpParser):
                 "html", shadow_markup(ctx.source), ctx.parse_timeout_micros
             ).root_node
             seen_ids: set[str] = set()
+            record.statements.extend(collect_register_statements(
+                ctx.source, ctx.path, fid, seen_ids, ctx.statement_text_limit))
             record.statements.extend(
                 collect_markup_statements(
-                    root, ctx.source, ctx.path, fid, seen_ids, ctx.statement_text_limit
+                    root, ctx.source, ctx.path, fid, seen_ids, ctx.statement_text_limit,
+                    register_controls(ctx.source, ctx.path, ctx.repo_root),
                 )
             )
+            # inline <script> jQuery AJAX calls → api_call
+            detect_inline_jquery(record, ctx.source, ctx.path, ctx.parse_timeout_micros)
         return record
 
     def parse_file(self, ctx: ParseContext) -> FileRecord:

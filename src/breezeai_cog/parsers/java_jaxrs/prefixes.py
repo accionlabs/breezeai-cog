@@ -31,7 +31,7 @@ from typing import Any
 from tree_sitter import Node
 
 from ..additive import FactSpec, index_fact, register_fact
-from ..java.config import module_of
+from ..java_spring_config import module_of
 from ..treesitter import node_text
 from .config import PROPERTY_KEYS, property_bases, web_xml_bases
 

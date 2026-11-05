@@ -22,6 +22,7 @@ from ..parsers.contract import validate as validate_contract
 from ..schemas import FileRecord, ProjectMetaData
 from . import executor
 from .ignore import IgnoreEngine
+from .nx import discover_nx_projects
 from .ownership import competing_languages, resolve_owners, shared_languages
 from .registry import base_parser_for, discover_builtin, registered, template_extensions
 from .scanner import ScanEntry, scan
@@ -218,6 +219,7 @@ def iter_records(repo_root: str | Path, settings) -> Iterator[tuple[ScanEntry, F
         parse_timeout_micros=options["parse_timeout_micros"],
     )
     options["owners"] = _owners(entries)
+    options["nx_projects"] = discover_nx_projects(repo_root, entries)
     for entry in entries:
         record = executor._parse_entry(entry.path, str(repo_root), options)
         if record is not None:
@@ -407,7 +409,10 @@ def run(
         repo_root, entries, jobs, debug_on=debug_on,
         parse_timeout_micros=int(settings.parse_timeout * 1_000_000),
     )
-    records = executor.parse_entries(entries, repo_root, settings, indexes, _owners(entries))
+    records = executor.parse_entries(
+        entries, repo_root, settings, indexes, _owners(entries),
+        discover_nx_projects(repo_root, entries),
+    )
     meta = _assemble(
         repo_root, records, sink, statement_text_limit=settings.statement_text_limit,
         max_statement_parts=settings.max_statement_parts,
@@ -432,6 +437,7 @@ def run_inprocess(repo_root: str | Path, settings, sink) -> ProjectMetaData:
         repo_root, entries, debug_on=debug_on, parse_timeout_micros=options["parse_timeout_micros"]
     )
     options["owners"] = _owners(entries)
+    options["nx_projects"] = discover_nx_projects(repo_root, entries)
 
     def gen() -> Iterator[tuple[str, FileRecord]]:
         for entry in entries:

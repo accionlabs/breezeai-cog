@@ -54,20 +54,23 @@ def test_inventory_in_run_order() -> None:
     (statement-id disambiguation), so a change to it is a deliberate, reviewed change."""
     inventory = {lang: [d.name for d in ds] for lang, ds in all_detectors().items()}
     assert inventory == {
-        "csharp": ["lambda-handlers", "lucene", "hotchocolate-registered-roots",
-                   "generic-handlers", "hangfire", "quartz"],
+        "csharp": ["lambda-handlers", "lucene", "hotchocolate-registered-roots", "aspnet-web-projects",
+                   "generic-handlers", "hangfire", "quartz", "aws-sdk-calls", "graphql-client"],
         "go": ["go-net-http", "go-gin", "go-echo", "go-chi", "go-fiber", "go-gorilla-mux", "go-grpc",
                "go-nats", "go-kafka", "go-scheduling", "go-database",
                "go-lambda"],
-        "java": ["quartz"],
+        "java": ["quartz", "struts2"],
         "python": ["celery"],
-        "php": ["wordpress-hooks", "laravel-events", "symfony-events", "php-data-access",
-                "php-http-calls"],
+        "php": ["wordpress-hooks", "laravel-events", "symfony-events", "laravel-data-access",
+                "doctrine-data-access", "codeigniter-data-access", "laravel-http-calls",
+                "guzzle-http-calls", "symfony-http-calls", "psr-http-calls"],
         "scala": ["akka-events", "spark"],
-        "typescript": ["express", "fastify", "aws-events", "sdk-calls", "graphql-client",
-                       "graphql-resolver-modules", "vue-routes",
-                       "nextjs-pages", "vue-navigation", "angular-navigation",
-                       "react-navigation"],
+        "typescript": ["express", "fastify", "aws-events", "nestjs-clients", "hubspot",
+                       "chargebee", "ts-force", "apollo", "aws-sdk-calls", "jquery-calls",
+                       "graphql-client",
+                       "graphql-resolver-modules", "vue-routes", "react-routes",
+                       "nextjs-routes", "nextjs-pages", "backbone", "backbone-routes", "vue-navigation", "angular-navigation",
+                       "react-navigation", "angularjs"],
     }
 
 

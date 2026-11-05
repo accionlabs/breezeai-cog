@@ -33,7 +33,7 @@ from tree_sitter import Node
 
 from ...schemas import FileRecord, Function
 from ..emits import Emit
-from ..java.config import resolve_placeholders
+from ..java_spring_config import resolve_placeholders
 from ..java.constants import fold_arg
 from ..treesitter import first_line, node_text
 

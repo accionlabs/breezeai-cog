@@ -52,7 +52,7 @@ from .mappings import (
 from .naming import camel_case, field_name
 
 
-def _generic_arg(type_text: str | None, bases: tuple[str, ...]) -> str | None:
+def generic_arg(type_text: str | None, bases: tuple[str, ...]) -> str | None:
     """``ObjectType<Query>`` → ``Query``, when the base name is one of ``bases``."""
     if not type_text or "<" not in type_text or not type_text.endswith(">"):
         return None
@@ -74,11 +74,11 @@ def configure_method(record_functions: list[Function], cls: Class) -> Function |
 def descriptor_target(cls: Class, configure: Function) -> str | None:
     """The type this descriptor describes, from the class's base type or, failing that, the
     ``Configure`` parameter type. Both are declarations of the same fact."""
-    target = _generic_arg(cls.extends, DESCRIPTOR_BASES)
+    target = generic_arg(cls.extends, DESCRIPTOR_BASES)
     if target is not None:
         return target
     for p in configure.params:
-        arg = _generic_arg(p.type, DESCRIPTOR_PARAM_TYPES)
+        arg = generic_arg(p.type, DESCRIPTOR_PARAM_TYPES)
         if arg is not None:
             return arg
     return None
@@ -182,9 +182,8 @@ def _chained_calls(field_call: Node, source: bytes) -> Iterator[tuple[str, Node]
 
 
 def _call_args(call: Node, source: bytes) -> list[str]:
-    """Argument texts in the form the base parser records attribute arguments — a string
-    literal unquoted, anything else as written — so a fluent guard reads like its attribute
-    twin."""
+    """Argument texts in the form a guard label reads attribute arguments — a string literal
+    unquoted, anything else as written — so a fluent guard reads like its attribute twin."""
     args = call.child_by_field_name("arguments")
     out: list[str] = []
     for arg in args.named_children if args is not None else []:
