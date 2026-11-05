@@ -108,13 +108,14 @@ def test_view_with_a_base_from_another_library_has_no_method(analyze_files) -> N
     assert (r.handler, r.handlerLine) == ("Contact", 3)
 
 
-def test_django_view_used_directly_is_framework_served(analyze_files) -> None:
+def test_django_view_used_directly_is_named_and_framework_served(analyze_files) -> None:
     st = analyze_files(_project(
         "from django.views.generic import TemplateView, RedirectView\n"
         "urlpatterns = [path('', TemplateView.as_view(template_name='home.html')),\n"
         "               path('old/', RedirectView.as_view(url='/'))]\n"))
-    assert _one(st, "GET", "/").handler is None
-    _one(st, "ANY", "/old/")
+    home, old = _one(st, "GET", "/"), _one(st, "ANY", "/old/")
+    assert (home.handler, home.handlerLine, home.handlerPath) == ("TemplateView", None, None)
+    assert (old.handler, old.handlerLine) == ("RedirectView", None)
 
 
 def test_include_is_wiring(analyze_files) -> None:
@@ -297,3 +298,4 @@ def test_lambda_view_is_anonymous(analyze_files) -> None:
     st = analyze_files(_project("urlpatterns = [path('ping/', lambda request: None)]\n"))
     r = _one(st, "ANY", "/ping/")
     assert (r.handler, r.handlerLine) == (None, 2)
+

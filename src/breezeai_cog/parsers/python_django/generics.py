@@ -29,9 +29,20 @@ DJANGO_VIEWS: dict[str, tuple[str, ...]] = {
     "DeleteView": ("GET", "POST", "DELETE"),
     "RedirectView": ("ANY",),
 }
+#: Views Django itself provides that a urlconf names directly (``path("m/<path:path>", serve)``,
+#: ``path("reset/", PasswordResetView.as_view())``): served by Django's code, so their records
+#: lead to nothing in the repo. Names in ``django.views`` and ``django.contrib.*.views``.
+DJANGO_PROVIDED_VIEWS = frozenset({
+    "serve", "page_not_found", "server_error", "bad_request", "permission_denied",
+    "set_language", "JavaScriptCatalog", "JSONCatalog", "sitemap", "shortcut", "flatpage",
+    "LoginView", "LogoutView", "PasswordChangeView", "PasswordChangeDoneView", "PasswordResetView",
+    "PasswordResetDoneView", "PasswordResetConfirmView", "PasswordResetCompleteView",
+})
 #: Django bases that handle no verb themselves: a view built on them handles what it defines.
 DJANGO_BASES = frozenset({"View", "ContextMixin", "TemplateResponseMixin", "SingleObjectMixin",
                           "MultipleObjectMixin", "FormMixin", "ModelFormMixin", "ProcessFormView"})
+#: Every view name Django serves itself, as a record's ``handler`` (not located: nothing in the repo).
+DJANGO_SERVED = DJANGO_PROVIDED_VIEWS | DJANGO_VIEWS.keys() | DJANGO_BASES
 #: The modules Django's views are imported from.
 DJANGO_VIEW_MODULES = ("django.views",)
 
