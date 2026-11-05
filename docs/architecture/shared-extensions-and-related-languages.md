@@ -516,6 +516,18 @@ C++.
 > also how a type and a name-building macro look (`int MANGLE(f)(…)`), so the name would be a
 > guess.
 
+> **Decision —** a calling-convention or export macro between a keyword return type and the
+> name (`int ZEXPORT unzOpen(…)`, `void WINAPI f(…)`, also in a K&R definition or a class
+> member) is read past: the keyword type is the `returnType` and the macro the decorator. After
+> a type made of keywords only the declarator can follow, so a bare word the grammar leaves in
+> an error there, before a clean declarator, is a macro. A word between a `*` and the name
+> (`const char * ZEXPORT zlibVersion(void)`, already captured) is that function's decorator for
+> the same reason. With a type name in front (`uLong ZEXPORT adler32`) which word is the type
+> still can't be told, as before.
+> **Why:** the shape is how zlib, minizip and Windows-facing C export their API; those functions
+> and prototypes were lost while the less certain `uLong ZEXPORT f` was kept. **Cost:** none —
+> the tree is already there.
+
 > **Decision —** a qualifier macro between a parameter's `*` and its name (`float *
 > GGML_RESTRICT s`, `float ** FAR s`) is read past: the parameter is named `s`. The grammar
 > takes the macro for the name and leaves the real name in an error right after the parameter;

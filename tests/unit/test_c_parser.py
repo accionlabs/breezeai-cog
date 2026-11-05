@@ -559,6 +559,43 @@ def test_a_qualifier_macro_after_a_star_is_not_the_parameter_name(tmp_path, pars
     assert [d.name for d in decl.decorators] == ["API"]
 
 
+@pytest.mark.parametrize("parser", [CParser(), CppParser()], ids=["c", "cpp"])
+def test_a_macro_after_a_keyword_return_type_is_read_past(tmp_path, parser) -> None:
+    # `int ZEXPORT f(…)`: after a type made of keywords only the declarator can follow, so the
+    # word the grammar leaves in an error there is a calling-convention or export macro. With a
+    # type name in front (`uLong ZEXPORT f`) which word is the type is still unknown.
+    src = (
+        "extern int ZEXPORT unzGoTo(unzFile file, int pos);\n"
+        "unsigned long WINAPI tick(void);\n"
+        "int ZEXPORT unzOpen(const char *path) { return helper(1); }\n"
+        "const char * ZEXPORT zlibVersion(void) { return 0; }\n"
+        "uLong ZEXPORT adler32(uLong adler) { return 0; }\n"
+        "static void helper(int a) { }\n"
+    )
+    rec = _parse(parser, tmp_path, "z.c", src)
+    fns = {f.name: f for f in rec.functions}
+    assert set(fns) == {"unzOpen", "zlibVersion", "adler32", "helper"}
+    assert (fns["unzOpen"].returnType, [d.name for d in fns["unzOpen"].decorators]) == (
+        "int", ["ZEXPORT"],
+    )
+    assert [p.name for p in fns["unzOpen"].params] == ["path"]
+    assert [d.name for d in fns["zlibVersion"].decorators] == ["ZEXPORT"]
+    assert (fns["adler32"].returnType, fns["adler32"].decorators) == (None, [])
+    decls = {s.name: s for s in rec.statements if s.nodeType == "declaration"}
+    assert [d.name for d in decls["unzGoTo"].decorators] == ["ZEXPORT"]
+    assert [d.name for d in decls["tick"].decorators] == ["WINAPI"]
+
+
+def test_a_k_and_r_definition_with_a_calling_convention_macro_is_read(tmp_path) -> None:
+    rec = _parse(
+        CParser(), tmp_path, "gz.c",
+        "int ZEXPORT gzclose(file)\n    gzFile file;\n{\n    return helper(file);\n}\n",
+    )
+    assert [(f.name, f.returnType, [d.name for d in f.decorators]) for f in rec.functions] == [
+        ("gzclose", "int", ["ZEXPORT"]),
+    ]
+
+
 def test_a_receiver_written_with_a_qualifier_macro_is_typed(tmp_path) -> None:
     repo = _repo(tmp_path / "r", {
         "m.cpp": "struct Model { int go(); };\n"

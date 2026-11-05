@@ -561,6 +561,35 @@ def _past_macro(node: Node, source: bytes) -> DeclarationRead:
     )
 
 
+def _macro_after_keyword_type(node: Node, source: bytes) -> str | None:
+    """The macro between a keyword return type and the name: ``int ZEXPORT unzOpen(…)``, ``void
+    WINAPI f(…)``. After a type made of keywords only the declarator can follow, so a bare word
+    there — one the grammar leaves in an error before a clean declarator — is a calling-convention
+    or export macro. ``None`` for any other shape (``uLong ZEXPORT f`` is ``_past_macro``'s)."""
+    ret = node.child_by_field_name("type")
+    declarator = node.child_by_field_name("declarator")
+    if (
+        ret is None or declarator is None or has_error_besides_qualifier_macros(declarator)
+        or not (
+            ret.type == "primitive_type"
+            or (ret.type == "sized_type_specifier"
+                and all(c.type != "type_identifier" for c in ret.children))
+        )
+    ):
+        return None
+    errors = [c for c in node.children if c.type == "ERROR" or c.is_missing]
+    if len(errors) != 1:
+        return None
+    err = errors[0]
+    if (
+        err.type != "ERROR" or err.child_count != 1 or err.children[0].type != "identifier"
+        or err.start_byte < ret.end_byte or err.end_byte > declarator.start_byte
+    ):
+        return None
+    word = node_text(err.children[0], source)
+    return None if word in _TYPE_KEYWORDS else word
+
+
 def _parenthesized_name(node: Node, source: bytes) -> DeclarationRead | None:
     """The read of a misread declarator (:func:`is_misread_declarator`), or ``None`` when it
     can't be read. ``LUA_API int (lua_gettop) (lua_State *L);`` — the name parenthesized so a
@@ -612,6 +641,8 @@ def read_declaration(node: Node, source: bytes) -> DeclarationRead | None:
         return None if has_declaration_error(node) else _parenthesized_name(node, source)
     prefixed = False
     if has_declaration_error(node):
+        if (macro := _macro_after_keyword_type(node, source)) is not None:
+            return DeclarationRead(macro=macro)
         if not _macro_prefixed(node, source):
             return None
         prefixed = True
@@ -648,6 +679,8 @@ def read_member(member: Node, source: bytes) -> DeclarationRead | None:
         return None if has_declaration_error(member) else _parenthesized_name(member, source)
     if not has_declaration_error(member):
         return DeclarationRead()
+    if (macro := _macro_after_keyword_type(member, source)) is not None:
+        return DeclarationRead(macro=macro)
     if _macro_prefixed(member, source):
         return _past_macro(member, source)
     return None
@@ -767,6 +800,19 @@ def decorators_of(node: Node, source: bytes, read: DeclarationRead) -> list[Deco
             (c.start_byte, [Decorator(name=node_text(c, source))])
             for c in ret.children if c.type == "type_identifier"
         )
+    pointer = node.child_by_field_name("declarator")
+    while pointer is not None and pointer.type == "pointer_declarator":
+        # `const char * ZEXPORT zlibVersion(void)`: no `T * A f(…)` is valid, so the word the
+        # grammar leaves in an error between the `*` and the name is a macro.
+        err = next((c for c in pointer.children if c.type == "ERROR"), None)
+        inner = pointer.child_by_field_name("declarator")
+        if (
+            err is not None and inner is not None and inner.type == "function_declarator"
+            and err.child_count == 1 and err.children[0].type == "identifier"
+            and err.end_byte <= inner.start_byte
+        ):
+            found.append((err.start_byte, [Decorator(name=node_text(err.children[0], source))]))
+        pointer = inner
     return [d for _, ds in sorted(found, key=lambda f: f[0]) for d in ds]
 
 
