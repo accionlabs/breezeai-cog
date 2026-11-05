@@ -40,7 +40,7 @@ from ..index_common import record_distinct
 from ..treesitter import node_text
 from ..typescript.declarations import import_bindings
 from ..typescript.imports import _is_fixture_path, _resolve as _resolve_module
-from ..typescript.navigation import literal
+from ..navigation_common import literal
 from .syntax import (
     FUNCTIONS,
     MethodCall,

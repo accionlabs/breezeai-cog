@@ -1063,8 +1063,11 @@ src/breezeai_cog/
 │  ├─ contract.py                  entry-point contract check
 │  ├─ handler_sites.py, aws_deploy.py  facts shared by several languages; where a handler is declared
 │  ├─ detection/                   shared api / db / query classifiers
-│  ├─ vertx_common.py, dotnet_common.py, aspnet_common.py, aspnet_areas.py, quartz_common.py
-│  │                               helpers shared by one framework family
+│  ├─ vertx_common.py, dotnet_common.py, aspnet_common.py, aspnet_areas.py, quartz_common.py,
+│  │  java_spring_config.py, java_web_guards.py, java_security_guards.py,
+│  │  base_paths_common.py, navigation_common.py, typescript_sdk_common.py, aws_sdk_common.py,
+│  │  php_route_common.py, php_data_access_common.py, php_http_common.py
+│  │                               helpers shared by several frameworks or libraries
 │  ├─ cfamily_common/              the extraction and index C and C++ share
 │  ├─ <lang>/                      language parsers
 │  ├─ <lang>_<framework>/          framework parsers

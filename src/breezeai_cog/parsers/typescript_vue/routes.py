@@ -36,7 +36,7 @@ from ...emit import file_id
 from ..additive import DetectContext, Detection, Detector, Gate, register_detector
 from ..emits import Emit
 from ..treesitter import entry_text, node_text
-from ..typescript.navigation import literal
+from ..navigation_common import literal
 
 # Dynamic-import target: ``() => import('./views/Reports.vue')`` -> ``./views/Reports.vue``
 # (an import specifier is a resolvable link; falling back to it beats honest-null here).

@@ -29,9 +29,9 @@ from typing import Any
 
 from tree_sitter import Node
 
-from ..additive import FactSpec, index_fact, register_fact
-from ..treesitter import node_text
-from .config import module_of
+from .additive import FactSpec, index_fact, register_fact
+from .treesitter import node_text
+from .java_spring_config import module_of
 
 _FILTER_TYPES = frozenset({"Filter", "OncePerRequestFilter", "GenericFilterBean"})
 _BEAN_ANNOTATIONS = frozenset({"Component", "Service", "Configuration"})

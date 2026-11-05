@@ -32,7 +32,7 @@ from ..emits import Emit
 from ..index_common import record_distinct
 from ..treesitter import node_text
 from ..typescript.imports import _is_fixture_path
-from ..typescript.navigation import literal
+from ..navigation_common import literal
 from .registrations import Env, handler_fields
 from .routes import navigation_emit, redirect_target
 from .syntax import (

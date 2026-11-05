@@ -13,11 +13,11 @@ from ...schemas import FileRecord
 from ..base import ParseContext
 from ..constfold import resolve_all
 from ..emits import apply
-from ..java.config import module_of, resolve_placeholders
+from ..java_spring_config import module_of, resolve_placeholders
 from ..java.constants import collect_constants
 from ..java.imports import JavaIndex
 from ..java.parser import JavaParser
-from ..java.web_guards import module_guards
+from ..java_web_guards import module_guards
 from ..treesitter import parse_source
 from .config_facts import context_paths, module_properties
 from .functional_routes import detect_spring_functional_routes
