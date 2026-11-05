@@ -21,12 +21,17 @@ and MassTransit's, ``SendMessageAsync`` is every chat client's; only a call on a
   never leaves the process (``GetPreSignedURL``, ``Dispose``) is not an operation.
 * **SNS publish, SQS send, EventBridge put-events** — ``eventbus_publish`` / ``eventbus_send``
   as the TypeScript AWS detector records them; an SNS publish to a ``PhoneNumber`` reaches one
-  recipient, so it is a send. Other operations on these clients (creating a topic, receiving a
-  message) are not recorded: a receive loop is not a consumer binding, and the management calls
-  are not traffic.
-* **Endpoint only from a literal** address in the request (an object initializer on the call or
-  on a local the call passes, or the positional overload's first argument), written by name as
-  a consumer writes it (``aws_sdk_common.address_name``); an injected address stays empty.
+  recipient, so it is a send. Management calls (creating a topic, deleting a message) are not
+  traffic and are not recorded.
+* **SQS receive** — ``ReceiveMessage(Async)`` takes messages off the queue, so it is a consumer
+  binding (``eventbus_consumer``, ``method: CONSUMER``) whose handler is the method the call is
+  in, as a polling read is for Go Kafka: a worker's ``ExecuteAsync`` loop is the queue's entry
+  point.
+* **Endpoint only from a literal or a constant** address in the request (an object initializer
+  on the call or on a local the call passes, or the positional overload's first argument),
+  written by name as a consumer writes it (``aws_sdk_common.address_name``): a
+  ``const`` / ``static readonly`` string resolves through the ``csharp.string-constants`` fact
+  (``aspnet_areas.constant_string``); an injected address stays empty.
 
 DynamoDB is data access and is recorded by the shared classifier (``detection/db_queries.py``)
 from the same declared-type evidence, not here.
@@ -34,13 +39,13 @@ from the same declared-type evidence, not here.
 
 from __future__ import annotations
 
-import re
 from collections.abc import Iterator
 
 from tree_sitter import Node
 
 from ...schemas import SemanticType
 from ..additive import DetectContext, Detection, Detector, Gate, register_detector
+from ..aspnet_areas import constant_string
 from ..aws_sdk_common import ADDRESS_KEYS, DIRECT_ADDRESS_KEYS, address_name
 from ..csharp.functions import type_map
 from ..csharp.statements import collect_typed_names
@@ -67,7 +72,8 @@ _API_SERVICES = frozenset({"aws-s3", "aws-ssm", "aws-cognito", "aws-lambda"})
 #: Messaging operations (sync and ``Async``) → semantic type, per service.
 _MESSAGING: dict[str, dict[str, SemanticType]] = {
     "aws-sns": {"Publish": "eventbus_publish", "PublishBatch": "eventbus_publish"},
-    "aws-sqs": {"SendMessage": "eventbus_send", "SendMessageBatch": "eventbus_send"},
+    "aws-sqs": {"SendMessage": "eventbus_send", "SendMessageBatch": "eventbus_send",
+                "ReceiveMessage": "eventbus_consumer"},
     "aws-eventbridge": {"PutEvents": "eventbus_publish"},
 }
 
@@ -81,8 +87,8 @@ _NOT_OPERATIONS = frozenset({
     "Equals", "GetHashCode", "ToString", "GetType",
 })
 
-#: A regular or verbatim C# string literal without interpolation.
-_LITERAL = re.compile(r'^@?"([^"{}\\]*)"$')
+#: Declarations a consumer's handler can be: the method (or local function) the receive is in.
+_HANDLERS = ("method_declaration", "local_function_statement", "constructor_declaration")
 
 
 def _iter(root: Node, kind: str) -> Iterator[Node]:
@@ -92,13 +98,6 @@ def _iter(root: Node, kind: str) -> Iterator[Node]:
         if node.type == kind:
             yield node
         stack.extend(reversed(node.named_children))
-
-
-def _literal(node: Node | None, source: bytes) -> str | None:
-    if node is None or node.type not in ("string_literal", "verbatim_string_literal"):
-        return None
-    m = _LITERAL.match(node_text(node, source))
-    return m.group(1) if m else None
 
 
 def _receiver_and_method(call: Node, source: bytes) -> tuple[Node, str] | None:
@@ -166,8 +165,10 @@ def _local_creation(name: str, call: Node, source: bytes) -> Node | None:
     return found
 
 
-def _address(call: Node, source: bytes, service: str) -> tuple[str | None, str | None]:
-    """(literal endpoint, address key present) for a messaging call."""
+def _address(call: Node, source: bytes, service: str, index: object,
+             positional_min: int = 2) -> tuple[str | None, str | None]:
+    """(endpoint, address key present) for a messaging call; the address from a literal or a
+    constant. The positional overload takes the address first and, for a send, the body."""
     args = call.child_by_field_name("arguments")
     values = [a.named_children[-1] for a in args.named_children if a.named_children] \
         if args is not None else []
@@ -179,8 +180,8 @@ def _address(call: Node, source: bytes, service: str) -> tuple[str | None, str |
         else None)
     if creation is None:
         key = _POSITIONAL_KEY.get(service)
-        literal = _literal(first, source)
-        if key is None or len(values) < 2 or literal is None:
+        literal = constant_string(first, source, index)
+        if key is None or len(values) < positional_min or literal is None:
             return None, None
         return address_name(key, literal), key
     key_found: str | None = None
@@ -191,7 +192,7 @@ def _address(call: Node, source: bytes, service: str) -> tuple[str | None, str |
         key_found = key_found or key
         if key in DIRECT_ADDRESS_KEYS:
             key_found = key
-        literal = _literal(value, source)
+        literal = constant_string(value, source, index)
         names.add(address_name(key, literal) if literal is not None else "")
     if len(names) != 1 or "" in names:
         return None, key_found  # absent, injected, or several different addresses
@@ -202,7 +203,18 @@ def _operation(method: str) -> str:
     return method[:-5] if method.endswith("Async") else method
 
 
-def detect_sdk_calls(root: Node, source: bytes) -> list[Emit]:
+def _handler(call: Node, source: bytes) -> dict[str, object]:
+    """``handler`` / ``handlerLine`` of the method the call is in (none for top-level code)."""
+    node = call.parent
+    while node is not None and node.type not in _HANDLERS:
+        node = node.parent
+    name = node.child_by_field_name("name") if node is not None else None
+    if node is None or name is None:
+        return {}
+    return {"handler": node_text(name, source), "handlerLine": node.start_point[0] + 1}
+
+
+def detect_sdk_calls(root: Node, source: bytes, index: object = None) -> list[Emit]:
     clients = collect_typed_names(root, source, type_map(root, source), _CLIENT_TYPES)
     found: list[Emit] = []
     for call in _iter(root, "invocation_expression"):
@@ -225,10 +237,14 @@ def detect_sdk_calls(root: Node, source: bytes) -> list[Emit]:
             semantic = _MESSAGING[service].get(_operation(method))
             if semantic is None:
                 continue
-            endpoint, key = _address(call, source, service)
+            consumer = semantic == "eventbus_consumer"
+            endpoint, key = _address(call, source, service, index, 1 if consumer else 2)
             if service == "aws-sns" and key in DIRECT_ADDRESS_KEYS:
                 semantic = "eventbus_send"  # an SMS reaches one recipient; nothing subscribes
-            fields = {"semanticType": semantic, "framework": service, "method": method}
+            fields = {"semanticType": semantic, "framework": service,
+                      "method": "CONSUMER" if consumer else method}
+            if consumer:
+                fields.update(_handler(call, source))
             fill = {"endpoint": endpoint}
         found.append(Emit(
             call, fields, fill=fill, enrich="unclassified",
@@ -238,7 +254,7 @@ def detect_sdk_calls(root: Node, source: bytes) -> list[Emit]:
 
 
 def _detect(dc: DetectContext) -> Detection | None:
-    found = detect_sdk_calls(dc.root, dc.source)
+    found = detect_sdk_calls(dc.root, dc.source, dc.ctx.resolution_index)
     return Detection(found) if found else None
 
 
