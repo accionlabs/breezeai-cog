@@ -542,6 +542,23 @@ def test_the_index_parse_honours_the_parse_timeout(tmp_path) -> None:
 
 
 @pytest.mark.parametrize("parser", [CParser(), CppParser()], ids=["c", "cpp"])
+def test_a_macro_line_in_a_struct_body_is_read_past(tmp_path, parser) -> None:
+    # `LOCKEDINT_MTX_DECLARE(mtx)` expands to a member (or nothing) and has no `;`; the grammar
+    # reads it as the type of the next field, which loses its own name and type.
+    src = (
+        "typedef struct counter_s {\n"
+        "\tLOCKEDINT_MTX_DECLARE(mtx)\n"
+        "\tlocked_u64_t accumbytes;\n"
+        "\tunsigned interval;\n"
+        "} counter_t;\n"
+    )
+    rec = _parse(parser, tmp_path, "counter.h", src)
+    assert [c.name for c in rec.classes] == ["counter_t"]
+    fields = [s for s in rec.statements if s.nodeType == "field_declaration"]
+    assert [s.name for s in fields] == ["accumbytes", "interval"]
+
+
+@pytest.mark.parametrize("parser", [CParser(), CppParser()], ids=["c", "cpp"])
 def test_file_scope_macros_are_statements_but_include_guards_are_not(tmp_path, parser) -> None:
     record = _parse(
         parser,

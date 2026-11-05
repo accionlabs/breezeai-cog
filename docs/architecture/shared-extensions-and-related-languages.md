@@ -546,6 +546,22 @@ C++.
 > of their 600 public prototypes. The notice is what an agent needs to know about a deprecated
 > function. **Cost:** such a file is parsed twice (sharing the class-head parse).
 
+> **Decision —** a macro written as a whole member of a class or struct body
+> (`OPENVINO_MATCHER_PASS_RTTI("…")`, jemalloc's `LOCKEDINT_MTX_DECLARE(mtx)`) is blanked in the
+> same second parse. A line that is only `NAME(…)` has no `;` and no body, so it can't be a
+> member: it is a macro that expands to members (or to nothing). It counts only where the
+> grammar failed on it inside a class body (a field with an error, or an error holding the
+> class keyword before it), outside a function body, after the end of a member, the body's `{`
+> or an access label, and followed by the start of another member. A following `:`, `{`, `=`,
+> `,`, `)`, a qualifier (`const`, `noexcept`, `override`, …), `->` or an attribute makes it a
+> member written over two lines (`Foo(int a)` / `: a_(a) {}`), which is left alone. The blank
+> is kept only where the line then sits in a class body outside any error and the member after
+> it parses whole. The macro itself is not captured.
+> **Why:** the grammar runs the line into the next member: the class is lost (llama.cpp's
+> OpenVINO pass headers) or the macro and the next member become one field with a wrong name
+> and type. **Cost:** such a file is parsed twice (sharing the class-head parse); a class that
+> also has an export macro in its head is read only if the head alone is enough.
+
 > **Decision —** an `extern "C"` guard the file's parse collapsed around is resolved as the
 > compiler for the file's language would, in the same second parse. In `#ifdef __cplusplus` /
 > `extern "C" {` / `#endif` … `#ifdef __cplusplus` / `}` / `#endif` the grammar reads both

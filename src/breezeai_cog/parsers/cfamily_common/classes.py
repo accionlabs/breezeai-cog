@@ -246,6 +246,97 @@ def _reads_as_declaration(root: Node, wrapper: _Wrapper) -> bool:
     return True
 
 
+#: What may end the text before a member: the end of a member, the body's ``{`` or an access
+#: label.
+_MEMBER_BEFORE = re.compile(rb"(?:[;{}]|\b(?:public|protected|private)[ \t]*:)\Z")
+#: What continues a declaration rather than starting a new member: a constructor's initializer
+#: list or body, ``= default``, a qualifier, a trailing return type, an attribute.
+_DECLARATION_GOES_ON = re.compile(
+    rb"(?:[{:=;,)&]|->|\[\[|(?:const|volatile|noexcept|override|final|try|throw|requires"
+    rb"|__attribute__)\b)"
+)
+_MEMBER_START = re.compile(rb"[A-Za-z_~}#]")
+_CLASS_KEYWORDS = ("class", "struct", "union")
+_LINE_COMMENT = re.compile(rb"//[^\n]*")
+
+
+def _text_before(source: bytes, at: int) -> bytes:
+    """The code before ``at``, without trailing blank and ``//``-comment lines."""
+    end = at
+    while end > 0:
+        start = source.rfind(b"\n", 0, end - 1) + 1
+        line = _LINE_COMMENT.sub(b"", source[start:end]).strip()
+        if line:
+            return line
+        end = start
+    return b""
+
+
+def _member_macros(root: Node, source: bytes) -> list[tuple[int, int]]:
+    """Macros written as a whole member of a class body: ``OPENVINO_MATCHER_PASS_RTTI("…")``.
+    A line that is only ``NAME(…)`` has no ``;`` and no body, so it can't be a member; the
+    grammar reads it as the start of a field and runs on into the next member, breaking the
+    class. A line counts only where the grammar failed on it in a class body (a field with an
+    error, or an error holding the class keyword before it), outside a function body, after the end of a member or an access label, and followed by the
+    start of another member — not ``:``, ``{``, ``=`` or a qualifier, which would make it a
+    constructor written over two lines."""
+    if not root.has_error:
+        return []
+    found = []
+    for m in _WRAPPER_HEAD.finditer(source):
+        node: Node | None = root.descendant_for_byte_range(m.start(1), m.end(1))
+        in_class = False
+        while node is not None and node.type != "compound_statement":
+            in_class = in_class or (
+                node.type == "field_declaration" and node.has_error
+            ) or (
+                node.type == "ERROR" and any(
+                    c.type in _CLASS_KEYWORDS and c.start_byte < m.start() for c in node.children
+                )
+            )
+            node = node.parent
+        if node is not None or not in_class:
+            continue  # clean, outside a class body, or inside a function body
+        closed = _close_paren(source, m.end())
+        if closed is None:
+            continue
+        end = closed[0] + 1
+        line_end = source.find(b"\n", end)
+        line_end = len(source) if line_end < 0 else line_end
+        if _LINE_COMMENT.sub(b"", source[end:line_end]).strip():
+            continue  # more on the line
+        after = _LINE_COMMENT.sub(b"", source[line_end:line_end + 256]).lstrip()
+        if (
+            _MEMBER_BEFORE.search(_text_before(source, m.start(1))) is None
+            or not _MEMBER_START.match(after) or _DECLARATION_GOES_ON.match(after)
+        ):
+            continue
+        found.append((m.start(1), end))
+    return found
+
+
+def _reads_as_members(root: Node, span: tuple[int, int]) -> bool:
+    """Whether a blanked member macro now sits in a class body, outside any error, with the
+    member after it parsed whole."""
+    start, end = span
+    body = root.descendant_for_byte_range(start, end)
+    while body is not None and body.type != "field_declaration_list":
+        if body.type == "ERROR":
+            return False
+        body = body.parent
+    if body is None or body.parent is None or body.parent.type not in _SPECIFIERS:
+        return False
+    following = next((c for c in body.children if c.start_byte >= end), None)
+    if following is None or following.type == "ERROR" or following.has_error:
+        return False
+    node: Node | None = body
+    while node is not None:
+        if node.type == "ERROR":
+            return False
+        node = node.parent
+    return True
+
+
 def _blank(source: bytes, spans: list[tuple[int, int]]) -> bytes:
     """``source`` with ``spans`` turned to spaces; newlines stay, so lines and offsets don't
     move."""
@@ -307,6 +398,8 @@ def parse_cfamily(grammar: str, source: bytes, timeout_micros: int) -> Node:
       reads as written without it;
     * a macro wrapped around a declaration (:func:`_declaration_wrappers`): ``DEPRECATED(`` and
       ``, "msg")`` go, and the declaration reads as written;
+    * a macro written as a whole class member (:func:`_member_macros`): the line goes, and the
+      members around it read as written;
 
     and an ``extern "C"`` guard the file's parse collapsed around is resolved as the compiler
     for the grammar's language would (:func:`_collapsed_guards`).
@@ -318,18 +411,23 @@ def parse_cfamily(grammar: str, source: bytes, timeout_micros: int) -> Node:
     words = _class_macro_words(root, source)
     wrappers = _declaration_wrappers(root, source)
     guards = _collapsed_guards(root, source, grammar)
+    members = _member_macros(root, source)
     for _ in range(2):  # blank all; if some still break, blank only the others once
-        if not words and not wrappers and not guards:
+        if not words and not wrappers and not guards and not members:
             return root
         spans = [w[0] for w in words] + [s for w in wrappers for s in w[:2]]
-        spans += [s for g in guards for s in g[0]]
+        spans += [s for g in guards for s in g[0]] + members
         reparsed = parse_source(grammar, _blank(source, spans), timeout_micros).root_node
         whole_words = [w for w in words if _reads_as_class(reparsed, w[1])]
         whole_wrappers = [w for w in wrappers if _reads_as_declaration(reparsed, w)]
         whole_guards = [g for g in guards if _reads_without_collapse(reparsed, g[1])]
-        if whole_words == words and whole_wrappers == wrappers and whole_guards == guards:
+        whole_members = [s for s in members if _reads_as_members(reparsed, s)]
+        if (whole_words, whole_wrappers, whole_guards, whole_members) == (
+            words, wrappers, guards, members
+        ):
             return reparsed
         words, wrappers, guards = whole_words, whole_wrappers, whole_guards
+        members = whole_members
     return root
 
 

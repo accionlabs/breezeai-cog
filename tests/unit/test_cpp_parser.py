@@ -290,6 +290,79 @@ def test_class_that_still_breaks_without_its_export_macro_is_not_read_again(tmp_
     assert {f.name for f in rec.functions} == {"ok"}
 
 
+def test_a_macro_written_as_a_whole_member_is_read_past(tmp_path) -> None:
+    # `OPENVINO_MATCHER_PASS_RTTI("…")` has no `;` and no body, so it can't be a member: it is
+    # a macro that expands to members. The grammar runs it into the next member, which loses
+    # the class (`Pass`) or turns the macro and the constructor into one field (`Small`). The
+    # line is blanked and the file read again; the macro itself is not captured.
+    src = (
+        b"namespace ov { namespace pass {\n"
+        b"class Pass : public ov::pass::MatcherPass {\n"
+        b"public:\n"
+        b'    OPENVINO_MATCHER_PASS_RTTI("ov::pass::Pass")  // the type name\n'
+        b"    Pass();\n"
+        b"};\n"
+        b"} }\n"
+        b"class Small : public Base {\n"
+        b"public:\n"
+        b'    MY_RTTI("x")\n'
+        b"    explicit Small(int n,\n"
+        b"                   bool f = false);\n"
+        b"    int n;\n"
+        b"};\n"
+    )
+    rec = _parse_src(tmp_path, src, "p.h", capture=True)
+    classes = {c.name: c for c in rec.classes}
+    assert set(classes) == {"Pass", "Small"}
+    assert classes["Pass"].extends == "ov::pass::MatcherPass"
+    assert (classes["Pass"].startLine, classes["Pass"].endLine) == (2, 6)
+    fns = {f.name: f for f in rec.functions}
+    assert set(fns) == {"Pass", "Small"}
+    assert fns["Pass"].type == "constructor" and fns["Pass"].visibility == "public"
+    assert [p.name for p in fns["Small"].params] == ["n", "f"]
+    assert {s.name for s in rec.statements if s.nodeType == "field_declaration"} == {"n"}
+
+
+def test_a_member_split_over_two_lines_is_not_read_as_a_macro(tmp_path) -> None:
+    # A constructor or method whose head and rest are on separate lines (`: x(a) {}`, `{ }`,
+    # `= default;`, `const;`), a macro followed by more on its line, and a line that is not a
+    # whole member are left to the grammar.
+    src = (
+        b"class Clean {\n"
+        b"public:\n"
+        b"    Clean(int a)\n"
+        b"        : a_(a) {}\n"
+        b"    Clean(int a, int b)\n"
+        b"    { a_ = a + b; }\n"
+        b"    Clean()\n"
+        b"        = default;\n"
+        b"    int get()\n"
+        b"        const;\n"
+        b"    int a_;\n"
+        b"};\n"
+    )
+    rec = _parse_src(tmp_path, src, "c.h", capture=True)
+    assert [c.name for c in rec.classes] == ["Clean"]
+    assert sorted(f.name for f in rec.functions) == ["Clean", "Clean", "Clean", "get"]
+
+
+def test_a_member_macro_whose_class_still_breaks_is_kept(tmp_path) -> None:
+    # Blanking the line must leave the class whole; otherwise the first parse stands.
+    src = (
+        b"class Bad : public B {\n"
+        b"public:\n"
+        b'    MY_OP("Bad")\n'
+        b"    Bad(int a b);\n"
+        b"};\n"
+    )
+    from breezeai_cog.parsers.cfamily_common.classes import _member_macros, parse_cfamily
+    from breezeai_cog.parsers.treesitter import parse_source
+
+    first = parse_source("cpp", src).root_node
+    assert _member_macros(first, src) == [(src.index(b"MY_OP"), src.index(b")\n") + 1)]
+    assert str(parse_cfamily("cpp", src, 0)) == str(first)
+
+
 def test_inherited_call_in_a_class_with_an_export_macro_resolves(tmp_path) -> None:
     # The index reads the class the same way, so its base class is known and a call to an
     # inherited method resolves.
